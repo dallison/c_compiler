@@ -1,0 +1,1295 @@
+//
+//  expr_codegen.c
+//  c_compiler
+//
+//  Created by David Allison on 11/21/17.
+//  Copyright © 2017 David Allison. All rights reserved.
+//
+
+#include "expr_codegen.h"
+#include <assert.h>
+#include "compiler.h"
+
+// Table to translate an AST node and type into an IR operation.
+static struct {
+  ASTOpcode node_op;
+  bool (*type_func)(TypeRecord*);
+  IROpcode ir_op;
+} expr_operators[] = {
+    {AST_OP(plus), TypeIsIntegral, IR_OP(addi)},
+    {AST_OP(plus), TypeIsFloat, IR_OP(addf)},
+    {AST_OP(plus), TypeIsDouble, IR_OP(addd)},
+    {AST_OP(plus), TypeIsPointerOrArray, IR_OP(adda)},
+
+    {AST_OP(minus), TypeIsIntegral, IR_OP(subi)},
+    {AST_OP(minus), TypeIsFloat, IR_OP(subf)},
+    {AST_OP(minus), TypeIsDouble, IR_OP(subd)},
+    {AST_OP(minus), TypeIsPointerOrArray, IR_OP(suba)},
+
+    {AST_OP(mult), TypeIsIntegral, IR_OP(muli)},
+    {AST_OP(mult), TypeIsFloat, IR_OP(mulf)},
+    {AST_OP(mult), TypeIsDouble, IR_OP(muld)},
+
+    {AST_OP(div), TypeIsIntegral, IR_OP(divi)},
+    {AST_OP(div), TypeIsFloat, IR_OP(divf)},
+    {AST_OP(div), TypeIsDouble, IR_OP(divd)},
+
+    {AST_OP(mod), TypeIsIntegral, IR_OP(modi)},
+
+    {AST_OP(lshift), TypeIsIntegral, IR_OP(lsli)},
+    {AST_OP(rshiftl), TypeIsIntegral, IR_OP(lsri)},
+    {AST_OP(rshifta), TypeIsIntegral, IR_OP(asri)},
+
+    {AST_OP(and), TypeIsIntegral, IR_OP(andi)},
+    {AST_OP(bitor), TypeIsIntegral, IR_OP(ori)},
+    {AST_OP(exor), TypeIsIntegral, IR_OP(xori)},
+
+    {AST_OP(equal), TypeIsIntegral, IR_OP(cmpeqi)},
+    {AST_OP(noteq), TypeIsIntegral, IR_OP(cmpnei)},
+    {AST_OP(less), TypeIsIntegral, IR_OP(cmplti)},
+    {AST_OP(lesseq), TypeIsIntegral, IR_OP(cmplei)},
+    {AST_OP(greater), TypeIsIntegral, IR_OP(cmpgti)},
+    {AST_OP(greatereq), TypeIsIntegral, IR_OP(cmpgei)},
+
+    {AST_OP(equal), TypeIsFloat, IR_OP(cmpeqf)},
+    {AST_OP(noteq), TypeIsFloat, IR_OP(cmpnef)},
+    {AST_OP(less), TypeIsFloat, IR_OP(cmpltf)},
+    {AST_OP(lesseq), TypeIsFloat, IR_OP(cmplef)},
+    {AST_OP(greater), TypeIsFloat, IR_OP(cmpgtf)},
+    {AST_OP(greatereq), TypeIsFloat, IR_OP(cmpgef)},
+
+    {AST_OP(equal), TypeIsDouble, IR_OP(cmpeqd)},
+    {AST_OP(noteq), TypeIsDouble, IR_OP(cmpned)},
+    {AST_OP(less), TypeIsDouble, IR_OP(cmpltd)},
+    {AST_OP(lesseq), TypeIsDouble, IR_OP(cmpled)},
+    {AST_OP(greater), TypeIsDouble, IR_OP(cmpgtd)},
+    {AST_OP(greatereq), TypeIsDouble, IR_OP(cmpged)},
+
+    {AST_OP(equal), TypeIsPointerOrArray, IR_OP(cmpeqa)},
+    {AST_OP(noteq), TypeIsPointerOrArray, IR_OP(cmpnea)},
+    {AST_OP(less), TypeIsPointerOrArray, IR_OP(cmplta)},
+    {AST_OP(lesseq), TypeIsPointerOrArray, IR_OP(cmplea)},
+    {AST_OP(greater), TypeIsPointerOrArray, IR_OP(cmpgta)},
+    {AST_OP(greatereq), TypeIsPointerOrArray, IR_OP(cmpgea)},
+
+    {AST_OP(not), TypeIsIntegral, IR_OP(noti)},
+    {AST_OP(not), TypeIsPointer, IR_OP(nota)},
+    {AST_OP(onescomp), TypeIsIntegral, IR_OP(onescomp)},
+    {AST_OP(uminus), TypeIsIntegral, IR_OP(negi)},
+    {AST_OP(uminus), TypeIsFloat, IR_OP(negf)},
+    {AST_OP(uminus), TypeIsDouble, IR_OP(negd)},
+
+    {AST_OP(bad), NULL, IR_OP(nop)},
+};
+
+// Given an AST node and an operation (might not be the same as node->op),
+// return an IR opcode based on the AST operation and node type.
+static IROpcode FindIROpcode(ASTNode* node, ASTOpcode op) {
+  for (size_t i = 0; expr_operators[i].node_op != AST_OP(bad); i++) {
+    if (expr_operators[i].node_op == op &&
+        expr_operators[i].type_func(node->type)) {
+      return expr_operators[i].ir_op;
+    }
+  }
+  assert(false);
+  return IR_OP(nop);
+}
+
+// Table to translate a type into load and store operations.
+static struct {
+  bool (*type_func)(TypeRecord*);
+  IROpcode signed_load;
+  IROpcode unsigned_load;
+  IROpcode store;
+} load_store_ops[] = {
+    {TypeIsInt, IR_OP(loadi), IR_OP(loadui), IR_OP(storei)},
+    {TypeIsChar, IR_OP(loadb), IR_OP(loadub), IR_OP(storeb)},
+    {TypeIsBool, IR_OP(loadb), IR_OP(loadub), IR_OP(storeb)},
+    {TypeIsShort, IR_OP(loads), IR_OP(loadus), IR_OP(stores)},
+    {TypeIsLong, IR_OP(loadl), IR_OP(loadl), IR_OP(storel)},
+    {TypeIsLongLong, IR_OP(loadl), IR_OP(loadl), IR_OP(storel)},
+    {TypeIsFloat, IR_OP(loadf), IR_OP(loadf), IR_OP(storef)},
+    {TypeIsDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
+    {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {TypeIsFunction, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {NULL, IR_OP(nop), IR_OP(nop), IR_OP(nop)},
+};
+
+static IROpcode GetLoadOpcode(ASTNode* node) {
+  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
+    if (load_store_ops[i].type_func(node->type)) {
+      if (TypeIsUnsigned(node->type)) {
+        return load_store_ops[i].unsigned_load;
+      } else {
+        return load_store_ops[i].signed_load;
+      }
+    }
+  }
+  assert(false);
+}
+
+static IROpcode GetStoreOpcode(ASTNode* node) {
+  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
+    if (load_store_ops[i].type_func(node->type)) {
+      return load_store_ops[i].store;
+    }
+  }
+  assert(false);
+}
+
+// String literals are global to the compiler.  Each one has a
+// unique id allocated by the compiler.  The IR instruction
+// contains this ID.
+static IRNode* GenerateLiteral(Generator* gen, ConstantASTNode* node) {
+  int literal_id = CompilerAddStringLiteral(node->value.string);
+
+  return GeneratorEmit(
+      gen, NewIR1(IR_OP(literalref),
+                  GeneratorGetIntConstant(gen, node->base.type, literal_id)));
+}
+
+static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
+  IRNode* left = GenerateExpression(gen, node->left);
+  IRNode* right = GenerateExpression(gen, node->right);
+  IROpcode opcode = FindIROpcode(&node->base, node->base.op);
+  return GeneratorEmit(gen, NewIR2(opcode, left, right));
+}
+
+static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
+  IRNode* sub = GenerateExpression(gen, node->sub);
+  IROpcode opcode = FindIROpcode(&node->base, node->base.op);
+  return GeneratorEmit(gen, NewIR1(opcode, sub));
+}
+
+// Check if the node is using (reading) a variable.  If so,
+// mark the write instruction with the VarUse flag.  This is necessary
+// so that the SSA conversions know that this is a read from a variable.
+static void CheckForVarUse(IRNode* read, ASTNode* node) {
+  switch (node->op) {
+    case AST_OP(identifier): {
+      IdentifierASTNode* id = (IdentifierASTNode*)node;
+      IRSetVarUse(read, id->symbol);
+      break;
+    }
+    case AST_OP(dot):
+    case AST_OP(arrow):
+    case AST_OP(subscript): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarUse(read, b->left);
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+static IROpcode IncDecOp(ASTNode* node, bool is_inc) {
+  if (TypeIsIntegral(node->type)) {
+    return is_inc ? IR_OP(addi) : IR_OP(subi);
+  }
+  if (TypeIsFloat(node->type)) {
+    return is_inc ? IR_OP(addf) : IR_OP(subf);
+  }
+  if (TypeIsDouble(node->type)) {
+    return is_inc ? IR_OP(addd) : IR_OP(subd);
+  }
+  return is_inc ? IR_OP(adda) : IR_OP(suba);
+}
+
+static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
+  StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
+  StructMember* bitfield = member_node->member;
+  if (bitfield->bit_size == 64) {
+    // Bitfield that is the whole word, just use the load.
+    return load;
+  }
+
+  // Check for variable use.
+  CheckForVarUse(load, (ASTNode*)node);
+
+  if (TypeIsUnsigned(bitfield->symbol->type)) {
+    // Unsigned, shift it right so that the low bit of the bitfield is in bit 0
+    // then mask it to the correct length.
+    IRNode* rshift =
+        bitfield->bit_offset == 0
+            ? load
+            : GeneratorEmit(gen, NewIR2(IR_OP(lsri), load,
+                                        GeneratorGetIntConstant(
+                                            gen, bitfield->symbol->type,
+                                            bitfield->bit_offset)));
+    int64_t mask = (1 << bitfield->bit_size) - 1;
+    return GeneratorEmit(gen, NewIR2(IR_OP(maski), rshift,
+                                     GeneratorGetIntConstant(
+                                         gen, bitfield->symbol->type, mask)));
+  }
+
+  // Signed type, sign extend it.  Do this by shifting left 64 - (offset+size)
+  // bits then shifting right by 64 - size bits.  The idea is to put the top bit
+  // of the bitfield in the sign bit position in a register, then do an
+  // arithmetic right shift to move the bottom bit of the bitfield to bit 0 in
+  // the register,
+  IRNode* lshift = GeneratorEmit(
+      gen, NewIR2(IR_OP(lsli), load,
+                  GeneratorGetIntConstant(
+                      gen, bitfield->symbol->type,
+                      64 - (bitfield->bit_size + bitfield->bit_offset))));
+  return GeneratorEmit(
+      gen, NewIR2(IR_OP(asri), lshift,
+                  GeneratorGetIntConstant(gen, bitfield->symbol->type,
+                                          64 - bitfield->bit_size)));
+}
+
+// Given a value loaded from a struct word containing a bitfield and new value
+// to store in the bitfield, return the new word value to be stored back into
+// the struct.
+static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
+                                         IRNode* value,
+                                         BinaryASTNode* member_ref_node) {
+  StructMemberASTNode* member_node =
+      (StructMemberASTNode*)member_ref_node->right;
+  StructMember* member = member_node->member;
+
+  // Clear the field by ANDing with the clearing_mask.
+  int64_t clearing_mask =
+      ~(((1 << member->bit_size) - 1) << member->bit_offset);
+  IRNode* cleared_field = GeneratorEmit(
+      gen, NewIR2(IR_OP(andi), load,
+                  GeneratorGetIntConstant(gen, member_ref_node->base.type,
+                                          clearing_mask)));
+
+  // Mask the value to set to the correct width.
+  int64_t setting_mask = ((1 << member->bit_size) - 1);
+  IRNode* shifted_value;
+  if (IRIsConst(value)) {
+    // Assigning a constant, mask it at compile time.
+    int64_t ivalue = ((IRConstant*)value)->value.ivalue;
+    shifted_value =
+        GeneratorGetIntConstant(gen, member_ref_node->base.type,
+                                (ivalue & setting_mask) << member->bit_offset);
+  } else {
+    IRNode* masked_value = GeneratorEmit(
+        gen, NewIR2(IR_OP(andi), value,
+                    GeneratorGetIntConstant(gen, member_ref_node->base.type,
+                                            setting_mask)));
+    // Shift to the correct bit position.
+    shifted_value =
+        member->bit_offset == 0
+            ? masked_value
+            : GeneratorEmit(gen, NewIR2(IR_OP(lsli), masked_value,
+                                        GeneratorGetIntConstant(
+                                            gen, member_ref_node->base.type,
+                                            member->bit_offset)));
+  }
+
+  // OR in the shifted value.
+  return GeneratorEmit(gen, NewIR2(IR_OP(ori), cleared_field, shifted_value));
+}
+
+static IRNode* GenerateVariableReference(Generator* gen,
+                                         IdentifierASTNode* node) {
+  if ((node->base.flags & kASTNeedAddress) != 0) {
+    // Need the address of the node, not the value.
+    return GeneratorGetVariable(gen, node->symbol);
+  }
+
+  IRNode* result;
+  if (TypeIsStructOrUnion(node->base.type)) {
+    result = GeneratorGetVariable(gen, node->symbol);
+  } else {
+    IROpcode load = GetLoadOpcode(&node->base);
+    result = GeneratorEmit(
+        gen, NewIR1(load, GeneratorGetVariable(gen, node->symbol)));
+  }
+  IRSetVarUse(result, node->symbol);
+  return result;
+}
+
+// Check if the node is defining (writing to) a variable.  If so,
+// mark the write instruction with the VarDef flag.  This is necessary
+// so that the SSA conversions know that this is a write to a variable.
+static void CheckForVarDef(IRNode* write, ASTNode* node) {
+  switch (node->op) {
+    case AST_OP(identifier): {
+      IdentifierASTNode* id = (IdentifierASTNode*)node;
+      IRSetVarDef(write, id->symbol);
+      break;
+    }
+    case AST_OP(dot):
+    case AST_OP(subscript):
+    case AST_OP(arrow): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarDef(write, b->left);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// Increment and decrement, both pre and post.
+// This is a little complex because of the variations in the
+// types.
+static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
+                              bool is_inc) {
+  IRNode* addr = GenerateExpression(gen, node->sub);
+  int inc_amount;
+  bool is_floating_point = false;
+  IROpcode mov_op;
+  TypeRecord* type = node->base.type;
+  if (TypeIsPointer(node->sub->type)) {
+    // Increment by size of thing pointed to.
+    inc_amount = node->sub->type->next->size;
+    mov_op = IR_OP(rmova);
+    type = node->sub->type;
+  } else {
+    // Increment or decrement by one.
+    inc_amount = 1;
+    mov_op = IR_OP(rmovi);
+    if (TypeIsFloatingPoint(node->sub->type)) {
+      is_floating_point = true;
+      if (TypeIsFloat(node->sub->type)) {
+        mov_op = IR_OP(rmovf);
+      } else {
+        mov_op = IR_OP(rmovd);
+      }
+    }
+  }
+
+  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+  IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
+
+  // If this is a bitfield, the 'load' contains the value of the whole
+  // word containing the bitfield.  We extract the bits of the field into
+  // 'value'.
+  IRNode* value = load;
+  if (IsBitfieldReference(node->sub)) {
+    value = LoadBitfield(gen, load, (BinaryASTNode*)node->sub);
+  }
+
+  CheckForVarUse(load, node->sub);
+
+  // TODO: bitfields.
+  IRNode* constant =
+      is_floating_point
+          ? GeneratorGetFloatingPointConstant(gen, type, inc_amount)
+          : GeneratorGetIntConstant(gen, type, inc_amount);
+
+  IRNode* tmp = NULL;
+  if (is_post) {
+    // If this is a post-operation (x++ or x--) then we need to record
+    // the pre-incremented value in a temporary.
+    tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+    tmp = GeneratorEmit(gen, NewIR2(mov_op, tmp, load));
+  }
+  IROpcode op = IncDecOp(node->sub, is_inc);
+
+  // Increment or decrement the value.
+  IRNode* new_value = GeneratorEmit(gen, NewIR2(op, value, constant));
+  IRSetType(new_value, node->base.type);
+
+  // If we are operating on a bitfield, we need to set the value back into the
+  // word we are storing.
+  if (IsBitfieldReference(node->sub)) {
+    new_value = CalculateNewBitfieldValue(gen, load, new_value,
+                                          (BinaryASTNode*)node->sub);
+  }
+
+  IROpcode store = GetStoreOpcode((ASTNode*)node);
+  IRNode* write = GeneratorEmit(gen, NewIR2(store, addr, new_value));
+
+  IRSetType(write, new_value->type);
+  CheckForVarDef(write, node->sub);
+
+  if (tmp == NULL) {
+    // This is a pre-increment operation, store the value and return the
+    // post-incremented value.
+    return write;
+  }
+
+  // Post increment operation, store value and return pre-incremented value.
+  return tmp;
+}
+
+// Generate code for a braced initializer.  This contains a vector of designated
+// initializers generated by the semantic analyzer.
+static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
+                                      BracedInitializerASTNode* init,
+                                      IRNode* dest) {
+  for (size_t i = 0; i < init->initializers->length; i++) {
+    IRNode* destaddr = dest;
+    ASTNode* subinit = (ASTNode*)init->initializers->value[i];
+    assert(subinit->op == AST_OP(designated_init));
+
+    DesignatedInitializerASTNode* designated_init =
+        (DesignatedInitializerASTNode*)subinit;
+    if (designated_init->designators != NULL) {
+      // We have designators.  Need to build up an address from the
+      // designators.
+      int offset = 0;
+      for (size_t i = 0; i < designated_init->designators->length; i++) {
+        Designator* d = (Designator*)designated_init->designators->value[i];
+        switch (d->designator_type) {
+          case kDesignatorArray:
+            // Array index.  Add index * size of lower dimensions to offset.
+            offset += d->value.array_index * d->type->next->size;
+            break;
+          case kDesignatorStruct:
+            offset += d->value.struct_member->byte_offset;
+            break;
+        }
+      }
+
+      // Add the offset to the destination to get the address.
+      destaddr = GeneratorEmit(
+          gen, NewIR2(IR_OP(adda), dest,
+                      GeneratorGetIntConstant(gen, NULL, offset)));
+    }
+    // Simple scalar initialization
+    switch (designated_init->init->op) {
+      case AST_OP(expr_init): {
+        ExpressionInitializerASTNode* expr_init =
+            (ExpressionInitializerASTNode*)designated_init->init;
+        IRNode* value = GenerateExpression(gen, expr_init->expr);
+        if (TypeIsStructOrUnion(subinit->type)) {
+          // Initialization of a struct/union.
+          GeneratorEmit(gen, NewIR3(IR_OP(memcpy), destaddr, value,
+                                    GeneratorGetIntConstant(
+                                        gen, NULL, subinit->type->size)));
+        } else {
+          if (IsBitfieldReference(subinit)) {
+            // Initialization of a bitfield.
+            IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+            IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
+            load = LoadBitfield(gen, load, (BinaryASTNode*)subinit);
+            value = CalculateNewBitfieldValue(gen, load, value,
+                                              (BinaryASTNode*)subinit);
+          }
+          IROpcode store = GetStoreOpcode(subinit);
+          GeneratorEmit(gen, NewIR2(store, destaddr, value));
+        }
+        break;
+      }
+      case AST_OP(braced_init): {
+        // TODO: braced init for struct or array.
+        BracedInitializerASTNode* braced_init =
+            (BracedInitializerASTNode*)designated_init->init;
+        GenerateBracedInitializer(gen, designated_init->init, braced_init,
+                                  destaddr);
+        break;
+      }
+      default:
+        assert(false);
+    }
+  }
+}
+
+// Initialization.  Semantic analysis converts the initializer to a
+// braced initializer containing only designated initalizers.
+static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
+  assert(node->right->op == AST_OP(braced_init));
+
+  // Get destination address.
+  IRNode* dest = GenerateExpression(gen, node->left);
+
+  BracedInitializerASTNode* init = (BracedInitializerASTNode*)node->right;
+
+  // Zero the memory if we are initializing a struct or an array.  The
+  // standard says that all non-initialized members should be initialized
+  // as if they are static.  This means that we zero out the memory.
+  if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type)) {
+    // TODO: we don't need to memzero if we are initializing with another
+    // struct.
+    GeneratorEmit(gen, NewIR1(IR_OP(memzero), dest));
+  }
+  GenerateBracedInitializer(gen, (ASTNode*)node, init, dest);
+  return dest;
+}
+
+// Simple assignment.
+static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
+  IRNode* dest = GenerateExpression(gen, node->left);
+
+  IRNode* value;
+  IRNode* result;
+  if (TypeIsStructOrUnion(node->left->type)) {
+    if (node->right->op == AST_OP(call)) {
+      // Assignment from a function call.
+      IRNode* old_struct_address = gen->current_struct_address;
+      IRNode* ref = GeneratorEmit(gen, NewIR1(IR_OP(structref), dest));
+      IRSetType(ref, NewPointerTo(kQualPlain, node->left->type));
+      gen->current_struct_address = ref;
+      value = GenerateExpression(gen, node->right);
+      gen->current_struct_address = old_struct_address;
+      return value;
+    } else {
+      // Struct or union assignment, use memcpy.
+      value = GenerateExpression(gen, node->right);
+      result = GeneratorEmit(
+          gen,
+          NewIR3(IR_OP(memcpy), dest, value,
+                 GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
+    }
+  } else {
+    value = GenerateExpression(gen, node->right);
+    if (IsBitfieldReference(node->left)) {
+      // Assigning to a bitfield.  The dest will be the address of the word
+      // containing the bitfield.  We need to mask out the bitfield (set the
+      // bits to zero) then OR in the new value, masked appropriately.
+      IROpcode load_op = GetLoadOpcode(node->left);
+      IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
+
+      CheckForVarUse(load, node->left);
+
+      value = CalculateNewBitfieldValue(gen, load, value,
+                                        (BinaryASTNode*)node->left);
+    }
+
+    // Simple scalar assignment.
+    IROpcode store = GetStoreOpcode((ASTNode*)node);
+    result = GeneratorEmit(gen, NewIR2(store, dest, value));
+  }
+
+  CheckForVarDef(result, node->left);
+
+  return result;
+}
+
+static struct {
+  ASTOpcode assignment;
+  ASTOpcode op;
+} compound_assignment_ops[] = {
+    {AST_OP(pluseq), AST_OP(plus)},       {AST_OP(minuseq), AST_OP(minus)},
+    {AST_OP(multeq), AST_OP(mult)},       {AST_OP(diveq), AST_OP(div)},
+    {AST_OP(percenteq), AST_OP(mod)}, {AST_OP(lshifteq), AST_OP(lshift)},
+    {AST_OP(rshifteq), AST_OP(rshifta)},  {AST_OP(andeq), AST_OP(and)},
+    {AST_OP(oreq), AST_OP(bitor)},        {AST_OP(exoreq), AST_OP(exor)},
+    {AST_OP(bad), AST_OP(bad)},
+};
+
+// Compound assignment.
+static IRNode* GeneratedCompoundAssignment(Generator* gen,
+                                           BinaryASTNode* node) {
+  // Get value of operation.
+  IRNode* value = GenerateExpression(gen, node->right);
+
+  // Get destination/source.
+  IRNode* dest = GenerateExpression(gen, node->left);
+
+  // Translate the assignment into an ALU operation.
+  ASTOpcode alu_op = AST_OP(bad);
+  for (int i = 0; compound_assignment_ops[i].assignment != AST_OP(bad); i++) {
+    if (compound_assignment_ops[i].assignment == node->base.op) {
+      alu_op = compound_assignment_ops[i].op;
+      break;
+    }
+  }
+  assert(alu_op != AST_OP(bad));
+
+  // Special case for right shift.  If the type is unsigned we use a logical
+  // shift, otherwise it's an arithmetic shift (sign extended).
+  if (alu_op == AST_OP(rshifta)) {
+    if (TypeIsUnsigned(node->base.type)) {
+      alu_op = AST_OP(rshiftl);
+    }
+  }
+
+  // Load the value.
+  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+  IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
+
+  // If we are operating on a variable we have a reference to it.
+  CheckForVarUse(load, node->left);
+
+  // For a bitfield we need to load the bits from the word loaded.
+  if (IsBitfieldReference(node->left)) {
+    load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
+  }
+
+  // Get the ALU operation to perform.
+  IROpcode ir_op = FindIROpcode((ASTNode*)node, alu_op);
+
+  // Operate on the value.
+  value = GeneratorEmit(gen, NewIR2(ir_op, load, value));
+
+  // TODO: bitfield.
+
+  // Store back to the destination.
+  IROpcode store_op = GetStoreOpcode((ASTNode*)node);
+
+  IRNode* result = GeneratorEmit(gen, NewIR2(store_op, dest, value));
+  CheckForVarDef(result, node->left);
+
+  return result;
+}
+
+static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
+  IRNode* addr = GenerateExpression(gen, node->left);
+  IRNode* index = GenerateExpression(gen, node->right);
+  int size = node->left->type->next->size;
+  IRNode* scaled_index = GeneratorEmit(
+      gen,
+      NewIR2(IR_OP(muli), index, GeneratorGetIntConstant(gen, NULL, size)));
+  IRSetType(scaled_index, index->type);
+  addr = GeneratorEmit(gen, NewIR2(IR_OP(adda), addr, scaled_index));
+  if ((node->base.flags & kASTNeedAddress) != 0) {
+    return addr;
+  }
+  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+  IRNode* result = GeneratorEmit(gen, NewIR1(load_op, addr));
+  CheckForVarUse(result, node->left);
+  return result;
+}
+
+static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
+  // Address to call.
+  IRNode* func = GenerateExpression(gen, node->left);
+
+  // Call instruction (not yet emitted).
+  IRNode* call = NewIR1(IR_OP(calla), func);
+
+  // If we are returning a struct or union we need to add an invisible
+  // first argument holding the address of where the function is to
+  // store the result.
+  if (TypeIsStructOrUnion(node->base.type)) {
+    if (gen->current_struct_address == NULL) {
+      // No assignment address, create a temporary.
+      Symbol* tmp = SyntaxNewTemporary(gen->syntax, node->base.type);
+      IRNode* var = GeneratorGetVariable(gen, tmp);
+      IRNode* ref = GeneratorEmit(gen, NewIR1(IR_OP(structref), var));
+      IRSetType(ref, NewPointerTo(kQualPlain, node->base.type));
+      IRAddInput(call, ref);
+    } else {
+      // We have a destination address, add it to the args.
+      IRAddInput(call, gen->current_struct_address);
+    }
+  }
+
+  // All arguments.
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* arg = (ASTNode*)node->children->value[i];
+    IRAddInput(call, GenerateExpression(gen, arg));
+  }
+
+  // Emit call instruction.
+  return GeneratorEmit(gen, call);
+}
+
+static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
+  IRNode* addr = GenerateExpression(gen, node->sub);
+  IRSetType(addr, node->base.type);
+  if ((node->base.flags & kASTNeedAddress) != 0) {
+    return addr;
+  }
+
+  if (TypeIsStructOrUnion(node->sub->type)) {
+    // We are dereferencing a struct pointer.  We can't load the value
+    // because the user of this expression will be expecting the
+    // address of the struct.
+    return addr;
+  }
+
+  if (TypeIsArray(node->sub->type)) {
+    // Loading contents of a pointer to an array.  Don't dereference the
+    // array.
+    return addr;
+  }
+
+  if (TypeIsFunction(node->sub->type)) {
+    // Loading contents of a pointer to an function.  Don't dereference the
+    // function.
+    return addr;
+  }
+
+  // All other types: load the value.
+  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+  return GeneratorEmit(gen, NewIR1(load_op, addr));
+}
+
+static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
+  // The sub node has the kASTNeedAddress flag set to generating code for
+  // it will calculate its address.
+  return GenerateExpression(gen, node->sub);
+}
+
+static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
+  // Address of struct or pointer.
+  IRNode* addr = GenerateExpression(gen, node->left);
+
+  // Member, containing information on the location inside the struct.
+  StructMemberASTNode* member = (StructMemberASTNode*)node->right;
+
+  addr = GeneratorEmit(
+      gen,
+      NewIR2(IR_OP(adda), addr,
+             GeneratorGetIntConstant(gen, NULL, member->member->byte_offset)));
+  IRSetType(addr, node->base.type);
+  if ((node->base.flags & kASTNeedAddress) != 0) {
+    // Only address needed.
+    return addr;
+  }
+
+  // For a bitfield we need to load the word, shift it right to the LSB and then
+  // either sign extend or mask it.
+  if (StructMemberIsBitField(member->member)) {
+    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+    IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
+    return LoadBitfield(gen, load, node);
+  } else {
+    // Need value, load it.
+    // TODO: structs.
+    // TODO: var reference?
+    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+    IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
+    CheckForVarUse(load, (ASTNode*)node);
+    return load;
+  }
+}
+
+static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
+  IRNode* label = NewIR(IR_OP(label));
+  IRNode* tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+
+  // Evaluate left node.
+  IRNode* left = GenerateExpression(gen, node->left);
+
+  // Put result of left node in tmp.
+  GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, left));
+
+  // Short circuit.
+  GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
+                                                            : IR_OP(btrue),
+                            left, label));
+
+  // Evaluate right node and place result in tmp.
+  IRNode* right = GenerateExpression(gen, node->right);
+  GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, right));
+
+  GeneratorEmit(gen, label);
+  return GeneratorEmit(gen, NewIR1(IR_OP(movi), tmp));
+}
+
+static struct {
+  bool (*type_func)(TypeRecord*);
+  IROpcode opcode;
+} rmov_opcodes[] = {
+    {TypeIsIntegral, IR_OP(rmovi)},       {TypeIsFloat, IR_OP(rmovf)},
+    {TypeIsDouble, IR_OP(rmovd)},         {TypeIsStructOrUnion, IR_OP(rmova)},
+    {TypeIsPointerOrArray, IR_OP(rmova)}, {TypeIsFunction, IR_OP(rmova)},
+    {TypeIsVoid, IR_OP(rmova)},           {NULL, 0},
+};
+
+static IROpcode MoveToTmpOpcode(TypeRecord* type) {
+  for (size_t i = 0; rmov_opcodes[i].type_func != NULL; i++) {
+    if (rmov_opcodes[i].type_func(type)) {
+      return rmov_opcodes[i].opcode;
+    }
+  }
+  assert(false);
+}
+
+static IRNode* GenerateConditionalExpression(Generator* gen,
+                                             BinaryASTNode* node) {
+  BinaryASTNode* colon = (BinaryASTNode*)node->right;
+  IRNode* false_label = NewIR(IR_OP(label));
+  IRNode* end_label = NewIR(IR_OP(label));
+  IRNode* tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+
+  // Evaluate condition.
+  IRNode* cond = GenerateExpression(gen, node->left);
+
+  // Compare against zero.
+  IRNode* compare;
+  if (IRIsComparison(cond)) {
+    compare = cond;
+  } else {
+    compare = GeneratorEmit(
+        gen, NewIR2(IR_OP(cmpeqi), cond,
+                    GeneratorGetIntConstant(gen, node->left->type, 0)));
+  }
+  // Branch to false label.
+  GeneratorEmit(gen, NewIR2(IR_OP(bfalse), compare, false_label));
+
+  // Generate true branch.
+  IRNode* left = GenerateExpression(gen, colon->left);
+  GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left));
+
+  // Branch to end.
+  GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+
+  // false_label:
+  GeneratorEmit(gen, false_label);
+
+  // Generate false branch,
+  IRNode* right = GenerateExpression(gen, colon->right);
+  GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right));
+
+  // end_label:
+  GeneratorEmit(gen, end_label);
+
+  return tmp;
+}
+
+static IRNode* GenerateBuiltinVaStart(Generator* gen, VectorASTNode* node) {
+  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
+  IRNode* arg = GenerateExpression(gen, node->children->value[1]);
+  return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_start), ap, arg));
+}
+
+static IRNode* GenerateBuiltinVaArg(Generator* gen, VectorASTNode* node) {
+  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
+  IRNode* size = GeneratorEmit(
+      gen, NewIntIRConstant(node->base.type, node->base.type->size));
+  return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_arg), ap, size));
+}
+
+static IRNode* GenerateBuiltinVaEnd(Generator* gen, VectorASTNode* node) {
+  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
+  return GeneratorEmit(gen, NewIR1(IR_OP(builtin_va_end), ap));
+}
+
+static IRNode* GenerateBuiltinVaCopy(Generator* gen, VectorASTNode* node) {
+  IRNode* d = GenerateExpression(gen, node->children->value[0]);
+  IRNode* s = GenerateExpression(gen, node->children->value[0]);
+  return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_copy), d, s));
+}
+
+static IRNode* GenerateMask(Generator* gen, ASTNode* node, IRNode* input,
+                            int32_t mask) {
+  if (IRIsConst(input)) {
+    assert(TypeIsIntegral(node->type));
+    IRConstant* c = (IRConstant*)input;
+    return GeneratorGetIntConstant(gen, node->type, c->value.ivalue & mask);
+  }
+  return GeneratorEmit(gen,
+                       NewIR2(IR_OP(maski), input,
+                              GeneratorGetIntConstant(gen, node->type, mask)));
+}
+
+static IRNode* GenerateSignExtend(Generator* gen, IRNode* input, ASTNode* node,
+                                  int from, int to) {
+  if (TypeIsUnsigned(node->type)) {
+    return input;
+  }
+  int diff = to - from;
+  if (IRIsConst(input)) {
+    IRConstant* c = (IRConstant*)input;
+    int64_t value = c->value.ivalue;
+    value <<= diff;
+    value >>= diff;
+    return GeneratorGetIntConstant(gen, node->type, value);
+  }
+  return GeneratorEmit(gen,
+                       NewIR2(IR_OP(signextendi), input,
+                              GeneratorGetIntConstant(gen, node->type, diff)));
+}
+
+static IRNode* GenerateToInt(Generator* gen, ASTNode* node, IROpcode op,
+                             IRNode* input, int mask) {
+  IRNode* convert = GeneratorEmit(gen, NewIR1(op, input));
+  return GeneratorEmit(gen,
+                       NewIR2(IR_OP(maski), convert,
+                              GeneratorGetIntConstant(gen, node->type, mask)));
+}
+
+// Conversion.
+static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
+  switch (node->op) {
+    case AST_OP(i2s):
+    case AST_OP(l2s):
+    case AST_OP(ll2s):
+      return GenerateMask(gen, node, sub, 0xffff);
+    case AST_OP(i2c):
+    case AST_OP(i2b):
+    case AST_OP(s2c):
+    case AST_OP(s2b):
+    case AST_OP(l2c):
+    case AST_OP(l2b):
+    case AST_OP(ll2c):
+    case AST_OP(ll2b):
+      return GenerateMask(gen, node, sub, 0xff);
+    case AST_OP(i2l):
+    case AST_OP(i2ll):
+      return GenerateSignExtend(gen, sub, node, 32, 64);
+    case AST_OP(i2f):
+    case AST_OP(c2f):
+    case AST_OP(s2f):
+    case AST_OP(l2f):
+    case AST_OP(ll2f):
+      return GeneratorEmit(gen, NewIR1(IR_OP(i2f), sub));
+    case AST_OP(i2d):
+    case AST_OP(i2ld):
+    case AST_OP(c2d):
+    case AST_OP(c2ld):
+    case AST_OP(s2d):
+    case AST_OP(s2ld):
+    case AST_OP(l2d):
+    case AST_OP(l2ld):
+    case AST_OP(ll2d):
+    case AST_OP(ll2ld):
+      return GeneratorEmit(gen, NewIR1(IR_OP(i2d), sub));
+    case AST_OP(c2i):
+      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 32);
+    case AST_OP(c2s):
+      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 16);
+    case AST_OP(c2l):
+    case AST_OP(c2ll):
+      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 64);
+
+    case AST_OP(c2b):
+    case AST_OP(l2ll):
+    case AST_OP(ll2l):
+      return sub;
+
+    case AST_OP(s2i):
+      return GenerateSignExtend(gen, sub, (ASTNode*)node, 16, 32);
+    case AST_OP(s2l):
+    case AST_OP(s2ll):
+      return GenerateSignExtend(gen, sub, (ASTNode*)node, 16, 64);
+    case AST_OP(l2i):
+    case AST_OP(ll2i):
+      return GenerateMask(gen, node, sub, 0xffffffff);
+    case AST_OP(f2i):
+      return GenerateToInt(gen, node, IR_OP(f2i), sub, 0xffff);
+    case AST_OP(f2s):
+      return GenerateToInt(gen, node, IR_OP(f2i), sub, 0xffffffff);
+
+    case AST_OP(f2l):
+    case AST_OP(f2ll):
+      return GeneratorEmit(gen, NewIR1(IR_OP(f2i), sub));
+
+    case AST_OP(f2d):
+    case AST_OP(f2ld):
+      return GeneratorEmit(gen, NewIR1(IR_OP(f2d), sub));
+    case AST_OP(f2b):
+    case AST_OP(f2c):
+      return GenerateToInt(gen, node, IR_OP(f2i), sub, 0xff);
+    case AST_OP(d2i):
+    case AST_OP(ld2i):
+      return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xffffffff);
+    case AST_OP(d2c):
+    case AST_OP(d2b):
+    case AST_OP(ld2c):
+    case AST_OP(ld2b):
+      return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xff);
+    case AST_OP(d2s):
+    case AST_OP(ld2s):
+      return GenerateToInt(gen, node, IR_OP(d2i), sub, 0xfffff);
+    case AST_OP(d2l):
+    case AST_OP(d2ll):
+    case AST_OP(ld2l):
+    case AST_OP(ld2ll):
+      return GeneratorEmit(gen, NewIR1(IR_OP(d2i), sub));
+    case AST_OP(d2f):
+    case AST_OP(ld2f):
+      return GeneratorEmit(gen, NewIR1(IR_OP(d2f), sub));
+    case AST_OP(d2ld):
+    case AST_OP(ld2d):
+    case AST_OP(b2c):
+    case AST_OP(b2s):
+    case AST_OP(b2l):
+    case AST_OP(b2ll):
+    case AST_OP(b2i):
+      return sub;
+    case AST_OP(b2f):
+      return GeneratorEmit(gen, NewIR1(IR_OP(i2f), sub));
+    case AST_OP(b2d):
+    case AST_OP(b2ld):
+      return GeneratorEmit(gen, NewIR1(IR_OP(i2d), sub));
+    default:
+      return sub;
+  }
+}
+
+static IRNode* SignExtendOrMaskExpression(Generator* gen, IRNode* inst,
+                                          ASTNode* node) {
+  if (!IRIsExpression(inst)) {
+    return inst;
+  }
+  if (TypeIsChar(node->type)) {
+    if (TypeIsUnsigned(node->type)) {
+      // Unsigned char, mask to 8 bits.
+      return GenerateMask(gen, node, inst, 0xff);
+    }
+    // Signed char, sign extend to 64 bits.
+    return GenerateSignExtend(gen, inst, node, 8, 64);
+  }
+  if (TypeIsShort(node->type)) {
+    if (TypeIsUnsigned(node->type)) {
+      // Unsigned short, mask to 16 bits.
+      return GenerateMask(gen, node, inst, 0xffff);
+    }
+    // Signed short, sign extend to 64 bits.
+    return GenerateSignExtend(gen, inst, node, 16, 64);
+  }
+  if (TypeIsInt(node->type)) {
+    if (TypeIsUnsigned(node->type)) {
+      // Unsigned int, mask to 32 bits.
+      return GenerateMask(gen, node, inst, 0xffffffff);
+    }
+    // Signed int, sign extend to 64 bits.
+    return GenerateSignExtend(gen, inst, node, 32, 64);
+  }
+
+  return inst;
+}
+
+// Main expression code generator.  Generates code for one expression and
+// returns the IR Node coding it.
+IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
+  ConstantASTNode* const_node = (ConstantASTNode*)node;
+  IdentifierASTNode* id_node = (IdentifierASTNode*)node;
+  BinaryASTNode* binary_node = (BinaryASTNode*)node;
+  UnaryASTNode* unary_node = (UnaryASTNode*)node;
+  CastASTNode* cast_node = (CastASTNode*)node;
+  VectorASTNode* vector_node = (VectorASTNode*)node;
+  SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+
+  IRNode* result = NULL;
+  switch (node->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+      result =
+          GeneratorGetIntConstant(gen, node->type, const_node->value.ivalue);
+      break;
+
+    case AST_OP(fnumber):
+      result = GeneratorEmitConstant(
+          gen,
+          NewFloatingPointIRConstant(node->type, const_node->value.fvalue));
+      break;
+
+    case AST_OP(string):
+    case AST_OP(string_wide):
+      result = GenerateLiteral(gen, const_node);
+      break;
+
+    case AST_OP(identifier):
+      result = GenerateVariableReference(gen, id_node);
+      break;
+
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshifta):
+    case AST_OP(rshiftl):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+      result = GenerateBinaryExpression(gen, binary_node);
+      break;
+
+    // Conversions.
+    case AST_OP(i2s):
+    case AST_OP(i2c):
+    case AST_OP(i2l):
+    case AST_OP(i2ll):
+    case AST_OP(i2f):
+    case AST_OP(i2d):
+    case AST_OP(i2ld):
+    case AST_OP(i2b):
+    case AST_OP(c2i):
+    case AST_OP(c2s):
+    case AST_OP(c2l):
+    case AST_OP(c2ll):
+    case AST_OP(c2f):
+    case AST_OP(c2d):
+    case AST_OP(c2ld):
+    case AST_OP(c2b):
+    case AST_OP(s2i):
+    case AST_OP(s2c):
+    case AST_OP(s2l):
+    case AST_OP(s2ll):
+    case AST_OP(s2f):
+    case AST_OP(s2d):
+    case AST_OP(s2ld):
+    case AST_OP(s2b):
+    case AST_OP(l2i):
+    case AST_OP(l2c):
+    case AST_OP(l2s):
+    case AST_OP(l2ll):
+    case AST_OP(l2f):
+    case AST_OP(l2d):
+    case AST_OP(l2ld):
+    case AST_OP(l2b):
+    case AST_OP(ll2i):
+    case AST_OP(ll2c):
+    case AST_OP(ll2s):
+    case AST_OP(ll2l):
+    case AST_OP(ll2f):
+    case AST_OP(ll2d):
+    case AST_OP(ll2ld):
+    case AST_OP(ll2b):
+    case AST_OP(f2i):
+    case AST_OP(f2c):
+    case AST_OP(f2s):
+    case AST_OP(f2l):
+    case AST_OP(f2ll):
+    case AST_OP(f2d):
+    case AST_OP(f2ld):
+    case AST_OP(f2b):
+    case AST_OP(d2i):
+    case AST_OP(d2c):
+    case AST_OP(d2s):
+    case AST_OP(d2l):
+    case AST_OP(d2ll):
+    case AST_OP(d2f):
+    case AST_OP(d2ld):
+    case AST_OP(d2b):
+    case AST_OP(ld2i):
+    case AST_OP(ld2c):
+    case AST_OP(ld2s):
+    case AST_OP(ld2l):
+    case AST_OP(ld2ll):
+    case AST_OP(ld2f):
+    case AST_OP(ld2d):
+    case AST_OP(ld2b):
+    case AST_OP(b2i):
+    case AST_OP(b2c):
+    case AST_OP(b2s):
+    case AST_OP(b2l):
+    case AST_OP(b2ll):
+    case AST_OP(b2f):
+    case AST_OP(b2d):
+    case AST_OP(b2ld): {
+      IRNode* sub = GenerateExpression(gen, unary_node->sub);
+      result = GenerateConversion(gen, (ASTNode*)unary_node, sub);
+      break;
+    }
+
+    case AST_OP(cast):
+      // Propagate flags down to child.
+      cast_node->expr->flags = cast_node->base.flags;
+      result = GenerateExpression(gen, cast_node->expr);
+      break;
+
+    case AST_OP(preinc):
+      result = GenerateIncDec(gen, unary_node, false, true);
+      break;
+
+    case AST_OP(predec):
+      result = GenerateIncDec(gen, unary_node, false, false);
+      break;
+
+    case AST_OP(postinc):
+      result = GenerateIncDec(gen, unary_node, true, true);
+      break;
+
+    case AST_OP(postdec):
+      result = GenerateIncDec(gen, unary_node, true, false);
+      break;
+
+    case AST_OP(init):
+      if ((node->flags & kASTStaticInit) == 0) {
+        // Only generate code for the initialization if we are not
+        // initializing a static variable.
+        result = GenerateInitialization(gen, binary_node);
+        break;
+      }
+      break;
+
+    case AST_OP(assign):
+      result = GenerateAssignment(gen, binary_node);
+      break;
+
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+      result = GeneratedCompoundAssignment(gen, binary_node);
+      break;
+
+    case AST_OP(uplus):
+    case AST_OP(uminus):
+    case AST_OP(not):
+    case AST_OP(onescomp):
+      result = GenerateUnaryExpression(gen, unary_node);
+      break;
+
+    case AST_OP(subscript):
+      result = GenerateIndexExpression(gen, binary_node);
+      break;
+
+    case AST_OP(call):
+      result = GenerateFunctionCall(gen, vector_node);
+      break;
+
+    case AST_OP(contents):
+      result = GenerateContentsOf(gen, unary_node);
+      break;
+
+    case AST_OP(address):
+      result = GenerateAddressOf(gen, unary_node);
+      break;
+
+    case AST_OP(dot):
+    case AST_OP(arrow):
+      result = GenerateMemberReference(gen, binary_node);
+      break;
+
+    case AST_OP(sizeof):
+      result = GeneratorGetIntConstant(gen, node->type,
+                                       sizeof_node->base.value.ivalue);
+      break;
+
+    case AST_OP(logand):
+    case AST_OP(logor):
+      result = GenerateLogicalOperation(gen, binary_node);
+      break;
+
+    case AST_OP(question):
+      result = GenerateConditionalExpression(gen, binary_node);
+      break;
+
+    case AST_OP(comma):
+      GenerateExpression(gen, binary_node->left);
+      result = GenerateExpression(gen, binary_node->right);
+      break;
+
+    case AST_OP(designated_init):
+    case AST_OP(expr_init):
+      assert(false);
+      break;
+
+    case AST_OP(braced_init):
+      // No code to generate for this.
+      break;
+
+    case AST_OP(builtin_va_start):
+      result = GenerateBuiltinVaStart(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_va_arg):
+      result = GenerateBuiltinVaArg(gen, vector_node);
+      break;
+    case AST_OP(builtin_va_end):
+      result = GenerateBuiltinVaEnd(gen, vector_node);
+      break;
+    case AST_OP(builtin_va_copy):
+      result = GenerateBuiltinVaCopy(gen, vector_node);
+      break;
+
+    default:
+      assert(false);
+      break;
+  }
+  assert(result != NULL);
+  IRSetType(result, node->type);
+  return result;
+}

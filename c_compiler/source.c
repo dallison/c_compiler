@@ -1,0 +1,317 @@
+//
+//  source.c
+//  c_compiler
+//
+//  Created by David Allison on 11/18/17.
+//  Copyright © 2017 David Allison. All rights reserved.
+//
+
+#include "source.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include "map.h"
+
+static Vector all_files;
+static Map file_map;
+static bool file_map_initialized = false;
+
+uint32_t NewFile(const char* filename) {
+  File* file = malloc(sizeof(File));
+  StringInit(&file->name, filename);
+  VectorInit(&file->lines);
+  size_t curr_length = all_files.length;
+  VectorAppend(&all_files, file);
+  return (uint32_t)curr_length;
+}
+
+static int CompareCharPointers(const void* a, const void* b) {
+  MapKeyValue* s1 = (MapKeyValue*)a;
+  MapKeyValue* s2 = (MapKeyValue*)b;
+  return strcmp(s1->key, s2->key);
+}
+
+// The file_map is a maping from filename to file index + 1.  We can't
+// store the value 0 in there because MapFind returns a NULL for the
+// key not found, so we add 1 to the index.
+static uint32_t FindFile(const char* filename) {
+  if (!file_map_initialized) {
+    // Lazy init of file_map.
+    MapInit(&file_map, CompareCharPointers);
+    file_map_initialized = true;
+  }
+  // Find the index (+1) in the file map corresponding to the filename.
+  void* index = MapFind(&file_map, (void*)filename);
+  if (index != NULL) {
+    return (uint32_t)(((uint64_t)index) - 1);
+  }
+
+  // No found, create a new file in the all_files vector and add its
+  // index (+1) into the file_map.
+  uint32_t file_index = NewFile(filename);
+  File* file = all_files.value[file_index];
+  MapInsert(&file_map, file->name.value, (void*)((uint64_t)file_index + 1));
+  return file_index;
+}
+
+void FileDestruct(File* file) {
+  StringDestruct(&file->name);
+  VectorDestruct(&file->lines);
+}
+
+void ClearAllFiles() {
+  for (size_t i = 0; i < all_files.length; i++) {
+    FileDestruct((File*)all_files.value[i]);
+    free(all_files.value[i]);
+  }
+  VectorDestruct(&all_files);
+}
+
+SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
+                                 size_t end) {
+  if (source->file_index == -1) {
+    source->file_index = FindFile(source->filename.value);
+  }
+  uint32_t file_index = source->file_index;
+  if (start > MAX_TOKEN_POS || file_index > MAX_FILE_INDEX) {
+    return SOURCE_LOCATION_MISSING;
+  }
+  File* file = (File*)all_files.value[file_index];
+  size_t line_index = file->lines.length;
+  int64_t length = end - start;
+  if (line_index > MAX_LINE_INDEX || length > MAX_TOKEN_LENGTH) {
+    return SOURCE_LOCATION_MISSING;
+  }
+  VectorAppend(&file->lines, (void*)((int64_t)lineno));
+  return ((int64_t)file_index << LOC_FILE_SHIFT) |
+         ((int64_t)line_index << LOC_LINE_SHIFT) |
+         ((int64_t)start << LOC_START_SHIFT) | (length << LOC_LENGTH_SHIFT);
+}
+
+void DecodeSourceLocation(SourceLocation location, const char** filename,
+                          int* lineno, int* start, int* end) {
+  *end = *start = *lineno = 0;
+  if (location == SOURCE_LOCATION_COMMAND_LINE) {
+    *filename = "command-line";
+    return;
+  }
+  if (location == SOURCE_LOCATION_MISSING) {
+    *filename = "<unknown>";
+    return;
+  }
+  uint32_t file_index = (location >> LOC_FILE_SHIFT) & LOC_FILE_MASK;
+  uint32_t line_index = (location >> LOC_LINE_SHIFT) & LOC_LINE_MASK;
+  uint32_t length = (location >> LOC_LENGTH_SHIFT) & LOC_LENGTH_MASK;
+  *start = (location >> LOC_START_SHIFT) & LOC_START_MASK;
+  if (file_index < all_files.length) {
+    File* file = (File*)all_files.value[file_index];
+    *filename = file->name.value;
+    if (line_index < file->lines.length) {
+      *lineno = (int)file->lines.value[line_index];
+    }
+    *end = *start + length;
+  } else {
+    *filename = "<unknown>";
+  }
+}
+
+void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
+                           int* colno) {
+  *fileno = *lineno = *colno = 0;
+  if (location == SOURCE_LOCATION_COMMAND_LINE ||
+      location == SOURCE_LOCATION_MISSING) {
+    return;
+  }
+  uint32_t file_index = (location >> LOC_FILE_SHIFT) & LOC_FILE_MASK;
+  uint32_t line_index = (location >> LOC_LINE_SHIFT) & LOC_LINE_MASK;
+  *colno = (location >> LOC_START_SHIFT) & LOC_START_MASK;
+  if (file_index < all_files.length) {
+    File* file = (File*)all_files.value[file_index];
+    if (line_index < file->lines.length) {
+      *lineno = (int)file->lines.value[line_index];
+    }
+    *fileno = file_index;
+  }
+}
+
+Source* NewSourceFromFile(const char* filename, FILE* in) {
+  Source* src = malloc(sizeof(Source));
+  StringInit(&src->filename, filename);
+  StringInit(&src->original, filename);
+  src->lineno = 0;
+  src->from.file = in;
+  src->device = kSourceFromFile;
+  src->file_index = -1;
+  src->prev = NULL;
+  src->path_index = 0;
+  return src;
+}
+
+Source* NewSourceFromString(const char* filename, String* str) {
+  Source* src = malloc(sizeof(Source));
+  StringInit(&src->filename, filename);
+  StringInit(&src->original, filename);
+  src->lineno = 0;
+  src->from.string.string = str;
+  src->from.string.index = 0;
+  src->device = kSourceFromString;
+  src->file_index = -1;
+  src->prev = NULL;
+  src->path_index = 0;
+  return src;
+}
+
+void SourceDestruct(Source* src) {
+  switch (src->device) {
+    case kSourceFromFile:
+      fclose(src->from.file);
+      break;
+    case kSourceFromString:
+      StringDestruct(src->from.string.string);
+      free(src->from.string.string);
+      break;
+  }
+  StringDestruct(&src->filename);
+  StringDestruct(&src->original);
+}
+
+void SourceDelete(Source* src) {
+  SourceDestruct(src);
+  free(src);
+}
+
+void SourceRewind(Source* src) {
+  switch (src->device) {
+    case kSourceFromFile:
+      rewind(src->from.file);
+      break;
+    case kSourceFromString:
+      src->from.string.index = 0;
+      break;
+  }
+}
+
+// Has end of file been reached?
+bool SourceEof(Source* src) {
+  switch (src->device) {
+    case kSourceFromFile:
+      // From a file, use feof.
+      return feof(src->from.file);
+    case kSourceFromString:
+      // From a string, check current index against length.
+      return src->from.string.index > src->from.string.string->length;
+  }
+}
+
+int SourceGetChar(Source* src) {
+  switch (src->device) {
+    case kSourceFromFile:
+      return fgetc(src->from.file);
+      break;
+    case kSourceFromString:
+      if (src->from.string.index > src->from.string.string->length) {
+        return EOF;
+      }
+      return src->from.string.string->value[src->from.string.index++];
+      break;
+  }
+}
+
+// Read a line from the source into the 'line'.  This replaces trigraphs and
+// appends lines ending in backslash.
+void SourceReadLine(Source* src, String* line) {
+  while (!SourceEof(src)) {
+    String newline;
+    StringInit(&newline, NULL);
+    for (;;) {
+      int ch = SourceGetChar(src);
+      if (ch == EOF) {
+        break;
+      }
+      if (ch == '\n') {
+        break;
+      }
+      StringAppendChar(&newline, ch);
+    }
+    src->lineno++;
+
+    // Replace trigraphs in newline, generating line.
+    for (size_t i = 0; i < newline.length; i++) {
+      char c = newline.value[i];
+
+      if (c == '?' && i < newline.length - 2 && newline.value[i + 1] == '?') {
+        switch (newline.value[i + 2]) {
+          case '=':
+            c = '#';
+            i += 2;
+            break;
+          case '/':
+            c = '\\';
+            i += 2;
+            break;
+          case '\'':
+            c = '^';
+            i += 2;
+            break;
+          case '(':
+            c = '[';
+            i += 2;
+            break;
+          case ')':
+            c = ']';
+            i += 2;
+            break;
+          case '!':
+            c = '|';
+            i += 2;
+            break;
+          case '<':
+            c = '{';
+            i += 2;
+            break;
+          case '>':
+            c = '}';
+            i += 2;
+            break;
+          case '-':
+            c = '~';
+            i += 2;
+            break;
+        }
+      }
+
+      StringAppendChar(line, c);  // Add char to line.
+    }
+
+    // If the last character is \ then we replace it with a space and
+    // keep reading.
+    if (line->length > 0) {
+      size_t len = line->length;
+      if (line->value[len - 1] == '\\') {  // Last char is \?
+        line->value[len - 1] = ' ';        // Replace by space.
+
+        // Read another line.
+        StringDestruct(&newline);
+        continue;
+      }
+    }
+    StringDestruct(&newline);
+    break;
+  }
+}
+
+void SourcePrintLocation(SourceLocation location) {
+  const char* filename;
+  int lineno;
+  int start;
+  int end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  printf("%s:%d\n", filename, lineno);
+}
+
+void SourceTraverseFiles(void* data,
+                         void (*func)(int index, File* file, void* data)) {
+  for (size_t i = 0; i < all_files.length; i++) {
+    func(i, all_files.value[i], data);
+  }
+}

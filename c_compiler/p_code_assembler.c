@@ -1,0 +1,908 @@
+//
+//  p_code_assembler.c
+//  c_compiler
+//
+//  Created by David Allison on 12/30/17.
+//  Copyright © 2017 David Allison. All rights reserved.
+//
+
+#include "p_code_assembler.h"
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "elf.h"
+#include "p_code_machine.h"
+
+static int CompareString(const void* a, const void* b) {
+  MapKeyValue* s1 = (MapKeyValue*)a;
+  MapKeyValue* s2 = (MapKeyValue*)b;
+  return strcmp(s1->key, s2->key);
+}
+
+//
+// Forward declarations of instruction assembly functions.
+//
+
+#define DECLARE_INST_FUNC(mnemonic) \
+  static void Assemble_##mnemonic(PCodeAssembler*)
+
+DECLARE_INST_FUNC(decsp);
+DECLARE_INST_FUNC(incsp);
+DECLARE_INST_FUNC(movc);
+DECLARE_INST_FUNC(movfc);
+DECLARE_INST_FUNC(movdc);
+DECLARE_INST_FUNC(movxc);
+DECLARE_INST_FUNC(mov);
+DECLARE_INST_FUNC(movf);
+DECLARE_INST_FUNC(movd);
+DECLARE_INST_FUNC(push);
+DECLARE_INST_FUNC(pushf);
+DECLARE_INST_FUNC(pushd);
+DECLARE_INST_FUNC(pushx);
+DECLARE_INST_FUNC(pop);
+DECLARE_INST_FUNC(popf);
+DECLARE_INST_FUNC(popd);
+DECLARE_INST_FUNC(popx);
+DECLARE_INST_FUNC(add);
+DECLARE_INST_FUNC(addf);
+DECLARE_INST_FUNC(addd);
+DECLARE_INST_FUNC(addc);
+DECLARE_INST_FUNC(ldw);
+DECLARE_INST_FUNC(ldh);
+DECLARE_INST_FUNC(ldb);
+DECLARE_INST_FUNC(lduw);
+DECLARE_INST_FUNC(ldub);
+DECLARE_INST_FUNC(lduh);
+DECLARE_INST_FUNC(ldx);
+DECLARE_INST_FUNC(ldf);
+DECLARE_INST_FUNC(ldd);
+DECLARE_INST_FUNC(stw);
+DECLARE_INST_FUNC(sth);
+DECLARE_INST_FUNC(stx);
+DECLARE_INST_FUNC(stf);
+DECLARE_INST_FUNC(std);
+DECLARE_INST_FUNC(stb);
+DECLARE_INST_FUNC(sub);
+DECLARE_INST_FUNC(subf);
+DECLARE_INST_FUNC(subd);
+DECLARE_INST_FUNC(mul);
+DECLARE_INST_FUNC(mulf);
+DECLARE_INST_FUNC(muld);
+DECLARE_INST_FUNC(div);
+DECLARE_INST_FUNC(divf);
+DECLARE_INST_FUNC(divd);
+DECLARE_INST_FUNC(mod);
+DECLARE_INST_FUNC(lsr);
+DECLARE_INST_FUNC(asr);
+DECLARE_INST_FUNC(lsl);
+DECLARE_INST_FUNC(or);
+DECLARE_INST_FUNC(and);
+DECLARE_INST_FUNC(xor);
+DECLARE_INST_FUNC(not);
+DECLARE_INST_FUNC(inv);
+DECLARE_INST_FUNC(neg);
+DECLARE_INST_FUNC(negf);
+DECLARE_INST_FUNC(negd);
+DECLARE_INST_FUNC(cmpeq);
+DECLARE_INST_FUNC(cmpne);
+DECLARE_INST_FUNC(cmplt);
+DECLARE_INST_FUNC(cmple);
+DECLARE_INST_FUNC(cmpgt);
+DECLARE_INST_FUNC(cmpge);
+DECLARE_INST_FUNC(cmpeqf);
+DECLARE_INST_FUNC(cmpnef);
+DECLARE_INST_FUNC(cmpltf);
+DECLARE_INST_FUNC(cmplef);
+DECLARE_INST_FUNC(cmpgtf);
+DECLARE_INST_FUNC(cmpgef);
+DECLARE_INST_FUNC(cmpeqd);
+DECLARE_INST_FUNC(cmpned);
+DECLARE_INST_FUNC(cmpltd);
+DECLARE_INST_FUNC(cmpled);
+DECLARE_INST_FUNC(cmpgtd);
+DECLARE_INST_FUNC(cmpged);
+DECLARE_INST_FUNC(bnz);
+DECLARE_INST_FUNC(bz);
+DECLARE_INST_FUNC(bra);
+DECLARE_INST_FUNC(cbra);
+DECLARE_INST_FUNC(i2f);
+DECLARE_INST_FUNC(i2d);
+DECLARE_INST_FUNC(f2d);
+DECLARE_INST_FUNC(d2f);
+DECLARE_INST_FUNC(f2i);
+DECLARE_INST_FUNC(d2i);
+DECLARE_INST_FUNC(jmp);
+DECLARE_INST_FUNC(call);
+DECLARE_INST_FUNC(rcall);
+DECLARE_INST_FUNC(ret);
+DECLARE_INST_FUNC(esc);
+
+#undef DECLARE_INST_FUNC
+
+#define INST(mnemonic) MapInsert(instructions, #mnemonic, Assemble_##mnemonic)
+
+// Add all instructions to the handler map.  This maps the instruction
+// spelling to a handler function.
+static void InitializeInstructions(Map* instructions) {
+  INST(decsp);
+  INST(incsp);
+  INST(movc);
+  INST(movfc);
+  INST(movdc);
+  INST(movxc);
+  INST(mov);
+  INST(movf);
+  INST(movd);
+  INST(push);
+  INST(pushf);
+  INST(pushd);
+  INST(pushx);
+  INST(pop);
+  INST(popf);
+  INST(popd);
+  INST(popx);
+  INST(add);
+  INST(addf);
+  INST(addd);
+  INST(addc);
+  INST(ldw);
+  INST(ldh);
+  INST(ldb);
+  INST(lduw);
+  INST(ldub);
+  INST(lduh);
+  INST(ldx);
+  INST(ldf);
+  INST(ldd);
+  INST(stw);
+  INST(sth);
+  INST(stx);
+  INST(stf);
+  INST(std);
+  INST(stb);
+  INST(sub);
+  INST(subf);
+  INST(subd);
+  INST(mul);
+  INST(mulf);
+  INST(muld);
+  INST(div);
+  INST(divf);
+  INST(divd);
+  INST(mod);
+  INST(lsr);
+  INST(asr);
+  INST(lsl);
+  INST(or);
+  INST(and);
+  INST(xor);
+  INST(not);
+  INST(inv);
+  INST(neg);
+  INST(negf);
+  INST(negd);
+  INST(cmpeq);
+  INST(cmpne);
+  INST(cmplt);
+  INST(cmple);
+  INST(cmpgt);
+  INST(cmpge);
+  INST(cmpeqf);
+  INST(cmpnef);
+  INST(cmpltf);
+  INST(cmplef);
+  INST(cmpgtf);
+  INST(cmpgef);
+  INST(cmpeqd);
+  INST(cmpned);
+  INST(cmpltd);
+  INST(cmpled);
+  INST(cmpgtd);
+  INST(cmpged);
+  INST(bnz);
+  INST(bz);
+  INST(bra);
+  INST(cbra);
+  INST(i2f);
+  INST(i2d);
+  INST(f2d);
+  INST(d2f);
+  INST(f2i);
+  INST(d2i);
+  INST(jmp);
+  INST(call);
+  INST(rcall);
+  INST(ret);
+  INST(esc);
+}
+
+#undef INST
+
+// Initialize the assembler.  Returns true if it worked.
+bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
+                        String* outfile) {
+  static int reloc_types[] = {
+      R_PCODE_DATA32, R_PCODE_DATA64, R_PCODE_ADD16, R_PCODE_ADD32,
+      R_PCODE_ADD64,  R_PCODE_SUB16,  R_PCODE_SUB32, R_PCODE_SUB64,
+  };
+
+  // NOTE: since this is not a real machine we can make up a machine type
+  // for the ELF file header.  I happen to like the 6502 processor.
+  if (!AssemblerInit(&assembler->base, 6502, 0, reloc_types, infile, outfile)) {
+    return false;
+  }
+
+  MapInit(&assembler->instructions, CompareString);
+
+  InitializeInstructions(&assembler->instructions);
+
+  // Add a NULL section at the start of the file.
+  AssemblerAddSection(&assembler->base, NULL, SHT(null), 0, 0);
+  // Add a .bss section.
+  assembler->bss = AssemblerAddSection(&assembler->base, NewString(".bss"),
+                                       SHT(nobits), SHF(alloc) | SHF(write), 8);
+  return true;
+}
+
+PCodeAssembler* NewPCodeAssembler(String* infile, String* outfile) {
+  PCodeAssembler* assembler = malloc(sizeof(PCodeAssembler));
+  PCodeAssemblerInit(assembler, infile, outfile);
+  return assembler;
+}
+
+// Destruct the assembler.
+void PCodeAssemblerDestruct(PCodeAssembler* assembler) {
+  AssemblerDestruct(&assembler->base);
+  MapDestruct(&assembler->instructions);
+}
+
+void PCodeAssemblerDelete(PCodeAssembler* assembler) {
+  PCodeAssemblerDestruct(assembler);
+  free(assembler);
+}
+
+// Shortcut macro avoid typing assembler->base. everywhere we want to access
+// the base assembler.
+#define ASM assembler->base
+
+// Main assembly function.  This is called by the assembler driver.  It will be
+// called twice, one for each pass.
+// In pass 1 we parse everything and define all the symbols.
+// In pass 2 we also parse everything but we also insert the binary instructions
+//    and data into the buffers and expect all symbols to be defined.
+void AssemblePCodeInstruction(Assembler* base, String* word) {
+  PCodeAssembler* assembler = (PCodeAssembler*)base;
+
+  void* asm_func = MapFind(&assembler->instructions, word->value);
+  if (asm_func != NULL) {
+    void (*func)(PCodeAssembler*) = asm_func;
+    func(assembler);
+  } else {
+    AssemblerError(&ASM, "Syntax error; unknown instruction: %s", word->value);
+  }
+}
+
+// Extract register number from register name.  The format is 'x#' where
+// 'x' is the register type (r, f or d) and # is the number.
+static int RegNumber(PCodeAssembler* assembler, String* reg_name) {
+  int n = 0;
+  size_t i = 1;
+  if (reg_name->length == 1) {
+    AssemblerError(&ASM, "Illegal register name");
+  }
+  while (i < reg_name->length) {
+    n = n * 10 + reg_name->value[i] - '0';
+    i++;
+  }
+  if (n > 255) {
+    AssemblerError(&ASM, "Illegal register number %d", n);
+  }
+  return n;
+}
+
+static bool RegisterName(PCodeAssembler* assembler, int* num, char* type) {
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    String reg_name;
+    StringInit(&reg_name, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+
+    // We allow special register names: sp, ap and fp, for the stack pointer,
+    // argument pointer and frame pointer respectively.
+    if (StringEqual(&reg_name, "sp")) {
+      *num = PCODE_SP_REG;
+      *type = 'i';
+      return true;
+    }
+
+    if (StringEqual(&reg_name, "fp")) {
+      *num = PCODE_FP_REG;
+      *type = 'i';
+      return true;
+    }
+
+    if (StringEqual(&reg_name, "ap")) {
+      *num = PCODE_AP_REG;
+      *type = 'i';
+      return true;
+    }
+
+    switch (reg_name.value[0]) {
+      case 'r':
+      case 'R':
+        *type = 'i';
+        break;
+      case 'f':
+      case 'F':
+        *type = 'f';
+        break;
+      case 'd':
+      case 'D':
+        *type = 'd';
+        break;
+      default:
+        return false;
+    }
+    *num = RegNumber(assembler, &reg_name);
+    StringDestruct(&reg_name);
+    return true;
+  }
+  return false;
+}
+
+static int Register(PCodeAssembler* assembler, char type_needed,
+                    const char* type_name) {
+  int num;
+  char type;
+  if (!RegisterName(assembler, &num, &type)) {
+    AssemblerError(&ASM, "Expected %s register name", type_name);
+    return 0;
+  }
+
+  if (type != type_needed) {
+    AssemblerError(&ASM, "Invalid register type; got %c expected %c", type,
+                   type_needed);
+    return 0;
+  }
+  return num;
+}
+
+static bool ParseRegisterTriple(PCodeAssembler* assembler, char type_needed,
+                                const char* type_name, int* regs) {
+  regs[0] = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return false;
+  }
+  regs[1] = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return false;
+  }
+  regs[2] = Register(assembler, type_needed, type_name);
+  return true;
+}
+
+// Comparisons always use an integer destination reg.
+static bool ParseComparisonRegisterTriple(PCodeAssembler* assembler,
+                                          char type_needed,
+                                          const char* type_name, int* regs) {
+  regs[0] = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return false;
+  }
+  regs[1] = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return false;
+  }
+  regs[2] = Register(assembler, type_needed, type_name);
+  return true;
+}
+
+static bool ParseRegisterPair(PCodeAssembler* assembler, char type_needed,
+                              const char* type_name, int* regs) {
+  regs[0] = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return false;
+  }
+  regs[1] = Register(assembler, type_needed, type_name);
+  regs[2] = 0;
+  return true;
+}
+
+//
+// Individual instruction handling functions.
+//
+
+static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
+  int32_t inst = opcode << 24 | regs[0] << 16 | regs[1] << 8 | regs[2];
+  AssemblerEmitWord(&assembler->base, assembler->base.current_section, inst);
+}
+
+#define ASSEMBLE_INT_ALU(inst)                                  \
+  static void Assemble_##inst(PCodeAssembler* assembler) {      \
+    int regs[3];                                                \
+    if (ParseRegisterTriple(assembler, 'i', "integer", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                   \
+    }                                                           \
+  }
+
+#define ASSEMBLE_FLOAT_ALU(inst)                              \
+  static void Assemble_##inst(PCodeAssembler* assembler) {    \
+    int regs[3];                                              \
+    if (ParseRegisterTriple(assembler, 'f', "float", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                 \
+    }                                                         \
+  }
+
+#define ASSEMBLE_DOUBLE_ALU(inst)                              \
+  static void Assemble_##inst(PCodeAssembler* assembler) {     \
+    int regs[3];                                               \
+    if (ParseRegisterTriple(assembler, 'd', "double", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                  \
+    }                                                          \
+  }
+
+#define ASSEMBLE_UNARY_INT_ALU(inst)                          \
+  static void Assemble_##inst(PCodeAssembler* assembler) {    \
+    int regs[3];                                              \
+    if (ParseRegisterPair(assembler, 'i', "integer", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                 \
+    }                                                         \
+  }
+
+#define ASSEMBLE_UNARY_FLOAT_ALU(inst)                      \
+  static void Assemble_##inst(PCodeAssembler* assembler) {  \
+    int regs[3];                                            \
+    if (ParseRegisterPair(assembler, 'f', "float", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);               \
+    }                                                       \
+  }
+
+#define ASSEMBLE_UNARY_DOUBLE_ALU(inst)                      \
+  static void Assemble_##inst(PCodeAssembler* assembler) {   \
+    int regs[3];                                             \
+    if (ParseRegisterPair(assembler, 'd', "double", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                \
+    }                                                        \
+  }
+
+#define ASSEMBLE_INT_CMP(inst)                                            \
+  static void Assemble_##inst(PCodeAssembler* assembler) {                \
+    int regs[3];                                                          \
+    if (ParseComparisonRegisterTriple(assembler, 'i', "integer", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                             \
+    }                                                                     \
+  }
+
+#define ASSEMBLE_FLOAT_CMP(inst)                                        \
+  static void Assemble_##inst(PCodeAssembler* assembler) {              \
+    int regs[3];                                                        \
+    if (ParseComparisonRegisterTriple(assembler, 'f', "float", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                           \
+    }                                                                   \
+  }
+
+#define ASSEMBLE_DOUBLE_CMP(inst)                                        \
+  static void Assemble_##inst(PCodeAssembler* assembler) {               \
+    int regs[3];                                                         \
+    if (ParseComparisonRegisterTriple(assembler, 'd', "double", regs)) { \
+      AssembleALU(assembler, OP(inst), regs);                            \
+    }                                                                    \
+  }
+
+ASSEMBLE_INT_ALU(add)
+ASSEMBLE_INT_ALU(sub)
+ASSEMBLE_FLOAT_ALU(addf)
+ASSEMBLE_DOUBLE_ALU(addd)
+ASSEMBLE_FLOAT_ALU(subf);
+ASSEMBLE_DOUBLE_ALU(subd);
+ASSEMBLE_INT_ALU(mul);
+ASSEMBLE_FLOAT_ALU(mulf);
+ASSEMBLE_DOUBLE_ALU(muld);
+ASSEMBLE_INT_ALU(div);
+ASSEMBLE_FLOAT_ALU(divf);
+ASSEMBLE_DOUBLE_ALU(divd);
+ASSEMBLE_INT_ALU(mod);
+ASSEMBLE_INT_ALU(lsr);
+ASSEMBLE_INT_ALU(asr);
+ASSEMBLE_INT_ALU(lsl);
+ASSEMBLE_INT_ALU(or);
+ASSEMBLE_INT_ALU(and);
+ASSEMBLE_INT_ALU(xor);
+ASSEMBLE_UNARY_INT_ALU(not);
+ASSEMBLE_UNARY_INT_ALU(inv);
+ASSEMBLE_UNARY_INT_ALU(neg);
+ASSEMBLE_UNARY_FLOAT_ALU(negf);
+ASSEMBLE_UNARY_DOUBLE_ALU(negd);
+ASSEMBLE_INT_CMP(cmpeq);
+ASSEMBLE_INT_CMP(cmpne);
+ASSEMBLE_INT_CMP(cmplt);
+ASSEMBLE_INT_CMP(cmple);
+ASSEMBLE_INT_CMP(cmpgt);
+ASSEMBLE_INT_CMP(cmpge);
+ASSEMBLE_FLOAT_CMP(cmpeqf);
+ASSEMBLE_FLOAT_CMP(cmpnef);
+ASSEMBLE_FLOAT_CMP(cmpltf);
+ASSEMBLE_FLOAT_CMP(cmplef);
+ASSEMBLE_FLOAT_CMP(cmpgtf);
+ASSEMBLE_FLOAT_CMP(cmpgef);
+ASSEMBLE_DOUBLE_CMP(cmpeqd);
+ASSEMBLE_DOUBLE_CMP(cmpned);
+ASSEMBLE_DOUBLE_CMP(cmpltd);
+ASSEMBLE_DOUBLE_CMP(cmpled);
+ASSEMBLE_DOUBLE_CMP(cmpgtd);
+ASSEMBLE_DOUBLE_CMP(cmpged);
+
+static void AssembleConversion(PCodeAssembler* assembler, int opcode,
+                               char from_type, const char* from_type_name,
+                               char to_type, const char* to_type_name) {
+  int regs[2];
+  regs[0] = Register(assembler, to_type, to_type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  regs[1] = Register(assembler, from_type, from_type_name);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    opcode << 24 | regs[0] << 16 | regs[1] << 8);
+}
+
+static void Assemble_i2f(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(i2f), 'i', "integer", 'f', "float");
+}
+
+static void Assemble_i2d(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(i2d), 'i', "integer", 'd', "double");
+}
+
+static void Assemble_d2f(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(d2f), 'd', "double", 'f', "float");
+}
+
+static void Assemble_f2d(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(f2d), 'f', "float", 'd', "double");
+}
+
+static void Assemble_f2i(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(f2i), 'f', "float", 'i', "integer");
+}
+
+static void Assemble_d2i(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(d2i), 'd', "double", 'i', "integer");
+}
+
+static void Assemble_decsp(PCodeAssembler* assembler) {
+  if (LexMatch(&ASM.lex, TOK(hash))) {
+    int64_t value = AssemblerEvaluateExpression(&ASM);
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      (OP(decsp) << 24 | (int)(value & 0xffffff)));
+  } else {
+    AssemblerError(&ASM, "Immediate expression expected");
+  }
+}
+
+static void Assemble_incsp(PCodeAssembler* assembler) {
+  if (LexMatch(&ASM.lex, TOK(hash))) {
+    int64_t value = AssemblerEvaluateExpression(&ASM);
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      (OP(incsp) << 24 | (int)(value & 0xffffff)));
+  } else {
+    AssemblerError(&ASM, "Immediate expression expected");
+  }
+}
+
+static void AssembleLoadStore(PCodeAssembler* assembler, int opcode,
+                              char type_needed, const char* type_name) {
+  int regs[2];
+  regs[0] = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexMatch(&ASM.lex, TOK(lsquare))) {
+    AssemblerError(&ASM, "Missing [");
+    return;
+  }
+
+  // Base register is always integer register.
+  regs[1] = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  // Now an immediate offset.
+  if (!LexMatch(&ASM.lex, TOK(hash))) {
+    AssemblerError(&ASM, "Missing # offset");
+    return;
+  }
+  int64_t offset = AssemblerEvaluateExpression(&ASM);
+  if (!LexMatch(&ASM.lex, TOK(rsquare))) {
+    AssemblerError(&ASM, "Missing ]");
+    return;
+  }
+
+  // These are 64 bit instructions with the first word containing the
+  // two registers and the second containing the offset.
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    0x80000000U | opcode << 24 | regs[0] << 16 | regs[1] << 8);
+  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+}
+
+#define ASSEMBLE_INT_LOAD_STORE(inst)                       \
+  static void Assemble_##inst(PCodeAssembler* assembler) {  \
+    AssembleLoadStore(assembler, OP(inst), 'i', "integer"); \
+  }
+
+ASSEMBLE_INT_LOAD_STORE(ldb)
+ASSEMBLE_INT_LOAD_STORE(ldh)
+ASSEMBLE_INT_LOAD_STORE(ldw)
+ASSEMBLE_INT_LOAD_STORE(ldub)
+ASSEMBLE_INT_LOAD_STORE(lduh)
+ASSEMBLE_INT_LOAD_STORE(lduw)
+ASSEMBLE_INT_LOAD_STORE(ldx)
+
+static void Assemble_ldf(PCodeAssembler* assembler) {
+  AssembleLoadStore(assembler, OP(ldf), 'f', "float");
+}
+
+static void Assemble_ldd(PCodeAssembler* assembler) {
+  AssembleLoadStore(assembler, OP(ldd), 'd', "double");
+}
+
+ASSEMBLE_INT_LOAD_STORE(stb);
+ASSEMBLE_INT_LOAD_STORE(stw);
+ASSEMBLE_INT_LOAD_STORE(sth);
+ASSEMBLE_INT_LOAD_STORE(stx);
+
+static void Assemble_stf(PCodeAssembler* assembler) {
+  AssembleLoadStore(assembler, OP(stf), 'f', "float");
+}
+
+static void Assemble_std(PCodeAssembler* assembler) {
+  AssembleLoadStore(assembler, OP(std), 'd', "double");
+}
+
+#undef ASSEMBLE_INT_LOAD_STORE
+
+static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
+                                 char type_needed, const char* type_name) {
+  int reg = Register(assembler, type_needed, type_name);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  // Now an immediate value or a symbol
+  if (!LexMatch(&ASM.lex, TOK(hash))) {
+    if (opcode != OP(movxc)) {
+      AssemblerError(&ASM, "Illegal symbol reference instruction");
+      return;
+    }
+    // Symbol.  We are moving a symbol into a register.
+    if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+      AssemblerError(&ASM, "Invalid mov operand");
+      return;
+    }
+    AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+    if (sym == NULL) {
+      sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                               SYM_TYPE(object), SYM_BIND(local), 0);
+      AssemblerInsertSymbol(&ASM, sym);
+    }
+    LexNextToken(&ASM.lex);
+    AssemblerRelocation* reloc =
+        NewAssemblerRelocation(sym, R_PCODE_MOVXC, ASM.current_section,
+                               (int32_t)AssemblerCurrentAddress(&ASM));
+    AssemblerAddRelocation(&ASM, reloc);
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      0xc0000000U | opcode << 24 | reg << 16);
+    AssemblerEmitLong(&ASM, ASM.current_section, 0);
+    return;
+  }
+
+  // These are 64 or 96 bit instructions with the first word containing the
+  // register and the second [two] containing the value.
+  switch (type_needed) {
+    case 'i': {
+      int64_t value = AssemblerEvaluateExpression(&ASM);
+
+      if (opcode == OP(movxc)) {
+        AssemblerEmitWord(&ASM, ASM.current_section,
+                          0xc0000000U | opcode << 24 | reg << 16);
+        AssemblerEmitLong(&ASM, ASM.current_section, value);
+      } else {
+        AssemblerEmitWord(&ASM, ASM.current_section,
+                          0x80000000U | opcode << 24 | reg << 16);
+        AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
+      }
+      break;
+    }
+    case 'f': {
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        0x80000000U | opcode << 24 | reg << 16);
+      float f = AssemblerGetDoubleConst(&ASM);
+      uint32_t* p = (uint32_t*)&f;
+      AssemblerEmitWord(&ASM, ASM.current_section, *p);
+      break;
+    }
+    case 'd': {
+      double f = AssemblerGetDoubleConst(&ASM);
+      uint64_t* p = (uint64_t*)&f;
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        0xc0000000U | opcode << 24 | reg << 16);
+      AssemblerEmitLong(&ASM, ASM.current_section, *p);
+      break;
+    }
+    default:
+      assert(false);
+  }
+}
+
+#define ASSEMBLE_MOVC(inst, reg_type, type_name)                    \
+  static void Assemble_##inst(PCodeAssembler* assembler) {          \
+    AssembleMoveConstant(assembler, OP(inst), reg_type, type_name); \
+  }
+
+#define UNDEFINED_INST(m) \
+  static void Assemble_##m(PCodeAssembler* assembler) {}
+
+ASSEMBLE_MOVC(movc, 'i', "integer");
+ASSEMBLE_MOVC(movfc, 'f', "float");
+ASSEMBLE_MOVC(movdc, 'd', "double");
+ASSEMBLE_MOVC(movxc, 'i', "integer");
+
+#undef ASSEMBLE_MOVC
+
+static void AssembleMove(PCodeAssembler* assembler, int opcode,
+                         char type_needed, const char* type_name) {
+  int regs[3];
+  if (ParseRegisterPair(assembler, type_needed, type_name, regs)) {
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      opcode << 24 | regs[0] << 16 | regs[1] << 8);
+  }
+}
+
+#define ASSEMBLE_MOV(inst, reg_type, type_name)             \
+  static void Assemble_##inst(PCodeAssembler* assembler) {  \
+    AssembleMove(assembler, OP(inst), reg_type, type_name); \
+  }
+
+ASSEMBLE_MOV(mov, 'i', "integer");
+ASSEMBLE_MOV(movf, 'f', "float");
+ASSEMBLE_MOV(movd, 'd', "double");
+
+#undef ASSEMBLE_MOV
+
+static void AssemblePushPop(PCodeAssembler* assembler, int opcode,
+                            char type_needed, const char* type_name) {
+  int reg = Register(assembler, type_needed, type_name);
+  AssemblerEmitWord(&ASM, ASM.current_section, opcode << 24 | reg << 16);
+}
+
+#define ASSEMBLE_PUSH_POP(inst, reg_type, type_name)           \
+  static void Assemble_##inst(PCodeAssembler* assembler) {     \
+    AssemblePushPop(assembler, OP(inst), reg_type, type_name); \
+  }
+
+ASSEMBLE_PUSH_POP(push, 'i', "integer");
+ASSEMBLE_PUSH_POP(pushf, 'f', "float");
+ASSEMBLE_PUSH_POP(pushd, 'd', "double");
+ASSEMBLE_PUSH_POP(pushx, 'i', "integer");
+ASSEMBLE_PUSH_POP(pop, 'i', "integer");
+ASSEMBLE_PUSH_POP(popf, 'f', "float");
+ASSEMBLE_PUSH_POP(popd, 'd', "double");
+ASSEMBLE_PUSH_POP(popx, 'i', "integer");
+
+static void Assemble_ret(PCodeAssembler* assembler) {
+  AssemblerEmitWord(&ASM, ASM.current_section, OP(ret) << 24);
+}
+
+static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
+  int reg = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  int64_t addr = AssemblerEvaluateExpression(&ASM);
+  int64_t offset = addr - AssemblerCurrentAddress(&ASM);
+  AssemblerEmitWord(&ASM, ASM.current_section,
+                    0x80000000 | opcode << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+}
+
+static void Assemble_bz(PCodeAssembler* assembler) {
+  AssembleConditionalBranch(assembler, OP(bz));
+}
+
+static void Assemble_bnz(PCodeAssembler* assembler) {
+  AssembleConditionalBranch(assembler, OP(bnz));
+}
+
+static void Assemble_bra(PCodeAssembler* assembler) {
+  int64_t addr = AssemblerEvaluateExpression(&ASM);
+  int64_t offset = addr - AssemblerCurrentAddress(&ASM);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0x80000000 | OP(bra) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
+}
+
+static void Assemble_addc(PCodeAssembler* assembler) {
+  int regs[3];
+  if (ParseRegisterPair(assembler, 'i', "integer", regs)) {
+    if (!LexMatch(&ASM.lex, TOK(comma))) {
+      AssemblerError(&ASM, "Missing comma");
+    }
+    if (!LexMatch(&ASM.lex, TOK(hash))) {
+      AssemblerError(&ASM, "Missing #constant");
+    }
+    int64_t value = AssemblerEvaluateExpression(&ASM);
+
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        0x80000000 | OP(addc) << 24 | regs[0] << 16 | regs[1] << 8);
+    AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
+  }
+}
+
+static void Assemble_cbra(PCodeAssembler* assembler) {
+  int reg = Register(assembler, 'i', "integer");
+  AssemblerEmitWord(&ASM, ASM.current_section, OP(cbra) << 24 | reg << 16);
+}
+
+static void Assemble_rcall(PCodeAssembler* assembler) {
+  int reg = Register(assembler, 'i', "integer");
+  AssemblerEmitWord(&ASM, ASM.current_section, OP(rcall) << 24 | reg << 16);
+}
+
+static void Assemble_call(PCodeAssembler* assembler) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for call instruction");
+    return;
+  }
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  AssemblerRelocation* reloc =
+      NewAssemblerRelocation(sym, R_PCODE_CALL, ASM.current_section,
+                             (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(call) << 24);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+}
+
+static void Assemble_jmp(PCodeAssembler* assembler) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for jmp instruction");
+    return;
+  }
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  AssemblerRelocation* reloc =
+      NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
+                             (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(call) << 24);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+}
+
+static void Assemble_esc(PCodeAssembler* assembler) {
+  if (LexMatch(&ASM.lex, TOK(hash))) {
+    int64_t value = AssemblerEvaluateExpression(&ASM);
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      (OP(esc) << 24 | (int)(value & 0xffffff)));
+  } else {
+    AssemblerError(&ASM, "Missing #value for esc instruction");
+  }
+}
+
+#undef UNDEFINED_INST

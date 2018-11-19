@@ -1,0 +1,1702 @@
+//
+//  p_code.c
+//  c_compiler
+//
+//  Created by David Allison on 12/22/17.
+//  Copyright © 2017 David Allison. All rights reserved.
+//
+
+#include "p_code_codegen.h"
+#include <assert.h>
+#include <stdlib.h>
+#include "compiler.h"
+#include "p_code_optimize.h"
+
+const char* PCodeOpcodeName(int op) {
+  PCodeOpcode opcode = op;
+  switch (opcode) {
+    default:
+      // Use the generic TargetOpcodeName for all non-p-code specific
+      // opcodes.
+      return TargetOpcodeName((TargetOpcode)opcode);
+
+    case P_OP(ap):
+      return "ap";
+    case P_OP(decsp):
+      return "decsp";
+    case P_OP(incsp):
+      return "incsp";
+
+    case P_OP(push):
+      return "push";
+    case P_OP(pushf):
+      return "pushf";
+    case P_OP(pushd):
+      return "pushd";
+    case P_OP(pushx):
+      return "pushx";
+    case P_OP(pop):
+      return "pop";
+    case P_OP(popf):
+      return "popf";
+    case P_OP(popd):
+      return "popd";
+    case P_OP(popx):
+      return "popx";
+
+    case P_OP(ldw):
+      return "ldw";
+    case P_OP(ldh):
+      return "ldh";
+    case P_OP(lduw):
+      return "lduw";
+    case P_OP(ldub):
+      return "ldub";
+    case P_OP(lduh):
+      return "lduh";
+    case P_OP(ldf):
+      return "ldf";
+    case P_OP(ldd):
+      return "ldd";
+    case P_OP(ldb):
+      return "ldb";
+    case P_OP(ldx):
+      return "ldx";
+
+    case P_OP(stw):
+      return "stw";
+    case P_OP(sth):
+      return "sth";
+    case P_OP(stx):
+      return "stx";
+    case P_OP(stf):
+      return "stf";
+    case P_OP(std):
+      return "std";
+    case P_OP(stb):
+      return "stb";
+
+    // Add.
+    case P_OP(add):
+      return "add";
+    case P_OP(addf):
+      return "addf";
+    case P_OP(addd):
+      return "addd";
+    case P_OP(addc):
+      return "addc";
+
+    // Subtract.
+    case P_OP(sub):
+      return "sub";
+    case P_OP(subf):
+      return "subf";
+    case P_OP(subd):
+      return "subd";
+
+    // Multiply.
+    case P_OP(mul):
+      return "mul";
+    case P_OP(mulf):
+      return "mulf";
+    case P_OP(muld):
+      return "muld";
+
+    // Divide.
+    case P_OP(div):
+      return "div";
+    case P_OP(divf):
+      return "divf";
+    case P_OP(divd):
+      return "divd";
+
+    // Modulus.
+    case P_OP(mod):
+      return "mod";
+
+    // Shifts.
+    case P_OP(lsr):
+      return "lsr";
+    case P_OP(asr):
+      return "asr";
+    case P_OP(lsl):
+      return "lsl";
+
+    // Bitwise.
+    case P_OP(or):
+      return "or";
+    case P_OP(and):
+      return "and";
+    case P_OP(xor):
+      return "xor";
+
+    case P_OP(not):
+      return "not";
+    case P_OP(inv):
+      return "inv";
+    case P_OP(neg):
+      return "neg";
+    case P_OP(negf):
+      return "negf";
+    case P_OP(negd):
+      return "negd";
+
+    // Compares.
+    case P_OP(cmpeq):
+      return "cmpeq";
+    case P_OP(cmpne):
+      return "cmpne";
+    case P_OP(cmplt):
+      return "cmplt";
+    case P_OP(cmple):
+      return "cmple";
+    case P_OP(cmpgt):
+      return "cmpgt";
+    case P_OP(cmpge):
+      return "cmpge";
+
+    case P_OP(cmpeqf):
+      return "cmpeqf";
+    case P_OP(cmpnef):
+      return "cmpnef";
+    case P_OP(cmpltf):
+      return "cmpltf";
+    case P_OP(cmplef):
+      return "cmplef";
+    case P_OP(cmpgtf):
+      return "cmpgtf";
+    case P_OP(cmpgef):
+      return "cmpgef";
+
+    case P_OP(cmpeqd):
+      return "cmpeqd";
+    case P_OP(cmpned):
+      return "cmpned";
+    case P_OP(cmpltd):
+      return "cmpltd";
+    case P_OP(cmpled):
+      return "cmpled";
+    case P_OP(cmpgtd):
+      return "cmpgtd";
+    case P_OP(cmpged):
+      return "cmpged";
+
+    // Relative branches.
+    case P_OP(bnz):
+      return "bnz";
+    case P_OP(bz):
+      return "bz";
+    case P_OP(bra):
+      return "bra";
+    case P_OP(cbra):
+      return "cbra";  // Computed branch.
+
+    case P_OP(i2f):
+      return "i2f";
+    case P_OP(i2d):
+      return "i2d";
+    case P_OP(f2d):
+      return "f2d";
+    case P_OP(d2f):
+      return "d2f";
+    case P_OP(f2i):
+      return "f2i";
+    case P_OP(d2i):
+      return "d2i";
+
+    // Absolute jump.
+    case P_OP(jmp):
+      return "jmp";
+
+    // Call and return.
+    case P_OP(call):
+      return "call";
+    case P_OP(callf):
+      return "callf";
+    case P_OP(calld):
+      return "calld";
+    case P_OP(rcall):
+      return "rcall";
+    case P_OP(rcallf):
+      return "rcallf";
+    case P_OP(rcalld):
+      return "rcalld";
+    case P_OP(ret):
+      return "ret";
+  }
+}
+
+static TargetInstruction* ArgumentPointer(PCodeGenerator* pcode) {
+  if (pcode->argument_pointer == NULL) {
+    pcode->argument_pointer =
+        TargetEmit(&pcode->base, TargetNewInstruction((TargetOpcode)P_OP(ap)));
+  }
+  return pcode->argument_pointer;
+}
+
+void PCodeGeneratorInit(PCodeGenerator* pcode, Generator* gen) {
+  TargetGeneratorInit(&pcode->base, gen);
+
+  pcode->argument_pointer = NULL;
+  PCodeRegisterAllocatorInit(&pcode->register_allocator, pcode);
+}
+
+PCodeGenerator* NewPCodeGenerator(Generator* gen) {
+  PCodeGenerator* pcode = malloc(sizeof(PCodeGenerator));
+  PCodeGeneratorInit(pcode, gen);
+  return pcode;
+}
+
+void PCodeGeneratorDestruct(PCodeGenerator* pcode) {
+  TargetGeneratorDestruct(&pcode->base);
+  PCodeRegisterAllocatorDestruct(&pcode->register_allocator);
+}
+
+void PCodeGeneratorDelete(PCodeGenerator* pcode) {
+  PCodeGeneratorDestruct(pcode);
+  free(pcode);
+}
+
+// Some static utility functions that map to generic target functions.
+static TargetInstruction* NewInstruction2(PCodeOpcode opcode,
+                                          TargetInstruction* op1) {
+  return TargetNewInstruction2((TargetOpcode)opcode, op1);
+}
+
+static TargetInstruction* NewInstruction3(PCodeOpcode opcode,
+                                          TargetInstruction* op1,
+                                          TargetInstruction* op2) {
+  return TargetNewInstruction3((TargetOpcode)opcode, op1, op2);
+}
+
+static TargetInstruction* NewInstruction4(PCodeOpcode opcode,
+                                          TargetInstruction* op1,
+                                          TargetInstruction* op2,
+                                          TargetInstruction* op3) {
+  return TargetNewInstruction4((TargetOpcode)opcode, op1, op2, op3);
+}
+
+static TargetInstruction* Emit(PCodeGenerator* pcode, TargetInstruction* inst) {
+  return TargetEmit(&pcode->base, inst);
+}
+
+static TargetInstruction* EmitBefore(PCodeGenerator* pcode,
+                                     TargetInstruction* inst,
+                                     TargetInstruction* pos) {
+  return TargetEmitBefore(&pcode->base, inst, pos);
+}
+
+static TargetInstruction* EmitAfter(PCodeGenerator* pcode,
+                                    TargetInstruction* inst,
+                                    TargetInstruction* pos) {
+  return TargetEmitAfter(&pcode->base, inst, pos);
+}
+
+static TargetInstruction* EmitConstant(PCodeGenerator* pcode,
+                                       TargetInstruction* c) {
+  return TargetEmitConstant(&pcode->base, c);
+}
+
+static TargetInstruction* EmitSymbol(PCodeGenerator* pcode,
+                                     TargetInstruction* c) {
+  return TargetEmitSymbol(&pcode->base, c);
+}
+
+static TargetInstruction* FramePointer(PCodeGenerator* pcode) {
+  return TargetFramePointer(&pcode->base);
+}
+
+static TargetInstruction* StackPointer(PCodeGenerator* pcode) {
+  return TargetStackPointer(&pcode->base);
+}
+
+static TargetInstruction* GetLoweredNode(IRNode* node) {
+  return TargetGetLoweredNode(node);
+}
+
+static TargetInstruction* SetLoweredNode(IRNode* node,
+                                         TargetInstruction* inst) {
+  return TargetSetLoweredNode(node, inst);
+}
+
+static TargetInstruction* GetIntConstant(PCodeGenerator* pcode, IRNode* node,
+                                         TargetType type, int64_t value) {
+  return TargetGetIntConstant(&pcode->base, node, type, value);
+}
+
+static TargetInstruction* GetFloatingPointConstant(PCodeGenerator* pcode,
+                                                   IRNode* node,
+                                                   TargetType type,
+                                                   int64_t value) {
+  return TargetGetFloatingPointConstant(&pcode->base, node, type, value);
+}
+
+static TargetInstruction* GetSymbol(PCodeGenerator* pcode, IRNode* node,
+                                    Symbol* symbol) {
+  return TargetGetSymbol(&pcode->base, node, symbol);
+}
+
+static TargetInstruction* NewInstruction(PCodeOpcode opcode) {
+  return TargetNewInstruction((TargetOpcode)opcode);
+}
+
+// Static varaibles have an address calculated by the linker so at this
+// point they are unknown.  We need to load their address into a register.  This
+// is done using a movxc instruction.
+static TargetInstruction* LoadStaticVariable(PCodeGenerator* pcode,
+                                             IRNode* node) {
+  return Emit(pcode, NewInstruction2(P_OP(movxc), GetLoweredNode(node)));
+}
+
+static struct {
+  bool (*type_func)(TypeRecord*);
+  PCodeOpcode load;
+} load_opcodes[] = {
+    {TypeIsInt, P_OP(ldw)},
+    {TypeIsShort, P_OP(ldh)},
+    {TypeIsChar, P_OP(ldb)},
+    {TypeIsLong, P_OP(ldx)},
+    {TypeIsLongLong, P_OP(ldx)},
+    {TypeIsUnsignedInt, P_OP(lduw)},
+    {TypeIsUnsignedShort, P_OP(lduh)},
+    {TypeIsUnsignedChar, P_OP(ldub)},
+    {TypeIsFloat, P_OP(ldf)},
+    {TypeIsDouble, P_OP(ldd)},
+    {TypeIsBool, P_OP(ldb)},
+    {TypeIsPointerOrArray, P_OP(ldx)},
+    {TypeIsFunction, P_OP(ldx)},
+    {NULL, 0},
+};
+
+static TargetInstruction* LoadVariableValue(PCodeGenerator* pcode, IRNode* node,
+                                            TargetInstruction* addr,
+                                            TargetInstruction* offset) {
+  PCodeOpcode opcode = P_OP(ldw);
+  for (size_t i = 0; load_opcodes[i].type_func != NULL; i++) {
+    if (load_opcodes[i].type_func(node->type)) {
+      opcode = load_opcodes[i].load;
+      break;
+    }
+  }
+  assert(opcode != 0);
+  return Emit(pcode, NewInstruction3(opcode, addr, offset));
+}
+
+// Materialize a value into a register.  This loads a constant into a register
+// or returns the pcode instruction associated with the node if it's
+// already in a register.
+static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
+  if (IRIsConst(node)) {
+    switch (node->opcode) {
+      case IR_OP(constb):
+      case IR_OP(consts):
+      case IR_OP(consti):
+        return Emit(pcode, NewInstruction2(P_OP(movc), GetLoweredNode(node)));
+      case IR_OP(constl):
+      case IR_OP(consta):
+        return Emit(pcode, NewInstruction2(P_OP(movxc), GetLoweredNode(node)));
+      case IR_OP(constf):
+        return Emit(pcode, NewInstruction2(P_OP(movfc), GetLoweredNode(node)));
+      case IR_OP(constd):
+        return Emit(pcode, NewInstruction2(P_OP(movdc), GetLoweredNode(node)));
+      default:
+        assert(false);
+    }
+  }
+  if (IRIsAutoVariable(node)) {
+    // Auto variables are in the stack frame.  These are accessed through
+    // the frame pointer with a negative offset.
+    TargetInstruction* addr = FramePointer(pcode);
+    int32_t var_offset = node->data.ivalue;
+    TargetInstruction* offset = (TargetInstruction*)GetIntConstant(
+        pcode, node, kTargetTypeWord,
+        var_offset - pcode->base.stack_frame_size);
+    return Emit(pcode, NewInstruction3(P_OP(addc), addr, offset));
+  } else if (IRIsArgument(node)) {
+    TargetInstruction* addr = ArgumentPointer(pcode);
+    int32_t var_offset = node->data.ivalue;
+    TargetInstruction* offset = (TargetInstruction*)GetIntConstant(
+        pcode, node, kTargetTypeWord, var_offset);
+    return Emit(pcode, NewInstruction3(P_OP(addc), addr, offset));
+  } else if (IRIsStaticVariable(node)) {
+    // The address of static variables need to be moved into a register.
+
+    TargetInstruction* addr = LoadStaticVariable(pcode, node);
+    TargetInstruction* offset = GetIntConstant(pcode, NULL, kTargetTypeWord, 0);
+    return Emit(pcode, NewInstruction3(P_OP(addc), addr, offset));
+  }
+
+  // Node is not a variable, is must be an already-lowered expression.
+  return GetLoweredNode(node);
+}
+
+static PCodeOpcode IR2PCode(IROpcode op) {
+  switch (op) {
+    case IR_OP(addi):
+      return P_OP(add);
+    case IR_OP(addf):
+      return P_OP(addf);
+    case IR_OP(addd):
+      return P_OP(addd);
+    case IR_OP(adda):
+      return P_OP(add);
+
+    case IR_OP(subi):
+      return P_OP(sub);
+    case IR_OP(subf):
+      return P_OP(subf);
+    case IR_OP(subd):
+      return P_OP(subd);
+    case IR_OP(suba):
+      return P_OP(sub);
+
+    case IR_OP(muli):
+      return P_OP(mul);
+    case IR_OP(mulf):
+      return P_OP(mulf);
+    case IR_OP(muld):
+      return P_OP(muld);
+
+    case IR_OP(divi):
+      return P_OP(div);
+    case IR_OP(divf):
+      return P_OP(divf);
+    case IR_OP(divd):
+      return P_OP(divd);
+
+    case IR_OP(modi):
+      return P_OP(mod);
+
+    case IR_OP(lsri):
+      return P_OP(lsr);
+    case IR_OP(asri):
+      return P_OP(asr);
+    case IR_OP(lsli):
+      return P_OP(lsl);
+
+    case IR_OP(ori):
+      return P_OP(or);
+    case IR_OP(andi):
+      return P_OP(and);
+    case IR_OP(xori):
+      return P_OP(xor);
+
+    case IR_OP(noti):
+      return P_OP(not);
+    case IR_OP(nota):
+      return P_OP(not);
+    case IR_OP(onescomp):
+      return P_OP(inv);
+    case IR_OP(negi):
+      return P_OP(neg);
+    case IR_OP(negf):
+      return P_OP(negf);
+    case IR_OP(negd):
+      return P_OP(negd);
+
+    case IR_OP(cmpeqi):
+      return P_OP(cmpeq);
+    case IR_OP(cmpnei):
+      return P_OP(cmpne);
+    case IR_OP(cmplti):
+      return P_OP(cmplt);
+    case IR_OP(cmplei):
+      return P_OP(cmple);
+    case IR_OP(cmpgti):
+      return P_OP(cmpgt);
+    case IR_OP(cmpgei):
+      return P_OP(cmpge);
+
+    case IR_OP(cmpeqf):
+      return P_OP(cmpeqf);
+    case IR_OP(cmpnef):
+      return P_OP(cmpnef);
+    case IR_OP(cmpltf):
+      return P_OP(cmpltf);
+    case IR_OP(cmplef):
+      return P_OP(cmplef);
+    case IR_OP(cmpgtf):
+      return P_OP(cmpgtf);
+    case IR_OP(cmpgef):
+      return P_OP(cmpgef);
+
+    case IR_OP(cmpeqd):
+      return P_OP(cmpeqd);
+    case IR_OP(cmpned):
+      return P_OP(cmpned);
+    case IR_OP(cmpltd):
+      return P_OP(cmpltd);
+    case IR_OP(cmpled):
+      return P_OP(cmpled);
+    case IR_OP(cmpgtd):
+      return P_OP(cmpgtd);
+    case IR_OP(cmpged):
+      return P_OP(cmpged);
+
+    case IR_OP(cmpeqa):
+      return P_OP(cmpeq);
+    case IR_OP(cmpnea):
+      return P_OP(cmpne);
+    case IR_OP(cmplta):
+      return P_OP(cmplt);
+    case IR_OP(cmplea):
+      return P_OP(cmple);
+    case IR_OP(cmpgta):
+      return P_OP(cmpgt);
+    case IR_OP(cmpgea):
+      return P_OP(cmpge);
+
+    case IR_OP(i2f):
+      return P_OP(i2f);
+    case IR_OP(i2d):
+      return P_OP(i2d);
+    case IR_OP(f2d):
+      return P_OP(f2d);
+    case IR_OP(d2f):
+      return P_OP(d2f);
+    case IR_OP(f2i):
+      return P_OP(f2i);
+    case IR_OP(d2i):
+      return P_OP(d2i);
+
+    case IR_OP(movi):
+      return P_OP(mov);
+    case IR_OP(movf):
+      return P_OP(movf);
+    case IR_OP(movd):
+      return P_OP(movd);
+    case IR_OP(mova):
+      return P_OP(mov);
+    case IR_OP(rmovi):
+      return P_OP(rmov);
+    case IR_OP(rmovf):
+      return P_OP(rmovf);
+    case IR_OP(rmovd):
+      return P_OP(rmovd);
+    case IR_OP(rmova):
+      return P_OP(rmov);
+    case IR_OP(tmp):
+      return P_OP(tmp);
+    default:
+      assert(false);
+  }
+}
+
+static void ApplyFixups(PCodeGenerator* pcode, IRNode* label_node) {
+  TargetApplyFixups(&pcode->base, label_node);
+}
+
+static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
+  // If we have already lowered the IR node, return it.
+  if (node->data.ptr != NULL) {
+    return node->data.ptr;
+  }
+  PCodeOpcode opcode = IR2PCode(node->opcode);
+  assert(node->inputs.length <= 2);
+  TargetInstruction* inst = NULL;
+
+  // Do some strength reduction if we can.
+  switch (opcode) {
+    default:
+      // All others are handled below.
+      break;
+    case P_OP(add): {
+      // We have an add with constant instruction.  Use it if we can.
+      assert(node->inputs.length == 2);
+      IRNode* op1 = node->inputs.value[0];
+      IRNode* op2 = node->inputs.value[1];
+      // Adds are commutative so we can have a const as first or
+      // second operand.
+      if (IRIsConst(op1) && IRIsConst(op2)) {
+        // Both constants, fold.
+        int64_t lhs = ((IRConstant*)op1)->value.ivalue;
+        int64_t rhs = ((IRConstant*)op2)->value.ivalue;
+        inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+        inst->operand[0] =
+            GetIntConstant(pcode, NULL, kTargetTypeWord, lhs + rhs);
+        break;
+      }
+      if (IRIsConst(op2)) {
+        int64_t c = ((IRConstant*)op2)->value.ivalue;
+        if (c == 0) {
+          // Adding zero is a mv instruction.
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] = Materialize(pcode, op1);
+        } else {
+          inst = (TargetInstruction*)NewInstruction(P_OP(addc));
+          inst->operand[0] = Materialize(pcode, op1);
+          inst->operand[1] = GetLoweredNode(op2);
+        }
+      } else if (IRIsConst(op1)) {
+        int64_t c = ((IRConstant*)op1)->value.ivalue;
+        if (c == 0) {
+          // Adding zero is a mv instruction.
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] = Materialize(pcode, op1);
+        } else {
+          inst = (TargetInstruction*)NewInstruction(P_OP(addc));
+          inst->operand[0] = Materialize(pcode, op2);
+          inst->operand[1] = GetLoweredNode(op1);
+        }
+      }
+      break;
+    }
+
+    case P_OP(sub): {
+      // A sub with a constant can be converted to an addc with a negative
+      // constant.
+      assert(node->inputs.length == 2);
+      IRNode* op1 = node->inputs.value[0];
+      IRNode* op2 = node->inputs.value[1];
+      if (IRIsConst(op1) && IRIsConst(op2)) {
+        // Both constants, fold.
+        int64_t lhs = ((IRConstant*)op1)->value.ivalue;
+        int64_t rhs = ((IRConstant*)op2)->value.ivalue;
+        inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+        inst->operand[0] =
+            GetIntConstant(pcode, NULL, kTargetTypeWord, lhs - rhs);
+        break;
+      }
+      if (IRIsConst(op2)) {
+        int64_t c = ((IRConstant*)op2)->value.ivalue;
+        if (c == 0) {
+          // Subtract zero is mov
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] = Materialize(pcode, op1);
+        } else {
+          // Add the negative of the constant.
+          inst = (TargetInstruction*)NewInstruction(P_OP(addc));
+          inst->operand[0] = Materialize(pcode, op1);
+          inst->operand[1] = GetIntConstant(pcode, NULL, kTargetTypeWord, -c);
+        }
+      }
+      break;
+    }
+
+    case P_OP(mul): {
+      assert(node->inputs.length == 2);
+      IRNode* op1 = node->inputs.value[0];
+      IRNode* op2 = node->inputs.value[1];
+      if (IRIsConst(op1) || IRIsConst(op2)) {
+        if (IRIsConst(op1) && IRIsConst(op2)) {
+          // Both constants, fold.
+          int64_t lhs = ((IRConstant*)op1)->value.ivalue;
+          int64_t rhs = ((IRConstant*)op2)->value.ivalue;
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] =
+              GetIntConstant(pcode, NULL, kTargetTypeWord, lhs * rhs);
+        } else {
+          if (IRIsConst(op1)) {
+            IRNode* tmp = op1;
+            op1 = op2;
+            op2 = tmp;
+          }
+          int64_t c = ((IRConstant*)op2)->value.ivalue;
+          if (c == 0) {
+            // Multiply by zero is zero.
+            inst = GetIntConstant(pcode, NULL, kTargetTypeWord, 0);
+          } else if (c == 1) {
+            // Multiply by 1 is movi.
+            inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+            inst->operand[0] = Materialize(pcode, op1);
+          }
+        }
+      }
+      break;
+    }
+    case P_OP(div): {
+      assert(node->inputs.length == 2);
+      IRNode* op1 = node->inputs.value[0];
+      IRNode* op2 = node->inputs.value[1];
+      if (IRIsConst(op1) && IRIsConst(op2)) {
+        // Both constants, fold.
+        int64_t lhs = ((IRConstant*)op1)->value.ivalue;
+        int64_t rhs = ((IRConstant*)op2)->value.ivalue;
+        if (rhs != 0) {
+          // Don't divide by zero.
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] =
+              GetIntConstant(pcode, NULL, kTargetTypeWord, lhs / rhs);
+          break;
+        }
+      }
+      if (IRIsConst(op2)) {
+        int64_t c = ((IRConstant*)op2)->value.ivalue;
+        if (c == 1) {
+          // Division by 1 is a mov
+          inst = (TargetInstruction*)NewInstruction(P_OP(mov));
+          inst->operand[0] = Materialize(pcode, op1);
+        }
+      }
+      break;
+    }
+  }
+
+  if (inst == NULL) {
+    inst = (TargetInstruction*)NewInstruction(opcode);
+    for (size_t i = 0; i < node->inputs.length; i++) {
+      IRNode* input = node->inputs.value[i];
+      inst->operand[i] = Materialize(pcode, input);
+    }
+  }
+  TargetUpdateRefCount(inst);
+  SetLoweredNode(node, inst);
+  return Emit(pcode, inst);
+}
+
+static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,
+                                                 IRNode* node) {
+  PCodeOpcode opcode;
+  switch (node->opcode) {
+    case IR_OP(btrue):
+      opcode = P_OP(bnz);
+      break;
+    case IR_OP(bfalse):
+      opcode = P_OP(bz);
+      break;
+    default:
+      assert(false);
+  }
+  assert(node->inputs.length == 2);
+  IRNode* expr = node->inputs.value[0];
+  IRNode* target_node = node->inputs.value[1];
+
+  TargetInstruction* inst = (TargetInstruction*)Emit(
+      pcode, NewInstruction2(opcode, GetLoweredNode(expr)));
+
+  TargetInstruction* target = target_node->data.ptr;
+  if (target == NULL) {
+    // Forward branch, add fixup for target label.
+    VectorAppend(&pcode->base.fixups, NewBranchFixup(inst, target_node, 1));
+  } else {
+    inst->operand[1] = target;
+  }
+  return inst;
+}
+
+static TargetInstruction* LowerBranch(PCodeGenerator* pcode, IRNode* node) {
+  assert(node->inputs.length == 1);
+  IRNode* target_node = node->inputs.value[0];
+
+  TargetInstruction* inst =
+      (TargetInstruction*)Emit(pcode, NewInstruction(P_OP(bra)));
+
+  TargetInstruction* target = target_node->data.ptr;
+  if (target == NULL) {
+    // Forward branch, add fixup for target label.
+    VectorAppend(&pcode->base.fixups, NewBranchFixup(inst, target_node, 0));
+  } else {
+    inst->operand[0] = target;
+  }
+  return inst;
+}
+
+static TargetInstruction* LowerComputedBranch(PCodeGenerator* pcode,
+                                              IRNode* node) {
+  assert(node->inputs.length == 1);
+  TargetInstruction* value = GetLoweredNode(node->inputs.value[0]);
+  TargetInstruction* cbra = Emit(pcode, NewInstruction2(P_OP(cbra), value));
+  SetLoweredNode(node, cbra);
+  return cbra;
+}
+
+static TargetInstruction* LowerLabel(PCodeGenerator* pcode, IRNode* label) {
+  TargetInstruction* inst = Emit(pcode, NewInstruction(P_OP(label)));
+  label->data.ptr = inst;
+  ApplyFixups(pcode, label);
+  return inst;
+}
+
+static void GetRegAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
+                            TargetInstruction** addr,
+                            TargetInstruction** offset) {
+  if (IRIsAutoVariable(addr_node)) {
+    // Auto variables are in the stack frame.  These are accessed through
+    // the frame pointer with a negative offset.
+    *addr = FramePointer(pcode);
+    int32_t var_offset = addr_node->data.ivalue;
+    *offset = (TargetInstruction*)GetIntConstant(
+        pcode, addr_node, kTargetTypeWord,
+        var_offset - pcode->base.stack_frame_size);
+  } else if (IRIsArgument(addr_node)) {
+    *addr = ArgumentPointer(pcode);
+    int32_t var_offset = addr_node->data.ivalue;
+    *offset = (TargetInstruction*)GetIntConstant(pcode, addr_node,
+                                                 kTargetTypeWord, var_offset);
+  } else if (IRIsStaticVariable(addr_node)) {
+    // The address of static variables need to be moved into a register.
+
+    *addr = LoadStaticVariable(pcode, addr_node);
+    *offset = GetIntConstant(pcode, NULL, kTargetTypeWord, 0);
+
+  } else {
+    // All others have a calculated address.
+    *addr = GetLoweredNode(addr_node);
+    *offset = GetIntConstant(pcode, NULL, kTargetTypeWord, 0);
+    assert(addr != NULL);
+  }
+}
+
+static TargetInstruction* LowerLoad(PCodeGenerator* pcode, IRNode* node) {
+  PCodeOpcode opcode;
+  assert(node->inputs.length == 1);
+  IRNode* addr_node = node->inputs.value[0];
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  GetRegAndOffset(pcode, addr_node, &addr, &offset);
+
+  switch (node->opcode) {
+    case IR_OP(loadi):
+      opcode = P_OP(ldw);
+      break;
+    case IR_OP(loadb):
+      opcode = P_OP(ldb);
+      break;
+    case IR_OP(loadl):
+      opcode = P_OP(ldx);
+      break;
+    case IR_OP(loads):
+      opcode = P_OP(ldh);
+      break;
+    case IR_OP(loadui):
+      opcode = P_OP(lduw);
+      break;
+    case IR_OP(loadub):
+      opcode = P_OP(ldub);
+      break;
+    case IR_OP(loadus):
+      opcode = P_OP(lduh);
+      break;
+    case IR_OP(loadf):
+      opcode = P_OP(ldf);
+      break;
+    case IR_OP(loadd):
+      opcode = P_OP(ldd);
+      break;
+    case IR_OP(loada):
+      opcode = P_OP(ldx);
+      break;
+    default:
+      assert(false);
+  }
+
+  TargetInstruction* result =
+      Emit(pcode, NewInstruction3(opcode, addr, offset));
+  SetLoweredNode(node, result);
+  return result;
+}
+
+static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
+  PCodeOpcode opcode;
+  assert(node->inputs.length == 2);
+
+  // Address to store to is the first operand of the store IR node.
+  // The value to store is the second operand.
+  IRNode* addr_node = node->inputs.value[0];
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  GetRegAndOffset(pcode, addr_node, &addr, &offset);
+
+  IRNode* src_node = node->inputs.value[1];
+
+  // Get the src in a register.
+  TargetInstruction* src = Materialize(pcode, src_node);
+#if 0
+  if (IRIsAutoVariable(src_node)) {
+    // Auto variables are in the stack frame.  These are accessed through
+    // the frame pointer with a negative offset.
+    TargetInstruction *src_addr = FramePointer(pcode);
+    int32_t var_offset = src_node->data.ivalue;
+    TargetInstruction *offset = (TargetInstruction *)GetIntConstant(
+        pcode, NULL, kTargetTypeWord,
+        var_offset - pcode->base.stack_frame_size);
+    dest = addr;
+  } else if (IRIsArgument(src_node)) {
+    TargetInstruction *src_addr = ArgumentPointer(pcode);
+    int32_t var_offset = node->data.ivalue;
+    TargetInstruction *offset = (TargetInstruction *)GetIntConstant(
+        pcode, NULL, kTargetTypeWord, var_offset);
+    dest = addr;
+  } else if (IRIsStaticVariable(src_node)) {
+    // The address of static variables need to be moved into a register.
+
+    dest = LoadStaticVariable(pcode, src_node);
+  } else {
+    // All others have a calculated address.
+    dest = Materialize(pcode, src_node);
+  }
+
+  assert(dest != NULL);
+#endif
+
+  switch (node->opcode) {
+    case IR_OP(storei):
+      opcode = P_OP(stw);
+      break;
+    case IR_OP(storeb):
+      opcode = P_OP(stb);
+      break;
+    case IR_OP(storel):
+      opcode = P_OP(stx);
+      break;
+    case IR_OP(stores):
+      opcode = P_OP(sth);
+      break;
+    case IR_OP(storef):
+      opcode = P_OP(stf);
+      break;
+    case IR_OP(stored):
+      opcode = P_OP(std);
+      break;
+    case IR_OP(storea):
+      opcode = P_OP(stx);
+      break;
+    default:
+      assert(false);
+  }
+
+  // NOTE: the first operand of the st instructions is the source register.
+  TargetInstruction* result =
+      Emit(pcode, NewInstruction4(opcode, src, addr, offset));
+  SetLoweredNode(node, result);
+  return result;
+}
+
+static struct {
+  bool (*type_func)(TypeRecord*);
+  PCodeOpcode opcode;
+  size_t size;
+} push_map[] = {
+    {TypeIsInt, P_OP(push), 4},
+    {TypeIsShort, P_OP(push), 4},
+    {TypeIsChar, P_OP(push), 4},
+    {TypeIsLong, P_OP(pushx), 8},
+    {TypeIsLongLong, P_OP(pushx), 8},
+    {TypeIsFloat, P_OP(pushf), 4},
+    {TypeIsDouble, P_OP(pushd), 8},
+    {TypeIsLongDouble, P_OP(pushd), 8},
+    {TypeIsPointerOrArray, P_OP(pushx), 8},
+    {TypeIsFunction, P_OP(pushx), 8},
+    {TypeIsStructOrUnion, P_OP(pushx), 8},
+    {NULL, P_OP(push), 0},
+};
+
+static TargetInstruction* PushArg(PCodeGenerator* pcode, IRNode* node,
+                                  TargetInstruction* inst, size_t* size) {
+  if (node->type == NULL) {
+    return Emit(pcode, NewInstruction2(P_OP(push), inst));
+  }
+  for (size_t i = 0; push_map[i].type_func != NULL; i++) {
+    if (push_map[i].type_func(node->type)) {
+      if (size != NULL) {
+        *size += push_map[i].size;
+      }
+      return Emit(pcode, NewInstruction2(push_map[i].opcode, inst));
+    }
+  }
+  assert(false);
+}
+
+static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
+  assert(node->inputs.length >= 1);
+  size_t args_size = 0;
+  for (size_t i = node->inputs.length - 1; i >= 1; i--) {
+    IRNode* arg_node = node->inputs.value[i];
+    if (TypeIsStructOrUnion(arg_node->type)) {
+      // Passing a struct or union to a function needs to copy
+      // the memory from the address to the stack.
+      size_t struct_size = arg_node->type->size;
+      args_size += struct_size;
+
+      // First make space on the stack.
+      TargetInstruction* size =
+          GetIntConstant(pcode, NULL, kTargetTypeWord, struct_size);
+      Emit(pcode, NewInstruction2(P_OP(decsp), size));
+      TargetInstruction* dest_addr =
+          Emit(pcode, NewInstruction2(P_OP(mov), StackPointer(pcode)));
+      // Push size for memcpy.
+      TargetInstruction* size_mov =
+          Emit(pcode, NewInstruction2(P_OP(movc), size));
+      Emit(pcode, NewInstruction2(P_OP(push), size_mov));
+
+      // Push source address.
+      TargetInstruction* src_addr;
+      TargetInstruction* src_offset;
+      GetRegAndOffset(pcode, arg_node, &src_addr, &src_offset);
+
+      // We have an address and register for the address, add them together.
+      src_addr = Emit(pcode, NewInstruction3(P_OP(addc), src_addr, src_offset));
+      Emit(pcode, NewInstruction2(P_OP(pushx), src_addr));
+
+      // Push dest address.
+      Emit(pcode, NewInstruction2(P_OP(push), dest_addr));
+
+      // Call memcpy.
+      TargetInstruction* memcpy = GetSymbol(pcode, NULL, pcode->base.memcpy);
+      Emit(pcode, NewInstruction2(P_OP(call), memcpy));
+      Emit(pcode,
+           NewInstruction2(P_OP(incsp),
+                           GetIntConstant(pcode, NULL, kTargetTypeWord, 20)));
+
+    } else {
+      TargetInstruction* arg = Materialize(pcode, arg_node);
+      PushArg(pcode, arg_node, arg, &args_size);
+    }
+  }
+  TargetInstruction* addr = GetLoweredNode(node->inputs.value[0]);
+  PCodeOpcode opcode;
+  if (addr->opcode == P_OP(symbol)) {
+    if (TypeIsFloat(node->type)) {
+      opcode = P_OP(callf);
+    } else if (TypeIsDouble(node->type)) {
+      opcode = P_OP(calld);
+    } else {
+      opcode = P_OP(call);
+    }
+  } else {
+    if (TypeIsFloat(node->type)) {
+      opcode = P_OP(rcallf);
+    } else if (TypeIsDouble(node->type)) {
+      opcode = P_OP(rcalld);
+    } else {
+      opcode = P_OP(rcall);
+    }
+  }
+  TargetInstruction* call = Emit(pcode, NewInstruction2(opcode, addr));
+  Emit(pcode,
+       NewInstruction2(P_OP(incsp), GetIntConstant(pcode, NULL, kTargetTypeWord,
+                                                   args_size)));
+  SetLoweredNode(node, call);
+  return call;
+}
+
+static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
+  assert(node->inputs.length == 1);
+  PCodeOpcode result_reg_opcode, opcode;
+  switch (node->opcode) {
+    case IR_OP(resulti):
+    case IR_OP(resulta):
+      result_reg_opcode = P_OP(resultx);
+      opcode = P_OP(rmov);
+      break;
+    case IR_OP(resultf):
+      result_reg_opcode = P_OP(resultf);
+      opcode = P_OP(rmovf);
+      break;
+    case IR_OP(resultd):
+      result_reg_opcode = P_OP(resultd);
+      opcode = P_OP(rmovd);
+      break;
+    default:
+      assert(false);
+  }
+  TargetInstruction* result = Materialize(pcode, node->inputs.value[0]);
+  TargetInstruction* result_reg =
+      Emit(pcode, NewInstruction(result_reg_opcode));
+  return Emit(pcode, NewInstruction3(opcode, result_reg, result));
+}
+
+// A literal reference is an add of the literal offset (the first input
+// to the literalref node) to the 'literal' with the given id.  This will
+// be assembled as a reference to a symbol with the name .str.%d.
+static TargetInstruction* LowerLiteralReference(PCodeGenerator* pcode,
+                                                IRNode* node) {
+  IRConstant* id_node = node->inputs.value[0];
+  TargetInstruction* literal =
+      Emit(pcode, TargetNewLiteral((int)id_node->value.ivalue));
+
+  TargetInstruction* result =
+      Emit(pcode, NewInstruction2(P_OP(movxc), literal));
+
+  SetLoweredNode(node, result);
+  return result;
+}
+
+static TargetInstruction* LowerStructReference(PCodeGenerator* pcode,
+                                               IRNode* node) {
+  return SetLoweredNode(node, Materialize(pcode, node->inputs.value[0]));
+}
+
+static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
+  // The memcpy IR node's inputs are the same as those for the memcpy
+  // function.  However, there are no load nodes for the desination
+  // or source addresses.
+  assert(node->inputs.length == 3);
+
+  // First push the constant for the length.
+  TargetInstruction* length =
+      Emit(pcode, Materialize(pcode, node->inputs.value[2]));
+  Emit(pcode, NewInstruction2(P_OP(push), length));
+
+  // Now push src.
+  IRNode* src_node = node->inputs.value[1];
+  TargetInstruction* src_addr;
+  TargetInstruction* src_offset;
+  GetRegAndOffset(pcode, src_node, &src_addr, &src_offset);
+
+  // We have an address and register for the address, add them together.
+  src_addr = Emit(pcode, NewInstruction3(P_OP(addc), src_addr, src_offset));
+  src_node->data.ptr = src_addr;
+  PushArg(pcode, src_node, src_addr, NULL);
+
+  // And now push dest.
+  IRNode* dest_node = node->inputs.value[0];
+  TargetInstruction* dest_addr;
+  TargetInstruction* dest_offset;
+  GetRegAndOffset(pcode, dest_node, &dest_addr, &dest_offset);
+
+  // We have an address and register for the address, add them together.
+  dest_addr = Emit(pcode, NewInstruction3(P_OP(addc), dest_addr, dest_offset));
+  dest_node->data.ptr = dest_addr;
+
+  PushArg(pcode, dest_node, dest_addr, NULL);
+
+  TargetInstruction* memcpy = GetSymbol(pcode, NULL, pcode->base.memcpy);
+  TargetInstruction* call = Emit(pcode, NewInstruction2(P_OP(call), memcpy));
+  Emit(pcode,
+       NewInstruction2(P_OP(incsp),
+                       GetIntConstant(pcode, NULL, kTargetTypeWord, 20)));
+  SetLoweredNode(node, call);
+
+  return call;
+}
+
+static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
+  // The memzero IR node has one input: the variable to zero.  We
+  // emit this is as a call to memset using the size of the symbol.
+  assert(node->inputs.length == 1);
+  IRNode* addr_node = node->inputs.value[0];
+  IRVariable* var = (IRVariable*)addr_node;
+
+  // Third parameter to memset is the length.
+  TargetInstruction* size = Emit(
+      pcode,
+      NewInstruction2(P_OP(movc), GetIntConstant(pcode, NULL, kTargetTypeWord,
+                                                 var->symbol->type->size)));
+  Emit(pcode, NewInstruction2(P_OP(push), size));
+
+  // Push a zero constant as the second argument.
+  TargetInstruction* zero = Emit(
+      pcode, NewInstruction2(P_OP(movc),
+                             GetIntConstant(pcode, NULL, kTargetTypeWord, 0)));
+  Emit(pcode, NewInstruction2(P_OP(push), zero));
+
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  GetRegAndOffset(pcode, addr_node, &addr, &offset);
+
+  // We have an address and register for the address, add them together
+  // to produce the address to zero.
+  addr = Emit(pcode, NewInstruction3(P_OP(addc), addr, offset));
+  addr_node->data.ptr = addr;
+
+  PushArg(pcode, addr_node, addr, NULL);
+
+  TargetInstruction* memset = GetSymbol(pcode, NULL, pcode->base.memset);
+  TargetInstruction* call = Emit(pcode, NewInstruction2(P_OP(call), memset));
+  Emit(pcode,
+       NewInstruction2(P_OP(incsp),
+                       GetIntConstant(pcode, NULL, kTargetTypeWord, 16)));
+  SetLoweredNode(node, call);
+  return call;
+}
+
+static TargetInstruction* LowerMask(PCodeGenerator* pcode, IRNode* node) {
+  TargetInstruction* value = Materialize(pcode, node->inputs.value[0]);
+  value =
+      Emit(pcode, NewInstruction3(P_OP(and), value,
+                                  Materialize(pcode, node->inputs.value[1])));
+  SetLoweredNode(node, value);
+  return value;
+}
+
+static TargetInstruction* LowerSignExtend(PCodeGenerator* pcode, IRNode* node) {
+  // If the source instruction is a signed load then there is no need to
+  // perform the sign extension since the load instructions already do
+  // that.
+  TargetInstruction* value = Materialize(pcode, node->inputs.value[0]);
+  if (PCodeIsSignedLoad((PCodeOpcode)value->opcode)) {
+    return SetLoweredNode(node, value);
+  }
+  IRConstant* diff_value = node->inputs.value[1];
+  int64_t diff = diff_value->value.ivalue;
+  TargetInstruction* diff_inst =
+      Emit(pcode,
+           NewInstruction2(P_OP(movc),
+                           GetIntConstant(pcode, NULL, kTargetTypeWord, diff)));
+  TargetInstruction* lsl =
+      Emit(pcode, NewInstruction3(P_OP(lsl), value, diff_inst));
+  TargetInstruction* asr =
+      Emit(pcode, NewInstruction3(P_OP(asr), lsl, diff_inst));
+
+  SetLoweredNode(node, asr);
+  return asr;
+}
+
+static TargetInstruction* LowerAsm(PCodeGenerator* pcode, IRNode* node) {
+  // The first argument is a literal containing the assembly language.
+  IRConstant* id_node = node->inputs.value[0];
+  TargetInstruction* literal =
+      Emit(pcode, TargetNewLiteral((int)id_node->value.ivalue));
+
+  TargetInstruction* result = Emit(pcode, NewInstruction2(P_OP(asm), literal));
+
+  SetLoweredNode(node, result);
+  return result;
+}
+
+static TargetInstruction* LowerLocation(PCodeGenerator* pcode, IRNode* node) {
+  IRLocation* loc = (IRLocation*)node;
+  return SetLoweredNode(node, Emit(pcode, TargetNewLocation(loc)));
+}
+
+// The first input is the address of the 'ap' variable.  The second is the
+// address of the last function argument.  The ap variable is set to the
+// address of the last argument + 8.
+static TargetInstruction* LowerBuiltinVaStart(PCodeGenerator* pcode,
+                                              IRNode* node) {
+  TargetInstruction* arg_addr;
+  TargetInstruction* arg_offset;
+  GetRegAndOffset(pcode, node->inputs.value[1], &arg_addr, &arg_offset);
+  TargetInstruction* arg =
+      Emit(pcode, NewInstruction3(P_OP(addc), arg_addr, arg_offset));
+  TargetInstruction* add = Emit(
+      pcode, NewInstruction3(P_OP(addc), arg,
+                             GetIntConstant(pcode, NULL, kTargetTypeWord, 8)));
+
+  TargetInstruction* ap_addr;
+  TargetInstruction* ap_offset;
+  GetRegAndOffset(pcode, node->inputs.value[0], &ap_addr, &ap_offset);
+  TargetInstruction* store =
+      Emit(pcode, NewInstruction4(P_OP(stx), add, ap_addr, ap_offset));
+  return SetLoweredNode(node, store);
+}
+
+static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
+                                            IRNode* node) {
+  TargetInstruction* ap_addr;
+  TargetInstruction* ap_offset;
+  GetRegAndOffset(pcode, node->inputs.value[0], &ap_addr, &ap_offset);
+  TargetInstruction* ap_load =
+      Emit(pcode, NewInstruction3(P_OP(ldx), ap_addr, ap_offset));
+
+  PCodeOpcode load_opcode = P_OP(ldx);
+  switch (node->type->size) {
+    case 1:
+      load_opcode = TypeIsUnsigned(node->type) ? P_OP(ldub) : P_OP(ldb);
+      break;
+    case 2:
+      load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduh) : P_OP(ldh);
+      break;
+    case 4:
+      load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduw) : P_OP(ldw);
+      break;
+  }
+
+  TargetInstruction* result = Emit(
+      pcode, NewInstruction3(load_opcode, ap_load,
+                             GetIntConstant(pcode, NULL, kTargetTypeWord, 0)));
+
+  TargetInstruction* size = GetLoweredNode(node->inputs.value[1]);
+  TargetInstruction* addc =
+      Emit(pcode, NewInstruction3(P_OP(addc), ap_load, size));
+  Emit(pcode, NewInstruction4(P_OP(stx), addc, ap_addr, ap_offset));
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerBuiltinVaEnd(PCodeGenerator* pcode,
+                                            IRNode* node) {
+  // Nothing to do for va_end.
+  return NULL;
+}
+
+static TargetInstruction* LowerBuiltinVaCopy(PCodeGenerator* pcode,
+                                             IRNode* node) {
+  return NULL;  // TODO
+}
+
+static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
+  // If we have already lowered the IR node, return it.
+  if (node->data.ptr != NULL) {
+    return node->data.ptr;
+  }
+  switch (node->opcode) {
+    case IR_OP(localvar):
+    case IR_OP(argument):
+    case IR_OP(tempvar):
+    case IR_OP(staticvar):
+    case IR_OP(externvar):
+      // These are handled before we get here.
+      return NULL;
+
+    case IR_OP(nop):
+    case last_ir_opcode:
+      return NULL;
+
+    case IR_OP(ssavar):
+    case IR_OP(phi):
+      // We should never see these as we've moved out of SSA form
+      // before here.
+      break;
+
+    case IR_OP(structreturn): {
+      TargetInstruction* result =
+          Emit(pcode, NewInstruction(P_OP(structreturn)));
+      SetLoweredNode(node, result);
+      return result;
+    }
+
+    case IR_OP(literalref):
+      return LowerLiteralReference(pcode, node);
+
+    case IR_OP(structref):
+      return LowerStructReference(pcode, node);
+
+    case IR_OP(consti):
+    case IR_OP(consta):
+      return GetIntConstant(pcode, node, kTargetTypeWord,
+                            ((IRConstant*)node)->value.ivalue);
+    case IR_OP(constb):
+      return GetIntConstant(pcode, node, kTargetTypeByte,
+                            ((IRConstant*)node)->value.ivalue);
+
+    case IR_OP(consts):
+      return GetIntConstant(pcode, node, kTargetTypeHalf,
+                            ((IRConstant*)node)->value.ivalue);
+
+    case IR_OP(constl):
+      return GetIntConstant(pcode, node, kTargetTypeExtended,
+                            ((IRConstant*)node)->value.ivalue);
+
+    case IR_OP(constf):
+      return GetFloatingPointConstant(pcode, node, kTargetTypeFloat,
+                                      ((IRConstant*)node)->value.ivalue);
+
+    case IR_OP(constd):
+      return GetFloatingPointConstant(pcode, node, kTargetTypeDouble,
+                                      ((IRConstant*)node)->value.fvalue);
+
+    case IR_OP(enter):
+      // Entry sequence:
+      // pushx ap
+      // mov ap, sp
+      // save (registers)
+      // pushx fp
+      // mov fp, sp
+      // decsp #frame_size
+      Emit(pcode, NewInstruction2(P_OP(pushx), ArgumentPointer(pcode)));
+      Emit(pcode, NewInstruction3(P_OP(rmov), ArgumentPointer(pcode),
+                                  StackPointer(pcode)));
+      Emit(pcode, NewInstruction(P_OP(save)));
+      Emit(pcode, NewInstruction2(P_OP(pushx), FramePointer(pcode)));
+      TargetInstruction* result =
+          Emit(pcode, NewInstruction3(P_OP(rmov), FramePointer(pcode),
+                                      StackPointer(pcode)));
+      if (pcode->base.stack_frame_size > 0) {
+        return Emit(pcode, NewInstruction2(
+                               P_OP(decsp),
+                               GetIntConstant(pcode, NULL, kTargetTypeWord,
+                                              pcode->base.stack_frame_size)));
+      }
+      return result;
+    case IR_OP(leave): {
+      // Exit sequence:
+      // incsp #frame_size
+      // popx fp
+      // restore (registers)
+      // popx ap
+      if (pcode->base.stack_frame_size > 0) {
+        Emit(pcode,
+             NewInstruction2(P_OP(incsp),
+                             GetIntConstant(pcode, NULL, kTargetTypeWord,
+                                            pcode->base.stack_frame_size)));
+      }
+      Emit(pcode, NewInstruction2(P_OP(popx), FramePointer(pcode)));
+      Emit(pcode, NewInstruction(P_OP(restore)));
+      return Emit(pcode, NewInstruction2(P_OP(popx), ArgumentPointer(pcode)));
+    }
+
+    case IR_OP(ret):
+      return Emit(pcode, NewInstruction(P_OP(ret)));
+
+    case IR_OP(loadi):
+    case IR_OP(loadb):
+    case IR_OP(loadl):
+    case IR_OP(loads):
+    case IR_OP(loadui):
+    case IR_OP(loadub):
+    case IR_OP(loadus):
+    case IR_OP(loadf):
+    case IR_OP(loadd):
+    case IR_OP(loada):
+      return LowerLoad(pcode, node);
+
+    // stores.
+    case IR_OP(storei):
+    case IR_OP(storeb):
+    case IR_OP(stores):
+    case IR_OP(storel):
+    case IR_OP(storef):
+    case IR_OP(stored):
+    case IR_OP(storea):
+      return LowerStore(pcode, node);
+
+    case IR_OP(addi):
+    case IR_OP(addf):
+    case IR_OP(addd):
+    case IR_OP(adda):
+
+    case IR_OP(subi):
+    case IR_OP(subf):
+    case IR_OP(subd):
+    case IR_OP(suba):
+
+    case IR_OP(muli):
+    case IR_OP(mulf):
+    case IR_OP(muld):
+
+    case IR_OP(divi):
+    case IR_OP(divf):
+    case IR_OP(divd):
+
+    case IR_OP(modi):
+
+    case IR_OP(lsri):
+    case IR_OP(asri):
+    case IR_OP(lsli):
+
+    case IR_OP(ori):
+    case IR_OP(andi):
+    case IR_OP(xori):
+
+    case IR_OP(noti):
+    case IR_OP(nota):
+    case IR_OP(onescomp):
+    case IR_OP(negi):
+    case IR_OP(negf):
+    case IR_OP(negd):
+
+    case IR_OP(cmpeqi):
+    case IR_OP(cmpnei):
+    case IR_OP(cmplti):
+    case IR_OP(cmplei):
+    case IR_OP(cmpgti):
+    case IR_OP(cmpgei):
+
+    case IR_OP(cmpeqf):
+    case IR_OP(cmpnef):
+    case IR_OP(cmpltf):
+    case IR_OP(cmplef):
+    case IR_OP(cmpgtf):
+    case IR_OP(cmpgef):
+
+    case IR_OP(cmpeqd):
+    case IR_OP(cmpned):
+    case IR_OP(cmpltd):
+    case IR_OP(cmpled):
+    case IR_OP(cmpgtd):
+    case IR_OP(cmpged):
+
+    case IR_OP(cmpeqa):
+    case IR_OP(cmpnea):
+    case IR_OP(cmplta):
+    case IR_OP(cmplea):
+    case IR_OP(cmpgta):
+    case IR_OP(cmpgea):
+
+    case IR_OP(i2f):
+    case IR_OP(i2d):
+    case IR_OP(f2d):
+    case IR_OP(d2f):
+    case IR_OP(f2i):
+    case IR_OP(d2i):
+
+    case IR_OP(movi):
+    case IR_OP(movf):
+    case IR_OP(movd):
+    case IR_OP(mova):
+    case IR_OP(rmovi):
+    case IR_OP(rmovf):
+    case IR_OP(rmovd):
+    case IR_OP(rmova):
+    case IR_OP(tmp):
+      return LowerExpression(pcode, node);
+
+    case IR_OP(btrue):
+    case IR_OP(bfalse):
+      return LowerConditionalBranch(pcode, node);
+
+    case IR_OP(bra):
+      return LowerBranch(pcode, node);
+
+    case IR_OP(cbra):
+      return LowerComputedBranch(pcode, node);
+
+    case IR_OP(label):
+      return LowerLabel(pcode, node);
+
+    case IR_OP(calla):
+      return LowerCall(pcode, node);
+
+    case IR_OP(resulti):
+    case IR_OP(resultf):
+    case IR_OP(resultd):
+    case IR_OP(resulta):
+      return LowerResult(pcode, node);
+
+    case IR_OP(memzero):
+      return LowerMemzero(pcode, node);
+
+    case IR_OP(memcpy):
+      return LowerMemcpy(pcode, node);
+
+    case IR_OP(maski):
+      return LowerMask(pcode, node);
+
+    case IR_OP(signextendi):
+      return LowerSignExtend(pcode, node);
+
+    case IR_OP(asm):
+      return LowerAsm(pcode, node);
+
+    case IR_OP(loc):
+      return LowerLocation(pcode, node);
+
+    case IR_OP(builtin_va_start):
+      return LowerBuiltinVaStart(pcode, node);
+
+    case IR_OP(builtin_va_arg):
+      return LowerBuiltinVaArg(pcode, node);
+
+    case IR_OP(builtin_va_end):
+      return LowerBuiltinVaEnd(pcode, node);
+
+    case IR_OP(builtin_va_copy):
+      return LowerBuiltinVaCopy(pcode, node);
+  }
+  // If we get here we've failed to handle the IR node.
+  assert(false);
+}
+
+// Calculate the size of an argument based on its type.
+static int64_t CalculateArgumentSize(Symbol* arg) {
+  if (TypeIsFloatingPoint(arg->type)) {
+    return 8;
+  }
+  if (TypeIsPointerOrArray(arg->type)) {
+    return 8;
+  }
+  if (TypeIsStructOrUnion(arg->type)) {
+    return arg->type->info.struct_info->size;
+  }
+  return arg->type->size < 4 ? 4 : arg->type->size;
+}
+
+void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
+  // Variables are allocated below the frame, arguments are above.
+  int32_t var_offset = 0;
+  int32_t arg_offset = 16;  // Leave room for return address and saved ap.
+
+  // Calculate the offset on the stack for all the arguments.  Store this offset
+  // in the stack_offset field of the Symbol.
+  Vector* prototype = &compiler->current_function->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* arg = prototype->value[i];
+    arg->stack_offset = arg_offset;
+    int64_t size = CalculateArgumentSize(arg);
+    arg_offset += size;
+  }
+
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value[i];
+
+    if (entry->pooled->opcode == IR_OP(localvar) ||
+        entry->pooled->opcode == IR_OP(tempvar)) {
+      int64_t size = entry->value.symbol->type->size;
+      entry->pooled->data.ivalue = var_offset;
+      var_offset += size;
+    } else if (entry->pooled->opcode == IR_OP(argument)) {
+      // Get the stack offset we calculated above.
+      entry->pooled->data.ivalue = entry->value.symbol->stack_offset;
+    } else if (entry->pooled->opcode == IR_OP(staticvar) ||
+               entry->pooled->opcode == IR_OP(externvar)) {
+      // Static variables are referenced by a symbol instruction.
+      IRVariable* var = (IRVariable*)entry->pooled;
+      TargetInstruction* inst = GetSymbol(pcode, NULL, var->symbol);
+      entry->pooled->data.ptr = inst;
+    }
+  }
+
+  // We now know the stack frame size.
+  pcode->base.stack_frame_size = (int32_t)var_offset;
+
+  IRNode* node = GeneratorFirstInstruction(gen);
+  while (node != NULL) {
+    LowerIRNode(pcode, node);
+    node = IRNext(node);
+  }
+
+  PCodeOptimize(pcode);
+
+  // Allocate registers to the instructions.
+  PCodeAllocateRegisters(&pcode->register_allocator);
+}
+
+void PCodePrint(PCodeGenerator* pcode) {
+  TargetInstruction* inst = TargetFirstInstruction(&pcode->base);
+  while (inst != NULL) {
+    TargetPrintInstruction(inst, PCodeOpcodeName);
+    inst = TargetNext(inst);
+  }
+}
+
+bool PCodeIsExpression(PCodeOpcode opcode) {
+  switch (opcode) {
+    case P_OP(save):
+    case P_OP(restore):
+    case P_OP(label):
+    case P_OP(asm):
+    case P_OP(decsp):
+    case P_OP(incsp):
+    case P_OP(push):
+    case P_OP(pushf):
+    case P_OP(pushd):
+    case P_OP(pushx):
+    case P_OP(pop):
+    case P_OP(popf):
+    case P_OP(popd):
+    case P_OP(popx):
+    case P_OP(stw):
+    case P_OP(sth):
+    case P_OP(stx):
+    case P_OP(stf):
+    case P_OP(std):
+    case P_OP(stb):
+    case P_OP(bnz):
+    case P_OP(bz):
+    case P_OP(bra):
+    case P_OP(cbra):
+    case P_OP(jmp):
+    case P_OP(call):
+    case P_OP(callf):
+    case P_OP(calld):
+    case P_OP(rcall):
+    case P_OP(rcallf):
+    case P_OP(rcalld):
+      return false;
+
+    default:
+      return true;
+  }
+}
+
+bool PCodeIsSignedLoad(PCodeOpcode opcode) {
+  switch (opcode) {
+    case P_OP(ldb):
+    case P_OP(ldh):
+    case P_OP(ldw):
+      return true;
+    default:
+      return false;
+  }
+}
