@@ -17,6 +17,7 @@
 #include "risc_v_assembler.h"
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
+#include <sys/socket.h>
 
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
@@ -442,7 +443,7 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   // addi sp, sp, S   - increment sp
 
   int stack_frame_size = StackFrameSize(emitter);
-  char buf1[8], buf2[8];
+  char buf1[8];
 
   bool is_leaf = emitter->rv->base.num_calls == 0;
   bool varargs = emitter->rv->base.varargs;

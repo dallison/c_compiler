@@ -267,7 +267,7 @@ TargetInstruction* TargetNewInstruction(TargetOpcode opcode) {
   return inst;
 }
 
-TargetInstruction* TargetNewInstruction2(TargetOpcode opcode,
+TargetInstruction* TargetNewInstruction1(TargetOpcode opcode,
                                          TargetInstruction* op1) {
   TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
   inst->operand[0] = op1;
@@ -275,7 +275,7 @@ TargetInstruction* TargetNewInstruction2(TargetOpcode opcode,
   return inst;
 }
 
-TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
+TargetInstruction* TargetNewInstruction2(TargetOpcode opcode,
                                          TargetInstruction* op1,
                                          TargetInstruction* op2) {
   TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
@@ -285,7 +285,7 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
   return inst;
 }
 
-TargetInstruction* TargetNewInstruction4(TargetOpcode opcode,
+TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
                                          TargetInstruction* op1,
                                          TargetInstruction* op2,
                                          TargetInstruction* op3) {
@@ -436,7 +436,7 @@ TargetInstruction* TargetGetIntConstant(TargetGenerator* target, IRNode* node,
 
 TargetInstruction* TargetGetFloatingPointConstant(TargetGenerator* target,
                                                   IRNode* node, TargetType type,
-                                                  int64_t value) {
+                                                  double value) {
   TargetInstruction* inst = TargetFirstInstruction(target);
   while (inst != NULL && TargetPrev(inst) != TargetLastConstant(target)) {
     TargetConstant* c = (TargetConstant*)inst;

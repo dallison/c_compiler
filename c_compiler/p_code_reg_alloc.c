@@ -37,6 +37,7 @@ void PCodeRegisterAllocatorInit(PCodeRegisterAllocator* allocator,
   allocator->int_regs[PCODE_FP_REG].base.reserved = true;
   allocator->int_regs[PCODE_SP_REG].base.reserved = true;
   allocator->int_regs[PCODE_AP_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TMP_REG].base.reserved = true;
 
   // We reserve the function return registers for simplicity.
   allocator->int_regs[PCODE_INT_RETURN_REG].base.reserved = true;
@@ -102,6 +103,7 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(mov):
     case P_OP(movc):
     case P_OP(movxc):
+    case P_OP(adr):
     case P_OP(rmov):
     case P_OP(ldw):
     case P_OP(ldh):
@@ -219,9 +221,6 @@ static PCodeRegister* AllocateRegisterWithType(
   // We don't support spilling registers in this target.
   assert(reg != NULL);
 
-  if (reg->base.reserved) {
-    return reg;
-  }
   switch (type) {
     case kPCodeRegTypeInt:
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
@@ -236,41 +235,50 @@ static PCodeRegister* AllocateRegisterWithType(
   return reg;
 }
 
-static void AllocateRegister(PCodeRegisterAllocator* allocator,
-                             TargetInstruction* inst) {
-  PCodeRegister* reg;
+static bool UsesFixedRegister(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+    case P_OP(call):
+    case P_OP(callf):
+    case P_OP(calld):
+    case P_OP(ap):
+    case P_OP(sp):
+    case P_OP(fp):
+      return true;
+    default:
+      return false;
+  }
+}
 
-  // rmov instructions use the register allocated to their first
-  // operand as their own register.
-  if (inst->opcode == P_OP(rmov) || inst->opcode == P_OP(rmovf) ||
-      inst->opcode == P_OP(rmovd)) {
-    reg = (PCodeRegister*)inst->operand[0]->reg;
-    TargetInstruction* src = inst->operand[1];
-
-    // See if we can reassign the src operand's register.  We can do
-    // this if this is the only reference to it.
-    if (src->refs == 1) {
-      FreeRegisters(allocator, inst);
-      src->reg = &reg->base;
-      src->uses++;
-      reg->base.owner = src;
-      inst->reg = src->reg;
-      return;
-    }
-
-    // Use the register assigned to the first operand as the
-    // register for this instruction.
-    inst->operand[0]->uses++;  // Prevent this from being freed.
+// rmov instructions use the register allocated to their first
+// operand as their own register.
+static void AllocateForRmov(PCodeRegisterAllocator* allocator,
+                            TargetInstruction* inst) {
+  PCodeRegister* reg = (PCodeRegister*)inst->operand[0]->reg;
+  TargetInstruction* src = inst->operand[1];
+  
+  // See if we can reassign the src operand's register.  We can do
+  // this if this is the only reference to it.  It can't be a fixed
+  // register though.
+  if (src->refs == 1 && !UsesFixedRegister(src)) {
     FreeRegisters(allocator, inst);
-    inst->uses = inst->refs;
-    inst->reg = &reg->base;
-    reg->base.owner = inst;
+    src->reg = &reg->base;
+    src->uses++;
+    reg->base.owner = src;
+    inst->reg = src->reg;
     return;
   }
-
-  // Free up any registers we can.
+  
+  // Use the register assigned to the first operand as the
+  // register for this instruction.
+  inst->operand[0]->uses++;  // Prevent this from being freed.
   FreeRegisters(allocator, inst);
+  inst->uses = inst->refs;
+  inst->reg = &reg->base;
+  reg->base.owner = inst;
+}
 
+// Does the instruction need a register allocated for it?
+static bool NeedsRegister(TargetInstruction* inst) {
   switch ((PCodeOpcode)inst->opcode) {
     case P_OP(constb):
     case P_OP(consth):
@@ -301,8 +309,30 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
     case P_OP(asm):
     case P_OP(loc):
       // These instructions do not have registers allocated to them.
-      return;
+      return false;
+    default:
+      return true;
+  }
+}
 
+static void AllocateRegister(PCodeRegisterAllocator* allocator,
+                             TargetInstruction* inst) {
+  // Treat rmov instructions specially.
+  if (inst->opcode == P_OP(rmov) || inst->opcode == P_OP(rmovf) ||
+      inst->opcode == P_OP(rmovd)) {
+    AllocateForRmov(allocator, inst);
+    return;
+  }
+
+  // Free up any registers we can.
+  FreeRegisters(allocator, inst);
+
+  if (!NeedsRegister(inst)) {
+    return;
+  }
+  
+  PCodeRegister* reg;
+  switch ((PCodeOpcode)inst->opcode) {
     case P_OP(fp):
       reg = &allocator->int_regs[PCODE_FP_REG];
       break;

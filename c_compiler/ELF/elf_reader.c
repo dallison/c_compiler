@@ -19,18 +19,11 @@ ELFReaderSection* NewELFReaderSection() {
   StringInit(&section->name, "");
   section->contents = NULL;
   section->address = 0;
-  section->relocated = false;
   return section;
 }
 
 void ELFReaderSectionDelete(ELFReaderSection* section) {
   StringDestruct(&section->name);
-  
-  // If the section has been relocated its contents are in the heap.
-  // Otherwise they are mapped in from the ELF file.
-  if (section->relocated) {
-    free(section->contents);
-  }
 }
 
 void ELFReaderFileInit(ELFReaderFile* elf, String* filename) {
@@ -118,12 +111,14 @@ bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
   }
 
   // Offset must be page aligned.
-  int64_t aligned_offset = offset & ~0xfff;
-  int64_t addr_diff = offset & 0xfff;
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  int page_mask = page_size - 1;
+  int64_t aligned_offset = offset & ~page_mask;
+  int64_t addr_diff = offset & page_mask;
   int64_t full_length = length + addr_diff;
   
   // Map it into memory.
-  void* addr = mmap(NULL, full_length, PROT_READ, MAP_PRIVATE, fd,
+  void* addr = mmap(NULL, full_length, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd,
                     aligned_offset);
   if (addr == MAP_FAILED) {
     close(fd);

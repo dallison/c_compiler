@@ -853,7 +853,7 @@ static void If(Preprocessor* p, String* line, size_t pos) {
   void* controlling_value = NULL;
   ASTNode* expr = SyntaxParseExpression(&syntax, 0);
   if (expr != NULL) {
-    AnalyzeExpression(&syntax, expr);
+    AnalyzeExpression(expr);
     int64_t value;
     if (EvaluateIntegerExpression(expr, &value)) {
       controlling_value = value == 0 ? NULL : &true_value;
@@ -977,7 +977,7 @@ static void Elif(Preprocessor* p, String* line, size_t pos) {
   void* controlling_value = NULL;
   ASTNode* expr = SyntaxParseExpression(&syntax, 0);
   if (expr != NULL) {
-    AnalyzeExpression(&syntax, expr);
+    AnalyzeExpression(expr);
     int64_t value;
     if (EvaluateIntegerExpression(expr, &value)) {
       controlling_value = value == 0 ? NULL : &true_value;

@@ -55,7 +55,7 @@ int main(int argc, const char * argv[]) {
         default: {
           bool option_ok = false;
           if (strcmp(argv[i], "-shared") == 0) {
-            linker.dso = true;
+            linker.building_dso = true;
             option_ok = true;
           }
           if (!option_ok) {
@@ -73,7 +73,7 @@ int main(int argc, const char * argv[]) {
         // Object files end in ".o".
         String* filename = NewString(argv[i]);
         VectorAppend(&object_files, filename);
-      } if (EndsWith(argv[i], ".so")) {
+      } else if (EndsWith(argv[i], ".so")) {
         LinkerAddDynamicLibrary(&linker, argv[i]);
       } else {
         fprintf(stderr, "Unknown file type %s\n", argv[i]);
@@ -81,12 +81,7 @@ int main(int argc, const char * argv[]) {
     }
   }
   
-  if (linker.dso) {
-    // We are building a DSO, build the dynamic section.
-    linker.dynamic_section = NewDynamicSection();
-    DynamicSectionInventSymbols(&linker, linker.dynamic_section);
-  }
-  
+  // Read all the object files.
   for (size_t i = 0; i < object_files.length; i++) {
     String* filename = object_files.value[i];
     bool ok = LinkerReadObjectFile(&linker, filename);
@@ -97,6 +92,13 @@ int main(int argc, const char * argv[]) {
   }
   VectorDestruct(&object_files);
   
+  if (linker.building_dso) {
+    // We are building a DSO, build the dynamic section.
+    linker.dynamic_section = NewDynamicSection(&linker);
+    DynamicSectionInventSymbols(&linker, linker.dynamic_section);
+    GatherDynamicRelocations(&linker);
+  }
+
   // Link all the files together.
   LinkerLinkAllFiles(&linker);
   

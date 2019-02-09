@@ -400,9 +400,8 @@ bool RVAssemblerInit(RVAssembler* assembler, String* infile, String* outfile) {
       R_RISCV_CALL_PLT, R_RISCV_GOT_HI20,
   };
 
-  // 243 is ELF machine type for RISC-V
   // 4 for the flags specifies the 64 bit float ABI.
-  if (!AssemblerInit(&assembler->base, 243, 4, reloc_types, infile, outfile)) {
+  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_RISC_V, 4, reloc_types, infile, outfile)) {
     return false;
   }
 

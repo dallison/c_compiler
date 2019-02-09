@@ -328,10 +328,10 @@ typedef struct {
 typedef struct RVGenerator {
   TargetGenerator base;
 
-  int num_int_arg_regs;
-  int num_fp_arg_regs;
-  int num_int_reg_vars;
-  int num_fp_reg_vars;
+  int num_int_arg_regs;   // Number of args in int regs.
+  int num_fp_arg_regs;    // Number of args in floating point regs.
+  int num_int_reg_vars;   // Number of int regs used for variables.
+  int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
 
   Vector saved_regs;

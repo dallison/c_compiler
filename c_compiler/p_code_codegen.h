@@ -73,125 +73,136 @@ typedef enum {
   P_OP(ap),  // Argument pointer pseudo operation.
 
   // Stack manipulation
-  P_OP(decsp),
-  P_OP(incsp),
+  P_OP(decsp),    // Decrement stack pointer by constant.
+  P_OP(incsp),    // Increment stack pointer by constant.
 
-  P_OP(push),
-  P_OP(pushf),
-  P_OP(pushd),
-  P_OP(pushx),
-  P_OP(pop),
-  P_OP(popf),
-  P_OP(popd),
-  P_OP(popx),
+  P_OP(push),     // Push 32 bit integer onto stack.
+  P_OP(pushf),    // Push single precision floating point.
+  P_OP(pushd),    // Push double precision floating point.
+  P_OP(pushx),    // Push 64 bit integer onto stack.
+  P_OP(pop),      // Pop 32 bit integer.
+  P_OP(popf),     // Pop single precision float.
+  P_OP(popd),     // Pop double precision float.
+  P_OP(popx),     // Pop 64 bit integer.
 
   // Loads: ld d,[r, #c].
-  P_OP(ldw),
-  P_OP(ldh),
-  P_OP(ldb),
-  P_OP(lduw),
-  P_OP(ldub),
-  P_OP(lduh),
-  P_OP(ldx),
-  P_OP(ldf),
-  P_OP(ldd),
+  P_OP(ldw),      // Load signed 32 bit word.
+  P_OP(ldh),      // Load signed 16 bit word.
+  P_OP(ldb),      // Load signed byte.
+  P_OP(lduw),     // Load unsigned 32 bit word.
+  P_OP(ldub),     // Load unsigned byte.
+  P_OP(lduh),     // Load unsigned 16 bit word.
+  P_OP(ldx),      // Load 64 bit word.
+  P_OP(ldf),      // Load single precision float.
+  P_OP(ldd),      // Load double precision float.
 
   // Stores: st r,[d, #c]
-  P_OP(stw),
-  P_OP(sth),
-  P_OP(stx),
-  P_OP(stf),
-  P_OP(std),
-  P_OP(stb),
+  P_OP(stw),      // Store 32 bit.
+  P_OP(sth),      // Store 16 bit.
+  P_OP(stx),      // Store 64 bit.
+  P_OP(stf),      // Store single precision float.
+  P_OP(std),      // Store double precision float.
+  P_OP(stb),      // Store byte.
 
   // Add.
-  P_OP(add),
-  P_OP(addf),
-  P_OP(addd),
-  P_OP(addc),  // Add with constant.
+  P_OP(add),      // Add int.
+  P_OP(addf),     // Add float.
+  P_OP(addd),     // Add double.
+  P_OP(addc),     // Add with constant.
 
   // Subtract.
-  P_OP(sub),
-  P_OP(subf),
-  P_OP(subd),
+  P_OP(sub),      // Subtract int.
+  P_OP(subf),     // Subtract float.
+  P_OP(subd),     // Subtract double.
 
   // Multiply.
-  P_OP(mul),
-  P_OP(mulf),
-  P_OP(muld),
+  P_OP(mul),      // Multiply int.
+  P_OP(mulf),     // Multiply float.
+  P_OP(muld),     // Multiply double.
 
   // Divide.
-  P_OP(div),
-  P_OP(divf),
-  P_OP(divd),
+  P_OP(div),      // Divide int.
+  P_OP(divu),     // Divide int unsigned
+  P_OP(divf),     // Divide float.
+  P_OP(divd),     // Divide double.
 
   // Modulus.
-  P_OP(mod),
+  P_OP(mod),      // Integer modulus.
+  P_OP(modu),     // Unsigned nteger modulus.
 
   // Shifts.
-  P_OP(lsr),
-  P_OP(asr),
-  P_OP(lsl),
+  P_OP(lsr),      // Logical shift right.
+  P_OP(asr),      // Arithmetic shift right.
+  P_OP(lsl),      // Logical shift left.
 
   // Bitwise.
-  P_OP(or),
-  P_OP(and),
-  P_OP(xor),
+  P_OP(or),       // OR.
+  P_OP(and),      // AND.
+  P_OP(xor),      // Exclusive OR.
 
-  P_OP(not),
-  P_OP(inv),
-  P_OP(neg),
-  P_OP(negf),
-  P_OP(negd),
+  P_OP(not),      //  != 0 -> 0
+  P_OP(inv),      // Ones complement.
+  P_OP(neg),      // Negate int.
+  P_OP(negf),     // Negate float.
+  P_OP(negd),     // Negate double.
 
   // Compares.
-  P_OP(cmpeq),
-  P_OP(cmpne),
-  P_OP(cmplt),
-  P_OP(cmple),
-  P_OP(cmpgt),
-  P_OP(cmpge),
+  P_OP(cmpeq),     // == int.
+  P_OP(cmpne),     // != int.
+  P_OP(cmplt),     // < int.
+  P_OP(cmple),     // <= int.
+  P_OP(cmpgt),     // > int.
+  P_OP(cmpge),     // >= int.
+  P_OP(cmpltu),    // < unsigned int.
+  P_OP(cmpleu),    // <= unsigned int.
+  P_OP(cmpgtu),    // > unsigned int.
+  P_OP(cmpgeu),    // >= unsigned int.
 
-  P_OP(cmpeqf),
-  P_OP(cmpnef),
-  P_OP(cmpltf),
-  P_OP(cmplef),
-  P_OP(cmpgtf),
-  P_OP(cmpgef),
+  P_OP(cmpeqf),    // == float.
+  P_OP(cmpnef),    // != float.
+  P_OP(cmpltf),    // < float.
+  P_OP(cmplef),    // <= float.
+  P_OP(cmpgtf),    // > float.
+  P_OP(cmpgef),    // >= float.
 
-  P_OP(cmpeqd),
-  P_OP(cmpned),
-  P_OP(cmpltd),
-  P_OP(cmpled),
-  P_OP(cmpgtd),
-  P_OP(cmpged),
+  P_OP(cmpeqd),    // == double.
+  P_OP(cmpned),    // != double.
+  P_OP(cmpltd),    // < double.
+  P_OP(cmpled),    // <= double.
+  P_OP(cmpgtd),    // > double.
+  P_OP(cmpged),    // >= double.
 
   // Relative branches.
-  P_OP(bnz),
-  P_OP(bz),
-  P_OP(bra),
+  P_OP(bnz),       // Branch if non-zero.
+  P_OP(bz),        // Branch if zero
+  P_OP(bra),       // Unconditional branch,
 
   // Computed branch.  Adds reg value to current PC and branches
   // to the calculated address.
   P_OP(cbra),
 
-  P_OP(i2f),
-  P_OP(i2d),
-  P_OP(f2d),
-  P_OP(d2f),
-  P_OP(f2i),
-  P_OP(d2i),
+  P_OP(i2f),      // int to float.
+  P_OP(i2d),      // int to double.
+  P_OP(ui2f),     // unsigned int to float.
+  P_OP(ui2d),     // unsigned int to double.
+  P_OP(f2d),      // float to double.
+  P_OP(d2f),      // double to float.
+  P_OP(f2i),      // float to int.
+  P_OP(d2i),      // double to int.
+  P_OP(f2ui),     // float to unsigned int.
+  P_OP(d2ui),     // double to unsigned int.
 
-  // Absolute jump to register value.
-  P_OP(jmp),
-
+  P_OP(jmp),      // Jump to address.
+  P_OP(cjmp),     // Jump to contents of address.
+  P_OP(adr),      // PC relative address.
+  
   // Call and return.
-  P_OP(call),
-  P_OP(callf),
-  P_OP(calld),
-  P_OP(rcall),
-  P_OP(rcallf),
-  P_OP(rcalld),
+  P_OP(call),     // Call address with int result.
+  P_OP(callf),    // Call address with float result.
+  P_OP(calld),    // Call address with double result.
+  P_OP(rcall),    // Call register with int resutl.
+  P_OP(rcallf),   // Call register with float result.
+  P_OP(rcalld),   // Call register with double result.
 } PCodeOpcode;
 
 // A PCode Generator is derived from a TargetGenerator.  It has

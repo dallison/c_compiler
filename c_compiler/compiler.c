@@ -386,7 +386,7 @@ static void CompileDeclaration(Syntax* syntax) {
                 VectorAppend(&compiler->uninitialized_static_variables, var);
               } else {
                 ASTNode* simplified_init = AnalyzeInitializer(
-                    syntax, decl->base.type, decl->initializer);
+                    decl->base.type, decl->initializer);
                 // This is an initialized static variable.  The initializer has
                 // been simplified to a braced initializer containing only
                 // designated initializers.

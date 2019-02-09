@@ -184,7 +184,7 @@ static void InsertDesignator(DesignatedInitializerASTNode* init,
         break;
       }
       state->member = FindStructMember(state->struct_info,
-                                       d->value.struct_member_name->value);
+                                       d->value.struct_member_name);
       if (state->member == NULL) {
         SemanticError((ASTNode*)init,
                       "Designated initializer specifies undefined member %s of "
@@ -203,7 +203,7 @@ static void InsertDesignator(DesignatedInitializerASTNode* init,
 
 // We are initializing a struct/union.  The limits array element in the state
 // says how many members there are to initialize.
-static void AnalyzeStructInitializer(Syntax* syntax, ASTNode* init,
+static void AnalyzeStructInitializer(ASTNode* init,
                                      InitializerState* state) {
   if (init->op == AST_OP(braced_init)) {
     state->current++;
@@ -222,11 +222,11 @@ static void AnalyzeStructInitializer(Syntax* syntax, ASTNode* init,
         DesignatedInitializerASTNode* designated_init =
             (DesignatedInitializerASTNode*)subinit;
         InsertDesignator(designated_init, state);
-        subinit = AnalyzeInitializer(syntax, state->member->symbol->type,
+        subinit = AnalyzeInitializer(state->member->symbol->type,
                                      designated_init->init);
       } else {
         subinit =
-            AnalyzeInitializer(syntax, state->member->symbol->type, subinit);
+            AnalyzeInitializer(state->member->symbol->type, subinit);
       }
 
       VectorAppend(state->init->initializers,
@@ -242,11 +242,10 @@ static void AnalyzeStructInitializer(Syntax* syntax, ASTNode* init,
 }
 
 // An expression initializer has been found.  Convert this to a fully designated
-// initailizer and insert it into the result.
-static void AnalyzeExpressionInitializer(Syntax* syntax,
-                                         ExpressionInitializerASTNode* init,
+// initializer and insert it into the result.
+static void AnalyzeExpressionInitializer(ExpressionInitializerASTNode* init,
                                          InitializerState* state) {
-  AnalyzeExpression(syntax, init->expr);
+  AnalyzeExpression(init->expr);
   TypeRecord* type = state->types[state->num_elements - 1];
 
   // If this expression is part of a struct we initialize the current struct
@@ -276,7 +275,7 @@ static void AnalyzeExpressionInitializer(Syntax* syntax,
 }
 
 // Analyze an array initialization.
-static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
+static void AnalyzeArrayInitializer(ASTNode* init,
                                     InitializerState* state) {
   switch (init->op) {
     case AST_OP(braced_init): {
@@ -292,7 +291,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
       if (state->current == state->num_elements - 2) {
         // Last dimension, this is either a scalar or struct.
         if (state->is_struct) {
-          AnalyzeStructInitializer(syntax, init, state);
+          AnalyzeStructInitializer(init, state);
           return;
         } else {
           // Brace enclosed scalar.
@@ -301,7 +300,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
                             "Too many initializers for scalar");
           }
           ASTNode* subinit = (ASTNode*)braced_init->initializers->value[0];
-          AnalyzeArrayInitializer(syntax, subinit, state);
+          AnalyzeArrayInitializer(subinit, state);
           return;
         }
         return;
@@ -309,7 +308,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
       state->current++;
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
         ASTNode* subinit = (ASTNode*)braced_init->initializers->value[i];
-        AnalyzeArrayInitializer(syntax, subinit, state);
+        AnalyzeArrayInitializer(subinit, state);
         CloseCurrentArrayState(state);
       }
       state->current--;
@@ -329,7 +328,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
       if (!ok) {
         SemanticWarning(init, "too-many-initialzers", "Too many intializers");
       }
-      AnalyzeExpressionInitializer(syntax, expr_init, state);
+      AnalyzeExpressionInitializer(expr_init, state);
       NextIndex(state);
       break;
     }
@@ -337,7 +336,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
       DesignatedInitializerASTNode* designated_init =
           (DesignatedInitializerASTNode*)init;
       InsertDesignator(designated_init, state);
-      AnalyzeArrayInitializer(syntax, designated_init->init, state);
+      AnalyzeArrayInitializer(designated_init->init, state);
       break;
     }
     default:;
@@ -349,7 +348,7 @@ static void AnalyzeArrayInitializer(Syntax* syntax, ASTNode* init,
 // The result is a fully designated initializer (as if the user had
 // designated each and every expression in the initializer with its
 // array indices or struct member.  This simplifies code generation.
-ASTNode* AnalyzeInitializer(Syntax* syntax, TypeRecord* type, ASTNode* init) {
+ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* init) {
   InitializerState state;
   StateInit(&state);
   state.init = (BracedInitializerASTNode*)NewBracedInitializerASTNode(
@@ -397,7 +396,7 @@ ASTNode* AnalyzeInitializer(Syntax* syntax, TypeRecord* type, ASTNode* init) {
     }
 
     // Perform the heavy lifting.
-    AnalyzeArrayInitializer(syntax, init, &state);
+    AnalyzeArrayInitializer(init, &state);
     if (type->info.array_size == 0) {
       type->info.array_size = state.indexes[0] - 1;
       TypeRecordCalculateSize(type);
@@ -416,7 +415,7 @@ ASTNode* AnalyzeInitializer(Syntax* syntax, TypeRecord* type, ASTNode* init) {
         state.limits[0] = state.struct_info->is_union
                               ? 1
                               : (int)state.struct_info->members.length;
-        AnalyzeStructInitializer(syntax, init, &state);
+        AnalyzeStructInitializer(init, &state);
         break;
 
       case AST_OP(expr_init): {
@@ -462,7 +461,7 @@ ASTNode* AnalyzeInitializer(Syntax* syntax, TypeRecord* type, ASTNode* init) {
       state.types[0] = type;
       ExpressionInitializerASTNode* expr_init =
           (ExpressionInitializerASTNode*)init;
-      AnalyzeExpressionInitializer(syntax, expr_init, &state);
+      AnalyzeExpressionInitializer(expr_init, &state);
     }
   }
 

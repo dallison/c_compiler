@@ -77,14 +77,15 @@ void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_ad
   // Build a sequence of code to call main followed by esc #4. The ret instruction
   // at the end of main will return to the esc #4 instruction.
   int32_t* startup = interpreter->startup_code;
+  interpreter->iregs[PCODE_PC_REG] = (int64_t)startup;
   startup[0] = 0xc3000000;                                 // call
-  startup[1] = (uint32_t)(entry_address & 0xffffffffLL);   // main low word.
-  startup[2] = (uint32_t)(entry_address >> 32);            // main high word.
+  int64_t pcrel = entry_address - (int64_t)startup + 4;
+  startup[1] = (uint32_t)(pcrel & 0xffffffffLL);           // main low word.
+  startup[2] = (uint32_t)(pcrel >> 32);                    // main high word.
   startup[3] = 0x40000004;                                 // esc #4
 
   // Invoke interpreter at startup code.  This will call main and then
   // halt.
-  interpreter->iregs[PCODE_PC_REG] = (int64_t)startup;
 
   // Push argv and argc onto stack.
   iregs[PCODE_SP_REG] -= 8;
@@ -160,6 +161,13 @@ void InterpreterRun(Interpreter* interpreter) {
             iregs[DEST(inst)] = iregs[SRC1(inst)] / iregs[SRC2(inst)];
           }
           break;
+        case OP(divu):
+          if (iregs[SRC2(inst)] == 0) {
+            interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
+          } else {
+            iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] / (uint64_t)iregs[SRC2(inst)];
+          }
+          break;
         case OP(divf):
           if (fregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
@@ -176,6 +184,9 @@ void InterpreterRun(Interpreter* interpreter) {
           break;
         case OP(mod):
           iregs[DEST(inst)] = iregs[SRC1(inst)] % iregs[SRC2(inst)];
+          break;
+        case OP(modu):
+          iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] % (uint64_t)iregs[SRC2(inst)];
           break;
         case OP(lsr):
           iregs[DEST(inst)] = (uint64_t)(iregs[SRC1(inst)]) >> iregs[SRC2(inst)];
@@ -228,7 +239,19 @@ void InterpreterRun(Interpreter* interpreter) {
         case OP(cmpge):
           iregs[DEST(inst)] = iregs[SRC1(inst)] >= iregs[SRC2(inst)];
           break;
-        case OP(cmpeqf):
+        case OP(cmpltu):
+          iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] < (uint64_t)iregs[SRC2(inst)];
+          break;
+        case OP(cmpleu):
+          iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] <= (uint64_t)iregs[SRC2(inst)];
+          break;
+        case OP(cmpgtu):
+          iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] > (uint64_t)iregs[SRC2(inst)];
+          break;
+        case OP(cmpgeu):
+          iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] >= (uint64_t)iregs[SRC2(inst)];
+          break;
+       case OP(cmpeqf):
           iregs[DEST(inst)] = fregs[SRC1(inst)] == fregs[SRC2(inst)];
           break;
         case OP(cmpnef):
@@ -327,6 +350,12 @@ void InterpreterRun(Interpreter* interpreter) {
         case OP(i2d):
           dregs[DEST(inst)] = iregs[SRC1(inst)];
           break;
+        case OP(ui2f):
+          fregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)];
+          break;
+        case OP(ui2d):
+          dregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)];
+          break;
         case OP(f2d):
           dregs[DEST(inst)] = fregs[SRC1(inst)];
           break;
@@ -339,9 +368,15 @@ void InterpreterRun(Interpreter* interpreter) {
         case OP(d2i):
           iregs[DEST(inst)] = dregs[SRC1(inst)];
           break;
-        case OP(rcall):
+        case OP(f2ui):
+          iregs[DEST(inst)] = (uint64_t)fregs[SRC1(inst)];
+          break;
+        case OP(d2ui):
+          iregs[DEST(inst)] = (uint64_t)dregs[SRC1(inst)];
+          break;
+       case OP(rcall):
           iregs[PCODE_SP_REG] -= 8;
-          *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG];
+          *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
           iregs[PCODE_PC_REG] = iregs[DEST(inst)];
           interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
@@ -475,14 +510,27 @@ void InterpreterRun(Interpreter* interpreter) {
           iregs[PCODE_PC_REG] += 8;
           break;
         case OP(jmp):
-          iregs[PCODE_PC_REG] = *(uint64_t*)pc;
+          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG];
           break;
         case OP(call):
           iregs[PCODE_SP_REG] -= 8;
           *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
-          iregs[PCODE_PC_REG] = *(uint64_t*)pc;
+          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
           interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
+          case OP(cjmp): {
+            // Load the value at the absolute address in the operand.  Then jump to that value.
+            uint64_t* addr = *(uint64_t**)pc;
+            iregs[PCODE_PC_REG] = *addr;
+            interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
+          break;
+          }
+        case OP(adr): {
+          // Operand is offset from PC to address.
+          uint64_t addr = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
+          iregs[DEST(inst)] = addr;
+          break;
+          }
         default:
           interpreter->escape(interpreter, P_CODE_ESC_UNDEF_INST);
           break;

@@ -10,15 +10,19 @@
 #include "stdlib.h"
 #include <assert.h>
 #include <string.h>
+#include "vector.h"
 
-void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine, int flags, bool dso) {
+void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
+                       int flags, bool dso,
+                       bool is_64_bit,
+                       bool is_little_endian) {
   memset(&elf->header, 0, sizeof(elf->header));
   elf->header.ident[EI_MAG0] = '\x7f';
   elf->header.ident[EI_MAG1] = 'E';
   elf->header.ident[EI_MAG2] = 'L';
   elf->header.ident[EI_MAG3] = 'F';
-  elf->header.ident[EI_CLASS] = 2;      // 64 bit.
-  elf->header.ident[EI_DATA] = 1;       // LSB.
+  elf->header.ident[EI_CLASS] = is_64_bit ? 2 : 1;
+  elf->header.ident[EI_DATA] = is_little_endian ? 1 : 2;
   elf->header.ident[EI_VERSION] = 1;
   elf->header.ident[EI_OSABI] = 0;
   elf->header.type = type;
@@ -28,7 +32,8 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine, int flags,
   elf->header.ehsize = sizeof(ELFHeader);
   elf->header.shentsize = sizeof(ELFSectionHeader);
   elf->header.phentsize = sizeof(ELFProgramHeader);
-  elf->header.phoff = sizeof(ELFHeader);      // Program segment headers after file header.
+  // Program segment headers are immediately after file header.
+  elf->header.phoff = sizeof(ELFHeader);
   VectorInit(&elf->sections);
   VectorInit(&elf->segments);
   BufferInit(&elf->string_table);
@@ -50,13 +55,14 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine, int flags,
 }
 
 void ELFWriterFileDestruct(ELFWriterFile* elf) {
-  // TODO: delete the objects in the vectors.
-  VectorDestruct(&elf->sections);
-  VectorDestruct(&elf->segments);
+  VectorDestructWithContents(&elf->sections,
+                             (VectorElementDestructor)ELFWriterSectionDestruct);
+  VectorDestructWithContents(&elf->segments,
+                             (VectorElementDestructor)ELFWriterSegmentDestruct);
   BufferDestruct(&elf->string_table);
-  VectorDestruct(&elf->symbol_table);
+  VectorDestructWithContents(&elf->symbol_table, NULL);
   BufferDestruct(&elf->dyn_string_table);
-  VectorDestruct(&elf->dyn_symbol_table);
+  VectorDestructWithContents(&elf->dyn_symbol_table, NULL);
   BufferDestruct(&elf->section_names);
 }
 
@@ -84,6 +90,7 @@ ELFWriterSectionContents* NewELFWriterSectionContents(ELFWriterSectionContentsDa
   }
   return contents;
 }
+
 void ELFWriterSectionContentsDestruct(ELFWriterSectionContents* contents) {
   switch (contents->data_location) {
     case kSectionContentsRaw:
@@ -120,7 +127,8 @@ size_t ELFWriterSectionContentsGetLength(ELFWriterSectionContents* contents) {
 void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp) {
   switch (contents->data_location) {
     case kSectionContentsBuffered:
-      fwrite(contents->data.buffered.value, contents->data.buffered.length, 1, fp);
+      fwrite(contents->data.buffered.value,
+             contents->data.buffered.length, 1, fp);
       break;
     case kSectionContentsRaw:
       fwrite(contents->data.raw, contents->size, 1, fp);
@@ -136,40 +144,10 @@ void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp)
   }
 }
 
-void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
-  // Add symbol table, section names and string table.
-  ELFWriterSection* symtab = ELFWriterAddNamedSection(elf, ".symtab", SHT(symtab), 0);
-  ELFWriterSection* strtab = ELFWriterAddNamedSection(elf, ".strtab", SHT(strtab), 0);
-  ELFWriterSection* shstrtab = ELFWriterAddNamedSection(elf, ".shstrtab", SHT(strtab), 0);
-  
-  // Setup the special symbol table fields.
-  symtab->header.entsize = sizeof(ELFSymbol);
-  
-  // The 'link' field is the index of the symbol names string table.
-  symtab->header.link = strtab->index;
-  
-  // The 'info' field is one greater than the index of the last local
-  // symbol.
-  symtab->header.info = elf->last_local_symbol_index + 1;
-  
-  // If we are writing a DSO we need to allocate the .dynsym and .dynstr
-  // sections for the dynamic symbol table.  These are separate from the
-  // regular symbol and string tables to allow the files to be stripped and
-  // still be loadable.
-  ELFWriterSection* dyn_symtab = NULL;
-  ELFWriterSection* dyn_strtab = NULL;
-  if (elf->dso) {
-    dyn_symtab = ELFWriterAddNamedSection(elf, ".dynsym", SHT(symtab), 0);
-    dyn_strtab = ELFWriterAddNamedSection(elf, ".dynstr", SHT(strtab), 0);
-    dyn_symtab->header.entsize = sizeof(ELFSymbol);
-    dyn_symtab->header.link = dyn_strtab->index;
-    dyn_symtab->header.info = 1;      // TODO: is this necessary?
-  }
-  
-  Vector relocation_sections;
-  VectorInit(&relocation_sections);
-  
-  // Add relocation sections.
+// Add relocation sections for all relocations.
+static void CreateRelocationSections(ELFWriterFile* elf,
+                           Vector* relocation_sections,
+                           ELFWriterSection* symtab) {
   // Record current section length because we will be adding sections
   // to the sections vector in the loop.
   size_t num_sections = elf->sections.length;
@@ -179,8 +157,8 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
       String relocation_section_name;
       StringInit(&relocation_section_name, "");
       StringPrintf(&relocation_section_name, ".rela%s", section->name.value);
-      ELFWriterSection* reloc_sect = ELFWriterAddNamedSection(elf, relocation_section_name.value,
-                                            SHT(rela), 0);
+      ELFWriterSection* reloc_sect = ELFWriterAddStandardSection(elf, relocation_section_name.value,
+                                                              SHT(rela), 0);
       // All relocation sections link to the symtab section so that
       // they can find the symbol.
       reloc_sect->header.link = symtab->index;
@@ -196,33 +174,29 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
       // Keep track of the relocation section.  It now owns
       // all the relocations so we know what its size and
       // contents are.
-      VectorAppend(&relocation_sections, reloc_sect);
+      VectorAppend(relocation_sections, reloc_sect);
       StringDestruct(&relocation_section_name);
     }
   }
-  elf->header.shnum = elf->sections.length;
-  elf->header.shstrndx = shstrtab->index;
+}
 
-  // We always add a PHDR segment as the first segment.  This covers the segment
-  // headers and is part of the code segment.  Only do this if there are actually
-  // segments in the file.
-  size_t num_segments = elf->segments.length == 0 ? 0 : elf->segments.length + 1;
-
-  elf->header.shoff = sizeof(ELFHeader) + num_segments * sizeof(ELFProgramHeader);
-
-  // Allocate space for the file header.  This will be written after
-  // we have all the information we need for it.
-  // Also add space for the program segment headers. This will put the file pointer
-  // at the start of the section headers.
-  fseek(fp, elf->header.shoff, SEEK_SET);
-
-  // Calculate the file offset for the first section data.   This is incremented
-  // during the offset assignment loop below to be the address of the next
-  // setion's file offset.
+// Write all section headers to the given file.
+static void WriteSectionHeaders(ELFWriterFile* elf,
+                                   ELFWriterSection* symtab,
+                                   ELFWriterSection* dyn_symtab,
+                                   ELFWriterSection* strtab,
+                                   ELFWriterSection* dyn_strtab,
+                                   ELFWriterSection* shstrtab,
+                                   Vector* relocation_sections,
+                                   size_t num_segments,
+                                   FILE* fp) {
+  // Calculate the file offset for the first section data.   This is
+  // incremented during the offset assignment loop below to be the
+  // address of the next section's file offset.
   int64_t next_section_data_offset = sizeof(ELFHeader) +
     num_segments * sizeof(ELFProgramHeader) +
     elf->sections.length * sizeof(ELFSectionHeader);
-  
+
   // Write all the section headers to the file.
   for (size_t i = 0; i < elf->sections.length; i++) {
     ELFWriterSection* section = elf->sections.value[i];
@@ -243,8 +217,8 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
         data_length = elf->section_names.length;
       } else {
         bool section_found = false;
-        for (size_t j = 0; j < relocation_sections.length; j++) {
-          if (relocation_sections.value[j] == section) {
+        for (size_t j = 0; j < relocation_sections->length; j++) {
+          if (relocation_sections->value[j] == section) {
             data_length = section->relocations->length * sizeof(ELFRelocation);
             section_found = true;
             break;
@@ -257,13 +231,22 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
       section->header.offset = next_section_data_offset;
     }
     section->header.size = data_length;
-
+    
     fwrite(&section->header, sizeof(ELFSectionHeader), 1, fp);
     if (section->header.type != SHT(nobits)) {
       next_section_data_offset += data_length;
     }
   }
-  
+}
+
+static void WriteSectionContents(ELFWriterFile* elf,
+                             ELFWriterSection* symtab,
+                             ELFWriterSection* dyn_symtab,
+                             ELFWriterSection* strtab,
+                             ELFWriterSection* dyn_strtab,
+                             ELFWriterSection* shstrtab,
+                             Vector* relocation_sections,
+                             FILE* fp) {
   // Write the section data to the file.
   for (size_t i = 0; i < elf->sections.length; i++) {
     ELFWriterSection* section = elf->sections.value[i];
@@ -277,10 +260,10 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
           fwrite(sym, sizeof(ELFSymbol), 1, fp);
         }
       } else if (section == dyn_symtab) {
-          for (size_t sym_index = 0; sym_index < elf->dyn_symbol_table.length; sym_index++) {
-            ELFSymbol* sym = elf->dyn_symbol_table.value[sym_index];
-            fwrite(sym, sizeof(ELFSymbol), 1, fp);
-          }
+        for (size_t sym_index = 0; sym_index < elf->dyn_symbol_table.length; sym_index++) {
+          ELFSymbol* sym = elf->dyn_symbol_table.value[sym_index];
+          fwrite(sym, sizeof(ELFSymbol), 1, fp);
+        }
       } else if (section == strtab) {
         data_length = elf->string_table.length;
         fwrite(elf->string_table.value, data_length, 1, fp);
@@ -293,8 +276,8 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
       } else {
         bool section_found = false;
         // Write out the relocation section contents.
-        for (size_t j = 0; j < relocation_sections.length; j++) {
-          if (relocation_sections.value[j] == section) {
+        for (size_t j = 0; j < relocation_sections->length; j++) {
+          if (relocation_sections->value[j] == section) {
             for (size_t reloc_index = 0;
                  reloc_index < section->relocations->length; reloc_index++) {
               ELFRelocation* reloc = section->relocations->value[reloc_index];
@@ -308,14 +291,17 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
       }
     }
   }
+}
 
+static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
+                                FILE* fp) {
   // Handle segments.  These have references to sections which, by this point,
   // will have been given addresses and offsets.
   if (elf->segments.length > 0) {
     // The segments are just written after the file header.
     elf->header.phnum = num_segments;
     fseek(fp, elf->header.phoff, SEEK_SET);
-
+    
     // Add a PHDR segment as the first segment.
     ELFProgramHeader phdr;
     memset(&phdr, 0, sizeof(phdr));
@@ -325,33 +311,33 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
     phdr.align = 8;
     phdr.flags = PF(r) | PF(x);
     phdr.type = PT(phdr);
-
+    
     ELFWriterSegment* code_segment = elf->segments.value[0];
     ELFWriterSection* section0 = code_segment->sections.value[0];
     phdr.vaddr = section0->address + elf->header.phoff;
     phdr.paddr = phdr.vaddr;
     fwrite(&phdr, sizeof(phdr), 1, fp);
-
+    
     // The first segment is at offset 0.  The next one starts at the offset
     // of the first section held within it.
     bool segment_includes_file_header = true;
     int64_t first_section_offset = 0;
-
+    
     for (size_t i = 0; i < elf->segments.length; i++) {
       ELFWriterSegment* segment = elf->segments.value[i];
       bool start_address_assigned = false;
       for (size_t j = 0; j < segment->sections.length; j++) {
         ELFWriterSection* section = segment->sections.value[j];
-
+        
         // Add section size to the memory size.
         segment->header.memsz += section->header.size;
-
+        
         // If the section is present in the file (not NOBITS), add its
         // size to the filesz.
         if (section->header.type != SHT(nobits)) {
           segment->header.filesz += section->header.size;
         }
-
+        
         // The first section gives us the offset and addresses for the segment.
         if (!start_address_assigned) {
           segment->header.offset = i == 0 ? 0 : section->header.offset;
@@ -361,9 +347,9 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
           first_section_offset = section->header.offset;
         }
       }
-
-      // The first segment includes the ELF file header.  So we need to adjust its file
-      // and memory sizes to account of for it.
+      
+      // The first segment includes the ELF file header.  So we need to
+      // adjust its file and memory sizes to account of for it.
       if (segment_includes_file_header) {
         segment->header.filesz += first_section_offset;
         segment->header.memsz += first_section_offset;
@@ -376,11 +362,85 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
     elf->header.phoff = 0;
     elf->header.phentsize = 0;
   }
+}
 
+// Write an ELF file to the given file pointer.
+void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
+  // Add symbol table, section names and string table.
+  ELFWriterSection* symtab = ELFWriterAddStandardSection(elf, ".symtab", SHT(symtab), 0);
+  ELFWriterSection* strtab = ELFWriterAddStandardSection(elf, ".strtab", SHT(strtab), 0);
+  ELFWriterSection* shstrtab = ELFWriterAddStandardSection(elf, ".shstrtab", SHT(strtab), 0);
+  
+  // Setup the special symbol table fields.
+  symtab->header.entsize = sizeof(ELFSymbol);
+  
+  // The 'link' field is the index of the symbol names string table.
+  symtab->header.link = strtab->index;
+  
+  // The 'info' field is one greater than the index of the last local
+  // symbol.
+  symtab->header.info = elf->last_local_symbol_index + 1;
+  
+  // If we are writing a DSO we need to allocate the .dynsym and .dynstr
+  // sections for the dynamic symbol table.  These are separate from the
+  // regular symbol and string tables to allow the files to be stripped and
+  // still be loadable.
+  ELFWriterSection* dyn_symtab = NULL;
+  ELFWriterSection* dyn_strtab = NULL;
+  if (elf->dso) {
+    dyn_symtab = ELFWriterAddStandardSection(elf, ".dynsym", SHT(symtab), 0);
+    dyn_strtab = ELFWriterAddStandardSection(elf, ".dynstr", SHT(strtab), 0);
+    dyn_symtab->header.entsize = sizeof(ELFSymbol);
+    dyn_symtab->header.link = dyn_strtab->index;
+    dyn_symtab->header.info = 1;      // TODO: is this necessary?
+  }
+  
+  // Vector containing pointers to sections for relocations.  The
+  // ELFWriterSection pointer is not owned by this vector.
+  Vector relocation_sections;
+  VectorInit(&relocation_sections);
+  
+  // Create the relocation sections.
+  CreateRelocationSections(elf, &relocation_sections, symtab);
+
+  elf->header.shnum = elf->sections.length;
+  elf->header.shstrndx = shstrtab->index;
+
+  // We always add a PHDR segment as the first segment.  This covers the segment
+  // headers and is part of the code segment.  Only do this if there are actually
+  // segments in the file.
+  size_t num_segments = elf->segments.length == 0 ? 0 : elf->segments.length + 1;
+
+  elf->header.shoff = sizeof(ELFHeader) + num_segments * sizeof(ELFProgramHeader);
+
+  // Allocate space for the file header.  This will be written after
+  // we have all the information we need for it.
+  // Also add space for the program segment headers. This will put the
+  // file pointer at the start of the section headers.
+  fseek(fp, elf->header.shoff, SEEK_SET);
+  
+  // Write all the section headers to the file.
+  WriteSectionHeaders(elf, symtab, dyn_symtab, strtab,
+                     dyn_strtab, shstrtab,
+                     &relocation_sections,
+                     num_segments, fp);
+
+  // Write the section data to the file.
+  WriteSectionContents(elf, symtab, dyn_symtab, strtab,
+                       dyn_strtab, shstrtab,
+                       &relocation_sections, fp);
+  
+
+  // Handle segments.  These have references to sections which,
+  // by this point, will have been given addresses and offsets.
+  WriteProgramHeaders(elf, num_segments, fp);
+  
   // Now we need to go back and write the file header.
-
   rewind(fp);
   fwrite(&elf->header, sizeof(ELFHeader), 1, fp);
+  
+  // Don't need the relocation sections vector now.
+  VectorDestruct(&relocation_sections);
 }
 
 
@@ -424,7 +484,7 @@ ELFWriterSection* ELFWriterAddSection(ELFWriterFile* elf, String* name, int32_t 
   return section;
 }
 
-ELFWriterSection* ELFWriterAddNamedSection(ELFWriterFile* elf, const char* name,
+ELFWriterSection* ELFWriterAddStandardSection(ELFWriterFile* elf, const char* name,
                           ELFSectionType type,
                           ELFSectionFlags flags) {
   ELFWriterSection* section = calloc(sizeof(ELFWriterSection), 1);
@@ -454,10 +514,18 @@ static ELFSymbol* NewSymbol(ELFWriterFile* elf, ELF_Word name_offset,
   return sym;
 }
 
-ELFSymbol* ELFWriterAddSymbol(ELFWriterFile* elf, String* name, int32_t section_index, int32_t symbol_type,
-                        int32_t symbol_binding, int64_t size, int64_t value, int32_t* index) {
-  ELFSymbol* sym = NewSymbol(elf, ELFWriterAddString(elf, name),
-                             section_index, symbol_type, symbol_binding, size, value);
+ELFSymbol* ELFWriterAddSymbol(ELFWriterFile* elf,
+                              String* name,
+                              int32_t section_index,
+                              int32_t symbol_type,
+                              int32_t symbol_binding,
+                              int64_t size,
+                              int64_t value,
+                              int32_t* index) {
+  ELFSymbol* sym = NewSymbol(elf,
+                             ELFWriterAddString(elf, name),
+                             section_index, symbol_type,
+                             symbol_binding, size, value);
  
   // Set index in symbol now that we know it.
   *index = (int32_t)elf->symbol_table.length;
@@ -465,7 +533,7 @@ ELFSymbol* ELFWriterAddSymbol(ELFWriterFile* elf, String* name, int32_t section_
   
   if (elf->dso && symbol_binding == STB(global)) {
     // If we are building a DSO, add the symbol to the dynamic symbol table,
-    // as long as the symbol is globa (or undefined).
+    // as long as the symbol is global (or undefined).
     ELFSymbol* sym = NewSymbol(elf, ELFWriterAddDynamicString(elf, name),
                                section_index, symbol_type,
                                symbol_binding, size, value);
@@ -498,7 +566,12 @@ ELFSymbol* ELFWriterAddFileSymbol(ELFWriterFile* elf, String* filename) {
   return sym;
 }
 
-void ELFWriterAddRelocationWithAddend(ELFWriterFile* elf, int32_t section_index, int64_t offset, int32_t symbol_index, int64_t addend, int32_t type) {
+void ELFWriterAddRelocationWithAddend(ELFWriterFile* elf,
+                                      int32_t section_index,
+                                      int64_t offset,
+                                      int32_t symbol_index,
+                                      int64_t addend,
+                                      int32_t type) {
   ELFWriterSection* section = elf->sections.value[section_index];
   ELFRelocation* r = malloc(sizeof(ELFRelocation));
 
@@ -510,7 +583,12 @@ void ELFWriterAddRelocationWithAddend(ELFWriterFile* elf, int32_t section_index,
   VectorAppend(section->relocations, r);
 }
 
-void ELFWriterAddRelocation(ELFWriterFile* elf, int32_t section_index, int64_t offset, int32_t symbol_index, int32_t type) {
+void ELFWriterAddRelocation(ELFWriterFile* elf,
+                            int32_t section_index,
+                            int64_t offset,
+                            int32_t
+                            symbol_index,
+                            int32_t type) {
   ELFWriterAddRelocationWithAddend(elf, section_index, offset, symbol_index, 0, type);
 }
 
@@ -554,8 +632,12 @@ ELFWriterSegment* NewELFWriterSegment(int32_t type, int32_t flags, int64_t align
   return segment;
 }
 
-void ELFWriterSegmentDelete(ELFWriterSegment* segment) {
+void ELFWriterSegmentDestruct(ELFWriterSegment* segment) {
   VectorDestruct(&segment->sections);
+}
+
+void ELFWriterSegmentDelete(ELFWriterSegment* segment) {
+  ELFWriterSegmentDestruct(segment);
   free(segment);
 }
 

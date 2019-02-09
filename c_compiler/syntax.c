@@ -156,7 +156,7 @@ static void ParseDesignatedInitializer(Syntax* syntax,
     if (LexMatch(syntax->lex, TOK(lsquare))) {
       // Array designator.
       ASTNode* index_expr = SyntaxParseExpression(syntax, TC(semicolon));
-      AnalyzeExpression(syntax, index_expr);
+      AnalyzeExpression(index_expr);
       int64_t value;
       bool ok = EvaluateIntegerExpression(index_expr, &value);
       if (!ok) {
@@ -395,6 +395,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
       *is_inline = true;
     } else if (SyntaxLookingAtType(syntax)) {
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
+    } else if (LexMatch(syntax->lex, TOK(attribute))) {
+      ParseAttribute(syntax, NULL);
     } else {
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
       return;

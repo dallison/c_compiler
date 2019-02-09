@@ -95,12 +95,12 @@ static bool FoldConstantExpression(ASTNode* node) {
 // and AST_OP(arrow) ones do, but those don't call this).
 // This also sets the type of the node to that of the left child.  This
 // will most likely be overwritten by the caller but it's safe to do it.
-static void AnalyzeBinaryExpression(Syntax* syntax, BinaryASTNode* node) {
+static void AnalyzeBinaryExpression(BinaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeExpression(syntax, node->left);
-  AnalyzeExpression(syntax, node->right);
+  AnalyzeExpression(node->left);
+  AnalyzeExpression(node->right);
   ASTNodeSetType((ASTNode*)node, node->left->type);
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
@@ -109,11 +109,11 @@ static void AnalyzeBinaryExpression(Syntax* syntax, BinaryASTNode* node) {
 // Analyze a unary expression by analyzing the sub expression
 // and propagating the type up.  Also checks that the expression
 // is scalar.
-static void AnalyzeUnaryExpression(Syntax* syntax, UnaryASTNode* node) {
+static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeExpression(syntax, node->sub);
+  AnalyzeExpression(node->sub);
   ASTNodeSetType((ASTNode*)node, node->sub->type);
   SemanticCheckScalarType(node->sub);
 }
@@ -170,11 +170,11 @@ static void InsertNumericConversions(BinaryASTNode* node) {
 
 // A binary plus operator allows an integer to be added to a pointer (or array).
 // The integer is scaled (multiplied) by the size of the thing pointed to.
-static void AnalyzePlusOperator(Syntax* syntax, BinaryASTNode* node) {
+static void AnalyzePlusOperator(BinaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeBinaryExpression(syntax, node);
+  AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
     if (TypeIsIntegral(node->right->type)) {
       // Multiply right side by size of left.
@@ -214,11 +214,11 @@ static void AnalyzePlusOperator(Syntax* syntax, BinaryASTNode* node) {
 
 // Like binary plus, a binary minus can subtract integers from pointers,
 // but not the other way around.  It can also subtract two pointers.
-static void AnalyzeMinusOperator(Syntax* syntax, BinaryASTNode* node) {
+static void AnalyzeMinusOperator(BinaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeBinaryExpression(syntax, node);
+  AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
     if (TypeIsIntegral(node->right->type)) {
       // Multiply right side by size of left.
@@ -273,8 +273,8 @@ static void AnalyzeMinusOperator(Syntax* syntax, BinaryASTNode* node) {
 }
 
 // Both sides of a shift operator needs to be an integral type.
-static void AnalyzeShift(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeBinaryExpression(syntax, node);
+static void AnalyzeShift(BinaryASTNode* node) {
+  AnalyzeBinaryExpression(node);
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Shift operator needs integral types");
   }
@@ -292,8 +292,8 @@ static void AnalyzeShift(Syntax* syntax, BinaryASTNode* node) {
 }
 
 // Bitwise operators need integers.
-static void AnalyzeBitwiseOperator(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeBinaryExpression(syntax, node);
+static void AnalyzeBitwiseOperator(BinaryASTNode* node) {
+  AnalyzeBinaryExpression(node);
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Bitwise operator needs integral types");
   } else {
@@ -301,24 +301,24 @@ static void AnalyzeBitwiseOperator(Syntax* syntax, BinaryASTNode* node) {
   }
 }
 
-static void AnalyzeComparisonOperator(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeBinaryExpression(syntax, node);
+static void AnalyzeComparisonOperator(BinaryASTNode* node) {
+  AnalyzeBinaryExpression(node);
   InsertNumericConversions(node);
 
   // Comparison operators produce boolean values.
   ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeBool, kQualPlain));
 }
 
-static void AnalyzeConditionalExpression(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeExpression(syntax, node->left);
+static void AnalyzeConditionalExpression(BinaryASTNode* node) {
+  AnalyzeExpression(node->left);
   if (!TypeIsScalar(node->left->type)) {
     SemanticError((ASTNode*)node, "Condition for ? operator must be scalar");
     ASTNodeSetType((ASTNode*)node, node->left->type);
     return;
   }
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
-  AnalyzeExpression(syntax, colon->left);
-  AnalyzeExpression(syntax, colon->right);
+  AnalyzeExpression(colon->left);
+  AnalyzeExpression(colon->right);
   InsertNumericConversions(colon);
   ASTNodeSetType((ASTNode*)node, colon->left->type);
 
@@ -376,10 +376,10 @@ static bool IsAssignable(ASTNode* node, bool is_init) {
   return IsBitfieldReference(node) || HasAddress(node);
 }
 
-static void AnalyzeInitialization(Syntax* syntax, ASTNode* node,
+static void AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
-  AnalyzeExpression(syntax, &id_node->base);
-  AnalyzeExpression(syntax, init);
+  AnalyzeExpression(&id_node->base);
+  AnalyzeExpression(init);
   ASTNodeSetType(node, id_node->base.type);
   ASTNodeSetType((ASTNode*)init, id_node->base.type);
 
@@ -411,7 +411,7 @@ static void AnalyzeInitialization(Syntax* syntax, ASTNode* node,
     }
   }
 
-  ASTNode* simplified_init = AnalyzeInitializer(syntax, node->type, init);
+  ASTNode* simplified_init = AnalyzeInitializer(node->type, init);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
 
   // If the symbol being initialized is static set a flag to tell the
@@ -423,9 +423,9 @@ static void AnalyzeInitialization(Syntax* syntax, ASTNode* node,
   }
 }
 
-static void AnalyzeAssignmentExpression(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeExpression(syntax, node->left);
-  AnalyzeExpression(syntax, node->right);
+static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
+  AnalyzeExpression(node->left);
+  AnalyzeExpression(node->right);
   if (!IsAssignable(node->left, false)) {
     SemanticError(node->left, "Cannot assign to this expression");
   }
@@ -455,8 +455,9 @@ static void AnalyzeAssignmentExpression(Syntax* syntax, BinaryASTNode* node) {
         node->right = scale;
       } else {
         SemanticConvertType(node->right, node->left->type);
-        ASTNodeSetType((ASTNode*)node, node->left->type);
       }
+      ASTNodeSetType((ASTNode*)node, node->left->type);
+      break;
     case AST_OP(multeq):
     case AST_OP(diveq):
       SemanticConvertType(node->right, node->left->type);
@@ -499,8 +500,8 @@ static void AnalyzeAssignmentExpression(Syntax* syntax, BinaryASTNode* node) {
 }
 
 // Increment and decrement operators, both pre and post.
-static void AnalyzeIncDec(Syntax* syntax, UnaryASTNode* node) {
-  AnalyzeUnaryExpression(syntax, node);
+static void AnalyzeIncDec(UnaryASTNode* node) {
+  AnalyzeUnaryExpression(node);
   if (!IsAssignable(node->sub, false)) {
     SemanticError(node->sub, "Cannot increment or decrement this value");
   }
@@ -512,9 +513,9 @@ static void AnalyzeIncDec(Syntax* syntax, UnaryASTNode* node) {
 }
 
 // Array subscripting operator.
-static void AnalyzeArraySubscript(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeExpression(syntax, node->left);
-  AnalyzeExpression(syntax, node->right);
+static void AnalyzeArraySubscript(BinaryASTNode* node) {
+  AnalyzeExpression(node->left);
+  AnalyzeExpression(node->right);
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
     SemanticError(node->right, "Subscripts must be integral types");
   }
@@ -529,11 +530,11 @@ static void AnalyzeArraySubscript(Syntax* syntax, BinaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, subtype);
 }
 
-static void AnalyzeFunctionCall(Syntax* syntax, VectorASTNode* node) {
-  AnalyzeExpression(syntax, node->left);
+static void AnalyzeFunctionCall(VectorASTNode* node) {
+  AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
-    AnalyzeExpression(syntax, (ASTNode*)node->children->value[i]);
+    AnalyzeExpression((ASTNode*)node->children->value[i]);
   }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
@@ -586,11 +587,11 @@ static void AnalyzeFunctionCall(Syntax* syntax, VectorASTNode* node) {
   }
 }
 
-static void AnalyzeMemberReference(Syntax* syntax, BinaryASTNode* node) {
+static void AnalyzeMemberReference(BinaryASTNode* node) {
   Struct* struct_info = NULL;
 
-  AnalyzeExpression(syntax, node->left);
-  AnalyzeExpression(syntax, node->right);
+  AnalyzeExpression(node->left);
+  AnalyzeExpression(node->right);
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
     if (!TypeIsStructOrUnionPointer(node->left->type)) {
@@ -646,8 +647,8 @@ static void AnalyzeMemberReference(Syntax* syntax, BinaryASTNode* node) {
 
 // Address-of operator.  If the operand has an address the type is
 // a pointer to the type of the operand.
-static void AnalyzeAddressOperator(Syntax* syntax, UnaryASTNode* node) {
-  AnalyzeExpression(syntax, node->sub);
+static void AnalyzeAddressOperator(UnaryASTNode* node) {
+  AnalyzeExpression(node->sub);
   TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");
@@ -667,8 +668,8 @@ static void AnalyzeAddressOperator(Syntax* syntax, UnaryASTNode* node) {
 
 // Contents-of operator.  If the operand is a pointer the result type
 // is the type pointed to.
-static void AnalyzeContentsOperator(Syntax* syntax, UnaryASTNode* node) {
-  AnalyzeExpression(syntax, node->sub);
+static void AnalyzeContentsOperator(UnaryASTNode* node) {
+  AnalyzeExpression(node->sub);
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");
     // Fake an integer type for the result.
@@ -676,19 +677,21 @@ static void AnalyzeContentsOperator(Syntax* syntax, UnaryASTNode* node) {
     return;
   }
 
+  // Fake an integer type for the result.
+  ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
   ASTNodeSetType((ASTNode*)node, node->sub->type->next);
 }
 
-static void AnalyzeSizeofExpression(Syntax* syntax, SizeofASTNode* node) {
+static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   if (node->expr != NULL) {
-    AnalyzeExpression(syntax, node->expr);
+    AnalyzeExpression(node->expr);
     node->base.value.ivalue = node->expr->type->size;
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
 
-static void AnalyzeCastExpression(Syntax* syntax, CastASTNode* node) {
-  AnalyzeExpression(syntax, node->expr);
+static void AnalyzeCastExpression(CastASTNode* node) {
+  AnalyzeExpression(node->expr);
 
   if (TypeIsVoid(node->cast_type)) {
     // Casting to void is always allowed.
@@ -715,22 +718,22 @@ static void AnalyzeCastExpression(Syntax* syntax, CastASTNode* node) {
   ASTNodeSetType((ASTNode*)node, node->cast_type);
 }
 
-static void AnalyzeLogicalOperator(Syntax* syntax, BinaryASTNode* node) {
-  AnalyzeBinaryExpression(syntax, node);
+static void AnalyzeLogicalOperator(BinaryASTNode* node) {
+  AnalyzeBinaryExpression(node);
   TypeRecord* bool_type = NewTypeRecord(kTypeBool, kQualPlain);
   ASTNodeSetType((ASTNode*)node, bool_type);
 }
 
-static void AnalyzeVarargsBuiltin1(Syntax* syntax, VectorASTNode* args) {
+static void AnalyzeVarargsBuiltin1(VectorASTNode* args) {
   for (size_t i = 0; i < args->children->length; i++) {
     ASTNode* child = args->children->value[i];
-    AnalyzeExpression(syntax, child);
+    AnalyzeExpression(child);
     child->flags |= kASTNeedAddress;  // Need address of all of these.
   }
   ASTNodeSetType(&args->base, NewTypeRecord(kTypeVoid, kQualPlain));
 }
 
-static void AnalyzeVarargsBuiltin2(Syntax* syntax, VectorASTNode* args) {
+static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
   // Second arg is a constant whose type is set to the type of the arg.
   ASTNode* ap = args->children->value[0];
   ap->flags |= kASTNeedAddress;  // Need address of ap arg.
@@ -741,7 +744,7 @@ static void AnalyzeVarargsBuiltin2(Syntax* syntax, VectorASTNode* args) {
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
-void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
+void AnalyzeExpression(ASTNode* node) {
   if (node == NULL) {
     return;
   }
@@ -766,21 +769,21 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
       break;
 
     case AST_OP(plus):
-      AnalyzePlusOperator(syntax, binary_node);
+      AnalyzePlusOperator(binary_node);
       break;
 
     case AST_OP(minus):
-      AnalyzeMinusOperator(syntax, binary_node);
+      AnalyzeMinusOperator(binary_node);
       break;
 
     case AST_OP(mult):
     case AST_OP(div):
-      AnalyzeBinaryExpression(syntax, binary_node);
+      AnalyzeBinaryExpression(binary_node);
       InsertNumericConversions(binary_node);
       break;
 
     case AST_OP(mod):
-      AnalyzeBinaryExpression(syntax, binary_node);
+      AnalyzeBinaryExpression(binary_node);
       if (!TypeIsIntegral(binary_node->left->type)) {
         SemanticError(node, "Modulus operator needs an integral type");
       }
@@ -788,13 +791,13 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
 
     case AST_OP(lshift):
     case AST_OP(rshift):
-      AnalyzeShift(syntax, binary_node);
+      AnalyzeShift(binary_node);
       break;
 
     case AST_OP(and):
     case AST_OP(bitor):
     case AST_OP(exor):
-      AnalyzeBitwiseOperator(syntax, binary_node);
+      AnalyzeBitwiseOperator(binary_node);
       break;
 
     case AST_OP(less):
@@ -803,11 +806,11 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
     case AST_OP(greatereq):
     case AST_OP(equal):
     case AST_OP(noteq):
-      AnalyzeComparisonOperator(syntax, binary_node);
+      AnalyzeComparisonOperator(binary_node);
       break;
 
     case AST_OP(question):
-      AnalyzeConditionalExpression(syntax, binary_node);
+      AnalyzeConditionalExpression(binary_node);
       break;
 
     case AST_OP(assign):
@@ -821,61 +824,61 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
     case AST_OP(andeq):
     case AST_OP(oreq):
     case AST_OP(exoreq):
-      AnalyzeAssignmentExpression(syntax, binary_node);
+      AnalyzeAssignmentExpression(binary_node);
       break;
 
     case AST_OP(preinc):
     case AST_OP(predec):
     case AST_OP(postinc):
     case AST_OP(postdec):
-      AnalyzeIncDec(syntax, unary_node);
+      AnalyzeIncDec(unary_node);
       break;
 
     case AST_OP(uplus):
     case AST_OP(uminus):
-      AnalyzeUnaryExpression(syntax, unary_node);
+      AnalyzeUnaryExpression(unary_node);
       break;
 
     case AST_OP(sizeof):
-      AnalyzeSizeofExpression(syntax, (SizeofASTNode*)node);
+      AnalyzeSizeofExpression((SizeofASTNode*)node);
       break;
 
     case AST_OP(cast):
-      AnalyzeCastExpression(syntax, (CastASTNode*)node);
+      AnalyzeCastExpression((CastASTNode*)node);
       break;
 
     case AST_OP(not):
-      AnalyzeUnaryExpression(syntax, unary_node);
+      AnalyzeUnaryExpression(unary_node);
       break;
 
     case AST_OP(onescomp):
-      AnalyzeUnaryExpression(syntax, unary_node);
+      AnalyzeUnaryExpression(unary_node);
       break;
 
     case AST_OP(address):
-      AnalyzeAddressOperator(syntax, unary_node);
+      AnalyzeAddressOperator(unary_node);
       break;
 
     case AST_OP(contents):
-      AnalyzeContentsOperator(syntax, unary_node);
+      AnalyzeContentsOperator(unary_node);
       break;
 
     case AST_OP(subscript):  // Array subscript.
-      AnalyzeArraySubscript(syntax, binary_node);
+      AnalyzeArraySubscript(binary_node);
       break;
 
     case AST_OP(call):  // Function call.
-      AnalyzeFunctionCall(syntax, vector_node);
+      AnalyzeFunctionCall(vector_node);
       break;
 
     case AST_OP(dot):
     case AST_OP(arrow):
-      AnalyzeMemberReference(syntax, binary_node);
+      AnalyzeMemberReference(binary_node);
       break;
 
     case AST_OP(comma):
-      AnalyzeExpression(syntax, binary_node->left);
-      AnalyzeExpression(syntax, binary_node->right);
+      AnalyzeExpression(binary_node->left);
+      AnalyzeExpression(binary_node->right);
 
       // Type of comma operator is type of right operand.
       ASTNodeSetType(node, binary_node->right->type);
@@ -883,11 +886,11 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
 
     case AST_OP(logand):
     case AST_OP(logor):
-      AnalyzeLogicalOperator(syntax, binary_node);
+      AnalyzeLogicalOperator(binary_node);
       break;
 
     case AST_OP(init):
-      AnalyzeInitialization(syntax, node, (IdentifierASTNode*)binary_node->left,
+      AnalyzeInitialization(node, (IdentifierASTNode*)binary_node->left,
                             binary_node->right);
       break;
 
@@ -901,11 +904,11 @@ void AnalyzeExpression(Syntax* syntax, ASTNode* node) {
     case AST_OP(builtin_va_start):
     case AST_OP(builtin_va_end):
     case AST_OP(builtin_va_copy):
-      AnalyzeVarargsBuiltin1(syntax, vector_node);
+      AnalyzeVarargsBuiltin1(vector_node);
       break;
     
     case AST_OP(builtin_va_arg):
-      AnalyzeVarargsBuiltin2(syntax, vector_node);
+      AnalyzeVarargsBuiltin2(vector_node);
       break;
 
     default:

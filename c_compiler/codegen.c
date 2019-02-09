@@ -18,6 +18,7 @@
 #include "optimizer.h"
 #include "ssa.h"
 #include "statement_codegen.h"
+#include <assert.h>
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->syntax = syntax;
@@ -169,9 +170,10 @@ IRNode* GeneratorEmitVariable(Generator* gen, IRNode* inst) {
     return inst;
   }
   if (gen->last_variable == NULL) {
-    gen->last_variable = gen->last_constant;
+    gen->last_variable = GeneratorEmitBefore(gen, inst, (IRNode*)gen->code.first);
+  } else {
+    gen->last_variable = GeneratorEmitAfter(gen, inst, gen->last_variable);
   }
-  gen->last_variable = GeneratorEmitAfter(gen, inst, gen->last_variable);
   return inst;
 }
 
@@ -289,57 +291,15 @@ static void PrintBasicBlocks(Generator* gen) {
   }
 }
 
-// Mapping from IR node to basic block.  This is used to keep track of the start
-// and end of blocks.
-typedef struct {
-  IRNode* inst;
-  BasicBlock* block;
-} BlockMapping;
-
-static BlockMapping* NewBlockMapping(IRNode* inst, BasicBlock* b) {
-  BlockMapping* map = malloc(sizeof(BlockMapping));
-  map->inst = inst;
-  map->block = b;
-  return map;
-}
-
-// Comparison function for sorting and searching an array of BlockMapping struct
-// pointers.  The comparison is done on the IRNode id.
-static int CompareBlockMapping(const void* a, const void* b) {
-  BlockMapping* b1 = *(BlockMapping**)a;
-  BlockMapping* b2 = *(BlockMapping**)b;
-  return b1->inst->id - b2->inst->id;
-}
-
-// We have all the instructions available.  Divide them into basic blocks where
-// a basic block is a sequence of instructions with no branches (flow must hit
-// every instruction in the block if the block is entered).
-//
-// Block boundaries are marked by labels and branches.
-static void BuildBasicBlocks(Generator* gen) {
+static void CreateBasicBlocks(Generator* gen,
+                              Vector* branches) {
   gen->entry_block = GeneratorNewBasicBlock(gen);
-
   BasicBlock* current = gen->entry_block;
-
-  // The Block Map is a vector of pointers to BlockMapping structs, each of
-  // which contains a pair: IRNode and BasicBlock.  This is used to hold
-  // a map of IRNodes of interest so that we can translate them to a BasicBlock
-  // given their ID.  It is used to look up the blocks to which branches will
-  // transfer control.
-  Vector block_map;
-
-  // The branches vector holds a list of all the branches we encounter in the
-  // code.  Each branch adds an edge from its block to the block starting with
-  // the label to which it is branching.
-  Vector branches;
-
-  VectorInit(&block_map);
-  VectorInit(&branches);
 
   // First instruction is in first block.
   current->code = GeneratorFirstInstruction(gen);
-
-  // Phase 1: find the boundary IRNodes (labels, branches and returns).  Each
+  
+  // Find the boundary IRNodes (labels, branches and returns).  Each
   // one of these either ends a block or starts a new one.
   for (IRNode* inst = current->code; inst != NULL; inst = IRNext(inst)) {
     // Check if this node defines (writes to) a variable.  If so
@@ -347,13 +307,12 @@ static void BuildBasicBlocks(Generator* gen) {
     if (IRIsVarDef(inst)) {
       MapInsert(&current->defined_vars, inst->var.def, NULL);
     }
-
+    
     if (inst->opcode == IR_OP(label)) {
       current->end_code = IRPrev(inst);
-
+      
       // A label marks the start of a block.
       BasicBlock* b = GeneratorNewBasicBlock(gen);
-      VectorAppend(&block_map, NewBlockMapping(inst, b));
       inst->block = b;
       b->code = inst;
       current = b;
@@ -361,14 +320,13 @@ static void BuildBasicBlocks(Generator* gen) {
       // A branch (and return) ends a block.
       current->end_code = inst;
       inst->block = current;
-      VectorAppend(&branches, inst);
-
+      VectorAppend(branches, inst);
+      
       // Allocate a new block starting at the next instruction provided it's
       // not a label (because that will be created in next iteration).
       IRNode* next = IRNext(inst);
       if (next != NULL && next->opcode != IR_OP(label)) {
         BasicBlock* b = GeneratorNewBasicBlock(gen);
-        VectorAppend(&block_map, NewBlockMapping(next, b));
         b->code = next;
         current = b;
       }
@@ -382,103 +340,69 @@ static void BuildBasicBlocks(Generator* gen) {
     }
   }
   current->end_code = GeneratorLastInstruction(gen);
-
-  // Sort the block_map so we can use a binary search on it.
-  qsort(block_map.value, block_map.length, sizeof(BlockMapping*),
-        CompareBlockMapping);
-
+  
   // Allocate exit block.
   gen->exit_block = GeneratorNewBasicBlock(gen);
+}
 
-  // We now have a set of basic blocks with their start and end instructions
-  // marked.  The blocks are not linked together so we need to create the edges.
-
-  // Phase 2: process all branches and link their targets to the appropriate
-  // block.
-  for (size_t i = 0; i < branches.length; i++) {
-    IRNode* inst = branches.value[i];
-    current = FindBasicBlock(gen, inst->block->block_id);
+// Process all branches and link their targets to the appropriate
+// block.
+static void BuildBasicBlockGraph(Generator* gen,
+                                  Vector* branches) {
+  for (size_t i = 0; i < branches->length; i++) {
+    IRNode* inst = branches->value[i];
+    BasicBlock* block = inst->block;
     if (IRIsConditionalBranch(inst)) {
       // Conditional branch links to both its taken and fallthrough blocks.
       IRNode* fallthrough = IRNext(inst);
       IRNode* taken = inst->inputs.value[1];
-
-      // Find taken block.
-      BlockMapping key;
-      key.inst = taken;
-      BlockMapping* keyptr = &key;
-      BlockMapping** mapping =
-          bsearch(&keyptr, block_map.value, block_map.length,
-                  sizeof(BlockMapping*), CompareBlockMapping);
-      if (mapping == NULL) {
-        // Not found.
-        abort();
-      }
-      BasicBlock* taken_block = (*mapping)->block;
-
-      // Find fallthough block.
-      key.inst = fallthrough;
-      keyptr = &key;
-      mapping = bsearch(&keyptr, block_map.value, block_map.length,
-                        sizeof(BlockMapping*), CompareBlockMapping);
-      if (mapping == NULL) {
-        // Not found.
-        abort();
-      }
-      BasicBlock* fallthrough_block = (*mapping)->block;
-
-      BasicBlockAddEdge(current, fallthrough_block);
-      BasicBlockAddEdge(current, taken_block);
+      BasicBlockAddEdge(block, fallthrough->block);
+      BasicBlockAddEdge(block, taken->block);
     } else if (inst->opcode == IR_OP(cbra)) {
       // Table jump is followed by a branch table.  These are bra instructions.
       // Find all of them and link to this block.
       IRNode* bra = IRNext(inst);
       while (bra->opcode == IR_OP(bra)) {
-        BasicBlockAddEdge(current, FindBasicBlock(gen, bra->block->block_id));
+        BasicBlockAddEdge(block, bra->block);
         bra = IRNext(bra);
       }
     } else if (IRIsReturn(inst)) {
       // Return always links to the exit block.
-      BasicBlockAddEdge(current, gen->exit_block);
+      BasicBlockAddEdge(block, gen->exit_block);
     } else {
       // Unconditional branch only links to its target.
       IRNode* target = inst->inputs.value[0];
-      BlockMapping key;
-      key.inst = target;
-      BlockMapping* keyptr = &key;
-      BlockMapping** mapping =
-          bsearch(&keyptr, block_map.value, block_map.length,
-                  sizeof(BlockMapping*), CompareBlockMapping);
-      if (mapping == NULL) {
-        // Not found.
-        abort();
-      }
-      BasicBlockAddEdge(current, (*mapping)->block);
+      BasicBlockAddEdge(block, target->block);
     }
   }
+}
 
-  // Phase 3: all blocks with no output edges link to exit block.  Also blocks
-  // that do not end in a branch or return fall through to next block.
+// All blocks with no output edges link to exit block.  Also blocks
+// that do not end in a branch or return fall through to next block.
+static void AddMissingLinks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value[i];
-    if (b != gen->exit_block) {
-      if (!BasicBlockEndsInBranchOrReturn(b)) {
-        BasicBlockAddEdge(b, FindBasicBlock(gen, b->block_id + 1));
-      }
-      if (b->out_edges.length == 0) {
-        BasicBlockAddEdge(b, FindBasicBlock(gen, gen->exit_block->block_id));
-      }
+    if (b == gen->exit_block) {
+      continue;
+    }
+    if (!BasicBlockEndsInBranchOrReturn(b)) {
+      // No branch or return, fall through to next block.
+      BasicBlockAddEdge(b, FindBasicBlock(gen, b->block_id + 1));
+    }
+    if (b->out_edges.length == 0) {
+      BasicBlockAddEdge(b, gen->exit_block);
     }
   }
+}
 
-  // Phase 4: calculate dominators, dominance frontier and idom.
-  // Phase 4a: dominators.
+// Calculate the dominators for all basic blocks.
+static void CalculateDominators(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value[i];
     BasicBlockInitDominators(b, b == gen->entry_block,
                              gen->basic_blocks.length);
   }
-
+  
   bool changed = true;
   while (changed) {
     changed = false;
@@ -487,36 +411,72 @@ static void BuildBasicBlocks(Generator* gen) {
       changed |= BasicBlockCalculateDominators(b, &gen->basic_blocks);
     }
   }
+}
 
-  // Phase 4b: immediate dominator.
+static void CalculateImmediateDominator(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value[i];
     BasicBlockCalculateImmediateDominator(b, &gen->basic_blocks);
   }
+}
 
-  // Phase 4c: dominance frontier.
+static void CalculateDominanceFrontier(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value[i];
     BasicBlockCalculateDominanceFrontier(b, &gen->basic_blocks);
   }
+}
 
-  // Phase 5: build domainance tree.  If a block has an
-  // immediate dominator (idom) add the block to the idom's
-  // dominatees set.
+// Build dominator tree.  If a block has an
+// immediate dominator (idom) add the block to the idom's
+// dominatees set.
+static void BuildDominatorTree(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value[i];
     if (b->idom != NULL) {
       VectorAppend(&b->idom->dominatees, (void*)b->block_id);
     }
   }
+}
 
+// We have all the instructions available.  Divide them into basic blocks where
+// a basic block is a sequence of instructions with no branches (flow must hit
+// every instruction in the block if the block is entered).
+//
+// Block boundaries are marked by labels and branches.
+static void BuildBasicBlocks(Generator* gen) {
+  // The branches vector holds a list of all the branches we encounter in the
+  // code.  Each branch adds an edge from its block to the block starting with
+  // the label to which it is branching.
+  Vector branches;
+  VectorInit(&branches);
+
+  // Phase 1: create all basic blocks.
+  CreateBasicBlocks(gen, &branches);
+  
+  // Phase 2: Link the blocks into a graph.
+  BuildBasicBlockGraph(gen, &branches);
+
+  // Phase 3: all blocks with no output edges link to exit block.  Also blocks
+  // that do not end in a branch or return fall through to next block.
+  AddMissingLinks(gen);
+  
+  // Phase 4: calculate dominators, dominance frontier and idom.
+  // Phase 4a: dominators.
+  CalculateDominators(gen);
+ 
+  // Phase 4b: immediate dominator.
+  CalculateImmediateDominator(gen);
+ 
+  // Phase 4c: dominance frontier.
+  CalculateDominanceFrontier(gen);
+  
+  // Phase 5: build dominator tree.
+  BuildDominatorTree(gen);
+ 
   // Tidy up.
-  // Delete the block_map and branches vectors.
+  // Delete the branches vector.
   VectorDestruct(&branches);
-  for (size_t i = 0; i < block_map.length; i++) {
-    free(block_map.value[i]);
-  }
-  VectorDestruct(&block_map);
 }
 
 // Remove all unreachable basic blocks.  These will never be
@@ -574,6 +534,9 @@ void* GenerateFunction(Generator* gen) {
   GeneratorPrintIR(gen);
 
   BuildBasicBlocks(gen);
+
+  printf("Before gvn\n");
+  PrintBasicBlocks(gen);
 
   if (compiler->optimize) {
     // Remove any unreachable blocks before we go into SSA conversion.

@@ -13,31 +13,29 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 
-static void AnalyzeExpressionStatement(Syntax* syntax,
-                                       ExpressionStatementASTNode* node) {
-  AnalyzeExpression(syntax, node->expr);
+static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
+  AnalyzeExpression(node->expr);
 }
 
-static void AnalyzeIfStatement(Syntax* syntax, IfStatementASTNode* node) {
-  AnalyzeExpression(syntax, node->cond);
+static void AnalyzeIfStatement(IfStatementASTNode* node) {
+  AnalyzeExpression(node->cond);
   SemanticCheckScalarType(node->cond);
-  AnalyzeStatement(syntax, node->if_part);
-  AnalyzeStatement(syntax, node->else_part);
-  SemanticCheckScalarType(node->cond);
-}
-
-static void AnalyzeWhileStatement(Syntax* syntax,
-                                  CombinedStatementASTNode* node) {
-  AnalyzeExpression(syntax, node->cond);
-  SemanticCheckScalarType(node->cond);
-  AnalyzeStatement(syntax, node->stmt);
+  AnalyzeStatement(node->if_part);
+  AnalyzeStatement(node->else_part);
   SemanticCheckScalarType(node->cond);
 }
 
-static void AnalyzeDoStatement(Syntax* syntax, CombinedStatementASTNode* node) {
-  AnalyzeExpression(syntax, node->cond);
+static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
+  AnalyzeExpression(node->cond);
   SemanticCheckScalarType(node->cond);
-  AnalyzeStatement(syntax, node->stmt);
+  AnalyzeStatement(node->stmt);
+  SemanticCheckScalarType(node->cond);
+}
+
+static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
+  AnalyzeExpression(node->cond);
+  SemanticCheckScalarType(node->cond);
+  AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
 }
 
@@ -53,10 +51,9 @@ static int CompareCaseValue(const void* case1, const void* case2) {
   return (int)(node1->value - node2->value);
 }
 
-static void AnalyzeSwitchStatement(Syntax* syntax,
-                                   SwitchStatementASTNode* node) {
-  AnalyzeExpression(syntax, node->expr);
-  AnalyzeStatement(syntax, node->stmt);
+static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
+  AnalyzeExpression(node->expr);
+  AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->expr);
   if (!TypeIsIntegral(node->expr->type)) {
     SemanticError(node->expr, "Switch statements need an integer type");
@@ -145,11 +142,11 @@ static void AnalyzeSwitchStatement(Syntax* syntax,
   }
 }
 
-static void AnalyzeForStatement(Syntax* syntax, ForStatementASTNode* node) {
+static void AnalyzeForStatement(ForStatementASTNode* node) {
   if (node->c1 != NULL) {
     if (node->c1->op == AST_OP(decl_list)) {
       // First "expression" might be a list of variable declaration statements.
-      AnalyzeStatement(syntax, node->c1);
+      AnalyzeStatement(node->c1);
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node->c1;
       for (size_t i = 0; i < decls->declarations->length; i++) {
         VariableDeclarationASTNode* vardecl =
@@ -164,32 +161,30 @@ static void AnalyzeForStatement(Syntax* syntax, ForStatementASTNode* node) {
         }
       }
     } else {
-      AnalyzeExpression(syntax, node->c1);
+      AnalyzeExpression(node->c1);
     }
   }
 
-  AnalyzeExpression(syntax, node->c2);
+  AnalyzeExpression(node->c2);
   if (node->c2 != NULL) {
     SemanticCheckScalarType(node->c2);
   }
 
   // Optional expression 3.
-  AnalyzeExpression(syntax, node->c3);
+  AnalyzeExpression(node->c3);
 
   // Finally the statment.
-  AnalyzeStatement(syntax, node->stmt);
+  AnalyzeStatement(node->stmt);
 }
 
-static void AnalyzeCompoundStatement(Syntax* syntax,
-                                     CompoundStatementASTNode* node) {
+static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
   for (size_t i = 0; i < num_statements; i++) {
-    AnalyzeStatement(syntax, (ASTNode*)node->statements->value[i]);
+    AnalyzeStatement((ASTNode*)node->statements->value[i]);
   }
 }
 
-static void AnalyzeReturnStatement(Syntax* syntax,
-                                   CombinedStatementASTNode* node) {
+static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   ASTNode* return_value = node->cond;
   if (return_value != NULL && return_value->op == AST_OP(asm)) {
     // Extension: return asm("foo") is allowed
@@ -197,7 +192,7 @@ static void AnalyzeReturnStatement(Syntax* syntax,
     ASTNodeSetType(return_value, compiler->current_function->next);
     return;
   }
-  AnalyzeExpression(syntax, return_value);
+  AnalyzeExpression(return_value);
 
   // Check current function return type.
   if (TypeIsVoid(compiler->current_function->next)) {
@@ -216,32 +211,31 @@ static void AnalyzeReturnStatement(Syntax* syntax,
   }
 }
 
-static void AnalyzeCaseLabel(Syntax* syntax, CaseLabelASTNode* node) {
+static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
   if (node->expr != NULL) {
     // A case with no expression is used for 'default'.
-    AnalyzeExpression(syntax, node->expr);
+    AnalyzeExpression(node->expr);
   }
   // Since we don't know the type of the switch controlling expressions here
   // we delay the analysis of the case label statements to the analysis of the
   // switch statement.
 }
 
-void AnalyzeVariableDeclaration(Syntax* syntax,
-                                VariableDeclarationASTNode* node) {
-  AnalyzeExpression(syntax, node->initializer);
+void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
+  AnalyzeExpression(node->initializer);
   if (node->initializer != NULL) {
     SemanticConvertType(node->initializer, node->symbol->type);
   }
 }
 
-void AnalyzeDeclarationList(Syntax* syntax, DeclarationListASTNode* node) {
+void AnalyzeDeclarationList(DeclarationListASTNode* node) {
   size_t num_decls = node->declarations->length;
   for (size_t i = 0; i < num_decls; i++) {
-    AnalyzeStatement(syntax, node->declarations->value[i]);
+    AnalyzeStatement(node->declarations->value[i]);
   }
 }
 
-void AnalyzeGotoStatement(Syntax* syntax, CombinedStatementASTNode* node) {
+void AnalyzeGotoStatement(CombinedStatementASTNode* node) {
   Vector* function_body = &compiler->current_function->info.function.body;
   String* label_name = ((ConstantASTNode*)node->cond)->value.string;
 
@@ -266,7 +260,7 @@ void AnalyzeGotoStatement(Syntax* syntax, CombinedStatementASTNode* node) {
   node->stmt = label_node;
 }
 
-void AnalyzeLabel(Syntax* syntax, LabelASTNode* node) {
+void AnalyzeLabel(LabelASTNode* node) {
   Vector* function_body = &compiler->current_function->info.function.body;
   String* label_name = &node->name;
 
@@ -288,50 +282,50 @@ void AnalyzeLabel(Syntax* syntax, LabelASTNode* node) {
   }
 }
 
-void AnalyzeStatement(Syntax* syntax, ASTNode* node) {
+void AnalyzeStatement(ASTNode* node) {
   if (node == NULL) {
     return;
   }
 
   switch (node->op) {
     case AST_OP(decl_list):
-      AnalyzeDeclarationList(syntax, (DeclarationListASTNode*)node);
+      AnalyzeDeclarationList((DeclarationListASTNode*)node);
       break;
     case AST_OP(vardecl):
-      AnalyzeVariableDeclaration(syntax, (VariableDeclarationASTNode*)node);
+      AnalyzeVariableDeclaration((VariableDeclarationASTNode*)node);
       break;
     case AST_OP(expr):
-      AnalyzeExpressionStatement(syntax, (ExpressionStatementASTNode*)node);
+      AnalyzeExpressionStatement((ExpressionStatementASTNode*)node);
       break;
     case AST_OP(compound):
-      AnalyzeCompoundStatement(syntax, (CompoundStatementASTNode*)node);
+      AnalyzeCompoundStatement((CompoundStatementASTNode*)node);
       break;
     case AST_OP(if):
-      AnalyzeIfStatement(syntax, (IfStatementASTNode*)node);
+      AnalyzeIfStatement((IfStatementASTNode*)node);
       break;
     case AST_OP(while):
-      AnalyzeWhileStatement(syntax, (CombinedStatementASTNode*)node);
+      AnalyzeWhileStatement((CombinedStatementASTNode*)node);
       break;
     case AST_OP(do):
-      AnalyzeDoStatement(syntax, (CombinedStatementASTNode*)node);
+      AnalyzeDoStatement((CombinedStatementASTNode*)node);
       break;
     case AST_OP(switch):
-      AnalyzeSwitchStatement(syntax, (SwitchStatementASTNode*)node);
+      AnalyzeSwitchStatement((SwitchStatementASTNode*)node);
       break;
     case AST_OP(for):
-      AnalyzeForStatement(syntax, (ForStatementASTNode*)node);
+      AnalyzeForStatement((ForStatementASTNode*)node);
       break;
     case AST_OP(return ):
-      AnalyzeReturnStatement(syntax, (CombinedStatementASTNode*)node);
+      AnalyzeReturnStatement((CombinedStatementASTNode*)node);
       break;
     case AST_OP(case):
-      AnalyzeCaseLabel(syntax, (CaseLabelASTNode*)node);
+      AnalyzeCaseLabel((CaseLabelASTNode*)node);
       break;
     case AST_OP(goto):
-      AnalyzeGotoStatement(syntax, (CombinedStatementASTNode*)node);
+      AnalyzeGotoStatement((CombinedStatementASTNode*)node);
       break;
     case AST_OP(label):
-      AnalyzeLabel(syntax, (LabelASTNode*)node);
+      AnalyzeLabel((LabelASTNode*)node);
       break;
 
     case AST_OP(break):

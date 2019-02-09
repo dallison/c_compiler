@@ -12,6 +12,6 @@
 #include "semantics.h"
 #include "syntax.h"
 
-void AnalyzeStatement(Syntax* syntax, ASTNode* node);
+void AnalyzeStatement(ASTNode* node);
 
 #endif /* statement_semantics_h */

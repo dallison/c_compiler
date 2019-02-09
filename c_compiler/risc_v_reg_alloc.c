@@ -277,7 +277,7 @@ static bool CanUseTemp(TargetInstruction* start_inst) {
 }
 
 // We want to change the register assigned to an instruction.  This function
-// makes sure it's save to do so.  This is used by the rmov instruction
+// makes sure it's safe to do so.  This is used by the rmov instruction
 // to remove unnecessary mv instructions.  It's only safe to reassign
 // the register if:
 // 1. The instruction being replaced isn't a fixed register (like an argument)
@@ -298,9 +298,30 @@ static bool CanReassignRegister(TargetInstruction* src, RVRegister* reg) {
   return true;
 }
 
+static void AllocateForRmov(RVRegisterAllocator* allocator,
+                            TargetInstruction* inst) {
+  TargetInstruction* dest = inst->operand[0];
+  TargetInstruction* src = inst->operand[1];
+  RVRegister* reg = (RVRegister*)dest->reg;
+  if (CanReassignRegister(src, reg)) {
+    // Safe to reassign register, merge the register into the source
+    // and eliminate the rmov.
+    FreeRegisters(allocator, inst);
+    src->reg = &reg->base;
+    src->uses++;
+    reg->base.owner = src;
+    inst->reg = src->reg;
+    return;
+  }
+  inst->operand[0]->uses++;  // Prevent this from being freed.
+  FreeRegisters(allocator, inst);
+  inst->uses = inst->refs;
+  inst->reg = &reg->base;
+  reg->base.owner = inst;
+}
+
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst) {
-  RVRegister* reg;
 
   bool is_leaf = allocator->rv->base.num_calls == 0;
 
@@ -308,30 +329,14 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
   // operand as their own register.
   if (inst->opcode == RV_OP(rmov) || inst->opcode == RV_OP(rmovf) ||
       inst->opcode == RV_OP(rmovd)) {
-    TargetInstruction* dest = inst->operand[0];
-    TargetInstruction* src = inst->operand[1];
-    reg = (RVRegister*)dest->reg;
-    if (CanReassignRegister(src, reg)) {
-      // Safe to reassign register, merge the register into the source
-      // and eliminate the rmov.
-      FreeRegisters(allocator, inst);
-      src->reg = &reg->base;
-      src->uses++;
-      reg->base.owner = src;
-      inst->reg = src->reg;
-      return;
-    }
-    inst->operand[0]->uses++;  // Prevent this from being freed.
-    FreeRegisters(allocator, inst);
-    inst->uses = inst->refs;
-    inst->reg = &reg->base;
-    reg->base.owner = inst;
+    AllocateForRmov(allocator, inst);
     return;
   }
 
   // Free up any registers we can.
   FreeRegisters(allocator, inst);
 
+  RVRegister* reg;
   switch ((RVOpcode)inst->opcode) {
     case RV_OP(constb):
     case RV_OP(consth):
@@ -435,20 +440,6 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(rcallf):
       reg = &allocator->float_regs[RV_FLOAT_RETURN_REG];
       break;
-#if 0
-    case RV_OP(i2d):
-      reg = AllocateRegisterWithType(allocator, kPCodeRegTypeDouble);
-      break;
-
-    case RV_OP(f2d):
-      reg = AllocateRegisterWithType(allocator, kPCodeRegTypeFloat);
-      break;
-
-    case RV_OP(f2i):
-    case RV_OP(d2i):
-      reg = AllocateRegisterWithType(allocator, kPCodeRegTypeInt);
-      break;
-#endif
 
     default: {
       RVRegisterType reg_type = RegisterTypeFromInstruction(inst);

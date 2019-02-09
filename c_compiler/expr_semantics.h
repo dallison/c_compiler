@@ -12,6 +12,6 @@
 #include "semantics.h"
 #include "syntax.h"
 
-void AnalyzeExpression(Syntax* syntax, ASTNode* node);
+void AnalyzeExpression(ASTNode* node);
 
 #endif /* expr_semantics_h */

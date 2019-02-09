@@ -7,6 +7,7 @@
 //
 
 #include "linker.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "errors.h"
@@ -21,12 +22,7 @@
 void LinkerError(LinkerFile* file, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  const char* filename = "";
-  if (file != NULL) {
-    filename = file->elf_file->filename.value;
-  }
-  VReportError(filename, 0,
-               error, ap);
+  VLinkerError(file, error, ap);
   va_end(ap);
 }
 
@@ -35,9 +31,9 @@ void VLinkerError(LinkerFile* file, const char* error, va_list ap) {
   if (file != NULL) {
     filename = file->elf_file->filename.value;
   }
-  VReportError(filename, 0,
-               error, ap);
-
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), error, ap);
+  fprintf(stderr, "%s: linker error: %s\n", filename, buf);
 }
 
 void LinkerWarning(LinkerFile* file, const char* warn, const char* error, ...) {
@@ -47,8 +43,7 @@ void LinkerWarning(LinkerFile* file, const char* warn, const char* error, ...) {
   if (file != NULL) {
     filename = file->elf_file->filename.value;
   }
-  VReportWarning(filename, 0,
-                 warn, error, ap);
+  VLinkerWarning(file, warn, error, ap);
   va_end(ap);
 
 }
@@ -58,8 +53,10 @@ void VLinkerWarning(LinkerFile* file, const char* warn, const char* error, va_li
   if (file != NULL) {
     filename = file->elf_file->filename.value;
   }
-  VReportWarning(filename, 0,
-                 warn, error, ap);
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), error, ap);
+  fprintf(stderr, "%s: linker warning: %s: %s\n", filename, warn, buf);
+
 }
 
 
@@ -78,7 +75,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->library_search_path, NewString("/lib"));
   linker->elf_machine_type = 0;
   linker->elf_flags = 0;
-  linker->dso = false;
+  linker->building_dso = false;
   
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");
@@ -223,12 +220,34 @@ SectionGroup* NewSectionGroup(const String* name, int32_t type, int64_t flags, i
 
 void SectionGroupDestruct(SectionGroup* group) {
   StringDestruct(&group->name);
-  VectorDestruct(&group->components);
+  VectorDestructWithContents(&group->components,
+                             (VectorElementDestructor)GroupedSectionDestruct);
 }
 
 void SectionGroupDelete(SectionGroup* group) {
   SectionGroupDestruct(group);
   free(group);
+}
+
+// Grouped sections, new or existing sections in a SectionGroup.
+GroupedSection* NewExistingGroupedSection(ELFReaderSection* section) {
+  GroupedSection* sect = malloc(sizeof(GroupedSection));
+  sect->source = kGroupedSectionExisting;
+  sect->section.existing = section;
+  return sect;
+}
+
+GroupedSection* NewGroupedSection(ELFWriterSection* section) {
+  GroupedSection* sect = malloc(sizeof(GroupedSection));
+  sect->source = kGroupedSectionNew;
+  sect->section.new = section;
+  return sect;
+}
+
+void GroupedSectionDestruct(GroupedSection* g) {
+  if (g->source == kGroupedSectionNew) {
+    ELFWriterSectionDelete(g->section.new);
+  }
 }
 
 void SegmentInit(Segment* segment) {
@@ -315,10 +334,10 @@ static void ReadELFContents(Linker* linker, ELFReaderFile* elf_file,
     }
     ELFReaderSection* strtab = elf_file->sections.value[symtab->header->link];
     const char* symbol_table_address = (const char*)elf_file->header +
-    symtab->header->offset;
+        symtab->header->offset;
     
     int64_t num_relocations = reloc_section->header->size /
-    reloc_section->header->entsize;
+        reloc_section->header->entsize;
     
     const char* reloc_addr = (const char*)elf_file->header +
     reloc_section->header->offset;
@@ -435,6 +454,11 @@ static void ResolveUndefinedSymbols(Linker* linker) {
   HashTableTraverse(&linker->global_symbol_table, ResolveUndefined, linker);
 }
 
+// This is a map traversal function that is called for each entry in a
+// mapping of section name to a vector of ELFReaderSection pointers, all
+// of which share a common name and type.  We build a SectionGroup struct
+// that contains the same ELFReaderSection pointers from the map entry held
+// inside GroupedSection structs.
 static void BuildSectionGroup(const void* key, void* value, void* data) {
   const String* name = key;
   Vector* sections = value;
@@ -450,7 +474,14 @@ static void BuildSectionGroup(const void* key, void* value, void* data) {
                                         section_alignment);
   VectorAppend(&linker->section_groups, group);
 
-  VectorCopy(&group->components, sections);
+  // Append all sections in the vector of ELFReaderSections to
+  // the components of the group.  Each element of the components
+  // vector is a GroupedSection object with source kGroupedSectionExisting.
+  for (size_t i = 0; i < sections->length; i++) {
+    ELFReaderSection* s = sections->value[i];
+    GroupedSection* gsection = NewExistingGroupedSection(s);
+    VectorAppend(&group->components, gsection);
+  }
 }
 
 // Print a section map key/value pair.
@@ -534,8 +565,53 @@ static void GroupSections(Linker* linker, int32_t section_type) {
   MapDestruct(&section_map);
 }
 
-static void AddDynamicSections(Linker* linker) {
+// Build a new ELFWriterSection with a given name for later addition to the
+// ELF file.
+// This is not suitable for writing directly to an ELF file.  In particular the
+// following things still need to be done.
+// 1.  The name field needs to be added to a string table.
+// 2.  There is no address assigned.
+// 3.  There is no section index assigned.
+static ELFWriterSection* NewELFSection(const char* name, int32_t type, int64_t flags,
+                                       int64_t alignment, ELFWriterSectionContents* contents) {
+  ELFWriterSection* section = calloc(sizeof(ELFWriterSection), 1);
+  StringInit(&section->name, name);
+  section->header.type = type;
+  section->header.flags = flags;
+  section->header.addralign = alignment;
+  section->header.addr = 0;
+  section->contents = contents;
+  section->relocations = NewVector();
+  section->index = 0;
+  section->address = 0;
+  return section;
+}
+
+
+static void AddGlobalOffsetTable(Linker* linker) {
+  String got_name;
+  StringInit(&got_name, ".got");
+  SectionGroup* group = NewSectionGroup(&got_name,
+                                        SHT(progbits),
+                                        SHF(write) | SHF(alloc),
+                                        8);
   
+  ELFWriterSectionContents* got_contents =
+      NewELFWriterSectionContents(kSectionContentsBuffered);
+  VectorAppend(&group->components, NewGroupedSection(
+                                      NewELFSection(".got",
+                                                    SHT(progbits),
+                                                    SHF(write) | SHF(alloc),
+                                                    8, got_contents)));
+  BuildGlobalOffsetTable(linker, got_contents);
+
+  // Add group to the data segment.
+  group->segment = &linker->data_segment;
+  VectorAppend(&linker->data_segment.sections, group);
+  
+  StringDestruct(&got_name);
+  
+  VectorAppend(&linker->section_groups, group);
 }
 
 // Assign addresses to all the sections held within the segment.  The starting address is
@@ -548,27 +624,21 @@ static uint64_t AssignSegmentSectionAddresses(Segment* segment, uint64_t address
     // Concatenate all the component sections, assigning
     // consecutive addresses.
     for (size_t j = 0; j < group->components.length; j++) {
-      ELFReaderSection* section = group->components.value[j];
-      section->address = address;
-      address += section->header->size;
-    }
+      GroupedSection* gsect = group->components.value[j];
+      if (gsect->source == kGroupedSectionExisting) {
+        ELFReaderSection* section = gsect->section.existing;
+        section->address = address;
+        address += section->header->size;
+      } else {
+        ELFWriterSection* section = gsect->section.new;
+        section->address = address;
+        address += section->contents->size;   // TODO: is this right?
+      }
+     }
   }
   return address;
 }
 
-static ELFReaderSection* FirstSectionInSegment(Segment* segment) {
-  assert(segment->sections.length > 0);
-  SectionGroup* group = segment->sections.value[0];
-  assert(group->components.length > 0);
-  return group->components.value[0];
-}
-
-static ELFReaderSection* LastSectionInSegment(Segment* segment) {
-  assert(segment->sections.length > 0);
-  SectionGroup* group = segment->sections.value[segment->sections.length-1];
-  assert(group->components.length > 0);
-  return group->components.value[group->components.length-1];
-}
 
 // Link all files passed to the linker together.  This gathers the sections
 // with the same names into the same place and assigns addresses to the
@@ -581,11 +651,14 @@ void LinkerLinkAllFiles(Linker* linker) {
   ResolveUndefinedSymbols(linker);
   
   // Find all PROGBITS sections and group by name.  These are sections
-  // that have data associated with them in the ELF file.
+  // that have data associated with them in the ELF file.  This also
+  // adds the grouped sections to the appropriate segment (code or data).
   GroupSections(linker, SHT(progbits));
 
-  // If are building a DSO, add the generated dynamic sections to the segments.
-  AddDynamicSections(linker);
+  if (linker->building_dso) {
+    // Add the global offset table.
+    AddGlobalOffsetTable(linker);
+  }
   
   // Assign addresses to all sections.
   // This variable is updated as we assign the addresses to the sections.
@@ -594,7 +667,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   uint64_t current_address = LINKER_CODE_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET;
 
   // We know how many sections there are now.  This is the number of groups + the number
-  // of extra sections we add.  Add space for the section headers ,each of whick is
+  // of extra sections we add.  Add space for the section headers, each of which is
   // sizeof(ELFSectionHeader) bytes long.
   // We also are going to create a BSS section.
   current_address += (linker->section_groups.length +
@@ -631,12 +704,15 @@ void LinkerLinkAllFiles(Linker* linker) {
   // all the relocations in the files.
   LinkerApplyAllRelocations(linker);
 
-  if (!linker->dso) {
+  if (!linker->building_dso) {
     // Check if we have any undefined symbols and report errors if found.
     LinkerCheckForUndefinedSymbols(linker);
   }
 }
 
+// Build an output section from a group of sections.  Each component of the
+// group is a GroupedSection that can come from an existing file or can
+// be generated by the linker.
 static ELFWriterSection* BuildOutputSection(ELFWriterFile* elf, SectionGroup* group) {
   ELFWriterSectionContents* contents = NewELFWriterSectionContents(kSectionContentsMulti);
   ELFWriterSection* section = ELFWriterAddSection(elf, &group->name,
@@ -646,10 +722,16 @@ static ELFWriterSection* BuildOutputSection(ELFWriterFile* elf, SectionGroup* gr
                       contents, group->address);
 
   for (size_t i = 0; i < group->components.length; i++) {
-    ELFReaderSection* part = group->components.value[i];
-    ELFWriterSectionContents* part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
-    part_contents->size = part->header->size;
-    part_contents->data.raw = part->contents;
+    GroupedSection* gsect = group->components.value[i];
+    ELFWriterSectionContents* part_contents;
+    if (gsect->source == kGroupedSectionExisting) {
+      ELFReaderSection* part = gsect->section.existing;
+      part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
+      part_contents->size = part->header->size;
+      part_contents->data.raw = part->contents;
+    } else {
+      part_contents = gsect->section.new->contents;
+    }
     VectorAppend(&contents->data.multi, part_contents);
   }
   return section;
@@ -657,8 +739,13 @@ static ELFWriterSection* BuildOutputSection(ELFWriterFile* elf, SectionGroup* gr
 
 static void AssignGroupSectionIndexes(SectionGroup* group, int32_t* index_ptr) {
   for (size_t i = 0; i < group->components.length; i++) {
-    ELFReaderSection* section = group->components.value[i];
-    section->output_section_index = *index_ptr;
+    GroupedSection* gsect = group->components.value[i];
+    if (gsect->source == kGroupedSectionExisting) {
+      ELFReaderSection* section = gsect->section.existing;
+      section->output_section_index = *index_ptr;
+    } else {
+      gsect->section.new->index = *index_ptr;
+    }
   }
   // Move the index on.
   (*index_ptr)++;
@@ -694,11 +781,11 @@ void LinkerWriteOutput(Linker* linker, FILE* output) {
   ELFWriterFile elf;
 
   ELFWriterFileInit(&elf,
-                    linker->dso ? ET(dyn) : ET(exec),
+                    linker->building_dso ? ET(dyn) : ET(exec),
                     linker->elf_machine_type,
-                    linker->elf_flags, linker->dso);
+                    linker->elf_flags, linker->building_dso, true, true);
 
-  if (!linker->dso) {
+  if (!linker->building_dso) {
     // Find "main".  This is the entry point for the program.
     LinkerSymbol* main = LinkerFindSymbol(&linker->global_symbol_table, "main");
     if (main == NULL) {

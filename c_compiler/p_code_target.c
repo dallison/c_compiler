@@ -50,6 +50,9 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
     // Print all source files.
     SourceTraverseFiles(fp, FilePrinter);
   }
+  if (compiler->pic) {
+    fprintf(fp, "\t.option pic\n");
+  }
   fprintf(fp, "\t.text\n");
   return fp;
 }

@@ -23,7 +23,8 @@ LinkerRelocation* NewLinkerRelocation(const char* symbol_name, int64_t offset,
   reloc->type = reloc_type;
   reloc->addend = 0;
   reloc->section = NULL;
-  reloc->dynamic_offset = 0;
+  reloc->got_offset = -1;
+  reloc->plt_offset = -1;
   return reloc;
 }
 
@@ -36,7 +37,7 @@ void LinkerRelocationDelete(LinkerRelocation* reloc) {
   free(reloc);
 }
 
-// Read a reloation from the ELF file and add it to the linker's
+// Read a relocation from the ELF file and add it to the linker's
 // relocation table.  A relocation is a modification to a piece of
 // data in the ELF file.  Once the linker has determined the addresses
 // of all symbols it can use those symbol values to modify the requested
@@ -90,26 +91,6 @@ void LinkerReadRelocation(Linker* linker,
   VectorAppend(&file->relocations, linker_reloc);
 
   StringDestruct(&target_section_name);
-  
-  // If we are building a DSO, check for a GOT or PLT relocation and build the
-  // global offset table and Procedure Linkage Table.
-  if (linker->dso) {
-    if (linker->elf_machine_type == 243) {
-      // Only for RISC-V
-      LinkerSymbol* symbol = LinkerFileFindSymbol(file, linker_reloc->symbol_name.value);
-      if (symbol != NULL) {
-        switch (linker_reloc->type) {
-          case R_RISCV_GOT_HI20:
-            linker_reloc->dynamic_offset = GetGOTOffset(linker->dynamic_section, symbol, R_RISCV_64);
-            break;
-          
-          case R_RISCV_CALL_PLT:
-            linker_reloc->dynamic_offset = GetPLTOffset(linker->dynamic_section, symbol, R_RISCV_64);
-            break;
-        }
-      }
-    }
-  }
 }
 
 // Set a bit field in a 32 bit word at the target address.  The bits in the word
@@ -209,19 +190,7 @@ static void ApplyRelocation(Linker* linker, LinkerFile* file,
   if (target_section == NULL) {
     return;
   }
-
-  // If this is the first relocation on the target section copy the
-  // contents to the heap.  We are going to make changes to the memory
-  // and we can't do that if it's mapped in from the ELF file.
-  if (!target_section->relocated) {
-    void* new_contents = malloc(target_section->header->size);
-    memcpy(new_contents, target_section->contents, target_section->header->size);
-    target_section->contents = new_contents;
-    target_section->relocated = true;
-    // The contents of the target section are now in the heap and
-    // modifyable.
-  }
-
+  
   // Find the value of the symbol to use.  This looks in the local symbol
   // table first, then the global symbol table.
   LinkerSymbol* symbol = LinkerFileFindSymbol(file, reloc->symbol_name.value);
@@ -234,33 +203,91 @@ static void ApplyRelocation(Linker* linker, LinkerFile* file,
   // What address are we applying the relocation to.
   char* target_address = (char*)target_section->contents + reloc->offset;
   
+  uint64_t S = symbol->address;   // Symbol address.
+  int64_t A = reloc->addend;      // Addend.
+  
+  // PC in P-Code is address of next instruction.  All the PC relative
+  // instructions are 96 bits long.
+  uint64_t P = target_section->address + reloc->offset + 12;
+
   printf("Applying relocation type %d for symbol %s(0x%llx) to offset %lld\n",
          reloc->type,
          reloc->symbol_name.value,
          symbol->address, reloc->offset);
   switch (linker->elf_machine_type) {
-    case 6502:        // P-CODE
+    case ELF_MACHINE_TYPE_PCODE:        // P-CODE
       switch (reloc->type) {
-        case R_PCODE_JMP:
-        case R_PCODE_CALL:
-        case R_PCODE_MOVXC:
+        case R_PCODE_MOVXC: {
           // Instruction is 96 bits long.  The relocation is applied
           // to the second and third word, in little endian format.
-          *((uint64_t*)(target_address + 4)) = symbol->address + reloc->addend;
+          // The instruction can be either a movxc or an adr.  In the latter
+          // case the value stored is pc relative.
+          int opcode = target_address[3] & 0x3f;
+          if (opcode == 1) {    // MOVXC
+            *((uint64_t*)(target_address + 4)) = S + A;
+          } else if (opcode == 5) {   // ADR
+            *((uint64_t*)(target_address + 4)) = S + A - P;
+          } else {
+            LinkerError(file, "Unsupported P-CODE MOVXC relocation opcode %d", opcode);
+          }
           break;
+          }
+ 
+        case R_PCODE_JMP:
+        case R_PCODE_CALL: {
+          // PC-relative instructions.
+          *((uint64_t*)(target_address + 4)) = S + A - P;
+          break;
+          }
+          
         case R_PCODE_DATA64:
-          *((uint64_t*)(target_address)) = symbol->address + reloc->addend;
+          *((uint64_t*)(target_address)) = S + A;
           break;
+          
         case R_PCODE_DATA32:
-          *((uint32_t*)(target_address)) = (uint32_t)(symbol->address + reloc->addend);
+          *((uint32_t*)(target_address)) = (uint32_t)(S + A);
           break;
-      default:
+          
+        case R_PCODE_CALL_PLT: {
+          // Instruction is 96 bits long.  The relocation is applied
+          // to the second and third word, in little endian format.
+          // Symbol contains a got_offset that is the offset into the
+          // PLT.  The instruction will be an CALL
+          // instruction that contains the offset relative to the current
+          // PC.
+          uint64_t plt_address = linker->dynamic_section->
+                procedure_linkage_table.address;
+          
+          // Each PLT entry is 36 bytes long.
+          uint64_t addr = plt_address + symbol->plt_offset * 36 + A;
+          *((uint64_t*)(target_address + 4)) = addr - P;
+          break;
+        }
+        case R_PCODE_GOT_ENTRY: {
+          // Instruction is 96 bits long.  The relocation is applied
+          // to the second and third word, in little endian format.
+          // Symbol contains a got_offset that is the offset into the
+          // global offset table.  The instruction will be an ADR
+          // instruction that contains the offset relative to the current
+          // PC.
+          uint64_t got_address = linker->dynamic_section->
+                global_offset_table.address;
+          // Each GOT entry is 8 bytes long.
+          uint64_t addr = got_address + symbol->got_offset * 8 + A;
+          *((uint64_t*)(target_address + 4)) = addr - P;
+          break;
+        }
+        case R_PCODE_GOT_DATA:
+          break;
+        case R_PCODE_GOT_FUNC:
+          break;
+        default:
           LinkerError(file, "Unsupported P-CODE relocation type %d", reloc->type);
           break;
       }
       break;
       
-    case 243: {      // RISC-V
+    case ELF_MACHINE_TYPE_RISC_V: {      // RISC-V
       // See https://github.com/riscv/riscv-elf-psabi-doc/blob/master/riscv-elf.md
       // for details on the relocation calculations.
       uint64_t S = symbol->address;
@@ -337,6 +364,7 @@ static void ApplyRelocation(Linker* linker, LinkerFile* file,
           SetBitField32(target_address, 12, 20, hi20);
           return;
         }
+          
         case R_RISCV_PCREL_LO12_I:
         case R_RISCV_PCREL_LO12_S: {
           // This relocation points to a label that contains the PCREL_HI20

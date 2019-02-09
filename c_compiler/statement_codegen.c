@@ -40,6 +40,20 @@ static void GenerateCompoundStatement(Generator* gen,
 }
 
 static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
+  // If the condition is a constant we can omit the expression,
+  // comparison and the statement as appropriate.
+  if (ASTNodeIsIntConstant(node->cond)) {
+    ConstantASTNode* c = (ConstantASTNode*)node->cond;
+    if (c->value.ivalue != 0) {
+      GenerateStatement(gen, node->if_part);
+    } else {
+      if (node->else_part != NULL) {
+        GenerateStatement(gen, node->else_part);
+      }
+    }
+    return;
+  }
+  
   // cond
   IRNode* cond = GenerateExpression(gen, node->cond);
   IRNode* else_label = NewIR(IR_OP(label));
@@ -71,6 +85,15 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
 
 static void GenerateWhileStatement(Generator* gen,
                                    CombinedStatementASTNode* node) {
+  // Check for constant loop condition.
+  ConstantASTNode* const_cond = NULL;
+  if (ASTNodeIsIntConstant(node->cond)) {
+    const_cond = (ConstantASTNode*)node->cond;
+    if (const_cond->value.ivalue == 0) {
+      // This is while(false), omit the whole statement.
+      return;
+    }
+  }
   IRNode* old_break = gen->break_label;
   IRNode* old_continue = gen->continue_label;
 
@@ -80,12 +103,15 @@ static void GenerateWhileStatement(Generator* gen,
   // continue_label:
   GeneratorEmit(gen, gen->continue_label);
 
-  // cond
-  IRNode* cond = GenerateExpression(gen, node->cond);
+  // If we have a constant condition at this point it is non-zero
+  // so this is a forever loop.
+  if (const_cond == NULL) {
+    IRNode* cond = GenerateExpression(gen, node->cond);
 
-  // bfalse cond, break_label
-  GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
-
+    // bfalse cond, break_label
+    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+  }
+  
   // stmt
   GenerateStatement(gen, node->stmt);
 
@@ -107,17 +133,31 @@ static void GenerateDoStatement(Generator* gen,
   gen->break_label = NewIR(IR_OP(label));
   gen->continue_label = NewIR(IR_OP(label));
 
-  // continue_label:
-  GeneratorEmit(gen, gen->continue_label);
-
+  // loop_label:
+  IRNode* loop_label = GeneratorEmit(gen, NewIR(IR_OP(label)));
+ 
   // stmt
   GenerateStatement(gen, node->stmt);
 
-  // cond
-  IRNode* cond = GenerateExpression(gen, node->cond);
+  // continue_label:
+  GeneratorEmit(gen, gen->continue_label);
 
-  // btrue cond, continue_label
-  GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->continue_label));
+  if (ASTNodeIsIntConstant(node->cond)) {
+    ConstantASTNode* c = (ConstantASTNode*)node->cond;
+    // do ... while(constant);
+    if (c->value.ivalue != 0) {
+      // do .. while(true) - always loop.
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
+    } else {
+      // do ... while(false) - no loop back
+    }
+  } else {
+    // cond
+    IRNode* cond = GenerateExpression(gen, node->cond);
+    
+    // btrue cond, loop_label
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
+  }
 
   // break_label:
   GeneratorEmit(gen, gen->break_label);
@@ -131,7 +171,6 @@ static void GenerateDoStatement(Generator* gen,
 // for coding as a branch table; that is, they have a decent density.
 static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   IRNode* old_break = gen->break_label;
-  IRNode* old_continue = gen->continue_label;
 
   gen->break_label = NewIR(IR_OP(label));
 
@@ -185,14 +224,50 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   GeneratorEmit(gen, gen->break_label);
 
   gen->break_label = old_break;
-  gen->continue_label = old_continue;
+}
+
+static void GenerateBinaryCaseSearch(Generator* gen,
+                                     SwitchStatementASTNode* node,
+                                     IRNode* expr,
+                                     IRNode* default_label,
+                                     size_t start,
+                                     size_t end) {
+  size_t length = end - start;
+  if (length > 15) {
+    // More than 15 cases, split search into lower and upper halfs.
+    IRNode* lower_half = NewIR(IR_OP(label));
+    size_t mid = start + length/2;
+    CaseLabelASTNode* mid_case_node = node->cases.value[mid];
+    IRNode* compare =
+          GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr,
+                              GeneratorGetIntConstant(gen, node->expr->type,
+                                                      mid_case_node->value)));
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), compare, lower_half));
+    
+    // Search upper half
+    GenerateBinaryCaseSearch(gen, node, expr, default_label, mid, end);
+    
+    // Search lower half.
+    GeneratorEmit(gen, lower_half);
+    GenerateBinaryCaseSearch(gen, node, expr, default_label, start, mid);
+    return;
+  }
+  // 15 cases or less, use linear search.
+  for (size_t i = start; i < end; i++) {
+    CaseLabelASTNode* case_node = node->cases.value[i];
+    IRNode* compare =
+    GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), expr,
+                              GeneratorGetIntConstant(gen, node->expr->type,
+                                                      case_node->value)));
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), compare, case_node->label));
+  }
+  GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
 }
 
 // Generate IR for a switch statement using a sparse comparison coding.  This
 // compares each case value in turn and branches to the appropriate label.
 static void GenerateSparseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   IRNode* old_break = gen->break_label;
-  IRNode* old_continue = gen->continue_label;
 
   gen->break_label = NewIR(IR_OP(label));
 
@@ -202,20 +277,11 @@ static void GenerateSparseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   IRNode* default_label =
       node->default_node != NULL ? node->default_node->label : gen->break_label;
 
-  // Generate sequence of comparisons using a linear search through the
+  // Generate sequence of comparisons using a binary search through the
   // cases.
-  // TODO: we could do a binary search if it's worth it.
-  for (size_t i = 0; i < node->cases.length; i++) {
-    CaseLabelASTNode* case_node = node->cases.value[i];
-    IRNode* compare =
-        GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), expr,
-                                  GeneratorGetIntConstant(gen, node->expr->type,
-                                                          case_node->value)));
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), compare, case_node->label));
-  }
-  // Branch to default because none of the comparisons hit.
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
-
+  GenerateBinaryCaseSearch(gen, node, expr,
+                          default_label, 0, node->cases.length);
+  
   // Switch statement body.  This includes all the case labels and default (if
   // present). These will emit their labels when they are generated.
   GenerateStatement(gen, node->stmt);
@@ -224,12 +290,72 @@ static void GenerateSparseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   GeneratorEmit(gen, gen->break_label);
 
   gen->break_label = old_break;
-  gen->continue_label = old_continue;
 }
 
+// A constant switch is generated as a branch to a label inside
+// the switch body.  What we really want is to simply generate
+// the code for the located case label but that is inside a
+// statement that is difficult to traverse.  So instead we
+// generate a single branch to a label and rely on the
+// basic block analysis to remove any unreachable code.
+static void GenerateConstantSwitch(Generator* gen,
+                                   SwitchStatementASTNode* node) {
+  ConstantASTNode* value_node = (ConstantASTNode*)node->expr;
+  int64_t value = value_node->value.ivalue;
+  
+  // Look for the case statement that matches the value and create
+  // a label for it.
+  CaseLabelASTNode* found_case = NULL;
+  for (size_t i = 0; i < node->cases.length; i++) {
+    CaseLabelASTNode* case_node = (CaseLabelASTNode*)node->cases.value[i];
+    if (case_node->value == value) {
+      found_case = case_node;
+      break;
+    }
+  }
+  
+  if (found_case != NULL) {
+    IRNode* label = NewIR(IR_OP(label));
+    found_case->label = label;
+    // Generate an unconditional branch to the label.
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), label));
+  } else {
+    // No case found, look for default.
+    if (node->default_node == NULL) {
+      // No default, no statement is possible.
+      return;
+    }
+    IRNode* label = NewIR(IR_OP(label));
+    node->default_node->label = label;
+    // Generate an unconditional branch to the label.
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), label));
+  }
+  
+  // There will be one label defined in the switch statement
+  // body.  We now generate the code for all the cases and
+  // anything that is unreachable will be eliminated later.
+  IRNode* old_break = gen->break_label;
+  
+  gen->break_label = NewIR(IR_OP(label));
+
+  GenerateStatement(gen, node->stmt);
+  
+  // break_label:
+  GeneratorEmit(gen, gen->break_label);
+  
+  gen->break_label = old_break;
+}
+  
 // Switch statement IR generation.
 static void GenerateSwitchStatement(Generator* gen,
                                     SwitchStatementASTNode* node) {
+  if (ASTNodeIsIntConstant(node->expr)) {
+    // Constant switch expression.  Only generate code for the case
+    // that matches.
+    GenerateConstantSwitch(gen, node);
+    return;
+  }
+
   // Create case labels.
   for (size_t i = 0; i < node->cases.length; i++) {
     IRNode* label = NewIR(IR_OP(label));
@@ -275,10 +401,23 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 
   // Condition (e2).
   if (node->c2 != NULL) {
-    IRNode* cond = GenerateExpression(gen, node->c2);
+    if (ASTNodeIsIntConstant(node->c2)) {
+      ConstantASTNode* c = (ConstantASTNode*)node->c2;
+      if (c->value.ivalue == 0) {
+        // Condition is false, omit whole statement as it will never
+        // be executed
+        gen->break_label = old_break;
+        gen->continue_label = old_continue;
+        return;
+      } else {
+        // Condition is always true, omit expression and bfalse.
+      }
+    } else {
+      IRNode* cond = GenerateExpression(gen, node->c2);
 
-    // bfalse cond, break_label
-    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      // bfalse cond, break_label
+      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+    }
   }
 
   // stmt
@@ -423,34 +562,34 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
   }
 
   switch (node->op) {
-    case AST_OP(decl_list):
-      GenerateDeclarationList(gen, (DeclarationListASTNode*)node);
-      break;
-    case AST_OP(vardecl):
-      GenerateVariableDeclaration(gen, (VariableDeclarationASTNode*)node);
-      break;
-    case AST_OP(expr):
-      GenerateExpressionStatement(gen, (ExpressionStatementASTNode*)node);
-      break;
-    case AST_OP(compound):
-      GenerateCompoundStatement(gen, (CompoundStatementASTNode*)node);
-      break;
-    case AST_OP(if):
-      GenerateIfStatement(gen, (IfStatementASTNode*)node);
-      break;
-    case AST_OP(while):
-      GenerateWhileStatement(gen, (CombinedStatementASTNode*)node);
-      break;
-    case AST_OP(do):
-      GenerateDoStatement(gen, (CombinedStatementASTNode*)node);
-      break;
-    case AST_OP(switch):
-      GenerateSwitchStatement(gen, (SwitchStatementASTNode*)node);
-      break;
+  case AST_OP(decl_list):
+    GenerateDeclarationList(gen, (DeclarationListASTNode*)node);
+    break;
+  case AST_OP(vardecl):
+    GenerateVariableDeclaration(gen, (VariableDeclarationASTNode*)node);
+    break;
+  case AST_OP(expr):
+    GenerateExpressionStatement(gen, (ExpressionStatementASTNode*)node);
+    break;
+  case AST_OP(compound):
+    GenerateCompoundStatement(gen, (CompoundStatementASTNode*)node);
+    break;
+  case AST_OP(if):
+    GenerateIfStatement(gen, (IfStatementASTNode*)node);
+    break;
+  case AST_OP(while):
+    GenerateWhileStatement(gen, (CombinedStatementASTNode*)node);
+    break;
+  case AST_OP(do):
+    GenerateDoStatement(gen, (CombinedStatementASTNode*)node);
+    break;
+  case AST_OP(switch):
+    GenerateSwitchStatement(gen, (SwitchStatementASTNode*)node);
+    break;
   case AST_OP(for):
     GenerateForStatement(gen, (ForStatementASTNode*)node);
     break;
-  case AST_OP(return):
+  case AST_OP(return ):
     GenerateReturnStatement(gen, (CombinedStatementASTNode*)node);
     break;
   case AST_OP(case):

@@ -108,7 +108,7 @@ void ValueSetDelete(ValueSet* set) {
 // +---------------------+-------------------------+-----------+
 //      22 bits              22 bits                  20 bits
 
-// 22 bits for the value gives us 2^22 = 2 million possible values.
+// 22 bits for the value gives us 2^22 = 4 million possible values.
 // That should be enough for one function.  20 bits gives us 1 million
 // possible nodes in a function.
 
@@ -118,9 +118,9 @@ void ValueSetDelete(ValueSet* set) {
 // is less or equal to than operand 2 value.
 
 static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
-  uint64_t key;
-
-  // Lower 8 bits are either the node id or the opcode
+  uint32_t id;
+  
+  // Lower 20 bits are either the node id or the opcode
   // for the instruction.  If the instruction is a variable
   // or constant we use the node id since we are pooling these.
   switch (inst->opcode) {
@@ -148,13 +148,15 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
-      key = (uint64_t)inst->id;
+      id = inst->id + last_ir_opcode;
       break;
     default:
-      key = (uint64_t)inst->opcode;
+      id = inst->opcode;
       break;
   }
 
+  uint64_t key = id;
+  
   if (inst->opcode == IR_OP(phi)) {
     // Handle PHI nodes differently.  They may have more than two
     // operands and these operands may not be in dominators.  We
@@ -213,14 +215,14 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
 //
 // If the instruction isn't found, add a new entry in the hash
 // table with the next value.
-static IRNode* LookupInstruction(ValueSet* opt, IRNode* inst) {
-  uint64_t key = CalculateInstructionKey(&opt->values, inst);
-  Value* value = HashTableSearch(&opt->values, (void*)key);
+static IRNode* LookupInstruction(ValueSet* set, IRNode* inst) {
+  uint64_t key = CalculateInstructionKey(&set->values, inst);
+  Value* value = HashTableSearch(&set->values, (void*)key);
   if (value != NULL) {
     return value->instruction;
   }
-  value = NewValue(key, opt->next_value_number++, inst);
-  HashTableInsert(&opt->values, value);
+  value = NewValue(key, set->next_value_number++, inst);
+  HashTableInsert(&set->values, value);
   return inst;
 }
 
@@ -253,6 +255,28 @@ static void PrintValueList(void* list, void* data) {
 
 static void PrintValueSet(ValueSet* set) {
   HashTableTraverse(&set->values, PrintValueList, NULL);
+}
+
+// Look at every instruction in the block.  If the instruction is an
+// expression, calculate the key for it and look it up in the value set.
+// If we find an instruction in the value set with the same key we replace
+// the current instruction by the one we found.  Replacing the instruction
+// means all references to it are moved to the other instruction and the
+// instruction is removed from the code.
+static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
+                                  BasicBlock* block) {
+  IRNode* inst = block->code;
+  while (inst != NULL && IRPrev(inst) != block->end_code) {
+    IRNode* next = IRNext(inst);
+    if (IRIsExpression(inst)) {
+      IRNode* prev_inst = LookupInstruction(set, inst);
+      if (prev_inst != inst) {
+        GeneratorReplaceInstruction(gen, inst, prev_inst);
+        BasicBlockRemoveInstruction(gen, block, inst);
+      }
+    }
+    inst = next;
+  }
 }
 
 // Perform GVN (Global Value Numbering) on the basic block.  This traverses
@@ -289,27 +313,13 @@ static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
       set->next_value_number = dominator_value_set->next_value_number;
     }
   }
+  
+  // Apply local value numbering algorithm on the block.
+  DoLocalValueNumbering(gen, set, block);
 
+  // printf("Value set for block %d\n", block->block_id);
   // PrintValueSet(set);
-
-  // Look at every instruction in the block.  If the instruction is an
-  // expression, calculate the key for it and look it up in the value set.
-  // If we find an instruction in the value set with the same key we replace
-  // the current instruction by the one we found.  Replacing the instruction
-  // means all references to it are moved to the other instruction and the
-  // instruction is removed from the code.
-  IRNode* inst = block->code;
-  while (inst != NULL && IRPrev(inst) != block->end_code) {
-    IRNode* next = IRNext(inst);
-    if (IRIsExpression(inst)) {
-      IRNode* prev_inst = LookupInstruction(set, inst);
-      if (prev_inst != inst) {
-        GeneratorReplaceInstruction(gen, inst, prev_inst);
-        BasicBlockRemoveInstruction(gen, block, inst);
-      }
-    }
-    inst = next;
-  }
+  // printf("\n");
 
   // Now perform value numbering on all blocks dominated by this one.
   for (size_t i = 0; i < block->dominatees.length; i++) {

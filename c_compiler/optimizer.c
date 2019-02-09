@@ -37,17 +37,11 @@ static bool IsIntConstantPowerOf2(IRNode* node, int maxbits) {
     return false;
   }
   IRConstant* c = (IRConstant*)node;
-  int bitcount = 0;
-  int64_t value = c->value.ivalue;
-  int i = 0;
-  for (; i < maxbits; i++) {
-    if ((value & (1 << i)) != 0) {
-      if (bitcount++ > 1) {
-        return false;
-      }
-    }
-  }
-  return bitcount == 1 && (value >> maxbits) == 0;
+  int mask = (1 << maxbits) - 1;
+  int64_t value = c->value.ivalue & mask;
+  return value != 0 &&
+      c->value.ivalue >> maxbits == 0 &&
+      (value & (value - 1)) == 0;
 }
 
 // The node is an integer power of 2.  What is its log?  This is the

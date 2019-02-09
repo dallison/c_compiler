@@ -47,9 +47,6 @@ void SemanticCheckScalarType(ASTNode* node) {
   if (node == NULL) {
     return;
   }
-  if (TypeIsScalar(node->type)) {
-    return;
-  }
   if (TypeIsVoid(node->type)) {
     SemanticError(node, "Illegal use of void type");
     return;
@@ -80,7 +77,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
   size_t num_statements = node->type->info.function.body.length;
   for (size_t i = 0; i < num_statements; i++) {
-    AnalyzeStatement(syntax, (ASTNode*)node->type->info.function.body.value[i]);
+    AnalyzeStatement((ASTNode*)node->type->info.function.body.value[i]);
   }
   CheckForUnusedLocalSymbols(syntax);
 }
@@ -445,7 +442,7 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   if (node->initializer == NULL) {
     return;
   }
-  AnalyzeExpression(syntax, node->initializer);
+  AnalyzeExpression(node->initializer);
   // TODO: at this level the expression must be evaluatable at compile time.
   SemanticConvertType(node->initializer, node->symbol->type);
   ASTNodeSetType((ASTNode*)node, node->symbol->type);

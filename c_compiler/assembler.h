@@ -113,23 +113,22 @@ typedef enum {
 
 typedef struct {
   Preprocessor preprocessor;
-  Lex lex;
-  Syntax syntax;
-  String filename;
-  FILE* out;
-  Map directives;
-  Vector sections;     // Vector of AssemblerSection*.
-  Vector relocations;  // Vector of AssemberRelocation*
-  HashTable symbol_table;
-  int pass;
-  int num_errors;
-  int32_t current_section;
-  uint16_t elf_machine_type;
-  uint16_t elf_flags;
-  int* reloc_types;
-  bool pic;
-
-  Dwarf dwarf;
+  Lex lex;                    // Lexical analyzer.
+  Syntax syntax;              // Syntax analyzer.
+  String filename;            // Input filename.
+  FILE* out;                  // Output file (open for write).
+  Map directives;             // Assembler directives.
+  Vector sections;            // Vector of AssemblerSection*.
+  Vector relocations;         // Vector of AssemberRelocation*
+  HashTable symbol_table;     // Symbol table.
+  int pass;                   // Pass number (1 or 2).
+  int num_errors;             // Number of errors.
+  int32_t current_section;    // Current section index.
+  uint16_t elf_machine_type;  // ELF machine.
+  uint16_t elf_flags;         // ELF flags.
+  int* reloc_types;           // Relocation types.
+  bool pic;                   // Position Independent Code.
+  Dwarf dwarf;                // Debugging information.
 } Assembler;
 
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,

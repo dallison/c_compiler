@@ -69,9 +69,11 @@ DECLARE_INST_FUNC(mul);
 DECLARE_INST_FUNC(mulf);
 DECLARE_INST_FUNC(muld);
 DECLARE_INST_FUNC(div);
+DECLARE_INST_FUNC(divu);
 DECLARE_INST_FUNC(divf);
 DECLARE_INST_FUNC(divd);
 DECLARE_INST_FUNC(mod);
+DECLARE_INST_FUNC(modu);
 DECLARE_INST_FUNC(lsr);
 DECLARE_INST_FUNC(asr);
 DECLARE_INST_FUNC(lsl);
@@ -89,6 +91,10 @@ DECLARE_INST_FUNC(cmplt);
 DECLARE_INST_FUNC(cmple);
 DECLARE_INST_FUNC(cmpgt);
 DECLARE_INST_FUNC(cmpge);
+DECLARE_INST_FUNC(cmpltu);
+DECLARE_INST_FUNC(cmpleu);
+DECLARE_INST_FUNC(cmpgtu);
+DECLARE_INST_FUNC(cmpgeu);
 DECLARE_INST_FUNC(cmpeqf);
 DECLARE_INST_FUNC(cmpnef);
 DECLARE_INST_FUNC(cmpltf);
@@ -107,11 +113,17 @@ DECLARE_INST_FUNC(bra);
 DECLARE_INST_FUNC(cbra);
 DECLARE_INST_FUNC(i2f);
 DECLARE_INST_FUNC(i2d);
+DECLARE_INST_FUNC(ui2f);
+DECLARE_INST_FUNC(ui2d);
 DECLARE_INST_FUNC(f2d);
 DECLARE_INST_FUNC(d2f);
 DECLARE_INST_FUNC(f2i);
 DECLARE_INST_FUNC(d2i);
+DECLARE_INST_FUNC(f2ui);
+DECLARE_INST_FUNC(d2ui);
 DECLARE_INST_FUNC(jmp);
+DECLARE_INST_FUNC(cjmp);
+DECLARE_INST_FUNC(adr);
 DECLARE_INST_FUNC(call);
 DECLARE_INST_FUNC(rcall);
 DECLARE_INST_FUNC(ret);
@@ -167,9 +179,11 @@ static void InitializeInstructions(Map* instructions) {
   INST(mulf);
   INST(muld);
   INST(div);
+  INST(divu);
   INST(divf);
   INST(divd);
   INST(mod);
+  INST(modu);
   INST(lsr);
   INST(asr);
   INST(lsl);
@@ -187,6 +201,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(cmple);
   INST(cmpgt);
   INST(cmpge);
+  INST(cmpltu);
+  INST(cmpleu);
+  INST(cmpgtu);
+  INST(cmpgeu);
   INST(cmpeqf);
   INST(cmpnef);
   INST(cmpltf);
@@ -205,11 +223,17 @@ static void InitializeInstructions(Map* instructions) {
   INST(cbra);
   INST(i2f);
   INST(i2d);
+  INST(ui2f);
+  INST(ui2d);
   INST(f2d);
   INST(d2f);
   INST(f2i);
   INST(d2i);
+  INST(f2ui);
+  INST(d2ui);
   INST(jmp);
+  INST(cjmp);
+  INST(adr);
   INST(call);
   INST(rcall);
   INST(ret);
@@ -227,8 +251,9 @@ bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
   };
 
   // NOTE: since this is not a real machine we can make up a machine type
-  // for the ELF file header.  I happen to like the 6502 processor.
-  if (!AssemblerInit(&assembler->base, 6502, 0, reloc_types, infile, outfile)) {
+  // for the ELF file header.  I happen to like the venerable 6502 processor.
+  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_PCODE, 0,
+                     reloc_types, infile, outfile)) {
     return false;
   }
 
@@ -503,9 +528,11 @@ ASSEMBLE_INT_ALU(mul);
 ASSEMBLE_FLOAT_ALU(mulf);
 ASSEMBLE_DOUBLE_ALU(muld);
 ASSEMBLE_INT_ALU(div);
+ASSEMBLE_INT_ALU(divu);
 ASSEMBLE_FLOAT_ALU(divf);
 ASSEMBLE_DOUBLE_ALU(divd);
 ASSEMBLE_INT_ALU(mod);
+ASSEMBLE_INT_ALU(modu);
 ASSEMBLE_INT_ALU(lsr);
 ASSEMBLE_INT_ALU(asr);
 ASSEMBLE_INT_ALU(lsl);
@@ -523,6 +550,10 @@ ASSEMBLE_INT_CMP(cmplt);
 ASSEMBLE_INT_CMP(cmple);
 ASSEMBLE_INT_CMP(cmpgt);
 ASSEMBLE_INT_CMP(cmpge);
+ASSEMBLE_INT_CMP(cmpltu);
+ASSEMBLE_INT_CMP(cmpleu);
+ASSEMBLE_INT_CMP(cmpgtu);
+ASSEMBLE_INT_CMP(cmpgeu);
 ASSEMBLE_FLOAT_CMP(cmpeqf);
 ASSEMBLE_FLOAT_CMP(cmpnef);
 ASSEMBLE_FLOAT_CMP(cmpltf);
@@ -554,8 +585,16 @@ static void Assemble_i2f(PCodeAssembler* assembler) {
   AssembleConversion(assembler, OP(i2f), 'i', "integer", 'f', "float");
 }
 
+static void Assemble_ui2f(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(ui2f), 'i', "integer", 'f', "float");
+}
+
 static void Assemble_i2d(PCodeAssembler* assembler) {
   AssembleConversion(assembler, OP(i2d), 'i', "integer", 'd', "double");
+}
+
+static void Assemble_ui2d(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(ui2d), 'i', "integer", 'd', "double");
 }
 
 static void Assemble_d2f(PCodeAssembler* assembler) {
@@ -572,6 +611,14 @@ static void Assemble_f2i(PCodeAssembler* assembler) {
 
 static void Assemble_d2i(PCodeAssembler* assembler) {
   AssembleConversion(assembler, OP(d2i), 'd', "double", 'i', "integer");
+}
+
+static void Assemble_f2ui(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(f2ui), 'f', "float", 'i', "integer");
+}
+
+static void Assemble_d2ui(PCodeAssembler* assembler) {
+  AssembleConversion(assembler, OP(d2ui), 'd', "double", 'i', "integer");
 }
 
 static void Assemble_decsp(PCodeAssembler* assembler) {
@@ -693,7 +740,10 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
     }
     LexNextToken(&ASM.lex);
     AssemblerRelocation* reloc =
-        NewAssemblerRelocation(sym, R_PCODE_MOVXC, ASM.current_section,
+    NewAssemblerRelocation(sym,
+                           assembler->base.pic ?
+                           R_PCODE_GOT_ENTRY : R_PCODE_MOVXC,
+                           ASM.current_section,
                                (int32_t)AssemblerCurrentAddress(&ASM));
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(&ASM, ASM.current_section,
@@ -868,8 +918,10 @@ static void Assemble_call(PCodeAssembler* assembler) {
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, R_PCODE_CALL, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM));
+  NewAssemblerRelocation(sym, assembler->base.pic ?
+                         R_PCODE_CALL_PLT : R_PCODE_CALL,
+                         ASM.current_section,
+                         (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(call) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
@@ -891,8 +943,58 @@ static void Assemble_jmp(PCodeAssembler* assembler) {
       NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(call) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(jmp) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
+}
+
+static void Assemble_cjmp(PCodeAssembler* assembler) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for cjmp instruction");
+    return;
+  }
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                             SYM_TYPE(object), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  AssemblerRelocation* reloc =
+  NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
+                         (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
+                    OP(cjmp) << 24);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+}
+
+static void Assemble_adr(PCodeAssembler* assembler) {
+  int reg = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for adr instruction");
+    return;
+  }
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  AssemblerRelocation* reloc =
+  NewAssemblerRelocation(sym, assembler->base.pic ?
+                         R_PCODE_GOT_ENTRY : R_PCODE_MOVXC,
+                         ASM.current_section,
+                         (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
+                    OP(adr) << 24 | reg << 16);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  
 }
 
 static void Assemble_esc(PCodeAssembler* assembler) {

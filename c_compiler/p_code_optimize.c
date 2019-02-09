@@ -35,6 +35,14 @@ static void RemoveUnusedExpressions(PCodeGenerator* pcode) {
           src->refs == 1) {
         TargetDeleteInstruction(&pcode->base, inst);
       }
+    } else if ((PCodeOpcode)inst->opcode == P_OP(decsp) ||
+              (PCodeOpcode)inst->opcode == P_OP(incsp)) {
+      // Incsp or Descp with zero bytes can go away.
+      TargetConstant* size = (TargetConstant*)inst->operand[0];
+      if (size->value.ivalue == 0) {
+        TargetDeleteInstruction(&pcode->base, inst);
+      }
+      
     }
     inst = prev;
   }

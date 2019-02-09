@@ -329,11 +329,13 @@ void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {
   }
   fprintf(fp, "\t.type %s, @function\n\n", func_name);
   fprintf(fp, "%s:\n", func_name);
+  
   TargetInstruction* inst = TargetFirstInstruction(&emitter->pcode->base);
   while (inst != NULL) {
     PrintInstruction(emitter, inst, func_name, fp);
     inst = TargetNext(inst);
   }
+
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);

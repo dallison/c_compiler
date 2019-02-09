@@ -85,7 +85,7 @@ struct DynamicSection;
 #define LINKER_NUM_EXTRA_STATIC_SECTIONS 4
 #define LINKER_NUM_EXTRA_DYNAMIC_SECTIONS (LINKER_NUM_EXTRA_STATIC_SECTIONS + 3)
 
-#define LINKER_NUM_EXTRA_SECTIONS(linker) (linker->dso ? \
+#define LINKER_NUM_EXTRA_SECTIONS(linker) (linker->building_dso ? \
       LINKER_NUM_EXTRA_DYNAMIC_SECTIONS : LINKER_NUM_EXTRA_STATIC_SECTIONS)
 
 // So after we read in the object files and know how many sections
@@ -113,9 +113,22 @@ struct DynamicSection;
 
 struct Segment;
 
+typedef enum {
+  kGroupedSectionExisting,
+  kGroupedSectionNew,
+} GroupedSectionSource;
+
+typedef struct {
+  GroupedSectionSource source;
+  union {
+    ELFReaderSection* existing;   // A section from an existing file.
+    ELFWriterSection* new;        // A new section.
+  } section;
+} GroupedSection;
+
 typedef struct {
   String name;
-  Vector components;
+  Vector components;          // Vector of pointers to GroupedSection.
   struct Segment* segment;
   int32_t type;
   int64_t flags;
@@ -126,6 +139,10 @@ typedef struct {
 SectionGroup* NewSectionGroup(const String* name, int32_t type, int64_t flags, int64_t alignment);
 void SectionGroupDestruct(SectionGroup* group);
 void SectionGroupDelete(SectionGroup* group);
+
+GroupedSection* NewExistingGroupedSection(ELFReaderSection* section);
+GroupedSection* NewGroupedSection(ELFWriterSection* section);
+void GroupedSectionDestruct(GroupedSection* g);
 
 #if 0
 
@@ -172,7 +189,7 @@ typedef struct Linker {
   Vector dynamic_libraries;
   int elf_machine_type;
   int elf_flags;
-  bool dso;           // True if we are building a shared object.
+  bool building_dso;           // True if we are building a shared object.
   struct DynamicSection* dynamic_section;
 } Linker;
 

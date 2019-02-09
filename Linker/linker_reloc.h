@@ -23,7 +23,8 @@ typedef struct {
   int type;
   int64_t offset;
   int32_t addend;
-  int dynamic_offset;
+  int got_offset;     // Offset into GOT.
+  int plt_offset;     // Offset into PLT.
 } LinkerRelocation;
 
 LinkerRelocation* NewLinkerRelocation(const char* symbol_name, int64_t offset,

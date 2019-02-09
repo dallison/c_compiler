@@ -43,6 +43,9 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
         // Assembler symbol, extract the value from the 'other'
         // value field.
         AssemblerSymbol* asm_sym = id_node->symbol->value.other;
+        if (asm_sym == NULL) {
+          return false;
+        }
         if (!asm_sym->defined) {
           return false;
         }

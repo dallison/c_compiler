@@ -54,6 +54,7 @@ DECLARE_DIRECTIVE_FUNC(option);
 // Add all directives to the map of directive name vs handling function.
 #define DIRECTIVE(spelling) \
   MapInsert(directives, "." #spelling, HandleDirective_##spelling)
+
 static void InitializeDirectives(Map* directives) {
   DIRECTIVE(globl);
   DIRECTIVE(global);
@@ -265,7 +266,7 @@ int64_t AssemblerEvaluateExpression(Assembler* assembler) {
   if (expr == NULL) {
     return 0;
   }
-  AnalyzeExpression(&assembler->syntax, expr);
+  AnalyzeExpression(expr);
   int64_t value;
   if (EvaluateIntegerExpression(expr, &value)) {
     ASTNodeDelete(expr);
@@ -310,6 +311,13 @@ static int CompareCharPointer(const void* a, const void* b) {
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
                    uint16_t elf_flags, int* reloc_types, String* infile,
                    String* outfile) {
+  // Open output file.
+  assembler->out = fopen(outfile->value, "w");
+  if (assembler->out == NULL) {
+    fprintf(stderr, "Cannot open object file %s\n", outfile->value);
+    return false;
+  }
+
   PreprocessorInit(&assembler->preprocessor);
   LexInitFromFile(&assembler->lex, infile->value, &assembler->preprocessor);
   assembler->lex.assembler_mode = true;
@@ -318,12 +326,6 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 
   StringInit(&assembler->filename, "");
 
-  // Open output file.
-  assembler->out = fopen(outfile->value, "w");
-  if (assembler->out == NULL) {
-    fprintf(stderr, "Cannot open object file %s\n", outfile->value);
-    return false;
-  }
   MapInit(&assembler->directives, CompareCharPointer);
   InitializeDirectives(&assembler->directives);
 
@@ -523,6 +525,76 @@ static void Assemble(Assembler* assembler,
   StringDestruct(&word);
 }
 
+// Add all the sections to the ELF file.
+static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
+  for (size_t i = 0; i < assembler->sections.length; i++) {
+    AssemblerSection* section = assembler->sections.value[i];
+    
+    bool align = true;
+    // We need to treat debug_line specially since its contents are generated
+    // from .loc and .file directives.  This section will only be present if
+    // -g is specifed on the compiler command line.
+    bool is_debug_line_section = StringEqual(section->name, ".debug_line");
+    
+    // If the section is .debug_line build the data.
+    if (is_debug_line_section) {
+      // This section is not aligned.
+      section->alignment = 1;
+      align = false;
+      ELFWriterSectionContentsInit(&section->contents,
+                                   kSectionContentsBuffered);
+      DwarfBuildDebugLineContents(&assembler->dwarf,
+                                  &section->contents.data.buffered);
+    }
+    
+    if (align) {
+      // Align the section length to next 8 byte boundary.
+      // TODO: do we align the beginning of the section?  I don't think we do,
+      // but should.
+      AssemblerSectionAlign(section, 8);
+    }
+    
+    // Add the section to the ELF file.
+    ELFWriterSection* elf_section =
+    ELFWriterAddSection(elf, section->name, section->type, section->flags,
+                        section->alignment, &section->contents, 0);
+    
+    // For debug_line we need to add a relocation for the initial address.  We
+    // can only do this when we know the section index.
+    if (is_debug_line_section) {
+      AssemblerSymbol* text = AssemblerFindSymbol(assembler, ".text");
+      if (text != NULL) {
+        AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
+                                &assembler->dwarf,
+                                text,
+                                assembler->reloc_types[kRelocSet64],
+                                elf_section->index);
+        AssemblerAddRelocation(assembler, addr_reloc);
+      }
+    }
+    
+    // Add a symbol for the section name.
+    if (section->name != NULL) {
+      AssemblerSymbol* section_symbol =
+      NewAssemblerSymbol(section->name->value, elf_section->index,
+                         SYM_TYPE(none), SYM_BIND(local), 0);
+      section_symbol->exported = true;
+      AssemblerInsertSymbol(assembler, section_symbol);
+    }
+    ELFWriterAddSectionSymbol(elf, &elf_section->name, elf_section->index);
+  }
+}
+
+// Add all the relocations now that we have the sections and symbol
+// indexes.
+static void AddRelocations(Assembler* assembler, ELFWriterFile* elf) {
+  for (size_t i = 0; i < assembler->relocations.length; i++) {
+    AssemblerRelocation* reloc = assembler->relocations.value[i];
+    ELFWriterAddRelocation(elf, reloc->section, reloc->offset,
+                           reloc->symbol->index, reloc->type);
+  }
+}
+
 void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   // We do two passes, numbered 1 and 2.
   assembler->pass = 1;
@@ -540,70 +612,18 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
     PreprocessorReset(&assembler->preprocessor);
   }
 
+  // Produce the ELF file.
   ELFWriterFile elf;
   ELFWriterFileInit(&elf, ET(rel), assembler->elf_machine_type,
-                    assembler->elf_flags, false);
+                    assembler->elf_flags, false, true, true);
 
   // Add the file symbol.
   if (assembler->filename.length != 0) {
     ELFWriterAddFileSymbol(&elf, &assembler->filename);
   }
 
-  // Add all the sections.
-  for (size_t i = 0; i < assembler->sections.length; i++) {
-    AssemblerSection* section = assembler->sections.value[i];
-
-    bool align = true;
-    // We need to treat debug_line specially since it's contents are generated
-    // from .loc and .file directives.  This section will only be present if
-    // -g is specifed on the compiler command line.
-    bool is_debug_line_section = StringEqual(section->name, ".debug_line");
-
-    // If the section is .debug_line build the data.
-    if (is_debug_line_section) {
-      // This section is not aligned.
-      section->alignment = 1;
-      align = false;
-      ELFWriterSectionContentsInit(&section->contents,
-                                   kSectionContentsBuffered);
-      DwarfBuildDebugLineContents(&assembler->dwarf,
-                                  &section->contents.data.buffered);
-    }
-
-    if (align) {
-      // Align the section length to next 8 byte boundary.
-      // TODO: do we align the beginning of the section?  I don't think we do,
-      // but should.
-      AssemblerSectionAlign(section, 8);
-    }
-
-    // Add the section to the ELF file.
-    ELFWriterSection* elf_section =
-        ELFWriterAddSection(&elf, section->name, section->type, section->flags,
-                            section->alignment, &section->contents, 0);
-
-    // For debug_line we need to add a relocation for the initial address.  We
-    // can only do this when we know the section index.
-    if (is_debug_line_section) {
-      AssemblerSymbol* text = AssemblerFindSymbol(assembler, ".text");
-      if (text != NULL) {
-        AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
-            &assembler->dwarf, text, assembler->reloc_types[kRelocSet64],
-            elf_section->index);
-        AssemblerAddRelocation(assembler, addr_reloc);
-      }
-    }
-
-    // Add a symbol for the section name.
-    if (section->name != NULL) {
-      AssemblerSymbol* section_symbol =
-          NewAssemblerSymbol(section->name->value, elf_section->index,
-                             SYM_TYPE(none), SYM_BIND(local), 0);
-      section_symbol->exported = true;
-      AssemblerInsertSymbol(assembler, section_symbol);
-    }
-    ELFWriterAddSectionSymbol(&elf, &elf_section->name, elf_section->index);
-  }
+  // Add all sections.
+  AddSections(assembler, &elf);
 
   // Add all the symbols to the ELF file.
   // NOTE: ELF symbol table conventions dictate that the local
@@ -621,13 +641,12 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
 
   // Add all the relocations now that we have the sections and symbol
   // indexes.
-  for (size_t i = 0; i < assembler->relocations.length; i++) {
-    AssemblerRelocation* reloc = assembler->relocations.value[i];
-    ELFWriterAddRelocation(&elf, reloc->section, reloc->offset,
-                           reloc->symbol->index, reloc->type);
-  }
+  AddRelocations(assembler, &elf);
 
+  // Write the ELF file to disk.
   ELFWriterFileWrite(&elf, assembler->out);
+  
+  // And we're done with the ELF writer.
   ELFWriterFileDestruct(&elf);
 }
 
@@ -657,18 +676,19 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
 UNDEFINED_DIRECTIVE(align);
 UNDEFINED_DIRECTIVE(set);
 
-static void HandleDirective_globl(Assembler* assembler) {
+static void SymbolDirective(Assembler* assembler,
+                            AssemblerSymbolBinding binding) {
   if (LexLookingAt(&assembler->lex, TOK(identifier))) {
     AssemblerSymbol* sym =
-        AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
+    AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
     if (sym != NULL) {
-      sym->binding = SYM_BIND(global);
+      sym->binding = binding;
       sym->exported = true;
     } else {
       // No symbol, add it as a global, but undefined.
       sym = NewAssemblerSymbol(assembler->lex.spelling.value,
                                assembler->current_section, SYM_TYPE(none),
-                               SYM_BIND(global), 0);
+                               binding, 0);
       AssemblerInsertSymbol(assembler, sym);
       sym->exported = true;
     }
@@ -678,25 +698,16 @@ static void HandleDirective_globl(Assembler* assembler) {
   }
 }
 
+static void HandleDirective_globl(Assembler* assembler) {
+  SymbolDirective(assembler, SYM_BIND(global));
+}
+
+static void HandleDirective_global(Assembler* assembler) {
+  HandleDirective_globl(assembler);
+}
+
 static void HandleDirective_local(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-    AssemblerSymbol* sym =
-        AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
-    if (sym != NULL) {
-      sym->binding = SYM_BIND(local);
-      sym->exported = true;
-    } else {
-      // No symbol, add it as a global, but undefined.
-      sym = NewAssemblerSymbol(assembler->lex.spelling.value,
-                               assembler->current_section, SYM_TYPE(none),
-                               SYM_BIND(local), 0);
-      AssemblerInsertSymbol(assembler, sym);
-      sym->exported = true;
-    }
-    LexNextToken(&assembler->lex);
-  } else {
-    AssemblerError(assembler, "Symbol name expected");
-  }
+  SymbolDirective(assembler, SYM_BIND(local));
 }
 
 static void HandleDirective_comm(Assembler* assembler) {
@@ -708,6 +719,7 @@ static void HandleDirective_comm(Assembler* assembler) {
       sym->defined = true;
       sym->section = SHN_COM;
       sym->value = 0;
+      sym->binding = SYM_BIND(global);
     } else {
       // No symbol, add it as a global in the COM section..
       sym = NewAssemblerSymbol(assembler->lex.spelling.value, SHN_COM,
@@ -734,10 +746,6 @@ static void HandleDirective_comm(Assembler* assembler) {
   } else {
     AssemblerError(assembler, "Symbol name expected");
   }
-}
-
-static void HandleDirective_global(Assembler* assembler) {
-  HandleDirective_globl(assembler);
 }
 
 static void HandleDirective_type(Assembler* assembler) {
@@ -801,6 +809,64 @@ static void HandleDirective_size(Assembler* assembler) {
     StringDestruct(&name);
   } else {
     AssemblerError(assembler, "Symbol name expected");
+  }
+}
+
+static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
+  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    AssemblerSymbol* sym =
+    AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
+    LexNextToken(&assembler->lex);
+    if (sym == NULL) {
+      // No symbol found.  In pass 1 this might happen due to a forward
+      // reference.  In pass 2 it's an error.
+      if (assembler->pass == 2) {
+        AssemblerError(assembler, "No such symbol %s",
+                       assembler->lex.spelling.value);
+        return NULL;
+      }
+    }
+    return sym;
+  }
+  return NULL;
+}
+
+// We only support simple expressions involving assembler symbols.  These can
+// only be symbols separated by + or -.  They generate relocations for the
+// symbols.
+static void SimpleSymbolExpression(Assembler* assembler, int bits) {
+  AssemblerSymbol* left = ExpressionPrimary(assembler);
+  if (left == NULL) {
+    return;
+  }
+  AssemblerRelocation* reloc = NewAssemblerRelocation(
+          left, assembler->reloc_types[bits == 64 ? kRelocSet64 : kRelocSet32],
+          assembler->current_section,
+                  (int32_t)AssemblerCurrentAddress(assembler));
+  AssemblerAddRelocation(assembler, reloc);
+  
+  while (LexLookingAt(&assembler->lex, TOK(plus)) ||
+         LexLookingAt(&assembler->lex, TOK(minus))) {
+    Token tok = assembler->lex.current_token;
+    LexNextToken(&assembler->lex);
+    AssemblerSymbol* right = ExpressionPrimary(assembler);
+    if (right == NULL) {
+      break;
+    }
+    int reloc_type = 0;
+    if (bits == 64) {
+      reloc_type = tok == TOK(plus) ? kRelocAdd64 : kRelocSub64;
+    } else if (bits == 32) {
+      reloc_type = tok == TOK(plus) ? kRelocAdd32 : kRelocSub32;
+    } else if (bits == 16) {
+      reloc_type = tok == TOK(plus) ? kRelocAdd16 : kRelocSub16;
+    } else {
+      assert(false);
+    }
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+                left, assembler->reloc_types[reloc_type], assembler->current_section,
+                            (int32_t)AssemblerCurrentAddress(assembler));
+    AssemblerAddRelocation(assembler, reloc);
   }
 }
 
@@ -908,62 +974,6 @@ static void HandleDirective_short(Assembler* assembler) {
   HandleDataDirective(assembler, 16);
 }
 
-static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-    AssemblerSymbol* sym =
-        AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
-    LexNextToken(&assembler->lex);
-    if (sym == NULL) {
-      // No symbol found.  In pass 1 this might happen due to a forward
-      // reference.  In pass 2 it's an error.
-      if (assembler->pass == 2) {
-        AssemblerError(assembler, "No such symbol %s",
-                       assembler->lex.spelling.value);
-        return NULL;
-      }
-    }
-    return sym;
-  }
-  return NULL;
-}
-
-// We only support simple expressions involving assembler symbols.  These can
-// only be symbols separated by + or -.  They generate relocations for the
-// symbols.
-static void SimpleSymbolExpression(Assembler* assembler, int bits) {
-  AssemblerSymbol* left = ExpressionPrimary(assembler);
-  if (left == NULL) {
-    return;
-  }
-  AssemblerRelocation* reloc = NewAssemblerRelocation(
-      left, assembler->reloc_types[bits == 64 ? kRelocSet64 : kRelocSet32],
-      assembler->current_section, (int32_t)AssemblerCurrentAddress(assembler));
-  AssemblerAddRelocation(assembler, reloc);
-
-  while (LexLookingAt(&assembler->lex, TOK(plus)) ||
-         LexLookingAt(&assembler->lex, TOK(minus))) {
-    Token tok = assembler->lex.current_token;
-    LexNextToken(&assembler->lex);
-    AssemblerSymbol* right = ExpressionPrimary(assembler);
-    if (right == NULL) {
-      break;
-    }
-    int reloc_type = 0;
-    if (bits == 64) {
-      reloc_type = tok == TOK(plus) ? kRelocAdd64 : kRelocSub64;
-    } else if (bits == 32) {
-      reloc_type = tok == TOK(plus) ? kRelocAdd32 : kRelocSub32;
-    } else if (bits == 16) {
-      reloc_type = tok == TOK(plus) ? kRelocAdd16 : kRelocSub16;
-    } else {
-      assert(false);
-    }
-    AssemblerRelocation* reloc = NewAssemblerRelocation(
-        left, assembler->reloc_types[reloc_type], assembler->current_section,
-        (int32_t)AssemblerCurrentAddress(assembler));
-    AssemblerAddRelocation(assembler, reloc);
-  }
-}
 
 // Words can refer to a symbol.  If this is case the lower 32 bits of the
 // symbol will be used.  If a relocation is needed, the reloc_types[kRelocSet32]
@@ -1086,11 +1096,8 @@ static void HandleDirective_text(Assembler* assembler) {
     section = AssemblerFindSection(assembler, name);
     StringDelete(name);
   }
-  if (section == -1) {
-    AssemblerError(assembler, "Bad .section directive");
-  } else {
-    assembler->current_section = section;
-  }
+  assert(section != -1);
+  assembler->current_section = section;
 }
 
 static void HandleDirective_data(Assembler* assembler) {
@@ -1100,17 +1107,14 @@ static void HandleDirective_data(Assembler* assembler) {
     section = AssemblerFindSection(assembler, name);
     if (section == -1) {
       section =
-          AssemblerAddSection(assembler, name, SHT(progbits), SHF(alloc), 8);
+      AssemblerAddSection(assembler, name, SHT(progbits), SHF(write)|SHF(alloc), 8);
     }
   } else {
     section = AssemblerFindSection(assembler, name);
     StringDelete(name);
   }
-  if (section == -1) {
-    AssemblerError(assembler, "Bad .section directive");
-  } else {
-    assembler->current_section = section;
-  }
+  assert(section != -1);
+  assembler->current_section = section;
 }
 
 static void HandleDirective_file(Assembler* assembler) {
@@ -1123,8 +1127,9 @@ static void HandleDirective_file(Assembler* assembler) {
   }
 
   String filename;
+  StringInit(&filename, NULL);
   if (LexLookingAt(&assembler->lex, TOK(string))) {
-    StringInit(&filename, assembler->lex.spelling.value);
+    StringSet(&filename, assembler->lex.spelling.value);
     if (index == -1) {
       StringSet(&assembler->filename, assembler->lex.spelling.value);
     }
@@ -1135,6 +1140,7 @@ static void HandleDirective_file(Assembler* assembler) {
   if (assembler->pass == 1) {
     DwarfAddFile(&assembler->dwarf, &filename);
   }
+  StringDestruct(&filename);
 }
 
 static void HandleDirective_loc(Assembler* assembler) {

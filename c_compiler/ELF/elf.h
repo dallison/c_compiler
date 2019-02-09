@@ -64,20 +64,20 @@ typedef enum {
 #define PT(x) kELFSegmentType_##x
 typedef enum {
  PT(null),
- PT(load),
- PT(dynamic),
- PT(interp),
- PT(note),
- PT(shlib),
- PT(phdr),
- PT(tls),
+ PT(load),        // Loadable segment.
+ PT(dynamic),     // DYNAMIC segment (for .so files)
+ PT(interp),      // Program interpreter.
+ PT(note),        // General note.
+ PT(shlib),       // Shared library.
+ PT(phdr),        // Program header
+ PT(tls),         // Thread local storage.
 } ELFSegmentType;
 
 #define PF(x) kELFSegmentFlags_##x
 typedef enum {
-  PF(x) = 1 << 0,
-  PF(w) = 1 << 1,
-  PF(r) = 1 << 2,
+  PF(x) = 1 << 0,   // Executable.
+  PF(w) = 1 << 1,   // Writeable.
+  PF(r) = 1 << 2,   // Readable.
 } ELFSegmentFlags;
 
 // Symbol binding values.
@@ -137,50 +137,56 @@ typedef struct  {
 
 // Relocation types we support.
 // P-CODE
-#define R_PCODE_CALL 1
-#define R_PCODE_MOVXC 2
-#define R_PCODE_JMP 3
-#define R_PCODE_DATA64 4
-#define R_PCODE_DATA32 5
-#define R_PCODE_ADD16 6
-#define R_PCODE_ADD32 7
-#define R_PCODE_ADD64 8
-#define R_PCODE_SUB16 9
-#define R_PCODE_SUB32 10
-#define R_PCODE_SUB64 11
+#define R_PCODE_CALL 1        // Call direct to symbol.
+#define R_PCODE_MOVXC 2       // Move symbol address to reg.
+#define R_PCODE_JMP 3         // Jump to symbol.
+#define R_PCODE_DATA64 4      // 64-bit data.
+#define R_PCODE_DATA32 5      // 32-bit data.
+#define R_PCODE_ADD16 6       // Add 16-bit.
+#define R_PCODE_ADD32 7       // Add 32-bit.
+#define R_PCODE_ADD64 8       // Add 64-bit.
+#define R_PCODE_SUB16 9       // Subtract 16-bit.
+#define R_PCODE_SUB32 10      // Subtract 32-bit.
+#define R_PCODE_SUB64 11      // Subtract 64-bit.
+#define R_PCODE_CALL_PLT 12   // Call via PLT.
+#define R_PCODE_GOT_ENTRY 13  // Address of GOT entry for data.
+#define R_PCODE_GOT_DATA 14       // Value of data in GOT.
+#define R_PCODE_GOT_FUNC 15       // Value of function in GOT.
 
 // RISC-V
-#define R_RISCV_NONE 0
-#define R_RISCV_32 1
-#define R_RISCV_64 2
-#define R_RISCV_RELATIVE 3
-#define R_RISCV_COPY 4
-#define R_RISCV_JUMP_SLOT 5
-#define R_RISCV_BRANCH 16
-#define R_RISCV_JAL 17
-#define R_RISCV_CALL 18
-#define R_RISCV_CALL_PLT 19
-#define R_RISCV_GOT_HI20 20
-#define R_RISCV_PCREL_HI20 23
-#define R_RISCV_PCREL_LO12_I 24
-#define R_RISCV_PCREL_LO12_S 25
-#define R_RISCV_HI20 26
-#define R_RISCV_LO12_I 27
-#define R_RISCV_LO12_S 28
-#define R_RISCV_ADD8 33
-#define R_RISCV_ADD16 34
-#define R_RISCV_ADD32 35
-#define R_RISCV_ADD64 36
-#define R_RISCV_SUB8 37
-#define R_RISCV_SUB16 38
-#define R_RISCV_SUB32 39
-#define R_RISCV_SUB64 40
-#define R_RISCV_ALIGN 43
-#define R_RISCV_RVC_BRANCH 44
-#define R_RISCV_RVC_JUMP 45
-#define R_RISCV_RVC_LUI 46
-#define R_RISCV_RELAX 51
+#define R_RISCV_NONE 0        // No action.
+#define R_RISCV_32 1          // Add 32 bit symbol value.
+#define R_RISCV_64 2          // Add 64 bit symbol value.
+#define R_RISCV_RELATIVE 3    // Add load address of shared object.
+#define R_RISCV_COPY 4        // Copy data from shared object.
+#define R_RISCV_JUMP_SLOT 5   // Set GOT entry.
+#define R_RISCV_BRANCH 16     // PC relative branch.
+#define R_RISCV_JAL 17        // PC relative jump.
+#define R_RISCV_CALL 18       // PC relative call.
+#define R_RISCV_CALL_PLT 19   // PC relative call via PLT.
+#define R_RISCV_GOT_HI20 20   // PC relative GOT high 20 bits.
+#define R_RISCV_PCREL_HI20 23   // PC relative high 20 bits.
+#define R_RISCV_PCREL_LO12_I 24 // PC relative low 12 bits (I-type)
+#define R_RISCV_PCREL_LO12_S 25 // PC relaitve low 12 bits (S-type)
+#define R_RISCV_HI20 26         // Absolute high 20 bits.
+#define R_RISCV_LO12_I 27       // Absolute low 12 bits (I-type)
+#define R_RISCV_LO12_S 28       // Absolute low 12 bits (S-type)
+#define R_RISCV_ADD8 33         // Add 8 bits.
+#define R_RISCV_ADD16 34        // Add 16 bits.
+#define R_RISCV_ADD32 35        // Add 32 bits.
+#define R_RISCV_ADD64 36        // Add 64 bits.
+#define R_RISCV_SUB8 37         // Subtract 8 bits.
+#define R_RISCV_SUB16 38        // Subtract 16 bits.
+#define R_RISCV_SUB32 39        // Subtract 32 bits.
+#define R_RISCV_SUB64 40        // Subtract 64 bits.
+#define R_RISCV_ALIGN 43        // Align
+#define R_RISCV_RVC_BRANCH 44   // Branch.
+#define R_RISCV_RVC_JUMP 45     // Jump.
+#define R_RISCV_RVC_LUI 46      // Address.
+#define R_RISCV_RELAX 51        // Relax instruction pair.
 
+#define ELF_MACHINE_TYPE_PCODE 6502
+#define ELF_MACHINE_TYPE_RISC_V 243
 
 // A program header.
 typedef struct {
@@ -273,6 +279,5 @@ typedef struct {
 #define	EI_VERSION 6
 #define	EI_OSABI 7
 #define	EI_PAD 8
-
 
 #endif /* elf_h */

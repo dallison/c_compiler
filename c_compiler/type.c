@@ -749,6 +749,10 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev) {
   PartialTypeSpecifier curr = ParseTypeSpecifier(parser);
+  if (prev->type == kTypeImplicit) {
+    return curr;
+  }
+  
   return CombineTypeSpecifiers(parser->syntax, prev, &curr);
 }
 
@@ -778,9 +782,14 @@ TypeRecord* TypeParserParseType(TypeParser* parser) {
     .type_record = NULL,
     .error = false };
   
-  while (SyntaxLookingAtType(syntax)) {
+  while (parser->found_void || SyntaxLookingAtType(syntax)) {
     PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser);
-    type_specifier = CombineTypeSpecifiers(parser->syntax, &type_specifier, &new_type_specifier);
+    parser->found_void = false;
+    if (type_specifier.type == kTypeImplicit) {
+      type_specifier = new_type_specifier;
+    } else {
+      type_specifier = CombineTypeSpecifiers(parser->syntax, &type_specifier, &new_type_specifier);
+    }
   }
   // No type?
   if (type_specifier.type == kTypeImplicit) {
@@ -805,6 +814,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   while (i > 0) {
     TypeRecord* record = (TypeRecord*)parser->stack.value[i - 1];
     TypeRecordChain(record, t);
+    record->type = t->type;
     t = record;
     i--;
   }
@@ -907,7 +917,9 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
     kStyleOld,
     kStyleNew
   } style = kStyleUnknown;
-  
+
+  func->info.function.old_style = false;
+
   while (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
     if (LexMatch(proto_parser->lex, TOK(ellipsis))) {
       // ... must be the last argument in the prototype.
@@ -938,8 +950,10 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
     
     // Parse the formal argument's type, if it has one.  Otherwise it's a possible
     // old-style function.
-    if (SyntaxLookingAtType(proto_parser->syntax)) {
+    if (proto_parser->found_void ||
+          SyntaxLookingAtType(proto_parser->syntax)) {
       TypeRecord* type = TypeParserParseType(proto_parser);
+      assert(type != NULL);
       if (style == kStyleUnknown) {
         style = kStyleNew;
       }
@@ -948,6 +962,7 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
                     "Cannot mix function prototype with old-style function args");
       }
       Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
+      assert(formal != NULL);
       ParseFormalArgument(proto_parser, func, formal, arg_number);
     } else {
       // Possible old-style function decl, identifiers only.
@@ -992,7 +1007,7 @@ static int ParseArrayDimension(TypeParser* parser) {
   if (!LexLookingAt(parser->lex, TOK(rsquare))) {
     ASTNode* size_expr =
     SyntaxParseExpression(parser->syntax, TC(closebra));
-    AnalyzeExpression(parser->syntax, size_expr);
+    AnalyzeExpression(size_expr);
     bool ok = EvaluateIntegerExpression(size_expr, &size);
     if (!ok) {
       // TODO: variable sized arrays?
@@ -1173,7 +1188,8 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
     } else {
       // Tag doesn't exist in the, create one.
       str = NewStruct(is_union);
-      TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
+      TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
+                                        kQualPlain);
       type->info.struct_info = str;
       tag = NewSymbol(tag_name.value, type, kStorageImplicit);
       str->tag_name = &tag->name;
@@ -1311,7 +1327,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
         if (LexMatch(parser->lex, TOK(equal))) {
           ASTNode* value =
               SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
-          AnalyzeExpression(parser->syntax, value);
+          AnalyzeExpression(value);
           int64_t next_value = e->next_value;
           if (!EvaluateIntegerExpression(value, &next_value)) {
             SyntaxError(parser->syntax,
@@ -1488,6 +1504,9 @@ bool TypeIsStructOrUnionPointer(TypeRecord* type) {
 }
 
 bool TypeIsUnsigned(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return TypeIsPrimitive(type) && (type->type & kTypeUnsigned) != 0;
 }
 

@@ -265,7 +265,7 @@ void GeneratorRenameVariables(Generator* gen) {
 
 // Convert the generated IR to Static Single Assignment (SSA) form.
 void GeneratorConvertToSSA(Generator* gen) {
-  // Insert PHI nodes for all varaibles.
+  // Insert PHI nodes for all variables.
   InsertPhiNodes(gen);
 
   // Rename all variables, creating a single assignment to each.

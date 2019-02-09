@@ -50,6 +50,7 @@ void BasicBlockDelete(BasicBlock* b) {
   BitSetDestruct(&b->dominance_frontier);
   VectorDestruct(&b->dominatees);
   MapDestruct(&b->defined_vars);
+  free(b);
 }
 
 void BasicBlockAddInEdge(BasicBlock* from, BasicBlock* to) {
@@ -128,7 +129,7 @@ void BasicBlockCalculateDominanceFrontier(BasicBlock* b, Vector* blocks) {
       BlockId id = (BlockId)b->in_edges.value[i];
       BasicBlock* block = VectorGet(blocks, id);
       BasicBlock* runner = block;
-      while (runner != NULL) {
+      while (runner != b->idom) { // TODO: this was NULL, which is right?
         BasicBlockAddToDF(runner, b->block_id);
         runner = runner->idom;
       }

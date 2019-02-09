@@ -21,9 +21,8 @@
 typedef struct {
   ELFSectionHeader* header;
   String name;
-  void* contents;               // Contents of section (mapped or heap)
+  void* contents;               // Contents of section.
   uint64_t address;             // Address assigned to section.
-  bool relocated;               // True if section is on heap.
   int32_t output_section_index; // Section index in output.
 } ELFReaderSection;
 

@@ -28,7 +28,7 @@ typedef enum {
 // If the data location is a buffer it may be empty (a .bss section)
 // in which case the size field is the size of the data.  If the data
 // comes from memory, the size field is the length of the data in memory.
-typedef struct {
+typedef struct ELFWriterSectionContents {
   ELFWriterSectionContentsDataLocation data_location;        // Data location.
   union {
     Buffer buffered;     // Data contained in section.
@@ -65,6 +65,7 @@ typedef struct {
 } ELFWriterSegment;
 
 ELFWriterSegment* NewELFWriterSegment(int32_t type, int32_t flags, int64_t alignment);
+void ELFWriterSegmentDestruct(ELFWriterSegment* segment);
 void ELFWriterSegmentDelete(ELFWriterSegment* segment);
 void ELFWriterSegmentAddSection(ELFWriterSegment* segment, ELFWriterSection* section);
 
@@ -82,14 +83,15 @@ typedef struct {
   bool dso;                 // Writing a dynamic shared object.
 } ELFWriterFile;
 
-void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine, int flags, bool dso);
+void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
+                       int flags, bool dso, bool is64bit, bool isLittleEndian);
 void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp);
 void ELFWriterFileDestruct(ELFWriterFile* elf);
 ELFWriterFile* NewELFWriterFileFromFile(FILE* fp);
 
 ELFWriterSection* ELFWriterAddSection(ELFWriterFile* elf, String* name, int32_t type, int64_t flags,
                           int64_t alignment, ELFWriterSectionContents* contents, uint64_t address);
-ELFWriterSection* ELFWriterAddNamedSection(ELFWriterFile* elf, const char* name,
+ELFWriterSection* ELFWriterAddStandardSection(ELFWriterFile* elf, const char* name,
                                ELFSectionType type,
                                ELFSectionFlags flags);
 

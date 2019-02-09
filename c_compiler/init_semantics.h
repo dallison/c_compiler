@@ -14,6 +14,6 @@
 
 #include "semantics.h"
 
-ASTNode* AnalyzeInitializer(Syntax* syntax, TypeRecord* type, ASTNode* init);
+ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* init);
 
 #endif /* init_semantics_h */

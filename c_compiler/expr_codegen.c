@@ -200,7 +200,7 @@ static IROpcode IncDecOp(ASTNode* node, bool is_inc) {
 static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
   StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
   StructMember* bitfield = member_node->member;
-  if (bitfield->bit_size == 64) {
+  if (bitfield->bit_size == bitfield->symbol->type->size * 8) {
     // Bitfield that is the whole word, just use the load.
     return load;
   }
@@ -224,20 +224,22 @@ static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
                                          gen, bitfield->symbol->type, mask)));
   }
 
-  // Signed type, sign extend it.  Do this by shifting left 64 - (offset+size)
-  // bits then shifting right by 64 - size bits.  The idea is to put the top bit
-  // of the bitfield in the sign bit position in a register, then do an
+  // Signed type, sign extend it.  Given the target register width, width,
+  // do this by shifting left width - (offset+size)
+  // bits then shifting right by width - size bits.  The idea is to put the
+  // top bit of the bitfield in the sign bit position in a register, then do an
   // arithmetic right shift to move the bottom bit of the bitfield to bit 0 in
   // the register,
+  int register_width = compiler->pointer_size * 8;
   IRNode* lshift = GeneratorEmit(
       gen, NewIR2(IR_OP(lsli), load,
                   GeneratorGetIntConstant(
                       gen, bitfield->symbol->type,
-                      64 - (bitfield->bit_size + bitfield->bit_offset))));
+                      register_width - (bitfield->bit_size + bitfield->bit_offset))));
   return GeneratorEmit(
       gen, NewIR2(IR_OP(asri), lshift,
                   GeneratorGetIntConstant(gen, bitfield->symbol->type,
-                                          64 - bitfield->bit_size)));
+                                          register_width - bitfield->bit_size)));
 }
 
 // Given a value loaded from a struct word containing a bitfield and new value
@@ -250,6 +252,11 @@ static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
       (StructMemberASTNode*)member_ref_node->right;
   StructMember* member = member_node->member;
 
+  if (member->bit_size == member->symbol->type->size * 8) {
+    // Bitfield that is the whole word, just use the new value.
+    return value;
+  }
+  
   // Clear the field by ANDing with the clearing_mask.
   int64_t clearing_mask =
       ~(((1 << member->bit_size) - 1) << member->bit_offset);
@@ -369,7 +376,6 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
 
   CheckForVarUse(load, node->sub);
 
-  // TODO: bitfields.
   IRNode* constant =
       is_floating_point
           ? GeneratorGetFloatingPointConstant(gen, type, inc_amount)
@@ -612,7 +618,11 @@ static IRNode* GeneratedCompoundAssignment(Generator* gen,
   // Operate on the value.
   value = GeneratorEmit(gen, NewIR2(ir_op, load, value));
 
-  // TODO: bitfield.
+  // Bitfield? Mask in the value.
+  if (IsBitfieldReference(node->left)) {
+    value = CalculateNewBitfieldValue(gen, load, value,
+                                    (BinaryASTNode*)node->left);
+  }
 
   // Store back to the destination.
   IROpcode store_op = GetStoreOpcode((ASTNode*)node);
@@ -696,7 +706,7 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
   }
 
   if (TypeIsFunction(node->sub->type)) {
-    // Loading contents of a pointer to an function.  Don't dereference the
+    // Loading contents of a pointer to a function.  Don't dereference the
     // function.
     return addr;
   }
@@ -707,7 +717,7 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
 }
 
 static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
-  // The sub node has the kASTNeedAddress flag set to generating code for
+  // The sub node has the kASTNeedAddress flag set so generating code for
   // it will calculate its address.
   return GenerateExpression(gen, node->sub);
 }
@@ -737,8 +747,11 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     return LoadBitfield(gen, load, node);
   } else {
     // Need value, load it.
-    // TODO: structs.
-    // TODO: var reference?
+    // Unless it's an array or struct/union.
+    if (TypeIsArray(member->member->symbol->type) ||
+        TypeIsStructOrUnion(member->member->symbol->type)) {
+      return addr;
+    }
     IROpcode load_op = GetLoadOpcode((ASTNode*)node);
     IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
     CheckForVarUse(load, (ASTNode*)node);
@@ -766,7 +779,7 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
   GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, right));
 
   GeneratorEmit(gen, label);
-  return GeneratorEmit(gen, NewIR1(IR_OP(movi), tmp));
+  return tmp;
 }
 
 static struct {
@@ -855,7 +868,7 @@ static IRNode* GenerateBuiltinVaCopy(Generator* gen, VectorASTNode* node) {
 }
 
 static IRNode* GenerateMask(Generator* gen, ASTNode* node, IRNode* input,
-                            int32_t mask) {
+                            int64_t mask) {
   if (IRIsConst(input)) {
     assert(TypeIsIntegral(node->type));
     IRConstant* c = (IRConstant*)input;
@@ -867,11 +880,11 @@ static IRNode* GenerateMask(Generator* gen, ASTNode* node, IRNode* input,
 }
 
 static IRNode* GenerateSignExtend(Generator* gen, IRNode* input, ASTNode* node,
-                                  int from, int to) {
-  if (TypeIsUnsigned(node->type)) {
+                                  int size) {
+  int diff = compiler->pointer_size * 8 - size;
+  if (diff == 0) {
     return input;
   }
-  int diff = to - from;
   if (IRIsConst(input)) {
     IRConstant* c = (IRConstant*)input;
     int64_t value = c->value.ivalue;
@@ -892,13 +905,23 @@ static IRNode* GenerateToInt(Generator* gen, ASTNode* node, IROpcode op,
                               GeneratorGetIntConstant(gen, node->type, mask)));
 }
 
+static IRNode* ShortenInt(Generator* gen, ASTNode* node, IRNode* sub,
+                          int size) {
+  if (TypeIsUnsigned(node->type)) {
+    int64_t mask = (1LL << size) - 1;
+    return GenerateMask(gen, node, sub, mask);
+  } else {
+    return GenerateSignExtend(gen, sub, node, size);
+  }
+}
+
 // Conversion.
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
   switch (node->op) {
     case AST_OP(i2s):
     case AST_OP(l2s):
     case AST_OP(ll2s):
-      return GenerateMask(gen, node, sub, 0xffff);
+      return ShortenInt(gen, node, sub, 16);
     case AST_OP(i2c):
     case AST_OP(i2b):
     case AST_OP(s2c):
@@ -907,10 +930,10 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
     case AST_OP(l2b):
     case AST_OP(ll2c):
     case AST_OP(ll2b):
-      return GenerateMask(gen, node, sub, 0xff);
+      return ShortenInt(gen, node, sub, 8);
     case AST_OP(i2l):
     case AST_OP(i2ll):
-      return GenerateSignExtend(gen, sub, node, 32, 64);
+      return sub;
     case AST_OP(i2f):
     case AST_OP(c2f):
     case AST_OP(s2f):
@@ -929,26 +952,19 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
     case AST_OP(ll2ld):
       return GeneratorEmit(gen, NewIR1(IR_OP(i2d), sub));
     case AST_OP(c2i):
-      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 32);
     case AST_OP(c2s):
-      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 16);
     case AST_OP(c2l):
     case AST_OP(c2ll):
-      return GenerateSignExtend(gen, sub, (ASTNode*)node, 8, 64);
-
     case AST_OP(c2b):
     case AST_OP(l2ll):
     case AST_OP(ll2l):
-      return sub;
-
     case AST_OP(s2i):
-      return GenerateSignExtend(gen, sub, (ASTNode*)node, 16, 32);
     case AST_OP(s2l):
     case AST_OP(s2ll):
-      return GenerateSignExtend(gen, sub, (ASTNode*)node, 16, 64);
+      return sub;
     case AST_OP(l2i):
     case AST_OP(ll2i):
-      return GenerateMask(gen, node, sub, 0xffffffff);
+      return ShortenInt(gen, node, sub, 32);
     case AST_OP(f2i):
       return GenerateToInt(gen, node, IR_OP(f2i), sub, 0xffff);
     case AST_OP(f2s):
@@ -1001,6 +1017,7 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
   }
 }
 
+#if 0
 static IRNode* SignExtendOrMaskExpression(Generator* gen, IRNode* inst,
                                           ASTNode* node) {
   if (!IRIsExpression(inst)) {
@@ -1033,6 +1050,7 @@ static IRNode* SignExtendOrMaskExpression(Generator* gen, IRNode* inst,
 
   return inst;
 }
+#endif
 
 // Main expression code generator.  Generates code for one expression and
 // returns the IR Node coding it.

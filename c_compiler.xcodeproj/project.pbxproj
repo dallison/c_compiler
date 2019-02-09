@@ -357,6 +357,14 @@
 		E544B84C1FEACF9200F2C59B /* list.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = list.h; sourceTree = "<group>"; };
 		E544B8531FEADE6500F2C59B /* gvn.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = gvn.c; sourceTree = "<group>"; };
 		E544B8541FEADE6500F2C59B /* gvn.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = gvn.h; sourceTree = "<group>"; };
+		E54C196B21E0277B00B4CECA /* strcat.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strcat.c; sourceTree = "<group>"; };
+		E54C196C21E0281600B4CECA /* strncat.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strncat.c; sourceTree = "<group>"; };
+		E54C196D21E02A4800B4CECA /* strchr.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strchr.c; sourceTree = "<group>"; };
+		E54C196E21E02B1C00B4CECA /* strrchr.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strrchr.c; sourceTree = "<group>"; };
+		E54C196F21E02BB800B4CECA /* strstr.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strstr.c; sourceTree = "<group>"; };
+		E54C197021E02F8F00B4CECA /* memcmp.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = memcmp.c; sourceTree = "<group>"; };
+		E54C197121E0338A00B4CECA /* memmove.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = memmove.c; sourceTree = "<group>"; };
+		E54C197221E04DB600B4CECA /* strtol.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strtol.c; sourceTree = "<group>"; };
 		E560C1AF1FFC685D00527ED5 /* elf_writer.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = elf_writer.c; sourceTree = "<group>"; };
 		E560C1B01FFC685D00527ED5 /* elf.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = elf.h; sourceTree = "<group>"; };
 		E563385320B0B39200368428 /* p_code_optimize.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = p_code_optimize.h; sourceTree = "<group>"; };
@@ -593,13 +601,21 @@
 			isa = PBXGroup;
 			children = (
 				E5300DED20964B39004F6F13 /* strlen.c */,
+				E54C196B21E0277B00B4CECA /* strcat.c */,
+				E54C196C21E0281600B4CECA /* strncat.c */,
+				E54C196D21E02A4800B4CECA /* strchr.c */,
+				E54C196F21E02BB800B4CECA /* strstr.c */,
+				E54C196E21E02B1C00B4CECA /* strrchr.c */,
 				E5300DEE20964B80004F6F13 /* strcpy.c */,
 				E5300DEF20964BED004F6F13 /* strncpy.c */,
 				E5A10D5620978C51009C6D1C /* strcmp.c */,
 				E5A10D572098C5A1009C6D1C /* strncmp.c */,
 				E5A10D54209788FA009C6D1C /* memcpy.c */,
 				E5A10D55209789A1009C6D1C /* memset.c */,
+				E54C197021E02F8F00B4CECA /* memcmp.c */,
+				E54C197121E0338A00B4CECA /* memmove.c */,
 				E5A10D58209E4BF2009C6D1C /* printf.c */,
+				E54C197221E04DB600B4CECA /* strtol.c */,
 			);
 			path = libc;
 			sourceTree = "<group>";
