@@ -51,7 +51,7 @@ void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path);
 void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                              const char* value);
 
-void PreprocessorReplaceMacros(Preprocessor* p, String* line);
+void PreprocessorReplaceMacros(Preprocessor* p, String* line, bool whole_input);
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line);
 Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name);

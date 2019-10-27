@@ -13,6 +13,7 @@
 #include <sys/param.h>
 #include <time.h>
 #include <unistd.h>
+#include <string.h>
 
 #include "compiler.h"
 #include "errors.h"
@@ -259,13 +260,13 @@ void PreprocessorDestruct(Preprocessor* p) {
 
   // Delete all user paths.
   for (size_t i = 0; i < p->user_include_paths.length; i++) {
-    StringDelete((String*)p->user_include_paths.value[i]);
+    StringDelete((String*)p->user_include_paths.value.p[i]);
   }
   VectorDestruct(&p->user_include_paths);
 
   // Delete all system paths.
   for (size_t i = 0; i < p->system_include_paths.length; i++) {
-    StringDelete((String*)p->system_include_paths.value[i]);
+    StringDelete((String*)p->system_include_paths.value.p[i]);
   }
   VectorDestruct(&p->system_include_paths);
 
@@ -466,6 +467,9 @@ static size_t ReadString(String* line, size_t pos, String* result) {
 // Checks if the given macro has the same composition as the arguments.
 static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
                        bool varargs, String* replacement_text) {
+  if (macro->undefined) {
+    return true;
+  }
   if (macro->is_function_like != is_function_like ||
       macro->varargs != varargs) {
     return false;
@@ -479,8 +483,8 @@ static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
     return false;
   }
   for (size_t i = 0; i < args->length; i++) {
-    String* old = (String*)macro->args.value[i];
-    String* new = (String*)args->value[i];
+    String* old = (String*)macro->args.value.p[i];
+    String* new = (String*)args->value.p[i];
     if (!StringEqualString(old, new)) {
       return false;
     }
@@ -532,7 +536,7 @@ static FILE* FindFileInPath(Vector* path, String* filename, size_t* start) {
   for (size_t i = *start; i < path->length; i++) {
     String pathname;
     StringInit(&pathname, NULL);
-    StringPrintf(&pathname, "%s/%s", ((String*)path->value[i])->value,
+    StringPrintf(&pathname, "%s/%s", ((String*)path->value.p[i])->value,
                  filename->value);
     FILE* fp = fopen(pathname.value, "r");
     if (fp != NULL) {
@@ -549,12 +553,85 @@ static FILE* FindFileInPath(Vector* path, String* filename, size_t* start) {
 // Type for function to handle preprocessor commands.
 typedef void (*PreprocessorCommand)(Preprocessor* p, String* line, size_t pos);
 
+static size_t ReadMacroFormalArguments(Preprocessor* p,
+                                       String* line,
+                                       size_t pos,
+                                       String* macro_name,
+                                       Vector* args,
+                                       bool* varargs) {
+  pos++;  // Skip open paren.
+  pos = SkipSpacesAndComments(p, pos, line, NULL);
+  
+  while (line->value[pos] != ')') {
+    String arg;
+    StringInit(&arg, NULL);
+    
+    pos = SkipSpacesAndComments(p, pos, line, NULL);
+    
+    // Check for ... and if so we terminated the arguments and mark
+    // this macro has having a variable number of args.
+    if (line->value[pos] == '.' && line->value[pos + 1] == '.' &&
+        line->value[pos + 2] == '.') {
+      *varargs = true;
+      pos += 3;
+      break;
+    }
+    
+    // Read the argument name.
+    pos = ReadIdentifier(line, pos, &arg);
+    
+    // Make sure it's not already defined in this macro.
+    for (size_t i = 0; i < args->length; i++) {
+      if (StringEqualString((String*)args->value.p[i], &arg)) {
+        PreprocessorError(p, "Duplicate macro argument %s", arg.value);
+        return pos;
+      }
+    }
+    
+    // Add argument to the set of known arguments.
+    VectorAppend(args, NewString(arg.value));
+    
+    // Check for more arguments.
+    pos = SkipSpacesAndComments(p, pos, line, NULL);
+    if (line->value[pos] != ',') {
+      break;
+    }
+    pos++;  // Skip comma.
+  }
+  if (line->value[pos] != ')') {
+    PreprocessorError(p, "Missing ')' for function-like macro %s",
+                      macro_name->value);
+    return pos;
+  }
+  pos++;  // Skip close paren.
+  return pos;
+}
+
+static void CheckHashHash(Preprocessor* p, String* rep) {
+  if (rep->length < 2) {
+    return;
+  }
+  // Starting with ##, not allowed
+  if (rep->value[0] == '#' && rep->value[1] == '#') {
+    PreprocessorError(p, "## is not allowed at start of replacement text");
+  }
+  
+  if (rep->length < 4) {
+    return;
+  }
+  // Ending in ## not allowed.
+  size_t last = rep->length - 1;
+  if (rep->value[last] == '#' && rep->value[last-1] == '#') {
+    PreprocessorError(p, "## is not allowed at end of replacement text");
+  }
+}
+
 static void Define(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     // Ignore this if it is #ifed out.
     return;
   }
-
+  
   // Collect the macro name (the identifier after #define) into a string
   String macro_name;
   StringInit(&macro_name, NULL);
@@ -575,51 +652,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   if (line->value[pos] == '(') {
     // Function like macro, collect the arguments.
     function_like_macro = true;
-    pos++;  // Skip open paren.
-    pos = SkipSpacesAndComments(p, pos, line, NULL);
-
-    while (line->value[pos] != ')') {
-      String arg;
-      StringInit(&arg, NULL);
-
-      pos = SkipSpacesAndComments(p, pos, line, NULL);
-
-      // Check for ... and if so we terminated the arguments and mark
-      // this macro has having a variable number of args.
-      if (line->value[pos] == '.' && line->value[pos + 1] == '.' &&
-          line->value[pos + 2] == '.') {
-        varargs = true;
-        pos += 3;
-        break;
-      }
-
-      // Read the argument name.
-      pos = ReadIdentifier(line, pos, &arg);
-
-      // Make sure it's not already defined in this macro.
-      for (size_t i = 0; i < args.length; i++) {
-        if (StringEqualString((String*)args.value[i], &arg)) {
-          PreprocessorError(p, "Duplicate macro argument %s", arg.value);
-          return;
-        }
-      }
-
-      // Add argument to the set of known arguments.
-      VectorAppend(&args, NewString(arg.value));
-
-      // Check for more arguments.
-      pos = SkipSpacesAndComments(p, pos, line, NULL);
-      if (line->value[pos] != ',') {
-        break;
-      }
-      pos++;  // Skip comma.
-    }
-    if (line->value[pos] != ')') {
-      PreprocessorError(p, "Missing ')' for function-like macro %s",
-                        macro_name.value);
-      return;
-    }
-    pos++;  // Skip close paren.
+    pos = ReadMacroFormalArguments(p, line, pos, &macro_name, &args, &varargs);
   }
 
   // Skip any spaces or comments before the replacement text.
@@ -633,7 +666,8 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   StringInit(&raw_replacement_text, &line->value[pos]);
   StringInit(&replacement_text, NULL);
   CompactString(&raw_replacement_text, &replacement_text);
-
+  CheckHashHash(p, &replacement_text);
+  
   // Check if the macro has already been defined and if so, make sure this
   // definition is the same as the old old.
   Macro* macro = HashTableSearch(&p->macros, macro_name.value);
@@ -681,6 +715,7 @@ static void Undef(Preprocessor* p, String* line, size_t pos) {
   if (pos < line->length) {
     PreprocessorWarning(p, "extra-tokens", "Extra tokens after #undef");
   }
+  StringDestruct(&macro_name);
 }
 
 // #include processing.
@@ -784,7 +819,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   // it as the current source in the Lex.
   Source* include_source = NewSourceFromFile(filename.value, fp);
   include_source->prev = p->lex->source;
-  printf("Including file %s\n", filename.value);
+  // printf("Including file %s\n", filename.value);
 
   // Save current path index and set new current.
   p->lex->source->path_index = compiler->current_include_path_index;
@@ -811,11 +846,11 @@ static void IncludeNext(Preprocessor* p, String* line, size_t pos) {
 }
 
 // Update the is_compiled_in state based on the if_stack.
-// An earilier compiled-out block dominates all lower level
+// An earlier compiled-out block dominates all lower level
 // blocks.
 static void UpdateState(Preprocessor* p) {
   for (size_t i = 0; i < p->if_stack.length; i++) {
-    if (p->if_stack.value[i] == NULL || p->if_stack.value[i] == (void*)(-1LL)) {
+    if (p->if_stack.value.p[i] == NULL || p->if_stack.value.p[i] == (void*)(-1LL)) {
       p->is_compiled_in = false;
       return;
     }
@@ -823,31 +858,19 @@ static void UpdateState(Preprocessor* p) {
   p->is_compiled_in = true;
 }
 
-// #if processing.
-static void If(Preprocessor* p, String* line, size_t pos) {
+static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   static int true_value;
-
-  // #if processing needs to evaluate the expression only if the current
-  // state of conditional processing is true.
-  if (!p->is_compiled_in) {
-    VectorPush(&p->if_stack, NULL);
-    return;
-  }
-
+  
   // Allow the lexical analyzer to see the controlling expression.
   p->is_compiled_in = true;
 
-  String controlling_expr;
-  StringInit(&controlling_expr, &line->value[pos]);
-  StringAppend(&controlling_expr, "\n\n");
-
   Lex lex;
   Lex* prev_lex = p->lex;
-  LexInitFromString(&lex, p->lex->source->filename.value, &controlling_expr, p);
+  LexInitFromString(&lex, p->lex->source->filename.value, expr_string, p);
   lex.preprocessor_mode = true;
   lex.assembler_mode = p->lex->assembler_mode;
   LexNextToken(&lex);
-
+  
   Syntax syntax;
   SyntaxInit(&syntax, &lex);
   void* controlling_value = NULL;
@@ -860,14 +883,31 @@ static void If(Preprocessor* p, String* line, size_t pos) {
     }
   }
 
-  VectorPush(&p->if_stack, controlling_value);
-
-  StringDestruct(&controlling_expr);
   SyntaxDestruct(&syntax);
   lex.source = NULL;  // Prevent Lex from freeing source.
   LexDestruct(&lex);
   p->lex = prev_lex;
 
+  return controlling_value;
+}
+
+// #if processing.
+static void If(Preprocessor* p, String* line, size_t pos) {
+  // #if processing needs to evaluate the expression only if the current
+  // state of conditional processing is true.
+  if (!p->is_compiled_in) {
+    VectorPush(&p->if_stack, NULL);
+    return;
+  }
+
+  String controlling_expr;
+  StringInit(&controlling_expr, &line->value[pos]);
+  StringAppend(&controlling_expr, "\n\n");
+
+  void* controlling_value = EvaluateExpression(p, &controlling_expr);
+  StringDestruct(&controlling_expr);
+  VectorPush(&p->if_stack, controlling_value);
+  
   // Update is is_compiled_in state.
   UpdateState(p);
 }
@@ -927,8 +967,6 @@ static void Ifdef(Preprocessor* p, String* line, size_t pos) {
 }
 
 static void Elif(Preprocessor* p, String* line, size_t pos) {
-  static int true_value;
-
   if (p->if_stack.length == 0) {
     PreprocessorError(p, "#elif outside #if..#endif");
     return;
@@ -943,7 +981,7 @@ static void Elif(Preprocessor* p, String* line, size_t pos) {
   //        #else are compiled out
   // 3. other value: the most recent #if or #elif was compiled in and we
   //                 now compile out all subsequent blocks.
-  void* top_value = p->if_stack.value[p->if_stack.length - 1];
+  void* top_value = p->if_stack.value.p[p->if_stack.length - 1];
   if (top_value == NULL) {
     // Need to evaulate expression.
   } else if (top_value == (void*)(-1LL)) {
@@ -953,45 +991,21 @@ static void Elif(Preprocessor* p, String* line, size_t pos) {
   } else {
     // Replace the top of the if_stack with -1 to tell all subsequent #elif
     // and #else that this #if block has been compiled in.
-    p->if_stack.value[p->if_stack.length - 1] = (void*)(-1LL);
+    p->if_stack.value.p[p->if_stack.length - 1] = (void*)(-1LL);
     UpdateState(p);
     return;
   }
-
-  // Allow the lexical analyzer to see the controlling expression.
-  p->is_compiled_in = true;
 
   String controlling_expr;
   StringInit(&controlling_expr, &line->value[pos]);
   StringAppend(&controlling_expr, "\n\n");
 
-  Lex lex;
-  Lex* prev_lex = p->lex;
-  LexInitFromString(&lex, p->lex->source->filename.value, &controlling_expr, p);
-  lex.preprocessor_mode = true;
-  lex.assembler_mode = p->lex->assembler_mode;
-  LexNextToken(&lex);
-
-  Syntax syntax;
-  SyntaxInit(&syntax, &lex);
-  void* controlling_value = NULL;
-  ASTNode* expr = SyntaxParseExpression(&syntax, 0);
-  if (expr != NULL) {
-    AnalyzeExpression(expr);
-    int64_t value;
-    if (EvaluateIntegerExpression(expr, &value)) {
-      controlling_value = value == 0 ? NULL : &true_value;
-    }
-  }
+  void* controlling_value = EvaluateExpression(p, &controlling_expr);
 
   // Replace the top of the if_stack with the new controlling value.
-  p->if_stack.value[p->if_stack.length - 1] = controlling_value;
+  p->if_stack.value.p[p->if_stack.length - 1] = controlling_value;
 
   StringDestruct(&controlling_expr);
-  SyntaxDestruct(&syntax);
-  lex.source = NULL;  // Prevent Lex from freeing source.
-  LexDestruct(&lex);
-  p->lex = prev_lex;
 
   UpdateState(p);
 }
@@ -1005,8 +1019,8 @@ static void Else(Preprocessor* p, String* line, size_t pos) {
   }
   // #else sets the top of the if_stack to true only if it current
   // has the value NULL (meaning that no #if or #elif block was compiled in)
-  void* top_value = p->if_stack.value[p->if_stack.length - 1];
-  p->if_stack.value[p->if_stack.length - 1] =
+  void* top_value = p->if_stack.value.p[p->if_stack.length - 1];
+  p->if_stack.value.p[p->if_stack.length - 1] =
       top_value == NULL ? &inverted_value : NULL;
 
   pos = SkipSpacesAndComments(p, pos, line, NULL);
@@ -1078,7 +1092,7 @@ static struct {
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   size_t pos = SkipSpacesAndComments(p, 0, line, NULL);
-  if (line->value[pos] != '#') {
+  if (pos >= line->length || line->value[pos] != '#') {
     return false;
   }
   pos++;
@@ -1115,391 +1129,15 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
                           command_name.value);
       }
     }
+    StringDestruct(&command_name);
     return true;
   }
 
   // Run the command parser.
   command(p, line, pos);
+  
+  StringDestruct(&command_name);
   return true;
-}
-
-Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name) {
-  return HashTableSearch(&p->macros, macro_name->value);
-}
-
-bool PreprocessorLineIsCompiledIn(Preprocessor* p) { return p->is_compiled_in; }
-
-// Skip forward in the input line to the next possible macro name.  Any
-// characters skipped are copied to the 'newline'.
-static size_t SkipToMacroName(Preprocessor* p, String* line, size_t pos,
-                              String* newline, bool* hash, bool* hashhash) {
-  bool in_string = false;
-  bool in_comment = p->lex->in_comment;
-  char prev_char = '\0';
-  while (pos < line->length) {
-    if (line->value[pos] == '"') {
-      if (prev_char != '\\') {
-        in_string = !in_string;
-      }
-    }
-
-    if (!in_string) {
-      if (!in_comment && line->value[pos] == '/' &&
-          line->value[pos + 1] == '/') {
-        // //comment, skip to end of line
-        while (pos < line->length) {
-          StringAppendChar(newline, line->value[pos++]);
-        }
-        return pos;
-      }
-      if (!in_comment && line->value[pos] == '/' &&
-          line->value[pos + 1] == '*') {
-        pos += 2;
-        in_comment = true;
-        StringAppend(newline, "/*");
-      }
-      if (in_comment && line->value[pos] == '*' &&
-          line->value[pos + 1] == '/') {
-        pos += 2;
-        in_comment = false;
-        StringAppend(newline, "*/");
-      }
-
-      if (in_comment) {
-        StringAppendChar(newline, line->value[pos]);
-        pos++;
-        continue;
-      }
-      if ((isalpha(line->value[pos]) || line->value[pos] == '_') &&
-          !isdigit(prev_char)) {
-        break;
-      }
-      if (line->value[pos] == '#') {
-        if (line->value[pos + 1] == '#') {
-          *hashhash = true;
-          pos += 2;
-        } else {
-          *hash = true;
-          pos++;
-        }
-        break;
-      }
-    }
-
-    // Merge adjacent spaces into one.
-    if (in_string || !(isblank(prev_char) && isblank(line->value[pos]))) {
-      prev_char = line->value[pos];
-      StringAppendChar(newline, prev_char);
-    }
-    pos++;
-  }
-  return pos;
-}
-
-typedef struct {
-  String* formal;
-  String* actual;
-} Arg;
-
-static String* FindMacroArg(Vector* args, String* name) {
-  for (size_t i = 0; i < args->length; i++) {
-    Arg* arg = args->value[i];
-    if (StringEqualString(arg->formal, name)) {
-      return arg->actual;
-    }
-  }
-  return NULL;
-}
-
-// We have a function-like macro invokation.  It will be followed by
-// a set of actual arguments.
-static size_t ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
-                                       String* line, size_t pos,
-                                       String* newline) {
-  pos = SkipSpacesAndComments(p, pos, line, NULL);
-  if (line->value[pos] != '(') {
-    PreprocessorError(p, "Missing '(' for function-like macro");
-    return pos;
-  }
-  pos++;  // Skip (.
-
-  // Collect the actual arguments.
-  int formal_index = 0;
-  int actual_index = 0;
-  bool too_many_args = false;
-  const char* va_arg_separator = "";
-
-  // Mapping of formal to actual for each argument.   Each memory of the 'args'
-  // vector is a pointer to an Arg object.
-  Vector args;
-  VectorInit(&args);
-  String va_args;
-  StringInit(&va_args, NULL);
-
-  while (!SourceEof(p->lex->source) && line->value[pos] != ')') {
-    String* actual = NewString(NULL);
-    int num_nested_brackets = 1;
-    bool in_string = false;
-    while (!SourceEof(p->lex->source)) {
-      pos = SkipSpacesAndComments(p, pos, line, actual);
-      if (pos >= line->length) {
-        // In a function-like macro invokation the language allows newline
-        // characters to be treated as spaces.  This means we need to read
-        // another line when we encounter the end of line.
-        StringClear(line);
-        SourceReadLine(p->lex->source, line);
-        pos = 0;
-        continue;
-      }
-      char ch = line->value[pos];
-      if (ch == '"') {
-        in_string = !in_string;
-      } else if (ch == '\\') {
-        StringAppendChar(actual, ch);
-        pos++;
-        StringAppendChar(actual, line->value[pos++]);
-        continue;
-      }
-
-      if (!in_string) {
-        if (ch == '(') {
-          num_nested_brackets++;
-        } else if (ch == ')') {
-          num_nested_brackets--;
-          if (num_nested_brackets == 0) {
-            // Close paren at end of actual.
-            break;
-          }
-        }
-        if (num_nested_brackets == 1 && ch == ',') {
-          // Comma outside of nested brackets, end of actual.
-          break;
-        }
-      }
-      StringAppendChar(actual, ch);
-      pos++;
-    }
-
-    // Replace all macros in the actual argument.
-    PreprocessorReplaceMacros(p, actual);
-
-    if (actual_index >= macro->args.length) {
-      if (macro->varargs) {
-        // Append actual arg to the va_args string, separated by comma from
-        // the previous one.
-        StringAppend(&va_args, va_arg_separator);
-        StringAppend(&va_args, actual->value);
-        StringDelete(actual);
-        va_arg_separator = ",";
-      } else {
-        // Note the fact that we have too many arguments for an non-varargs
-        // macro.
-        too_many_args = true;
-      }
-    } else {
-      Arg* arg = malloc(sizeof(Arg));
-      arg->formal = macro->args.value[formal_index];
-      arg->actual = actual;
-      VectorAppend(&args, arg);
-      formal_index++;
-    }
-    actual_index++;
-    if (line->value[pos] == ',') {
-      pos++;
-    }
-  }
-  if (line->value[pos] != ')') {
-    PreprocessorError(p, "Missing ')' for function like macro arguments");
-  } else {
-    pos++;
-  }
-
-  if (too_many_args) {
-    PreprocessorError(
-        p, "Too many actual arguments for macro %s; expected %zd, got %d)",
-        macro->name.value, macro->args.length, actual_index);
-  }
-  if (actual_index < formal_index) {
-    PreprocessorError(
-        p, "Insufficient actual arguments for macro %s; expected %zd, got %d)",
-        macro->name.value, macro->args.length, actual_index);
-  }
-
-  // Now we process the macro replacement list, replacing all formal arguments
-  // by their actuals.  This handles # and ## operators.
-  String temp;
-  StringInit(&temp, NULL);
-
-  size_t i = 0;
-
-  // Alias to avoid excess typing.
-  String* rep = &macro->replacement_text;
-
-  while (i < rep->length) {
-    bool hash = false;
-    bool hashhash = false;
-    i = SkipToMacroName(p, rep, i, &temp, &hash, &hashhash);
-    if (i >= rep->length) {
-      break;
-    }
-    String possible_arg;
-    StringInit(&possible_arg, NULL);
-    i = ReadIdentifier(rep, i, &possible_arg);
-    if (StringEqual(&possible_arg, "__VA_ARGS__")) {
-      if (macro->varargs) {
-        StringAppendString(&temp, &va_args);
-      } else {
-        PreprocessorError(p, "Use of __VA_ARGS__ outside of varargs macro");
-      }
-    } else {
-      if (hash) {
-        // # must be followed by an argument name to be effective.
-        String* actual = FindMacroArg(&args, &possible_arg);
-        if (actual == NULL) {
-          // Not an argument, retain original text.
-          StringAppendChar(&temp, '#');
-          StringAppendString(&temp, &possible_arg);
-        } else {
-          // Form a string literal out of the argument value, but first compact
-          // it by trimming spaces at both ends and replacing multiple spaces by
-          // single spaces.  Special characters in argumenta are then escaped.
-          String literal;
-          StringInit(&literal, NULL);
-          CompactString(actual, &literal);
-          StringAppendChar(&temp, '"');
-          StringEscape(&literal, &temp);
-          StringAppendChar(&temp, '"');
-          StringDestruct(&literal);
-        }
-        continue;
-      } else if (hashhash) {
-        // Back up to the first non-space char.
-        StringTrimEnd(&temp);
-        i = SkipSpacesAndComments(p, i, rep, NULL);
-      }
-      String* actual = FindMacroArg(&args, &possible_arg);
-      if (actual != NULL) {
-        StringAppendString(&temp, actual);
-      } else {
-        StringAppendString(&temp, &possible_arg);
-      }
-    }
-  }
-  StringAppendString(newline, &temp);
-  StringDestruct(&temp);
-
-  // Now delete the args and va_args.  Note that we don't delete the formal
-  // field in the args vector since this is owned by the macro itself.  The
-  // actual is deleted.
-  for (size_t i = 0; i < args.length; i++) {
-    Arg* arg = args.value[i];
-    StringDelete(arg->actual);
-  }
-  VectorDestruct(&args);
-  StringDestruct(&va_args);
-  return pos;
-}
-
-void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
-  int total_replacements = 0;
-  const int kMaxMacroReplacements = 1000;
-
-  int num_replacements = 0;
-  do {
-    size_t pos = 0;
-    num_replacements = 0;
-
-    String newline;
-    StringInit(&newline, NULL);
-
-    while (pos < line->length) {
-      bool hash = false;
-      bool hashhash = false;
-      pos = SkipToMacroName(p, line, pos, &newline, &hash, &hashhash);
-      if (pos >= line->length) {
-        break;
-      }
-      if (hash) {
-        // Keep # token.
-        StringAppendChar(&newline, '#');
-        continue;
-      } else if (hashhash) {
-        // ## tokens are deleted.
-        // TODO: does this concatenate?
-        continue;
-      }
-
-      String possible_macro_name;
-      StringInit(&possible_macro_name, NULL);
-      pos = ReadIdentifier(line, pos, &possible_macro_name);
-      if (StringEqual(&possible_macro_name, "defined")) {
-        // We don't replace any macros in the whole "defined" unary operator
-        // because this needs to be seen by the expression parser.  So we
-        // just copy the 'defined' and the following (possibly parenthesized)
-        // macro name to the newline.
-        StringAppendString(&newline, &possible_macro_name);
-        pos = SkipSpacesAndComments(p, pos, line, &newline);
-        if (line->value[pos] == '(') {
-          StringAppendChar(&newline, '(');
-          StringClear(&possible_macro_name);
-          pos++;
-          pos = ReadIdentifier(line, pos, &possible_macro_name);
-          StringAppendString(&newline, &possible_macro_name);
-          if (line->value[pos] == ')') {
-            StringAppendChar(&newline, ')');
-            pos++;
-          }
-        } else {
-          pos = ReadIdentifier(line, pos, &possible_macro_name);
-          StringAppendString(&newline, &possible_macro_name);
-        }
-      } else if (StringEqual(&possible_macro_name, "_Pragma")) {
-        // TODO:
-      } else if (StringEqual(&possible_macro_name, "__FILE__")) {
-        StringPrintf(&newline, "\"%s\"", &p->lex->source->filename);
-      } else if (StringEqual(&possible_macro_name, "__LINE__")) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", p->lex->source->lineno);
-        StringAppend(&newline, buf);
-      } else if (StringEqual(&possible_macro_name, "__func__") ||
-                 StringEqual(&possible_macro_name, "__FUNCTION__")) {
-        if (compiler->current_function != NULL) {
-          StringPrintf(
-              &newline, "\"%s\"",
-              compiler->current_function->info.function.symbol->name.value);
-        }
-      } else {
-        // Not a predefined macro, let's try a user-defined one.
-        Macro* macro = HashTableSearch(&p->macros, possible_macro_name.value);
-        if (macro != NULL) {
-          // printf("replacing macro %s with %s\n",possible_macro_name.value,
-          // macro->replacement_text.value);
-          if (macro->is_function_like) {
-            // Function-like macro, more complex processing needed.
-            pos = ReplaceFunctionLikeMacro(p, macro, line, pos, &newline);
-          } else {
-            // Regular macro.
-            StringAppendString(&newline, &macro->replacement_text);
-          }
-          num_replacements++;
-        } else {
-          StringAppendString(&newline, &possible_macro_name);
-        }
-      }
-      StringDestruct(&possible_macro_name);
-    }
-
-    StringSetString(line, &newline);
-    StringDestruct(&newline);
-
-    total_replacements += num_replacements;
-
-    // Check for infinite recursion.
-    if (total_replacements > kMaxMacroReplacements) {
-      PreprocessorError(p, "Macro recursion detected");
-      return;
-    }
-  } while (num_replacements > 0);
 }
 
 bool PreprocessorHasInclude(Preprocessor* p, String* filename,
@@ -1543,3 +1181,571 @@ bool PreprocessorHasIncludeNext(Preprocessor* p, String* filename,
   fclose(fp);
   return true;
 }
+
+//
+// Macro replacement.
+//
+
+Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name) {
+  return HashTableSearch(&p->macros, macro_name->value);
+}
+
+bool PreprocessorLineIsCompiledIn(Preprocessor* p) { return p->is_compiled_in; }
+
+static size_t SkipIntegerSuffix(String* line, size_t pos,
+                              String* newline) {
+  char ch = toupper(line->value[pos]);
+  bool foundu = false;
+  if (ch == 'U') {
+    StringAppendChar(newline, 'U');
+    pos++;
+    foundu = true;
+  }
+  ch = toupper(line->value[pos]);
+  if (ch == 'L') {
+    StringAppendChar(newline, 'L');
+    pos++;
+  }
+  ch = toupper(line->value[pos]);
+  if (ch == 'L') {
+    StringAppendChar(newline, 'L');
+    pos++;
+  }
+  if (!foundu) {
+    ch = toupper(line->value[pos]);
+    // Allow U to appear after L or LL.
+    if (ch == 'U') {
+      char buf[16];
+      buf[0] = 'U';
+      strcpy(&buf[1], newline->value);
+      StringSet(newline, buf);
+      pos++;
+    }
+  }
+  return pos;
+}
+
+// Collect a floating point suffix
+// Allows F or L.
+static size_t SkipFloatingSuffix(String* line, size_t pos,
+                                 String* newline) {
+  char ch = toupper(line->value[pos]);
+  if (ch == 'F') {
+    StringAppendChar(newline, 'F');
+    pos++;
+  } else {
+    ch = toupper(line->value[pos]);
+    if (ch == 'L') {
+      StringAppendChar(newline, 'L');
+      pos++;
+    }
+  }
+  return pos;
+}
+
+// Skip a number preprocessing token, copying it to newline.
+static size_t SkipNumber(String* line, size_t pos,
+                         String* newline) {
+  char ch = line->value[pos];
+  bool seenexp = false;      // Have we seen an exponent?
+  bool seendot = ch == '.';  // Have we seen a dot?
+  bool seensign = false;     // Have we seen a sign char?
+  
+  while (pos < line->length) {
+    ch = line->value[pos];
+    if (ch == '.') {
+      if (seendot) {
+        // Two dots terminate number.
+        break;
+      }
+      seendot = true;
+    } else if (ch == 'e' || ch == 'E') {
+      if (seenexp) {
+        // Already seen exponent, terminate.
+        break;
+      }
+      seenexp = true;
+    } else if (ch == '+' || ch == '-') {
+      if (!seenexp || seensign) {
+        // Signs can only be after exponent.
+        break;
+      }
+      seensign = true;
+    } else if (!isdigit(ch)) {
+      // Not a digit, terminate.
+      break;
+    }
+    StringAppendChar(newline, ch);
+    pos++;
+  }
+  
+  // Now we can determine the type.  If we've seen a dot
+  // or exponent then we are a floating point number.
+  // A suffix of ‘F’ or ‘f’ is also floating point.
+  bool isfp = seendot || seenexp || toupper(line->value[pos]) == 'F';
+  
+  // Skip the appropriate type of suffix.
+  if (isfp) {
+    SkipFloatingSuffix(line, pos, newline);
+  } else {
+    SkipIntegerSuffix(line, pos, newline);
+  }
+  return pos;
+}
+
+// Skip forward in the input line to the next possible macro name.  Any
+// characters skipped are copied to the 'newline'.  A macro name is am
+// identifier preprocessing token.  Stops when we have a possible
+// macro name or the # operator.
+static size_t SkipToMacroName(Preprocessor* p,
+                              String* line, size_t pos,
+                              String* newline,
+                              bool process_hash,
+                              bool* hash) {
+  bool in_string = false;
+  bool in_comment = p->lex->in_comment;
+  char prev_char = '\0';
+  while (pos < line->length) {
+    char ch = line->value[pos];
+    if ((ch == 'L' || ch == 'l') && line->value[pos+1] == '"') {
+      // Long string.
+      StringAppendChar(newline, ch);
+      pos++;
+      ch = line->value[pos];
+    }
+    // Start of string?  If so, in_string will be set to true.
+    if (ch == '"') {
+      if (prev_char != '\\') {
+        in_string = !in_string;
+      }
+    }
+    
+    if (!in_string) {
+      // For a // comment we copy to the end of line.
+      if (!in_comment && ch == '/' &&
+          line->value[pos + 1] == '/') {
+        // //comment, skip to end of line
+        while (pos < line->length) {
+          StringAppendChar(newline, line->value[pos++]);
+        }
+        return pos;
+      }
+      
+      // Multiline comment copy intact.
+      if (!in_comment && ch == '/' &&
+          line->value[pos + 1] == '*') {
+        pos += 2;
+        in_comment = true;
+        StringAppend(newline, "/*");
+      }
+      if (in_comment && ch == '*' &&
+          line->value[pos + 1] == '/') {
+        pos += 2;
+        in_comment = false;
+        StringAppend(newline, "*/");
+      }
+
+      if (in_comment || in_string) {
+        StringAppendChar(newline, line->value[pos]);
+        pos++;
+        continue;
+      }
+      
+      // Number, including floating point.
+      if (isdigit(ch) ||
+          (ch == '.' && isdigit(line->value[pos+1]))) {
+        pos = SkipNumber(line, pos, newline);
+        continue;
+      }
+      
+      // # operator.  Process if needed.
+      if (ch == '#') {
+        if (process_hash) {
+          *hash = true;
+          pos++;
+          while (isspace(line->value[pos])) {
+            pos++;
+          }
+          break;
+        }
+      }
+      
+      // Possible macro name.
+      if ((isalpha(ch) || ch == '_')) {
+        break;
+      }
+    }
+
+    // Append current char, but also merge adjacent spaces as long
+    // as we are not in a string.
+    if (in_string || !(isblank(prev_char) && isblank(ch))) {
+      prev_char = ch;
+      StringAppendChar(newline, prev_char);
+    }
+    pos++;
+  }
+  return pos;
+}
+
+typedef struct {
+  String* formal;
+  String* actual;
+} Arg;
+
+static String* FindMacroArg(Vector* args, String* name) {
+  for (size_t i = 0; i < args->length; i++) {
+    Arg* arg = args->value.p[i];
+    if (StringEqualString(arg->formal, name)) {
+      return arg->actual;
+    }
+  }
+  return NULL;
+}
+
+// Collect the actual arguments from the source code.
+static size_t CollectActualArguments(Preprocessor* p,
+                                     String* line,
+                                     size_t pos,
+                                     Macro* macro,
+                                     Vector* args,
+                                     String* va_args,
+                                     bool whole_input) {
+  int formal_index = 0;
+  int actual_index = 0;
+  bool too_many_args = false;
+  const char* va_arg_separator = "";
+  
+  while (!SourceEof(p->lex->source) && line->value[pos] != ')') {
+    String* actual = NewString(NULL);
+    int num_nested_brackets = 1;
+    bool in_string = false;
+    while (!SourceEof(p->lex->source)) {
+      pos = SkipSpacesAndComments(p, pos, line, actual);
+      if (pos >= line->length) {
+        if (whole_input) {
+          break;
+        }
+        // In a function-like macro invocation the language allows newline
+        // characters to be treated as spaces.  This means we need to read
+        // another line when we encounter the end of line.
+        StringClear(line);
+        SourceReadLine(p->lex->source, line);
+        pos = 0;
+        continue;
+      }
+      char ch = line->value[pos];
+      if (ch == '"') {
+        in_string = !in_string;
+      } else if (ch == '\\') {
+        StringAppendChar(actual, ch);
+        pos++;
+        StringAppendChar(actual, line->value[pos++]);
+        continue;
+      }
+      
+      if (!in_string) {
+        if (ch == '(') {
+          num_nested_brackets++;
+        } else if (ch == ')') {
+          num_nested_brackets--;
+          if (num_nested_brackets == 0) {
+            // Close paren at end of actual.
+            break;
+          }
+        }
+        if (num_nested_brackets == 1 && ch == ',') {
+          // Comma outside of nested brackets, end of actual.
+          break;
+        }
+      }
+      StringAppendChar(actual, ch);
+      pos++;
+    }
+    
+    // Replace all macros in the actual argument.
+    PreprocessorReplaceMacros(p, actual, true);
+    
+    if (actual_index >= macro->args.length) {
+      if (macro->varargs) {
+        // Append actual arg to the va_args string, separated by comma from
+        // the previous one.
+        StringAppend(va_args, va_arg_separator);
+        StringAppend(va_args, actual->value);
+        StringDelete(actual);
+        va_arg_separator = ",";
+      } else {
+        // Note the fact that we have too many arguments for an non-varargs
+        // macro.
+        too_many_args = true;
+      }
+    } else {
+      Arg* arg = malloc(sizeof(Arg));
+      arg->formal = macro->args.value.p[formal_index];
+      arg->actual = actual;
+      VectorAppend(args, arg);
+      formal_index++;
+    }
+    actual_index++;
+    if (line->value[pos] == ',') {
+      pos++;
+    }
+  }
+  if (line->value[pos] != ')') {
+    PreprocessorError(p, "Missing ')' for function like macro arguments");
+  } else {
+    pos++;
+  }
+  
+  if (too_many_args) {
+    PreprocessorError(
+                      p, "Too many actual arguments for macro %s; expected %zd, got %d)",
+                      macro->name.value, macro->args.length, actual_index);
+  }
+  if (actual_index < formal_index) {
+    PreprocessorError(
+                      p, "Insufficient actual arguments for macro %s; expected %zd, got %d)",
+                      macro->name.value, macro->args.length, actual_index);
+  }
+  return pos;
+}
+
+// Append line to newline, removing ## tokens with surrounding
+// whitespace, joining adjacent tokens.
+static void AppendPastedLine(String* newline, String* line) {
+  for (size_t i = 0; i < line->length; i++) {
+    size_t next = i;
+    if (isspace(line->value[i])) {
+      // Lookahead for non-space
+      while (isspace(line->value[next])) {
+        next++;
+      }
+    }
+    // ## token?
+    if (line->value[next] == '#' && line->value[next+1] == '#') {
+      next += 2;      // Skip ##.
+      // Skip any whitespace following ##
+      while (isspace(line->value[next])) {
+        next++;
+      }
+      i = next - 1;     // i wil be incremented at end of loop.
+    } else {
+      StringAppendChar(newline, line->value[i]);
+    }
+  }
+}
+
+// Process any macros and arguments in the replacement text. This also
+// handles the # operator.
+static void ProcessFunctionLikeReplacementText(Preprocessor* p,
+                                   Macro* macro,
+                                   String* newline,
+                                   Vector* args,
+                                   String* va_args) {
+  String temp;
+  StringInit(&temp, NULL);
+  
+  size_t i = 0;
+  
+  // Alias to avoid excess typing.
+  String* rep = &macro->replacement_text;
+  
+  while (i < rep->length) {
+    bool hash = false;
+    i = SkipToMacroName(p, rep, i, &temp, true, &hash);
+    if (i >= rep->length) {
+      break;
+    }
+    String possible_arg;
+    StringInit(&possible_arg, NULL);
+    i = ReadIdentifier(rep, i, &possible_arg);
+    if (StringEqual(&possible_arg, "__VA_ARGS__")) {
+      if (macro->varargs) {
+        StringAppendString(&temp, va_args);
+      } else {
+        PreprocessorError(p, "Use of __VA_ARGS__ outside of varargs macro");
+      }
+    } else {
+      if (hash) {
+        // # must be followed by an argument name to be effective.
+        String* actual = FindMacroArg(args, &possible_arg);
+        if (actual == NULL) {
+          // Not an argument, error.
+          PreprocessorError(p, "# is not followed by a macro argument name");
+        } else {
+          // Form a string literal out of the argument value, but first compact
+          // it by trimming spaces at both ends and replacing multiple spaces by
+          // single spaces.  Special characters in argumenta are then escaped.
+          String literal;
+          StringInit(&literal, NULL);
+          String compacted_actual;
+          StringInit(&compacted_actual, actual->value);
+          CompactString(&compacted_actual, &literal);
+          StringAppendChar(&temp, '"');
+          StringEscape(&literal, &temp);
+          StringAppendChar(&temp, '"');
+          StringDestruct(&literal);
+          StringDestruct(&compacted_actual);
+        }
+        continue;
+      }
+      String* actual = FindMacroArg(args, &possible_arg);
+      if (actual != NULL) {
+        StringAppendString(&temp, actual);
+      } else {
+        StringAppendString(&temp, &possible_arg);
+      }
+    }
+  }
+  StringAppendString(newline, &temp);
+  StringDestruct(&temp);
+}
+
+// We have a function-like macro invokation.  It will be followed by
+// a set of actual arguments.
+static size_t ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
+                                       String* line, size_t pos,
+                                       String* newline,
+                                       bool whole_input) {
+  pos = SkipSpacesAndComments(p, pos, line, NULL);
+  if (line->value[pos] != '(') {
+    PreprocessorError(p, "Missing '(' for function-like macro");
+    return pos;
+  }
+  pos++;  // Skip (.
+
+  // Collect the actual arguments.
+  // Mapping of formal to actual for each argument.   Each memory of the 'args'
+  // vector is a pointer to an Arg object.
+  Vector args;
+  VectorInit(&args);
+  String va_args;
+  StringInit(&va_args, NULL);
+  pos = CollectActualArguments(p, line, pos, macro, &args, &va_args, whole_input);
+
+  // Now we process the macro replacement list, replacing all formal arguments
+  // by their actuals.  This handles # operator.
+  ProcessFunctionLikeReplacementText(p, macro, newline, &args, &va_args);
+  
+  // Now delete the args and va_args.  Note that we don't delete the formal
+  // field in the args vector since this is owned by the macro itself.  The
+  // actual is deleted.
+  for (size_t i = 0; i < args.length; i++) {
+    Arg* arg = args.value.p[i];
+    StringDelete(arg->actual);
+  }
+  VectorDestruct(&args);
+  StringDestruct(&va_args);
+  return pos;
+}
+
+// We have a possible macro name.  See if it's a macro or other special
+// name and if so, replace it by the replacement text.
+static size_t ProcessPossibleMacro(Preprocessor* p,
+                                   String* possible_macro_name,
+                                   String* line,
+                                   size_t pos,
+                                   String* newline,
+                                   int* num_replacements,
+                                   bool whole_input) {
+  if (StringEqual(possible_macro_name, "defined")) {
+    // We don't replace any macros in the whole "defined" unary operator
+    // because this needs to be seen by the expression parser.  So we
+    // just copy the 'defined' and the following (possibly parenthesized)
+    // macro name to the newline.
+    StringAppendString(newline, possible_macro_name);
+    pos = SkipSpacesAndComments(p, pos, line, newline);
+    if (line->value[pos] == '(') {
+      StringAppendChar(newline, '(');
+      StringClear(possible_macro_name);
+      pos++;
+      pos = ReadIdentifier(line, pos, possible_macro_name);
+      StringAppendString(newline, possible_macro_name);
+      if (line->value[pos] == ')') {
+        StringAppendChar(newline, ')');
+        pos++;
+      }
+    } else {
+      pos = ReadIdentifier(line, pos, possible_macro_name);
+      StringAppendString(newline, possible_macro_name);
+    }
+  } else if (StringEqual(possible_macro_name, "_Pragma")) {
+    // No pragmas in this compiler.
+  } else if (StringEqual(possible_macro_name, "__FILE__")) {
+    StringPrintf(newline, "\"%s\"", &p->lex->source->filename);
+  } else if (StringEqual(possible_macro_name, "__LINE__")) {
+    StringPrintf(newline, "%d", p->lex->source->lineno);
+  } else if (StringEqual(possible_macro_name, "__func__") ||
+             StringEqual(possible_macro_name, "__FUNCTION__")) {
+    if (compiler->current_function != NULL) {
+      StringPrintf(
+                   newline, "\"%s\"",
+                   compiler->current_function->info.function.symbol->name.value);
+    }
+  } else {
+    // Not a predefined macro, let's try a user-defined one.
+    Macro* macro = HashTableSearch(&p->macros, possible_macro_name->value);
+    if (macro != NULL) {
+      if (macro->is_function_like) {
+        // Function-like macro, more complex processing needed.
+        pos = ReplaceFunctionLikeMacro(p, macro, line, pos, newline, whole_input);
+      } else {
+        // Regular macro.
+        AppendPastedLine(newline, &macro->replacement_text);
+      }
+      (*num_replacements)++;
+    } else {
+      StringAppendString(newline, possible_macro_name);
+    }
+  }
+  return pos;
+}
+
+// Replace all macros in the given source line.  This can also read
+// additional lines for macros that span multiple lines.  The string
+// pointed to by 'line' is overwritten by the processed source text.
+void PreprocessorReplaceMacros(Preprocessor* p, String* line,
+                               bool whole_input) {
+  int total_replacements = 0;
+  const int kMaxMacroReplacements = 1000;
+
+  int num_replacements = 0;
+  do {
+    size_t pos = 0;
+    num_replacements = 0;
+
+    // Output string for macro replacement.
+    String newline;
+    StringInit(&newline, NULL);
+
+    while (pos < line->length) {
+      pos = SkipToMacroName(p, line, pos, &newline, false, NULL);
+      if (pos >= line->length) {
+        break;
+      }
+      // Read the identifier into a temporary string.
+      String possible_macro_name;
+      StringInit(&possible_macro_name, NULL);
+      pos = ReadIdentifier(line, pos, &possible_macro_name);
+      
+      // See if it's a macro or special name.
+      pos = ProcessPossibleMacro(p, &possible_macro_name, line,
+                                 pos, &newline, &num_replacements, whole_input);
+      
+      StringDestruct(&possible_macro_name);
+    }
+
+    // Replace current line with new line.
+    StringSetString(line, &newline);
+    StringDestruct(&newline);
+
+    total_replacements += num_replacements;
+
+    // Check for infinite recursion.
+    if (total_replacements > kMaxMacroReplacements) {
+      PreprocessorError(p, "Macro recursion detected");
+      return;
+    }
+  } while (num_replacements > 0);
+}
+
+
