@@ -186,6 +186,8 @@ const char* TokenName(Token tok) {
       return "~";
     case TOK(typedef):
       return "typedef";
+    case TOK(thread):
+      return "__thread";
     case TOK(union):
       return "unionr";
     case TOK(unsigned):

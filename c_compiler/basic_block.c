@@ -72,8 +72,8 @@ bool BasicBlockCalculateDominators(BasicBlock* b, Vector* blocks) {
 
   // Calculate intersection.
   for (size_t i = 0; i < b->in_edges.length; i++) {
-    BlockId id = (BlockId)b->in_edges.value[i];
-    BasicBlock* dom_block = blocks->value[id];
+    BlockId id = (BlockId)b->in_edges.value.p[i];
+    BasicBlock* dom_block = blocks->value.p[id];
 
     BitSetClear(&intersection);
     BitSetIntersection(&dominators, &dom_block->dominators, &intersection);
@@ -111,7 +111,7 @@ void BasicBlockCalculateImmediateDominator(BasicBlock* b, Vector* blocks) {
   BitSetExpand(&b->dominators, &dominators);
 
   for (size_t i = 0; i < dominators.length; i++) {
-    BlockId id = (BlockId)dominators.value[i];
+    BlockId id = (BlockId)dominators.value.p[i];
     if (id != b->block_id) {
       BasicBlock* block = VectorGet(blocks, id);
       if (block->num_dominators > maxndoms) {
@@ -126,7 +126,7 @@ void BasicBlockCalculateImmediateDominator(BasicBlock* b, Vector* blocks) {
 void BasicBlockCalculateDominanceFrontier(BasicBlock* b, Vector* blocks) {
   if (b->in_edges.length >= 2) {
     for (size_t i = 0; i < b->in_edges.length; i++) {
-      BlockId id = (BlockId)b->in_edges.value[i];
+      BlockId id = (BlockId)b->in_edges.value.p[i];
       BasicBlock* block = VectorGet(blocks, id);
       BasicBlock* runner = block;
       while (runner != b->idom) { // TODO: this was NULL, which is right?
@@ -163,18 +163,18 @@ void BasicBlockPrint(BasicBlock* b, BasicBlock* entry, BasicBlock* exit) {
   }
   printf("  In:");
   for (size_t i = 0; i < b->in_edges.length; i++) {
-    printf(" %zd", (BlockId)b->in_edges.value[i]);
+    printf(" %zd", (BlockId)b->in_edges.value.p[i]);
   }
   printf("\n  Out:");
   for (size_t i = 0; i < b->out_edges.length; i++) {
-    printf(" %zd", (BlockId)b->out_edges.value[i]);
+    printf(" %zd", (BlockId)b->out_edges.value.p[i]);
   }
   printf("\n  Dominators: ");
   BitSetPrint(&b->dominators);
 
   printf("\n  Dominatees:");
   for (size_t i = 0; i < b->dominatees.length; i++) {
-    printf(" %zd", (BlockId)b->dominatees.value[i]);
+    printf(" %zd", (BlockId)b->dominatees.value.p[i]);
   }
   printf("\n  DF: ");
   BitSetPrint(&b->dominance_frontier);
@@ -188,7 +188,7 @@ void BasicBlockPrint(BasicBlock* b, BasicBlock* entry, BasicBlock* exit) {
 
   printf("  Defined variables:");
   for (size_t i = 0; i < b->defined_vars.length; i++) {
-    Symbol* sym = b->defined_vars.values[i].key;
+    Symbol* sym = b->defined_vars.values[i].key.p;
     printf(" %s", sym->name.value);
   }
   printf("\n");

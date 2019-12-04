@@ -16,10 +16,6 @@
 #include "map.h"
 #include "ar.h"
 
-struct LinkerSymbol;
-struct LinkerFile;
-struct DynamicSection;
-
 // The linker wants to create a set of program segments.  The following
 // segments are created:
 // 1. Code segment - consisting of all read-only and executable content.
@@ -77,16 +73,9 @@ struct DynamicSection;
 // 2. SYMTAB
 // 3. STRTAB
 // 4. STRTAB for section names.
-// + for dynamic shared objects:
-// 5. .plt
-// 6. .got
-// 7. .dynamic
 
-#define LINKER_NUM_EXTRA_STATIC_SECTIONS 4
-#define LINKER_NUM_EXTRA_DYNAMIC_SECTIONS (LINKER_NUM_EXTRA_STATIC_SECTIONS + 3)
 
-#define LINKER_NUM_EXTRA_SECTIONS(linker) (linker->building_dso ? \
-      LINKER_NUM_EXTRA_DYNAMIC_SECTIONS : LINKER_NUM_EXTRA_STATIC_SECTIONS)
+#define LINKER_NUM_EXTRA_SECTIONS 4
 
 // So after we read in the object files and know how many sections
 // we can calculate the section addresses.
@@ -106,12 +95,21 @@ struct DynamicSection;
 #error "Unknown operating system"
 #endif
 
+// For a Dynamic Shared Object the addresses are not absolute.
+#define LINKER_DSO_CODE_SEGMENT_START_ADDRESS 0LL
+#define LINKER_DYNAMIC_SEGMENT_ALIGNMENT 0x200000LL
+
 #define LINKER_NUM_SEGMENTS 3
 #define LINKER_SECTION_HEADER_OFFSET (sizeof(ELFHeader) + \
           LINKER_NUM_SEGMENTS * sizeof(ELFProgramHeader))
 
 
 struct Segment;
+struct Linker;
+struct Symbol;
+struct ObjectFile;
+struct DynamicLinker;
+struct Architecture;
 
 typedef enum {
   kGroupedSectionExisting,
@@ -126,14 +124,14 @@ typedef struct {
   } section;
 } GroupedSection;
 
-typedef struct {
+typedef struct SectionGroup {
   String name;
   Vector components;          // Vector of pointers to GroupedSection.
   struct Segment* segment;
   int32_t type;
   int64_t flags;
   int64_t alignment;
-  int64_t address;
+  uint64_t address;
 } SectionGroup;
 
 SectionGroup* NewSectionGroup(const String* name, int32_t type, int64_t flags, int64_t alignment);
@@ -144,69 +142,57 @@ GroupedSection* NewExistingGroupedSection(ELFReaderSection* section);
 GroupedSection* NewGroupedSection(ELFWriterSection* section);
 void GroupedSectionDestruct(GroupedSection* g);
 
-#if 0
-
-typedef struct {
-  ELFReaderSection* section;
-  ELFWriterSectionContents contents;
-} LinkerOutputSectionContents;
-
-// This is a section that will appear in the output.  It comprises of a set
-// of input sections (from the object files) along with the location of their
-// data.  This data might be located as a mapped address from the input
-// file (if it hasn't been modified by the linker) or it might be a piece
-// of memory allocated on the heap if the linker has performed relocations on it.
-// The section is allocated an address inside the segment.
-typedef struct {
-  String* name;
-  Vector contents;      // Vector of LinkerOutputSectionContents*.
-  int64_t address;
-  int32_t flags;
-  int32_t type;
-  int32_t alignment;      // Alignment for section (power of 2).
-} Section;
-#endif
-
 // A segment.  This consists of a set of sections.
 typedef struct Segment {
   Vector sections;      // Vector of SectionGroup*.
-  int64_t address;
+  uint64_t address;
 } Segment;
 
 void SegmentInit(Segment* segment);
 void SegmentDestruct(Segment* segment);
 
 typedef struct Linker {
-  Vector files;
-  HashTable global_symbol_table;
-  Vector section_groups;      // All SectionGroups from the input.
-  Segment code_segment;
-  Segment data_segment;
-  uint64_t nobits_address;
-  size_t nobit_size;
-  Vector library_search_path;
-  Vector static_libraries;
-  Vector dynamic_libraries;
-  int elf_machine_type;
-  int elf_flags;
-  bool building_dso;           // True if we are building a shared object.
-  struct DynamicSection* dynamic_section;
+  String output_filename;     // Output filename.
+  Vector files;               // All object files.
+  Vector architectures;       // Vector of LinkerArchitecture*.
+  struct LinkerArchitecture* arch;     // Current architecture.
+  Vector rpath;               // Vector of String*.
+  String interpreter;         // Interpreter name.
+  HashTable global_symbol_table;  // All global symbols.
+  Vector section_groups;      // All SectionGroups.
+  Segment code_segment;       // Executable code.
+  Segment data_segment;       // Static data.
+  Segment dynamic_segment;    // Dynamic library information.
+  Segment interpreter_segment; // Interpreter name.
+  Segment tls_segment;        // Thread local storage segment.
+  uint64_t nobits_address;    // Address of .bss.
+  size_t nobit_size;          // Size of .bss.
+  Vector library_search_path; // Vector of String*.
+  Vector static_libraries;    // Vector of ARArchive*.
+  Vector dynamic_libraries;   // Vector of LoadedDynamicLibrary*.
+  int elf_machine_type;       // From first object file.
+  int elf_flags;              // From first object fie.
+  bool building_dso;          // True if building a shared object.
+  bool fully_static;          // Generating fully static executable.
+  struct DynamicLinker* dynamic_linker;
+  Vector needed_libraries;    // Vector of String*.
+  int so_name;                // Index into dynstr or -1.
+  int64_t origin;             // Origin address (or zero for default).
 } Linker;
 
 void LinkerInit(Linker* linker);
 void LinkerDestruct(Linker* linker);
+void LinkerInitDynamic(Linker* linker);
 
 bool LinkerReadObjectFile(Linker* linker, String* filename);
 void LinkerLinkAllFiles(Linker* linker);
 void LinkerWriteOutput(Linker* linker, FILE* fp);
 
-struct LinkerFile* LinkerReadDynamicObject(Linker* linker, String* filename);
-
-struct LinkerSymbol* LinkerFindSymbol(HashTable* symbol_table,
+struct Symbol* LinkerFindSymbol(HashTable* symbol_table,
                                const char* name);
 
 void LinkerInsertSymbol(HashTable* symbol_table,
-                        struct LinkerSymbol* sym);
+                        struct Symbol* sym);
 
 void LinkerAddLibrarySearchDir(Linker* linker, String* dir);
 bool LinkerAddLibrary(Linker* linker, const char* name);
@@ -216,10 +202,12 @@ bool LinkerFindSymbolInStaticLibraries(Linker* linker, const char* name,
                                  ARArchive** archive,
                                  ARFile** file);
 
-void LinkerError(struct LinkerFile* file, const char* error, ...);
-void VLinkerError(struct LinkerFile* file, const char* error, va_list ap);
+void LinkerError(struct ObjectFile* file, const char* error, ...);
+void VLinkerError(struct ObjectFile* file, const char* error, va_list ap);
 
-void LinkerWarning(struct LinkerFile* file, const char* warn, const char* error, ...);
-void VLinkerWarning(struct LinkerFile* file, const char* warn, const char* error, va_list ap);
+void LinkerWarning(struct ObjectFile* file, const char* warn, const char* error, ...);
+void VLinkerWarning(struct ObjectFile* file, const char* warn, const char* error, va_list ap);
+
+void LinkerInitArchitecture(Linker* linker);
 
 #endif /* linker_h */

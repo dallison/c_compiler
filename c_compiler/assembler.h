@@ -39,6 +39,7 @@ typedef enum {
   SYM_TYPE(func),
   SYM_TYPE(object),
   SYM_TYPE(common),
+  SYM_TYPE(tls),
 } AssemblerSymbolType;
 
 #define SYM_BIND(b) kAssemblerSymbolBinding_##b
@@ -71,7 +72,7 @@ void AssemblerSymbolDelete(AssemblerSymbol* sym);
 typedef struct AssemblerSection {
   String* name;
   ELFWriterSectionContents contents;
-  int64_t address;
+  uint64_t address;
   int32_t flags;
   int32_t type;
   int32_t alignment;  // Alignment for section (power of 2).
@@ -100,6 +101,7 @@ void AssemblerRelocationDelete(AssemblerRelocation* reloc);
 // as indexes into an array of integers containing the actual relocation
 // values, set by the architecture.
 typedef enum {
+  kRelocSet16,
   kRelocSet32,
   kRelocSet64,
   kRelocAdd16,
@@ -111,7 +113,7 @@ typedef enum {
   kNumRelocTypes,
 } RelocationType;
 
-typedef struct {
+typedef struct Assembler {
   Preprocessor preprocessor;
   Lex lex;                    // Lexical analyzer.
   Syntax syntax;              // Syntax analyzer.
@@ -129,6 +131,10 @@ typedef struct {
   int* reloc_types;           // Relocation types.
   bool pic;                   // Position Independent Code.
   Dwarf dwarf;                // Debugging information.
+  
+  // Function to define a label.  This can be overridden by architecture
+  // specific assemblers to handle branches and labels.
+  AssemblerSymbol* (*define_label)(struct Assembler*, String*);
 } Assembler;
 
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
@@ -137,6 +143,8 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 void AssemblerDestruct(Assembler* assembler);
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name);
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym);
+void AssemblerReset(Assembler* assembler, bool clear_symbols);
+void AssemblerClearSymbols(Assembler* assembler);
 
 int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
                         int32_t flags, int32_t alignment);
@@ -159,5 +167,6 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
                       const char* format, ...);
 
 int64_t AssemblerCurrentAddress(Assembler* assembler);
+void AssemblerExtractSymbolSuffix(String* symbol, String* name, String* suffix);
 
 #endif /* assembler_h */

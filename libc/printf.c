@@ -14,10 +14,7 @@ int write(int fp, const char* buf, int len) {
   // The ecall instruction is used with r0 set to 4.  This
   // is the write system call.
   return asm(
-      "mv a3, a2\n"
-      "mv a2, a1\n"
-      "mv a1, a0\n"
-      "li a0, 4\n"
+      "li t6, 4\n"
       "ecall\n"
       );
 #elif defined(__p_code__)

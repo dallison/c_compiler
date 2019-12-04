@@ -20,6 +20,7 @@
 
 #include "p_code_target.h"
 #include "risc_v_target.h"
+#include "6502_target.h"
 
 // This is global to avoid having to pass it around everywhere.
 Compiler* compiler;
@@ -40,57 +41,80 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-Wall", kCompilerOptionBool, kOptionWall, false},
     {"-W", kCompilerOptionString, kOptionWarning, true},
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false},
+    {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false},
     {NULL, 0, 0, false},
 };
 
 void ParseOptions(int argc, char** argv, Vector* options) {
+  // Temporary vector of parts of args.  Values are copied
+  // out into other vectors.  Retains ownership of strings.
+  Vector parts;
+  VectorInit(&parts);
   for (int i = 1; i < argc; i++) {
-    String s;
-    StringInit(&s, argv[i]);
-    if (s.value[0] == '-') {
-      for (size_t opt = 0; compiler_options[opt].name != NULL; opt++) {
-        if (compiler_options[opt].is_prefix &&
-            s.value[1] == compiler_options[opt].name[1]) {
-          CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-          o->opt = compiler_options[opt].opt;
-          // Prefixed options are always a string.
-          StringInit(&o->value.svalue, &argv[i][2]);
-          VectorAppend(options, o);
-        } else if (StringEqual(&s, compiler_options[opt].name)) {
-          CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-          o->opt = compiler_options[opt].opt;
-          switch (compiler_options[opt].type) {
-            case kCompilerOptionString:
-              i++;
-              if (i < argc) {
-                StringInit(&o->value.svalue, argv[i]);
-              }
-              break;
-            case kCompilerOptionBool:
-              o->value.bvalue = true;
-              break;
-            case kCompilerOptionInt:
-              i++;
-              if (i < argc) {
-                o->value.ivalue = atoi(argv[i]);
-              }
-              break;
-          }
-          VectorAppend(options, o);
-        }
-      }
+    // If arg starts with - check for = and split into two.
+    char* equals = argv[i][0] != '-' ? NULL : strchr(argv[i], '=');
+    if (equals != NULL) {
+      String* s = NewString(NULL);
+      StringAppendSegment(s, argv[i], equals - argv[i]);
+      VectorAppend(&parts, s);
+      s = NewString(NULL);
+      StringAppend(s, equals+1);
+      VectorAppend(&parts, s);
     } else {
-      CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-      o->opt = kOptionInputFile;
-      StringInit(&o->value.svalue, s.value);
-      VectorAppend(options, o);
+      // Not an option or no equals.
+      VectorAppend(&parts, NewString(argv[i]));
     }
   }
+  
+  for (int i = 0; i < parts.length; i++) {
+      String* s = parts.value.p[i];
+      if (s->value[0] == '-') {
+        for (size_t opt = 0; compiler_options[opt].name != NULL; opt++) {
+          if (compiler_options[opt].is_prefix &&
+              s->value[1] == compiler_options[opt].name[1]) {
+            CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
+            o->opt = compiler_options[opt].opt;
+            // Prefixed options are always a string.
+            StringInit(&o->value.svalue, &parts.value.p[i][2]);
+            VectorAppend(options, o);
+            break;
+          } else if (StringEqual(s, compiler_options[opt].name)) {
+            CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
+            o->opt = compiler_options[opt].opt;
+            switch (compiler_options[opt].type) {
+              case kCompilerOptionString:
+                i++;
+                if (i < parts.length) {
+                  StringInit(&o->value.svalue, parts.value.p[i]);
+                }
+                break;
+              case kCompilerOptionBool:
+                o->value.bvalue = true;
+                break;
+              case kCompilerOptionInt:
+                i++;
+                if (i < parts.length) {
+                  o->value.ivalue = atoi(parts.value.p[i]);
+                }
+                break;
+            }
+            VectorAppend(options, o);
+            break;
+          }
+        }
+      } else {
+        CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
+        o->opt = kOptionInputFile;
+        StringInit(&o->value.svalue, s->value);
+        VectorAppend(options, o);
+      }
+    }
+    VectorDestructWithContents(&parts, (VectorElementDestructor)StringDestruct);
 }
 
 static String* OptionStringValue(CompilerOption option, Vector* options) {
   for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value[i - 1];
+    CompilerOptionValue* opt = options->value.p[i - 1];
     if (opt->opt == option) {
       return &opt->value.svalue;
     }
@@ -100,7 +124,7 @@ static String* OptionStringValue(CompilerOption option, Vector* options) {
 
 static int OptionIntValue(CompilerOption option, Vector* options, int def) {
   for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value[i - 1];
+    CompilerOptionValue* opt = options->value.p[i - 1];
     if (opt->opt == option) {
       return opt->value.ivalue;
     }
@@ -110,7 +134,7 @@ static int OptionIntValue(CompilerOption option, Vector* options, int def) {
 
 static bool OptionBoolValue(CompilerOption option, Vector* options, bool def) {
   for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value[i - 1];
+    CompilerOptionValue* opt = options->value.p[i - 1];
     if (opt->opt == option) {
       return opt->value.bvalue;
     }
@@ -186,7 +210,7 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
       SemanticError(subinit, "Invalid static initialization");
     }
   } else if (TypeIsPointer(type)) {
-    // Pointers can be initialize to the address of an existing static
+    // Pointers can be initialized to the address of an existing static
     // variable of the same type.
     ASTNode* var_node;
     if (expr->op == AST_OP(address)) {
@@ -235,7 +259,7 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
 static void ExpandBracedInitializer(BracedInitializerASTNode* init,
                                     int dest_offset, Vector* initializers) {
   for (size_t i = 0; i < init->initializers->length; i++) {
-    ASTNode* subinit = (ASTNode*)init->initializers->value[i];
+    ASTNode* subinit = (ASTNode*)init->initializers->value.p[i];
     assert(subinit->op == AST_OP(designated_init));
 
     DesignatedInitializerASTNode* designated_init =
@@ -245,11 +269,11 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
       // We have designators.  Need to build up an offset from the
       // designators.
       for (size_t i = 0; i < designated_init->designators->length; i++) {
-        Designator* d = (Designator*)designated_init->designators->value[i];
+        Designator* d = (Designator*)designated_init->designators->value.p[i];
         switch (d->designator_type) {
           case kDesignatorArray:
             // Array index.  Add index * size of lower dimensions to offset.
-            offset += d->value.array_index * d->type->next->size;
+            offset += d->value.array_index * d->type->size;
             break;
           case kDesignatorStruct:
             offset += d->value.struct_member->byte_offset;
@@ -257,6 +281,9 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
         }
       }
     }
+    // TODO: init of array of struct.
+    InitScalar(designated_init->init, subinit, offset, initializers);
+#if 0
     switch (designated_init->init->op) {
       // Simple scalar initialization
       case AST_OP(expr_init): {
@@ -275,6 +302,7 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
       default:
         assert(false);
     }
+#endif
   }
 }
 
@@ -282,9 +310,10 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
                                          ASTNode* init) {
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   StringInit(&var->name, decl->symbol->name.value);
-  var->is_global = decl->symbol->storage != kStorageStatic;
+  var->is_global = !StorageIs(decl->symbol->storage, STO(static));
   VectorInit(&var->initializers);
   var->size = decl->symbol->type->size;
+  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
   var->alignment = TypeRecordAlignment(decl->symbol->type);
   ExpandBracedInitializer((BracedInitializerASTNode*)init, 0,
                           &var->initializers);
@@ -296,7 +325,7 @@ void InitializerDelete(Initializer* init) { free(init); }
 void InitializedStaticVariableDelete(InitializedStaticVariable* var) {
   StringDestruct(&var->name);
   for (size_t i = 0; i < var->initializers.length; i++) {
-    InitializerDelete(var->initializers.value[i]);
+    InitializerDelete(var->initializers.value.p[i]);
   }
   VectorDestruct(&var->initializers);
   free(var);
@@ -318,7 +347,7 @@ int CompilerAddStringLiteral(String* value) {
 
 StringLiteral* CompilerFindStringLiteral(int literal_id) {
   for (size_t i = 0; i < compiler->string_literals.length; i++) {
-    StringLiteral* literal = compiler->string_literals.value[i];
+    StringLiteral* literal = compiler->string_literals.value.p[i];
     if (literal->id == literal_id) {
       return literal;
     }
@@ -340,7 +369,7 @@ static void CompileDeclaration(Syntax* syntax) {
       size_t num_decls = decls->declarations->length;
       for (size_t i = 0; i < num_decls; i++) {
         VariableDeclarationASTNode* decl =
-            (VariableDeclarationASTNode*)decls->declarations->value[i];
+            (VariableDeclarationASTNode*)decls->declarations->value.p[i];
 
         if (TypeIsFunctionDefinition(decl->base.type)) {
           compiler->current_function = decl->base.type;
@@ -362,11 +391,11 @@ static void CompileDeclaration(Syntax* syntax) {
           if (TypeIsFunction(decl->base.type)) {
             // Function declaration, not a definition.
           } else {
-            if (decl->symbol->storage == kStorageTypedef) {
+            if (StorageIs(decl->symbol->storage, STO(typedef))) {
               continue;
             }
             // Declaration is a variable.
-            if (decl->symbol->storage == kStorageExtern &&
+            if (StorageIs(decl->symbol->storage, STO(extern)) &&
                 decl->initializer == NULL) {
               // Extern variable declaration.
               if (TypeIsVoid(decl->symbol->type)) {
@@ -380,9 +409,10 @@ static void CompileDeclaration(Syntax* syntax) {
                 UnintializedStaticVariable* var =
                     malloc(sizeof(UnintializedStaticVariable));
                 StringInit(&var->name, decl->symbol->name.value);
-                var->is_global = decl->symbol->storage != kStorageStatic;
+                var->is_global = !StorageIs(decl->symbol->storage, STO(static));
                 var->size = decl->symbol->type->size;
                 var->alignment = TypeRecordAlignment(decl->symbol->type);
+                var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                 VectorAppend(&compiler->uninitialized_static_variables, var);
               } else {
                 ASTNode* simplified_init = AnalyzeInitializer(
@@ -432,6 +462,20 @@ static int CompareWarning(const void* a, const void* b) {
   return strcmp(*s1, *s2);
 }
 
+// Parse a tls model name to a tls model.
+TlsModel ParseTlsModelName(String* tls_model) {
+  if (StringEqual(tls_model, "global-dynamic")) {
+    return TLS(global_dynamic);
+  } else if (StringEqual(tls_model, "local-dynamic")) {
+    return TLS(local_dynamic);
+  } else if (StringEqual(tls_model, "initial-exec")) {
+    return TLS(initial_exec);
+  } else if (StringEqual(tls_model, "local-exec")) {
+    return TLS(local_exec);
+  }
+  return TLS(bad);
+}
+
 static bool CompilerInitCommon(Compiler* compiler, const char* filename,
                                Vector* options) {
   StringInit(&compiler->infile, filename);
@@ -460,6 +504,8 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
   } else if (StringEqual(compiler->target_name, "riscv") ||
              StringEqual(compiler->target_name, "risc-v")) {
     compiler->target = NewRVTarget();
+  } else if (StringEqual(compiler->target_name, "6502")) {
+    compiler->target = New6502Target();
   } else {
     fprintf(stderr, "Unknown -target value %s\n", compiler->target_name->value);
     return false;
@@ -467,15 +513,26 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
   compiler->optimize = OptionBoolValue(kOptionOptimize, options, false);
   compiler->pic = OptionBoolValue(kOptionPic, options, false);
-  
+  compiler->tls_model = compiler->pic ? TLS(global_dynamic) : TLS(local_exec);
+
   compiler->pointer_size = compiler->target->pointer_size;
+  
+  // TLS model.
+  String* tls_model = OptionStringValue(kOptionTlsModel, options);
+  if (tls_model != NULL) {
+    compiler->tls_model = ParseTlsModelName(tls_model);
+    if (compiler->tls_model == TLS(bad)) {
+      fprintf(stderr, "Invalid TLS model value: %s\n", tls_model->value);
+      return false;
+    }
+  }
   
   PreprocessorDefineArchitectureMacros(&compiler->preprocessor);
 
   // Process macro definition and include path options and process warning
   // options
   for (size_t i = 0; i < options->length; i++) {
-    CompilerOptionValue* option_value = options->value[i];
+    CompilerOptionValue* option_value = options->value.p[i];
     switch (option_value->opt) {
       case kOptionIncludePath:
         PreprocessorAddUserIncludePath(&compiler->preprocessor,
@@ -527,24 +584,24 @@ void CompilerDestruct(Compiler* compiler) {
   StringDestruct(&compiler->infile);
 
   for (size_t i = 0; i < compiler->functions.length; i++) {
-    compiler->target->cleanup(compiler->functions.value[i]);
+    compiler->target->cleanup(compiler->functions.value.p[i]);
   }
   VectorDestruct(&compiler->functions);
 
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
     InitializedStaticVariableDelete(
-        compiler->initialized_static_variables.value[i]);
+        compiler->initialized_static_variables.value.p[i]);
   }
   VectorDestruct(&compiler->initialized_static_variables);
 
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
     UninitializedStaticVariableDelete(
-        compiler->uninitialized_static_variables.value[i]);
+        compiler->uninitialized_static_variables.value.p[i]);
   }
   VectorDestruct(&compiler->uninitialized_static_variables);
 
   for (size_t i = 0; i < compiler->string_literals.length; i++) {
-    StringLiteralDelete(compiler->string_literals.value[i]);
+    StringLiteralDelete(compiler->string_literals.value.p[i]);
   }
   VectorDestruct(&compiler->string_literals);
 
@@ -597,8 +654,8 @@ bool CompilerInitForAssembler(const char* filename, Vector* options) {
   return true;
 }
 
-// Compile a source file.
-static void Compile(Compiler* compiler, Vector* options) {
+// Compile a source file, returning name of object file
+static String* Compile(Compiler* compiler, Vector* options) {
   CreateGlobalSymbolTables();
   DeclarePredefinedTypes(&compiler->preprocessor);
   LexNextToken(&compiler->lex);
@@ -624,30 +681,38 @@ static void Compile(Compiler* compiler, Vector* options) {
       compiler->target->create_asm_file(&compiler->infile, &asm_filename);
   if (asm_file == NULL) {
     fprintf(stderr, "Unable to open assembler file %s\n", asm_filename.value);
-    return;
+    return NULL;
   }
   for (size_t i = 0; i < compiler->functions.length; i++) {
     // Debug, print to stdout.
-    compiler->target->emit_function_assembly(compiler->functions.value[i],
+    compiler->target->emit_function_assembly(compiler->functions.value.p[i],
                                              stdout);
 
-    compiler->target->emit_function_assembly(compiler->functions.value[i],
+    compiler->target->emit_function_assembly(compiler->functions.value.p[i],
                                              asm_file);
   }
 
   // Now emit the data to the assembly file.
   compiler->target->emit_data_start(asm_file);
 
+  bool contains_tls_vars = false;
+  
   // Initialized variables.
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
-    compiler->target->emit_static_variable(
-        compiler->initialized_static_variables.value[i], asm_file);
+    InitializedStaticVariable* var =  compiler->initialized_static_variables.value.p[i];
+    if (!var->is_tls) {
+      compiler->target->emit_static_variable(var, asm_file);
+    }
+    contains_tls_vars |= var->is_tls;
   }
 
   // Uninitialized variables.
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
-    compiler->target->emit_bss_space(
-        compiler->uninitialized_static_variables.value[i], asm_file);
+    UnintializedStaticVariable* var = compiler->uninitialized_static_variables.value.p[i];
+    if (!var->is_tls) {
+      compiler->target->emit_bss_space(var, asm_file);
+    }
+    contains_tls_vars |= var->is_tls;
   }
 
   // Emit string literals start.
@@ -655,10 +720,32 @@ static void Compile(Compiler* compiler, Vector* options) {
 
   // Now the string literals.
   for (size_t i = 0; i < compiler->string_literals.length; i++) {
-    compiler->target->emit_string_literal(compiler->string_literals.value[i],
+    compiler->target->emit_string_literal(compiler->string_literals.value.p[i],
                                           asm_file);
   }
 
+  // Emit TLS sections if there is any TLS data.
+  if (contains_tls_vars) {
+    // .tdata section.
+    compiler->target->emit_tdata_start(asm_file);
+    for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+      InitializedStaticVariable* var =  compiler->initialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        compiler->target->emit_tls_variable(var, asm_file);
+      }
+    }
+    
+    // .tbss section.
+    compiler->target->emit_tbss_start(asm_file);
+
+    for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+      UnintializedStaticVariable* var = compiler->uninitialized_static_variables.value.p[i];
+      if (var->is_tls) {
+        compiler->target->emit_tbss_space(var, asm_file);
+      }
+    }
+  }
+  
   if (compiler->debug_output) {
     compiler->target->emit_debug(asm_file);
   }
@@ -668,55 +755,58 @@ static void Compile(Compiler* compiler, Vector* options) {
   // If the user specified -S then we don't assemble the output
   // and we keep the output file.
   if (OptionBoolValue(kOptionAssemblyOutput, options, false)) {
-    return;
+    return NULL;
   }
 
-  String object_filename;
+  String* object_filename;
   String* output_filename = OptionStringValue(kOptionOutputFile, options);
   if (output_filename != NULL) {
-    StringInit(&object_filename, output_filename->value);
+    object_filename = NewString(output_filename->value);
   } else {
-    StringInit(&object_filename, compiler->infile.value);
+    object_filename = NewString(compiler->infile.value);
 
     // If the file ends in ".c", make it ".o", otherwise append ".o".
-    suffix = strstr(object_filename.value, ".c");
+    suffix = strstr(object_filename->value, ".c");
     if (suffix == NULL) {
-      StringAppend(&object_filename, ".o");
+      StringAppend(object_filename, ".o");
     } else {
       // Overwrite 'c' with 'o'.
       suffix[1] = 'o';
     }
   }
 
-  bool ok = compiler->target->assemble(&asm_filename, &object_filename);
+  bool ok = compiler->target->assemble(&asm_filename, object_filename);
   if (!ok) {
     fprintf(stderr, "Failed to assemble\n");
   }
 
   // Remove .s file.
   // remove(asm_filename.value);
+  return object_filename;
 }
 
-void CompileTranslationUnit(const char* filename, Vector* options) {
+String* CompileTranslationUnit(const char* filename, Vector* options) {
   ClearAllFiles();
 
   compiler = malloc(sizeof(Compiler));
   if (!CompilerInitFromFile(compiler, filename, options)) {
     fprintf(stderr, "Cannot open file %s\n", filename);
-    return;
+    return NULL;
   }
 
-  Compile(compiler, options);
+  String* object_file = Compile(compiler, options);
   CompilerDelete(compiler);
   compiler = NULL;
+  return object_file;
 }
 
-void CompileTranslationUnitFromString(const char* filename, const char* code,
+String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                       Vector* options) {
   ClearAllFiles();
   compiler = malloc(sizeof(Compiler));
   CompilerInitFromString(compiler, filename, code, options);
-  Compile(compiler, options);
+  String* object_file = Compile(compiler, options);
   CompilerDelete(compiler);
   compiler = NULL;
+  return object_file;
 }

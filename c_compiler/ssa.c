@@ -18,37 +18,39 @@
 // Given a symbol, find the version stack associated with it.  If there
 // isn't one, add one for it.
 static Vector* FindVariableStack(Map* stacks, Symbol* symbol) {
-  void* result = MapFind(stacks, symbol);
+  void* result = MapFindPointerKey(stacks, symbol);
   if (result != NULL) {
     return result;
   }
 
   // Not found, add a new one for this symbol.
   Vector* versions = NewVector();
-  MapInsert(stacks, symbol, versions);
+  MapKeyValue kv;
+  kv.key.p = symbol;
+  kv.value.p = versions;
   return versions;
 }
 
 // Change the IRNode associated with the most recent (top of stack)
 // variable to that given.
 static void RenameTopVariable(Map* stacks, Symbol* symbol, IRNode* ssavar) {
-  Vector* versions = MapFind(stacks, symbol);
+  Vector* versions = MapFindPointerKey(stacks, symbol);
   assert(versions != NULL);
-  IRNode** top = (IRNode**)&versions->value[versions->length - 1];
+  IRNode** top = (IRNode**)&versions->value.p[versions->length - 1];
   *top = ssavar;
 }
 
 // Find the most recent (top of stack) IRNode associated with
 // the given variable.  Returns NULL if there isn't one.
 static IRNode* GetTopVariable(Map* stacks, Symbol* symbol) {
-  Vector* versions = MapFind(stacks, symbol);
+  Vector* versions = MapFindPointerKey(stacks, symbol);
   if (versions == NULL) {
     return NULL;
   }
   if (versions->length == 0) {
     return NULL;
   }
-  return versions->value[versions->length - 1];
+  return versions->value.p[versions->length - 1];
 }
 
 // Follow the instructions to find a reference to the given
@@ -68,7 +70,7 @@ static IRNode* FindVariableReference(IRNode* origin, Symbol* symbol) {
     }
     prev = inst;
     if (IRIsLoad(inst) || IRIsStore(inst) || inst->opcode == IR_OP(adda)) {
-      inst = inst->inputs.value[0];
+      inst = inst->inputs.value.p[0];
       continue;
     }
     break;
@@ -83,7 +85,7 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
                             Map* var_stacks) {
   // Push all variable definitions onto the var_stack.
   for (size_t i = 0; i < block->defined_vars.length; i++) {
-    Symbol* sym = block->defined_vars.values[i].key;
+    Symbol* sym = block->defined_vars.values[i].key.p;
     Vector* stack = FindVariableStack(var_stacks, sym);
     IRNode* var;
     // Either duplicate the top of the stack or add the original variable
@@ -91,7 +93,7 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
     if (stack->length == 0) {
       var = GeneratorGetVariable(gen, sym);
     } else {
-      var = stack->value[stack->length - 1];
+      var = stack->value.p[stack->length - 1];
     }
     VectorPush(stack, var);
   }
@@ -138,19 +140,19 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
   // Process all blocks dominated by this one.
   for (size_t i = 0; i < block->dominatees.length; i++) {
     BasicBlock* b =
-        VectorGet(&gen->basic_blocks, (BlockId)block->dominatees.value[i]);
+        VectorGet(&gen->basic_blocks, (BlockId)block->dominatees.value.p[i]);
     RenameVariables(gen, b, var_stacks);
   }
 
   // Pop all stacks for all defined vars.
   for (size_t i = 0; i < block->defined_vars.length; i++) {
-    Symbol* sym = block->defined_vars.values[i].key;
+    Symbol* sym = block->defined_vars.values[i].key.p;
     Vector* stack = FindVariableStack(var_stacks, sym);
 
     // Store the most recent IRNode assigned to the defined variable to the
     // value held in the defined_vars map for this symbol.  This allows us
     // to know what SSA variable to use for the PHI node inputs.
-    block->defined_vars.values[i].value = stack->value[stack->length - 1];
+    block->defined_vars.values[i].value.p = stack->value.p[stack->length - 1];
     VectorPop(stack);
   }
 }
@@ -165,14 +167,14 @@ static void InsertPhiNodes(Generator* gen) {
   do {
     changed = false;
     for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-      BasicBlock* block = gen->basic_blocks.value[i];
+      BasicBlock* block = gen->basic_blocks.value.p[i];
       for (size_t j = 0; j < block->defined_vars.length; j++) {
-        Symbol* sym = block->defined_vars.values[j].key;
+        Symbol* sym = block->defined_vars.values[j].key.p;
         VectorClear(&df);
         BitSetExpand(&block->dominance_frontier, &df);
         for (size_t k = 0; k < df.length; k++) {
           BasicBlock* df_node =
-              VectorGet(&gen->basic_blocks, (BlockId)df.value[k]);
+              VectorGet(&gen->basic_blocks, (BlockId)df.value.p[k]);
 
           // Insert PHI node into block.  This will not add the a PHI node to
           // the same variable more than once.  It returns true if it adds a new
@@ -181,7 +183,10 @@ static void InsertPhiNodes(Generator* gen) {
           if (new_phi) {
             // We've added a new PHI node.  This defines a new variable in the
             // destination block.  Add it.
-            MapInsert(&df_node->defined_vars, sym, NULL);
+            MapKeyValue kv;
+            kv.key.p = sym;
+            kv.value.p = NULL;
+            MapInsert(&df_node->defined_vars, kv);
           }
           changed |= new_phi;
         }
@@ -193,12 +198,12 @@ static void InsertPhiNodes(Generator* gen) {
 
 static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
                           BitSet* visited) {
-  void* latest_var = MapFind(&block->defined_vars, sym);
+  void* latest_var = MapFindPointerKey(&block->defined_vars, sym);
   if (latest_var != NULL) {
     return latest_var;
   }
   for (size_t i = 0; i < block->in_edges.length; i++) {
-    BlockId id = (BlockId)block->in_edges.value[i];
+    BlockId id = (BlockId)block->in_edges.value.p[i];
     if (BitSetContains(visited, id)) {
       continue;
     }
@@ -224,7 +229,7 @@ static void AddPhiInputs(Generator* gen, BasicBlock* block) {
     Symbol* sym = phi->symbol;
     for (size_t i = 0; i < block->in_edges.length; i++) {
       BasicBlock* input =
-          VectorGet(&gen->basic_blocks, (BlockId)block->in_edges.value[i]);
+          VectorGet(&gen->basic_blocks, (BlockId)block->in_edges.value.p[i]);
       void* latest_var = FindSSAVar(gen, input, sym, &visited);
       if (latest_var != NULL) {
         IRAddInput((IRNode*)phi, latest_var);
@@ -241,7 +246,7 @@ static int SymbolCompare(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
 
-  ptrdiff_t diff = s1->key - s2->key;
+  ptrdiff_t diff = s1->key.p - s2->key.p;
   return (int)diff;
 }
 
@@ -258,7 +263,7 @@ void GeneratorRenameVariables(Generator* gen) {
 
   // Clean up.
   for (size_t i = 0; i < var_stacks.length; i++) {
-    VectorDelete(var_stacks.values[i].value);
+    VectorDelete(var_stacks.values[i].value.p);
   }
   MapDestruct(&var_stacks);
 }
@@ -273,7 +278,7 @@ void GeneratorConvertToSSA(Generator* gen) {
 
   // Add inputs to all phi nodes in the blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    AddPhiInputs(gen, gen->basic_blocks.value[i]);
+    AddPhiInputs(gen, gen->basic_blocks.value.p[i]);
   }
 }
 
@@ -298,10 +303,10 @@ static void RemovePhiNodes(Generator* gen, BasicBlock* block) {
 
     size_t i = 0;
     while (i < inst->outputs.length) {
-      IRNode* node = inst->outputs.value[i];
+      IRNode* node = inst->outputs.value.p[i];
       bool modified = false;
       for (size_t j = 0; j < node->inputs.length; j++) {
-        if (node->inputs.value[j] == inst) {
+        if (node->inputs.value.p[j] == inst) {
           IRReplaceInput(node, j, input);
           modified = true;
           break;
@@ -334,10 +339,10 @@ static void RemoveSSAVariables(Generator* gen, BasicBlock* block) {
       IRNode* input = GeneratorGetVariable(gen, var->symbol);
       size_t i = 0;
       while (i < inst->outputs.length) {
-        IRNode* node = inst->outputs.value[i];
+        IRNode* node = inst->outputs.value.p[i];
         bool modified = false;
         for (size_t j = 0; j < node->inputs.length; j++) {
-          if (node->inputs.value[j] == inst) {
+          if (node->inputs.value.p[j] == inst) {
             IRReplaceInput(node, j, input);
             modified = true;
             break;
@@ -357,11 +362,11 @@ static void RemoveSSAVariables(Generator* gen, BasicBlock* block) {
 void GeneratorRemoveSSA(Generator* gen) {
   // Pass 1: remove phi nodes.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    RemovePhiNodes(gen, gen->basic_blocks.value[i]);
+    RemovePhiNodes(gen, gen->basic_blocks.value.p[i]);
   }
 
   // Pass 2: remove SSA variables.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    RemoveSSAVariables(gen, gen->basic_blocks.value[i]);
+    RemoveSSAVariables(gen, gen->basic_blocks.value.p[i]);
   }
 }

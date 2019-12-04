@@ -6,6 +6,7 @@
 //
 
 #include "loader.h"
+#include "loader_arch.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
@@ -19,86 +20,21 @@ Region* NewRegion(void* addr, int64_t length) {
   Region* region = malloc(sizeof(Region));
   region->address = addr;
   region->length = length;
+  VectorInit(&region->sections);
   return region;
 }
 
-static Symbol* NewSymbol(ELFSymbol* elf_sym, const char* name, uint64_t address) {
-  Symbol* symbol = malloc(sizeof(Symbol));
-  symbol->header = elf_sym;
-  StringInit(&symbol->name, name);
-  symbol->address = address;
-  return symbol;
+void RegionDestruct(Region* region) {
+  VectorDestruct(&region->sections);
 }
 
-static void SymbolDelete(Symbol* sym) {
-  StringDestruct(&sym->name);
-  free(sym);
+void VLoaderError(const char* error, va_list ap) {
+  char buf[4096];
+  vsnprintf(buf, sizeof(buf), error, ap);
+  fprintf(stderr, "Loader error: %s\n", buf);
 }
 
-//
-// Symbol table.  This is a hash table of Vectors.  The Vectors
-// contain Symbol pointers.  The key for the hash table is the address
-// of the symbol.
-//
-static size_t SymbolHash(void* value, HashTable* table, HashMode mode) {
-  uint64_t address;
-  switch (mode) {
-    case kHashInsert:
-      // For insertion we have a pointer a Symbol.
-      address = ((Symbol*)value)->address;
-      break;
-    case kHashSearch:
-      // For search we have an address.
-      // to find.
-      address = (uint64_t)value;
-      break;
-  }
-  return address;
-}
-
-static bool SymbolInsertInHashTable(void* entry, void* value, void** parent) {
-  if (entry == NULL) {
-    entry = NewVector();
-    *parent = entry;
-  }
-  Vector* bucket = (Vector*)entry;
-  VectorAppend(bucket, value);
-  return true;
-}
-
-static void* SymbolFindInHashTable(void* entry, void* value) {
-  if (entry == NULL) {
-    return NULL;
-  }
-  Vector* bucket = (Vector*)entry;
-  for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value[i];
-    if (sym->address == (uint64_t)value) {
-      return sym;
-    }
-  }
-  return NULL;
-}
-
-static void DeleteSymbolList(void* entry, void* data) {
-  Vector* bucket = (Vector*)entry;
-  for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value[i];
-    SymbolDelete(sym);
-  }
-  VectorDelete(bucket);
-}
-
-static void ClearSymbolTable(HashTable* table) {
-  HashTableTraverse(table, DeleteSymbolList, NULL);
-}
-
-
-static void VLoaderError(const char* error, va_list ap) {
-  vfprintf(stderr, error, ap);
-}
-
-static void LoaderError(const char* error, ...) {
+void LoaderError(const char* error, ...) {
   va_list ap;
   va_start(ap, error);
   VLoaderError(error, ap);
@@ -107,11 +43,11 @@ static void LoaderError(const char* error, ...) {
 
 
 
-static void VLoaderWarning(const char* warn, const char* error, va_list ap) {
+void VLoaderWarning(const char* warn, const char* error, va_list ap) {
   vfprintf(stderr, error, ap);
 }
 
-static void LoaderWarning(const char* warn, const char* error, ...) {
+void LoaderWarning(const char* warn, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
   VLoaderWarning(warn, error, ap);
@@ -119,91 +55,71 @@ static void LoaderWarning(const char* warn, const char* error, ...) {
   
 }
 
-Symbol* LoaderFindSymbol(Loader* loader,
-                               uint64_t address) {
-  return HashTableSearch(&loader->global_symbol_table, (void*)address);
-}
-
-static void InsertSymbol(HashTable* symbol_table,
-                        Symbol* sym) {
-  HashTableInsert(symbol_table, sym);
-}
-
-static void PrintSymbolList(void* entry, void* data) {
-  Vector* bucket = entry;
-  for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* symbol = bucket->value[i];
-    printf("0x%016llx: %s\n", symbol->address, symbol->name.value);
+SymbolScope* LoaderFindSymbol(Loader* loader,
+                      uint64_t address) {
+  if (address >= loader->current_symbol.start && address < loader->current_symbol.end) {
+    return &loader->current_symbol;
   }
-}
-
-// Print the symbol tables for debugging.
-static void PrintSymbolTable(Loader* loader) {
-  HashTableTraverse(&loader->global_symbol_table, PrintSymbolList, NULL);
-}
-
-static void ReadSymbol(Loader* loader,
-                      ELFReaderFile* elf_file,
-                      ELFReaderSection* symtab,
-                      ELFReaderSection* strtab,
-                      ELFSymbol* elf_sym) {
-  if (elf_sym->name > strtab->header->size) {
-    LoaderError("Corrupt symbol name");
-    return;
-  }
-  const char* sym_name = (const char*)strtab->contents + elf_sym->name;
-  uint64_t sym_address = elf_sym->value;
   
-  // Symbol is new.  Add it to the global symbol table.
-  Symbol* sym = NewSymbol(elf_sym, sym_name, sym_address);
-  InsertSymbol(&loader->global_symbol_table, sym);
+  // Symbol is not cached in current_symbol, replace it.
+  uint64_t symbol_address;
+  uint64_t symbol_length;
+  const char* symbol_name;
+  bool found = DynamicLoaderLookupSymbolByAddress(
+                                            &loader->loaded_libraries,
+                                            address,
+                                            &symbol_name,
+                                            &symbol_address,
+                                            &symbol_length);
+  if (found) {
+    loader->current_symbol.start = symbol_address;
+    loader->current_symbol.end = symbol_address + symbol_length;
+    loader->current_symbol.name = symbol_name;
+    return &loader->current_symbol;
+  }
+  return NULL;
 }
 
 
-bool LoaderInitFromFile(Loader* loader, String* filename) {
-  // Load the ELF file.
-  loader->elf_file = NewELFReaderFile(filename);
-  bool ok = ELFReaderFileRead(loader->elf_file, 0, 0);
-  if (!ok) {
-    return false;
-  }
+void LoaderSetCurrentSymbol(Loader* loader,
+                            uint64_t address,
+                            uint64_t length,
+                            const char* name) {
+}
 
-  // Initialize regions vector.
-  VectorInit(&loader->regions);
+SymbolScope* LoaderGetCurrentSymbol(Loader* loader) {
+  return &loader->current_symbol;
+}
 
-  // Add the whole ELF file to the regions vector.
-  VectorAppend(&loader->regions, NewRegion(loader->elf_file->header, loader->elf_file->file_length));
 
-  // Get the entry point address.
-  loader->main_address = loader->elf_file->header->entry;
+// Align the given value to a power of 2 alignment.
+static uint64_t Align(uint64_t v, uint64_t alignment) {
+  return (v + (alignment - 1)) & ~(alignment - 1);
+}
 
-  HashTableInit(&loader->global_symbol_table, "symbols", 111, SymbolHash, SymbolInsertInHashTable, SymbolFindInHashTable);
-  
-  // Read the symbol tables and insert all the symbols into the global symbol table.
+// Find all the sections that are part of the program segment and
+// add them to the region.
+static void GetRegionSections(Loader* loader, Region* region,
+                              ELFProgramHeader* segment, size_t segment_number) {
+  uint64_t segment_start = segment->offset;
+  uint64_t segment_end = segment->offset + segment->filesz;
   for (size_t i = 0; i < loader->elf_file->sections.length; i++) {
-    ELFReaderSection* section = loader->elf_file->sections.value[i];
-    if (section->header->type == SHT(symtab)) {
-      ELFReaderSection* symtab = section;
-      if (symtab->header->link >= loader->elf_file->sections.length) {
-        LoaderError("Corrupt symbol table link value");
-        continue;
-      }
-      ELFReaderSection* strtab = loader->elf_file->sections.value[symtab->header->link];
-      size_t num_symbols = symtab->header->size / symtab->header->entsize;
-      const char* symbol_addr = (const char*)loader->elf_file->header + symtab->header->offset;
-      
-      // Now read the symbols and add them to the symbol tables in the file.
-      for (size_t i = 0; i < num_symbols; i++) {
-        ELFSymbol* elf_sym = (ELFSymbol*)symbol_addr;
-        ReadSymbol(loader, loader->elf_file, symtab, strtab, elf_sym);
-        symbol_addr += symtab->header->entsize;
-      }
+    ELFReaderSection* section = loader->elf_file->sections.value.p[i];
+    if (section->header->type == SHT(null)) {
+      continue;
+    }
+    uint64_t section_start = section->header->offset;
+    uint64_t section_end = section->header->offset + section->header->size;
+    if (section_start >= segment_start && section_end <= segment_end) {
+      VectorAppend(&region->sections, section);
     }
   }
-  
-  if (kPrintSymbolTableOnStart) {
-    PrintSymbolTable(loader);
-  }
+}
+
+static bool LoadStaticSegments(Loader* loader, String* filename) {
+  // Get page size and mask (almost guaranteed to be 4K).
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  int page_mask = page_size - 1;
   
   // Process all program segments and look for PT_LOAD types.  These are
   // loadable segments that have an address assigned to them.  We map them in
@@ -212,19 +128,21 @@ bool LoaderInitFromFile(Loader* loader, String* filename) {
   // and points them to the file contents so that when they are read the page
   // is filled with the data in the file.
   for (size_t i = 0; i < loader->elf_file->segments.length; i++) {
-    ELFProgramHeader* segment = loader->elf_file->segments.value[i];
+    ELFProgramHeader* segment = loader->elf_file->segments.value.p[i];
     if (segment->type == PT(load)) {
-      uint64_t addr = segment->vaddr;       // Address to place segment at.
-      uint64_t load_addr = addr;
+      if (segment->memsz == 0) {
+        // No point in trying to map a zero length segment.
+        break;
+      }
+      uint64_t addr = loader->arch->ignore_vaddr ? 0 : segment->vaddr;       // Address to place segment at.
       uint64_t offset = segment->offset;    // Offset into file.
-
+      
       // Align address and offset to lower page boundary.  The address and
       // file offset must be page-aligned for the mmap function to operate
-      // correctly (it will error out if this is not the case).  We assume
-      // our pages are 4K long as this is almost universally true these daye.
-      addr &= ~0xfff;
-      offset &= ~0xfff;
-
+      // correctly (it will error out if this is not the case).
+      addr &= ~page_mask;
+      offset &= ~page_mask;
+      
       // Protection for mmap and open.  We have to open the file in order the mmap it.
       // If the mapping is going to allow writes to the pages we need to open the file
       // in read-write mode, but we won't be writing to it.
@@ -239,12 +157,12 @@ bool LoaderInitFromFile(Loader* loader, String* filename) {
         // Segment is executable.
         prot |= PROT_EXEC;
       }
-
+      
       // Length of segment in memory.  We can map memory up the next
       // page boundary beyond the end of the file.  If the memsz is
       // beyond that we need to mmap a new ANON segment for it.
-      int64_t length = segment->filesz + (segment->vaddr & 0xfff);
-      length = (length + 0xfff) & ~0xfff;
+      int64_t length = segment->filesz + (segment->vaddr & page_mask);
+      length = (length + page_mask) & ~page_mask;
       
       // Open the ELF file again to get a file descriptor that we can use
       // for mmap.
@@ -253,11 +171,15 @@ bool LoaderInitFromFile(Loader* loader, String* filename) {
         printf("Failed to open ELF file segment\n");
         return false;
       }
-
+      
       if (length == 0) {
         continue;
       }
       
+      int flags = MAP_PRIVATE;
+      if (addr != 0) {
+        flags |= MAP_FIXED;
+      }
       // Map in the segment at the address specified in the ELF file.  This is done using
       // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
       // will be copied to a new physical address if they are written to, otherwise they
@@ -265,56 +187,199 @@ bool LoaderInitFromFile(Loader* loader, String* filename) {
       // flag says that we are providing the address to map the pages at.  Normally mmap
       // chooses the address, but in this case we need them at the same virtual address
       // that he Loader chose and specified in the segment header.
-      void* segment_ptr = mmap((void*)addr, length, prot, MAP_PRIVATE|MAP_FIXED, fd, offset);
+      void* segment_ptr = mmap((void*)addr, length, prot, flags, fd, offset);
       if (segment_ptr == MAP_FAILED) {
         printf("Failed to map in ELF segment: %s\n", strerror(errno));
         return false;
       }
-
+      
       // Don't need the file descriptor now.
       close(fd);
-
+      
       // Zero out any difference between memsz and filesz.  This will really only
       // be the .bss section.  We have mapped the contents of the file but some of
       // it will need to be zeroed out.  We also need to allocate a contiguous
       // anonymous region of zeros above the segment.
       // We need the .bss to be all zeroes before thae program starts.
       if ((prot & PROT_WRITE) != 0) {
-        void* zeroed_region = (char*)load_addr + segment->filesz;   // Start of zero memory.
-        int64_t zeroed_region_size = (char*)segment_ptr + length - (char*)zeroed_region;
-        //length - segment->filesz;
+        void* zeroed_region = (loader->arch->ignore_vaddr ?
+                               segment_ptr : (char*)segment->vaddr) +
+            segment->filesz;   // Start of zero memory.
+        // Calculate end of mapped memory.  The 'length' contains the total length
+        // of the mapped memory.
+        uint64_t end_of_mapped_memory = (loader->arch->ignore_vaddr ?
+                                         (uint64_t)segment_ptr : addr) +
+                                          length;
+        int64_t zeroed_region_size = end_of_mapped_memory - (uint64_t)zeroed_region;
         memset(zeroed_region, 0, zeroed_region_size);
         
         // Any additional memory beyond the file.
-        int64_t additional_memory = segment->memsz - length;
+        int64_t additional_memory = Align(segment->memsz - length, page_size);
         if (additional_memory > 0) {
-          void* zero = (char*)segment_ptr + length;
+          void* zero = (char*)end_of_mapped_memory;
           zero = mmap(zero, additional_memory, PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
           if (zero == MAP_FAILED) {
-            printf("Failed to map in ELF segment: %s\n", strerror(errno));
+            LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
             return false;
           }
           VectorAppend(&loader->regions, NewRegion(zero, additional_memory));
         }
       }
-
+      
       // Add a new region to the regions vector so that we can remove it
       // when destructed.
-      VectorAppend(&loader->regions, NewRegion(segment_ptr, length));
+      Region* region = NewRegion(segment_ptr, length);
+      VectorAppend(&loader->regions, region);
+      GetRegionSections(loader, region, segment, i);
     }
   }
   return true;
 }
 
+
+// Find the .dynamic section.  Return NULL if not found.
+static DynamicSection* FindDynamicSection(Loader* loader) {
+  for (size_t i = 0; i < loader->elf_file->sections.length; i++) {
+    ELFReaderSection* section = loader->elf_file->sections.value.p[i];
+    if (section->header->type == SHT(dynamic)) {
+      return section->contents;
+    }
+  }
+  return NULL;
+}
+
+
+static bool LoadDynamic(Loader* loader, bool lazy) {
+  // Create a new LoaddedDynamicLibrary from the currently loaded
+  // file. This will recursively load all the libraries it needs.
+  // TODO: figure out where to get the address from.
+  uint64_t load_addr = 0x600000000LL;
+  loader->dynamic_lib = NewLoadedDynamicLibrary(loader->filename.value,
+                                                loader);
+  DynamicLibraryRegistryInsert(&loader->loaded_libraries, loader->dynamic_lib);
+  bool ok = LoadedDynamicLibraryLoad(loader->dynamic_lib, &loader->loaded_libraries,
+                                     &loader->library_search_path,
+                                     &load_addr);
+  
+   if (!ok) {
+     LoaderError("Unable to find %s", loader->dynamic_lib->libname.value);
+     LoadedDynamicLibraryDelete(loader->dynamic_lib);
+     return false;
+  }
+  
+  // Relocate all the loaded libraries.
+  for (size_t i = 0; i < loader->loaded_libraries.search.length; i++) {
+    LoadedDynamicLibrary* lib = loader->loaded_libraries.search.value.p[i];
+    LoadedDynamicLibraryRelocate(loader, lib,
+                                 &loader->loaded_libraries,
+                                 lazy);
+  }
+  return true;
+}
+
+static void InitLibrarySearchPath(Loader* loader) {
+  VectorAppend(&loader->library_search_path, NewString("/usr/lib"));
+  VectorAppend(&loader->library_search_path, NewString("/lib"));
+  
+  char* ld_library_path = getenv("LD_LIBRARY_PATH");
+  if (ld_library_path != NULL) {
+    char* start = ld_library_path;
+    while (*start != '\0') {
+      char* p = ld_library_path;
+      while (*p != ':' && *p != '\0') {
+        p++;
+      }
+      String* dir = NewString("");
+      StringAppendSegment(dir, start, p - start);
+      VectorAppend(&loader->library_search_path, dir);
+      start = p;
+      if (*start == ':') {
+        start++;
+      }
+    }
+  }
+}
+
+bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
+                        LoaderArchitecture* arch, void* arch_data) {
+  loader->arch = arch;
+  loader->arch_data = arch_data;
+  loader->flags = flags;
+  
+  // Load the ELF file.
+  loader->elf_file = NewELFReaderFile(filename);
+  bool ok = ELFReaderFileRead(loader->elf_file, 0, 0);
+  if (!ok) {
+    return false;
+  }
+
+  if (loader->elf_file->header->machine != loader->arch->machine_type) {
+    fprintf(stderr, "Wrong architecture: got %d, need %d\n",
+            loader->elf_file->header->machine,
+            loader->arch->machine_type);
+    return false;
+  }
+  
+  // Set origin to the directory name of the executable file, or empty
+  // string if there isn't one.
+  StringInit(&loader->origin, NULL);
+  const char* slash = strrchr(filename->value, '/');
+  if (slash != NULL) {
+    StringAppendSegment(&loader->origin,
+                        filename->value,
+                        slash - filename->value);
+  } else {
+    StringAppend(&loader->origin, ".");
+  }
+
+  // Expand any symbolic links in the origin path.
+  char resolved[4096];
+  char* p = realpath(loader->origin.value, resolved);
+  if (p != NULL) {
+    StringInit(&loader->resolved_origin, resolved);
+  } else {
+    StringInit(&loader->resolved_origin, loader->origin.value);
+
+  }
+  DynamicLibraryRegistryInit(&loader->loaded_libraries);
+  VectorInit(&loader->library_search_path);
+  InitLibrarySearchPath(loader);
+  StringInit(&loader->filename, filename->value);
+  
+  // Initialize regions vector.
+  VectorInit(&loader->regions);
+
+  // Add the whole ELF file to the regions vector.
+  VectorAppend(&loader->regions, NewRegion(loader->elf_file->header,
+                                           loader->elf_file->file_length));
+
+  // Get the entry point address.
+  loader->main_address = loader->elf_file->header->entry;
+  
+  loader->dynamic = FindDynamicSection(loader);
+  if (loader->dynamic == NULL) {
+    // No dynamic segment means this is a fully static executable.
+    if (loader->elf_file->header->type != ET(exec)) {
+      return false;
+    }
+    ok = LoadStaticSegments(loader, filename);
+  } else {
+    // This is a dynamic executable.
+    ok = LoadDynamic(loader, (flags & LOADER_LAZY_RESOLVE) != 0);
+  }
+    
+  memset(&loader->current_symbol, 0, sizeof(SymbolScope));
+  return ok;
+}
+
 void LoaderDestruct(Loader* loader) {
   // Unmap all regions.
   for (size_t i = 0; i < loader->regions.length; i++) {
-    Region* region = loader->regions.value[i];
+    Region* region = loader->regions.value.p[i];
     munmap(region->address, region->length);
   }
-  VectorDestructWithContents(&loader->regions, NULL);
+  DynamicLibraryRegistryInit(&loader->loaded_libraries);
   
-  // Clear the symbol table and delete it.
-  ClearSymbolTable(&loader->global_symbol_table);
-  HashTableDestruct(&loader->global_symbol_table);
+  VectorDestructWithContents(&loader->regions,
+                             (VectorElementDestructor)RegionDestruct);
 }

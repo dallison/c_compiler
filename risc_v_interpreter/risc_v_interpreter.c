@@ -33,12 +33,63 @@ static void DumpStateAndExit(Interpreter* interpreter) {
   exit(1);
 }
 
-const bool kDisassemble = false;
+// On entry:
+// t0: address of resolver data structure.  This is called "link_map" in
+//     Linux, but in this loader it's the address of the LoadedDynamicLibrary
+//     that contains the GOT entry being resolved.
+// t1: the byte offset from the start of the GOTPLT (the part of the GOT
+//     that contains addresses of functions rather than data) to the GOT
+//     entry that is being resolved.
+//
+// The procedure is to use the offset into the GOTPLT to find a relocation
+// for the GOT entry.  This gives us an ELFSymbol, from which we get the
+// symbol name.  This is looked up in the dynamic symbol tables and if
+// found, the GOT entry is set to the address of the symbol and the PC
+// is set to that address.
+static void ResolveAndFixupSymbol(Interpreter* interpreter) {
+  const int t0 = 5;
+  const int t1 = 6;
+  int64_t offset = interpreter->iregs[t1];
+  LoadedDynamicLibrary* lib = (LoadedDynamicLibrary*)interpreter->iregs[t0];
+  const void* relocs = DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(jmprel));
+  if (relocs == NULL) {
+    fprintf(stderr, "Failed to find relocations in library %s\n", lib->filename.value);
+    exit(1);
+  }
+  // The offset is a byte offset into the .got.plt.  We need to find the
+  // relocation which will be at index offset/8 into the relocation table.
+  // TODO: is it safe to assume that relocations are in order in the
+  // .rela.plt table or do we need to search for the offset?
+  int64_t reloc_index = offset / 8;
+  
+  const ELFRelocation* reloc = (const ELFRelocation*)relocs + reloc_index;
+  int32_t sym_index = ELF_R_SYM(reloc->info);
+  const char* sym_name = lib->dynstr + lib->dynsym[sym_index].name;
+  // printf("Resolving symbol %s\n", sym_name);
+  const ELFSymbol* symbol;
+  LoadedDynamicLibrary* found_lib;
+  bool ok = DynamicLoaderFindSymbol(&lib->loader->loaded_libraries,
+                                    sym_name, &symbol, &found_lib);
+  if (!ok) {
+    fprintf(stderr, "Undefined symbol %s\n", sym_name);
+    exit(1);
+  }
+  uint64_t symbol_address = found_lib->load_address + symbol->value;
+  
+  // Fixup GOT entry to contain the symbol address.
+  *(uint64_t*)(lib->load_address + reloc->offset) = symbol_address;
+  
+  // Finally jump to the address.  The PC will be incremented after the
+  // ecall instruction so we need to set it to one instruction before
+  // the address we want - 4 bytes.
+  interpreter->pc = symbol_address - 4;
+}
+
 const bool kDumpRegsonEbreak = false;
 const bool kShowRegChanges = false;
 
 static void HandleEcall(Interpreter* interpreter) {
-  switch (interpreter->iregs[10]) {
+  switch (interpreter->iregs[31]) {
     case RISC_V_ECALL_HALT:
       exit(0);
       break;
@@ -61,10 +112,15 @@ static void HandleEcall(Interpreter* interpreter) {
       break;
     }
     case RISC_V_ECALL_WRITE: {
-      int fd = (int)interpreter->iregs[11];
-      const void* addr = (void*)interpreter->iregs[12];
-      size_t size = (size_t)interpreter->iregs[13];
+      int fd = (int)interpreter->iregs[10];
+      const void* addr = (void*)interpreter->iregs[11];
+      size_t size = (size_t)interpreter->iregs[12];
       interpreter->iregs[10] = write(fd, addr, size);
+      break;
+    }
+      
+    case RISC_V_ECALL_RESOLVE: {
+      ResolveAndFixupSymbol(interpreter);
       break;
     }
     default:
@@ -93,14 +149,36 @@ static void DumpRegChanges(Interpreter* interpreter) {
   }
 }
 
-void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
+void InterpreterInit(Interpreter* interpreter, bool trace_regs, bool trace_instructions) {
   memset(interpreter, 0, sizeof(Interpreter));
+  interpreter->trace_regs = trace_regs;
+  interpreter->trace_instructions = trace_instructions;
+  
+  // Create symbol resolver code.  This is invoked from the first
+  // PLT entry with the following registers set:
+  // t0: address of resolver data in the GOT.
+  // t1: index into PLT for function to be called.
+  //
+  // The resolver data in the GOT contains:
+  // [0]: Address of this code.
+  // [1]: Address of LoadedDynamicLibrary containing the GOT and PLT
+  //
+  // This loads x10 with the ecall opcode (RISC_V_ECALL_RESOLVE)
+  // and invokes an ecall instruction.
+  interpreter->symbol_resolver_code[0] = RV_OPCODE(op_imm) |
+    (31 << 7) |
+    (RISC_V_ECALL_RESOLVE << 20);    // addi x31, x0, 6
+  interpreter->symbol_resolver_code[1]= RV_OPCODE(system);   // ecall
+}
+
+void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
   interpreter->loader = loader;
   interpreter->stack = malloc(RISC_V_STACK_SIZE);
   interpreter->iregs[RV_SP_REG] = (int64_t)(interpreter->stack + RISC_V_STACK_SIZE);
     
   int64_t* iregs = interpreter->iregs;
-  
+  double* fregs = interpreter->fregs;
+
   // Invoke interpreter at startup code.  This will call main and then
   // halt.
   int32_t* startup = interpreter->startup_code;
@@ -110,7 +188,7 @@ void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_ad
   // mv x10, 1
   // ecall
   startup[0] = RV_OPCODE(jalr) | (1 << 7) | (1 << 15); // jalr x1, x1 ,0
-  startup[1] = RV_OPCODE(op_imm) | (10 << 7) | (1 << 20);    // addi x10, x0, 1
+  startup[1] = RV_OPCODE(op_imm) | (31 << 7) | (1 << 20);    // addi x31, x0, 1
   startup[2] = RV_OPCODE(system);                           // ecall
   interpreter->iregs[1] = entry_address;
   interpreter->pc = (int64_t)startup;
@@ -120,15 +198,13 @@ void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_ad
   iregs[RV_INT_ARG_START+1] = (int64_t)argv;
   
   interpreter->trace_regs = kShowRegChanges;
-}
 
-void InterpreterRun(Interpreter* interpreter) {
-  int64_t* iregs = interpreter->iregs;
-  double* fregs = interpreter->fregs;
-
-  interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->pc);
-  
   for (; interpreter->pc != 0; interpreter->pc += 4) {
+    if (interpreter->trace_instructions) {
+      interpreter->current_symbol = LoaderFindSymbol(interpreter->loader,
+                                                     interpreter->pc);
+    }
+    
     // x0 is hardcoded as zero.  Reset it every loop in case it's been
     // overwritten.
     iregs[RV_INT_ZERO_REG] = 0;
@@ -137,7 +213,7 @@ void InterpreterRun(Interpreter* interpreter) {
       memcpy(interpreter->old_iregs, interpreter->iregs, sizeof(interpreter->iregs));
       memcpy(interpreter->old_fregs, interpreter->fregs, sizeof(interpreter->fregs));
     }
-    if (kDisassemble) {
+    if (interpreter->trace_instructions) {
       DisassembleRiscVInstruction(interpreter, (void*)interpreter->pc, stdout);
     }
     
@@ -366,18 +442,12 @@ void InterpreterRun(Interpreter* interpreter) {
         immed >>= 63-20;
         iregs[rd] = interpreter->pc + 4;
         interpreter->pc += immed - 4;
-        if (rd != 0) {
-          // A jal with x0 as the rd is a 'j' instruction and that jumps to the same
-          // procedure.
-          interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->pc+4);
-        }
         break;
       }
       case RV_OPCODE(jalr): {
         int64_t immed = inst >> 20;     // Auto sign extended to 64 bits.
         int64_t old_pc = interpreter->pc;
         interpreter->pc = iregs[rs1] + immed - 4;
-        interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->pc+4);
         iregs[rd] = old_pc + 4;
         break;
       }

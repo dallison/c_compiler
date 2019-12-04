@@ -75,6 +75,8 @@ const char* TargetOpcodeName(int op) {
       return "fp";  // Frame pointer pseudo operation.
     case TARGET_OP(sp):
       return "sp";  // Stack pointer pseudo operation.
+    case TARGET_OP(tp):
+      return "tp";  // Thread pointer pseudo operation.
 
     // Function result registers.
     case TARGET_OP(resultx):
@@ -95,25 +97,25 @@ const char* TargetOpcodeName(int op) {
 }
 
 void TargetPrintInstruction(TargetInstruction* inst,
-                            const char* (*name_func)(int)) {
+                            const char* (*name_func)(int), FILE* fp) {
   if (inst == NULL) {
     return;
   }
-  printf("@%d %s(", inst->id, name_func(inst->opcode));
+  fprintf(fp, "@%d %s(", inst->id, name_func(inst->opcode));
   TargetConstant* c = (TargetConstant*)inst;
   switch (inst->opcode) {
     case TARGET_OP(constb):
     case TARGET_OP(consth):
     case TARGET_OP(constw):
     case TARGET_OP(constx):
-      printf("#%lld", c->value.ivalue);
+      fprintf(fp, "#%lld", c->value.ivalue);
       break;
     case TARGET_OP(constf):
     case TARGET_OP(constd):
-      printf("#%g", c->value.dvalue);
+      fprintf(fp, "#%g", c->value.dvalue);
       break;
     case TARGET_OP(symbol):
-      printf("%s", ((TargetSymbol*)inst)->symbol->name.value);
+      fprintf(fp, "%s", ((TargetSymbol*)inst)->symbol->name.value);
       break;
 
     case TARGET_OP(loc): {
@@ -123,7 +125,7 @@ void TargetPrintInstruction(TargetInstruction* inst,
       int start;
       int end;
       DecodeSourceLocation(loc->location, &filename, &lineno, &start, &end);
-      printf("%s %d %d %d", filename, lineno, start, end);
+      fprintf(fp, "%s %d %d %d", filename, lineno, start, end);
       break;
     }
 
@@ -131,14 +133,14 @@ void TargetPrintInstruction(TargetInstruction* inst,
       const char* sep = "";
       for (size_t i = 0; i < 3; i++) {
         if (inst->operand[i] != NULL) {
-          printf("%s@%d", sep, inst->operand[i]->id);
+          fprintf(fp, "%s@%d", sep, inst->operand[i]->id);
           sep = ", ";
         }
       }
       break;
     }
   }
-  printf(") *%d\n", inst->refs);
+  fprintf(fp, ") *%d\n", inst->refs);
 }
 
 void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
@@ -146,7 +148,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
   Symbol* func = func_type->info.function.symbol;
   const char* func_name = func->name.value;
   StringInit(&target->function_name, func_name);
-  target->is_global = func->storage != kStorageStatic;
+  target->is_global = !StorageIs(func->storage, STO(static));
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
 
@@ -158,6 +160,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
   VectorInit(&target->fixups);
   target->frame_pointer = NULL;
   target->stack_pointer = NULL;
+  target->thread_pointer = NULL;
   next_instruction_id = 1;
 
   // Create the memcpy symbol.
@@ -165,14 +168,21 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
   TypeRecord* memcpy_func = NewFunctionTypeRecord();
   memcpy_func->info.function.unknown_args = true;
   TypeRecordChain(memcpy_func, memcpy_base);
-  target->memcpy = NewSymbol("memcpy", memcpy_func, kStorageExtern);
+  target->memcpy = NewSymbol("memcpy", memcpy_func, STO(extern));
 
   // Create the memset symbol.
   TypeRecord* memset_base = NewTypeRecord(kTypeInt, kQualPlain);
   TypeRecord* memset_func = NewFunctionTypeRecord();
   memcpy_func->info.function.unknown_args = true;
   TypeRecordChain(memset_func, memset_base);
-  target->memset = NewSymbol("memset", memset_func, kStorageExtern);
+  target->memset = NewSymbol("memset", memset_func, STO(extern));
+  
+  // Create the __tls_get_addr symbol.
+  TypeRecord* tls_base = NewTypeRecord(kTypeInt, kQualPlain);
+  TypeRecord* tls_func = NewFunctionTypeRecord();
+  tls_func->info.function.unknown_args = true;
+  TypeRecordChain(tls_func, tls_base);
+  target->__tls_get_addr = NewSymbol("__tls_get_addr", tls_func, STO(extern));
 }
 
 void TargetGeneratorDestruct(TargetGenerator* target) {
@@ -363,6 +373,13 @@ TargetInstruction* TargetStackPointer(TargetGenerator* target) {
   return target->stack_pointer;
 }
 
+TargetInstruction* TargetThreadPointer(TargetGenerator* target) {
+  if (target->thread_pointer == NULL) {
+    target->thread_pointer =
+    TargetEmit(target, TargetNewInstruction(TARGET_OP(tp)));
+  }
+  return target->thread_pointer;
+}
 TargetInstruction* TargetNewLiteral(int id) {
   TargetLiteral* literal = malloc(sizeof(TargetLiteral));
   TargetInitInstruction(&literal->base, TARGET_OP(literal));
@@ -490,7 +507,7 @@ TargetBranchFixup* NewBranchFixup(TargetInstruction* inst, IRNode* target,
 
 void TargetApplyFixups(TargetGenerator* target, IRNode* label_node) {
   for (size_t i = 0; i < target->fixups.length; i++) {
-    TargetBranchFixup* fixup = target->fixups.value[i];
+    TargetBranchFixup* fixup = target->fixups.value.p[i];
     if (fixup->target == label_node) {
       fixup->inst->operand[fixup->operand] = TargetGetLoweredNode(label_node);
     }

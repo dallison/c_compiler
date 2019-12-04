@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct Vector;
+
 // This is a struct the implements a general purpose variable
 // length string.  The string is mutable and can be appended to
 // or changed.  The memory is either in a small array inside the
@@ -21,6 +23,7 @@
 // will expand as needed as the string changes.
 
 #define STRING_BUFFER_SIZE 16
+#define STRING_IMMUTABLE ((size_t)-1)
 
 typedef struct {
   // Most strings are short.  This buffer will avoid heap
@@ -43,6 +46,9 @@ String* NewString(const char* init);
 
 void StringInitFromSegment(String* str, const char* init, size_t length);
 
+// Initialize an immutable string from a character pointer.
+void StringInitImmutable(String* str, const char* init);
+
 // Destroys a string, freeing up the memory.
 void StringDestruct(String* str);
 
@@ -58,6 +64,10 @@ bool StringEqualString(String* str1, String* str2);
 int StringCompareString(String* str1, String* str2);
 bool StringContainsChar(String* str, char ch);
 bool StringContainsString(String* str, const char* s);
+
+bool StringEqualCaseBlind(String* str1, const char* str2);
+int StringCompareCaseBlind(String* str1, const char* str2);
+int StringCompareStringCaseBlind(String* str1, String* str2);
 
 // Set and append.
 void StringSet(String* str, const char* value);
@@ -82,5 +92,10 @@ size_t StringLastIndexOf(String* s, const char* substring);
 void StringSubstring(String* s, size_t start, size_t length, String* out);
 bool StringStartsWith(String* s, const char* prefix);
 bool StringEndsWith(String* s, const char* suffix);
+
+void StringSplit(String* s, char sep, struct Vector* v);
+void StringReplace(String* str, size_t pos, size_t len, const char* p, size_t plen);
+void StringReplaceString(String* str, size_t pos, size_t len, String* p);
+void StringErase(String* str, size_t pos, size_t len);
 
 #endif /* string_h */

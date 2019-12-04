@@ -13,19 +13,24 @@
 
 #include "buffer.h"
 #include "dstring.h"
+#include "vector.h"
 
 struct TypeRecord;
 
 // Storage for symbol (where it is located in memory).
+#define STO(x) kStorage_##x
 typedef enum {
-  kStorageImplicit,      // Implied.
-  kStorageAuto,          // Automatic (on stack).
-  kStorageStatic,        // Static (in data segment)
-  kStorageTypedef,       // Type definition.
-  kStorageExtern,        // External (not defined in this program).
-  kStorageRegister,      // In a register (not used in modern C).
-  kStorageAssembler,     // Assembler label.
+  STO(implicit) = 0,         // Implied.
+  STO(auto) = 1<<0,          // Automatic (on stack).
+  STO(static) = 1<<1,        // Static (in data segment)
+  STO(typedef) = 1<<2,       // Type definition.
+  STO(extern) = 1<<3,        // External (not defined in this program).
+  STO(register) = 1<<4,      // In a register (not used in modern C).
+  STO(assembler) = 1<<5,     // Assembler label.
+  STO(thread) = 1<<6,        // Thread local.
 } Storage;
+
+bool StorageIs(Storage storage, Storage value);
 
 // A symbol.  This is a variable, function or type used in a program.
 typedef struct Symbol {
@@ -39,6 +44,8 @@ typedef struct Symbol {
   bool is_temp;               // Temporary (invented).
   bool address_taken;         // The address has been taken in the program.
   bool used;                  // The symbol has been used.
+  Vector attributes;          // Attributes (owns String*).
+  
   // Symbol value, one of these.
   union {
     int64_t ivalue;         // Integer value for constants.
@@ -50,6 +57,7 @@ typedef struct Symbol {
   int32_t stack_offset;     // Stack offset if local.
 } Symbol;
 
+
 void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
                 Storage storage);
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage);
@@ -57,6 +65,10 @@ void SymbolDelete(Symbol* symbol);
 void SymbolDestruct(Symbol* symbol);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
+
+// Adds attribute and takes ownership of the String.
+void SymbolAddAttribute(Symbol* symbol, String* attribute);
+bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 
 void SymbolPrintDetails(Symbol* sym, bool with_function_body);
 void SymbolPrint(Symbol* sym);

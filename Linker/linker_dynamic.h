@@ -6,16 +6,22 @@
 //  Copyright © 2018 David Allison. All rights reserved.
 //
 
-
+//
+// This is the dynamic support for the linker.  It supports reading
+// and writing dynamic libraries and executables as neede by
+// the linker.  It is not the runtime dynamic loader.
+//
 #ifndef linker_dynamic_h
 #define linker_dynamic_h
 
 #include "vector.h"
 #include <stdint.h>
+#include "loader_dynamic.h"
 
-struct LinkerSymbol;
+struct Symbol;
 struct Linker;
 struct ELFWriterSectionContents;
+struct DynamicLinker;
 
 // Dynamic Shared Object (DSO)
 
@@ -33,63 +39,91 @@ struct ELFWriterSectionContents;
 // 4. Relocations to lookup the addresses of the symbols in the GOT and
 //    assign them to the entry.
 
-// There are 2 parts to the GOT.  The first part contains the addresses
-// of data and will be relocated at load time to contain the
+
+// There are a number of parts to the GOT.  The first part contains the
+// addresses of data and will be relocated at load time to contain the
 // correct address.  This is used for access to global variables referenced
 // from a DSO.
 //
-// The second part of the GOT is for the addresses of functions.  When loaded
+// The second part contains the offsets of TLS variabled that uss the
+// InitialExec model.  These are offsets into the TLS data allocated for
+// every thread.
+//
+// The third part is pairs of words for variables using the TLS Global Dynamic
+// model.  The first word is the module id and the second is the offset
+// into the TLS data for that module.
+
+// The fourth part of the GOT is for the addresses of functions.  When loaded
 // these are all set to an address that allows the dynamic linker to lookup
 // the address of the function and set the GOT entry when the function
 // is first called.
+//
+// The first three parts of the GOT are held in the section ".got" and are
+// relocated at load time to contain the absolute addresses of variables or
+// TLS offsets.
+//
+// The fourth part of the GOT is held in the section ".got.plt" and at load
+// time contains the addresses of the PLT entries so that the resolution
+// of symbols can be done lazyily on the first call to the function.
 typedef struct {
-  int num_reserved_entries;
-  int entry_size;
-  uint64_t address;
-  Vector data_entries;     // Vector of pointers to LinkerSymbol.
-  Vector function_entries; // Vector of pointers to LinkerSymbol.
+  int num_resolver_data_entries;  // Number of entries for resolver data.
+  int entry_size;          // Size of each entry (4 or 8).
+  Vector data_entries;     // Vector of pointers to Symbol.
+  Vector tls_ie_entries;      // Vector of pointers to Symbol.
+  Vector tls_gd_entries;      // Vector of pointers to Symbol.
+  Vector function_entries; // Vector of pointers to Symbol.
 } GlobalOffsetTable;
 
+// The PLT consists of a set of trampolines that relay a call
+// to its correct address, after first locating the symbol
+// using dynamic lookup at runtime.
 typedef struct {
-  int num_reserved_entries;
-  int entry_size;
-  uint64_t address;
-  Vector trampolines;
+  int num_reserved_entries;       // Reserved for runtime resolver.
+  int entry_size;                 // Size of each entry.
+  Vector trampolines;             // Vector of Symbol*.
 } ProcedureLinkageTable;
 
-
-// TODO: think of a better name.  Maybe DynamicLinker?
-typedef struct DynamicSection {
+typedef struct DynamicLinker {
   GlobalOffsetTable global_offset_table;
   ProcedureLinkageTable procedure_linkage_table;
-  Vector relocations;
-  struct LinkerSymbol* global_offset_table_symbol;
-  struct LinkerSymbol* dynamic_symbol;
-} DynamicSection;
+  Vector got_relocations;
+  Vector plt_relocations;
+  Vector needed_libraries;      // Offsets into dynstr table.
+  ELF_Xword rpath;              // Offset into dynstr table.
+  struct Symbol* global_offset_table_symbol;
+  struct Symbol* dynamic_symbol;
+  
+  // These are the synthetic sections created by the dynamic
+  // linker.  The linker always deals with groups of sections
+  // at a time so these groups have a single section in them.
+  struct SectionGroup* got_group;
+  struct SectionGroup* got_plt_group;
+  struct SectionGroup* plt_group;
+  struct SectionGroup* dyn_rela_group;
+  struct SectionGroup* plt_rela_group;
+  struct SectionGroup* dynamic_group;
+  struct SectionGroup* interpreter_group;
+  
+  // All loaded libraries.
+  DynamicLibraryRegistry loaded_dynamic_libraries;
+} DynamicLinker;
 
-void DynamicSectionInit(DynamicSection* s, struct Linker* linker);
-DynamicSection* NewDynamicSection(struct Linker* linker);
-void DynamicSectionDestruct(DynamicSection* s);
-void DynamicSectionDelete(DynamicSection* s);
-void DynamicSectionInventSymbols(struct Linker* linker, DynamicSection* s);
+void DynamicLinkerInit(DynamicLinker* s, struct Linker* linker);
+DynamicLinker* NewDynamicLinker(struct Linker* linker);
+void DynamicLinkerDestruct(DynamicLinker* s);
+void DynamicLinkerDelete(DynamicLinker* s);
+void DynamicLinkerInventSymbols(struct Linker* linker, DynamicLinker* s);
+void DynamicLinkerDefineSymbols(Linker* linker);
 
-typedef struct {
-  struct LinkerFile* file;
-  DynamicSection dynamic;
-} DynamicLibrary;
+void DynamicLinkerBuildDynamicRelocations(struct Linker* linker);
+void DynamicLinkerBuildPLTRelocations(struct Linker* linker);
+void DynamicLinkerGatherDynamicRelocations(struct Linker* linker);
+void DynamicLinkerCreateDynamicLinkerGroups(Linker* linker);
+void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
+                                          int32_t bss_section_index);
+void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf);
+void DynamicLinkerFixupPLT(Linker* linker);
+void DynamicLinkerFixupGOT(Linker* linker);
 
-DynamicLibrary* NewDynamicLibrary(struct LinkerFile* file);
-void DynamicLibraryDestruct(DynamicLibrary* lib);
-void DynamicLibraryDelete(DynamicLibrary* lib);
-
-int GetDataGOTOffset(DynamicSection* s, struct LinkerSymbol* symbol);
-int GetFunctionGOTOffset(DynamicSection* s, struct LinkerSymbol* symbol);
-int GetPLTOffset(DynamicSection* s, struct LinkerSymbol* symbol);
-
-//Section* DynamicInventSection(const char* name);
-
-void BuildGlobalOffsetTable(struct Linker* linker, struct ELFWriterSectionContents* contents);
-
-void GatherDynamicRelocations(struct Linker* linker);
 
 #endif /* linker_dynamic_h */

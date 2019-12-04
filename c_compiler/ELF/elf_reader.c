@@ -19,6 +19,7 @@ ELFReaderSection* NewELFReaderSection() {
   StringInit(&section->name, "");
   section->contents = NULL;
   section->address = 0;
+  section->output_section_index = 0;
   return section;
 }
 
@@ -68,13 +69,13 @@ bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
   }
   
   // Read the section name string table.
-  ELFReaderSection* section_names = elf->sections.value[elf->header->shstrndx];
+  ELFReaderSection* section_names = elf->sections.value.p[elf->header->shstrndx];
   elf->section_names = header_addr + section_names->header->offset;
   
   // Now that we have the section names in memory we can initialize
   // the sections.
   for (size_t i = 0; i < elf->sections.length; i++) {
-    ELFReaderSection* section = elf->sections.value[i];
+    ELFReaderSection* section = elf->sections.value.p[i];
     StringSet(&section->name, elf->section_names + section->header->name);
     section->contents = (void*)(header_addr + section->header->offset);
   }
@@ -127,7 +128,7 @@ bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
 
   // Now we have the file mapped into memory at address 'addr'.  We can
   // access this memory directly.  It is mapped read-only so we can't
-  // write to it.  Writing to it would overwrite the file contents.
+  // write to it.
   void* start_addr = (char*)addr + addr_diff;
   bool ok = ReadFileContents(elf, start_addr, length);
   if (!ok) {
@@ -149,7 +150,7 @@ void ELFReaderFileDelete(ELFReaderFile* elf) {
 
 ELFReaderSection* ELFReaderFileFindSection(ELFReaderFile* elf, const char* name) {
   for (size_t i = 0; i < elf->sections.length; i++) {
-    ELFReaderSection* section = elf->sections.value[i];
+    ELFReaderSection* section = elf->sections.value.p[i];
     if (StringEqual(&section->name, name)) {
       return section;
     }
@@ -159,7 +160,7 @@ ELFReaderSection* ELFReaderFileFindSection(ELFReaderFile* elf, const char* name)
 
 void ELFReaderFileFindSectionsByType(ELFReaderFile* elf, int32_t type, Vector* output) {
   for (size_t i = 0; i < elf->sections.length; i++) {
-    ELFReaderSection* section = elf->sections.value[i];
+    ELFReaderSection* section = elf->sections.value.p[i];
     if (section->header->type == type) {
       VectorAppend(output, section);
     }

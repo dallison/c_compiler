@@ -341,7 +341,7 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
 
   if (!is_leaf) {
     for (size_t i = 0; i < emitter->rv->saved_regs.length; i++) {
-      SavedArgumentRegister* saved_reg = emitter->rv->saved_regs.value[i];
+      SavedArgumentRegister* saved_reg = emitter->rv->saved_regs.value.p[i];
       int offset = saved_reg->offset;
       fprintf(fp, "\tsd %s, %d(%s)\n",
               RVRegisterNameFromNum(saved_reg->reg_num, kRVRegTypeInt, buf1,
@@ -360,7 +360,7 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     int offset = saved_reg_offset;
     saved_reg_offset -= 8;
     fprintf(fp, "\tsd %s, %d(sp)\n",
@@ -371,7 +371,7 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     int offset = saved_reg_offset;
     saved_reg_offset -= 8;
     fprintf(fp, "\tfsd %s, %d(sp)\n",
@@ -397,7 +397,7 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
   VectorDestruct(&regs);
 
   for (size_t i = 0; i < emitter->rv->register_loads.length; i++) {
-    RegisterLoad* load = emitter->rv->register_loads.value[i];
+    RegisterLoad* load = emitter->rv->register_loads.value.p[i];
     if (load->address_only) {
       fprintf(fp, "\taddi %s, s0, -%d\n",
               RVRegisterNameFromNum(first_fp_reg_var + load->dest_reg,
@@ -468,7 +468,7 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     fprintf(fp, "\tfld %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf1, sizeof(buf1)),
             offset);
@@ -478,7 +478,7 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     fprintf(fp, "\tld %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeInt, buf1, sizeof(buf1)),
             offset);
@@ -534,8 +534,11 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       break;
     case RV_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
-      // TODO: local symbols.
-      fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+      if (StorageIs(sym->symbol->storage, STO(static))) {
+        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+      } else {
+        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+      }
       return;
     }
     case RV_OP(call):

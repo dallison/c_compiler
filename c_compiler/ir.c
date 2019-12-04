@@ -271,7 +271,7 @@ void IRSetVarDef(IRNode* inst, Symbol* var) {
 }
 
 void IRReplaceInput(IRNode* node, size_t index, IRNode* new) {
-  IRNode* existing = node->inputs.value[index];
+  IRNode* existing = node->inputs.value.p[index];
 
   // The existing input points to an IRNode.  This node will
   // have an output pointing back to this node.  Delete the node
@@ -279,11 +279,11 @@ void IRReplaceInput(IRNode* node, size_t index, IRNode* new) {
   // (at the given index) to the new node and add this node
   // as an output for the new node.
   for (size_t i = 0; i < existing->outputs.length; i++) {
-    IRNode* output = existing->outputs.value[i];
+    IRNode* output = existing->outputs.value.p[i];
     if (output == node) {
       VectorDeleteElement(&existing->outputs, i);
 
-      node->inputs.value[index] = new;
+      node->inputs.value.p[index] = new;
       VectorAppend(&new->outputs, node);
       return;
     }
@@ -292,9 +292,9 @@ void IRReplaceInput(IRNode* node, size_t index, IRNode* new) {
 }
 
 void IRRemoveInput(IRNode* node, size_t index) {
-  IRNode* input = node->inputs.value[index];
+  IRNode* input = node->inputs.value.p[index];
   for (size_t i = 0; i < input->outputs.length; i++) {
-    IRNode* output = input->outputs.value[i];
+    IRNode* output = input->outputs.value.p[i];
     if (output == node) {
       VectorDeleteElement(&input->outputs, i);
       VectorDeleteElement(&node->inputs, index);
@@ -307,9 +307,9 @@ void IRRemoveInput(IRNode* node, size_t index) {
 void IRRemoveNode(IRNode* node) {
   // Remove this node from the outputs of all inputs.
   for (size_t i = 0; i < node->inputs.length; i++) {
-    IRNode* input = node->inputs.value[i];
+    IRNode* input = node->inputs.value.p[i];
     for (size_t j = 0; j < input->outputs.length; j++) {
-      if (input->outputs.value[j] == node) {
+      if (input->outputs.value.p[j] == node) {
         VectorDeleteElement(&input->outputs, j);
         break;
       }
@@ -318,9 +318,9 @@ void IRRemoveNode(IRNode* node) {
 
   // Remove this node from the inputs of all outputs.
   for (size_t i = 0; i < node->outputs.length; i++) {
-    IRNode* output = node->outputs.value[i];
+    IRNode* output = node->outputs.value.p[i];
     for (size_t j = 0; j < output->inputs.length; j++) {
-      if (output->inputs.value[j] == node) {
+      if (output->inputs.value.p[j] == node) {
         VectorDeleteElement(&output->inputs, j);
         break;
       }
@@ -420,12 +420,12 @@ IRNode* NewIRVariable(Symbol* sym) {
   } else if (sym->is_temp) {
     op = IR_OP(tempvar);
   } else if (sym->is_local) {
-    if (sym->storage != kStorageStatic) {
+    if (!StorageIs(sym->storage, STO(static))) {
       op = IR_OP(localvar);
     }
   } else {
     // Global variable.  If it's extern it will have no storage.
-    if (sym->storage == kStorageExtern) {
+    if (StorageIs(sym->storage, STO(extern))) {
       op = IR_OP(externvar);
     }
   }
@@ -456,7 +456,7 @@ void IRPrint(IRNode* inst) {
   printf("$%d %s(", inst->id, IROpcodeName(inst->opcode));
   const char* sep = "";
   for (size_t i = 0; i < inst->inputs.length; i++) {
-    IRNode* op = (IRNode*)inst->inputs.value[i];
+    IRNode* op = (IRNode*)inst->inputs.value.p[i];
     printf("%s$%d", sep, op->id);
     sep = ", ";
   }
@@ -465,7 +465,7 @@ void IRPrint(IRNode* inst) {
   printf(" [");
   sep = "";
   for (size_t i = 0; i < inst->outputs.length; i++) {
-    IRNode* op = (IRNode*)inst->outputs.value[i];
+    IRNode* op = (IRNode*)inst->outputs.value.p[i];
     printf("%s$%d", sep, op->id);
     sep = ", ";
   }
@@ -564,6 +564,18 @@ bool IRIsStaticVariable(IRNode* node) {
     case IR_OP(staticvar):
     case IR_OP(externvar):
       return true;
+    default:
+      return false;
+  }
+}
+
+bool IRIsThreadVariable(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(staticvar):
+    case IR_OP(externvar): {
+      IRVariable* var = (IRVariable*)node;
+      return StorageIs(var->symbol->storage, STO(thread));
+    }
     default:
       return false;
   }

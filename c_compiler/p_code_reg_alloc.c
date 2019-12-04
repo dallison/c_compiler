@@ -37,7 +37,11 @@ void PCodeRegisterAllocatorInit(PCodeRegisterAllocator* allocator,
   allocator->int_regs[PCODE_FP_REG].base.reserved = true;
   allocator->int_regs[PCODE_SP_REG].base.reserved = true;
   allocator->int_regs[PCODE_AP_REG].base.reserved = true;
-  allocator->int_regs[PCODE_TMP_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TP_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TMP1_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TMP2_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TMP3_REG].base.reserved = true;
+  allocator->int_regs[PCODE_TMP4_REG].base.reserved = true;
 
   // We reserve the function return registers for simplicity.
   allocator->int_regs[PCODE_INT_RETURN_REG].base.reserved = true;
@@ -104,6 +108,8 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(movc):
     case P_OP(movxc):
     case P_OP(adr):
+    case P_OP(adrs):
+    case P_OP(adrtls):
     case P_OP(rmov):
     case P_OP(ldw):
     case P_OP(ldh):
@@ -149,14 +155,13 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(cmpled):
     case P_OP(cmpgtd):
     case P_OP(cmpged):
-    case P_OP(i2d):
-    case P_OP(f2d):
     case P_OP(f2i):
     case P_OP(d2i):
     case P_OP(literal):
     case P_OP(fp):
     case P_OP(sp):
     case P_OP(ap):
+    case P_OP(tp):
     case P_OP(resultx):
     case P_OP(call):
     case P_OP(tmp):
@@ -191,6 +196,8 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(negd):
     case P_OP(resultd):
     case P_OP(calld):
+    case P_OP(i2d):
+    case P_OP(f2d):
       return kPCodeRegTypeDouble;
     default:
       assert(false);
@@ -243,6 +250,7 @@ static bool UsesFixedRegister(TargetInstruction* inst) {
     case P_OP(ap):
     case P_OP(sp):
     case P_OP(fp):
+    case P_OP(tp):
       return true;
     default:
       return false;
@@ -344,6 +352,10 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
     case P_OP(ap):
       reg = &allocator->int_regs[PCODE_AP_REG];
       break;
+      
+    case P_OP(tp):
+      reg = &allocator->int_regs[PCODE_TP_REG];
+      break;
 
     case P_OP(structreturn):
       reg = &allocator->int_regs[0];
@@ -427,6 +439,10 @@ const char* PCodeRegisterName(PCodeRegister* reg, char* buf, size_t len) {
       }
       if (reg->base.num == PCODE_AP_REG) {
         snprintf(buf, len, "ap");
+        break;
+      }
+      if (reg->base.num == PCODE_TP_REG) {
+        snprintf(buf, len, "tp");
         break;
       }
       snprintf(buf, len, "r%d", reg->base.num);

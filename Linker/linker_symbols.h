@@ -15,27 +15,29 @@
 #include "elf_reader.h"
 
 struct Linker;
-struct LinkerFile;
+struct ObjectFile;
 
-typedef struct LinkerSymbol {
+typedef struct Symbol {
   ELFSymbol* header;
   String name;
   bool defined;         // Symbol is defined.
+  bool invented;
   ELFReaderSection* section;    // Section containing symbol (or NULL for COM)
-  struct LinkerFile* file;
+  struct ObjectFile* file;
   size_t size;          // Number of bytes in used by symbol;
   uint64_t address;     // Address assigned by linker.
-  bool delete_header;   // The ELFHeader is owned (and needs deleted).
-  int got_offset;       // Global Offset Table offset (-1 = none)
-  int plt_offset;       // Procedure Linkage Table offset (-1 = none)
-} LinkerSymbol;
+  int got_index;       // Global Offset Table index (-1 = none)
+  int plt_index;       // Procedure Linkage Table index (-1 = none)
+  int index;            // Index into symbol table.
+  int dynamic_index;    // Index into dynamic symbol table.
+} Symbol;
 
-LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, struct LinkerFile* file);
-void LinkerSymbolDelete(LinkerSymbol* sym);
+Symbol* NewSymbol(ELFSymbol* elf_sym, struct ObjectFile* file);
+void SymbolDelete(Symbol* sym);
 
-size_t LinkerSymbolHash(void* value, HashTable* table, HashMode mode);
-bool LinkerSymbolInsertInHashTable(void* entry, void* value, void** parent);
-void* LinkerSymbolFindInHashTable(void* entry, void* value);
+size_t SymbolHash(void* value, HashTable* table, HashMode mode);
+bool SymbolInsertInHashTable(void* entry, void* value, void** parent);
+void* SymbolFindInHashTable(void* entry, void* value);
 
 void LinkerPrintSymbolTables(struct Linker* linker);
 void LinkerCheckForUndefinedSymbols(struct Linker* linker);
@@ -43,17 +45,14 @@ void LinkerAssignSymbolAddresses(struct Linker* linker);
 void LinkerAssignCommonSymbolAddresses(struct Linker* linker, uint64_t* address);
 
 void LinkerReadSymbol(struct Linker* linker,
-                struct LinkerFile* file,
+                struct ObjectFile* file,
                 ELFReaderFile* elf_file,
-                ELFReaderSection* symtab,
                 ELFReaderSection* strtab,
                 ELFSymbol* elf_sym);
-LinkerSymbol* LinkerInventSymbol(struct Linker* linker, const char* name, int size);
+Symbol* LinkerInventSymbol(struct Linker* linker, const char* name, int size);
 
 void LinkerAssignSectionSymbolAddresses(struct Linker* linker);
 void LinkerAssignBSSSymbolAddresses(struct Linker* linker);
-void LinkerDefineGlobalSymbol(struct Linker* linker, const char* name, ELFReaderSection* section,
-                              int32_t type, int64_t size, int64_t value);
 void LinkerClearSymbolTable(HashTable* table);
 
 #endif /* linker_symbols_h */

@@ -108,6 +108,7 @@ typedef enum {
   TOK(struct),
   TOK(switch),
   TOK(typedef),
+  TOK(thread),
   TOK(union),
   TOK(unsigned),
   TOK(void),

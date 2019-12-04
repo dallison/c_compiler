@@ -424,7 +424,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
                                       IRNode* dest) {
   for (size_t i = 0; i < init->initializers->length; i++) {
     IRNode* destaddr = dest;
-    ASTNode* subinit = (ASTNode*)init->initializers->value[i];
+    ASTNode* subinit = (ASTNode*)init->initializers->value.p[i];
     assert(subinit->op == AST_OP(designated_init));
 
     DesignatedInitializerASTNode* designated_init =
@@ -434,7 +434,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // designators.
       int offset = 0;
       for (size_t i = 0; i < designated_init->designators->length; i++) {
-        Designator* d = (Designator*)designated_init->designators->value[i];
+        Designator* d = (Designator*)designated_init->designators->value.p[i];
         switch (d->designator_type) {
           case kDesignatorArray:
             // Array index.  Add index * size of lower dimensions to offset.
@@ -451,6 +451,28 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
           gen, NewIR2(IR_OP(adda), dest,
                       GeneratorGetIntConstant(gen, NULL, offset)));
     }
+    
+    // TODO: struct and array.
+    IRNode* value = GenerateExpression(gen, designated_init->init);
+    if (TypeIsStructOrUnion(subinit->type)) {
+      // Initialization of a struct/union.
+      GeneratorEmit(gen, NewIR3(IR_OP(memcpy), destaddr, value,
+                                GeneratorGetIntConstant(
+                                    gen, NULL, subinit->type->size)));
+    } else {
+      if (IsBitfieldReference(subinit)) {
+        // Initialization of a bitfield.
+        IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+        IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
+        load = LoadBitfield(gen, load, (BinaryASTNode*)subinit);
+        value = CalculateNewBitfieldValue(gen, load, value,
+                                          (BinaryASTNode*)subinit);
+      }
+      IROpcode store = GetStoreOpcode(subinit);
+      GeneratorEmit(gen, NewIR2(store, destaddr, value));
+    }
+    
+#if 0
     // Simple scalar initialization
     switch (designated_init->init->op) {
       case AST_OP(expr_init): {
@@ -487,6 +509,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       default:
         assert(false);
     }
+#endif
   }
 }
 
@@ -677,7 +700,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
 
   // All arguments.
   for (size_t i = 0; i < node->children->length; i++) {
-    ASTNode* arg = (ASTNode*)node->children->value[i];
+    ASTNode* arg = (ASTNode*)node->children->value.p[i];
     IRAddInput(call, GenerateExpression(gen, arg));
   }
 
@@ -844,26 +867,26 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
 }
 
 static IRNode* GenerateBuiltinVaStart(Generator* gen, VectorASTNode* node) {
-  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
-  IRNode* arg = GenerateExpression(gen, node->children->value[1]);
+  IRNode* ap = GenerateExpression(gen, node->children->value.p[0]);
+  IRNode* arg = GenerateExpression(gen, node->children->value.p[1]);
   return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_start), ap, arg));
 }
 
 static IRNode* GenerateBuiltinVaArg(Generator* gen, VectorASTNode* node) {
-  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
+  IRNode* ap = GenerateExpression(gen, node->children->value.p[0]);
   IRNode* size = GeneratorEmit(
       gen, NewIntIRConstant(node->base.type, node->base.type->size));
   return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_arg), ap, size));
 }
 
 static IRNode* GenerateBuiltinVaEnd(Generator* gen, VectorASTNode* node) {
-  IRNode* ap = GenerateExpression(gen, node->children->value[0]);
+  IRNode* ap = GenerateExpression(gen, node->children->value.p[0]);
   return GeneratorEmit(gen, NewIR1(IR_OP(builtin_va_end), ap));
 }
 
 static IRNode* GenerateBuiltinVaCopy(Generator* gen, VectorASTNode* node) {
-  IRNode* d = GenerateExpression(gen, node->children->value[0]);
-  IRNode* s = GenerateExpression(gen, node->children->value[0]);
+  IRNode* d = GenerateExpression(gen, node->children->value.p[0]);
+  IRNode* s = GenerateExpression(gen, node->children->value.p[0]);
   return GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_copy), d, s));
 }
 

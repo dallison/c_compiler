@@ -70,6 +70,7 @@ typedef enum {
 
   RV_OP(fp),  // Frame pointer pseudo operation.
   RV_OP(sp),  // Stack pointer pseudo operation.
+  RV_OP(tp),  // Thread pointer pseudo operation.
 
   // Function result registers.
   RV_OP(resultx),

@@ -65,6 +65,8 @@ typedef struct {
   bool definition;    // Function is a definition.
   bool old_style;     // Old-style arguments.
   bool is_inline;     // This is an inline function.
+  bool is_constructor;  // Called before main.
+  bool is_destructor;   // Called after exit.
 } FunctionInfo;
 
 // A struct or union member.  Behaves like a Symbol with extra information.
@@ -97,6 +99,11 @@ typedef struct {
   int next_value;    // Value to give to next constant.
 } Enum;
 
+typedef struct {
+  int size;
+  bool is_flexible;
+} ArrayInfo;
+
 // Type record.  This represents one part of a type.
 // Each of these structs is chained into a full type by the 'next'
 // pointer.  We keep a count of the number of things pointing to
@@ -109,7 +116,7 @@ typedef struct TypeRecord {
   int size;
   struct TypeRecord* next;
   union {
-    int array_size;
+    ArrayInfo array;
     FunctionInfo function;
     Struct* struct_info;
     Enum* enum_info;
@@ -152,7 +159,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
-TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size);
+TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size,
+                               bool is_flexible);
 TypeRecord* NewFunctionTypeRecord(void);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
 

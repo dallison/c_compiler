@@ -31,6 +31,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case P_OP(fp):
     case P_OP(sp):
     case P_OP(ap):
+    case P_OP(tp):
     case P_OP(literal):
     case P_OP(structreturn):
     case P_OP(resultx):
@@ -85,21 +86,21 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
   VectorInit(&regs);
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     fprintf(fp, "\tpushx   r%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     fprintf(fp, "\tpushf    f%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value[i];
+    int reg = (int)regs.value.p[i];
     fprintf(fp, "\tpushd    d%d\n", reg);
   }
   VectorDestruct(&regs);
@@ -113,21 +114,21 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value[i - 1];
+    int reg = (int)regs.value.p[i - 1];
     fprintf(fp, "\tpopd    d%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value[i - 1];
+    int reg = (int)regs.value.p[i - 1];
     fprintf(fp, "\tpopf    f%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value[i - 1];
+    int reg = (int)regs.value.p[i - 1];
     fprintf(fp, "\tpopx    r%d\n", reg);
   }
   VectorDestruct(&regs);
@@ -157,8 +158,11 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
       return;
     case P_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
-      // TODO: local symbols.
-      fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+      if (StorageIs(sym->symbol->storage, STO(static))) {
+        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+      } else {
+        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+      }
       return;
     }
     case P_OP(call):
@@ -204,7 +208,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t.loc %d %d %d\n", fileno + 1, lineno, colno + 1);
       return;
     }
-
+      
     default:
       break;
   }
@@ -284,8 +288,12 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
           if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s#%d", sep, (int)TargetIntValue(inst->operand[i]));
           } else if (inst->operand[i]->opcode == P_OP(symbol)) {
+            TargetSymbol* sym = (TargetSymbol*)inst->operand[i];
             fprintf(fp, "%s%s", sep,
-                    ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+                    sym->symbol->name.value);
+            if (StorageIs(sym->symbol->storage, STO(thread))) {
+              fprintf(fp, "@tls");
+            }
           } else if (inst->operand[i]->opcode == P_OP(literal)) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
             fprintf(fp, "%s.str.%d", sep, literal->literal_id);

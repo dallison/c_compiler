@@ -81,6 +81,6 @@ struct AssemblerRelocation* DwarfDebugLineRelocation(
     int section_index);
 void DwarfAddFile(Dwarf* dwarf, String* filename);
 void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col,
-                      int64_t address);
+                      uint64_t address);
 
 #endif /* dwarf_h */

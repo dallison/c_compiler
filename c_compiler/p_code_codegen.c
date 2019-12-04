@@ -232,6 +232,10 @@ const char* PCodeOpcodeName(int op) {
 
     case P_OP(adr):
       return "adr";
+    case P_OP(adrs):
+      return "adrs";
+    case P_OP(adrtls):
+      return "adrtls";
 
     // Call and return.
     case P_OP(call):
@@ -335,6 +339,10 @@ static TargetInstruction* StackPointer(PCodeGenerator* pcode) {
   return TargetStackPointer(&pcode->base);
 }
 
+static TargetInstruction* ThreadPointer(PCodeGenerator* pcode) {
+  return TargetThreadPointer(&pcode->base);
+}
+
 static TargetInstruction* GetLoweredNode(IRNode* node) {
   return TargetGetLoweredNode(node);
 }
@@ -372,9 +380,8 @@ static TargetInstruction* LoadStaticVariable(PCodeGenerator* pcode,
                                              IRNode* node) {
   if (!compiler->pic) {
     // Non-PIC, load address into reg.
-    return Emit(pcode,
-                                    NewInstruction1(P_OP(movxc),
-                                                    GetLoweredNode(node)));
+    return Emit(pcode,NewInstruction1(P_OP(movxc),
+                                      GetLoweredNode(node)));
   }
   // PIC, addr is address of GOT entry, load the address from it.
   TargetInstruction* addr =  Emit(pcode,
@@ -419,6 +426,104 @@ static TargetInstruction* LoadVariableValue(PCodeGenerator* pcode, IRNode* node,
   return Emit(pcode, NewInstruction2(opcode, addr, offset));
 }
 
+// TODO: allow override of tls model per variable.
+static TargetInstruction* GetTlsVariableAddress(PCodeGenerator* pcode, IRNode* node) {
+  switch (compiler->tls_model) {
+    default:
+      abort();
+    case TLS(global_dynamic):
+    case TLS(local_dynamic): {
+      // These call __tls_get_addr to get the address of the a TLS variable
+      // from the GOT.
+      //
+      // First load the address of the GOT entry, based on the symbol.
+      TargetInstruction* addr =  Emit(pcode,
+                                      NewInstruction1(P_OP(adr),
+                                                      GetLoweredNode(node)));
+      // Push onto stack.
+      Emit(pcode, NewInstruction1(P_OP(push), addr));
+      TargetInstruction* __tls_get_addr =
+          GetSymbol(pcode, NULL, pcode->base.__tls_get_addr);
+      TargetInstruction* result = Emit(pcode,
+                                       NewInstruction1(P_OP(call), __tls_get_addr));
+      Emit(pcode,
+           NewInstruction1(P_OP(incsp),
+                           GetIntConstant(pcode, NULL, kTargetTypeWord, 8)));
+      return result;
+    }
+    case TLS(initial_exec): {
+      // The address of the TLS variable is obtained from adding the offset
+      // from the GOT to the thread pointer.
+      TargetInstruction* addr =  Emit(pcode,
+                                      NewInstruction1(P_OP(adrtls),
+                                                      GetLoweredNode(node)));
+      // Load the value as a 64-bit integer.
+      TargetInstruction* zero = GetIntConstant(pcode, NULL, kTargetTypeExtended, 0);
+      TargetInstruction* value = Emit(pcode, NewInstruction2(P_OP(ldx), addr, zero));
+      TargetInstruction* tp = ThreadPointer(pcode);
+      return Emit(pcode, NewInstruction2(P_OP(addc), tp, value));
+    }
+    case TLS(local_exec): {
+      // Address is constructed from thread pointer plus an offset
+      // provided by the linker.
+      TargetInstruction* addr = ThreadPointer(pcode);
+      TargetInstruction* offset = Emit(pcode, NewInstruction1(P_OP(movxc),
+                                                              GetLoweredNode(node)));
+      return Emit(pcode, NewInstruction2(P_OP(add), addr, offset));
+    }
+  }
+}
+
+
+static void GetTlsAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
+                                                 TargetInstruction** addr,
+                                                 TargetInstruction** offset) {
+  switch (compiler->tls_model) {
+    default:
+      abort();
+    case TLS(global_dynamic):
+    case TLS(local_dynamic): {
+      // These call __tls_get_addr to get the address of the a TLS variable
+      // from the GOT.
+      //
+      // First load the address of the GOT entry, based on the symbol.
+      TargetInstruction* tls_addr =  Emit(pcode,
+                                      NewInstruction1(P_OP(adr),
+                                                      GetLoweredNode(addr_node)));
+      // Push onto stack.
+      Emit(pcode, NewInstruction1(P_OP(push), tls_addr));
+      TargetInstruction* __tls_get_addr = GetSymbol(pcode, NULL, pcode->base.__tls_get_addr);
+      *addr = Emit(pcode, NewInstruction1(P_OP(call), __tls_get_addr));
+      Emit(pcode,
+                  NewInstruction1(P_OP(incsp),
+                                  GetIntConstant(pcode, NULL, kTargetTypeWord, 8)));
+      *offset = GetIntConstant(pcode, NULL, kTargetTypeExtended, 0);
+      break;
+    }
+    case TLS(initial_exec): {
+      // The address of the TLS variable is obtained from adding the offset
+      // from the GOT to the thread pointer.
+      TargetInstruction* tls_addr =  Emit(pcode,
+                                      NewInstruction1(P_OP(adrtls),
+                                                      GetLoweredNode(addr_node)));
+      // Load the value as a 64-bit integer.
+      *offset = GetIntConstant(pcode, NULL, kTargetTypeExtended, 0);
+      tls_addr = Emit(pcode, NewInstruction2(P_OP(ldx), tls_addr, *offset));
+      *addr = Emit(pcode, NewInstruction2(P_OP(add), ThreadPointer(pcode), tls_addr));
+      break;
+     }
+    case TLS(local_exec): {
+      // Address is thread pointer plus an offset obtained from the
+      // linker.
+      TargetInstruction* tp_offset =
+          Emit(pcode, NewInstruction1(P_OP(movxc), GetLoweredNode(addr_node)));
+      *addr = Emit(pcode, NewInstruction2(P_OP(add), ThreadPointer(pcode), tp_offset));
+      *offset = GetIntConstant(pcode, NULL, kTargetTypeExtended, 0);
+      break;
+    }
+  }
+}
+
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the pcode instruction associated with the node if it's
 // already in a register.
@@ -440,6 +545,7 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
         assert(false);
     }
   }
+  // Variables are materialized as their address.
   if (IRIsAutoVariable(node)) {
     // Auto variables are in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
@@ -455,12 +561,16 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
     TargetInstruction* offset = (TargetInstruction*)GetIntConstant(
         pcode, node, kTargetTypeWord, var_offset);
     return Emit(pcode, NewInstruction2(P_OP(addc), addr, offset));
+  } else if (IRIsThreadVariable(node)) {
+    // Thread variables are relative to the thread pointer.  Access to
+    // them depends on the TLS model being used.
+    return GetTlsVariableAddress(pcode, node);
   } else if (IRIsStaticVariable(node)) {
     // The address of static variables need to be moved into a register.
 
     return LoadStaticVariable(pcode, node);
   }
-
+  
   // Node is not a variable, is must be an already-lowered expression.
   return GetLoweredNode(node);
 }
@@ -632,8 +742,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
     case P_OP(add): {
       // We have an add with constant instruction.  Use it if we can.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       // Adds are commutative so we can have a const as first or
       // second operand.
       if (IRIsConst(op1) && IRIsConst(op2)) {
@@ -675,8 +785,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
       // A sub with a constant can be converted to an addc with a negative
       // constant.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) && IRIsConst(op2)) {
         // Both constants, fold.
         int64_t lhs = ((IRConstant*)op1)->value.ivalue;
@@ -704,8 +814,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
       
     case P_OP(mul): {
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) || IRIsConst(op2)) {
         if (IRIsConst(op1) && IRIsConst(op2)) {
           // Both constants, fold.
@@ -735,8 +845,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
     }
     case P_OP(div): {
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) && IRIsConst(op2)) {
         // Both constants, fold.
         int64_t lhs = ((IRConstant*)op1)->value.ivalue;
@@ -761,8 +871,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
     }
     case P_OP(divu): {
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) && IRIsConst(op2)) {
         // Both constants, fold.
         uint64_t lhs = ((IRConstant*)op1)->value.ivalue;
@@ -801,7 +911,7 @@ static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
   if (inst == NULL) {
     inst = (TargetInstruction*)NewInstruction(opcode);
     for (size_t i = 0; i < node->inputs.length; i++) {
-      IRNode* input = node->inputs.value[i];
+      IRNode* input = node->inputs.value.p[i];
       inst->operand[i] = Materialize(pcode, input);
     }
   }
@@ -824,8 +934,8 @@ static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,
       assert(false);
   }
   assert(node->inputs.length == 2);
-  IRNode* expr = node->inputs.value[0];
-  IRNode* target_node = node->inputs.value[1];
+  IRNode* expr = node->inputs.value.p[0];
+  IRNode* target_node = node->inputs.value.p[1];
 
   TargetInstruction* inst = (TargetInstruction*)Emit(
       pcode, NewInstruction1(opcode, GetLoweredNode(expr)));
@@ -842,7 +952,7 @@ static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,
 
 static TargetInstruction* LowerBranch(PCodeGenerator* pcode, IRNode* node) {
   assert(node->inputs.length == 1);
-  IRNode* target_node = node->inputs.value[0];
+  IRNode* target_node = node->inputs.value.p[0];
 
   TargetInstruction* inst =
       (TargetInstruction*)Emit(pcode, NewInstruction(P_OP(bra)));
@@ -860,7 +970,7 @@ static TargetInstruction* LowerBranch(PCodeGenerator* pcode, IRNode* node) {
 static TargetInstruction* LowerComputedBranch(PCodeGenerator* pcode,
                                               IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value[0]);
+  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
   TargetInstruction* cbra = Emit(pcode, NewInstruction1(P_OP(cbra), value));
   SetLoweredNode(node, cbra);
   return cbra;
@@ -889,12 +999,13 @@ static void GetAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
     int32_t var_offset = addr_node->data.ivalue;
     *offset = (TargetInstruction*)GetIntConstant(pcode, addr_node,
                                                  kTargetTypeWord, var_offset);
+  } else if (IRIsThreadVariable(addr_node)) {
+    GetTlsAddressAndOffset(pcode, addr_node, addr, offset);
   } else if (IRIsStaticVariable(addr_node)) {
     // The address of static variables need to be moved into a register.
 
     *addr = LoadStaticVariable(pcode, addr_node);
     *offset = GetIntConstant(pcode, NULL, kTargetTypeWord, 0);
-
   } else if (addr_node->opcode == IR_OP(structreturn)) {
     // Struct return value is the first argument, at ap + 16.
     *addr = ArgumentPointer(pcode);
@@ -910,7 +1021,7 @@ static void GetAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
 static TargetInstruction* LowerLoad(PCodeGenerator* pcode, IRNode* node) {
   PCodeOpcode opcode;
   assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   TargetInstruction* addr;
   TargetInstruction* offset;
   GetAddressAndOffset(pcode, addr_node, &addr, &offset);
@@ -962,12 +1073,12 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
 
   // Address to store to is the first operand of the store IR node.
   // The value to store is the second operand.
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   TargetInstruction* addr;
   TargetInstruction* offset;
   GetAddressAndOffset(pcode, addr_node, &addr, &offset);
 
-  IRNode* src_node = node->inputs.value[1];
+  IRNode* src_node = node->inputs.value.p[1];
 
   // Get the src in a register.
   TargetInstruction* src = Materialize(pcode, src_node);
@@ -1085,7 +1196,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t args_size = 0;
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
-    IRNode* arg_node = node->inputs.value[i];
+    IRNode* arg_node = node->inputs.value.p[i];
     if (TypeIsStructOrUnion(arg_node->type)) {
       PushStructArg(pcode, arg_node, &args_size);
     } else {
@@ -1093,7 +1204,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
       PushArg(pcode, arg_node, arg, &args_size);
     }
   }
-  TargetInstruction* addr = GetLoweredNode(node->inputs.value[0]);
+  TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
   PCodeOpcode opcode;
   if (addr->opcode == P_OP(symbol)) {
     if (TypeIsFloat(node->type)) {
@@ -1142,7 +1253,7 @@ static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
     default:
       assert(false);
   }
-  TargetInstruction* result = Materialize(pcode, node->inputs.value[0]);
+  TargetInstruction* result = Materialize(pcode, node->inputs.value.p[0]);
   TargetInstruction* result_reg =
       Emit(pcode, NewInstruction(result_reg_opcode));
   return Emit(pcode, NewInstruction2(opcode, result_reg, result));
@@ -1153,12 +1264,12 @@ static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
 // be assembled as a reference to a symbol with the name .str.%d.
 static TargetInstruction* LowerLiteralReference(PCodeGenerator* pcode,
                                                 IRNode* node) {
-  IRConstant* id_node = node->inputs.value[0];
+  IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(pcode, TargetNewLiteral((int)id_node->value.ivalue));
 
   TargetInstruction* result =
-      Emit(pcode, NewInstruction1(P_OP(movxc), literal));
+      Emit(pcode, NewInstruction1(P_OP(adrs), literal));
 
   SetLoweredNode(node, result);
   return result;
@@ -1166,7 +1277,7 @@ static TargetInstruction* LowerLiteralReference(PCodeGenerator* pcode,
 
 static TargetInstruction* LowerStructReference(PCodeGenerator* pcode,
                                                IRNode* node) {
-  return SetLoweredNode(node, Materialize(pcode, node->inputs.value[0]));
+  return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
 }
 
 static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
@@ -1177,11 +1288,11 @@ static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
 
   // First push the constant for the length.
   TargetInstruction* length =
-      Emit(pcode, Materialize(pcode, node->inputs.value[2]));
+      Emit(pcode, Materialize(pcode, node->inputs.value.p[2]));
   Emit(pcode, NewInstruction1(P_OP(pushx), length));
 
   // Now push src.
-  IRNode* src_node = node->inputs.value[1];
+  IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src_addr;
   TargetInstruction* src_offset;
   GetAddressAndOffset(pcode, src_node, &src_addr, &src_offset);
@@ -1192,7 +1303,7 @@ static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
   PushArg(pcode, src_node, src_addr, NULL);
 
   // And now push dest.
-  IRNode* dest_node = node->inputs.value[0];
+  IRNode* dest_node = node->inputs.value.p[0];
   TargetInstruction* dest_addr;
   TargetInstruction* dest_offset;
   GetAddressAndOffset(pcode, dest_node, &dest_addr, &dest_offset);
@@ -1217,7 +1328,7 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
   // The memzero IR node has one input: the variable to zero.  We
   // emit this is as a call to memset using the size of the symbol.
   assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   IRVariable* var = (IRVariable*)addr_node;
 
   // Third parameter to memset is the length.
@@ -1254,10 +1365,10 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
 }
 
 static TargetInstruction* LowerMask(PCodeGenerator* pcode, IRNode* node) {
-  TargetInstruction* value = Materialize(pcode, node->inputs.value[0]);
+  TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
   value =
       Emit(pcode, NewInstruction2(P_OP(and), value,
-                                  Materialize(pcode, node->inputs.value[1])));
+                                  Materialize(pcode, node->inputs.value.p[1])));
   SetLoweredNode(node, value);
   return value;
 }
@@ -1266,11 +1377,11 @@ static TargetInstruction* LowerSignExtend(PCodeGenerator* pcode, IRNode* node) {
   // If the source instruction is a signed load then there is no need to
   // perform the sign extension since the load instructions already do
   // that.
-  TargetInstruction* value = Materialize(pcode, node->inputs.value[0]);
+  TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
   if (PCodeIsSignedLoad((PCodeOpcode)value->opcode)) {
     return SetLoweredNode(node, value);
   }
-  IRConstant* diff_value = node->inputs.value[1];
+  IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   TargetInstruction* diff_inst =
       Emit(pcode,
@@ -1287,7 +1398,7 @@ static TargetInstruction* LowerSignExtend(PCodeGenerator* pcode, IRNode* node) {
 
 static TargetInstruction* LowerAsm(PCodeGenerator* pcode, IRNode* node) {
   // The first argument is a literal containing the assembly language.
-  IRConstant* id_node = node->inputs.value[0];
+  IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(pcode, TargetNewLiteral((int)id_node->value.ivalue));
 
@@ -1309,7 +1420,7 @@ static TargetInstruction* LowerBuiltinVaStart(PCodeGenerator* pcode,
                                               IRNode* node) {
   TargetInstruction* arg_addr;
   TargetInstruction* arg_offset;
-  GetAddressAndOffset(pcode, node->inputs.value[1], &arg_addr, &arg_offset);
+  GetAddressAndOffset(pcode, node->inputs.value.p[1], &arg_addr, &arg_offset);
   TargetInstruction* arg =
       Emit(pcode, NewInstruction2(P_OP(addc), arg_addr, arg_offset));
   TargetInstruction* add = Emit(
@@ -1318,7 +1429,7 @@ static TargetInstruction* LowerBuiltinVaStart(PCodeGenerator* pcode,
 
   TargetInstruction* ap_addr;
   TargetInstruction* ap_offset;
-  GetAddressAndOffset(pcode, node->inputs.value[0], &ap_addr, &ap_offset);
+  GetAddressAndOffset(pcode, node->inputs.value.p[0], &ap_addr, &ap_offset);
   TargetInstruction* store =
       Emit(pcode, NewInstruction3(P_OP(stx), add, ap_addr, ap_offset));
   return SetLoweredNode(node, store);
@@ -1328,7 +1439,7 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
                                             IRNode* node) {
   TargetInstruction* ap_addr;
   TargetInstruction* ap_offset;
-  GetAddressAndOffset(pcode, node->inputs.value[0], &ap_addr, &ap_offset);
+  GetAddressAndOffset(pcode, node->inputs.value.p[0], &ap_addr, &ap_offset);
   TargetInstruction* ap_load =
       Emit(pcode, NewInstruction2(P_OP(ldx), ap_addr, ap_offset));
 
@@ -1349,7 +1460,7 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
       pcode, NewInstruction2(load_opcode, ap_load,
                              GetIntConstant(pcode, NULL, kTargetTypeWord, 0)));
 
-  TargetInstruction* size = GetLoweredNode(node->inputs.value[1]);
+  TargetInstruction* size = GetLoweredNode(node->inputs.value.p[1]);
   TargetInstruction* addc =
       Emit(pcode, NewInstruction2(P_OP(addc), ap_load, size));
   Emit(pcode, NewInstruction3(P_OP(stx), addc, ap_addr, ap_offset));
@@ -1651,20 +1762,19 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
   // Variables are allocated below the frame, arguments are above.
   int32_t var_offset = 0;
   int32_t arg_offset = 16;  // Leave room for return address and saved ap.
-
+  
   // Calculate the offset on the stack for all the arguments.  Store this offset
   // in the stack_offset field of the Symbol.
   Vector* prototype = &compiler->current_function->info.function.prototype;
   for (size_t i = 0; i < prototype->length; i++) {
-    Symbol* arg = prototype->value[i];
+    Symbol* arg = prototype->value.p[i];
     arg->stack_offset = arg_offset;
     int64_t size = CalculateArgumentSize(arg);
     arg_offset += size;
   }
 
   for (size_t i = 0; i < gen->variable_pool.length; i++) {
-    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value[i];
-
+    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
     if (entry->pooled->opcode == IR_OP(localvar) ||
         entry->pooled->opcode == IR_OP(tempvar)) {
       int32_t size = entry->value.symbol->type->size;
@@ -1701,7 +1811,7 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
 void PCodePrint(PCodeGenerator* pcode) {
   TargetInstruction* inst = TargetFirstInstruction(&pcode->base);
   while (inst != NULL) {
-    TargetPrintInstruction(inst, PCodeOpcodeName);
+    TargetPrintInstruction(inst, PCodeOpcodeName, stdout);
     inst = TargetNext(inst);
   }
 }

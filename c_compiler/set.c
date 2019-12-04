@@ -39,11 +39,11 @@ static void** FindLocation(Set* set, void* value, bool* found) {
   size_t high = set->vec.length;
   while (low < high) {
     size_t mid = low + (high - low) / 2;
-    int compval = set->compare(&value, &set->vec.value[mid]);
+    int compval = set->compare(&value, &set->vec.value.p[mid]);
     if (compval == 0) {
       // Exact match found.
       *found = true;
-      return &set->vec.value[mid];
+      return &set->vec.value.p[mid];
     }
     if (compval < 0) {
       // In first half.
@@ -56,14 +56,14 @@ static void** FindLocation(Set* set, void* value, bool* found) {
   if (high == set->vec.length) {
     return NULL;
   }
-  return &set->vec.value[high];
+  return &set->vec.value.p[high];
 }
 
 // Insert into the vector keeping it sorted and omitting duplicates.
 // O(n) for insertion
 static void LinearInsert(Set* set, void* value) {
   for (size_t i = 0; i < set->vec.length; i++) {
-    int compval = set->compare(&value, &set->vec.value[i]);
+    int compval = set->compare(&value, &set->vec.value.p[i]);
     if (compval == 0) {
       // Matches existing value, do not insert.
       return;
@@ -90,7 +90,7 @@ static void BinaryInsert(Set* set, void* value) {
     return;
   }
   // Insert before 'p'.
-  VectorInsertBefore(&set->vec, p - set->vec.value, value);
+  VectorInsertBefore(&set->vec, p - set->vec.value.p, value);
 }
 
 // Insert the value into the set.
@@ -110,13 +110,13 @@ void SetRemove(Set* set, void* value) {
   if (p == NULL || !found) {
     return;
   }
-  VectorDeleteElement(&set->vec, p - set->vec.value);
+  VectorDeleteElement(&set->vec, p - set->vec.value.p);
 }
 
 // Find an element given a value, return true if found.
 // O(ln2(n))
 bool SetContains(Set* set, void* value) {
-  return bsearch(&value, set->vec.value,
+  return bsearch(&value, set->vec.value.p,
                  set->vec.length,
                  sizeof(void*),
                  set->compare) != NULL;
@@ -126,9 +126,9 @@ void SetIntersection(Set* set1, Set* set2, Set* result) {
   size_t i = 0;
   size_t j = 0;
   while (i < set1->vec.length && j < set2->vec.length) {
-    int compval = set1->compare(&set1->vec.value[i], &set2->vec.value[j]);
+    int compval = set1->compare(&set1->vec.value.p[i], &set2->vec.value.p[j]);
     if (compval == 0) {
-      SetInsert(result, set1->vec.value[i]);
+      SetInsert(result, set1->vec.value.p[i]);
       i++;
       j++;
     } else if (compval < 0) {
@@ -141,10 +141,10 @@ void SetIntersection(Set* set1, Set* set2, Set* result) {
 
 void SetUnion(Set* set1, Set* set2, Set* result) {
   for (size_t i = 0; i < set1->vec.length; i++) {
-    SetInsert(result, set1->vec.value[i]);
+    SetInsert(result, set1->vec.value.p[i]);
   }
   for (size_t i = 0; i < set2->vec.length; i++) {
-    SetInsert(result, set2->vec.value[i]);
+    SetInsert(result, set2->vec.value.p[i]);
   }
 }
 

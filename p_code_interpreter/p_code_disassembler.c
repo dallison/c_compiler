@@ -32,9 +32,11 @@ static Instruction inst_32[] = {
   {"mulf", 'f', 'f', 'f'},
   {"muld", 'd', 'd', 'd'},
   {"div", 'r', 'r', 'r'},
+  {"divu", 'r', 'r', 'r'},
   {"divf", 'f', 'f', 'f'},
   {"divd", 'd', 'd', 'd'},
   {"mod", 'r', 'r', 'r'},
+  {"modu", 'r', 'r', 'r'},
   {"lsr", 'r', 'r', 'r'},
   {"asr", 'r', 'r', 'r'},
   {"lsl", 'r', 'r', 'r'},
@@ -52,6 +54,10 @@ static Instruction inst_32[] = {
   {"cmple", 'r', 'r', 'r'},
   {"cmpgt", 'r', 'r', 'r'},
   {"cmpge", 'r', 'r', 'r'},
+  {"cmpltu", 'r', 'r', 'r'},
+  {"cmpleu", 'r', 'r', 'r'},
+  {"cmpgtu", 'r', 'r', 'r'},
+  {"cmpgeu", 'r', 'r', 'r'},
   {"cmpeqf", 'r', 'f', 'f'},
   {"cmpnef", 'r', 'f', 'f'},
   {"cmpltf", 'r', 'f', 'f'},
@@ -81,10 +87,14 @@ static Instruction inst_32[] = {
   {"cbra", 'r', 'x', 'x'},
   {"i2f", 'f', 'r', 'x'},
   {"i2d", 'd', 'r', 'x'},
+  {"ui2f", 'f', 'r', 'x'},
+  {"ui2d", 'd', 'r', 'x'},
   {"f2d", 'd', 'f', 'x'},
   {"d2f", 'f', 'd', 'x'},
   {"f2i", 'r', 'f', 'x'},
   {"d2i", 'r', 'd', 'x'},
+  {"f2ui", 'r', 'f', 'x'},
+  {"d2ui", 'r', 'd', 'x'},
   {"rcall", 'r', 'x', 'x'},
   {"esc", 'i', 'x', 'x'},
 };
@@ -120,6 +130,8 @@ static Instruction inst_96[] = {
   {"movxc", 'r', 'i', 'x'},
   {"jmp", 'i', 'x', 'x'},
   {"call", 'i', 'x', 'x'},
+  {"cjmp", 'i', 'x', 'x'},
+  {"adr", 'i', 'x', 'x'},
 };
 
 #define DEST(inst) (inst >> 16) & 0xff
@@ -138,7 +150,7 @@ static void Print32(int32_t inst, FILE* fp) {
   int opcode = (inst >> 24) & 0x7f;
   fprintf(fp, "%-8s", inst_32[opcode].name);
   const char* sep = "";
-  if (opcode == OP(incsp) || opcode == OP(decsp) || opcode == OP(esc)) {
+  if (opcode == PCODE_OP(incsp) || opcode == PCODE_OP(decsp) || opcode == PCODE_OP(esc)) {
     fprintf(fp, "#%d", inst & 0xffffff);
   } else {
     sep = PrintOperand(DEST(inst), inst_32[opcode].dest_type, sep, fp);
@@ -152,44 +164,54 @@ static void Print64(int32_t inst, int32_t value, FILE* fp) {
   int opcode = (inst >> 24) & 0x3f;
   fprintf(fp, "%-8s", inst_64[opcode].name);
   const char* sep = "";
-  if (opcode < OP(movc)) {
+  if (opcode < PCODE_OP(movc)) {
     // Load/Store instruction.
     PrintOperand(DEST(inst), inst_64[opcode].dest_type, "", fp);
     fprintf(fp, ", [r%d, #%d]", SRC1(inst), value);
-  } else if (opcode == OP(bz) || opcode == OP(bnz)) {
-    fprintf(fp, "r%d, %d", DEST(inst), value);
-  } else if (opcode == OP(bra)) {
-    fprintf(fp, "%d", value);
-  } else if (opcode == OP(movc)) {
+  } else if (opcode == PCODE_OP(bz) || opcode == PCODE_OP(bnz)) {
+    fprintf(fp, "r%d, %d", DEST(inst), value + 8);
+  } else if (opcode == PCODE_OP(bra)) {
+    fprintf(fp, "%d", value + 8);
+  } else if (opcode == PCODE_OP(movc)) {
     sep = PrintOperand(DEST(inst), inst_64[opcode].dest_type, "", fp);
     fprintf(fp, "%s#%d", sep, value);
-  } else if (opcode == OP(movfc)) {
+  } else if (opcode == PCODE_OP(movfc)) {
     sep = PrintOperand(DEST(inst), inst_64[opcode].dest_type, "", fp);
     fprintf(fp, "%s#%f", sep, *(float*)(&value));
   } else {
     sep = PrintOperand(DEST(inst), inst_64[opcode].dest_type, "", fp);
     sep = PrintOperand(SRC1(inst), inst_64[opcode].src1_type, sep, fp);
-    if (opcode == OP(addc)) {
+    if (opcode == PCODE_OP(addc)) {
       fprintf(fp, "%s#%d", sep, value);
     }
   }
   printf("\n");
 }
 
-static void Print96(int32_t inst, int64_t value, FILE* fp) {
+// PC is the address after the instruction.
+static void Print96(int32_t inst, int32_t* pc, int64_t value, FILE* fp) {
   int opcode = (inst >> 24) & 0x3f;
   fprintf(fp, "%-8s", inst_96[opcode].name);
   const char* sep = "";
   switch (opcode) {
-    case OP(movdc):
-    case OP(movxc):
+    case PCODE_OP(movdc):
+    case PCODE_OP(movxc):
       sep = PrintOperand(DEST(inst), inst_96[opcode].dest_type, "", fp);
       fprintf(fp, "%s#0x%llx", sep, value);
       break;
-    case OP(jmp):
-    case OP(call):
-      fprintf(fp, "0x%llx", value);
+    case PCODE_OP(jmp):
+    case PCODE_OP(call):
+    case PCODE_OP(cjmp): {
+      int64_t addr = (int64_t)pc + value;
+      fprintf(fp, "0x%llx", addr);
       break;
+    }
+    case PCODE_OP(adr): {
+      PrintOperand(DEST(inst), 'r', "", fp);
+      int64_t addr = (int64_t)pc + value;
+      fprintf(fp, ", 0x%llx", addr);
+      break;
+    }
   }
   printf("\n");
 }
@@ -199,10 +221,10 @@ void* DisassemblePCodeInstruction(Interpreter* interpreter, void* p, FILE* fp) {
   const char* symbol_name = "???";
   uint64_t offset = 0;
   if (interpreter->current_symbol != NULL) {
-    symbol_name = interpreter->current_symbol->name.value;
-    offset = (uint64_t)p - interpreter->current_symbol->address;
+    symbol_name = interpreter->current_symbol->name;
+    offset = (uint64_t)p - interpreter->current_symbol->start;
   }
-  fprintf(fp, "%s+%lld: %p  ", symbol_name, offset, p);
+  fprintf(fp, "%s+0x%llx: %p  ", symbol_name, offset, p);
   int32_t inst = *pc++;
   if ((inst & 0x80000000) == 0) {
     Print32(inst, fp);
@@ -212,6 +234,6 @@ void* DisassemblePCodeInstruction(Interpreter* interpreter, void* p, FILE* fp) {
     Print64(inst, *pc++, fp);
     return pc;
   }
-  Print96(inst, *(int64_t*)pc, fp);
+  Print96(inst, pc + 2, *(int64_t*)pc, fp);
   return pc + 2;
 }

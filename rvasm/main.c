@@ -32,7 +32,7 @@ int main(int argc, char * argv[]) {
   VectorAppend(&options, target);
   
   for (size_t i = 0; i < options.length; i++) {
-    CompilerOptionValue* option = options.value[i];
+    CompilerOptionValue* option = options.value.p[i];
     if (option->opt == kOptionInputFile) {
       VectorAppend(&asm_filenames, &option->value.svalue);
     } else if (option->opt == kOptionOutputFile) {
@@ -56,12 +56,12 @@ int main(int argc, char * argv[]) {
   }
 
   for (size_t i = 0; i < asm_filenames.length; i++) {
-    String* asm_filename = asm_filenames.value[i];
+    String* asm_filename = asm_filenames.value.p[i];
     String output_filename;
     StringInit(&output_filename, object_filename.value);
     
     if (object_filename.length == 0) {
-      StringSet(&output_filename, asm_filenames.value[i]);
+      StringSet(&output_filename, asm_filenames.value.p[i]);
       // No output file specified (no -o) so work it out.
       // If the file ends in ".s", make it ".o", otherwise append ".o".
       char* suffix = strstr(output_filename.value, ".s");

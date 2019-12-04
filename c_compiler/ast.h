@@ -517,7 +517,7 @@ typedef struct {
   } value;
 } Designator;
 
-Designator* NewArrayDesignator(int index);
+Designator* NewArrayDesignator(TypeRecord* type, int index);
 Designator* NewStructDesignator(String* member);
 Designator* NewStructMemberDesignator(StructMember* member);
 

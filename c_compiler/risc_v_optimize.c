@@ -9,6 +9,7 @@
 #include "risc_v_optimize.h"
 #include <assert.h>
 #include "risc_v_codegen.h"
+#include "compiler.h"
 
 // This file contains functions to optimize the instruction sequence for RISC-V.
 // Now that we have lowered the IR to actual RISC-V instructions we can look for
@@ -73,7 +74,8 @@ static void CombineLoadOrStores(RVGenerator* rv) {
     TargetInstruction* next = TargetNext(inst);
     if (RVIsLoad((RVOpcode)inst->opcode)) {
       TargetInstruction* base = inst->operand[0];
-      if (base->opcode == (TargetOpcode)RV_OP(la)) {
+      if (base->opcode == (TargetOpcode)RV_OP(la) &&
+          !compiler->pic) {
         // Insert label for auipc instruction.
         TargetInstruction* label =
             TargetNewInstruction((TargetOpcode)RV_OP(label));
@@ -100,7 +102,7 @@ static void CombineLoadOrStores(RVGenerator* rv) {
       }
     } else if (RVIsStore((RVOpcode)inst->opcode)) {
       TargetInstruction* base = inst->operand[1];
-      if (base->opcode == (TargetOpcode)RV_OP(la)) {
+      if (base->opcode == (TargetOpcode)RV_OP(la) && !compiler->pic) {
         // Insert label for auipc instruction.
         TargetInstruction* label =
             TargetNewInstruction((TargetOpcode)RV_OP(label));

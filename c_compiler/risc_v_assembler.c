@@ -16,7 +16,7 @@
 static int CompareString(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
-  return strcmp(s1->key, s2->key);
+  return strcmp(s1->key.p, s2->key.p);
 }
 
 //
@@ -205,9 +205,21 @@ DECLARE_INST_FUNC(rcallf);
 
 #undef DECLARE_INST_FUNC
 
-#define INST(mnemonic) MapInsert(instructions, #mnemonic, Assemble_##mnemonic)
+#define INST(mnemonic) \
+do {\
+MapKeyValue kv;\
+kv.key.p = #mnemonic;\
+kv.value.p = Assemble_##mnemonic;\
+MapInsert(instructions, kv);\
+} while(0)
+
 #define INST2(mnemonic, inst) \
-  MapInsert(instructions, #inst, Assemble_##mnemonic)
+  do {\
+    MapKeyValue kv;\
+    kv.key.p = #inst;\
+    kv.value.p = Assemble_##mnemonic;\
+    MapInsert(instructions, kv);\
+  } while(0)
 
 // Add all instructions to the handler map.  This maps the instruction
 // spelling to a handler function.
@@ -395,7 +407,7 @@ static void InitializeInstructions(Map* instructions) {
 // Initialize the assembler.  Returns true if it worked.
 bool RVAssemblerInit(RVAssembler* assembler, String* infile, String* outfile) {
   static int reloc_types[] = {
-      R_RISCV_32,       R_RISCV_64,       R_RISCV_ADD16, R_RISCV_ADD32,
+      R_RISCV_ADD16, R_RISCV_32,       R_RISCV_64,       R_RISCV_ADD16, R_RISCV_ADD32,
       R_RISCV_ADD64,    R_RISCV_SUB16,    R_RISCV_SUB32, R_RISCV_SUB64,
       R_RISCV_CALL_PLT, R_RISCV_GOT_HI20,
   };
@@ -443,7 +455,7 @@ void RVAssemblerDelete(RVAssembler* assembler) {
 void AssembleRVInstruction(Assembler* base, String* word) {
   RVAssembler* assembler = (RVAssembler*)base;
 
-  void* asm_func = MapFind(&assembler->instructions, word->value);
+  void* asm_func = MapFindPointerKey(&assembler->instructions, word->value);
   if (asm_func != NULL) {
     void (*func)(RVAssembler*) = asm_func;
     func(assembler);
@@ -1059,12 +1071,12 @@ static void Assemble_auipc(RVAssembler* assembler) {
       int64_t value = AssemblerEvaluateExpression(&ASM);
       AssemblerEmitWord(
           &ASM, ASM.current_section,
-          JTypeInstruction(RV_OPCODE(auipc), reg, (int32_t)value));
+          UTypeInstruction(RV_OPCODE(auipc), reg, (int32_t)value));
       return;
     }
   }
 
-  AssembleJType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
+  AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
                 assembler->base.pic ? R_RISCV_GOT_HI20 : R_RISCV_PCREL_HI20);
 }
 
@@ -1496,7 +1508,7 @@ UNDEFINED_INST(nop);
 static void Assemble_not(RVAssembler* assembler) {
   int regs[2];
   if (ParseRegisterPair(assembler, kRVRegTypeInt, "integer", regs)) {
-    AssembleALUImm(assembler, RV_OPCODE(op), RV_F3(xori), -1, regs);
+    AssembleALUImm(assembler, RV_OPCODE(op_imm), RV_F3(xori), -1, regs);
   }
 }
 
@@ -1528,7 +1540,7 @@ static void Assemble_li(RVAssembler* assembler) {
 
     //   Output relocation R_RISCV_HI20
     //     auipc reg, 0
-    AssembleJType(assembler, RV_OPCODE(auipc), reg, &symbol_name, R_RISCV_HI20);
+    AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name, R_RISCV_HI20);
 
     //   Output relocation R_RISCV_LO12_I
     //     addi reg, reg, 0
@@ -1571,7 +1583,7 @@ static void Assemble_la(RVAssembler* assembler) {
 
     // Output relocation R_RISCV_PCREL_HI20 or R_RISCV_GOT_HI20
     //   auipc reg, 0
-    AssembleJType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
+    AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
                   assembler->base.pic ? R_RISCV_GOT_HI20 : R_RISCV_PCREL_HI20);
 
     if (assembler->base.pic) {

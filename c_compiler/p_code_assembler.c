@@ -16,7 +16,7 @@
 static int CompareString(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
-  return strcmp(s1->key, s2->key);
+  return strcmp(s1->key.p, s2->key.p);
 }
 
 //
@@ -124,6 +124,8 @@ DECLARE_INST_FUNC(d2ui);
 DECLARE_INST_FUNC(jmp);
 DECLARE_INST_FUNC(cjmp);
 DECLARE_INST_FUNC(adr);
+DECLARE_INST_FUNC(adrs);
+DECLARE_INST_FUNC(adrtls);
 DECLARE_INST_FUNC(call);
 DECLARE_INST_FUNC(rcall);
 DECLARE_INST_FUNC(ret);
@@ -131,7 +133,13 @@ DECLARE_INST_FUNC(esc);
 
 #undef DECLARE_INST_FUNC
 
-#define INST(mnemonic) MapInsert(instructions, #mnemonic, Assemble_##mnemonic)
+#define INST(mnemonic) \
+do {\
+MapKeyValue kv;\
+kv.key.p = #mnemonic;\
+kv.value.p = Assemble_##mnemonic;\
+MapInsert(instructions, kv);\
+} while(0)
 
 // Add all instructions to the handler map.  This maps the instruction
 // spelling to a handler function.
@@ -234,6 +242,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(jmp);
   INST(cjmp);
   INST(adr);
+  INST(adrs);
+  INST(adrtls);
   INST(call);
   INST(rcall);
   INST(ret);
@@ -246,12 +256,12 @@ static void InitializeInstructions(Map* instructions) {
 bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
                         String* outfile) {
   static int reloc_types[] = {
-      R_PCODE_DATA32, R_PCODE_DATA64, R_PCODE_ADD16, R_PCODE_ADD32,
+      R_PCODE_ADD16, R_PCODE_DATA32, R_PCODE_DATA64, R_PCODE_ADD16, R_PCODE_ADD32,
       R_PCODE_ADD64,  R_PCODE_SUB16,  R_PCODE_SUB32, R_PCODE_SUB64,
   };
 
   // NOTE: since this is not a real machine we can make up a machine type
-  // for the ELF file header.  I happen to like the venerable 6502 processor.
+  // for the ELF file header. 
   if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_PCODE, 0,
                      reloc_types, infile, outfile)) {
     return false;
@@ -298,7 +308,7 @@ void PCodeAssemblerDelete(PCodeAssembler* assembler) {
 void AssemblePCodeInstruction(Assembler* base, String* word) {
   PCodeAssembler* assembler = (PCodeAssembler*)base;
 
-  void* asm_func = MapFind(&assembler->instructions, word->value);
+  void* asm_func = MapFindPointerKey(&assembler->instructions, word->value);
   if (asm_func != NULL) {
     void (*func)(PCodeAssembler*) = asm_func;
     func(assembler);
@@ -347,6 +357,12 @@ static bool RegisterName(PCodeAssembler* assembler, int* num, char* type) {
 
     if (StringEqual(&reg_name, "ap")) {
       *num = PCODE_AP_REG;
+      *type = 'i';
+      return true;
+    }
+    
+    if (StringEqual(&reg_name, "tp")) {
+      *num = PCODE_TP_REG;
       *type = 'i';
       return true;
     }
@@ -450,7 +466,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {      \
     int regs[3];                                                \
     if (ParseRegisterTriple(assembler, 'i', "integer", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                   \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                   \
     }                                                           \
   }
 
@@ -458,7 +474,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {    \
     int regs[3];                                              \
     if (ParseRegisterTriple(assembler, 'f', "float", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                 \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                 \
     }                                                         \
   }
 
@@ -466,7 +482,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {     \
     int regs[3];                                               \
     if (ParseRegisterTriple(assembler, 'd', "double", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                  \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                  \
     }                                                          \
   }
 
@@ -474,7 +490,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {    \
     int regs[3];                                              \
     if (ParseRegisterPair(assembler, 'i', "integer", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                 \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                 \
     }                                                         \
   }
 
@@ -482,7 +498,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {  \
     int regs[3];                                            \
     if (ParseRegisterPair(assembler, 'f', "float", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);               \
+      AssembleALU(assembler, PCODE_OP(inst), regs);               \
     }                                                       \
   }
 
@@ -490,7 +506,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {   \
     int regs[3];                                             \
     if (ParseRegisterPair(assembler, 'd', "double", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                \
     }                                                        \
   }
 
@@ -498,7 +514,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {                \
     int regs[3];                                                          \
     if (ParseComparisonRegisterTriple(assembler, 'i', "integer", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                             \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                             \
     }                                                                     \
   }
 
@@ -506,7 +522,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {              \
     int regs[3];                                                        \
     if (ParseComparisonRegisterTriple(assembler, 'f', "float", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                           \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                           \
     }                                                                   \
   }
 
@@ -514,7 +530,7 @@ static void AssembleALU(PCodeAssembler* assembler, int opcode, int* regs) {
   static void Assemble_##inst(PCodeAssembler* assembler) {               \
     int regs[3];                                                         \
     if (ParseComparisonRegisterTriple(assembler, 'd', "double", regs)) { \
-      AssembleALU(assembler, OP(inst), regs);                            \
+      AssembleALU(assembler, PCODE_OP(inst), regs);                            \
     }                                                                    \
   }
 
@@ -582,50 +598,50 @@ static void AssembleConversion(PCodeAssembler* assembler, int opcode,
 }
 
 static void Assemble_i2f(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(i2f), 'i', "integer", 'f', "float");
+  AssembleConversion(assembler, PCODE_OP(i2f), 'i', "integer", 'f', "float");
 }
 
 static void Assemble_ui2f(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(ui2f), 'i', "integer", 'f', "float");
+  AssembleConversion(assembler, PCODE_OP(ui2f), 'i', "integer", 'f', "float");
 }
 
 static void Assemble_i2d(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(i2d), 'i', "integer", 'd', "double");
+  AssembleConversion(assembler, PCODE_OP(i2d), 'i', "integer", 'd', "double");
 }
 
 static void Assemble_ui2d(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(ui2d), 'i', "integer", 'd', "double");
+  AssembleConversion(assembler, PCODE_OP(ui2d), 'i', "integer", 'd', "double");
 }
 
 static void Assemble_d2f(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(d2f), 'd', "double", 'f', "float");
+  AssembleConversion(assembler, PCODE_OP(d2f), 'd', "double", 'f', "float");
 }
 
 static void Assemble_f2d(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(f2d), 'f', "float", 'd', "double");
+  AssembleConversion(assembler, PCODE_OP(f2d), 'f', "float", 'd', "double");
 }
 
 static void Assemble_f2i(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(f2i), 'f', "float", 'i', "integer");
+  AssembleConversion(assembler, PCODE_OP(f2i), 'f', "float", 'i', "integer");
 }
 
 static void Assemble_d2i(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(d2i), 'd', "double", 'i', "integer");
+  AssembleConversion(assembler, PCODE_OP(d2i), 'd', "double", 'i', "integer");
 }
 
 static void Assemble_f2ui(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(f2ui), 'f', "float", 'i', "integer");
+  AssembleConversion(assembler, PCODE_OP(f2ui), 'f', "float", 'i', "integer");
 }
 
 static void Assemble_d2ui(PCodeAssembler* assembler) {
-  AssembleConversion(assembler, OP(d2ui), 'd', "double", 'i', "integer");
+  AssembleConversion(assembler, PCODE_OP(d2ui), 'd', "double", 'i', "integer");
 }
 
 static void Assemble_decsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      (OP(decsp) << 24 | (int)(value & 0xffffff)));
+                      (PCODE_OP(decsp) << 24 | (int)(value & 0xffffff)));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
   }
@@ -635,7 +651,7 @@ static void Assemble_incsp(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      (OP(incsp) << 24 | (int)(value & 0xffffff)));
+                      (PCODE_OP(incsp) << 24 | (int)(value & 0xffffff)));
   } else {
     AssemblerError(&ASM, "Immediate expression expected");
   }
@@ -680,7 +696,7 @@ static void AssembleLoadStore(PCodeAssembler* assembler, int opcode,
 
 #define ASSEMBLE_INT_LOAD_STORE(inst)                       \
   static void Assemble_##inst(PCodeAssembler* assembler) {  \
-    AssembleLoadStore(assembler, OP(inst), 'i', "integer"); \
+    AssembleLoadStore(assembler, PCODE_OP(inst), 'i', "integer"); \
   }
 
 ASSEMBLE_INT_LOAD_STORE(ldb)
@@ -692,11 +708,11 @@ ASSEMBLE_INT_LOAD_STORE(lduw)
 ASSEMBLE_INT_LOAD_STORE(ldx)
 
 static void Assemble_ldf(PCodeAssembler* assembler) {
-  AssembleLoadStore(assembler, OP(ldf), 'f', "float");
+  AssembleLoadStore(assembler, PCODE_OP(ldf), 'f', "float");
 }
 
 static void Assemble_ldd(PCodeAssembler* assembler) {
-  AssembleLoadStore(assembler, OP(ldd), 'd', "double");
+  AssembleLoadStore(assembler, PCODE_OP(ldd), 'd', "double");
 }
 
 ASSEMBLE_INT_LOAD_STORE(stb);
@@ -705,11 +721,11 @@ ASSEMBLE_INT_LOAD_STORE(sth);
 ASSEMBLE_INT_LOAD_STORE(stx);
 
 static void Assemble_stf(PCodeAssembler* assembler) {
-  AssembleLoadStore(assembler, OP(stf), 'f', "float");
+  AssembleLoadStore(assembler, PCODE_OP(stf), 'f', "float");
 }
 
 static void Assemble_std(PCodeAssembler* assembler) {
-  AssembleLoadStore(assembler, OP(std), 'd', "double");
+  AssembleLoadStore(assembler, PCODE_OP(std), 'd', "double");
 }
 
 #undef ASSEMBLE_INT_LOAD_STORE
@@ -723,7 +739,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
   }
   // Now an immediate value or a symbol
   if (!LexMatch(&ASM.lex, TOK(hash))) {
-    if (opcode != OP(movxc)) {
+    if (opcode != PCODE_OP(movxc)) {
       AssemblerError(&ASM, "Illegal symbol reference instruction");
       return;
     }
@@ -732,23 +748,36 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
       AssemblerError(&ASM, "Invalid mov operand");
       return;
     }
-    AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+    String symbol_name;
+    String suffix;
+    StringInit(&symbol_name, NULL);
+    StringInit(&suffix, NULL);
+    AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
+    
+    AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
     if (sym == NULL) {
-      sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+      sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
                                SYM_TYPE(object), SYM_BIND(local), 0);
       AssemblerInsertSymbol(&ASM, sym);
     }
     LexNextToken(&ASM.lex);
+    int reloc_type;
+    if (StringEqual(&suffix, "tls")) {
+      reloc_type = assembler->base.pic ? R_PCODE_GOT_TLS_IE : R_PCODE_TLS_TP_OFF;
+    } else {
+      reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+    }
     AssemblerRelocation* reloc =
-    NewAssemblerRelocation(sym,
-                           assembler->base.pic ?
-                           R_PCODE_GOT_ENTRY : R_PCODE_MOVXC,
+      NewAssemblerRelocation(sym,
+                           reloc_type,
                            ASM.current_section,
                                (int32_t)AssemblerCurrentAddress(&ASM));
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(&ASM, ASM.current_section,
                       0xc0000000U | opcode << 24 | reg << 16);
     AssemblerEmitLong(&ASM, ASM.current_section, 0);
+    StringDestruct(&symbol_name);
+    StringDestruct(&suffix);
     return;
   }
 
@@ -758,7 +787,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
     case 'i': {
       int64_t value = AssemblerEvaluateExpression(&ASM);
 
-      if (opcode == OP(movxc)) {
+      if (opcode == PCODE_OP(movxc)) {
         AssemblerEmitWord(&ASM, ASM.current_section,
                           0xc0000000U | opcode << 24 | reg << 16);
         AssemblerEmitLong(&ASM, ASM.current_section, value);
@@ -792,7 +821,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
 
 #define ASSEMBLE_MOVC(inst, reg_type, type_name)                    \
   static void Assemble_##inst(PCodeAssembler* assembler) {          \
-    AssembleMoveConstant(assembler, OP(inst), reg_type, type_name); \
+    AssembleMoveConstant(assembler, PCODE_OP(inst), reg_type, type_name); \
   }
 
 #define UNDEFINED_INST(m) \
@@ -816,7 +845,7 @@ static void AssembleMove(PCodeAssembler* assembler, int opcode,
 
 #define ASSEMBLE_MOV(inst, reg_type, type_name)             \
   static void Assemble_##inst(PCodeAssembler* assembler) {  \
-    AssembleMove(assembler, OP(inst), reg_type, type_name); \
+    AssembleMove(assembler, PCODE_OP(inst), reg_type, type_name); \
   }
 
 ASSEMBLE_MOV(mov, 'i', "integer");
@@ -825,28 +854,28 @@ ASSEMBLE_MOV(movd, 'd', "double");
 
 #undef ASSEMBLE_MOV
 
-static void AssemblePushPop(PCodeAssembler* assembler, int opcode,
+static void AssemblePushPPCODE_OP(PCodeAssembler* assembler, int opcode,
                             char type_needed, const char* type_name) {
   int reg = Register(assembler, type_needed, type_name);
   AssemblerEmitWord(&ASM, ASM.current_section, opcode << 24 | reg << 16);
 }
 
-#define ASSEMBLE_PUSH_POP(inst, reg_type, type_name)           \
+#define ASSEMBLE_PUSH_PPCODE_OP(inst, reg_type, type_name)           \
   static void Assemble_##inst(PCodeAssembler* assembler) {     \
-    AssemblePushPop(assembler, OP(inst), reg_type, type_name); \
+    AssemblePushPPCODE_OP(assembler, PCODE_OP(inst), reg_type, type_name); \
   }
 
-ASSEMBLE_PUSH_POP(push, 'i', "integer");
-ASSEMBLE_PUSH_POP(pushf, 'f', "float");
-ASSEMBLE_PUSH_POP(pushd, 'd', "double");
-ASSEMBLE_PUSH_POP(pushx, 'i', "integer");
-ASSEMBLE_PUSH_POP(pop, 'i', "integer");
-ASSEMBLE_PUSH_POP(popf, 'f', "float");
-ASSEMBLE_PUSH_POP(popd, 'd', "double");
-ASSEMBLE_PUSH_POP(popx, 'i', "integer");
+ASSEMBLE_PUSH_PPCODE_OP(push, 'i', "integer");
+ASSEMBLE_PUSH_PPCODE_OP(pushf, 'f', "float");
+ASSEMBLE_PUSH_PPCODE_OP(pushd, 'd', "double");
+ASSEMBLE_PUSH_PPCODE_OP(pushx, 'i', "integer");
+ASSEMBLE_PUSH_PPCODE_OP(pop, 'i', "integer");
+ASSEMBLE_PUSH_PPCODE_OP(popf, 'f', "float");
+ASSEMBLE_PUSH_PPCODE_OP(popd, 'd', "double");
+ASSEMBLE_PUSH_PPCODE_OP(popx, 'i', "integer");
 
 static void Assemble_ret(PCodeAssembler* assembler) {
-  AssemblerEmitWord(&ASM, ASM.current_section, OP(ret) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(ret) << 24);
 }
 
 static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
@@ -856,24 +885,24 @@ static void AssembleConditionalBranch(PCodeAssembler* assembler, int opcode) {
     return;
   }
   int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int64_t offset = addr - AssemblerCurrentAddress(&ASM);
+  int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
   AssemblerEmitWord(&ASM, ASM.current_section,
                     0x80000000 | opcode << 24 | reg << 16);
   AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
 }
 
 static void Assemble_bz(PCodeAssembler* assembler) {
-  AssembleConditionalBranch(assembler, OP(bz));
+  AssembleConditionalBranch(assembler, PCODE_OP(bz));
 }
 
 static void Assemble_bnz(PCodeAssembler* assembler) {
-  AssembleConditionalBranch(assembler, OP(bnz));
+  AssembleConditionalBranch(assembler, PCODE_OP(bnz));
 }
 
 static void Assemble_bra(PCodeAssembler* assembler) {
   int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int64_t offset = addr - AssemblerCurrentAddress(&ASM);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0x80000000 | OP(bra) << 24);
+  int64_t offset = addr - (AssemblerCurrentAddress(&ASM) + 8);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0x80000000 | PCODE_OP(bra) << 24);
   AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)offset);
 }
 
@@ -890,19 +919,19 @@ static void Assemble_addc(PCodeAssembler* assembler) {
 
     AssemblerEmitWord(
         &ASM, ASM.current_section,
-        0x80000000 | OP(addc) << 24 | regs[0] << 16 | regs[1] << 8);
+        0x80000000 | PCODE_OP(addc) << 24 | regs[0] << 16 | regs[1] << 8);
     AssemblerEmitWord(&ASM, ASM.current_section, (int32_t)value);
   }
 }
 
 static void Assemble_cbra(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section, OP(cbra) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(cbra) << 24 | reg << 16);
 }
 
 static void Assemble_rcall(PCodeAssembler* assembler) {
   int reg = Register(assembler, 'i', "integer");
-  AssemblerEmitWord(&ASM, ASM.current_section, OP(rcall) << 24 | reg << 16);
+  AssemblerEmitWord(&ASM, ASM.current_section, PCODE_OP(rcall) << 24 | reg << 16);
 }
 
 static void Assemble_call(PCodeAssembler* assembler) {
@@ -923,7 +952,7 @@ static void Assemble_call(PCodeAssembler* assembler) {
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(call) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(call) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -943,7 +972,7 @@ static void Assemble_jmp(PCodeAssembler* assembler) {
       NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
                              (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
-  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | OP(jmp) << 24);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(jmp) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -964,7 +993,7 @@ static void Assemble_cjmp(PCodeAssembler* assembler) {
                          (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    OP(cjmp) << 24);
+                    PCODE_OP(cjmp) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
 }
 
@@ -978,6 +1007,46 @@ static void Assemble_adr(PCodeAssembler* assembler) {
     AssemblerError(&ASM, "Missing symbol for adr instruction");
     return;
   }
+  String symbol_name;
+  String suffix;
+  StringInit(&symbol_name, NULL);
+  StringInit(&suffix, NULL);
+  AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  int reloc_type;
+  if (StringEqual(&suffix, "tls")) {
+    reloc_type = R_PCODE_GOT_TLS_GD;
+  } else {
+    reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+  }
+  AssemblerRelocation* reloc =
+  NewAssemblerRelocation(sym, reloc_type,
+                         ASM.current_section,
+                         (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
+                    PCODE_OP(adr) << 24 | reg << 16);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  StringDestruct(&symbol_name);
+  StringDestruct(&suffix);
+}
+
+static void Assemble_adrs(PCodeAssembler* assembler) {
+  int reg = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for adrs instruction");
+    return;
+  }
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
   if (sym == NULL) {
     sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
@@ -986,22 +1055,62 @@ static void Assemble_adr(PCodeAssembler* assembler) {
   }
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
-  NewAssemblerRelocation(sym, assembler->base.pic ?
-                         R_PCODE_GOT_ENTRY : R_PCODE_MOVXC,
+  NewAssemblerRelocation(sym, R_PCODE_PCREL,
                          ASM.current_section,
                          (int32_t)AssemblerCurrentAddress(&ASM));
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
-                    OP(adr) << 24 | reg << 16);
+                    PCODE_OP(adr) << 24 | reg << 16);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
   
+}
+
+// Initial exec TLS address.
+static void Assemble_adrtls(PCodeAssembler* assembler) {
+  int reg = Register(assembler, 'i', "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for adrtls instruction");
+    return;
+  }
+  String symbol_name;
+  String suffix;
+  StringInit(&symbol_name, NULL);
+  StringInit(&suffix, NULL);
+  AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(symbol_name.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  int reloc_type;
+  if (StringEqual(&suffix, "tls")) {
+    reloc_type = R_PCODE_GOT_TLS_IE;
+  } else {
+    reloc_type = assembler->base.pic ? R_PCODE_GOT_ENTRY : R_PCODE_ABS;
+  }
+  AssemblerRelocation* reloc =
+  NewAssemblerRelocation(sym, reloc_type,
+                         ASM.current_section,
+                         (int32_t)AssemblerCurrentAddress(&ASM));
+  AssemblerAddRelocation(&ASM, reloc);
+  AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
+                    PCODE_OP(adr) << 24 | reg << 16);
+  AssemblerEmitLong(&ASM, ASM.current_section, 0);
+  StringDestruct(&symbol_name);
+  StringDestruct(&suffix);
 }
 
 static void Assemble_esc(PCodeAssembler* assembler) {
   if (LexMatch(&ASM.lex, TOK(hash))) {
     int64_t value = AssemblerEvaluateExpression(&ASM);
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      (OP(esc) << 24 | (int)(value & 0xffffff)));
+                      (PCODE_OP(esc) << 24 | (int)(value & 0xffffff)));
   } else {
     AssemblerError(&ASM, "Missing #value for esc instruction");
   }

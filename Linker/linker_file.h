@@ -15,23 +15,23 @@
 #include "vector.h"
 #include "linker_symbols.h"
 
-typedef struct LinkerFile {
+typedef struct ObjectFile {
   String filename;
   ELFReaderFile* elf_file;
   HashTable local_symbol_table;
-  Vector relocations;         // Vector of LinkerRelocation*.
+  Vector relocations;         // Vector of Relocation*.
   struct Linker* linker;
   Map sections_by_name;       // Map of section name vs ELFReaderSection* in elf_file.
   Map sections_by_type;       // Map of section type vs Vector of ELFReaderSection*
-  Vector common_symbols;      // Vector of LinkerSymbol*.
-} LinkerFile;
+  Vector common_symbols;      // Vector of Symbol*.
+} ObjectFile;
 
-LinkerFile* NewLinkerFile(ELFReaderFile* elf_file, struct Linker* linker,
+ObjectFile* NewObjectFile(ELFReaderFile* elf_file, struct Linker* linker,
                           const char* filename);
-void LinkerFileDestruct(LinkerFile* file);
-void LinkerFileDelete(LinkerFile* file);
-LinkerSymbol* LinkerFileFindSymbol(LinkerFile* file, const char *name);
-ELFReaderSection* LinkerFileFindSection(LinkerFile* file, String* name);
+void ObjectFileDestruct(ObjectFile* file);
+void ObjectFileDelete(ObjectFile* file);
+Symbol* ObjectFileFindSymbol(ObjectFile* file, const char *name);
+ELFReaderSection* ObjectFileFindSection(ObjectFile* file, String* name);
 
 
 #endif /* linker_file_h */

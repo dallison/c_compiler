@@ -34,6 +34,7 @@ typedef enum {
   kOptionWerror,
   kOptionWall,
   kOptionErrorLimit,
+  kOptionTlsModel,
 } CompilerOption;
 
 typedef struct {
@@ -57,6 +58,16 @@ typedef struct {
   CompilerOption opt;
   bool is_prefix;
 } CompilerOptionDefinition;
+
+// Thread local storage model.
+#define TLS(x) kTls_##x
+typedef enum {
+  TLS(bad),
+  TLS(global_dynamic),
+  TLS(local_dynamic),
+  TLS(initial_exec),
+  TLS(local_exec),
+} TlsModel;
 
 void ParseOptions(int argc, char** argv, Vector* options);
 
@@ -92,6 +103,7 @@ typedef struct {
   size_t size;
   int32_t alignment;
   Vector initializers;
+  bool is_tls;
 } InitializedStaticVariable;
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var);
@@ -102,6 +114,7 @@ typedef struct {
   bool is_global;  // Variable is global (can be seen outside of file).
   size_t size;
   size_t alignment;
+  bool is_tls;
 } UnintializedStaticVariable;
 
 // A string literal has an id and a value.
@@ -115,6 +128,8 @@ int CompilerAddStringLiteral(String* value);
 void StringLiteralDelete(StringLiteral* literal);
 
 void UninitializedStaticVariableDelete(InitializedStaticVariable* var);
+
+TlsModel ParseTlsModelName(String* name);
 
 // A compiler target back-end.  This contains pointers to
 // functions to generate code for a particlar target.
@@ -145,6 +160,18 @@ typedef struct {
   // Emit BSS (uninitialized variable) to the assembly file.
   // NOTE: BSS is an old term meaning Block Started by Symbol.
   void (*emit_bss_space)(UnintializedStaticVariable* var, FILE* asm_file);
+
+  // Emit start of tdata section to asm file.
+  void (*emit_tdata_start)(FILE* asm_file);
+  
+  // Emit start of tbss section to asm file.
+  void (*emit_tbss_start)(FILE* asm_file);
+
+  // Emit tls data to the assembly file
+  void (*emit_tls_variable)(InitializedStaticVariable* var, FILE* asm_file);
+  
+  // Emit tbss (uninitialized tls variable) to the assembly file.
+  void (*emit_tbss_space)(UnintializedStaticVariable* var, FILE* asm_file);
 
   // Emit start of string literals.
   void (*emit_literals_start)(FILE* asm_file);
@@ -199,6 +226,8 @@ typedef struct {
   bool optimize;
   bool pic;
 
+  TlsModel tls_model;
+  
   int pointer_size;     // Size of a pointer.
   size_t current_include_path_index;
 } Compiler;
@@ -215,8 +244,8 @@ bool CompilerInitForAssembler(const char* filename, Vector* options);
 void CompilerDestruct(Compiler* compiler);
 void CompilerDelete(Compiler* compiler);
 
-void CompileTranslationUnit(const char* filename, Vector* options);
-void CompileTranslationUnitFromString(const char* filename, const char* code,
+String* CompileTranslationUnit(const char* filename, Vector* options);
+String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                       Vector* options);
 int CompilerAddStringLiteral(String* value);
 StringLiteral* CompilerFindStringLiteral(int literal_id);

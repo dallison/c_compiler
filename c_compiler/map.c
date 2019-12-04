@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dstring.h>
 
 #define INIT_CAPACITY 2
 
@@ -19,6 +20,56 @@ void MapInit(Map* map, MapKeyCompareFunc compare_func) {
   map->length = 0;
   map->values = NULL;
   map->compare = compare_func;
+}
+
+static int CompareStrings(const void* a, const void* b) {
+  const MapKeyValue* v1 = a;
+  const MapKeyValue* v2 = b;
+  return StringCompareString(v1->key.p, v2->key.p);
+}
+
+static int CompareStringsCaseBlind(const void* a, const void* b) {
+  const MapKeyValue* v1 = a;
+  const MapKeyValue* v2 = b;
+  return StringCompareStringCaseBlind(v1->key.p, v2->key.p);
+}
+
+static int CompareCharPointers(const void* a, const void* b) {
+  const MapKeyValue* v1 = a;
+  const MapKeyValue* v2 = b;
+  return strcmp(v1->key.p, v2->key.p);
+}
+
+static int CompareCharPointersCaseBlind(const void* a, const void* b) {
+  const MapKeyValue* v1 = a;
+  const MapKeyValue* v2 = b;
+  return strcasecmp(v1->key.p, v2->key.p);
+}
+
+static int CompareMappedInt64s(const void*a, const void* b) {
+  const MapKeyValue* s1 = a;
+  const MapKeyValue* s2 = b;
+  return (int)(s1->key.w - s2->key.w);
+}
+
+void MapInitForStringKeys(Map* map) {
+  MapInit(map,  CompareStrings);
+}
+
+void MapInitForCaseBlindStringKeys(Map* map) {
+  MapInit(map,  CompareStringsCaseBlind);
+}
+
+void MapInitForCharPointerKeys(Map* map) {
+  MapInit(map,  CompareCharPointers);
+}
+
+void MapInitForCaseBlindCharPointerKeys(Map* map) {
+  MapInit(map,  CompareCharPointersCaseBlind);
+}
+
+void MapInitForInt64Keys(Map* map) {
+  MapInit(map,  CompareMappedInt64s);
 }
 
 Map* NewMap(MapKeyCompareFunc compare_func) {
@@ -39,18 +90,17 @@ void MapDelete(Map* map) {
 }
 
 void MapDestructWithContents(Map* map,
-                             void (*func)(const void* key, void* value)) {
+                             void (*func)(MapKeyValue *kv)) {
   for (size_t i = 0; i < map->length; i++) {
-    const MapKeyValue* kv = &map->values[i];
     if (func != NULL) {
-      func(kv->key, kv->value);
+      func(&map->values[i]);
     }
   }
   MapDestruct(map);
 }
 
 void MapDeleteWithContents(Map* map,
-                           void (*func)(const void* key, void* value)) {
+                           void (*func)(MapKeyValue* kv)) {
   MapDestructWithContents(map, func);
   free(map);
 }
@@ -142,7 +192,7 @@ static void* LinearInsert(Map* map, MapKeyValue* key_value) {
     int compval = map->compare(key_value, &map->values[i]);
     if (compval == 0) {
       // Matches exising value, replace value.
-      void* old_value = map->values[i].value;
+      void* old_value = map->values[i].value.p;
       map->values[i].value = key_value->value;
       return old_value;
     }
@@ -168,7 +218,7 @@ static void* BinaryInsert(Map* map, MapKeyValue* key_value) {
   }
   if (found) {
     // Matches exising value, replace value.
-    void* old_value = p->value;
+    void* old_value = p->value.p;
     p->value = key_value->value;
     return old_value;
   }
@@ -180,17 +230,14 @@ static void* BinaryInsert(Map* map, MapKeyValue* key_value) {
 // Insert the value in the map, keeping the values array sorted by key.
 // Returns NULL if the value is newly inserted or the value replaced
 // if the key is already present.
-void* MapInsert(Map* map, void* key, void* value) {
-  MapKeyValue key_value;
-  key_value.key = key;
-  key_value.value = value;
+void* MapInsert(Map* map, MapKeyValue kv) {
   if (map->length < 5) {
-    return LinearInsert(map, &key_value);
+    return LinearInsert(map, &kv);
   }
-  return BinaryInsert(map, &key_value);
+  return BinaryInsert(map, &kv);
 }
 
-void* MapFind(Map* map, void* key) {
+void* MapFind(Map* map, MapKeyType key) {
   MapKeyValue key_value;
   key_value.key = key;
   MapKeyValue* result = bsearch(&key_value, map->values, map->length,
@@ -198,10 +245,22 @@ void* MapFind(Map* map, void* key) {
   if (result == NULL) {
     return NULL;
   }
-  return result->value;
+  return result->value.p;
 }
 
-void* MapRemove(Map* map, void* key) {
+void* MapFindPointerKey(Map* map, void* key) {
+  MapKeyType k;
+  k.p = key;
+  return MapFind(map, k);
+}
+
+void* MapFindInt64Key(Map* map, int64_t key) {
+  MapKeyType k;
+  k.w = key;
+  return MapFind(map, k);
+}
+
+void* MapRemove(Map* map, MapKeyType key) {
   MapKeyValue key_value;
   key_value.key = key;
   MapKeyValue* result = bsearch(&key_value, map->values, map->length,
@@ -211,7 +270,7 @@ void* MapRemove(Map* map, void* key) {
   }
 
   // Remove the key-value pair at the index found.
-  void* value = result->value;
+  void* value = result->value.p;
   Remove(map, result - map->values);
   return value;
 }
@@ -228,10 +287,9 @@ void MapPrint(Map* map, void (*printer)(const MapKeyValue* kv)) {
 }
 
 void MapTraverse(Map* map,
-                 void (*func)(const void* key, void* value, void* data),
+                 void (*func)(MapKeyValue* kv, void* data),
                  void* data) {
   for (size_t i = 0; i < map->length; i++) {
-    const MapKeyValue* kv = &map->values[i];
-    func(kv->key, kv->value, data);
+    func(&map->values[i], data);
   }
 }

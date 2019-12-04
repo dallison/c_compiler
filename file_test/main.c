@@ -13,7 +13,7 @@ int main(int argc, char * argv[]) {
   Vector options;
   ParseOptions(argc, argv, &options);
   for (size_t i = 0; i < options.length; i++) {
-    CompilerOptionValue* opt = options.value[i];
+    CompilerOptionValue* opt = options.value.p[i];
     if (opt->opt == kOptionInputFile) {
       CompileTranslationUnit(opt->value.svalue.value, &options);
     }

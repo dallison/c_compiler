@@ -678,7 +678,7 @@ static void VectorASTNodeDelete(ASTNode* node) {
     ASTNodeDelete(vnode->left);
   }
   for (size_t i = 0; i < vnode->children->length; i++) {
-    ASTNode* child = (ASTNode*)vnode->children->value[i];
+    ASTNode* child = (ASTNode*)vnode->children->value.p[i];
     if (child != NULL) {
       ASTNodeDelete(child);
     }
@@ -697,15 +697,15 @@ static void VectorASTNodePrint(ASTNode* node, int indents) {
   for (size_t i = 0; i < num_children; i++) {
     Indent(indents + 2);
     printf("[%zd]:\n", i);
-    ASTNodePrint((ASTNode*)vnode->children->value[i], indents + 4);
+    ASTNodePrint((ASTNode*)vnode->children->value.p[i], indents + 4);
   }
 }
 
 static void VectorASTNodeReplaceChild(ASTNode* parent, int child_id,
                                       ASTNode* child, bool delete_old_child) {
   VectorASTNode* node = (VectorASTNode*)parent;
-  ASTNode* old = node->children->value[child_id];
-  node->children->value[child_id] = child;
+  ASTNode* old = node->children->value.p[child_id];
+  node->children->value.p[child_id] = child;
   child->parent = parent;
   if (delete_old_child) {
     ASTNodeDelete(old);
@@ -723,7 +723,7 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
   node->left = left;
   node->children = children;
   for (size_t i = 0; i < children->length; i++) {
-    ASTNode* child = children->value[i];
+    ASTNode* child = children->value.p[i];
     child->parent = (ASTNode*)node;
     child->child_id = (int)i;
   }
@@ -1038,7 +1038,7 @@ ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
 static void CompoundStatementASTNodeDelete(ASTNode* node) {
   CompoundStatementASTNode* vnode = (CompoundStatementASTNode*)node;
   for (size_t i = 0; i < vnode->statements->length; i++) {
-    ASTNode* stmt = (ASTNode*)vnode->statements->value[i];
+    ASTNode* stmt = (ASTNode*)vnode->statements->value.p[i];
     if (stmt != NULL) {
       ASTNodeDelete(stmt);
     }
@@ -1050,7 +1050,7 @@ static void CompoundStatementASTNodeDelete(ASTNode* node) {
 static void CompoundStatementASTNodePrint(ASTNode* node, int indents) {
   CompoundStatementASTNode* vnode = (CompoundStatementASTNode*)node;
   for (size_t i = 0; i < vnode->statements->length; i++) {
-    ASTNode* stmt = (ASTNode*)vnode->statements->value[i];
+    ASTNode* stmt = (ASTNode*)vnode->statements->value.p[i];
     if (stmt != NULL) {
       ASTNodePrint(stmt, indents);
     }
@@ -1061,8 +1061,8 @@ static void CompoundStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
                                                  ASTNode* child,
                                                  bool delete_old_child) {
   CompoundStatementASTNode* node = (CompoundStatementASTNode*)parent;
-  ASTNode* old = node->statements->value[child_id];
-  node->statements->value[child_id] = child;
+  ASTNode* old = node->statements->value.p[child_id];
+  node->statements->value.p[child_id] = child;
   child->parent = parent;
   if (delete_old_child) {
     ASTNodeDelete(old);
@@ -1081,7 +1081,7 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
               &compound_stmt_vtbl);
   node->statements = statements;
   for (size_t i = 0; i < node->statements->length; i++) {
-    ASTNode* stmt = (ASTNode*)node->statements->value[i];
+    ASTNode* stmt = (ASTNode*)node->statements->value.p[i];
     stmt->parent = (ASTNode*)node;
     stmt->child_id = (int)i;
   }
@@ -1236,7 +1236,7 @@ ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
 static void DeclarationListASTNodeDelete(ASTNode* node) {
   DeclarationListASTNode* vnode = (DeclarationListASTNode*)node;
   for (size_t i = 0; i < vnode->declarations->length; i++) {
-    ASTNode* stmt = (ASTNode*)vnode->declarations->value[i];
+    ASTNode* stmt = (ASTNode*)vnode->declarations->value.p[i];
     if (stmt != NULL) {
       ASTNodeDelete(stmt);
     }
@@ -1248,7 +1248,7 @@ static void DeclarationListASTNodeDelete(ASTNode* node) {
 static void DeclarationListASTNodePrint(ASTNode* node, int indents) {
   DeclarationListASTNode* vnode = (DeclarationListASTNode*)node;
   for (size_t i = 0; i < vnode->declarations->length; i++) {
-    ASTNode* stmt = (ASTNode*)vnode->declarations->value[i];
+    ASTNode* stmt = (ASTNode*)vnode->declarations->value.p[i];
     if (stmt != NULL) {
       ASTNodePrint(stmt, indents);
     }
@@ -1459,7 +1459,7 @@ ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
 static void BracedInitializerASTNodeDelete(ASTNode* node) {
   BracedInitializerASTNode* lnode = (BracedInitializerASTNode*)node;
   for (size_t i = 0; i < lnode->initializers->length; i++) {
-    ASTNode* init = (ASTNode*)lnode->initializers->value[i];
+    ASTNode* init = (ASTNode*)lnode->initializers->value.p[i];
     if (init != NULL) {
       ASTNodeDelete(init);
     }
@@ -1471,7 +1471,7 @@ static void BracedInitializerASTNodeDelete(ASTNode* node) {
 static void BracedInitializerASTNodePrint(ASTNode* node, int indents) {
   BracedInitializerASTNode* lnode = (BracedInitializerASTNode*)node;
   for (size_t i = 0; i < lnode->initializers->length; i++) {
-    ASTNode* init = (ASTNode*)lnode->initializers->value[i];
+    ASTNode* init = (ASTNode*)lnode->initializers->value.p[i];
     if (init != NULL) {
       ASTNodePrint(init, indents + 2);
     }
@@ -1484,8 +1484,8 @@ static void BracedInitializerASTNodeReplaceChild(ASTNode* parent, int child_id,
                                                  ASTNode* child,
                                                  bool delete_old_child) {
   BracedInitializerASTNode* lnode = (BracedInitializerASTNode*)parent;
-  ASTNode* old = lnode->initializers->value[child_id];
-  lnode->initializers->value[child_id] = child;
+  ASTNode* old = lnode->initializers->value.p[child_id];
+  lnode->initializers->value.p[child_id] = child;
   child->parent = parent;
   if (delete_old_child) {
     ASTNodeDelete(old);
@@ -1503,17 +1503,19 @@ ASTNode* NewBracedInitializerASTNode(Vector* initializers,
               &braced_init_vtbl);
   node->initializers = initializers;
   for (size_t i = 0; i < node->initializers->length; i++) {
-    ASTNode* init = (ASTNode*)node->initializers->value[i];
+    ASTNode* init = (ASTNode*)node->initializers->value.p[i];
     init->parent = (ASTNode*)node;
     init->child_id = (int)i;
   }
   return (ASTNode*)node;
 }
 
-Designator* NewArrayDesignator(int index) {
+Designator* NewArrayDesignator(TypeRecord* type, int index) {
   Designator* d = malloc(sizeof(Designator));
   d->designator_type = kDesignatorArray;
   d->value.array_index = index;
+  d->type = type;
+  TypeRecordIncRef(type);
   return d;
 }
 
@@ -1543,7 +1545,7 @@ static void DesignatedInitializerASTNodePrint(ASTNode* node, int indents) {
   Indent(indents + 2);
   if (dnode->designators != NULL) {
     for (size_t i = 0; i < dnode->designators->length; i++) {
-      Designator* d = (Designator*)dnode->designators->value[i];
+      Designator* d = (Designator*)dnode->designators->value.p[i];
       if (d->designator_type == kDesignatorArray) {
         printf("[%d]", d->value.array_index);
       } else {

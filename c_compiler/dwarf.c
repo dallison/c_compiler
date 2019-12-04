@@ -15,13 +15,13 @@
 static int CompareString(const void* a, const void* b) {
   MapKeyValue* k1 = (MapKeyValue*)a;
   MapKeyValue* k2 = (MapKeyValue*)b;
-  String* s1 = k1->key;
-  String* s2 = k2->key;
+  String* s1 = k1->key.p;
+  String* s2 = k2->key.p;
   return strcmp(s1->value, s2->value);
 }
 
 void DwarfInit(Dwarf* dwarf) {
-  MapInit(&dwarf->directory_table, CompareString);
+  MapInitForStringKeys(&dwarf->directory_table);
 
   // The next directory index.  This starts at 1 because 0 is the same
   // as NULL and that is returned from MapFind to signify that the key
@@ -44,8 +44,8 @@ void DwarfInit(Dwarf* dwarf) {
 
 // A directory in the directory_table is a mapping of dir name
 // vs index (an integer).  The name is a String*
-static void DeleteDirectoryEntry(const void* key, void* value) {
-  StringDelete((String*)key);
+static void DeleteDirectoryEntry(MapKeyValue* kv) {
+  StringDelete((String*)kv->key.p);
 }
 
 void DwarfDestruct(Dwarf* dwarf) {
@@ -75,13 +75,15 @@ void DwarfAddFile(Dwarf* dwarf, String* filename) {
   if (basename_index != -1) {
     String dir_name;
     StringInitFromSegment(&dir_name, filename->value, basename_index);
-    void* dir_plus_one = MapFind(&dwarf->directory_table, &dir_name);
+    void* dir_plus_one = MapFindPointerKey(&dwarf->directory_table, &dir_name);
     if (dir_plus_one == NULL) {
       // No dir in map.
       String* stored_dir_name = NewString(dir_name.value);
       dir = dwarf->next_dir_index - 1;
-      MapInsert(&dwarf->directory_table, stored_dir_name,
-                (void*)(dwarf->next_dir_index++));
+      MapKeyValue kv;
+      kv.key.p = stored_dir_name;
+      kv.value.w = dwarf->next_dir_index++;
+      MapInsert(&dwarf->directory_table, kv);
     } else {
       dir = (int64_t)dir_plus_one - 1;
     }
@@ -94,7 +96,7 @@ void DwarfAddFile(Dwarf* dwarf, String* filename) {
 }
 
 void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col,
-                      int64_t address) {
+                      uint64_t address) {
   if (dwarf->locations.length > 0) {
     LocationEntry* last_loc = VectorLast(&dwarf->locations);
     if (last_loc->address == address) {
@@ -133,8 +135,8 @@ static void WriteSLEB128(uint32_t value, Buffer* buffer) {
   }
 }
 
-static void EmitDirectory(const void* key, void* value, void* data) {
-  const String* dir = key;
+static void EmitDirectory(MapKeyValue* kv, void* data) {
+  const String* dir = kv->key.p;
   Buffer* buffer = data;
   BufferAppend(buffer, dir->value, dir->length + 1);  // Includes \0 at end.
 }
@@ -189,7 +191,7 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
 
   // Emit filenames.
   for (size_t i = 0; i < dwarf->file_table.length; i++) {
-    FileEntry* file = dwarf->file_table.value[i];
+    FileEntry* file = dwarf->file_table.value.p[i];
     BufferAppend(debug_line, file->filename->value, file->filename->length + 1);
     WriteULEB128(file->dir, debug_line);
 
@@ -217,7 +219,7 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
   //                     byte.  Limited range of values allowed.
   LocationEntry* prev_loc = NULL;
   for (size_t i = 0; i < dwarf->locations.length; i++) {
-    LocationEntry* loc = dwarf->locations.value[i];
+    LocationEntry* loc = dwarf->locations.value.p[i];
     if (prev_loc == NULL) {
       // No previous location means this is the first location.  We need
       // to set the initial line and address.  The address is associated
@@ -285,6 +287,7 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
   uint32_t* unit_length = (uint32_t*)(debug_line->value);
   *unit_length = (uint32_t)debug_line->length -
                  4;  // Doesn't include unit_length field itself.
+  BufferAlignLength(debug_line, 8);
 }
 
 AssemblerRelocation* DwarfDebugLineRelocation(Dwarf* dwarf,

@@ -94,7 +94,7 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
   fprintf(fp, "\t.p2align  %d\n", p2align_arg);
   int next_offset = 0;
   for (size_t i = 0; i < var->initializers.length; i++) {
-    Initializer* init = var->initializers.value[i];
+    Initializer* init = var->initializers.value.p[i];
     if (init->offset > next_offset) {
       int diff = init->offset - next_offset;
       fprintf(fp, "\t.space  %d\n", diff);

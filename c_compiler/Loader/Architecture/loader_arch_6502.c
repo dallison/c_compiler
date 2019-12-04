@@ -1,0 +1,45 @@
+//
+//  loader_arch_6502.c
+//  p_code_interpreter
+//
+//  Created by David Allison on 6/25/19.
+//  Copyright © 2019 David Allison. All rights reserved.
+//
+
+#include <stdlib.h>
+#include "loader_arch_6502.h"
+
+// PIC is not supported on 6502.
+static void InitGOTPLT(LoadedDynamicLibrary* lib, void* data) {
+}
+
+static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
+                                   const ELFRelocation* reloc,
+                                   const ELFSymbol* symbol,
+                                   const char* sym_name,
+                                   char* target_address) {
+}
+
+static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
+                                  const ELFRelocation* reloc,
+                                  const ELFSymbol* symbol,
+                                  const char* sym_name,
+                                  char* target_address,
+                                  bool lazy) {
+  
+}
+
+void _6502LoaderArchitectureInit(LoaderArchitecture* arch) {
+  arch->machine_type = ELF_MACHINE_TYPE_6502;
+  arch->platform = "6502";
+  arch->ignore_vaddr = true;
+  arch->init_got_plt = InitGOTPLT;
+  arch->apply_got_data_relocation = ApplyGOTDataRelocation;
+  arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;
+}
+
+LoaderArchitecture* New6502LoaderArchitecture(void) {
+  LoaderArchitecture* arch = malloc(sizeof(LoaderArchitecture));
+  _6502LoaderArchitectureInit(arch);
+  return arch;
+}

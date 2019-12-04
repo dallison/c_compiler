@@ -7,11 +7,13 @@
 //
 
 #include "dstring.h"
+#include "vector.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 void StringInitFromSegment(String* str, const char* init, size_t length) {
   size_t real_length = length + 1;  // With \0 at the end.
@@ -37,7 +39,19 @@ void StringInit(String* str, const char* init) {
   StringInitFromSegment(str, init, length);
 }
 
+void StringInitImmutable(String* str, const char* init) {
+  size_t length = init == NULL ? 0 : strlen(init);
+  str->value = (char*)init;
+  str->capacity = STRING_IMMUTABLE;
+  str->length = length;
+}
+
+static void CheckMutable(String* s) {
+  assert(s->capacity != STRING_IMMUTABLE);
+}
+
 void StringClear(String* str) {
+  CheckMutable(str);
   if (str->value != str->buffer) {
     free(str->value);
     str->value = str->buffer;
@@ -54,7 +68,8 @@ String* NewString(const char* init) {
 }
 
 void StringDestruct(String* str) {
-  if (str->value != str->buffer) {
+  if (str->capacity != STRING_IMMUTABLE &&
+      str->value != str->buffer) {
     free(str->value);
   }
   str->value = NULL;
@@ -63,6 +78,7 @@ void StringDestruct(String* str) {
 }
 
 void StringDelete(String* str) {
+  CheckMutable(str);
   if (str->value != str->buffer) {
     free(str->value);
   }
@@ -76,9 +92,18 @@ bool StringEqual(String* str1, const char* str2) {
   return str1 != NULL && strcmp(str1->value, str2) == 0;
 }
 
+bool StringEqualCaseBlind(String* str1, const char* str2) {
+  return str1 != NULL && strcasecmp(str1->value, str2) == 0;
+}
+
 int StringCompare(String* str1, const char* str2) {
   return strcmp(str1->value, str2);
 }
+
+int StringCompareCaseBlind(String* str1, const char* str2) {
+  return strcasecmp(str1->value, str2);
+}
+
 
 bool StringEqualString(String* str1, String* str2) {
   return strcmp(str1->value, str2->value) == 0;
@@ -88,8 +113,13 @@ int StringCompareString(String* str1, String* str2) {
   return strcmp(str1->value, str2->value);
 }
 
+int StringCompareStringCaseBlind(String* str1, String* str2) {
+  return strcasecmp(str1->value, str2->value);
+}
+
 // Set and append.
 void StringSet(String* str, const char* value) {
+  CheckMutable(str);
   size_t length =
       value == NULL ? 1 : strlen(value) + 1;  // Length of value + 1.
   if (str->capacity < length) {
@@ -113,6 +143,7 @@ void StringSetString(String* str, String* value) {
 }
 
 void StringAppendSegment(String* str, const char* value, size_t length) {
+  CheckMutable(str);
   // Full length of strings, including \0.
   size_t full_length = str->length + length + 1;
   if (str->capacity < full_length) {
@@ -144,6 +175,7 @@ void StringAppendString(String* str, String* value) {
 }
 
 void StringTrimEnd(String* s) {
+  CheckMutable(s);
   while (s->length > 0) {
     if (isspace(s->value[s->length - 1])) {
       s->length--;
@@ -157,6 +189,7 @@ void StringTrimEnd(String* s) {
 // This needs to be optimal since code that build up strings tends
 // to call it a lot.
 void StringAppendChar(String* str, char ch) {
+  CheckMutable(str);
   // We are appending a single char but the memory needs a '\0'
   // at the end and this is not included in str->length, so
   // the actual length we need is str->length + 2.
@@ -181,6 +214,50 @@ void StringAppendChar(String* str, char ch) {
   // Append the character and then '\0'.
   str->value[str->length++] = ch;
   str->value[str->length] = '\0';
+}
+
+void StringReplace(String* str, size_t pos, size_t len, const char* p, size_t plen) {
+  CheckMutable(str);
+  ssize_t len_diff = plen - len;
+  size_t new_length = str->length + len_diff + 1;
+  if (str->capacity < new_length) {
+    // Out of space, reallocate memory.
+    // If we are appending chars we don't want to keep reallocing
+    // the memory for each additional char.  So double the amount of
+    // memory needed each time we grow.
+    new_length *= 2;
+    
+    if (str->value == str->buffer) {
+      // Moving from buffer, allocate memory and copy the buffer in to it.
+      str->value = malloc(new_length);
+      memcpy(str->value, str->buffer, STRING_BUFFER_SIZE);
+    } else {
+      // No space, reallocate memory.
+      str->value = realloc(str->value, new_length);
+    }
+    str->capacity = new_length;
+  }
+  
+  // Move tail up or down in memory
+  size_t tail_length = str->length - (pos + len) + 1;
+  if (tail_length > 0) {
+    memmove(&str->value[pos + plen],
+            &str->value[pos + len],
+            tail_length);
+  }
+  // Copy in new string.
+  if (plen > 0) {
+    memcpy(&str->value[pos], p, plen);
+  }
+  str->length += len_diff;
+}
+
+void StringReplaceString(String* str, size_t pos, size_t len, String* p) {
+  StringReplace(str, pos, len, p->value, p->length);
+}
+
+void StringErase(String* str, size_t pos, size_t len) {
+  StringReplace(str, pos, len, NULL, 0);
 }
 
 size_t StringIndexOf(String* s, const char* substring) {
@@ -298,3 +375,19 @@ void StringEscape(String* in, String* out) {
     }
   }
 }
+
+void StringSplit(String* s, char sep, Vector* v) {
+  size_t i = 0;
+  while (i < s->length) {
+    size_t start = i;
+    
+    while (i < s->length && s->value[i] != sep) {
+      i++;
+    }
+    String* part = NewString(NULL);
+    StringAppendSegment(part, &s->value[start], i - start);
+    VectorAppend(v, part);
+    i++;    // Skip separator.
+  }
+}
+

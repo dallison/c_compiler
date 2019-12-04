@@ -21,6 +21,7 @@
 #define P_CODE_ESC_READ 3        // Input an array.
 #define P_CODE_ESC_HALT 4           // Halt interpreter.
 #define P_CODE_ESC_DEBUG 5         // Debug escape.
+#define P_CODE_ESC_RESOLVE 6      // Resolve symbol.
 // Start of user escape codes.
 #define P_CODE_ESC_USER_START  256
 
@@ -31,13 +32,16 @@ typedef struct Interpreter {
   double dregs[PCODE_NUM_DOUBLE_REGS];
 
   int32_t startup_code[4];
+  int32_t symbol_resolver_code[1];
+  
   char* stack;
   void (*escape)(struct Interpreter*, int32_t value);
-  Symbol* current_symbol;
+  SymbolScope* current_symbol;
 } Interpreter;
 
-void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void InterpreterInit(Interpreter* interpreter);
+
+void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
 void InterpreterDestruct(Interpreter* interpreter);
-void InterpreterRun(Interpreter* interpreter);
 
 #endif /* p_code_interpreter_h */

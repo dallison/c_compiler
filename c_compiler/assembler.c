@@ -15,6 +15,9 @@
 #include "expr_parser.h"
 #include "expr_semantics.h"
 
+// Default label defining function.
+static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling);
+
 //
 // Forward declaration of static assembler directive handlers.
 //
@@ -48,12 +51,18 @@ DECLARE_DIRECTIVE_FUNC(local);
 DECLARE_DIRECTIVE_FUNC(file);
 DECLARE_DIRECTIVE_FUNC(loc);
 DECLARE_DIRECTIVE_FUNC(option);
+DECLARE_DIRECTIVE_FUNC(set);
 
 #undef DECLARE_DIRECTIVE_FUNC
 
 // Add all directives to the map of directive name vs handling function.
 #define DIRECTIVE(spelling) \
-  MapInsert(directives, "." #spelling, HandleDirective_##spelling)
+  do { \
+    MapKeyValue kv; \
+    kv.key.p = "." #spelling;\
+    kv.value.p = HandleDirective_##spelling;\
+    MapInsert(directives, kv); \
+    } while(0)
 
 static void InitializeDirectives(Map* directives) {
   DIRECTIVE(globl);
@@ -83,6 +92,7 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(file);
   DIRECTIVE(loc);
   DIRECTIVE(option);
+  DIRECTIVE(set);
 }
 
 #undef DIRECTIVE
@@ -91,7 +101,9 @@ AssemblerSection* NewAssemblerSection(String* name, int32_t type, int32_t flags,
                                       int32_t alignment) {
   AssemblerSection* section = malloc(sizeof(AssemblerSection));
   section->name = name;
-  ELFWriterSectionContentsInit(&section->contents, kSectionContentsBuffered);
+  ELFWriterSectionContentsInit(&section->contents, type == SHT(nobits) ?
+                               kSectionContentsNobits :
+                               kSectionContentsBuffered);
   section->address = 0;
   section->flags = flags;
   section->type = type;
@@ -116,6 +128,7 @@ AssemblerRelocation* NewAssemblerRelocation(AssemblerSymbol* sym, int32_t type,
                                             int32_t section, int32_t offset) {
   AssemblerRelocation* r = malloc(sizeof(AssemblerRelocation));
   r->symbol = sym;
+  sym->exported = true;     // Must be exported.
   r->type = type;
   r->section = section;
   r->offset = offset;
@@ -189,7 +202,7 @@ static void* FindSymbolInHashTable(void* entry, void* value) {
   }
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    AssemblerSymbol* sym = bucket->value[i];
+    AssemblerSymbol* sym = bucket->value.p[i];
     if (StringEqual(&sym->name, (char*)value)) {
       return sym;
     }
@@ -200,7 +213,7 @@ static void* FindSymbolInHashTable(void* entry, void* value) {
 static void DeleteSymbolList(void* entry, void* data) {
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    AssemblerSymbol* sym = bucket->value[i];
+    AssemblerSymbol* sym = bucket->value.p[i];
     AssemblerSymbolDelete(sym);
   }
   VectorDelete(bucket);
@@ -208,10 +221,21 @@ static void DeleteSymbolList(void* entry, void* data) {
 
 static void ClearAssemblerSymbolTable(HashTable* table) {
   HashTableTraverse(table, DeleteSymbolList, NULL);
+  HashTableClear(table);
 }
 
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name) {
   return HashTableSearch(&assembler->symbol_table, (void*)name);
+}
+
+void AssemblerExtractSymbolSuffix(String* symbol, String* name, String* suffix) {
+  size_t index = StringIndexOf(symbol, "@");
+  if (index == -1) {
+    StringSetString(name, symbol);
+    return;
+  }
+  StringAppendSegment(name, symbol->value, index);
+  StringSet(suffix, symbol->value + index + 1);
 }
 
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
@@ -224,39 +248,43 @@ void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
   // Insert a symbol suitable for the Syntax Analyzer into the local
   // syntax scope.  This is so that we can use the symbol in expressions.
   TypeRecord* int_type = NewTypeRecord(kTypeInt, kQualPlain);
-  Symbol* syntax_sym = NewSymbol(sym->name.value, int_type, kStorageAssembler);
+  Symbol* syntax_sym = NewSymbol(sym->name.value, int_type, STO(assembler));
   syntax_sym->value.other = sym;
   SyntaxAddSymbol(&assembler->syntax, syntax_sym);
 }
 
 void AssemblerEmitWord(Assembler* assembler, int section, int32_t word) {
-  AssemblerSection* sect = assembler->sections.value[section];
+  AssemblerSection* sect = assembler->sections.value.p[section];
   if (assembler->pass == 2) {
     BufferAppend(&sect->contents.data.buffered, (char*)&word, 4);
+    sect->contents.size += 4;
   }
   sect->address += 4;
 }
 
 void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte) {
-  AssemblerSection* sect = assembler->sections.value[section];
+  AssemblerSection* sect = assembler->sections.value.p[section];
   if (assembler->pass == 2) {
     BufferAppend(&sect->contents.data.buffered, (char*)&byte, 1);
+    sect->contents.size += 1;
   }
   sect->address += 1;
 }
 
 void AssemblerEmitHalf(Assembler* assembler, int section, uint16_t half) {
-  AssemblerSection* sect = assembler->sections.value[section];
+  AssemblerSection* sect = assembler->sections.value.p[section];
   if (assembler->pass == 2) {
     BufferAppend(&sect->contents.data.buffered, (char*)&half, 2);
+    sect->contents.size += 2;
   }
   sect->address += 2;
 }
 
 void AssemblerEmitLong(Assembler* assembler, int section, uint64_t l) {
-  AssemblerSection* sect = assembler->sections.value[section];
+  AssemblerSection* sect = assembler->sections.value.p[section];
   if (assembler->pass == 2) {
     BufferAppend(&sect->contents.data.buffered, (char*)&l, 8);
+    sect->contents.size += 8;
   }
   sect->address += 8;
 }
@@ -305,7 +333,7 @@ LocationEntry* NewLocationEntry(int file, int line, int col, uint64_t address) {
 static int CompareCharPointer(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
-  return strcmp(s1->key, s2->key);
+  return strcmp(s1->key.p, s2->key.p);
 }
 
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
@@ -342,6 +370,8 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 
   DwarfInit(&assembler->dwarf);
 
+  // Default label defining function.
+  assembler->define_label = DefineLabel;
   return true;
 }
 
@@ -396,7 +426,7 @@ int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
 
 int AssemblerFindSection(Assembler* assembler, String* name) {
   for (size_t i = 0; i < assembler->sections.length; i++) {
-    AssemblerSection* section = assembler->sections.value[i];
+    AssemblerSection* section = assembler->sections.value.p[i];
     if (section->name != NULL && StringEqualString(section->name, name)) {
       return (int)i;
     }
@@ -406,14 +436,14 @@ int AssemblerFindSection(Assembler* assembler, String* name) {
 
 void AssemblerSetSectionSize(Assembler* assembler, size_t index, size_t size) {
   if (index < assembler->sections.length) {
-    AssemblerSection* section = assembler->sections.value[index];
+    AssemblerSection* section = assembler->sections.value.p[index];
     section->contents.size = size;
   }
 }
 
 int64_t AssemblerCurrentAddress(Assembler* assembler) {
   AssemblerSection* section =
-      assembler->sections.value[assembler->current_section];
+      assembler->sections.value.p[assembler->current_section];
   return section->address;
 }
 
@@ -427,6 +457,8 @@ static int32_t SymbolTypeToELFType(AssemblerSymbolType type) {
       return STT(object);
     case SYM_TYPE(common):
       return STT(common);
+    case SYM_TYPE(tls):
+      return STT(tls);
     default:
       assert(false);
   }
@@ -448,7 +480,7 @@ static void AddLocalSymbolToELFFile(void* entry, void* data) {
   Vector* buckets = entry;
   ELFWriterFile* elf = data;
   for (size_t i = 0; i < buckets->length; i++) {
-    AssemblerSymbol* sym = buckets->value[i];
+    AssemblerSymbol* sym = buckets->value.p[i];
     if (sym->exported && sym->binding == SYM_BIND(local)) {
       ELFWriterAddSymbol(elf, &sym->name, sym->section,
                          SymbolTypeToELFType(sym->type),
@@ -462,7 +494,7 @@ static void AddGlobalSymbolToELFFile(void* entry, void* data) {
   Vector* buckets = entry;
   ELFWriterFile* elf = data;
   for (size_t i = 0; i < buckets->length; i++) {
-    AssemblerSymbol* sym = buckets->value[i];
+    AssemblerSymbol* sym = buckets->value.p[i];
     if (sym->exported && sym->binding == SYM_BIND(global)) {
       ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
                          SymbolTypeToELFType(sym->type),
@@ -470,6 +502,28 @@ static void AddGlobalSymbolToELFFile(void* entry, void* data) {
                          sym->value, &sym->index);
     }
   }
+}
+
+// Default label defining function.  Copies spelling into symbol defined.
+static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
+  AssemblerSymbol* sym = AssemblerFindSymbol(assembler, spelling->value);
+  if (sym != NULL) {
+    if (!sym->defined) {
+      sym->defined = true;
+      sym->section = assembler->current_section;
+      sym->value = AssemblerCurrentAddress(assembler);
+    } else {
+      AssemblerError(assembler, "Duplicate symbol %s", spelling->value);
+    }
+  } else {
+    // Label is new, define it as a local.
+    sym = NewAssemblerSymbol(spelling->value, assembler->current_section,
+                             SYM_TYPE(none), SYM_BIND(local),
+                             AssemblerCurrentAddress(assembler));
+    sym->defined = true;
+    AssemblerInsertSymbol(assembler, sym);
+  }
+  return sym;
 }
 
 static void Assemble(Assembler* assembler,
@@ -484,30 +538,14 @@ static void Assemble(Assembler* assembler,
       StringSetString(&word, &assembler->lex.spelling);
       LexNextToken(&assembler->lex);
       if (LexMatch(&assembler->lex, TOK(colon))) {
-        // Defining a symbol.
-        AssemblerSymbol* sym = AssemblerFindSymbol(assembler, word.value);
+        // Defining a label.
         if (assembler->pass == 1) {
-          // Only define symbols in pass 1.
-          if (sym != NULL) {
-            if (!sym->defined) {
-              sym->defined = true;
-              sym->section = assembler->current_section;
-              sym->value = AssemblerCurrentAddress(assembler);
-            } else {
-              AssemblerError(assembler, "Duplicate symbol %s", word.value);
-            }
-          } else {
-            // Symbol is new, define it as a local.
-            sym = NewAssemblerSymbol(word.value, assembler->current_section,
-                                     SYM_TYPE(none), SYM_BIND(local),
-                                     AssemblerCurrentAddress(assembler));
-            sym->defined = true;
-            AssemblerInsertSymbol(assembler, sym);
-          }
+          // Only define labels in pass 1.
+          assembler->define_label(assembler, &word);
         }
       } else {
         // Try as a directive name.
-        void* dir_func = MapFind(&assembler->directives, word.value);
+        void* dir_func = MapFindPointerKey(&assembler->directives, word.value);
         if (dir_func != NULL) {
           void (*func)(Assembler*) = dir_func;
           func(assembler);
@@ -528,7 +566,7 @@ static void Assemble(Assembler* assembler,
 // Add all the sections to the ELF file.
 static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
   for (size_t i = 0; i < assembler->sections.length; i++) {
-    AssemblerSection* section = assembler->sections.value[i];
+    AssemblerSection* section = assembler->sections.value.p[i];
     
     bool align = true;
     // We need to treat debug_line specially since its contents are generated
@@ -589,9 +627,23 @@ static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
 // indexes.
 static void AddRelocations(Assembler* assembler, ELFWriterFile* elf) {
   for (size_t i = 0; i < assembler->relocations.length; i++) {
-    AssemblerRelocation* reloc = assembler->relocations.value[i];
+    AssemblerRelocation* reloc = assembler->relocations.value.p[i];
     ELFWriterAddRelocation(elf, reloc->section, reloc->offset,
                            reloc->symbol->index, reloc->type);
+  }
+}
+
+void AssemblerReset(Assembler* assembler, bool clear_symbols) {
+  // Reset all section addresses to zero.
+  for (size_t i = 0; i < assembler->sections.length; i++) {
+    AssemblerSection* section = assembler->sections.value.p[i];
+    section->address = 0;
+  }
+  LexRewind(&assembler->lex);
+  LexNextToken(&assembler->lex);
+  PreprocessorReset(&assembler->preprocessor);
+  if (clear_symbols) {
+    ClearAssemblerSymbolTable(&assembler->symbol_table);
   }
 }
 
@@ -602,20 +654,13 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   while (assembler->num_errors == 0 && assembler->pass < 3) {
     Assemble(assembler, run_func);  // Run the assembly pass.
     assembler->pass++;
-    // Reset all section addresses to zero.
-    for (size_t i = 0; i < assembler->sections.length; i++) {
-      AssemblerSection* section = assembler->sections.value[i];
-      section->address = 0;
-    }
-    LexRewind(&assembler->lex);
-    LexNextToken(&assembler->lex);
-    PreprocessorReset(&assembler->preprocessor);
+    AssemblerReset(assembler, false);
   }
 
   // Produce the ELF file.
   ELFWriterFile elf;
   ELFWriterFileInit(&elf, ET(rel), assembler->elf_machine_type,
-                    assembler->elf_flags, false, true, true);
+                    assembler->elf_flags, NULL, true, true);
 
   // Add the file symbol.
   if (assembler->filename.length != 0) {
@@ -674,7 +719,6 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
   static void HandleDirective_##spelling(Assembler* assembler) {}
 
 UNDEFINED_DIRECTIVE(align);
-UNDEFINED_DIRECTIVE(set);
 
 static void SymbolDirective(Assembler* assembler,
                             AssemblerSymbolBinding binding) {
@@ -765,13 +809,20 @@ static void HandleDirective_type(Assembler* assembler) {
       // If the symbol has a .type then it is exported to the object file.
       sym->exported = true;
       if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+        AssemblerSection* sect = sym->section == SHN_COM ? NULL :
+          assembler->sections.value.p[sym->section];
         String type;
         StringInit(&type, assembler->lex.spelling.value);
         if (StringEqual(&type, "function") || StringEqual(&type, "@function")) {
           sym->type = SYM_TYPE(func);
         } else if (StringEqual(&type, "object") ||
                    StringEqual(&type, "@object")) {
-          sym->type = SYM_TYPE(object);
+          // An object is TLS if the section it's in has the TLS flag.
+          if (sect != NULL && (sect->flags & SHF(tls)) == 0) {
+            sym->type = SYM_TYPE(object);
+          } else {
+            sym->type = SYM_TYPE(tls);
+          }
         } else {
           AssemblerError(assembler, "Invalid .type syntax; unsupported type %s",
                          type.value);
@@ -839,8 +890,22 @@ static void SimpleSymbolExpression(Assembler* assembler, int bits) {
   if (left == NULL) {
     return;
   }
+  int reloc_index = kRelocSet32;
+  switch (bits) {
+    case 16:
+      reloc_index = kRelocSet16;
+      break;
+    case 32:
+      reloc_index = kRelocSet32;
+      break;
+    case 64:
+      reloc_index = kRelocSet64;
+      break;
+    default:
+      abort();
+  }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-          left, assembler->reloc_types[bits == 64 ? kRelocSet64 : kRelocSet32],
+          left, assembler->reloc_types[reloc_index],
           assembler->current_section,
                   (int32_t)AssemblerCurrentAddress(assembler));
   AssemblerAddRelocation(assembler, reloc);
@@ -879,11 +944,12 @@ static void HandleDirective_p2align(Assembler* assembler) {
     // TODO: implement second and third args to .p2align?
 
     AssemblerSection* sect =
-        assembler->sections.value[assembler->current_section];
+        assembler->sections.value.p[assembler->current_section];
     size_t next_address = (sect->address + alignment) & ~alignment;
     size_t num_bytes = next_address - sect->address;
     if (assembler->pass == 2) {
       BufferAddSpace(&sect->contents.data.buffered, num_bytes);
+      sect->contents.size += num_bytes;
     }
     sect->address += num_bytes;
   } else {
@@ -923,9 +989,10 @@ static void HandleDataDirective(Assembler* assembler, int bits) {
 static void HandleDirective_space(Assembler* assembler) {
   int64_t num_bytes = AssemblerEvaluateExpression(assembler);
   AssemblerSection* sect =
-      assembler->sections.value[assembler->current_section];
+      assembler->sections.value.p[assembler->current_section];
   if (assembler->pass == 2) {
     BufferAddSpace(&sect->contents.data.buffered, num_bytes);
+    sect->contents.size += num_bytes;
   }
   sect->address += num_bytes;
 }
@@ -967,11 +1034,21 @@ static void HandleDirective_byte(Assembler* assembler) {
 }
 
 static void HandleDirective_hword(Assembler* assembler) {
-  HandleDataDirective(assembler, 16);
-}
+  while (!LexEof(&assembler->lex)) {
+    if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+      SimpleSymbolExpression(assembler, 16);
+      AssemblerEmitHalf(assembler, assembler->current_section, 0);
+    } else {
+      int16_t value = (int16_t)AssemblerEvaluateExpression(assembler);
+      AssemblerEmitHalf(assembler, assembler->current_section, value);
+    }
+    if (!LexMatch(&assembler->lex, TOK(comma))) {
+      break;
+    }
+  }}
 
 static void HandleDirective_short(Assembler* assembler) {
-  HandleDataDirective(assembler, 16);
+  HandleDirective_hword(assembler);
 }
 
 
@@ -1048,6 +1125,9 @@ static void HandleDirective_section(Assembler* assembler) {
             case 'S':
               flags |= SHF(strings);
               break;
+            case 'T':
+              flags |= SHF(tls);
+              break;
           }
         }
         LexNextToken(&assembler->lex);
@@ -1056,6 +1136,8 @@ static void HandleDirective_section(Assembler* assembler) {
           if (LexLookingAt(&assembler->lex, TOK(identifier))) {
             if (strcmp(assembler->lex.spelling.value, "@progbits") == 0) {
               type = SHT(progbits);
+            } else if (strcmp(assembler->lex.spelling.value, "@nobits") == 0) {
+              type = SHT(nobits);
             }
             // TODO: others.
             LexNextToken(&assembler->lex);
@@ -1177,6 +1259,36 @@ static void HandleDirective_option(Assembler* assembler) {
     LexNextToken(&assembler->lex);
     if (!LexMatch(&assembler->lex, TOK(comma))) {
       break;
+    }
+  }
+}
+
+static void HandleDirective_set(Assembler* assembler) {
+  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    String name;
+    StringInit(&name, assembler->lex.spelling.value);
+    LexNextToken(&assembler->lex);
+    int64_t value = AssemblerEvaluateExpression(assembler);
+    
+    AssemblerSymbol* sym = AssemblerFindSymbol(assembler, name.value);
+    if (assembler->pass == 1) {
+      // Only define symbols in pass 1.
+      if (sym != NULL) {
+        if (!sym->defined) {
+          sym->defined = true;
+          sym->section = assembler->current_section;
+          sym->value = AssemblerCurrentAddress(assembler);
+        } else {
+          AssemblerError(assembler, "Duplicate symbol %s", name.value);
+        }
+      } else {
+        // Symbol is new, define it as a local.
+        sym = NewAssemblerSymbol(name.value, assembler->current_section,
+                                 SYM_TYPE(none), SYM_BIND(local),
+                                 value);
+        sym->defined = true;
+        AssemblerInsertSymbol(assembler, sym);
+      }
     }
   }
 }

@@ -109,10 +109,10 @@ void DisassembleRiscVInstruction(Interpreter* interpreter, void* p, FILE* fp) {
   const char* symbol_name = "???";
   uint64_t offset = 0;
   if (interpreter->current_symbol != NULL) {
-    symbol_name = interpreter->current_symbol->name.value;
-    offset = (uint64_t)p - interpreter->current_symbol->address;
+    symbol_name = interpreter->current_symbol->name;
+    offset = (uint64_t)p - interpreter->current_symbol->start;
   }
-  fprintf(fp, "%s+%lld: %p  ", symbol_name, offset, pc);
+  fprintf(fp, "%s+0x%llx: %p  ", symbol_name, offset, pc);
   
   // Fetch instruction.
   int32_t inst = *pc;
@@ -255,7 +255,7 @@ void DisassembleRiscVInstruction(Interpreter* interpreter, void* p, FILE* fp) {
       int64_t immed = inst >> 12;     // Auto sign extended to 64 bits.
       PrintMnemonic(fp, "auipc");
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
-      fprintf(fp, ", 0x%llx", immed);
+      fprintf(fp, ", 0x%llx        // 0x%llx", immed, (int64_t)pc + (immed << 12));
       break;
     }
     case RV_OPCODE(jal): {
@@ -274,11 +274,16 @@ void DisassembleRiscVInstruction(Interpreter* interpreter, void* p, FILE* fp) {
     }
     case RV_OPCODE(jalr): {
       int64_t immed = inst >> 20;     // Auto sign extended to 64 bits.
+      if (rd == 0 && rs1 == RV_RET_REG && immed == 0) {
+        // ret instruction.
+        PrintMnemonic(fp, "ret");
+        break;
+      }
       PrintMnemonic(fp, "jalr");
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
       DisassemblePrintRegister(fp, rs1, kRegTypeInt, ", ");
       int64_t reg_value = interpreter->iregs[rs1];
-      fprintf(fp, ", 0x%llx", reg_value + immed);
+      fprintf(fp, ", %llx        // 0x%llx", immed, reg_value + immed);
       break;
     }
     case RV_OPCODE(branch): {

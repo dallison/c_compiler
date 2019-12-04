@@ -4,6 +4,16 @@
 <dict>
 	<key>SchemeUserState</key>
 	<dict>
+		<key>6502_interpreter.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>17</integer>
+		</dict>
+		<key>6502asm.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>15</integer>
+		</dict>
 		<key>ar.xcscheme</key>
 		<dict>
 			<key>orderHint</key>
@@ -24,6 +34,11 @@
 			<key>orderHint</key>
 			<integer>9</integer>
 		</dict>
+		<key>davecc.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>16</integer>
+		</dict>
 		<key>expr_eval.xcscheme</key>
 		<dict>
 			<key>orderHint</key>
@@ -38,6 +53,16 @@
 		<dict>
 			<key>orderHint</key>
 			<integer>2</integer>
+		</dict>
+		<key>linkerlibrary.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>18</integer>
+		</dict>
+		<key>linkerlibrary.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>18</integer>
 		</dict>
 		<key>manual_test.xcscheme</key>
 		<dict>
@@ -122,6 +147,11 @@
 			<key>primary</key>
 			<true/>
 		</dict>
+		<key>E57CB95022C59AF20068119C</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
 		<key>E5AB5FB6208E7281006CA8FB</key>
 		<dict>
 			<key>primary</key>
@@ -153,6 +183,16 @@
 			<true/>
 		</dict>
 		<key>E5BC31921FA78FBD00C7691B</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>E5CCAA362290AF140033AFFF</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>E5CCAA442290BABA0033AFFF</key>
 		<dict>
 			<key>primary</key>
 			<true/>

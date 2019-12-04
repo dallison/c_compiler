@@ -16,7 +16,7 @@
 #define INIT_CAPACITY 1
 
 void VectorInit(Vector* vec) {
-  vec->value = NULL;
+  vec->value.p = NULL;
   vec->length = 0;
   vec->capacity = 0;
 }
@@ -28,9 +28,9 @@ Vector* NewVector() {
 }
 
 void VectorDestruct(Vector* vec) {
-  free(vec->value);
+  free(vec->value.p);
   vec->length = vec->capacity = 0;
-  vec->value = NULL;
+  vec->value.p = NULL;
 }
 
 void VectorDelete(Vector* vec) {
@@ -42,9 +42,9 @@ void VectorDestructWithContents(Vector* vec,
                                 VectorElementDestructor destructor) {
   for (size_t i = 0; i < vec->length; i++) {
     if (destructor != NULL) {
-      (*destructor)(vec->value[i]);
+      (*destructor)(vec->value.p[i]);
     }
-    free(vec->value[i]);
+    free(vec->value.p[i]);
   }
   VectorDestruct(vec);
 }
@@ -58,19 +58,19 @@ void VectorClear(Vector* vec) { vec->length = 0; }
 
 static void MakeSpace(Vector* vec) {
   // If the vector is initially empty, allocate it with default capacity.
-  if (vec->value == NULL) {
+  if (vec->value.p == NULL) {
     vec->capacity = INIT_CAPACITY;
-    vec->value = malloc(sizeof(void*) * vec->capacity);
-    memset(vec->value, 0, sizeof(void*) * vec->capacity);
+    vec->value.p = malloc(sizeof(int64_t) * vec->capacity);
+    memset(vec->value.p, 0, sizeof(int64_t) * vec->capacity);
   }
 
   // Make room for new contents.
   if (vec->length + 1 > vec->capacity) {
     size_t old_capacity = vec->capacity;
     vec->capacity *= 2;
-    vec->value = realloc(vec->value, sizeof(void*) * vec->capacity);
-    memset(vec->value + old_capacity, 0,
-           (vec->capacity - old_capacity) * sizeof(void*));
+    vec->value.p = realloc(vec->value.p, sizeof(int64_t) * vec->capacity);
+    memset(vec->value.p + old_capacity, 0,
+           (vec->capacity - old_capacity) * sizeof(int64_t));
   }
 }
 
@@ -78,22 +78,22 @@ void VectorAppend(Vector* vec, void* value) {
   MakeSpace(vec);
 
   // Append value to end of memory.
-  vec->value[vec->length] = value;
+  vec->value.p[vec->length] = value;
   vec->length++;
 }
 
 void VectorSet(Vector* vec, size_t index, void* value) {
-  vec->value[index] = value;
+  vec->value.p[index] = value;
 }
 
-void* VectorGet(Vector* vec, size_t index) { return vec->value[index]; }
+void* VectorGet(Vector* vec, size_t index) { return vec->value.p[index]; }
 
-void* VectorLast(Vector* vec) { return vec->value[vec->length - 1]; }
+void* VectorLast(Vector* vec) { return vec->value.p[vec->length - 1]; }
 
 void VectorCopy(Vector* dest, Vector* src) {
   VectorInit(dest);
   for (size_t i = 0; i < src->length; i++) {
-    VectorAppend(dest, src->value[i]);
+    VectorAppend(dest, src->value.p[i]);
   }
 }
 
@@ -110,7 +110,7 @@ bool VectorEqual(Vector* a, Vector* b) {
     return false;
   }
   for (size_t i = 0; i < a->length; i++) {
-    if (a->value[i] != b->value[i]) {
+    if (a->value.p[i] != b->value.p[i]) {
       return false;
     }
   }
@@ -121,9 +121,9 @@ void VectorInsertBefore(Vector* vec, size_t index, void* value) {
   assert(index < vec->length);
   MakeSpace(vec);
   size_t elements_to_move = vec->length - index;
-  memmove(vec->value + index + 1, vec->value + index,
-          sizeof(void*) * elements_to_move);
-  vec->value[index] = value;
+  memmove(vec->value.p + index + 1, vec->value.p + index,
+          sizeof(int64_t) * elements_to_move);
+  vec->value.p[index] = value;
   vec->length++;
 }
 
@@ -137,16 +137,16 @@ void VectorInsertAfter(Vector* vec, size_t index, void* value) {
   MakeSpace(vec);
   size_t elements_to_move = vec->length - index - 1;
 
-  memmove(vec->value + index + 2, vec->value + index + 1,
-          sizeof(void*) * elements_to_move);
-  vec->value[index + 1] = value;
+  memmove(vec->value.p + index + 2, vec->value.p + index + 1,
+          sizeof(int64_t) * elements_to_move);
+  vec->value.p[index + 1] = value;
   vec->length++;
 }
 
 void VectorDeleteElement(Vector* vec, size_t index) {
   assert(index < vec->length);
   size_t elements_to_move = vec->length - index - 1;
-  memmove(vec->value + index, vec->value + index + 1,
-          sizeof(void*) * elements_to_move);
+  memmove(vec->value.p + index, vec->value.p + index + 1,
+          sizeof(int64_t) * elements_to_move);
   vec->length--;
 }

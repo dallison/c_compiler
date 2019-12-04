@@ -1186,8 +1186,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     case RV_OP(add): {
       // We have an add with constant instruction.  Use it if we can.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       // Adds are commutative so we can have a const as first or
       // second operand.
       if (IRIsConst(op2)) {
@@ -1212,8 +1212,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       // A subtract immediate can be done using an addi with the negative of the
       // immediate.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         if (RVIsPossibleImmediate(c)) {
@@ -1229,8 +1229,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     case RV_OP(sra): {
       // There are constant shift operations.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: what about a shift out of range?
@@ -1264,8 +1264,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       // If we are multiplying by a constant power of 2 we can use a shift.
       // TODO: other constants can be done too.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) || IRIsConst(op2)) {
         // One is constant, put it on the right of the slli instruction.
         if (IRIsConst(op1)) {
@@ -1312,8 +1312,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       // If we are dividing by a constant power of 2 we can use a shift.
       // TODO: other constants can be done too.
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         RVOpcode opcode =
             TypeIsUnsigned(node->type) ? RV_OP(srli) : RV_OP(srai);
@@ -1339,8 +1339,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
 
     case RV_OP(and): {
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         if (c == 0) {
@@ -1357,8 +1357,8 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
 
     case RV_OP(or): {
       assert(node->inputs.length == 2);
-      IRNode* op1 = node->inputs.value[0];
-      IRNode* op2 = node->inputs.value[1];
+      IRNode* op1 = node->inputs.value.p[0];
+      IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         if (c == 0) {
@@ -1377,7 +1377,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   if (inst == NULL) {
     inst = (TargetInstruction*)NewInstruction(opcode);
     for (size_t i = 0; i < node->inputs.length; i++) {
-      IRNode* input = node->inputs.value[i];
+      IRNode* input = node->inputs.value.p[i];
       inst->operand[i] = Materialize(rv, input);
     }
   }
@@ -1460,8 +1460,8 @@ static TargetInstruction* CompareLessThanInt(RVGenerator* rv, IRNode* node,
 // We need to reverse the operands to perform the other conditions.
 static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 2);
-  IRNode* op1 = node->inputs.value[0];
-  IRNode* op2 = node->inputs.value[1];
+  IRNode* op1 = node->inputs.value.p[0];
+  IRNode* op2 = node->inputs.value.p[1];
   switch (node->opcode) {
     case IR_OP(cmpeqi):
     case IR_OP(cmpeqa): {
@@ -1655,7 +1655,7 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
 static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
   RVOpcode opcode;
   assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
@@ -1731,7 +1731,7 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 2);
 
   // Address to store to is the first operand of the store IR node.
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
@@ -1740,7 +1740,7 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
   // containing the offset.  Otherwise it is NULL.
 
   // Value to store is in second input.
-  IRNode* src_node = node->inputs.value[1];
+  IRNode* src_node = node->inputs.value.p[1];
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
@@ -1840,8 +1840,8 @@ static struct BranchInfo {
 static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
                                                  IRNode* node) {
   assert(node->inputs.length == 2);
-  IRNode* expr = node->inputs.value[0];
-  IRNode* target_node = node->inputs.value[1];
+  IRNode* expr = node->inputs.value.p[0];
+  IRNode* target_node = node->inputs.value.p[1];
 
   // The RISC-V has 3 operand integer compare and branch instructions.
   // For these we can remove the comparison instructions and combine
@@ -1861,8 +1861,8 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
     // Found an integer comparison as the expression for the
     // branch.  The comparison will be eliminated later if it is
     // only used in this branch.
-    IRNode* op1 = expr->inputs.value[0];
-    IRNode* op2 = expr->inputs.value[1];
+    IRNode* op1 = expr->inputs.value.p[0];
+    IRNode* op2 = expr->inputs.value.p[1];
 
     // There are beqz and bnez pseudo-instructions for comparing against zero.
     // Use them if possible.
@@ -1942,7 +1942,7 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
 
 static TargetInstruction* LowerBranch(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
-  IRNode* target_node = node->inputs.value[0];
+  IRNode* target_node = node->inputs.value.p[0];
 
   TargetInstruction* inst =
       (TargetInstruction*)Emit(rv, NewInstruction(RV_OP(j)));
@@ -1984,14 +1984,14 @@ static TargetInstruction* LowerResult(RVGenerator* rv, IRNode* node) {
     default:
       assert(false);
   }
-  TargetInstruction* result = Materialize(rv, node->inputs.value[0]);
+  TargetInstruction* result = Materialize(rv, node->inputs.value.p[0]);
   TargetInstruction* result_reg = Emit(rv, NewInstruction(result_reg_opcode));
   return Emit(rv, NewInstruction2(opcode, result_reg, result));
 }
 
 static TargetInstruction* LowerAsm(RVGenerator* rv, IRNode* node) {
   // The first argument is a literal containing the assembly language.
-  IRConstant* id_node = node->inputs.value[0];
+  IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(rv, TargetNewLiteral((int)id_node->value.ivalue));
 
@@ -2005,7 +2005,7 @@ static TargetInstruction* LowerAsm(RVGenerator* rv, IRNode* node) {
 // to the literalref node) to the 'literal' with the given id.  This will
 // be assembled as a reference to a symbol with the name .str.%d.
 static TargetInstruction* LowerLiteralReference(RVGenerator* rv, IRNode* node) {
-  IRConstant* id_node = node->inputs.value[0];
+  IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(rv, TargetNewLiteral((int)id_node->value.ivalue));
 
@@ -2016,12 +2016,12 @@ static TargetInstruction* LowerLiteralReference(RVGenerator* rv, IRNode* node) {
 }
 
 static TargetInstruction* LowerStructReference(RVGenerator* rv, IRNode* node) {
-  return SetLoweredNode(node, Materialize(rv, node->inputs.value[0]));
+  return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
 }
 
 static TargetInstruction* LowerMask(RVGenerator* rv, IRNode* node) {
-  TargetInstruction* value = Materialize(rv, node->inputs.value[0]);
-  IRConstant* mask_node = (IRConstant*)node->inputs.value[1];
+  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  IRConstant* mask_node = (IRConstant*)node->inputs.value.p[1];
   int64_t mask = mask_node->value.ivalue;
   if (RVIsPossibleImmediate(mask)) {
     value = Emit(rv, NewInstruction2(
@@ -2029,18 +2029,18 @@ static TargetInstruction* LowerMask(RVGenerator* rv, IRNode* node) {
                          GetIntConstant(rv, NULL, kTargetTypeExtended, mask)));
   } else {
     value = Emit(rv, NewInstruction2(RV_OP(and), value,
-                                     Materialize(rv, node->inputs.value[1])));
+                                     Materialize(rv, node->inputs.value.p[1])));
   }
   SetLoweredNode(node, value);
   return value;
 }
 
 static TargetInstruction* LowerSignExtend(RVGenerator* rv, IRNode* node) {
-  TargetInstruction* value = Materialize(rv, node->inputs.value[0]);
+  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
   if (RVIsSignedLoad((RVOpcode)value->opcode)) {
     return SetLoweredNode(node, value);
   }
-  IRConstant* diff_value = node->inputs.value[1];
+  IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff == 32) {
     // There is a word signextension instruction sext.w
@@ -2079,10 +2079,10 @@ static TargetInstruction* LowerMemcpy(RVGenerator* rv, IRNode* node) {
   // to memcpy we will do that.
 
   assert(node->inputs.length == 3);
-  assert(IRIsConst(node->inputs.value[2]));
+  assert(IRIsConst(node->inputs.value.p[2]));
 
   // Source address.
-  IRNode* src_node = node->inputs.value[1];
+  IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src_addr;
   TargetInstruction* src_offset;
   int src_offset_value = 0;
@@ -2097,7 +2097,7 @@ static TargetInstruction* LowerMemcpy(RVGenerator* rv, IRNode* node) {
   src_node->data.ptr = src_addr;
 
   // Destination address.
-  IRNode* dest_node = node->inputs.value[0];
+  IRNode* dest_node = node->inputs.value.p[0];
   TargetInstruction* dest_addr;
   TargetInstruction* dest_offset;
   int dest_offset_value = 0;
@@ -2112,7 +2112,7 @@ static TargetInstruction* LowerMemcpy(RVGenerator* rv, IRNode* node) {
     }
   }
 
-  int length = (int)((IRConstant*)node->inputs.value[2])->value.ivalue;
+  int length = (int)((IRConstant*)node->inputs.value.p[2])->value.ivalue;
   TargetInstruction* result = Memcpy(rv, dest_addr, src_addr, length,
                                      src_offset_value, dest_offset_value);
 
@@ -2125,11 +2125,11 @@ static TargetInstruction* LowerMemzero(RVGenerator* rv, IRNode* node) {
   // emit this is as a call to memset using the size of the symbol unless
   // we can do it more efficiently.
   assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value[0];
+  IRNode* addr_node = node->inputs.value.p[0];
   IRVariable* var = (IRVariable*)addr_node;
 
   // Dest ddress.
-  IRNode* dest_node = node->inputs.value[0];
+  IRNode* dest_node = node->inputs.value.p[0];
   TargetInstruction* dest_addr;
   TargetInstruction* dest_offset;
   int offset_value = 0;
@@ -2217,7 +2217,7 @@ static TargetInstruction* BuildArgList(RVGenerator* rv, Vector* arg_locations) {
   TargetInstruction* result = NULL;
   // Find next -based argument and add it to the regargs instruction list.
   for (size_t i = 0; i < arg_locations->length; i++) {
-    ArgLocation* loc = arg_locations->value[i];
+    ArgLocation* loc = arg_locations->value.p[i];
     if (loc->type == kArgLocationRegister) {
       result =
           Emit(rv, NewInstruction2(RV_OP(regarg), result, loc->location.reg));
@@ -2257,7 +2257,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
-    IRNode* arg_node = node->inputs.value[i];
+    IRNode* arg_node = node->inputs.value.p[i];
     if (TypeIsStructOrUnion(arg_node->type)) {
       // Struct or union that fit in a register are passed in a register.  If
       // they are bigger than 8 bytes they are passed by reference (first making
@@ -2339,8 +2339,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // stack and passed by reference.  We need to copy all of these onto the
   // stack before we push all other arguments
   for (size_t i = 1; i < node->inputs.length; i++) {
-    ArgLocation* arg_location = arg_locations.value[i - 1];
-    IRNode* arg_node = node->inputs.value[i];
+    ArgLocation* arg_location = arg_locations.value.p[i - 1];
+    IRNode* arg_node = node->inputs.value.p[i];
     size_t size = arg_node->type->size;
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister:
@@ -2364,8 +2364,8 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // registers and moving the register arguments into their argument
   // registers.
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
-    IRNode* arg_node = node->inputs.value[i];
-    ArgLocation* arg_location = arg_locations.value[i - 1];
+    IRNode* arg_node = node->inputs.value.p[i];
+    ArgLocation* arg_location = arg_locations.value.p[i - 1];
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
@@ -2435,7 +2435,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // the lifetime of the registers allocated for argument passing
   // extend to the call site, thus enabling the register allocator
   // to keep them from being used before the call.
-  TargetInstruction* addr = GetLoweredNode(node->inputs.value[0]);
+  TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
   RVOpcode opcode;
   if (addr->opcode == RV_OP(symbol)) {
     // Calling a symbol, use a regular 'call' instruction.
@@ -2475,7 +2475,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
 
 static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value[0]);
+  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
   TargetInstruction* slli =
       Emit(rv, NewInstruction2(RV_OP(slli), value,
                                GetIntConstant(rv, NULL, kTargetTypeWord, 2)));
@@ -2498,7 +2498,7 @@ static TargetInstruction* LowerBuiltinVaStart(RVGenerator* rv, IRNode* node) {
   TargetInstruction* s0 = Emit(rv, NewInstruction(RV_OP(fp)));
   TargetInstruction* addr;
   TargetInstruction* offset;
-  bool on_stack = GetRegAndOffset(rv, node->inputs.value[0], &addr, &offset);
+  bool on_stack = GetRegAndOffset(rv, node->inputs.value.p[0], &addr, &offset);
   if (!on_stack) {
     return SetLoweredNode(node,
                           Emit(rv, NewInstruction2(RV_OP(rmov), addr, s0)));
@@ -2518,7 +2518,7 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
   TargetInstruction* ap_addr;
   TargetInstruction* ap_offset;
   bool on_stack =
-      GetRegAndOffset(rv, node->inputs.value[0], &ap_addr, &ap_offset);
+      GetRegAndOffset(rv, node->inputs.value.p[0], &ap_addr, &ap_offset);
   TargetInstruction* ap_load;
   if (!on_stack) {
     ap_load = ap_addr;
@@ -2868,7 +2868,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       return location;
     }
 
-    Symbol* arg_symbol = args->value[i];
+    Symbol* arg_symbol = args->value.p[i];
     if (TypeIsFloatingPoint(arg_symbol->type)) {
       if (fp_reg <= RV_LAST_FP_REG_VAR) {
         fp_reg++;
@@ -3020,12 +3020,12 @@ static void AssignRegisterVars(RVGenerator* rv, Vector* vars, Vector* args) {
   // Sort the pooled local variables in reverse order of usage.  Those
   // with the largest number of references will be at the start of the
   // vector.
-  qsort(vars->value, vars->length, sizeof(IRNode*), CompareRegisterVar);
+  qsort(vars->value.p, vars->length, sizeof(IRNode*), CompareRegisterVar);
 
   int32_t var_offset = 0;
 
   for (size_t i = 0; i < vars->length; i++) {
-    PoolEntry* entry = vars->value[i];
+    PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(rv, entry, args, &var_offset);
   }
 
@@ -3044,7 +3044,7 @@ void RVLower(RVGenerator* rv, Generator* gen) {
   // Collect all local variables so that we can assign some of them
   // to registers.
   for (size_t i = 0; i < gen->variable_pool.length; i++) {
-    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value[i];
+    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
     switch (entry->pooled->opcode) {
       case IR_OP(localvar):
       case IR_OP(tempvar):
@@ -3086,7 +3086,7 @@ void RVLower(RVGenerator* rv, Generator* gen) {
 void RVPrint(RVGenerator* rv) {
   TargetInstruction* inst = TargetFirstInstruction(&rv->base);
   while (inst != NULL) {
-    TargetPrintInstruction(inst, RVOpcodeName);
+    TargetPrintInstruction(inst, RVOpcodeName, stdout);
     inst = TargetNext(inst);
   }
 }

@@ -33,13 +33,13 @@
 // fields contain ASCII strings, padded to the right with spaces.  There is
 // special handling for filenames > 15 bytes long.
 typedef struct {
-  char filename[16];
-  char timestamp[12];
-  char owner[6];
-  char group[6];
-  char mode[8];
-  char size[10];
-  char end[2];      // 2 chars: 0x60 0x0a
+  char filename[16];    // Offset 0.
+  char timestamp[12];   // Offset 16.
+  char owner[6];        // Offset 28.
+  char group[6];        // Offset 34.
+  char mode[8];         // Offset 40.
+  char size[10];        // Offset 48
+  char end[2];          // Offset 58: 2 chars: 0x60 0x0a
 } ARFileHeader;
 
 typedef struct {
@@ -61,11 +61,11 @@ void ARSymbolDelete(ARSymbol* sym);
 
 typedef struct {
   String filename;
-  Vector files;
-  Map file_offsets;
-  int64_t extended_filenames_offset;
-  ARFile* symbol_table_file;
-  HashTable symbol_table;
+  Vector files;                   // Vector of ARFile*.
+  Map file_offsets;               // Offset vs ARFile*.
+  int64_t extended_filenames_offset;  // Offset to "//"
+  ARFile* symbol_table_file;      // Symbol table file.
+  HashTable symbol_table;         // Symbol table (name vs ARSymbol*)
 } ARArchive;
 
 ARArchive* NewARArchive(const char* filename);

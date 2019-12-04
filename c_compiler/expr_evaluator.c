@@ -39,7 +39,7 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       *result = (int64_t)const_node->value.fvalue;
       return true;
     case AST_OP(identifier): {
-      if (id_node->symbol->storage == kStorageAssembler) {
+      if (StorageIs(id_node->symbol->storage, STO(assembler))) {
         // Assembler symbol, extract the value from the 'other'
         // value field.
         AssemblerSymbol* asm_sym = id_node->symbol->value.other;
@@ -243,7 +243,7 @@ case AST_OP(ast_op): \
       BracedInitializerASTNode* list_init = (BracedInitializerASTNode*)node;
       if (list_init->initializers->length == 1) {
         return EvaluateIntegerExpression(
-            (ASTNode*)list_init->initializers->value[0], result);
+            (ASTNode*)list_init->initializers->value.p[0], result);
       }
       break;
     }
@@ -427,7 +427,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       // Only one element allowed in braced initializer.
       if (braced_init->initializers->length == 1) {
         return EvaluateFloatingPointExpression(
-            (ASTNode*)braced_init->initializers->value[0], result);
+            (ASTNode*)braced_init->initializers->value.p[0], result);
       }
       break;
     }

@@ -63,7 +63,7 @@ static void* FindInHashTable(void* entry, void* value) {
   }
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    ARSymbol* sym = bucket->value[i];
+    ARSymbol* sym = bucket->value.p[i];
     if (StringEqual(&sym->name, (char*)value)) {
       return sym;
     }
@@ -74,7 +74,7 @@ static void* FindInHashTable(void* entry, void* value) {
 static void DeleteSymbolList(void* entry, void* data) {
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    ARSymbol* sym = bucket->value[i];
+    ARSymbol* sym = bucket->value.p[i];
     ARSymbolDelete(sym);
   }
   VectorDelete(bucket);
@@ -87,7 +87,7 @@ static void ClearSymbolTable(HashTable* table) {
 static void PrintSymbolList(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    ARSymbol* symbol = bucket->value[i];
+    ARSymbol* symbol = bucket->value.p[i];
     printf("%-30s %-20s @0x%llx\n", symbol->name.value,
            symbol->file->filename.value,
            symbol->file->file_offset);
@@ -98,12 +98,6 @@ static void PrintSymbolTable(HashTable* table) {
   HashTableTraverse(table, PrintSymbolList, NULL);
 }
 
-static int CompareFileOffset(const void* a, const void* b) {
-  const MapKeyValue* v1 = a;
-  const MapKeyValue* v2 = b;
-  return (int)((int64_t)v1->key - (int64_t)v2->key);
-}
-
 void ARArchiveInit(ARArchive* archive, const char* filename) {
   StringInit(&archive->filename, filename);
   VectorInit(&archive->files);
@@ -111,7 +105,7 @@ void ARArchiveInit(ARArchive* archive, const char* filename) {
   archive->symbol_table_file = NULL;
   HashTableInit(&archive->symbol_table, "symbol-table", 1009,
                 HashSymbol, InsertInHashTable, FindInHashTable);
-  MapInit(&archive->file_offsets, CompareFileOffset);
+  MapInitForInt64Keys(&archive->file_offsets);
 }
 
 ARArchive* NewARArchive(const char* filename) {
@@ -122,7 +116,7 @@ ARArchive* NewARArchive(const char* filename) {
 
 void ARArchiveDestruct(ARArchive* archive) {
   for (size_t i = 0; i < archive->files.length; i++) {
-    ARFileDelete(archive->files.value[i]);
+    ARFileDelete(archive->files.value.p[i]);
   }
   VectorDestruct(&archive->files);
   ClearSymbolTable(&archive->symbol_table);
@@ -207,7 +201,7 @@ static void ReadSymbolName(String* name, FILE* fp) {
 // 2. Sequence of file offsets (big endian 32 bit)
 // 3. Sequence of symbol names (character strings, zero terminated).
 //
-// There are the same number of file offsets as symbol names the the
+// There are the same number of file offsets as symbol names the
 // indexes of each file offset corresponds to the same index in the
 // symbol names.
 static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
@@ -229,20 +223,20 @@ static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
   for (int32_t i = 0; i < num_entries; i++) {
     int64_t file_offset = ReadBigEndianInt(fp);
     ARSymbol* symbol = NewARSymbol();
-    symbol->file = MapFind(&archive->file_offsets, (void*)file_offset);
+    symbol->file = MapFindInt64Key(&archive->file_offsets, file_offset);
     VectorAppend(&symbols, symbol);
   }
   
   // Now read all the symbol names and set them in the corresponding ARSymbol
   // object.
   for (int32_t i = 0; i < num_entries; i++) {
-    ARSymbol* symbol = symbols.value[i];
+    ARSymbol* symbol = symbols.value.p[i];
     ReadSymbolName(&symbol->name, fp);
   }
   
   // We have all the symbols, insert them into the symbol table.
   for (size_t i = 0; i < symbols.length; i++) {
-    HashTableInsert(&archive->symbol_table, symbols.value[i]);
+    HashTableInsert(&archive->symbol_table, symbols.value.p[i]);
   }
   
   // We're done with this vector.  All the symbols are now owned
@@ -250,16 +244,7 @@ static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
   VectorDestruct(&symbols);
 }
 
-
-bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
-  // Read and verify archive header.
-  char header[8];
-  fread(header, 8, 1, fp);
-  if (memcmp(header, AR_MAGIC, 8) != 0) {
-    return false;
-  }
-  
-  // Header OK, now read all the file headers.
+static bool ReadFileHeaders(ARArchive* archive, FILE* fp) {
   while (!feof(fp)) {
     int64_t file_start = ftell(fp);
     ARFileHeader header;
@@ -301,19 +286,22 @@ bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
     
     // Add the offset to the map of offsets vs file.  This is used by
     // the symbol table to find the file for each symbol.
-    MapInsert(&archive->file_offsets, (void*)file_start, file);
+    MapKeyValue kv;
+    kv.key.w = file_start;
+    kv.value.p = file;
+    MapInsert(&archive->file_offsets, kv);
     
     // Skip to next file header.
     // This is 2-byte aligned.
     int64_t aligned_size = (file->size + 1) & ~1;
     fseek(fp, aligned_size, SEEK_CUR);
   }
-  
-  // Now get the extended filenames for any files whose name is longer
-  // than will fit in the file header.  These are in a special file with the
-  // name "//".
+  return true;
+}
+
+static void ReadExtendedFilenames(ARArchive* archive, FILE* fp) {
   for (size_t i = 0; i < archive->files.length; i++) {
-    ARFile* file = archive->files.value[i];
+    ARFile* file = archive->files.value.p[i];
     
     // An extended filename is encoded as a slash followed by an integer.
     // The integer is the offset into the extended file names file.
@@ -342,6 +330,27 @@ bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
       }
     }
   }
+}
+
+bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
+  // Read and verify archive header.
+  char header[8];
+  ssize_t n = fread(header, sizeof(header), 1, fp);
+  if (n != sizeof(header) ||
+      memcmp(header, AR_MAGIC, sizeof(header)) != 0) {
+    return false;
+  }
+  
+  // Header OK, now read all the file headers.
+  bool ok = ReadFileHeaders(archive, fp);
+  if (!ok) {
+    return ok;
+  }
+  
+  // Now get the extended filenames for any files whose name is longer
+  // than will fit in the file header.  These are in a special file with the
+  // name "//".
+  ReadExtendedFilenames(archive, fp);
   
   // Any symbol table?  If so, read it.
   if (archive->symbol_table_file != NULL) {

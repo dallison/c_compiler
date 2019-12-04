@@ -59,7 +59,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // if they don't exist.  They are declared as variables with
       // type unsigned long.
       TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
-      symbol = NewSymbol(name.value, type, kStorageImplicit);
+      symbol = NewSymbol(name.value, type, STO(implicit));
       symbol->is_forward_declared = true;
     } else if (LexLookingAt(lex, TOK(lparen))) {
       if (GetIntrinsicIndex(name.value) == -1) {
@@ -74,12 +74,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecord* func_type = NewFunctionTypeRecord();
       func_type->info.function.unknown_args = true;
       TypeRecordChain(func_type, type);
-      symbol = NewSymbol(name.value, func_type, kStorageImplicit);
+      symbol = NewSymbol(name.value, func_type, STO(implicit));
       symbol->is_forward_declared = true;
     } else {
       SyntaxError(syntax, "No such symbol \"%s\"", name.value);
       TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
-      symbol = NewSymbol(SyntaxFakeName(syntax), type, kStorageImplicit);
+      symbol = NewSymbol(SyntaxFakeName(syntax), type, STO(implicit));
     }
   }
   StringDestruct(&name);
@@ -144,7 +144,7 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   }
   
   TypeRecord* array =
-  NewArrayTypeRecord(kQualPlain, (int)contents->length + 1);
+  NewArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
   TypeRecord* type = NewTypeRecord(kTypeChar, kQualPlain);
   array->next = type;
   return NewStringConstantASTNode(contents, array,
@@ -165,7 +165,7 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   }
   
   TypeRecord* array =
-  NewArrayTypeRecord(kQualPlain, (int)contents->length + 4);
+  NewArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
   TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
   array->next = type;
   return NewStringConstantASTNode(contents, array,
@@ -288,7 +288,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
       if (intrinsics[intrinsic_index].opcode == AST_OP(builtin_va_arg) &&
           actuals->length == 1) {
         TypeParser parser;
-        TypeParserInit(&parser, syntax->lex, syntax, kStorageImplicit);
+        TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
         TypeRecord* type = TypeParserParseType(&parser);
         Symbol* sym = TypeParserParseDeclarator(&parser, type);
         type = sym->type;
@@ -490,7 +490,7 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   ASTNode* result = NULL;
   if (has_brackets && SyntaxLookingAtType(syntax)) {
     TypeParser parser;
-    TypeParserInit(&parser, syntax->lex, syntax, kStorageImplicit);
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
     TypeRecord* type = TypeParserParseType(&parser);
     if (type == NULL) {
       SyntaxError(syntax, "Invalid cast");
@@ -611,7 +611,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       LexMatch(syntax->lex, TOK(lparen))) {
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
-      TypeParserInit(&parser, syntax->lex, syntax, kStorageImplicit);
+      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
       TypeRecord* type = TypeParserParseType(&parser);
       Symbol* sym = NULL;
       if (type == NULL) {

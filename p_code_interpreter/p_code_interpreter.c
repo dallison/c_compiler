@@ -23,7 +23,50 @@ static void DumpStateAndExit(Interpreter* interpreter) {
   exit(1);
 }
 
-static bool disassemble = false;
+static bool disassemble = true;
+
+// Resolve a PLT symbol and fixup the GOT entry.
+// On entry:
+// t1 (r26): contains the index into the relocation table that
+//           refers to the symbol to resolve and the offset
+//           into the library of the GOT entry.
+// t2 (r27): contains the address of the resolver data inside
+//           the GOT.  This consists of a single pointer containing
+//           the address of the LoadedDynamicLibrary to use for
+//           the resolution.
+//
+// The relocations for the PLTGOT are in the DT(jmprel) entry
+// in the dynamic section, which can be obtained from the
+// library.
+static void ResolveAndFixupSymbol(Interpreter* interpreter) {
+  uint64_t reloc_index = interpreter->iregs[26];
+  uint64_t* resolver_data = (uint64_t*)interpreter->iregs[27];
+  LoadedDynamicLibrary* lib = (LoadedDynamicLibrary*)resolver_data[0];
+  const void* relocs = DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(jmprel));
+  if (relocs == NULL) {
+    fprintf(stderr, "Failed to find relocations in library %s\n", lib->filename.value);
+    exit(1);
+  }
+  const ELFRelocation* reloc = (const ELFRelocation*)relocs + reloc_index;
+  int32_t sym_index = ELF_R_SYM(reloc->info);
+  const char* sym_name = lib->dynstr + lib->dynsym[sym_index].name;
+  printf("Resolving symbol %s\n", sym_name);
+  const ELFSymbol* symbol;
+  LoadedDynamicLibrary* found_lib;
+  bool ok = DynamicLoaderFindSymbol(&lib->loader->loaded_libraries,
+                                    sym_name, &symbol, &found_lib);
+  if (!ok) {
+    fprintf(stderr, "Undefined symbol %s\n", sym_name);
+    exit(1);
+  }
+  uint64_t symbol_address = found_lib->load_address + symbol->value;
+  
+  // Fixup GOT entry to contain the symbol address.
+  *(uint64_t*)(lib->load_address + reloc->offset) = symbol_address;
+  
+  // Finally jump to the address.
+  interpreter->iregs[PCODE_PC_REG] = symbol_address;
+}
 
 static void EscapeHandler(Interpreter* interpreter, int32_t code){
   switch (code) {
@@ -59,30 +102,63 @@ static void EscapeHandler(Interpreter* interpreter, int32_t code){
       printf("Debug escape\n");
       break;
 
+    case P_CODE_ESC_RESOLVE:
+      ResolveAndFixupSymbol(interpreter);
+      break;
+      
     default:
       printf("Undefined escape\n");
       DumpStateAndExit(interpreter);
   }
 }
 
-void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
+void InterpreterInit(Interpreter* interpreter) {
   memset(interpreter, 0, sizeof(Interpreter));
+  
+  // Create symbol resolver code.  This is invoked from the first
+  // PLT entry with the following registers set:
+  // t1: index into PLT for function to be called.
+  // t2: address of resolver data in the GOT.
+  //
+  // The resolver data in the GOT contains:
+  // [0]: Address of LoadedDynamicLibrary containing the GOT and PLT
+  // [1]: Address of this code.
+  //
+  // So we get two registers containing the information we need to find
+  // the library and the function to resolve.  The library comes from
+  // the 8-byte word in t2.  The address of the .dynamic section can
+  // be obtained from the library.  From that we can get the DT(jmprel)
+  // relocations, each of which contains the symbol for the function to
+  // be resolved.
+  //
+  // For this trampoline we just need to invoke esc #6 (P_CODE_ESC_RESOLVE).
+  // This will resolve the symbol, write its address into the GOT
+  // determined by the relocation and then jump to the symbol, thus
+  // invoking the function.
+  interpreter->symbol_resolver_code[0] = PCODE_OP(esc) << 24 |
+      P_CODE_ESC_RESOLVE;
+}
+
+void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
   interpreter->stack = malloc(P_CODE_STACK_SIZE);
   interpreter->iregs[PCODE_SP_REG] = (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
   interpreter->escape = EscapeHandler;
   interpreter->loader = loader;
   
+  // Set up register banks.
   int64_t* iregs = interpreter->iregs;
+  float* fregs = interpreter->fregs;
+  double* dregs = interpreter->dregs;
 
-  // Build a sequence of code to call main followed by esc #4. The ret instruction
-  // at the end of main will return to the esc #4 instruction.
+  // Build a sequence of code to call main followed by esc #4. The ret
+  // instruction at the end of main will return to the esc #4 instruction.
   int32_t* startup = interpreter->startup_code;
   interpreter->iregs[PCODE_PC_REG] = (int64_t)startup;
-  startup[0] = 0xc3000000;                                 // call
-  int64_t pcrel = entry_address - (int64_t)startup + 4;
+  startup[0] = 0xc0000000 | PCODE_OP(call) << 24;          // call
+  int64_t pcrel = entry_address - (int64_t)startup - 12;
   startup[1] = (uint32_t)(pcrel & 0xffffffffLL);           // main low word.
   startup[2] = (uint32_t)(pcrel >> 32);                    // main high word.
-  startup[3] = 0x40000004;                                 // esc #4
+  startup[3] = PCODE_OP(esc) << 24 | 4;                    // esc #4
 
   // Invoke interpreter at startup code.  This will call main and then
   // halt.
@@ -92,12 +168,6 @@ void InterpreterInit(Interpreter* interpreter, Loader* loader, uint64_t entry_ad
   *((uint64_t*)iregs[PCODE_SP_REG]) = (int64_t)argv;
   iregs[PCODE_SP_REG] -= 4;
   *((int32_t*)iregs[PCODE_SP_REG]) = argc;
-}
-
-void InterpreterRun(Interpreter* interpreter) {
-  int64_t* iregs = interpreter->iregs;
-  float* fregs = interpreter->fregs;
-  double* dregs = interpreter->dregs;
 
   for (;;) {
     // Fetch instruction from current PC location.
@@ -105,7 +175,9 @@ void InterpreterRun(Interpreter* interpreter) {
     // convenience.  This is only valid in this loop and the main program counter
     // register is canonical.
     int32_t* pc = (int32_t*)iregs[PCODE_PC_REG];
-    
+    interpreter->current_symbol = LoaderFindSymbol(interpreter->loader,
+                                                   interpreter->iregs[PCODE_PC_REG]);
+
     if (disassemble) {
       DisassemblePCodeInstruction(interpreter, pc, stdout);
     }
@@ -113,7 +185,7 @@ void InterpreterRun(Interpreter* interpreter) {
     // Fetch first word and advance PC to next word.  All instructions are at least
     // 32 bits long.
     uint32_t inst = *pc++;
-    iregs[PCODE_PC_REG] += 4;
+    iregs[PCODE_PC_REG] += 4;     // PC is moved to next instruction for most.
 
     // The top 2 bits of the first instruction word tell us the size of the
     // instruction as follows:
@@ -127,261 +199,259 @@ void InterpreterRun(Interpreter* interpreter) {
     if (is_32_bit) {
       // 7 bit opcode
       switch ((inst >> 24) & 0x7f) {
-        case OP(add):
+        case PCODE_OP(add):
           iregs[DEST(inst)] = iregs[SRC1(inst)] + iregs[SRC2(inst)];
           break;
-        case OP(sub):
+        case PCODE_OP(sub):
           iregs[DEST(inst)] = iregs[SRC1(inst)] - iregs[SRC2(inst)];
           break;
-        case OP(addf):
+        case PCODE_OP(addf):
           fregs[DEST(inst)] = fregs[SRC1(inst)] - fregs[SRC2(inst)];
           break;
-        case OP(addd):
+        case PCODE_OP(addd):
           dregs[DEST(inst)] = dregs[SRC1(inst)] - dregs[SRC2(inst)];
           break;
-        case OP(subf):
+        case PCODE_OP(subf):
           fregs[DEST(inst)] = fregs[SRC1(inst)] - fregs[SRC2(inst)];
           break;
-        case OP(subd):
+        case PCODE_OP(subd):
           dregs[DEST(inst)] = dregs[SRC1(inst)] - dregs[SRC2(inst)];
           break;
-        case OP(mul):
+        case PCODE_OP(mul):
           iregs[DEST(inst)] = iregs[SRC1(inst)] * iregs[SRC2(inst)];
           break;
-        case OP(mulf):
+        case PCODE_OP(mulf):
           fregs[DEST(inst)] = fregs[SRC1(inst)] * fregs[SRC2(inst)];
           break;
-        case OP(muld):
+        case PCODE_OP(muld):
           dregs[DEST(inst)] = dregs[SRC1(inst)] * dregs[SRC2(inst)];
           break;
-        case OP(div):
+        case PCODE_OP(div):
           if (iregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
             iregs[DEST(inst)] = iregs[SRC1(inst)] / iregs[SRC2(inst)];
           }
           break;
-        case OP(divu):
+        case PCODE_OP(divu):
           if (iregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
             iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] / (uint64_t)iregs[SRC2(inst)];
           }
           break;
-        case OP(divf):
+        case PCODE_OP(divf):
           if (fregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
             fregs[DEST(inst)] = fregs[SRC1(inst)] / fregs[SRC2(inst)];
           }
           break;
-        case OP(divd):
+        case PCODE_OP(divd):
           if (dregs[SRC2(inst)] == 0) {
             interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
           } else {
             dregs[DEST(inst)] = dregs[SRC1(inst)] - dregs[SRC2(inst)];
           }
           break;
-        case OP(mod):
+        case PCODE_OP(mod):
           iregs[DEST(inst)] = iregs[SRC1(inst)] % iregs[SRC2(inst)];
           break;
-        case OP(modu):
+        case PCODE_OP(modu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] % (uint64_t)iregs[SRC2(inst)];
           break;
-        case OP(lsr):
+        case PCODE_OP(lsr):
           iregs[DEST(inst)] = (uint64_t)(iregs[SRC1(inst)]) >> iregs[SRC2(inst)];
           break;
-        case OP(asr):
+        case PCODE_OP(asr):
           iregs[DEST(inst)] = iregs[SRC1(inst)] >> iregs[SRC2(inst)];
           break;
-        case OP(lsl):
+        case PCODE_OP(lsl):
           iregs[DEST(inst)] = iregs[SRC1(inst)] << iregs[SRC2(inst)];
           break;
-        case OP(or):
+        case PCODE_OP(or):
           iregs[DEST(inst)] = iregs[SRC1(inst)] | iregs[SRC2(inst)];
           break;
-        case OP(and):
+        case PCODE_OP(and):
           iregs[DEST(inst)] = iregs[SRC1(inst)] & iregs[SRC2(inst)];
           break;
-        case OP(xor):
+        case PCODE_OP(xor):
           iregs[DEST(inst)] = iregs[SRC1(inst)] ^ iregs[SRC2(inst)];
           break;
-        case OP(not):
+        case PCODE_OP(not):
           iregs[DEST(inst)] = !iregs[SRC1(inst)];
           break;
-        case OP(inv):
+        case PCODE_OP(inv):
           iregs[DEST(inst)] = ~iregs[SRC1(inst)];
           break;
-        case OP(neg):
+        case PCODE_OP(neg):
           iregs[DEST(inst)] = -iregs[SRC1(inst)];
           break;
-        case OP(negf):
+        case PCODE_OP(negf):
           fregs[DEST(inst)] = -fregs[SRC1(inst)];
           break;
-        case OP(negd):
+        case PCODE_OP(negd):
           dregs[DEST(inst)] = -dregs[SRC1(inst)];
           break;
-        case OP(cmpeq):
+        case PCODE_OP(cmpeq):
           iregs[DEST(inst)] = iregs[SRC1(inst)] == iregs[SRC2(inst)];
           break;
-        case OP(cmpne):
+        case PCODE_OP(cmpne):
           iregs[DEST(inst)] = iregs[SRC1(inst)] != iregs[SRC2(inst)];
           break;
-        case OP(cmplt):
+        case PCODE_OP(cmplt):
           iregs[DEST(inst)] = iregs[SRC1(inst)] < iregs[SRC2(inst)];
           break;
-        case OP(cmple):
+        case PCODE_OP(cmple):
           iregs[DEST(inst)] = iregs[SRC1(inst)] <= iregs[SRC2(inst)];
           break;
-        case OP(cmpgt):
+        case PCODE_OP(cmpgt):
           iregs[DEST(inst)] = iregs[SRC1(inst)] > iregs[SRC2(inst)];
           break;
-        case OP(cmpge):
+        case PCODE_OP(cmpge):
           iregs[DEST(inst)] = iregs[SRC1(inst)] >= iregs[SRC2(inst)];
           break;
-        case OP(cmpltu):
+        case PCODE_OP(cmpltu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] < (uint64_t)iregs[SRC2(inst)];
           break;
-        case OP(cmpleu):
+        case PCODE_OP(cmpleu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] <= (uint64_t)iregs[SRC2(inst)];
           break;
-        case OP(cmpgtu):
+        case PCODE_OP(cmpgtu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] > (uint64_t)iregs[SRC2(inst)];
           break;
-        case OP(cmpgeu):
+        case PCODE_OP(cmpgeu):
           iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] >= (uint64_t)iregs[SRC2(inst)];
           break;
-       case OP(cmpeqf):
+       case PCODE_OP(cmpeqf):
           iregs[DEST(inst)] = fregs[SRC1(inst)] == fregs[SRC2(inst)];
           break;
-        case OP(cmpnef):
+        case PCODE_OP(cmpnef):
           iregs[DEST(inst)] = fregs[SRC1(inst)] != fregs[SRC2(inst)];
           break;
-        case OP(cmpltf):
+        case PCODE_OP(cmpltf):
           iregs[DEST(inst)] = fregs[SRC1(inst)] < fregs[SRC2(inst)];
           break;
-        case OP(cmplef):
+        case PCODE_OP(cmplef):
           iregs[DEST(inst)] = fregs[SRC1(inst)] <= fregs[SRC2(inst)];
           break;
-        case OP(cmpgtf):
+        case PCODE_OP(cmpgtf):
           iregs[DEST(inst)] = fregs[SRC1(inst)] > fregs[SRC2(inst)];
           break;
-        case OP(cmpgef):
+        case PCODE_OP(cmpgef):
           iregs[DEST(inst)] = fregs[SRC1(inst)] >= fregs[SRC2(inst)];
           break;
-        case OP(cmpeqd):
+        case PCODE_OP(cmpeqd):
           iregs[DEST(inst)] = dregs[SRC1(inst)] == dregs[SRC2(inst)];
           break;
-        case OP(cmpned):
+        case PCODE_OP(cmpned):
           iregs[DEST(inst)] = dregs[SRC1(inst)] != dregs[SRC2(inst)];
           break;
-        case OP(cmpltd):
+        case PCODE_OP(cmpltd):
           iregs[DEST(inst)] = dregs[SRC1(inst)] < dregs[SRC2(inst)];
           break;
-        case OP(cmpled):
+        case PCODE_OP(cmpled):
           iregs[DEST(inst)] = dregs[SRC1(inst)] <= dregs[SRC2(inst)];
           break;
-        case OP(cmpgtd):
+        case PCODE_OP(cmpgtd):
           iregs[DEST(inst)] = dregs[SRC1(inst)] < dregs[SRC2(inst)];
           break;
-        case OP(cmpged):
+        case PCODE_OP(cmpged):
           iregs[DEST(inst)] = dregs[SRC1(inst)] >= dregs[SRC2(inst)];
           break;
-        case OP(decsp):
+        case PCODE_OP(decsp):
           iregs[PCODE_SP_REG] -= inst & 0xffffff;
           break;
-        case OP(incsp):
+        case PCODE_OP(incsp):
           iregs[PCODE_SP_REG] += inst & 0xffffff;
           break;
-        case OP(push):
+        case PCODE_OP(push):
           iregs[PCODE_SP_REG] -= 4;
           *((int32_t*)iregs[PCODE_SP_REG]) = (int32_t)iregs[DEST(inst)];
           break;
-        case OP(pushf):
+        case PCODE_OP(pushf):
           iregs[PCODE_SP_REG] -= 4;
           *((float*)iregs[PCODE_SP_REG]) = fregs[DEST(inst)];
           break;
-        case OP(pushd):
+        case PCODE_OP(pushd):
           iregs[PCODE_SP_REG] -= 8;
          *((double*)iregs[PCODE_SP_REG]) = dregs[DEST(inst)];
           break;
-        case OP(pushx):
+        case PCODE_OP(pushx):
           iregs[PCODE_SP_REG] -= 8;
           *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[DEST(inst)];
           break;
-        case OP(pop):
+        case PCODE_OP(pop):
           iregs[DEST(inst)] = *((int32_t*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 4;
           break;
-        case OP(popf):
+        case PCODE_OP(popf):
           fregs[DEST(inst)] = *((float*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 4;
           break;
-        case OP(popd):
+        case PCODE_OP(popd):
           dregs[DEST(inst)] = *((double*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
           break;
-        case OP(popx):
+        case PCODE_OP(popx):
           iregs[DEST(inst)] = *((uint64_t*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
           break;
-        case OP(mov):
+        case PCODE_OP(mov):
           iregs[DEST(inst)] = iregs[SRC1(inst)];
           break;
-        case OP(movf):
+        case PCODE_OP(movf):
           fregs[DEST(inst)] = fregs[SRC1(inst)];
           break;
-        case OP(movd):
+        case PCODE_OP(movd):
           dregs[DEST(inst)] = dregs[SRC1(inst)];
           break;
-        case OP(ret):
+        case PCODE_OP(ret):
           // Return from function.  sp[0] contains 64 bit return address;
           iregs[PCODE_PC_REG] = *((uint64_t*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
-          interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
 
-        case OP(cbra):
+        case PCODE_OP(cbra):
           // TODO
           break;
-        case OP(i2f):
+        case PCODE_OP(i2f):
           fregs[DEST(inst)] = iregs[SRC1(inst)];
           break;
-        case OP(i2d):
+        case PCODE_OP(i2d):
           dregs[DEST(inst)] = iregs[SRC1(inst)];
           break;
-        case OP(ui2f):
+        case PCODE_OP(ui2f):
           fregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)];
           break;
-        case OP(ui2d):
+        case PCODE_OP(ui2d):
           dregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)];
           break;
-        case OP(f2d):
+        case PCODE_OP(f2d):
           dregs[DEST(inst)] = fregs[SRC1(inst)];
           break;
-        case OP(d2f):
+        case PCODE_OP(d2f):
           fregs[DEST(inst)] = dregs[SRC1(inst)];
           break;
-        case OP(f2i):
+        case PCODE_OP(f2i):
           iregs[DEST(inst)] = fregs[SRC1(inst)];
           break;
-        case OP(d2i):
+        case PCODE_OP(d2i):
           iregs[DEST(inst)] = dregs[SRC1(inst)];
           break;
-        case OP(f2ui):
+        case PCODE_OP(f2ui):
           iregs[DEST(inst)] = (uint64_t)fregs[SRC1(inst)];
           break;
-        case OP(d2ui):
+        case PCODE_OP(d2ui):
           iregs[DEST(inst)] = (uint64_t)dregs[SRC1(inst)];
           break;
-       case OP(rcall):
+       case PCODE_OP(rcall):
           iregs[PCODE_SP_REG] -= 8;
           *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
           iregs[PCODE_PC_REG] = iregs[DEST(inst)];
-          interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
 
-        case OP(esc):
+        case PCODE_OP(esc):
           // Call the escape function with the immediate value.
           if (interpreter->escape != NULL) {
             interpreter->escape(interpreter, inst & 0xffffff);
@@ -398,97 +468,97 @@ void InterpreterRun(Interpreter* interpreter) {
         // 64 bit instructions.
         // 6 bit opcode
         switch ((inst >> 24) & 0x3f) {
-        case OP(ldw):
+        case PCODE_OP(ldw):
           iregs[DEST(inst)] = *(int32_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldh):
+        case PCODE_OP(ldh):
           iregs[DEST(inst)] = *(int16_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldb):
+        case PCODE_OP(ldb):
           iregs[DEST(inst)] = *(int8_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(lduw):
+        case PCODE_OP(lduw):
           iregs[DEST(inst)] = *(uint32_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldub):
+        case PCODE_OP(ldub):
           iregs[DEST(inst)] = *(uint8_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(lduh):
+        case PCODE_OP(lduh):
           iregs[DEST(inst)] = *(uint16_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldx):
+        case PCODE_OP(ldx):
           iregs[DEST(inst)] = *(uint64_t*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldf):
+        case PCODE_OP(ldf):
           fregs[DEST(inst)] = *(float*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(ldd):
+        case PCODE_OP(ldd):
           dregs[DEST(inst)] = *(double*)(iregs[SRC1(inst)] + *pc);
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(stw):
+        case PCODE_OP(stw):
           *(int32_t*)(iregs[SRC1(inst)] + *pc) = (int32_t)iregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(sth):
+        case PCODE_OP(sth):
           *(int16_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(stx):
+        case PCODE_OP(stx):
           *(uint64_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(stf):
+        case PCODE_OP(stf):
           *(float*)(iregs[SRC1(inst)] + *pc) = fregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(std):
+        case PCODE_OP(std):
           *(double*)(iregs[SRC1(inst)] + *pc) = dregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(stb):
+        case PCODE_OP(stb):
           *(int8_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
           iregs[PCODE_PC_REG] += 4;
           break;
 
-        case OP(movc):
+        case PCODE_OP(movc):
           iregs[DEST(inst)] = *pc;
           iregs[PCODE_PC_REG] += 4;
           break;
-        case OP(movfc):
+        case PCODE_OP(movfc):
           fregs[DEST(inst)] = *pc++;
           iregs[PCODE_PC_REG] += 4;
           break;
 
-        case OP(bz):
+        case PCODE_OP(bz):
           if (iregs[DEST(inst)] == 0) {
             // Relative branch.
-            iregs[PCODE_PC_REG] += (int32_t)*pc - 4;
+            iregs[PCODE_PC_REG] += (int32_t)*pc + 4;
           } else {
             iregs[PCODE_PC_REG] += 4;
           }
           break;
-        case OP(bnz):
+        case PCODE_OP(bnz):
           if (iregs[DEST(inst)] != 0) {
             // Relative branch.
-            iregs[PCODE_PC_REG] += (int32_t)*pc - 4;
+            iregs[PCODE_PC_REG] += (int32_t)*pc + 4;
           } else {
             iregs[PCODE_PC_REG] += 4;
           }
           break;
-        case OP(bra):
+        case PCODE_OP(bra):
             // Relative branch.
-          iregs[PCODE_PC_REG] += (int32_t)*pc - 4;
+          iregs[PCODE_PC_REG] += (int32_t)*pc + 4;
           break;
-        case OP(addc):
+        case PCODE_OP(addc):
           iregs[DEST(inst)] = iregs[SRC1(inst)] + *pc;
           iregs[PCODE_PC_REG] += 4;
           break;
@@ -501,35 +571,36 @@ void InterpreterRun(Interpreter* interpreter) {
         // 96 bit instructions.
         // 6 bit opcode.
         switch ((inst >> 24) & 0x3f) {
-         case OP(movdc):
+         case PCODE_OP(movdc):
           dregs[DEST(inst)] = *(double*)pc;
           iregs[PCODE_PC_REG] += 8;
           break;
-        case OP(movxc):
+        case PCODE_OP(movxc):
           iregs[DEST(inst)] = *(uint64_t*)pc;
           iregs[PCODE_PC_REG] += 8;
           break;
-        case OP(jmp):
-          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG];
+        case PCODE_OP(jmp):
+          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
           break;
-        case OP(call):
+        case PCODE_OP(call):
           iregs[PCODE_SP_REG] -= 8;
           *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
           iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
-          interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
-          case OP(cjmp): {
-            // Load the value at the absolute address in the operand.  Then jump to that value.
-            uint64_t* addr = *(uint64_t**)pc;
+       case PCODE_OP(cjmp): {
+            // Load the value at the pc-relative address in the operand.
+            // Then jump to that value.
+            uint64_t offset = *(uint64_t*)pc;    // Offset from PC.
+            uint64_t* addr = (uint64_t*)(iregs[PCODE_PC_REG] + 8 + offset);
             iregs[PCODE_PC_REG] = *addr;
-            interpreter->current_symbol = LoaderFindSymbol(interpreter->loader, interpreter->iregs[PCODE_PC_REG]);
           break;
           }
-        case OP(adr): {
+        case PCODE_OP(adr): {
           // Operand is offset from PC to address.
           uint64_t addr = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
           iregs[DEST(inst)] = addr;
-          break;
+          iregs[PCODE_PC_REG] += 8;
+        break;
           }
         default:
           interpreter->escape(interpreter, P_CODE_ESC_UNDEF_INST);

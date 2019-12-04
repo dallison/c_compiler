@@ -63,7 +63,7 @@ static void* FindValue(void* entry, void* value) {
   }
   int64_t key = (int64_t)value;
   for (size_t i = 0; i < buckets->length; i++) {
-    Value* v = buckets->value[i];
+    Value* v = buckets->value.p[i];
     if (key == v->key) {
       return v;
     }
@@ -86,7 +86,7 @@ ValueSet* NewValueSet() {
 static void DeleteValueList(void* list, void* data) {
   Vector* vec = (Vector*)list;
   for (size_t i = 0; i < vec->length; i++) {
-    Value* value = vec->value[i];
+    Value* value = vec->value.p[i];
     ValueDelete(value);
   }
   VectorDelete((Vector*)list);
@@ -182,7 +182,7 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
 
   // Get the values for the operands.
   for (size_t i = 0; i < inst->inputs.length; i++) {
-    IRNode* input = inst->inputs.value[i];
+    IRNode* input = inst->inputs.value.p[i];
     int64_t input_key = CalculateInstructionKey(table, input);
     Value* v = HashTableSearch(table, (void*)input_key);
     assert(v != NULL);
@@ -235,8 +235,8 @@ static void* CopyValueList(void* list) {
   Vector* to = NewVector();
   VectorCopy(to, from);
   for (size_t i = 0; i < to->length; i++) {
-    Value* value = ValueCopy(from->value[i]);
-    to->value[i] = value;
+    Value* value = ValueCopy(from->value.p[i]);
+    to->value.p[i] = value;
   }
   return to;
 }
@@ -249,7 +249,7 @@ static void PrintValue(Value* value) {
 static void PrintValueList(void* list, void* data) {
   Vector* vec = (Vector*)list;
   for (size_t i = 0; i < vec->length; i++) {
-    PrintValue(vec->value[i]);
+    PrintValue(vec->value.p[i]);
   }
 }
 
@@ -323,7 +323,7 @@ static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
 
   // Now perform value numbering on all blocks dominated by this one.
   for (size_t i = 0; i < block->dominatees.length; i++) {
-    BlockId id = (BlockId)block->dominatees.value[i];
+    BlockId id = (BlockId)block->dominatees.value.p[i];
     BasicBlock* b = VectorGet(&gen->basic_blocks, id);
     DoGlobalValueNumbering(gen, b);
   }
@@ -334,7 +334,7 @@ void GlobalValueNumberingOptimization(Generator* gen) {
 
   // Done with all the value sets, delete them from every block.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* block = gen->basic_blocks.value[i];
+    BasicBlock* block = gen->basic_blocks.value.p[i];
     if (block->optimizer_data != NULL) {
       ValueSetDelete((ValueSet*)block->optimizer_data);
       block->optimizer_data = NULL;

@@ -15,7 +15,7 @@ static void GenerateDeclarationList(Generator* gen,
                                     DeclarationListASTNode* node) {
   size_t num_decls = node->declarations->length;
   for (size_t i = 0; i < num_decls; i++) {
-    GenerateStatement(gen, node->declarations->value[i]);
+    GenerateStatement(gen, node->declarations->value.p[i]);
   }
 }
 
@@ -35,7 +35,7 @@ static void GenerateCompoundStatement(Generator* gen,
                                       CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
   for (size_t i = 0; i < num_statements; i++) {
-    GenerateStatement(gen, (ASTNode*)node->statements->value[i]);
+    GenerateStatement(gen, (ASTNode*)node->statements->value.p[i]);
   }
 }
 
@@ -204,7 +204,7 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   // and branches to the case labels for those with case values.
   int64_t next_value = node->min_case_value;
   for (size_t i = 0; i < node->cases.length; i++) {
-    CaseLabelASTNode* case_node = node->cases.value[i];
+    CaseLabelASTNode* case_node = node->cases.value.p[i];
     if (next_value != case_node->value) {
       // Fill gap in branch table with branches to the default label.
       do {
@@ -237,7 +237,7 @@ static void GenerateBinaryCaseSearch(Generator* gen,
     // More than 15 cases, split search into lower and upper halfs.
     IRNode* lower_half = NewIR(IR_OP(label));
     size_t mid = start + length/2;
-    CaseLabelASTNode* mid_case_node = node->cases.value[mid];
+    CaseLabelASTNode* mid_case_node = node->cases.value.p[mid];
     IRNode* compare =
           GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr,
                               GeneratorGetIntConstant(gen, node->expr->type,
@@ -254,7 +254,7 @@ static void GenerateBinaryCaseSearch(Generator* gen,
   }
   // 15 cases or less, use linear search.
   for (size_t i = start; i < end; i++) {
-    CaseLabelASTNode* case_node = node->cases.value[i];
+    CaseLabelASTNode* case_node = node->cases.value.p[i];
     IRNode* compare =
     GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), expr,
                               GeneratorGetIntConstant(gen, node->expr->type,
@@ -307,7 +307,7 @@ static void GenerateConstantSwitch(Generator* gen,
   // a label for it.
   CaseLabelASTNode* found_case = NULL;
   for (size_t i = 0; i < node->cases.length; i++) {
-    CaseLabelASTNode* case_node = (CaseLabelASTNode*)node->cases.value[i];
+    CaseLabelASTNode* case_node = (CaseLabelASTNode*)node->cases.value.p[i];
     if (case_node->value == value) {
       found_case = case_node;
       break;
@@ -359,7 +359,7 @@ static void GenerateSwitchStatement(Generator* gen,
   // Create case labels.
   for (size_t i = 0; i < node->cases.length; i++) {
     IRNode* label = NewIR(IR_OP(label));
-    CaseLabelASTNode* case_node = (CaseLabelASTNode*)node->cases.value[i];
+    CaseLabelASTNode* case_node = (CaseLabelASTNode*)node->cases.value.p[i];
     case_node->label = label;
   }
 

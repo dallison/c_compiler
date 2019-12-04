@@ -64,7 +64,7 @@ void SemanticCheckScalarType(ASTNode* node) {
 // to be unused deliberately.
 static void CheckForUnusedLocalSymbols(Syntax* syntax) {
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
-    Symbol* symbol = syntax->all_local_symbols.value[i];
+    Symbol* symbol = syntax->all_local_symbols.value.p[i];
     if (!symbol->used && !symbol->is_argument) {
       SyntaxWarning(syntax, "unused-var",
                     "Local variable '%s' is not used in this function",
@@ -77,7 +77,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
   size_t num_statements = node->type->info.function.body.length;
   for (size_t i = 0; i < num_statements; i++) {
-    AnalyzeStatement((ASTNode*)node->type->info.function.body.value[i]);
+    AnalyzeStatement((ASTNode*)node->type->info.function.body.value.p[i]);
   }
   CheckForUnusedLocalSymbols(syntax);
 }

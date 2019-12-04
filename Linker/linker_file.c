@@ -12,49 +12,35 @@
 #include "linker.h"
 #include <stdlib.h>
 
-// Map compare function for section names.  The key is a String*.
-static int CompareMappedSectionNames(const void*a, const void* b) {
-  const MapKeyValue* s1 = a;
-  const MapKeyValue* s2 = b;
-  return StringCompareString(s1->key, s2->key);
-}
-
-// Map compare function for section types.  The key is an integer.
-static int CompareMappedSectionTypes(const void*a, const void* b) {
-  const MapKeyValue* s1 = a;
-  const MapKeyValue* s2 = b;
-  return (int)(s1->key - s2->key);
-}
-
 // Create a new linker file from an ELF file.
-LinkerFile* NewLinkerFile(ELFReaderFile* elf_file, Linker* linker, const char* filename) {
-  LinkerFile* file = malloc(sizeof(LinkerFile));
+ObjectFile* NewObjectFile(ELFReaderFile* elf_file, Linker* linker, const char* filename) {
+  ObjectFile* file = malloc(sizeof(ObjectFile));
   StringInit(&file->filename, filename);
   file->elf_file = elf_file;
   HashTableInit(&file->local_symbol_table, "local-symbol-table", 111,
-                LinkerSymbolHash, LinkerSymbolInsertInHashTable, LinkerSymbolFindInHashTable);
+                SymbolHash, SymbolInsertInHashTable, SymbolFindInHashTable);
 
   VectorInit(&file->relocations);
   file->linker = linker;
-  MapInit(&file->sections_by_name, CompareMappedSectionNames);
-  MapInit(&file->sections_by_type, CompareMappedSectionTypes);
+  MapInitForStringKeys(&file->sections_by_name);
+  MapInitForInt64Keys(&file->sections_by_type);
   VectorInit(&file->common_symbols);
   return file;
 }
 
-static void DeleteSectionMapEntry(const void* key, void* value, void* data) {
-  Vector* sections = value;
+static void DeleteSectionMapEntry(MapKeyValue* kv, void* data) {
+  Vector* sections = kv->value.p;
   VectorDelete(sections);
 }
 
-void LinkerFileDestruct(LinkerFile* file) {
+void ObjectFileDestruct(ObjectFile* file) {
   StringDestruct(&file->filename);
   
   LinkerClearSymbolTable(&file->local_symbol_table);
   HashTableDestruct(&file->local_symbol_table);
   MapDestruct(&file->sections_by_name);
 
-  VectorDestructWithContents(&file->relocations, (VectorElementDestructor)LinkerRelocationDestruct);
+  VectorDestructWithContents(&file->relocations, (VectorElementDestructor)RelocationDestruct);
 
   MapTraverse(&file->sections_by_type, DeleteSectionMapEntry, NULL);
   MapDestruct(&file->sections_by_type);
@@ -62,15 +48,15 @@ void LinkerFileDestruct(LinkerFile* file) {
   VectorDestruct(&file->common_symbols);
 }
 
-void LinkerFileDelete(LinkerFile* file) {
-  LinkerFileDestruct(file);
+void ObjectFileDelete(ObjectFile* file) {
+  ObjectFileDestruct(file);
   free(file);
 }
 
 // Find a symbol by looking in the given file and then in the global
 // symbol table.
-LinkerSymbol* LinkerFileFindSymbol(LinkerFile* file, const char *name) {
-  LinkerSymbol* sym = LinkerFindSymbol(&file->local_symbol_table, name);
+Symbol* ObjectFileFindSymbol(ObjectFile* file, const char *name) {
+  Symbol* sym = LinkerFindSymbol(&file->local_symbol_table, name);
   if (sym == NULL) {
     sym = LinkerFindSymbol(&file->linker->global_symbol_table, name);
   }
@@ -78,8 +64,8 @@ LinkerSymbol* LinkerFileFindSymbol(LinkerFile* file, const char *name) {
 }
 
 // Find a section by name.
-ELFReaderSection* LinkerFileFindSection(LinkerFile* file, String* name) {
-  return MapFind(&file->sections_by_name, name);
+ELFReaderSection* ObjectFileFindSection(ObjectFile* file, String* name) {
+  return MapFindPointerKey(&file->sections_by_name, name);
 }
 
 

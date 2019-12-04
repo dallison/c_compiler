@@ -63,6 +63,7 @@ static ReservedWord reserved_words[] = {
   {"_Complex", TOK(complex)},
   {"_Imaginary", TOK(imaginary)},
   {"__attribute__", TOK(attribute)},
+  {"__thread", TOK(thread)},
   {"asm", TOK(asm)},
   {"auto", TOK(auto)},
   {"break", TOK(break)},
@@ -801,7 +802,7 @@ static void CollectNumber(Lex* lex, char ch) {
         }
         seensign = true;
       } else if (!isdigit(ch)) {
-        // Not a digit, termnate.
+        // Not a digit, terminate.
         break;
       }
       StringAppendChar(&lex->spelling, ch);
@@ -930,7 +931,7 @@ void LexReadLine(Lex* lex) {
       SourceReadLine(lex->source, &lex->line);
 
       // Check for preprocessing directive.
-      bool directive =
+       bool directive =
           PreprocessorParseDirective(lex->preprocessor, &lex->line);
       if (!directive) {
         // Not a preprocessor directive, therefore this is a line that should be
@@ -975,6 +976,13 @@ void LexSkipSpacesAndComments(Lex* lex) {
         // '//' comment?
         if (lex->pos < lex->line.length &&
             lex->line.value[lex->pos + 1] == '/') {
+          if (lex->assembler_mode) {
+            // In assembler mode we stop when we reach a line comment
+            // because the assembler will read the next line itself.
+            // But we set the current position to the line length.
+            lex->pos = lex->line.length;
+            break;
+          }
           // Single line comment, read another line.
           LexReadLine(lex);
 

@@ -55,6 +55,7 @@ typedef enum {
 
   P_OP(fp),  // Frame pointer pseudo operation.
   P_OP(sp),  // Stack pointer pseudo operation.
+  P_OP(tp),   // Thread pointer.
 
   // Function result registers.
   P_OP(resultx),
@@ -71,7 +72,7 @@ typedef enum {
 
   // Now follow PCode opcodes.
   P_OP(ap),  // Argument pointer pseudo operation.
-
+  
   // Stack manipulation
   P_OP(decsp),    // Decrement stack pointer by constant.
   P_OP(incsp),    // Increment stack pointer by constant.
@@ -195,7 +196,9 @@ typedef enum {
   P_OP(jmp),      // Jump to address.
   P_OP(cjmp),     // Jump to contents of address.
   P_OP(adr),      // PC relative address.
-  
+  P_OP(adrs),     // PC relative address of a string literal.
+  P_OP(adrtls),      // PC relative TLS address.
+
   // Call and return.
   P_OP(call),     // Call address with int result.
   P_OP(callf),    // Call address with float result.

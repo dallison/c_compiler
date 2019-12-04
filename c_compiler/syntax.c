@@ -122,21 +122,24 @@ Storage SyntaxParseStorage(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(extern):
       LexNextToken(syntax->lex);
-      return kStorageExtern;
+      return STO(extern);
     case TOK(typedef):
       LexNextToken(syntax->lex);
-      return kStorageTypedef;
+      return STO(typedef);
     case TOK(auto):
       LexNextToken(syntax->lex);
-      return kStorageAuto;
+      return STO(auto);
     case TOK(static):
       LexNextToken(syntax->lex);
-      return kStorageStatic;
+      return STO(static);
     case TOK(register):
       LexNextToken(syntax->lex);
-      return kStorageRegister;
+      return STO(register);
+    case TOK(thread):
+      LexNextToken(syntax->lex);
+      return STO(thread);
    default:
-      return kStorageImplicit;
+      return STO(implicit);
   }
 }
 
@@ -165,7 +168,7 @@ static void ParseDesignatedInitializer(Syntax* syntax,
         value = 0;
       }
       SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
-      VectorAppend(designators, NewArrayDesignator((int)value));
+      VectorAppend(designators, NewArrayDesignator(NULL, (int)value));
     } else if (LexMatch(syntax->lex, TOK(dot))) {
       // Struct designator.  The dot is followed by a struct member name.
       String* member_name;
@@ -228,13 +231,13 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
 
 // Parses a symbol initializer.
 static ASTNode* ParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
-  if (storage == kStorageExtern) {
+  if (StorageIs(storage, STO(extern))) {
     SyntaxWarning(syntax, "extern-with-init", "extern with initializer");
   }
-  if (storage == kStorageTypedef) {
+  if (StorageIs(storage, STO(typedef))) {
     SyntaxError(syntax, "typdefs can't have initializers");
   }
-  if (storage != kStorageExtern) {
+  if (!StorageIs(storage, STO(extern))) {
     sym->is_defined = true;
   }
   if (LexMatch(syntax->lex, TOK(lbrace))) {
@@ -247,11 +250,12 @@ static ASTNode* ParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
       SyntaxParseExpression(syntax, TC(semicolon) | TC(stmt)), location);
 }
 
-// TODO: handle these attributes.
-void ParseAttribute(Syntax* syntax, Symbol* symbol) {
+// Parse attributes and return a bitmask containing them.
+void ParseAttribute(Syntax* syntax, Vector* attrs) {
   String attribute_list;
   StringInit(&attribute_list, NULL);
   LexReadAttributes(syntax->lex, &attribute_list);
+  StringSplit(&attribute_list, ',', attrs);
   SyntaxNeedBracket(syntax, TOK(rparen), 0);
 }
 
@@ -261,9 +265,9 @@ void ParseAttribute(Syntax* syntax, Symbol* symbol) {
 static void ResolveOldStyleFormalArgument(Syntax* syntax, TypeRecord* func, Symbol* formal) {
   Vector* formals = &func->info.function.prototype;
   for (size_t i = 0; i < formals->length; i++) {
-    Symbol* prev_formal = (Symbol*)formals->value[i];
+    Symbol* prev_formal = (Symbol*)formals->value.p[i];
     if (StringEqualString(&prev_formal->name, &formal->name)) {
-      formals->value[i] = formal;
+      formals->value.p[i] = formal;
       formal->is_argument = true;
       formal->value.arg_number = prev_formal->value.arg_number;
       SymbolDelete(prev_formal);
@@ -283,7 +287,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     // body.
     while (!LexLookingAt(syntax->lex, TOK(lbrace))) {
       TypeParser arg_parser;
-      TypeParserInit(&arg_parser, syntax->lex, syntax, kStorageAuto);
+      TypeParserInit(&arg_parser, syntax->lex, syntax, STO(auto));
       TypeRecord* arg_type = TypeParserParseType(&arg_parser);
       if (arg_type != NULL) {
         while (!LexLookingAt(syntax->lex, TOK(semicolon))) {
@@ -320,8 +324,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       size_t num_defn_formals = defn_prototype->length;
       for (size_t i = 0; i < num_decl_formals && i < num_defn_formals;
            i++) {
-        Symbol* decl_formal = decl_prototype->value[i];
-        Symbol* defn_formal = defn_prototype->value[i];
+        Symbol* decl_formal = decl_prototype->value.p[i];
+        Symbol* defn_formal = defn_prototype->value.p[i];
         StringSet(&decl_formal->name, defn_formal->name.value);
       }
       // We now refer to the previously defined symbol rather than this new
@@ -334,7 +338,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     size_t num_formals = prototype->length;
     for (size_t i = 0; i < num_formals; i++) {
       InsertLocalSymbol(syntax->local_symbol_stack,
-                        (Symbol*)prototype->value[i]);
+                        (Symbol*)prototype->value.p[i]);
     }
     
     sym->is_defined = true;
@@ -359,13 +363,29 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   return NULL;
 }
 
+static bool IsPowerOf2OrZero(int32_t v) {
+  return (v & (v - 1)) == 0;
+}
+
+// Only static variables can be thread local.  This checks for invalid
+// symbol storage or type.
+static void CheckThreadLocal(Syntax* syntax, Symbol* symbol) {
+  if (StorageIs(symbol->storage, STO(thread))) {
+    bool error = TypeIsFunction(symbol->type);
+    error |= !StorageIs(symbol->storage, STO(static) | STO(extern));
+    if (error) {
+      SyntaxError(syntax, "Illegal use of __thread");
+    }
+  }
+}
+
 // A declaration specifier is a set of:
 // 1. storage specifier
 // 2. type specifier
 // 3. function specifier (inline).
 // This collects them into the output variables.
 static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is_inline,
-                                      TypeRecord** type) {
+                                      TypeRecord** type, Vector* attributes) {
   PartialTypeSpecifier type_specifier = {
     .type = kTypeImplicit,
     .quals = kQualPlain,
@@ -374,20 +394,25 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
   };
 
   TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, kStorageImplicit);
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
   
   while (!LexEof(syntax->lex)) {
     Storage s = SyntaxParseStorage(syntax);
-    if (s != kStorageImplicit) {
-      if (*storage != kStorageImplicit) {
-        if (*storage != s) {
-          SyntaxError(syntax,
-                      "Multiple incompatible storage specifiers");
-        } else {
-          SyntaxWarning(syntax, "dup-storage", "Duplicate storage specifier");
-        }
+    if (s != STO(implicit)) {
+      Storage new = s;
+      Storage old = *storage;
+    
+      // Check for duplicate storage.
+      if ((new & old) != 0) {
+        SyntaxWarning(syntax, "dup-storage", "Duplicate storage specifier");
       }
-      *storage = s;
+    
+      // Remove __thread from mask and check for multiple bits set.
+      if (!IsPowerOf2OrZero((new | old) & ~STO(thread))) {
+        SyntaxError(syntax,
+                    "Multiple incompatible storage specifiers");
+      }
+      *storage |= s;
     } else if (LexMatch(syntax->lex, TOK(inline))) {
       if (*is_inline) {
         SyntaxWarning(syntax, "dup-inline", "Duplicate 'inline' specifier");
@@ -396,7 +421,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
     } else if (SyntaxLookingAtType(syntax)) {
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
     } else if (LexMatch(syntax->lex, TOK(attribute))) {
-      ParseAttribute(syntax, NULL);
+      ParseAttribute(syntax, attributes);
     } else {
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
       return;
@@ -408,21 +433,23 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
 // to the symbol table.
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   Vector* declarations = NewVector();
-
+  Vector attributes;
+  VectorInit(&attributes);
+  
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
-    ParseAttribute(syntax, NULL);
+    ParseAttribute(syntax, &attributes);
   }
 
-  Storage storage = kStorageImplicit;
+  Storage storage = STO(implicit);
   bool is_inline = false;
   TypeRecord* type = NULL;
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type);
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
 
-  if (storage == kStorageAuto || storage == kStorageRegister) {
+  if (StorageIs(storage, STO(auto)) || StorageIs(storage, STO(register))) {
     SyntaxError(syntax, "Illegal global storage specified: %s",
-                storage == kStorageRegister ? "register" : "auto");
-    storage = kStorageImplicit;
+                StorageIs(storage, STO(register)) ? "register" : "auto");
+    storage = STO(implicit);
   }
 
   // We just treat inline as static for now, but the rules
@@ -431,12 +458,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   // for example has "extern inline int isascii(...)" and I don't know how
   // this can work.
   if (is_inline) {
-    storage = kStorageStatic;
+    storage = STO(static);
   }
 
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
-    ParseAttribute(syntax, NULL);
+    ParseAttribute(syntax, &attributes);
   }
 
   // Create a type parser for the declarators.
@@ -461,7 +488,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
         // OK to declare (and define) it now.  If it's a definition then
         // this must be a declaration.
         if (old_sym->is_defined) {
-          if (storage == kStorageExtern) {
+          if (StorageIs(storage, STO(extern))) {
             // This might be a declaration, only if there is no initializer
             if (LexLookingAt(parser.lex, TOK(equal))) {
               // This is 'extern int foo = xxx', a definition
@@ -512,9 +539,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
     // Parse common __attribute__ syntax.
     while (LexMatch(syntax->lex, TOK(attribute))) {
-      ParseAttribute(syntax, sym);
+      ParseAttribute(syntax, &attributes);
     }
     
+    VectorCopy(&sym->attributes, &attributes);
+    VectorClear(&attributes);
+  
     // Declaring or defining a function?
     if (sym->type->declarator == kDeclFunction) {
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
@@ -560,6 +590,8 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax);
 
+  VectorDestruct(&attributes);
+  
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);
 }
@@ -585,10 +617,13 @@ static void SkipFunctionBody(Syntax* syntax) {
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   Vector* declarations = NewVector();
 
-  Storage storage = kStorageImplicit;
+  Storage storage = STO(implicit);
   bool is_inline = false;
   TypeRecord* type = NULL;
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type);
+  Vector attributes;
+  VectorInit(&attributes);
+  
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
 
   if (is_inline) {
     SyntaxError(syntax, "inline is not allowed here");
@@ -614,7 +649,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
         // OK to declare (and define) it now.  If it's a definition then
         // this must be a declaration.
         if (old_sym->is_defined) {
-          if (storage == kStorageExtern) {
+          if (StorageIs(storage, STO(extern))) {
             // This might be a declaration, only if there is no initializer
             if (LexLookingAt(parser.lex, TOK(equal))) {
               SyntaxError(syntax,
@@ -670,10 +705,17 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
       continue;
     }
 
-    if (sym->storage != kStorageExtern) {
+    if (!StorageIs(sym->storage, STO(extern))) {
       // This is a local variable.
       sym->is_local = true;
     }
+
+    // Symbol takes ownerhip of attribute strings.
+    VectorCopy(&sym->attributes, &attributes);
+    VectorClear(&attributes);
+    
+    // Check for __thread violations.
+    CheckThreadLocal(syntax, sym);
 
     // Declaring or defining a function?
     if (sym->type->declarator == kDeclFunction) {
@@ -718,6 +760,8 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax);
 
+  VectorDestruct(&attributes);
+  
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);
 }
@@ -763,7 +807,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       if (sym == NULL) {
         return false;
       }
-      if (sym->storage == kStorageTypedef) {
+      if (StorageIs(sym->storage , STO(typedef))) {
         return true;
       }
       return false;
@@ -813,7 +857,7 @@ void SyntaxCloseScope(Syntax* syntax) {
 }
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type) {
-  Symbol* sym = NewSymbol(SyntaxFakeName(syntax), type, kStorageImplicit);
+  Symbol* sym = NewSymbol(SyntaxFakeName(syntax), type, STO(implicit));
   sym->is_temp = true;
   SyntaxAddSymbol(syntax, sym);
   return sym;

@@ -68,16 +68,11 @@ static bool Assemble(String* asm_filename, String* object_filename) {
 
 static void DataStart(FILE* fp) { fprintf(fp, "\t.data\n"); }
 
-static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
-  fprintf(fp, "%s:\n", var->name.value);
-  fprintf(fp, "\t.type   %s,@object\n", var->name.value);
-  if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", var->name.value);
-  } else {
-    fprintf(fp, "\t.local  %s\n", var->name.value);
-  }
-  fprintf(fp, "\t.size   %s,%zd\n", var->name.value, var->size);
-  int alignment = (int)var->alignment - 1;
+static void TlsDataStart(FILE* fp) { fprintf(fp, "\t.section \".tdata\", \"awT\", @progbits\n"); }
+static void TlsBSSStart(FILE* fp) { fprintf(fp, "\t.section \".tbss\", \"awT\", @nobits\n"); }
+
+static void EmitP2Align(int alignment, FILE* fp) {
+  alignment = alignment - 1;
   // The p2align directive takes, as its first argument the number
   // of bits to align to.  We caluclate this by counting the
   // lower order 1 bits in the alignment.
@@ -89,11 +84,25 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
       break;
     }
   }
-
   fprintf(fp, "\t.p2align  %d\n", p2align_arg);
+}
+
+static void StaticVariable(InitializedStaticVariable* var,
+                                FILE* fp) {
+  fprintf(fp, "%s:\n", var->name.value);
+  fprintf(fp, "\t.type   %s,@object\n", var->name.value);
+  if (var->is_global) {
+    fprintf(fp, "\t.global %s\n", var->name.value);
+  } else {
+    fprintf(fp, "\t.local  %s\n", var->name.value);
+  }
+  fprintf(fp, "\t.size   %s,%zd\n", var->name.value, var->size);
+  
+  EmitP2Align(var->alignment, fp);
+
   int next_offset = 0;
   for (size_t i = 0; i < var->initializers.length; i++) {
-    Initializer* init = var->initializers.value[i];
+    Initializer* init = var->initializers.value.p[i];
     if (init->offset > next_offset) {
       int diff = init->offset - next_offset;
       fprintf(fp, "\t.space  %d\n", diff);
@@ -135,6 +144,10 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
   fprintf(fp, "\n");
 }
 
+static void TlsVariable(InitializedStaticVariable* var, FILE* fp) {
+  StaticVariable(var, fp);
+}
+
 static void BSSVariable(UnintializedStaticVariable* var, FILE* fp) {
   fprintf(fp, "\t.type   %s,@object\n", var->name.value);
   if (var->is_global) {
@@ -144,6 +157,19 @@ static void BSSVariable(UnintializedStaticVariable* var, FILE* fp) {
   }
   fprintf(fp, "\t.comm   %s,%zd,%zd\n", var->name.value, var->size,
           var->alignment);
+  fprintf(fp, "\n");
+}
+
+static void TlsBSSVariable(UnintializedStaticVariable* var, FILE* fp) {
+  fprintf(fp, "\t.type   %s,@object\n", var->name.value);
+  if (var->is_global) {
+    fprintf(fp, "\t.global %s\n", var->name.value);
+  } else {
+    fprintf(fp, "\t.local  %s\n", var->name.value);
+  }
+  EmitP2Align((int)var->alignment, fp);
+  fprintf(fp, "%s:\n", var->name.value);
+  fprintf(fp, "\t.space   %zd\n", var->size);
   fprintf(fp, "\n");
 }
 
@@ -206,6 +232,10 @@ CompilerTarget* NewPCodeTarget() {
   target->emit_static_variable = StaticVariable;
   target->emit_bss_space = BSSVariable;
   target->emit_data_start = DataStart;
+  target->emit_tdata_start = TlsDataStart;
+  target->emit_tbss_start = TlsBSSStart;
+  target->emit_tls_variable = TlsVariable;
+  target->emit_tbss_space = TlsBSSVariable;
   target->emit_literals_start = StringLiteralSection;
   target->emit_string_literal = EmitLiteral;
   target->emit_debug = EmitDebug;

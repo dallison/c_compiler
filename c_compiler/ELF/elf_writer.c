@@ -13,7 +13,7 @@
 #include "vector.h"
 
 void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
-                       int flags, bool dso,
+                       int flags, DynamicCallback dynamic_callback,
                        bool is_64_bit,
                        bool is_little_endian) {
   memset(&elf->header, 0, sizeof(elf->header));
@@ -38,9 +38,8 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
   VectorInit(&elf->segments);
   BufferInit(&elf->string_table);
   VectorInit(&elf->symbol_table);
-  BufferInit(&elf->dyn_string_table);
-  VectorInit(&elf->dyn_symbol_table);
   BufferInit(&elf->section_names);
+  VectorInit(&elf->section_fixups);
   
   // Add first (empty) symbol to the symbol table.  All fields
   // of this symbol are zero.
@@ -51,7 +50,7 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
   // to the start of it.
   BufferAppend(&elf->string_table, "", 1);
   BufferAppend(&elf->section_names, "", 1);
-  elf->dso = dso;
+  elf->dynamic_callback = dynamic_callback;
 }
 
 void ELFWriterFileDestruct(ELFWriterFile* elf) {
@@ -61,9 +60,41 @@ void ELFWriterFileDestruct(ELFWriterFile* elf) {
                              (VectorElementDestructor)ELFWriterSegmentDestruct);
   BufferDestruct(&elf->string_table);
   VectorDestructWithContents(&elf->symbol_table, NULL);
-  BufferDestruct(&elf->dyn_string_table);
-  VectorDestructWithContents(&elf->dyn_symbol_table, NULL);
   BufferDestruct(&elf->section_names);
+  VectorDestructWithContents(&elf->section_fixups, NULL);
+}
+
+void ELFWriterAddSectionFixupByName(ELFWriterFile* elf,
+                                    ELFWriterFixupField field,
+                              const char* from, const char* to) {
+  ELFWriterSectionFixup* fixup = malloc(sizeof(ELFWriterSectionFixup));
+  fixup->field = field;
+  fixup->from = from;
+  fixup->to = to;
+  VectorAppend(&elf->section_fixups, fixup);
+}
+
+void ELFWriterAddSectionFixup(ELFWriterFile* elf,
+                              ELFWriterFixupField field,
+                              ELFWriterSection* from, ELFWriterSection* to) {
+  ELFWriterAddSectionFixupByName(elf, field, from->name.value, to->name.value);
+}
+
+void ELFWriterFixupSections(ELFWriterFile* elf) {
+  for (size_t i = 0; i < elf->section_fixups.length; i++) {
+    ELFWriterSectionFixup* fixup = elf->section_fixups.value.p[i];
+    ELFWriterSection* from = ELFWriterFindSection(elf, fixup->from);
+    ELFWriterSection* to = ELFWriterFindSection(elf, fixup->to);
+    assert(from != NULL && to != NULL);
+    switch (fixup->field) {
+      case kFixupFieldInfo:
+        from->header.info = to->index;
+        break;
+      case kFixupFieldLink:
+        from->header.link = to->index;
+        break;
+    }
+  }
 }
 
 void ELFWriterSectionContentsInit(ELFWriterSectionContents* contents, ELFWriterSectionContentsDataLocation location) {
@@ -106,6 +137,13 @@ void ELFWriterSectionContentsDestruct(ELFWriterSectionContents* contents) {
   }
 }
 
+static ELF_Word AddBufferedString(Buffer* buffer, String* str) {
+  ELF_Word offset = (ELF_Word)buffer->length;
+  BufferAppend(buffer, str->value, str->length + 1);
+  return offset;
+}
+
+
 size_t ELFWriterSectionContentsGetLength(ELFWriterSectionContents* contents) {
   switch (contents->data_location) {
     case kSectionContentsBuffered:
@@ -115,7 +153,7 @@ size_t ELFWriterSectionContentsGetLength(ELFWriterSectionContents* contents) {
     case kSectionContentsMulti: {
       size_t size = 0;
       for (size_t i = 0; i < contents->data.multi.length; i++) {
-        size += ELFWriterSectionContentsGetLength(contents->data.multi.value[i]);
+        size += ELFWriterSectionContentsGetLength(contents->data.multi.value.p[i]);
       }
       return size;
     }
@@ -135,7 +173,7 @@ void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp)
       break;
     case kSectionContentsMulti: {
       for (size_t i = 0; i < contents->data.multi.length; i++) {
-        ELFWriterSectionContentsWrite(contents->data.multi.value[i], fp);
+        ELFWriterSectionContentsWrite(contents->data.multi.value.p[i], fp);
       }
       break;
     }
@@ -144,26 +182,39 @@ void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp)
   }
 }
 
+// Find a section given its name.
+ELFWriterSection* ELFWriterFindSection(ELFWriterFile* elf, const char* name) {
+  for (size_t i = 0; i < elf->sections.length; i++) {
+    ELFWriterSection* section= elf->sections.value.p[i];
+    if (StringEqual(&section->name, name)) {
+      return section;
+    }
+  }
+  return NULL;
+}
+
 // Add relocation sections for all relocations.
 static void CreateRelocationSections(ELFWriterFile* elf,
                            Vector* relocation_sections,
                            ELFWriterSection* symtab) {
   // Record current section length because we will be adding sections
   // to the sections vector in the loop.
-  size_t num_sections = elf->sections.length;
+  size_t num_sections =  elf->sections.length;
   for (size_t i = 0; i < num_sections; i++) {
-    ELFWriterSection* section = elf->sections.value[i];
-    if (section->relocations->length != 0) {
+    ELFWriterSection* section = elf->sections.value.p[i];
+    if (section->relocations != NULL && section->relocations->length != 0) {
       String relocation_section_name;
+      // Invent relocation section name.
       StringInit(&relocation_section_name, "");
       StringPrintf(&relocation_section_name, ".rela%s", section->name.value);
+    
+      // Add relocation section after section it refers to.
       ELFWriterSection* reloc_sect = ELFWriterAddStandardSection(elf, relocation_section_name.value,
                                                               SHT(rela), 0);
       // All relocation sections link to the symtab section so that
       // they can find the symbol.
-      reloc_sect->header.link = symtab->index;
-      
-      reloc_sect->header.info = section->index;
+      ELFWriterAddSectionFixup(elf, kFixupFieldLink, reloc_sect, symtab);
+      ELFWriterAddSectionFixup(elf, kFixupFieldInfo, reloc_sect, section);
       
       // RELA sections have a fixed entry size.
       reloc_sect->header.entsize = sizeof(ELFRelocation);
@@ -180,12 +231,27 @@ static void CreateRelocationSections(ELFWriterFile* elf,
   }
 }
 
+// Align v to power of 2.
+static uint64_t AlignTo(uint64_t v, uint64_t p2) {
+  return (v + (p2 - 1)) & ~(p2 - 1);
+}
+
+// Write padding to the file.
+static void Pad(uint64_t size, FILE* fp) {
+  const uint64_t kBufferSize = 4096;
+  char buf[kBufferSize];
+  memset(buf, 0xda, kBufferSize);
+  while (size > 0) {
+    size_t len = size > kBufferSize ? kBufferSize : size;
+    fwrite(buf, len, 1, fp);
+    size -= len;
+  }
+}
+
 // Write all section headers to the given file.
 static void WriteSectionHeaders(ELFWriterFile* elf,
                                    ELFWriterSection* symtab,
-                                   ELFWriterSection* dyn_symtab,
                                    ELFWriterSection* strtab,
-                                   ELFWriterSection* dyn_strtab,
                                    ELFWriterSection* shstrtab,
                                    Vector* relocation_sections,
                                    size_t num_segments,
@@ -196,10 +262,11 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
   int64_t next_section_data_offset = sizeof(ELFHeader) +
     num_segments * sizeof(ELFProgramHeader) +
     elf->sections.length * sizeof(ELFSectionHeader);
-
+  ELFWriterSection* prev = NULL;
+  
   // Write all the section headers to the file.
   for (size_t i = 0; i < elf->sections.length; i++) {
-    ELFWriterSection* section = elf->sections.value[i];
+    ELFWriterSection* section = elf->sections.value.p[i];
     size_t data_length = 0;
     if (section->contents != NULL) {
       // Get section data length.
@@ -207,18 +274,14 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
     } else {
       if (section == symtab) {
         data_length = elf->symbol_table.length * sizeof(ELFSymbol);
-      } else if (section == dyn_symtab) {
-        data_length = elf->dyn_symbol_table.length * sizeof(ELFSymbol);
       } else if (section == strtab) {
         data_length = elf->string_table.length;
-      } else if (section == dyn_strtab) {
-        data_length = elf->dyn_string_table.length;
       } else if (section == shstrtab) {
         data_length = elf->section_names.length;
       } else {
         bool section_found = false;
         for (size_t j = 0; j < relocation_sections->length; j++) {
-          if (relocation_sections->value[j] == section) {
+          if (relocation_sections->value.p[j] == section) {
             data_length = section->relocations->length * sizeof(ELFRelocation);
             section_found = true;
             break;
@@ -227,49 +290,53 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
         assert(section_found);
       }
     }
+    
+    uint64_t padding = 0;
     if (section->header.name != 0) {
-      section->header.offset = next_section_data_offset;
-    }
+      uint64_t aligned_address = AlignTo(next_section_data_offset,
+                                         section->header.addralign);
+      // Padding to get to next section.
+      padding = aligned_address - next_section_data_offset;
+      section->header.offset = aligned_address;
+      if (prev != NULL) {
+         prev->padding = padding;
+      }
+
+   }
     section->header.size = data_length;
     
     fwrite(&section->header, sizeof(ELFSectionHeader), 1, fp);
     if (section->header.type != SHT(nobits)) {
-      next_section_data_offset += data_length;
+      next_section_data_offset += data_length + padding;
     }
+    
+    
+    // Record previous.
+    prev = section;
   }
 }
 
 static void WriteSectionContents(ELFWriterFile* elf,
                              ELFWriterSection* symtab,
-                             ELFWriterSection* dyn_symtab,
                              ELFWriterSection* strtab,
-                             ELFWriterSection* dyn_strtab,
                              ELFWriterSection* shstrtab,
                              Vector* relocation_sections,
                              FILE* fp) {
   // Write the section data to the file.
   for (size_t i = 0; i < elf->sections.length; i++) {
-    ELFWriterSection* section = elf->sections.value[i];
+    ELFWriterSection* section = elf->sections.value.p[i];
     size_t data_length = 0;
     if (section->contents != NULL) {
       ELFWriterSectionContentsWrite(section->contents, fp);
     } else {
       if (section == symtab) {
         for (size_t sym_index = 0; sym_index < elf->symbol_table.length; sym_index++) {
-          ELFSymbol* sym = elf->symbol_table.value[sym_index];
-          fwrite(sym, sizeof(ELFSymbol), 1, fp);
-        }
-      } else if (section == dyn_symtab) {
-        for (size_t sym_index = 0; sym_index < elf->dyn_symbol_table.length; sym_index++) {
-          ELFSymbol* sym = elf->dyn_symbol_table.value[sym_index];
+          ELFSymbol* sym = elf->symbol_table.value.p[sym_index];
           fwrite(sym, sizeof(ELFSymbol), 1, fp);
         }
       } else if (section == strtab) {
         data_length = elf->string_table.length;
         fwrite(elf->string_table.value, data_length, 1, fp);
-      } else if (section == dyn_strtab) {
-        data_length = elf->dyn_string_table.length;
-        fwrite(elf->dyn_string_table.value, data_length, 1, fp);
       } else if (section == shstrtab) {
         data_length = elf->section_names.length;
         fwrite(elf->section_names.value, data_length, 1, fp);
@@ -277,10 +344,10 @@ static void WriteSectionContents(ELFWriterFile* elf,
         bool section_found = false;
         // Write out the relocation section contents.
         for (size_t j = 0; j < relocation_sections->length; j++) {
-          if (relocation_sections->value[j] == section) {
+          if (relocation_sections->value.p[j] == section) {
             for (size_t reloc_index = 0;
                  reloc_index < section->relocations->length; reloc_index++) {
-              ELFRelocation* reloc = section->relocations->value[reloc_index];
+              ELFRelocation* reloc = section->relocations->value.p[reloc_index];
               fwrite(reloc, sizeof(*reloc), 1, fp);
             }
             section_found = true;
@@ -289,6 +356,11 @@ static void WriteSectionContents(ELFWriterFile* elf,
         }
         assert(section_found);
       }
+    }
+    
+    // Pad to next section address.
+    if (section->padding != 0) {
+      Pad(section->padding, fp);
     }
   }
 }
@@ -312,8 +384,8 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     phdr.flags = PF(r) | PF(x);
     phdr.type = PT(phdr);
     
-    ELFWriterSegment* code_segment = elf->segments.value[0];
-    ELFWriterSection* section0 = code_segment->sections.value[0];
+    ELFWriterSegment* code_segment = elf->segments.value.p[0];
+    ELFWriterSection* section0 = code_segment->sections.value.p[0];
     phdr.vaddr = section0->address + elf->header.phoff;
     phdr.paddr = phdr.vaddr;
     fwrite(&phdr, sizeof(phdr), 1, fp);
@@ -324,10 +396,10 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     int64_t first_section_offset = 0;
     
     for (size_t i = 0; i < elf->segments.length; i++) {
-      ELFWriterSegment* segment = elf->segments.value[i];
+      ELFWriterSegment* segment = elf->segments.value.p[i];
       bool start_address_assigned = false;
       for (size_t j = 0; j < segment->sections.length; j++) {
-        ELFWriterSection* section = segment->sections.value[j];
+        ELFWriterSection* section = segment->sections.value.p[j];
         
         // Add section size to the memory size.
         segment->header.memsz += section->header.size;
@@ -373,27 +445,11 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   
   // Setup the special symbol table fields.
   symtab->header.entsize = sizeof(ELFSymbol);
-  
-  // The 'link' field is the index of the symbol names string table.
-  symtab->header.link = strtab->index;
-  
+  ELFWriterAddSectionFixup(elf, kFixupFieldLink, symtab, strtab);
+
   // The 'info' field is one greater than the index of the last local
   // symbol.
   symtab->header.info = elf->last_local_symbol_index + 1;
-  
-  // If we are writing a DSO we need to allocate the .dynsym and .dynstr
-  // sections for the dynamic symbol table.  These are separate from the
-  // regular symbol and string tables to allow the files to be stripped and
-  // still be loadable.
-  ELFWriterSection* dyn_symtab = NULL;
-  ELFWriterSection* dyn_strtab = NULL;
-  if (elf->dso) {
-    dyn_symtab = ELFWriterAddStandardSection(elf, ".dynsym", SHT(symtab), 0);
-    dyn_strtab = ELFWriterAddStandardSection(elf, ".dynstr", SHT(strtab), 0);
-    dyn_symtab->header.entsize = sizeof(ELFSymbol);
-    dyn_symtab->header.link = dyn_strtab->index;
-    dyn_symtab->header.info = 1;      // TODO: is this necessary?
-  }
   
   // Vector containing pointers to sections for relocations.  The
   // ELFWriterSection pointer is not owned by this vector.
@@ -401,11 +457,15 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   VectorInit(&relocation_sections);
   
   // Create the relocation sections.
-  CreateRelocationSections(elf, &relocation_sections, symtab);
+  CreateRelocationSections(elf, &relocation_sections,
+                           symtab);
 
   elf->header.shnum = elf->sections.length;
   elf->header.shstrndx = shstrtab->index;
 
+  // Fixup all the section links.
+  ELFWriterFixupSections(elf);
+  
   // We always add a PHDR segment as the first segment.  This covers the segment
   // headers and is part of the code segment.  Only do this if there are actually
   // segments in the file.
@@ -420,14 +480,19 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   fseek(fp, elf->header.shoff, SEEK_SET);
   
   // Write all the section headers to the file.
-  WriteSectionHeaders(elf, symtab, dyn_symtab, strtab,
-                     dyn_strtab, shstrtab,
+  WriteSectionHeaders(elf, symtab, strtab,
+                     shstrtab,
                      &relocation_sections,
                      num_segments, fp);
 
+  if (elf->dynamic_callback != NULL) {
+    // If we have a callback for a dynamic library, call it now.
+    elf->dynamic_callback(elf);
+  }
+  
   // Write the section data to the file.
-  WriteSectionContents(elf, symtab, dyn_symtab, strtab,
-                       dyn_strtab, shstrtab,
+  WriteSectionContents(elf, symtab, strtab,
+                       shstrtab,
                        &relocation_sections, fp);
   
 
@@ -480,6 +545,8 @@ ELFWriterSection* ELFWriterAddSection(ELFWriterFile* elf, String* name, int32_t 
   section->relocations = NewVector();
   section->index = (int32_t)elf->sections.length;
   section->address = address;
+  section->padding = 0;
+  section->user_data = NULL;
   VectorAppend(&elf->sections, section);
   return section;
 }
@@ -492,25 +559,35 @@ ELFWriterSection* ELFWriterAddStandardSection(ELFWriterFile* elf, const char* na
   section->header.name = name == NULL ? 0 : ELFWriterAddSectionName(elf, name);
   section->header.type = type;
   section->header.flags = flags;
-  section->header.addralign = 1;
+  section->header.addralign = 8;
   section->contents = NULL;
   section->index = (int32_t)elf->sections.length;
   section->relocations = NewVector();
+  section->user_data = NULL;
   VectorAppend(&elf->sections, section);
   return section;
 }
 
-static ELFSymbol* NewSymbol(ELFWriterFile* elf, ELF_Word name_offset,
+void ELFSymbolInit(ELFSymbol* sym, ELF_Word name_offset,
+                    int32_t section_index, int32_t symbol_type,
+                    int32_t symbol_binding, int64_t size,
+                    int64_t value) {
+  sym->name = name_offset;
+  sym->shndx = section_index;
+  sym->other = 0;
+  sym->size = size;
+  sym->value = value;
+  sym->info = symbol_type | symbol_binding << 4;
+  
+}
+                   
+ELFSymbol* NewELFSymbol(ELF_Word name_offset,
                             int32_t section_index, int32_t symbol_type,
                             int32_t symbol_binding, int64_t size,
                             int64_t value) {
   ELFSymbol* sym = calloc(sizeof(ELFSymbol), 1);
-  sym->name = name_offset;
-  sym->shndx = section_index;
-  
-  sym->size = size;
-  sym->value = value;
-  sym->info = symbol_type | symbol_binding << 4;
+  ELFSymbolInit(sym, name_offset, section_index, symbol_type,
+                symbol_binding, size, value);
   return sym;
 }
 
@@ -522,7 +599,7 @@ ELFSymbol* ELFWriterAddSymbol(ELFWriterFile* elf,
                               int64_t size,
                               int64_t value,
                               int32_t* index) {
-  ELFSymbol* sym = NewSymbol(elf,
+  ELFSymbol* sym = NewELFSymbol(
                              ELFWriterAddString(elf, name),
                              section_index, symbol_type,
                              symbol_binding, size, value);
@@ -531,15 +608,6 @@ ELFSymbol* ELFWriterAddSymbol(ELFWriterFile* elf,
   *index = (int32_t)elf->symbol_table.length;
   VectorAppend(&elf->symbol_table, sym);
   
-  if (elf->dso && symbol_binding == STB(global)) {
-    // If we are building a DSO, add the symbol to the dynamic symbol table,
-    // as long as the symbol is global (or undefined).
-    ELFSymbol* sym = NewSymbol(elf, ELFWriterAddDynamicString(elf, name),
-                               section_index, symbol_type,
-                               symbol_binding, size, value);
-
-    VectorAppend(&elf->dyn_symbol_table, sym);
-  }
   return sym;
 }
 
@@ -566,43 +634,51 @@ ELFSymbol* ELFWriterAddFileSymbol(ELFWriterFile* elf, String* filename) {
   return sym;
 }
 
+void ELFWriterInitRelocation(ELFRelocation* r,
+                             int64_t offset,
+                             int32_t symbol_index,
+                             int64_t addend,
+                             int32_t type) {
+  r->offset = offset;      // Offset into section.
+  r->info = (ELF_Xword)symbol_index << 32 | type;
+  r->addend = addend;
+  
+}
+
 void ELFWriterAddRelocationWithAddend(ELFWriterFile* elf,
                                       int32_t section_index,
                                       int64_t offset,
                                       int32_t symbol_index,
                                       int64_t addend,
                                       int32_t type) {
-  ELFWriterSection* section = elf->sections.value[section_index];
   ELFRelocation* r = malloc(sizeof(ELFRelocation));
-
-  r->offset = offset;      // Offset into section.
-
+  ELFWriterInitRelocation(r, offset, symbol_index, addend, type);
   assert(symbol_index != -1);
-  r->info = (ELF_Xword)symbol_index << 32 | type;
-  r->addend = addend;
-  VectorAppend(section->relocations, r);
+  ELFWriterInsertRelocation(elf, section_index, r);
 }
 
 void ELFWriterAddRelocation(ELFWriterFile* elf,
                             int32_t section_index,
                             int64_t offset,
-                            int32_t
-                            symbol_index,
+                            int32_t symbol_index,
                             int32_t type) {
-  ELFWriterAddRelocationWithAddend(elf, section_index, offset, symbol_index, 0, type);
+  ELFWriterAddRelocationWithAddend(elf, section_index, offset,
+                                   symbol_index, 0, type);
 }
+
+void ELFWriterInsertRelocation(ELFWriterFile* elf,
+                                      int32_t section_index,
+                                      ELFRelocation* reloc) {
+  ELFWriterSection* section = elf->sections.value.p[section_index];
+  VectorAppend(section->relocations, reloc);
+}
+
 
 ELF_Word ELFWriterAddString(ELFWriterFile* elf, String* str) {
-  ELF_Word offset = (ELF_Word)elf->string_table.length;
-  BufferAppend(&elf->string_table, str->value, str->length + 1);
-  return offset;
+  return AddBufferedString(&elf->string_table, str);
 }
 
-ELF_Word ELFWriterAddDynamicString(ELFWriterFile* elf, String* str) {
-  ELF_Word offset = (ELF_Word)elf->dyn_string_table.length;
-  BufferAppend(&elf->dyn_string_table, str->value, str->length + 1);
-  return offset;
-}
+
 
 ELF_Word ELFWriterAddRawString(ELFWriterFile* elf, const char* str) {
   ELF_Word offset = (ELF_Word)elf->string_table.length;

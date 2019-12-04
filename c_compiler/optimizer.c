@@ -80,19 +80,19 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
     case IR_OP(addi):
     case IR_OP(adda):
       // Adding constant 0 is a nop.
-      if (IsIntConstantWithValue(node->inputs.value[0], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[1]);
-      } else if (IsIntConstantWithValue(node->inputs.value[1], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
       }
       break;
     case IR_OP(subi):
       // Subtracting zero is a nop.
-      if (IsIntConstantWithValue(node->inputs.value[1], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
+      if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
       } else {
         // Subtracting from zero is a negation.
-        if (IsIntConstantWithValue(node->inputs.value[0], 0)) {
+        if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
           node->opcode = IR_OP(negi);
           IRRemoveInput(node, 0);
         }
@@ -100,55 +100,55 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       break;
     case IR_OP(muli):
       // Multiply by zero is zero.
-      if (IsIntConstantWithValue(node->inputs.value[0], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
-      } else if (IsIntConstantWithValue(node->inputs.value[1], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[1]);
-      } else if (IsIntConstantWithValue(node->inputs.value[0], 1)) {
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[1], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[0], 1)) {
         // Multiply by 1 is a nop.
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[1]);
-      } else if (IsIntConstantWithValue(node->inputs.value[1], 1)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[1], 1)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
       } else {
         // Multiply by a power of 2 less than the word width is a left shift.
         int maxbits = node->type->size * 8;
-        if (IsIntConstantPowerOf2(node->inputs.value[0], maxbits)) {
+        if (IsIntConstantPowerOf2(node->inputs.value.p[0], maxbits)) {
           // Left is power of 2, convert to shift with left input moved to
           // the right and replaced by its log (base 2).
           node->opcode = IR_OP(lsli);
-          IRNode* c = (IRNode*)node->inputs.value[0];
+          IRNode* c = (IRNode*)node->inputs.value.p[0];
           IRNode* log2 = GeneratorGetIntConstant(
-              gen, c->type, LogBase2(node->inputs.value[0]));
+              gen, c->type, LogBase2(node->inputs.value.p[0]));
           IRRemoveInput(node, 0);
           IRAddInput(node, log2);
-        } else if (IsIntConstantPowerOf2(node->inputs.value[1], maxbits)) {
+        } else if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to shift replaced by its log (base 2).
           node->opcode = IR_OP(lsli);
-          IRNode* c = (IRNode*)node->inputs.value[1];
+          IRNode* c = (IRNode*)node->inputs.value.p[1];
           IRNode* log2 = GeneratorGetIntConstant(
-              gen, c->type, LogBase2(node->inputs.value[1]));
+              gen, c->type, LogBase2(node->inputs.value.p[1]));
           IRReplaceInput(node, 1, log2);
         }
       }
       break;
 
     case IR_OP(divi):
-      if (IsIntConstantWithValue(node->inputs.value[1], 1)) {
+      if (IsIntConstantWithValue(node->inputs.value.p[1], 1)) {
         // Division by 1 is nop.
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
-      } else if (IsIntConstantWithValue(node->inputs.value[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
+      } else if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
         // Division of zero by anything is zero.
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
       } else {
         // Division by a power of 2 less than the word width is a right shift.
         int maxbits = node->type->size * 8;
-        if (IsIntConstantPowerOf2(node->inputs.value[1], maxbits)) {
+        if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to shift with left input moved to
           // the right and replaced by its log (base 2).
           node->opcode = TypeIsUnsigned(node->type) ? IR_OP(lsri) : IR_OP(asri);
-          IRNode* c = (IRNode*)node->inputs.value[1];
+          IRNode* c = (IRNode*)node->inputs.value.p[1];
           IRNode* log2 = GeneratorGetIntConstant(
-              gen, c->type, LogBase2(node->inputs.value[1]));
+              gen, c->type, LogBase2(node->inputs.value.p[1]));
           IRReplaceInput(node, 1, log2);
         }
       }
@@ -156,16 +156,16 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
 
     case IR_OP(modi):
       // Modulus of zero by anything is zero.
-      if (IsIntConstantWithValue(node->inputs.value[0], 0)) {
-        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value[0]);
+      if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
+        BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[0]);
       } else {
         // Modulus with a power of 2 is an AND (with the value - 1)
         // For example, x % 8 is the same as x & 0x7
         int maxbits = node->type->size * 8;
-        if (IsIntConstantPowerOf2(node->inputs.value[1], maxbits)) {
+        if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to AND with mask.
           node->opcode = IR_OP(andi);
-          IRNode* c = (IRNode*)node->inputs.value[1];
+          IRNode* c = (IRNode*)node->inputs.value.p[1];
           IRNode* mask = GeneratorGetIntConstant(gen, c->type, BitMask(c));
           IRReplaceInput(node, 1, mask);
         }
@@ -181,7 +181,7 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
 // instructions cheaper to execute.
 void StrengthReductionOptimization(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* block = gen->basic_blocks.value[i];
+    BasicBlock* block = gen->basic_blocks.value.p[i];
     IRNode* inst = block->code;
     while (inst != NULL && IRPrev(inst) != block->end_code) {
       IRNode* next = IRNext(inst);

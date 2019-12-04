@@ -71,7 +71,7 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)node->stmt;
   size_t num_statments = body->statements->length;
   for (size_t i = 0; i < num_statments; i++) {
-    ASTNode* stmt = (ASTNode*)body->statements->value[i];
+    ASTNode* stmt = (ASTNode*)body->statements->value.p[i];
 
     if (stmt->op == AST_OP(case)) {
       CaseLabelASTNode* case_node = (CaseLabelASTNode*)stmt;
@@ -118,24 +118,24 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // Now we sort the cases into ascending order.  We do this because it's better
   // for code generation.  We can do a branch table or a binary search if the
   // values are sorted.
-  qsort(node->cases.value, node->cases.length, sizeof(void*), CompareCaseValue);
+  qsort(node->cases.value.p, node->cases.length, sizeof(void*), CompareCaseValue);
 
   // Check the case labels for duplicates. Since they are sorted we only need
   // to check for two adjacent values being the same.  This is faster than doing
   // an n^2 search for each value;
   size_t num_cases = node->cases.length;
   for (size_t i = 0; i < num_cases - 1; i++) {
-    int64_t case_value1 = ((CaseLabelASTNode*)(node->cases.value[i]))->value;
+    int64_t case_value1 = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
     int64_t case_value2 =
-        ((CaseLabelASTNode*)(node->cases.value[i + 1]))->value;
+        ((CaseLabelASTNode*)(node->cases.value.p[i + 1]))->value;
     if (case_value1 == case_value2) {
       const char* filename;
       int lineno;
       int start, end;
       DecodeSourceLocation(
-          ((CaseLabelASTNode*)node->cases.value[i])->expr->location, &filename,
+          ((CaseLabelASTNode*)node->cases.value.p[i])->expr->location, &filename,
           &lineno, &start, &end);
-      SemanticError(((CaseLabelASTNode*)node->cases.value[i + 1])->expr,
+      SemanticError(((CaseLabelASTNode*)node->cases.value.p[i + 1])->expr,
                     "Duplicate case value %d; previous is at %s:%d",
                     case_value2, filename, lineno);
     }
@@ -150,10 +150,10 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node->c1;
       for (size_t i = 0; i < decls->declarations->length; i++) {
         VariableDeclarationASTNode* vardecl =
-            (VariableDeclarationASTNode*)decls->declarations->value[i];
-        if (vardecl->symbol->storage != kStorageAuto &&
-            vardecl->symbol->storage != kStorageRegister &&
-            vardecl->symbol->storage != kStorageImplicit) {
+            (VariableDeclarationASTNode*)decls->declarations->value.p[i];
+        if (!StorageIs(vardecl->symbol->storage, STO(auto)) &&
+            !StorageIs(vardecl->symbol->storage, STO(register)) &&
+            vardecl->symbol->storage != STO(implicit)) {
           SemanticError((ASTNode*)vardecl,
                         "Only auto or register variables "
                         "allowed in a for statement "
@@ -180,7 +180,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
   for (size_t i = 0; i < num_statements; i++) {
-    AnalyzeStatement((ASTNode*)node->statements->value[i]);
+    AnalyzeStatement((ASTNode*)node->statements->value.p[i]);
   }
 }
 
@@ -231,7 +231,7 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
 void AnalyzeDeclarationList(DeclarationListASTNode* node) {
   size_t num_decls = node->declarations->length;
   for (size_t i = 0; i < num_decls; i++) {
-    AnalyzeStatement(node->declarations->value[i]);
+    AnalyzeStatement(node->declarations->value.p[i]);
   }
 }
 
@@ -245,7 +245,7 @@ void AnalyzeGotoStatement(CombinedStatementASTNode* node) {
   size_t num_statements = function_body->length;
   ASTNode* label_node = NULL;
   for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->value[i];
+    ASTNode* stmt = (ASTNode*)function_body->value.p[i];
     if (stmt->op == AST_OP(label)) {
       LabelASTNode* label = (LabelASTNode*)stmt;
       if (StringEqualString(label_name, &label->name)) {
@@ -267,7 +267,7 @@ void AnalyzeLabel(LabelASTNode* node) {
   // Look for another label with same name.
   size_t num_statements = function_body->length;
   for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->value[i];
+    ASTNode* stmt = (ASTNode*)function_body->value.p[i];
     if (stmt == (ASTNode*)node) {
       // Same statement, ignore.
       continue;

@@ -65,7 +65,7 @@ void GeneratorDestruct(Generator* gen) {
 
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* block = gen->basic_blocks.value[i];
+    BasicBlock* block = gen->basic_blocks.value.p[i];
     BasicBlockDelete(block);
   }
 }
@@ -186,11 +186,11 @@ void GeneratorRemoveInstruction(Generator* gen, IRNode* inst) {
 void GeneratorReplaceInstruction(Generator* gen, IRNode* old, IRNode* new) {
   // Replace references to the old node with those to the new one.
   for (size_t i = 0; i < old->outputs.length; i++) {
-    IRNode* ref = old->outputs.value[i];
+    IRNode* ref = old->outputs.value.p[i];
     for (size_t j = 0; j < ref->inputs.length; j++) {
-      IRNode* input = ref->inputs.value[j];
+      IRNode* input = ref->inputs.value.p[j];
       if (input == old) {
-        ref->inputs.value[j] = new;
+        ref->inputs.value.p[j] = new;
         VectorAppend(&new->outputs, ref);
       }
     }
@@ -206,7 +206,7 @@ IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
     type_spec = type->type;
   }
   for (size_t i = 0; i < gen->int_constant_pool.length; i++) {
-    entry = gen->int_constant_pool.value[i];
+    entry = gen->int_constant_pool.value.p[i];
     if (entry->value.ivalue == value && entry->type == type_spec) {
       return entry->pooled;
     }
@@ -233,7 +233,7 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
     type_spec = type->type;
   }
   for (size_t i = 0; i < gen->fp_constant_pool.length; i++) {
-    entry = gen->fp_constant_pool.value[i];
+    entry = gen->fp_constant_pool.value.p[i];
     if (entry->value.fvalue == value && entry->type == type_spec) {
       return entry->pooled;
     }
@@ -255,7 +255,7 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
 
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {
   for (size_t i = 0; i < gen->variable_pool.length; i++) {
-    PoolEntry* entry = gen->variable_pool.value[i];
+    PoolEntry* entry = gen->variable_pool.value.p[i];
     if (entry->value.symbol == sym) {
       return entry->pooled;
     }
@@ -286,7 +286,7 @@ static BasicBlock* FindBasicBlock(Generator* gen, BlockId id) {
 
 static void PrintBasicBlocks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     BasicBlockPrint(b, gen->entry_block, gen->exit_block);
   }
 }
@@ -305,7 +305,10 @@ static void CreateBasicBlocks(Generator* gen,
     // Check if this node defines (writes to) a variable.  If so
     // keep track of this in the basic block.
     if (IRIsVarDef(inst)) {
-      MapInsert(&current->defined_vars, inst->var.def, NULL);
+      MapKeyValue kv;
+      kv.key.p = inst->var.def;
+      kv.value.p = NULL;
+      MapInsert(&current->defined_vars, kv);
     }
     
     if (inst->opcode == IR_OP(label)) {
@@ -350,12 +353,12 @@ static void CreateBasicBlocks(Generator* gen,
 static void BuildBasicBlockGraph(Generator* gen,
                                   Vector* branches) {
   for (size_t i = 0; i < branches->length; i++) {
-    IRNode* inst = branches->value[i];
+    IRNode* inst = branches->value.p[i];
     BasicBlock* block = inst->block;
     if (IRIsConditionalBranch(inst)) {
       // Conditional branch links to both its taken and fallthrough blocks.
       IRNode* fallthrough = IRNext(inst);
-      IRNode* taken = inst->inputs.value[1];
+      IRNode* taken = inst->inputs.value.p[1];
       BasicBlockAddEdge(block, fallthrough->block);
       BasicBlockAddEdge(block, taken->block);
     } else if (inst->opcode == IR_OP(cbra)) {
@@ -371,7 +374,7 @@ static void BuildBasicBlockGraph(Generator* gen,
       BasicBlockAddEdge(block, gen->exit_block);
     } else {
       // Unconditional branch only links to its target.
-      IRNode* target = inst->inputs.value[0];
+      IRNode* target = inst->inputs.value.p[0];
       BasicBlockAddEdge(block, target->block);
     }
   }
@@ -381,7 +384,7 @@ static void BuildBasicBlockGraph(Generator* gen,
 // that do not end in a branch or return fall through to next block.
 static void AddMissingLinks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     if (b == gen->exit_block) {
       continue;
     }
@@ -398,7 +401,7 @@ static void AddMissingLinks(Generator* gen) {
 // Calculate the dominators for all basic blocks.
 static void CalculateDominators(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     BasicBlockInitDominators(b, b == gen->entry_block,
                              gen->basic_blocks.length);
   }
@@ -407,7 +410,7 @@ static void CalculateDominators(Generator* gen) {
   while (changed) {
     changed = false;
     for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-      BasicBlock* b = gen->basic_blocks.value[i];
+      BasicBlock* b = gen->basic_blocks.value.p[i];
       changed |= BasicBlockCalculateDominators(b, &gen->basic_blocks);
     }
   }
@@ -415,14 +418,14 @@ static void CalculateDominators(Generator* gen) {
 
 static void CalculateImmediateDominator(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     BasicBlockCalculateImmediateDominator(b, &gen->basic_blocks);
   }
 }
 
 static void CalculateDominanceFrontier(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     BasicBlockCalculateDominanceFrontier(b, &gen->basic_blocks);
   }
 }
@@ -432,7 +435,7 @@ static void CalculateDominanceFrontier(Generator* gen) {
 // dominatees set.
 static void BuildDominatorTree(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     if (b->idom != NULL) {
       VectorAppend(&b->idom->dominatees, (void*)b->block_id);
     }
@@ -485,7 +488,7 @@ static void BuildBasicBlocks(Generator* gen) {
 // them.
 static void RemoveUnreachableBlocks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
 
     if (BasicBlockIsUnreachable(gen, b)) {
       BasicBlockClear(gen, b);
@@ -498,7 +501,7 @@ static void RemoveUnreachableBlocks(Generator* gen) {
 int GeneratorNumCalls(Generator* gen) {
   int calls = 0;
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    BasicBlock* b = gen->basic_blocks.value[i];
+    BasicBlock* b = gen->basic_blocks.value.p[i];
     calls += b->num_calls;
   }
   return calls;
@@ -518,7 +521,7 @@ void* GenerateFunction(Generator* gen) {
     GeneratorEmit(gen, NewIR(IR_OP(enter)));
     size_t num_statments = gen->func->info.function.body.length;
     for (size_t i = 0; i < num_statments; i++) {
-      ASTNode* node = gen->func->info.function.body.value[i];
+      ASTNode* node = gen->func->info.function.body.value.p[i];
       GenerateStatement(gen, node);
     }
 

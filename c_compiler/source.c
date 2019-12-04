@@ -25,23 +25,17 @@ uint32_t NewFile(const char* filename) {
   return (uint32_t)curr_length;
 }
 
-static int CompareCharPointers(const void* a, const void* b) {
-  MapKeyValue* s1 = (MapKeyValue*)a;
-  MapKeyValue* s2 = (MapKeyValue*)b;
-  return strcmp(s1->key, s2->key);
-}
-
 // The file_map is a maping from filename to file index + 1.  We can't
 // store the value 0 in there because MapFind returns a NULL for the
 // key not found, so we add 1 to the index.
 static uint32_t FindFile(const char* filename) {
   if (!file_map_initialized) {
     // Lazy init of file_map.
-    MapInit(&file_map, CompareCharPointers);
+    MapInitForCharPointerKeys(&file_map);
     file_map_initialized = true;
   }
   // Find the index (+1) in the file map corresponding to the filename.
-  void* index = MapFind(&file_map, (void*)filename);
+  void* index = MapFindPointerKey(&file_map, (void*)filename);
   if (index != NULL) {
     return (uint32_t)(((uint64_t)index) - 1);
   }
@@ -49,8 +43,11 @@ static uint32_t FindFile(const char* filename) {
   // No found, create a new file in the all_files vector and add its
   // index (+1) into the file_map.
   uint32_t file_index = NewFile(filename);
-  File* file = all_files.value[file_index];
-  MapInsert(&file_map, file->name.value, (void*)((uint64_t)file_index + 1));
+  File* file = all_files.value.p[file_index];
+  MapKeyValue kv;
+  kv.key.p = file->name.value;
+  kv.value.w = file_index + 1;
+  MapInsert(&file_map, kv);
   return file_index;
 }
 
@@ -61,10 +58,20 @@ void FileDestruct(File* file) {
 
 void ClearAllFiles() {
   for (size_t i = 0; i < all_files.length; i++) {
-    FileDestruct((File*)all_files.value[i]);
-    free(all_files.value[i]);
+    FileDestruct((File*)all_files.value.p[i]);
+    free(all_files.value.p[i]);
   }
   VectorDestruct(&all_files);
+}
+
+static void ResetFiles() {
+  for (size_t i = 0; i < all_files.length; i++) {
+    FileDestruct((File*)all_files.value.p[i]);
+    free(all_files.value.p[i]);
+  }
+  VectorClear(&all_files);
+  MapClear(&file_map);
+  file_map_initialized = false;
 }
 
 SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
@@ -76,16 +83,24 @@ SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
   if (start > MAX_TOKEN_POS || file_index > MAX_FILE_INDEX) {
     return SOURCE_LOCATION_MISSING;
   }
-  File* file = (File*)all_files.value[file_index];
-  size_t line_index = file->lines.length;
+  File* file = (File*)all_files.value.p[file_index];
+  size_t line_index = file->lines.length;     // One greater than index.
   int64_t length = end - start;
   if (line_index > MAX_LINE_INDEX || length > MAX_TOKEN_LENGTH) {
     return SOURCE_LOCATION_MISSING;
   }
-  VectorAppend(&file->lines, (void*)((int64_t)lineno));
-  return ((int64_t)file_index << LOC_FILE_SHIFT) |
+  void* lineno_value = (void*)((int64_t)lineno);
+  // Only append to vector if line number has changeed.
+  if (file->lines.length == 0 ||
+      file->lines.value.p[file->lines.length-1] != lineno_value) {
+    VectorAppend(&file->lines, lineno_value);
+  } else {
+    line_index--;     // One too far since we didn't append to vector.
+  }
+  SourceLocation r = ((int64_t)file_index << LOC_FILE_SHIFT) |
          ((int64_t)line_index << LOC_LINE_SHIFT) |
          ((int64_t)start << LOC_START_SHIFT) | (length << LOC_LENGTH_SHIFT);
+  return r;
 }
 
 void DecodeSourceLocation(SourceLocation location, const char** filename,
@@ -104,10 +119,10 @@ void DecodeSourceLocation(SourceLocation location, const char** filename,
   uint32_t length = (location >> LOC_LENGTH_SHIFT) & LOC_LENGTH_MASK;
   *start = (location >> LOC_START_SHIFT) & LOC_START_MASK;
   if (file_index < all_files.length) {
-    File* file = (File*)all_files.value[file_index];
+    File* file = (File*)all_files.value.p[file_index];
     *filename = file->name.value;
     if (line_index < file->lines.length) {
-      *lineno = (int)file->lines.value[line_index];
+      *lineno = (int)file->lines.value.p[line_index];
     }
     *end = *start + length;
   } else {
@@ -126,9 +141,9 @@ void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
   uint32_t line_index = (location >> LOC_LINE_SHIFT) & LOC_LINE_MASK;
   *colno = (location >> LOC_START_SHIFT) & LOC_START_MASK;
   if (file_index < all_files.length) {
-    File* file = (File*)all_files.value[file_index];
+    File* file = (File*)all_files.value.p[file_index];
     if (line_index < file->lines.length) {
-      *lineno = (int)file->lines.value[line_index];
+      *lineno = (int)file->lines.value.p[line_index];
     }
     *fileno = file_index;
   }
@@ -189,6 +204,9 @@ void SourceRewind(Source* src) {
       src->from.string.index = 0;
       break;
   }
+  src->lineno = 0;
+  src->file_index = -1;
+  ResetFiles();
 }
 
 // Has end of file been reached?
@@ -312,6 +330,6 @@ void SourcePrintLocation(SourceLocation location) {
 void SourceTraverseFiles(void* data,
                          void (*func)(int index, File* file, void* data)) {
   for (size_t i = 0; i < all_files.length; i++) {
-    func(i, all_files.value[i], data);
+    func((int)i, all_files.value.p[i], data);
   }
 }

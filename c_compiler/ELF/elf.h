@@ -138,7 +138,7 @@ typedef struct  {
 // Relocation types we support.
 // P-CODE
 #define R_PCODE_CALL 1        // Call direct to symbol.
-#define R_PCODE_MOVXC 2       // Move symbol address to reg.
+#define R_PCODE_ABS 2         // Move symbol address to reg.
 #define R_PCODE_JMP 3         // Jump to symbol.
 #define R_PCODE_DATA64 4      // 64-bit data.
 #define R_PCODE_DATA32 5      // 32-bit data.
@@ -152,6 +152,12 @@ typedef struct  {
 #define R_PCODE_GOT_ENTRY 13  // Address of GOT entry for data.
 #define R_PCODE_GOT_DATA 14       // Value of data in GOT.
 #define R_PCODE_GOT_FUNC 15       // Value of function in GOT.
+#define R_PCODE_PCREL 16        // PC relative address.
+#define R_PCODE_GOT_TLS_IE 17    // TLS IE GOT entry.
+#define R_PCODE_GOT_TLS_GD 18    // TLS GD GOT entry.
+#define R_PCODE_TLS_TP_OFF 19    // TLS Thread pointer offset.
+#define R_PCODE_GOT_TLS_OFFSET 20
+#define R_PCODE_GOT_TLS_MODID 21
 
 // RISC-V
 #define R_RISCV_NONE 0        // No action.
@@ -160,17 +166,29 @@ typedef struct  {
 #define R_RISCV_RELATIVE 3    // Add load address of shared object.
 #define R_RISCV_COPY 4        // Copy data from shared object.
 #define R_RISCV_JUMP_SLOT 5   // Set GOT entry.
+#define R_RISCV_TLS_DTPMOD32 6  // TLS DTV module ID
+#define R_RISCV_TLS_DTPMOD64 7  // TLS DTV module ID
+#define R_RISCV_TLS_DTPREL32 8  // TLS
+#define R_RISCV_TLS_DTPREL64 9
+#define R_RISCV_TLS_TPREL32 10
+#define R_RISCV_TLS_TPREL64 11
 #define R_RISCV_BRANCH 16     // PC relative branch.
 #define R_RISCV_JAL 17        // PC relative jump.
 #define R_RISCV_CALL 18       // PC relative call.
 #define R_RISCV_CALL_PLT 19   // PC relative call via PLT.
 #define R_RISCV_GOT_HI20 20   // PC relative GOT high 20 bits.
+#define R_RISCV_TLS_GOT_HI20 21 // TLS IE high 20 bits.
+#define R_RISCV_TLS_GD_HI20 22  // TLS GD high 20.
 #define R_RISCV_PCREL_HI20 23   // PC relative high 20 bits.
 #define R_RISCV_PCREL_LO12_I 24 // PC relative low 12 bits (I-type)
 #define R_RISCV_PCREL_LO12_S 25 // PC relaitve low 12 bits (S-type)
 #define R_RISCV_HI20 26         // Absolute high 20 bits.
 #define R_RISCV_LO12_I 27       // Absolute low 12 bits (I-type)
 #define R_RISCV_LO12_S 28       // Absolute low 12 bits (S-type)
+#define R_RISCV_TPREL_HI20 29
+#define R_RISCV_TPREL_LO12_I 30
+#define R_RISCV_TPREL_LO12_S 31
+#define R_RISCV_TPREL_ADD 32
 #define R_RISCV_ADD8 33         // Add 8 bits.
 #define R_RISCV_ADD16 34        // Add 16 bits.
 #define R_RISCV_ADD32 35        // Add 32 bits.
@@ -183,10 +201,44 @@ typedef struct  {
 #define R_RISCV_RVC_BRANCH 44   // Branch.
 #define R_RISCV_RVC_JUMP 45     // Jump.
 #define R_RISCV_RVC_LUI 46      // Address.
+#define R_RISCV_TPREL_I 49
+#define R_RISCV_TPREL_S 50
 #define R_RISCV_RELAX 51        // Relax instruction pair.
 
-#define ELF_MACHINE_TYPE_PCODE 6502
+// 6502 processor
+#define R_6502_JSR 1         // Call direct to symbol.
+#define R_6502_JMP 2         // Move symbol address to reg.
+#define R_6502_DATA16 3      // 16-bit data.
+#define R_6502_JSR_PLT 4    // Call via PLT.
+#define R_6502_GOT_ENTRY 5  // Address of GOT entry for data.
+#define R_6502_GOT_DATA 6       // Value of data in GOT.
+#define R_6502_GOT_FUNC 7       // Value of function in GOT.
+#define R_6502_PCREL 8        // PC relative address.
+#define R_6502_GOT_TLS_IE 9    // TLS IE GOT entry.
+#define R_6502_GOT_TLS_GD 10    // TLS GD GOT entry.
+#define R_6502_TLS_TP_OFF 11    // TLS Thread pointer offset.
+#define R_6502_GOT_TLS_OFFSET 12
+#define R_6502_GOT_TLS_MODID 13
+#define R_6502_ADD16 14       // Add 16-bit.
+#define R_6502_ADD32 15       // Add 32-bit.
+#define R_6502_ADD64 16       // Add 64-bit.
+#define R_6502_SUB16 17       // Subtract 16-bit.
+#define R_6502_SUB32 18      // Subtract 32-bit.
+#define R_6502_SUB64 19      // Subtract 64-bit.
+#define R_6502_DATA32 21      // 32-bit data.
+#define R_6502_DATA64 22      // 64-bit data.
+#define R_6502_BYTE0 23
+#define R_6502_BYTE1 24
+#define R_6502_BYTE2 25
+#define R_6502_BYTE3 26
+#define R_6502_BYTE4 27
+#define R_6502_BYTE5 28
+#define R_6502_BYTE6 29
+#define R_6502_BYTE7 30
+
+#define ELF_MACHINE_TYPE_PCODE 6500
 #define ELF_MACHINE_TYPE_RISC_V 243
+#define ELF_MACHINE_TYPE_6502 6502
 
 // A program header.
 typedef struct {
@@ -217,6 +269,7 @@ typedef enum {
   SHT(rel),          // Relocations without addend.
   SHT(shlib),        // Shared library information.
   SHT(dynsym),       // Dynamic symbol table.
+  SHT(gnu_hash) = 0x6ffffff6,     // GNU hash table.
   SHT(num),
 } ELFSectionType;
 
@@ -229,6 +282,7 @@ typedef enum {
                                      // 0x08 is missing.
   SHF(merge) = 0x10,                 // Mergeable.
   SHF(strings) = 0x20,               // Contains strings.
+  SHF(tls) = (1 << 10),              // Thread Local Storage.
 } ELFSectionFlags;
 
 // A section header.
@@ -250,6 +304,80 @@ typedef struct  {
 #define SHN_LORESERVE 0xff00  // Start of reserved section indices.
 #define SHN_ABS 0xfff1        // Absolute.
 #define SHN_COM 0xfff2        // Common.
+
+// Dynamic section.
+
+// Dynamic section tags.
+#define DT(x) kELFDynamicTag_##x
+typedef enum {
+  DT(null)        = 0,
+  DT(needed)      = 1,
+  DT(pltrelsz)    = 2,
+  DT(pltgot)      = 3,
+  DT(hash)        = 4,
+  DT(strtab)      = 5,
+  DT(symtab)      = 6,
+  DT(rela)        = 7,
+  DT(relasz)      = 8,
+  DT(relaent)     = 9,
+  DT(strsz)       = 10,
+  DT(syment)      = 11,
+  DT(init)        = 12,
+  DT(fini)        = 13,
+  DT(soname)      = 14,
+  DT(rpath)       = 15,
+  DT(symbolic)    = 16,
+  DT(rel)         = 17,
+  DT(relsz)       = 18,
+  DT(relent)      = 19,
+  DT(pltrel)      = 20,
+  DT(debug)       = 21,
+  DT(textrel)     = 22,
+  DT(jmprel)      = 23,
+  DT(bind_now)    = 24,
+  DT(init_array)  = 25,
+  DT(fini_array)  = 26,
+  DT(init_arraysz) = 27,
+  DT(fini_arraysz) = 28,
+  DT(runpath)     = 29,
+  DT(flags)       = 30,
+  DT(preinit_array) = 32,
+  DT(preinit_arraysz) = 33,
+  DT(maxpostags)  = 34,
+  // OS extensions in here.
+  DT(checksum)    = 0x6ffffdf8,
+  DT(pltpadsz)    = 0x6ffffdf9,
+  DT(moveent)     = 0x6ffffdfa,
+  DT(movsz)       = 0x6ffffdfb,
+  DT(posflag_1)   = 0x6ffffdfd,
+  DT(syminsz)     = 0x6ffffdfe,
+  DT(syminent)    = 0x6ffffdff,
+  DT(gnu_hash)    = 0x6ffffef5,
+  DT(config)      = 0x6ffffefa,
+  DT(depaudit)    = 0x6ffffefb,
+  DT(audit)       = 0x6ffffefc,
+  DT(pltpad)      = 0x6ffffefd,
+  DT(movetab)     = 0x6ffffefe,
+  DT(syminfo)     = 0x6ffffeff,
+  DT(relacount)   = 0x6ffffff9,
+  DT(relcount)    = 0x6ffffffa,
+  DT(flags_1)     = 0x6ffffffb,
+  DT(verdef)      = 0x6ffffffc,
+  DT(verdefnum)   = 0x6ffffffd,
+  DT(verneed)     = 0x6ffffffe,
+  DT(verneednum)  = 0x6fffffff,
+  DT(auxilliary)  = 0x7ffffffd,
+  DT(used)        = 0x7ffffffe,
+  DT(filter)      = 0x7fffffff,
+} ELFDynamicTag;
+
+typedef struct {
+  ELF_Xword tag;
+  union {
+    ELF_Xword val;
+    ELF_Addr ptr;
+  } un;
+} ELFDynamicSectionEntry;
 
 // Header for ELF file.
 typedef struct {

@@ -22,10 +22,22 @@
 // field is the number of key/value pairs for which we have space in the array.
 // The array is expanded as needed, but never contracts.
 
+// Key type.
+typedef union {
+  void* p;
+  int64_t w;
+} MapKeyType;
+
+// Value type;
+typedef union {
+  void* p;
+  int64_t w;
+} MapValueType;
+
 // The map's memory is an array of these structs.
 typedef struct {
-  void* key;
-  void* value;
+  MapKeyType key;
+  MapValueType value;
 } MapKeyValue;
 
 // Comparison function, taking MapKeyValue pointers.  Returns 0 if the keys
@@ -45,32 +57,41 @@ typedef struct {
 void MapInit(Map* map, MapKeyCompareFunc compare_func);
 Map* NewMap(MapKeyCompareFunc compare_func);
 
+// Initializers for common map types.
+void MapInitForStringKeys(Map* map);
+void MapInitForCharPointerKeys(Map* map);
+void MapInitForInt64Keys(Map* map);
+void MapInitForCaseBlindStringKeys(Map* map);
+void MapInitForCaseBlindCharPointerKeys(Map* map);
+
 void MapDestruct(Map* map);
 void MapDelete(Map* map);
 void MapClear(Map* map);
 
 void MapDestructWithContents(Map* map,
-                             void (*func)(const void* key, void* value));
+                             void (*func)(MapKeyValue* kv));
 void MapDeleteWithContents(Map* map,
-                             void (*func)(const void* key, void* value));
+                             void (*func)(MapKeyValue* kv));
 
 // Removes the key from the map, returning the value being removed if the
 // removal was successful. If the removal was unsuccessful (the key was not
 // present) NULL is returned.  You can use the value returned to free up any
 // memory used by the value if necessary.
-void* MapRemove(Map* map, void* key);
+void* MapRemove(Map* map, MapKeyType key);
 
 // Inserts the key and value into the map.  Returns the old value if the
 // insertion replaced an old value, NULL otherwise.  You can use this return
 // value to free any memory used by the old value if necessary.
-void* MapInsert(Map* map, void* key, void* value);
+void* MapInsert(Map* map, MapKeyValue kv);
 
 // Finds a value given an key.  Returns NULL if it is not found.
-void* MapFind(Map* map, void* key);
+void* MapFind(Map* map, MapKeyType key);
+void* MapFindPointerKey(Map* map, void* key);
+void* MapFindInt64Key(Map* map, int64_t key);
 
 void MapPrint(Map* map, void (*printer)(const MapKeyValue* kv));
 void MapTraverse(Map* map,
-                 void (*func)(const void* key, void* value, void* data),
+                 void (*func)(MapKeyValue* kv, void* data),
                  void* data);
 
 #endif /* map_h */

@@ -14,26 +14,33 @@
 #include <stdint.h>
 
 struct Linker;
-struct LinkerFile;
+struct ObjectFile;
+struct Symbol;
 
 // A decoded ELFRelocation.
-typedef struct {
-  String symbol_name;
-  ELFReaderSection* section;
-  int type;
-  int64_t offset;
-  int32_t addend;
-  int got_offset;     // Offset into GOT.
-  int plt_offset;     // Offset into PLT.
-} LinkerRelocation;
+typedef struct Relocation {
+  String symbol_name;        // Symbol name.
+  struct Symbol* symbol;     // Decoded symbol (might be NULL).
+  ELFReaderSection* section; // Target section.
+  int type;                  // Relocation type.
+  int64_t offset;            // Offset into section.
+  int64_t addend;            // Value to add to end.
+} Relocation;
 
-LinkerRelocation* NewLinkerRelocation(const char* symbol_name, int64_t offset,
-                                      int32_t reloc_type);
-void LinkerRelocationDestruct(LinkerRelocation* reloc);
-void LinkerRelocationDelete(LinkerRelocation* reloc);
+Relocation* NewRelocation(const char* symbol_name,
+                            ELFReaderSection* target_section,
+                            int64_t offset,
+                            int32_t reloc_type,
+                          int64_t addend);
+Relocation* NewSymbolRelocation(struct Symbol* symbol,
+                                      int64_t offset,
+                                      int32_t reloc_type,
+                                      int64_t addend);
+void RelocationDestruct(Relocation* reloc);
+void RelocationDelete(Relocation* reloc);
 
 void LinkerReadRelocation(struct Linker* linker,
-                    struct LinkerFile* file,
+                    struct ObjectFile* file,
                     ELFReaderFile* elf_file,
                     ELFRelocation* reloc,
                     const char* symbol_table_address,

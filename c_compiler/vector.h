@@ -10,20 +10,19 @@
 #define vector_h
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
-// Vector of pointers.  This is a dynamic array of pointers.  The array will
-// be expanded as space is exhausted.  The Vector does not own the pointers
-// and is not responsible for freeing up memory occupied by them.
+// Vector of 64-bit values.  This is a dynamic array.  The array will
+// be expanded as space is exhausted.  The Vector does not own anything
+// stored in it and is not responsible for freeing up memory occupied by
+// the values.
 //
-// Since a pointer is the largest scalar type we can use the space
-// occupied by the pointer to store any other scalar type, with
-// appropriate use of casts.  For example, we can easily store 32 bit
-// integers directly in the vector memory without mallocing 4 bytes
-// and pointing to it.
-
-typedef struct {
-  void** value;     // Memory holding the pointers.
+typedef struct Vector {
+  union {
+    void** p;       // Pointers.
+    int64_t* w;     // 64-bit values.
+  } value;
   size_t length;    // Number of pointers in memory.
   size_t capacity;  // Number of pointers we have space for.
 } Vector;

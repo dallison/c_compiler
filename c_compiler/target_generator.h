@@ -51,6 +51,7 @@ typedef enum {
 
   TARGET_OP(fp),  // Frame pointer pseudo operation.
   TARGET_OP(sp),  // Stack pointer pseudo operation.
+  TARGET_OP(tp),  // Thread pointer pseudo operation.
 
   // Function result registers.
   TARGET_OP(resultx),     // Place in int result reg.
@@ -147,6 +148,7 @@ typedef struct TargetGenerator {
   
   TargetInstruction* frame_pointer;  // Frame pointer.
   TargetInstruction* stack_pointer;  // Stack pointer.
+  TargetInstruction* thread_pointer;  // Thread pointer.
 
   // Size of stack frame for current function.
   int32_t stack_frame_size;
@@ -157,6 +159,8 @@ typedef struct TargetGenerator {
   // array and struct operations.
   Symbol* memcpy;
   Symbol* memset;
+  
+  Symbol* __tls_get_addr;   // Get address of TLS variable.
 } TargetGenerator;
 
 void TargetGeneratorInit(TargetGenerator* Target, Generator* gen);
@@ -166,7 +170,7 @@ void TargetGeneratorDestruct(TargetGenerator* Target);
 void TargetGeneratorDelete(TargetGenerator* Target);
 
 void TargetPrintInstruction(TargetInstruction* inst,
-                            const char* (*name_func)(int));
+                            const char* (*name_func)(int), FILE* fp);
 
 TargetInstruction* TargetFirstInstruction(TargetGenerator* Target);
 TargetInstruction* TargetLastInstruction(TargetGenerator* Target);
@@ -238,6 +242,7 @@ TargetInstruction* TargetEmitConstant(TargetGenerator* target,
 TargetInstruction* TargetEmitSymbol(TargetGenerator* target,
                                     TargetInstruction* c);
 TargetInstruction* TargetFramePointer(TargetGenerator* target);
+TargetInstruction* TargetThreadPointer(TargetGenerator* target);
 
 TargetInstruction* TargetStackPointer(TargetGenerator* target);
 TargetInstruction* TargetNewLiteral(int id);

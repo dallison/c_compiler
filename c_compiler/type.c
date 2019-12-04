@@ -122,7 +122,7 @@ void TypeRecordCalculateSize(TypeRecord* record) {
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:
-        record->size = record->info.array_size * record->next->size;
+        record->size = record->info.array.size * record->next->size;
         break;
       case kDeclPointer:
         record->size = SizeofPointer();
@@ -184,10 +184,11 @@ TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type) {
   return ptr;
 }
 
-TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size) {
+TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size, bool is_flexible) {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
   t->declarator = kDeclArray;
-  t->info.array_size = array_size;
+  t->info.array.size = array_size;
+  t->info.array.is_flexible = is_flexible;
   t->size = 0;  // Don't know yet.
   return t;
 }
@@ -200,6 +201,10 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.varargs = false;
   t->info.function.unknown_args = false;
   t->info.function.definition = false;
+  t->info.function.is_constructor = false;
+  t->info.function.is_destructor = false;
+  t->info.function.old_style = false;
+  t->info.function.is_inline = false;
   VectorInit(&t->info.function.body);
   VectorInit(&t->info.function.prototype);
   return t;
@@ -233,7 +238,7 @@ bool StructMemberIsBitField(StructMember* member) {
 static int CompareStructMember(const void* a, const void* b) {
   const MapKeyValue* key1 = (const MapKeyValue*)a;
   const MapKeyValue* key2 = (const MapKeyValue*)b;
-  return StringCompare(key1->key, key2->key);
+  return StringCompare(key1->key.p, key2->key.p);
 }
 
 Struct* NewStruct(bool is_union) {
@@ -258,7 +263,7 @@ void StructDelete(Struct* s) {
 
 Symbol* NewEnumConstant(const char* name, int value) {
   TypeRecord* int_type = NewTypeRecord(kTypeInt, kQualConst);
-  Symbol* c = NewSymbol(name, int_type, kStorageImplicit);
+  Symbol* c = NewSymbol(name, int_type, STO(implicit));
   c->value.ivalue = value;
   return c;
 }
@@ -337,13 +342,13 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body) {
     printf("%s", str.value);
 
     if (record->declarator == kDeclArray) {
-      printf("array of size %d ", record->info.array_size);
+      printf("array of size %d ", record->info.array.size);
     } else if (record->declarator == kDeclFunction) {
       printf("function (");
       const char* sep = "";
       size_t nformals = record->info.function.prototype.length;
       for (size_t i = 0; i < nformals; i++) {
-        Symbol* formal = (Symbol*)record->info.function.prototype.value[i];
+        Symbol* formal = (Symbol*)record->info.function.prototype.value.p[i];
         printf("%s", sep);
         sep = ",";
         SymbolPrint(formal);
@@ -359,7 +364,7 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body) {
           print_newline = true;
         }
         for (size_t i = 0; i < num_statements; i++) {
-          ASTNode* stmt = (ASTNode*)record->info.function.body.value[i];
+          ASTNode* stmt = (ASTNode*)record->info.function.body.value.p[i];
           ASTNodePrint(stmt, 2);
         }
         printf("} returning ");
@@ -408,7 +413,7 @@ void TypeRecordToString(TypeRecord* type, String* result) {
 
     case kDeclArray:
       TypeRecordToString(type->next, result);
-      StringPrintf(result, "[%d]", type->info.array_size);
+      StringPrintf(result, "[%d]", type->info.array.size);
       break;
 
     case kDeclFunction: {
@@ -417,7 +422,7 @@ void TypeRecordToString(TypeRecord* type, String* result) {
       const char* sep = "";
       size_t nformals = type->info.function.prototype.length;
       for (size_t i = 0; i < nformals; i++) {
-        Symbol* formal = (Symbol*)type->info.function.prototype.value[i];
+        Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
         StringAppend(result, sep);
         TypeRecordToString(formal->type, result);
         sep = ",";
@@ -445,7 +450,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
 
 void TypeParserReset(TypeParser* parser) {
   parser->symbol = NULL;
-  parser->storage = kStorageImplicit;
+  parser->storage = STO(implicit);
   parser->found_void = false;
   parser->dimension_count = 0;
   VectorDestruct(&parser->stack);
@@ -518,7 +523,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
       StringDestruct(&typedef_name);
       if (symbol != NULL) {
         // Reference to a typedef?
-        if (symbol->storage == kStorageTypedef) {
+        if (StorageIs(symbol->storage, STO(typedef))) {
           LexNextToken(lex);
           type_record = TypeRecordCopy(symbol->type);
           type |= type_record->type;
@@ -534,7 +539,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
     Symbol* tag;
     TypeParser composite_parser;
     TypeParserInit(&composite_parser, parser->lex, parser->syntax,
-                   kStorageImplicit);
+                   STO(implicit));
     
     if ((type & (kTypeStruct | kTypeUnion)) != 0) {
       bool is_union = (type & kTypeUnion) != 0;
@@ -812,7 +817,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   size_t i = parser->stack.length;
   TypeRecord* t = parser->base_type;
   while (i > 0) {
-    TypeRecord* record = (TypeRecord*)parser->stack.value[i - 1];
+    TypeRecord* record = (TypeRecord*)parser->stack.value.p[i - 1];
     TypeRecordChain(record, t);
     record->type = t->type;
     t = record;
@@ -826,7 +831,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
     SymbolSetType(parser->symbol, t);
   } else {
     // Invent a fake symbol.
-    parser->symbol = NewSymbol(SyntaxFakeName(parser->syntax), t, kStorageAuto);
+    parser->symbol = NewSymbol(SyntaxFakeName(parser->syntax), t, STO(auto));
   }
   return parser->symbol;
 }
@@ -870,7 +875,7 @@ static bool CheckFormalName(Vector* formals, String* name) {
     return true;
   }
   for (size_t i = 0; i < formals->length; i++) {
-    Symbol* formal = (Symbol*)formals->value[i];
+    Symbol* formal = (Symbol*)formals->value.p[i];
     if (StringEqualString(&formal->name, name)) {
       return false;
     }
@@ -976,7 +981,7 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
         } else {
           TypeRecord* unknown = NewTypeRecord(kTypeInt, kQualPlain);
           Symbol* formal = NewSymbol(proto_parser->lex->spelling.value,
-                                     unknown, kStorageAuto);
+                                     unknown, STO(auto));
           LexNextToken(proto_parser->lex);
           ParseFormalArgument(proto_parser, func, formal, arg_number);
         }
@@ -1002,6 +1007,8 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
 }
 
 // Parse an array dimension expression and return the integer value.
+// Returns size if positive or:
+// -1: no size given.
 static int ParseArrayDimension(TypeParser* parser) {
   int64_t size = 0;
   if (!LexLookingAt(parser->lex, TOK(rsquare))) {
@@ -1012,7 +1019,12 @@ static int ParseArrayDimension(TypeParser* parser) {
     if (!ok) {
       // TODO: variable sized arrays?
       SyntaxError(parser->syntax, "Constant expression required");
-      size = 0;
+      size = 1;
+    } else {
+      if (size < 0) {
+        SyntaxError(parser->syntax, "Array with negative size");
+        size = 1;
+      }
     }
     ASTNodeDelete(size_expr);
   } else {
@@ -1020,6 +1032,7 @@ static int ParseArrayDimension(TypeParser* parser) {
       LexError(parser->lex,
                "Array dimension required after first dimension");
     }
+    size = -1;
   }
   return (int)size;
 }
@@ -1031,7 +1044,7 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
     // Check for function prototype declaration.
     if (LexMatch(parser->lex, TOK(lparen))) {
       TypeParser proto_parser;
-      TypeParserInit(&proto_parser, parser->lex, parser->syntax, kStorageAuto);
+      TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto));
       TypeRecord* func = NewFunctionTypeRecord();
       if (parser->symbol != NULL) {
         func->info.function.symbol = parser->symbol;
@@ -1045,11 +1058,15 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
       parser->dimension_count++;
       
       int size = ParseArrayDimension(parser);
-      
+      bool is_flexible = false;
+      if (size < 0) {
+        size = 0;
+        is_flexible = true;
+      }
       if (!LexMatch(parser->lex, TOK(rsquare))) {
         LexError(parser->lex, "Missing ]");
       }
-      TypeRecord* p = NewArrayTypeRecord(kQualPlain, size);
+      TypeRecord* p = NewArrayTypeRecord(kQualPlain, size, is_flexible);
       VectorAppend(&parser->stack, p);
     }
   }
@@ -1072,7 +1089,7 @@ void TypeParserParseBase(TypeParser* parser) {
 }
 
 StructMember* FindStructMember(Struct* str, String* name) {
-  return MapFind(&str->symbol_table, name);
+  return MapFindPointerKey(&str->symbol_table, name);
 }
 
 static bool CheckStructMember(Struct* str, String* name) {
@@ -1152,6 +1169,7 @@ error:
   SyntaxError(parser->syntax, "Invalid bitfield; %s", error);
 }
 
+
 // Parse a struct.  The 'struct' or 'union' keyword has been
 // consumed and the current token will be the follower.  This may
 // be a tag name or an open brace, or semicolon.  Don't consume
@@ -1191,7 +1209,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
       TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                         kQualPlain);
       type->info.struct_info = str;
-      tag = NewSymbol(tag_name.value, type, kStorageImplicit);
+      tag = NewSymbol(tag_name.value, type, STO(implicit));
       str->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
     }
@@ -1216,7 +1234,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
 
           // Add the member to the struct/union.
           VectorAppend(&str->members, member);
-          MapInsert(&str->symbol_table, &member->symbol->name, member);
+          MapKeyValue kv;
+          kv.key.p = &member->symbol->name;
+          kv.value.p = member;
+          MapInsert(&str->symbol_table, kv);
           
           // Check for bitfield.
           if (LexMatch(parser->lex, TOK(colon))) {
@@ -1250,6 +1271,34 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
     // Round the size of the struct to the next 8 byte boundary.
     str->size = (str->size + 7) & ~7;
     SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
+    
+    // Check the constraints for flexible arrays.
+    // 1. Flexible array cannot be the only member
+    // 2. Flexible array must be at the end of the struct.
+    // 3. No flexible arrays in unions.
+    for (size_t i = 0; i < str->members.length; i++) {
+      StructMember* member = str->members.value.p[i];
+      if (TypeIsArray(member->symbol->type)) {
+        if (member->symbol->type->info.array.is_flexible) {
+          if (is_union) {
+            SyntaxError(parser->syntax, "No flexible arrays allowed in unions");
+            break;
+          }
+          if (str->members.length == 1) {
+            SyntaxError(parser->syntax,
+                        "Flexible array '%s' cannot be the only member in a struct",
+                        member->symbol->name.value);
+            break;
+          }
+          if (i != str->members.length - 1) {
+            SyntaxError(parser->syntax,
+                        "Flexible array '%s' needs to be the last member in a struct",
+                        member->symbol->name.value);
+            break;
+          }
+        }
+      }
+    }
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.
@@ -1263,7 +1312,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
       Struct* str = NewStruct(is_union);
       TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
       type->info.struct_info = str;
-      tag = NewSymbol(tag_name.value, type, kStorageImplicit);
+      tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->is_forward_declared = true;
       str->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
@@ -1307,7 +1356,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       e = NewEnum();
       TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
       type->info.enum_info = e;
-      tag = NewSymbol(tag_name.value, type, kStorageImplicit);
+      tag = NewSymbol(tag_name.value, type, STO(implicit));
       e->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
     }
@@ -1373,7 +1422,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       Enum* e = NewEnum();
       TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
       type->info.enum_info = e;
-      tag = NewSymbol(tag_name.value, type, kStorageImplicit);
+      tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->is_forward_declared = true;
       e->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);

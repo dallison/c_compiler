@@ -207,7 +207,7 @@ typedef struct IRNode {
   Vector outputs;
   struct BasicBlock* block;
   TypeRecord* type;
-  int flags;
+  int flags;    // Bottom 16 bits for IR, top 16 for target.
   struct {
     void* ptr;
     int32_t ivalue;
@@ -286,6 +286,7 @@ bool IRIsVariable(IRNode* node);
 bool IRIsAutoVariable(IRNode* node);
 bool IRIsArgument(IRNode* node);
 bool IRIsStaticVariable(IRNode* node);
+bool IRIsThreadVariable(IRNode* node);
 bool IRIsZero(IRNode* node);
 
 bool IRIsVarDef(IRNode* inst);

@@ -139,6 +139,10 @@ static int GetRank(TypeRecord* type) {
   return -1;
 }
 
+static bool IsIntConstant(ASTNode* node) {
+  return node->op == AST_OP(number) || node->op == AST_OP(charconst);
+}
+
 // Check that we have a valid operands for a numeric expression
 // and insert conversions as necessary.
 static void InsertNumericConversions(BinaryASTNode* node) {
@@ -153,8 +157,8 @@ static void InsertNumericConversions(BinaryASTNode* node) {
     // TODO:
   } else {
     // Convert smaller rank to larger.
-    int left_rank = GetRank(node->left->type);
-    int right_rank = GetRank(node->right->type);
+    int left_rank = IsIntConstant(node->left) ? 0 : GetRank(node->left->type);
+    int right_rank = IsIntConstant(node->right) ? 0 : GetRank(node->right->type);
     assert(left_rank != -1 && right_rank != -1);
     if (left_rank > right_rank) {
       // Convert right to left.
@@ -389,8 +393,8 @@ static void AnalyzeInitialization(ASTNode* node,
     return;
   }
 
-  bool is_static = id_node->symbol->storage == kStorageStatic ||
-                   id_node->symbol->storage == kStorageExtern;
+  bool is_static = StorageIs(id_node->symbol->storage, STO(static)) ||
+                   StorageIs(id_node->symbol->storage, STO(extern));
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -534,7 +538,7 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
   AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
-    AnalyzeExpression((ASTNode*)node->children->value[i]);
+    AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
@@ -573,8 +577,8 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
     }
 
     for (size_t i = 0; i < num_formal_args && i < num_actual_args; i++) {
-      ASTNode* actual = (ASTNode*)node->children->value[i];
-      Symbol* formal = (Symbol*)subtype->info.function.prototype.value[i];
+      ASTNode* actual = (ASTNode*)node->children->value.p[i];
+      Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
       SemanticConvertType(actual, formal->type);
 
       // Composites (structs/unions), arrays and functions need addresses, not
@@ -726,7 +730,7 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
 
 static void AnalyzeVarargsBuiltin1(VectorASTNode* args) {
   for (size_t i = 0; i < args->children->length; i++) {
-    ASTNode* child = args->children->value[i];
+    ASTNode* child = args->children->value.p[i];
     AnalyzeExpression(child);
     child->flags |= kASTNeedAddress;  // Need address of all of these.
   }
@@ -735,9 +739,9 @@ static void AnalyzeVarargsBuiltin1(VectorASTNode* args) {
 
 static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
   // Second arg is a constant whose type is set to the type of the arg.
-  ASTNode* ap = args->children->value[0];
+  ASTNode* ap = args->children->value.p[0];
   ap->flags |= kASTNeedAddress;  // Need address of ap arg.
-  ASTNode* type_node = args->children->value[1];
+  ASTNode* type_node = args->children->value.p[1];
   ASTNodeSetType(&args->base, type_node->type);  // Type is type of second arg.
 }
 
