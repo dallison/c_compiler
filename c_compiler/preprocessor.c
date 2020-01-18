@@ -15,6 +15,11 @@
 #include <unistd.h>
 #include <string.h>
 
+#if defined(__APPLE__)
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
+
 #include "compiler.h"
 #include "errors.h"
 #include "expr_evaluator.h"
@@ -23,7 +28,7 @@
 #include "lex.h"
 
 // Forward declarations.
-static void Tokenize(String* input, String* output,
+static void Tokenize(String* input, String* output, size_t start,
                      bool init_output, bool assembler_mode,
                      bool header_names_ok);
 
@@ -36,6 +41,7 @@ Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
                 Vector* args, String* replacement_text,
                 SourceLocation location) {
   Macro* macro = malloc(sizeof(Macro));
+  BinaryTreeNodeInit(&macro->header);
   StringInit(&macro->name, name);
   VectorCopy(&macro->args, args);
   StringInit(&macro->replacement_text, replacement_text->value);
@@ -44,8 +50,6 @@ Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
   macro->varargs = varargs;
   macro->enabled = true;
   macro->location = location;
-  macro->left = NULL;
-  macro->right = NULL;
   return macro;
 }
 
@@ -66,46 +70,25 @@ void MacroEnable(Macro* macro) {
 
 #define MACROS_TABLE_SIZE 1009
 
-static bool InsertMacro(Macro* table, Macro* macro, Macro** parent) {
-  if (table == NULL) {
-    *parent = macro;
-    return true;
-  } else {
-    int comp = StringCompareString(&table->name, &macro->name);
-    if (comp == 0) {
-      // Duplicate macro.
-      return false;
-    }
-    if (comp < 0) {
-      return InsertMacro(table->left, macro, &table->left);
-    }
-    return InsertMacro(table->right, macro, &table->right);
-  }
+static int MacroInsertCompare(BinaryTreeNode* node1, BinaryTreeNode* node2) {
+  Macro* macro1 = (Macro*)node1;
+  Macro* macro2 = (Macro*)node2;
+  return StringCompareString(&macro1->name, &macro2->name);
 }
 
-static Macro* FindMacro(Macro* table, const char* name) {
-  if (table == NULL) {
-    return NULL;
-  }
-  int comp = StringCompare(&table->name, name);
-  if (comp == 0) {
-    return table;
-  }
-  if (comp < 0) {
-    return FindMacro(table->left, name);
-  }
-  return FindMacro(table->right, name);
+static int MacroSearchCompare(BinaryTreeNode* node, void* name) {
+  Macro* macro = (Macro*)node;
+  return StringCompare(&macro->name, name);
 }
 
-static void DeleteMacro(void* macro, void* data) {
-  Macro* mac = (Macro*)macro;
-  if (mac == NULL) {
-    return;
-  }
-  DeleteMacro(mac->left, data);
-  DeleteMacro(mac->right, data);
-  MacroDestruct(mac);
-  free(mac);
+static void MacroDestructor(BinaryTreeNode* node, void* data) {
+  MacroDestruct((Macro*)node);
+}
+
+
+static void DeleteMacroTree(void* tree, void* data) {
+  BinaryTreeDestruct(tree, data);
+  free(tree);
 }
 
 static size_t HashMacro(void* value, HashTable* table, HashMode mode) {
@@ -129,11 +112,19 @@ static size_t HashMacro(void* value, HashTable* table, HashMode mode) {
 }
 
 static bool InsertMacroInHashTable(void* entry, void* value, void** parent) {
-  return InsertMacro(entry, value, (Macro**)parent);
+  BinaryTree* tree = entry;
+  if (entry == NULL) {
+    tree = NewBinaryTree(MacroInsertCompare,
+                         MacroSearchCompare,
+                         MacroDestructor);
+    *parent = tree;
+  }
+  return BinaryTreeInsert(tree, value);
 }
 
 static void* FindMacroInHashTable(void* entry, void* value) {
-  return FindMacro(entry, value);
+  BinaryTree* tree = entry;
+  return BinaryTreeSearch(tree, value);
 }
 
 static void PredefineMacros(Preprocessor* p) {
@@ -230,6 +221,84 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   }
 }
 
+#if defined(__APPLE__)
+// Find all dirs called "include" in the Mac OS toolchains directory
+// and add them all as system incude paths.
+static void AddMacOSIncludeDirs(Preprocessor* p, const char* root) {
+  DIR* dir = opendir(root);
+  if (dir == NULL) {
+    return;
+  }
+  struct dirent* entry;
+  while (((entry = readdir(dir)) != NULL)) {
+    if (entry->d_name[0] == '.') {
+      continue;
+    }
+    // No frameworks.
+    if (strcmp(entry->d_name, "Frameworks") == 0) {
+      continue;
+    }
+    if (strcmp(entry->d_name, "PrivateFrameworks") == 0) {
+      continue;
+    }
+    String path;
+    StringInit(&path, NULL);
+    StringPrintf(&path, "%s/%s", root, entry->d_name);
+    if (strcmp(entry->d_name, "include") == 0) {
+      PreprocessorAddSystemIncludePath(p, path.value);
+    }
+    struct stat st;
+    int e = stat(path.value, &st);
+    if (e == 0 && S_ISDIR(st.st_mode)) {
+      // Directory, recurse into it.
+      AddMacOSIncludeDirs(p, path.value);
+    }
+    StringDestruct(&path);
+  }
+  closedir(dir);
+}
+
+// On MacOS the standard C files are not inside a directory
+// named 'include'.  We need to find them and add their parent
+// directory.  We look for a file and add its parent dir.  Returns
+// true when we've found the file to prevent looking at all dirs.
+static bool AddMacOSClib(Preprocessor* p, const char* root,
+                         const char* search_file) {
+  DIR* dir = opendir(root);
+
+  if (dir == NULL) {
+    return false;
+  }
+  struct dirent* entry;
+  while (((entry = readdir(dir)) != NULL)) {
+    if (entry->d_name[0] == '.') {
+      continue;
+    }
+    String path;
+    StringInit(&path, NULL);
+    StringPrintf(&path, "%s/%s", root, entry->d_name);
+    if (strcmp(entry->d_name, search_file) == 0) {
+      PreprocessorAddSystemIncludePath(p, root);
+      StringDestruct(&path);
+      return true;
+    }
+    struct stat st;
+    int e = stat(path.value, &st);
+    if (e == 0 && S_ISDIR(st.st_mode)) {
+      // Directory, recurse into it.
+      if (AddMacOSClib(p, path.value, search_file)) {
+        StringDestruct(&path);
+        return true;
+      }
+    }
+    StringDestruct(&path);
+  }
+  closedir(dir);
+  return false;
+}
+
+#endif
+
 void PreprocessorInit(Preprocessor* p) {
   HashTableInit(&p->macros, "macros", MACROS_TABLE_SIZE, HashMacro,
                 InsertMacroInHashTable, FindMacroInHashTable);
@@ -241,23 +310,21 @@ void PreprocessorInit(Preprocessor* p) {
 
   PreprocessorAddSystemIncludePath(p, "/usr/include");
 #ifdef __APPLE__
-  // TODO: this is all wrong.  There has to be a better way.
-  PreprocessorAddSystemIncludePath(
-      p,
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/"
-      "XcodeDefault.xctoolchain/usr/lib/clang/9.1.0/include");
-  PreprocessorAddSystemIncludePath(
-      p,
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/"
-      "XcodeDefault.xctoolchain/usr/include");
-  PreprocessorAddSystemIncludePath(
-      p,
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/"
-      "Developer/SDKs/MacOSX10.13.sdk/usr/include");
-  PreprocessorAddSystemIncludePath(
-      p,
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/"
-      "XcodeDefault.xctoolchain/usr/lib/clang/9.0.0/include");
+  const char toolchains[] =
+      "/Applications/Xcode.app/Contents/Developer/Toolchains";
+  AddMacOSClib(p, toolchains, "stdio.h");
+  AddMacOSClib(p, toolchains, "ctype.h");
+  AddMacOSIncludeDirs(p, toolchains);
+  AddMacOSIncludeDirs(p,
+                      "/Applications/Xcode.app/Contents/Developer/"
+                      "Platforms/MacOSX.platform/"
+                      "Developer");
+#if 0
+  for (size_t i = 0; i < p->system_include_paths.length; i++) {
+    String* path = p->system_include_paths.value.p[i];
+    printf("%s\n", path->value);
+  }
+#endif
 #endif
 
   // Add current dir to the include paths.
@@ -294,16 +361,27 @@ void PreprocessorDestruct(Preprocessor* p) {
 }
 
 void PreprocessorReset(Preprocessor* p) {
-  HashTableTraverse(&p->macros, DeleteMacro, NULL);
+  HashTableTraverse(&p->macros, DeleteMacroTree, NULL);
   HashTableClear(&p->macros);
   PredefineMacros(p);
 }
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
-  VectorAppend(&p->user_include_paths, NewString(path));
+  // Ensure only one entry with this path.
+  for (size_t i = 0; i < p->user_include_paths.length; i++) {
+    if (StringEqual(p->user_include_paths.value.p[i], path)) {
+      return;
+    }
+  }  VectorAppend(&p->user_include_paths, NewString(path));
 }
 
 void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path) {
+  // Ensure only one entry with this path.
+  for (size_t i = 0; i < p->system_include_paths.length; i++) {
+    if (StringEqual(p->system_include_paths.value.p[i], path)) {
+      return;
+    }
+  }
   VectorAppend(&p->system_include_paths, NewString(path));
 }
 
@@ -312,7 +390,7 @@ void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
   String raw_value;
   StringInitImmutable(&raw_value, value);
   String tokens;
-  Tokenize(&raw_value, &tokens, true,
+  Tokenize(&raw_value, &tokens, 0, true,
            p->lex == NULL ? false : p->lex->assembler_mode, false);
 
   Macro* macro = HashTableSearch(&p->macros, (char*)macro_name);
@@ -383,7 +461,8 @@ typedef enum {
   PPTOK(openparen),           // (
   PPTOK(closeparen),          // )
   PPTOK(comma),               // ,
-  PPTOK(space),               // whitespace
+  PPTOK(comment),             // comment (*)
+  PPTOK(space),               // single space char
   PPTOK(system_header),       // system header name
   PPTOK(end),                 // Not present in token stream.
 } PreprocessingToken;
@@ -444,6 +523,7 @@ static size_t FindNextTokenIndex(TokenIterator* t) {
     case PPTOK(char_literal):
     case PPTOK(wide_char_literal):
     case PPTOK(system_header): {
+    case PPTOK(comment):
       curr = DecodeLength(t->input, curr+1, &length);
       break;
     }
@@ -506,6 +586,7 @@ static void AppendTokenSpelling(String* tokens,
     case PPTOK(other_string):
     case PPTOK(number):
     case PPTOK(defined):
+    case PPTOK(comment):
     case PPTOK(literal):
     case PPTOK(wide_literal):
     case PPTOK(char_literal):
@@ -558,9 +639,14 @@ static void GetCurrentTokenSpelling(TokenIterator* t, String* spelling) {
   AppendCurrentTokenSpelling(t, spelling);
 }
 
+static bool IsSpaceToken(TokenIterator* t) {
+  char tok = CurrentToken(t);
+  return tok == PPTOK(space) || tok == PPTOK(comment);
+}
+
 static void MoveToNextToken(TokenIterator* t) {
   // Set prev to curr as long as curr isn't a space.
-  if (CurrentToken(t) != PPTOK(space)) {
+  if (!IsSpaceToken(t)) {
     t->prev = t->curr;
   }
   t->curr = t->next;
@@ -754,9 +840,9 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
         do {
           do {
             ch = line->value[++pos];
-          } while (ch != '*');
+          } while (pos < line->length && ch != '*');
           ch = line->value[++pos];
-        } while (ch != '/');
+        } while (pos < line->length && ch != '/');
         
         // Continue to get another token.
         continue;
@@ -771,12 +857,78 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
   return pos;
 }
 
+static size_t HandleSpacesAndComments(String* line, String* output,
+                                      size_t pos) {
+  while (pos < line->length) {
+    char ch = line->value[pos];
+    
+    // Check for a comment.
+    if (ch == '/') {
+      // '//' comment?
+      if (pos < line->length &&
+          line->value[pos + 1] == '/') {
+        
+        // Append comment token with rest of line as spelling.
+        StringAppendChar(output, PPTOK(comment));
+        size_t length = line->length - pos;
+        EncodeLength(output, length);
+        StringAppendSegment(output, &line->value[pos], length);
+        break;
+      } else if (pos < line->length - 1 &&
+                 line->value[pos + 1] == '*') {
+        size_t start = pos;
+        // Multi-line comment.  Read until we find the */ at the end or
+        // end of line.
+        pos += 2;  // Skip /*.
+        do {
+          do {
+            ch = line->value[++pos];
+          } while (pos < line->length && ch != '*');
+          ch = line->value[++pos];
+        } while (pos < line->length && ch != '/');
+        
+        // Append comment token with comment as spelling.
+        StringAppendChar(output, PPTOK(comment));
+        size_t length = pos - start;
+        EncodeLength(output, length);
+        StringAppendSegment(output, &line->value[start], length);
+
+        // Continue to get another token.
+        continue;
+      }
+    }
+    
+    // Sequence of spaces.  Appended as single space as long as it isn't
+    // at the start or end of the line.
+    if (isspace(ch)) {
+      bool start_or_end = pos == 0;
+      while (pos < line->length) {
+        ch = line->value[pos];
+        if (!isspace(ch)) {
+          break;
+        }
+        pos++;
+      }
+      start_or_end |= pos == line->length;
+      if (!start_or_end) {
+         // Append space token
+         StringAppendChar(output, PPTOK(space));
+      }
+      continue;
+    }
+    break;
+   }
+  return pos;
+}
+
+
 // Handle:
 // defined name
 // defined (name) - spaces optional
 static size_t AppendDefined(String* input, String* output, size_t pos) {
   pos = SkipSpacesAndCommentsInLine(input, pos);
   size_t start = pos;
+  size_t length = 0;
   if (input->value[pos] == '(') {
     pos++;
     pos = SkipSpacesAndCommentsInLine(input, pos);
@@ -784,33 +936,27 @@ static size_t AppendDefined(String* input, String* output, size_t pos) {
     while (isalnum(input->value[pos]) || input->value[pos] == '_') {
       pos++;
     }
+    length = pos - start;
     pos++;
   } else {
     while (isalnum(input->value[pos]) || input->value[pos] == '_') {
       pos++;
     }
+    length = pos - start;
   }
-  size_t length = pos - start;
   EncodeLength(output, length);
   StringAppendSegment(output, &input->value[start], length);
   
   return pos;
 }
 
-static void Tokenize(String* input, String* output,
+static void Tokenize(String* input, String* output, size_t start,
                      bool init_output, bool assembler_mode, bool header_names_ok) {
   if (init_output) {
     StringInit(output, NULL);
   }
-  for (size_t i = 0; i < input->length;) {
-    size_t new_i = SkipSpacesAndCommentsInLine(input, i);
-    if (new_i > i) {
-      if (i > 0 && new_i < input->length) {
-        // Space token, ignore at beginning and end.
-        StringAppendChar(output, PPTOK(space));
-      }
-      i = new_i;
-    }
+  for (size_t i = start; i < input->length;) {
+    i = HandleSpacesAndComments(input, output, i);
     char ch = input->value[i];
     if (isalpha(ch) || ch == '_' || (assembler_mode && (ch == '.' || ch == '@'))) {
       if ((ch == 'L' || ch == 'l') && input->value[i+1] == '"') {
@@ -861,7 +1007,7 @@ static void Tokenize(String* input, String* output,
       i = AppendStringLiteral(input, output, i+1);
       continue;
     }
-    if (ch == '"') {
+    if (ch == '\'') {
       StringAppendChar(output, PPTOK(char_literal));
       i = AppendCharLiteral(input, output, i+1);
       continue;
@@ -977,7 +1123,11 @@ static void PrintTokenizedLine(String* line) {
          printf("comma\n");
          break;
       case PPTOK(space):
-         printf("space\n");
+          printf("space\n");
+          break;
+      case PPTOK(comment):
+         printf("comment\n");
+         i = PrintLengthDelimitedToken(line, i);
          break;
       case PPTOK(end):
         printf("end\n");
@@ -1000,14 +1150,15 @@ static void EraseCurrentToken(TokenIterator* t) {
 }
 
 static void SkipSpaceTokens(TokenIterator* t) {
-  while (CurrentToken(t) == PPTOK(space)) {
+  while (IsSpaceToken(t)) {
     MoveToNextToken(t);
   }
 }
 
-static void TokenizeAndReplaceCurrentToken(TokenIterator* t, String* text, bool assembler_mode) {
+static void TokenizeAndReplaceCurrentToken(TokenIterator* t,
+                                           String* text, bool assembler_mode) {
   String tokens;
-  Tokenize(text, &tokens, true, assembler_mode, false);
+  Tokenize(text, &tokens, 0, true, assembler_mode, false);
   ReplaceCurrentToken(t, &tokens);
   StringDestruct(&tokens);
 }
@@ -1021,6 +1172,7 @@ static void DetokenizeToken(String* tokens,
     case PPTOK(identifier):
     case PPTOK(other_string):
     case PPTOK(number):
+    case PPTOK(comment):
       AppendTokenSpelling(tokens, index, text);
       break;
     case PPTOK(defined):
@@ -1083,6 +1235,18 @@ static void Detokenize(String* tokens, String* text) {
     DetokenizeToken(ti.input, ti.curr, text);
     MoveToNextToken(&ti);
   }
+}
+
+// Returns index after comment close (or eol).
+static size_t SkipToEndOfComment(String* line, size_t pos) {
+  while (pos < line->length) {
+    if (line->value[pos] == '*' && line->value[pos+1] == '/') {
+      pos += 2;
+      break;
+    }
+    pos++;
+  }
+  return pos;
 }
 
 // This skips spaces and tabs, but not newlines.  Comments are also skipped.
@@ -1311,12 +1475,11 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   size_t name_start = pos;
   pos = ReadIdentifier(line, pos, &macro_name);
   size_t name_end = pos;
-
   String replacement_text;  // Value of macro.
   bool function_like_macro = false;
   bool varargs = false;
 
-  // Arguments for function-like macro.
+  // Arguments for function-like macro."
   Vector args;
   VectorInit(&args);
 
@@ -1335,7 +1498,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   // need to tokenize the string.
   String raw_replacement_text;
   StringInitImmutable(&raw_replacement_text, &line->value[pos]);
-  Tokenize(&raw_replacement_text, &replacement_text, true, p->lex->assembler_mode, false);
+  Tokenize(&raw_replacement_text, &replacement_text, 0, true, p->lex->assembler_mode, false);
   
   // Check that ## rules are not violated.
   CheckHashHash(p, &replacement_text);
@@ -1451,11 +1614,9 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     return;
   }
   
-  String tail;
-  StringInitFromSegment(&tail, &line->value[pos], line->length - pos);
   String tokenized_line;
   // Tokenize, allowing header names.
-  Tokenize(&tail, &tokenized_line, true, false, true);
+  Tokenize(line, &tokenized_line, pos,  true, false, true);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
 
   TokenIterator ti;
@@ -1470,7 +1631,6 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     system_include = true;
   } else {
     PreprocessorError(p, "#include needs \"filename\" or <filename>");
-    StringDestruct(&tail);
     StringDestruct(&tokenized_line);
     return;
   }
@@ -1488,6 +1648,10 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     fp = FindFileInPath(&p->system_include_paths, &filename, &path_index);
   }
   if (fp == NULL) {
+    if (start_index != 0) {
+      // For #include_next we don't abort if there is no next include file.
+      return;
+    }
     // There is no point in continuing to compile if we can't find
     // an include file.  This will generated many, many errors for undefined
     // types and functions.
@@ -1503,7 +1667,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   // it as the current source in the Lex.
   Source* include_source = NewSourceFromFile(filename.value, fp);
   include_source->prev = p->lex->source;
-  // printf("Including file %s\n", filename.value);
+  printf("Including file %s\n", filename.value);
 
   // Save current path index and set new current.
   p->lex->source->path_index = compiler->current_include_path_index;
@@ -1514,7 +1678,6 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   // Done with this string since the Source will create a new one.
   StringDestruct(&filename);
   
-  StringDestruct(&tail);
   StringDestruct(&tokenized_line);
 
   // We have pushed a new Source provider as the current one
@@ -1561,16 +1724,20 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   
   Syntax syntax;
   SyntaxInit(&syntax, &lex);
+  bool prev_abort_on_error = abort_on_error;
+  abort_on_error = true;
   void* controlling_value = NULL;
-  ASTNode* expr = SyntaxParseExpression(&syntax, 0);
-  if (expr != NULL) {
-    AnalyzeExpression(expr);
-    int64_t value;
-    if (EvaluateIntegerExpression(expr, &value)) {
-      controlling_value = value == 0 ? NULL : &true_value;
+  if (setjmp(error_abort_state) == 0) {
+    ASTNode* expr = SyntaxParseExpression(&syntax, 0);
+    if (expr != NULL) {
+      AnalyzeExpression(expr);
+      int64_t value;
+      if (EvaluateIntegerExpression(expr, &value)) {
+        controlling_value = value == 0 ? NULL : &true_value;
+      }
     }
   }
-
+  abort_on_error = prev_abort_on_error;
   SyntaxDestruct(&syntax);
   lex.source = NULL;  // Prevent Lex from freeing source.
   LexDestruct(&lex);
@@ -1593,9 +1760,9 @@ static void If(Preprocessor* p, String* line, size_t pos) {
   StringAppend(&controlling_expr, "\n\n");
 
   void* controlling_value = EvaluateExpression(p, &controlling_expr);
-  StringDestruct(&controlling_expr);
   VectorPush(&p->if_stack, controlling_value);
-  
+  StringDestruct(&controlling_expr);
+
   // Update is is_compiled_in state.
   UpdateState(p);
 }
@@ -1622,6 +1789,7 @@ static void Ifndef(Preprocessor* p, String* line, size_t pos) {
     PreprocessorError(p, "Expected macro name after #ifndef");
     // An empty macro name will always be missing.
   }
+ 
   Macro* macro = HashTableSearch(&p->macros, macro_name.value);
   VectorPush(&p->if_stack, macro == NULL ? &macro_not_defined : NULL);
   StringDestruct(&macro_name);
@@ -1720,10 +1888,8 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
-  String tail;
-  StringInitFromSegment(&tail, &line->value[pos], line->length - pos);
   String tokenized_line;
-  Tokenize(&tail, &tokenized_line, true, false, false);
+  Tokenize(line, &tokenized_line, pos, true, false, false);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
   
   TokenIterator ti;
@@ -1774,7 +1940,6 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
      }
   }
   StringDestruct(&tokenized_line);
-  StringDestruct(&tail);
 }
 
 static void Error(Preprocessor* p, String* line, size_t pos) {
@@ -1828,10 +1993,8 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
-  String tail;
-  StringInitFromSegment(&tail, &line->value[pos], line->length - pos);
   String tokenized_tail;
-  Tokenize(&tail, &tokenized_tail, true, false, false);
+  Tokenize(line, &tokenized_tail, pos, true, false, false);
   
   TokenIterator ti;
   TokenIteratorInit(&ti, &tokenized_tail);
@@ -1847,9 +2010,11 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
         }
       }
       StringDestruct(&warning);
+    } else {
+      // Unknown pragma, ignore rest of line.
+      break;
     }
   }
-  StringDestruct(&tail);
   StringDestruct(&tokenized_tail);
 }
 
@@ -1869,7 +2034,11 @@ static struct {
 };
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line) {
-  size_t pos = SkipSpacesAndComments(p, 0, line, NULL);
+  size_t pos = 0;
+  if (p->lex->in_comment) {
+    pos = SkipToEndOfComment(line, pos);
+  }
+  pos = SkipSpacesAndComments(p, pos, line, NULL);
   if (pos >= line->length || line->value[pos] != '#') {
     return false;
   }
@@ -2006,7 +2175,7 @@ static void CollectActualArguments(Preprocessor* p,
         StringInit(&newline, NULL);
         SourceReadLine(p->lex->source, &newline);
         // Append newly read chars to the current tokens.
-        Tokenize(&newline, tokens, false, p->lex->assembler_mode, false);
+        Tokenize(&newline, tokens, 0, false, p->lex->assembler_mode, false);
         ti->next = FindNextTokenIndex(ti);
         StringDestruct(&newline);
         if (CurrentToken(ti) == PPTOK(end)) {
@@ -2158,7 +2327,7 @@ static void ReplaceFunctionLikeMacroText(TokenIterator* ti,
                       macro_name_token_index,
                       ti->curr - macro_name_token_index,
                       tokens);
-
+  ti->next = macro_name_token_index + tokens->length;
 }
 
 // Process any macros and arguments in the replacement text. This also
@@ -2402,12 +2571,21 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
     return;
   }
   String tokenized_line;
-  Tokenize(line, &tokenized_line, true, p->lex->assembler_mode, false);
-  
+  size_t start = 0;
+  if (p->lex->in_comment) {
+    start = SkipToEndOfComment(line, 0);
+  }
+  Tokenize(line, &tokenized_line, start, true, p->lex->assembler_mode, false);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, false);
   
   // Detokenize new line into output.
-  StringClear(line);
+  if (start != 0) {
+    // If we started out in a comment, put the comment back at the
+    // start of the line.
+    line->length = start;
+  } else {
+    StringClear(line);
+  }
   Detokenize(&tokenized_line, line);
 }
 

@@ -931,7 +931,7 @@ void LexReadLine(Lex* lex) {
       SourceReadLine(lex->source, &lex->line);
 
       // Check for preprocessing directive.
-       bool directive =
+      bool directive =
           PreprocessorParseDirective(lex->preprocessor, &lex->line);
       if (!directive) {
         // Not a preprocessor directive, therefore this is a line that should be
@@ -997,9 +997,9 @@ void LexSkipSpacesAndComments(Lex* lex) {
           do {
             do {
               ch = GetCharInComment(lex);
-            } while (ch != '*');
+            } while (!SourceEof(lex->source) && ch != '*');
             ch = GetCharInComment(lex);
-          } while (ch != '/');
+          } while (!SourceEof(lex->source) && ch != '/');
 
           lex->in_comment = false;
           // Continue to get another token.

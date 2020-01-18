@@ -20,6 +20,9 @@ void SemanticError(ASTNode* node, const char* format, ...) {
 }
 
 void VSemanticError(ASTNode* node, const char* format, va_list ap) {
+  if (abort_on_error) {
+    longjmp(error_abort_state, 1);
+  }
   const char* filename;
   int lineno;
   int start, end;
@@ -75,10 +78,7 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax) {
 
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
-  size_t num_statements = node->type->info.function.body.length;
-  for (size_t i = 0; i < num_statements; i++) {
-    AnalyzeStatement((ASTNode*)node->type->info.function.body.value.p[i]);
-  }
+  AnalyzeStatement(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax);
 }
 

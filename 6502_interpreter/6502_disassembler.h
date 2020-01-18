@@ -13,6 +13,6 @@
 #include "6502_machine.h"
 #include "6502_interpreter.h"
 
-void* Disassemble6502Instruction(Interpreter* interpreter, uint16_t addr, void* p, FILE* fp);
+void* Disassemble6502Instruction(_6502Interpreter* interpreter, uint16_t addr, void* p, FILE* fp);
 
 #endif /* _6502_disassembler_h */

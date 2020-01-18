@@ -253,6 +253,37 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
   }
 }
 
+static void InitArray(ASTNode* expr, ASTNode* subinit, int offset,
+                     Vector* initializers) {
+  TypeRecordCalculateSize(expr->type);
+  Initializer* init_out = malloc(sizeof(Initializer));
+  ConstantASTNode* string_node = (ConstantASTNode*)expr;
+  init_out->type = kInitTypeMemory;
+  init_out->offset = offset;
+  BufferInit(&init_out->value.memory);
+  size_t memory_size = expr->type->size;
+  size_t length;
+  if (TypeIsInt(expr->type)) {
+    // Wide string literal, string length includes 0 at end.
+    length = string_node->value.string->length;
+  } else {
+    // String literal, string length doesn't include \0.
+    length = string_node->value.string->length + 1;
+  }
+  if (length > memory_size) {
+    length = memory_size;
+  }
+  BufferAppend(&init_out->value.memory, string_node->value.string->value, length);
+  memory_size -= length;
+  if (memory_size > 0) {
+    // Add padding.
+    BufferAddSpace(&init_out->value.memory, memory_size);
+  }
+
+  VectorAppend(initializers, init_out);
+}
+
+
 // Expand a braced initializer into the vector given.
 // The initializer has been simplified into a braced initializer
 // containing only designated initializers.
@@ -281,28 +312,13 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
         }
       }
     }
-    // TODO: init of array of struct.
-    InitScalar(designated_init->init, subinit, offset, initializers);
-#if 0
-    switch (designated_init->init->op) {
-      // Simple scalar initialization
-      case AST_OP(expr_init): {
-        ExpressionInitializerASTNode* expr_init =
-            (ExpressionInitializerASTNode*)designated_init->init;
-        InitScalar(expr_init->expr, subinit, offset, initializers);
-        break;
-      }
-      case AST_OP(braced_init): {
-        // TODO: braced init for struct or array.
-        BracedInitializerASTNode* braced_init =
-            (BracedInitializerASTNode*)designated_init->init;
-        ExpandBracedInitializer(braced_init, offset, initializers);
-        break;
-      }
-      default:
-        assert(false);
+    if (TypeIsArray(designated_init->base.type)) {
+      InitArray(designated_init->init, subinit, offset, initializers);
+    } else {
+      // Whole struct is not possible at static level since they
+      // are not compile-time constants.
+      InitScalar(designated_init->init, subinit, offset, initializers);
     }
-#endif
   }
 }
 
@@ -320,7 +336,12 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
   VectorAppend(&compiler->initialized_static_variables, var);
 }
 
-void InitializerDelete(Initializer* init) { free(init); }
+void InitializerDelete(Initializer* init) {
+  if (init->type == kInitTypeMemory) {
+    BufferDestruct(&init->value.memory);
+  }
+  free(init);
+}
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var) {
   StringDestruct(&var->name);
@@ -416,7 +437,7 @@ static void CompileDeclaration(Syntax* syntax) {
                 VectorAppend(&compiler->uninitialized_static_variables, var);
               } else {
                 ASTNode* simplified_init = AnalyzeInitializer(
-                    decl->base.type, decl->initializer);
+                    decl->base.type, decl->initializer, true);
                 // This is an initialized static variable.  The initializer has
                 // been simplified to a braced initializer containing only
                 // designated initializers.

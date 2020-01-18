@@ -39,6 +39,11 @@
 			<key>orderHint</key>
 			<integer>16</integer>
 		</dict>
+		<key>elfdump.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>20</integer>
+		</dict>
 		<key>expr_eval.xcscheme</key>
 		<dict>
 			<key>orderHint</key>
@@ -98,6 +103,11 @@
 		<dict>
 			<key>orderHint</key>
 			<integer>4</integer>
+		</dict>
+		<key>tree_test.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>19</integer>
 		</dict>
 		<key>util_test.xcscheme</key>
 		<dict>
@@ -183,6 +193,11 @@
 			<true/>
 		</dict>
 		<key>E5BC31921FA78FBD00C7691B</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>E5C8E9C423CE8432006124C8</key>
 		<dict>
 			<key>primary</key>
 			<true/>

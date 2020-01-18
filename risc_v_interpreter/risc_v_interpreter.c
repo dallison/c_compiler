@@ -15,7 +15,7 @@
 #include "risc_v_disassembler.h"
 
 
-static void DumpRegisters(Interpreter* interpreter) {
+static void DumpRegisters(RISCVInterpreter* interpreter) {
   for (int i = 0; i < RV_NUM_INT_REGS; i++) {
     DisassemblePrintRegister(stdout, i, kRegTypeInt, "");
     
@@ -28,7 +28,7 @@ static void DumpRegisters(Interpreter* interpreter) {
   printf("pc: 0x%llx (%lld)\n", interpreter->pc, interpreter->pc);
 }
 
-static void DumpStateAndExit(Interpreter* interpreter) {
+static void DumpStateAndExit(RISCVInterpreter* interpreter) {
   DumpRegisters(interpreter);
   exit(1);
 }
@@ -46,7 +46,7 @@ static void DumpStateAndExit(Interpreter* interpreter) {
 // symbol name.  This is looked up in the dynamic symbol tables and if
 // found, the GOT entry is set to the address of the symbol and the PC
 // is set to that address.
-static void ResolveAndFixupSymbol(Interpreter* interpreter) {
+static void ResolveAndFixupSymbol(RISCVInterpreter* interpreter) {
   const int t0 = 5;
   const int t1 = 6;
   int64_t offset = interpreter->iregs[t1];
@@ -88,7 +88,7 @@ static void ResolveAndFixupSymbol(Interpreter* interpreter) {
 const bool kDumpRegsonEbreak = false;
 const bool kShowRegChanges = false;
 
-static void HandleEcall(Interpreter* interpreter) {
+static void HandleEcall(RISCVInterpreter* interpreter) {
   switch (interpreter->iregs[31]) {
     case RISC_V_ECALL_HALT:
       exit(0);
@@ -128,13 +128,13 @@ static void HandleEcall(Interpreter* interpreter) {
  }
 }
 
-static void HandleEbreak(Interpreter* interpreter) {
+static void HandleEbreak(RISCVInterpreter* interpreter) {
   if (kDumpRegsonEbreak) {
     DumpRegisters(interpreter);
   }
 }
 
-static void DumpRegChanges(Interpreter* interpreter) {
+static void DumpRegChanges(RISCVInterpreter* interpreter) {
   for (int i = 0; i < RV_NUM_INT_REGS; i++) {
     if (interpreter->iregs[i] != interpreter->old_iregs[i]) {
       DisassemblePrintRegister(stdout, i, kRegTypeInt, "");
@@ -149,8 +149,8 @@ static void DumpRegChanges(Interpreter* interpreter) {
   }
 }
 
-void InterpreterInit(Interpreter* interpreter, bool trace_regs, bool trace_instructions) {
-  memset(interpreter, 0, sizeof(Interpreter));
+void RISCVInterpreterInit(RISCVInterpreter* interpreter, bool trace_regs, bool trace_instructions) {
+  memset(interpreter, 0, sizeof(RISCVInterpreter));
   interpreter->trace_regs = trace_regs;
   interpreter->trace_instructions = trace_instructions;
   
@@ -171,7 +171,7 @@ void InterpreterInit(Interpreter* interpreter, bool trace_regs, bool trace_instr
   interpreter->symbol_resolver_code[1]= RV_OPCODE(system);   // ecall
 }
 
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
+void RISCVInterpreterRun(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
   interpreter->loader = loader;
   interpreter->stack = malloc(RISC_V_STACK_SIZE);
   interpreter->iregs[RV_SP_REG] = (int64_t)(interpreter->stack + RISC_V_STACK_SIZE);
@@ -636,7 +636,7 @@ void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_add
   }
 }
 
-void InterpreterDestruct(Interpreter* interpreter) {
+void RISCVInterpreterDestruct(RISCVInterpreter* interpreter) {
   free(interpreter->stack);
 }
 

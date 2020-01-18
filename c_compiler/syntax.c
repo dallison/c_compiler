@@ -17,6 +17,9 @@
 #include "syntax.h"
 #include "type.h"
 
+jmp_buf error_abort_state;       // Where to abort to.
+bool abort_on_error;
+
 void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->ast = NULL;
   syntax->lex = lex;
@@ -72,7 +75,7 @@ Symbol* SyntaxFindTag(Syntax* syntax, String* name) {
 Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_tag_stack;
   if (scope != NULL) {
-    Symbol* symbol = FindSymbol(scope->table, name);
+    Symbol* symbol = FindSymbol(&scope->table, name);
     if (symbol != NULL) {
       return symbol;
     }
@@ -92,6 +95,9 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
 }
 
 void SyntaxError(Syntax* syntax, const char* format, ...) {
+  if (abort_on_error) {
+    longjmp(error_abort_state, 1);
+  }
   va_list ap;
   va_start(ap, format);
   VLexError(syntax->lex, format, ap);
@@ -247,7 +253,7 @@ static ASTNode* ParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
 
   SourceLocation location = syntax->lex->current_token_location;
   return NewExpressionInitializerASTNode(
-      SyntaxParseExpression(syntax, TC(semicolon) | TC(stmt)), location);
+      SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(stmt)), location);
 }
 
 // Parse attributes and return a bitmask containing them.
@@ -345,12 +351,15 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     sym->type->info.function.definition = true;
     
     // Parse the function body.
+    Vector* body = NewVector();
     while (syntax->lex->current_token != TOK(rbrace)) {
       ASTNode* stmt = SyntaxParseStatement(syntax, TC(semicolon));
       if (stmt != NULL) {
-        VectorAppend(&sym->type->info.function.body, stmt);
+        VectorAppend(body, stmt);
       }
     }
+    sym->type->info.function.body =
+        NewCompoundStatementASTNode(body, syntax->lex->current_token_location);
     SyntaxNeedBracket(syntax, TOK(rbrace), TC(decl));
     SyntaxCloseScope(syntax);
     ASTNode* decl = NewVariableDeclarationASTNode(sym, NULL,
@@ -429,6 +438,130 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
   }
 }
 
+static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
+                                         TypeRecord* type,
+                                         Storage storage,
+                                         Vector* attributes,
+                                         Vector* declarations) {
+  Syntax* syntax = parser->syntax;
+  while (!LexEof(parser->syntax->lex)) {
+    if (LexLookingAt(syntax->lex, TOK(semicolon))) {
+      // We don't need to have a variable declaration.
+      break;
+    }
+
+    Symbol* sym = TypeParserParseDeclarator(parser, type);
+    // The old_sym refers to a previous declaration if found.
+    Symbol* old_sym = NULL;
+    if (sym != NULL) {
+      old_sym = FindGlobalSymbol(&sym->name);
+      bool ok = true;
+      if (old_sym != NULL) {
+        // We have this symbol already.  If it's a declaration then it's
+        // OK to declare (and define) it now.  If it's a definition then
+        // this must be a declaration.
+        if (old_sym->is_defined) {
+          if (StorageIs(storage, STO(extern))) {
+            // This might be a declaration, only if there is no initializer
+            if (LexLookingAt(parser->lex, TOK(equal))) {
+              // This is 'extern int foo = xxx', a definition
+              SyntaxError(syntax, "Duplicate definition of symbol %s",
+                          sym->name.value);
+              ok = false;
+            }
+          } else {
+            // This is a declaration of a previously known definition.
+            SyntaxError(syntax, "Duplicate definition of symbol %s",
+                        sym->name.value);
+            ok = false;
+          }
+        } else {
+          // Old sym is a declaration.
+        }
+        
+        if (!TypeEqual(sym->type, old_sym->type)) {
+          SyntaxError(syntax, "Symbol %s redeclared with different type",
+                      sym->name.value);
+          ok = false;
+        } else {
+          // Symbol declaration is the same type as the definition, make sure
+          // the linkage matches.
+          if (old_sym->storage != sym->storage) {
+            SyntaxError(syntax, "Symbol %s redeclared with different linkage",
+                        sym->name.value);
+            ok = false;
+          }
+        }
+      } else {
+        // This is the first declaration of this symbol, add to the symbol
+        // table.
+        bool ok = InsertGlobalSymbol(sym);
+        assert(ok);
+      }
+    }
+
+    // If we don't have a symbol in the type declarator we look for a comma and
+    // continue parsing.
+    if (sym == NULL) {
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      TypeParserReset(parser);
+      continue;
+    }
+
+    // Parse common __attribute__ syntax.
+    while (LexMatch(syntax->lex, TOK(attribute))) {
+      ParseAttribute(syntax, attributes);
+    }
+    
+    VectorCopy(&sym->attributes, attributes);
+    VectorClear(attributes);
+  
+    // Declaring or defining a function?
+    if (sym->type->declarator == kDeclFunction) {
+      ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
+      if (result != NULL) {
+        return result;
+      }
+    }
+    
+    if (old_sym != NULL) {
+      // We now refer to the previously defined symbol rather than this new
+      // one.
+      SymbolDelete(sym);
+      sym = old_sym;
+    }
+
+    // Check for "asm" after declaration
+    if (LexMatch(syntax->lex, TOK(asm))) {
+      SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
+      // TODO: actually do something with this?
+      // TODO: gcc asm syntax?
+      while (LexLookingAt(syntax->lex, TOK(string))) {
+        LexNextToken(syntax->lex);
+      }
+      SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
+    }
+
+    // Any initializer?
+    ASTNode* initializer = NULL;
+    if (LexMatch(syntax->lex, TOK(equal))) {
+      initializer = ParseInitializer(syntax, sym, storage);
+    }
+    ASTNode* decl = NewVariableDeclarationASTNode(
+        sym, initializer, syntax->lex->current_token_location);
+    VectorAppend(declarations, decl);
+
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+    TypeParserReset(parser);
+  }
+  return NULL;
+}
+
+
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
@@ -471,120 +604,20 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   TypeParserInit(&parser, syntax->lex, syntax, storage);
 
   // Now we get a sequence of declarations, separated by commas.
-  while (!LexEof(syntax->lex)) {
-    if (LexLookingAt(syntax->lex, TOK(semicolon))) {
-      // We don't need to have a variable declaration.
-      break;
-    }
-
-    Symbol* sym = TypeParserParseDeclarator(&parser, type);
-    // The old_sym refers to a previous declaration if found.
-    Symbol* old_sym = NULL;
-    if (sym != NULL) {
-      old_sym = FindGlobalSymbol(&sym->name);
-      bool ok = true;
-      if (old_sym != NULL) {
-        // We have this symbol already.  If it's a declaration then it's
-        // OK to declare (and define) it now.  If it's a definition then
-        // this must be a declaration.
-        if (old_sym->is_defined) {
-          if (StorageIs(storage, STO(extern))) {
-            // This might be a declaration, only if there is no initializer
-            if (LexLookingAt(parser.lex, TOK(equal))) {
-              // This is 'extern int foo = xxx', a definition
-              SyntaxError(syntax, "Duplicate definition of symbol %s",
-                          sym->name.value);
-              ok = false;
-            }
-          } else {
-            // This is a declaration of a previously known definition.
-            SyntaxError(syntax, "Duplicate definition of symbol %s",
-                        sym->name.value);
-            ok = false;
-          }
-        } else {
-          // Old sym is a declaration.
-        }
-        
-        if (!TypeEqual(sym->type, old_sym->type)) {
-          SyntaxError(parser.syntax, "Symbol %s redeclared with different type",
-                      sym->name.value);
-          ok = false;
-        } else {
-          // Symbol declaration is the same type as the definition, make sure
-          // the linkage matches.
-          if (old_sym->storage != sym->storage) {
-            SyntaxError(syntax, "Symbol %s redeclared with different linkage",
-                        sym->name.value);
-            ok = false;
-          }
-        }
-      } else {
-        // This is the first declaration of this symbol, add to the symbol
-        // table.
-        bool ok = InsertGlobalSymbol(sym);
-        assert(ok);
+  ASTNode* result = ParseExternalDeclarationList(&parser,
+                                                 type, storage,
+                                                 &attributes,
+                                                 declarations);
+  if (result != NULL) {
+    if (declarations->length != 1) {
+      SyntaxError(syntax, "Cannot mix function definition with declaration");
+      for (size_t i = 0; i < declarations->length; i++) {
+        ASTNodeDelete(declarations->value.p[i]);
       }
+      VectorDelete(declarations);
     }
-
-    // If we don't have a symbol in the type declarator we look for a comma and
-    // continue parsing.
-    if (sym == NULL) {
-      if (!LexMatch(syntax->lex, TOK(comma))) {
-        break;
-      }
-      TypeParserReset(&parser);
-      continue;
-    }
-
-    // Parse common __attribute__ syntax.
-    while (LexMatch(syntax->lex, TOK(attribute))) {
-      ParseAttribute(syntax, &attributes);
-    }
-    
-    VectorCopy(&sym->attributes, &attributes);
-    VectorClear(&attributes);
-  
-    // Declaring or defining a function?
-    if (sym->type->declarator == kDeclFunction) {
-      ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
-      if (result != NULL) {
-        return result;
-      }
-    }
-    
-    if (old_sym != NULL) {
-      // We now refer to the previously defined symbol rather than this new
-      // one.
-      SymbolDelete(sym);
-      sym = old_sym;
-    }
-
-    // Check for "asm" after declaration
-    if (LexMatch(syntax->lex, TOK(asm))) {
-      SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
-      // TODO: actually do something with this?
-      // TODO: gcc asm syntax?
-      while (LexLookingAt(syntax->lex, TOK(string))) {
-        LexNextToken(syntax->lex);
-      }
-      SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
-    }
-
-    // Any initializer?
-    ASTNode* initializer = NULL;
-    if (LexMatch(syntax->lex, TOK(equal))) {
-      initializer = ParseInitializer(syntax, sym, storage);
-    }
-
-    ASTNode* decl = NewVariableDeclarationASTNode(
-        sym, initializer, syntax->lex->current_token_location);
-    VectorAppend(declarations, decl);
-
-    if (!LexMatch(syntax->lex, TOK(comma))) {
-      break;
-    }
-    TypeParserReset(&parser);
+    VectorDestruct(&attributes);
+    return result;
   }
 
   // The declaration is followed by a semicolon.
@@ -611,38 +644,19 @@ static void SkipFunctionBody(Syntax* syntax) {
   }
 }
 
-// Parses a local symbol declaration or definition.  This occurs inside a
-// function.  The symbol is added to the local scope (top symbol table in the
-// local symbol stack).
-ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
-  Vector* declarations = NewVector();
-
-  Storage storage = STO(implicit);
-  bool is_inline = false;
-  TypeRecord* type = NULL;
-  Vector attributes;
-  VectorInit(&attributes);
-  
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
-
-  if (is_inline) {
-    SyntaxError(syntax, "inline is not allowed here");
-  }
-  
-  // Parse the type specifier (char, unsigned int, etc.)
-  TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, storage);
-
-  // Now we get a sequence of declarations, separated by commas.
+static void ParseLocalDeclarationList(TypeParser* parser,
+                                      TypeRecord* type, Storage storage,
+                                      Vector* attributes, Vector* declarations) {
+  Syntax* syntax = parser->syntax;
   while (!LexEof(syntax->lex)) {
     if (LexLookingAt(syntax->lex, TOK(semicolon))) {
       // We don't need to have a variable declaration.
       break;
     }
-    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    Symbol* sym = TypeParserParseDeclarator(parser, type);
     if (sym != NULL) {
       Symbol* old_sym =
-          FindTopLocalSymbol(parser.syntax->local_symbol_stack, &sym->name);
+          FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
       bool ok = true;
       if (old_sym != NULL) {
         // We have this symbol already.  If it's a declaration then it's
@@ -651,7 +665,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
         if (old_sym->is_defined) {
           if (StorageIs(storage, STO(extern))) {
             // This might be a declaration, only if there is no initializer
-            if (LexLookingAt(parser.lex, TOK(equal))) {
+            if (LexLookingAt(parser->lex, TOK(equal))) {
               SyntaxError(syntax,
                           "Extern variable can't have an initializer: %s",
                           sym->name.value);
@@ -659,7 +673,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
             }
           } else {
             // This is a declaration of a previously known definition.
-            SyntaxError(syntax, "Duplicate defintition of local symbol %s",
+            SyntaxError(syntax, "Duplicate definition of local symbol %s",
                         sym->name.value);
             ok = false;
           }
@@ -690,7 +704,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        bool ok = SyntaxAddSymbol(parser.syntax, sym);
+        bool ok = SyntaxAddSymbol(syntax, sym);
         assert(ok);
       }
     }
@@ -701,7 +715,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
       if (!LexMatch(syntax->lex, TOK(comma))) {
         break;
       }
-      TypeParserReset(&parser);
+      TypeParserReset(parser);
       continue;
     }
 
@@ -711,8 +725,8 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
     }
 
     // Symbol takes ownerhip of attribute strings.
-    VectorCopy(&sym->attributes, &attributes);
-    VectorClear(&attributes);
+    VectorCopy(&sym->attributes, attributes);
+    VectorClear(attributes);
     
     // Check for __thread violations.
     CheckThreadLocal(syntax, sym);
@@ -721,9 +735,9 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
     if (sym->type->declarator == kDeclFunction) {
       if (LexMatch(syntax->lex, TOK(lbrace))) {
         // C does not supported nested functions.
-        SyntaxError(parser.syntax, "Function definition not allowed here");
+        SyntaxError(syntax, "Function definition not allowed here");
         // Skip function body so that we can attempt to recover.
-        SkipFunctionBody(parser.syntax);
+        SkipFunctionBody(syntax);
         // Continue on to check for comma, which probably won't exist
         // then we will exit the loop.
       }
@@ -754,8 +768,34 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
-    TypeParserReset(&parser);
+    TypeParserReset(parser);
   }
+}
+
+// Parses a local symbol declaration or definition.  This occurs inside a
+// function.  The symbol is added to the local scope (top symbol table in the
+// local symbol stack).
+ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
+  Vector* declarations = NewVector();
+
+  Storage storage = STO(implicit);
+  bool is_inline = false;
+  TypeRecord* type = NULL;
+  Vector attributes;
+  VectorInit(&attributes);
+  
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
+
+  if (is_inline) {
+    SyntaxError(syntax, "inline is not allowed here");
+  }
+  
+  // Parse the type specifier (char, unsigned int, etc.)
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, storage);
+
+  // Now we get a sequence of declarations, separated by commas.
+  ParseLocalDeclarationList(&parser, type, storage, &attributes, declarations);
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax);

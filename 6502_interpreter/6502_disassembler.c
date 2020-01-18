@@ -330,7 +330,7 @@ static void* DisassembleGroup12(uint16_t addr, void* p, int hi, FILE* fp) {
   return (char*)p + 2;
 }
 
-void* Disassemble6502Instruction(Interpreter* interpreter, uint16_t addr, void* p, FILE* fp) {
+void* Disassemble6502Instruction(_6502Interpreter* interpreter, uint16_t addr, void* p, FILE* fp) {
   fprintf(fp, "%4x  ", addr);
   int lo = *(char*)p & 0xf;
   int hi = (*(char*)p & 0xf0) >> 4;

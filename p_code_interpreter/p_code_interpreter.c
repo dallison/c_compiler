@@ -18,7 +18,7 @@
 #define SRC1(inst) ((inst >> 8) & 0xff)
 #define SRC2(inst) (inst & 0xff)
 
-static void DumpStateAndExit(Interpreter* interpreter) {
+static void DumpStateAndExit(PCodeInterpreter* interpreter) {
   // TODO: dump registers.
   exit(1);
 }
@@ -38,7 +38,7 @@ static bool disassemble = true;
 // The relocations for the PLTGOT are in the DT(jmprel) entry
 // in the dynamic section, which can be obtained from the
 // library.
-static void ResolveAndFixupSymbol(Interpreter* interpreter) {
+static void ResolveAndFixupSymbol(PCodeInterpreter* interpreter) {
   uint64_t reloc_index = interpreter->iregs[26];
   uint64_t* resolver_data = (uint64_t*)interpreter->iregs[27];
   LoadedDynamicLibrary* lib = (LoadedDynamicLibrary*)resolver_data[0];
@@ -68,7 +68,7 @@ static void ResolveAndFixupSymbol(Interpreter* interpreter) {
   interpreter->iregs[PCODE_PC_REG] = symbol_address;
 }
 
-static void EscapeHandler(Interpreter* interpreter, int32_t code){
+static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code){
   switch (code) {
     case P_CODE_ESC_UNDEF_INST:
       printf("Undefined instruction opcode\n");
@@ -112,8 +112,8 @@ static void EscapeHandler(Interpreter* interpreter, int32_t code){
   }
 }
 
-void InterpreterInit(Interpreter* interpreter) {
-  memset(interpreter, 0, sizeof(Interpreter));
+void PCodeInterpreterInit(PCodeInterpreter* interpreter) {
+  memset(interpreter, 0, sizeof(PCodeInterpreter));
   
   // Create symbol resolver code.  This is invoked from the first
   // PLT entry with the following registers set:
@@ -139,7 +139,7 @@ void InterpreterInit(Interpreter* interpreter) {
       P_CODE_ESC_RESOLVE;
 }
 
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
+void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
   interpreter->stack = malloc(P_CODE_STACK_SIZE);
   interpreter->iregs[PCODE_SP_REG] = (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
   interpreter->escape = EscapeHandler;
@@ -611,6 +611,6 @@ void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_add
   }
 }
 
-void InterpreterDestruct(Interpreter* interpreter) {
+void PCodeInterpreterDestruct(PCodeInterpreter* interpreter) {
   free(interpreter->stack);
 }

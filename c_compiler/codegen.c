@@ -514,16 +514,13 @@ void* GenerateFunction(Generator* gen) {
     IRSetType(gen->struct_return_value, gen->func->next);
   }
 
-  if (gen->func->info.function.body.length == 0) {
+  CompoundStatementASTNode* body = (CompoundStatementASTNode*)gen->func->info.function.body;
+  if (body->statements->length == 0) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));
   } else {
     GeneratorEmit(gen, NewIR(IR_OP(enter)));
-    size_t num_statments = gen->func->info.function.body.length;
-    for (size_t i = 0; i < num_statments; i++) {
-      ASTNode* node = gen->func->info.function.body.value.p[i];
-      GenerateStatement(gen, node);
-    }
+    GenerateStatement(gen, &body->base);
 
     if (gen->return_label == NULL) {
       GeneratorEmit(gen, NewIR(IR_OP(leave)));

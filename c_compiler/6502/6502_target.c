@@ -171,7 +171,26 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
         fprintf(fp, "\t.long    .str.%d\n", init->value.literal_id);
         next_offset += 8;
         break;
-    }
+      case kInitTypeMemory: {
+        int byte_count = 0;
+        const char* sep = "";
+        const int kByteLimit = 16;  // 16 bytes per line.
+        for (size_t i = 0; i < init->value.memory.length; i++) {
+          if (byte_count == 0) {
+            fprintf(fp, "\t.byte ");
+          }
+          fprintf(fp, "%s0x%02x", sep, init->value.memory.value[i]);
+          sep = ",";
+          byte_count++;
+          if (byte_count == kByteLimit) {
+            byte_count = 0;
+            fprintf(fp, "\n");
+            sep = "";
+          }
+        }
+        fprintf(fp, "\n");
+        break;
+      }    }
   }
   
   // Pad to full size.

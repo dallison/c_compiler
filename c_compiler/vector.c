@@ -88,7 +88,9 @@ void VectorSet(Vector* vec, size_t index, void* value) {
 
 void* VectorGet(Vector* vec, size_t index) { return vec->value.p[index]; }
 
-void* VectorLast(Vector* vec) { return vec->value.p[vec->length - 1]; }
+void* VectorLast(Vector* vec) {
+  return vec->length == 0 ? NULL : vec->value.p[vec->length - 1];
+}
 
 void VectorCopy(Vector* dest, Vector* src) {
   VectorInit(dest);

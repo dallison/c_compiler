@@ -135,7 +135,7 @@ bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
     munmap(addr, length);
   }
   close(fd);
-  return true;
+  return ok;
 }
 
 void ELFReaderFileDestruct(ELFReaderFile* elf) {

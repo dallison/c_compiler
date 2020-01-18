@@ -13,10 +13,12 @@
 #include "hashtable.h"
 #include "source.h"
 #include "vector.h"
+#include "binary_tree.h"
 
 // This is a macro defined using #define (or predefined).  Macros are held
 // in a hash table of binary trees so the lookup is quick.
 typedef struct Macro {
+  BinaryTreeNode header;    // Embedded binary tree node.
   String name;              // Macro name.
   Vector args;              // Arg names (for function-like macro).
   String replacement_text;  // Value of macro (tokenized).
@@ -25,8 +27,6 @@ typedef struct Macro {
   bool varargs;             // Variable args.
   bool enabled;             // Macro is enabled.
   SourceLocation location;  // Where the macro was defined.
-  struct Macro* left;       // Left tree (names less than this one).
-  struct Macro* right;      // Macros with names greater or equal to this one.
 } Macro;
 
 Macro* NewMacro(const char* name, bool is_function_like, bool varargs,

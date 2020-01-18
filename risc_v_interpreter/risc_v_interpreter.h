@@ -23,7 +23,7 @@
 #define RISC_V_ECALL_READ 5
 #define RISC_V_ECALL_RESOLVE 6
 
-typedef struct Interpreter {
+typedef struct RISCVInterpreter {
   Loader* loader;
   int64_t iregs[RV_NUM_INT_REGS];
   double fregs[RV_NUM_FLOAT_REGS];;
@@ -37,10 +37,10 @@ typedef struct Interpreter {
   SymbolScope* current_symbol;
   bool trace_regs;
   bool trace_instructions;
-} Interpreter;
+} RISCVInterpreter;
 
-void InterpreterInit(Interpreter* interpreter, bool trace_regs, bool trace_instructions);
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
-void InterpreterDestruct(Interpreter* interpreter);
+void RISCVInterpreterInit(RISCVInterpreter* interpreter, bool trace_regs, bool trace_instructions);
+void RISCVInterpreterRun(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void RISCVInterpreterDestruct(RISCVInterpreter* interpreter);
 
 #endif /* risc_v_interpreter_h */

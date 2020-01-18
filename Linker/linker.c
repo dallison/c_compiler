@@ -851,7 +851,7 @@ static void AddSymbolListToOutput(void* entry, void* data) {
       // to the file (before the symbol table, string table, etc.)
       section_index = (int32_t)elf->sections.length - 1;
     } else {
-      section_index = sym->section->output_section_index;
+      section_index = sym->section->output_section_index - 1;
     }
     ELFWriterAddSymbol(elf, &sym->name, section_index,
                        type, binding, sym->header->size,

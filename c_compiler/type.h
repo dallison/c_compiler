@@ -14,6 +14,8 @@
 #include "vector.h"
 #include "map.h"
 
+struct ASTNode;
+
 // Basic type (int, long, etc.)
 typedef enum {
   kTypeImplicit = 0,
@@ -57,14 +59,14 @@ typedef enum {
 
 // Function info.
 typedef struct {
-  Symbol* symbol;     // Symbol for function (or NULL).
-  Vector prototype;   // Formal arguments (vector of Symbol*).
-  bool varargs;       // True if varargs function.
-  Vector body;        // Vector of statements (ASTNode*).
-  bool unknown_args;  // Old-style or invented function.
-  bool definition;    // Function is a definition.
-  bool old_style;     // Old-style arguments.
-  bool is_inline;     // This is an inline function.
+  Symbol* symbol;       // Symbol for function (or NULL).
+  Vector prototype;     // Formal arguments (vector of Symbol*).
+  bool varargs;         // True if varargs function.
+  struct ASTNode* body; // Body AST.
+  bool unknown_args;    // Old-style or invented function.
+  bool definition;      // Function is a definition.
+  bool old_style;       // Old-style arguments.
+  bool is_inline;       // This is an inline function.
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
 } FunctionInfo;

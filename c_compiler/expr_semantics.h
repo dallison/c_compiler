@@ -12,6 +12,7 @@
 #include "semantics.h"
 #include "syntax.h"
 
-void AnalyzeExpression(ASTNode* node);
+ASTNode* AnalyzeExpression(ASTNode* node);
+bool IsConstantExpression(ASTNode* node);
 
 #endif /* expr_semantics_h */

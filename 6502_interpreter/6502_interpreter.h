@@ -25,7 +25,7 @@
 // Start of user escape codes.
 #define _6502_ESC_USER_START  256
 
-typedef struct Interpreter {
+typedef struct _6502Interpreter {
   Loader* loader;
   uint8_t* memory;         // 64K of memory
   uint8_t* zero_page;
@@ -51,14 +51,14 @@ typedef struct Interpreter {
   int8_t startup_code[4];
   int8_t symbol_resolver_code[4];
   
-  void (*escape)(struct Interpreter*, int32_t value);
+  void (*escape)(struct _6502Interpreter*, int32_t value);
   SymbolScope* current_symbol;
-} Interpreter;
+} _6502Interpreter;
 
-void InterpreterInit(Interpreter* interpreter);
+void _6502InterpreterInit(_6502Interpreter* interpreter);
 
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
-void InterpreterDisassemble(Interpreter* interpreter, Loader* loader);
-void InterpreterExtract(Interpreter* interpreter, Loader* loader, FILE* fp);
-void InterpreterDestruct(Interpreter* interpreter);
+void _6502InterpreterRun(_6502Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void _6502InterpreterDisassemble(_6502Interpreter* interpreter, Loader* loader);
+void _6502InterpreterExtract(_6502Interpreter* interpreter, Loader* loader, FILE* fp);
+void _6502InterpreterDestruct(_6502Interpreter* interpreter);
 #endif /* _6502_interpreter_h */

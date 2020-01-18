@@ -14,11 +14,11 @@
 #include <unistd.h>
 #include "6502_disassembler.h"
 
-#define _6502_instruction_decl(x) static void Interpret_##x(Interpreter*);
-#define _6502_instruction_def(x) static void Interpret_##x(Interpreter* interpreter)
+#define _6502_instruction_decl(x) static void Interpret_##x(_6502Interpreter*);
+#define _6502_instruction_def(x) static void Interpret_##x(_6502Interpreter* interpreter)
 #define _6502_instruction(x) Interpret_##x,
 
-typedef void (*Instruction)(Interpreter*);
+typedef void (*Instruction)(_6502Interpreter*);
 
 bool disassemble = true;
 
@@ -571,11 +571,11 @@ static Instruction instructions[256] = {
   _6502_instruction(sbc_abs_x)
 };
 
-void InterpreterInit(Interpreter* interpreter) {
-  memset(interpreter, 0, sizeof(Interpreter));
+void _6502InterpreterInit(_6502Interpreter* interpreter) {
+  memset(interpreter, 0, sizeof(_6502Interpreter));
 }
 
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
+void _6502InterpreterRun(_6502Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
   interpreter->memory = calloc(65536, 1);    // 64K of memory.
   interpreter->s = 0xff;
   interpreter->zero_page = (uint8_t*)interpreter->memory;
@@ -610,7 +610,7 @@ void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_add
   }
 }
 
-void InterpreterDisassemble(Interpreter* interpreter, Loader* loader) {
+void _6502InterpreterDisassemble(_6502Interpreter* interpreter, Loader* loader) {
   for (size_t i = 1; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
     for (size_t section_index = 0; section_index < region->sections.length; section_index++) {
@@ -633,7 +633,7 @@ void InterpreterDisassemble(Interpreter* interpreter, Loader* loader) {
 // Extract the contents of the EXE file into a binary file containing
 // only the sections with data.  This will be .text and .data sections
 // containing code and static data.  This can be burned into a ROM.
-void InterpreterExtract(Interpreter* interpreter, Loader* loader, FILE* fp) {
+void _6502InterpreterExtract(_6502Interpreter* interpreter, Loader* loader, FILE* fp) {
   char* memory = calloc(65536, 1);
   char* start_memory = memory + 65536;
   char* end_memory = memory;
@@ -662,7 +662,7 @@ void InterpreterExtract(Interpreter* interpreter, Loader* loader, FILE* fp) {
   free(memory);
 }
 
-void InterpreterDestruct(Interpreter* interpreter) {
+void _6502InterpreterDestruct(_6502Interpreter* interpreter) {
   free(interpreter->memory);
 }
 

@@ -110,9 +110,19 @@ int TypeRecordAlignment(TypeRecord* record) {
   }
 }
 
-void TypeRecordIncRef(TypeRecord* record) { record->refs++; }
+void TypeRecordIncRef(TypeRecord* record) {
+  if (record == NULL) {
+    return;
+  }
+  record->refs++;
+}
 
-void TypeRecordDecRef(TypeRecord* record) { record->refs--; }
+void TypeRecordDecRef(TypeRecord* record) {
+  if (record == NULL) {
+    return;
+  }
+  record->refs--;
+}
 
 void TypeRecordCalculateSize(TypeRecord* record) {
   if (record == NULL) {
@@ -205,7 +215,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_destructor = false;
   t->info.function.old_style = false;
   t->info.function.is_inline = false;
-  VectorInit(&t->info.function.body);
+  t->info.function.body = NULL;
   VectorInit(&t->info.function.prototype);
   return t;
 }
@@ -358,13 +368,15 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body) {
       }
       if (with_function_body) {
         printf(") {");
-        size_t num_statements = record->info.function.body.length;
+        CompoundStatementASTNode* body = (CompoundStatementASTNode*)
+              record->info.function.body;
+        size_t num_statements = body->statements->length;
         if (num_statements > 0) {
           printf("\n");
           print_newline = true;
         }
         for (size_t i = 0; i < num_statements; i++) {
-          ASTNode* stmt = (ASTNode*)record->info.function.body.value.p[i];
+          ASTNode* stmt = (ASTNode*)body->statements->value.p[i];
           ASTNodePrint(stmt, 2);
         }
         printf("} returning ");
@@ -911,24 +923,69 @@ static void ParseFormalArgument(TypeParser* proto_parser,
   }
 }
 
+
+// Prototype style.  C still allows old-style K&R code.
+typedef enum  {
+  kStyleUnknown,
+  kStyleOld,
+  kStyleNew
+} PrototypeStyle;
+
+static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecord* func,
+                                             PrototypeStyle style,
+                                             int arg_number) {
+  if (proto_parser->found_void ||
+        SyntaxLookingAtType(proto_parser->syntax)) {
+    TypeRecord* type = TypeParserParseType(proto_parser);
+    assert(type != NULL);
+    if (style == kStyleUnknown) {
+      style = kStyleNew;
+    }
+    if (style == kStyleOld) {
+      SyntaxError(proto_parser->syntax,
+                  "Cannot mix function prototype with old-style function args");
+    }
+    Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
+    assert(formal != NULL);
+    ParseFormalArgument(proto_parser, func, formal, arg_number);
+  } else {
+    // Possible old-style function decl, identifiers only.
+    if (LexLookingAt(proto_parser->lex, TOK(identifier))) {
+      if (style == kStyleUnknown) {
+        style = kStyleOld;
+      }
+      if (style == kStyleNew) {
+        SyntaxError(proto_parser->syntax, "Type expected for function arg");
+        SyntaxRecover(proto_parser->syntax, TC(closebra));
+      } else {
+        TypeRecord* unknown = NewTypeRecord(kTypeInt, kQualPlain);
+        Symbol* formal = NewSymbol(proto_parser->lex->spelling.value,
+                                   unknown, STO(auto));
+        LexNextToken(proto_parser->lex);
+        ParseFormalArgument(proto_parser, func, formal, arg_number);
+      }
+    } else {
+      SyntaxError(proto_parser->syntax,
+                  "Expected type or identifier in function prototype");
+      SyntaxRecover(proto_parser->syntax, TC(closebra));
+    }
+  }
+  return style;
+}
+
 // Parse a function prototype, old or new style.
 static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   bool void_args = false;
+  FunctionInfo* info = &func->info.function;
+  PrototypeStyle style = kStyleUnknown;
   int arg_number = 0;
   
-  // Prototype style.  C still allows old-style K&R code.
-  enum PrototypeStyle {
-    kStyleUnknown,
-    kStyleOld,
-    kStyleNew
-  } style = kStyleUnknown;
-
-  func->info.function.old_style = false;
+  info->old_style = false;
 
   while (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
     if (LexMatch(proto_parser->lex, TOK(ellipsis))) {
       // ... must be the last argument in the prototype.
-      func->info.function.varargs = true;
+      info->varargs = true;
       if (!LexLookingAt(proto_parser->lex, TOK(rparen))) {
         SyntaxError(proto_parser->syntax,
                     "... must be at the end of a function prototype");
@@ -953,56 +1010,22 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
       style = kStyleNew;
     }
     
-    // Parse the formal argument's type, if it has one.  Otherwise it's a possible
-    // old-style function.
-    if (proto_parser->found_void ||
-          SyntaxLookingAtType(proto_parser->syntax)) {
-      TypeRecord* type = TypeParserParseType(proto_parser);
-      assert(type != NULL);
-      if (style == kStyleUnknown) {
-        style = kStyleNew;
-      }
-      if (style == kStyleOld) {
-        SyntaxError(proto_parser->syntax,
-                    "Cannot mix function prototype with old-style function args");
-      }
-      Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
-      assert(formal != NULL);
-      ParseFormalArgument(proto_parser, func, formal, arg_number);
-    } else {
-      // Possible old-style function decl, identifiers only.
-      if (LexLookingAt(proto_parser->lex, TOK(identifier))) {
-        if (style == kStyleUnknown) {
-          style = kStyleOld;
-        }
-        if (style == kStyleNew) {
-          SyntaxError(proto_parser->syntax, "Type expected for function arg");
-          SyntaxRecover(proto_parser->syntax, TC(closebra));
-        } else {
-          TypeRecord* unknown = NewTypeRecord(kTypeInt, kQualPlain);
-          Symbol* formal = NewSymbol(proto_parser->lex->spelling.value,
-                                     unknown, STO(auto));
-          LexNextToken(proto_parser->lex);
-          ParseFormalArgument(proto_parser, func, formal, arg_number);
-        }
-      } else {
-        SyntaxError(proto_parser->syntax,
-                    "Expected type or identifier in function prototype");
-        SyntaxRecover(proto_parser->syntax, TC(closebra));
-      }
-    }
+    // Parse the formal argument's type, if it has one.
+    // Otherwise it's a possible old-style function.
+    style = ParseFunctionParameter(proto_parser, func, style, arg_number);
     arg_number++;
     if (!LexMatch(proto_parser->lex, TOK(comma))) {
       break;
     }
   }
+  if (style == kStyleOld) {
+    info->old_style = true;
+  }
+
   // If we were not told (void) and there are no formal args then the C
   // language says that this is a variable arguments function.
-  if (func->info.function.prototype.length == 0 && !void_args) {
-    func->info.function.unknown_args = true;
-  }
-  if (style == kStyleOld) {
-    func->info.function.old_style = true;
+  if (info->prototype.length == 0 && !void_args) {
+    info->unknown_args = true;
   }
 }
 
@@ -1169,6 +1192,148 @@ error:
   SyntaxError(parser->syntax, "Invalid bitfield; %s", error);
 }
 
+static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
+  while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+    TypeRecord* member_type = TypeParserParseType(parser);
+    while (!LexEof(parser->lex)) {
+      Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
+      if (!CheckStructMember(str, &member_symbol->name)) {
+        SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                    member_symbol->name.value);
+        SymbolDelete(member_symbol);
+      } else {
+        StructMember* member = NewStructMember(member_symbol);
+
+        // Add the member to the struct/union.
+        VectorAppend(&str->members, member);
+        MapKeyValue kv;
+        kv.key.p = &member->symbol->name;
+        kv.value.p = member;
+        MapInsert(&str->symbol_table, kv);
+        
+        // Check for bitfield.
+        if (LexMatch(parser->lex, TOK(colon))) {
+          ParseBitField(parser, is_union, str, member_symbol, member);
+        } else {
+          // Regular member, align the member to the appropriate boundary.
+          AlignNextOffset(str, member_symbol->type);
+          member->byte_offset = str->next_offset;
+          member->index = str->members.length - 1;
+
+          // Update the struct offset and size based on the
+          // member that was inserted.
+          if (!is_union) {
+            str->next_offset += member_symbol->type->size;
+            str->size = str->next_offset;
+          } else {
+            // The size of a union is the maximum size of its members.
+            if (member_symbol->type->size > str->size) {
+              str->size = member_symbol->type->size;
+            }
+          }
+        }
+      }
+      if (!LexMatch(parser->lex, TOK(comma))) {
+        break;
+      }
+    }
+    SyntaxNeedSemicolon(parser->syntax);
+  }
+}
+
+static void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union) {
+  // Check the constraints for flexible arrays.
+  // 1. Flexible array cannot be the only member
+  // 2. Flexible array must be at the end of the struct.
+  // 3. No flexible arrays in unions.
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (TypeIsArray(member->symbol->type)) {
+      if (member->symbol->type->info.array.is_flexible) {
+        if (is_union) {
+          SyntaxError(parser->syntax, "No flexible arrays allowed in unions");
+          break;
+        }
+        if (str->members.length == 1) {
+          SyntaxError(parser->syntax,
+                      "Flexible array '%s' cannot be the only "
+                      "member in a struct",
+                      member->symbol->name.value);
+          break;
+        }
+        if (i != str->members.length - 1) {
+          SyntaxError(parser->syntax,
+                      "Flexible array '%s' needs to be "
+                      "the last member in a struct",
+                      member->symbol->name.value);
+          break;
+        }
+      }
+    }
+  }
+}
+
+static void CheckTagType(TypeParser* parser, Symbol* old,
+                         bool is_union, bool is_enum) {
+  bool error = false;
+  if (TypeIsEnum(old->type)) {
+    error = !is_enum;
+  } else {
+    // Tag is a struct or union.
+    Struct* str = old->type->info.struct_info;
+    error = str->is_union != is_union;
+  }
+  if (error) {
+    SyntaxError(parser->syntax,
+              "Tag %s declared with different tag type",
+              old->name.value);
+  }
+}
+
+static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_union) {
+  // We have a struct body.
+  // First check that this is not a duplicate definition.
+  Struct* str = NULL;
+  if (tag_name->length == 0) {
+    StringSet(tag_name, SyntaxFakeName(parser->syntax));
+  }
+  Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  if (tag != NULL) {
+    if (!tag->is_forward_declared) {
+      SyntaxError(parser->syntax, "Duplicate definition of struct/union %s",
+                   tag_name->value);
+    } else {
+      CheckTagType(parser, tag, is_union, false);
+    }
+    str = tag->type->info.struct_info;
+  } else {
+    // Tag doesn't exist in the, create one.
+    str = NewStruct(is_union);
+    TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
+                                      kQualPlain);
+    type->info.struct_info = str;
+    tag = NewSymbol(tag_name->value, type, STO(implicit));
+    str->tag_name = &tag->name;
+    SyntaxAddTag(parser->syntax, tag);
+  }
+
+  // Note in the symbol that this tag is now defined and not
+  // forward declared.
+  tag->is_forward_declared = false;
+  tag->is_defined = true;
+
+  // Now 'tag' will be the struct tag pointer
+  // and 'str' will be a pointer to the Struct information.
+  ParseStructMembers(parser, str, is_union);
+  
+  // Round the size of the struct to the next 8 byte boundary.
+  str->size = (str->size + 7) & ~7;
+  SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
+   
+  CheckFlexibleArrays(parser, str, is_union);
+  
+  return tag;
+}
 
 // Parse a struct.  The 'struct' or 'union' keyword has been
 // consumed and the current token will be the follower.  This may
@@ -1190,115 +1355,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   }
   Symbol* tag = NULL;
   if (LexMatch(parser->lex, TOK(lbrace))) {
-    // We have a struct body.
-    // First check that this is not a duplicate definition.
-    Struct* str = NULL;
-    if (tag_name.length == 0) {
-      StringSet(&tag_name, SyntaxFakeName(parser->syntax));
-    }
-    tag = SyntaxFindTopScopeTag(parser->syntax, &tag_name);
-    if (tag != NULL) {
-      if (!tag->is_forward_declared) {
-        SyntaxError(parser->syntax, "Duplicate definition of struct/union %s",
-                    tag_name.value);
-      }
-      str = tag->type->info.struct_info;
-    } else {
-      // Tag doesn't exist in the, create one.
-      str = NewStruct(is_union);
-      TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
-                                        kQualPlain);
-      type->info.struct_info = str;
-      tag = NewSymbol(tag_name.value, type, STO(implicit));
-      str->tag_name = &tag->name;
-      SyntaxAddTag(parser->syntax, tag);
-    }
-
-    // Note in the symbol that this tag is now defined and not
-    // forward declared.
-    tag->is_forward_declared = false;
-    tag->is_defined = true;
-
-    // Now 'tag' will be the struct tag pointer
-    // and 'str' will be a pointer to the Struct information.
-    while (!LexLookingAt(parser->lex, TOK(rbrace))) {
-      TypeRecord* member_type = TypeParserParseType(parser);
-      while (!LexEof(parser->lex)) {
-        Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
-        if (!CheckStructMember(str, &member_symbol->name)) {
-          SyntaxError(parser->syntax, "Duplicate struct/union member %s",
-                      member_symbol->name.value);
-          SymbolDelete(member_symbol);
-        } else {
-          StructMember* member = NewStructMember(member_symbol);
-
-          // Add the member to the struct/union.
-          VectorAppend(&str->members, member);
-          MapKeyValue kv;
-          kv.key.p = &member->symbol->name;
-          kv.value.p = member;
-          MapInsert(&str->symbol_table, kv);
-          
-          // Check for bitfield.
-          if (LexMatch(parser->lex, TOK(colon))) {
-            ParseBitField(parser, is_union, str, member_symbol, member);
-          } else {
-            // Regular member, align the member to the appropriate boundary.
-            AlignNextOffset(str, member_symbol->type);
-            member->byte_offset = str->next_offset;
-            member->index = str->members.length - 1;
-
-            // Update the struct offset and size based on the
-            // member that was inserted.
-            if (!is_union) {
-              str->next_offset += member_symbol->type->size;
-              str->size = str->next_offset;
-            } else {
-              // The size of a union is the maximum size of its members.
-              if (member_symbol->type->size > str->size) {
-                str->size = member_symbol->type->size;
-              }
-            }
-          }
-        }
-        if (!LexMatch(parser->lex, TOK(comma))) {
-          break;
-        }
-      }
-      SyntaxNeedSemicolon(parser->syntax);
-    }
-
-    // Round the size of the struct to the next 8 byte boundary.
-    str->size = (str->size + 7) & ~7;
-    SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
-    
-    // Check the constraints for flexible arrays.
-    // 1. Flexible array cannot be the only member
-    // 2. Flexible array must be at the end of the struct.
-    // 3. No flexible arrays in unions.
-    for (size_t i = 0; i < str->members.length; i++) {
-      StructMember* member = str->members.value.p[i];
-      if (TypeIsArray(member->symbol->type)) {
-        if (member->symbol->type->info.array.is_flexible) {
-          if (is_union) {
-            SyntaxError(parser->syntax, "No flexible arrays allowed in unions");
-            break;
-          }
-          if (str->members.length == 1) {
-            SyntaxError(parser->syntax,
-                        "Flexible array '%s' cannot be the only member in a struct",
-                        member->symbol->name.value);
-            break;
-          }
-          if (i != str->members.length - 1) {
-            SyntaxError(parser->syntax,
-                        "Flexible array '%s' needs to be the last member in a struct",
-                        member->symbol->name.value);
-            break;
-          }
-        }
-      }
-    }
+    tag = ParseStructBody(parser, &tag_name, is_union);
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.
@@ -1316,8 +1373,92 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
       tag->is_forward_declared = true;
       str->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
+    } else {
+      // Tag already exists, make sure it's the same tag type.
+      CheckTagType(parser, tag, is_union, false);
     }
   }
+  return tag;
+}
+
+static void ParseEnumConstants(TypeParser* parser, Enum* e) {
+  while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+    if (LexLookingAt(parser->lex, TOK(identifier))) {
+      String const_name;
+      StringInit(&const_name, parser->lex->spelling.value);
+      LexNextToken(parser->lex);
+      if (LexMatch(parser->lex, TOK(equal))) {
+        ASTNode* value =
+            SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
+        AnalyzeExpression(value);
+        int64_t next_value = e->next_value;
+        if (!EvaluateIntegerExpression(value, &next_value)) {
+          SyntaxError(parser->syntax,
+                      "Constant integer expression required for value of "
+                      "enum constant %s",
+                      const_name.value);
+          next_value = e->next_value;
+        }
+        e->next_value = (int32_t)next_value;
+        ASTNodeDelete(value);
+      }
+      Symbol* ec = NewEnumConstant(const_name.value, e->next_value);
+      e->next_value++;
+      StringDestruct(&const_name);
+
+      // Insert the constant as a symbol in the current scope.
+      bool ok = SyntaxAddSymbol(parser->syntax, ec);
+      if (!ok) {
+        SyntaxError(parser->syntax,
+                    "Enum constant %s is already defined in this scope",
+                    ec->name.value);
+        SymbolDelete(ec);
+      } else {
+        VectorAppend(&e->constants, ec);
+      }
+    }
+    if (!LexMatch(parser->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
+  // We have an enum body.
+  // First check that this is not a duplicate definition.
+  Enum* e = NULL;
+  if (tag_name->length == 0) {
+    StringSet(tag_name, SyntaxFakeName(parser->syntax));
+  }
+  Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  if (tag != NULL) {
+    if (!tag->is_forward_declared) {
+      SyntaxError(parser->syntax, "Duplicate definition of enum %s",
+                  tag_name->value);
+    } else {
+      CheckTagType(parser, tag, false, true);
+    }
+    e = tag->type->info.enum_info;
+  } else {
+    // Tag doesn't exist, create one.
+    e = NewEnum();
+    TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
+    type->info.enum_info = e;
+    tag = NewSymbol(tag_name->value, type, STO(implicit));
+    e->tag_name = &tag->name;
+    SyntaxAddTag(parser->syntax, tag);
+  }
+
+  // Note in the symbol that this tag is now defined and not
+  // forward declared.
+  tag->is_forward_declared = false;
+  tag->is_defined = true;
+
+  // Now 'tag' will be the struct tag pointer
+  // and 'e' will be a pointer to the Enum information.
+  ParseEnumConstants(parser, e);
+
+  SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(expr));
   return tag;
 }
 
@@ -1338,77 +1479,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   }
   Symbol* tag = NULL;
   if (LexMatch(parser->lex, TOK(lbrace))) {
-    // We have an enum body.
-    // First check that this is not a duplicate definition.
-    Enum* e = NULL;
-    if (tag_name.length == 0) {
-      StringSet(&tag_name, SyntaxFakeName(parser->syntax));
-    }
-    tag = SyntaxFindTopScopeTag(parser->syntax, &tag_name);
-    if (tag != NULL) {
-      if (!tag->is_forward_declared) {
-        SyntaxError(parser->syntax, "Duplicate definition of enum %s",
-                    tag_name.value);
-      }
-      e = tag->type->info.enum_info;
-    } else {
-      // Tag doesn't exist, create one.
-      e = NewEnum();
-      TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
-      type->info.enum_info = e;
-      tag = NewSymbol(tag_name.value, type, STO(implicit));
-      e->tag_name = &tag->name;
-      SyntaxAddTag(parser->syntax, tag);
-    }
-
-    // Note in the symbol that this tag is now defined and not
-    // forward declared.
-    tag->is_forward_declared = false;
-    tag->is_defined = true;
-
-    // Now 'tag' will be the struct tag pointer
-    // and 'e' will be a pointer to the Enum information.
-    while (!LexLookingAt(parser->lex, TOK(rbrace))) {
-      if (LexLookingAt(parser->lex, TOK(identifier))) {
-        String const_name;
-        StringInit(&const_name, parser->lex->spelling.value);
-        LexNextToken(parser->lex);
-        if (LexMatch(parser->lex, TOK(equal))) {
-          ASTNode* value =
-              SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
-          AnalyzeExpression(value);
-          int64_t next_value = e->next_value;
-          if (!EvaluateIntegerExpression(value, &next_value)) {
-            SyntaxError(parser->syntax,
-                        "Constant integer expression required for value of "
-                        "enum constant %s",
-                        const_name.value);
-            next_value = e->next_value;
-          }
-          e->next_value = (int32_t)next_value;
-          ASTNodeDelete(value);
-        }
-        Symbol* ec = NewEnumConstant(const_name.value, e->next_value);
-        e->next_value++;
-        StringDestruct(&const_name);
-
-        // Insert the constant as a symbol in the current scope.
-        bool ok = SyntaxAddSymbol(parser->syntax, ec);
-        if (!ok) {
-          SyntaxError(parser->syntax,
-                      "Enum constant %s is already defined in this scope",
-                      ec->name.value);
-          SymbolDelete(ec);
-        } else {
-          VectorAppend(&e->constants, ec);
-        }
-      }
-      if (!LexMatch(parser->lex, TOK(comma))) {
-        break;
-      }
-    }
-
-    SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(expr));
+    tag = ParseEnumBody(parser, &tag_name);
   } else {
     // No open brace, this is a reference to an existing enum or the
     // creation of a new one.
@@ -1426,6 +1497,9 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       tag->is_forward_declared = true;
       e->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
+    } else {
+      // Tag already exists, make sure it's the same tag type.
+      CheckTagType(parser, tag, false, true);
     }
   }
   return tag;

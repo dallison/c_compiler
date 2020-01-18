@@ -43,6 +43,7 @@ typedef struct {
 void StringInit(String* str, const char* init);
 // Allocates a new string from the heap using malloc and initializes it.
 String* NewString(const char* init);
+String* NewStringWithLength(const char* init, size_t length);
 
 void StringInitFromSegment(String* str, const char* init, size_t length);
 

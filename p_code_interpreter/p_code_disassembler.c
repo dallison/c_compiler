@@ -216,7 +216,7 @@ static void Print96(int32_t inst, int32_t* pc, int64_t value, FILE* fp) {
   printf("\n");
 }
 
-void* DisassemblePCodeInstruction(Interpreter* interpreter, void* p, FILE* fp) {
+void* DisassemblePCodeInstruction(PCodeInterpreter* interpreter, void* p, FILE* fp) {
   int32_t* pc = p;
   const char* symbol_name = "???";
   uint64_t offset = 0;

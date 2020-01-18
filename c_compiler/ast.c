@@ -440,6 +440,11 @@ void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
   parent->virtuals->replacer(parent, child_id, child, delete_old_child);
 }
 
+ASTNode* ASTNodeMove(ASTNode* node) {
+  ASTNodeReplaceChild(node->parent, node->child_id, NULL, false);
+  return node;
+}
+
 bool ASTNodeIsIntConstant(ASTNode* node) {
   switch (node->op) {
     case AST_OP(number):
@@ -508,13 +513,15 @@ static void ConstantASTNodePrint(ASTNode* node, int indents) {
     case AST_OP(fnumber):
       printf("%g\n", cnode->value.fvalue);
       break;
-    case AST_OP(string): {
+    case AST_OP(string):
+    case AST_OP(string_wide): {
       String escaped;
       StringInit(&escaped, NULL);
       StringEscape(cnode->value.string, &escaped);
       printf("\"%s\"\n", escaped.value);
       break;
     }
+    case AST_OP(charwide):
     case AST_OP(charconst):
       printf("'\\x%04x'\n", (int)cnode->value.ivalue);
       break;
@@ -560,6 +567,14 @@ ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
                                   SourceLocation location) {
   ConstantASTNode* node = malloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string), type, location, &constant_vtbl);
+  node->value.string = value;
+  return (ASTNode*)node;
+}
+
+ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
+                                  SourceLocation location) {
+  ConstantASTNode* node = malloc(sizeof(ConstantASTNode));
+  ASTNodeInit(&node->base, AST_OP(string_wide), type, location, &constant_vtbl);
   node->value.string = value;
   return (ASTNode*)node;
 }
@@ -706,7 +721,9 @@ static void VectorASTNodeReplaceChild(ASTNode* parent, int child_id,
   VectorASTNode* node = (VectorASTNode*)parent;
   ASTNode* old = node->children->value.p[child_id];
   node->children->value.p[child_id] = child;
-  child->parent = parent;
+  if (child != NULL) {
+    child->parent = parent;
+  }
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
@@ -1088,6 +1105,18 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
   return (ASTNode*)node;
 }
 
+void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
+                                    ASTNode* stmt, size_t at_index) {
+  VectorInsertBefore(node->statements, at_index, stmt);
+  
+  // The child ids for all statements have now changed.
+  // Fix them.
+  for (size_t i = at_index + 1; i < node->statements->length; i++) {
+    ASTNode* child = node->statements->value.p[i];
+    child->child_id++;
+  }
+}
+
 static void ForStatementASTNodeDelete(ASTNode* node) {
   ForStatementASTNode* enode = (ForStatementASTNode*)node;
   if (enode->c1 != NULL) {
@@ -1436,7 +1465,9 @@ static void ExpressionInitializerASTNodeReplaceChild(ASTNode* parent,
   ExpressionInitializerASTNode* node = (ExpressionInitializerASTNode*)parent;
   ASTNode* old = node->expr;
   node->expr = child;
-  child->parent = parent;
+  if (child != NULL) {
+    child->parent = parent;
+  }
   if (delete_old_child) {
     ASTNodeDelete(old);
   }

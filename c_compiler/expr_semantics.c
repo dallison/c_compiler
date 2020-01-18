@@ -50,7 +50,7 @@ static void AnalyzeIdentifier(IdentifierASTNode* node) {
 
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
-static bool FoldConstantExpression(ASTNode* node) {
+static ASTNode* FoldConstantExpression(ASTNode* node) {
   switch (node->op) {
     case AST_OP(number):
     case AST_OP(charconst):
@@ -61,7 +61,7 @@ static bool FoldConstantExpression(ASTNode* node) {
     case AST_OP(macro):
     case AST_OP(identifier):
       // These are leaf nodes so they are already folded.
-      return false;
+      return NULL;
     default:
       break;
   }
@@ -74,7 +74,7 @@ static bool FoldConstantExpression(ASTNode* node) {
       ASTNode* const_node =
           NewIntConstantASTNode(value, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
-      return true;
+      return const_node;
     }
   } else if (TypeIsFloatingPoint(node->type)) {
     double value;
@@ -83,10 +83,10 @@ static bool FoldConstantExpression(ASTNode* node) {
       ASTNode* const_node =
           NewRealConstantASTNode(value, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
-      return true;
+      return const_node;
     }
   }
-  return false;
+  return NULL;
 }
 
 // General analysis of a binary expression.  Does a recursive analysis
@@ -415,14 +415,12 @@ static void AnalyzeInitialization(ASTNode* node,
     }
   }
 
-  ASTNode* simplified_init = AnalyzeInitializer(node->type, init);
+  ASTNode* simplified_init = AnalyzeInitializer(node->type, init, is_static);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
 
   // If the symbol being initialized is static set a flag to tell the
   // code generator not to generate any code for it.
   if (is_static) {
-    // TODO: check that all initializers are constant or a reference to existing
-    // static variable.
     node->flags |= kASTStaticInit;
   }
 }
@@ -748,9 +746,9 @@ static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
-void AnalyzeExpression(ASTNode* node) {
+ASTNode* AnalyzeExpression(ASTNode* node) {
   if (node == NULL) {
-    return;
+    return NULL;
   }
 
   BinaryASTNode* binary_node = (BinaryASTNode*)node;
@@ -898,12 +896,18 @@ void AnalyzeExpression(ASTNode* node) {
                             binary_node->right);
       break;
 
-    case AST_OP(expr_init):
+    case AST_OP(expr_init): {
+      ExpressionInitializerASTNode* expr_init = (ExpressionInitializerASTNode*)node;
+      AnalyzeExpression(expr_init->expr);
+      ASTNodeSetType(node, expr_init->expr->type);
+      break;
+    }
+      
     case AST_OP(braced_init):
     case AST_OP(designated_init):
       // Prevent folding of these expressions since we don't know its type
       // until the AST_OP(init) is analyzed.
-      return;
+      return node;
 
     case AST_OP(builtin_va_start):
     case AST_OP(builtin_va_end):
@@ -921,13 +925,29 @@ void AnalyzeExpression(ASTNode* node) {
   }
 
   // Attempt to fold a constant expression.
-  bool folded = FoldConstantExpression(node);
-  if (folded) {
-    return;
+  ASTNode* folded = FoldConstantExpression(node);
+  if (folded != NULL) {
+    return folded;
   }
 
   if (node->type == NULL) {
     // Make sure we have type for the node.
     ASTNodeSetType(node, NewTypeRecord(kTypeInt, kQualPlain));
+  }
+  return node;
+}
+
+bool IsConstantExpression(ASTNode* node) {
+  node = AnalyzeExpression(node);
+  switch (node->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+    case AST_OP(fnumber):
+    case AST_OP(string):
+    case AST_OP(string_wide):
+      return true;
+    default:
+      return false;
   }
 }

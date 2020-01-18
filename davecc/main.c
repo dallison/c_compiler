@@ -113,6 +113,7 @@ int main(int argc, char * argv[]) {
   
   // Parse compiler options for C and asm files.
   Vector compiler_options;
+  VectorInit(&compiler_options);
   if (run_compiler || asm_files.length > 0) {
     ParseOptions((int)compiler_args.length,
                  (char**)compiler_args.value.p,

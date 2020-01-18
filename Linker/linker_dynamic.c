@@ -1002,7 +1002,7 @@ void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
       // to the file (before the symbol table, string table, etc.)
       section_index = bss_section_index;
     } else {
-      section_index = sym->section->output_section_index;
+      section_index = sym->section->output_section_index - 1;
     }
     ELFSymbolInit(elfsym, fixup->fixup.name_offset,
                   section_index,

@@ -18,7 +18,7 @@ typedef enum {
   kRegTypeFloat,
 } RegisterType;
 
-void DisassembleRiscVInstruction(Interpreter* interpreter, void* p, FILE* fp);
+void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p, FILE* fp);
 void DisassemblePrintRegister(FILE* fp, int reg, RegisterType type, const char* sep);
 
 #endif /* risc_v_disassembler_h */

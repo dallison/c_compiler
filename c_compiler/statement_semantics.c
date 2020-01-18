@@ -184,6 +184,80 @@ static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
   }
 }
 
+// Replace the CombinedStatementASTNode (a return statement) with a
+// CompoundStatementASTNode containing arg assignemnts and a goto statement
+// to a new label at the start of the function body,
+static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* call) {
+  static char tail_label_name[32];   // Unique name for label
+  static int tail_label_num = 0;
+  CompoundStatementASTNode* function_body =
+        (CompoundStatementASTNode*)compiler->current_function->info.function.body;
+  if (compiler->current_function->info.function.varargs ||
+      compiler->current_function->info.function.unknown_args) {
+    // Don't know the arguments, no tail recursion possible.
+    return;
+  }
+  SourceLocation location = call->base.location;
+  
+  // Insert label as first statement in function body.
+  snprintf(tail_label_name, sizeof(tail_label_name), "__tail_label_%d",
+          tail_label_num++);
+  LabelASTNode* label = (LabelASTNode*)NewLabelASTNode(tail_label_name,
+                                                       location);
+  CompoundASTNodeInsertStatement(function_body, (ASTNode*)label, 0);
+   
+  Vector* statements = NewVector();
+  
+  // Create assignment statements for all arguments to their formal args via
+  // temporaries.
+  size_t num_actual_args = call->children->length;
+  TypeRecord* subtype = call->left->type;
+  
+  // Declare temporaries for all arguments and assign them from the call's
+  // actual arguments.
+  Vector* decls = NewVector();
+  for (size_t i = 0; i < num_actual_args; i++) {
+    ASTNode* actual = ASTNodeMove((ASTNode*)call->children->value.p[i]);
+    Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, formal->type);
+  
+    ASTNode* assignment = NewBinaryASTNode(AST_OP(assign),
+                                            formal->type,
+                                            location,
+                                            NewIdentifierASTNode(temp,
+                                                                 location),
+                                            actual);
+    ASTNode* decl = NewVariableDeclarationASTNode(temp, assignment, location);
+    VectorAppend(decls, decl);
+  }
+  VectorAppend(statements, NewDeclarationListASTNode(decls, location));
+  
+  // Now assign all temporaries back to the formals.
+  for (size_t i = 0; i < num_actual_args; i++) {
+    VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)decls->value.p[i];
+    ASTNode* temp = NewIdentifierASTNode(decl->symbol, location);
+    Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
+    ASTNode* assignment = NewBinaryASTNode(AST_OP(assign),
+                                           formal->type,
+                                           location,
+                                           NewIdentifierASTNode(formal,
+                                                                location),
+                                           temp);
+    VectorAppend(statements, NewExpressionStatementASTNode(assignment,
+                                                         location));
+  }
+  
+  // Create goto statement to the label.
+  ASTNode* label_ref = NewStringConstantASTNode(&label->name, NULL, location);
+  ASTNode* goto_stmt = NewCombinedStatementASTNode(AST_OP(goto),
+                                                   label_ref, NULL,
+                                                   location);
+  VectorAppend(statements, goto_stmt);
+  ASTNode* result = NewCompoundStatementASTNode(statements, location);
+  ASTNodeReplaceChild(node->base.parent, node->base.child_id, result, true);
+  AnalyzeStatement(result);
+}
+
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   ASTNode* return_value = node->cond;
   if (return_value != NULL && return_value->op == AST_OP(asm)) {
@@ -207,6 +281,18 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
                     "Must return a value from a non-void function");
     } else {
       SemanticConvertType(return_value, compiler->current_function->next);
+    }
+  }
+  
+  // Check for tail recursion.  This is a direct call to the current
+  // function.
+  if (return_value != NULL && return_value->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)return_value;
+    if (call->left->op == AST_OP(identifier)) {
+      IdentifierASTNode* id_node = (IdentifierASTNode*)call->left;
+      if (id_node->symbol == compiler->current_function->info.function.symbol) {
+        AnalyzeTailRecursion(node, call);
+      }
     }
   }
 }
@@ -236,16 +322,17 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
 }
 
 void AnalyzeGotoStatement(CombinedStatementASTNode* node) {
-  Vector* function_body = &compiler->current_function->info.function.body;
+  CompoundStatementASTNode* function_body =
+        (CompoundStatementASTNode*)compiler->current_function->info.function.body;
   String* label_name = ((ConstantASTNode*)node->cond)->value.string;
 
   // Look for label matching the goto.
   // If we find it, set the 'stmt' field of the node to point to it.
   // In C, labels are global to the whole function.
-  size_t num_statements = function_body->length;
+  size_t num_statements = function_body->statements->length;
   ASTNode* label_node = NULL;
   for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->value.p[i];
+    ASTNode* stmt = (ASTNode*)function_body->statements->value.p[i];
     if (stmt->op == AST_OP(label)) {
       LabelASTNode* label = (LabelASTNode*)stmt;
       if (StringEqualString(label_name, &label->name)) {
@@ -261,13 +348,14 @@ void AnalyzeGotoStatement(CombinedStatementASTNode* node) {
 }
 
 void AnalyzeLabel(LabelASTNode* node) {
-  Vector* function_body = &compiler->current_function->info.function.body;
+  CompoundStatementASTNode* function_body =
+        (CompoundStatementASTNode*)compiler->current_function->info.function.body;
   String* label_name = &node->name;
 
   // Look for another label with same name.
-  size_t num_statements = function_body->length;
+  size_t num_statements = function_body->statements->length;
   for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->value.p[i];
+    ASTNode* stmt = (ASTNode*)function_body->statements->value.p[i];
     if (stmt == (ASTNode*)node) {
       // Same statement, ignore.
       continue;

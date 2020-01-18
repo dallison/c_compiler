@@ -104,7 +104,7 @@ static void PrintMnemonic(FILE* fp, const char* mnemonic) {
   fprintf(fp, "\t%-8s  ", mnemonic);
 }
 
-void DisassembleRiscVInstruction(Interpreter* interpreter, void* p, FILE* fp) {
+void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p, FILE* fp) {
   int32_t* pc = p;
   const char* symbol_name = "???";
   uint64_t offset = 0;

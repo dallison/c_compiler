@@ -262,6 +262,7 @@ void ASTNodeSetType(ASTNode* node, TypeRecord* type);
 void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
 void ASTNodePrint(ASTNode* node, int indents);
+ASTNode* ASTNodeMove(ASTNode* node);
 
 bool ASTNodeIsIntConstant(ASTNode* node);
 int64_t ASTNodeConstantValue(ASTNode* node);
@@ -331,7 +332,9 @@ ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
 ASTNode* NewRealConstantASTNode(double value, TypeRecord* type,
                                 SourceLocation location);
 ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
-                                  SourceLocation location);
+                                    SourceLocation location);
+ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
+                                      SourceLocation location);
 ASTNode* NewCharConstantASTNode(int value, TypeRecord* type,
                                 SourceLocation location);
 
@@ -403,6 +406,8 @@ typedef struct {
 
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
                                      SourceLocation location);
+void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
+                                    ASTNode* stmt, size_t at_index);
 
 // For statement.  All expressions (e1, e2 and e3) are optional.
 typedef struct {

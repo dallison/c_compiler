@@ -24,7 +24,6 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
   IdentifierASTNode* id_node = (IdentifierASTNode*)node;
   BinaryASTNode* binary_node = (BinaryASTNode*)node;
   UnaryASTNode* unary_node = (UnaryASTNode*)node;
-  CastASTNode* cast_node = (CastASTNode*)node;
 
   int64_t left;
   int64_t right;
@@ -235,19 +234,6 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(d2ll, (long long))
       EVAL_UNARY_OP(ld2ll, (long long))
 
-    case AST_OP(expr_init):
-      return EvaluateIntegerExpression(
-          ((ExpressionStatementASTNode*)node)->expr, result);
-
-    case AST_OP(braced_init): {
-      BracedInitializerASTNode* list_init = (BracedInitializerASTNode*)node;
-      if (list_init->initializers->length == 1) {
-        return EvaluateIntegerExpression(
-            (ASTNode*)list_init->initializers->value.p[0], result);
-      }
-      break;
-    }
-
     case AST_OP(sizeof): {
       SizeofASTNode* snode = (SizeofASTNode*)node;
       *result = snode->base.value.ivalue;
@@ -277,7 +263,6 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
   IdentifierASTNode* id_node = (IdentifierASTNode*)node;
   BinaryASTNode* binary_node = (BinaryASTNode*)node;
   UnaryASTNode* unary_node = (UnaryASTNode*)node;
-  CastASTNode* cast_node = (CastASTNode*)node;
 
   double left;
   double right;
@@ -417,20 +402,6 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       EVAL_UNARY_OP(ll2ld, (double))
       EVAL_UNARY_OP(f2ld, (double))
       EVAL_UNARY_OP(d2ld, (double))
-
-    case AST_OP(expr_init):
-      return EvaluateFloatingPointExpression(
-          ((ExpressionStatementASTNode*)node)->expr, result);
-
-    case AST_OP(braced_init): {
-      BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)node;
-      // Only one element allowed in braced initializer.
-      if (braced_init->initializers->length == 1) {
-        return EvaluateFloatingPointExpression(
-            (ASTNode*)braced_init->initializers->value.p[0], result);
-      }
-      break;
-    }
 
     default:
       return false;

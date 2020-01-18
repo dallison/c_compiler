@@ -146,7 +146,7 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   TypeRecord* array =
   NewArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
   TypeRecord* type = NewTypeRecord(kTypeChar, kQualPlain);
-  array->next = type;
+  TypeRecordChain(array, type);
   return NewStringConstantASTNode(contents, array,
                                   syntax->lex->current_token_location);
   
@@ -155,7 +155,8 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
 static ASTNode* ParseWideStringLiteral(Syntax* syntax,
                                                TokenClass followers) {
   Lex* lex = syntax->lex;
-  String* contents = NewString(lex->spelling.value);
+  String* contents = NewStringWithLength(lex->spelling.value,
+                                         lex->spelling.length + 4);
   LexNextToken(lex);
   
   // Adjacent wide string literals are joined together.
@@ -167,8 +168,8 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   TypeRecord* array =
   NewArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
   TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
-  array->next = type;
-  return NewStringConstantASTNode(contents, array,
+  TypeRecordChain(array, type);
+  return NewWideStringConstantASTNode(contents, array,
                                  syntax->lex->current_token_location);
 }
 
@@ -488,12 +489,21 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   bool has_brackets = LexMatch(syntax->lex, TOK(lparen));
   ASTNode* result = NULL;
-  if (has_brackets && SyntaxLookingAtType(syntax)) {
+  bool sizeof_type_name = false;
+  if (SyntaxLookingAtType(syntax)) {
+    if (!has_brackets) {
+      SyntaxError(syntax,
+                  "Parentheses expected around type name "
+                  " in sizeof operator");
+    }
+    sizeof_type_name = true;
+  }
+  if (sizeof_type_name) {
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
     TypeRecord* type = TypeParserParseType(&parser);
     if (type == NULL) {
-      SyntaxError(syntax, "Invalid cast");
+      SyntaxError(syntax, "Invalid sizeof operand");
       type = NewTypeRecord(kTypeInt, kQualPlain);
     } else {
       Symbol* sym = TypeParserParseDeclarator(&parser, type);

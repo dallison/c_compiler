@@ -15,6 +15,7 @@
 #include "type.h"
 #include "vector.h"
 #include "set.h"
+#include "buffer.h"
 
 struct Generator;
 
@@ -78,11 +79,13 @@ typedef enum {
   kInitTypeLong,
   kInitTypeSymbol,
   kInitTypeString,
+  kInitTypeMemory,
 } InitializerType;
 
 typedef struct {
   InitializerType type;
   int32_t offset;
+  int32_t length;
   union {
     uint8_t byte;
     uint16_t half;
@@ -90,6 +93,7 @@ typedef struct {
     uint64_t _long;
     Symbol* symbol;
     int literal_id;
+    Buffer memory;
   } value;
 } Initializer;
 

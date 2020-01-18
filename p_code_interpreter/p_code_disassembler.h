@@ -13,6 +13,6 @@
 #include "p_code_machine.h"
 #include "p_code_interpreter.h"
 
-void* DisassemblePCodeInstruction(Interpreter* interpreter, void* p, FILE* fp);
+void* DisassemblePCodeInstruction(PCodeInterpreter* interpreter, void* p, FILE* fp);
 
 #endif /* p_code_disassembler_h */

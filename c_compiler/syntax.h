@@ -10,12 +10,16 @@
 #define syntax_h
 
 #include <stdarg.h>
+#include <setjmp.h>
 
 #include "ast.h"
 #include "dstring.h"
 #include "lex.h"
 #include "symbol_table.h"
 #include "vector.h"
+
+extern jmp_buf error_abort_state;       // Where to abort to.
+extern bool abort_on_error;
 
 // The syntax analyzer.
 typedef struct Syntax {

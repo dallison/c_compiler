@@ -47,8 +47,19 @@ static bool IsIntConstantPowerOf2(IRNode* node, int maxbits) {
 // The node is an integer power of 2.  What is its log?  This is the
 // number of zero bits up to the first one bit.
 // For example, the value 128 (0x80) is 7.
+// This comes from:
+// https://graphics.stanford.edu/~seander/bithacks.html#IntegerLogDeBruijn
 static int LogBase2(IRNode* node) {
   IRConstant* c = (IRConstant*)node;
+  int64_t value = c->value.ivalue;
+  static const int MultiplyDeBruijnBitPosition2[32] =
+  {
+    0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+    31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
+  };
+  return MultiplyDeBruijnBitPosition2[(uint32_t)(value * 0x077CB531U) >> 27];
+
+#if 0
   int zerocount = 0;
   int64_t value = c->value.ivalue;
   for (int i = 0; i < 64; i++) {
@@ -59,7 +70,9 @@ static int LogBase2(IRNode* node) {
     }
   }
   return zerocount;
+#endif
 }
+
 
 // The node is an integer power of 2, generate a bitmask suitable for
 // ANDing.  This is simply the number minus 1.

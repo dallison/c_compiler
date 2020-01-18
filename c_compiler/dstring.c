@@ -67,6 +67,13 @@ String* NewString(const char* init) {
   return s;
 }
 
+String* NewStringWithLength(const char* init, size_t length) {
+  String* s = malloc(sizeof(String));
+  StringInit(s, NULL);
+  StringAppendSegment(s, init, length);
+  return s;
+}
+
 void StringDestruct(String* str) {
   if (str->capacity != STRING_IMMUTABLE &&
       str->value != str->buffer) {

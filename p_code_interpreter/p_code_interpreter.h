@@ -25,7 +25,7 @@
 // Start of user escape codes.
 #define P_CODE_ESC_USER_START  256
 
-typedef struct Interpreter {
+typedef struct PCodeInterpreter {
   Loader* loader;
   int64_t iregs[PCODE_NUM_INT_REGS];
   float fregs[PCODE_NUM_FLOAT_REGS];;
@@ -35,13 +35,13 @@ typedef struct Interpreter {
   int32_t symbol_resolver_code[1];
   
   char* stack;
-  void (*escape)(struct Interpreter*, int32_t value);
+  void (*escape)(struct PCodeInterpreter*, int32_t value);
   SymbolScope* current_symbol;
-} Interpreter;
+} PCodeInterpreter;
 
-void InterpreterInit(Interpreter* interpreter);
+void PCodeInterpreterInit(PCodeInterpreter* interpreter);
 
-void InterpreterRun(Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
-void InterpreterDestruct(Interpreter* interpreter);
+void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void PCodeInterpreterDestruct(PCodeInterpreter* interpreter);
 
 #endif /* p_code_interpreter_h */

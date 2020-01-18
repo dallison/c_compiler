@@ -16,36 +16,66 @@
 #define GLOBAL_SYMBOL_TABLE_SIZE 1009
 #define GLOBAL_TAG_TABLE_SIZE 101
 
-void DeleteSymbolTree(SymbolNode* tree, bool delete_symbols) {
-  if (tree == NULL) {
-    return;
+static int SymbolNodeInsertCompare(BinaryTreeNode* node1,
+                                   BinaryTreeNode* node2) {
+  SymbolNode* sym1 = (SymbolNode*)node1;
+  SymbolNode* sym2 = (SymbolNode*)node2;
+  return StringCompareString(&sym1->symbol->name, &sym2->symbol->name);
+}
+
+static int SymbolNodeSearchCompare(BinaryTreeNode* node, void* name) {
+  SymbolNode* sym = (SymbolNode*)node;
+  return StringCompareString(&sym->symbol->name, name);
+}
+
+static void SymbolNodeDestructor(BinaryTreeNode* node, void* delete_symbols) {
+  if (delete_symbols != NULL) {
+    SymbolNode* sym = (SymbolNode*)node;
+    SymbolDelete(sym->symbol);
   }
-  DeleteSymbolTree(tree->left, delete_symbols);
-  DeleteSymbolTree(tree->right, delete_symbols);
-  if (delete_symbols) {
-    SymbolDelete(tree->symbol);
-  }
-  free(tree);
+}
+
+static void DeleteSymbolTable(void* table, void* data) {
+  BinaryTreeDestruct(table, data);
+  free(table);
 }
 
 // Clear a symbol table, optionally deleting the symbols.
 void ClearSymbolTable(HashTable* table, bool delete_symbols) {
-  for (size_t i = 0; i < table->size; i++) {
-    DeleteSymbolTree((SymbolNode*)table->entries[i], delete_symbols);
-  }
+  HashTableTraverse(table, DeleteSymbolTable, (void*)delete_symbols);
   HashTableClear(table);
 }
 
 LocalSymbolTable* NewLocalSymbolTable() {
   LocalSymbolTable* table = malloc(sizeof(LocalSymbolTable));
-  table->table = NULL;
+  BinaryTreeInit(&table->table,
+                 SymbolNodeInsertCompare,
+                 SymbolNodeSearchCompare,
+                 SymbolNodeDestructor);
   table->prev = NULL;
   return table;
 }
 
+static void PrintSymbolNode(SymbolNode* node, int indent) {
+  for (int i = 0; i < indent * 2; i++) {
+    printf("%s", " ");
+  }
+  SymbolNode* parent = (SymbolNode*)node->header.parent;
+  printf("%s: %s (%s)\n", node->symbol->name.value,
+         node->header.color == kBinaryTreeNodeRed ? "RED" : "BLACK",
+         parent == NULL ? "" : parent->symbol->name.value);
+}
+
+static void Printer(BinaryTreeNode* node, int depth, void* data) {
+  PrintSymbolNode((SymbolNode*)node, depth);
+}
+
+
 void LocalSymbolTableDelete(LocalSymbolTable* table) {
   // Clear the symbol table but don't delete the symbols.
-  DeleteSymbolTree(table->table, false);
+  // BinaryTreeTraverse(&table->table, Printer, NULL);
+
+  BinaryTreeDestruct(&table->table, NULL);
   free(table);
 }
 
@@ -79,7 +109,7 @@ Symbol* FindGlobalTag(String* name) {
 
 bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
   SymbolNode* node = NewSymbolNode(symbol);
-  bool ok = InsertSymbol(table->table, node, &table->table);
+  bool ok = BinaryTreeInsert(&table->table, &node->header);
   if (!ok) {
     free(node);
   }
@@ -88,7 +118,7 @@ bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
 
 Symbol* FindLocalSymbol(LocalSymbolTable* table, String* name) {
   while (table != NULL) {
-    Symbol* symbol = FindSymbol(table->table, name);
+    Symbol* symbol = FindSymbol(&table->table, name);
     if (symbol != NULL) {
       return symbol;
     }
@@ -98,75 +128,44 @@ Symbol* FindLocalSymbol(LocalSymbolTable* table, String* name) {
 }
 
 Symbol* FindTopLocalSymbol(LocalSymbolTable* table, String* name) {
-  return FindSymbol(table->table, name);
+  return FindSymbol(&table->table, name);
 }
 
 SymbolNode* NewSymbolNode(Symbol* symbol) {
   SymbolNode* node = malloc(sizeof(SymbolNode));
+  BinaryTreeNodeInit(&node->header);
   node->symbol = symbol;
-  node->left = NULL;
-  node->right = NULL;
   return node;
-}
-
-void SymbolNodeDelete(SymbolNode* node) {
-  if (node->left != NULL) {
-    SymbolNodeDelete(node->left);
-  }
-  if (node->right != NULL) {
-    SymbolNodeDelete(node->right);
-  }
-  free(node->symbol);
-}
-
-// Inserts a symbol in the given table using a recursive binary
-// insertion algorithm.  The SymbolNode is inserted either to the
-// left or right of a parent depending on is lexographical order.  If an
-// existing symbol is found the insertion is aborted and the function
-// returns false.   The 'parent' pointer is a pointer to the address of the
-// left or right pointers inside the node.  This says where to insert the
-// new node when we reach the leaf node.
-bool InsertSymbol(SymbolNode* table, SymbolNode* node, SymbolNode** parent) {
-  if (table == NULL) {
-    *parent = node;
-    return true;
-  } else {
-    int comp = StringCompareString(&node->symbol->name, &table->symbol->name);
-    if (comp == 0) {
-      // Duplicate symbol.
-      return false;
-    }
-    if (comp < 0) {
-      return InsertSymbol(table->left, node, &table->left);
-    }
-    return InsertSymbol(table->right, node, &table->right);
-  }
 }
 
 // Mapping function for hash table inserter.
 static bool InsertSymbolIntoHashTable(void* table, void* node, void** parent) {
-  return InsertSymbol(table, node, (SymbolNode**)parent);
+  BinaryTree* tree = table;
+  if (table == NULL) {
+    tree = NewBinaryTree(
+                         SymbolNodeInsertCompare,
+                         SymbolNodeSearchCompare,
+                         SymbolNodeDestructor);
+
+    *parent = tree;
+  }
+  return BinaryTreeInsert(tree, node);
 }
 
 // Find a symbol given its name in the given symbol table.  This
 // searches the binary tree using a recursive algorithm.
-Symbol* FindSymbol(SymbolNode* table, String* name) {
-  if (table == NULL) {
+Symbol* FindSymbol(BinaryTree* table, String* name) {
+  SymbolNode* node = (SymbolNode*)BinaryTreeSearch(table, name);
+  if (node == NULL) {
     return NULL;
   }
-  int comp = StringCompareString(name, &table->symbol->name);
-  if (comp == 0) {
-    return table->symbol;
-  }
-  if (comp < 0) {
-    return FindSymbol(table->left, name);
-  }
-  return FindSymbol(table->right, name);
+  return node->symbol;
 }
 
 // Mapping function for hash table searcher.
 static void* FindSymbolInHashTable(void* table, void* value) {
-  return FindSymbol(table, value);
+  BinaryTree* tree = table;
+  return FindSymbol(tree, value);
 }
 
 // Create a hash value from a given symbol node (passed as void* from
