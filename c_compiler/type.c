@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "assert.h"
+#include <assert.h>
 #include "dstring.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
@@ -20,6 +20,10 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "compiler.h"
+#include "errors.h"
+#include "debug.h"
+
+static int next_type_id = 0;
 
 // Mapping of type to its size in bytes.
 static struct {
@@ -53,6 +57,7 @@ int SizeofPointer() {
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   TypeRecord* record = malloc(sizeof(TypeRecord));
+  record->id = next_type_id++;
   record->type = type;
   record->qualifiers = quals;
   record->size = 0;
@@ -82,13 +87,14 @@ void TypeRecordDelete(TypeRecord* record) {
       if (--record->info.struct_info->refs == 0) {
         StructDelete(record->info.struct_info);
       }
-    }
-    if (TypeIsEnum(record)) {
+    } else if (TypeIsEnum(record)) {
       if (--record->info.enum_info->refs == 0) {
         EnumDelete(record->info.enum_info);
       }
+    } else if (TypeIsFunction(record)) {
+      VectorDestructWithContents(&record->info.function.prototype,
+                                (VectorElementDestructor)SymbolDestruct);
     }
-
     free(record);
   }
 }
@@ -156,6 +162,9 @@ void TypeRecordCalculateSize(TypeRecord* record) {
 // the reference count on the one pointed to.
 void TypeRecordChain(TypeRecord* from, TypeRecord* to) {
   TypeRecordIncRef(to);
+  if (to == NULL) {
+    printf("");
+  }
   from->next = to;
 }
 
@@ -164,6 +173,7 @@ void TypeRecordChain(TypeRecord* from, TypeRecord* to) {
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
   TypeRecord* r = malloc(sizeof(TypeRecord));
   memcpy(r, record, sizeof(TypeRecord));
+  r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
   if (r->next != NULL) {
     TypeRecordIncRef(r->next);  // Another ref to next.
@@ -248,7 +258,7 @@ bool StructMemberIsBitField(StructMember* member) {
 static int CompareStructMember(const void* a, const void* b) {
   const MapKeyValue* key1 = (const MapKeyValue*)a;
   const MapKeyValue* key2 = (const MapKeyValue*)b;
-  return StringCompare(key1->key.p, key2->key.p);
+  return StringCompareString(key1->key.p, key2->key.p);
 }
 
 Struct* NewStruct(bool is_union) {
@@ -339,8 +349,7 @@ static void QualifiersToString(Qualifiers quals, String* result) {
 // all the information needed.  The 'with_function_body' parameter
 // says whether the function body (the statements) are also printed.
 void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body) {
-  String str;
-  StringInit(&str, NULL);
+  String str = {0};
   bool print_newline = false;
 
   while (record != NULL) {
@@ -458,6 +467,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->symbol = NULL;
   parser->found_void = false;
   parser->dimension_count = 0;
+  parser->is_inline = false;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -489,6 +499,8 @@ static struct {
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
   PartialTypeSpecifier result;
+  result.error = false;
+  
   Type type = kTypeImplicit;
   Qualifiers quals = kQualPlain;
   Lex* lex = parser->lex;
@@ -499,7 +511,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
   
   if (parser->found_void) {
     // Special handling for already-consumed void type.  This can
-    // happen inside a function prottype.
+    // happen inside a function prototype.
     type |= kTypeVoid;
     parser->found_void = false;
     found = true;
@@ -532,7 +544,6 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
       String typedef_name;
       StringInit(&typedef_name, lex->spelling.value);
       Symbol* symbol = SyntaxFindSymbol(parser->syntax, &typedef_name);
-      StringDestruct(&typedef_name);
       if (symbol != NULL) {
         // Reference to a typedef?
         if (StorageIs(symbol->storage, STO(typedef))) {
@@ -541,6 +552,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
           type |= type_record->type;
         }
       }
+      StringDestruct(&typedef_name);
     }
   }
 
@@ -766,7 +778,7 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev) {
   PartialTypeSpecifier curr = ParseTypeSpecifier(parser);
-  if (prev->type == kTypeImplicit) {
+  if (prev->type == kTypeImplicit && prev->quals == kQualPlain) {
     return curr;
   }
   
@@ -790,9 +802,9 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
   }
 }
 
-TypeRecord* TypeParserParseType(TypeParser* parser) {
+TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
   Syntax* syntax = parser->syntax;
-
+  
   PartialTypeSpecifier type_specifier = {
     .type = kTypeImplicit,
     .quals = kQualPlain,
@@ -801,8 +813,7 @@ TypeRecord* TypeParserParseType(TypeParser* parser) {
   
   while (parser->found_void || SyntaxLookingAtType(syntax)) {
     PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser);
-    parser->found_void = false;
-    if (type_specifier.type == kTypeImplicit) {
+    if (type_specifier.type == kTypeImplicit && type_specifier.quals == kQualPlain) {
       type_specifier = new_type_specifier;
     } else {
       type_specifier = CombineTypeSpecifiers(parser->syntax, &type_specifier, &new_type_specifier);
@@ -810,6 +821,11 @@ TypeRecord* TypeParserParseType(TypeParser* parser) {
   }
   // No type?
   if (type_specifier.type == kTypeImplicit) {
+    if (needed) {
+      SyntaxError(parser->syntax, "Type expected");
+      SyntaxRecover(parser->syntax, TC(semicolon) | TC(type));
+      return NewTypeRecord(kTypeInt, kQualPlain);
+    }
     return NULL;
   }
   return TypeParserBuildTypeRecord(parser, &type_specifier);
@@ -844,6 +860,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   } else {
     // Invent a fake symbol.
     parser->symbol = NewSymbol(SyntaxFakeName(parser->syntax), t, STO(auto));
+    parser->symbol->flags.invented = true;
   }
   return parser->symbol;
 }
@@ -914,7 +931,7 @@ static void ParseFormalArgument(TypeParser* proto_parser,
       SymbolSetType(formal, ptr);
     }
     VectorAppend(&func->info.function.prototype, formal);
-    formal->is_argument = true;
+    formal->flags.is_argument = true;
     formal->value.arg_number = arg_number;
   } else {
     SyntaxError(proto_parser->syntax, "Duplicate function argument '%s'",
@@ -936,8 +953,7 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecor
                                              int arg_number) {
   if (proto_parser->found_void ||
         SyntaxLookingAtType(proto_parser->syntax)) {
-    TypeRecord* type = TypeParserParseType(proto_parser);
-    assert(type != NULL);
+    TypeRecord* type = TypeParserParseType(proto_parser, true);
     if (style == kStyleUnknown) {
       style = kStyleNew;
     }
@@ -945,6 +961,7 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecor
       SyntaxError(proto_parser->syntax,
                   "Cannot mix function prototype with old-style function args");
     }
+
     Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
     assert(formal != NULL);
     ParseFormalArgument(proto_parser, func, formal, arg_number);
@@ -994,7 +1011,7 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
       break;
     }
     // Check for (void).
-    if (LexMatch(proto_parser->lex, TOK(void))) {
+    if (arg_number == 0 && LexMatch(proto_parser->lex, TOK(void))) {
       proto_parser->found_void = true;
       // Look for close paren; meaning (void).
       if (LexLookingAt(proto_parser->lex, TOK(rparen))) {
@@ -1037,11 +1054,11 @@ static int ParseArrayDimension(TypeParser* parser) {
   if (!LexLookingAt(parser->lex, TOK(rsquare))) {
     ASTNode* size_expr =
     SyntaxParseExpression(parser->syntax, TC(closebra));
-    AnalyzeExpression(size_expr);
+    size_expr = AnalyzeExpression(size_expr);
     bool ok = EvaluateIntegerExpression(size_expr, &size);
     if (!ok) {
       // TODO: variable sized arrays?
-      SyntaxError(parser->syntax, "Constant expression required");
+      SyntaxError(parser->syntax, "Constant expression required for array size");
       size = 1;
     } else {
       if (size < 0) {
@@ -1069,6 +1086,8 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
       TypeParser proto_parser;
       TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto));
       TypeRecord* func = NewFunctionTypeRecord();
+      func->info.function.is_inline = parser->is_inline;
+      
       if (parser->symbol != NULL) {
         func->info.function.symbol = parser->symbol;
       }
@@ -1103,15 +1122,24 @@ void TypeParserParseBase(TypeParser* parser) {
     }
   } else {
     if (LexLookingAt(parser->lex, TOK(identifier))) {
+      SourceLocation location = parser->lex->current_token_location;
       String* name = &parser->lex->spelling;
       LexNextToken(parser->lex);
       parser->symbol =
           NewSymbol(name->value, parser->base_type, parser->storage);
+      parser->symbol->location = location;
     }
   }
 }
 
+static void PrintStructMember(const MapKeyValue* kv) {
+  String* name = kv->key.p;
+  printf("%s", name->value);
+}
+
 StructMember* FindStructMember(Struct* str, String* name) {
+//  MapPrint(&str->symbol_table, PrintStructMember);
+//  printf("\n");
   return MapFindPointerKey(&str->symbol_table, name);
 }
 
@@ -1194,10 +1222,12 @@ error:
 
 static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
-    TypeRecord* member_type = TypeParserParseType(parser);
+    TypeRecord* member_type = TypeParserParseType(parser, true);
     while (!LexEof(parser->lex)) {
       Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
-      if (!CheckStructMember(str, &member_symbol->name)) {
+      if (member_symbol == NULL) {
+        SyntaxError(parser->syntax, "Invalid type for struct member");
+      } else if (!CheckStructMember(str, &member_symbol->name)) {
         SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                     member_symbol->name.value);
         SymbolDelete(member_symbol);
@@ -1237,7 +1267,8 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
         break;
       }
     }
-    SyntaxNeedSemicolon(parser->syntax);
+  
+    SyntaxNeedSemicolon(parser->syntax, TC(type));
   }
 }
 
@@ -1294,12 +1325,13 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
-  if (tag_name->length == 0) {
+  bool empty_tag_name = tag_name->length == 0;
+  if (empty_tag_name) {
     StringSet(tag_name, SyntaxFakeName(parser->syntax));
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
   if (tag != NULL) {
-    if (!tag->is_forward_declared) {
+    if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of struct/union %s",
                    tag_name->value);
     } else {
@@ -1314,13 +1346,16 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
     type->info.struct_info = str;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     str->tag_name = &tag->name;
+    if (empty_tag_name) {
+      tag->flags.invented = true;
+    }
     SyntaxAddTag(parser->syntax, tag);
   }
 
   // Note in the symbol that this tag is now defined and not
   // forward declared.
-  tag->is_forward_declared = false;
-  tag->is_defined = true;
+  tag->flags.is_forward_declared = false;
+  tag->flags.is_defined = true;
 
   // Now 'tag' will be the struct tag pointer
   // and 'str' will be a pointer to the Struct information.
@@ -1346,8 +1381,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   }
 
   // Read the tag name if there is one.
-  String tag_name;
-  StringInit(&tag_name, NULL);
+  String tag_name = {0};
   if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
@@ -1370,7 +1404,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
       TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
       type->info.struct_info = str;
       tag = NewSymbol(tag_name.value, type, STO(implicit));
-      tag->is_forward_declared = true;
+      tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
     } else {
@@ -1390,7 +1424,7 @@ static void ParseEnumConstants(TypeParser* parser, Enum* e) {
       if (LexMatch(parser->lex, TOK(equal))) {
         ASTNode* value =
             SyntaxParseSingleExpression(parser->syntax, TC(semicolon));
-        AnalyzeExpression(value);
+        value = AnalyzeExpression(value);
         int64_t next_value = e->next_value;
         if (!EvaluateIntegerExpression(value, &next_value)) {
           SyntaxError(parser->syntax,
@@ -1427,12 +1461,13 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
   // We have an enum body.
   // First check that this is not a duplicate definition.
   Enum* e = NULL;
-  if (tag_name->length == 0) {
+  bool empty_tag_name = tag_name->length == 0;
+  if (empty_tag_name) {
     StringSet(tag_name, SyntaxFakeName(parser->syntax));
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
   if (tag != NULL) {
-    if (!tag->is_forward_declared) {
+    if (!tag->flags.is_forward_declared) {
       SyntaxError(parser->syntax, "Duplicate definition of enum %s",
                   tag_name->value);
     } else {
@@ -1446,13 +1481,16 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
     type->info.enum_info = e;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     e->tag_name = &tag->name;
+    if (empty_tag_name) {
+      tag->flags.invented = true;
+    }
     SyntaxAddTag(parser->syntax, tag);
   }
 
   // Note in the symbol that this tag is now defined and not
   // forward declared.
-  tag->is_forward_declared = false;
-  tag->is_defined = true;
+  tag->flags.is_forward_declared = false;
+  tag->flags.is_defined = true;
 
   // Now 'tag' will be the struct tag pointer
   // and 'e' will be a pointer to the Enum information.
@@ -1470,8 +1508,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   }
 
   // Read the tag name if there is one.
-  String tag_name;
-  StringInit(&tag_name, NULL);
+  String tag_name = {0};
   if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
@@ -1494,7 +1531,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
       type->info.enum_info = e;
       tag = NewSymbol(tag_name.value, type, STO(implicit));
-      tag->is_forward_declared = true;
+      tag->flags.is_forward_declared = true;
       e->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
     } else {
@@ -1619,7 +1656,7 @@ bool TypeIsEnum(TypeRecord* type) {
 }
 
 bool TypeIsVoidPointer(TypeRecord* type) {
-  return TypeIsPointer(type) && TypeIsVoid(type->next);
+  return TypeIsPointer(type) && type->next != NULL && TypeIsVoid(type->next);
 }
 
 bool TypeIsStructOrUnionPointer(TypeRecord* type) {
@@ -1637,6 +1674,20 @@ bool TypeIsSigned(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
 }
 
+static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
+  if (a->prototype.length != b->prototype.length) {
+    return false;
+  }
+  for (size_t i = 0; i < a->prototype.length; i++) {
+    Symbol* s1 = a->prototype.value.p[i];
+    Symbol* s2 = b->prototype.value.p[i];
+    if (!TypeEqual(s1->type, s2->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   if (t1->declarator != t2->declarator) {
     return false;
@@ -1646,8 +1697,7 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      // TODO: check size?
-      return true;
+      return t1->info.array.size == t2->info.array.size;
     case kDeclPointer:
       return TypeEqual(t1->next, t2->next);
 
@@ -1655,10 +1705,25 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      return true;
+      return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive:
-      return t1->type == t2->type;
+      return t1->type == t2->type && t1->qualifiers == t2->qualifiers;
   }
+}
+
+bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
+  if (TypeEqual(to, from)) {
+    return true;
+  }
+  // A pointer can be assigned to a const pointer of the same type.
+  if (TypeIsPointerOrArray(to)) {
+    int to_quals = to->next->qualifiers & ~kQualConst;
+    int from_quals = from->next->qualifiers & ~kQualConst;
+    if (to_quals == from_quals) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
@@ -1670,8 +1735,7 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      // TODO: check size?
-      return true;
+      return t1->info.array.size == t2->info.array.size;
     case kDeclPointer:
       return TypeEqual(t1->next, t2->next);
 
@@ -1679,7 +1743,7 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      return true;
+      return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive: {
       Type a = t1->type & ~(kTypeUnsigned | kTypeSigned);
       Type b = t2->type & ~(kTypeUnsigned | kTypeSigned);
@@ -1688,8 +1752,73 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
   }
 }
 
+static void FunctionPrototypesDetails(SourceLocation location, FunctionInfo* a, FunctionInfo* b) {
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  if (a->prototype.length != b->prototype.length) {
+    ReportNote(filename, lineno, "Different number of arguments: %zd vs %zd",
+               a->prototype.length, b->prototype.length);
+    return;
+  }
+  for (size_t i = 0; i < a->prototype.length; i++) {
+    Symbol* s1 = a->prototype.value.p[i];
+    Symbol* s2 = b->prototype.value.p[i];
+    if (!TypeEqual(s1->type, s2->type)) {
+      TypeErrorDetails(location, s1->type, s2->type);
+      ReportNote(filename, lineno, "  for argument #%zd", i+1);
+    }
+  }
+}
+
+void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
+  String error1 = {0};
+  String error2 = {0};
+  TypeRecordToString(t1, &error1);
+  TypeRecordToString(t2, &error2);
+
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+    
+  if (t1->declarator != t2->declarator) {
+    ReportNote(filename, lineno, "Declarators '%s' and '%s' are different",
+               error1.value, error2.value);
+    return;
+  }
+  switch (t1->declarator) {
+    case kDeclArray:
+    case kDeclPointer:
+      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
+                 error1.value, error2.value);
+      TypeErrorDetails(location, t1->next, t2->next);
+      break;
+
+    case kDeclFunction:
+      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
+                 error1.value, error2.value);
+      TypeErrorDetails(location, t1->next, t2->next);
+      return FunctionPrototypesDetails(location, &t1->info.function, &t2->info.function);
+      
+    case kDeclPrimitive:
+      if (t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
+        ReportNote(filename, lineno, "Types '%s' and '%s' are different",
+                   error1.value, error2.value);
+
+      }
+  }
+  StringDestruct(&error1);
+  StringDestruct(&error1);
+}
+
 bool TypeIsConst(TypeRecord* type) {
   return (type->qualifiers & kQualConst) != 0;
+}
+
+bool TypeIsVolatile(TypeRecord* type) {
+  return (type->qualifiers & kQualVolatile) != 0;
 }
 
 bool TypeIsArray(TypeRecord* type) { return type->declarator == kDeclArray; }
@@ -1710,4 +1839,8 @@ bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type) {
     return TypeIsStructOrUnion(type->next->next);
   }
   return false;
+}
+
+bool TypeIsUnknown(TypeRecord* type) {
+  return (type->type & kTypeUnknown) != 0;
 }

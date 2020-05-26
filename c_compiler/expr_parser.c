@@ -60,7 +60,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // type unsigned long.
       TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
       symbol = NewSymbol(name.value, type, STO(implicit));
-      symbol->is_forward_declared = true;
+      symbol->flags.is_forward_declared = true;
     } else if (LexLookingAt(lex, TOK(lparen))) {
       if (GetIntrinsicIndex(name.value) == -1) {
         // Calling an unknown function is a warning.
@@ -70,16 +70,17 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       
       // Declare the function so we don't get more warnings for the same
       // function.
-      TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
+      TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
       TypeRecord* func_type = NewFunctionTypeRecord();
       func_type->info.function.unknown_args = true;
       TypeRecordChain(func_type, type);
       symbol = NewSymbol(name.value, func_type, STO(implicit));
-      symbol->is_forward_declared = true;
+      symbol->flags.is_forward_declared = true;
     } else {
       SyntaxError(syntax, "No such symbol \"%s\"", name.value);
-      TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
+      TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
       symbol = NewSymbol(SyntaxFakeName(syntax), type, STO(implicit));
+      symbol->flags.invented = true;
     }
   }
   StringDestruct(&name);
@@ -265,7 +266,7 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   // Invalid primary expression, error out, recover and return 0.
   SyntaxError(syntax, "Expression syntax error; primary expression expected");
   SyntaxRecover(syntax, followers);
-  TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
+  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
   return (ASTNode*)NewIntConstantASTNode(0, type,
                                          syntax->lex->current_token_location);
 }
@@ -290,7 +291,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
           actuals->length == 1) {
         TypeParser parser;
         TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
-        TypeRecord* type = TypeParserParseType(&parser);
+        TypeRecord* type = TypeParserParseType(&parser, true);
         Symbol* sym = TypeParserParseDeclarator(&parser, type);
         type = sym->type;
         actual =
@@ -501,17 +502,14 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   if (sizeof_type_name) {
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
-    TypeRecord* type = TypeParserParseType(&parser);
-    if (type == NULL) {
-      SyntaxError(syntax, "Invalid sizeof operand");
-      type = NewTypeRecord(kTypeInt, kQualPlain);
-    } else {
-      Symbol* sym = TypeParserParseDeclarator(&parser, type);
-      if (sym != NULL) {
-        SymbolDelete(sym);
-      }
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    int size = type->size;
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    if (sym != NULL) {
+      SymbolDelete(sym);
     }
-    result = NewSizeofASTNodeWithKnownSize(type->size,
+    
+    result = NewSizeofASTNodeWithKnownSize(size,
                                            syntax->lex->current_token_location);
   } else {
     ASTNode* expr = ParseUnaryExpression(syntax, followers);
@@ -569,7 +567,7 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     // to be in memory (can't be in a register, if that is supported).
     if (sub->op == AST_OP(identifier)) {
       IdentifierASTNode* ident = (IdentifierASTNode*)sub;
-      ident->symbol->address_taken = true;
+      ident->symbol->flags.address_taken = true;
     }
     return NewUnaryASTNode(AST_OP(address), NULL,
                            syntax->lex->current_token_location, sub);
@@ -622,11 +620,11 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
-      TypeRecord* type = TypeParserParseType(&parser);
+      TypeRecord* type = TypeParserParseType(&parser, false);
       Symbol* sym = NULL;
       if (type == NULL) {
         SyntaxError(syntax, "Invalid cast");
-        type = NewTypeRecord(kTypeInt, kQualPlain);
+        type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
       } else {
         sym = TypeParserParseDeclarator(&parser, type);
         type = sym->type;

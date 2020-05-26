@@ -10,7 +10,6 @@
 #include <assert.h>
 #include <ctype.h>
 #include <stdlib.h>
-#include <sys/param.h>
 #include <time.h>
 #include <unistd.h>
 #include <string.h>
@@ -28,7 +27,7 @@
 #include "lex.h"
 
 // Forward declarations.
-static void Tokenize(String* input, String* output, size_t start,
+static void Tokenize(Preprocessor* p, String* input, String* output, size_t start,
                      bool init_output, bool assembler_mode,
                      bool header_names_ok);
 
@@ -104,9 +103,9 @@ static size_t HashMacro(void* value, HashTable* table, HashMode mode) {
       name = (const char*)value;
       break;
   }
-  size_t hash = 0;
-  for (size_t i = 0; name[i] != '\0'; i++) {
-    hash = (hash << 1) ^ name[i];
+  uint32_t hash = 5381;
+  while (*name != '\0') {
+    hash = (hash << 5) + hash + *name++;
   }
   return hash;
 }
@@ -133,6 +132,8 @@ static void PredefineMacros(Preprocessor* p) {
   PreprocessorDefineMacro(p, "__STDC_HOSTED__", "1");
   PreprocessorDefineMacro(p, "__STDC_VERSION__", "199901L");
   PreprocessorDefineMacro(p, "__STDC_MB_MIGHT_NEQ_WC__", "1");
+
+  PreprocessorDefineMacro(p, "__DAVECC__", "1");
 
   // Date and time are defined as coming from the 'asctime' function.
   // We are using 'ctime' because it's a wrapper for asctime.  We extract
@@ -166,6 +167,9 @@ static void PredefineMacros(Preprocessor* p) {
 
   // Pretend to be llvm to get compatibility with code in standard header files.
   PreprocessorDefineMacro(p, "__llvm__", "1");
+
+  // Pretend to be on linux.
+  PreprocessorDefineMacro(p, "__linux__", "1");
 
   // These are defined by GCC and clang and are used in header files.  We need
   // to define them too.
@@ -241,8 +245,7 @@ static void AddMacOSIncludeDirs(Preprocessor* p, const char* root) {
     if (strcmp(entry->d_name, "PrivateFrameworks") == 0) {
       continue;
     }
-    String path;
-    StringInit(&path, NULL);
+    String path = {0};
     StringPrintf(&path, "%s/%s", root, entry->d_name);
     if (strcmp(entry->d_name, "include") == 0) {
       PreprocessorAddSystemIncludePath(p, path.value);
@@ -274,8 +277,7 @@ static bool AddMacOSClib(Preprocessor* p, const char* root,
     if (entry->d_name[0] == '.') {
       continue;
     }
-    String path;
-    StringInit(&path, NULL);
+    String path = {0};
     StringPrintf(&path, "%s/%s", root, entry->d_name);
     if (strcmp(entry->d_name, search_file) == 0) {
       PreprocessorAddSystemIncludePath(p, root);
@@ -308,6 +310,7 @@ void PreprocessorInit(Preprocessor* p) {
   VectorInit(&p->system_include_paths);
   p->is_compiled_in = true;
 
+#if 0
   PreprocessorAddSystemIncludePath(p, "/usr/include");
 #ifdef __APPLE__
   const char toolchains[] =
@@ -326,9 +329,12 @@ void PreprocessorInit(Preprocessor* p) {
   }
 #endif
 #endif
-
+#else
+  PreprocessorAddSystemIncludePath(p, "/Users/dallison/Google Drive/c_compiler/libc/include");
+#endif
+  
   // Add current dir to the include paths.
-  char current_dir[MAXPATHLEN];
+  char current_dir[4096];
   getcwd(current_dir, sizeof(current_dir));
 
   PreprocessorAddUserIncludePath(p, current_dir);
@@ -372,7 +378,8 @@ void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
     if (StringEqual(p->user_include_paths.value.p[i], path)) {
       return;
     }
-  }  VectorAppend(&p->user_include_paths, NewString(path));
+  }
+  VectorAppend(&p->user_include_paths, NewString(path));
 }
 
 void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path) {
@@ -385,12 +392,24 @@ void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path) {
   VectorAppend(&p->system_include_paths, NewString(path));
 }
 
+void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
+                                         const char* path) {
+
+   // Ensure only one entry with this path.
+    for (size_t i = 0; i < p->system_include_paths.length; i++) {
+      if (StringEqual(p->system_include_paths.value.p[i], path)) {
+        return;
+      }
+    }
+    VectorInsertBefore(&p->system_include_paths, 0, NewString(path));
+  }
+
 void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                              const char* value) {
   String raw_value;
   StringInitImmutable(&raw_value, value);
   String tokens;
-  Tokenize(&raw_value, &tokens, 0, true,
+  Tokenize(p, &raw_value, &tokens, 0, true,
            p->lex == NULL ? false : p->lex->assembler_mode, false);
 
   Macro* macro = HashTableSearch(&p->macros, (char*)macro_name);
@@ -404,6 +423,13 @@ void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                    SOURCE_LOCATION_COMMAND_LINE);
   HashTableInsert(&p->macros, macro);
   StringDestruct(&tokens);
+}
+
+void PreprocessorUndefineMacro(Preprocessor* p, String* macro_name) {
+  Macro* macro = HashTableSearch(&p->macros, macro_name->value);
+   if (macro != NULL) {
+     macro->undefined = true;
+   }
 }
 
 void PreprocessorError(Preprocessor* preprocessor, const char* error, ...) {
@@ -471,6 +497,7 @@ typedef enum {
 // in a token sequence.
 //
 typedef struct {
+  Preprocessor* p;    // Preprocessor.
   String* input;      // String this iterates through.
   size_t prev;        // Index of start of previous token.
   size_t curr;        // Index of start of current token.
@@ -545,7 +572,8 @@ static size_t FindNextTokenIndex(TokenIterator* t) {
   return curr + length;
 }
 
-static void TokenIteratorInit(TokenIterator* t, String* input) {
+static void TokenIteratorInit(TokenIterator* t, Preprocessor* p, String* input) {
+  t->p = p;
   t->input = input;
   t->prev = 0;
   t->curr = 0;
@@ -696,13 +724,12 @@ static size_t SkipFloatingSuffix(String* line, size_t pos) {
 
 // Skip a number preprocessing token.
 static size_t SkipNumber(String* line, size_t pos) {
-  char ch = line->value[pos];
   bool seenexp = false;      // Have we seen an exponent?
-  bool seendot = ch == '.';  // Have we seen a dot?
+  bool seendot = false;  // Have we seen a dot?
   bool seensign = false;     // Have we seen a sign char?
   
   while (pos < line->length) {
-    ch = line->value[pos];
+    char ch = line->value[pos];
     if (ch == '.') {
       if (seendot) {
         // Two dots terminate number.
@@ -792,7 +819,7 @@ static size_t AppendCharLiteral(String* input, String* output, size_t pos) {
 static bool CanStartToken(String* input, size_t pos) {
   char ch = input->value[pos];
   if (isspace(ch) || isalnum(ch) || ch == '_' ||
-      ch == '"' || ch == '\'' || ch == '#') {
+      ch == '"' || ch == '\'' || ch == '#' || ch == '(' || ch == ')') {
     return true;
   }
   if (ch == '.') {
@@ -857,7 +884,20 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
   return pos;
 }
 
-static size_t HandleSpacesAndComments(String* line, String* output,
+// Get next char in a multi-line comment, reading new lines and appending
+// them to the current line as necessary.
+static char GetNextCommentChar(Preprocessor* p, String* line, size_t* pos) {
+  while (!LexEof(p->lex) && *pos == line->length) {
+    SourceReadLine(p->lex->source, line);
+  }
+  if (LexEof(p->lex)) {
+    return '\0';
+  }
+  (*pos)++;
+  return line->value[*pos];
+}
+
+static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* output,
                                       size_t pos) {
   while (pos < line->length) {
     char ch = line->value[pos];
@@ -867,13 +907,8 @@ static size_t HandleSpacesAndComments(String* line, String* output,
       // '//' comment?
       if (pos < line->length &&
           line->value[pos + 1] == '/') {
-        
-        // Append comment token with rest of line as spelling.
-        StringAppendChar(output, PPTOK(comment));
-        size_t length = line->length - pos;
-        EncodeLength(output, length);
-        StringAppendSegment(output, &line->value[pos], length);
-        break;
+        // Single line comment.  Remove rest of line.
+        return line->length;
       } else if (pos < line->length - 1 &&
                  line->value[pos + 1] == '*') {
         size_t start = pos;
@@ -882,10 +917,10 @@ static size_t HandleSpacesAndComments(String* line, String* output,
         pos += 2;  // Skip /*.
         do {
           do {
-            ch = line->value[++pos];
-          } while (pos < line->length && ch != '*');
-          ch = line->value[++pos];
-        } while (pos < line->length && ch != '/');
+            ch = GetNextCommentChar(p, line, &pos);
+          } while (!LexEof(p->lex) && ch != '*');
+           ch = GetNextCommentChar(p, line, &pos);
+        } while (!LexEof(p->lex) && ch != '/');
         
         // Append comment token with comment as spelling.
         StringAppendChar(output, PPTOK(comment));
@@ -950,13 +985,16 @@ static size_t AppendDefined(String* input, String* output, size_t pos) {
   return pos;
 }
 
-static void Tokenize(String* input, String* output, size_t start,
+static void Tokenize(Preprocessor* p, String* input, String* output, size_t start,
                      bool init_output, bool assembler_mode, bool header_names_ok) {
   if (init_output) {
     StringInit(output, NULL);
   }
   for (size_t i = start; i < input->length;) {
-    i = HandleSpacesAndComments(input, output, i);
+    i = HandleSpacesAndComments(p, input, output, i);
+    if (i >= input->length) {
+      break;
+    }
     char ch = input->value[i];
     if (isalpha(ch) || ch == '_' || (assembler_mode && (ch == '.' || ch == '@'))) {
       if ((ch == 'L' || ch == 'l') && input->value[i+1] == '"') {
@@ -967,8 +1005,7 @@ static void Tokenize(String* input, String* output, size_t start,
         i = AppendCharLiteral(input, output, i + 2);
       } else {
         size_t start = i;
-        String spelling;
-        StringInit(&spelling, NULL);
+        String spelling = {0};
         while (isalnum(input->value[i]) || input->value[i] == '_' ||
                (assembler_mode && (input->value[i] == '.' || input->value[i] == '@'))) {
           StringAppendChar(&spelling, input->value[i]);
@@ -991,8 +1028,7 @@ static void Tokenize(String* input, String* output, size_t start,
       StringAppendChar(output, PPTOK(system_header));
       i++;
       size_t start = i;
-      String spelling;
-      StringInit(&spelling, NULL);
+      String spelling = {0};
       while (i < input->length && input->value[i] != '>') {
         StringAppendChar(&spelling, input->value[i]);
         i++;
@@ -1077,7 +1113,7 @@ static void PrintTokenizedLine(String* line) {
         i = PrintLengthDelimitedToken(line, i);
         break;
       case PPTOK(defined):
-        printf("number: ");
+        printf("defined: ");
         i = PrintLengthDelimitedToken(line, i);
         break;
      case PPTOK(literal):
@@ -1158,7 +1194,7 @@ static void SkipSpaceTokens(TokenIterator* t) {
 static void TokenizeAndReplaceCurrentToken(TokenIterator* t,
                                            String* text, bool assembler_mode) {
   String tokens;
-  Tokenize(text, &tokens, 0, true, assembler_mode, false);
+  Tokenize(t->p, text, &tokens, 0, true, assembler_mode, false);
   ReplaceCurrentToken(t, &tokens);
   StringDestruct(&tokens);
 }
@@ -1166,8 +1202,7 @@ static void TokenizeAndReplaceCurrentToken(TokenIterator* t,
 static void DetokenizeToken(String* tokens,
                             size_t index,
                             String* text) {
-  String spelling;
-  StringInit(&spelling, NULL);
+  String spelling = {0};
   switch ((PreprocessingToken)tokens->value[index]) {
     case PPTOK(identifier):
     case PPTOK(other_string):
@@ -1177,7 +1212,11 @@ static void DetokenizeToken(String* tokens,
       break;
     case PPTOK(defined):
       AppendTokenSpelling(tokens, index, &spelling);
-      StringPrintf(text, "defined(%s)", spelling.value);
+      if (spelling.length == 0) {
+        StringPrintf(text, "defined");
+      } else {
+        StringPrintf(text, "defined(%s)", spelling.value);
+      }
       break;
     case PPTOK(literal):
       AppendTokenSpelling(tokens, index, &spelling);
@@ -1228,9 +1267,9 @@ static void DetokenizeToken(String* tokens,
   StringDestruct(&spelling);
 }
 
-static void Detokenize(String* tokens, String* text) {
+static void Detokenize(Preprocessor* p, String* tokens, String* text) {
   TokenIterator ti;
-  TokenIteratorInit(&ti, tokens);
+  TokenIteratorInit(&ti, p, tokens);
   while (CurrentToken(&ti) != PPTOK(end)) {
     DetokenizeToken(ti.input, ti.curr, text);
     MoveToNextToken(&ti);
@@ -1373,8 +1412,7 @@ static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
 // be found or couldn't be opened due to permissions problems.
 static FILE* FindFileInPath(Vector* path, String* filename, size_t* start) {
   for (size_t i = *start; i < path->length; i++) {
-    String pathname;
-    StringInit(&pathname, NULL);
+    String pathname = {0};
     StringPrintf(&pathname, "%s/%s", ((String*)path->value.p[i])->value,
                  filename->value);
     FILE* fp = fopen(pathname.value, "r");
@@ -1447,7 +1485,7 @@ static size_t ReadMacroFormalArguments(Preprocessor* p,
 
 static void CheckHashHash(Preprocessor* p, String* rep) {
   TokenIterator ti;
-  TokenIteratorInit(&ti, rep);
+  TokenIteratorInit(&ti, p, rep);
   if (CurrentToken(&ti) == PPTOK(hashhash)) {
     PreprocessorError(p, "## is not allowed at start of replacement text");
   }
@@ -1480,8 +1518,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   bool varargs = false;
 
   // Arguments for function-like macro."
-  Vector args;
-  VectorInit(&args);
+  Vector args = {0};
 
   // No space allowed before open paren for function-like macro.
   if (line->value[pos] == '(') {
@@ -1497,8 +1534,8 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
   // has already been processed by appending all lines ending in \.  Then we
   // need to tokenize the string.
   String raw_replacement_text;
-  StringInitImmutable(&raw_replacement_text, &line->value[pos]);
-  Tokenize(&raw_replacement_text, &replacement_text, 0, true, p->lex->assembler_mode, false);
+  StringInit(&raw_replacement_text, &line->value[pos]);
+  Tokenize(p, &raw_replacement_text, &replacement_text, 0, true, p->lex->assembler_mode, false);
   
   // Check that ## rules are not violated.
   CheckHashHash(p, &replacement_text);
@@ -1608,6 +1645,27 @@ bool PreprocessorParseIncludeFilename(Preprocessor* p, String* line,
   return true;
 }
 
+static void PrintSearchDetails(Preprocessor* p, const char* file, bool system_include) {
+  ReportNote(NULL, 0, "Looked in the following locations:");
+  if (!system_include) {
+    for (size_t i = 0; i < p->user_include_paths.length; i++) {
+      String pathname = {0};
+      StringPrintf(&pathname, "%s/%s",
+                   ((String*)p->user_include_paths.value.p[i])->value,
+                   file);
+      ReportNote(NULL, 0, "  %s", pathname.value);
+    }
+  }
+  for (size_t i = 0; i < p->system_include_paths.length; i++) {
+    String pathname = {0};
+    StringPrintf(&pathname, "%s/%s",
+                 ((String*)p->system_include_paths.value.p[i])->value,
+                 file);
+    ReportNote(NULL, 0, "  %s", pathname.value);
+  }
+
+}
+
 static void DoInclude(Preprocessor* p, String* line, size_t pos,
                       size_t start_index) {
   if (!p->is_compiled_in) {
@@ -1616,11 +1674,11 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   
   String tokenized_line;
   // Tokenize, allowing header names.
-  Tokenize(line, &tokenized_line, pos,  true, false, true);
+  Tokenize(p, line, &tokenized_line, pos,  true, false, true);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
 
   TokenIterator ti;
-  TokenIteratorInit(&ti, &tokenized_line);
+  TokenIteratorInit(&ti, p, &tokenized_line);
 
   String filename;
   bool system_include = false;
@@ -1657,6 +1715,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     // types and functions.
     PreprocessorError(p, "Fatal error: cannot open include file \"%s\"",
                       filename.value);
+    PrintSearchDetails(p, filename.value, system_include);
     exit(1);
   }
 
@@ -1667,8 +1726,10 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   // it as the current source in the Lex.
   Source* include_source = NewSourceFromFile(filename.value, fp);
   include_source->prev = p->lex->source;
-  printf("Including file %s\n", filename.value);
-
+  if (compiler->print_preprocessor) {
+    printf("Including file %s\n", filename.value);
+  }
+  
   // Save current path index and set new current.
   p->lex->source->path_index = compiler->current_include_path_index;
   compiler->current_include_path_index = path_index;
@@ -1730,7 +1791,7 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   if (setjmp(error_abort_state) == 0) {
     ASTNode* expr = SyntaxParseExpression(&syntax, 0);
     if (expr != NULL) {
-      AnalyzeExpression(expr);
+      expr = AnalyzeExpression(expr);
       int64_t value;
       if (EvaluateIntegerExpression(expr, &value)) {
         controlling_value = value == 0 ? NULL : &true_value;
@@ -1889,11 +1950,11 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
     return;
   }
   String tokenized_line;
-  Tokenize(line, &tokenized_line, pos, true, false, false);
+  Tokenize(p, line, &tokenized_line, pos, true, false, false);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
   
   TokenIterator ti;
-  TokenIteratorInit(&ti, &tokenized_line);
+  TokenIteratorInit(&ti, p, &tokenized_line);
   
   int lineno = -1;
   bool error = false;
@@ -1946,8 +2007,7 @@ static void Error(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
-  String error;
-  StringInit(&error, NULL);
+  String error = {0};
   StringAppend(&error, &line->value[pos]);  // Rest of line
   PreprocessorError(p, error.value);
   StringDestruct(&error);
@@ -1957,8 +2017,7 @@ static void Warning(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
   }
-  String warning;
-  StringInit(&warning, NULL);
+  String warning = {0};
   StringAppend(&warning, &line->value[pos]);  // Rest of line
   PreprocessorWarning(p, "preprocessor", warning.value);
   StringDestruct(&warning);
@@ -1994,10 +2053,10 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
     return;
   }
   String tokenized_tail;
-  Tokenize(line, &tokenized_tail, pos, true, false, false);
+  Tokenize(p, line, &tokenized_tail, pos, true, false, false);
   
   TokenIterator ti;
-  TokenIteratorInit(&ti, &tokenized_tail);
+  TokenIteratorInit(&ti,p,  &tokenized_tail);
   while (CurrentToken(&ti) != PPTOK(end)) {
     if (MatchIdentifierToken(&ti, "warning")) {
       String warning;
@@ -2045,8 +2104,7 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   pos++;
   pos = SkipSpacesAndComments(p, pos, line, NULL);
 
-  String command_name;
-  StringInit(&command_name, NULL);
+  String command_name = {0};
 
   // Read directive (command) name.  This must start with a letter.
   if (pos < line->length && isalpha(line->value[pos])) {
@@ -2155,12 +2213,11 @@ static void CollectActualArguments(Preprocessor* p,
   bool too_many_args = false;
   bool separate_va_arg = false;
   bool end = false;
-  
+    
   while (!end && CurrentToken(ti) != PPTOK(closeparen)) {
     String* actual = NewString(NULL);
     int num_nested_brackets = 1;
     while (!end) {
-      SkipSpaceTokens(ti);
       PreprocessingToken tok = CurrentToken(ti);
       if (tok == PPTOK(end)) {
         if (whole_input) {
@@ -2171,11 +2228,10 @@ static void CollectActualArguments(Preprocessor* p,
         // In a function-like macro invocation the language allows newline
         // characters to be treated as spaces.  This means we need to read
         // another line when we encounter the end of line.
-        String newline;
-        StringInit(&newline, NULL);
+        String newline = {0};
         SourceReadLine(p->lex->source, &newline);
         // Append newly read chars to the current tokens.
-        Tokenize(&newline, tokens, 0, false, p->lex->assembler_mode, false);
+        Tokenize(p, &newline, tokens, 0, false, p->lex->assembler_mode, false);
         ti->next = FindNextTokenIndex(ti);
         StringDestruct(&newline);
         if (CurrentToken(ti) == PPTOK(end)) {
@@ -2192,10 +2248,13 @@ static void CollectActualArguments(Preprocessor* p,
           break;
         }
       }
-      if (num_nested_brackets == 1 && tok == PPTOK(comma)) {
-        // Comma outside of nested brackets, end of actual.
+      if (tok == PPTOK(comma)) {
         MoveToNextToken(ti);
-        break;
+        SkipSpaceTokens(ti);
+        if (num_nested_brackets == 1) {
+          // Comma outside of nested brackets, end of actual.
+          break;
+        }
       }
       
       AppendCurrentToken(ti, actual);
@@ -2226,6 +2285,16 @@ static void CollectActualArguments(Preprocessor* p,
     }
     actual_index++;
   }
+  // If the last actual value is empty we will have terminated the loop
+  // early (on the close paren).
+  if (actual_index < macro->args.length) {
+    MapKeyValue arg;
+    arg.key.p = macro->args.value.p[formal_index];
+    arg.value.p = NewString("");
+    MapInsert(args, arg);
+    actual_index++;
+    formal_index++;
+  }
   if (CurrentToken(ti) != PPTOK(closeparen)) {
     PreprocessorError(p, "Missing ')' for function like macro arguments");
   } else {
@@ -2234,12 +2303,12 @@ static void CollectActualArguments(Preprocessor* p,
   
   if (too_many_args) {
     PreprocessorError(
-                      p, "Too many actual arguments for macro %s; expected %zd, got %d)",
+                      p, "Too many actual arguments for macro %s; expected %zd, got %d",
                       macro->name.value, macro->args.length, actual_index);
   }
-  if (actual_index < formal_index) {
+  if (actual_index < macro->args.length) {
     PreprocessorError(
-                      p, "Insufficient actual arguments for macro %s; expected %zd, got %d)",
+                      p, "Insufficient actual arguments for macro %s; expected %zd, got %d",
                       macro->name.value, macro->args.length, actual_index);
   }
 }
@@ -2272,14 +2341,12 @@ static void Paste(TokenIterator* ti) {
   SkipSpaceTokens(ti);
   size_t next_index = ti->curr;
   size_t end_index = ti->next;
-  String pasted;
-  StringInit(&pasted, NULL);
+  String pasted = {0};
   DetokenizeToken(ti->input, prev_index, &pasted);
   DetokenizeToken(ti->input, next_index, &pasted);
   
   // The result is a single token containing the pasted tokens.
-  String tokenized_paste;
-  StringInit(&tokenized_paste, NULL);
+  String tokenized_paste = {0};
   StringAppendChar(&tokenized_paste, PPTOK(other_string));
   EncodeLength(&tokenized_paste, pasted.length);
   StringAppendString(&tokenized_paste, &pasted);
@@ -2297,9 +2364,9 @@ static void Paste(TokenIterator* ti) {
 
 
 
-static void PasteTokens(String* tokens) {
+static void PasteTokens(Preprocessor* p, String* tokens) {
   TokenIterator ti;
-  TokenIteratorInit(&ti, tokens);
+  TokenIteratorInit(&ti, p, tokens);
   while (CurrentToken(&ti) != PPTOK(end)) {
     if (CurrentToken(&ti) == PPTOK(hashhash)) {
       Paste(&ti);
@@ -2308,9 +2375,9 @@ static void PasteTokens(String* tokens) {
   }
 }
 
-static void RemovePlacemarkers(String* tokens) {
+static void RemovePlacemarkers(Preprocessor* p, String* tokens) {
   TokenIterator ti;
-  TokenIteratorInit(&ti, tokens);
+  TokenIteratorInit(&ti, p, tokens);
   while (CurrentToken(&ti) != PPTOK(end)) {
     if (CurrentToken(&ti) == PPTOK(placemarker)) {
       EraseCurrentToken(&ti);
@@ -2344,7 +2411,7 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   
   // Iterator for passing over replacement text (tokens).
   TokenIterator rep_ti;
-  TokenIteratorInit(&rep_ti, &rep);
+  TokenIteratorInit(&rep_ti, p, &rep);
   
   // Replace all arguments in replacement text by their actual value.
   while (CurrentToken(&rep_ti) != PPTOK(end)) {
@@ -2372,8 +2439,7 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
             // as if they formed the rest of the preprocessing file;
             // no other preprocessing tokens are available.
             if (actual->length == 0) {
-              String p;
-              StringInit(&p, NULL);
+              String p = {0};
               StringAppendChar(&p, PPTOK(placemarker));
               ReplaceCurrentToken(&rep_ti, &p);
               StringDestruct(&p);
@@ -2409,12 +2475,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
           PreprocessorError(p, "# is not followed by a macro argument name");
         } else {
           // Detokenize the actual value.
-          String detokenized;
-          StringInit(&detokenized, NULL);
-          Detokenize(actual, &detokenized);
+          String detokenized = {0};
+          Detokenize(p, actual, &detokenized);
           
-          String literal;
-          StringInit(&literal, NULL);
+          String literal = {0};
           // Append a PPTOK(literal) to the temp value.
           StringAppendChar(&literal, PPTOK(literal));
           EncodeLength(&literal, detokenized.length);
@@ -2433,10 +2497,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   }
   
   // Paste tokens either side of ## in replacement text.
-  PasteTokens(&rep);
+  PasteTokens(p, &rep);
   
   // Remove placemarker tokens.
-  RemovePlacemarkers(&rep);
+  RemovePlacemarkers(p, &rep);
   
   // Rescan replacement text for more macros to replace.
   ReplaceMacrosInTokenizedLine(p, &rep, true);
@@ -2460,9 +2524,10 @@ static void ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
   // function-like macro name and its args with its replacement text.
   size_t current_token_index = ti->curr;
   MoveToNextToken(ti);
+  SkipSpaceTokens(ti);      // Space between macro and ( is OK.
   
   if (CurrentToken(ti) != PPTOK(openparen)) {
-    PreprocessorError(p, "Missing '(' for function-like macro");
+    // Missing open paren means that we don't replace the macro.
     return;
   }
   MoveToNextToken(ti);
@@ -2471,8 +2536,7 @@ static void ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
   // Mapping of formal to actual for each argument.
   Map args;
   MapInitForStringKeys(&args);
-  String va_args;
-  StringInit(&va_args, NULL);
+  String va_args = {0};
   CollectActualArguments(p, ti, tokens, macro, &args, &va_args, whole_input);
 
   // Now we process the macro replacement list, replacing all formal arguments
@@ -2495,9 +2559,7 @@ static void ProcessPossibleMacro(Preprocessor* p,
                                    String* tokenized_line,
                                    TokenIterator* ti,
                                    bool whole_input) {
-
-  String replacement;
-  StringInit(&replacement, NULL);
+  String replacement = {0};
   if (StringEqual(possible_macro_name, "_Pragma")) {
     // No pragmas in this compiler.
   } else if (StringEqual(possible_macro_name, "__FILE__")) {
@@ -2525,16 +2587,15 @@ static void ProcessPossibleMacro(Preprocessor* p,
       } else {
         // Object-like macro.  Handle ## by pasting adjacent tokens.
         StringSet(&replacement, macro->replacement_text.value);
-        PasteTokens(&replacement);
-        
+        PasteTokens(p, &replacement);
         // Remove placemarker tokens.
-        RemovePlacemarkers(&replacement);
+        RemovePlacemarkers(p, &replacement);
         
         // Rescan the replacement text for more macros.  This macro is
         // disabled so it won't be replaced.
         ReplaceMacrosInTokenizedLine(p, &replacement, true);
         
-        // Replace the current token with the new replacement text.s
+        // Replace the current token with the new replacement text.
         ReplaceCurrentToken(ti, &replacement);
       }
       MacroEnable(macro);
@@ -2547,7 +2608,7 @@ static void ReplaceMacrosInTokenizedLine(Preprocessor* p,
                                          String* tokenized_line,
                                          bool whole_input) {
   TokenIterator ti;
-  TokenIteratorInit(&ti, tokenized_line);
+  TokenIteratorInit(&ti, p, tokenized_line);
   while (CurrentToken(&ti) != PPTOK(end)) {
     if (CurrentToken(&ti) == PPTOK(identifier)) {
       String possible_macro_name;
@@ -2575,7 +2636,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   if (p->lex->in_comment) {
     start = SkipToEndOfComment(line, 0);
   }
-  Tokenize(line, &tokenized_line, start, true, p->lex->assembler_mode, false);
+  Tokenize(p, line, &tokenized_line, start, true, p->lex->assembler_mode, false);
   ReplaceMacrosInTokenizedLine(p, &tokenized_line, false);
   
   // Detokenize new line into output.
@@ -2586,7 +2647,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   } else {
     StringClear(line);
   }
-  Detokenize(&tokenized_line, line);
+  Detokenize(p, &tokenized_line, line);
 }
 
 

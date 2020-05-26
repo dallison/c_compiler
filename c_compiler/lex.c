@@ -888,6 +888,9 @@ void LexNextToken(Lex* lex) {
   CollectOperator(lex);
 
 record_token_location:
+  if (lex->current_token == TOK(bad)) {
+    lex->pos++;
+  }
   // Record the token location now that we know the start and end indexes.
   lex->current_token_location =
       NewSourceLocation(lex->source, lineno, token_start, lex->pos);

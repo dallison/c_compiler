@@ -8,6 +8,7 @@
 #include "ar.h"
 #include <string.h>
 #include <ctype.h>
+#include <assert.h>
 #include <stdlib.h>
 
 //
@@ -15,15 +16,19 @@
 // contain ARSymbol pointers.
 //
 
-ARSymbol* NewARSymbol(void) {
+ARSymbol* NewARSymbol(const char* name) {
   ARSymbol* sym = malloc(sizeof(ARSymbol));
-  StringInit(&sym->name, "");
+  StringInit(&sym->name, name);
   sym->file = NULL;
   return sym;
 }
 
-void ARSymbolDelete(ARSymbol* sym) {
+void ARSymbolDestruct(ARSymbol* sym) {
   StringDestruct(&sym->name);
+}
+
+void ARSymbolDelete(ARSymbol* sym) {
+  ARSymbolDestruct(sym);
   free(sym);
 }
 
@@ -40,9 +45,9 @@ static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
       name = (const char*)value;
       break;
   }
-  size_t hash = 0;
-  for (size_t i = 0; name[i] != '\0'; i++) {
-    hash = (hash << 1) ^ name[i];
+  uint32_t hash = 5381;
+  while (*name != '\0') {
+    hash = (hash << 5) + hash + *name++;
   }
   return hash;
 }
@@ -94,8 +99,8 @@ static void PrintSymbolList(void* entry, void* data) {
   }
 }
 
-static void PrintSymbolTable(HashTable* table) {
-  HashTableTraverse(table, PrintSymbolList, NULL);
+void ARArchivePrintSymbolTable(ARArchive* archive) {
+  HashTableTraverse(&archive->symbol_table, PrintSymbolList, NULL);
 }
 
 void ARArchiveInit(ARArchive* archive, const char* filename) {
@@ -212,18 +217,21 @@ static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
   int32_t num_entries = ReadBigEndianInt(fp);
   
   // Temporary vector to hold symbols we build.  We hold them
-  // here and then insert them into the symbol table after thay
+  // here and then insert them into the symbol table after they
   // are all read.  We have to do it this way because the information
   // for each symbol is split into two parts.
-  Vector symbols;
-  VectorInit(&symbols);
+  Vector symbols = {0};
   
   // Read the file offsets and create the symbols.  Insert them
   // in the temporary vector.
   for (int32_t i = 0; i < num_entries; i++) {
     int64_t file_offset = ReadBigEndianInt(fp);
-    ARSymbol* symbol = NewARSymbol();
+    ARSymbol* symbol = NewARSymbol("");
     symbol->file = MapFindInt64Key(&archive->file_offsets, file_offset);
+    if (symbol->file == NULL) {
+      fprintf(stderr, "Corrupted symbol table\n");
+      exit(1);
+    }
     VectorAppend(&symbols, symbol);
   }
   
@@ -248,7 +256,7 @@ static bool ReadFileHeaders(ARArchive* archive, FILE* fp) {
   while (!feof(fp)) {
     int64_t file_start = ftell(fp);
     ARFileHeader header;
-    size_t n = fread(&header, sizeof(header), 1, fp);
+    size_t n = fread(&header, 1, sizeof(header), fp);
     if (n < 1) {
       break;
     }
@@ -261,7 +269,7 @@ static bool ReadFileHeaders(ARArchive* archive, FILE* fp) {
     }
     
     // All looks good, create the file.
-    ARFile* file = NewARFile();
+    ARFile* file = NewARFile("");
     
     // The slash character terminates filenames but is also used
     // as special names when at the start of the filename.
@@ -271,6 +279,10 @@ static bool ReadFileHeaders(ARArchive* archive, FILE* fp) {
     // filename in the '//' file.
     ReadFilename(&file->filename, header.filename);
     file->size = ReadInteger(header.size, sizeof(header.size));
+    file->owner = (int)ReadInteger(header.owner, sizeof(header.owner));
+    file->group = (int)ReadInteger(header.group, sizeof(header.group));
+    file->mode = (int)ReadInteger(header.mode, sizeof(header.mode));
+    file->timestamp = ReadInteger(header.timestamp, sizeof(header.timestamp));
     file->file_offset = ftell(fp);
     
     if (StringEqual(&file->filename, "//")) {
@@ -335,7 +347,7 @@ static void ReadExtendedFilenames(ARArchive* archive, FILE* fp) {
 bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
   // Read and verify archive header.
   char header[8];
-  ssize_t n = fread(header, sizeof(header), 1, fp);
+  ssize_t n = fread(header, 1, sizeof(header), fp);
   if (n != sizeof(header) ||
       memcmp(header, AR_MAGIC, sizeof(header)) != 0) {
     return false;
@@ -355,22 +367,53 @@ bool ARArchiveOpen(ARArchive* archive, FILE* fp) {
   // Any symbol table?  If so, read it.
   if (archive->symbol_table_file != NULL) {
     ReadSymbolTable(archive, fp);
-    PrintSymbolTable(&archive->symbol_table);
+    // PrintSymbolTable(&archive->symbol_table);
   }
   return true;
 }
 
-ARFile* NewARFile(void) {
+ARFile* NewARFile(const char* filename) {
   ARFile* file = malloc(sizeof(ARFile));
-  StringInit(&file->filename, "");
+  StringInit(&file->filename, filename);
   file->file_offset = 0;
   file->size = 0;
+  file->owner = 0;
+  file->group = 0;
+  file->mode = 0;
+  file->timestamp = 0;
+  file->contents = NULL;
+  file->deleted = false;
+  file->delete_contents = false;
   return file;
 }
 
-void ARFileDelete(ARFile* file) {
+void ARFileDestruct(ARFile* file) {
   StringDestruct(&file->filename);
+  if (file->delete_contents) {
+    free(file->contents);
+  }
+}
+
+void ARFileDelete(ARFile* file) {
+  ARFileDestruct(file);
   free(file);
+}
+
+ARFile* ARFileCopyFromArchive(ARFile* file, FILE* fp) {
+  ARFile* new_file = NewARFile(file->filename.value);
+  new_file->size = file->size;
+  new_file->owner = file->owner;
+  new_file->group = file->group;
+  new_file->mode = file->mode;
+  new_file->timestamp = file->timestamp;
+  
+  // Allocate space for contents and populate it from the original archive
+  // file.
+  new_file->contents = malloc(new_file->size);
+  fseek(fp, file->file_offset, SEEK_SET);
+  fread(new_file->contents, 1, new_file->size, fp);
+  new_file->delete_contents = true;
+  return new_file;
 }
 
 ARSymbol* ARArchiveFindSymbol(ARArchive* archive, const char* name) {
@@ -378,3 +421,369 @@ ARSymbol* ARArchiveFindSymbol(ARArchive* archive, const char* name) {
 }
 
 
+ARArchiveBuilder* NewARArchiveBuilder(const char* filename) {
+  ARArchiveBuilder* archive = malloc(sizeof(ARArchiveBuilder));
+  ARArchiveBuilderInit(archive, filename);
+  return archive;
+}
+
+void ARArchiveBuilderInit(ARArchiveBuilder* archive, const char* filename) {
+  StringInit(&archive->filename, filename);
+  VectorInit(&archive->files);
+  VectorInit(&archive->symbols);
+  VectorInit(&archive->long_filenames);
+  archive->next_long_filename_offset = 0;
+  archive->num_symbols = 0;
+  archive->symbol_table_length = 0;
+  MapInitForInt64Keys(&archive->file_offsets);
+}
+
+void ARArchiveBuilderDestruct(ARArchiveBuilder* archive) {
+  StringDestruct(&archive->filename);
+  VectorDestructWithContents(&archive->files, (VectorElementDestructor)ARFileDestruct);
+  VectorDestructWithContents(&archive->symbols, (VectorElementDestructor)ARSymbolDestruct);
+  VectorDestruct(&archive->long_filenames);
+  MapDestruct(&archive->file_offsets);
+}
+
+void ARArchiveBuilderDelete(ARArchiveBuilder* archive) {
+  ARArchiveBuilderDestruct(archive);
+  free(archive);
+}
+
+ARFile* ARArchiveBuilderAddFile(ARArchiveBuilder* archive,
+                                const char* filename,
+                                size_t size,
+                                int owner,
+                                int group,
+                                int mode,
+                                int64_t timestamp,
+                                void* contents) {
+  ARFile* file = NewARFile(filename);
+  file->size = size;
+  file->owner = owner;
+  file->group = group;
+  file->mode = mode;
+  file->timestamp = timestamp;
+  file->contents = contents;
+  VectorAppend(&archive->files, file);
+  return file;
+}
+
+void ARArchiveBuilderAddExisingFile(ARArchiveBuilder* archive, ARFile* file) {
+  VectorAppend(&archive->files, file);
+  // Add the offset to the map of offsets vs file.  This is used by
+  // the symbol table to find the file for each symbol.
+  MapKeyValue kv;
+  kv.key.w = file->file_offset;
+  kv.value.p = file;
+  MapInsert(&archive->file_offsets, kv);
+}
+
+ARSymbol* ARArchiveBuilderAddSymbol(ARArchiveBuilder* archive, ARFile* file,
+                               const char* symbol_name) {
+  ARSymbol* symbol = NewARSymbol(symbol_name);
+  symbol->file = file;
+  VectorAppend(&archive->symbols, symbol);
+  return symbol;
+}
+
+static void WriteBigEndianInt(int32_t v, FILE *fp) {
+  for (int i = 3; i >= 0; i--) {
+    fputc((v >> (i * 8)) & 0xff, fp);
+  }
+}
+
+static void WriteSymbolName(String* name, FILE* fp) {
+  for (size_t i = 0; i < name->length; i++) {
+    fputc(name->value[i], fp);
+  }
+  fputc('\0', fp);
+}
+
+static void AlignFileOffset(FILE* fp) {
+  off_t current_offset = ftell(fp);
+  if ((current_offset & 1) == 1) {
+    fputc(0, fp);
+  }
+}
+
+static void WriteLeftString(char* dest, const char* src, size_t destlen) {
+  while (*src != '\0') {
+    *dest++ = *src++;
+    destlen--;
+  }
+  while (destlen-- > 0) {
+    *dest++ = ' ';
+  }
+}
+
+static void WriteLeftInt(char* dest, size_t src, size_t destlen) {
+  size_t n = snprintf(dest, destlen, "%zd", src);
+  dest += n;
+  destlen -= n;
+  while (destlen-- > 0) {
+    *dest++ = ' ';
+  }
+}
+
+static void WriteLeftFilename(char* dest, const char* src, size_t destlen) {
+  bool terminate = *src != '/';
+  while (*src != '\0') {
+    *dest++ = *src++;
+    destlen--;
+  }
+  if (terminate) {
+    *dest++ = '/';
+    destlen--;
+  }
+  while (destlen-- > 0) {
+    *dest++ = ' ';
+  }
+}
+
+static void BuildFileHeader(ARFileHeader* header, const char* filename,
+                            int owner, int group, int mode, int64_t timestamp,
+                            size_t size) {
+  if (filename != NULL) {
+    WriteLeftFilename(header->filename, filename, sizeof(header->filename));
+  }
+  WriteLeftInt(header->size, size, sizeof(header->size));
+  WriteLeftInt(header->owner, owner, sizeof(header->owner));
+  WriteLeftInt(header->group, group, sizeof(header->group));
+  WriteLeftInt(header->mode, mode, sizeof(header->mode));
+  WriteLeftInt(header->timestamp, timestamp, sizeof(header->timestamp));
+  header->end[0] = AR_FILE_END[0];
+  header->end[1] = AR_FILE_END[1];
+}
+
+
+
+// Write the file, updating file->file_offset.
+static void WriteFile(ARArchiveBuilder* archive, ARFile* file, FILE* fp) {
+  // Record header offset.  This will be used by the symbol table to
+  // refer to the file.
+  file->file_offset = ftell(fp);
+  
+  ARFileHeader header;
+  if (file->filename.length > 15) {
+    // Need extended name.
+    // Form filename with form "/xxx" where "xxx" if the offset into
+    // the extended filenames file.
+    char tmp[16];
+    snprintf(tmp,
+             sizeof(tmp),
+             "/%zd", file->extended_filename_offset);
+    WriteLeftString(header.filename, tmp, sizeof(header.filename));
+  } else {
+    WriteLeftFilename(header.filename,
+                      file->filename.value, sizeof(header.filename));
+  }
+  BuildFileHeader(&header, NULL, file->owner,
+                  file->group, file->mode, file->timestamp, file->size);
+  
+  // Write header.
+  fwrite(&header, 1, sizeof(header), fp);
+  
+  // Write contents.
+  fwrite(file->contents, 1, file->size, fp);
+  
+  // Align to 2 bytes.
+  AlignFileOffset(fp);
+}
+
+static void WriteExtendedFilenames(ARArchiveBuilder* archive, FILE* fp) {
+  if (archive->long_filenames.length == 0) {
+    return;
+  }
+  ARFileHeader header;
+  BuildFileHeader(&header, "//", 0, 0, 0777, time(NULL), archive->next_long_filename_offset);
+  
+  // Write header.
+  fwrite(&header, 1, sizeof(header), fp);
+  
+  // Write extended filenames.  Each one is terminated by a newline.
+  for (size_t i = 0; i < archive->long_filenames.length; i++) {
+    String* filename = archive->long_filenames.value.p[i];
+    fwrite(filename->value, 1, filename->length, fp);
+    fputc('\n', fp);
+  }
+  
+  // Align to 2 bytes.
+  AlignFileOffset(fp);
+}
+
+// Count symbols and calculate file length;
+static void PrepareSymbolTable(ARArchiveBuilder* archive) {
+  archive->symbol_table_length = 4;
+  for (size_t i = 0; i < archive->symbols.length; i++) {
+    ARSymbol* symbol = (ARSymbol*)archive->symbols.value.p[i];
+    if (!symbol->file->deleted) {
+      archive->num_symbols++;
+      archive->symbol_table_length += symbol->name.length + 1 + 4;
+    }
+  }
+}
+
+// For each file whose name is longer than 15 chars, assign an
+// offset into the "//" file.  The filename for this file will
+// be "/xxx" where xxx is the offset into the extended filenames
+// file, which is terminated by newline.
+static void PrepareExtendedFilenames(ARArchiveBuilder* archive) {
+  for (size_t i = 0; i < archive->files.length; i++) {
+    ARFile* file = (ARFile*)archive->files.value.p[i];
+    if (file->filename.length > 15) {
+      // Need extended name.
+      file->extended_filename_offset = archive->next_long_filename_offset;
+      archive->next_long_filename_offset += file->filename.length + 1;
+      VectorAppend(&archive->long_filenames, &file->filename);
+    }
+  }
+}
+
+static void WriteSymbolTable(ARArchiveBuilder* archive, FILE* fp) {
+  if (archive->symbols.length == 0) {
+    return;
+  }
+  
+  ARFileHeader header;
+  BuildFileHeader(&header, "/", 0, 0, 0777, time(NULL), archive->symbol_table_length);
+  
+  // Write header.
+  fwrite(&header, 1, sizeof(header), fp);
+  
+  // Number of symbols.
+  WriteBigEndianInt(archive->num_symbols, fp);
+  
+  // Symbol file offsets.
+  for (size_t i = 0; i < archive->symbols.length; i++) {
+    ARSymbol* symbol = (ARSymbol*)archive->symbols.value.p[i];
+    if (symbol->file->deleted) {
+      continue;
+    }
+    WriteBigEndianInt((int)symbol->file->file_offset, fp);
+  }
+  
+  // Symbol names.
+  for (size_t i = 0; i < archive->symbols.length; i++) {
+    ARSymbol* symbol = (ARSymbol*)archive->symbols.value.p[i];
+    if (symbol->file->deleted) {
+      continue;
+    }
+    WriteSymbolName(&symbol->name, fp);
+  }
+  
+  // Align to 2 bytes.
+  AlignFileOffset(fp);
+}
+  
+inline static off_t Align2(off_t offset) {
+  return (offset + 1) & ~1;
+}
+
+bool ARArchiveBuilderWrite(ARArchiveBuilder* archive) {
+  FILE* fp = fopen(archive->filename.value, "w");
+  if (fp == NULL) {
+    return false;
+  }
+  // File header,
+  fwrite(AR_MAGIC, 1, 8, fp);
+
+  // For compatibility with Linux and other systems, place the symbol
+  // table at the beginning of the archive.  It appears that Linux
+  // expects it to be there and some tools don't work properly if it's
+  // not.
+  PrepareSymbolTable(archive);
+  
+  // It appears that the extended filenames file needs to be second
+  // in the archive too.
+  PrepareExtendedFilenames(archive);
+  
+  // Set file offsets.  First file offset is after symbol table file and
+  // the extended filenames file.
+  off_t offset = Align2(8 + sizeof(ARFileHeader) + archive->symbol_table_length);
+
+  // Next file is the extended filenames file, which may be absent.
+  if (archive->long_filenames.length > 0) {
+    offset += Align2(sizeof(ARFileHeader) + archive->next_long_filename_offset);
+  }
+  
+  // Calculate the file offsets.
+  for (size_t i = 0; i < archive->files.length; i++) {
+    ARFile* file = (ARFile*)archive->files.value.p[i];
+    file->file_offset = offset;
+    offset += Align2(file->size + sizeof(ARFileHeader));
+  }
+  WriteSymbolTable(archive, fp);
+
+  // Extended filenames file.
+  WriteExtendedFilenames(archive, fp);
+
+  // Now write files.
+  for (size_t i = 0; i < archive->files.length; i++) {
+    ARFile* file = (ARFile*)archive->files.value.p[i];
+    if (file->deleted) {
+      continue;
+    }
+    WriteFile(archive, file, fp);
+  }
+  
+  
+  fclose(fp);
+  return true;
+}
+
+typedef struct {
+  ARArchiveBuilder* archive;
+  Map file_map;
+} SymbolTableCopier;
+
+static void CopySymbolTable(void* entry, void* data) {
+  Vector* bucket = (Vector*)entry;
+  SymbolTableCopier* copier = data;
+  for (size_t i = 0; i < bucket->length; i++) {
+    ARSymbol* sym = bucket->value.p[i];
+    if (sym->file->deleted) {
+      continue;
+    }
+    MapKeyType key = {.p = sym->file};
+    void* new_file = MapFind(&copier->file_map, key);
+    assert(new_file != NULL);
+    ARSymbol* new_sym = malloc(sizeof(ARSymbol));
+    new_sym->file = new_file;
+    StringInit(&new_sym->name, sym->name.value);
+    VectorAppend(&copier->archive->symbols, new_sym);
+  }
+}
+
+void ARArchiveBuilderCopyArchive(ARArchiveBuilder* to, ARArchive* from, FILE* fp) {
+  // Map of original ARFile to new ARFile.  Symbols in the original
+  // archive contain references to the old ARFile and the will need
+  // to be redirected to the new ARFile.
+  SymbolTableCopier copier;
+  copier.archive = to;
+  MapInitForPointerKeys(&copier.file_map);
+  
+  for (size_t i = 0; i < from->files.length; i++) {
+    ARFile* from_file = from->files.value.p[i];
+    if (StringEqual(&from_file->filename, "/")) {
+      // Don't copy symbol table.
+      continue;
+    }
+    if (StringEqual(&from_file->filename, "//")) {
+       // Don't copy extended filenames file.
+       continue;
+     }
+    ARFile* to_file = ARFileCopyFromArchive(from_file, fp);
+    ARArchiveBuilderAddExisingFile(to, to_file);
+    
+    // Add mapping from from_file to to_file for symbol conversion.
+    MapKeyValue kv;
+    kv.key.p = from_file;
+    kv.value.p = to_file;
+    MapInsert(&copier.file_map, kv);
+  }
+  
+  HashTableTraverse(&from->symbol_table, CopySymbolTable, &copier);
+  MapDestruct(&copier.file_map);
+}

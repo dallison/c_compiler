@@ -10,20 +10,24 @@
 #include "loader.h"
 #include "loader_arch_riscv.h"
 #include "risc_v_interpreter.h"
+#include "risc_v_debugger.h"
 #include <stdlib.h>
 
 extern bool print_libraries_only;
 
 int main(int argc, char * argv[]) {
-  String filename;
-  StringInit(&filename, NULL);
+  String filename = {0};
   bool trace_regs = false;
   bool trace_instructions = false;
+  bool enter_debugger = false;
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
       switch (argv[i][1]) {
         case 'd':
           trace_instructions = true;
+          break;
+        case 'g':
+          enter_debugger = true;
           break;
         case 'r':
           trace_regs = true;
@@ -41,11 +45,9 @@ int main(int argc, char * argv[]) {
     }
   }
   
-  Interpreter interpreter;
+  RISCVInterpreter interpreter;
   Loader loader;
   
-  InterpreterInit(&interpreter, trace_regs, trace_instructions);
-
   int32_t loader_flags = trace_instructions ? LOADER_MAP_SYMTAB : 0;
 
   // The environment variable LD_BIND_NOW tells the dynamic loader to
@@ -63,15 +65,19 @@ int main(int argc, char * argv[]) {
     print_libraries_only = true;
   }
   
+  if (enter_debugger) {
+    loader_flags |= LOADER_WRITEABLE_TEXT;
+  }
+  
   // Initialize a RISC-V architecture.
   LoaderArchitecture arch;
   RISCVLoaderArchitectureInit(&arch);
   
-  
   // Initialize the loader from the given exe file.
   bool ok = LoaderInitFromFile(&loader, &filename, loader_flags,
                                &arch,
-                               &interpreter.symbol_resolver_code);
+                               &interpreter.symbol_resolver_code,
+                               ".");
   if (!ok) {
     printf("Error Loading %s\n", filename.value);
     exit(1);
@@ -80,9 +86,18 @@ int main(int argc, char * argv[]) {
   if (print_libraries_only) {
     exit(0);
   }
-  // Run the code at its entry address.
-  InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
+  RISCVInterpreterInit(&interpreter, &loader,
+                       loader.main_address, argc, argv,
+                       trace_regs, trace_instructions);
+  if (enter_debugger) {
+    RISCVDebugger debugger;
+    RISCVDebuggerInit(&debugger, &interpreter, loader.main_address);
+    RISCVDebuggerRun(&debugger);
+  } else {
+    // Run the code at its entry address.
+    RISCVInterpreterCycle(&interpreter);
+  }
   
-  InterpreterDestruct(&interpreter);
+  RISCVInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
 }

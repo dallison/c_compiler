@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 #include "errors.h"
 #include "symbol.h"
 
@@ -99,6 +100,7 @@ const char* ASTOpcodeName(ASTOpcode op) {
     case AST_OP(logor):
       return "||";
     case AST_OP(call):
+    case AST_OP(inline_call):
       return "(";
     case AST_OP(lshift):
       return "<<";
@@ -154,6 +156,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "~";
     case AST_OP(while):
       return "while";
+    case AST_OP(structmember):
+      return "structmember";
     case AST_OP(asm):
       return "__asm";
     case AST_OP(attribute):
@@ -360,6 +364,7 @@ const char* ASTOpcodeName(ASTOpcode op) {
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
                  SourceLocation location, ASTNodeVirtuals* virtuals) {
   assert(virtuals != NULL);
+  assert(op != AST_OP(bad));
   node->op = op;
   node->flags = 0;
   node->type = NULL;
@@ -392,7 +397,15 @@ static void ASTNodeBasePrint(ASTNode* node, int indents) {
   printf("\n");
 }
 
-static ASTNodeVirtuals base_vtbl = {ASTNodeBaseDelete, ASTNodeBasePrint, NULL};
+static void ASTNodeBaseCopy(ASTNode* dest, const ASTNode* src) {
+  memcpy(dest, src, sizeof(ASTNode));
+  if (dest->type != NULL) {
+    TypeRecordIncRef(dest->type);
+  }
+}
+
+static ASTNodeVirtuals base_vtbl = {ASTNodeBaseDelete, ASTNodeBasePrint, NULL,
+                                    NULL, NULL};
 
 ASTNode* NewASTNode(ASTOpcode op, TypeRecord* type, SourceLocation location) {
   ASTNode* node = malloc(sizeof(ASTNode));
@@ -440,8 +453,45 @@ void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
   parent->virtuals->replacer(parent, child_id, child, delete_old_child);
 }
 
+ASTNode* ASTNodeClone(const ASTNode* node,
+                      ASTNode* (*func)(ASTNode* node, void*), void* data,
+                      ASTNode* new_parent) {
+  if (node == NULL) {
+    return NULL;
+  }
+  ASTNode* clone;
+  if (node->virtuals->cloner == NULL) {
+    // Base class only.
+    clone = malloc(sizeof(ASTNode));
+    ASTNodeBaseCopy(clone, node);
+    clone = func(clone, data);
+  } else {
+    clone = node->virtuals->cloner(node, func, data);
+  }
+  if (clone != NULL) {
+    clone->parent = new_parent;
+  }
+  return clone;
+}
+
+void ASTNodeVisit(ASTNode* node,
+                  void (*func)(ASTNode* node, void*, int, VisitorMode),
+                  int child_id,
+                  void* data) {
+  if (node == NULL) {
+    return;
+  }
+  if (node->virtuals->visitor == NULL) {
+    // Base class only.
+    func(node, data, child_id, kVisitPreChildren);
+    return;
+  }
+  node->virtuals->visitor(node, func, child_id, data);
+}
+
 ASTNode* ASTNodeMove(ASTNode* node) {
   ASTNodeReplaceChild(node->parent, node->child_id, NULL, false);
+  node->parent = NULL;
   return node;
 }
 
@@ -473,8 +523,19 @@ static void IdentifierASTNodePrint(ASTNode* node, int indents) {
   ASTNodeBasePrint(node, indents + 2);
 }
 
+static ASTNode* IdentifierASTNodeClone(const ASTNode* node,
+                                       ASTNode* (*func)(ASTNode* node, void*),
+                                       void* data) {
+  IdentifierASTNode* from = (IdentifierASTNode*)node;
+  IdentifierASTNode* to = malloc(sizeof(IdentifierASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->symbol = from->symbol;
+  return func(&to->base, data);
+}
+
 static ASTNodeVirtuals identifier_vtbl = {ASTNodeBaseDelete,
-                                          IdentifierASTNodePrint, NULL};
+                                          IdentifierASTNodePrint, NULL,
+                                          IdentifierASTNodeClone, NULL};
 
 ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location) {
   IdentifierASTNode* node = malloc(sizeof(IdentifierASTNode));
@@ -492,12 +553,23 @@ static void StructMemberASTNodePrint(ASTNode* node, int indents) {
   ASTNodeBasePrint(node, indents + 2);
 }
 
+static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
+                                         ASTNode* (*func)(ASTNode* node, void*),
+                                         void* data) {
+  StructMemberASTNode* from = (StructMemberASTNode*)node;
+  StructMemberASTNode* to = malloc(sizeof(StructMemberASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->member = from->member;
+  return func(&to->base, data);
+}
+
 static ASTNodeVirtuals struct_member_vtbl = {ASTNodeBaseDelete,
-                                             StructMemberASTNodePrint, NULL};
+                                             StructMemberASTNodePrint, NULL,
+                                             StructMemberASTNodeClone, NULL};
 
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location) {
   StructMemberASTNode* node = malloc(sizeof(StructMemberASTNode));
-  ASTNodeInit(&node->base, AST_OP(identifier), member->symbol->type, location,
+  ASTNodeInit(&node->base, AST_OP(structmember), member->symbol->type, location,
               &struct_member_vtbl);
   node->member = member;
   return (ASTNode*)node;
@@ -515,10 +587,10 @@ static void ConstantASTNodePrint(ASTNode* node, int indents) {
       break;
     case AST_OP(string):
     case AST_OP(string_wide): {
-      String escaped;
-      StringInit(&escaped, NULL);
+      String escaped = {0};
       StringEscape(cnode->value.string, &escaped);
       printf("\"%s\"\n", escaped.value);
+      StringDestruct(&escaped);
       break;
     }
     case AST_OP(charwide):
@@ -539,8 +611,18 @@ static void ConstantASTNodePrint(ASTNode* node, int indents) {
   }
 }
 
+static ASTNode* ConstantASTNodeClone(const ASTNode* node,
+                                     ASTNode* (*func)(ASTNode* node, void*),
+                                     void* data) {
+  ConstantASTNode* from = (ConstantASTNode*)node;
+  ConstantASTNode* to = malloc(sizeof(ConstantASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  memcpy(&to->value, &from->value, sizeof(to->value));
+  return func(&to->base, data);
+}
+
 static ASTNodeVirtuals constant_vtbl = {ASTNodeBaseDelete, ConstantASTNodePrint,
-                                        NULL};
+                                        NULL, ConstantASTNodeClone, NULL};
 
 void IntConstantASTNodeInit(ConstantASTNode* node, int64_t value,
                             TypeRecord* type, SourceLocation location) {
@@ -572,7 +654,7 @@ ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
 }
 
 ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
-                                  SourceLocation location) {
+                                      SourceLocation location) {
   ConstantASTNode* node = malloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string_wide), type, location, &constant_vtbl);
   node->value.string = value;
@@ -608,14 +690,36 @@ static void UnaryASTNodeReplaceChild(ASTNode* parent, int child_id,
   UnaryASTNode* node = (UnaryASTNode*)parent;
   ASTNode* old = node->sub;
   node->sub = child;
+  child->child_id = child_id;
   child->parent = parent;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* UnaryASTNodeClone(const ASTNode* node,
+                                  ASTNode* (*func)(ASTNode* node, void*),
+                                  void* data) {
+  UnaryASTNode* from = (UnaryASTNode*)node;
+  UnaryASTNode* to = malloc(sizeof(UnaryASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->sub = ASTNodeClone(from->sub, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void UnaryASTNodeVisit(ASTNode* node,
+                              void (*func)(ASTNode* node, void*, int, VisitorMode),
+                              int child_id,
+                              void* data) {
+  UnaryASTNode* n = (UnaryASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->sub, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals unary_vtbl = {UnaryASTNodeDelete, UnaryASTNodePrint,
-                                     UnaryASTNodeReplaceChild};
+                                     UnaryASTNodeReplaceChild,
+                                     UnaryASTNodeClone, UnaryASTNodeVisit};
 
 // Unary AST node with a single child.
 ASTNode* NewUnaryASTNode(ASTOpcode op, TypeRecord* type,
@@ -664,13 +768,37 @@ static void BinaryASTNodeReplaceChild(ASTNode* parent, int child_id,
       break;
   }
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* BinaryASTNodeClone(const ASTNode* node,
+                                   ASTNode* (*func)(ASTNode* node, void*),
+                                   void* data) {
+  BinaryASTNode* from = (BinaryASTNode*)node;
+  BinaryASTNode* to = malloc(sizeof(BinaryASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->left = ASTNodeClone(from->left, func, data, &to->base);
+  to->right = ASTNodeClone(from->right, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void BinaryASTNodeVisit(ASTNode* node,
+                               void (*func)(ASTNode* node, void*, int, VisitorMode),
+                               int child_id,
+                               void* data) {
+  BinaryASTNode* n = (BinaryASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->left, func, 0, data);
+  ASTNodeVisit(n->right, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals binary_vtbl = {BinaryASTNodeDelete, BinaryASTNodePrint,
-                                      BinaryASTNodeReplaceChild};
+                                      BinaryASTNodeReplaceChild,
+                                      BinaryASTNodeClone, BinaryASTNodeVisit};
 
 // Binary AST node, which a left and right child.
 ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
@@ -684,6 +812,96 @@ ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
   node->right = right;
   right->parent = (ASTNode*)node;
   right->child_id = 1;
+  return (ASTNode*)node;
+}
+
+// Inlined call
+
+static void InlineCallASTNodeDelete(ASTNode* node) {
+  InlineCallASTNode* bnode = (InlineCallASTNode*)node;
+  if (bnode->inlined != NULL) {
+    ASTNodeDelete(bnode->inlined);
+  }
+  if (bnode->ret_value != NULL) {
+    ASTNodeDelete(bnode->ret_value);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void InlineCallASTNodePrint(ASTNode* node, int indents) {
+  InlineCallASTNode* cnode = (InlineCallASTNode*)node;
+  if (cnode->inlined != NULL) {
+    ASTNodePrint(cnode->inlined, indents + 2);
+  }
+  ASTNodeBasePrint(node, indents);
+  if (cnode->ret_value != NULL) {
+    ASTNodePrint(cnode->ret_value, indents + 1);
+  }
+}
+
+static void InlineCallASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                          ASTNode* child,
+                                          bool delete_old_child) {
+  InlineCallASTNode* node = (InlineCallASTNode*)parent;
+  ASTNode* old = NULL;
+  switch (child_id) {
+    case 0:  // Inlined child.
+      old = node->inlined;
+      node->inlined = child;
+      break;
+    case 1:  // ret_value child.
+      old = node->ret_value;
+      node->ret_value = child;
+      break;
+  }
+  child->parent = parent;
+  child->child_id = child_id;
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
+                                       ASTNode* (*func)(ASTNode* node, void*),
+                                       void* data) {
+  InlineCallASTNode* from = (InlineCallASTNode*)node;
+  InlineCallASTNode* to = malloc(sizeof(InlineCallASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->inlined = ASTNodeClone(from->inlined, func, data, &to->base);
+  to->ret_value = ASTNodeClone(from->ret_value, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void InlineCallASTNodeVisit(ASTNode* node,
+                                   void (*func)(ASTNode* node, void*,
+                                                int, VisitorMode),
+                                   int child_id,
+                                   void* data) {
+  InlineCallASTNode* n = (InlineCallASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->inlined, func, 0, data);
+  ASTNodeVisit(n->ret_value, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals inline_call_vtbl = {
+    InlineCallASTNodeDelete, InlineCallASTNodePrint,
+    InlineCallASTNodeReplaceChild, InlineCallASTNodeClone,
+    InlineCallASTNodeVisit};
+
+ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
+                              ASTNode* inlined, ASTNode* ret_value) {
+  InlineCallASTNode* node = malloc(sizeof(InlineCallASTNode));
+  ASTNodeInit(&node->base, AST_OP(inline_call), type, location,
+              &inline_call_vtbl);
+  node->inlined = inlined;
+  inlined->parent = (ASTNode*)node;
+  inlined->child_id = 0;
+  node->ret_value = ret_value;
+  if (ret_value != NULL) {
+    ret_value->parent = (ASTNode*)node;
+    ret_value->child_id = 1;
+  }
   return (ASTNode*)node;
 }
 
@@ -723,14 +941,45 @@ static void VectorASTNodeReplaceChild(ASTNode* parent, int child_id,
   node->children->value.p[child_id] = child;
   if (child != NULL) {
     child->parent = parent;
+    child->child_id = child_id;
   }
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* VectorASTNodeClone(const ASTNode* node,
+                                   ASTNode* (*func)(ASTNode* node, void*),
+                                   void* data) {
+  VectorASTNode* from = (VectorASTNode*)node;
+  VectorASTNode* to = malloc(sizeof(VectorASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->left = ASTNodeClone(from->left, func, data, &to->base);
+  to->children = NewVector();
+  for (size_t i = 0; i < from->children->length; i++) {
+    ASTNode* child =
+        ASTNodeClone(from->children->value.p[i], func, data, &to->base);
+    VectorAppend(to->children, child);
+  }
+  return func(&to->base, data);
+}
+
+static void VectorASTNodeVisit(ASTNode* node,
+                               void (*func)(ASTNode* node, void*,int,  VisitorMode),
+                               int child_id,
+                               void* data) {
+  VectorASTNode* n = (VectorASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->left, func, 0, data);
+  for (size_t i = 0; i < n->children->length; i++) {
+    ASTNodeVisit(n->children->value.p[i], func, (int)i+1, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals vector_vtbl = {VectorASTNodeDelete, VectorASTNodePrint,
-                                      VectorASTNodeReplaceChild};
+                                      VectorASTNodeReplaceChild,
+                                      VectorASTNodeClone, VectorASTNodeVisit};
 
 ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
                           SourceLocation location, ASTNode* left,
@@ -738,6 +987,7 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
   VectorASTNode* node = malloc(sizeof(VectorASTNode));
   ASTNodeInit(&node->base, op, type, location, &vector_vtbl);
   node->left = left;
+  left->parent = &node->base;
   node->children = children;
   for (size_t i = 0; i < children->length; i++) {
     ASTNode* child = children->value.p[i];
@@ -775,13 +1025,25 @@ static void CastASTNodeReplaceChild(ASTNode* parent, int child_id,
   ASTNode* old = node->expr;
   node->expr = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* CastASTNodeClone(const ASTNode* node,
+                                 ASTNode* (*func)(ASTNode* node, void*),
+                                 void* data) {
+  CastASTNode* from = (CastASTNode*)node;
+  CastASTNode* to = malloc(sizeof(CastASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->cast_type = from->cast_type;
+  TypeRecordIncRef(to->cast_type);
+  return func(&to->base, data);
+}
+
 static ASTNodeVirtuals cast_vtbl = {CastASTNodeDelete, CastASTNodePrint,
-                                    CastASTNodeReplaceChild};
+                                    CastASTNodeReplaceChild, CastASTNodeClone};
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
                         ASTNode* expr) {
@@ -789,26 +1051,6 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
   ASTNodeInit(&node->base, AST_OP(cast), NULL, location, &cast_vtbl);
   node->cast_type = type;
   TypeRecordIncRef(type);
-  node->expr = expr;
-  expr->parent = (ASTNode*)node;
-  return (ASTNode*)node;
-}
-
-ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
-  SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
-  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
-  IntConstantASTNodeInit(&node->base, size, type, location);
-  node->expr = NULL;
-  node->base.base.op = AST_OP(sizeof);
-  return (ASTNode*)node;
-}
-
-ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
-                                        SourceLocation location) {
-  SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
-  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
-  IntConstantASTNodeInit(&node->base, 0, type, location);
-  node->base.base.op = AST_OP(sizeof);
   node->expr = expr;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;
@@ -838,9 +1080,46 @@ void SizeofASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
   ASTNode* old = node->expr;
   node->expr = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
+}
+
+static ASTNode* SizeofASTNodeClone(const ASTNode* node,
+                                   ASTNode* (*func)(ASTNode* node, void*),
+                                   void* data) {
+  SizeofASTNode* from = (SizeofASTNode*)node;
+  SizeofASTNode* to = malloc(sizeof(SizeofASTNode));
+  memcpy(&to->base, &from->base, sizeof(to->base));
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base.base);
+  return func(&to->base.base, data);
+}
+
+static ASTNodeVirtuals sizeof_vtbl = {SizeofASTNodeDelete, SizeofASTNodePrint,
+                                      SizeofASTNodeReplaceChild,
+                                      SizeofASTNodeClone};
+
+ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
+  SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
+  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
+  IntConstantASTNodeInit(&node->base, size, type, location);
+  node->base.base.virtuals = &sizeof_vtbl;
+  node->expr = NULL;
+  node->base.base.op = AST_OP(sizeof);
+  return (ASTNode*)node;
+}
+
+ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
+                                        SourceLocation location) {
+  SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
+  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
+  IntConstantASTNodeInit(&node->base, 0, type, location);
+  node->base.base.virtuals = &sizeof_vtbl;
+  node->base.base.op = AST_OP(sizeof);
+  node->expr = expr;
+  expr->parent = (ASTNode*)node;
+  return (ASTNode*)node;
 }
 
 static void MacroNameASTNodeDelete(ASTNode* node) {
@@ -854,13 +1133,60 @@ static void MacroNameASTNodePrint(ASTNode* node, int indents) {
   printf("macro: %s", mnode->macro_name.value);
 }
 
-static ASTNodeVirtuals macro_vtbl = {MacroNameASTNodeDelete,
-                                     MacroNameASTNodePrint, NULL};
+static ASTNode* MacroNameASTNodeClone(const ASTNode* node,
+                                      ASTNode* (*func)(ASTNode* node, void*),
+                                      void* data) {
+  MacroNameASTNode* from = (MacroNameASTNode*)node;
+  MacroNameASTNode* to = malloc(sizeof(MacroNameASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  StringInit(&to->macro_name, from->macro_name.value);
+  return func(&to->base, data);
+}
+
+static ASTNodeVirtuals macro_vtbl = {
+    MacroNameASTNodeDelete, MacroNameASTNodePrint, NULL, MacroNameASTNodeClone};
 
 ASTNode* NewMacroNameASTNode(String* macro_name, SourceLocation location) {
   MacroNameASTNode* node = malloc(sizeof(MacroNameASTNode));
   ASTNodeInit(&node->base, AST_OP(macro), NULL, location, &macro_vtbl);
   StringInit(&node->macro_name, macro_name->value);
+  return (ASTNode*)node;
+}
+
+static void GotoStatementASTNodeDelete(ASTNode* node) {
+  GotoStatementASTNode* g = (GotoStatementASTNode*)node;
+  StringDelete(g->label_name);
+  ASTNodeBaseDelete(node);
+}
+
+static void GotoStatementASTNodePrint(ASTNode* node, int indents) {
+  GotoStatementASTNode* g = (GotoStatementASTNode*)node;
+  printf("%s\n", g->label_name->value);
+}
+
+static ASTNode* GotoStatementASTNodeClone(const ASTNode* node,
+                                 ASTNode* (*func)(ASTNode* node, void*),
+                                 void* data) {
+  GotoStatementASTNode* from = (GotoStatementASTNode*)node;
+  GotoStatementASTNode* to = malloc(sizeof(GotoStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->label_name = NewString(from->label_name->value);
+
+  // Need to analyze this again.
+  to->label = NULL;
+  to->base.flags &= ~kASTAnalyzed;
+
+  return func(&to->base, data);
+}
+
+static ASTNodeVirtuals goto_vtbl = {GotoStatementASTNodeDelete, GotoStatementASTNodePrint, NULL,
+                                    GotoStatementASTNodeClone};
+
+ASTNode* NewGotoStatementASTNode(String* label_name, SourceLocation location) {
+  GotoStatementASTNode* node = malloc(sizeof(GotoStatementASTNode));
+  ASTNodeInit(&node->base, AST_OP(goto), NULL, location, &goto_vtbl);
+  node->label_name = label_name;
+  node->label = NULL;
   return (ASTNode*)node;
 }
 
@@ -890,14 +1216,35 @@ static void ExpressionStatementASTNodeReplaceChild(ASTNode* parent,
   ASTNode* old = node->expr;
   node->expr = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* ExpressionStatementASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  ExpressionStatementASTNode* from = (ExpressionStatementASTNode*)node;
+  ExpressionStatementASTNode* to = malloc(sizeof(ExpressionStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void ExpressionStatementASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+                                            int child_id,
+                                            void* data) {
+  ExpressionStatementASTNode* n = (ExpressionStatementASTNode*)node;
+  func(node, data, child_id,  kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals expr_stmt_vtbl = {
     ExpressionStatementASTNodeDelete, ExpressionStatementASTNodePrint,
-    ExpressionStatementASTNodeReplaceChild};
+    ExpressionStatementASTNodeReplaceChild, ExpressionStatementASTNodeClone,
+    ExpressionStatementASTNodeVisit};
 
 ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location) {
   ExpressionStatementASTNode* node = malloc(sizeof(ExpressionStatementASTNode));
@@ -959,14 +1306,41 @@ static void IfStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
       break;
   }
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
-static ASTNodeVirtuals if_stmt_vtbl = {IfStatementASTNodeDelete,
-                                       IfStatementASTNodePrint,
-                                       IfStatementASTNodeReplaceChild};
+static ASTNode* IfStatementASTNodeClone(const ASTNode* node,
+                                        ASTNode* (*func)(ASTNode* node, void*),
+                                        void* data) {
+  IfStatementASTNode* from = (IfStatementASTNode*)node;
+  IfStatementASTNode* to = malloc(sizeof(IfStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->cond = ASTNodeClone(from->cond, func, data, &to->base);
+  to->if_part = ASTNodeClone(from->if_part, func, data, &to->base);
+  to->else_part = ASTNodeClone(from->else_part, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void IfStatementASTNodeVisit(ASTNode* node,
+                                    void (*func)(ASTNode* node, void*,
+                                                 int, VisitorMode),
+                                    int child_id,
+                                    void* data) {
+  IfStatementASTNode* n = (IfStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->cond, func, 0, data);
+  ASTNodeVisit(n->if_part, func, 1, data);
+  ASTNodeVisit(n->else_part, func, 2, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals if_stmt_vtbl = {
+    IfStatementASTNodeDelete, IfStatementASTNodePrint,
+    IfStatementASTNodeReplaceChild, IfStatementASTNodeClone,
+    IfStatementASTNodeVisit};
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
                                ASTNode* else_part, SourceLocation location) {
@@ -1025,15 +1399,41 @@ static void CombinedStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
       node->stmt = child;
       break;
   }
-  child->parent = parent;
+  if (child != NULL) {
+    child->parent = parent;
+    child->child_id = child_id;
+  }
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* CombinedStatementASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  CombinedStatementASTNode* from = (CombinedStatementASTNode*)node;
+  CombinedStatementASTNode* to = malloc(sizeof(CombinedStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->cond = ASTNodeClone(from->cond, func, data, &to->base);
+  to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void CombinedStatementASTNodeVisit(ASTNode* node,
+                                          void (*func)(ASTNode* node, void*,
+                                                      int,  VisitorMode),
+                                          int child_id,
+                                          void* data) {
+  CombinedStatementASTNode* n = (CombinedStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->cond, func, 0, data);
+  ASTNodeVisit(n->stmt, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals combined_stmt_vtbl = {
     CombinedStatementASTNodeDelete, CombinedStatementASTNodePrint,
-    CombinedStatementASTNodeReplaceChild};
+    CombinedStatementASTNodeReplaceChild, CombinedStatementASTNodeClone,
+    CombinedStatementASTNodeVisit};
 
 ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
                                      ASTNode* stmt, SourceLocation location) {
@@ -1081,14 +1481,43 @@ static void CompoundStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
   ASTNode* old = node->statements->value.p[child_id];
   node->statements->value.p[child_id] = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* CompoundStatementASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  CompoundStatementASTNode* from = (CompoundStatementASTNode*)node;
+  CompoundStatementASTNode* to = malloc(sizeof(CompoundStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->statements = NewVector();
+  for (size_t i = 0; i < from->statements->length; i++) {
+    ASTNode* child =
+        ASTNodeClone(from->statements->value.p[i], func, data, &to->base);
+    VectorAppend(to->statements, child);
+  }
+  return func(&to->base, data);
+}
+
+static void CompoundStatementASTNodeVisit(ASTNode* node,
+                                          void (*func)(ASTNode* node, void*,
+                                                       int, VisitorMode),
+                                          int child_id,
+                                          void* data) {
+  CompoundStatementASTNode* n = (CompoundStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  for (size_t i = 0; i < n->statements->length; i++) {
+    ASTNodeVisit(n->statements->value.p[i], func, (int)i, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals compound_stmt_vtbl = {
     CompoundStatementASTNodeDelete, CompoundStatementASTNodePrint,
-    CompoundStatementASTNodeReplaceChild};
+    CompoundStatementASTNodeReplaceChild, CompoundStatementASTNodeClone,
+    CompoundStatementASTNodeVisit};
 
 // Compound statement.
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
@@ -1102,13 +1531,15 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
     stmt->parent = (ASTNode*)node;
     stmt->child_id = (int)i;
   }
+  node->low_pc = VectorFirst(statements);
+  node->high_pc = VectorLast(statements);
   return (ASTNode*)node;
 }
 
 void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
                                     ASTNode* stmt, size_t at_index) {
   VectorInsertBefore(node->statements, at_index, stmt);
-  
+
   // The child ids for all statements have now changed.
   // Fix them.
   for (size_t i = at_index + 1; i < node->statements->length; i++) {
@@ -1181,14 +1612,43 @@ static void ForStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
       break;
   }
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
-static ASTNodeVirtuals for_stmt_vtbl = {ForStatementASTNodeDelete,
-                                        ForStatementASTNodePrint,
-                                        ForStatementASTNodeReplaceChild};
+static ASTNode* ForStatementASTNodeClone(const ASTNode* node,
+                                         ASTNode* (*func)(ASTNode* node, void*),
+                                         void* data) {
+  ForStatementASTNode* from = (ForStatementASTNode*)node;
+  ForStatementASTNode* to = malloc(sizeof(ForStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->c1 = ASTNodeClone(from->c1, func, data, &to->base);
+  to->c2 = ASTNodeClone(from->c2, func, data, &to->base);
+  to->c3 = ASTNodeClone(from->c3, func, data, &to->base);
+  to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void ForStatementASTNodeVisit(ASTNode* node,
+                                     void (*func)(ASTNode* node, void*,
+                                                  int, VisitorMode),
+                                     int child_id,
+                                     void* data) {
+  ForStatementASTNode* n = (ForStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->c1, func, 0, data);
+  ASTNodeVisit(n->c2, func, 1, data);
+  ASTNodeVisit(n->c3, func, 2, data);
+  ASTNodeVisit(n->stmt, func, 3, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals for_stmt_vtbl = {
+    ForStatementASTNodeDelete, ForStatementASTNodePrint,
+    ForStatementASTNodeReplaceChild, ForStatementASTNodeClone,
+    ForStatementASTNodeVisit};
 
 ASTNode* NewForStatementASTNode(ASTNode* e1, ASTNode* e2, ASTNode* e3,
                                 ASTNode* stmt, SourceLocation location) {
@@ -1240,14 +1700,37 @@ static void VariableDeclarationASTNodeReplaceChild(ASTNode* parent,
   ASTNode* old = node->initializer;
   node->initializer = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
-static ASTNodeVirtuals var_decl_vtbl = {VariableDeclarationASTNodeDelete,
-                                        VariableDeclarationASTNodePrint,
-                                        VariableDeclarationASTNodeReplaceChild};
+static ASTNode* VariableDeclarationASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  VariableDeclarationASTNode* from = (VariableDeclarationASTNode*)node;
+  VariableDeclarationASTNode* to = malloc(sizeof(VariableDeclarationASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->symbol = from->symbol;
+  to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void VariableDeclarationASTNodeVisit(ASTNode* node,
+                                            void (*func)(ASTNode* node, void*,
+                                                         int, VisitorMode),
+                                            int child_id,
+                                            void* data) {
+  VariableDeclarationASTNode* n = (VariableDeclarationASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->initializer, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals var_decl_vtbl = {
+    VariableDeclarationASTNodeDelete, VariableDeclarationASTNodePrint,
+    VariableDeclarationASTNodeReplaceChild, VariableDeclarationASTNodeClone,
+    VariableDeclarationASTNodeVisit};
 
 ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
                                        SourceLocation location) {
@@ -1284,8 +1767,36 @@ static void DeclarationListASTNodePrint(ASTNode* node, int indents) {
   }
 }
 
-static ASTNodeVirtuals decl_list_vtbl = {DeclarationListASTNodeDelete,
-                                         DeclarationListASTNodePrint, NULL};
+static ASTNode* DeclarationListASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  DeclarationListASTNode* from = (DeclarationListASTNode*)node;
+  DeclarationListASTNode* to = malloc(sizeof(DeclarationListASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->declarations = NewVector();
+  for (size_t i = 0; i < from->declarations->length; i++) {
+    ASTNode* child =
+        ASTNodeClone(from->declarations->value.p[i], func, data, &to->base);
+    VectorAppend(to->declarations, child);
+  }
+  return func(&to->base, data);
+}
+
+static void DeclarationListASTNodeVisit(ASTNode* node,
+                                        void (*func)(ASTNode* node, void*,
+                                                     int, VisitorMode),
+                                        int child_id,
+                                        void* data) {
+  DeclarationListASTNode* n = (DeclarationListASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  for (size_t i = 0; i < n->declarations->length; i++) {
+    ASTNodeVisit(n->declarations->value.p[i], func, (int)i, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals decl_list_vtbl = {
+    DeclarationListASTNodeDelete, DeclarationListASTNodePrint, NULL,
+    DeclarationListASTNodeClone, DeclarationListASTNodeVisit};
 
 // Declaration list.
 ASTNode* NewDeclarationListASTNode(Vector* declarations,
@@ -1315,13 +1826,53 @@ static void CaseLabelASTNodePrint(ASTNode* node, int indents) {
   }
 }
 
-static ASTNodeVirtuals case_label_vtbl = {CaseLabelASTNodeDelete,
-                                          CaseLabelASTNodePrint, NULL};
+static ASTNode* CaseLabelASTNodeClone(const ASTNode* node,
+                                      ASTNode* (*func)(ASTNode* node, void*),
+                                      void* data) {
+  CaseLabelASTNode* from = (CaseLabelASTNode*)node;
+  CaseLabelASTNode* to = malloc(sizeof(CaseLabelASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->value = from->value;
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  to->label = from->label;
+  return func(&to->base, data);
+}
+
+static void CaseLabelASTNodeVisit(ASTNode* node,
+                                  void (*func)(ASTNode* node, void*,
+                                               int, VisitorMode),
+                                  int child_id,
+                                  void* data) {
+  CaseLabelASTNode* n = (CaseLabelASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void CaseLabelASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                             ASTNode* child,
+                                             bool delete_old_child) {
+  CaseLabelASTNode* node = (CaseLabelASTNode*)parent;
+  ASTNode* old = node->expr;
+  node->expr = child;
+  child->parent = parent;
+  child->child_id = child_id;
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNodeVirtuals case_label_vtbl = {
+    CaseLabelASTNodeDelete, CaseLabelASTNodePrint, CaseLabelASTNodeReplaceChild, CaseLabelASTNodeClone,
+    CaseLabelASTNodeVisit};
 
 ASTNode* NewCaseLabelASTNode(ASTNode* expr, SourceLocation location) {
   CaseLabelASTNode* node = malloc(sizeof(CaseLabelASTNode));
   ASTNodeInit(&node->base, AST_OP(case), NULL, location, &case_label_vtbl);
   node->expr = expr;
+  if (expr != NULL) {
+    expr->parent = &node->base;
+  }
   node->value = 0;
   node->label = NULL;
   return (ASTNode*)node;
@@ -1365,14 +1916,47 @@ static void SwitchStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
       break;
   }
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
-static ASTNodeVirtuals switch_stmt_vtbl = {SwitchStatementASTNodeDelete,
-                                           SwitchStatementASTNodePrint,
-                                           SwitchStatementASTNodeReplaceChild};
+static ASTNode* SwitchStatementASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  SwitchStatementASTNode* from = (SwitchStatementASTNode*)node;
+  SwitchStatementASTNode* to = malloc(sizeof(SwitchStatementASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
+
+  VectorInit(&to->cases);
+  to->default_node = NULL;
+  to->density = 0;
+  to->min_case_value = LLONG_MAX;
+  to->max_case_value = LLONG_MIN;
+
+  // We need to perform semantic analysis again
+  to->base.flags &= ~kASTAnalyzed;
+  return func(&to->base, data);
+}
+
+static void SwitchStatementASTNodeVisit(ASTNode* node,
+                                        void (*func)(ASTNode* node, void*,
+                                                    int,  VisitorMode),
+                                        int child_id,
+                                        void* data) {
+  SwitchStatementASTNode* n = (SwitchStatementASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  ASTNodeVisit(n->stmt, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals switch_stmt_vtbl = {
+    SwitchStatementASTNodeDelete, SwitchStatementASTNodePrint,
+    SwitchStatementASTNodeReplaceChild, SwitchStatementASTNodeClone,
+    SwitchStatementASTNodeVisit};
 
 ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
                                    SourceLocation location) {
@@ -1406,14 +1990,26 @@ static void LabelASTNodePrint(ASTNode* node, int indents) {
   printf(" %s\n", lnode->name.value);
 }
 
-static ASTNodeVirtuals label_vtbl = {LabelASTNodeDelete, LabelASTNodePrint,
-                                     NULL};
+static ASTNode* LabelASTNodeClone(const ASTNode* node,
+                                  ASTNode* (*func)(ASTNode* node, void*),
+                                  void* data) {
+  LabelASTNode* from = (LabelASTNode*)node;
+  LabelASTNode* to = malloc(sizeof(LabelASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  StringInit(&to->name, from->name.value);
+  to->label = from->label;
+  return func(&to->base, data);
+}
 
-ASTNode* NewLabelASTNode(const char* name, SourceLocation location) {
+static ASTNodeVirtuals label_vtbl = {LabelASTNodeDelete, LabelASTNodePrint,
+                                     NULL, LabelASTNodeClone, NULL};
+
+ASTNode* NewLabelASTNode(const char* name, bool named, SourceLocation location) {
   LabelASTNode* node = malloc(sizeof(LabelASTNode));
   ASTNodeInit(&node->base, AST_OP(label), NULL, location, &label_vtbl);
   StringInit(&node->name, name);
   node->label = NULL;
+  node->named = named;
   return (ASTNode*)node;
 }
 
@@ -1429,7 +2025,18 @@ static void AsmASTNodePrint(ASTNode* node, int indents) {
   printf(" %s\n", lnode->text->value);
 }
 
-static ASTNodeVirtuals asm_vtbl = {AsmASTNodeDelete, AsmASTNodePrint, NULL};
+static ASTNode* AsmASTNodeClone(const ASTNode* node,
+                                ASTNode* (*func)(ASTNode* node, void*),
+                                void* data) {
+  AsmASTNode* from = (AsmASTNode*)node;
+  AsmASTNode* to = malloc(sizeof(AsmASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->text = NewString(from->text->value);
+  to->is_volatile = from->is_volatile;
+  return func(&to->base, data);
+}
+static ASTNodeVirtuals asm_vtbl = {AsmASTNodeDelete, AsmASTNodePrint, NULL,
+                                   AsmASTNodeClone, NULL};
 
 ASTNode* NewAsmASTNode(String* text, bool is_volatile,
                        SourceLocation location) {
@@ -1467,15 +2074,38 @@ static void ExpressionInitializerASTNodeReplaceChild(ASTNode* parent,
   node->expr = child;
   if (child != NULL) {
     child->parent = parent;
+    child->child_id = child_id;
   }
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* ExpressionInitializerASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  ExpressionInitializerASTNode* from = (ExpressionInitializerASTNode*)node;
+  ExpressionInitializerASTNode* to =
+      malloc(sizeof(ExpressionInitializerASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void ExpressionInitializerASTNodeVisit(ASTNode* node,
+                                              void (*func)(ASTNode* node, void*,
+                                                           int, VisitorMode),
+                                              int child_id,
+                                              void* data) {
+  ExpressionInitializerASTNode* n = (ExpressionInitializerASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals expr_init_vtbl = {
     ExpressionInitializerASTNodeDelete, ExpressionInitializerASTNodePrint,
-    ExpressionInitializerASTNodeReplaceChild};
+    ExpressionInitializerASTNodeReplaceChild, ExpressionInitializerASTNodeClone,
+    ExpressionInitializerASTNodeVisit};
 
 ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
                                          SourceLocation location) {
@@ -1518,14 +2148,43 @@ static void BracedInitializerASTNodeReplaceChild(ASTNode* parent, int child_id,
   ASTNode* old = lnode->initializers->value.p[child_id];
   lnode->initializers->value.p[child_id] = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* BracedInitializerASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  BracedInitializerASTNode* from = (BracedInitializerASTNode*)node;
+  BracedInitializerASTNode* to = malloc(sizeof(BracedInitializerASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->initializers = NewVector();
+  for (size_t i = 0; i < from->initializers->length; i++) {
+    ASTNode* init =
+        ASTNodeClone(from->initializers->value.p[i], func, data, &to->base);
+    VectorAppend(to->initializers, init);
+  }
+  return func(&to->base, data);
+}
+
+static void BracedInitializerASTNodeVisit(ASTNode* node,
+                                          void (*func)(ASTNode* node, void*,
+                                                       int, VisitorMode),
+                                          int child_id,
+                                          void* data) {
+  BracedInitializerASTNode* n = (BracedInitializerASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  for (size_t i = 0; i < n->initializers->length; i++) {
+    ASTNodeVisit(n->initializers->value.p[i], func, (int)i, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals braced_init_vtbl = {
     BracedInitializerASTNodeDelete, BracedInitializerASTNodePrint,
-    BracedInitializerASTNodeReplaceChild};
+    BracedInitializerASTNodeReplaceChild, BracedInitializerASTNodeClone,
+    BracedInitializerASTNodeVisit};
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,
                                      SourceLocation location) {
@@ -1603,14 +2262,47 @@ static void DesignatedInitializerASTNodeReplaceChild(ASTNode* parent,
   ASTNode* old = node->init;
   node->init = child;
   child->parent = parent;
+  child->child_id = child_id;
   if (delete_old_child) {
     ASTNodeDelete(old);
   }
 }
 
+static ASTNode* DesignatedInitializerASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  DesignatedInitializerASTNode* from = (DesignatedInitializerASTNode*)node;
+  DesignatedInitializerASTNode* to =
+      malloc(sizeof(DesignatedInitializerASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->designators = NewVector();
+  for (size_t i = 0; i < from->designators->length; i++) {
+    Designator* from_d = (Designator*)from->designators->value.p[i];
+    Designator* to_d = malloc(sizeof(Designator));
+    to_d->designator_type = from_d->designator_type;
+    to_d->type = from_d->type;
+    TypeRecordIncRef(to_d->type);
+    memcpy(&to_d->value, &from_d->value, sizeof(to_d->value));
+    VectorAppend(to->designators, to_d);
+  }
+  to->init = ASTNodeClone(from->init, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void DesignatedInitializerASTNodeVisit(ASTNode* node,
+                                              void (*func)(ASTNode* node, void*,
+                                                           int, VisitorMode),
+                                              int child_id,
+                                              void* data) {
+  DesignatedInitializerASTNode* n = (DesignatedInitializerASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->init, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static ASTNodeVirtuals designated_init_vtbl = {
     DesignatedInitializerASTNodeDelete, DesignatedInitializerASTNodePrint,
-    DesignatedInitializerASTNodeReplaceChild};
+    DesignatedInitializerASTNodeReplaceChild, DesignatedInitializerASTNodeClone,
+    DesignatedInitializerASTNodeVisit};
 
 ASTNode* NewDesignatedInitializerASTNode(Vector* designators, ASTNode* init,
                                          SourceLocation location) {

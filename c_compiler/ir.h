@@ -44,6 +44,7 @@ typedef enum {
   IR_OP(rmova),  // Move address op1 to op0
 
   IR_OP(label),  // Label.
+  IR_OP(named_label),  // Named label.
 
   // loads.
   IR_OP(loadi),   // Load signed 32-bit from [op0]
@@ -158,9 +159,9 @@ typedef enum {
   IR_OP(tempvar),       // Temporary variable
   IR_OP(ssavar),        // SSA renamed variable.
   IR_OP(structreturn),  // Struct return value.
-
+  IR_OP(addressof),     // Address of operand.
+  
   IR_OP(literalref),  // Load literal op0
-  IR_OP(structref),   // Load struct address [op0]
   IR_OP(loc),         // Source location
 
   // Function results.
@@ -268,6 +269,13 @@ typedef struct {
 } IRLocation;
 
 IRNode* NewIRLocation(SourceLocation location);
+
+typedef struct {
+  IRNode base;
+  const char* name;
+} IRNamedLabel;
+
+IRNode* NewIRNamedLabel(const char* name);
 
 typedef struct {
   IRNode base;

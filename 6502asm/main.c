@@ -17,11 +17,10 @@
 
 int main(int argc, char * argv[]) {
   Vector asm_filenames;
-  String object_filename;
+  String object_filename = {0};
   Vector options;
   
   VectorInit(&asm_filenames);
-  StringInit(&object_filename, NULL);
   VectorInit(&options);
   ParseOptions(argc, argv, &options);
   

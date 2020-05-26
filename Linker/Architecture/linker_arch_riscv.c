@@ -67,23 +67,41 @@ static void HandlePICRelocation(DynamicLinker* dynamic, Symbol* symbol,
   switch (reloc->type) {
     case R_RISCV_GOT_HI20:
     case R_RISCV_TLS_GOT_HI20:
-      symbol->got_index = append_data_to_got(dynamic, symbol);
+      if (symbol != NULL) {
+        symbol->got_index = append_data_to_got(dynamic, symbol);
+      }
       break;
  
     case R_RISCV_TLS_GD_HI20:
-      // This needs two GOT entries.
-      symbol->got_index = append_data_to_got(dynamic, symbol);
-      append_data_to_got(dynamic, symbol);
-      symbol->got_index--;    // Back to first entry.
+      if (symbol != NULL) {
+        // This needs two GOT entries.
+        symbol->got_index = append_data_to_got(dynamic, symbol);
+        append_data_to_got(dynamic, symbol);
+        symbol->got_index--;    // Back to first entry.
+      }
       break;
 
     case R_RISCV_CALL_PLT:
-      // Add GOT entry for function address.
-      symbol->got_index = append_func_to_got(dynamic, symbol);
-      
-      // Add PLT entry for call to GOT.
-      symbol->plt_index = append_to_plt(dynamic, symbol);
+      if (symbol != NULL) {
+        // Add GOT entry for function address.
+        symbol->got_index = append_func_to_got(dynamic, symbol);
+        
+        // Add PLT entry for call to GOT.
+        symbol->plt_index = append_to_plt(dynamic, symbol);
+      }
       break;
+      
+    case R_RISCV_64: {
+      // This is used for a relocation to a local symbol.
+      // Build a RELATIVE relocation and add it to the data_relocations
+      // in the dynamic linker.
+      Relocation* rel_reloc = NewRelativeRelocation(reloc->offset,
+                                                    reloc->section,
+                                                    R_RISCV_RELATIVE,
+                                                    reloc->addend);
+      VectorAppend(&dynamic->data_relocations, rel_reloc);
+      break;
+    }
   }
 }
 
@@ -583,8 +601,8 @@ static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
   uint32_t* p = (uint32_t*)plt_buffer->value;
 
   int32_t addr_diff = (int32_t)(got_address - plt_address);
-  int32_t hi20 = (addr_diff + 0x800) >> 12;
-  int32_t lo12 = addr_diff - (hi20 << 12);
+  int32_t hi20, lo12;
+  SplitValue(addr_diff, &hi20, &lo12);
   
   // 1:   auipc  t2, %pcrel_hi(.got.plt)
   p[0] = UTypeInstruction(RV_OPCODE(auipc), t2, hi20);
@@ -632,12 +650,15 @@ static void FixupPLTEntry(ProcedureLinkageTable* plt,
   // Offset in bytes from trampoline start to got entry address.
   int64_t pcrel = entry_address - trampoline_address;
   
+  int32_t hi20, lo12;
+  SplitValue(pcrel, &hi20, &lo12);
+  
   // auipc instruction has the upper 20 bits of the offset in its
   // upper 20 bits.
-  p[0] |= (pcrel >> 12) << 12;
+  p[0] |= hi20 << 12;
   
   // ld instruction, upper 12 bits are lower 12 bits of offset.
-  p[1] |= (pcrel & 0xfff) << 20;
+  p[1] |= lo12 << 20;
 }
 
 LinkerArchitecture* NewRISCVLinkerArchitecture() {

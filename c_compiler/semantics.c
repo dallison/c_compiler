@@ -11,6 +11,7 @@
 #include "expr_semantics.h"
 #include "lex.h"
 #include "statement_semantics.h"
+#include "var_analysis.h"
 
 void SemanticError(ASTNode* node, const char* format, ...) {
   va_list ap;
@@ -34,6 +35,17 @@ void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   VSemanticWarning(node, warn, format, ap);
+  va_end(ap);
+}
+
+void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(symbol->location, &filename, &lineno, &start, &end);
+  VReportWarning(filename, lineno, warn, format, ap);
   va_end(ap);
 }
 
@@ -65,13 +77,15 @@ void SemanticCheckScalarType(ASTNode* node) {
 // same name.
 // We don't do this for arguments because it's common for arguments
 // to be unused deliberately.
-static void CheckForUnusedLocalSymbols(Syntax* syntax) {
+static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
-    if (!symbol->used && !symbol->is_argument) {
-      SyntaxWarning(syntax, "unused-var",
-                    "Local variable '%s' is not used in this function",
-                    symbol->name.value);
+    if (!symbol->flags.used && !symbol->flags.is_argument &&
+        !symbol->flags.is_temp && !symbol->flags.invented) {
+      SemanticSymbolWarning(symbol, "unused-var",
+                    "Local variable '%s' is not used in function '%s'",
+                    symbol->name.value,
+                      node->type->info.function.symbol->name.value);
     }
   }
 }
@@ -79,7 +93,8 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax) {
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
-  CheckForUnusedLocalSymbols(syntax);
+  // AnalyzeVariables(node->type->info.function.body);
+  CheckForUnusedLocalSymbols(syntax, node);
 }
 
 // This table contains mappings from one type to another.  The 'from'
@@ -183,10 +198,8 @@ struct {
 
 void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,
                                  const char* format) {
-  String from_string;
-  String to_string;
-  StringInit(&from_string, NULL);
-  StringInit(&to_string, NULL);
+  String from_string = {0};
+  String to_string = {0};
   TypeRecordToString(from->type, &from_string);
   TypeRecordToString(to, &to_string);
   SemanticError(from, format, from_string.value, to_string.value);
@@ -196,10 +209,8 @@ void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,
 
 void SemanticTypeConversionWarning(ASTNode* from, TypeRecord* to,
                                    const char* warn, const char* format) {
-  String from_string;
-  String to_string;
-  StringInit(&from_string, NULL);
-  StringInit(&to_string, NULL);
+  String from_string = {0};
+  String to_string = {0};
   TypeRecordToString(from->type, &from_string);
   TypeRecordToString(to, &to_string);
   SemanticWarning(from, warn, format, from_string.value, to_string.value);
@@ -253,7 +264,6 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
         case AST_OP(i2d):
         case AST_OP(i2ld):
           return ConvertIntToDouble(c, 32);
-          return from;
         case AST_OP(i2b):
         case AST_OP(c2b):
         case AST_OP(s2b):
@@ -358,7 +368,11 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
   return NULL;
 }
 
-void SemanticConvertType(ASTNode* from, TypeRecord* to) {
+void NormalConversion(ASTNode* from, TypeRecord* to) {
+  SemanticConvertType(from, to, kConvertNormal);
+}
+
+void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
     return;
@@ -397,41 +411,82 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to) {
     }
   }
 
-  if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
-    TypeRecord* from_next = from->type->next;
-    TypeRecord* to_next = to->next;
-    if (!TypeEqual(from_next, to_next)) {
-      SemanticTypeConversionWarning(from, to, "ptr-conversion",
-                                    "Illegal pointer conversion; "
-                                    "from '%s' to '%s'");
-    }
-    return;
-  }
+  switch (ctx) {
+    case kConvertCast:
+      if (TypeIsVoid(to)) {
+         // Casting to void is always allowed.
+       } else {
+         // Convert the expression to the given type.
+         // This is different from a normal conversion in that there are
+         // very few illegal casts.
+         // Illegal casts:
+         // 1. struct/union to/from anything
+         // 2. void to anything but void
+         bool bad_cast = false;
+         if (TypeIsStructOrUnion(from->type) ||
+             TypeIsStructOrUnion(to)) {
+           bad_cast = true;
+         } else if (TypeIsVoid(from->type)) {
+           bad_cast = true;
+         }
+         if (bad_cast) {
+           SemanticTypeConversionError(from, to, "Illegal cast");
+         }
+       }
+      break;
+      
+    case kConvertNormal:
+      if (TypeIsVoidPointer(to)) {
+        // Can convert any pointer, array or function to void*.
+        if (TypeIsFunction(from->type) || TypeIsPointerOrArray(from->type)) {
+          return;
+        }
+        // The only integer we can convert to void* is NULL.
+        if (from->op == AST_OP(number)) {
+          ConstantASTNode* c = (ConstantASTNode*)from;
+          if (c->value.ivalue == 0) {
+            return;
+          }
+        }
+      }
+      if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
+        if (!TypeAssignmentCompatible(from->type, to)) {
+          SemanticTypeConversionWarning(from, to, "ptr-conversion",
+                                        "Illegal pointer conversion; "
+                                        "from '%s' to '%s'");
+        }
+        return;
+      }
 
-  // Treat enum and ints as same.
-  if ((TypeIsEnum(from->type) && TypeIsInt(to)) ||
-      (TypeIsInt(from->type) && TypeIsEnum(to))) {
-    return;
-  }
+      // Treat enum and ints as same.
+      if ((TypeIsEnum(from->type) && TypeIsInt(to)) ||
+          (TypeIsInt(from->type) && TypeIsEnum(to))) {
+        return;
+      }
 
-  // Allow the number 0 (explicitly) to be converted to a pointer.
-  if (from->op == AST_OP(number) && TypeIsPointer(to)) {
-    ConstantASTNode* const_node = (ConstantASTNode*)from;
-    if (TypeIsInt(const_node->base.type) && const_node->value.ivalue == 0) {
-      return;
-    }
-  }
+      // Allow the number 0 (explicitly) to be converted to a pointer.
+      if (from->op == AST_OP(number) && TypeIsPointer(to)) {
+        ConstantASTNode* const_node = (ConstantASTNode*)from;
+        if (TypeIsInt(const_node->base.type) && const_node->value.ivalue == 0) {
+          return;
+        }
+      }
 
-  if (TypeIsFunction(from->type) && TypeIsFunctionPointer(to)) {
-    // Functions can be converted to function pointers to the same type.
-    if (TypeEqual(from->type, to->next)) {
-      return;
-    }
-  }
+      if (TypeIsFunction(from->type) && TypeIsFunctionPointer(to)) {
+        // Functions can be converted to function pointers to the same type.
+        if (TypeEqual(from->type, to->next)) {
+          return;
+        }
+      }
 
-  SemanticTypeConversionError(
-      from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
-  return;
+      if (TypeIsUnknown(to) || TypeIsUnknown(from->type)) {
+        // Unknown types don't cause errors.
+        return;
+      }
+      SemanticTypeConversionError(
+          from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
+      break;
+  }
 }
 
 void SemanticAnalyzeVariableDefinition(Syntax* syntax,
@@ -442,8 +497,8 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   if (node->initializer == NULL) {
     return;
   }
-  AnalyzeExpression(node->initializer);
+  node->initializer = AnalyzeExpression(node->initializer);
   // TODO: at this level the expression must be evaluatable at compile time.
-  SemanticConvertType(node->initializer, node->symbol->type);
+  NormalConversion(node->initializer, node->symbol->type);
   ASTNodeSetType((ASTNode*)node, node->symbol->type);
 }

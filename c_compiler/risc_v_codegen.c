@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
+#include "debug.h"
 
 #include "risc_v_optimize.h"
 
@@ -349,6 +350,8 @@ const char* RVOpcodeName(int op) {
 
     case RV_OP(la):
       return "la";
+    case RV_OP(lla):
+        return "lla";
     case RV_OP(sext_w):
       return "sext.w";
 
@@ -388,6 +391,7 @@ const char* RVOpcodeName(int op) {
     case RV_OP(fa7):
       return "fa7";
 
+    // NOTE: these must match the number of int and fp reg vars.
     case RV_OP(v0):
       return "v0";
     case RV_OP(v1):
@@ -396,6 +400,10 @@ const char* RVOpcodeName(int op) {
       return "v2";
     case RV_OP(v3):
       return "v3";
+    case RV_OP(v4):
+      return "v4";
+    case RV_OP(v5):
+      return "v5";
 
     case RV_OP(fv0):
       return "fv0";
@@ -405,6 +413,10 @@ const char* RVOpcodeName(int op) {
       return "fv2";
     case RV_OP(fv3):
       return "fv3";
+    case RV_OP(fv4):
+      return "fv4";
+    case RV_OP(fv5):
+      return "fv5";
 
     case RV_OP(regarg):
       return "regarg";
@@ -441,11 +453,12 @@ bool RVIsExpression(RVOpcode opcode) {
     case RV_OP(rmovd):
     case RV_OP(sb):
     case RV_OP(sw):
+    case RV_OP(sh):
     case RV_OP(sd):
-    case RV_OP(lh):
     case RV_OP(fsw):
     case RV_OP(fsd):
     case RV_OP(loc):
+    case RV_OP(named_label):
       return false;
     default:
       return true;
@@ -548,17 +561,21 @@ bool RVIsFixedRegister(RVOpcode opcode) {
 }
 
 int RVIntValue(TargetInstruction* inst) {
+  if (inst->opcode == (TargetOpcode)RV_OP(x0)) {
+    return 0;
+  }
   return (int)((TargetConstant*)inst)->value.ivalue;
 }
 
 // Is the value small enough to be encoded in an immediate field?
 bool RVIsPossibleImmediate(int64_t value) {
-  // Check for 12 bit immediate.
+  // Check for 12 bit signed immediate.
   if (value < 0) {
-    value = -value;
+    return value >= -2048;
   }
-  return value <= 0x7ff;
+  return value < 2048;
 }
+
 
 void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   TargetGeneratorInit(&rv->base, gen);
@@ -568,6 +585,7 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   rv->num_int_reg_vars = 0;
   rv->num_fp_reg_vars = 0;
   rv->struct_return_reg = -1;
+  rv->use_reg_vars = false;
   rv->zero = NULL;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
@@ -575,6 +593,7 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   memset(rv->fp_variable_registers, 0, sizeof(rv->fp_variable_registers));
   VectorInit(&rv->saved_regs);
   VectorInit(&rv->register_loads);
+  VectorInit(&rv->offsets);
 
   RVRegisterAllocatorInit(&rv->register_allocator, rv);
 }
@@ -589,6 +608,7 @@ void RVGeneratorDestruct(RVGenerator* rv) {
   TargetGeneratorDestruct(&rv->base);
   VectorDestructWithContents(&rv->saved_regs, NULL);
   VectorDestructWithContents(&rv->register_loads, NULL);
+  VectorDestructWithContents(&rv->offsets, NULL);
   RVRegisterAllocatorDestruct(&rv->register_allocator);
 }
 
@@ -739,10 +759,6 @@ static TargetInstruction* FloatingPointVariableRegister(RVGenerator* rv,
   return rv->fp_variable_registers[reg_index];
 }
 
-// Calculate the offset from the frame pointer to a local variable in the stack.
-static int LocalVariableOffset(RVGenerator* rv, int32_t var_offset) {
-  return var_offset - rv->base.stack_frame_size - RV_STACK_FRAME_HEADER_SIZE;
-}
 
 // Add immediate to the src.  If it fits in 12 bits we can use an addi
 // instruction, otherwise load the immediate and use an add instruction.
@@ -770,6 +786,88 @@ static TargetInstruction* AddValue(RVGenerator* rv, TargetInstruction* src,
   return Emit(rv, NewInstruction2(RV_OP(add), src, value));
 }
 
+// Calculate the offset from the frame pointer to a local variable in the stack.
+static int LocalVariableOffset(RVGenerator* rv, int32_t var_offset) {
+  return var_offset - rv->base.stack_frame_size -
+      RV_STACK_FRAME_HEADER_SIZE;
+}
+
+static TargetInstruction* PagedOffsetFrom(RVGenerator* rv, TargetInstruction* src,
+                                          int32_t offset, int32_t* page_offset) {
+  // Offset is not in range.  Need to calculate an offset in a register.
+  //
+  // We calculate a page offset.  The addi instruction
+  // has a 12 bit signed immediate that can be added to an offset
+  // calculated from the src.
+  int page;
+  if (offset < 0) {
+    page = -(-offset & ~0xfff);
+  } else {
+    page = offset & ~0xfff;
+  }
+  TargetInstruction* page_inst = NULL;
+  for (size_t i = 0; i < rv->offsets.length; i++) {
+    Offset* f = rv->offsets.value.p[i];
+    if (f->page_offset == page) {
+      page_inst = f->inst;
+      break;
+    }
+  }
+  if (page_inst == NULL) {
+    // No page offset calculated, need to calculate one.
+    page_inst =
+        AddImmediate(rv, src, page);
+    Offset* f = malloc(sizeof(Offset));
+    f->inst = page_inst;
+    f->page_offset = page;
+    VectorAppend(&rv->offsets, f);
+  }
+  *page_offset = offset - page;
+  return page_inst;
+}
+
+// Returns either an integer constant or an instruction to calculate an
+// offset from the src.
+static TargetInstruction* OffsetFrom(RVGenerator* rv, TargetInstruction* src,
+                                     int32_t offset) {
+  bool offset_in_range = RVIsPossibleImmediate(offset);
+  if (offset_in_range) {
+    return AddImmediate(rv, src, offset);
+  }
+  int page_offset;
+  TargetInstruction* page_inst = PagedOffsetFrom(rv, src, offset, &page_offset);
+  if (page_offset == 0) {
+    return page_inst;
+  }
+  return AddImmediate(rv, page_inst, page_offset);
+}
+
+static TargetInstruction* LoadImmediate(RVGenerator* rv, RVOpcode opcode,
+                                          TargetInstruction* base, int32_t offset) {
+  if (RVIsPossibleImmediate(offset)) {
+    return Emit(rv, NewInstruction2(opcode, base,
+                                    GetIntConstant(rv, NULL, kTargetTypeWord, offset)));
+  }
+  int32_t page_offset;
+  TargetInstruction* page_inst = PagedOffsetFrom(rv, base, offset, &page_offset);
+  return Emit(rv, NewInstruction2(opcode, page_inst,
+                                  GetIntConstant(rv, NULL, kTargetTypeWord, page_offset)));
+
+}
+
+static TargetInstruction* StoreImmediate(RVGenerator* rv, RVOpcode opcode,
+                                         TargetInstruction* value, TargetInstruction* base, int32_t offset) {
+  if (RVIsPossibleImmediate(offset)) {
+    return Emit(rv, NewInstruction3(opcode, value, base,
+                                    GetIntConstant(rv, NULL, kTargetTypeWord, offset)));
+  }
+  int32_t page_offset;
+  TargetInstruction* page_inst = PagedOffsetFrom(rv, base, offset, &page_offset);
+  return Emit(rv, NewInstruction3(opcode, value, page_inst,
+                                  GetIntConstant(rv, NULL, kTargetTypeWord, page_offset)));
+
+}
+
 static TargetInstruction* Memcpy(RVGenerator* rv, TargetInstruction* dest_addr,
                                  TargetInstruction* src_addr, int length,
                                  int src_offset, int dest_offset) {
@@ -779,22 +877,12 @@ static TargetInstruction* Memcpy(RVGenerator* rv, TargetInstruction* dest_addr,
     int num_words = length >> 3;
     TargetInstruction* result = NULL;
     for (int i = 0; i < num_words; i++, src_offset += 8, dest_offset += 8) {
-      TargetInstruction* src_off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, src_offset);
-      TargetInstruction* dest_off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, dest_offset);
-      TargetInstruction* load =
-          Emit(rv, NewInstruction2(RV_OP(ld), src_addr, src_off));
-      result = Emit(rv, NewInstruction3(RV_OP(sd), load, dest_addr, dest_off));
+      TargetInstruction* load = LoadImmediate(rv, RV_OP(ld), src_addr, src_offset);
+      result = StoreImmediate(rv, RV_OP(sd), load, dest_addr, dest_offset);
     }
     for (int i = 0; i < num_bytes; i++, src_offset += 1, dest_offset += 1) {
-      TargetInstruction* src_off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, src_offset);
-      TargetInstruction* dest_off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, dest_offset);
-      TargetInstruction* load =
-          Emit(rv, NewInstruction2(RV_OP(lb), src_addr, src_off));
-      result = Emit(rv, NewInstruction3(RV_OP(sb), load, dest_addr, dest_off));
+      TargetInstruction* load = LoadImmediate(rv, RV_OP(lb), src_addr, src_offset);
+      result = StoreImmediate(rv, RV_OP(sb), load, dest_addr, dest_offset);
     }
     return result;
   }
@@ -809,14 +897,14 @@ static TargetInstruction* Memcpy(RVGenerator* rv, TargetInstruction* dest_addr,
 
   // Source in a1.
   if (src_offset != 0) {
-    src_addr = AddImmediate(rv, src_addr, src_offset);
+    src_addr = OffsetFrom(rv, src_addr, src_offset);
   }
   TargetInstruction* arg1 = Emit(
       rv, NewInstruction2(RV_OP(rmov), IntArgumentRegister(rv, 1), src_addr));
 
   // Dest in a0.
   if (dest_offset != 0) {
-    dest_addr = AddImmediate(rv, dest_addr, dest_offset);
+    dest_addr = OffsetFrom(rv, dest_addr, dest_offset);
   }
   TargetInstruction* arg0 = Emit(
       rv, NewInstruction2(RV_OP(rmov), IntArgumentRegister(rv, 0), dest_addr));
@@ -841,14 +929,10 @@ static TargetInstruction* Memzero(RVGenerator* rv, TargetInstruction* dest_addr,
     int num_words = length >> 3;
     TargetInstruction* result = NULL;
     for (int i = 0; i < num_words; i++, offset += 8) {
-      TargetInstruction* off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, offset);
-      result = Emit(rv, NewInstruction3(RV_OP(sd), Zero(rv), dest_addr, off));
+      result = StoreImmediate(rv, RV_OP(sd), Zero(rv), dest_addr, offset);
     }
     for (int i = 0; i < num_bytes; i++, offset += 1) {
-      TargetInstruction* off =
-          GetIntConstant(rv, NULL, kTargetTypeWord, offset);
-      result = Emit(rv, NewInstruction3(RV_OP(sb), Zero(rv), dest_addr, off));
+      result = StoreImmediate(rv, RV_OP(sb), Zero(rv), dest_addr, offset);
     }
     return result;
   }
@@ -981,9 +1065,13 @@ static RVOpcode IR2RV(IROpcode op) {
 }
 
 static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
+  if (!compiler->optimize) {
+    // When not optimizing, all variables are on the stack.
+    return false;
+  }
   // Can't use a register if its address has been taken.
   IRVariable* var = (IRVariable*)var_node;
-  if (var->symbol->address_taken) {
+  if (var->symbol->flags.address_taken) {
     return false;
   }
 
@@ -997,7 +1085,7 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
     if (rv->num_fp_reg_vars >= RV_MAX_FP_REG_VARS) {
       return false;
     }
-    printf("variable %s allocated to a register\n", var->symbol->name.value);
+    // printf("variable %s allocated to a register\n", var->symbol->name.value);
     return true;
   }
 
@@ -1005,16 +1093,21 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
   if (rv->num_int_reg_vars >= RV_MAX_INT_REG_VARS) {
     return false;
   }
-  printf("variable %s allocated to a register\n", var->symbol->name.value);
+  // printf("variable %s allocated to a register\n", var->symbol->name.value);
   return true;
 }
 
 // Static varaibles have an address calculated by the linker so at this
 // point they are unknown.  We need to load their address into a register.  This
-// is done using a la pseudo-instruction.
+// is done using a la or lla pseudo-instruction.
 static TargetInstruction* LoadStaticVariableAddress(RVGenerator* rv,
                                                     IRNode* node) {
-  return Emit(rv, NewInstruction1(RV_OP(la), GetLoweredNode(node)));
+  IRVariable* var = (IRVariable*)node;
+  // A local variable is loaded usng the lla instruction and globals
+  // are loaded using la.  The difference is in PIC code lla will
+  // not use the GOT for the relocation.
+  RVOpcode opcode = var->symbol->flags.is_local ? RV_OP(lla) : RV_OP(la);
+  return Emit(rv, NewInstruction1(opcode, GetLoweredNode(node)));
 }
 
 static struct {
@@ -1119,7 +1212,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
     // Auto variable is in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
     TargetInstruction* addr = FramePointer(rv);
-    return AddImmediate(rv, addr, LocalVariableOffset(rv, var_offset));
+    return OffsetFrom(rv, addr, LocalVariableOffset(rv, var_offset));
   } else if (IRIsArgument(node)) {
     // TODO: structs passed by reference.
     int32_t var_offset = node->data.ivalue;
@@ -1135,7 +1228,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
       // Argument is on the stack.
       TargetInstruction* addr = FramePointer(rv);
       int32_t var_offset = node->data.ivalue;
-      return AddImmediate(rv, addr, var_offset);
+      return OffsetFrom(rv, addr, var_offset);
     }
   } else if (IRIsStaticVariable(node)) {
     // The address of static variables need to be moved into a register.
@@ -1157,15 +1250,88 @@ static bool IsPowerOf2(int64_t v) {
 
 // Given a number that is a power of 2, what is the log (base 2) of it.
 static int64_t Log2(int64_t v) {
-  int bit = 0;
-  for (int i = 0; i < 64; i++) {
-    if ((v & (1LL << i)) != 0) {
-      return bit;
-    }
-    bit++;
-  }
-  assert(false);
+  static const int MultiplyDeBruijnBitPosition2[32] =
+  {
+    0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+    31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
+  };
+  return MultiplyDeBruijnBitPosition2[(uint32_t)(v * 0x077CB531U) >> 27];
 }
+
+// Count the number of 1 bits in the integer up to maxbits in length.
+static int PopulationCount(uint64_t x) {
+  int c = 0;
+  for (; x != 0; x &= x - 1) {
+      c++;
+  }
+  return c;
+}
+
+// It's worth multiplying by a constant using shifts and adds
+// if the number of shift and add instructions is less than the number of
+// cycles it takes for the mul instruction.
+//
+// While each RISC-V processor is different, let's assume that the multiplier
+// can do 8 bits at a time.  Since this is a 64 bit processor, that's
+// 8 cycles to multiply two 64 bit numbers.  Each 1-bit in the constant
+// causes the emission of a shift instruction and these need to be added
+// together.  Therefore the number of instructions for a n bits is
+// n + (n - 1) = 2n-1.  However for bit 0 we don't do the shift but instead
+// use the input value directly.
+//
+// Let's assume that both a slli and an add instruction take 1 cycle.
+static TargetInstruction* MultiplyByConstant(RVGenerator* rv,
+                               IRNode* variable,
+                               IRConstant* constant) {
+  int64_t value = constant->value.ivalue;
+  int numbits = PopulationCount(value);
+  int num_cycles = numbits * 2 - 1;
+  if ((value & 1) == 1) {
+    // If the bottom bit is 1 we can subtract one instruction.
+    num_cycles--;
+  }
+  const int kMaxCycles = 8;
+  if (num_cycles > kMaxCycles) {
+    return NULL;
+  }
+ 
+  TargetInstruction* left = NULL;   // Current left instruction.
+  TargetInstruction* right = NULL;  // Current right instruction.
+  TargetInstruction* input = GetLoweredNode(variable);
+  
+  int bitpos = 0;
+  while (value != 0) {
+    if ((value & 1) == 1) {
+      // Build a shift by the bitpos.
+      TargetInstruction* inst;
+      if (bitpos == 0) {
+        inst = input;     // Bit 0, use input directly.
+      } else {
+        // Shift left by the bitpos.
+       inst =
+           Emit(rv, NewInstruction2(RV_OP(slli), input,
+                           GetIntConstant(rv, NULL, kTargetTypeWord, bitpos)));
+      }
+      if (left == NULL) {
+        left = inst;
+      } else if (right == NULL) {
+        right = inst;
+      }
+      if (left != NULL && right != NULL) {
+        // Add left and right together.
+        inst = Emit(rv, NewInstruction2(RV_OP(add), left, right));
+        
+        // Left is now the result of the add.  Right is empty.
+        left = inst;
+        right = NULL;
+      }
+    }
+    bitpos++;
+    value >>= 1;
+  }
+  return left;
+}
+
 
 static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -1177,7 +1343,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =
       false;  // True if we don't need to update operand ref counts.
-
+                
   // Do some strength reduction if we can.
   switch (opcode) {
     default:
@@ -1188,6 +1354,10 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
+      if (IRIsConst(op1) && IRIsConst(op2)) {
+        // Both constant, multiply don't replace.
+        break;
+      }
       // Adds are commutative so we can have a const as first or
       // second operand.
       if (IRIsConst(op2)) {
@@ -1261,12 +1431,15 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       break;
     }
     case RV_OP(mul): {
-      // If we are multiplying by a constant power of 2 we can use a shift.
-      // TODO: other constants can be done too.
+      // If we are multiplying by a constant we can use shifts and
+      // adds.
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) || IRIsConst(op2)) {
+        if (IRIsConst(op1) && IRIsConst(op2)) {
+          break;
+        }
         // One is constant, put it on the right of the slli instruction.
         if (IRIsConst(op1)) {
           int64_t c = ((IRConstant*)op1)->value.ivalue;
@@ -1278,13 +1451,11 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
             inst = NewInstruction(RV_OP(mv));
             inst->operand[0] = Materialize(rv, op2);
           } else {
-            if (IsPowerOf2(c) && c < 64) {
-              c = Log2(c);
-              inst =
-                  NewInstruction2(RV_OP(slli), Materialize(rv, op2),
-                                  GetIntConstant(rv, NULL, kTargetTypeWord, c));
-              ref_counts_ok = true;
+            inst = MultiplyByConstant(rv, op2, (IRConstant*)op1);
+            if (inst == NULL) {
+              break;
             }
+            ref_counts_ok = true;
           }
         } else {
           int64_t c = ((IRConstant*)op2)->value.ivalue;
@@ -1296,13 +1467,11 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
             inst = NewInstruction(RV_OP(mv));
             inst->operand[0] = Materialize(rv, op1);
           } else {
-            if (IsPowerOf2(c) && c < 64) {
-              c = Log2(c);
-              inst =
-                  NewInstruction2(RV_OP(slli), Materialize(rv, op1),
-                                  GetIntConstant(rv, NULL, kTargetTypeWord, c));
-              ref_counts_ok = true;
+            inst = MultiplyByConstant(rv, op1, (IRConstant*)op2);
+            if (inst == NULL) {
+              break;
             }
+            ref_counts_ok = true;
           }
         }
       }
@@ -1599,6 +1768,22 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
   return NULL;
 }
 
+static void GetAddressAndOffsetFrom(RVGenerator* rv,
+                                 TargetInstruction* addr,
+                                 int offset,
+                                 TargetInstruction** addr_inst,
+                                 TargetInstruction** offset_inst) {
+  if (RVIsPossibleImmediate(offset)) {
+    *addr_inst = addr;
+    *offset_inst = GetIntConstant(rv, NULL, kTargetTypeWord, offset);
+    return;
+  }
+  int page_offset;
+  TargetInstruction* page_inst = PagedOffsetFrom(rv, addr, offset, &page_offset);
+  *addr_inst = page_inst;
+  *offset_inst = GetIntConstant(rv, NULL, kTargetTypeWord, page_offset);
+}
+
 static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
                             TargetInstruction** addr,
                             TargetInstruction** offset) {
@@ -1618,9 +1803,8 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
 
     // Auto variable is in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
-    *addr = FramePointer(rv);
-    *offset = (TargetInstruction*)GetIntConstant(
-        rv, addr_node, kTargetTypeWord, LocalVariableOffset(rv, var_offset));
+    GetAddressAndOffsetFrom(rv, FramePointer(rv), LocalVariableOffset(rv, var_offset),
+                            addr, offset);
   } else if (IRIsArgument(addr_node)) {
     int32_t var_offset = addr_node->data.ivalue;
     if (RV_IS_REG_VAR(var_offset)) {
@@ -1634,19 +1818,18 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
       *offset = NULL;
       return false;
     } else {
-      *addr = FramePointer(rv);
-      *offset = (TargetInstruction*)GetIntConstant(rv, addr_node,
-                                                   kTargetTypeWord, var_offset);
-    }
+      GetAddressAndOffsetFrom(rv, FramePointer(rv), var_offset,
+                              addr, offset);
+     }
   } else if (IRIsStaticVariable(addr_node)) {
     // The address of static variables need to be moved into a register.
 
     *addr = LoadStaticVariableAddress(rv, addr_node);
-    *offset = GetIntConstant(rv, NULL, kTargetTypeWord, 0);
+    *offset = Zero(rv);
   } else {
     // All others have a calculated address.
     *addr = GetLoweredNode(addr_node);
-    *offset = GetIntConstant(rv, NULL, kTargetTypeWord, 0);
+    *offset = Zero(rv);
     assert(addr != NULL);
   }
   return true;
@@ -1714,13 +1897,7 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
     result = Emit(rv, NewInstruction2(opcode, src, immed));
   }
   if (result == NULL) {
-    int64_t c = ((TargetConstant*)offset)->value.ivalue;
-    if (!RVIsPossibleImmediate(c)) {
-      TargetInstruction* load_imm = AddImmediate(rv, addr, c);
-      result = Emit(rv, NewInstruction2(opcode, load_imm, Zero(rv)));
-    } else {
-      result = Emit(rv, NewInstruction2(opcode, addr, offset));
-    }
+    result = Emit(rv, NewInstruction2(opcode, addr, offset));
   }
   SetLoweredNode(node, result);
   return result;
@@ -1784,17 +1961,9 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
 
   TargetInstruction* src = Materialize(rv, src_node);
   TargetInstruction* result = NULL;
+  result = Emit(rv, NewInstruction3(opcode, src, addr, offset));
 
-  // NOTE: the first operand of the store instructions is the source register.
-  // If the offset won't fit in 12 bits we need to put it in a register.
-  int64_t c = ((TargetConstant*)offset)->value.ivalue;
-  if (!RVIsPossibleImmediate(c)) {
-    TargetInstruction* load_imm = AddImmediate(rv, addr, c);
-    result = Emit(rv, NewInstruction3(opcode, src, load_imm, Zero(rv)));
-  } else {
-    result = Emit(rv, NewInstruction3(opcode, src, addr, offset));
-  }
-
+  
   SetLoweredNode(node, result);
   return result;
 }
@@ -1958,9 +2127,16 @@ static TargetInstruction* LowerBranch(RVGenerator* rv, IRNode* node) {
 }
 
 static TargetInstruction* LowerLabel(RVGenerator* rv, IRNode* label) {
-  TargetInstruction* inst = Emit(rv, NewInstruction(RV_OP(label)));
+  TargetInstruction* inst =  Emit(rv, NewInstruction(RV_OP(label)));
   label->data.ptr = inst;
   ApplyFixups(rv, label);
+  return inst;
+}
+
+static TargetInstruction* LowerNamedLabel(RVGenerator* rv, IRNode* label) {
+  IRNamedLabel* n = (IRNamedLabel*)label;
+  TargetInstruction* inst =  Emit(rv, TargetNewNamedLabel(n->name));
+  label->data.ptr = inst;
   return inst;
 }
 
@@ -2009,13 +2185,13 @@ static TargetInstruction* LowerLiteralReference(RVGenerator* rv, IRNode* node) {
   TargetInstruction* literal =
       Emit(rv, TargetNewLiteral((int)id_node->value.ivalue));
 
-  TargetInstruction* result = Emit(rv, NewInstruction1(RV_OP(la), literal));
+  TargetInstruction* result = Emit(rv, NewInstruction1(RV_OP(lla), literal));
 
   SetLoweredNode(node, result);
   return result;
 }
 
-static TargetInstruction* LowerStructReference(RVGenerator* rv, IRNode* node) {
+static TargetInstruction* LowerAddressOf(RVGenerator* rv, IRNode* node) {
   return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
 }
 
@@ -2140,7 +2316,7 @@ static TargetInstruction* LowerMemzero(RVGenerator* rv, IRNode* node) {
       // We have an address and register for the address, add them together.
       dest_addr = AddValue(rv, dest_addr, dest_offset);
     } else {
-      offset_value = (int)((IRConstant*)dest_offset)->value.ivalue;
+      offset_value = (int)((TargetConstant*)dest_offset)->value.ivalue;
     }
   }
   dest_node->data.ptr = dest_addr;
@@ -2549,7 +2725,8 @@ static TargetInstruction* LowerBuiltinVaCopy(RVGenerator* rv, IRNode* node) {
 }
 
 static RegisterLoad* NewRegisterLoad(int dest_reg, bool on_stack,
-                                     int offset_or_src_reg, bool address_only) {
+                                     int offset_or_src_reg, bool address_only,
+                                     IRNode* symbol) {
   RegisterLoad* load = malloc(sizeof(RegisterLoad));
   load->dest_reg = dest_reg;
   load->on_stack = on_stack;
@@ -2559,6 +2736,8 @@ static RegisterLoad* NewRegisterLoad(int dest_reg, bool on_stack,
     load->src.reg = offset_or_src_reg;
   }
   load->address_only = address_only;
+  load->is_fp = false;
+  load->symbol = (IRVariable*)symbol;
   return load;
 }
 
@@ -2602,8 +2781,8 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, IRNode* node) {
     case IR_OP(literalref):
       return LowerLiteralReference(rv, node);
 
-    case IR_OP(structref):
-      return LowerStructReference(rv, node);
+    case IR_OP(addressof):
+      return LowerAddressOf(rv, node);
 
     case IR_OP(consti):
     case IR_OP(consta):
@@ -2758,6 +2937,9 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, IRNode* node) {
     case IR_OP(label):
       return LowerLabel(rv, node);
 
+    case IR_OP(named_label):
+      return LowerNamedLabel(rv, node);
+
     case IR_OP(calla):
       return LowerCall(rv, node);
 
@@ -2820,8 +3002,15 @@ static int CompareRegisterVar(const void* a, const void* b) {
   const PoolEntry* var1 = *(const PoolEntry**)a;
   const PoolEntry* var2 = *(const PoolEntry**)b;
 
+  Symbol* sym1 = var1->value.symbol;
+  Symbol* sym2 = var2->value.symbol;
+  int weight1 = sym1->usage_info.reads * (sym1->usage_info.used_in_loop + 1);
+  int weight2 = sym2->usage_info.reads * (sym2->usage_info.used_in_loop + 1);
+
+  return weight2 - weight1;
+  
   // Sorted in reverse order, highest first.
-  return (int)(var2->pooled->outputs.length - var1->pooled->outputs.length);
+  //return (int)(var2->pooled->outputs.length - var1->pooled->outputs.length);
 }
 
 // Work out where an argument is located.  It will either be in a register
@@ -2904,7 +3093,20 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 
-// Assign a register to a varible or argument if possible.  The
+static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
+  VariableDIESetRegister(entry->value.symbol->die, reg);
+}
+
+static void SetDebugStackLocation(PoolEntry* entry, int offset) {
+  VariableDIESetStackOffset(entry->value.symbol->die, offset);
+}
+
+static void SetDebugSymbolLocation(PoolEntry* entry) {
+  VariableDIESetStatic(entry->value.symbol->die,
+                       entry->value.symbol->name.value);
+}
+
+// Assign a register to a variable or argument if possible.  The
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
                                    Vector* args, int* var_offset) {
@@ -2913,21 +3115,24 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
 
+  // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
   if (TypeIsFloatingPoint(entry->pooled->type)) {
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;
+      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         RegisterLoad* load =
             NewRegisterLoad(reg, location.type != kArgLocationRegister,
-                            (int)location.location.offset, false);
+                            (int)location.location.offset, false, entry->pooled);
         load->is_fp = true;
         VectorAppend(&rv->register_loads, load);
       }
     } else {
       AlignOffset(entry, var_offset);
       entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
@@ -2936,10 +3141,13 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         // Less than a pointer, passed in reg
         if (UseRegisterForVariable(rv, entry->pooled)) {
           // TODO: if this is a leaf procedure we can keep them in the arg regs.
-          entry->pooled->data.ivalue = RV_REG_VAR | rv->num_int_reg_vars++;
+          int reg = rv->num_int_reg_vars++;
+          entry->pooled->data.ivalue = RV_REG_VAR | reg;
+          SetDebugRegisterLocation(entry, reg);
         } else {
           AlignOffset(entry, var_offset);
           entry->pooled->data.ivalue = *var_offset;
+          SetDebugStackLocation(entry, *var_offset);
           *var_offset += size;
         }
       } else {
@@ -2953,6 +3161,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       // TODO: it is possible to put small structs in registers.
       AlignOffset(entry, var_offset);
       entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
 
@@ -2963,22 +3172,30 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;
-      RegisterLoad* load = NewRegisterLoad(reg, true, (int)*var_offset, true);
+      SetDebugRegisterLocation(entry, entry->pooled->data.ivalue);
+      RegisterLoad* load = NewRegisterLoad(reg, true, (int)*var_offset, true, entry->pooled);
       VectorAppend(&rv->register_loads, load);
     } else {
       entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
     }
     *var_offset += size;
+  } else if (TypeIsFunction(entry->pooled->type)) {
+    IRVariable* var = (IRVariable*)entry->pooled;
+    TargetInstruction* inst = GetSymbol(rv, NULL, var->symbol);
+    entry->pooled->data.ptr = inst;
+    SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer argument.
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;
+      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         RegisterLoad* load =
             NewRegisterLoad(reg, location.type != kArgLocationRegister,
-                            (int)location.location.offset, false);
+                            (int)location.location.offset, false, entry->pooled);
         VectorAppend(&rv->register_loads, load);
         if (location.type == kArgLocationRegister) {
           rv->num_int_arg_regs++;  // Argument was passed in a register.
@@ -3001,10 +3218,12 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           entry->pooled->data.ivalue = offset;
           VectorAppend(&rv->saved_regs, saved);
           rv->num_int_arg_regs++;  // Argument was passed in a register.
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
+        SetDebugStackLocation(entry, *var_offset);
         *var_offset += size;
       }
     }
@@ -3029,6 +3248,10 @@ static void AssignRegisterVars(RVGenerator* rv, Vector* vars, Vector* args) {
     AssignRegisterOrOffset(rv, entry, args, &var_offset);
   }
 
+  // If we are a leaf procedure and we have more than 3 variables,
+  // force the register allocator to use registers for the variables.
+  rv->use_reg_vars = rv->num_int_reg_vars >= 3;
+  
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
   rv->base.stack_frame_size =
@@ -3048,7 +3271,9 @@ void RVLower(RVGenerator* rv, Generator* gen) {
     switch (entry->pooled->opcode) {
       case IR_OP(localvar):
       case IR_OP(tempvar):
-        VectorAppend(&local_vars, entry);
+        if (!compiler->optimize || entry->value.symbol->flags.used) {
+          VectorAppend(&local_vars, entry);
+        }
         break;
       case IR_OP(argument):
         VectorAppend(&local_vars, entry);
@@ -3073,8 +3298,10 @@ void RVLower(RVGenerator* rv, Generator* gen) {
     node = IRNext(node);
   }
 
-  RVPrint(rv);
-
+  if (compiler->print_back_end) {
+    RVPrint(rv);
+  }
+  
   // Optimize the code sequence.
   RVOptimize(rv);
 

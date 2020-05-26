@@ -9,23 +9,119 @@
 #ifndef stdio_h
 #define stdio_h
 
+#ifdef __DAVECC__
+#include <stdarg.h>
+
 #define EOF (-1)
-#define NULL 0
+#define NULL ((void*)0)
+
+#ifndef __FPOS_T
+typedef long fpos_t;
+#define __FPOS_T
+#endif
+
+#ifndef __SIZE_T
+typedef long size_t;
+#define __SIZE_T
+#endif
 
 typedef struct {
   int fd;
   char* buf;
   int bufsize;
   int index;
+  int buffering_mode;
+  fpos_t pos;
 } FILE;
+
+// Buffering modes.
+#define _IOFBF 1
+#define _IOLBF 2
+#define _IONBF 3
+
+// Default buffer size.
+#define BUFSIZE 4096
+#define BUFSIZ BUFSIZE
+
+#define FOPEN_MAX 0
+#define FILENAME_MAX 256
+#define L_tmpnam 16
+
+#define SEEK_CUR 0
+#define SEET_END 1
+#define SEEK_SET 2
+
+#define TMP_MAX 256
 
 extern FILE* stdout;
 extern FILE* stdin;
 extern FILE* stderr;
 
-FILE* fopen(const char* filename, const char* mode);
-void fclose(FILE* fp);
-int fflush(FILE* fp);
+int remove(const char *filename);
+int rename(const char *old, const char *new);
+FILE *tmpfile(void);
+char *tmpnam(char *s);
+int fclose(FILE *stream);
+int fflush(FILE *stream);
+FILE *fopen(const char * restrict filename,
+     const char * restrict mode);
+FILE *freopen(const char * restrict filename,
+     const char * restrict mode,
+     FILE * restrict stream);
+void setbuf(FILE * restrict stream,
+     char * restrict buf);
+int setvbuf(FILE * restrict stream,
+     char * restrict buf,
+            int mode, size_t size);
+int fprintf(FILE * restrict stream,
+     const char * restrict format, ...);
+int fscanf(FILE * restrict stream,
+const char * restrict format, ...);
+int printf(const char * restrict format, ...);
+int scanf(const char * restrict format, ...);
+int snprintf(char * restrict s, size_t n,
+     const char * restrict format, ...);
+int sprintf(char * restrict s,
+     const char * restrict format, ...);
+int sscanf(const char * restrict s,
+     const char * restrict format, ...);
+int vfprintf(FILE * restrict stream,
+const char * restrict format, va_list arg);
+int vfscanf(FILE * restrict stream,
+const char * restrict format, va_list arg);
+int vprintf(const char * restrict format, va_list arg);
+int vscanf(const char * restrict format, va_list arg);
+int vsnprintf(char * restrict s, size_t n,
+              const char * restrict format, va_list arg);
+int vsprintf(char * restrict s,
+             const char * restrict format, va_list arg);
+int vsscanf(const char * restrict s,
+            const char * restrict format, va_list arg);
+int fgetc(FILE *stream);
+char *fgets(char * restrict s, int n,
+     FILE * restrict stream);
+int fputc(int c, FILE *stream);
+int fputs(const char * restrict s,
+     FILE * restrict stream);
+int getc(FILE *stream);
+int getchar(void);
+char *gets(char *s);
+int putc(int c, FILE *stream);
+int putchar(int c);
+int puts(const char *s);
+int ungetc(int c, FILE *stream);
+size_t fread(void * restrict ptr, size_t size, size_t nmemb, FILE * restrict stream);
+size_t fwrite(const void * restrict ptr, size_t size, size_t nmemb,
+FILE * restrict stream);
+int fgetpos(FILE * restrict stream, fpos_t * restrict pos);
+int fseek(FILE *stream, long int offset, int whence);
+int fsetpos(FILE *stream, const fpos_t *pos);
+long int ftell(FILE *stream);
+void rewind(FILE *stream);
+void clearerr(FILE *stream);
+int feof(FILE *stream);
+int ferror(FILE *stream);
+void perror(const char *s);
 
-
+#endif /* __DAVECC__ */
 #endif /* stdio_h */

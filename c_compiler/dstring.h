@@ -85,7 +85,9 @@ void StringVPrintf(String* str, const char* format, va_list ap);
 void StringClear(String* str);
 
 void StringEscape(String* in, String* out);
+void StringTrimStart(String* s);
 void StringTrimEnd(String* s);
+void StringTrim(String* s);
 
 // Returns index into s or -1.
 size_t StringIndexOf(String* s, const char* substring);

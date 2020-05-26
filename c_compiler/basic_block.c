@@ -296,18 +296,39 @@ bool BasicBlockIsUnreachable(struct Generator* gen, BasicBlock* b) {
   return b != gen->entry_block && b->in_edges.length == 0;
 }
 
-// Remove all instructions from the block.
+// Remove all instructions from the block.  Don't remove
+// named labels since these are referenced from debug info.
 void BasicBlockClear(struct Generator* gen, BasicBlock* b) {
   if (b->code == NULL) {
     return;
   }
   IRNode* inst = b->code;
+  IRNode* first_named_label = NULL;
+  IRNode* last_named_label = NULL;
   while (inst != NULL && inst != b->end_code) {
     IRNode* next = IRNext(inst);
-    GeneratorRemoveInstruction(gen, inst);
+    if (inst->opcode != IR_OP(named_label)) {
+      GeneratorRemoveInstruction(gen, inst);
+    } else {
+      if (first_named_label == NULL) {
+        first_named_label = inst;
+        last_named_label = inst;
+      } else {
+        last_named_label = inst;
+      }
+    }
     inst = next;
   }
-  GeneratorRemoveInstruction(gen, b->end_code);
-  b->code = NULL;
-  b->end_code = NULL;
+  if (b->end_code != NULL && b->end_code->opcode != IR_OP(named_label)) {
+    GeneratorRemoveInstruction(gen, b->end_code);
+  } else {
+    if (first_named_label == NULL) {
+      first_named_label = inst;
+      last_named_label = inst;
+    } else {
+      last_named_label = inst;
+    }
+  }
+  b->code = first_named_label;
+  b->end_code = last_named_label;
 }

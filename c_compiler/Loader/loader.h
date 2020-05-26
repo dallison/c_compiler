@@ -39,8 +39,9 @@ typedef struct {
 } SymbolScope;
 
 // Loader flags.
-#define LOADER_MAP_SYMTAB 1    // Load symbol table.
-#define LOADER_LAZY_RESOLVE 2  // Use lazy PLT resolution.
+#define LOADER_MAP_SYMTAB 1      // Load symbol table.
+#define LOADER_LAZY_RESOLVE 2    // Use lazy PLT resolution.
+#define LOADER_WRITEABLE_TEXT 4  // Map the text writeable.
 
 // A loader loads ELF files into memory based on their contents.  The
 // file header contains everything we need to find the loadable regions
@@ -65,10 +66,15 @@ typedef struct Loader {
 
 bool LoaderInitFromFile(Loader* loader, String* filename,
                         int32_t flags,
-                        struct LoaderArchitecture* arch, void* arch_data);
+                        struct LoaderArchitecture* arch, void* arch_data,
+                        const char* initial_path);
 void LoaderDestruct(Loader* loader);
-SymbolScope* LoaderFindSymbol(Loader* loader,
+SymbolScope* LoaderFindSymbolAndCacheResult(Loader* loader,
                          uint64_t address);
+bool LoaderFindSymbol(Loader* loader,
+                              uint64_t address, SymbolScope* symbol);
+uint64_t LoaderLookupSymbol(Loader* loader, const char* name);
+
 void LoaderSetCurrentSymbol(Loader* loader,
                           uint64_t address, uint64_t length, const char* name);
 SymbolScope* LoaderGetCurrentSymbol(Loader* loader);
@@ -76,5 +82,7 @@ SymbolScope* LoaderGetCurrentSymbol(Loader* loader);
 void LoaderError(const char* error, ...);
 
 void VLoaderError(const char* error, va_list ap);
+
+int LoaderNumErrors(void);
 
 #endif /* loader_h */

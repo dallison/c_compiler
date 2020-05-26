@@ -29,11 +29,12 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
                                    const ELFRelocation* reloc,
                                    const ELFSymbol* symbol,
                                    const char* sym_name,
-                                   char* target_address) {
+                                   char* target_address,
+                                   bool lazy) {
   switch (ELF_R_TYPE(reloc->info)) {
     case R_PCODE_GOT_DATA:
       if (symbol == NULL) {
-        LoaderError("Relocation depends on undefined symbol %s\n",
+        LoaderError("Relocation refers on undefined symbol '%s'\n",
                     sym_name);
       } else {
         *(uint64_t*)target_address = lib->load_address + symbol->value;
@@ -65,7 +66,7 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
         // Non-lazy resolution, replace GOT entry by the address
         // of the symbol.
         if (symbol == NULL) {
-          LoaderError("Relocation depends on undefined symbol %s\n",
+          LoaderError("Relocation refers on undefined symbol '%s'\n",
                       sym_name);
         } else {
           *(uint64_t*)target_address = lib->load_address + symbol->value;

@@ -34,17 +34,22 @@ void BufferDelete(Buffer* buf) {
 
 void BufferClear(Buffer* buf) { buf->length = 0; }
 
+static void ExpandMemory(Buffer* buf, size_t new_length) {
+  buf->capacity = new_length * 2;
+  if (buf->value == NULL) {
+     buf->value = calloc(buf->capacity, 1);
+   } else {
+     buf->value = realloc(buf->value, buf->capacity);
+     memset(&buf->value[buf->length], 0, buf->capacity - buf->length);
+   }
+}
+
 void BufferAppend(Buffer* buf, char* value, size_t length) {
   size_t new_length = buf->length + length;
 
   // Make room for new contents by doubling the necessary memory.
   if (new_length > buf->capacity) {
-    buf->capacity = new_length * 2;
-    if (buf->value == NULL) {
-      buf->value = malloc(buf->capacity);
-    } else {
-      buf->value = realloc(buf->value, buf->capacity);
-    }
+    ExpandMemory(buf, new_length);
   }
 
   // Append value to end of memory.
@@ -57,12 +62,7 @@ void BufferAppendByte(Buffer* buf, char byte) {
 
   // Make room for new contents by doubling the necessary memory.
   if (new_length > buf->capacity) {
-    buf->capacity = new_length * 2;
-    if (buf->value == NULL) {
-      buf->value = malloc(buf->capacity);
-    } else {
-      buf->value = realloc(buf->value, buf->capacity);
-    }
+    ExpandMemory(buf, new_length);
   }
 
   // Append value to end of memory.
@@ -86,13 +86,7 @@ void BufferAddSpace(Buffer* buf, size_t length) {
   size_t new_length = buf->length + length;
   // Make room for new contents by doubling the necessary memory,
   if (new_length > buf->capacity) {
-    buf->capacity = new_length * 2;
-    if (buf->value == NULL) {
-      buf->value = calloc(buf->capacity, 1);
-    } else {
-      buf->value = realloc(buf->value, buf->capacity);
-      memset(&buf->value[buf->length], 0, new_length - buf->length);
-    }
+    ExpandMemory(buf, new_length);
   }
   buf->length = new_length;
 }
@@ -100,4 +94,13 @@ void BufferAddSpace(Buffer* buf, size_t length) {
 void BufferAlignLength(Buffer* buf, int alignment) {
   size_t new_length = (buf->length + (alignment - 1)) & ~(alignment - 1);
   BufferAddSpace(buf, new_length - buf->length);
+}
+
+int BufferCompare(Buffer* b1, Buffer* b2) {
+  size_t min = b1->length < b2->length ? b1->length : b2->length;
+  int v = memcmp(b1->value, b2->value, min);
+  if (v != 0) {
+    return v;
+  }
+  return (int)(b1->length - b2->length);
 }

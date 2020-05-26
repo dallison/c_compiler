@@ -92,6 +92,10 @@ void LinkerInit(Linker* linker) {
   linker->fully_static = false;
   linker->origin = 0;
   
+  linker->print_relocations = false;
+  linker->print_symbol_tables = false;
+  linker->print_sections = false;
+
   // Initialize and add the architectures.
   VectorAppend(&linker->architectures, NewPCodeLinkerArchitecture());
   VectorAppend(&linker->architectures, NewRISCVLinkerArchitecture());
@@ -205,7 +209,7 @@ void LinkerAddDynamicLibrary(Linker* linker, const char* name) {
     DynamicLibraryRegistryInsert(&linker->dynamic_linker->loaded_dynamic_libraries, lib);
 
     bool ok = LoadedDynamicLibraryLoad(lib, &linker->dynamic_linker->loaded_dynamic_libraries,
-                             &linker->library_search_path, NULL);
+                             &linker->library_search_path, 0, NULL);
     if (!ok) {
       StringDestruct(&libname);
       return;
@@ -255,7 +259,8 @@ void LinkerInsertSymbol(HashTable* symbol_table,
   HashTableInsert(symbol_table, sym);
 }
 
-SectionGroup* NewSectionGroup(const String* name, int32_t type, int64_t flags, int64_t alignment) {
+SectionGroup* NewSectionGroup(const String* name, int32_t type,
+                              int64_t flags, int64_t alignment) {
   SectionGroup* group = malloc(sizeof(SectionGroup));
   StringInit(&group->name, name->value);
   VectorInit(&group->components);
@@ -596,7 +601,9 @@ static void GroupSections(Linker* linker, int32_t section_type,
     }
   }
 
-  PrintSectionMap(&section_map);
+  if (linker->print_sections) {
+    PrintSectionMap(&section_map);
+  }
   
   // The section_map contains a mapping of section name vs a vector of
   // ELFReaderSection pointers (all the sections with that name within the
@@ -632,9 +639,10 @@ static void AssignSectionGroupsToSegments(Linker* linker) {
   }
 }
 
-// Assign addresses to all the sections held within the segment.  The starting address is
-// passed and the final address is returned.
+// Assign addresses to all the sections held within the segment.
+// The starting address is passed and the final address is returned.
 static uint64_t AssignSegmentSectionAddresses(Segment* segment, uint64_t address) {
+  int64_t offset = 0;
   for (size_t i = 0; i < segment->sections.length; i++) {
     SectionGroup* group = segment->sections.value.p[i];
     group->address = address;
@@ -646,11 +654,13 @@ static uint64_t AssignSegmentSectionAddresses(Segment* segment, uint64_t address
       if (gsect->source == kGroupedSectionExisting) {
         ELFReaderSection* section = gsect->section.existing;
         section->address = address;
+        section->offset = offset;
         address += section->header->size;
+        offset += section->header->size;
       } else {
         ELFWriterSection* section = gsect->section.new;
         section->address = address;
-        address += section->contents->data.buffered.length;  
+        address += section->contents->data.buffered.length;
       }
      }
   }
@@ -758,8 +768,10 @@ void LinkerLinkAllFiles(Linker* linker) {
     DynamicLinkerFixupPLT(linker);
   }
   
-  LinkerPrintSymbolTables(linker);
-
+  if (linker->print_symbol_tables) {
+    LinkerPrintSymbolTables(linker);
+  }
+  
   // We have all the values of the symbols, apply those values to
   // all the relocations in the files.
   LinkerApplyAllRelocations(linker);
@@ -851,7 +863,7 @@ static void AddSymbolListToOutput(void* entry, void* data) {
       // to the file (before the symbol table, string table, etc.)
       section_index = (int32_t)elf->sections.length - 1;
     } else {
-      section_index = sym->section->output_section_index - 1;
+      section_index = sym->section->output_section_index;
     }
     ELFWriterAddSymbol(elf, &sym->name, section_index,
                        type, binding, sym->header->size,
@@ -966,8 +978,8 @@ static void InsertSegments(Linker* linker, ELFWriterFile* elf) {
     interpreter_segment = NewELFWriterSegment(PT(interp), PF(r), 1);
   }
   
-  // We have added all output sections to the ELF file.  Now we can add them all to the
-  // code and data segments in the ELF file.
+  // We have added all output sections to the ELF file.  Now we can
+  // add them all to the code and data segments in the ELF file.
   // NOTE: the first section is a NULL section so we don't count that.
   for (size_t i = 1; i < elf->sections.length; i++) {
     ELFWriterSection* section = elf->sections.value.p[i];

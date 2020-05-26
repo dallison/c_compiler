@@ -56,8 +56,7 @@ int main(int argc, const char * argv[]) {
   Command command = kCommandNone;
   
   const char* archive_filename = NULL;
-  Vector files;
-  VectorInit(&files);
+  Vector files = {0};
   
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
@@ -80,7 +79,7 @@ int main(int argc, const char * argv[]) {
   }
 
   ARArchive archive;
-  ARArchiveInit(&archive), archive_filename;
+  ARArchiveInit(&archive, archive_filename);
   
   switch (command) {
     case kCommandAddSymbolTable:

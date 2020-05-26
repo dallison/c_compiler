@@ -82,8 +82,7 @@ static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
 
 // Save all used registers on the stack.
 static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
-  Vector regs;
-  VectorInit(&regs);
+  Vector regs = {0};
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
     int reg = (int)regs.value.p[i];
@@ -109,8 +108,7 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
 // Restore registers by popping them off the stack in the reverse
 // order to which they were pushed.
 static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
-  Vector regs;
-  VectorInit(&regs);
+  Vector regs = {0};
 
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
@@ -141,6 +139,13 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     return;
   }
+  
+  if (inst->opcode == P_OP(named_label)) {
+    TargetNamedLabel* label = (TargetNamedLabel*)inst;
+    fprintf(fp, "%s:\n", label->name);
+    return;
+  }
+  
   if (!IsPrintable(inst)) {
     return;
   }

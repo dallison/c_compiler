@@ -488,8 +488,8 @@ static void GenerateCaseLabel(Generator* gen, CaseLabelASTNode* node) {
 // goto statement has been generated.  If the label node has an IRNode already
 // assigned we generate a branch to it, otherwise we create one for it.
 static void GenerateGotoStatement(Generator* gen,
-                                  CombinedStatementASTNode* node) {
-  LabelASTNode* label_node = (LabelASTNode*)node->stmt;
+                                  GotoStatementASTNode* node) {
+  LabelASTNode* label_node = (LabelASTNode*)node->label;
   if (label_node->label == NULL) {
     label_node->label = NewIR(IR_OP(label));
   }
@@ -500,7 +500,11 @@ static void GenerateLabel(Generator* gen, LabelASTNode* node) {
   // If the label has not already been generated (by the goto) generate
   // one now.
   if (node->label == NULL) {
-    node->label = NewIR(IR_OP(label));
+    if (node->named) {
+      node->label = NewIRNamedLabel(node->name.value);
+    } else {
+      node->label = NewIR(IR_OP(label));
+    }
   }
 
   // Emit label.
@@ -596,7 +600,7 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
     GenerateCaseLabel(gen, (CaseLabelASTNode*)node);
     break;
   case AST_OP(goto):
-    GenerateGotoStatement(gen, (CombinedStatementASTNode*)node);
+    GenerateGotoStatement(gen, (GotoStatementASTNode*)node);
     break;
   case AST_OP(label):
     GenerateLabel(gen, (LabelASTNode*)node);

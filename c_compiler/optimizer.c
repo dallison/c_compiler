@@ -82,6 +82,7 @@ static int64_t BitMask(IRNode* node) {
   return value - 1;
 }
 
+
 // Perform strength reduction on the given node (in the given basic block). This
 // looks at the operation and its operands.  If it can be simplified into
 // something that is cheaper to execute, it is replaced by the better

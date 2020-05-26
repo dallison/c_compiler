@@ -63,6 +63,7 @@ typedef enum {
   TARGET_OP(asm),       // Insert assembly language.
 
   TARGET_OP(loc),       // Code location.
+  TARGET_OP(named_label),     // Named label.
 } TargetOpcode;
 
 typedef enum {
@@ -101,6 +102,9 @@ typedef struct TargetInstruction {
 // Flag for TargetInstruction to mark an instruction as dead.
 #define TARGET_INST_DEAD 1
 
+// Register has been spilled onto the stack.
+#define TARGET_INST_SPILLED 2
+
 // A constant.
 typedef struct {
   TargetInstruction base;
@@ -134,6 +138,11 @@ typedef struct {
   IRNode* target;
   int operand;
 } TargetBranchFixup;
+
+typedef struct {
+  TargetInstruction base;
+  const char* name;
+} TargetNamedLabel;
 
 typedef struct TargetGenerator {
   String function_name;   // Current function name.
@@ -261,6 +270,7 @@ TargetInstruction* TargetGetFloatingPointConstant(TargetGenerator* target,
                                                   double value);
 
 TargetInstruction* TargetNewLocation(IRLocation* loc);
+TargetInstruction* TargetNewNamedLabel(const char* name);
 
 TargetInstruction* NewTargetSymbol(Symbol* symbol);
 

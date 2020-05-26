@@ -983,6 +983,13 @@ static TargetInstruction* LowerLabel(PCodeGenerator* pcode, IRNode* label) {
   return inst;
 }
 
+static TargetInstruction* LowerNamedLabel(PCodeGenerator* rv, IRNode* label) {
+  IRNamedLabel* n = (IRNamedLabel*)label;
+  TargetInstruction* inst =  Emit(rv, TargetNewNamedLabel(n->name));
+  label->data.ptr = inst;
+  return inst;
+}
+
 static void GetAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
                             TargetInstruction** addr,
                             TargetInstruction** offset) {
@@ -1275,8 +1282,7 @@ static TargetInstruction* LowerLiteralReference(PCodeGenerator* pcode,
   return result;
 }
 
-static TargetInstruction* LowerStructReference(PCodeGenerator* pcode,
-                                               IRNode* node) {
+static TargetInstruction* LowerAddressOf(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
 }
 
@@ -1512,8 +1518,8 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(literalref):
       return LowerLiteralReference(pcode, node);
 
-    case IR_OP(structref):
-      return LowerStructReference(pcode, node);
+    case IR_OP(addressof):
+      return LowerAddressOf(pcode, node);
 
     case IR_OP(consti):
       return GetIntConstant(pcode, node, kTargetTypeWord,
@@ -1697,6 +1703,9 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
 
     case IR_OP(label):
       return LowerLabel(pcode, node);
+      
+    case IR_OP(named_label):
+        return LowerNamedLabel(pcode, node);
 
     case IR_OP(calla):
       return LowerCall(pcode, node);
@@ -1804,6 +1813,10 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
 
   PCodeOptimize(pcode);
 
+  if (compiler->print_back_end) {
+    PCodePrint(pcode);
+  }
+  
   // Allocate registers to the instructions.
   PCodeAllocateRegisters(&pcode->register_allocator);
 }
@@ -1855,6 +1868,7 @@ bool PCodeIsExpression(PCodeOpcode opcode) {
     case P_OP(rmovf):
     case P_OP(rmovd):
     case P_OP(loc):
+    case P_OP(named_label):
       return false;
 
     default:

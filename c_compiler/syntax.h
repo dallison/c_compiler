@@ -34,6 +34,8 @@ typedef struct Syntax {
   int switch_count;                     // Number of nested switch statements.
   Vector all_local_symbols;  // All symbols defined in a function (owned by this
                              // vector).
+  Vector local_statics;      // All local statics defined in function.
+  Vector all_symbols;        // All symbols (needed by assembler).
 } Syntax;
 
 // Token classes allow us to recover from syntax errors by
@@ -57,6 +59,7 @@ TokenClass ClassifyToken(Token tok);
 
 void SyntaxInit(Syntax* syntax, Lex* lex);
 void SyntaxDestruct(Syntax* syntax);
+void SyntaxResetForNewDeclaration(Syntax* syntax);
 
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name);
@@ -77,12 +80,13 @@ Storage SyntaxParseStorage(Syntax* syntax);
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
 
-void SyntaxNeedSemicolon(Syntax* syntax);
+void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers);
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);
 void SyntaxRecover(Syntax* syntax, TokenClass tc);
 bool SyntaxLookingAtType(Syntax* syntax);
 bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
+ASTNode* SyntaxNewPCLabel(SourceLocation location);
 
 #endif /* syntax_h */

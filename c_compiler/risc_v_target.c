@@ -53,6 +53,7 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
   if (compiler->pic) {
     fprintf(fp, "\t.option pic\n");
   }
+  fprintf(fp, ".PCbegin:\n");
   return fp;
 }
 
@@ -66,7 +67,7 @@ static bool Assemble(String* asm_filename, String* object_filename) {
   return num_errors == 0;
 }
 
-static void DataStart(FILE* fp) { fprintf(fp, "\t.data\n"); }
+static void DataStart(FILE* fp) { fprintf(fp, ".PCend:\n\t.data\n"); }
 
 static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
   fprintf(fp, "%s:\n", var->name.value);
@@ -118,6 +119,11 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
         next_offset += 8;
         break;
       case kInitTypeSymbol:
+        if (init->value.symbol->flags.is_local) {
+          fprintf(fp, "\t.local %s\n", init->value.symbol->name.value);
+        } else {
+          fprintf(fp, "\t.global %s\n", init->value.symbol->name.value);
+        }
         fprintf(fp, "\t.long    %s\n", init->value.symbol->name.value);
         next_offset += 8;
         break;
@@ -197,8 +203,7 @@ static void EmitLiteral(StringLiteral* literal, FILE* fp) {
   // Print the literal in escaped form. Any non-printable
   // characters are encoded in hex or as their usual
   // ANSI C escape characters.
-  String escaped;
-  StringInit(&escaped, NULL);
+  String escaped = {0};
   StringEscape(&literal->value, &escaped);
   fprintf(fp, "\t.asciz \"%s\"\n", escaped.value);
   StringDestruct(&escaped);

@@ -82,6 +82,7 @@ typedef enum {
   RV_OP(asm),
 
   RV_OP(loc),
+  RV_OP(named_label),
 
   // End of TargetOpcode enumeration.
 
@@ -258,6 +259,7 @@ typedef enum {
   RV_OP(rcallf),
 
   RV_OP(la),      // Load address.
+  RV_OP(lla),     // Load local address.
   RV_OP(sext_w),  // Sign extend word.
 
   // Integer argument registers.
@@ -280,17 +282,31 @@ typedef enum {
   RV_OP(fa6),
   RV_OP(fa7),
 
-  // Integer variable registers.
+  // Integer variable registers.  
+  // NOTE: these must match the number of int and fp reg vars.
   RV_OP(v0),
   RV_OP(v1),
   RV_OP(v2),
   RV_OP(v3),
+  RV_OP(v4),
+  RV_OP(v5),
+  RV_OP(v6),
+  RV_OP(v7),
+  RV_OP(v8),
+  RV_OP(v9),
 
   // Floating point variable registers.
+  // NOTE: these must match the number of int and fp reg vars.
   RV_OP(fv0),
   RV_OP(fv1),
   RV_OP(fv2),
   RV_OP(fv3),
+  RV_OP(fv4),
+  RV_OP(fv5),
+  RV_OP(fv6),
+  RV_OP(fv7),
+  RV_OP(fv8),
+  RV_OP(fv9),
 
   RV_OP(x0),  // Zero reg.
 
@@ -322,7 +338,21 @@ typedef struct {
     int reg;     // Not on stack, source register.
     int offset;  // On stack, positive offset from fp.
   } src;
+  IRVariable* symbol;
 } RegisterLoad;
+
+// For large offsets that don't fit into an immediate field
+// of load and store instructions we divide the offsets up into
+// pages, each of which is 11 bits long.  Ww store the address of this
+// page in an instruction (an add instruction) and use that as the
+// base for the load and store.
+//
+// The offsets for load and store are 12 bit signed offsets, giving us
+// a range of -2048...2047.
+typedef struct {
+  TargetInstruction* inst;    // Page calculation instruction.
+  int page_offset;            // Offset for page.
+} Offset;
 
 // A RISC-V Generator is derived from a TargetGenerator.  It has
 // a '.base' field that is the TargetGenerator.
@@ -337,7 +367,8 @@ typedef struct RVGenerator {
 
   Vector saved_regs;
   Vector register_loads;
-
+  Vector offsets;         // Pointers to Offset.
+  
   TargetInstruction* int_argument_registers[RV_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[RV_NUM_FP_ARGS];
   TargetInstruction* int_variable_registers[RV_MAX_INT_REG_VARS];
@@ -345,6 +376,7 @@ typedef struct RVGenerator {
 
   TargetInstruction* zero;
 
+  bool use_reg_vars;
   // Register allocator.
   RVRegisterAllocator register_allocator;
 } RVGenerator;

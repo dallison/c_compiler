@@ -9,6 +9,8 @@
 #ifndef risc_v_interpreter_h
 #define risc_v_interpreter_h
 
+#include <setjmp.h>
+
 #include "loader.h"
 #include "risc_v_machine.h"
 
@@ -22,6 +24,48 @@
 #define RISC_V_ECALL_WRITE 4
 #define RISC_V_ECALL_READ 5
 #define RISC_V_ECALL_RESOLVE 6
+#define RISC_V_ECALL_LSEEK 7
+#define RISC_V_ECALL_MALLOC 8
+#define RISC_V_ECALL_FREE 9
+#define RISC_V_ECALL_REALLOC 10
+#define RISC_V_ECALL_ABORT 11
+
+// Registers
+#define RISC_V_REG_x0 0
+#define RISC_V_REG_ra 1
+#define RISC_V_REG_sp 2
+#define RISC_V_REG_gp 3
+#define RISC_V_REG_tp 4
+#define RISC_V_REG_t0 5
+#define RISC_V_REG_t1 6
+#define RISC_V_REG_t2 7
+#define RISC_V_REG_fp 8
+#define RISC_V_REG_s0 8
+#define RISC_V_REG_s1 9
+#define RISC_V_REG_a0 10
+#define RISC_V_REG_a1 11
+#define RISC_V_REG_a2 12
+#define RISC_V_REG_a3 13
+#define RISC_V_REG_a4 14
+#define RISC_V_REG_a5 15
+#define RISC_V_REG_a6 16
+#define RISC_V_REG_a7 17
+#define RISC_V_REG_s2 18
+#define RISC_V_REG_s3 19
+#define RISC_V_REG_s4 20
+#define RISC_V_REG_s5 21
+#define RISC_V_REG_s6 22
+#define RISC_V_REG_s7 23
+#define RISC_V_REG_s8 24
+#define RISC_V_REG_s9 25
+#define RISC_V_REG_s10 26
+#define RISC_V_REG_s11 27
+#define RISC_V_REG_t3 28
+#define RISC_V_REG_t4 29
+#define RISC_V_REG_t5 30
+#define RISC_V_REG_t6 31
+
+#define REG(n) RISC_V_REG_##n
 
 typedef struct RISCVInterpreter {
   Loader* loader;
@@ -37,10 +81,14 @@ typedef struct RISCVInterpreter {
   SymbolScope* current_symbol;
   bool trace_regs;
   bool trace_instructions;
+  int64_t num_steps;
+  jmp_buf debugger;
 } RISCVInterpreter;
 
-void RISCVInterpreterInit(RISCVInterpreter* interpreter, bool trace_regs, bool trace_instructions);
-void RISCVInterpreterRun(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,
+                          bool trace_regs, bool trace_instructions);
+void RISCVInterpreterCycle(RISCVInterpreter* interpreter);
 void RISCVInterpreterDestruct(RISCVInterpreter* interpreter);
+void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter);
 
 #endif /* risc_v_interpreter_h */

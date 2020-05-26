@@ -16,6 +16,7 @@ void SemanticError(ASTNode* node, const char* format, ...);
 void VSemanticError(ASTNode* node, const char* format, va_list ap);
 
 void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...);
+void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format, ...);
 void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
                       va_list ap);
 
@@ -25,9 +26,16 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node);
 void SemanticAnalyzeVariableDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* node);
 
+typedef enum {
+  kConvertNormal,
+  kConvertCast,
+} ConversionContext;
+
 // Convert a type 'from' to 'to', replacing 'from' with new ASTNode that
 // contains the conversion operation.
-void SemanticConvertType(ASTNode* from, TypeRecord* to);
+void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx);
+
+void NormalConversion(ASTNode* from, TypeRecord* to);
 
 void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,
                                  const char* format);

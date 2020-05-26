@@ -12,11 +12,15 @@
 #include <stdio.h>
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
+#include "map.h"
 
 typedef struct {
   RVGenerator* rv;
   RVRegisterAllocator* regs;
   int saved_reg_offset;
+  int spill_region_size;
+  int next_spill_offset;
+  Map spilled_instructions;
 } RVEmitter;
 
 void RVEmitterInit(RVEmitter* emitter, RVGenerator* rv);

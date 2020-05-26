@@ -183,7 +183,15 @@ case AST_OP(ast_op): \
       }
       break;
 
-    EVAL_UNARY_OP(cast, )
+    case AST_OP(cast): {
+      CastASTNode* c = (CastASTNode*)node;
+      if (EvaluateIntegerExpression(c->expr, &left)) {
+        *result = left;
+        return true;
+      }
+      break;
+    }
+
  
     // Conversions.
     case AST_OP(i2b):
@@ -207,7 +215,6 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(f2i, (int))
       EVAL_UNARY_OP(d2i, (int))
       EVAL_UNARY_OP(ld2i, (int))
-
 
       EVAL_UNARY_OP(b2s, (short))
       EVAL_UNARY_OP(i2s, (short))
@@ -240,6 +247,11 @@ case AST_OP(ast_op): \
       return true;
     }
 
+    case AST_OP(expr_init): {
+      ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)node;
+      return EvaluateIntegerExpression(e->expr, result);
+      break;
+    }
     default:
       return false;
   }
@@ -402,6 +414,12 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       EVAL_UNARY_OP(ll2ld, (double))
       EVAL_UNARY_OP(f2ld, (double))
       EVAL_UNARY_OP(d2ld, (double))
+
+      case AST_OP(expr_init): {
+         ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)node;
+         return EvaluateFloatingPointExpression(e->expr, result);
+         break;
+       }
 
     default:
       return false;

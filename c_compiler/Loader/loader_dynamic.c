@@ -32,8 +32,20 @@ void DynamicLibraryRegistryDestruct(DynamicLibraryRegistry* reg) {
 
 
 // Align the given value to a power of 2 alignment.
-static uint64_t Align(uint64_t v, uint64_t alignment) {
+static uint64_t AlignUp(uint64_t v, uint64_t alignment) {
   return (v + (alignment - 1)) & ~(alignment - 1);
+}
+
+static uint64_t AlignDown(uint64_t v, uint64_t alignment) {
+  return v & ~(alignment - 1);
+}
+
+static uint64_t NextAddress(LoadedDynamicLibrary* lib, uint64_t current_address,
+                            uint64_t* next_address) {
+  if (lib->header->type == ET(dyn) && next_address != NULL) {
+    return AlignUp(*next_address, sysconf(_SC_PAGESIZE));
+  }
+  return current_address;
 }
 
 static MappedSegment* NewMappedSegment(void* addr, size_t length) {
@@ -107,7 +119,12 @@ const void* DynamicLoaderFindDynamicSectionAddressEntry(
   const DynamicSection* dynamic = lib->dynamic;
   for (size_t i = 0; dynamic->entries[i].tag != DT(null); i++) {
     if (dynamic->entries[i].tag == tag) {
-      return (const void*)(lib->load_address + dynamic->entries[i].un.ptr);
+      if (lib->dynamic_section_relocated) {
+        // This has already been relocated and contains the full address.
+        return (const void*)dynamic->entries[i].un.ptr;
+      } else {
+        return (const void*)lib->load_address + dynamic->entries[i].un.ptr;
+      }
     }
   }
   return NULL;
@@ -144,53 +161,6 @@ uint64_t DynamicLoaderBloomBits64(uint32_t hash) {
     (1LL << ((hash >> 26) % 64));
 }
 
-
-// Load the DT_NEEDED libraries into the dynamic linker.  These
-// are not added to the DT_NEEDED list of the output.
-static void LoadNeededLibraries(DynamicLibraryRegistry* registry,
-                                LoadedDynamicLibrary* lib,
-                                Vector* search_path,
-                                uint64_t* load_addr) {
-  const DynamicSection* section = lib->dynamic;
-  const char* strtab = DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(strtab));
-  if (strtab == NULL) {
-    return;
-  }
-  String libname;
-  StringInit(&libname, NULL);
-  
-  // All new libraries.  Contains pointers to LoadedDynamicLibrary but does
-  // now own them.
-  Vector new_libraries;
-  VectorInit(&new_libraries);
-  
-  // Go through all the NEEDED libraries and see if they are already loaded.
-  // If they aren't create the LoadedDynamicLibrary and add it to the
-  // registry.
-  for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
-    if (section->entries[i].tag == DT(needed)) {
-      StringSet(&libname, strtab + section->entries[i].un.val);
-      LoadedDynamicLibrary* dep = DynamicLoaderFindLibrary(registry, &libname);
-      if (dep == NULL) {
-        LoadedDynamicLibrary* new_lib = NewLoadedDynamicLibrary(libname.value,
-                                                                lib->loader);
-        DynamicLibraryRegistryInsert(registry, new_lib);
-        VectorAppend(&new_libraries, new_lib);
-      }
-    }
-  }
-  
-  // Now load all the newly created libraries - the ones that are not
-  // already loaded.
-  for (size_t i = 0; i < new_libraries.length; i++) {
-    LoadedDynamicLibrary* lib = new_libraries.value.p[i];
-    LoadedDynamicLibraryLoad(lib, registry, search_path, load_addr);
-  }
-  
-  StringDestruct(&libname);
-  VectorDestruct(&new_libraries);
-}
-
 // Find a dynamic library file by searching for it in the given
 // paths.
 // If the file is absolute (rooted), it looks for it as a file.
@@ -202,7 +172,7 @@ static bool FindDynamicLibraryFile(Vector* static_search_path,
                                    String* pathname) {
   struct stat st;
   // Check as full path.
-  if (stat(filename, &st) == 0) {
+  if (filename[0] == '/' && stat(filename, &st) == 0) {
     StringSet(pathname, filename);
     return true;
   }
@@ -212,13 +182,15 @@ static bool FindDynamicLibraryFile(Vector* static_search_path,
   // in the dynamic section.
   
   // Search for the file in the static search path.
-  for (size_t i = 0; i < static_search_path->length; i++) {
-    String* path = static_search_path->value.p[i];
-    StringClear(pathname);
-    StringPrintf(pathname, "%s/%s", path->value, filename);
-    if (stat(pathname->value, &st) == 0) {
-      // Found file at the path.
-      return true;
+  if (static_search_path != NULL) {
+    for (size_t i = 0; i < static_search_path->length; i++) {
+      String* path = static_search_path->value.p[i];
+      StringClear(pathname);
+      StringPrintf(pathname, "%s/%s", path->value, filename);
+      if (stat(pathname->value, &st) == 0) {
+        // Found file at the path.
+        return true;
+      }
     }
   }
   
@@ -238,26 +210,92 @@ static bool FindDynamicLibraryFile(Vector* static_search_path,
   return false;
 }
 
+// Load the DT_NEEDED libraries into the dynamic linker.  These
+// are not added to the DT_NEEDED list of the output.
+static void LoadNeededLibraries(DynamicLibraryRegistry* registry,
+                                LoadedDynamicLibrary* lib,
+                                Vector* search_path,
+                                uint64_t load_addr,
+                                uint64_t* next_available_address) {
+  const DynamicSection* section = lib->dynamic;
+  const char* strtab = DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(strtab));
+  if (strtab == NULL) {
+    return;
+  }
+  String libname = {0};
+  
+  // All new libraries.  Contains pointers to LoadedDynamicLibrary but does
+  // now own them.
+  Vector new_libraries = {0};
+  
+  Vector all_search_paths = {0};
+  VectorCopy(&all_search_paths, search_path);
+  VectorAppendVector(&all_search_paths, &lib->runtime_search_path);
+  
+  // Go through all the NEEDED libraries and see if they are already loaded.
+  // If they aren't create the LoadedDynamicLibrary and add it to the
+  // registry.
+  for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
+    if (section->entries[i].tag == DT(needed)) {
+      const char* libname = strtab + section->entries[i].un.val;
+      String pathname = {0};
+      bool found = FindDynamicLibraryFile(NULL, &all_search_paths, libname, &pathname);
+      if (found) {
+        LoadedDynamicLibrary* dep = DynamicLoaderFindLibrary(registry, &pathname);
+        if (dep == NULL) {
+          LoadedDynamicLibrary* new_lib = NewLoadedDynamicLibrary(pathname.value,
+                                                                lib->loader);
+          DynamicLibraryRegistryInsert(registry, new_lib);
+          VectorAppend(&new_libraries, new_lib);
+        }
+      } else {
+        LoaderError("Cannot find library %s", libname);
+      }
+      StringDestruct(&pathname);
+    }
+  }
+  
+  // Now load all the newly created libraries - the ones that are not
+  // already loaded.
+  for (size_t i = 0; i < new_libraries.length; i++) {
+    LoadedDynamicLibrary* lib = new_libraries.value.p[i];
+    LoadedDynamicLibraryLoad(lib, registry, search_path, load_addr, next_available_address);
+    load_addr = NextAddress(lib, load_addr, next_available_address);
+  }
+  
+  StringDestruct(&libname);
+  VectorDestruct(&new_libraries);
+  VectorDestruct(&all_search_paths);
+}
+
+
+
 // Add the load address to all pointer values in the dynamic section.
 static void RelocateDynamicSection(LoadedDynamicLibrary* lib) {
+  if (lib->header->type != ET(dyn)) {
+    // Only relocate if we are a dynamic library.
+    lib->dynamic_section_relocated = true;
+    return;
+  }
   DynamicSection* section = (DynamicSection*)lib->dynamic;
   if (section == NULL) {
     return;
   }
   for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
-    printf("%llx\n", section->entries[i].tag);
     switch (section->entries[i].tag) {
       case DT(symtab):
       case DT(strtab):
       case DT(rela):
       case DT(jmprel):
       case DT(pltgot):
+      case DT(gnu_hash):
         section->entries[i].un.val += lib->load_address;
         break;
       default:
         break;
     }
   }
+  lib->dynamic_section_relocated = true;
 }
 
 static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
@@ -354,10 +392,14 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
       DynamicLoaderFindSymbol(loaded_libraries,
                                       sym_name, &symbol,
                                       &found_lib);
+      if (found_lib == NULL) {
+        // Might not have a symbol (as in the case of RELATIVE relocations).
+        found_lib = lib;
+      }
       char* target_address = (char*)lib->load_address + reloc->offset;
       loader->arch->apply_got_data_relocation(found_lib, reloc,
                                               symbol, sym_name,
-                                              target_address);
+                                              target_address, lazy);
       
     }
   }
@@ -422,7 +464,7 @@ static int MapDynamicLibraryHeader(String* filename,
           end_program_headers :
           end_section_headers;
   
-  off_t map_size = Align(max_offset,
+  off_t map_size = AlignUp(max_offset,
                         page_size);
   *length = map_size;
   
@@ -495,7 +537,7 @@ static void MapSymbolTable(LoadedDynamicLibrary* lib,
   int64_t page_mask = page_size - 1;
   int64_t delta = start & page_mask;    // From mapped address to start.
   int64_t start_offset = start & ~page_mask;
-  int64_t length = Align(end - start_offset, page_size);
+  int64_t length = AlignUp(end - start_offset, page_size);
   void* addr = mmap(NULL, length, PROT_READ, MAP_PRIVATE, lib->fd, start_offset);
   if (addr == MAP_FAILED) {
     return;
@@ -525,17 +567,21 @@ static void FindAndLoadSymbolTable(LoadedDynamicLibrary* lib) {
   }
 }
 
-static bool LoadSegments(LoadedDynamicLibrary* lib, uint64_t *load_address) {
-  if (load_address != NULL) {
+static bool LoadSegments(LoadedDynamicLibrary* lib,
+                         uint64_t load_address,
+                         uint64_t* end_of_library) {
+  if (load_address != 0) {
     // Most of the file data is located in the PT_LOAD segments.  This
     // includes the symbol tables. The PT_DYNAMIC segment also needs
     // to be loaded.
     if (lib->header->type == ET(exec)) {
       // Executable file.  The load address is as specified in
       // the file.
-      lib->load_address = LoadedDynamicLibraryLoadSegments(lib, NULL);
+      LoadedDynamicLibraryLoadSegments(lib, 0, end_of_library);
     } else if (lib->header->type == ET(dyn)){
-      lib->load_address = LoadedDynamicLibraryLoadSegments(lib, load_address);
+      lib->load_address = LoadedDynamicLibraryLoadSegments(lib,
+                                                           load_address,
+                                                           end_of_library);
     } else {
       // Unknown ELF file type.
       LoadedDynamicLibraryDelete(lib);
@@ -549,25 +595,34 @@ static bool LoadSegments(LoadedDynamicLibrary* lib, uint64_t *load_address) {
 }
 
 static bool FindDynamicSection(LoadedDynamicLibrary* lib,
-                               uint64_t* load_address) {
-  for (int i = 0; i < lib->header->phnum; i++) {
-    if (lib->program_headers[i].type == PT(dynamic)) {
-      if (load_address == NULL) {
-        // If we are not loading into a particular address the dynamic segment
-        // is loaded with the whole file.
-        lib->dynamic = (DynamicSection*)(lib->load_address + lib->program_headers[i].offset);
-      } else {
-        lib->dynamic = (DynamicSection*)(lib->load_address + lib->program_headers[i].vaddr);
+                               uint64_t load_address) {
+  if (lib->dynamic == NULL) {
+    for (int i = 0; i < lib->header->phnum; i++) {
+      if (lib->program_headers[i].type == PT(dynamic)) {
+        if (load_address == 0) {
+          // If we are not loading into a particular address the dynamic segment
+          // is loaded with the whole file.
+          lib->dynamic = (DynamicSection*)((char*)lib->load_address +
+                                           lib->program_headers[i].offset);
+        } else {
+          if (lib->header->type == ET(exec)) {
+            lib->dynamic = (DynamicSection*)(lib->program_headers[i].vaddr);
+          } else {
+            lib->dynamic = (DynamicSection*)((char*)lib->dynamic + lib->program_headers[i].offset);
+          }
+        }
+        break;
       }
-      break;
     }
   }
+  
   if (lib->dynamic == NULL) {
     return false;
   }
   
-  // Relocate the pointer entries in the dynamic section.
-  if (load_address != NULL) {
+  // Relocate the pointer entries in the dynamic section.  Only if we
+  // can write to it.  If load_address was 0 we map read-only.
+  if (load_address != 0) {
     RelocateDynamicSection(lib);
   }
   
@@ -619,12 +674,10 @@ static void FindHashTable(LoadedDynamicLibrary* lib) {
 // * $LIB or ${LIB}: "lib" or "lib64"
 // * $PLATFORM or ${PLATFORM}: machine architecture name (e.g. x86_64).
 void ExpandRuntimePath(LoadedDynamicLibrary* lib, String* rpath) {
-  String result;
-  StringInit(&result, NULL);
+  String result = {0};
   size_t i = 0;
   while (i < rpath->length) {
-    String part;
-    StringInit(&part, NULL);
+    String part = {0};
     while (i < rpath->length && rpath->value[i] != '/') {
       StringAppendChar(&part, rpath->value[i]);
       i++;
@@ -637,7 +690,7 @@ void ExpandRuntimePath(LoadedDynamicLibrary* lib, String* rpath) {
         StringSetString(&part, &lib->loader->origin);
       } else if (StringEqual(&part, "$LIB") || StringEqual(&part, "${LIB}")) {
           StringSet(&part, "lib");
-      } else if (StringEqual(&part, "$PLATFORM}") ||
+      } else if (StringEqual(&part, "$PLATFORM") ||
                  StringEqual(&part, "${PLATFORM}")) {
         StringSet(&part, lib->loader->arch->platform);
       }
@@ -689,7 +742,8 @@ static void BuildRuntimePaths(LoadedDynamicLibrary* lib) {
 bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
                               DynamicLibraryRegistry* registry,
                               Vector* search_path,
-                              uint64_t *load_address) {
+                              uint64_t load_address,
+                              uint64_t* end_of_library) {
   // Find the pathname for the file.
   if (!FindDynamicLibraryFile(search_path, &lib->runtime_search_path,
                               lib->libname.value,
@@ -699,7 +753,7 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
   const void* addr;
   size_t length;
   
-  if (load_address == NULL) {
+  if (load_address == 0) {
      lib->fd = MapWholeDynamicLibrary(&lib->filename, &addr, &length);
   } else {
     // Try to map the file header into memory.  This includes just
@@ -717,14 +771,15 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
   lib->program_headers = (const ELFProgramHeader*)(lib->addr + lib->header->phoff);
   lib->section_headers = (const ELFSectionHeader*)(lib->addr + lib->header->shoff);
 
-  if (!LoadSegments(lib, load_address)) {
+  if (!LoadSegments(lib, load_address, end_of_library)) {
     return false;
   }
   
   if (print_libraries_only) {
     uint64_t base_address = lib->load_address;
     if (base_address != 0) {
-      printf("\t%s => %s (0x%llx)\n", lib->libname.value, lib->filename.value, base_address);
+      printf("\t%s => %s (0x%llx)\n", lib->libname.value,
+             lib->filename.value, base_address);
     }
   }
   
@@ -737,9 +792,8 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
   // present.
   FindHashTable(lib);
   
-  // Build runtime paths from DT_RPATH or DT_RUNPATH.  Only do this for
-  // executable, not loaded libraries.
-  if (lib->loader != NULL && lib->header->type == ET(exec)) {
+  // Build runtime paths from DT_RPATH or DT_RUNPATH.
+  if (lib->loader != NULL) {
     BuildRuntimePaths(lib);
   }
   
@@ -747,8 +801,11 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
     FindAndLoadSymbolTable(lib);
   }
   
+  // Move to next load address.
+  load_address = NextAddress(lib, load_address, end_of_library);
+  
   // Load all libraries needed by this one.
-  LoadNeededLibraries(registry, lib, search_path, load_address);
+  LoadNeededLibraries(registry, lib, search_path, load_address, end_of_library);
   return true;
 }
 
@@ -771,6 +828,7 @@ LoadedDynamicLibrary* NewLoadedDynamicLibrary(const char* libname,
   lib->gnu_hash = NULL;
   lib->program_headers = NULL;
   lib->section_headers = NULL;
+  lib->load_address = 0;
   VectorInit(&lib->mapped_segments);
   VectorInit(&lib->runtime_search_path);
   lib->load_symbol_table = loader == NULL ? false :
@@ -778,6 +836,7 @@ LoadedDynamicLibrary* NewLoadedDynamicLibrary(const char* libname,
   lib->symtab = NULL;
   lib->strtab = NULL;
   lib->num_symtab_symbols = 0;
+  lib->dynamic_section_relocated = false;
   return lib;
 }
 
@@ -919,123 +978,171 @@ bool LoadedDynamicLibraryLookupSymbolByAddress(LoadedDynamicLibrary* lib,
   return false;
 }
 
+// Load a loadable segment.  The load_address is where we want to load
+// a dynamic segment at.  However this might need adjusted to
+// account for segment and page alignments.  Returns the address
+// at which the segment is loaded and sets *length to the segment length;
+static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
+                                    const ELFProgramHeader* segment,
+                                    uint64_t load_address,
+                                    uint64_t* length,
+                                    void** start_address) {
+  int page_size = (int)sysconf(_SC_PAGESIZE);
+  uint64_t addr = lib->header->type == ET(dyn) ?
+          load_address + segment->vaddr :
+          segment->vaddr;
+     
+  // Virtual address for start of segment.
+  uint64_t vaddr = addr;
+  if (start_address != NULL) {
+    *start_address = (void*)vaddr;
+  }
+ 
+  int64_t segment_loaded_at = addr;
+
+  // The address to map at is the current load_address aligned down to
+  // the boundary specified in the program header.
+  addr = AlignDown(addr, segment->align);
+
+  uint64_t offset = segment->offset;    // Offset into file.
+  
+  // Align address and offset to lower page boundary.  The address and
+  // file offset must be page-aligned for the mmap function to operate
+  // correctly (it will error out if this is not the case).
+  addr = AlignDown(addr, page_size);
+  offset = AlignDown(offset, page_size);
+ 
+  // Protection for mmap and open.  We have to open the file in order the mmap it.
+  // If the mapping is going to allow writes to the pages we need to open the file
+  // in read-write mode, but we won't be writing to it.
+  int prot = PROT_READ;
+  if ((segment->flags & PF(w)) != 0 ||
+      (lib->loader->flags & LOADER_WRITEABLE_TEXT) != 0) {
+    // Segment is writeable.
+    prot |= PROT_WRITE;
+  }
+  if ((segment->flags & PF(x)) != 0) {
+    // Segment is executable.
+    prot |= PROT_EXEC;
+  }
+  
+  // Front porch is the difference between vaddr and aligned address.
+  uint64_t front_porch = vaddr - (uint64_t)addr;
+  
+  // Length of segment in memory.  We can map memory up the next
+  // page boundary beyond the end of the file.  If the memsz is
+  // beyond that we need to mmap a new ANON segment for it.
+  uint64_t full_length = front_porch + segment->filesz;
+  uint64_t aligned_length = AlignUp(full_length, page_size);
+  *length = aligned_length;
+  // uint64_t back_porch = aligned_length - full_length;
+  
+  if (*length == 0) {
+    return NULL;
+  }
+
+  // Calculate end of mapped memory.  The 'length' contains the total length
+  // of the mapped memory.
+  uint64_t end_of_segment = addr + aligned_length;
+
+  // Map in the segment at an address chosen by the OS.  This is done using
+  // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
+  // will be copied to a new physical address if they are written to, otherwise they
+  // are shared with other physical pages that map the same file in.
+  void* segment_ptr = mmap((void*)addr, *length, prot,
+                           MAP_PRIVATE|MAP_FIXED, lib->fd, offset);
+  if (segment_ptr == MAP_FAILED) {
+    LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
+    return NULL;
+  }
+
+  // Zero out any difference between memsz and filesz.  This will really only
+  // be the .bss section.  We have mapped the contents of the file but some of
+  // it will need to be zeroed out.  We also need to allocate a contiguous
+  // anonymous region of zeros above the segment.
+  // We need the .bss to be all zeroes before thae program starts.
+  if ((prot & PROT_WRITE) != 0 && segment->memsz > segment->filesz) {
+    void* zeroed_region = (char*)segment_loaded_at +
+        segment->filesz;   // Start of zero memory.
+    int64_t zeroed_region_size = end_of_segment - (uint64_t)zeroed_region;
+    memset(zeroed_region, 0, zeroed_region_size);
+    
+    // Any additional memory beyond the file.
+    int64_t additional_memory = AlignUp(segment->memsz - *length,
+                                        page_size);
+    if (additional_memory > 0) {
+      void* zero = (char*)end_of_segment;
+      zero = mmap(zero, additional_memory, PROT_WRITE,
+                  MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
+      if (zero == MAP_FAILED) {
+        LoaderError("Failed to map in dynamic segment: %s\n",
+                    strerror(errno));
+        return NULL;
+      }
+      VectorAppend(&lib->mapped_segments,
+                   NewMappedSegment(zero, additional_memory));
+    }
+  }
+  return segment_ptr;
+}
+
+
+#if 0
+if (segment->type == PT(dynamic)) {
+  // We have mapped the dynamic segment to the page boundary just below
+  // it.  We need to move the address down so that when segment->offset
+  // is added to the address it will point to the correct address.
+  // For example:
+  // segment->offset = 0x3480
+  // offset = 0x3000
+  // segment_ptr = 0x60040000
+  // The actual address of the dynamic section is 0x60040000 - 0x3000)
+  // So that when segment->offset (0x3480) is added to it we get
+  // the actual address.
+  lib->dynamic = (DynamicSection*)((char*)segment_ptr -
+                                   offset);
+}
+#endif
+
 // Load the segments of the dynamic library starting at the given
 // address.  The PT_LOAD segments are loaded in order specified
-// in the file.  Returns the address of the first loaded segment and
-// updates *load_address to be the end of the loaded segments.
-// If the load_address is NULL then the address for each segment
-// is the address specified in the program header.
+// in the file.  Returns the address of the first loaded segment.
+// Sets *next_available_address to the address at the end of
+// all loaded segments.
 uint64_t LoadedDynamicLibraryLoadSegments(LoadedDynamicLibrary* lib,
-            uint64_t* load_address) {
-  // Get page size and mask (almost guaranteed to be 4K).
-  int page_size = (int)sysconf(_SC_PAGESIZE);
-  int page_mask = page_size - 1;
-  
-  uint64_t loaded_at = 0;
+            uint64_t load_address, uint64_t* next_available_address) {
+  // int page_size = (int)sysconf(_SC_PAGESIZE);
+  *next_available_address = 0;
+  uint64_t first_loaded_segment = 0;
   for (int i = 0; i < lib->header->phnum; i++) {
     const ELFProgramHeader* segment = &lib->program_headers[i];
     // Load the PT(load) and PT(dynamic) segments into memory
     // at the address specified by their alignment.
-    if (segment->type == PT(load) || segment->type == PT(dynamic)) {
-      uint64_t addr;
-      if (load_address == NULL) {
-        addr = segment->vaddr;       // Address to place segment at.
-      } else {
-        addr = *load_address;
-        
-        // The address to map at is the current load_address aligned up to
-        // the boundary specified in the program header.
-        uint64_t alignment = segment->align;
-        addr = Align(addr, alignment);
-      }
-      if (load_address != NULL && loaded_at == 0) {
-        loaded_at = addr;
-      }
-      uint64_t offset = segment->offset;    // Offset into file.
+    void* addr = NULL;
+    uint64_t length = 0;
+    if (segment->type == PT(load)) {
+      addr = LoadLoadableSegment(lib, segment,  load_address, &length, NULL);
+    } else if (segment->type == PT(dynamic)) {
+      addr = LoadLoadableSegment(lib, segment, load_address, &length,
+                                 (void**)&lib->dynamic);
+    }
+    
+    if (addr == NULL) {
+      continue;
+    }
+    if (first_loaded_segment == 0) {
+      first_loaded_segment = (uint64_t)addr;
+    }
+    uint64_t end_of_segment = (uint64_t)addr + length;
       
-      // Align address and offset to lower page boundary.  The address and
-      // file offset must be page-aligned for the mmap function to operate
-      // correctly (it will error out if this is not the case).
-      addr &= ~page_mask;
-      offset &= ~page_mask;
-
-      // Protection for mmap and open.  We have to open the file in order the mmap it.
-      // If the mapping is going to allow writes to the pages we need to open the file
-      // in read-write mode, but we won't be writing to it.
-      int prot = PROT_READ;
-      if ((segment->flags & PF(w)) != 0) {
-        // Segment is writeable.
-        prot |= PROT_WRITE;
-      }
-      if ((segment->flags & PF(x)) != 0) {
-        // Segment is executable.
-        prot |= PROT_EXEC;
-      }
-      
-      // Length of segment in memory.  We can map memory up the next
-      // page boundary beyond the end of the file.  If the memsz is
-      // beyond that we need to mmap a new ANON segment for it.
-      int64_t length = segment->filesz + (segment->vaddr & page_mask);
-      length = Align(length, page_size);
-      
-      if (length == 0) {
-        goto next_segment;
-      }
-
-      // Map in the segment at an address chosen by the OS.  This is done using
-      // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
-      // will be copied to a new physical address if they are written to, otherwise they
-      // are shared with other physical pages that map the same file in.
-      void* segment_ptr = mmap((void*)addr, length, prot,
-                               MAP_PRIVATE|MAP_FIXED, lib->fd, offset);
-      if (segment_ptr == MAP_FAILED) {
-        LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
-        goto next_segment;
-      }
-
-      // Zero out any difference between memsz and filesz.  This will really only
-      // be the .bss section.  We have mapped the contents of the file but some of
-      // it will need to be zeroed out.  We also need to allocate a contiguous
-      // anonymous region of zeros above the segment.
-      // We need the .bss to be all zeroes before thae program starts.
-      if ((prot & PROT_WRITE) != 0 && segment->memsz > segment->filesz) {
-        void* zeroed_region = (char*)(loaded_at + segment->vaddr) +
-            segment->filesz;   // Start of zero memory.
-        // Calculate end of mapped memory.  The 'length' contains the total length
-        // of the mapped memory.
-        uint64_t end_of_mapped_memory = (uint64_t)addr +
-               length;
-        int64_t zeroed_region_size = end_of_mapped_memory - (uint64_t)zeroed_region;
-        memset(zeroed_region, 0, zeroed_region_size);
-        
-        // Any additional memory beyond the file.
-        int64_t additional_memory = Align(segment->memsz - length, page_size);
-        if (additional_memory > 0) {
-          void* zero = (char*)end_of_mapped_memory;
-          zero = mmap(zero, additional_memory, PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
-          if (zero == MAP_FAILED) {
-            LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
-            goto next_segment;
-          }
-          VectorAppend(&lib->mapped_segments, NewMappedSegment(zero, additional_memory));
-        }
-      }
-      
-      // Add a new region to the regions vector so that we can remove it
-      // when destructed.
-      VectorAppend(&lib->mapped_segments, NewMappedSegment(segment_ptr, length));
-      
-    next_segment:
-      if (load_address != NULL) {
-        // Move to next load address.
-        *load_address += segment->memsz;
-        
-        // And align to the segment alignment.
-        *load_address = Align(*load_address, segment->align);
-       }
+    // Add a new region to the regions vector so that we can remove it
+    // when destructed.
+    VectorAppend(&lib->mapped_segments, NewMappedSegment(addr, length));
+    if (end_of_segment > *next_available_address) {
+      *next_available_address = end_of_segment;
     }
   }
-  return loaded_at;
+  return first_loaded_segment;
 }
 
 void LoadedDynamicLibraryRelocate(Loader* loader,

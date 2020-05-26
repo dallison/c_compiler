@@ -10,6 +10,7 @@
 
 #include "expr_parser.h"
 #include "statement_parser.h"
+#include "compiler.h"
 
 // A compound statement is a brace-enclosed sequence of statements.
 // The AST node holding this is a CompoundStatementASTNode.
@@ -21,6 +22,10 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
   Vector* statements = NewVector();
   Lex* lex = syntax->lex;
 
+  // Add label for start of statements in block
+  if (compiler->debug_output) {
+    VectorAppend(statements, SyntaxNewPCLabel(location));
+  }
   // Parse the sequence of statements, adding them to the vector.
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(rbrace))) {
     if (!LexMatch(lex, TOK(semicolon))) {
@@ -30,7 +35,12 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
       }
     }
   }
-
+ 
+  if (compiler->debug_output) {
+    // Label at end of statements in block.
+    VectorAppend(statements, SyntaxNewPCLabel(location));
+  }
+  
   // We have not consumed the close paren yet, do so now.
   SyntaxNeedBracket(syntax, TOK(rbrace), followers);
 
@@ -137,15 +147,15 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
       c1 = SyntaxParseLocalDeclaration(syntax);
     } else {
       c1 = SyntaxParseExpression(syntax, followers);
-      SyntaxNeedSemicolon(syntax);
+      SyntaxNeedSemicolon(syntax, followers | TC(expr));
     }
   } else {
-    SyntaxNeedSemicolon(syntax);
+    SyntaxNeedSemicolon(syntax, followers | TC(expr));
   }
   if (!LexLookingAt(lex, TOK(semicolon))) {
     c2 = SyntaxParseExpression(syntax, followers);
   }
-  SyntaxNeedSemicolon(syntax);
+  SyntaxNeedSemicolon(syntax, followers | TC(closebra));
   if (!LexLookingAt(lex, TOK(rparen))) {
     c3 = SyntaxParseExpression(syntax, followers);
   }
@@ -222,17 +232,13 @@ static ASTNode* ParseReturnStatement(Syntax* syntax, TokenClass followers,
 
 static ASTNode* ParseGotoStatement(Syntax* syntax, TokenClass followers,
                                    SourceLocation location) {
-  ASTNode* label = NULL;
   if (!LexLookingAt(syntax->lex, TOK(identifier))) {
     SyntaxError(syntax, "Label expected after goto");
     return NULL;
   } else {
     String* label_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
-    label = NewStringConstantASTNode(label_name, NULL,
-                                     syntax->lex->current_token_location);
-    return NewCombinedStatementASTNode(AST_OP(goto), label, NULL,
-                                       location);
+    return NewGotoStatementASTNode(label_name, location);
   }
 }
 
@@ -295,7 +301,7 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
         // but will not change the current token.
         LexSkipSpacesAndComments(lex);
         if (lex->line.value[lex->pos] == ':') {
-          stmt = NewLabelASTNode(lex->spelling.value,
+          stmt = NewLabelASTNode(lex->spelling.value, false,
                                  syntax->lex->current_token_location);
           LexNextToken(lex);  // Consume label name.
           LexNextToken(lex);  // Consume colon.
@@ -312,9 +318,11 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
   }
 
   if (need_semicolon) {
-    SyntaxNeedSemicolon(syntax);
+    SyntaxNeedSemicolon(syntax, followers);
   }
-  // This is the start of a statement.
-  stmt->flags |= kASTStatementStart;
+  if (stmt != NULL) {
+    // This is the start of a statement.
+    stmt->flags |= kASTStatementStart;
+  }
   return stmt;
 }

@@ -20,7 +20,8 @@ typedef struct LoaderArchitecture {
                                     const ELFRelocation* reloc,
                                     const ELFSymbol* symbol,
                                     const char* sym_name,
-                                    char* target_address);
+                                    char* target_address,
+                                    bool lazy);
   void (*apply_got_plt_relocation)(LoadedDynamicLibrary* lib,
                                    const ELFRelocation* reloc,
                                    const ELFSymbol* symbol,

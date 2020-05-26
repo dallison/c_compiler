@@ -10,6 +10,8 @@
 #include <assert.h>
 #include "expr_evaluator.h"
 #include "init_semantics.h"
+#include "statement_semantics.h"
+#include "compiler.h"
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -22,14 +24,19 @@
 // It also is responsible for checking that the semantic rules of the
 // language are being followed.
 
-static void AnalyzeIdentifier(IdentifierASTNode* node) {
+static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
+  if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
+    // Symbol has now been used.
+    node->symbol->flags.used = true;
+  }
+  
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
       TypeIsFunction(node->base.type)) {
     node->base.flags |= kASTNeedAddress;
   } else {
     // If this is a declaration, don't try to fold it.
     if ((node->base.flags & kASTIsDeclaration) != 0) {
-      return;
+      return &node->base;
     }
     // If the identifier is a constant, replace the node with a constant node.
     if (TypeIsIntConstant(node->base.type)) {
@@ -37,15 +44,18 @@ static void AnalyzeIdentifier(IdentifierASTNode* node) {
           node->symbol->value.ivalue, node->symbol->type, node->base.location);
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
                           true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
     } else if (TypeIsFloatingPointConstant(node->base.type)) {
       ASTNode* const_node = NewRealConstantASTNode(
           node->symbol->value.fvalue, node->symbol->type, node->base.location);
       ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
                           true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
     }
   }
-  // Symbol has now been used.
-  node->symbol->used = true;
+  return &node->base;
 }
 
 // Attempt to fold a constant expression by evaluating it and if
@@ -62,6 +72,9 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
     case AST_OP(identifier):
       // These are leaf nodes so they are already folded.
       return NULL;
+    case AST_OP(expr_init):
+      // Never fold this.
+      return NULL;
     default:
       break;
   }
@@ -74,6 +87,7 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
       ASTNode* const_node =
           NewIntConstantASTNode(value, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      const_node->flags |= kASTAnalyzed;
       return const_node;
     }
   } else if (TypeIsFloatingPoint(node->type)) {
@@ -83,6 +97,7 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
       ASTNode* const_node =
           NewRealConstantASTNode(value, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      const_node->flags |= kASTAnalyzed;
       return const_node;
     }
   }
@@ -99,8 +114,8 @@ static void AnalyzeBinaryExpression(BinaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeExpression(node->left);
-  AnalyzeExpression(node->right);
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
   ASTNodeSetType((ASTNode*)node, node->left->type);
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
@@ -113,9 +128,13 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;
   }
-  AnalyzeExpression(node->sub);
-  ASTNodeSetType((ASTNode*)node, node->sub->type);
+  node->sub = AnalyzeExpression(node->sub);
   SemanticCheckScalarType(node->sub);
+  if (node->base.op == AST_OP(not)) {
+    // Not operator is boolean.
+    NormalConversion(node->sub, NewTypeRecord(kTypeBool, kQualPlain));
+  }
+  ASTNodeSetType((ASTNode*)node, node->sub->type);
 }
 
 // Ranks for types.  Larger ranks are closer to the end
@@ -162,11 +181,11 @@ static void InsertNumericConversions(BinaryASTNode* node) {
     assert(left_rank != -1 && right_rank != -1);
     if (left_rank > right_rank) {
       // Convert right to left.
-      SemanticConvertType(node->right, node->left->type);
+      NormalConversion(node->right, node->left->type);
       ASTNodeSetType((ASTNode*)node, node->left->type);
     } else if (left_rank < right_rank) {
       // Convert left to right.
-      SemanticConvertType(node->left, node->right->type);
+      NormalConversion(node->left, node->right->type);
       ASTNodeSetType((ASTNode*)node, node->right->type);
     }
   }
@@ -186,7 +205,7 @@ static void AnalyzePlusOperator(BinaryASTNode* node) {
       // If the right node is a constant we can do the multiplication now.
       if (ASTNodeIsIntConstant(node->right)) {
         int64_t value = ASTNodeConstantValue(node->right);
-        ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
+        ASTNode* scale = NewIntConstantASTNode(value * size, node->right->type,
                                                node->base.location);
         node->right = scale;
       } else {
@@ -199,15 +218,22 @@ static void AnalyzePlusOperator(BinaryASTNode* node) {
     } else {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
     }
-  } else if (TypeIsPointer(node->right->type)) {
+  } else if (TypeIsPointerOrArray(node->right->type)) {
     if (TypeIsIntegral(node->left->type)) {
       // Multiply left side by size of right.
       int64_t size = node->right->type->next->size;
-      ASTNode* scale = NewBinaryASTNode(
+      if (ASTNodeIsIntConstant(node->left)) {
+         int64_t value = ASTNodeConstantValue(node->left);
+         ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
+                                                node->base.location);
+         node->left = scale;
+       } else {
+         ASTNode* scale = NewBinaryASTNode(
           AST_OP(mult), node->left->type, node->left->location, node->left,
           NewIntConstantASTNode(size, NewTypeRecord(kTypeInt, kQualPlain),
                                 node->left->location));
-      node->left = scale;
+         node->left = scale;
+       }
     } else {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
     }
@@ -314,15 +340,15 @@ static void AnalyzeComparisonOperator(BinaryASTNode* node) {
 }
 
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
-  AnalyzeExpression(node->left);
+  node->left = AnalyzeExpression(node->left);
   if (!TypeIsScalar(node->left->type)) {
     SemanticError((ASTNode*)node, "Condition for ? operator must be scalar");
     ASTNodeSetType((ASTNode*)node, node->left->type);
     return;
   }
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
-  AnalyzeExpression(colon->left);
-  AnalyzeExpression(colon->right);
+  colon->left = AnalyzeExpression(colon->left);
+  colon->right = AnalyzeExpression(colon->right);
   InsertNumericConversions(colon);
   ASTNodeSetType((ASTNode*)node, colon->left->type);
 
@@ -380,17 +406,17 @@ static bool IsAssignable(ASTNode* node, bool is_init) {
   return IsBitfieldReference(node) || HasAddress(node);
 }
 
-static void AnalyzeInitialization(ASTNode* node,
+static ASTNode* AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
-  AnalyzeExpression(&id_node->base);
-  AnalyzeExpression(init);
+  (void)AnalyzeExpression(&id_node->base);
+  init = AnalyzeExpression(init);
   ASTNodeSetType(node, id_node->base.type);
   ASTNodeSetType((ASTNode*)init, id_node->base.type);
 
   if (!IsAssignable((ASTNode*)id_node, true)) {
     SemanticError((ASTNode*)id_node,
                   "Cannot initialize a variable of this type");
-    return;
+    return init;
   }
 
   bool is_static = StorageIs(id_node->symbol->storage, STO(static)) ||
@@ -423,11 +449,12 @@ static void AnalyzeInitialization(ASTNode* node,
   if (is_static) {
     node->flags |= kASTStaticInit;
   }
+  return simplified_init;
 }
 
 static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
-  AnalyzeExpression(node->left);
-  AnalyzeExpression(node->right);
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
   if (!IsAssignable(node->left, false)) {
     SemanticError(node->left, "Cannot assign to this expression");
   }
@@ -437,7 +464,7 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
 
   switch (node->base.op) {
     case AST_OP(assign):
-      SemanticConvertType(node->right, node->left->type);
+      NormalConversion(node->right, node->left->type);
       ASTNodeSetType((ASTNode*)node, node->left->type);
 
       break;
@@ -456,13 +483,13 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
                                   node->right->location));
         node->right = scale;
       } else {
-        SemanticConvertType(node->right, node->left->type);
+        NormalConversion(node->right, node->left->type);
       }
       ASTNodeSetType((ASTNode*)node, node->left->type);
       break;
     case AST_OP(multeq):
     case AST_OP(diveq):
-      SemanticConvertType(node->right, node->left->type);
+      NormalConversion(node->right, node->left->type);
       ASTNodeSetType((ASTNode*)node, node->left->type);
       break;
     case AST_OP(percenteq):
@@ -474,7 +501,7 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
           !TypeIsIntegral(node->right->type)) {
         SemanticError((ASTNode*)node, "Integer type expected");
       } else {
-        SemanticConvertType(node->right, node->left->type);
+        NormalConversion(node->right, node->left->type);
       }
       ASTNodeSetType((ASTNode*)node, node->left->type);
       break;
@@ -486,7 +513,7 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
           !TypeIsIntegral(node->right->type)) {
         SemanticError((ASTNode*)node, "Integer type expected");
       } else {
-        SemanticConvertType(node->right, node->left->type);
+        NormalConversion(node->right, node->left->type);
       }
       ASTNodeSetType((ASTNode*)node, node->left->type);
       if (TypeIsUnsigned(node->base.type)) {
@@ -516,8 +543,8 @@ static void AnalyzeIncDec(UnaryASTNode* node) {
 
 // Array subscripting operator.
 static void AnalyzeArraySubscript(BinaryASTNode* node) {
-  AnalyzeExpression(node->left);
-  AnalyzeExpression(node->right);
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
     SemanticError(node->right, "Subscripts must be integral types");
   }
@@ -532,19 +559,226 @@ static void AnalyzeArraySubscript(BinaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, subtype);
 }
 
-static void AnalyzeFunctionCall(VectorASTNode* node) {
-  AnalyzeExpression(node->left);
+// Inliner data.
+typedef struct {
+  Map argument_map;     // Map of argument to new symbol pointers.
+  ASTNode* end_label;   // End label for return conversion.
+  Symbol* return_value; // Return value symbol.
+} Inliner;
+
+// This is called while cloning the function body for inlining.  The
+// data is a pointer to an Inliner.  The node is a cloned node.
+// There are two conversion that need to happen:
+// 1. A reference to an identifier that is a formal argument of the function
+//    being inlined needs to refer to a new symbol that has been assigned
+//    the actual value.
+// 2. A return statement needs to be converted to a goto, after first
+//    assigning the return value (if any) to the temporary symbol allocated
+//    to hold the result.
+//
+// In addiiton, a cloned switch statement no longer has any case label
+// or default information.  We perform a new semantic analysis on that
+// after the clone of that node.
+//
+// Returns either the node passed or a new node (in the case of return
+// converted to assignment and goto).
+static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
+  Inliner* inliner = data;
+  // For an identifier
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id_node = (IdentifierASTNode*)node;
+    MapKeyType key;
+    key.p = id_node->symbol;
+    void* new_sym = MapFind(&inliner->argument_map, key);
+    if (new_sym != NULL) {
+      id_node->symbol = new_sym;
+    }
+    return node;
+  }
+  if (node->op == AST_OP(return)) {
+    CombinedStatementASTNode* ret_node = (CombinedStatementASTNode*)node;
+    Vector* new_ret = NewVector();
+    if (inliner->return_value != NULL && ret_node->cond != NULL) {
+      ASTNode* value = ASTNodeMove(ret_node->cond);
+      ASTNode* ret_value =
+          NewIdentifierASTNode(inliner->return_value, ret_node->base.location);
+      ASTNode* ret_assign = NewBinaryASTNode(AST_OP(assign),
+                                             value->type,
+                                             value->location,
+                                             ret_value,
+                                             value);
+      ASTNode* assign_expr = NewExpressionStatementASTNode(ret_assign, ret_assign->location);
+      AnalyzeStatement(assign_expr);
+      VectorAppend(new_ret, assign_expr);
+    }
+    // Now make a goto node to the end_label.
+    LabelASTNode* end_label = (LabelASTNode*)inliner->end_label;
+    GotoStatementASTNode* goto_node = (GotoStatementASTNode*)
+                    NewGotoStatementASTNode(
+                                  NewString(end_label->name.value),
+                                  ret_node->base.location);
+    goto_node->label = inliner->end_label;
+    VectorAppend(new_ret, goto_node);
+    
+    // Don't need the return now.
+    ASTNodeDelete(node);
+    
+    // Build a new Compound statement containing the assignment to the
+    // return value (if necessary) and the goto.
+    return NewCompoundStatementASTNode(new_ret, ret_node->base.location);
+  }
+  
+  // After cloning a switch statement we have lost the analysis of
+  // case and default labels.  Need to do it again now.
+  if (node->op == AST_OP(switch)) {
+    AnalyzeStatement(node);
+  }
+  
+  return node;
+}
+
+// Build declaration list for all formal args and initialize them with
+// the actual args.  Since these are no longer arguments we need
+// to copy the Symbols too.  The ownership of all actual expressions is
+// changed to the variable declaration.  The inliner's argument_map
+// will contains a mapping of old symbol to new symbol.
+static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* inliner) {
+  SourceLocation location = call->base.location;
+  Vector* decls = NewVector();
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = SymbolClone(info->prototype.value.p[i]);
+    formal->flags.is_argument = false;
+    formal->flags.is_local = true;
+    VectorAppend(&compiler->syntax.all_local_symbols, formal);
+    
+    // Insert old and new into inliner's argument map so we can translate
+    // the argument references to the local variables.
+    MapKeyValue kv;
+    kv.key.p = info->prototype.value.p[i];
+    kv.value.p = formal;
+    MapInsert(&inliner->argument_map, kv);
+    
+    ASTNode* actual = ASTNodeMove(call->children->value.p[i]);
+    ASTNode* assign = NewBinaryASTNode(AST_OP(assign),
+                                       actual->type,
+                                       actual->location,
+                                       NewIdentifierASTNode(formal, location),
+                                       actual);
+    assign = AnalyzeExpression(assign);
+    VectorAppend(decls,
+                 NewVariableDeclarationASTNode(formal,
+                                               assign,
+                                               location));
+  }
+  
+  // Allocate a temporary for the return value if it's not void.
+  if (!TypeIsVoid(call->base.type)) {
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, call->base.type);
+    inliner->return_value = temp;
+    VectorAppend(decls, NewVariableDeclarationASTNode(temp, NULL, location));
+  } else {
+    inliner->return_value = NULL;
+  }
+  return NewDeclarationListASTNode(decls, location);
+}
+
+// Inline a function call.
+// 1. Create new symbols for all formal args.
+// 2. Assign all actual values to new symbols.
+// 3. Allocate (but don't emit) end_label.
+// 4. Clone body, replacing all returns by a goto to end_label and references
+//    to the arguments with references to the new symbols.
+// 5. Emit end_label.
+static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
+  Vector* statements = NewVector();
+  SourceLocation location = call->base.location;
+  Inliner inliner;
+  MapInitForPointerKeys(&inliner.argument_map);
+  
+  VectorAppend(statements,
+               CopyArguments(info, call, &inliner));
+
+  inliner.end_label = NewLabelASTNode(SyntaxFakeName(&compiler->syntax),
+                                      false,
+                                      location);
+    
+  // Clone function body replacing:
+  // 1. Variable references to arguments with new symbols.
+  // 2. return statements with goto statements to end_label.
+  ASTNode* new_body = ASTNodeClone(info->body,
+                                   InlineFunctionBodyStatement,
+                                   &inliner, NULL);
+  VectorAppend(statements, new_body);
+  VectorAppend(statements, inliner.end_label);
+  
+  ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
+  ASTNode* ret_node = NULL;
+  if (inliner.return_value != NULL) {
+    // Void function, no return value;
+    ret_node = NewIdentifierASTNode(inliner.return_value, location);
+  }
+  MapDestruct(&inliner.argument_map);
+  return NewInlineCallASTNode(call->base.type, location, inlined, ret_node);
+}
+
+typedef struct {
+  int node_count;
+  bool found_goto;
+} GotoFinder;
+
+static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  GotoFinder* finder = data;
+  finder->node_count++;
+  if (node->op == AST_OP(goto)) {
+    finder->found_goto = true;
+  }
+}
+
+// We can only inline a function if:
+// 1. It is defined and has a body
+// 2. It is not the current function.
+// 3. It's not a varargs function or has unknown args.
+// 4. It has no goto statements.
+// 5. The number of AST nodes is reasonably small.
+//
+// Why the goto prohibition.  Well, the GotoStatementASTNode contains
+// a resolved reference to its label.  We clone the body to
+// inline it, so this reference is no longer valid after the
+// copy.  It's really hard to find the new resolved label without
+// traversing the whole function looking for the label.  Goto statements
+// are pretty rare anyway so this isn't a big deal really.
+//
+// NOTE: a tail-recursive inline function will not be inlined because
+// the tail recursion is converted into a goto statement.
+static bool FunctionCanBeInlined(FunctionInfo* func) {
+  if (!func->is_inline || !func->symbol->flags.is_defined ||
+      func->body == NULL ||
+      func->symbol == compiler->current_function->info.function.symbol ||
+      func->unknown_args || func->varargs) {
+    return false;
+  }
+  const int kMaxInlineNodeCount = 100;    // Arbitrary.
+  GotoFinder finder = {0, false};
+  ASTNodeVisit(func->body, ExamineBody, 0, &finder);
+  if (finder.found_goto) {
+    return false;
+  }
+  return finder.node_count < kMaxInlineNodeCount;
+}
+
+static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
-    AnalyzeExpression((ASTNode*)node->children->value.p[i]);
+    node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
     ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
-    return;
+    return &node->base;
   }
   if (node->left == NULL) {
-    return;
+    return &node->base;
   }
 
   // Set node type by dereferencing the function.  We've already checked that
@@ -557,6 +791,7 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
 
   ASTNodeSetType((ASTNode*)node, subtype->next);
 
+  bool call_ok = true;
   // We are calling a function.  Let's check the arguments.
   size_t num_formal_args = subtype->info.function.prototype.length;
   if (!node->left->type->info.function.unknown_args) {
@@ -565,6 +800,7 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
                     "Too few arguments supplied to varargs function call; need "
                     "%zd, got %zd",
                     num_formal_args, num_actual_args);
+      call_ok = false;
     }
     if (!node->left->type->info.function.varargs &&
         num_actual_args != num_formal_args) {
@@ -572,12 +808,13 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
                     "Incorrect number of arguments supplied to function call; "
                     "need %zd, got %zd",
                     num_formal_args, num_actual_args);
+      call_ok = false;
     }
 
     for (size_t i = 0; i < num_formal_args && i < num_actual_args; i++) {
       ASTNode* actual = (ASTNode*)node->children->value.p[i];
       Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
-      SemanticConvertType(actual, formal->type);
+      NormalConversion(actual, formal->type);
 
       // Composites (structs/unions), arrays and functions need addresses, not
       // values.
@@ -587,13 +824,32 @@ static void AnalyzeFunctionCall(VectorASTNode* node) {
       }
     }
   }
+  
+  // Inline function call if possible.  Only possible if we are calling
+  // a function (not a function pointer) and it was tagged as inline.
+  if (call_ok && TypeIsFunction(node->left->type)) {
+    FunctionInfo* func = &node->left->type->info.function;
+    if (FunctionCanBeInlined(func)) {
+      // Clone the function's body and replace the call by
+      // an inline_call node.
+      ASTNode* inline_call = InlineFunctionCall(func, node);
+      ASTNodeReplaceChild(node->base.parent,
+                          node->base.child_id, inline_call, true);
+      return inline_call;
+    }
+  }
+  return &node->base;
 }
 
 static void AnalyzeMemberReference(BinaryASTNode* node) {
+  if (node->base.type != NULL) {
+    // Already analyzed.
+    return;
+  }
   Struct* struct_info = NULL;
 
-  AnalyzeExpression(node->left);
-  AnalyzeExpression(node->right);
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
     if (!TypeIsStructOrUnionPointer(node->left->type)) {
@@ -650,7 +906,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
 // Address-of operator.  If the operand has an address the type is
 // a pointer to the type of the operand.
 static void AnalyzeAddressOperator(UnaryASTNode* node) {
-  AnalyzeExpression(node->sub);
+  node->sub = AnalyzeExpression(node->sub);
   TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");
@@ -671,7 +927,7 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
 // Contents-of operator.  If the operand is a pointer the result type
 // is the type pointed to.
 static void AnalyzeContentsOperator(UnaryASTNode* node) {
-  AnalyzeExpression(node->sub);
+  node->sub = AnalyzeExpression(node->sub);
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");
     // Fake an integer type for the result.
@@ -686,35 +942,15 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
 
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   if (node->expr != NULL) {
-    AnalyzeExpression(node->expr);
+    node->expr = AnalyzeExpression(node->expr);
     node->base.value.ivalue = node->expr->type->size;
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
 
 static void AnalyzeCastExpression(CastASTNode* node) {
-  AnalyzeExpression(node->expr);
-
-  if (TypeIsVoid(node->cast_type)) {
-    // Casting to void is always allowed.
-  } else {
-    // Convert the expression to the given type.
-    // This is different from a normal conversion in that there are
-    // very few illegal casts.
-    // Illegal casts:
-    // 1. struct/union to/from anything
-    // 2. void to anything but void
-    bool bad_cast = false;
-    if (TypeIsStructOrUnion(node->expr->type) ||
-        TypeIsStructOrUnion(node->cast_type)) {
-      bad_cast = true;
-    } else if (TypeIsVoid(node->expr->type)) {
-      bad_cast = true;
-    }
-    if (bad_cast) {
-      SemanticTypeConversionError(&node->base, node->cast_type, "Illegal cast");
-    }
-  }
+  node->expr = AnalyzeExpression(node->expr);
+  SemanticConvertType(node->expr, node->cast_type, kConvertCast);
 
   // Result is the requested type.
   ASTNodeSetType((ASTNode*)node, node->cast_type);
@@ -729,7 +965,8 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
 static void AnalyzeVarargsBuiltin1(VectorASTNode* args) {
   for (size_t i = 0; i < args->children->length; i++) {
     ASTNode* child = args->children->value.p[i];
-    AnalyzeExpression(child);
+    args->children->value.p[i] = AnalyzeExpression(child);
+    child = args->children->value.p[i];
     child->flags |= kASTNeedAddress;  // Need address of all of these.
   }
   ASTNodeSetType(&args->base, NewTypeRecord(kTypeVoid, kQualPlain));
@@ -747,8 +984,8 @@ static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
 ASTNode* AnalyzeExpression(ASTNode* node) {
-  if (node == NULL) {
-    return NULL;
+  if (node == NULL || (node->flags & kASTAnalyzed) != 0) {
+    return node;
   }
 
   BinaryASTNode* binary_node = (BinaryASTNode*)node;
@@ -767,7 +1004,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(identifier):
-      AnalyzeIdentifier((IdentifierASTNode*)node);
+      node = AnalyzeIdentifier((IdentifierASTNode*)node);
       break;
 
     case AST_OP(plus):
@@ -870,7 +1107,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(call):  // Function call.
-      AnalyzeFunctionCall(vector_node);
+      node = AnalyzeFunctionCall(vector_node);
       break;
 
     case AST_OP(dot):
@@ -879,8 +1116,8 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(comma):
-      AnalyzeExpression(binary_node->left);
-      AnalyzeExpression(binary_node->right);
+      binary_node->left = AnalyzeExpression(binary_node->left);
+      binary_node->right = AnalyzeExpression(binary_node->right);
 
       // Type of comma operator is type of right operand.
       ASTNodeSetType(node, binary_node->right->type);
@@ -892,13 +1129,14 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(init):
-      AnalyzeInitialization(node, (IdentifierASTNode*)binary_node->left,
+      binary_node->right = AnalyzeInitialization(node,
+                                                 (IdentifierASTNode*)binary_node->left,
                             binary_node->right);
       break;
 
     case AST_OP(expr_init): {
       ExpressionInitializerASTNode* expr_init = (ExpressionInitializerASTNode*)node;
-      AnalyzeExpression(expr_init->expr);
+      expr_init->expr = AnalyzeExpression(expr_init->expr);
       ASTNodeSetType(node, expr_init->expr->type);
       break;
     }
@@ -920,7 +1158,6 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     default:
-      assert(false);
       break;
   }
 
@@ -930,6 +1167,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     return folded;
   }
 
+  // Set flag to prevent double analysis.
+  node->flags |= kASTAnalyzed;
+  
   if (node->type == NULL) {
     // Make sure we have type for the node.
     ASTNodeSetType(node, NewTypeRecord(kTypeInt, kQualPlain));
@@ -947,6 +1187,41 @@ bool IsConstantExpression(ASTNode* node) {
     case AST_OP(string):
     case AST_OP(string_wide):
       return true;
+    case AST_OP(identifier): {
+      // Static identifiers that are arrays are constant.
+      IdentifierASTNode* id_node = (IdentifierASTNode*)node;
+      if (TypeIsIntConstant(id_node->base.type) ||
+          TypeIsFloatingPointConstant(id_node->base.type)) {
+        return true;
+      }
+      // Functions are constant expressions.
+      if (TypeIsFunction(id_node->base.type)) {
+        return true;
+      }
+      if (!TypeIsArray(id_node->base.type)) {
+        return false;
+      }
+      if (StorageIs(id_node->symbol->storage, STO(static)|STO(extern))) {
+        return true;
+      }
+      return false;
+    }
+    case AST_OP(address): {
+      // Address of a static variable is a constant.
+      UnaryASTNode* addr = (UnaryASTNode*)node;
+      if (addr->sub->op == AST_OP(identifier)) {
+        IdentifierASTNode* id_node = (IdentifierASTNode*)addr->sub;
+        if (StorageIs(id_node->symbol->storage, STO(static)|STO(extern))) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case AST_OP(cast): {
+      CastASTNode* c = (CastASTNode*)node;
+      return IsConstantExpression(c->expr);
+    }
+      
     default:
       return false;
   }

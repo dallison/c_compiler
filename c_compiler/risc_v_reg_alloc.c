@@ -8,6 +8,7 @@
 
 #include "risc_v_reg_alloc.h"
 #include <assert.h>
+#include <limits.h>
 #include "risc_v_codegen.h"
 #include "risc_v_machine.h"
 
@@ -34,13 +35,16 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
+  
+  allocator->spilled_region_size = 0;
 }
 
 void RVRegisterAllocatorReserveRegisters(RVRegisterAllocator* allocator) {
   RVGenerator* rv = allocator->rv;
 
   // Reserve and mark register variables.
-  bool is_leaf = allocator->rv->base.num_calls == 0;
+  bool is_leaf = allocator->rv->base.num_calls == 0 &&
+      !rv->use_reg_vars;
   int first_int_reg_var =
       is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
   int first_fp_reg_var =
@@ -101,6 +105,36 @@ static struct {
 };
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
+
+static RVRegister* FindSpillVictim(RVRegisterAllocator* allocator,
+                                   RVRegisterType type) {
+  RVRegister* regs =
+      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  RVRegister* min_refs_reg = NULL;
+  // Find the register with the minimum number of references
+  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
+    if (register_ranges[i].type == type) {
+      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+        if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
+          TargetInstruction* owner = regs[j].base.owner;
+          if (owner->opcode == RV_OP(rmov)) {
+            // Not rmov instruction.
+            continue;
+          }
+          if ((owner->flags & TARGET_INST_SPILLED) != 0) {
+            // Not already spilled.
+            continue;
+          }
+          if (min_refs_reg == NULL || owner->uses < min_refs_reg->base.owner->uses) {
+            min_refs_reg = &regs[j];
+          }
+        }
+      }
+    }
+  }
+  assert(min_refs_reg != NULL);
+  return min_refs_reg;
+}
 
 static RVRegister* FindFreeRegister(RVRegisterAllocator* allocator,
                                     RVRegisterType type, bool can_use_temp) {
@@ -163,12 +197,23 @@ static bool IsSavedReg(RVRegister* reg) {
   return false;
 }
 
+static void SpillRegister(RVRegisterAllocator* allocator, RVRegister* reg) {
+  TargetInstruction* inst = reg->base.owner;
+  assert(inst != NULL);
+  inst->flags |= TARGET_INST_SPILLED;
+  reg->base.owner = NULL;
+  allocator->spilled_region_size += 8;    // Register size.
+}
+
 static RVRegister* AllocateRegisterWithType(RVRegisterAllocator* allocator,
                                             RVRegisterType type,
                                             bool can_use_temp) {
   RVRegister* reg = FindFreeRegister(allocator, type, can_use_temp);
 
-  // TODO: spilling
+  if (reg == NULL) {
+    reg = FindSpillVictim(allocator, type);
+    SpillRegister(allocator, reg);
+  }
   assert(reg != NULL);
 
   if (reg->base.reserved) {
@@ -207,6 +252,10 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(fv2):
     case RV_OP(fv3):
     case RV_OP(fmv_w_x):
+    case RV_OP(fneg_d):
+    case RV_OP(fneg_s):
+    case RV_OP(fcvt_s_l):
+    case RV_OP(fcvt_d_l):
       return kRVRegTypeFloat;
 
     case RV_OP(fcvt_w_d):
@@ -302,6 +351,16 @@ static void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
+  // If the source is spilled then so is the target.
+  if ((src->flags & TARGET_INST_SPILLED) != 0) {
+    if (src->uses == 1) {
+      dest->flags |= TARGET_INST_SPILLED;
+    } else {
+      // There is more than one use of the source.  This means we can't
+      // propagate the spill to the destination since the source will
+      // be used after this point.
+    }
+  }
   RVRegister* reg = (RVRegister*)dest->reg;
   if (CanReassignRegister(src, reg)) {
     // Safe to reassign register, merge the register into the source
@@ -323,7 +382,8 @@ static void AllocateForRmov(RVRegisterAllocator* allocator,
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst) {
 
-  bool is_leaf = allocator->rv->base.num_calls == 0;
+  bool is_leaf = allocator->rv->base.num_calls == 0 &&
+      !allocator->rv->use_reg_vars;
 
   // rmov instructions use the register allocated to their first
   // operand as their own register.
@@ -358,11 +418,25 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(restore):
     case RV_OP(literal):
     case RV_OP(asm):
-    case RV_OP(regarg):
     case RV_OP(loc):
       // These instructions do not have registers allocated to them.
       return;
 
+    case RV_OP(regarg): {
+      // A register arg points to the argument register instruction
+      // in its second operand.  The register allocated to this needs
+      // to be freed.
+      TargetInstruction* arg_reg = inst->operand[1];
+      TargetRegister* reg = arg_reg->reg;
+      assert(reg != NULL);
+      TargetInstruction* owner = reg->owner;
+      if (owner != NULL) {
+        owner->uses--;
+      }
+      reg->owner = NULL;
+      return;
+    }
+      
     case RV_OP(x0):
       reg = &allocator->int_regs[RV_INT_ZERO_REG];
       break;
@@ -391,6 +465,12 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(v1):
     case RV_OP(v2):
     case RV_OP(v3):
+    case RV_OP(v4):
+    case RV_OP(v5):
+    case RV_OP(v6):
+    case RV_OP(v7):
+    case RV_OP(v8):
+    case RV_OP(v9):
       reg = &allocator->int_regs[(int)inst->opcode - RV_OP(v0) +
                                  (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR
                                           : RV_FIRST_INT_REG_VAR)];
@@ -412,6 +492,12 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(fv1):
     case RV_OP(fv2):
     case RV_OP(fv3):
+    case RV_OP(fv4):
+    case RV_OP(fv5):
+    case RV_OP(fv6):
+    case RV_OP(fv7):
+    case RV_OP(fv8):
+    case RV_OP(fv9):
       reg = &allocator->float_regs[(int)inst->opcode - RV_OP(fv0) +
                                    (is_leaf ? RV_FIRST_LEAF_FP_REG_VAR
                                             : RV_FIRST_FP_REG_VAR)];
@@ -439,6 +525,15 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(callf):
     case RV_OP(rcallf):
       reg = &allocator->float_regs[RV_FLOAT_RETURN_REG];
+      break;
+      
+    case RV_OP(feq_s):
+    case RV_OP(flt_s):
+    case RV_OP(fle_s):
+    case RV_OP(feq_d):
+    case RV_OP(flt_d):
+    case RV_OP(fle_d):
+      reg = AllocateRegisterWithType(allocator, kRVRegTypeInt, CanUseTemp(inst));
       break;
 
     default: {

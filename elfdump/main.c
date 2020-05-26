@@ -84,8 +84,7 @@ static void PrintHeader(ELFReaderFile* elf) {
   }
   printf("Type:\t%s\n", type);
   
-  String section_names;
-  StringInit(&section_names, NULL);
+  String section_names = {0};
   for (size_t si = 0; si < elf->sections.length; si++) {
     ELFReaderSection* section = elf->sections.value.p[si];
     StringPrintf(&section_names, "  %zd: %s\n", si, section->name.value);
@@ -93,8 +92,7 @@ static void PrintHeader(ELFReaderFile* elf) {
   printf("Sections: %d\n%s\n", (int)header->shnum, section_names.value);
   StringDestruct(&section_names);
  
-  String segment_types;
-  StringInit(&segment_types, NULL);
+  String segment_types = {0};
   for (size_t si = 0; si < elf->segments.length; si++) {
     ELFProgramHeader* segment = elf->segments.value.p[si];
     StringPrintf(&segment_types, "  %zd: %s\n", si, ProgramHeaderType(segment->type));
@@ -157,7 +155,7 @@ static void PrintSections(ELFReaderFile* elf) {
     }
     
     String flags;
-    StringInit(&flags, NULL);
+    StringInit(&flags, "");
 
     AddFlag(section->header->flags, SHF(write), "w", &flags);
     AddFlag(section->header->flags, SHF(alloc), "a", &flags);
@@ -168,7 +166,7 @@ static void PrintSections(ELFReaderFile* elf) {
     
     ELFReaderSection* link = elf->sections.value.p[section->header->link];
     printf("%3zd: %-20s %-8s %-4s %08llx %08llx %08llx %-8s %-3d\n", i, section->name.value, type, flags.value,
-           section->header->addr, section->header->offset, section->header->size,
+           section->header->offset, section->header->addr, section->header->size,
            link->name.value, section->header->info);
     StringDestruct(&flags);
   }
@@ -179,15 +177,13 @@ static void PrintSegments(ELFReaderFile* elf) {
     ELFProgramHeader* segment = elf->segments.value.p[i];
     const char* type = ProgramHeaderType(segment->type);
  
-    String flags;
-    StringInit(&flags, NULL);
+    String flags = {0};
 
     AddFlag(segment->flags, PF(w), "w", &flags);
     AddFlag(segment->flags, PF(r), "r", &flags);
     AddFlag(segment->flags, PF(x), "x", &flags);
     
-    String info;
-    StringInit(&info, NULL);
+    String info = {0};
     
     switch (segment->type) {
       case PT(load): {
@@ -215,9 +211,10 @@ static void PrintSegments(ELFReaderFile* elf) {
         StringPrintf(&info, "%zd entries", segment->filesz / sizeof(ELFDynamicSectionEntry));
         break;
     }
-    printf("%3zd: %-8s %-4s %08llx %08llx %-6lld %-6lld %s\n", i, type, flags.value,
+    printf("%3zd: %-8s %-4s %08llx %08llx %08llx %08llx %08llx %s\n", i, type, flags.value,
            segment->offset, segment->vaddr,
            segment->filesz, segment->memsz,
+           segment->align,
            info.value);
     StringDestruct(&flags);
     StringDestruct(&info);
@@ -271,13 +268,15 @@ static void PrintSymbol(ELFReaderFile* elf,
   } else if (sym->shndx == SHN_COM) {
     section_name = "<com>";
   } else {
-    ELFReaderSection* section = elf->sections.value.p[sym->shndx];
-    section_name = section->name.value;
+    if (sym->shndx < elf->sections.length) {
+      ELFReaderSection* section = elf->sections.value.p[sym->shndx];
+      section_name = section->name.value;
+    }
   }
   
-  printf("%3zd: %08llx %5lld %-8s %-6s %-8s %s\n", index,
+  printf("%3zd: %08llx %5lld %-8s %-6s %-8s(%d) %s\n", index,
          sym->value, sym->size,
-         type, bind, section_name, sym_name);
+         type, bind, section_name, sym->shndx, sym_name);
   
 }
 
@@ -287,9 +286,11 @@ static void PrintSymbols(ELFReaderFile* elf) {
   
   // Find symbol and string tables.
   ELFReaderFileFindSectionsByType(elf, SHT(symtab), &symbol_tables);
-  
+  ELFReaderFileFindSectionsByType(elf, SHT(dynsym), &symbol_tables);
+
   for (size_t i = 0; i < symbol_tables.length; i++) {
     ELFReaderSection* symtab = symbol_tables.value.p[i];
+    printf("symtab: %s\n", symtab->name.value);
     int strtab_index = symtab->header->link;
     if (strtab_index >= elf->sections.length) {
       // Invalid string table.
@@ -457,11 +458,18 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
                             ELFReaderSection* reloc_section,
                             ELFReaderSection* symtab,
                             ELFReaderSection* strtab) {
+  int num_symbols = (int)symtab->header->size / symtab->header->entsize;
   int32_t symbol_index = ELF_R_SYM(reloc->info);
+  bool bad_symbol = false;
+  if (symbol_index < 0 || symbol_index >= num_symbols) {
+    bad_symbol = true;
+  }
   int32_t reloc_type = ELF_R_TYPE(reloc->info);
   int64_t addend = reloc_section->header->type == SHT(rela) ? reloc->addend : 0;
   
-  ELFSymbol* elf_sym = (ELFSymbol*)(symbol_table_address + symbol_index * symtab->header->entsize);
+  ELFSymbol* elf_sym = bad_symbol ? NULL :
+      (ELFSymbol*)(symbol_table_address +
+                   symbol_index * symtab->header->entsize);
 
   // Get the target section index from the info field in the section header.
   int target_section_index = reloc_section->header->info;
@@ -473,8 +481,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
 
   void (*disassembler)(void*, void*) = NULL;
   void *interpreter = NULL;
-  String type;
-  StringInit(&type, NULL);
+  String type = {0};
   switch (elf->header->machine) {
     case ELF_MACHINE_TYPE_PCODE:
       StringPrintf(&type, "%08x", reloc_type);
@@ -491,9 +498,16 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
       disassembler = NULL;
       break;
   }
+  String sym_name = {0};
+  if (bad_symbol) {
+    StringPrintf(&sym_name, "<bad symbol index 0x%x>", symbol_index);
+  } else {
+    StringInit(&sym_name, string_table_address + elf_sym->name);
+  }
   ELFReaderSection* target_section = elf->sections.value.p[target_section_index];
   printf("%3zd: %-8s %08llx %-24s %-16s\t", i, target_section->name.value,
-         reloc->offset, type.value, string_table_address + elf_sym->name);
+         reloc->offset, type.value,
+         sym_name.value);
   if (addend != 0) {
     printf(" + %lld", addend);
   }
@@ -505,6 +519,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
     printf("\n");
   }
   StringDestruct(&type);
+  StringDestruct(&sym_name);
 }
 
 static void PrintRelocations(ELFReaderFile* elf) {
@@ -518,8 +533,9 @@ static void PrintRelocations(ELFReaderFile* elf) {
   // Process all relocation sections.
   for (size_t i = 0; i < relocation_sections.length; i++) {
     ELFReaderSection* reloc_section = relocation_sections.value.p[i];
+    printf("Section: %s\n", reloc_section->name.value);
     int32_t symtab_section_index = reloc_section->header->link;
-    if (symtab_section_index >= elf->sections.length) {
+    if (symtab_section_index == 0 || symtab_section_index >= elf->sections.length) {
       continue;
     }
     ELFReaderSection* symtab = elf->sections.value.p[symtab_section_index];
@@ -599,6 +615,7 @@ enum Command {
   kRelocations,
   kDynamic,
   kDisassemble,
+  kHexDump,
   kLast,
 };
 
@@ -845,6 +862,8 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
         case DT(fini_array):
         case DT(preinit_array):
         case DT(gnu_hash):
+        case DT(strtab):
+        case DT(symtab):
           printf("0x%llx\n", entry->un.ptr);
           break;
       }
@@ -855,7 +874,45 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
   VectorDestruct(&dynamic_sections);
 }
 
-static void RunCommand(ELFReaderFile* elf_file, enum Command command,
+void Hexdump(const void* addr, int size) {
+  char buf[16];
+  const char* caddr = (const char*)addr;
+  const char* endaddr = caddr + size;
+  int len = size;
+  while (len > 0) {
+    int filled_bytes = 0;
+    for (int i = 0; i < 16; i++) {
+      if (caddr < endaddr) {
+         buf[i] = *caddr++;
+        filled_bytes++;
+        printf("%02X ", buf[i] & 0xff);
+      } else {
+        printf("   ");
+      }
+    }
+    printf("  ");
+    for (int i = 0; i < filled_bytes; i++) {
+      if (buf[i] >= 0x20 && buf[i] < 0x7f) {
+        printf("%c", buf[i]);
+      } else {
+        printf("%c", '.');
+      }
+    }
+    len -= 16;
+    printf("\n");
+  }
+}
+
+static void DumpSection(ELFReaderFile* elf_file, int section_number) {
+  if (section_number < 0 || section_number >= elf_file->sections.length) {
+    fprintf(stderr, "Invalid section number %d\n", section_number);
+    exit(1);
+  }
+  ELFReaderSection* section = elf_file->sections.value.p[section_number];
+  Hexdump(section->contents, (int)section->header->size);
+}
+
+static void RunCommand(ELFReaderFile* elf_file, enum Command command, int command_arg,
                        bool print_name) {
   switch (command) {
     case kHeader:
@@ -900,6 +957,9 @@ static void RunCommand(ELFReaderFile* elf_file, enum Command command,
       }
       Disassemble(elf_file);
       break;
+    case kHexDump:
+      DumpSection(elf_file, command_arg);
+      break;
     case kAll:
     case kLast:
       break;
@@ -907,9 +967,10 @@ static void RunCommand(ELFReaderFile* elf_file, enum Command command,
 }
 
 int main(int argc, const char * argv[]) {
-  String filename;
-  StringInit(&filename, NULL);
- enum Command command = kHeader;
+  String filename = {0};
+  enum Command command = kHeader;
+  int command_arg = 0;
+  
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
       // Flags here.
@@ -933,7 +994,16 @@ int main(int argc, const char * argv[]) {
            command = kDynamic;
            break;
         case 'c':
-          command = kDisassemble;
+           command = kDisassemble;
+           break;
+        case 'x':
+          command = kHexDump;
+          i++;
+          if (i >= argc) {
+            fprintf(stderr, "-x needs a section number\n");
+            exit(1);
+          }
+          command_arg = atoi(argv[i]);
           break;
         case 'a':
           command = kAll;
@@ -956,10 +1026,14 @@ int main(int argc, const char * argv[]) {
   }
   if (command == kAll) {
     for (command = kHeader; command < kLast; command++) {
-      RunCommand(elf_file, command, true);
+      if (command == kHexDump) {
+        // Don't include hexdump.
+        continue;
+      }
+      RunCommand(elf_file, command, -1, true);
     }
   } else {
-    RunCommand(elf_file, command, false);
+    RunCommand(elf_file, command, command_arg, false);
   }
 
   ELFReaderFileDelete(elf_file);

@@ -531,13 +531,16 @@ void* GenerateFunction(Generator* gen) {
     }
   }
 
-  GeneratorPrintIR(gen);
-
+  if (compiler->print_back_end) {
+    GeneratorPrintIR(gen);
+  }
+  
   BuildBasicBlocks(gen);
 
-  printf("Before gvn\n");
-  PrintBasicBlocks(gen);
-
+  if (compiler->print_back_end) {
+    printf("Before gvn\n");
+    PrintBasicBlocks(gen);
+  }
   if (compiler->optimize) {
     // Remove any unreachable blocks before we go into SSA conversion.
     RemoveUnreachableBlocks(gen);
@@ -548,8 +551,9 @@ void* GenerateFunction(Generator* gen) {
     // optimizations.
     GeneratorConvertToSSA(gen);
 
-    PrintBasicBlocks(gen);
-
+    if (compiler->print_back_end) {
+      PrintBasicBlocks(gen);
+    }
     // Perform strength reduction optimization.  This simplifies instructions.
     StrengthReductionOptimization(gen);
 
@@ -571,8 +575,10 @@ void* GenerateFunction(Generator* gen) {
     RemoveUnreachableBlocks(gen);
   }
 
-  PrintBasicBlocks(gen);
-
+  if (compiler->print_back_end) {
+    PrintBasicBlocks(gen);
+  }
+  
   // Generate lowered code for the target.
   void* code = compiler->target->codegen(gen);
 

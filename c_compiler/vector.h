@@ -56,10 +56,14 @@ void VectorSet(Vector* vec, size_t index, void* value);
 // Gets a value from the vector at the given index.
 void* VectorGet(Vector* vec, size_t index);
 
+// Gets the first pointer in the vector.
+void* VectorFirst(Vector* vec);
+
 // Gets the last pointer in the vector.
 void* VectorLast(Vector* vec);
 
 void VectorCopy(Vector* dest, Vector* src);
+void VectorAppendVector(Vector* dest, Vector* src);
 
 void VectorPush(Vector* v, void* value);
 void VectorPop(Vector* v);

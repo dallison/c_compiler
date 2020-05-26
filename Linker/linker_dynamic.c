@@ -25,6 +25,8 @@
 #include <string.h>
 
 void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
+  assert(linker->arch != NULL);
+
   // Initialize architecture specific info.
   linker->arch->init_dynamic_linker(s);
 
@@ -35,6 +37,7 @@ void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
   VectorInit(&s->procedure_linkage_table.trampolines);
   VectorInit(&s->got_relocations);
   VectorInit(&s->plt_relocations);
+  VectorInit(&s->data_relocations);
   VectorInit(&s->needed_libraries);
   s->rpath = 0;
   s->plt_group = NULL;
@@ -59,6 +62,7 @@ void DynamicLinkerDestruct(DynamicLinker* s) {
   VectorDestruct(&s->procedure_linkage_table.trampolines);
   VectorDestruct(&s->got_relocations);
   VectorDestruct(&s->plt_relocations);
+  VectorDestruct(&s->data_relocations);
   VectorInit(&s->needed_libraries);
   DynamicLibraryRegistryDestruct(&s->loaded_dynamic_libraries);
 }
@@ -281,16 +285,13 @@ void DynamicLinkerFixupPLT(Linker* linker) {
 static void ProcessPossibleDynamicRelocation(struct Linker* linker,
                                              struct ObjectFile* file,
                                              Relocation* reloc) {
-  Symbol* symbol = ObjectFileFindSymbol(file,
-                                              reloc->symbol_name.value);
-  if (symbol != NULL) {
-    linker->arch->handle_pic_relocation(linker->dynamic_linker,
+  Symbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+  linker->arch->handle_pic_relocation(linker->dynamic_linker,
                                         symbol,
                                         reloc,
                                         GetDataGOTOffset,
                                         GetFunctionGOTOffset,
                                         GetPLTOffset);
-  }
 }
 
 void DynamicLinkerGatherDynamicRelocations(Linker* linker) {
@@ -308,8 +309,11 @@ void DynamicLinkerGatherDynamicRelocations(Linker* linker) {
 static void AllocateDynamicRelocations(struct Linker* linker,
                              struct ELFWriterSectionContents* contents) {
   DynamicLinker* dynamic = linker->dynamic_linker;
-  BufferAddSpace(&contents->data.buffered,
-                 dynamic->got_relocations.length * sizeof(ELFRelocation));
+  
+  // The .rela.dyn section contains both GOT and data reloacations.
+  size_t length = (dynamic->got_relocations.length +
+                   dynamic->data_relocations.length) * sizeof(ELFRelocation);
+  BufferAddSpace(&contents->data.buffered, length);
 }
 
 // We don't have all the information we need for the plt relocations
@@ -321,6 +325,7 @@ static void AllocatePLTRelocations(struct Linker* linker,
   BufferAddSpace(&contents->data.buffered,
                  dynamic->plt_relocations.length * sizeof(ELFRelocation));
 }
+
 
 // Build the dynamic relocation section contents now that we know all
 // the information for the relocations.
@@ -337,11 +342,32 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
   // The buffer already has all the space we need but it is not populated.
   // Since we now know the symbol indexes we can create the relocation
   // entries in the table, overwriting the memory previously allocated.
+  
+  // Data relocations come first.
+  int32_t index = 0;
+  for (size_t i = 0; i < dynamic->data_relocations.length; i++) {
+    Relocation* reloc = dynamic->data_relocations.value.p[i];
+    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[index*sizeof(ELFRelocation)];
+    int64_t offset = reloc->offset + reloc->section->address;
+    ELFWriterInitRelocation(elfreloc, offset,
+                            0, 0, reloc->type);
+    index++;
+  }
+
+  // Now GOT relocations.
   for (size_t i = 0; i < dynamic->got_relocations.length; i++) {
     Relocation* reloc = dynamic->got_relocations.value.p[i];
-    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[i*sizeof(ELFRelocation)];
+    ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[index*sizeof(ELFRelocation)];
+    int symbol_index;
+    if (reloc->symbol->dynamic_index == -1) {
+      symbol_index = reloc->symbol->index;
+    } else {
+      symbol_index = reloc->symbol->dynamic_index;
+    }
+    assert(symbol_index != -1);
     ELFWriterInitRelocation(elfreloc, reloc->offset + got->address,
-                           reloc->symbol->dynamic_index, 0, reloc->type);
+                           symbol_index, 0, reloc->type);
+    index++;
   }
 }
 
@@ -361,10 +387,18 @@ void DynamicLinkerBuildPLTRelocations(struct Linker* linker) {
   for (size_t i = 0; i < dynamic->plt_relocations.length; i++) {
     Relocation* reloc = dynamic->plt_relocations.value.p[i];
     ELFRelocation* elfreloc = (ELFRelocation*)&contents->value[i*sizeof(ELFRelocation)];
+    int symbol_index;
+    if (reloc->symbol->dynamic_index == -1) {
+      symbol_index = reloc->symbol->index;
+    } else {
+      symbol_index = reloc->symbol->dynamic_index;
+    }
+    // assert(symbol_index != -1);
     ELFWriterInitRelocation(elfreloc, reloc->offset + got_plt->address,
-                            reloc->symbol->dynamic_index, 0, reloc->type);
+                            symbol_index, 0, reloc->type);
   }
 }
+
 
 // Build a new ELFWriterSection with a given name for later addition to the
 // ELF file.
@@ -514,6 +548,24 @@ static SectionGroup* AddPLTRelocationsSection(Linker* linker) {
   return NewDynamicLinkerGroup(linker,
                                section,
                                &linker->code_segment);
+}
+
+static SectionGroup* AddDataRelocationsSection(Linker* linker) {
+  ELFWriterSectionContents* contents =
+  NewELFWriterSectionContents(kSectionContentsBuffered);
+  ELFWriterSection* section = NewELFSection(".rela.data",
+                                            SHT(rela),
+                                            SHF(alloc),
+                                            8, contents);
+  section->header.entsize = sizeof(ELFRelocation);
+
+  // Allocate space for the relocations but we don't know the
+  // contents yet.
+  AllocateDataRelocations(linker, contents);
+  
+  return NewDynamicLinkerGroup(linker,
+                                section,
+                                &linker->code_segment);
 }
 
 // The .interp section (and segment) is for finding the dynamic
@@ -847,7 +899,7 @@ static void DebugPrintHashTable(Buffer* hashtable, size_t num_symbols) {
     printf("bloom[%d] = %llx\n", i, bloom_filter[i]);
   }
   for (int i = 0; i < header->num_buckets; i++) {
-    printf("bucket[%d]: %x\n", i, buckets[i]);
+    printf("bucket[%d]: %d\n", i, buckets[i]);
   }
   for (int i = 0; i < num_symbols - header->symoffset; i++) {
     printf("chain[%d]: %x\n", i, chains[i]);
@@ -925,14 +977,17 @@ static void WriteHashTable(Buffer* dynsym,
     // Value to insert into chain entry is the hash with the
     // bottom bit cleared.
     uint32_t hash = sym->fixup.hash & ~1;
-    
+#if 0
+    printf("adding %s to hash with value %x bucket %d\n",
+           sym->fixup.symbol->name.value, hash, curr_bucket);
+#endif
     // Moving to next bucket?
     if ((sym->fixup.hash % num_gnu_buckets) != curr_bucket) {
       if (last_chain != -1) {
         // Set bottom bit of last chain entry set.
         chains[last_chain] |= 1;
       }
-      curr_bucket++;
+      curr_bucket = sym->fixup.hash % num_gnu_buckets;
       buckets[curr_bucket] = (uint32_t)i;
     }
     
@@ -991,21 +1046,11 @@ void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
   while (index < dynsym->length){
     SymbolFixup* fixup = (SymbolFixup*)&dynsym->value[index];
     Symbol* sym = fixup->fixup.symbol;
-     ELFSymbol* elfsym = &fixup->sym;
+    ELFSymbol* elfsym = &fixup->sym;
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
-    int32_t section_index;
-    if (sym->section == NULL) {
-      // Common symbol. This is in the BSS section.  The index
-      // of this is determined from the number of sections
-      // in the ELF file.  The BSS section is the last one added
-      // to the file (before the symbol table, string table, etc.)
-      section_index = bss_section_index;
-    } else {
-      section_index = sym->section->output_section_index - 1;
-    }
     ELFSymbolInit(elfsym, fixup->fixup.name_offset,
-                  section_index,
+                  sym->header->shndx,
                   type, binding, sym->header->size,
                   sym->address);
     
@@ -1017,21 +1062,34 @@ void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
   }
 }
 
+static char* Basename(String* pathname) {
+  char* leaf = strrchr(pathname->value, '/');
+  if (leaf != NULL) {
+    leaf++;     // Skip /.
+  } else {
+    leaf = pathname->value;   // Whole name.
+  }
+  return leaf;
+}
+
 static void InsertDynamicStrings(Linker* linker, ELFWriterSection* strtab,
                                  ELFWriterSectionContents* strtab_contents) {
   // Write so_name as the second entry in the dynstr.
   linker->so_name = (int)strtab->contents->data.buffered.length;
+  char* basename = Basename(&linker->output_filename);
   BufferAppend(&strtab_contents->data.buffered,
-               linker->output_filename.value,
-               linker->output_filename.length+1);
+               basename,
+               strlen(basename)+1);
   
   // We always need libc.so, so add that now.
+#if 0
   const char libc[] = "libc.so";
   VectorAppend(&linker->dynamic_linker->needed_libraries,
                (void*)strtab_contents->data.buffered.length);
   BufferAppend(&strtab_contents->data.buffered,
                (char*)libc,
                sizeof(libc));
+#endif
   
   // Now add all the names for the dynamic libraries to the string
   // table, recording their offsets in the needed_libraries vector.
@@ -1039,8 +1097,10 @@ static void InsertDynamicStrings(Linker* linker, ELFWriterSection* strtab,
     LoadedDynamicLibrary* lib = linker->dynamic_libraries.value.p[i];
     VectorAppend(&linker->dynamic_linker->needed_libraries,
                  (void*)strtab_contents->data.buffered.length);
-    BufferAppend(&strtab_contents->data.buffered, lib->libname.value,
-                 lib->libname.length + 1);
+    // Add final leaf filename to the NEEDED libraries.
+     char* basename = Basename(&lib->libname);
+     BufferAppend(&strtab_contents->data.buffered, basename,
+                 strlen(basename) + 1);
   }
   
   // Add rpath
@@ -1164,7 +1224,7 @@ void DynamicLinkerCreateDynamicLinkerGroups(Linker* linker) {
 
   // Add PLT relocations.
   dynamic->plt_rela_group = AddPLTRelocationsSection(linker);
-  
+
   // Interpreter.
   if (!linker->building_dso) {
     dynamic->interpreter_group = AddInterpreterSection(linker);

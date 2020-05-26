@@ -7,10 +7,12 @@
 //
 
 int strcmp(const char* a, const char* b) {
-  while (*a != '\0' && *b != '\0') {
+  while (*a != '\0') {
     if (*a != *b) {
       break;
     }
+    a++;
+    b++;
   }
   return *a - *b;
 }

@@ -61,6 +61,7 @@ Map* NewMap(MapKeyCompareFunc compare_func);
 void MapInitForStringKeys(Map* map);
 void MapInitForCharPointerKeys(Map* map);
 void MapInitForInt64Keys(Map* map);
+void MapInitForPointerKeys(Map* map);
 void MapInitForCaseBlindStringKeys(Map* map);
 void MapInitForCaseBlindCharPointerKeys(Map* map);
 

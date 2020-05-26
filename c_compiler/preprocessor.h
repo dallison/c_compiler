@@ -51,8 +51,11 @@ void PreprocessorReset(Preprocessor* p);
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path);
 void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path);
+void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
+                                         const char* path);
 void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                              const char* value);
+void PreprocessorUndefineMacro(Preprocessor* p, String* macro_name);
 
 void PreprocessorReplaceMacros(Preprocessor* p, String* line);
 

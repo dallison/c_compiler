@@ -13,6 +13,14 @@
 
 static int next_instruction_id = 1;
 
+
+static void TrapInstruction(TargetInstruction* inst, int id) {
+  if (inst->id == id) {
+    // Set breakpoint here to trap on a certain instruction id.
+    printf("Instruction trap at %d\n", id);
+  }
+}
+
 const char* TargetOpcodeName(int op) {
   TargetOpcode opcode = (TargetOpcode)op;
   switch (opcode) {
@@ -93,6 +101,8 @@ const char* TargetOpcodeName(int op) {
       return "asm";
     case TARGET_OP(loc):
       return "loc";
+    case TARGET_OP(named_label):
+      return "namedlabel";
   }
 }
 
@@ -309,6 +319,7 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
 
 TargetInstruction* TargetEmit(TargetGenerator* target,
                               TargetInstruction* inst) {
+  // TrapInstruction(inst, 32);
   if (TargetNext(inst) != NULL || TargetPrev(inst) != NULL) {
     // Already in list, nothing to do.
     return inst;
@@ -430,6 +441,13 @@ TargetInstruction* TargetNewLocation(IRLocation* loc) {
   TargetLocation* l = malloc(sizeof(TargetLocation));
   TargetInitInstruction(&l->base, TARGET_OP(loc));
   l->location = loc->location;
+  return (TargetInstruction*)l;
+}
+
+TargetInstruction* TargetNewNamedLabel(const char* name) {
+  TargetNamedLabel* l = malloc(sizeof(TargetNamedLabel));
+  TargetInitInstruction(&l->base, TARGET_OP(named_label));
+  l->name = name;
   return (TargetInstruction*)l;
 }
 

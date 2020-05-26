@@ -7,7 +7,7 @@
 //
 
 #include "elf_writer.h"
-#include "stdlib.h"
+#include <stdlib.h>
 #include <assert.h>
 #include <string.h>
 #include "vector.h"
@@ -40,6 +40,7 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
   VectorInit(&elf->symbol_table);
   BufferInit(&elf->section_names);
   VectorInit(&elf->section_fixups);
+  elf->last_local_symbol_index = -1;
   
   // Add first (empty) symbol to the symbol table.  All fields
   // of this symbol are zero.
@@ -386,13 +387,11 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     
     ELFWriterSegment* code_segment = elf->segments.value.p[0];
     ELFWriterSection* section0 = code_segment->sections.value.p[0];
-    phdr.vaddr = section0->address + elf->header.phoff;
+    phdr.vaddr = (section0->address & ~(code_segment->header.align - 1)) +
+              elf->header.phoff;
     phdr.paddr = phdr.vaddr;
     fwrite(&phdr, sizeof(phdr), 1, fp);
     
-    // The first segment is at offset 0.  The next one starts at the offset
-    // of the first section held within it.
-    bool segment_includes_file_header = true;
     int64_t first_section_offset = 0;
     
     for (size_t i = 0; i < elf->segments.length; i++) {
@@ -412,7 +411,7 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
         
         // The first section gives us the offset and addresses for the segment.
         if (!start_address_assigned) {
-          segment->header.offset = i == 0 ? 0 : section->header.offset;
+          segment->header.offset = section->header.offset;
           segment->header.vaddr = section->address;
           segment->header.paddr = segment->header.vaddr;
           start_address_assigned = true;
@@ -420,13 +419,6 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
         }
       }
       
-      // The first segment includes the ELF file header.  So we need to
-      // adjust its file and memory sizes to account of for it.
-      if (segment_includes_file_header) {
-        segment->header.filesz += first_section_offset;
-        segment->header.memsz += first_section_offset;
-        segment_includes_file_header = false;
-      }
       fwrite(&segment->header, sizeof(ELFProgramHeader), 1, fp);
     }
   } else {
@@ -440,8 +432,8 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
 void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   // Add symbol table, section names and string table.
   ELFWriterSection* symtab = ELFWriterAddStandardSection(elf, ".symtab", SHT(symtab), 0);
-  ELFWriterSection* strtab = ELFWriterAddStandardSection(elf, ".strtab", SHT(strtab), 0);
-  ELFWriterSection* shstrtab = ELFWriterAddStandardSection(elf, ".shstrtab", SHT(strtab), 0);
+  ELFWriterSection* strtab = ELFWriterAddStandardSection(elf, ".strtab", SHT(strtab), SHF(strings));
+  ELFWriterSection* shstrtab = ELFWriterAddStandardSection(elf, ".shstrtab", SHT(strtab), SHF(strings));
   
   // Setup the special symbol table fields.
   symtab->header.entsize = sizeof(ELFSymbol);
@@ -453,8 +445,7 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   
   // Vector containing pointers to sections for relocations.  The
   // ELFWriterSection pointer is not owned by this vector.
-  Vector relocation_sections;
-  VectorInit(&relocation_sections);
+  Vector relocation_sections = {0};
   
   // Create the relocation sections.
   CreateRelocationSections(elf, &relocation_sections,
@@ -541,6 +532,7 @@ ELFWriterSection* ELFWriterAddSection(ELFWriterFile* elf, String* name, int32_t 
   section->header.flags = flags;
   section->header.addralign = alignment;
   section->header.addr = address;
+  section->header.info = 0;
   section->contents = contents;
   section->relocations = NewVector();
   section->index = (int32_t)elf->sections.length;
@@ -560,6 +552,7 @@ ELFWriterSection* ELFWriterAddStandardSection(ELFWriterFile* elf, const char* na
   section->header.type = type;
   section->header.flags = flags;
   section->header.addralign = 8;
+  section->header.info = 0;
   section->contents = NULL;
   section->index = (int32_t)elf->sections.length;
   section->relocations = NewVector();
@@ -578,7 +571,6 @@ void ELFSymbolInit(ELFSymbol* sym, ELF_Word name_offset,
   sym->size = size;
   sym->value = value;
   sym->info = symbol_type | symbol_binding << 4;
-  
 }
                    
 ELFSymbol* NewELFSymbol(ELF_Word name_offset,

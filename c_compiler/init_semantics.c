@@ -5,6 +5,8 @@
 //  Created by David Allison on 12/2/17.
 //  Copyright © 2017 David Allison. All rights reserved.
 //
+#include <assert.h>
+
 #include "init_semantics.h"
 #include <stdlib.h>
 #include "expr_semantics.h"
@@ -68,10 +70,6 @@ static void AppendStructMembers(INode* inode) {
   TypeRecord* type = inode->type;
   INode* prev = NULL;
   size_t num_children = type->info.struct_info->members.length;
-  if (type->info.struct_info->is_union && num_children > 1) {
-    // Only first member can be initialized in a union.
-    num_children = 1;
-  }
   for (size_t i = 0; i < num_children; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
     // Flexible array members are effectively invisible in initializers.
@@ -82,13 +80,14 @@ static void AppendStructMembers(INode* inode) {
     INode* child = BuildINode(member->symbol->type, inode);
     child->index = i;
     VectorAppend(&inode->children, child);
-    if (prev != NULL) {
-      prev->next = child;
-    }
-    prev = child;
     if (type->info.struct_info->is_union) {
-      // Only first element of a union is initialized.
-      break;
+      // All members of union don't have a next pointer.
+    } else {
+      // Struct members are chained together.
+      if (prev != NULL) {
+        prev->next = child;
+      }
+      prev = child;
     }
   }
   // Current node is first child.
@@ -283,13 +282,14 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
   if (inode->expr != NULL) {
     return false;
   }
-  AnalyzeExpression(expr);
+  expr = AnalyzeExpression(expr);
   switch (inode->kind) {
     case kIScalar:
       if (constants_only && !IsConstantExpression(expr)) {
         SemanticError(expr, "Expression is not a compile-time constant");
       }
       inode->expr = ASTNodeMove(expr);
+      assert(inode->expr->op != AST_OP(braced_init));
       return AdvanceCurrent(inode);
       
     case kIArray:
@@ -392,6 +392,7 @@ static int GetArraySizeFromInitializer(BracedInitializerASTNode* braced_init) {
   return size;
 }
 
+
 static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only) {
   switch (init_expr->op) {
     case AST_OP(expr_init): {
@@ -406,13 +407,15 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
         // occurs at the top level and never inside a struct.
         inode->type->info.array.size = GetArraySizeFromInitializer(braced_init);
         inode->type->info.array.is_flexible = false;
+        TypeRecordCalculateSize(inode->type);
       }
       
       LazyInitINode(inode);
       INode* parent = inode->parent;
       inode->parent = NULL;
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
-        if (!InitializeINode(inode->current, braced_init->initializers->value.p[i], constants_only)) {
+        INode* current = inode->current == NULL ? inode : inode->current;
+        if (!InitializeINode(current, braced_init->initializers->value.p[i], constants_only)) {
           SemanticError((ASTNode*)braced_init->initializers->value.p[i],
                         "Too many initializers");
           break;
@@ -480,11 +483,11 @@ static ASTNode* BuildDesignatedInitializer(INode* inode) {
   } else {
     BuildDesignator(inode, designators);
   }
+  inode->expr = AnalyzeExpression(inode->expr);
   ASTNode* designated_init = NewDesignatedInitializerASTNode(designators,
                                                 inode->expr,
                                                 inode->expr->location);
-  AnalyzeExpression(inode->expr);
-  SemanticConvertType(inode->expr, inode->type);
+  NormalConversion(inode->expr, inode->type);
   ASTNodeSetType(designated_init, inode->type);
   return designated_init;
 }
@@ -503,10 +506,10 @@ static void FlattenINode(INode* inode,
 ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_only) {
   INode* inode = BuildINode(type, NULL);
   InitializeINode(inode, ast_node, constants_only);
-  PrintINode(inode, 0);
+  // PrintINode(inode, 0);
   ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), ast_node->location);
   FlattenINode(inode, (BracedInitializerASTNode*)braced_init);
-  ASTNodePrint(braced_init, 0);
+  // ASTNodePrint(braced_init, 0);
   DeleteINode(inode);
   return braced_init;
 }

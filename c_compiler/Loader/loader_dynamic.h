@@ -81,7 +81,7 @@ typedef struct LoadedDynamicLibrary {
   const ELFSymbol* symtab;
   const char* strtab;
   int64_t num_symtab_symbols;
-
+  bool dynamic_section_relocated;
   Vector mapped_segments;
 } LoadedDynamicLibrary;
 
@@ -95,7 +95,8 @@ void LoadedDynamicLibraryDelete(LoadedDynamicLibrary* lib);
 bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
                               DynamicLibraryRegistry* registry,
                               Vector* search_path,
-                              uint64_t *load_address);
+                              uint64_t load_address,
+                              uint64_t* end_of_library);
 
 void LoadedDynamicLibraryRelocate(struct Loader* loader,
                                   LoadedDynamicLibrary* lib,
@@ -105,7 +106,7 @@ void LoadedDynamicLibraryRelocate(struct Loader* loader,
 const ELFSymbol* LoadedDynamicLibraryFindSymbol(LoadedDynamicLibrary* lib,
                                                     const char* name);
 uint64_t LoadedDynamicLibraryLoadSegments(LoadedDynamicLibrary* lib,
-                                          uint64_t* load_address);
+                                          uint64_t load_address, uint64_t* next_available_address);
 
 bool LoadedDynamicLibraryLookupSymbolByAddress(LoadedDynamicLibrary* lib,
                                                uint64_t address,

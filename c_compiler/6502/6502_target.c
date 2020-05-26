@@ -164,11 +164,16 @@ static void StaticVariable(InitializedStaticVariable* var, FILE* fp) {
         next_offset += 8;
         break;
       case kInitTypeSymbol:
-        fprintf(fp, "\t.long    %s\n", init->value.symbol->name.value);
+        if (init->value.symbol->flags.is_local) {
+          fprintf(fp, "\t.local %s\n", init->value.symbol->name.value);
+        } else {
+          fprintf(fp, "\t.global %s\n", init->value.symbol->name.value);
+        }
+        fprintf(fp, "\t.hword    %s\n", init->value.symbol->name.value);
         next_offset += 8;
         break;
       case kInitTypeString:
-        fprintf(fp, "\t.long    .str.%d\n", init->value.literal_id);
+        fprintf(fp, "\t.hword    .str.%d\n", init->value.literal_id);
         next_offset += 8;
         break;
       case kInitTypeMemory: {
@@ -241,8 +246,7 @@ static void EmitLiteral(StringLiteral* literal, FILE* fp) {
   // Print the literal in escaped form. Any non-printable
   // characters are encoded in hex or as their usual
   // ANSI C escape characters.
-  String escaped;
-  StringInit(&escaped, NULL);
+  String escaped = {0};
   StringEscape(&literal->value, &escaped);
   fprintf(fp, "\t.asciz \"%s\"\n", escaped.value);
   StringDestruct(&escaped);

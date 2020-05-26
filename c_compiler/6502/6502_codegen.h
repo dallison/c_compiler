@@ -84,7 +84,8 @@ typedef enum {
   _6502_OP(asm),
   
   _6502_OP(loc),
-  
+  _6502_OP(named_label),
+
   // End of TargetOpcode enumeration.
 
   _6502_OP(movac),    // Move constant address (16 bit)

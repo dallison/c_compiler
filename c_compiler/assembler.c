@@ -125,13 +125,14 @@ void AssemblerSectionAlign(AssemblerSection* section, int alignment) {
 }
 
 AssemblerRelocation* NewAssemblerRelocation(AssemblerSymbol* sym, int32_t type,
-                                            int32_t section, int32_t offset) {
+                                            int32_t section, int32_t offset,
+                                            int32_t addend) {
   AssemblerRelocation* r = malloc(sizeof(AssemblerRelocation));
   r->symbol = sym;
-  sym->exported = true;     // Must be exported.
   r->type = type;
   r->section = section;
   r->offset = offset;
+  r->addend = addend;
   return r;
 }
 
@@ -157,6 +158,7 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
   sym->index = -1;
   sym->exported = false;
   sym->alignment = 1;
+  sym->is_label = false;
   return sym;
 }
 
@@ -179,9 +181,9 @@ static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
       name = (const char*)value;
       break;
   }
-  size_t hash = 0;
-  for (size_t i = 0; name[i] != '\0'; i++) {
-    hash = (hash << 1) ^ name[i];
+  uint32_t hash = 5381;
+  while (*name != '\0') {
+    hash = (hash << 5) + hash + *name++;
   }
   return hash;
 }
@@ -294,7 +296,7 @@ int64_t AssemblerEvaluateExpression(Assembler* assembler) {
   if (expr == NULL) {
     return 0;
   }
-  AnalyzeExpression(expr);
+  expr = AnalyzeExpression(expr);
   int64_t value;
   if (EvaluateIntegerExpression(expr, &value)) {
     ASTNodeDelete(expr);
@@ -405,6 +407,9 @@ void AssemblerAddRelocation(Assembler* assembler, AssemblerRelocation* reloc) {
     AssemblerRelocationDelete(reloc);
     return;
   }
+  // There is a relocation pointing to this symbol so it must be in the
+  // symbol table.
+  reloc->symbol->exported = true;
   VectorAppend(&assembler->relocations, reloc);
 }
 
@@ -520,6 +525,7 @@ static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
     sym = NewAssemblerSymbol(spelling->value, assembler->current_section,
                              SYM_TYPE(none), SYM_BIND(local),
                              AssemblerCurrentAddress(assembler));
+    sym->is_label = true;
     sym->defined = true;
     AssemblerInsertSymbol(assembler, sym);
   }
@@ -528,8 +534,7 @@ static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
 
 static void Assemble(Assembler* assembler,
                      void (*run_func)(Assembler*, String*)) {
-  String word;
-  StringInit(&word, NULL);
+  String word = {0};
   while (!LexEof(&assembler->lex)) {
     if (LexLookingAt(&assembler->lex, TOK(identifier))) {
       // Starts with identifier.  Could be a symbol definition
@@ -628,8 +633,8 @@ static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
 static void AddRelocations(Assembler* assembler, ELFWriterFile* elf) {
   for (size_t i = 0; i < assembler->relocations.length; i++) {
     AssemblerRelocation* reloc = assembler->relocations.value.p[i];
-    ELFWriterAddRelocation(elf, reloc->section, reloc->offset,
-                           reloc->symbol->index, reloc->type);
+    ELFWriterAddRelocationWithAddend(elf, reloc->section, reloc->offset,
+                           reloc->symbol->index, reloc->addend, reloc->type);
   }
 }
 
@@ -818,10 +823,10 @@ static void HandleDirective_type(Assembler* assembler) {
         } else if (StringEqual(&type, "object") ||
                    StringEqual(&type, "@object")) {
           // An object is TLS if the section it's in has the TLS flag.
-          if (sect != NULL && (sect->flags & SHF(tls)) == 0) {
-            sym->type = SYM_TYPE(object);
-          } else {
+          if (sect != NULL && (sect->flags & SHF(tls)) != 0) {
             sym->type = SYM_TYPE(tls);
+          } else {
+            sym->type = SYM_TYPE(object);
           }
         } else {
           AssemblerError(assembler, "Invalid .type syntax; unsupported type %s",
@@ -885,10 +890,12 @@ static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
 // We only support simple expressions involving assembler symbols.  These can
 // only be symbols separated by + or -.  They generate relocations for the
 // symbols.
-static void SimpleSymbolExpression(Assembler* assembler, int bits) {
+// If all symbols are labels we can do the calculations here since their
+// values are known relative to their section at assembly time.
+static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   AssemblerSymbol* left = ExpressionPrimary(assembler);
   if (left == NULL) {
-    return;
+    return 0;
   }
   int reloc_index = kRelocSet32;
   switch (bits) {
@@ -904,11 +911,20 @@ static void SimpleSymbolExpression(Assembler* assembler, int bits) {
     default:
       abort();
   }
+  Vector relocations = {0};
+
+  // TODO: an optimization here would be to check for an internal label
+  // and use its section symbol plus an addend instead of exporting the
+  // label.  Maybe later.  The problem is that the section symbols aren't
+  // created until we add the sections to the ELF file.
   AssemblerRelocation* reloc = NewAssemblerRelocation(
           left, assembler->reloc_types[reloc_index],
           assembler->current_section,
-                  (int32_t)AssemblerCurrentAddress(assembler));
-  AssemblerAddRelocation(assembler, reloc);
+                  (int32_t)AssemblerCurrentAddress(assembler), 0);
+  
+  VectorAppend(&relocations, reloc);
+  bool known_values = left->is_label && left->type == SYM_TYPE(none) &&
+      assembler->current_section == left->section;
   
   while (LexLookingAt(&assembler->lex, TOK(plus)) ||
          LexLookingAt(&assembler->lex, TOK(minus))) {
@@ -929,10 +945,34 @@ static void SimpleSymbolExpression(Assembler* assembler, int bits) {
       assert(false);
     }
     AssemblerRelocation* reloc = NewAssemblerRelocation(
-                left, assembler->reloc_types[reloc_type], assembler->current_section,
-                            (int32_t)AssemblerCurrentAddress(assembler));
-    AssemblerAddRelocation(assembler, reloc);
+                right, assembler->reloc_types[reloc_type], assembler->current_section,
+                            (int32_t)AssemblerCurrentAddress(assembler), 0);
+    known_values |= right->is_label && left->type == SYM_TYPE(none) &&
+        assembler->current_section == right->section;
+    VectorAppend(&relocations, reloc);
   }
+  int64_t value = 0;
+  if (known_values) {
+    value = left->value;
+    for (size_t i = 1; i < relocations.length; i++) {
+      AssemblerRelocation* reloc = relocations.value.p[i];
+      if (reloc->type == assembler->reloc_types[kRelocAdd64] ||
+          reloc->type == assembler->reloc_types[kRelocAdd32] ||
+          reloc->type == assembler->reloc_types[kRelocAdd16]) {
+        value += reloc->symbol->value;
+      } else {
+        value -= reloc->symbol->value;
+      }
+    }
+    VectorDestructWithContents(&relocations,
+                               (VectorElementDestructor)AssemblerRelocationDestruct);
+  } else {
+    for (size_t i = 0; i < relocations.length; i++) {
+      AssemblerAddRelocation(assembler, relocations.value.p[i]);
+    }
+    VectorDestruct(&relocations);
+  }
+  return value;
 }
 
 static void HandleDirective_p2align(Assembler* assembler) {
@@ -1036,8 +1076,8 @@ static void HandleDirective_byte(Assembler* assembler) {
 static void HandleDirective_hword(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
     if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-      SimpleSymbolExpression(assembler, 16);
-      AssemblerEmitHalf(assembler, assembler->current_section, 0);
+      int16_t value = (int16_t)SimpleSymbolExpression(assembler, 16);
+      AssemblerEmitHalf(assembler, assembler->current_section, value);
     } else {
       int16_t value = (int16_t)AssemblerEvaluateExpression(assembler);
       AssemblerEmitHalf(assembler, assembler->current_section, value);
@@ -1058,8 +1098,8 @@ static void HandleDirective_short(Assembler* assembler) {
 static void HandleDirective_word(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
     if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-      SimpleSymbolExpression(assembler, 32);
-      AssemblerEmitWord(assembler, assembler->current_section, 0);
+      int32_t value = (int32_t)SimpleSymbolExpression(assembler, 32);
+      AssemblerEmitWord(assembler, assembler->current_section, value);
     } else {
       int32_t value = (int32_t)AssemblerEvaluateExpression(assembler);
       AssemblerEmitWord(assembler, assembler->current_section, value);
@@ -1085,8 +1125,8 @@ static void HandleDirective_8byte(Assembler* assembler) {
 static void HandleDirective_long(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
     if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-      SimpleSymbolExpression(assembler, 64);
-      AssemblerEmitLong(assembler, assembler->current_section, 0);
+      int64_t value = SimpleSymbolExpression(assembler, 64);
+      AssemblerEmitLong(assembler, assembler->current_section, value);
     } else {
       int64_t value = AssemblerEvaluateExpression(assembler);
       AssemblerEmitLong(assembler, assembler->current_section, value);
@@ -1208,8 +1248,7 @@ static void HandleDirective_file(Assembler* assembler) {
     LexNextToken(&assembler->lex);
   }
 
-  String filename;
-  StringInit(&filename, NULL);
+  String filename = {0};
   if (LexLookingAt(&assembler->lex, TOK(string))) {
     StringSet(&filename, assembler->lex.spelling.value);
     if (index == -1) {

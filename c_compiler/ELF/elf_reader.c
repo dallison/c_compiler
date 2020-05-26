@@ -19,6 +19,7 @@ ELFReaderSection* NewELFReaderSection() {
   StringInit(&section->name, "");
   section->contents = NULL;
   section->address = 0;
+  section->offset = 0;
   section->output_section_index = 0;
   return section;
 }
@@ -97,12 +98,11 @@ bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
 bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
   if (length == 0) {
     // First get the length of the file if needed.
-    struct stat st;
-    int e = stat(elf->filename.value, &st);
+    int e = stat(elf->filename.value, &elf->file_stat);
     if (e != 0) {
       return false;
     }
-    length = st.st_size;
+    length = elf->file_stat.st_size;
   }
   
   // Open the file.

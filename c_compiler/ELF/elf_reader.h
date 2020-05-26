@@ -10,6 +10,7 @@
 #define elf_reader_h
 
 // This is a general purpose ELF (Execuable and Linkable Format) file reader.
+#include <sys/stat.h>
 
 #include <stdio.h>
 #include "elf.h"
@@ -18,11 +19,12 @@
 #include "hashtable.h"
 #include "buffer.h"
 
-typedef struct {
+typedef struct ELFReaderSection {
   ELFSectionHeader* header;
   String name;
   void* contents;               // Contents of section.
   uint64_t address;             // Address assigned to section.
+  uint64_t offset;              // Offset into output section.
   int32_t output_section_index; // Section index in output.
 } ELFReaderSection;
 
@@ -36,6 +38,7 @@ typedef struct {
   Vector sections;            // Vector of ELFReaderSection*.
   Vector segments;            // Vector of ELFProgramHeader*.
   const char* section_names;  // Section names string table mapped from file.
+  struct stat file_stat;      // Result of stat call.
 } ELFReaderFile;
 
 void ELFReaderFileInit(ELFReaderFile* elf, String* filename);

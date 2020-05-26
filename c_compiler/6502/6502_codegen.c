@@ -1145,6 +1145,13 @@ static TargetInstruction* LowerLabel(_6502Generator* g, IRNode* label) {
   return inst;
 }
 
+static TargetInstruction* LowerNamedLabel(_6502Generator* rv, IRNode* label) {
+  IRNamedLabel* n = (IRNamedLabel*)label;
+  TargetInstruction* inst =  Emit(rv, TargetNewNamedLabel(n->name));
+  label->data.ptr = inst;
+  return inst;
+}
+
 static TargetInstruction* LowerVariable(_6502Generator* g, IRNode* node) {
   int32_t var_offset = 0;
   TargetInstruction* inst = NULL;
@@ -1453,7 +1460,8 @@ static TargetInstruction* LowerLiteralReference(_6502Generator* g,
   return result;
 }
 
-static TargetInstruction* LowerStructReference(_6502Generator* g,
+
+static TargetInstruction* LowerAddressOf(_6502Generator* g,
                                                IRNode* node) {
   return SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
 }
@@ -1684,9 +1692,10 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
     case IR_OP(literalref):
       return LowerLiteralReference(g, node);
       
-    case IR_OP(structref):
-      return LowerStructReference(g, node);
-      
+
+    case IR_OP(addressof):
+      return LowerAddressOf(g, node);
+
     case IR_OP(consti):
       return GetIntConstant(g, node, kTargetTypeWord,
                             ((IRConstant*)node)->value.ivalue);
@@ -1860,6 +1869,9 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
     case IR_OP(label):
       return LowerLabel(g, node);
       
+    case IR_OP(named_label):
+      return LowerNamedLabel(g, node);
+
     case IR_OP(calla):
       return LowerCall(g, node);
       
@@ -1979,8 +1991,10 @@ void _6502Lower(_6502Generator* g, Generator* gen) {
   }
   
   //_6502Optimize(g);
-  _6502Print(g);
-
+  if (compiler->print_back_end) {
+    _6502Print(g);
+  }
+  
   // Allocate registers to the instructions.
   _6502AllocateRegisters(&g->register_allocator);
 }
@@ -2043,6 +2057,7 @@ bool _6502IsExpression(_6502Opcode opcode) {
     case _6502_OP(rmovf):
     case _6502_OP(rmovd):
     case _6502_OP(loc):
+    case _6502_OP(named_label):
       return false;
       
     default:

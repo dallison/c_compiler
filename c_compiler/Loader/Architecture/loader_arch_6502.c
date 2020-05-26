@@ -17,7 +17,8 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
                                    const ELFRelocation* reloc,
                                    const ELFSymbol* symbol,
                                    const char* sym_name,
-                                   char* target_address) {
+                                   char* target_address,
+                                   bool lazy) {
 }
 
 static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,

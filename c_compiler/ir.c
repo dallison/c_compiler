@@ -40,6 +40,7 @@ static struct {
     {IR_OP(rmova), "rmova"},
 
     {IR_OP(label), "label"},
+    {IR_OP(named_label), "namedlabel"},
 
     // loads.
     {IR_OP(loadi), "loadi"},
@@ -155,10 +156,11 @@ static struct {
     {IR_OP(ssavar), "ssavar"},
 
     {IR_OP(structreturn), "structreturn"},
+    {IR_OP(addressof), "addressof"},
 
     {IR_OP(literalref), "literalref"},
-    {IR_OP(structref), "structref"},
     {IR_OP(loc), "loc"},
+    {IR_OP(named_label), "label"},
 
     {IR_OP(resulti), "resulti"},
     {IR_OP(resultf), "resultf"},
@@ -203,6 +205,9 @@ void IRResetNodeId() { next_ir_id = 1; }
 void IRInit(IRNode* inst, IROpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_ir_id++;
+  if (inst->id == 143) {
+    printf("");
+  }
   inst->opcode = opcode;
   VectorInit(&inst->inputs);
   VectorInit(&inst->outputs);
@@ -412,14 +417,21 @@ IRNode* NewIRLocation(SourceLocation location) {
   return &inst->base;
 }
 
+IRNode* NewIRNamedLabel(const char* name) {
+  IRNamedLabel* inst = malloc(sizeof(IRNamedLabel));
+  IRInit(&inst->base, IR_OP(named_label));
+  inst->name = name;
+  return &inst->base;
+}
+
 IRNode* NewIRVariable(Symbol* sym) {
   IRVariable* inst = malloc(sizeof(IRVariable));
   IROpcode op = IR_OP(staticvar);
-  if (sym->is_argument) {
+  if (sym->flags.is_argument) {
     op = IR_OP(argument);
-  } else if (sym->is_temp) {
+  } else if (sym->flags.is_temp) {
     op = IR_OP(tempvar);
-  } else if (sym->is_local) {
+  } else if (sym->flags.is_local) {
     if (!StorageIs(sym->storage, STO(static))) {
       op = IR_OP(localvar);
     }

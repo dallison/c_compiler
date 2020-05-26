@@ -6,7 +6,7 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#include <stddef>
+#include <stddef.h>
 
 char* strncat(char* dest, const char* src, size_t n) {
   char* p = dest;

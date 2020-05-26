@@ -190,6 +190,7 @@ DECLARE_INST_FUNC(fneg_s);
 DECLARE_INST_FUNC(fneg_d);
 DECLARE_INST_FUNC(li);
 DECLARE_INST_FUNC(la);
+DECLARE_INST_FUNC(lla);
 DECLARE_INST_FUNC(sext_w);
 DECLARE_INST_FUNC(seqz);
 DECLARE_INST_FUNC(snez);
@@ -388,6 +389,7 @@ static void InitializeInstructions(Map* instructions) {
   INST2(fneg_d, fneg.d);
   INST(li);
   INST(la);
+  INST(lla);
   INST2(sext_w, sext.w);
   INST(seqz);
   INST(snez);
@@ -730,7 +732,8 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
       }
     }
   }
-  if (bit_width <= 12) {
+  // printf("LoadImmediate %lld, bit width: %d\n", immed, bit_width);
+  if (bit_width < 12) {
     AssemblerEmitWord(
         &ASM, ASM.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, 0, RV_F3(addi), (int)immed));
@@ -738,9 +741,11 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
   } else if (bit_width <= 32) {
     AssemblerEmitWord(&ASM, ASM.current_section,
                       UTypeInstruction(RV_OPCODE(lui), reg, (int)immed >> 12));
-    AssemblerEmitWord(&ASM, ASM.current_section,
-                      ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi),
+    if ((immed & 0xfff) != 0) {
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi),
                                        (int)immed & 0xfff));
+    }
   } else {
     AssembleLoadImmediateConstant(assembler, 6, immed >> 32);
     AssemblerEmitWord(
@@ -796,9 +801,24 @@ static void AssembleALUImm(RVAssembler* assembler, int opcode, int funct3,
                     ITypeInstruction(opcode, regs[0], regs[1], funct3, immed));
 }
 
+// Loads and stores have a 12 bit signed offset.  So the offset must
+// be in the range. -2048..2047.
+static void CheckLoadStoreOffset(RVAssembler* assembler, int offset) {
+  bool offset_ok = true;
+  if (offset < 0) {
+    offset_ok = offset >= -2048;
+  } else {
+    offset_ok = offset < 2048;
+  }
+  if (!offset_ok) {
+    AssemblerError(&assembler->base, "Invalid load/store offset %d", offset);
+  }
+}
+
 // Load or store with a constant offset.
 static void AssembleLoadStore(RVAssembler* assembler, bool isload, int funct3,
                               int offset, int* regs) {
+  CheckLoadStoreOffset(assembler, offset);
   if (isload) {
     AssemblerEmitWord(
         &ASM, ASM.current_section,
@@ -825,7 +845,7 @@ static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
   }
   AssemblerRelocation* reloc =
       NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM));
+                             (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   if (isload) {
@@ -980,7 +1000,7 @@ static void AssembleJType(RVAssembler* assembler, int opcode, int reg,
 
   AssemblerRelocation* reloc =
       NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM));
+                             (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   AssemblerEmitWord(&ASM, ASM.current_section,
@@ -988,12 +1008,16 @@ static void AssembleJType(RVAssembler* assembler, int opcode, int reg,
 }
 
 static void AssembleUType(RVAssembler* assembler, int opcode, int reg,
-                          String* symbol_name, int reloc_type) {
+                          String* symbol_name, int rel_reloc_type, int pic_reloc_type) {
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name->value);
 
+  int reloc_type = rel_reloc_type;
+  if (assembler->base.pic && sym->binding == SYM_BIND(global)) {
+    reloc_type = pic_reloc_type;
+  }
   AssemblerRelocation* reloc =
       NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM));
+                             (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   AssemblerEmitWord(&ASM, ASM.current_section,
@@ -1024,12 +1048,12 @@ static void Assemble_lui(RVAssembler* assembler) {
       return;
     }
     StringDestruct(&func);
-    AssembleUType(assembler, RV_OPCODE(lui), reg, &symbol_name, R_RISCV_HI20);
+    AssembleUType(assembler, RV_OPCODE(lui), reg, &symbol_name, R_RISCV_HI20, R_RISCV_GOT_HI20);
   }
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     StringSet(&symbol_name, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
-    AssembleUType(assembler, RV_OPCODE(lui), reg, &symbol_name, R_RISCV_HI20);
+    AssembleUType(assembler, RV_OPCODE(lui), reg, &symbol_name, R_RISCV_HI20, R_RISCV_GOT_HI20);
   } else {
     // Expression.
     int64_t value = AssemblerEvaluateExpression(&ASM);
@@ -1077,7 +1101,7 @@ static void Assemble_auipc(RVAssembler* assembler) {
   }
 
   AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
-                assembler->base.pic ? R_RISCV_GOT_HI20 : R_RISCV_PCREL_HI20);
+                R_RISCV_PCREL_HI20, R_RISCV_GOT_HI20);
 }
 
 static void Assemble_jal(RVAssembler* assembler) {
@@ -1129,16 +1153,22 @@ static void Assemble_call(RVAssembler* assembler) {
   // Call relocation: this is a macro relocation that acts on two instructions
   // put the destination address in a register and use a jalr instruction to
   // jump to it, saving the return address.
+  // We use a PLT relocation if we are in PIC mode and the symbol is
+  // global.
+  int reloc_type = R_RISCV_CALL;
+  if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
+    reloc_type = R_RISCV_CALL_PLT;
+  }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-      sym, assembler->base.pic ? R_RISCV_CALL_PLT : R_RISCV_CALL,
-      ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM));
+      sym, reloc_type,
+      ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   // Call is followed by R_RISC_V_RELAX relocation to allow the linker to
   // relax the call instruction sequence to a jal instruction if the
   // address is within range.
   reloc = NewAssemblerRelocation(sym, R_RISCV_RELAX, ASM.current_section,
-                                 (int32_t)AssemblerCurrentAddress(&ASM));
+                                 (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 
   // The general instruction sequence for a call is:
@@ -1522,8 +1552,25 @@ static void Assemble_neg(RVAssembler* assembler) {
   }
 }
 
-UNDEFINED_INST(fneg_s);
-UNDEFINED_INST(fneg_d);
+// Assembled as fsgnjn.s rd, rs, rs
+static void Assemble_fneg_s(RVAssembler* assembler) {
+  int regs[3];
+  if (ParseRegisterPair(assembler, kRVRegTypeFloat, "float", regs)) {
+    regs[2] = regs[1];
+    AssembleALUReg(assembler, RV_OPCODE(op_fp), RV_F3(fsgnjn_s), RV_F7(fsgnjn_s),
+                   regs);
+  }
+}
+
+// Assembled as fsgnjn.d rd, rs, rs
+static void Assemble_fneg_d(RVAssembler* assembler) {
+  int regs[3];
+  if (ParseRegisterPair(assembler, kRVRegTypeFloat, "float", regs)) {
+    regs[2] = regs[1];
+    AssembleALUReg(assembler, RV_OPCODE(op_fp), RV_F3(fsgnjn_d), RV_F7(fsgnjn_d),
+                   regs);
+  }
+}
 
 static void Assemble_li(RVAssembler* assembler) {
   int reg = Register(assembler, kRVRegTypeInt, "integer");
@@ -1540,13 +1587,13 @@ static void Assemble_li(RVAssembler* assembler) {
 
     //   Output relocation R_RISCV_HI20
     //     auipc reg, 0
-    AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name, R_RISCV_HI20);
+    AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name, R_RISCV_HI20, R_RISCV_GOT_HI20);
 
     //   Output relocation R_RISCV_LO12_I
     //     addi reg, reg, 0
     AssemblerRelocation* reloc =
         NewAssemblerRelocation(sym, R_RISCV_LO12_I, ASM.current_section,
-                               (int32_t)AssemblerCurrentAddress(&ASM));
+                               (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(
         &ASM, ASM.current_section,
@@ -1584,15 +1631,17 @@ static void Assemble_la(RVAssembler* assembler) {
     // Output relocation R_RISCV_PCREL_HI20 or R_RISCV_GOT_HI20
     //   auipc reg, 0
     AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
-                  assembler->base.pic ? R_RISCV_GOT_HI20 : R_RISCV_PCREL_HI20);
+                  R_RISCV_PCREL_HI20, R_RISCV_GOT_HI20);
 
-    if (assembler->base.pic) {
+    AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
+
+    if (assembler->base.pic && sym->binding == SYM_BIND(global)) {
       // Position independent, Load the address from the GOT.
       //   Output relocation R_RISCV_PCREL_LO12_I
       //     ld reg, 0(reg)
       AssemblerRelocation* reloc = NewAssemblerRelocation(
           label, R_RISCV_PCREL_LO12_I, ASM.current_section,
-          (int32_t)AssemblerCurrentAddress(&ASM));
+          (int32_t)AssemblerCurrentAddress(&ASM), 0);
       AssemblerAddRelocation(&ASM, reloc);
       AssemblerEmitWord(
           &ASM, ASM.current_section,
@@ -1602,7 +1651,7 @@ static void Assemble_la(RVAssembler* assembler) {
       //     addi reg, reg, 0
       AssemblerRelocation* reloc = NewAssemblerRelocation(
           label, R_RISCV_PCREL_LO12_I, ASM.current_section,
-          (int32_t)AssemblerCurrentAddress(&ASM));
+          (int32_t)AssemblerCurrentAddress(&ASM), 0);
       AssemblerAddRelocation(&ASM, reloc);
       AssemblerEmitWord(
           &ASM, ASM.current_section,
@@ -1615,11 +1664,54 @@ static void Assemble_la(RVAssembler* assembler) {
   }
 }
 
+// Load a local address (pc relative but not using GOT)
+static void Assemble_lla(RVAssembler* assembler) {
+  int reg = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    String symbol_name;
+    StringInit(&symbol_name, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+
+    // Since we are using PC relative relocations we need a label before the
+    // auipc instruction relocation (PCREL_HI20).  This label is referred to by
+    // the LO12_I relocation.
+    char label_name[256];
+    snprintf(label_name, sizeof(label_name), ".la_label_%lld",
+             AssemblerCurrentAddress(&ASM));
+    AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
+    label->value = AssemblerCurrentAddress(&ASM);
+    label->exported = true;
+
+    // Output relocation R_RISCV_PCREL_HI20
+    //   auipc reg, 0
+    AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
+                  R_RISCV_PCREL_HI20, R_RISCV_PCREL_HI20);
+
+    //   Output relocation R_RISCV_PCREL_LO12_I
+    //     addi reg, reg, 0
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+        label, R_RISCV_PCREL_LO12_I, ASM.current_section,
+        (int32_t)AssemblerCurrentAddress(&ASM), 0);
+    AssemblerAddRelocation(&ASM, reloc);
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi), 0));
+    
+    StringDestruct(&symbol_name);
+  } else {
+    AssemblerError(&ASM, "Expected symbol name for lla instruction");
+  }
+}
+
 // Assembled as addiw rd, rs, 0
 static void Assemble_sext_w(RVAssembler* assembler) {
   int regs[3];
   if (ParseRegisterPair(assembler, kRVRegTypeInt, "integer", regs)) {
-    AssembleALUImm(assembler, RV_OPCODE(op_imm), RV_F3(addiw), 0, regs);
+    AssembleALUImm(assembler, RV_OPCODE(op_imm_32), RV_F3(addiw), 0, regs);
   }
 }
 

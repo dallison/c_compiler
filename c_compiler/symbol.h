@@ -14,8 +14,10 @@
 #include "buffer.h"
 #include "dstring.h"
 #include "vector.h"
+#include "source.h"
 
 struct TypeRecord;
+struct DIE;
 
 // Storage for symbol (where it is located in memory).
 #define STO(x) kStorage_##x
@@ -37,14 +39,26 @@ typedef struct Symbol {
   String name;                // Symbol name.
   struct TypeRecord* type;    // Type.
   Storage storage;            // Storage (static, typedef, etc.)
-  bool is_defined;            // Symbol is defined.
-  bool is_forward_declared;   // Symbol is forward declared.
-  bool is_local;              // Local symbol.
-  bool is_argument;           // Defined in function prototype.
-  bool is_temp;               // Temporary (invented).
-  bool address_taken;         // The address has been taken in the program.
-  bool used;                  // The symbol has been used.
+  struct {
+    bool is_defined: 1;            // Symbol is defined.
+    bool is_tentative_decl: 1;     // Tentative declaration.
+    bool is_forward_declared: 1;   // Symbol is forward declared.
+    bool is_local: 1;              // Local symbol.
+    bool is_argument: 1;           // Defined in function prototype.
+    bool is_temp: 1;               // Temporary (invented).
+    bool address_taken: 1;         // The address has been taken in the program.
+    bool used: 1;                  // The symbol has been used.
+    bool invented: 1;
+  } flags;
+  
+  struct {
+    int used_as_arg;              // Times used as function arg.
+    int used_in_loop;             // Times used in loop.
+    int reads;                    // Number of reads.
+  } usage_info;
+  
   Vector attributes;          // Attributes (owns String*).
+  SourceLocation location;
   
   // Symbol value, one of these.
   union {
@@ -55,6 +69,7 @@ typedef struct Symbol {
   } value;
   
   int32_t stack_offset;     // Stack offset if local.
+  struct DIE* die;
 } Symbol;
 
 
@@ -63,6 +78,8 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage);
 void SymbolDelete(Symbol* symbol);
 void SymbolDestruct(Symbol* symbol);
+
+Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 

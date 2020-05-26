@@ -19,96 +19,200 @@
 #include "compiler.h"
 #include "linker_main.h"
 
-int main(int argc, char * argv[]) {
-  Vector asm_files;
-  
-  Vector compiler_args;
-  Vector linker_args;
-  Vector object_files;
+static int ParseArg(int i, int argc, char** argv,
+                    Vector* compiler_args,
+                    Vector* linker_args,
+                    Vector* object_files,
+                    Vector* asm_files, Vector* args_from_file,
+                    bool* run_compiler, bool* compile_only) {
+  if (argv[i][0] == '-') {
+    // Option.
+    String* option = NewString(argv[i]);
+    if (StringStartsWith(option, "-Wl,")) {
+      // Arg passed through to linker.
+      VectorAppend(linker_args, argv[i]+4);
+    } else if (StringEqual(option, "-c")) {
+      // Compile only flag.
+      *compile_only = true;
+    } else if (StringEqual(option, "-o")) {
+      // -o option is followed by a filename
+      if (i == argc-1) {
+        fprintf(stderr, "-o needs the name of a file");
+        exit(1);
+      }
+      if (*compile_only) {
+        // Pass through to compiler.
+        VectorAppend(compiler_args, argv[i]);
+        // Get next arg into compiler_args too.
+        VectorAppend(compiler_args, argv[i+1]);
+      } else {
+        // Linker option
+        VectorAppend(linker_args, argv[i]);
+        // Get next arg into linker_args too.
+        VectorAppend(linker_args, argv[i+1]);
+      }
+      i++;
+    } else if (StringEqual(option, "-target")) {
+      // -target option is followed by a target name
+      if (i == argc-1) {
+        fprintf(stderr, "-target needs a target name");
+        exit(1);
+      }
+      // Pass through to compiler.
+      VectorAppend(compiler_args, argv[i]);
+      // Get next arg into compiler_args too.
+      VectorAppend(compiler_args, argv[i+1]);
+      i++;
+    } else if (StringEqual(option, "-isystem")) {
+      // -isystem option is followed by an include dir
+      if (i == argc-1) {
+        fprintf(stderr, "-isystem needs a directory");
+        exit(1);
+      }
+      // Pass through to compiler.
+      VectorAppend(compiler_args, argv[i]);
+      // Get next arg into compiler_args too.
+      VectorAppend(compiler_args, argv[i+1]);
+        i++;
+    } else if (StringEqual(option, "-rpath")) {
+      // -rpath option is followed by an include dir
+      if (i == argc-1) {
+        fprintf(stderr, "-rpath needs a directory");
+        exit(1);
+      }
+      // Pass through to linker.
+      VectorAppend(linker_args, argv[i]);
+      // Get next arg into linker_args too.
+      VectorAppend(linker_args, argv[i+1]);
+      i++;
+    } else if (StringEqual(option, "-chdir")) {
+      // -chdir option is followed by an include dir
+      if (i == argc-1) {
+        fprintf(stderr, "-chdir needs a directory");
+        exit(1);
+      }
+      // Pass through to compiler and linker.
+      VectorAppend(compiler_args, argv[i]);
+      VectorAppend(linker_args, argv[i]);
+      // Get next arg into compiler_args too.
+      VectorAppend(compiler_args, argv[i+1]);
+      VectorAppend(linker_args, argv[i+1]);
+      i++;
+          
+    } else if (StringEqual(option, "-origin")) {
+      // -origin option is followed by an address
+      if (i == argc-1) {
+        fprintf(stderr, "-origin needs a value");
+        exit(1);
+      }
+      // Pass through to linker.
+      VectorAppend(linker_args, argv[i]);
+      // Get next arg into linker too.
+      VectorAppend(linker_args, argv[i+1]);
+      i++;
+    } else if (StringEqual(option, "-static")) {
+      VectorAppend(linker_args, argv[i]);
+    } else if (StringEqual(option, "-shared")) {
+      VectorAppend(linker_args, argv[i]);
+    } else if (StringStartsWith(option, "-l")) {
+      VectorAppend(linker_args, argv[i]);
+    } else if (StringStartsWith(option, "-L")) {
+      VectorAppend(linker_args, argv[i]);
+    } else {
+      VectorAppend(compiler_args, argv[i]);
+    }
+  } else if (argv[i][0] == '@') {
+    char* arg = &argv[i][1];
+    // Args from file.
+    FILE* fp = fopen(arg, "r");
+    if (fp == NULL) {
+      fprintf(stderr, "Unable to open compiler args file %s\n", argv[i]);
+    } else {
+      char buf[1024];
+      while (fgets(buf, sizeof(buf), fp) != NULL) {
+        String s;
+        StringInit(&s, buf);
+        StringTrim(&s);     // Contains newline.
+        if (s.length == 0) {
+          continue;
+        }
+        if (s.value[0] == '#') {
+          continue;
+        }
+        // Split string into parts separated by space.  Each element
+        // of the vector will be a String pointer which will be added
+        // to the args_from_file vector.
+        Vector parts = {0};
+        StringSplit(&s, ' ', &parts);
+        for (size_t i = 0; i < parts.length; i++) {
+          String* part = parts.value.p[i];
+          while (StringEndsWith(part, "\\")) {
+            // If it ends in \ then append next part.
+            StringReplace(part, part->length - 1, 1, "", 0);
+            StringAppend(part, " ");
+            i++;
+            String* tail = parts.value.p[i];
+            StringAppend(part, tail->value);
+          }
+          VectorAppend(args_from_file, part);
+        }
+        StringDestruct(&s);
+        VectorDestruct(&parts);
+      }
+      fclose(fp);
+      
+      // Build a new argv vector pointing to the strings in args_from_file.
+      int new_argc = (int)args_from_file->length;
+      char** new_argv = malloc(sizeof(char*) * new_argc);
+      char** p = new_argv;
+      for (size_t i = 0; i < new_argc; i++) {
+        String* s = args_from_file->value.p[i];
+        *p++ = s->value;
+      }
+      int j = 0;
+      while (j < new_argc) {
+        j = ParseArg(j,
+                     new_argc, new_argv, compiler_args,
+                     linker_args, asm_files, object_files,
+                     args_from_file, compile_only, run_compiler);
+      }
+      free(new_argv);
+    }
+  } else {
+    String arg;
+    StringInit(&arg, argv[i]);
+    if (StringEndsWith(&arg, ".c")) {
+      VectorAppend(compiler_args, argv[i]);
+      *run_compiler = true;
+    } else if (StringEndsWith(&arg, ".s")) {
+      VectorAppend(asm_files, NewString(argv[i]));
+    } else if (StringEndsWith(&arg, ".o")) {
+      VectorAppend(linker_args, argv[i]);
+    }
+  }
+  return i + 1;
+}
 
-  VectorInit(&asm_files);
-  VectorInit(&compiler_args);
-  VectorInit(&linker_args);
-  VectorInit(&object_files);
+
+int main(int argc, char * argv[]) {
+  Vector asm_files = {0};
+  Vector compiler_args = {0};
+  Vector linker_args = {0};
+  Vector object_files = {0};
+
   VectorAppend(&compiler_args, "");   // argv[0]
   VectorAppend(&linker_args, "");   // argv[0]
 
+  // Storage for strings read from @file.
+  Vector args_from_file = {0};
+  
   bool compile_only = false;
   bool run_compiler = false;
   
-  for (int i = 1; i < argc; i++) {
-    if (argv[i][0] == '-') {
-      // Option.
-      String* option = NewString(argv[i]);
-      if (StringStartsWith(option, "-Wl,")) {
-        // Arg passed through to linker.
-        VectorAppend(&linker_args, argv[i]+4);
-      } else if (StringEqual(option, "-c")) {
-        // Compile only flag.
-        compile_only = true;
-      } else if (StringEqual(option, "-o")) {
-        // -o option is followed by a filename
-        if (i == argc-1) {
-          fprintf(stderr, "-o needs the name of a file");
-          exit(1);
-        }
-        if (compile_only) {
-          // Pass through to compiler.
-          VectorAppend(&compiler_args, argv[i]);
-          // Get next arg into compiler_args too.
-          VectorAppend(&compiler_args, argv[i+1]);
-        } else {
-          // Linker option
-          VectorAppend(&linker_args, argv[i]);
-          // Get next arg into linker_args too.
-          VectorAppend(&linker_args, argv[i+1]);
-        }
-        i++;
-      } else if (StringEqual(option, "-target")) {
-        // -target option is followed by a target name
-        if (i == argc-1) {
-          fprintf(stderr, "-target needs a target name");
-          exit(1);
-        }
-        // Pass through to compiler.
-        VectorAppend(&compiler_args, argv[i]);
-        // Get next arg into compiler_args too.
-        VectorAppend(&compiler_args, argv[i+1]);
-        i++;
-      } else if (StringEqual(option, "-origin")) {
-        // -origin option is followed by an address
-        if (i == argc-1) {
-          fprintf(stderr, "-origin needs a value");
-          exit(1);
-        }
-        // Pass through to linker.
-        VectorAppend(&linker_args, argv[i]);
-        // Get next arg into linker too.
-        VectorAppend(&linker_args, argv[i+1]);
-        i++;
-      } else if (StringEqual(option, "-static")) {
-        VectorAppend(&linker_args, argv[i]);
-      } else if (StringEqual(option, "-shared")) {
-        VectorAppend(&linker_args, argv[i]);
-      } else if (StringStartsWith(option, "-l")) {
-        VectorAppend(&linker_args, argv[i]);
-      } else if (StringStartsWith(option, "-L")) {
-        VectorAppend(&linker_args, argv[i]);
-      } else {
-        VectorAppend(&compiler_args, argv[i]);
-      }
-    } else {
-      String arg;
-      StringInit(&arg, argv[i]);
-      if (StringEndsWith(&arg, ".c")) {
-        VectorAppend(&compiler_args, argv[i]);
-        run_compiler = true;
-      } else if (StringEndsWith(&arg, ".s")) {
-        VectorAppend(&asm_files, NewString(argv[i]));
-      } else if (StringEndsWith(&arg, ".o")) {
-        VectorAppend(&linker_args, argv[i]);
-      }
-    }
+  int i = 1;
+  while (i < argc) {
+    i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
+                 &asm_files, &args_from_file, &compile_only, &run_compiler);
   }
   
   // Parse compiler options for C and asm files.
@@ -128,16 +232,17 @@ int main(int argc, char * argv[]) {
         String* object_file = CompileTranslationUnit(opt->value.svalue.value, &compiler_options);
         if (object_file != NULL) {
           VectorAppend(&linker_args, object_file->value);
+        } else {
+          fprintf(stderr, "Failed to compile\n");
+          exit(1);
         }
       }
     }
   }
   
   if (asm_files.length > 0) {
-    String object_filename;
-    StringInit(&object_filename, NULL);
-    String target;
-    StringInit(&target, NULL);
+    String object_filename = {0};
+    String target = {0};
     
     // See if we've been given an output filename as a compiler option.
     // Get the target from the options too.

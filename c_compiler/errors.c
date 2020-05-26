@@ -78,6 +78,11 @@ void VReportWarning(const char* filename, int lineno, const char* warn,
   } else {
     fprintf(stderr, "%s[%s]: %s:%d: %s [%s]\n", begin_text, warn, filename, lineno, buf, end_text);
   }
+  compiler->num_errors++;
+  if (compiler->num_errors >= compiler->max_errors) {
+    fprintf(stderr, "Too many errors; terminated\n");
+    exit(1);
+  }
 }
 
 void ReportWarning(const char* filename, int lineno, const char* warn,
@@ -92,7 +97,9 @@ void VReportNote(const char* filename, int lineno, const char* note,
                  va_list arg) {
   char buf[4096];
   vsnprintf(buf, sizeof(buf), note, arg);
-  if (lineno == 0) {
+  if (filename == NULL) {
+    fprintf(stderr, "    note: %s\n", buf);
+  } else if (lineno == 0) {
     fprintf(stderr, "    note: %s: %s\n", filename, buf);
   } else {
     fprintf(stderr, "    note: %s:%d: %s\n", filename, lineno, buf);

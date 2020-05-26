@@ -25,7 +25,7 @@ uint32_t NewFile(const char* filename) {
   return (uint32_t)curr_length;
 }
 
-// The file_map is a maping from filename to file index + 1.  We can't
+// The file_map is a mapping from filename to file index + 1.  We can't
 // store the value 0 in there because MapFind returns a NULL for the
 // key not found, so we add 1 to the index.
 static uint32_t FindFile(const char* filename) {
@@ -239,8 +239,7 @@ int SourceGetChar(Source* src) {
 // appends lines ending in backslash.
 void SourceReadLine(Source* src, String* line) {
   while (!SourceEof(src)) {
-    String newline;
-    StringInit(&newline, NULL);
+    String newline = {0};
     for (;;) {
       int ch = SourceGetChar(src);
       if (ch == EOF) {

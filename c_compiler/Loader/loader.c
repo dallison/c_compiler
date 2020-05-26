@@ -15,6 +15,11 @@
 #include <errno.h>
 
 const bool kPrintSymbolTableOnStart = true;
+static int num_errors;
+
+int LoaderNumErrors() {
+  return num_errors;
+}
 
 Region* NewRegion(void* addr, int64_t length) {
   Region* region = malloc(sizeof(Region));
@@ -32,6 +37,7 @@ void VLoaderError(const char* error, va_list ap) {
   char buf[4096];
   vsnprintf(buf, sizeof(buf), error, ap);
   fprintf(stderr, "Loader error: %s\n", buf);
+  num_errors++;
 }
 
 void LoaderError(const char* error, ...) {
@@ -55,31 +61,52 @@ void LoaderWarning(const char* warn, const char* error, ...) {
   
 }
 
-SymbolScope* LoaderFindSymbol(Loader* loader,
+bool LoaderFindSymbol(Loader* loader,
+                             uint64_t address,
+                      SymbolScope* symbol) {
+   uint64_t symbol_address;
+   uint64_t symbol_length;
+   const char* symbol_name;
+   bool found = DynamicLoaderLookupSymbolByAddress(
+                                             &loader->loaded_libraries,
+                                             address,
+                                             &symbol_name,
+                                             &symbol_address,
+                                             &symbol_length);
+  if (!found) {
+    return false;
+  }
+  symbol->start = symbol_address;
+  symbol->end = symbol_address + symbol_length;
+  symbol->name = symbol_name;
+  return true;
+}
+
+SymbolScope* LoaderFindSymbolAndCacheResult(Loader* loader,
                       uint64_t address) {
   if (address >= loader->current_symbol.start && address < loader->current_symbol.end) {
     return &loader->current_symbol;
   }
   
-  // Symbol is not cached in current_symbol, replace it.
-  uint64_t symbol_address;
-  uint64_t symbol_length;
-  const char* symbol_name;
-  bool found = DynamicLoaderLookupSymbolByAddress(
-                                            &loader->loaded_libraries,
-                                            address,
-                                            &symbol_name,
-                                            &symbol_address,
-                                            &symbol_length);
-  if (found) {
-    loader->current_symbol.start = symbol_address;
-    loader->current_symbol.end = symbol_address + symbol_length;
-    loader->current_symbol.name = symbol_name;
-    return &loader->current_symbol;
+  bool found = LoaderFindSymbol(loader, address, &loader->current_symbol);
+  if (!found) {
+    return NULL;
   }
-  return NULL;
+
+  return &loader->current_symbol;
 }
 
+uint64_t LoaderLookupSymbol(Loader* loader, const char* name) {
+  const ELFSymbol* symbol;
+  LoadedDynamicLibrary* lib;
+  bool found = DynamicLoaderFindSymbol(&loader->loaded_libraries,
+                                            name,
+                                       &symbol, &lib);
+  if (!found) {
+    return 0;
+  }
+  return lib->load_address + symbol->value;
+}
 
 void LoaderSetCurrentSymbol(Loader* loader,
                             uint64_t address,
@@ -93,8 +120,12 @@ SymbolScope* LoaderGetCurrentSymbol(Loader* loader) {
 
 
 // Align the given value to a power of 2 alignment.
-static uint64_t Align(uint64_t v, uint64_t alignment) {
+static uint64_t AlignUp(uint64_t v, uint64_t alignment) {
   return (v + (alignment - 1)) & ~(alignment - 1);
+}
+
+static uint64_t AlignDown(uint64_t v, uint64_t alignment) {
+  return v & ~(alignment - 1);
 }
 
 // Find all the sections that are part of the program segment and
@@ -119,7 +150,6 @@ static void GetRegionSections(Loader* loader, Region* region,
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
   int page_size = (int)sysconf(_SC_PAGESIZE);
-  int page_mask = page_size - 1;
   
   // Process all program segments and look for PT_LOAD types.  These are
   // loadable segments that have an address assigned to them.  We map them in
@@ -134,21 +164,27 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         // No point in trying to map a zero length segment.
         break;
       }
+      
       uint64_t addr = loader->arch->ignore_vaddr ? 0 : segment->vaddr;       // Address to place segment at.
       uint64_t offset = segment->offset;    // Offset into file.
+      
+      // Align address to the segment alignment.
+      uint64_t alignment_mask = segment->align - 1;
+      addr &= ~alignment_mask;
       
       // Align address and offset to lower page boundary.  The address and
       // file offset must be page-aligned for the mmap function to operate
       // correctly (it will error out if this is not the case).
-      addr &= ~page_mask;
-      offset &= ~page_mask;
+      addr = AlignDown(addr, page_size);
+      offset = AlignDown(offset, page_size);
       
       // Protection for mmap and open.  We have to open the file in order the mmap it.
       // If the mapping is going to allow writes to the pages we need to open the file
       // in read-write mode, but we won't be writing to it.
       int prot = PROT_READ;
       int file_prot = O_RDONLY;
-      if ((segment->flags & PF(w)) != 0) {
+      if ((segment->flags & PF(w)) != 0 ||
+          (loader->flags & LOADER_WRITEABLE_TEXT) != 0) {
         // Segment is writeable.
         prot |= PROT_WRITE;
         file_prot = O_RDWR;
@@ -158,12 +194,15 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         prot |= PROT_EXEC;
       }
       
-      // Length of segment in memory.  We can map memory up the next
-      // page boundary beyond the end of the file.  If the memsz is
-      // beyond that we need to mmap a new ANON segment for it.
-      int64_t length = segment->filesz + (segment->vaddr & page_mask);
-      length = (length + page_mask) & ~page_mask;
-      
+      // Difference between vaddr and aligned address.
+       uint64_t delta = segment->vaddr - (uint64_t)addr;
+       
+       // Length of segment in memory.  We can map memory up the next
+       // page boundary beyond the end of the file.  If the memsz is
+       // beyond that we need to mmap a new ANON segment for it.
+       uint64_t length = delta + segment->filesz;
+       length = AlignUp(length, page_size);
+
       // Open the ELF file again to get a file descriptor that we can use
       // for mmap.
       int fd = open(filename->value, file_prot);
@@ -214,7 +253,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         memset(zeroed_region, 0, zeroed_region_size);
         
         // Any additional memory beyond the file.
-        int64_t additional_memory = Align(segment->memsz - length, page_size);
+        int64_t additional_memory = AlignUp(segment->memsz - length, page_size);
         if (additional_memory > 0) {
           void* zero = (char*)end_of_mapped_memory;
           zero = mmap(zero, additional_memory, PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
@@ -253,19 +292,24 @@ static bool LoadDynamic(Loader* loader, bool lazy) {
   // Create a new LoaddedDynamicLibrary from the currently loaded
   // file. This will recursively load all the libraries it needs.
   // TODO: figure out where to get the address from.
-  uint64_t load_addr = 0x600000000LL;
+  static uint64_t load_addr = 0x600000000LL;
+  uint64_t next_available_address = 0;
   loader->dynamic_lib = NewLoadedDynamicLibrary(loader->filename.value,
                                                 loader);
   DynamicLibraryRegistryInsert(&loader->loaded_libraries, loader->dynamic_lib);
   bool ok = LoadedDynamicLibraryLoad(loader->dynamic_lib, &loader->loaded_libraries,
                                      &loader->library_search_path,
-                                     &load_addr);
+                                     load_addr,
+                                     &next_available_address);
   
    if (!ok) {
      LoaderError("Unable to find %s", loader->dynamic_lib->libname.value);
      LoadedDynamicLibraryDelete(loader->dynamic_lib);
      return false;
   }
+  
+  // Next load address is at end of loaded libary.
+  load_addr = AlignUp(next_available_address, (int)sysconf(_SC_PAGESIZE));
   
   // Relocate all the loaded libraries.
   for (size_t i = 0; i < loader->loaded_libraries.search.length; i++) {
@@ -285,7 +329,7 @@ static void InitLibrarySearchPath(Loader* loader) {
   if (ld_library_path != NULL) {
     char* start = ld_library_path;
     while (*start != '\0') {
-      char* p = ld_library_path;
+      char* p = start;
       while (*p != ':' && *p != '\0') {
         p++;
       }
@@ -301,7 +345,8 @@ static void InitLibrarySearchPath(Loader* loader) {
 }
 
 bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
-                        LoaderArchitecture* arch, void* arch_data) {
+                        LoaderArchitecture* arch, void* arch_data,
+                        const char* initial_path) {
   loader->arch = arch;
   loader->arch_data = arch_data;
   loader->flags = flags;
@@ -343,6 +388,9 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   }
   DynamicLibraryRegistryInit(&loader->loaded_libraries);
   VectorInit(&loader->library_search_path);
+  if (initial_path != NULL) {
+    VectorAppend(&loader->library_search_path, NewString(initial_path));
+  }
   InitLibrarySearchPath(loader);
   StringInit(&loader->filename, filename->value);
   
@@ -369,7 +417,8 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   }
     
   memset(&loader->current_symbol, 0, sizeof(SymbolScope));
-  return ok;
+  
+  return ok && LoaderNumErrors() == 0;
 }
 
 void LoaderDestruct(Loader* loader) {

@@ -64,6 +64,7 @@ typedef enum {
   AST_OP(logand),
   AST_OP(logor),
   AST_OP(call),
+  AST_OP(inline_call),
   AST_OP(lshift),
   AST_OP(lshifteq),
   AST_OP(subscript),
@@ -89,6 +90,7 @@ typedef enum {
   AST_OP(switch),
   AST_OP(onescomp),
   AST_OP(while),
+  AST_OP(structmember),
   
   AST_OP(asm),
   AST_OP(attribute),
@@ -211,6 +213,24 @@ typedef void (*ASTNodePrinter)(struct ASTNode* node, int indents);
 typedef void (*ASTNodeChildReplacer)(struct ASTNode* parent, int child_id,
                                      struct ASTNode* child,
                                      bool delete_old_child);
+typedef struct ASTNode* (*ASTNodeCloner)(
+    const struct ASTNode* node, struct ASTNode* (*func)(struct ASTNode*, void*),
+    void* data);
+
+// Mode passed to visitor function.  It will be called once or twice per
+// node.  Prechildren will be used once for every node, even if the node
+// has no children.  If the node has children, the function will be called
+// again after the children have been processed with PostChildren mode.
+typedef enum {
+  kVisitPreChildren,   // Called before any children (also if no children)
+  kVisitPostChildren,  // Called after chilren.
+} VisitorMode;
+
+typedef void (*ASTNodeVisitor)(struct ASTNode* node,
+                               void (*func)(struct ASTNode*, void*,
+                                            int, VisitorMode),
+                               int child_id,
+                               void* data);
 
 // This is a table of pointers to functions that are provided at runtime
 // to implement late-bound functions (a.k.a virtual functions) for an
@@ -219,6 +239,8 @@ typedef struct {
   ASTNodeDeleter deleter;  // Function to delete the node.
   ASTNodePrinter printer;  // Function to print the node.
   ASTNodeChildReplacer replacer;
+  ASTNodeCloner cloner;
+  ASTNodeVisitor visitor;
 } ASTNodeVirtuals;
 
 // Abstract Syntax Tree (AST) node.
@@ -232,20 +254,22 @@ typedef struct {
 // Each AST node has an identifiying field called 'op'.
 
 typedef struct ASTNode {
-  ASTOpcode op;               // Opcode.
-  int flags;                  // Flags
-  TypeRecord* type;           // Node type (mostly set by semantic analyzer)
-  struct ASTNode* parent;     // Parent node (if any).
-  int child_id;               // Which child am I in the parent node?
-  SourceLocation location;    // Location in input.
-  ASTNodeVirtuals* virtuals;  // Virtual table (statically allocated, do not free).
+  ASTOpcode op;             // Opcode.
+  int flags;                // Flags
+  TypeRecord* type;         // Node type (mostly set by semantic analyzer)
+  struct ASTNode* parent;   // Parent node (if any).
+  int child_id;             // Which child am I in the parent node?
+  SourceLocation location;  // Location in input.
+  ASTNodeVirtuals*
+      virtuals;  // Virtual table (statically allocated, do not free).
 } ASTNode;
 
 // Flags for ASTNode.
-#define kASTNeedAddress 1     // Need address, not value.
-#define kASTIsDeclaration 2   // Identifier is a declaration, not reference.
-#define kASTStaticInit 4      // Initialization is for a static variable.
-#define kASTStatementStart 8  // Start of a statement.
+#define kASTNeedAddress (1 << 0)     // Need address, not value.
+#define kASTStaticInit (1 << 1)      // Static variable init.
+#define kASTStatementStart (1 << 2)  // Start of a statement.
+#define kASTAnalyzed (1 << 3)        // ASTNode has been analyzed.
+#define kASTIsDeclaration (1 << 4)   // This is a declaration.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -263,6 +287,14 @@ void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
 void ASTNodePrint(ASTNode* node, int indents);
 ASTNode* ASTNodeMove(ASTNode* node);
+
+// Clone the node and call func with data for every node cloned.
+ASTNode* ASTNodeClone(const ASTNode* node, ASTNode* (*func)(ASTNode*, void*),
+                      void* data, ASTNode* new_parent);
+void ASTNodeVisit(ASTNode* node,
+                  void (*func)(ASTNode* node, void*, int, VisitorMode),
+                  int child_id,
+                  void* data);
 
 bool ASTNodeIsIntConstant(ASTNode* node);
 int64_t ASTNodeConstantValue(ASTNode* node);
@@ -286,6 +318,15 @@ typedef struct {
 ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
                           SourceLocation location, ASTNode* left,
                           ASTNode* right);
+
+typedef struct {
+  ASTNode base;
+  struct ASTNode* inlined;
+  struct ASTNode* ret_value;
+} InlineCallASTNode;
+
+ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
+                              ASTNode* inlined, ASTNode* ret_value);
 
 // An AST node with a left node and vector of children.
 typedef struct {
@@ -332,7 +373,7 @@ ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
 ASTNode* NewRealConstantASTNode(double value, TypeRecord* type,
                                 SourceLocation location);
 ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
-                                    SourceLocation location);
+                                  SourceLocation location);
 ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
                                       SourceLocation location);
 ASTNode* NewCharConstantASTNode(int value, TypeRecord* type,
@@ -402,6 +443,8 @@ ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
 typedef struct {
   ASTNode base;
   Vector* statements;
+  struct LabelASTNode* low_pc;
+  struct LabelASTNode* high_pc;
 } CompoundStatementASTNode;
 
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
@@ -467,13 +510,14 @@ ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
                                    SourceLocation location);
 
 // Label.
-typedef struct {
+typedef struct LabelASTNode {
   ASTNode base;
   String name;
   struct IRNode* label;
+  bool named;     // Use label name in assembly output.
 } LabelASTNode;
 
-ASTNode* NewLabelASTNode(const char* name, SourceLocation location);
+ASTNode* NewLabelASTNode(const char* name, bool named, SourceLocation location);
 
 typedef struct {
   ASTNode base;
@@ -482,6 +526,15 @@ typedef struct {
 } AsmASTNode;
 
 ASTNode* NewAsmASTNode(String* text, bool is_volatile, SourceLocation location);
+
+// Goto.
+typedef struct {
+  ASTNode base;
+  String* label_name;
+  ASTNode* label;  // Not owned, set by semantic analysis.
+} GotoStatementASTNode;
+
+ASTNode* NewGotoStatementASTNode(String* label_name, SourceLocation location);
 
 //
 // Initialization

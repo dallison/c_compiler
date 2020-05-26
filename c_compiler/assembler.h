@@ -58,6 +58,7 @@ typedef struct AssemblerSymbol {
   int32_t section;  // Section number.
   int32_t index;    // Symbol index.
   bool exported;    // Symbol is to be exported to object file.
+  bool is_label;    // Is a section-local label.
   int32_t alignment;
 } AssemblerSymbol;
 
@@ -90,10 +91,11 @@ typedef struct AssemblerRelocation {
   int32_t type;             // Relocation type.
   int32_t section;          // Section index that it is applied to.
   int32_t offset;           // Offset into section.
+  int32_t addend;           // Value to add to symbol.
 } AssemblerRelocation;
 
 AssemblerRelocation* NewAssemblerRelocation(AssemblerSymbol* sym, int32_t type,
-                                            int32_t section, int32_t offset);
+                                            int32_t section, int32_t offset, int32_t addend);
 void AssemblerRelocationDestruct(AssemblerRelocation* reloc);
 void AssemblerRelocationDelete(AssemblerRelocation* reloc);
 

@@ -8,6 +8,7 @@
 #ifndef ar_h
 #define ar_h
 
+#include <time.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include "vector.h"
@@ -46,17 +47,26 @@ typedef struct {
   String filename;
   int64_t file_offset;
   int64_t size;
+  int owner;
+  int group;
+  int mode;
+  time_t timestamp;
+  void* contents;
+  bool deleted;
+  bool delete_contents;
+  size_t extended_filename_offset;
 } ARFile;
 
-ARFile* NewARFile(void);
+ARFile* NewARFile(const char* filename);
 void ARFileDelete(ARFile* file);
+ARFile* ARFileCopyFromArchive(ARFile* file, FILE* fp);
 
 typedef struct {
   String name;
   ARFile* file;
 } ARSymbol;
 
-ARSymbol* NewARSymbol(void);
+ARSymbol* NewARSymbol(const char* name);
 void ARSymbolDelete(ARSymbol* sym);
 
 typedef struct {
@@ -68,13 +78,41 @@ typedef struct {
   HashTable symbol_table;         // Symbol table (name vs ARSymbol*)
 } ARArchive;
 
+typedef struct {
+  String filename;
+  Vector files;                   // Vector of ARFile*.
+  Vector symbols;                 // Vector of ARSymbol*.
+  Vector long_filenames;
+  size_t next_long_filename_offset;
+  Map file_offsets;               // Offset vs ARFile*.
+  int num_symbols;
+  size_t symbol_table_length;
+} ARArchiveBuilder;
+
 ARArchive* NewARArchive(const char* filename);
 void ARArchiveInit(ARArchive* archive, const char* filename);
 void ARArchiveDestruct(ARArchive* archive);
 void ARArchiveDelete(ARArchive* archive);
 
 bool ARArchiveOpen(ARArchive* archive, FILE* fp);
+void ARArchivePrintSymbolTable(ARArchive* archive);
 
 ARSymbol* ARArchiveFindSymbol(ARArchive* archive, const char* name);
+
+// Archive creator.
+ARArchiveBuilder* NewARArchiveBuilder(const char* filename);
+void ARArchiveBuilderInit(ARArchiveBuilder* archive, const char* filename);
+void ARArchiveBuilderDestruct(ARArchiveBuilder* archive);
+void ARArchiveBuilderDelete(ARArchiveBuilder* archive);
+
+void ARArchiveBuilderCopyArchive(ARArchiveBuilder* to, ARArchive* from, FILE* fp);
+
+ARFile* ARArchiveBuilderAddFile(ARArchiveBuilder* archive, const char* filename, size_t size,
+                                int owner, int group, int mode, int64_t timestamp, void* contents);
+void ARArchiveBuilderAddExisingFile(ARArchiveBuilder* archive, ARFile* file);
+
+bool ARArchiveBuilderWrite(ARArchiveBuilder* archive);
+ARSymbol* ARArchiveBuilderAddSymbol(ARArchiveBuilder* archive, ARFile* file,
+                               const char* symbol_name);
 
 #endif /* ar_h */

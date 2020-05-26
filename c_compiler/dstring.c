@@ -13,7 +13,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
+
+static void LazyInit(String* str) {
+  if (str == NULL) {
+    return;
+  }
+  if (str->value == NULL) {
+    str->value = str->buffer;
+    str->length = 0;
+    str->capacity = STRING_BUFFER_SIZE;
+  }
+}
 
 void StringInitFromSegment(String* str, const char* init, size_t length) {
   size_t real_length = length + 1;  // With \0 at the end.
@@ -35,7 +47,7 @@ void StringInitFromSegment(String* str, const char* init, size_t length) {
 }
 
 void StringInit(String* str, const char* init) {
-  size_t length = init == NULL ? 0 : strlen(init);
+  size_t length = {init == NULL ? 0 : strlen(init)};
   StringInitFromSegment(str, init, length);
 }
 
@@ -47,6 +59,7 @@ void StringInitImmutable(String* str, const char* init) {
 }
 
 static void CheckMutable(String* s) {
+  LazyInit(s);
   assert(s->capacity != STRING_IMMUTABLE);
 }
 
@@ -68,8 +81,7 @@ String* NewString(const char* init) {
 }
 
 String* NewStringWithLength(const char* init, size_t length) {
-  String* s = malloc(sizeof(String));
-  StringInit(s, NULL);
+  String* s = calloc(sizeof(String), 1);
   StringAppendSegment(s, init, length);
   return s;
 }
@@ -92,35 +104,48 @@ void StringDelete(String* str) {
   free(str);
 }
 
-char StringCharAt(String* str, size_t index) { return str->value[index]; }
+char StringCharAt(String* str, size_t index) {
+  LazyInit(str);
+  return str->value[index];
+}
 
 // Comparion.
 bool StringEqual(String* str1, const char* str2) {
+  LazyInit(str1);
   return str1 != NULL && strcmp(str1->value, str2) == 0;
 }
 
 bool StringEqualCaseBlind(String* str1, const char* str2) {
+  LazyInit(str1);
   return str1 != NULL && strcasecmp(str1->value, str2) == 0;
 }
 
 int StringCompare(String* str1, const char* str2) {
+  LazyInit(str1);
   return strcmp(str1->value, str2);
 }
 
 int StringCompareCaseBlind(String* str1, const char* str2) {
+  LazyInit(str1);
   return strcasecmp(str1->value, str2);
 }
 
 
 bool StringEqualString(String* str1, String* str2) {
+  LazyInit(str1);
+  LazyInit(str2);
   return strcmp(str1->value, str2->value) == 0;
 }
 
 int StringCompareString(String* str1, String* str2) {
+  LazyInit(str1);
+  LazyInit(str2);
   return strcmp(str1->value, str2->value);
 }
 
 int StringCompareStringCaseBlind(String* str1, String* str2) {
+  LazyInit(str1);
+  LazyInit(str2);
   return strcasecmp(str1->value, str2->value);
 }
 
@@ -146,6 +171,7 @@ void StringSet(String* str, const char* value) {
 }
 
 void StringSetString(String* str, String* value) {
+  LazyInit(value);
   StringSet(str, value->value);
 }
 
@@ -172,12 +198,14 @@ void StringAppendSegment(String* str, const char* value, size_t length) {
 }
 
 void StringAppend(String* str, const char* value) {
+  LazyInit(str);
   // Get length of value (without \0).
   size_t value_length = value == NULL ? 0 : strlen(value);
   StringAppendSegment(str, value, value_length);
 }
 
 void StringAppendString(String* str, String* value) {
+  LazyInit(value);
   StringAppend(str, value->value);
 }
 
@@ -191,6 +219,27 @@ void StringTrimEnd(String* s) {
     }
   }
   s->value[s->length] = '\0';
+}
+
+void StringTrimStart(String* s) {
+  CheckMutable(s);
+  size_t first_non_space = 0;
+  while (first_non_space < s->length) {
+    if (!isspace(s->value[first_non_space])) {
+      break;
+    }
+    first_non_space++;
+  }
+  if (first_non_space == s->length) {
+    StringClear(s);
+    return;
+  }
+  StringReplace(s, 0, first_non_space, "", 0);
+}
+
+void StringTrim(String* s) {
+  StringTrimStart(s);
+  StringTrimEnd(s);
 }
 
 // This needs to be optimal since code that build up strings tends
@@ -268,6 +317,7 @@ void StringErase(String* str, size_t pos, size_t len) {
 }
 
 size_t StringIndexOf(String* s, const char* substring) {
+  LazyInit(s);
   char* pos = strstr(s->value, substring);
   if (pos == NULL) {
     return (size_t)-1;
@@ -277,6 +327,7 @@ size_t StringIndexOf(String* s, const char* substring) {
 
 // Look for a substring, backwards in the file.
 size_t StringLastIndexOf(String* s, const char* substring) {
+  LazyInit(s);
   size_t len = strlen(substring);
   size_t index = s->length - len;
   while (index > 0) {
@@ -290,6 +341,7 @@ size_t StringLastIndexOf(String* s, const char* substring) {
 }
 
 void StringSubstring(String* s, size_t start, size_t length, String* out) {
+  LazyInit(s);
   if (start >= s->length) {
     return;
   }
@@ -302,10 +354,12 @@ void StringSubstring(String* s, size_t start, size_t length, String* out) {
 }
 
 bool StringStartsWith(String* s, const char* prefix) {
+  LazyInit(s);
   return strstr(s->value, prefix) == s->value;
 }
 
 bool StringEndsWith(String* s, const char* suffix) {
+  LazyInit(s);
   size_t len = strlen(suffix);
   if (len > s->length) {
     return false;
@@ -321,20 +375,24 @@ void StringPrintf(String* str, const char* format, ...) {
 }
 
 void StringVPrintf(String* str, const char* format, va_list ap) {
+  LazyInit(str);
   char buf[1024];
   vsnprintf(buf, sizeof(buf), format, ap);
   StringAppend(str, buf);
 }
 
 bool StringContainsChar(String* str, char ch) {
+  LazyInit(str);
   return strchr(str->value, ch) != NULL;
 }
 
 bool StringContainsString(String* str, const char* s) {
+  LazyInit(str);
   return strstr(str->value, s) != NULL;
 }
 
 void StringEscape(String* in, String* out) {
+  LazyInit(in);
   for (size_t i = 0; i < in->length; i++) {
     char ch = in->value[i];
     if (ch < ' ' || ch >= 127) {
@@ -384,6 +442,7 @@ void StringEscape(String* in, String* out) {
 }
 
 void StringSplit(String* s, char sep, Vector* v) {
+  LazyInit(s);
   size_t i = 0;
   while (i < s->length) {
     size_t start = i;

@@ -28,6 +28,7 @@ static Vector* FindVariableStack(Map* stacks, Symbol* symbol) {
   MapKeyValue kv;
   kv.key.p = symbol;
   kv.value.p = versions;
+  MapInsert(stacks, kv);
   return versions;
 }
 
@@ -161,8 +162,7 @@ static void InsertPhiNodes(Generator* gen) {
   // Inserting PHI nodes in basic blocks adds a new variable definition to the
   // block.  We need to keep trying until we get all the PHI nodes inserted.
   bool changed;
-  Vector df;  // Expanded dominance frontier (easier than a BitSet to traverse).
-  VectorInit(&df);
+  Vector df = {0};  // Expanded dominance frontier (easier than a BitSet to traverse).
 
   do {
     changed = false;

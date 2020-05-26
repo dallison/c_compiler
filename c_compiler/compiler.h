@@ -11,39 +11,46 @@
 
 #include <stdlib.h>
 #include "assembler.h"
+#include "buffer.h"
 #include "hashtable.h"
+#include "set.h"
 #include "type.h"
 #include "vector.h"
-#include "set.h"
-#include "buffer.h"
+#include "debug.h"
 
 struct Generator;
 
 typedef enum {
-  kOptionInputFile,
-  kOptionDebug,
-  kOptionOptimize,
-  kOptionTarget,
-  kOptionCompileOnly,
-  kOptionAssemblyOutput,
-  kOptionOutputFile,
-  kOptionIncludePath,
-  kOptionDefineMacro,
-  kOptionUndefineMacro,
-  kOptionPic,
-  kOptionWarning,
-  kOptionWerror,
-  kOptionWall,
-  kOptionErrorLimit,
-  kOptionTlsModel,
+  kOptionInputFile,          // File being compiled.
+  kOptionDebug,              // Generate debug output.
+  kOptionOptimize,           // Optimize code.
+  kOptionTarget,             // Target architecture.
+  kOptionCompileOnly,        // Compile only, don't link.
+  kOptionAssemblyOutput,     // Output asembly only, dont assemble.
+  kOptionOutputFile,         // Output file name.
+  kOptionIncludePath,        // Add to user include search path.
+  kOptionSystemIncludePath,  // Add to system include search path.
+  kOptionDefineMacro,        // Define a macro.
+  kOptionUndefineMacro,      // Undefine a macro.
+  kOptionPic,                // Position Independent Code.
+  kOptionWarning,            // Disable warning.
+  kOptionWerror,             // All warnings are errors.
+  kOptionWall,               // Enable all warnings.
+  kOptionErrorLimit,         // Max error limit.
+  kOptionTlsModel,           // TLS model.
+  kOptionChdir,              // Change dir before running.
+  kOptionPrintFrontend,      // Debug front end.
+  kOptionPrintBackend,       // Debug back end.
+  kOptionPrintPreprocessor,  // Debug preprocessor.
+  kOptionKeepAsmFile,        // Keep asm file after assembling.
 } CompilerOption;
 
 typedef struct {
-  CompilerOption opt;
+  CompilerOption opt;   // Option identifier.
   union {
-    int ivalue;
-    String svalue;
-    bool bvalue;
+    int ivalue;         // Integer value.
+    String svalue;      // String value.
+    bool bvalue;        // Boolean value.
   } value;
 } CompilerOptionValue;
 
@@ -73,19 +80,18 @@ typedef enum {
 void ParseOptions(int argc, char** argv, Vector* options);
 
 typedef enum {
-  kInitTypeByte,
-  kInitTypeHalf,
-  kInitTypeWord,
-  kInitTypeLong,
-  kInitTypeSymbol,
-  kInitTypeString,
-  kInitTypeMemory,
+  kInitTypeByte,    // 8-bit constant.
+  kInitTypeHalf,    // 16-bit constant.
+  kInitTypeWord,    // 32-bit constant.
+  kInitTypeLong,    // 64-bit constant
+  kInitTypeSymbol,  // Reference to a symbo.
+  kInitTypeString,  // String literal reference.
+  kInitTypeMemory,  // Fixed memory contents.
 } InitializerType;
 
 typedef struct {
   InitializerType type;
   int32_t offset;
-  int32_t length;
   union {
     uint8_t byte;
     uint16_t half;
@@ -138,9 +144,9 @@ TlsModel ParseTlsModelName(String* name);
 // A compiler target back-end.  This contains pointers to
 // functions to generate code for a particlar target.
 typedef struct {
-  String name;  // Name of target.
-  int pointer_size;   // Size of pointer.
-  
+  String name;       // Name of target.
+  int pointer_size;  // Size of pointer.
+
   // Function to generate code.  Returns target specific data.
   void* (*codegen)(struct Generator*);
 
@@ -167,13 +173,13 @@ typedef struct {
 
   // Emit start of tdata section to asm file.
   void (*emit_tdata_start)(FILE* asm_file);
-  
+
   // Emit start of tbss section to asm file.
   void (*emit_tbss_start)(FILE* asm_file);
 
   // Emit tls data to the assembly file
   void (*emit_tls_variable)(InitializedStaticVariable* var, FILE* asm_file);
-  
+
   // Emit tbss (uninitialized tls variable) to the assembly file.
   void (*emit_tbss_space)(UnintializedStaticVariable* var, FILE* asm_file);
 
@@ -203,9 +209,17 @@ typedef struct {
   Lex lex;
   Syntax syntax;
 
+  // DWARF debug builder.
+  DebugBuilder debug_builder;
+  
   // Global symbol and tag tables created by front end.
   HashTable global_symbol_table;
   HashTable global_tag_table;
+
+  int pointer_size;  // Size of a pointer.
+  size_t current_include_path_index;
+  TypeRecord* current_function;
+  TlsModel tls_model;
 
   // Back-end, specific to a target.
   CompilerTarget* target;
@@ -225,15 +239,14 @@ typedef struct {
   Vector string_literals;
   int next_literal_id;
 
-  TypeRecord* current_function;
+  // Flags.
   bool debug_output;
   bool optimize;
   bool pic;
-
-  TlsModel tls_model;
-  
-  int pointer_size;     // Size of a pointer.
-  size_t current_include_path_index;
+  bool print_front_end;
+  bool print_back_end;
+  bool print_preprocessor;
+  bool keep_asm_file;
 } Compiler;
 
 // Globals to avoid passing these around.
@@ -250,7 +263,7 @@ void CompilerDelete(Compiler* compiler);
 
 String* CompileTranslationUnit(const char* filename, Vector* options);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
-                                      Vector* options);
+                                         Vector* options);
 int CompilerAddStringLiteral(String* value);
 StringLiteral* CompilerFindStringLiteral(int literal_id);
 

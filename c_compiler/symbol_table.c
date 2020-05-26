@@ -183,9 +183,10 @@ static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
       name = (String*)value;
       break;
   }
-  size_t hash = 0;
-  for (size_t i = 0; i < name->length; i++) {
-    hash = (hash << 1) ^ name->value[i];
+  const char* nm = name->value;
+  uint32_t hash = 5381;
+  while (*nm != '\0') {
+    hash = (hash << 5) + hash + *nm++;
   }
   return hash;
 }

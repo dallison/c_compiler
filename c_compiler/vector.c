@@ -88,12 +88,22 @@ void VectorSet(Vector* vec, size_t index, void* value) {
 
 void* VectorGet(Vector* vec, size_t index) { return vec->value.p[index]; }
 
+void* VectorFirst(Vector* vec) {
+  return vec->length == 0 ? NULL : vec->value.p[0];
+}
+
 void* VectorLast(Vector* vec) {
   return vec->length == 0 ? NULL : vec->value.p[vec->length - 1];
 }
 
 void VectorCopy(Vector* dest, Vector* src) {
   VectorInit(dest);
+  for (size_t i = 0; i < src->length; i++) {
+    VectorAppend(dest, src->value.p[i]);
+  }
+}
+
+void VectorAppendVector(Vector* dest, Vector* src) {
   for (size_t i = 0; i < src->length; i++) {
     VectorAppend(dest, src->value.p[i]);
   }

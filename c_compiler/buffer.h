@@ -57,4 +57,7 @@ void BufferAddSpace(Buffer* buf, size_t length);
 // Align the length of the buffer to the alignment (must be a power of 2).
 void BufferAlignLength(Buffer* buf, int alignment);
 
+// Compare buffer contents as in memcmp.
+int BufferCompare(Buffer* b1, Buffer* b2);
+
 #endif /* buffer_h */

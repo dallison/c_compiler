@@ -169,6 +169,7 @@ static void PropagateZeroes(RVGenerator* rv) {
   }
 }
 
+
 void RVOptimize(RVGenerator* rv) {
   // Remove all unused expressions.
   RemoveUnusedExpressions(rv);

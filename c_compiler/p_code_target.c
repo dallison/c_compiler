@@ -126,6 +126,11 @@ static void StaticVariable(InitializedStaticVariable* var,
         next_offset += 8;
         break;
       case kInitTypeSymbol:
+        if (init->value.symbol->flags.is_local) {
+          fprintf(fp, "\t.local %s\n", init->value.symbol->name.value);
+        } else {
+          fprintf(fp, "\t.global %s\n", init->value.symbol->name.value);
+        }
         fprintf(fp, "\t.long    %s\n", init->value.symbol->name.value);
         next_offset += 8;
         break;

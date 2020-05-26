@@ -11,7 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dstring.h>
+#include <strings.h>
+#include "dstring.h"
 
 #define INIT_CAPACITY 2
 
@@ -52,12 +53,22 @@ static int CompareMappedInt64s(const void*a, const void* b) {
   return (int)(s1->key.w - s2->key.w);
 }
 
+static int CompareMappedPointers(const void*a, const void* b) {
+  const MapKeyValue* s1 = a;
+  const MapKeyValue* s2 = b;
+  return (int)(s1->key.p - s2->key.p);
+}
+
 void MapInitForStringKeys(Map* map) {
   MapInit(map,  CompareStrings);
 }
 
 void MapInitForCaseBlindStringKeys(Map* map) {
   MapInit(map,  CompareStringsCaseBlind);
+}
+
+void MapInitForPointerKeys(Map* map) {
+  MapInit(map,  CompareMappedPointers);
 }
 
 void MapInitForCharPointerKeys(Map* map) {

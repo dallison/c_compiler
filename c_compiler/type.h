@@ -34,6 +34,7 @@ typedef enum {
   kTypeEnum = 1 << 12,
   kTypeSigned = 1 << 13,
   kTypeUnsigned = 1 << 14,
+  kTypeUnknown = 1 << 15,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
@@ -60,7 +61,7 @@ typedef enum {
 // Function info.
 typedef struct {
   Symbol* symbol;       // Symbol for function (or NULL).
-  Vector prototype;     // Formal arguments (vector of Symbol*).
+  Vector prototype;     // Formal arguments (owned Symbol*).
   bool varargs;         // True if varargs function.
   struct ASTNode* body; // Body AST.
   bool unknown_args;    // Old-style or invented function.
@@ -111,6 +112,7 @@ typedef struct {
 // pointer.  We keep a count of the number of things pointing to
 // each record so we can delete them when the count goes to zero.
 typedef struct TypeRecord {
+  int id;     // Unique id for debugging.
   int refs;  // Reference count.
   Type type;
   Qualifiers qualifiers;
@@ -139,6 +141,7 @@ typedef struct {
   Storage storage;        // Storage for symbol.
   bool found_void;        // Flag: we've found 'void'.
   int dimension_count;    // Dimensions in array.
+  bool is_inline;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
@@ -197,7 +200,7 @@ PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev);
 TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* type);
 
-TypeRecord* TypeParserParseType(TypeParser* parser);
+TypeRecord* TypeParserParseType(TypeParser* parser, bool needed);
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type);
 void TypeParserParseBase(TypeParser* parser);
 void TypeParserParsePointer(TypeParser* parser);
@@ -245,14 +248,19 @@ bool TypeIsScalar(TypeRecord* type);
 bool TypeIsVoidPointer(TypeRecord* type);
 bool TypeIsArray(TypeRecord* type);
 bool TypeIsConst(TypeRecord* type);
+bool TypeIsVolatile(TypeRecord* type);
 bool TypeIsEnum(TypeRecord* type);
 bool TypeIsUnsigned(TypeRecord* type);
 bool TypeIsSigned(TypeRecord* type);
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
+bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);
+void TypeErrorDetails(SourceLocation location,
+                      TypeRecord* t1, TypeRecord* t2);
 
 bool TypeIsIntConstant(TypeRecord* type);
 bool TypeIsFloatingPointConstant(TypeRecord* type);
+bool TypeIsUnknown(TypeRecord* type);
 
 #endif /* type_h */

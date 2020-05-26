@@ -26,6 +26,7 @@ Symbol* NewSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
   symbol->got_index = -1;
   symbol->plt_index = -1;
   symbol->index = -1;
+  symbol->dynamic_index = -1;
   return symbol;
 }
 
@@ -51,9 +52,9 @@ size_t SymbolHash(void* value, HashTable* table, HashMode mode) {
       name = (const char*)value;
       break;
   }
-  size_t hash = 0;
-  for (size_t i = 0; name[i] != '\0'; i++) {
-    hash = (hash << 1) ^ name[i];
+  uint32_t hash = 5381;
+  while (*name != '\0') {
+    hash = (hash << 5) + hash + *name++;
   }
   return hash;
 }

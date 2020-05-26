@@ -47,8 +47,7 @@ static bool IsPrintable(TargetInstruction* inst) {
 // Generate a .hword with a bitmask for all the registers to save.
 static void GenerateRegisterMask(_6502Emitter* emitter, FILE* fp) {
   int16_t mask = 0;
-  Vector regs;
-  VectorInit(&regs);
+  Vector regs = {0};
   BitSetExpand(&emitter->regs->used_b_regs, &regs);
   if (regs.length > 0) {
     // Save all B regs.
@@ -638,6 +637,13 @@ static void PrintInstruction(_6502Emitter* emitter, TargetInstruction* inst,
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     return;
   }
+  
+  if (inst->opcode == _6502_OP(named_label)) {
+    TargetNamedLabel* label = (TargetNamedLabel*)inst;
+    fprintf(fp, "%s:\n", label->name);
+    return;
+  }
+
   if (!IsPrintable(inst)) {
     return;
   }

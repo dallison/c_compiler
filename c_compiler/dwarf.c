@@ -224,11 +224,11 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
       // No previous location means this is the first location.  We need
       // to set the initial line and address.  The address is associated
       // with a relocation referring to the .text of the current file.
-      BufferAppendByte(debug_line, DW_LNS_advance_line);
+      BufferAppendByte(debug_line, DW_LNS(advance_line));
       WriteSLEB128(loc->line - 1,
                    debug_line);  //  First line is 1 so we subtract 1.
 
-      // Use extended opcode DW_LNE_set_address to set the address.
+      // Use extended opcode DW_LNE(set_address) to set the address.
       // First byte is zero.
       BufferAppendByte(debug_line, 0);
 
@@ -236,7 +236,7 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
       WriteULEB128(9, debug_line);  // Address is 8 bytes, plus sub-opcode.
 
       // Followed by the sub-opcode.
-      BufferAppendByte(debug_line, DW_LNE_set_address);
+      BufferAppendByte(debug_line, DW_LNE(set_address));
 
       // Followed by the address (this will be relocated).  We record the offset
       // so that the relocation can be applied.
@@ -245,7 +245,7 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
 
       // We advance the address.  The address is going to be relative to
       // the start of .text so it will be small.  We cast it to 32 bits.
-      BufferAppendByte(debug_line, DW_LNS_advance_pc);
+      BufferAppendByte(debug_line, DW_LNS(advance_pc));
       WriteULEB128((int32_t)loc->address / dwarf->min_instruction_length,
                    debug_line);
     } else {
@@ -268,11 +268,11 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
         // instruction specifies how many operands it takes and the format of
         // the operands.
         if (line_diff != 0) {
-          BufferAppendByte(debug_line, DW_LNS_advance_line);
+          BufferAppendByte(debug_line, DW_LNS(advance_line));
           WriteSLEB128(line_diff, debug_line);
         }
         if (address_diff != 0) {
-          BufferAppendByte(debug_line, DW_LNS_advance_pc);
+          BufferAppendByte(debug_line, DW_LNS(advance_pc));
           WriteULEB128(address_diff, debug_line);
         }
       } else {
@@ -295,5 +295,5 @@ AssemblerRelocation* DwarfDebugLineRelocation(Dwarf* dwarf,
                                               int reloc_type,
                                               int section_index) {
   return NewAssemblerRelocation(symbol, reloc_type, section_index,
-                                dwarf->address_offset);
+                                dwarf->address_offset, 0);
 }

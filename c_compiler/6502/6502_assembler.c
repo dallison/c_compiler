@@ -566,7 +566,7 @@ static void EmitBranchBinary(_6502Assembler* assembler, Branch* branch) {
     AssemblerRelocation* reloc =
     NewAssemblerRelocation(sym, R_6502_JMP,
                            ASM.current_section,
-                           (int32_t)AssemblerCurrentAddress(&ASM));
+                           (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitByte(&ASM, ASM.current_section, _6502_OPCODE(jmp) | 0x0c);
     AssemblerEmitHalf(&ASM, ASM.current_section, 0);
@@ -632,7 +632,7 @@ static void AssembleJump(_6502Assembler* assembler) {
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, R_6502_JMP,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   
   if (opcode == _6502_OPCODE(jmpr) && LexMatch(&ASM.lex, TOK(comma))) {
@@ -691,7 +691,7 @@ static void AssembleAbsouteAddress(_6502Assembler* assembler) {
   }
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, reloc_type, ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
 error:
   StringDestruct(&func);
@@ -1007,7 +1007,7 @@ static void Assemble_jsr(_6502Assembler* assembler) {
   NewAssemblerRelocation(sym, assembler->base.pic ?
                          R_6502_JSR_PLT : R_6502_JSR,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitByte(&ASM, ASM.current_section, opcode);
   AssemblerEmitHalf(&ASM, ASM.current_section, 0);

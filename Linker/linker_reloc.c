@@ -43,6 +43,21 @@ Relocation* NewSymbolRelocation(Symbol* symbol, int64_t offset,
   reloc->section = NULL;
   return reloc;
 }
+
+Relocation* NewRelativeRelocation(int64_t offset,
+                                  ELFReaderSection* target_section,
+                                  int32_t reloc_type,
+                                  int64_t addend) {
+  Relocation* reloc = malloc(sizeof(Relocation));
+   StringInit(&reloc->symbol_name, NULL);
+   reloc->symbol = NULL;
+   reloc->offset = offset;
+   reloc->type = reloc_type;
+   reloc->addend = 0;
+   reloc->section = target_section;
+   return reloc;
+}
+              
 void RelocationDestruct(Relocation* reloc) {
   StringDestruct(&reloc->symbol_name);
 }
@@ -119,10 +134,12 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   int64_t A = reloc->addend;      // Addend.
   
 
-  printf("Applying relocation type %d for symbol %s(0x%llx) to offset %lld\n",
+  if (linker->print_relocations) {
+    printf("Applying relocation type %d for symbol %s(0x%llx) to offset %lld\n",
          reloc->type,
          reloc->symbol_name.value,
          symbol->address, reloc->offset);
+  }
   assert(linker->arch != NULL);
   linker->arch->apply_relocation(linker, file, reloc,
                                  symbol, target_address,

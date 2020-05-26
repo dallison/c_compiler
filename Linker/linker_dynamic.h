@@ -88,6 +88,7 @@ typedef struct DynamicLinker {
   ProcedureLinkageTable procedure_linkage_table;
   Vector got_relocations;
   Vector plt_relocations;
+  Vector data_relocations;      // Pointers to Relocation.
   Vector needed_libraries;      // Offsets into dynstr table.
   ELF_Xword rpath;              // Offset into dynstr table.
   struct Symbol* global_offset_table_symbol;
@@ -101,6 +102,7 @@ typedef struct DynamicLinker {
   struct SectionGroup* plt_group;
   struct SectionGroup* dyn_rela_group;
   struct SectionGroup* plt_rela_group;
+  struct SectionGroup* data_rela_group;
   struct SectionGroup* dynamic_group;
   struct SectionGroup* interpreter_group;
   

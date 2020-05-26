@@ -771,7 +771,7 @@ static void AssembleMoveConstant(PCodeAssembler* assembler, int opcode,
       NewAssemblerRelocation(sym,
                            reloc_type,
                            ASM.current_section,
-                               (int32_t)AssemblerCurrentAddress(&ASM));
+                               (int32_t)AssemblerCurrentAddress(&ASM), 0);
     AssemblerAddRelocation(&ASM, reloc);
     AssemblerEmitWord(&ASM, ASM.current_section,
                       0xc0000000U | opcode << 24 | reg << 16);
@@ -950,7 +950,7 @@ static void Assemble_call(PCodeAssembler* assembler) {
   NewAssemblerRelocation(sym, assembler->base.pic ?
                          R_PCODE_CALL_PLT : R_PCODE_CALL,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(call) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
@@ -970,7 +970,7 @@ static void Assemble_jmp(PCodeAssembler* assembler) {
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
       NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM));
+                             (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 | PCODE_OP(jmp) << 24);
   AssemblerEmitLong(&ASM, ASM.current_section, 0);
@@ -990,7 +990,7 @@ static void Assemble_cjmp(PCodeAssembler* assembler) {
   LexNextToken(&ASM.lex);
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, R_PCODE_JMP, ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
                     PCODE_OP(cjmp) << 24);
@@ -1028,7 +1028,7 @@ static void Assemble_adr(PCodeAssembler* assembler) {
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, reloc_type,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
                     PCODE_OP(adr) << 24 | reg << 16);
@@ -1057,7 +1057,7 @@ static void Assemble_adrs(PCodeAssembler* assembler) {
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, R_PCODE_PCREL,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
                     PCODE_OP(adr) << 24 | reg << 16);
@@ -1097,7 +1097,7 @@ static void Assemble_adrtls(PCodeAssembler* assembler) {
   AssemblerRelocation* reloc =
   NewAssemblerRelocation(sym, reloc_type,
                          ASM.current_section,
-                         (int32_t)AssemblerCurrentAddress(&ASM));
+                         (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitWord(&ASM, ASM.current_section, 0xc0000000 |
                     PCODE_OP(adr) << 24 | reg << 16);

@@ -8,106 +8,162 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
 
-int write(int fp, const char* buf, int len) {
-#if defined(__risc_v__)
-  // The ecall instruction is used with r0 set to 4.  This
-  // is the write system call.
-  return asm(
-      "li t6, 4\n"
-      "ecall\n"
-      );
-#elif defined(__p_code__)
-  // This uses escape code 2 to call the write system call.
-  // Stack contains arguments.
-  // offset 28: length
-  // offset 20: buffer
-  // offset 16: file descriptor
-  return asm(
-             "pushx r1\n"
-             "pushx r2\n"
-             "ldw r0, [ap, #16]\n"
-             "ldx r1, [ap, #20]\n"
-             "ldw r2, [ap, #28]\n"
-             "esc #2\n"
-             "popx r2\n"
-             "popx r1\n"
-  );
-#endif
-}
+// Values for field_width and precision.  Positive numbers
+// are specified by user.  Negative numbers below -1 mean
+// to use arg -(n - 2).  so *3$ is encoded as -4.
+typedef enum {
+  kWidthDefault = -1,
+  kWidthNextArg = -2,
+  kWidthExplicit = 0,
+} Width;
 
-#define NULL 0
-#define EOF (-1)
+typedef enum {
+  kModNone = 0,
+  kModChar,
+  kModShort,
+  kModLong,
+  kModLongLong,
+  kModLongDouble,
+  kModIntMax,
+  kModSize_t,
+  kModPtrdiff_t
+} Modifier;
 
 typedef struct {
-  int fd;
-  char* buf;
-  int bufsize;
-  int index;
-} FILE;
+  Width field_width;
+  Width precision;
+  bool left_justify;
+  char fill_char;
+  bool prepend_sign;
+  bool prepend_space;
+  bool alternate_form;
+  int fw_argnum;
+  int p_argnum;
+  Modifier modifier;
+  int next_arg_value[2];    // [0]: width, [1]: precision
+} ConversionFormat;
 
-#define STDOUT_BUFSIZE 4096
-#define STDIN_BUFSIZE 4096
-
-static char stdout_buf[STDOUT_BUFSIZE];
-static char stdin_buf[STDIN_BUFSIZE];
-
-static FILE s_stdin = {0, stdin_buf, sizeof(stdin_buf), 0};
-static FILE s_stdout = {1, stdout_buf, sizeof(stdout_buf), 0};
-static FILE s_stderr = {2, NULL, 0, 0};
-
-FILE* stdout = &s_stdout;
-FILE* stdin = &s_stdin;
-FILE* stderr = &s_stderr;
-
-int fflush(FILE* fp) {
-  int e = write(fp->fd, fp->buf, fp->index);
-  if (e > 0) {
-    fp->index = 0;
-    return 0;
+ const char* CollectFormat(const char* p, ConversionFormat* format) {
+  format->field_width = kWidthDefault;
+  format->precision = kWidthDefault;
+  format->fill_char = ' ';
+  
+  switch (*p) {
+    case '-':
+      p++;
+      format->left_justify = true;
+      break;
+    case '0':
+      if (!format->left_justify) {
+        format->fill_char = '0';
+      }
+      p++;
+      break;
+    case '#':
+      format->alternate_form = true;
+      p++;
+      break;
+    case ' ':
+      format->prepend_space = true;
+      p++;
+      break;
+    case '+':
+      format->prepend_sign = true;
+      p++;
+      break;
   }
-  return EOF;
-}
-
-int fputc(int c, FILE* fp) {
-  if (fp->buf == NULL) {
-    int e = write(fp->fd, &fp->buf, 1);
-    return e == 0 ? 0 : EOF;
-  }
-  // Buffer full?
-  if (fp->index == fp->bufsize) {
-    int e = fflush(fp);
-    if (e != 0) {
-      return e;
+  if (*p == '*') {
+    p++;
+    format->field_width = kWidthNextArg;
+    // TODO: *m$ to specify arg number.
+  } else {
+    int n = 0;
+    while (isdigit(*p)) {
+      n = n * 10 + *p++ - '0';
+    }
+    if (n > 0) {
+      format->field_width = n;
     }
   }
-  // Add to next position in buffer.
-  fp->buf[fp->index++] = c;
+  if (*p == '.') {
+    p++;
+    if (*p == '*') {
+      p++;
+      format->precision = kWidthNextArg;
+      // TODO: *m$ to specify arg number.
+    } else {
+      int n = 0;
+      while (isdigit(*p)) {
+        n = n * 10 + *p++ - '0';
+      }
+      if (n > 0) {
+        format->precision = n;
+      }
+    }
+  }
+  return p;
+}
+
+// Index is the start of the converted field in the buffer which is created
+// backwards, right justified.
+// This is used if a field width has been specified.
+// Returns index into buffer
+ int FillField(char* buf, int buflen, int index,
+                      ConversionFormat* fmt) {
+ 
+  int precision = fmt->precision;
+  if (fmt->precision == kWidthNextArg) {
+    precision = fmt->next_arg_value[1];
+  }
   
-  if (c == '\n') {
-    // Flush on newline.
-    return fflush(fp);
+  int len = buflen - index;     // Existing length.
+   if (precision != kWidthDefault) {
+     if (len < fmt->precision) {
+       while (len < precision) {
+         buf[--index] = '0';
+         len++;
+       }
+     }
   }
-  return 0;
-}
-
-int putchar(char c) {
-  return fputc(c, stdout);
-}
-
-int fputs(const char* str, FILE* fp) {
-  const char* s = str;
-  while (*s != '\0') {
-    fputc(*s++, fp);
+   
+  if (fmt->field_width == kWidthDefault) {
+    return index;
   }
+  int field_width = fmt->field_width;
+  if (field_width == kWidthNextArg) {
+     field_width = fmt->next_arg_value[0];
+  }
+  
+  if (fmt->left_justify) {
+    // Left justify to start of buffer.
+    int new_index = buflen - field_width;
+    char* left = &buf[new_index];
+    memmove(left, &buf[index], len);
+    index = new_index + len;
+    while (len < field_width) {
+       buf[index++] = fmt->fill_char;
+       len++;
+    }
+    return new_index;
+  }
+  while (len < field_width) {
+    buf[--index] = fmt->fill_char;
+    len++;
+  }
+   return index;
 }
 
-static void PrintInt(long long v, FILE* fp) {
-  char buf[16];
-  int i = 0;
+ char* PrintDecimal(ConversionFormat* fmt, long long v, char* buf, int buflen) {
+  int i = buflen - 1;
   if (v == 0) {
-    fputc('0', fp);
-    return;
+    buf[i] = '0';
+    i = FillField(buf, buflen, i, fmt);
+    return &buf[i];
   }
   bool negative = false;
   if (v < 0) {
@@ -116,41 +172,157 @@ static void PrintInt(long long v, FILE* fp) {
   }
   while (v != 0) {
     char ch = (v % 10) + '0';
-    buf[i++] = ch;
+    buf[i--] = ch;
     v /= 10;
   }
   if (negative) {
-    buf[i++] = '-';
+    buf[i--] = '-';
+  } else {
+    if (fmt->prepend_sign) {
+      buf[i--] = '+';
+    } else if (fmt->prepend_space) {
+      buf[i--] = ' ';
+    }
   }
-  // Digits in buf are reversed.
-  i--;
-  while (i >= 0) {
-    fputc(buf[i--], fp);
+  // i is one less than the first char.
+  i++;
+  i = FillField(buf, buflen, i, fmt);
+  return &buf[i];
+}
+
+ char* PrintHex(ConversionFormat* fmt, long long v, char* buf, int buflen, bool upper) {
+  int i = buflen - 1;
+  if (v == 0) {
+    buf[i] = '0';
+    i = FillField(buf, buflen, i, fmt);
+    return &buf[i];
+  }
+  while (v != 0) {
+    int n = v & 0xf;
+    char ch;
+    if (n > 9) {
+      ch = n - 10 + (upper ? 'A' : 'a');
+    } else {
+      ch = n + '0';
+    }
+    buf[i--] = ch;
+    v >>= 4;
+  }
+  i++;
+  i = FillField(buf, buflen, i, fmt);
+  return &buf[i];
+}
+
+char* PrintString(ConversionFormat* fmt, const char* s, int len, char* buf,
+                  int buflen) {
+  int i = buflen - 1;     // Last pos in buffer.
+  fmt->fill_char = ' ';   // Don't use fill char
+  char* p = buf + i;
+  s += len - 1;               // Last char in s.
+  
+  // Copy s to p, backwards.
+  while (len-- > 0) {
+    *p-- = *s--;
+    i--;
+  }
+  // i is the index of first char in buf.
+  i = FillField(buf, buflen, i, fmt);
+  return &buf[i];
+}
+
+ void EnsureBuffer(char* default_buffer, char** buf, int* buflen, Width width, va_list ap) {
+  if (width == kWidthDefault) {
+    return;
+  }
+  int width_needed = *buflen;
+  if (width == kWidthNextArg) {
+    width_needed = va_arg(ap, int);
+  } else {
+    width_needed = -(width + 2);
+  }
+  if (width_needed > *buflen) {
+    if (*buf == default_buffer) {
+      *buf = malloc(width_needed);
+    } else {
+      *buf = realloc(*buf, width_needed);
+    }
+    *buflen = width_needed;
   }
 }
 
 int vfprintf(FILE* fp, const char* format, va_list ap) {
+  char default_buffer[4096];
+  int buflen = sizeof(default_buffer);
+  char* buf = default_buffer;
+  char* v;
+  int len;
   const char* p = format;
+  int count = 0;
   while (*p != '\0') {
     if (*p == '%') {
       p++;
+      ConversionFormat fmt = {0};
+      p = CollectFormat(p, &fmt);
+      EnsureBuffer(default_buffer, &buf, &buflen, fmt.field_width, ap);
+      EnsureBuffer(default_buffer, &buf, &buflen, fmt.precision, ap);
+      char* end = buf + buflen;
       switch (*p) {
         case 'd':
+        case 'i':
           p++;
-          PrintInt(va_arg(ap, int), fp);
+          v = PrintDecimal(&fmt, va_arg(ap, int), buf, buflen);
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
           break;
-        case 's':
+        case 'l':
           p++;
-          fputs(va_arg(ap, char*), fp);
+          v = PrintDecimal(&fmt, va_arg(ap, long), buf, buflen);
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
           break;
+        case 'h':
+          p++;
+          v = PrintDecimal(&fmt, va_arg(ap, short), buf, buflen);
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
+          break;
+        case 'x':
+        case 'X':
+          p++;
+          v = PrintHex(&fmt, va_arg(ap, int), buf, buflen, p[-1] == 'X');
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
+          break;
+        case 'c': {
+          p++;
+          char b[1] = {va_arg(ap, char)};
+          v = PrintString(&fmt, b, 1, buf, buflen);
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
+          break;
+        }
+        case 's': {
+          p++;
+          char* s = va_arg(ap, char*);
+          v = PrintString(&fmt, s, strlen(s), buf, buflen);
+          len = end - v;
+          count += fwrite(v, 1, len, fp);
+          break;
+        }
         default:
           fputc(*p++, fp);
+          count++;
           break;
       }
     } else {
       fputc(*p++, fp);
+      count++;
     }
   }
+  if (buf != default_buffer) {
+    free(buf);
+  }
+  return count;
 }
 
 int fprintf(FILE* fp, const char* format, ...) {
@@ -167,11 +339,106 @@ int printf(const char* format, ...) {
   va_end(ap);
 }
 
-int main(int argc, char** argv) {
-  // printf("%d\n", 1234);
-  for (int i = 100; i > 13; i-= 8) {
-    printf("hello %s %d\n", "world", -1234*i);
-    //printf("%d\n", -i);
+static char* SafeMemcpy(char* to, char* end, char* from, size_t len) {
+  if ((to + len) > end) {
+    len = end - to;
   }
-  //fputs("from fputs\n", stdout);
+  memcpy(to, from, len);
+  return to + len;
 }
+
+int vsnprintf(char * restrict s, size_t n,
+              const char * restrict format, va_list ap) {
+  char default_buffer[4096];
+  int buflen = sizeof(default_buffer);
+  char* buf = default_buffer;
+  char* v;
+  int len;
+  const char* p = format;
+
+  char* s_start = s;
+  char* s_end = s + n;
+  
+  while (*p != '\0' && s < s_end) {
+    if (*p == '%') {
+      p++;
+      ConversionFormat fmt;
+      p = CollectFormat(p, &fmt);
+      EnsureBuffer(default_buffer, &buf, &buflen, fmt.field_width, ap);
+      EnsureBuffer(default_buffer, &buf, &buflen, fmt.precision, ap);
+      char* end = buf + buflen;
+      switch (*p) {
+        case 'd':
+        case 'i':
+          p++;
+          v = PrintDecimal(&fmt, va_arg(ap, int), buf, buflen);
+          len = end - v;
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        case 'l':
+          p++;
+          v = PrintDecimal(&fmt, va_arg(ap, long), buf, sizeof(buf));
+          len = end - v;
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        case 'h':
+          p++;
+          v = PrintDecimal(&fmt, va_arg(ap, short), buf, sizeof(buf));
+          len = end - v;
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        case 'x':
+        case 'X':
+          p++;
+          v = PrintHex(&fmt, va_arg(ap, int), buf, sizeof(buf), p[-1] == 'X');
+          len = end - v;
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        case 'c': {
+          p++;
+          char b[1] = {va_arg(ap, char)};
+          v = PrintString(&fmt, b, 1, buf, buflen);
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        }
+        case 's': {
+          p++;
+          char* s = va_arg(ap, char*);
+          v = PrintString(&fmt, s, strlen(s), buf, buflen);
+          len = end - v;
+          s = SafeMemcpy(s, s_end, v, len);
+          break;
+        }
+        default:
+          *s++ = *p++;
+          break;
+      }
+    } else {
+      *s++ = *p++;
+    }
+  }
+  return s - s_start;
+}
+
+int vsprintf(char * restrict s,
+             const char * restrict format, va_list ap) {
+  vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
+}
+
+int snprintf(char * restrict s, size_t n,
+             const char * restrict format, ...) {
+  va_list ap;
+   va_start(ap, format);
+   vsnprintf(s, n, format, ap);
+   va_end(ap);
+
+}
+
+int sprintf(char * restrict s,
+            const char * restrict format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
+  va_end(ap);
+}
+

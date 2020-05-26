@@ -86,18 +86,18 @@
 #if defined(__APPLE__)
 #define LINKER_CODE_SEGMENT_START_ADDRESS 0x400000000LL
 #define LINKER_DATA_SEGMENT_START_ADDRESS 0x410000000LL
-#define LINKER_SEGMENT_ALIGNMENT 0x10000000LL
+#define LINKER_SEGMENT_ALIGNMENT 0x1000LL
 #elif defined(__linux__)
 #define LINKER_CODE_SEGMENT_START_ADDRESS 0x40000000LL
 #define LINKER_DATA_SEGMENT_START_ADDRESS 0x41000000LL
-#define LINKER_SEGMENT_ALIGNMENT 0x1000000LL
+#define LINKER_SEGMENT_ALIGNMENT 0x1000LL
 #else
 #error "Unknown operating system"
 #endif
 
 // For a Dynamic Shared Object the addresses are not absolute.
 #define LINKER_DSO_CODE_SEGMENT_START_ADDRESS 0LL
-#define LINKER_DYNAMIC_SEGMENT_ALIGNMENT 0x200000LL
+#define LINKER_DYNAMIC_SEGMENT_ALIGNMENT 0x1000LL
 
 #define LINKER_NUM_SEGMENTS 3
 #define LINKER_SECTION_HEADER_OFFSET (sizeof(ELFHeader) + \
@@ -134,7 +134,8 @@ typedef struct SectionGroup {
   uint64_t address;
 } SectionGroup;
 
-SectionGroup* NewSectionGroup(const String* name, int32_t type, int64_t flags, int64_t alignment);
+SectionGroup* NewSectionGroup(const String* name, int32_t type,
+                              int64_t flags, int64_t alignment);
 void SectionGroupDestruct(SectionGroup* group);
 void SectionGroupDelete(SectionGroup* group);
 
@@ -178,6 +179,11 @@ typedef struct Linker {
   Vector needed_libraries;    // Vector of String*.
   int so_name;                // Index into dynstr or -1.
   int64_t origin;             // Origin address (or zero for default).
+  
+  // Debug printing.
+  bool print_symbol_tables;
+  bool print_relocations;
+  bool print_sections;
 } Linker;
 
 void LinkerInit(Linker* linker);

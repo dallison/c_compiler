@@ -32,6 +32,7 @@ typedef struct RVRegister {
   RVRegisterType type;
 } RVRegister;
 
+
 // The RISC-V R32F and R32D instructions share floating point registers.
 
 #define RV_INT_RETURN_REG RV_INT_ARG_START  // Integer return value register.
@@ -48,6 +49,8 @@ typedef struct {
   // we have used.
   BitSet used_int_regs;
   BitSet used_float_regs;
+  
+  int spilled_region_size;
 } RVRegisterAllocator;
 
 void RVRegisterAllocatorInit(RVRegisterAllocator* alloc,

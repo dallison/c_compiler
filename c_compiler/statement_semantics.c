@@ -14,11 +14,11 @@
 #include "expr_semantics.h"
 
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
-  AnalyzeExpression(node->expr);
+  node->expr = AnalyzeExpression(node->expr);
 }
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
-  AnalyzeExpression(node->cond);
+  node->cond = AnalyzeExpression(node->cond);
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->if_part);
   AnalyzeStatement(node->else_part);
@@ -26,14 +26,14 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
 }
 
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
-  AnalyzeExpression(node->cond);
+  node->cond = AnalyzeExpression(node->cond);
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
 }
 
 static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
-  AnalyzeExpression(node->cond);
+  node->cond = AnalyzeExpression(node->cond);
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
@@ -51,8 +51,69 @@ static int CompareCaseValue(const void* case1, const void* case2) {
   return (int)(node1->value - node2->value);
 }
 
+typedef struct {
+  SwitchStatementASTNode* switch_node;
+  int switch_level;
+} SwitchResolver;
+
+// Check for duplicate case labels and defaults in statement.
+// Also fill in the 'cases' vector in the switch statement AST node
+// and the default_node if present.
+static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  SwitchResolver* resolver = data;
+  SwitchStatementASTNode* switch_node = resolver->switch_node;
+  
+  // We can't descend into nested switch statements.  If we are looking
+  // at a switch, change the switch_level in the finder.
+  if (node->op == AST_OP(switch)) {
+    if (mode == kVisitPreChildren) {
+      resolver->switch_level++;
+    } else if (mode == kVisitPostChildren) {
+      resolver->switch_level--;
+    }
+  }
+  
+  // If we are in a nested switch statememnt stop here.
+  if (resolver->switch_level > 1) {
+    return;
+  }
+  
+  if (mode == kVisitPreChildren && node->op == AST_OP(case)) {
+     CaseLabelASTNode* case_node = (CaseLabelASTNode*)node;
+
+     if (case_node->expr == NULL) {
+       // This is a default node.
+       if (switch_node->default_node != NULL) {
+         SemanticError(node, "Duplicate default in switch statement");
+       }
+       switch_node->default_node = case_node;
+       return;
+     }
+
+     // Convert the case expression to the type of the switch controlling
+     // expression.
+     NormalConversion(case_node->expr, switch_node->expr->type);
+
+     // Case labels need to be constant integer expressions.
+     if (!EvaluateIntegerExpression(case_node->expr, &case_node->value)) {
+       SemanticError(switch_node->expr,
+                     "Case labels must be constant integral expressions");
+     }
+
+     // Calculate min, max and density.
+     if (case_node->value < switch_node->min_case_value) {
+       switch_node->min_case_value = case_node->value;
+     }
+     if (case_node->value > switch_node->max_case_value) {
+       switch_node->max_case_value = case_node->value;
+     }
+     VectorAppend(&switch_node->cases, node);
+   }
+}
+
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
-  AnalyzeExpression(node->expr);
+  node->expr = AnalyzeExpression(node->expr);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->expr);
   if (!TypeIsIntegral(node->expr->type)) {
@@ -64,47 +125,15 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   if (node->stmt->op != AST_OP(compound)) {
     return;
   }
-
-  // Check for duplicate case labels and defaults in statement.
-  // Also fill in the 'cases' vector in the switch statement AST node
-  // and the defualt_node if present.
-  CompoundStatementASTNode* body = (CompoundStatementASTNode*)node->stmt;
-  size_t num_statments = body->statements->length;
-  for (size_t i = 0; i < num_statments; i++) {
-    ASTNode* stmt = (ASTNode*)body->statements->value.p[i];
-
-    if (stmt->op == AST_OP(case)) {
-      CaseLabelASTNode* case_node = (CaseLabelASTNode*)stmt;
-
-      if (case_node->expr == NULL) {
-        // This is a default node.
-        if (node->default_node != NULL) {
-          SemanticError(stmt, "Duplicate default in switch statement");
-        }
-        node->default_node = case_node;
-        continue;
-      }
-
-      // Convert the case expression to the type of the switch controlling
-      // expression.
-      SemanticConvertType(case_node->expr, node->expr->type);
-
-      // Case labels need to be constant integer expressions.
-      if (!EvaluateIntegerExpression(case_node->expr, &case_node->value)) {
-        SemanticError(node->expr,
-                      "Case labels must be constant integral expressions");
-      }
-
-      // Calculate min, max and density.
-      if (case_node->value < node->min_case_value) {
-        node->min_case_value = case_node->value;
-      }
-      if (case_node->value > node->max_case_value) {
-        node->max_case_value = case_node->value;
-      }
-      VectorAppend(&node->cases, stmt);
-    }
-  }
+  
+  SwitchResolver resolver = {
+    .switch_node = node,
+    .switch_level = 0,
+  };
+  
+  // Visit the switch statement and all its children, collecting
+  // case and defaults.
+  ASTNodeVisit(&node->base, ResolveSwitchStatement, 0, &resolver);
 
   // Get an idea of the case density.
   // Density is mass/volume.  Let's say that the number of cases is the
@@ -161,25 +190,24 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
         }
       }
     } else {
-      AnalyzeExpression(node->c1);
+      node->c1 = AnalyzeExpression(node->c1);
     }
   }
 
-  AnalyzeExpression(node->c2);
+  node->c2 = AnalyzeExpression(node->c2);
   if (node->c2 != NULL) {
     SemanticCheckScalarType(node->c2);
   }
 
   // Optional expression 3.
-  AnalyzeExpression(node->c3);
+  node->c3 = AnalyzeExpression(node->c3);
 
   // Finally the statment.
   AnalyzeStatement(node->stmt);
 }
 
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
-  size_t num_statements = node->statements->length;
-  for (size_t i = 0; i < num_statements; i++) {
+  for (size_t i = 0; i < node->statements->length; i++) {
     AnalyzeStatement((ASTNode*)node->statements->value.p[i]);
   }
 }
@@ -203,6 +231,7 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
   snprintf(tail_label_name, sizeof(tail_label_name), "__tail_label_%d",
           tail_label_num++);
   LabelASTNode* label = (LabelASTNode*)NewLabelASTNode(tail_label_name,
+                                                       false,
                                                        location);
   CompoundASTNodeInsertStatement(function_body, (ASTNode*)label, 0);
    
@@ -248,9 +277,7 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
   }
   
   // Create goto statement to the label.
-  ASTNode* label_ref = NewStringConstantASTNode(&label->name, NULL, location);
-  ASTNode* goto_stmt = NewCombinedStatementASTNode(AST_OP(goto),
-                                                   label_ref, NULL,
+  ASTNode* goto_stmt = NewGotoStatementASTNode(NewString(label->name.value),
                                                    location);
   VectorAppend(statements, goto_stmt);
   ASTNode* result = NewCompoundStatementASTNode(statements, location);
@@ -266,13 +293,16 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     ASTNodeSetType(return_value, compiler->current_function->next);
     return;
   }
-  AnalyzeExpression(return_value);
+  return_value = AnalyzeExpression(return_value);
 
   // Check current function return type.
   if (TypeIsVoid(compiler->current_function->next)) {
     // C does not allow a return statement with a value in a void function.
+    // Unless the value being returned is also void (from a function call)
     if (return_value != NULL) {
-      SemanticError(return_value, "Cannot return a value from a void function");
+      if (!TypeIsVoid(return_value->type)) {
+        SemanticError(return_value, "Cannot return a value from a void function");
+      }
     }
   } else {
     // Function returns a value.
@@ -280,7 +310,7 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
       SemanticError((ASTNode*)node,
                     "Must return a value from a non-void function");
     } else {
-      SemanticConvertType(return_value, compiler->current_function->next);
+      NormalConversion(return_value, compiler->current_function->next);
     }
   }
   
@@ -300,7 +330,7 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
 static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
   if (node->expr != NULL) {
     // A case with no expression is used for 'default'.
-    AnalyzeExpression(node->expr);
+    node->expr = AnalyzeExpression(node->expr);
   }
   // Since we don't know the type of the switch controlling expressions here
   // we delay the analysis of the case label statements to the analysis of the
@@ -308,9 +338,9 @@ static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
 }
 
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
-  AnalyzeExpression(node->initializer);
+  node->initializer = AnalyzeExpression(node->initializer);
   if (node->initializer != NULL) {
-    SemanticConvertType(node->initializer, node->symbol->type);
+    NormalConversion(node->initializer, node->symbol->type);
   }
 }
 
@@ -321,57 +351,64 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
   }
 }
 
-void AnalyzeGotoStatement(CombinedStatementASTNode* node) {
-  CompoundStatementASTNode* function_body =
-        (CompoundStatementASTNode*)compiler->current_function->info.function.body;
-  String* label_name = ((ConstantASTNode*)node->cond)->value.string;
-
-  // Look for label matching the goto.
-  // If we find it, set the 'stmt' field of the node to point to it.
-  // In C, labels are global to the whole function.
-  size_t num_statements = function_body->statements->length;
-  ASTNode* label_node = NULL;
-  for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->statements->value.p[i];
-    if (stmt->op == AST_OP(label)) {
-      LabelASTNode* label = (LabelASTNode*)stmt;
-      if (StringEqualString(label_name, &label->name)) {
-        label_node = stmt;
-        break;
-      }
+static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  GotoStatementASTNode* goto_node = data;
+  if (goto_node->label != NULL) {
+    // Already found, nothing to do.
+    return;
+  }
+  if (node->op == AST_OP(label)) {
+    LabelASTNode* label = (LabelASTNode*)node;
+    if (StringEqualString(goto_node->label_name, &label->name)) {
+      goto_node->label = node;
     }
   }
-  if (label_node == NULL) {
-    SemanticError((ASTNode*)node, "Undefined label %s", label_name->value);
+}
+
+void AnalyzeGotoStatement(GotoStatementASTNode* node) {
+  // Look for label matching the goto.
+  // If we find it, set the 'label' field of the node to point to it.  This
+  // does not own the label node.
+  // In C, labels are global to the whole function.
+  ASTNodeVisit(compiler->current_function->info.function.body, FindLabel, 0, node);
+
+  if (node->label == NULL) {
+    SemanticError((ASTNode*)node, "Undefined label %s", node->label_name->value);
   }
-  node->stmt = label_node;
+}
+
+typedef struct {
+  String* label_name;
+  bool found;
+} DuplicateLabelFinder;
+
+static void FindDuplicateLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  DuplicateLabelFinder* finder = data;
+
+  if (node->op == AST_OP(label)) {
+    LabelASTNode* label = (LabelASTNode*)node;
+    if (StringEqualString(finder->label_name, &label->name)) {
+      if (finder->found) {
+        SemanticError(&label->base, "Duplicate label %s",
+                      finder->label_name->value);
+      }
+      finder->found = true;
+    }
+  }
 }
 
 void AnalyzeLabel(LabelASTNode* node) {
-  CompoundStatementASTNode* function_body =
-        (CompoundStatementASTNode*)compiler->current_function->info.function.body;
-  String* label_name = &node->name;
-
-  // Look for another label with same name.
-  size_t num_statements = function_body->statements->length;
-  for (size_t i = 0; i < num_statements; i++) {
-    ASTNode* stmt = (ASTNode*)function_body->statements->value.p[i];
-    if (stmt == (ASTNode*)node) {
-      // Same statement, ignore.
-      continue;
-    }
-    if (stmt->op == AST_OP(label)) {
-      LabelASTNode* label = (LabelASTNode*)stmt;
-      if (StringEqualString(label_name, &label->name)) {
-        SemanticError(stmt, "Duplicate label %s", label_name->value);
-        break;
-      }
-    }
-  }
+  DuplicateLabelFinder finder = {
+    .label_name = &node->name,
+    .found = false,
+  };
+  
+  ASTNodeVisit(compiler->current_function->info.function.body,
+               FindDuplicateLabel, 0, &finder);
 }
 
 void AnalyzeStatement(ASTNode* node) {
-  if (node == NULL) {
+  if (node == NULL || (node->flags & kASTAnalyzed) != 0) {
     return;
   }
 
@@ -410,7 +447,7 @@ void AnalyzeStatement(ASTNode* node) {
       AnalyzeCaseLabel((CaseLabelASTNode*)node);
       break;
     case AST_OP(goto):
-      AnalyzeGotoStatement((CombinedStatementASTNode*)node);
+      AnalyzeGotoStatement((GotoStatementASTNode*)node);
       break;
     case AST_OP(label):
       AnalyzeLabel((LabelASTNode*)node);
@@ -425,4 +462,5 @@ void AnalyzeStatement(ASTNode* node) {
     default:
       assert(false);
   }
+  node->flags |= kASTAnalyzed;
 }

@@ -84,6 +84,18 @@ static void HandlePICRelocation(DynamicLinker* dynamic, Symbol* symbol,
       // Add PLT entry for call to GOT.
       symbol->plt_index = append_to_plt(dynamic, symbol);
       break;
+      
+    case R_PCODE_DATA64: {
+      // This is used for a relocation to a local symbol.
+      // Build a RELATIVE relocation and add it to the data_relocations
+      // in the dynamic linker.
+      Relocation* rel_reloc = NewRelativeRelocation(reloc->offset,
+                                                    reloc->section,
+                                                    R_PCODE_RELATIVE,
+                                                    reloc->addend);
+      VectorAppend(&dynamic->data_relocations, rel_reloc);
+      break;
+    }
   }
 }
 
@@ -225,7 +237,7 @@ static void AddGOTEntry(Linker* linker, Symbol* symbol,
     case kGOTRelocationTLSModuleId:
       reloc_type = R_PCODE_GOT_TLS_MODID;
       break;
-  }
+}
   BufferAppendLongLE(&contents->data.buffered, 0);
   
   // Add relocation.

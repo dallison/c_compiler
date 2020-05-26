@@ -158,6 +158,7 @@ typedef struct  {
 #define R_PCODE_TLS_TP_OFF 19    // TLS Thread pointer offset.
 #define R_PCODE_GOT_TLS_OFFSET 20
 #define R_PCODE_GOT_TLS_MODID 21
+#define R_PCODE_RELATIVE 22
 
 // RISC-V
 #define R_RISCV_NONE 0        // No action.
@@ -235,6 +236,7 @@ typedef struct  {
 #define R_6502_BYTE5 28
 #define R_6502_BYTE6 29
 #define R_6502_BYTE7 30
+#define R_6502_RELATIVE 31
 
 #define ELF_MACHINE_TYPE_PCODE 6500
 #define ELF_MACHINE_TYPE_RISC_V 243

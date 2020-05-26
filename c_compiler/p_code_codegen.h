@@ -67,6 +67,7 @@ typedef enum {
   P_OP(asm),
 
   P_OP(loc),
+  P_OP(named_label),
 
   // End of TargetOpcode enumeration.
 

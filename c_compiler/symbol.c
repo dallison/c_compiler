@@ -22,17 +22,24 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   StringInit(&sym->name, name);
   sym->type = NULL;
   sym->storage = storage;
-  sym->is_defined = false;
-  sym->is_forward_declared = false;
-  sym->is_local = false;
-  sym->is_argument = false;
-  sym->is_temp = false;
-  sym->address_taken = false;
-  sym->used = false;
+  sym->flags.is_defined = false;
+  sym->flags.is_tentative_decl = false;
+  sym->flags.is_forward_declared = false;
+  sym->flags.is_local = false;
+  sym->flags.is_argument = false;
+  sym->flags.is_temp = false;
+  sym->flags.address_taken = false;
+  sym->flags.used = false;
+  sym->flags.invented = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
+  sym->location = 0;
+  sym->usage_info.reads = 0;
+  sym->usage_info.used_as_arg = 0;
+  sym->usage_info.used_in_loop = 0;
   VectorInit(&sym->attributes);
   SymbolSetType(sym, type);
+  sym->die = NULL;
 }
 
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
@@ -54,6 +61,21 @@ void SymbolDelete(Symbol* symbol) {
 
 void SymbolAddAttribute(Symbol* symbol, String* attribute) {
   VectorAppend(&symbol->attributes, attribute);   // Takes ownership.
+}
+
+Symbol* SymbolClone(Symbol* sym) {
+  Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
+  new_sym->flags = sym->flags;
+  new_sym->usage_info = sym->usage_info;
+  new_sym->value = sym->value;
+  new_sym->stack_offset = sym->stack_offset;
+  new_sym->location = sym->location;
+  VectorInit(&new_sym->attributes);
+  for (size_t i = 0; i < sym->attributes.length; i++) {
+    String* attr = sym->attributes.value.p[i];
+    VectorAppend(&new_sym->attributes, NewString(attr->value));
+  }
+  return new_sym;
 }
 
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute) {

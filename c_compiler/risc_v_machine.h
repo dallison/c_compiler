@@ -65,12 +65,15 @@
 
 // Register variables: variables that are in registers rather than being on
 // the stack.
+// We don't want to use all the registers for variables because it will
+// cause more spilling to occur.  Let's keep 2 free for temp usage.
 
+// NOTE: if these are changed, make sure to update the RV opcodes.
 // Max number of int register variables.
-#define RV_MAX_INT_REG_VARS 4
+#define RV_MAX_INT_REG_VARS 8
 
 // Max number of floating point register variables.
-#define RV_MAX_FP_REG_VARS 4
+#define RV_MAX_FP_REG_VARS 8
 
 // First and last register numbers for int register variables.
 #define RV_FIRST_INT_REG_VAR RV_INT_SAVED_START_2
@@ -285,7 +288,7 @@ typedef enum {
   RV_F7(fsub_d) = 0x05,
   RV_F7(fmul_d) = 0x09,
   RV_F7(fdiv_d) = 0x0d,
-  RV_F7(fsqrt_d) = 0x2c,
+  RV_F7(fsqrt_d) = 0x2d,
   RV_F7(fsgnj_d) = 0x11,
   RV_F7(fsgnjn_d) = 0x11,
   RV_F7(fsgnjx_d) = 0x11,
