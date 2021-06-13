@@ -89,6 +89,30 @@ Map* NewMap(MapKeyCompareFunc compare_func) {
   return map;
 }
 
+Map* NewMapForStringKeys(void) {
+  return NewMap(CompareStrings);
+}
+
+Map* NewMapForCharPointerKeys(void) {
+  return NewMap(CompareCharPointers);
+}
+
+Map* NewMapForInt64Keys(void) {
+  return NewMap(CompareMappedInt64s);
+}
+
+Map* NewMapForPointerKeys(void) {
+  return NewMap(CompareMappedPointers);
+}
+
+Map* NewMapForCaseBlindStringKeys(void) {
+  return NewMap(CompareStringsCaseBlind);
+}
+
+Map* NewMapForCaseBlindCharPointerKeys(void) {
+  return NewMap(CompareCharPointersCaseBlind);
+}
+
 void MapDestruct(Map* map) {
   free(map->values);
   map->capacity = 0;
@@ -98,6 +122,18 @@ void MapDestruct(Map* map) {
 void MapDelete(Map* map) {
   MapDestruct(map);
   free(map);
+}
+
+void MapClone(Map* dest, Map* src) {
+  dest->capacity = src->capacity;
+  dest->length = src->length;
+  if (src->values == NULL) {
+    dest->values = NULL;
+  } else {
+    dest->values = malloc(dest->capacity * sizeof(MapKeyValue));
+    memcpy(dest->values, src->values, dest->capacity * sizeof(MapKeyValue));
+  }
+  dest->compare = src->compare;
 }
 
 void MapDestructWithContents(Map* map,
@@ -259,6 +295,17 @@ void* MapFind(Map* map, MapKeyType key) {
   return result->value.p;
 }
 
+MapValueType* MapSearch(Map* map, MapKeyType key) {
+  MapKeyValue key_value;
+  key_value.key = key;
+  MapKeyValue* result = bsearch(&key_value, map->values, map->length,
+                                sizeof(MapKeyValue), map->compare);
+  if (result == NULL) {
+    return NULL;
+  }
+  return &result->value;
+}
+
 void* MapFindPointerKey(Map* map, void* key) {
   MapKeyType k;
   k.p = key;
@@ -284,6 +331,13 @@ void* MapRemove(Map* map, MapKeyType key) {
   void* value = result->value.p;
   Remove(map, result - map->values);
   return value;
+}
+
+void MapCopy(Map* dest, Map* src) {
+  for (size_t i = 0; i < src->length; i++) {
+    MapKeyValue* kv = &src->values[i];
+    MapInsert(dest, *kv);
+  }
 }
 
 void MapPrint(Map* map, void (*printer)(const MapKeyValue* kv)) {

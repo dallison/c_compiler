@@ -74,6 +74,23 @@ static void MakeSpace(Vector* vec) {
   }
 }
 
+void VectorReserve(Vector* vec, size_t n) {
+  if (vec->value.p == NULL) {
+    vec->capacity = n;;
+    vec->value.p = malloc(sizeof(int64_t) * vec->capacity);
+    memset(vec->value.p, 0, sizeof(int64_t) * vec->capacity);
+  }
+
+  if (n <= vec->capacity) {
+    return;
+  }
+  size_t old_capacity = vec->capacity;
+  vec->capacity = n;
+  vec->value.p = realloc(vec->value.p, sizeof(int64_t) * vec->capacity);
+  memset(vec->value.p + old_capacity, 0,
+         (vec->capacity - old_capacity) * sizeof(int64_t));
+}
+
 void VectorAppend(Vector* vec, void* value) {
   MakeSpace(vec);
 
@@ -97,7 +114,7 @@ void* VectorLast(Vector* vec) {
 }
 
 void VectorCopy(Vector* dest, Vector* src) {
-  VectorInit(dest);
+  VectorClear(dest);
   for (size_t i = 0; i < src->length; i++) {
     VectorAppend(dest, src->value.p[i]);
   }
@@ -161,4 +178,12 @@ void VectorDeleteElement(Vector* vec, size_t index) {
   memmove(vec->value.p + index, vec->value.p + index + 1,
           sizeof(int64_t) * elements_to_move);
   vec->length--;
+}
+
+void VectorSortPointers(Vector* vec, int (*compare)(const void*, const void*)) {
+  qsort(vec->value.p, vec->length, sizeof(void*), compare);
+}
+
+void VectorSortInts(Vector* vec, int (*compare)(const void*, const void*)) {
+  qsort(vec->value.w, vec->length, sizeof(int64_t), compare);
 }

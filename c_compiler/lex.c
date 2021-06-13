@@ -704,6 +704,7 @@ bool LexInitFromFile(Lex* lex, const char* filename,
                      Preprocessor* preprocessor) {
   FILE* in = fopen(filename, "r");
   if (in == NULL) {
+    fprintf(stderr, "No such file %s\n", filename);
     return false;
   }
   lex->source = NewSourceFromFile(filename, in);

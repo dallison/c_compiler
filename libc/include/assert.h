@@ -13,10 +13,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #ifndef NDEBUG
-#define assert(e) do { if (!(e)) \
-  { printf("Assertion failed: " #e); abort(); } \
-} while (0)
+#define assert(e)  \
+    ((void) ((e) ? ((void)0) : __assert (#e, __FILE__, __LINE__)))
+#define __assert(e, file, line) \
+    ((void)printf ("%s:%d: failed assertion `%s'\n", file, line, e), abort())
+
 #else
 #define assert(e)
 #endif

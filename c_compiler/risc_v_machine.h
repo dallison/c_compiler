@@ -40,6 +40,11 @@
 #define RV_INT_TEMP_START_2 28
 #define RV_INT_TEMP_END_2 31
 
+// Register reserved for spill address calculation if necessary.
+// This is the Global Pointer register in the ABI that appears
+// not to be needed.
+#define RV_SPILL_ADDR 3
+
 // Floating point return values.
 #define RV_FP_RETURN_VALUE_0 10
 #define RV_FP_RETURN_VALUE_1 11
@@ -65,29 +70,19 @@
 
 // Register variables: variables that are in registers rather than being on
 // the stack.
-// We don't want to use all the registers for variables because it will
-// cause more spilling to occur.  Let's keep 2 free for temp usage.
-
-// NOTE: if these are changed, make sure to update the RV opcodes.
-// Max number of int register variables.
-#define RV_MAX_INT_REG_VARS 8
-
-// Max number of floating point register variables.
-#define RV_MAX_FP_REG_VARS 8
 
 // First and last register numbers for int register variables.
 #define RV_FIRST_INT_REG_VAR RV_INT_SAVED_START_2
-#define RV_LAST_INT_REG_VAR (RV_FIRST_INT_REG_VAR + RV_MAX_INT_REG_VARS)
+#define RV_LAST_INT_REG_VAR RV_INT_SAVED_END_2
 
 #define RV_FIRST_LEAF_INT_REG_VAR RV_INT_TEMP_START_2
-#define RV_LAST_LEAF_INT_REG_VAR \
-  (RV_FIRST_LEAF_INT_REG_VAR + RV_MAX_INT_REG_VARS)
+#define RV_LAST_LEAF_INT_REG_VAR RV_INT_TEMP_END_2
 
 // First and last register numbers for floating point register variables.
 #define RV_FIRST_FP_REG_VAR RV_FP_SAVED_START_2
-#define RV_LAST_FP_REG_VAR (RV_FIRST_FP_REG_VAR + RV_MAX_FP_REG_VARS)
+#define RV_LAST_FP_REG_VAR RV_FP_SAVED_END_2
 #define RV_FIRST_LEAF_FP_REG_VAR RV_FP_TEMP_START_2
-#define RV_LAST_LEAF_FP_REG_VAR (RV_FIRST_LEAF_FP_REG_VAR + RV_MAX_FP_REG_VARS)
+#define RV_LAST_LEAF_FP_REG_VAR RV_FP_TEMP_END_2
 
 // Instruction encodings.
 

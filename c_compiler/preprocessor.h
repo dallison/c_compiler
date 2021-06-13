@@ -64,7 +64,7 @@ Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name);
 
 bool PreprocessorLineIsCompiledIn(Preprocessor* p);
 
-void PreprocessorPrintStats(Preprocessor* p);
+void PreprocessorPrintStats(Preprocessor* p, FILE* fp);
 
 void PreprocessorDefineArchitectureMacros(Preprocessor* p);
 

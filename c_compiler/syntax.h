@@ -17,6 +17,7 @@
 #include "lex.h"
 #include "symbol_table.h"
 #include "vector.h"
+#include "parser_context.h"
 
 extern jmp_buf error_abort_state;       // Where to abort to.
 extern bool abort_on_error;
@@ -36,6 +37,8 @@ typedef struct Syntax {
                              // vector).
   Vector local_statics;      // All local statics defined in function.
   Vector all_symbols;        // All symbols (needed by assembler).
+  
+  ParserContext context;     // Parser context.
 } Syntax;
 
 // Token classes allow us to recover from syntax errors by

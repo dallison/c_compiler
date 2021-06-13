@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #include "dstring.h"
 
@@ -96,6 +97,6 @@ void HashTableTraverse(HashTable* table, void (*func)(void* entry, void* data),
 void HashTableCopy(HashTable* to, HashTable* from,
                    void* (*copy_func)(void* entry));
 
-void HashTablePrintStats(HashTable* table);
+void HashTablePrintStats(HashTable* table, FILE* fp);
 
 #endif /* hashtable_h */

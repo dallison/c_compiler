@@ -7,6 +7,7 @@
 //
 
 #include "loader.h"
+#include "loader_dynamic.h"
 
 #ifndef loader_arch_h
 #define loader_arch_h

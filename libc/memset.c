@@ -20,7 +20,7 @@ void *memset(void *s, int c, size_t n) {
   if (n64 > 0) {
     uint64_t c64 = 0;
     for (int i = 0; i < 8; i++) {
-      c64 |= (c * 0xff) << (i * 8);
+      c64 |= (c & 0xff) << (i * 8);
     }
     uint64_t* wp = p;
     while (n64-- > 0) {
@@ -34,7 +34,7 @@ void *memset(void *s, int c, size_t n) {
   if (n32 > 0) {
     uint32_t c32 = 0;
     for (int i = 0; i < 4; i++) {
-      c32 |= (c * 0xff) << (i * 8);
+      c32 |= (c & 0xff) << (i * 8);
     }
     uint32_t* wp = p;
     while (n32-- > 0) {
@@ -48,7 +48,7 @@ void *memset(void *s, int c, size_t n) {
   if (n16 > 0) {
     uint16_t c16 = 0;
     for (int i = 0; i < 2; i++) {
-      c16 |= (c * 0xff) << (i * 8);
+      c16 |= (c & 0xff) << (i * 8);
     }
     uint16_t* wp = p;
     while (n16-- > 0) {

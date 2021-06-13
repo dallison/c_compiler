@@ -12,6 +12,8 @@
 // 6502 Runtime
 // -------------
 //
+// THIS IS OUT OF DATE
+//
 // Zero page is used to hold sets of registers:
 // Single byte registers: 8 bits
 // 0x00: b0
@@ -19,19 +21,19 @@
 // 0x02: b2
 // 0x03: b3
 
-// Address registers: 16 bits
-// 0x04/0x04: a0
-// 0x06/0x07: a1
-// 0x08/0x09: a2
-// 0x0a/0x0b: a3
+// Integer/address registers: 16 bits
+// 0x04/0x04: i0
+// 0x06/0x07: i1
+// 0x08/0x09: i2
+// 0x0a/0x0b: i3
 //
-// Integer registers: 32 bits
-// 0x0c..0x0f: i0
-// 0x19..0x13: i1
-// 0x14..0x17: i2
-// 0x18..0x1f: i3
+// Long registers: 32 bits
+// 0x0c..0x0f: l0
+// 0x19..0x13: l1
+// 0x14..0x17: l2
+// 0x18..0x1f: l3
 //
-// Long registers: 64 bits
+// Long long registers: 64 bits
 // 0x20..0x27: x0
 // 0x28..0x2f: x1
 // 0x30..0x37: x2
@@ -49,20 +51,24 @@
 // 0x60..0x67: d2
 // 0x68..0x6f: d3
 //
-// Argument pointer: 16 bits - address of arguments to function.
-// 0x70/0x71: ap
-//
 // Stack pointer: 16 bits - address of top of stack.
-// 0x72/0x73: sp
+// 0x70/0x71: sp
 //
 // Frame pointer: 16 bits - address of bottom of stack frame.
-// 0x74/0x75: fp
+// 0x72/0x73: fp
 //
+// Result address register:
+// 0x74/0x75: result
+
 // Temp registers.
-// 0x76,0x77: 16-bit temp
-// 0x78..0x7b: 32-bit temp
-// 0x7c..0x83: 65-bit temp
+// 0x76: t0
+// 0x77: t1
 //
+// For memory pushes to stack
+// 0x78, 0x79: mem_src
+// 0x7a, 0x7b: mem_dest
+// 0x7c, 0x7d: mem_size;
+
 // Page 1 contains the 6502 processor stack.
 //
 // The program load address is 0x400 (1K) and extends up to the 48K boundary
@@ -73,51 +79,30 @@
 // starts just above the end of the program and extends up to the
 // stack.  When they collide we are out of memory.
 
-#define _6502_NUM_B_REGS 4
-#define _6502_NUM_A_REGS 4
-#define _6502_NUM_I_REGS 4
+#define _6502_NUM_B_REGS 8
+#define _6502_NUM_I_REGS 16
+#define _6502_NUM_L_REGS 8
 #define _6502_NUM_X_REGS 4
 #define _6502_NUM_F_REGS 4
 #define _6502_NUM_D_REGS 4
 
 #define _6502_B_REG_START 0
-#define _6502_A_REG_START (_6502_B_REG_START + _6502_NUM_B_REGS)
-#define _6502_I_REG_START (_6502_A_REG_START + _6502_NUM_A_REGS)
-#define _6502_X_REG_START (_6502_I_REG_START + _6502_NUM_I_REGS)
-#define _6502_F_REG_START (_6502_X_REG_START + _6502_NUM_X_REGS)
-#define _6502_D_REG_START (_6502_F_REG_START + _6502_NUM_F_REGS)
+#define _6502_I_REG_START (_6502_B_REG_START + _6502_NUM_B_REGS)
+#define _6502_L_REG_START (_6502_I_REG_START + _6502_NUM_I_REGS*2)
+#define _6502_X_REG_START (_6502_I_REG_START + _6502_NUM_I_REGS*4)
+#define _6502_F_REG_START (_6502_X_REG_START + _6502_NUM_X_REGS*8)
+#define _6502_D_REG_START (_6502_F_REG_START + _6502_NUM_F_REGS*4)
 
-#define _6502_AP_REG (_6502_D_REG_START + _6502_NUM_D_REGS)
-#define _6502_SP_REG (_6502_AP_REG + 2)
+#define _6502_SP_REG (_6502_D_REG_START + _6502_NUM_D_REGS*8)
 #define _6502_FP_REG (_6502_SP_REG + 2)
-#define _6502_T2_REG (_6502_FP_REG + 2)
-#define _6502_T4_REG (_6502_T2_REG + 2)
-#define _6502_T8_REG (_6502_T4_REG + 4)
-
-// Register save mask.  This is a 16-bit word held in memory immediately
-// after a JSR __call or JSR __rts instruction.  It has a bit for
-// every register that needs to be saved or restored. Because we only have
-// 16 bits there are enough bits to specify each register individually
-// so the b registers are saved or restored as a whole.  They are only
-// one byte each to it's only 3 bytes need to be saved.
-//
-// There are 3 registers for each type in the order:
-// 0: all of b1 to b3
-// 1..3: a
-// 4..6: i
-// 7..9: x
-// 10..12: f
-// 13..15: d
-// These are the opcodes for the 6502 instructions.  They are used
-// by the assembler and the interpreter.
-
-// These are the start bit positions for the registers in the mask.
-#define _6502_RMASK_B 0
-#define _6502_RMASK_A 1
-#define _6502_RMASK_I 4
-#define _6502_RMASK_X 7
-#define _6502_RMASK_F 10
-#define _6502_RMASK_D 13
+#define _6502_RESULT_REG (_6502_FP_REG + 2)
+#define _6502_T0_REG (_6502_RESULT_REG + 2)
+#define _6502_T1_REG (_6502_T0_REG + 1)
+#define _6502_T2_REG (_6502_T1_REG + 1)
+#define _6502_T3_REG (_6502_T2_REG + 1)
+#define _6502_MSRC_REG (_6502_T3_REG + 1)
+#define _6502_MDST_REG (_6502_MSRC_REG + 2)
+#define _6502_MSZ_REG (_6502_MDST_REG + 2)
 
 
 // The opcodes are in the first byte.  Most of them fall into the form
@@ -196,7 +181,7 @@ typedef enum {
   _6502_OPCODE(txs) = 0x9a,
   _6502_OPCODE(tax) = 0xaa,
   _6502_OPCODE(tsx) = 0xba,
-  _6502_OPCODE(dex) = 0xce,
+  _6502_OPCODE(dex) = 0xca,
   _6502_OPCODE(nop) = 0xea,
   
   // 65C02
@@ -226,6 +211,7 @@ typedef enum {
   _6502_ADDR_MODE(10, zp) = 1,
   _6502_ADDR_MODE(10, acc) = 2,
   _6502_ADDR_MODE(10, abs) = 3,
+  _6502_ADDR_MODE(10, zpi) = 4,
   _6502_ADDR_MODE(10, zpx) = 5,
   _6502_ADDR_MODE(10, absx) = 7,
 
@@ -235,6 +221,7 @@ typedef enum {
   _6502_ADDR_MODE(00, abs) = 3,
   _6502_ADDR_MODE(00, zpx) = 5,
   _6502_ADDR_MODE(00, absx) = 7,
+  _6502_ADDR_MODE(00, bit) = 9,
 } _6502AddrMode;
 
 

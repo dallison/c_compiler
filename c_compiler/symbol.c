@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "dstring.h"
+#include "compiler.h"
 
 bool StorageIs(Storage storage, Storage value) {
   return (storage & value) != 0;
@@ -31,12 +32,14 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.address_taken = false;
   sym->flags.used = false;
   sym->flags.invented = false;
+  sym->flags.is_inline_defn = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
   sym->usage_info.used_in_loop = 0;
+  sym->id = compiler->next_symbol_id++;
   VectorInit(&sym->attributes);
   SymbolSetType(sym, type);
   sym->die = NULL;
@@ -98,7 +101,7 @@ static const char* storages[] = {
   "__thread ",
 };
 
-void SymbolPrintDetails(Symbol* sym, bool with_function_body) {
+void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp) {
   String storage;
   StringInit(&storage, "");
   for (int i = 0; i < 32; i++) {
@@ -107,12 +110,12 @@ void SymbolPrintDetails(Symbol* sym, bool with_function_body) {
     }
   }
  
-  printf("%s: %s", sym->name.value, storage.value);
-  TypeRecordPrintDetails(sym->type, with_function_body);
+  fprintf(fp, "%s: %s", sym->name.value, storage.value);
+  TypeRecordPrintDetails(sym->type, with_function_body, fp);
   StringDestruct(&storage);
 }
 
-void SymbolPrint(Symbol* sym) { SymbolPrintDetails(sym, false); }
+void SymbolPrint(Symbol* sym, FILE* fp) { SymbolPrintDetails(sym, false, fp); }
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type) {
   if (symbol->type == type) {

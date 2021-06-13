@@ -15,35 +15,13 @@
 #include "risc_v_emitter.h"
 #include "6502_machine.h"
 
-// Branches and labels.
-// -------------------
-// The assembler has to take care of branches that are out of range.
-// The 6502 branch instructions have only a signed 128-bit offset, giving
-// a possibility of 0x7f bytes forward or backward from the PC.
-// If the branch offset is bigger than than, we have to use a branch
-// over a JMP instruction.
-//
-// We keep maps of all branches and all labels.  The branches map is
-// keyed by a SourceLocation and contains an entry for each branch
-// instruction.  A branch refers to a label but we might not know
-// what the label is (which Label*) it refers to when the Branch
-// is created.
-//
-// For each label, we keep a map of label name vs struct Label.  The
-// Label contains the name of the label (again) and a vector of pointers
-// to Branch structs that use this label.
-
-typedef enum {
-  kBranchShort,     // Short, 2-byte branch.
-  kBranchLong,      // Long, 5-byte branch,
-} BranchType;
 
 typedef struct {
   _6502OpcodeValue opcode;    // BEQ, BCS, etc.
-  BranchType type;            // Short or long.
   String label_name;          // Label name branched to.
   struct Label* label;        // Resolved Label.
   int64_t address;
+  SourceLocation location;
 } Branch;
 
 typedef struct Label {
@@ -65,6 +43,7 @@ typedef struct {
 
 bool _6502AssemblerInit(_6502Assembler* assembler, String* infile, String* outfile);
 _6502Assembler* New6502Assembler(String* infile, String* outfile);
+void _6502AssemblerFinalize(_6502Assembler* assembler);
 void _6502AssemblerDestruct(_6502Assembler* assembler);
 void _6502AssemblerDelete(_6502Assembler* assembler);
 void Assemble6502Instruction(Assembler* assembler, String* word);

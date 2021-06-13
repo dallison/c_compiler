@@ -26,10 +26,16 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
   if (compiler->debug_output) {
     VectorAppend(statements, SyntaxNewPCLabel(location));
   }
-  // Parse the sequence of statements, adding them to the vector.
+  // Parse the sequence of statements or declarations, adding them to the vector.
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(rbrace))) {
     if (!LexMatch(lex, TOK(semicolon))) {
-      ASTNode* stmt = SyntaxParseStatement(syntax, followers | TC(closebrace));
+      ASTNode* stmt;
+      if (SyntaxLookingAtDeclaration(syntax)) {
+        // Declaration.
+        stmt = SyntaxParseLocalDeclaration(syntax);
+      } else {
+        stmt = SyntaxParseStatement(syntax, followers | TC(closebrace));
+      }
       if (stmt != NULL) {
         VectorAppend(statements, stmt);
       }
@@ -194,7 +200,19 @@ static ASTNode* ParseCaseStatement(Syntax* syntax, TokenClass followers,
   if (!LexMatch(syntax->lex, TOK(colon))) {
     SyntaxError(syntax, "Missing colon after case");
   }
-  return NewCaseLabelASTNode(expr, location);
+  // We don't want to create a deep tree of case statements for the common
+  // code sequence:
+  // case a:
+  // case b:
+  // ...
+  // case c:
+  //
+  ASTNode* stmt = NULL;
+  if (!LexLookingAt(syntax->lex, TOK(case)) &&
+      !LexLookingAt(syntax->lex, TOK(default))) {
+    stmt = SyntaxParseStatement(syntax, followers);
+  }
+  return NewCaseLabelASTNode(expr, stmt, location);
 }
 
 static ASTNode* ParseDefaultStatement(Syntax* syntax, TokenClass followers,
@@ -205,7 +223,8 @@ static ASTNode* ParseDefaultStatement(Syntax* syntax, TokenClass followers,
   if (!LexMatch(syntax->lex, TOK(colon))) {
     SyntaxError(syntax, "Missing colon after default");
   }
-  return NewCaseLabelASTNode(NULL, location);
+  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  return NewCaseLabelASTNode(NULL, stmt, location);
 }
 
 static ASTNode* ParseReturnStatement(Syntax* syntax, TokenClass followers,
@@ -290,31 +309,30 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     }
   }
   if (!found) {
-    if (SyntaxLookingAtDeclaration(syntax)) {
-      // Variable declaration.
-      stmt = SyntaxParseLocalDeclaration(syntax);
-      need_semicolon = false;
-    } else {
-      // Expression or label statement.
-      if (LexLookingAt(lex, TOK(identifier))) {
-        // This will skip forward to the next non-space or non-comment
-        // but will not change the current token.
-        LexSkipSpacesAndComments(lex);
-        if (lex->line.value[lex->pos] == ':') {
-          stmt = NewLabelASTNode(lex->spelling.value, false,
-                                 syntax->lex->current_token_location);
-          LexNextToken(lex);  // Consume label name.
-          LexNextToken(lex);  // Consume colon.
-          need_semicolon = false;
-        } else {
-          ASTNode* expr = SyntaxParseExpression(syntax, followers);
-          stmt = NewExpressionStatementASTNode(expr, location);
-        }
+    // Expression or label statement.
+    if (LexLookingAt(lex, TOK(identifier))) {
+      // This will skip forward to the next non-space or non-comment
+      // but will not change the current token.
+      LexSkipSpacesAndComments(lex);
+      if (lex->line.value[lex->pos] == ':') {
+        String label_name;
+        StringInit(&label_name, lex->spelling.value);
+        LexNextToken(lex);  // Consume label name.
+        LexNextToken(lex);  // Consume colon.
+        ASTNode* label_stmt = SyntaxParseStatement(syntax, followers);
+        stmt = NewLabelASTNode(label_name.value, label_stmt, false,
+                               syntax->lex->current_token_location);
+        need_semicolon = false;
+        StringDestruct(&label_name);
       } else {
         ASTNode* expr = SyntaxParseExpression(syntax, followers);
         stmt = NewExpressionStatementASTNode(expr, location);
       }
+    } else {
+      ASTNode* expr = SyntaxParseExpression(syntax, followers);
+      stmt = NewExpressionStatementASTNode(expr, location);
     }
+    
   }
 
   if (need_semicolon) {

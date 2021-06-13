@@ -161,6 +161,7 @@ const char* DW_TAGString(DW_TAG tag) {
       return "DW_TAG_hi_user";
   }
   assert(false);
+  return "unknown";
 }
 
 const char* DW_FORMString(DW_FORM form) {
@@ -255,6 +256,7 @@ const char* DW_FORMString(DW_FORM form) {
       break;
   }
   assert(false);
+  return "unknown";
 }
 
 const char* DW_ATString(DW_AT at) {
@@ -510,6 +512,7 @@ const char* DW_ATString(DW_AT at) {
       return "DW_AT_hi_user";
   }
   assert(false);
+  return "unknown";
 }
 
 const char* DW_OPString(DW_OP op) {
@@ -849,6 +852,7 @@ const char* DW_OPString(DW_OP op) {
       return "DW_OP_hi_user";
   }
   assert(false);
+  return "unknown";
 }
 
 const char* DW_ATEString(DW_ATE ate) {

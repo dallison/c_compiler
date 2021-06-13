@@ -12,6 +12,8 @@
 #include "compiler.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
+#include "bitset.h"
+#include "errors.h"
 
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
@@ -100,8 +102,7 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
        SemanticError(switch_node->expr,
                      "Case labels must be constant integral expressions");
      }
-
-     // Calculate min, max and density.
+    // Calculate min, max and density.
      if (case_node->value < switch_node->min_case_value) {
        switch_node->min_case_value = case_node->value;
      }
@@ -112,6 +113,64 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
    }
 }
 
+static void AnalyzeEnumSwitch(SwitchStatementASTNode* node) {
+  BitSet enum_constants = {0};
+  BitSet found_constants = {0};
+  Enum* info = node->expr->type->info.enum_info;
+  assert(info != NULL);
+  for (size_t i = 0; i < info->constants.length; i++) {
+    Symbol* ec = info->constants.value.p[i];
+    BitSetInsert(&enum_constants, ec->value.ivalue);
+  }
+  
+  // Go through all the cases and make sure they are in the enum_constants.
+  size_t num_cases = node->cases.length;
+  for (size_t i = 0; i < num_cases; i++) {
+    int64_t case_value = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
+     if (BitSetContains(&enum_constants, case_value)) {
+       BitSetInsert(&found_constants, case_value);
+     } else {
+       SemanticWarning(&node->base, "switch-bad-case",
+                       "Case value %lld is not valid for enumeration %s",
+                       case_value, info->tag_name->value);
+     }
+  }
+  
+  // Now check that we have included all the constants as cases.
+  Vector missing_constants = {0};
+  for (size_t i = 0; i < info->constants.length; i++) {
+    Symbol* ec = info->constants.value.p[i];
+    if (!BitSetContains(&found_constants,  ec->value.ivalue)) {
+      VectorAppend(&missing_constants, ec);
+    }
+  }
+  if (node->default_node == NULL && missing_constants.length > 0) {
+    if (missing_constants.length > 4) {
+      Symbol* ec = missing_constants.value.p[0];
+      SemanticWarning(&node->base, "missing-switch-enum",
+                      "Enum constant %s and %lld others are not present in switch statement",
+                      ec->name.value, missing_constants.length - 1);
+
+    } else {
+      for (size_t i = 0; i < missing_constants.length; i++) {
+        Symbol* ec = missing_constants.value.p[i];
+        SemanticWarning(&node->base, "missing-switch-enum",
+                        "Enum constant %s is not present in switch statement",
+                        ec->name.value);
+      }
+    }
+  } else {
+    if (node->default_node == NULL) {
+      // All cases covered.
+      node->all_cases_covered = true;
+    }
+  }
+  
+  VectorDestruct(&missing_constants);
+  BitSetDestruct(&enum_constants);
+  BitSetDestruct(&found_constants);
+}
+  
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   AnalyzeStatement(node->stmt);
@@ -130,7 +189,7 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
     .switch_node = node,
     .switch_level = 0,
   };
-  
+    
   // Visit the switch statement and all its children, collecting
   // case and defaults.
   ASTNodeVisit(&node->base, ResolveSwitchStatement, 0, &resolver);
@@ -168,6 +227,13 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
                     "Duplicate case value %d; previous is at %s:%d",
                     case_value2, filename, lineno);
     }
+  }
+  
+  // If the switch is on enumerated type we need to validate that the
+  // cases are part of the enumeration and set the all_cases_covered
+  // flag if we have all the valid enumeration constants.
+  if (TypeIsEnum(node->expr->type)) {
+    AnalyzeEnumSwitch(node);
   }
 }
 
@@ -231,6 +297,7 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
   snprintf(tail_label_name, sizeof(tail_label_name), "__tail_label_%d",
           tail_label_num++);
   LabelASTNode* label = (LabelASTNode*)NewLabelASTNode(tail_label_name,
+                                                       NULL,
                                                        false,
                                                        location);
   CompoundASTNodeInsertStatement(function_body, (ASTNode*)label, 0);
@@ -314,9 +381,22 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     }
   }
   
+  // Returns a struct.  If this is a call node it might be subject
+  // to RVO.
+  if (compiler->optimize) {
+    if (TypeIsStructOrUnion(compiler->current_function->next)) {
+      if (return_value->op == AST_OP(call)) {
+        return_value->flags |= kASTRvoCall;
+      } else if (return_value->op == AST_OP(identifier)) {
+        return_value->flags |= kASTNrvoMarker;
+      }
+    }
+  }
+  
   // Check for tail recursion.  This is a direct call to the current
   // function.
-  if (return_value != NULL && return_value->op == AST_OP(call)) {
+  if (OptLevel2() && return_value != NULL &&
+      return_value->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)return_value;
     if (call->left->op == AST_OP(identifier)) {
       IdentifierASTNode* id_node = (IdentifierASTNode*)call->left;
@@ -328,9 +408,15 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
 }
 
 static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
+  if (node->base.id == 4368) {
+    printf("");
+  }
   if (node->expr != NULL) {
     // A case with no expression is used for 'default'.
     node->expr = AnalyzeExpression(node->expr);
+  }
+  if (node->stmt != NULL) {
+    AnalyzeStatement(node->stmt);
   }
   // Since we don't know the type of the switch controlling expressions here
   // we delay the analysis of the case label statements to the analysis of the
@@ -353,6 +439,9 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
 
 static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   GotoStatementASTNode* goto_node = data;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
   if (goto_node->label != NULL) {
     // Already found, nothing to do.
     return;
@@ -365,6 +454,162 @@ static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode)
   }
 }
 
+static bool ContainsVLA(ASTNode* node) {
+  if (node->op != AST_OP(decl_list)) {
+    return false;
+  }
+  DeclarationListASTNode* decl_list = (DeclarationListASTNode*)node;
+  for (size_t j = 0; j < decl_list->declarations->length; j++) {
+     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[j];
+     if (TypeIsVLA(decl->base.type)) {
+       return true;
+     }
+  }
+  return false;
+}
+
+static void GetVLAs(DeclarationListASTNode* decl_list, Vector* vlas) {
+  for (size_t i = 0; i < decl_list->declarations->length; i++) {
+     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[i];
+     if (TypeIsVLA(decl->base.type)) {
+       VectorAppend(vlas, decl);
+     }
+  }
+}
+
+static void ReportJumpError(ASTNode* jump, ASTNode* label,
+                            Vector* bypassed_vlas) {
+  SemanticError(jump, "Goto cannot jump to this label as it "
+                "would bypass a variable length array definition");
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(label->location, &filename, &lineno, &start, &end);
+  ReportNote(filename, lineno, "Label is here");
+  
+  for (size_t i = 0; i < bypassed_vlas->length; i++) {
+    VariableDeclarationASTNode* decl = bypassed_vlas->value.p[i];
+    DecodeSourceLocation(decl->base.location, &filename, &lineno, &start, &end);
+    ReportNote(filename, lineno,
+               "Variable length array '%s' is bypassed",
+               decl->symbol->name.value);
+  }
+}
+
+// Check a goto.
+//
+// Find the Lowest Common Ancestor (LCA) of the label and the jump.
+// This is the AST closest AST node that has both as descendants.
+//
+// Build two vectors of AST nodes, one from the label to the
+// and one from the jump to the root.
+//
+// At some point there will be a sequence of AST nodes that are the
+// same.  The first of these is a Lowest Common Ancestor.  That's
+// where the two tree branches converge.  This will be a compound
+// statement and both branches will emerge from there.
+//
+// We need to verify that the jump from the goto to the label doesn't
+// go past the definition of a variable length array because those
+// decrement the stack pointer when they are allocated.
+//
+// In the LCA we go through the statements in the block starting at
+// the branch containing the jump until we reach the branch containing
+// the label.  If we see any VLA definitions between the two we have jumped
+// over the VLA definition.
+//
+// If we reach the end of the block there isn't a branch to the label after
+// the goto so this is a backward branch.  They can't jump over a VLA.
+//
+// We then need to look inside the branch
+// containing the label.  In each AST node, if it's a compound statement
+// we look for VLA decls before we reach the label's branch.
+
+
+static void CheckGoto(ASTNode* label, ASTNode* jump, GotoStatementASTNode* g) {
+  Vector label_path = {0};
+  Vector jump_path = {0};
+  ASTNode* node = label;
+  while (node != NULL) {
+    VectorAppend(&label_path, node);
+    node = node->parent;
+  }
+  node = jump;
+  while (node != NULL) {
+    VectorAppend(&jump_path, node);
+    node = node->parent;
+  }
+#if 0
+  // Debugging, enable to see vectors.
+  printf("label: ");
+  for (size_t i = 0; i < label_path.length; i++) {
+    printf("%d ", ((ASTNode*)label_path.value.p[i])->id);
+  }
+  printf("\njump: ");
+  for (size_t i = 0; i < jump_path.length; i++) {
+    printf("%d ", ((ASTNode*)jump_path.value.p[i])->id);
+  }
+  printf("\n");
+#endif
+  ASTNode* lca = NULL;
+  // Go from end of the vectors (root of tree) and find the last common
+  // node.
+  int label_index = (int)label_path.length - 1;
+  int jump_index = (int)jump_path.length - 1;
+
+  // Find Lowest Common Ancestor of jump and label.
+  while (label_index >= 0 && jump_index >= 0) {
+    if (label_path.value.p[label_index] != jump_path.value.p[jump_index]) {
+      lca = label_path.value.p[label_index+1];
+      break;
+    }
+    label_index--;
+    jump_index--;
+  }
+  assert(lca != NULL);
+  g->lca = lca;
+  
+  // We have the LCA.  Start from the jump's branch forward.
+  ASTNode* jump_branch = jump_path.value.p[jump_index];
+  ASTNode* label_branch = label_path.value.p[label_index];
+  assert(lca->op == AST_OP(compound));
+  
+  // Look in LCA.
+  CompoundStatementASTNode* c = (CompoundStatementASTNode*)lca;
+  Vector vlas = {0};
+  for (size_t i = jump_branch->child_id + 1; i < label_branch->child_id; i++) {
+    ASTNode* stmt = c->statements->value.p[i];
+    if (ContainsVLA(stmt)) {
+      GetVLAs((DeclarationListASTNode*)stmt, &vlas);
+    }
+  }
+  // Now we look down the tree at all blocks parenting the label's
+  // block.  In each one we traverse the statments until we find the
+  // branch for the next label index and look for a VLA.
+  for (size_t i = label_index; i > 0; i--) {
+    ASTNode* block = label_path.value.p[i];
+    label_branch = label_path.value.p[i-1];
+    if (block->op == AST_OP(compound)) {
+      CompoundStatementASTNode* c = (CompoundStatementASTNode*)block;
+      for (size_t j = 0; j < label_branch->child_id; j++) {
+        ASTNode* stmt = c->statements->value.p[j];
+        if (ContainsVLA(stmt)) {
+          GetVLAs((DeclarationListASTNode*)stmt, &vlas);
+        }
+      }
+    }
+  }
+  
+  if (vlas.length != 0) {
+    ReportJumpError(jump, label, &vlas);
+  }
+
+  VectorDestruct(&vlas);
+  VectorDestruct(&label_path);
+  VectorDestruct(&jump_path);
+}
+
+
 void AnalyzeGotoStatement(GotoStatementASTNode* node) {
   // Look for label matching the goto.
   // If we find it, set the 'label' field of the node to point to it.  This
@@ -373,9 +618,12 @@ void AnalyzeGotoStatement(GotoStatementASTNode* node) {
   ASTNodeVisit(compiler->current_function->info.function.body, FindLabel, 0, node);
 
   if (node->label == NULL) {
-    SemanticError((ASTNode*)node, "Undefined label %s", node->label_name->value);
+    SemanticError((ASTNode*)node, "Undefined label '%s'", node->label_name->value);
+  } else {
+    CheckGoto(node->label, &node->base, node);
   }
 }
+
 
 typedef struct {
   String* label_name;
@@ -385,11 +633,14 @@ typedef struct {
 static void FindDuplicateLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   DuplicateLabelFinder* finder = data;
 
+  if (mode != kVisitPreChildren) {
+    return;
+  }
   if (node->op == AST_OP(label)) {
     LabelASTNode* label = (LabelASTNode*)node;
     if (StringEqualString(finder->label_name, &label->name)) {
       if (finder->found) {
-        SemanticError(&label->base, "Duplicate label %s",
+        SemanticError(&label->base, "Duplicate label '%s'",
                       finder->label_name->value);
       }
       finder->found = true;
@@ -405,6 +656,9 @@ void AnalyzeLabel(LabelASTNode* node) {
   
   ASTNodeVisit(compiler->current_function->info.function.body,
                FindDuplicateLabel, 0, &finder);
+  if (node->stmt != NULL) {
+    AnalyzeStatement(node->stmt);
+  }
 }
 
 void AnalyzeStatement(ASTNode* node) {

@@ -263,8 +263,163 @@ static TargetInstruction* ArgumentPointer(PCodeGenerator* pcode) {
   return pcode->argument_pointer;
 }
 
+static bool PCodeIsBranch(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case P_OP(bra):
+  case P_OP(bz):
+  case P_OP(bnz):
+  case P_OP(jmp):      // Jump to address.
+  case P_OP(cjmp):     // Jump to contents of address.
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool PCodeIsCall(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case P_OP(call):
+  case P_OP(callf):
+  case P_OP(calld):
+  case P_OP(rcall):
+  case P_OP(rcallf):
+  case P_OP(rcalld):
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool PCodeIsReturn(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)P_OP(ret);
+}
+
+static bool PCodeIsSpill(TargetInstruction* inst) {
+  return false;
+}
+
+static bool PCodeIsLabel(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)P_OP(label);
+
+}
+
+static bool PCodeIsFloatingPoint(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case  P_OP(constf):
+  case  P_OP(constd):
+  case P_OP(movf):
+  case P_OP(movd):
+  case P_OP(rmovf):
+  case P_OP(rmovd):
+  case P_OP(resultf):
+  case P_OP(resultd):
+  case P_OP(pushf):
+  case P_OP(pushd):
+  case P_OP(popf):
+  case P_OP(popd):
+  case P_OP(ldf):
+  case P_OP(ldd):
+  case P_OP(stf):
+  case P_OP(std):
+  case P_OP(addf):
+  case P_OP(addd):
+  case P_OP(subf):
+  case P_OP(subd):
+  case P_OP(mulf):
+  case P_OP(muld):
+  case P_OP(divf):
+  case P_OP(divd):
+  case P_OP(negf):
+  case P_OP(negd):
+    case P_OP(i2f):     // int to float.
+    case  P_OP(i2d):     // int to double.
+    case  P_OP(ui2f):     // unsigned int to float.
+    case  P_OP(ui2d):     // unsigned int to double.
+    case  P_OP(f2d):     // float to double.
+    case  P_OP(d2f):      // double to float.
+    case P_OP(callf):
+    case P_OP(calld):
+    case P_OP(rcallf):
+    case P_OP(rcalld):
+      return true;
+  default:
+    return false;
+  }
+}
+static bool PCodeIsConditionalBranch(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case P_OP(bnz):
+  case P_OP(bz):
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool PCodeIsFixedRegister(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case P_OP(call):
+  case P_OP(callf):
+  case P_OP(calld):
+  case P_OP(rcall):
+  case P_OP(rcallf):
+  case P_OP(rcalld):
+    return true;
+  default:
+    return false;
+  }
+}
+static bool PCodeIsConst(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+    case P_OP(constb):
+    case  P_OP(consth):
+    case  P_OP(constw):
+    case  P_OP(constx):
+    case  P_OP(constf):
+    case  P_OP(constd):
+
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool PCodeIsSymbol(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
+  case P_OP(symbol):
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool PCodeIsJumpTableEntry(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)P_OP(bra);
+}
+
+static TargetInstruction* PCodeGetBranchTarget(TargetInstruction* inst) {
+  return inst->operand[1];
+}
+
+static TargetVirtuals virtuals = {
+  .opcode_name = PCodeOpcodeName,
+  .is_branch = PCodeIsBranch,
+  .is_call = PCodeIsCall,
+  .is_return = PCodeIsReturn,
+  .is_spill = PCodeIsSpill,
+  .is_label = PCodeIsLabel,
+  .is_floating_point = PCodeIsFloatingPoint,
+  .is_conditional_branch = PCodeIsConditionalBranch,
+  .is_fixed_register = PCodeIsFixedRegister,
+  .is_const = PCodeIsConst,
+  .is_symbol = PCodeIsSymbol,
+  .is_expression = PCodeIsExpression,
+  .is_table_entry = PCodeIsJumpTableEntry,
+  .get_branch_target = PCodeGetBranchTarget,
+};
+
 void PCodeGeneratorInit(PCodeGenerator* pcode, Generator* gen) {
-  TargetGeneratorInit(&pcode->base, gen);
+  TargetGeneratorInit(&pcode->base, gen, &virtuals);
 
   pcode->argument_pointer = NULL;
   PCodeRegisterAllocatorInit(&pcode->register_allocator, pcode);
@@ -724,6 +879,7 @@ static PCodeOpcode IR2PCode(IROpcode op, bool is_unsigned) {
       return P_OP(tmp);
     default:
       assert(false);
+      return false;
   }
 }
 
@@ -915,7 +1071,7 @@ static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
       inst->operand[i] = Materialize(pcode, input);
     }
   }
-  TargetUpdateRefCount(inst);
+  TargetUpdateOperandUsers(inst);
   SetLoweredNode(node, inst);
   return Emit(pcode, inst);
 }
@@ -1370,7 +1526,7 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
   return call;
 }
 
-static TargetInstruction* LowerMask(PCodeGenerator* pcode, IRNode* node) {
+static TargetInstruction* LowerZeroExtend(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
   value =
       Emit(pcode, NewInstruction2(P_OP(and), value,
@@ -1400,6 +1556,19 @@ static TargetInstruction* LowerSignExtend(PCodeGenerator* pcode, IRNode* node) {
 
   SetLoweredNode(node, asr);
   return asr;
+}
+
+static TargetInstruction* LowerAlign(PCodeGenerator* pcode, IRNode* node) {
+  TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
+  IRConstant* align = node->inputs.value.p[1];
+
+  TargetInstruction* immed = GetIntConstant(pcode, NULL, kTargetTypeWord, align->value.ivalue - 1);
+  TargetInstruction* inv_immed = GetIntConstant(pcode, NULL, kTargetTypeWord, ~(align->value.ivalue - 1));
+  TargetInstruction* add = Emit(pcode, NewInstruction2(P_OP(add), value, immed));
+  TargetInstruction* and = Emit(pcode, NewInstruction2(P_OP(and), add, inv_immed));
+
+  SetLoweredNode(node, and);
+  return and;
 }
 
 static TargetInstruction* LowerAsm(PCodeGenerator* pcode, IRNode* node) {
@@ -1710,6 +1879,10 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(calla):
       return LowerCall(pcode, node);
 
+    case IR_OP(structarg):
+      // Same as its input.
+      return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
+
     case IR_OP(resulti):
     case IR_OP(resultf):
     case IR_OP(resultd):
@@ -1721,13 +1894,19 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
 
     case IR_OP(memcpy):
       return LowerMemcpy(pcode, node);
+      
+    case IR_OP(cast):
+      return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
 
-    case IR_OP(maski):
-      return LowerMask(pcode, node);
+    case IR_OP(zeroextendi):
+      return LowerZeroExtend(pcode, node);
 
     case IR_OP(signextendi):
       return LowerSignExtend(pcode, node);
-
+      
+    case IR_OP(aligni):
+      return LowerAlign(pcode, node);
+      
     case IR_OP(asm):
       return LowerAsm(pcode, node);
 
@@ -1748,6 +1927,7 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
   }
   // If we get here we've failed to handle the IR node.
   assert(false);
+  return NULL;
 }
 
 // Calculate the size of an argument based on its type.
@@ -1829,8 +2009,8 @@ void PCodePrint(PCodeGenerator* pcode) {
   }
 }
 
-bool PCodeIsExpression(PCodeOpcode opcode) {
-  switch (opcode) {
+bool PCodeIsExpression(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
     case P_OP(save):
     case P_OP(restore):
     case P_OP(label):
@@ -1876,8 +2056,8 @@ bool PCodeIsExpression(PCodeOpcode opcode) {
   }
 }
 
-bool PCodeIsSignedLoad(PCodeOpcode opcode) {
-  switch (opcode) {
+bool PCodeIsSignedLoad(TargetInstruction* inst) {
+  switch ((PCodeOpcode)inst->opcode) {
     case P_OP(ldb):
     case P_OP(ldh):
     case P_OP(ldw):

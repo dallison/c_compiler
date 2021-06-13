@@ -37,7 +37,12 @@ static void FilePrinter(int index, File* file, void* data) {
 }
 
 static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
-  FILE* fp = fopen(asm_file->value, "w");
+  FILE* fp;
+  if (StringEqual(asm_file, "-")) {
+    fp = stdout;
+  } else {
+    fp = fopen(asm_file->value, "w");
+  }
   if (fp == NULL) {
     return NULL;
   }
@@ -114,7 +119,7 @@ static void StaticVariable(InitializedStaticVariable* var,
         next_offset += 1;
         break;
       case kInitTypeHalf:
-        fprintf(fp, "\t.half   %d\n", (int32_t)init->value.half);
+        fprintf(fp, "\t.sbort   %d\n", (int32_t)init->value.half);
         next_offset += 2;
         break;
       case kInitTypeWord:
@@ -208,35 +213,51 @@ static void StringLiteralSection(FILE* fp) {
   fprintf(fp, "\t.section \".rodata\", \"aMS\", @progbits\n");
 }
 
-static void EmitLiteral(StringLiteral* literal, FILE* fp) {
+static void EmitLiteral(Literal* literal, FILE* fp) {
   // A string literal might be disabled if it's used in an
   // asm statement and has alrady been emitted as assembly
   // language.
   if (literal->disabled) {
     return;
   }
-  // Each string literal has its own symbol.  The symbol
-  // is of the form ".str.xx" where 'xx' is the literal
-  // id (assigned when the string literal is compiled).
-  // A reference to this symbol is output to a movxc
-  // instruction with a relocation so that the linker
-  // can set the address.
-  fprintf(fp, ".str.%d:\n", literal->id);
-
-  // Print the literal in escaped form. Any non-printable
-  // characters are encoded in hex or as their usual
-  // ANSI C escape characters.
-  String escaped;
-  StringInit(&escaped, NULL);
-  StringEscape(&literal->value, &escaped);
-  fprintf(fp, "\t.asciz \"%s\"\n", escaped.value);
-  StringDestruct(&escaped);
-
-  // The literal is an object and the size includes the zero
-  // at the end.
-  fprintf(fp, "\t.type .str.%d, @object\n", literal->id);
-  fprintf(fp, "\t.size .str.%d, %zd\n", literal->id, literal->value.length + 1);
-  fprintf(fp, "\n");
+  switch (literal->type) {
+    case kLiteralString: {
+      // Each string literal has its own symbol.  The symbol
+      // is of the form ".str.xx" where 'xx' is the literal
+      // id (assigned when the string literal is compiled).
+      // A reference to this symbol is output to a movxc
+      // instruction with a relocation so that the linker
+      // can set the address.
+      fprintf(fp, ".str.%d:\n", literal->id);
+      
+      // Print the literal in escaped form. Any non-printable
+      // characters are encoded in hex or as their usual
+      // ANSI C escape characters.
+      StringLiteral* slit = (StringLiteral*)literal;
+      String escaped = {0};
+      StringEscape(&slit->value, &escaped);
+      fprintf(fp, "\t.asciz \"%s\"\n", escaped.value);
+      StringDestruct(&escaped);
+      
+      // The literal is an object and the size includes the zero
+      // at the end.
+      fprintf(fp, "\t.type .str.%d, @object\n", literal->id);
+      fprintf(fp, "\t.size .str.%d, %zd\n", literal->id, slit->value.length + 1);
+      fprintf(fp, "\n");
+      break;
+    }
+    case kLiteralBuffer: {
+      fprintf(fp, ".lit.%d:\n", literal->id);
+      BufferLiteral* buf = (BufferLiteral*)literal;
+      for (size_t i = 0 ; i < buf->value.length; i++) {
+        fprintf(fp, "\t.byte 0x%02x\n", buf->value.value[i] & 0xff);
+      }
+      fprintf(fp, "\t.type .lit.%d, @object\n", literal->id);
+      fprintf(fp, "\t.size .lit.%d, %zd\n", literal->id, buf->value.length);
+      fprintf(fp, "\n");
+      break;
+    }
+  }
 }
 
 static void EmitDebug(FILE* fp) {}
@@ -249,6 +270,16 @@ CompilerTarget* NewPCodeTarget() {
   CompilerTarget* target = malloc(sizeof(CompilerTarget));
   StringInit(&target->name, "P-CODE");
   target->pointer_size = 8;
+  target->int_size = 4;
+  target->bool_size = 4;
+  target->short_size = 2;
+  target->long_size = 8;
+  target->long_long_size = 8;
+  target->code_preference = kCodeForSpeed;
+  target->call_return_fixed_reg = true;
+  target->callee_save = true;
+  target->keep_ssa = false;
+  target->stack_alignment = 8;
   target->codegen = GenerateCode;
   target->emit_function_assembly = EmitFunctionAssembly;
   target->assemble = Assemble;
@@ -262,7 +293,7 @@ CompilerTarget* NewPCodeTarget() {
   target->emit_tls_variable = TlsVariable;
   target->emit_tbss_space = TlsBSSVariable;
   target->emit_literals_start = StringLiteralSection;
-  target->emit_string_literal = EmitLiteral;
+  target->emit_literal = EmitLiteral;
   target->emit_debug = EmitDebug;
   return target;
 }

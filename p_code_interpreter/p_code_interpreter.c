@@ -175,7 +175,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
     // convenience.  This is only valid in this loop and the main program counter
     // register is canonical.
     int32_t* pc = (int32_t*)iregs[PCODE_PC_REG];
-    interpreter->current_symbol = LoaderFindSymbol(interpreter->loader,
+    interpreter->current_symbol = LoaderFindSymbolAndCacheResult(interpreter->loader,
                                                    interpreter->iregs[PCODE_PC_REG]);
 
     if (disassemble) {

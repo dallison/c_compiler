@@ -80,6 +80,6 @@ void HashTableClear(HashTable* table) {
   memset(table->entries, 0, sizeof(void*) * table->size);
 }
 
-void HashTablePrintStats(HashTable* table) {
-  printf("table %s: %zd objects\n", table->name.value, table->object_count);
+void HashTablePrintStats(HashTable* table, FILE* fp) {
+  fprintf(fp, "table %s: %zd objects\n", table->name.value, table->object_count);
 }

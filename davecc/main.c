@@ -31,9 +31,10 @@ static int ParseArg(int i, int argc, char** argv,
     if (StringStartsWith(option, "-Wl,")) {
       // Arg passed through to linker.
       VectorAppend(linker_args, argv[i]+4);
-    } else if (StringEqual(option, "-c")) {
+    } else if (StringEqual(option, "-c") || StringEqual(option, "-S")) {
       // Compile only flag.
       *compile_only = true;
+      VectorAppend(compiler_args, argv[i]);
     } else if (StringEqual(option, "-o")) {
       // -o option is followed by a filename
       if (i == argc-1) {
@@ -173,8 +174,8 @@ static int ParseArg(int i, int argc, char** argv,
       while (j < new_argc) {
         j = ParseArg(j,
                      new_argc, new_argv, compiler_args,
-                     linker_args, asm_files, object_files,
-                     args_from_file, compile_only, run_compiler);
+                     linker_args, object_files, asm_files,
+                     args_from_file, run_compiler, compile_only);
       }
       free(new_argv);
     }
@@ -193,6 +194,15 @@ static int ParseArg(int i, int argc, char** argv,
   return i + 1;
 }
 
+static bool BoolOptionValue(Vector* options, int opt, bool def) {
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* option = options->value.p[i];
+    if (option->opt == opt) {
+      return option->value.bvalue;
+    }
+  }
+  return def;
+}
 
 int main(int argc, char * argv[]) {
   Vector asm_files = {0};
@@ -212,7 +222,7 @@ int main(int argc, char * argv[]) {
   int i = 1;
   while (i < argc) {
     i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
-                 &asm_files, &args_from_file, &compile_only, &run_compiler);
+                 &asm_files, &args_from_file, &run_compiler, &compile_only);
   }
   
   // Parse compiler options for C and asm files.
@@ -233,8 +243,11 @@ int main(int argc, char * argv[]) {
         if (object_file != NULL) {
           VectorAppend(&linker_args, object_file->value);
         } else {
-          fprintf(stderr, "Failed to compile\n");
-          exit(1);
+          // If -S was specified we won't have an output file.
+          if (!BoolOptionValue(&compiler_options, kOptionAssemblyOutput, false)) {
+            fprintf(stderr, "Failed to compile\n");
+            exit(1);
+          }
         }
       }
     }
@@ -287,12 +300,15 @@ int main(int argc, char * argv[]) {
       Assembler* assembler = NULL;
       void (*asm_run)(Assembler*, String*);
       typedef void (*AssemblerDestructor)(Assembler*);
+      typedef void (*AssemblerFinalizer)(Assembler*);
+      AssemblerFinalizer finalizer = NULL;
       AssemblerDestructor destructor;
-      
+
       if (StringEqual(&target, "6502")) {
         assembler = (Assembler*)New6502Assembler(asm_filename, &output_filename);
         asm_run = Assemble6502Instruction;
         destructor = (AssemblerDestructor)_6502AssemblerDestruct;
+        finalizer = (AssemblerFinalizer)_6502AssemblerFinalize;
       } else if (StringEqual(&target, "risc-v")) {
         assembler = (Assembler*)NewRVAssembler(asm_filename, &output_filename);
         asm_run = AssembleRVInstruction;
@@ -306,6 +322,9 @@ int main(int argc, char * argv[]) {
         exit(1);
       }
       AssemblerRun(assembler, asm_run);
+      if (finalizer != NULL) {
+        finalizer(assembler);
+      }
       int num_errors = assembler->num_errors;
       destructor(assembler);
       if (num_errors != 0) {
@@ -318,9 +337,18 @@ int main(int argc, char * argv[]) {
     }
   }
   
+  int status = 0;
   if (!compile_only) {
-     Link((int)linker_args.length, (char**)linker_args.value.p);
+    String* output = Link((int)linker_args.length, (char**)linker_args.value.p);
+    if (output == NULL) {
+      status = 1;
+    } else {
+      StringDelete(output);
+    }
   }
   
   // TODO: tidyup
+  exit(status);
 }
+
+

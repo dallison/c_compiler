@@ -17,6 +17,7 @@
 #include "risc_v_assembler.h"
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
+#include "target_basic_block.h"
 
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
@@ -53,27 +54,11 @@ static bool IsPrintable(TargetInstruction* inst) {
     case RV_OP(fa6):
     case RV_OP(fa7):
     case RV_OP(regarg):
-    case RV_OP(v0):
-    case RV_OP(v1):
-    case RV_OP(v2):
-    case RV_OP(v3):
-    case RV_OP(v4):
-    case RV_OP(v5):
-    case RV_OP(v6):
-    case RV_OP(v7):
-    case RV_OP(v8):
-    case RV_OP(v9):
-    case RV_OP(fv0):
-    case RV_OP(fv1):
-    case RV_OP(fv2):
-    case RV_OP(fv3):
-    case RV_OP(fv4):
-    case RV_OP(fv5):
-    case RV_OP(fv6):
-    case RV_OP(fv7):
-    case RV_OP(fv8):
-    case RV_OP(fv9):
+    case RV_OP(ivarreg):
+    case RV_OP(fvarreg):
     case RV_OP(x0):
+    case RV_OP(t0):
+    case RV_OP(nrvoval):
       return false;
     default:
       break;
@@ -96,17 +81,17 @@ static bool IsPrintable(TargetInstruction* inst) {
 // +------------------------------+
 // |      saved frame pointer     |
 // +------------------------------+ }-+
-// |                              |   | Argumnents passed in registers
+// |                              |   | Arguments passed in registers
 // |       saved args             |   | that are not assigned to registers
 // |                              |   | in the procedure
-// +------------------------------+ }-+
-// |                              |   |  Expression results saved when
-// |       spilled registers      |   |  we run out of registers
-// |                              |   |
 // +------------------------------+ }-+
 // |                              |   | emitter->rv->base.stack_frame_size
 // |       local variables        |   | bytes long.  All local variables
 // |                              |   | not in registers are here.
+// +------------------------------+ }-+
+// |                              |   |  Expression results saved when
+// |       spilled registers      |   |  we run out of registers
+// |                              |   |
 // +------------------------------+ }-+
 // |                              |   | Callee-saved registers are stored
 // |       saved registers        |   | here.
@@ -162,7 +147,7 @@ static int StackFrameSize(RVEmitter* emitter) {
 
 static bool EmptyStackFrame(RVEmitter* emitter) {
   return emitter->rv->base.stack_frame_size == 0 &&
-         emitter->rv->base.num_calls == 0;
+         emitter->rv->base.num_calls == 0 && !emitter->rv->not_leaf;
 }
 
 static void DecrementStackPointer(RVEmitter* emitter, int stack_frame_size,
@@ -243,13 +228,17 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
 
   int stack_frame_size = StackFrameSize(emitter);
 
-  bool is_leaf = emitter->rv->base.num_calls == 0 && !emitter->rv->use_reg_vars;
+  bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
+          !emitter->rv->not_leaf;
   bool varargs = emitter->rv->base.varargs;
   int space_above_frame_pointer =
       varargs ? (RV_NUM_INT_ARGS - emitter->rv->num_int_arg_regs) * 8 : 0;
 
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
+  }
+  if (is_leaf) {
+    fprintf(fp, "\t// Leaf procedure, no stack frame generated\n");
   }
 
   //
@@ -319,9 +308,10 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
   int frame_pointer_offset = stack_frame_size - 16 - space_above_frame_pointer;
 
   // Local vars are referenced as a negative offset from s0 and are immediately
-  // below the spilled register area.
+  // below the saved argument registers.  This is the low address of the
+  // start of the local variable region on the stack.
   int local_vars = emitter->rv->base.stack_frame_size +
-                     RV_STACK_FRAME_HEADER_SIZE  + emitter->spill_region_size;
+                     RV_STACK_FRAME_HEADER_SIZE;
 
   // Offset from sp of first saved register.
   int saved_reg_offset = stack_frame_size - RV_STACK_FRAME_HEADER_SIZE - 8 -
@@ -401,123 +391,63 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
                                   buf2, sizeof(buf2)));
   }
   
-
+  if (!is_leaf) {
+    fprintf(fp, "\t// Local vars at offset -%d(s0)\n", local_vars);
+  }
+  
   // Space for spilled registers.
    
-  // Spill region is above local vars and is a positive number subtracted
+  // Spill region is below local vars and is a positive number subtracted
   // from the frame pointer.  So the first spill offset is 8 bytes less
-  // than the saved args end.
+  // than the local vars end.
   //
-  // Spilled region is just below the saved argument to ensure that we
-   // can access it with a small negative offset from s0.
-  int spilled_region = RV_STACK_FRAME_HEADER_SIZE +
-                       (int)emitter->rv->saved_regs.length * 8;
-  emitter->next_spill_offset = spilled_region + 8;
+  int spilled_region_hi_addr = local_vars;
+  int first_spill_offset = spilled_region_hi_addr + 8;
+  emitter->first_spill_offset = first_spill_offset;
   if (emitter->spill_region_size > 0) {
      fprintf(fp, "\t// Spilled register region: %d bytes at -%d(s0) to -%d(s0)\n",
              emitter->spill_region_size,
-             emitter->next_spill_offset + emitter->spill_region_size - 8,
-             emitter->next_spill_offset - 8);
+             first_spill_offset + emitter->spill_region_size - 8,
+             first_spill_offset - 8);
    }
 
-  fprintf(fp, "\t// Local vars at offset -%d(s0)\n", local_vars);
 
   // Record offset for last saved register for reloading.
   emitter->saved_reg_offset = saved_reg_offset;
   
-  Vector regs = {0};
+  BitSetIterator it;
 
-  BitSetExpand(&emitter->regs->used_int_regs, &regs);
-  if (regs.length > 0) {
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  if (!BitSetIteratorDone(&it)) {
     fprintf(fp, "\t// Saved integer registers.\n");
   }
-  for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
     int offset = saved_reg_offset;
     saved_reg_offset -= 8;
     fprintf(fp, "\tsd %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeInt, buf1, sizeof(buf1)),
             offset);
+    BitSetIteratorNext(&it);
   }
-  VectorClear(&regs);
   
-  BitSetExpand(&emitter->regs->used_float_regs, &regs);
-  if (regs.length > 0) {
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  if (!BitSetIteratorDone(&it)) {
     fprintf(fp, "\t// Saved floating point registers.\n");
   }
-  for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
     int offset = saved_reg_offset;
     saved_reg_offset -= 8;
     fprintf(fp, "\tfsd %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf1, sizeof(buf1)),
             offset);
+    BitSetIteratorNext(&it);
   }
 
-  int first_int_reg_var =
-      is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
-  int first_fp_reg_var =
-      is_leaf ? RV_FIRST_LEAF_FP_REG_VAR : RV_FIRST_FP_REG_VAR;
-
-  // If this is a function returning a struct we need to load the first
-  // argument into the struct return register.
-  if (TypeIsStructOrUnion(
-          compiler->current_function->info.function.symbol->type->next)) {
-    fprintf(fp, "\t// Struct return address\n");
-    fprintf(fp, "\tmv %s, a0\n",
-            RVRegisterNameFromNum(
-                first_int_reg_var + emitter->rv->struct_return_reg,
-                kRVRegTypeInt, buf1, sizeof(buf1)));
+  if (!is_leaf) {
+    fprintf(fp, "\t// End of stack frame\n");
   }
-
-  VectorDestruct(&regs);
-
-  if (emitter->rv->register_loads.length > 0) {
-    fprintf(fp, "\t// Register variable loads.\n");
-  }
-  for (size_t i = 0; i < emitter->rv->register_loads.length; i++) {
-    RegisterLoad* load = emitter->rv->register_loads.value.p[i];
-    const char* symbol_name = "??";
-    if (load->symbol != NULL) {
-      symbol_name = load->symbol->symbol->name.value;
-    }
-    if (load->address_only) {
-      fprintf(fp, "\t// Local variable at offset %d from local vars base\n",
-              load->src.offset);
-      GenerateOffsetFromFrame(emitter, first_int_reg_var + load->dest_reg,
-                              local_vars - load->src.offset, symbol_name, fp);
-      continue;
-    }
-    if (load->is_fp) {
-      // Floating point.  These are all loaded as double precision.
-      if (load->on_stack) {
-        LoadRegisterFromFrame(emitter, first_fp_reg_var + load->dest_reg,
-                              local_vars - load->src.offset, true,
-                              symbol_name, fp);
-      } else {
-        fprintf(fp, "\tfmv.d   %s, %s\t\t// %s\n",
-                RVRegisterNameFromNum(first_fp_reg_var + load->dest_reg,
-                                      kRVRegTypeFloat, buf1, sizeof(buf1)),
-                RVRegisterNameFromNum(load->src.reg, kRVRegTypeFloat, buf2,
-                                      sizeof(buf2)),
-                symbol_name);
-      }
-    } else {
-      // Integer, 64 bit only.
-      if (load->on_stack) {
-        LoadRegisterFromFrame(emitter, first_int_reg_var + load->dest_reg,
-                              local_vars - load->src.offset, false, symbol_name, fp);
-      } else {
-        fprintf(fp, "\tmv   %s, %s\t\t// %s\n",
-                RVRegisterNameFromNum(first_int_reg_var + load->dest_reg,
-                                      kRVRegTypeInt, buf1, sizeof(buf1)),
-                RVRegisterNameFromNum(load->src.reg, kRVRegTypeInt, buf2,
-                                      sizeof(buf2)),
-                symbol_name);
-      }
-    }
-  }
-  fprintf(fp, "\t// End of stack frame\n");
 }
 
 static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
@@ -528,7 +458,8 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   int stack_frame_size = StackFrameSize(emitter);
   char buf1[8];
 
-  bool is_leaf = emitter->rv->base.num_calls == 0 && !emitter->rv->use_reg_vars;
+  bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
+          !emitter->rv->not_leaf;
   bool varargs = emitter->rv->base.varargs;
   int space_above_frame_pointer =
       varargs ? (RV_NUM_INT_ARGS - emitter->rv->num_int_arg_regs) * 8 : 0;
@@ -542,32 +473,34 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   // A leaf procedure doesn't save the return address.
   if (is_leaf) {
     frame_pointer_offset += 8;
+  } else {
+    fprintf(fp, "\t// Restored registers.\n");
   }
-
-  fprintf(fp, "\t// Restored registers.\n");
   Vector regs = {0};
 
   int offset = emitter->saved_reg_offset;
 
-  BitSetExpand(&emitter->regs->used_float_regs, &regs);
-  for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+  BitSetIterator it;
+
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
     fprintf(fp, "\tfld %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf1, sizeof(buf1)),
             offset);
     offset -= 8;
+    BitSetIteratorNext(&it);
   }
-  VectorClear(&regs);
 
-  BitSetExpand(&emitter->regs->used_int_regs, &regs);
-  for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
     fprintf(fp, "\tld %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeInt, buf1, sizeof(buf1)),
             offset);
     offset -= 8;
+    BitSetIteratorNext(&it);
   }
-  VectorDestruct(&regs);
 
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
@@ -583,88 +516,17 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   }
 }
 
-static bool IsSpilled(TargetInstruction* inst) {
-  return (inst->flags & TARGET_INST_SPILLED) != 0;
-}
-
-static void Spill(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
-  MapKeyValue kv = {.key.w = inst->id, .value.w = emitter->next_spill_offset};
-  emitter->next_spill_offset += 8;
-  MapInsert(&emitter->spilled_instructions, kv);
-  RVRegister* reg = (RVRegister*)inst->reg;
-  
-  char buf[8];
-  fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
-          reg->type == kRVRegTypeInt ? "sd" : "fsd",
-          RVRegisterName((RVRegister*)inst->reg, buf, sizeof(buf)),
-          (int)kv.value.w, inst->id);
-}
-
-static void LoadSpilledRegister(RVEmitter* emitter,
-                                TargetInstruction* inst,
-                                TargetRegister* dest_reg,
-                                FILE* fp) {
-  if (!IsSpilled(inst)) {
-    // Not spilled.
-    return;
-  }
-  MapKeyType key = {.w = inst->id};
-  int64_t spill_offset = (int64_t)MapFind(&emitter->spilled_instructions, key);
-  assert(spill_offset != 0);
-  RVRegister* reg = (RVRegister*)dest_reg;
-  
-  char buf[8];
-  fprintf(fp, "\t%-12s%s, -%d(s0)\t// Reloaded spilled @%d\n",
-          reg->type == kRVRegTypeInt ? "ld" : "fld",
-          RVRegisterName(reg, buf, sizeof(buf)),
-          (int)spill_offset, inst->id);
-
-}
-
-static void LoadSpilledOperands(RVEmitter* emitter,
-                                TargetInstruction* inst, FILE* fp) {
-  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
-    if (inst->operand[i] != NULL) {
-      LoadSpilledRegister(emitter, inst->operand[i], inst->operand[i]->reg, fp);
-    }
-  }
-}
-
 // The rmov instructions are an explicit mov from operand[1] to
 // operand[0].  Both are registers.
 static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   assert(inst->operand[0] != NULL);
   assert(inst->operand[1] != NULL);
-  assert(inst->operand[0]->reg != NULL);
-  assert(inst->operand[1]->reg != NULL);
-
-  // Is the source spilled?  The register allocator will also spill
-  // the destination as long as there are no more uses of the source.
-  if (IsSpilled(inst->operand[1])) {
-    if (IsSpilled(inst->operand[0])) {
-      // If the destination is spilled, propagate the spill location from
-      // the source to the destination.
-      // The likely use of this is, if @53 is spilled:
-      // @54 tmp
-      // @55 rmov(@54,@53)
-      // ...
-      // @99 add(@54, @4)   - @54 is spilled
-      // The result is that the spill is propagated to @54.
-      MapKeyType key = {.w = inst->operand[1]->id};
-      int64_t spill_offset = (int64_t)MapFind(&emitter->spilled_instructions, key);
-      assert(spill_offset != 0);
-      MapKeyValue kv = {.key.w = inst->operand[0]->id, .value.w = spill_offset};
-      MapInsert(&emitter->spilled_instructions, kv);
-      fprintf(fp, "\t// @%d spill propagated to @%d\n", inst->operand[1]->id, inst->operand[0]->id);
-    } else {
-      // Source is spilled but destination is not.  This means that we
-      // need to load the spilled value into the destination register.
-      // This will happen if the source has more than one use when the
-      // rmov instruction is executed.
-      LoadSpilledRegister(emitter, inst->operand[1], inst->operand[0]->reg, fp);
-    }
+  if (inst->operand[1]->block == NULL) {
+    // Optimized out.
     return;
   }
+  assert(inst->operand[0]->reg != NULL);
+  assert(inst->operand[1]->reg != NULL);
   
   // Don't output mov rx,rx.
   if (inst->operand[0]->reg == inst->operand[1]->reg) {
@@ -692,9 +554,24 @@ static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
       RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2, sizeof(buf2)));
 }
 
+static const char* GetRegisterName(TargetInstruction* inst, char* buf, size_t size) {
+  if (inst->dest != NULL) {
+    return RVRegisterName((RVRegister*)inst->dest->reg, buf, size);
+  }
+  return RVRegisterName((RVRegister*)inst->reg, buf, size);
+}
+
 // Main instruction printer.
 static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
+  if (inst->block == NULL) {
+    return;
+  }
+  if (inst->block != emitter->current_block) {
+    TargetBasicBlock* b = inst->block;
+    fprintf(fp, "\n\t// *** Basic block %zd\n\n", b->block_id);
+    emitter->current_block = inst->block;
+  }
   if (inst->opcode == RV_OP(label)) {
     if ((inst->flags & RV_EXPORTED_LABEL) != 0) {
       // Label may be exported.
@@ -707,6 +584,10 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
   if (inst->opcode == RV_OP(named_label)) {
     TargetNamedLabel* label = (TargetNamedLabel*)inst;
     fprintf(fp, "%s:\n", label->name);
+    return;
+  }
+  
+  if (inst->opcode == RV_OP(ivarreg) || inst->opcode == RV_OP(fvarreg)) {
     return;
   }
   if (!IsPrintable(inst)) {
@@ -723,14 +604,13 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(rmovf):
     case RV_OP(rmovd):
       PrintRmov(emitter, inst, fp);
-      goto done;
+      return;
 
     case RV_OP(mv):
       // Don't emit mv x, x.
       if (inst->operand[0]->reg == inst->reg) {
-        goto done;
+        return;
       }
-      LoadSpilledOperands(emitter, inst, fp);
       break;
     case RV_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
@@ -739,31 +619,30 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       } else {
         fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
       }
-      goto done;
+      return;
     }
     case RV_OP(call):
     case RV_OP(callf): {
       assert(inst->operand[0]->opcode == RV_OP(symbol));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
       fprintf(fp, "\t%-12s%s\n", "call", sym->symbol->name.value);
-      goto done;
+      return;
     }
 
     case RV_OP(rcall):
     case RV_OP(rcallf):
-      LoadSpilledOperands(emitter, inst, fp);
       fprintf(fp, "\t%-12s x1, %s, 0\n", "jalr",
-              RVRegisterName((RVRegister*)inst->operand[0]->reg, buf2,
+              GetRegisterName(inst->operand[0], buf2,
                              sizeof(buf2)));
 
-      goto done;
+      return;
     case RV_OP(save):
       SaveRegisters(emitter, fp);
-      goto done;
+      return;
 
     case RV_OP(restore):
       RestoreRegisters(emitter, fp);
-      goto done;
+      return;
 
     case RV_OP(asm): {
       TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
@@ -772,8 +651,8 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 
       // Output text directly into assembly output.
       fprintf(fp, "\t%s\n", lit->value.value);
-      lit->disabled = true;
-      goto done;
+      lit->base.disabled = true;
+      return;
     }
 
     case RV_OP(loc): {
@@ -781,17 +660,72 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       TargetLocation* loc = (TargetLocation*)inst;
       SourceLocationNumbers(loc->location, &fileno, &lineno, &colno);
       fprintf(fp, "\t.loc %d %d %d\n", fileno + 1, lineno, colno + 1);
-      goto done;
+      return;
     }
 
+    case RV_OP(spill): {
+      RVRegister* reg = (RVRegister*)inst->reg;
+      int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
+      const int spill_addr = RV_SPILL_ADDR;
+      if (!RVIsPossibleImmediate(offset)) {
+        fprintf(fp, "\t%-12s%s, %d\n",
+                "lui",
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
+                offset >> 12);
+        fprintf(fp, "\t%-12s%s, s0, %s\n",
+                "sub",
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)));
+        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Spilled @%d\n",
+                 reg->type == kRVRegTypeInt ? "sd" : "fsd",
+                 RVRegisterName(reg, buf1, sizeof(buf1)),
+                 offset & 0xfff,
+                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)),
+                 inst->operand[0]->id);
+      } else {
+        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
+                 reg->type == kRVRegTypeInt ? "sd" : "fsd",
+                 RVRegisterName(reg, buf1, sizeof(buf1)),
+                 offset,
+                 inst->operand[0]->id);
+      }
+      return;
+    }
+      
+    case RV_OP(reload): {
+      RVRegister* reg = (RVRegister*)inst->reg;
+      TargetInstruction* spill = inst->operand[0];
+      int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
+      const int spill_addr = RV_SPILL_ADDR;
+      if (!RVIsPossibleImmediate(offset)) {
+        fprintf(fp, "\t%-12s%s, %d\n",
+                "lui",
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
+                offset >> 12);
+        fprintf(fp, "\t%-12s%s, s0, %s\n",
+                "sub",
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf1, sizeof(buf1)),
+                RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)));
+        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Reloaded spilled @%d\n",
+                 reg->type == kRVRegTypeInt ? "ld" : "fld",
+                 RVRegisterName(reg, buf1, sizeof(buf1)),
+                 offset & 0xfff,
+                 RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)),
+                 spill->operand[0]->id);
+      } else {
+        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
+                 reg->type == kRVRegTypeInt ? "ld" : "fld",
+                 RVRegisterName(reg, buf1, sizeof(buf1)),
+                 offset,
+                 spill->operand[0]->id);
+      }
+      return;
+    }
     default:
       break;
   }
 
   // General case for instruction printing.
-
-  // Load any spilled operands.
-  LoadSpilledOperands(emitter, inst, fp);
 
   // Print opcode.
   fprintf(fp, "\t%-12s", RVOpcodeName(inst->opcode));
@@ -812,30 +746,32 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->reg != NULL);
       assert(inst->operand[0]->reg != NULL);
       if (TargetIsConst(inst->operand[1])) {
+        int offset = (int)TargetIntValue(inst->operand[1]);
+        assert(RVIsPossibleImmediate(offset));
         fprintf(fp, "%s, %d(%s)\n",
-                RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)),
-                (int)TargetIntValue(inst->operand[1]),
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf2,
+                GetRegisterName(inst, buf1, sizeof(buf1)),
+                offset,
+                GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
 
       } else if (inst->operand[1]->opcode == RV_OP(symbol)) {
         assert((inst->flags & RV_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
-                RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)),
+                GetRegisterName(inst, buf1, sizeof(buf1)),
                 ((TargetSymbol*)inst->operand[1])->symbol->name.value,
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf2,
+                GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
       } else if (inst->operand[1]->opcode == RV_OP(label)) {
         assert((inst->flags & RV_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
-                RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)),
+                GetRegisterName(inst, buf1, sizeof(buf1)),
                 func_name, inst->operand[1]->id,
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf2,
+                GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
       } else if (inst->operand[1]->opcode == RV_OP(x0)) {
         fprintf(fp, "%s, 0(%s)\n",
-                RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)),
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf2,
+                GetRegisterName(inst, buf1, sizeof(buf1)),
+                GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
       } else {
         assert(false);
@@ -854,39 +790,46 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0]->reg != NULL);
       assert(inst->operand[1]->reg != NULL);
       if (TargetIsConst(inst->operand[2])) {
+        int offset = (int)TargetIntValue(inst->operand[2]);
+        assert(RVIsPossibleImmediate(offset));
         fprintf(fp, "%s, %d(%s)\n",
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+                GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
-                (int)TargetIntValue(inst->operand[2]),
-                RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+                offset,
+                GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
       } else if (inst->operand[2]->opcode == RV_OP(symbol)) {
         assert((inst->flags & RV_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+                GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
                 ((TargetSymbol*)inst->operand[2])->symbol->name.value,
-                RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+                GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
       } else if (inst->operand[2]->opcode == RV_OP(label)) {
         assert((inst->flags & RV_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+                GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
                 func_name, inst->operand[2]->id,
-                RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+                GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
       } else if (inst->operand[2]->opcode == RV_OP(x0)) {
         fprintf(fp, "%s, 0(%s)\n",
-                RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+                GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
-                RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+                GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
 
       } else {
         assert(false);
       }
       break;
+      
+    case RV_OP(nop):
+      fprintf(fp, "\n");
+      break;
+      
     case RV_OP(beq):
     case RV_OP(bne):
     case RV_OP(blt):
@@ -899,9 +842,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0]->reg != NULL);
       assert(inst->operand[1]->reg != NULL);
       fprintf(fp, "%s, %s, .%s_label_%d\n",
-              RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+              GetRegisterName(inst->operand[0], buf1,
                              sizeof(buf1)),
-              RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+              GetRegisterName(inst->operand[1], buf2,
                              sizeof(buf2)),
               func_name, inst->operand[2]->id);
       break;
@@ -913,24 +856,38 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[1] != NULL);
       assert(inst->operand[0]->reg != NULL);
       fprintf(fp, "%s, .%s_label_%d\n",
-              RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+              GetRegisterName(inst->operand[0], buf1,
                              sizeof(buf1)),
               func_name, inst->operand[1]->id);
       break;
 
-    case RV_OP(j):
+    case RV_OP(j): {
       assert(inst->operand[0] != NULL);
-      fprintf(fp, ".%s_label_%d\n", func_name, inst->operand[0]->id);
+      TargetInstruction* dest = inst->operand[0];
+      if (dest->opcode == RV_OP(label)) {
+        fprintf(fp, ".%s_label_%d\n", func_name, inst->operand[0]->id);
+      } else if (dest->opcode == RV_OP(symbol)) {
+        fprintf(fp, "%s\n", ((TargetSymbol*)dest)->symbol->name.value);
+      } else {
+        assert(false);
+      }
       break;
-
+    }
+      
+    case RV_OP(jr):
+      fprintf(fp, "%s\n",
+              GetRegisterName(inst->operand[0], buf1,
+                             sizeof(buf1)));
+      break;
+      
     case RV_OP(jalr):
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
       assert(inst->operand[2] != NULL);
       fprintf(fp, "%s, %s, %d\n",
-              RVRegisterName((RVRegister*)inst->operand[0]->reg, buf1,
+              GetRegisterName(inst->operand[0], buf1,
                              sizeof(buf1)),
-              RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2,
+              GetRegisterName(inst->operand[1], buf2,
                              sizeof(buf2)),
               (int)TargetIntValue(inst->operand[2]));
       break;
@@ -939,7 +896,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       int64_t value = TargetIntValue(inst->operand[0]);
       
       fprintf(fp, "%s, %lld\t\t// 0x%llx",
-              RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)),
+              GetRegisterName(inst, buf1, sizeof(buf1)),
               value,
               value);
       if (value >= 0 && value < 0xff) {
@@ -958,7 +915,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       const char* sep = "";
       if (inst->reg != NULL) {
         fprintf(fp, "%s",
-                RVRegisterName((RVRegister*)inst->reg, buf1, sizeof(buf1)));
+                GetRegisterName(inst, buf1, sizeof(buf1)));
         sep = ", ";
       }
       for (int i = 0; i < 2; i++) {
@@ -978,7 +935,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
             fprintf(fp, "%s.str.%d", sep, literal->literal_id);
           } else {
             fprintf(fp, "%s%s", sep,
-                    RVRegisterName((RVRegister*)inst->operand[i]->reg, buf2,
+                    GetRegisterName(inst->operand[i], buf2,
                                    sizeof(buf2)));
           }
           sep = ", ";
@@ -988,20 +945,15 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     }
   }
   
-done:
-  // Do we need to spill the result to the stack?
-  if (IsSpilled(inst)) {
-    Spill(emitter, inst, fp);
-  }
 }
 
 void RVEmitterInit(RVEmitter* emitter, RVGenerator* rv) {
   emitter->rv = rv;
   emitter->regs = &rv->register_allocator;
   emitter->saved_reg_offset = 0;
-  emitter->spill_region_size = rv->register_allocator.spilled_region_size;
-  emitter->next_spill_offset = 0;
-  MapInitForInt64Keys(&emitter->spilled_instructions);
+  emitter->spill_region_size = rv->register_allocator.max_spilled_region_size;
+  emitter->first_spill_offset = 0;
+  emitter->current_block = NULL;
 }
 
 RVEmitter* NewRVEmitter(RVGenerator* rv) {
@@ -1011,13 +963,13 @@ RVEmitter* NewRVEmitter(RVGenerator* rv) {
 }
 
 void RVEmitterDestruct(RVEmitter* emitter) {
-  MapDestruct(&emitter->spilled_instructions);
 }
 
 void RVEmitterDelete(RVEmitter* emitter) {
   RVEmitterDestruct(emitter);
   free(emitter);
 }
+
 
 void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;

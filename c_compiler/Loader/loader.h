@@ -23,9 +23,10 @@ typedef struct {
   void* address;        // Virtual address.
   int64_t length;       // Length in bytes.
   Vector sections;      // Sections in this region (ELFReaderSection*).
+  ELFProgramHeader* segment;
 } Region;
 
-Region* NewRegion(void* addr, int64_t length);
+Region* NewRegion(void* addr, int64_t length, ELFProgramHeader* segment);
 void RegionDestruct(Region* region);
 
 // A symbol scope is a region of memory that corresponds
@@ -43,11 +44,21 @@ typedef struct {
 #define LOADER_LAZY_RESOLVE 2    // Use lazy PLT resolution.
 #define LOADER_WRITEABLE_TEXT 4  // Map the text writeable.
 
+typedef struct {
+  uint64_t load_address;
+  const ELFSymbol* symtab;
+  const char* strtab;
+  int64_t num_symtab_symbols;
+  Vector symbols_by_addr;       // Sorted by address.
+  Map symbols_by_name;
+} StaticSymbolTable;
+
 // A loader loads ELF files into memory based on their contents.  The
 // file header contains everything we need to find the loadable regions
 // and load them into memory at the correct addresses.
 typedef struct Loader {
   String filename;
+  bool is_static;
   int32_t flags;
   struct LoaderArchitecture* arch;
   void* arch_data;
@@ -62,6 +73,7 @@ typedef struct Loader {
   LoadedDynamicLibrary* dynamic_lib;
   DynamicLibraryRegistry loaded_libraries;
   SymbolScope current_symbol;
+  StaticSymbolTable static_symbol_table;
 } Loader;
 
 bool LoaderInitFromFile(Loader* loader, String* filename,

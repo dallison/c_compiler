@@ -27,6 +27,9 @@ void SetDestruct(Set* set);
 void SetDelete(Set* set);
 void SetClear(Set* set);
 
+void SetInitForPointers(Set* set);
+void SetInitForIntegers(Set* set);
+
 void SetInsert(Set* set, void* value);
 void SetRemove(Set* set, void* value);
 bool SetContains(Set* set, void* value);

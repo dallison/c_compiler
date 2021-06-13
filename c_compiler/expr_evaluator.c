@@ -107,7 +107,7 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       break;
 
       EVAL_BINARY_OP(lshift, <<)
-      EVAL_BINARY_OP(rshifta, <<)
+      EVAL_BINARY_OP(rshifta, >>)
 
   
     case AST_OP(rshiftl):
@@ -243,6 +243,9 @@ case AST_OP(ast_op): \
 
     case AST_OP(sizeof): {
       SizeofASTNode* snode = (SizeofASTNode*)node;
+      if (snode->expr != NULL && TypeIsVLA(snode->expr->type)) {
+        return false;
+      }
       *result = snode->base.value.ivalue;
       return true;
     }
@@ -388,7 +391,14 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       }
       break;
 
-      EVAL_UNARY_OP(cast, )
+    case AST_OP(cast): {
+      CastASTNode* c = (CastASTNode*)node;
+      if (EvaluateFloatingPointExpression(c->expr, &left)) {
+        *result = left;
+        return true;
+      }
+      break;
+    }
 
       EVAL_UNARY_OP(b2f, (float))
       EVAL_UNARY_OP(i2f, (float))

@@ -15,9 +15,10 @@
 #include "risc_v_reg_alloc.h"
 #include "target_generator.h"
 
+struct TargetBasicBlock;
+
 // If this bit is set in the data.ivalue of a variable pool entry then
-// the lower bits specify the absolute register number in which the
-// variable is stored.
+// the lower bits contain a register variable number.
 #define RV_REG_VAR 0x80000000
 
 // Since we are using bit 31 for the REG_VAR flag we have to be careful
@@ -27,7 +28,7 @@
 #define RV_REG_VAR_MASK 0xc0000000
 #define RV_IS_REG_VAR(offset) ((offset & RV_REG_VAR_MASK) == RV_REG_VAR)
 
-#define RV_OP(op) kRVk##op
+#define RV_OP(op) kRV_##op
 
 // RISC-V code generator opcodes.
 
@@ -83,7 +84,9 @@ typedef enum {
 
   RV_OP(loc),
   RV_OP(named_label),
-
+  RV_OP(ivarreg),
+  RV_OP(fvarreg),
+  
   // End of TargetOpcode enumeration.
 
   // Now follow the actual RISC-V instruction directly from the
@@ -253,6 +256,7 @@ typedef enum {
   RV_OP(beqz),
   RV_OP(bnez),
   RV_OP(j),
+  RV_OP(jr),
   RV_OP(call),
   RV_OP(rcall),
   RV_OP(callf),
@@ -282,35 +286,16 @@ typedef enum {
   RV_OP(fa6),
   RV_OP(fa7),
 
-  // Integer variable registers.  
-  // NOTE: these must match the number of int and fp reg vars.
-  RV_OP(v0),
-  RV_OP(v1),
-  RV_OP(v2),
-  RV_OP(v3),
-  RV_OP(v4),
-  RV_OP(v5),
-  RV_OP(v6),
-  RV_OP(v7),
-  RV_OP(v8),
-  RV_OP(v9),
-
-  // Floating point variable registers.
-  // NOTE: these must match the number of int and fp reg vars.
-  RV_OP(fv0),
-  RV_OP(fv1),
-  RV_OP(fv2),
-  RV_OP(fv3),
-  RV_OP(fv4),
-  RV_OP(fv5),
-  RV_OP(fv6),
-  RV_OP(fv7),
-  RV_OP(fv8),
-  RV_OP(fv9),
-
+  RV_OP(nrvoval),
+  
   RV_OP(x0),  // Zero reg.
+  RV_OP(t0),  // Temp reg.
 
   RV_OP(regarg),  // Holder for reg args.
+  
+  // Spill and reload.
+  RV_OP(spill),
+  RV_OP(reload),
 } RVOpcode;
 
 // Flags for TargetInstruction.
@@ -326,20 +311,6 @@ typedef struct {
   int offset;  // Negative offset from frame pointer (or zero).
 } SavedArgumentRegister;
 
-// Record of loaded registers.  These are used to load
-// arguments into a register variable.  The argument is either on
-// the stack or already in a registers.
-typedef struct {
-  int dest_reg;       // Register varaible (reg num).
-  bool on_stack;      // True if the source is on the stack (offset from fp).
-  bool is_fp;         // True if the reg is floating point.
-  bool address_only;  // Calculate address, not contents.
-  union {
-    int reg;     // Not on stack, source register.
-    int offset;  // On stack, positive offset from fp.
-  } src;
-  IRVariable* symbol;
-} RegisterLoad;
 
 // For large offsets that don't fit into an immediate field
 // of load and store instructions we divide the offsets up into
@@ -354,6 +325,12 @@ typedef struct {
   int page_offset;            // Offset for page.
 } Offset;
 
+typedef struct {
+  TargetInstruction* inst;      // Actually a TargetSymbol*.
+  int varnum;
+  bool is_fp;
+} RegisterVariable;
+
 // A RISC-V Generator is derived from a TargetGenerator.  It has
 // a '.base' field that is the TargetGenerator.
 typedef struct RVGenerator {
@@ -364,19 +341,18 @@ typedef struct RVGenerator {
   int num_int_reg_vars;   // Number of int regs used for variables.
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
-
+  bool not_leaf;          // Not a leaf procedure.
+  
   Vector saved_regs;
-  Vector register_loads;
   Vector offsets;         // Pointers to Offset.
   
   TargetInstruction* int_argument_registers[RV_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[RV_NUM_FP_ARGS];
-  TargetInstruction* int_variable_registers[RV_MAX_INT_REG_VARS];
-  TargetInstruction* fp_variable_registers[RV_MAX_FP_REG_VARS];
+  Vector var_regs;
 
-  TargetInstruction* zero;
-
-  bool use_reg_vars;
+  TargetInstruction* zero;  // Explicit zero (register x0).
+  TargetInstruction* tmp;   // Temp reg for tail calls vi jr instruction.
+  
   // Register allocator.
   RVRegisterAllocator register_allocator;
 } RVGenerator;
@@ -389,16 +365,32 @@ void RVGeneratorDelete(RVGenerator* pcode);
 
 // Lower the IR to RISC-V.
 void RVLower(RVGenerator* pcode, Generator* gen);
-void RVPrint(RVGenerator* pcode);
+void RVPrint(RVGenerator* pcode, FILE* fp);
 
-bool RVIsExpression(RVOpcode opcode);
-bool RVIsLoad(RVOpcode opcode);
-bool RVIsSignedLoad(RVOpcode opcode);
-bool RVIsStore(RVOpcode opcode);
-bool RVIsFixedRegister(RVOpcode opcode);
-bool RVIsIntConst(RVOpcode opcode);
+bool RVIsExpression(TargetInstruction* inst);
+bool RVIsFloatingPoint(TargetInstruction* inst);
+bool RVIsLoad(TargetInstruction* inst);
+bool RVIsSignedLoad(TargetInstruction* inst);
+bool RVIsStore(TargetInstruction* inst);
+bool RVIsFixedRegister(TargetInstruction* inst);
+bool RVIsConst(TargetInstruction* inst);
+bool RVIsSymbol(TargetInstruction* inst);
+bool RVIsIntConst(TargetInstruction* inst);
 int RVIntValue(TargetInstruction* inst);
 bool RVIsPossibleImmediate(int64_t value);
+bool RVIsBranch(TargetInstruction* inst);
+bool RVIsConditionalBranch(TargetInstruction* inst);
+bool RVIsReturn(TargetInstruction* inst);
+bool RVIsCall(TargetInstruction* inst);
+bool RVGeneratesOutput(TargetInstruction* inst);
+bool RVIsResult(TargetInstruction* inst);
+bool RVIsSpill(TargetInstruction* inst);
+bool RVIsLabel(TargetInstruction* inst);
+bool RVIsArgRegister(TargetInstruction* inst);
+bool RVIsVarRegister(TargetInstruction* inst);
+bool RVIsJumpTableEntry(TargetInstruction* inst);
+
+TargetInstruction* RVGetBranchTarget(TargetInstruction* inst);
 
 const char* RVOpcodeName(int op);
 

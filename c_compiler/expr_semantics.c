@@ -132,7 +132,7 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   SemanticCheckScalarType(node->sub);
   if (node->base.op == AST_OP(not)) {
     // Not operator is boolean.
-    NormalConversion(node->sub, NewTypeRecord(kTypeBool, kQualPlain));
+    NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
   }
   ASTNodeSetType((ASTNode*)node, node->sub->type);
 }
@@ -200,39 +200,39 @@ static void AnalyzePlusOperator(BinaryASTNode* node) {
   AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
     if (TypeIsIntegral(node->right->type)) {
-      // Multiply right side by size of left.
-      int64_t size = node->left->type->next->size;
+      // Scale right side by size of left.
       // If the right node is a constant we can do the multiplication now.
       if (ASTNodeIsIntConstant(node->right)) {
+        int64_t size = node->left->type->next->size;
         int64_t value = ASTNodeConstantValue(node->right);
         ASTNode* scale = NewIntConstantASTNode(value * size, node->right->type,
                                                node->base.location);
         node->right = scale;
       } else {
-        ASTNode* scale = NewBinaryASTNode(
-            AST_OP(mult), node->right->type, node->right->location, node->right,
-            NewIntConstantASTNode(size, NewTypeRecord(kTypeInt, kQualPlain),
-                                  node->right->location));
+        ASTNode* scale = NewPtrScaleASTNode(node->left->type->next, AST_OP(mult),
+                                            node->right, node->right->location);
         node->right = scale;
+        scale->parent = (ASTNode*)node;
+        ASTNodeSetType(scale, node->left->type);
       }
     } else {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
     }
   } else if (TypeIsPointerOrArray(node->right->type)) {
     if (TypeIsIntegral(node->left->type)) {
-      // Multiply left side by size of right.
-      int64_t size = node->right->type->next->size;
+      // Scale left side by size of right.
       if (ASTNodeIsIntConstant(node->left)) {
+         int64_t size = node->right->type->next->size;
          int64_t value = ASTNodeConstantValue(node->left);
          ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
                                                 node->base.location);
          node->left = scale;
        } else {
-         ASTNode* scale = NewBinaryASTNode(
-          AST_OP(mult), node->left->type, node->left->location, node->left,
-          NewIntConstantASTNode(size, NewTypeRecord(kTypeInt, kQualPlain),
-                                node->left->location));
+         ASTNode* scale = NewPtrScaleASTNode(
+           node->right->type->next, AST_OP(mult), node->left, node->left->location);
          node->left = scale;
+         scale->parent = (ASTNode*)node;
+         ASTNodeSetType(scale, node->right->type);
        }
     } else {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
@@ -244,27 +244,27 @@ static void AnalyzePlusOperator(BinaryASTNode* node) {
 
 // Like binary plus, a binary minus can subtract integers from pointers,
 // but not the other way around.  It can also subtract two pointers.
-static void AnalyzeMinusOperator(BinaryASTNode* node) {
+static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
   if (node == NULL) {
-    return;
+    return &node->base;
   }
   AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
     if (TypeIsIntegral(node->right->type)) {
-      // Multiply right side by size of left.
-      int64_t size = node->left->type->next->size;
+      // Scale right side by size of left.
       // If the right node is a constant we can do the multiplication now.
       if (ASTNodeIsIntConstant(node->right)) {
+        int64_t size = node->left->type->next->size;
         int64_t value = ASTNodeConstantValue(node->right);
         ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
                                                node->base.location);
         node->right = scale;
       } else {
-        ASTNode* scale = NewBinaryASTNode(
-            AST_OP(mult), node->right->type, node->right->location, node->right,
-            NewIntConstantASTNode(size, NewTypeRecord(kTypeInt, kQualPlain),
-                                  node->right->location));
+        ASTNode* scale = NewPtrScaleASTNode(
+            node->left->type->next, AST_OP(mult), node->right, node->right->location);
         node->right = scale;
+        scale->parent = (ASTNode*)node;
+        ASTNodeSetType(scale, node->left->type);
       }
     } else if (TypeIsPointerOrArray(node->right->type)) {
       // Pointer - pointer: divide the result by the size of the type
@@ -275,24 +275,31 @@ static void AnalyzeMinusOperator(BinaryASTNode* node) {
             "Illegal pointer subtraction; "
             "pointers are not the same type: '%s' and '%s'");
       } else {
-        // We need to convert the node to a AST_OP(div) op with the left as
-        // the current node and the right as the size of the type pointed to. To
-        // do this, make a new node and with left and right being the current
-        // left and right. Then set this node's op to AST_OP(div) and set the
-        // left to the new node.
-        ASTNode* new_minus =
-            NewBinaryASTNode(AST_OP(minus), node->base.type,
-                             node->base.location, node->left, node->right);
-        int64_t size = node->left->type->next->size;
-        ASTNode* size_node = NewIntConstantASTNode(
-            size, NewTypeRecord(kTypeInt, kQualPlain), node->base.location);
-        node->base.op = AST_OP(div);
-        node->left = new_minus;
-        node->right = size_node;
-
+        // Scale the pointer difference by the size of the type.
+        // Tree goes from this:
+        //                minus
+        //                 / \
+        //               x     y
+        //
+        // To:
+        //             ptr_scale
+        //              /
+        //           minus
+        //            / \
+        //           x   y
+        //
+        
+        ASTNode* parent = node->base.parent;
+        ASTNode* scale = NewPtrScaleASTNode(node->right->type->next,
+                                             AST_OP(div),
+                                             ASTNodeMove(&node->base),
+                                             node->right->location);
+        ASTNodeReplaceChild(parent, node->base.child_id, scale, false);
+  
         // The type of the result is unsigned long (size_t).
-        ASTNodeSetType(&node->base,
-                       NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain));
+        ASTNodeSetType(scale,
+                       NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain));
+        return scale;
       }
     } else {
       SemanticError((ASTNode*)node, "Illegal pointer subtraction operation");
@@ -300,6 +307,7 @@ static void AnalyzeMinusOperator(BinaryASTNode* node) {
   } else {
     InsertNumericConversions(node);
   }
+  return &node->base;
 }
 
 // Both sides of a shift operator needs to be an integral type.
@@ -336,7 +344,7 @@ static void AnalyzeComparisonOperator(BinaryASTNode* node) {
   InsertNumericConversions(node);
 
   // Comparison operators produce boolean values.
-  ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeBool, kQualPlain));
+  ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
 }
 
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
@@ -476,12 +484,13 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
           SemanticError((ASTNode*)node,
                         "Cannot add or subtract non-integers from pointers");
         }
-        int64_t size = node->left->type->next->size;
-        ASTNode* scale = NewBinaryASTNode(
-            AST_OP(mult), node->right->type, node->right->location, node->right,
-            NewIntConstantASTNode(size, NewTypeRecord(kTypeInt, kQualPlain),
-                                  node->right->location));
+        ASTNode* scale = NewPtrScaleASTNode(node->left->type->next,
+                                            AST_OP(mult),
+                                            node->right,
+                                            node->right->location);
         node->right = scale;
+        scale->parent = (ASTNode*)node;
+        ASTNodeSetType(scale, node->left->type);
       } else {
         NormalConversion(node->right, node->left->type);
       }
@@ -550,7 +559,7 @@ static void AnalyzeArraySubscript(BinaryASTNode* node) {
   }
   if (node->left != NULL && !TypeIsPointerOrArray(node->left->type)) {
     SemanticError(node->left, "Can only subscript arrays and pointers");
-    ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
 
@@ -564,7 +573,9 @@ typedef struct {
   Map argument_map;     // Map of argument to new symbol pointers.
   ASTNode* end_label;   // End label for return conversion.
   Symbol* return_value; // Return value symbol.
+  ASTNode* top_stmt;    // Top level compound statement.
 } Inliner;
+
 
 // This is called while cloning the function body for inlining.  The
 // data is a pointer to an Inliner.  The node is a cloned node.
@@ -618,6 +629,7 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
                                   NewString(end_label->name.value),
                                   ret_node->base.location);
     goto_node->label = inliner->end_label;
+    goto_node->lca = inliner->top_stmt;
     VectorAppend(new_ret, goto_node);
     
     // Don't need the return now.
@@ -697,8 +709,11 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   
   VectorAppend(statements,
                CopyArguments(info, call, &inliner));
-
+  ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
+  inliner.top_stmt = inlined;
+  
   inliner.end_label = NewLabelASTNode(SyntaxFakeName(&compiler->syntax),
+                                      NULL,
                                       false,
                                       location);
     
@@ -711,7 +726,12 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   VectorAppend(statements, new_body);
   VectorAppend(statements, inliner.end_label);
   
-  ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
+  // Attach the new statements to the compound statement.
+  for (size_t i = 0; i < statements->length; i++) {
+    ASTNode* stmt = statements->value.p[i];
+    stmt->parent = inlined;
+    stmt->child_id = (int)i;
+  }
   ASTNode* ret_node = NULL;
   if (inliner.return_value != NULL) {
     // Void function, no return value;
@@ -751,6 +771,10 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
 // NOTE: a tail-recursive inline function will not be inlined because
 // the tail recursion is converted into a goto statement.
 static bool FunctionCanBeInlined(FunctionInfo* func) {
+  if (!OptLevel2()) {
+    // Only at -O2 and above.
+    return false;
+  }
   if (!func->is_inline || !func->symbol->flags.is_defined ||
       func->body == NULL ||
       func->symbol == compiler->current_function->info.function.symbol ||
@@ -774,7 +798,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
-    ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return &node->base;
   }
   if (node->left == NULL) {
@@ -874,7 +898,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
 
   if (struct_info == NULL) {
     // Error case, assign type as integer.
-    ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
 
@@ -892,7 +916,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (member == NULL) {
     SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
                   member_name->value, struct_info->tag_name->value);
-    ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
 
@@ -911,7 +935,7 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");
     // Make a void* pointer type for this node.
-    TypeRecord* void_type = NewTypeRecord(kTypeVoid, kQualPlain);
+    TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
     TypeRecordChain(ptr, void_type);
     ASTNodeSetType((ASTNode*)node, ptr);
     return;
@@ -931,19 +955,23 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");
     // Fake an integer type for the result.
-    ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
   }
 
   // Fake an integer type for the result.
-  ASTNodeSetType((ASTNode*)node, NewTypeRecord(kTypeInt, kQualPlain));
+  ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
   ASTNodeSetType((ASTNode*)node, node->sub->type->next);
 }
 
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   if (node->expr != NULL) {
     node->expr = AnalyzeExpression(node->expr);
-    node->base.value.ivalue = node->expr->type->size;
+    if (TypeIsVLA(node->expr->type)) {
+      // sizeof(vla) is calculated at runtime.
+    } else {
+      node->base.value.ivalue = node->expr->type->size;
+    }
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
@@ -958,7 +986,7 @@ static void AnalyzeCastExpression(CastASTNode* node) {
 
 static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   AnalyzeBinaryExpression(node);
-  TypeRecord* bool_type = NewTypeRecord(kTypeBool, kQualPlain);
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   ASTNodeSetType((ASTNode*)node, bool_type);
 }
 
@@ -969,7 +997,7 @@ static void AnalyzeVarargsBuiltin1(VectorASTNode* args) {
     child = args->children->value.p[i];
     child->flags |= kASTNeedAddress;  // Need address of all of these.
   }
-  ASTNodeSetType(&args->base, NewTypeRecord(kTypeVoid, kQualPlain));
+  ASTNodeSetType(&args->base, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
 static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
@@ -1012,7 +1040,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(minus):
-      AnalyzeMinusOperator(binary_node);
+      node = AnalyzeMinusOperator(binary_node);
       break;
 
     case AST_OP(mult):
@@ -1172,7 +1200,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
   
   if (node->type == NULL) {
     // Make sure we have type for the node.
-    ASTNodeSetType(node, NewTypeRecord(kTypeInt, kQualPlain));
+    ASTNodeSetType(node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
   }
   return node;
 }

@@ -68,6 +68,8 @@ typedef enum {
 
   P_OP(loc),
   P_OP(named_label),
+  P_OP(ivarreg),
+  P_OP(fvarreg),
 
   // End of TargetOpcode enumeration.
 
@@ -231,7 +233,7 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen);
 void PCodePrint(PCodeGenerator* pcode);
 
 const char* PCodeOpcodeName(int op);
-bool PCodeIsExpression(PCodeOpcode opcode);
-bool PCodeIsSignedLoad(PCodeOpcode opcode);
+bool PCodeIsExpression(TargetInstruction* inst);
+bool PCodeIsSignedLoad(TargetInstruction* inst);
 
 #endif /* p_code_h */

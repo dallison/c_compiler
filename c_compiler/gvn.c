@@ -176,6 +176,12 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
   if (inst->opcode == IR_OP(tmp)) {
     return key;
   }
+  
+  // Volatile things prevent this optimization.
+  if (TypeIsVolatile(inst->type)) {
+    return key;
+  }
+  
   // We can only deal with 1 or 2 operands.
   assert(inst->inputs.length <= 2);
   int32_t op_values[2] = {0, 0};
@@ -265,9 +271,10 @@ static void PrintValueSet(ValueSet* set) {
 // instruction is removed from the code.
 static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
                                   BasicBlock* block) {
-  IRNode* inst = block->code;
-  while (inst != NULL && IRPrev(inst) != block->end_code) {
-    IRNode* next = IRNext(inst);
+  IRNode* next = NULL;
+  for (IRNode* inst = block->code; inst != NULL && block->end_code != NULL &&
+       IRPrev(inst) != block->end_code; inst = next) {
+    next = block->end_code == NULL ? NULL : IRNext(inst);
     if (IRIsExpression(inst)) {
       IRNode* prev_inst = LookupInstruction(set, inst);
       if (prev_inst != inst) {

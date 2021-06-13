@@ -7,18 +7,87 @@
 //
 
 #include "target_generator.h"
+#include "target_basic_block.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int next_instruction_id = 1;
 
-
-static void TrapInstruction(TargetInstruction* inst, int id) {
-  if (inst->id == id) {
+static void Trap() {}
+static void TrapInstruction(TargetInstruction* inst) {
+  if (inst->id == 282) {
     // Set breakpoint here to trap on a certain instruction id.
-    printf("Instruction trap at %d\n", id);
+    Trap();
   }
+}
+
+void TargetPrintInstruction(TargetInstruction* inst,
+                            const char* (*name_func)(int), FILE* fp) {
+  if (inst == NULL) {
+    return;
+  }
+  fprintf(fp, "@%d %s(", inst->id, name_func(inst->opcode));
+  TargetConstant* c = (TargetConstant*)inst;
+  switch (inst->opcode) {
+    case TARGET_OP(constb):
+    case TARGET_OP(consth):
+    case TARGET_OP(constw):
+    case TARGET_OP(constx):
+      fprintf(fp, "#%lld", c->value.ivalue);
+      break;
+    case TARGET_OP(constf):
+    case TARGET_OP(constd):
+      fprintf(fp, "#%g", c->value.dvalue);
+      break;
+    case TARGET_OP(symbol):
+    case TARGET_OP(ivarreg):
+    case TARGET_OP(fvarreg):
+      fprintf(fp, "%s", ((TargetSymbol*)inst)->symbol->name.value);
+      break;
+
+    case TARGET_OP(loc): {
+      TargetLocation* loc = (TargetLocation*)inst;
+      const char* filename;
+      int lineno;
+      int start;
+      int end;
+      DecodeSourceLocation(loc->location, &filename, &lineno, &start, &end);
+      fprintf(fp, "%s %d %d %d", filename, lineno, start, end);
+      break;
+    }
+
+    default: {
+      const char* sep = "";
+      for (size_t i = 0; i < 3; i++) {
+        if (inst->operand[i] != NULL) {
+          fprintf(fp, "%s@%d", sep, inst->operand[i]->id);
+          sep = ", ";
+        }
+      }
+      break;
+    }
+  }
+  fprintf(fp, ")");
+  if (inst->dest != NULL) {
+    fprintf(fp, " -> @%d", inst->dest->id);
+  }
+  fprintf(fp, " *%zd", inst->users.length);
+  if (inst->users.length > 0) {
+    fprintf(fp, " [");
+    const char* sep = "";
+    for (size_t i = 0; i < inst->users.length; i++) {
+      TargetInstruction* user = inst->users.value.p[i];
+      fprintf(fp, "%s@%d", sep, user->id);
+      sep = ",";
+    }
+    fprintf(fp, "]");
+  }
+  // Print flags (in hex)
+  fprintf(fp, " F:%08x", inst->flags);
+  fprintf(fp, " [%d]", inst->uses);
+  fprintf(fp, "\n");
 }
 
 const char* TargetOpcodeName(int op) {
@@ -103,57 +172,16 @@ const char* TargetOpcodeName(int op) {
       return "loc";
     case TARGET_OP(named_label):
       return "namedlabel";
+    case TARGET_OP(ivarreg):
+      return "ivarreg";
+    case TARGET_OP(fvarreg):
+      return "fvarreg";
   }
 }
 
-void TargetPrintInstruction(TargetInstruction* inst,
-                            const char* (*name_func)(int), FILE* fp) {
-  if (inst == NULL) {
-    return;
-  }
-  fprintf(fp, "@%d %s(", inst->id, name_func(inst->opcode));
-  TargetConstant* c = (TargetConstant*)inst;
-  switch (inst->opcode) {
-    case TARGET_OP(constb):
-    case TARGET_OP(consth):
-    case TARGET_OP(constw):
-    case TARGET_OP(constx):
-      fprintf(fp, "#%lld", c->value.ivalue);
-      break;
-    case TARGET_OP(constf):
-    case TARGET_OP(constd):
-      fprintf(fp, "#%g", c->value.dvalue);
-      break;
-    case TARGET_OP(symbol):
-      fprintf(fp, "%s", ((TargetSymbol*)inst)->symbol->name.value);
-      break;
 
-    case TARGET_OP(loc): {
-      TargetLocation* loc = (TargetLocation*)inst;
-      const char* filename;
-      int lineno;
-      int start;
-      int end;
-      DecodeSourceLocation(loc->location, &filename, &lineno, &start, &end);
-      fprintf(fp, "%s %d %d %d", filename, lineno, start, end);
-      break;
-    }
-
-    default: {
-      const char* sep = "";
-      for (size_t i = 0; i < 3; i++) {
-        if (inst->operand[i] != NULL) {
-          fprintf(fp, "%s@%d", sep, inst->operand[i]->id);
-          sep = ", ";
-        }
-      }
-      break;
-    }
-  }
-  fprintf(fp, ") *%d\n", inst->refs);
-}
-
-void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
+void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals* virtuals) {
+  target->virtuals = virtuals;
   TypeRecord* func_type = gen->func;
   Symbol* func = func_type->info.function.symbol;
   const char* func_name = func->name.value;
@@ -161,6 +189,10 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
   target->is_global = !StorageIs(func->storage, STO(static));
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
+
+  VectorInit(&target->basic_blocks);
+  target->entry_block = NULL;
+  target->exit_block = NULL;
 
   ListInit(&target->code);
   target->stack_frame_size = 0;
@@ -195,10 +227,16 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen) {
   target->__tls_get_addr = NewSymbol("__tls_get_addr", tls_func, STO(extern));
 }
 
-void TargetGeneratorDestruct(TargetGenerator* target) {
-  ListDestruct(&target->code);
-  SymbolDelete(target->memcpy);
-  SymbolDelete(target->memset);
+void TargetGeneratorDestruct(TargetGenerator* gen) {
+  ListDestruct(&gen->code);
+  SymbolDelete(gen->memcpy);
+  SymbolDelete(gen->memset);
+  
+  // Delete the basic blocks.
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    TargetBasicBlockDelete(block);
+  }
 }
 
 TargetInstruction* TargetFirstInstruction(TargetGenerator* target) {
@@ -229,15 +267,90 @@ TargetInstruction* TargetPrev(TargetInstruction* inst) {
   return (TargetInstruction*)inst->header.prev;
 }
 
+
 void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst) {
   // Decrement the reference count for all operands.
   for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     if (op != NULL) {
-      op->refs--;
+      TargetRemoveUser(op, inst);
     }
   }
+  VectorDestruct(&inst->users);
   ListDeleteElement(&target->code, &inst->header);
+}
+
+void TargetAddUser(TargetInstruction* inst, TargetInstruction* user) {
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* op = inst->users.value.p[i];
+    if (op == user) {
+      return;
+    }
+  }
+  VectorAppend(&inst->users, user);
+}
+
+void TargetRemoveUser(TargetInstruction* inst, TargetInstruction* user) {
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* op = inst->users.value.p[i];
+    if (op == user) {
+      VectorDeleteElement(&inst->users, i);
+      inst->uses--;
+      return;
+    }
+  }
+}
+
+// Move all references from old to new.
+void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new) {
+  for (size_t i = 0; i < old->users.length; i++) {
+    TargetInstruction* user = old->users.value.p[i];
+    for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
+      if (user->operand[j] == old) {
+        user->operand[j] = new;
+        TargetAddUser(new, user);
+      }
+    }
+  }
+  VectorClear(&old->users);
+  old->uses = 0;
+}
+
+void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new, bool (*predicate)(TargetInstruction*)) {
+  for (size_t i = 0; i < old->users.length; i++) {
+    TargetInstruction* user = old->users.value.p[i];
+    for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
+      if (user->operand[j] == old && predicate(user)) {
+        user->operand[j] = new;
+        TargetAddUser(new, user);
+      }
+    }
+  }
+  VectorClear(&old->users);
+  old->uses = 0;
+}
+
+void TargetReplaceInstruction(TargetGenerator* target,
+                              TargetInstruction* old,
+                              TargetInstruction* new) {
+  TargetRetargetInstruction(old, new);
+  TargetDeleteInstruction(target, old);
+}
+
+
+void TargetReplaceOperand(TargetInstruction* inst, int op,
+                          TargetInstruction* new) {
+  TargetInstruction* old = inst->operand[op];
+  if (old == new) {
+    return;
+  }
+  // Remove reference from old to inst.
+  assert(inst != new);
+  TargetRemoveUser(old, inst);
+  inst->operand[op] = new;
+  if (new != NULL) {
+    TargetAddUser(new, inst);
+  }
 }
 
 int64_t TargetIntValue(TargetInstruction* inst) {
@@ -260,26 +373,30 @@ TargetInstruction* TargetSetLoweredNode(IRNode* node, TargetInstruction* inst) {
   return inst;
 }
 
+
 void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_instruction_id++;
   inst->opcode = opcode;
-  inst->refs = 0;
   inst->uses = 0;
+  inst->dest = NULL;
   inst->reg = NULL;
   inst->operand[0] = NULL;
   inst->operand[1] = NULL;
   inst->operand[2] = NULL;
+  VectorInit(&inst->users);
+  inst->block = NULL;
   inst->flags = 0;
 }
 
-void TargetUpdateRefCount(TargetInstruction* inst) {
-  for (size_t i = 0; i < 3; i++) {
+void TargetUpdateOperandUsers(TargetInstruction* inst) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
-      inst->operand[i]->refs++;
+      TargetAddUser(inst->operand[i], inst);
     }
   }
 }
+
 
 TargetInstruction* TargetNewInstruction(TargetOpcode opcode) {
   TargetInstruction* inst = malloc(sizeof(TargetInstruction));
@@ -290,8 +407,9 @@ TargetInstruction* TargetNewInstruction(TargetOpcode opcode) {
 TargetInstruction* TargetNewInstruction1(TargetOpcode opcode,
                                          TargetInstruction* op1) {
   TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
+  assert(inst != op1);
   inst->operand[0] = op1;
-  TargetUpdateRefCount(inst);
+  TargetUpdateOperandUsers(inst);
   return inst;
 }
 
@@ -299,9 +417,11 @@ TargetInstruction* TargetNewInstruction2(TargetOpcode opcode,
                                          TargetInstruction* op1,
                                          TargetInstruction* op2) {
   TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
+  assert(inst != op1);
+  assert(inst != op2);
   inst->operand[0] = op1;
   inst->operand[1] = op2;
-  TargetUpdateRefCount(inst);
+  TargetUpdateOperandUsers(inst);
   return inst;
 }
 
@@ -310,21 +430,33 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
                                          TargetInstruction* op2,
                                          TargetInstruction* op3) {
   TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
+  assert(inst != op1);
+  assert(inst != op2);
+  assert(inst != op3);
   inst->operand[0] = op1;
   inst->operand[1] = op2;
   inst->operand[2] = op3;
-  TargetUpdateRefCount(inst);
+  TargetUpdateOperandUsers(inst);
+  return inst;
+}
+
+TargetInstruction* TargetSetDest(TargetInstruction* inst,
+                                TargetInstruction* dest) {
+  assert(inst->dest == NULL);
+  inst->dest = dest;
+  // Don't add as user.
+  // TargetAddUser(dest, inst);
   return inst;
 }
 
 TargetInstruction* TargetEmit(TargetGenerator* target,
                               TargetInstruction* inst) {
-  // TrapInstruction(inst, 32);
   if (TargetNext(inst) != NULL || TargetPrev(inst) != NULL) {
     // Already in list, nothing to do.
     return inst;
   }
   ListAppend(&target->code, &inst->header);
+  TrapInstruction(inst);
   return inst;
 }
 
@@ -338,6 +470,7 @@ TargetInstruction* TargetEmitBefore(TargetGenerator* target,
   if (pos == NULL) {
     return TargetEmit(target, inst);
   }
+  TrapInstruction(inst);
   ListInsertBefore(&target->code, &inst->header, &pos->header);
   return inst;
 }
@@ -349,6 +482,7 @@ TargetInstruction* TargetEmitAfter(TargetGenerator* target,
     // Already in list, nothing to do.
     return inst;
   }
+  TrapInstruction(inst);
   ListInsertAfter(&target->code, &inst->header, &pos->header);
   return inst;
 }
@@ -421,6 +555,7 @@ TargetInstruction* TargetNewIntConstant(IRNode* node, TargetType type,
   TargetInitInstruction(&c->base, constant_ops[type]);
   c->type = type;
   c->value.ivalue = value;
+  c->literal_id = -1;
   if (node != NULL) {
     TargetSetLoweredNode(node, (TargetInstruction*)c);
   }
@@ -433,6 +568,7 @@ TargetInstruction* TargetNewFloatingPointConstant(IRNode* node, TargetType type,
   TargetInitInstruction(&c->base, constant_ops[type]);
   c->type = type;
   c->value.dvalue = value;
+  c->literal_id = -1;
   TargetSetLoweredNode(node, (TargetInstruction*)c);
   return (TargetInstruction*)c;
 }
@@ -536,4 +672,13 @@ void TargetRegisterInit(TargetRegister* reg, int num) {
   reg->num = num;
   reg->owner = NULL;
   reg->reserved = false;
+}
+
+const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
+  if (symbol->flags.is_local) {
+    snprintf(buf, len, ".local.%s.%d", symbol->name.value, symbol->id);
+  } else {
+    strncpy(buf, symbol->name.value, len);
+  }
+  return buf;
 }

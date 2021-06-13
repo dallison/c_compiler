@@ -25,35 +25,66 @@
 
 static int next_type_id = 0;
 
-// Mapping of type to its size in bytes.
 static struct {
   Type type;
   int size;
-} type_sizes[] = {
-    {kTypeChar, 1},     {kTypeInt, 4},   {kTypeShort, 2},
-    {kTypeLong, -1},
+} fixed_type_sizes[] = {
+    {kTypeChar, 1},   {kTypeShort, 2},
     {kTypeLongLong, 8}, {kTypeFloat, 4}, {kTypeDouble, 8}, {kTypeLongDouble, 8},
     {kTypeVoid, 0},     {kTypeBool, 1},  {kTypeEnum, 4},   {kTypeImplicit, 0},
 };
 
+static int FixedSize(Type type) {
+  for (int i = 0; fixed_type_sizes[i].type != kTypeImplicit; i++) {
+    if ((type & fixed_type_sizes[i].type) != 0) {
+       return fixed_type_sizes[i].size;
+    }
+  }
+  return -1;
+}
+
+
+// The size of a pointer depends on the machine architecture.
+int SizeofPointer(void) {
+  return compiler->pointer_size;
+}
+
+// The size of a int depends on the machine architecture.
+int SizeofInt(void) {
+  return compiler->int_size;
+}
+
+// The size of a int depends on the machine architecture.
+int SizeofLong(void) {
+  return compiler->long_size;
+}
+
+// Mapping of type to its size in bytes.
+static struct {
+  Type type;
+  int (*func)(void);
+} type_sizes[] = {
+    {kTypeInt, SizeofInt},    {kTypeLong, SizeofLong},
+    {kTypeImplicit, 0},
+};
+
+
 // What is the size in bytes of the given type?  Uses the mapping
 // above.  Returns the size or zero if the type isn't known.
 int SizeofType(Type type) {
+  int size = FixedSize(type);
+  if (size >= 0) {
+    return size;
+  }
   for (int i = 0; type_sizes[i].type != kTypeImplicit; i++) {
     if ((type & type_sizes[i].type) != 0) {
-      if (type_sizes[i].size == -1) {
-        return compiler->pointer_size;
-      }
-      return type_sizes[i].size;
+       return type_sizes[i].func();
     }
   }
-  return 0;
+  return SizeofPointer();
 }
 
-// The size of a pointer depends on the machine architecture.
-int SizeofPointer() {
-  return compiler->pointer_size;
-}
+
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   TypeRecord* record = malloc(sizeof(TypeRecord));
@@ -64,6 +95,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->refs = 0;
   record->next = NULL;
   record->declarator = kDeclPrimitive;
+  memset(&record->info, 0, sizeof(record->info));
   return record;
 }
 
@@ -94,6 +126,9 @@ void TypeRecordDelete(TypeRecord* record) {
     } else if (TypeIsFunction(record)) {
       VectorDestructWithContents(&record->info.function.prototype,
                                 (VectorElementDestructor)SymbolDestruct);
+    } else if (TypeIsVLA(record)) {
+      // Delete the AST containing the size.
+      ASTNodeDelete(record->info.array.size.vla.size);
     }
     free(record);
   }
@@ -130,15 +165,17 @@ void TypeRecordDecRef(TypeRecord* record) {
   record->refs--;
 }
 
-void TypeRecordCalculateSize(TypeRecord* record) {
+TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
   if (record == NULL) {
-    return;
+    return NULL;
   }
   TypeRecordCalculateSize(record->next);
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:
-        record->size = record->info.array.size * record->next->size;
+        if (!record->info.array.is_vla) {
+          record->size = record->info.array.size.fixed * record->next->size;
+        }
         break;
       case kDeclPointer:
         record->size = SizeofPointer();
@@ -156,6 +193,11 @@ void TypeRecordCalculateSize(TypeRecord* record) {
         break;
     }
   }
+  return record;
+}
+
+TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals) {
+  return TypeRecordCalculateSize(NewTypeRecord(type, quals));
 }
 
 // Join two type records through the next field.  This increments
@@ -166,6 +208,10 @@ void TypeRecordChain(TypeRecord* from, TypeRecord* to) {
     printf("");
   }
   from->next = to;
+}
+
+static ASTNode* CloneVLAExpr(ASTNode* node, void* data) {
+  return node;
 }
 
 // Copy a type record and chain it to its existing next,
@@ -183,6 +229,10 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
     record->info.struct_info->refs++;
   } else if (TypeIsEnum(record)) {
     record->info.enum_info->refs++;
+  } else if (TypeIsVLA(record)) {
+    // Copy the expression AST.
+    r->info.array.size.vla.size =
+      ASTNodeClone(record->info.array.size.vla.size, CloneVLAExpr, NULL, NULL);
   }
   return r;
 }
@@ -204,12 +254,24 @@ TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type) {
   return ptr;
 }
 
-TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size, bool is_flexible) {
+TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static) {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
   t->declarator = kDeclArray;
-  t->info.array.size = array_size;
-  t->info.array.is_flexible = is_flexible;
+  t->info.array.size.fixed = 0;
+  t->info.array.is_flexible = false;
+  t->info.array.is_static = is_static;
+  t->info.array.size.vla.size = NULL;
+  t->info.array.size.vla.codegen_info = NULL;
+  t->info.array.is_vla = false;
+  t->info.array.is_placeholder_vla = false;
   t->size = 0;  // Don't know yet.
+  return t;
+}
+
+TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible) {
+  TypeRecord* t = NewArrayTypeRecord(quals, false);
+  t->info.array.size.fixed = size;
+  t->info.array.is_flexible = is_flexible;
   return t;
 }
 
@@ -348,62 +410,66 @@ static void QualifiersToString(Qualifiers quals, String* result) {
 // This is very verbose output, intended for debugging to display
 // all the information needed.  The 'with_function_body' parameter
 // says whether the function body (the statements) are also printed.
-void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body) {
+void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* fp) {
   String str = {0};
   bool print_newline = false;
 
   while (record != NULL) {
     if (record->declarator == kDeclPointer) {
-      printf("pointer to ");
+      fprintf(fp, "pointer to ");
     }
     QualifiersToString(record->qualifiers, &str);
     TypeToString(record->type, &str);
-    printf("%s", str.value);
+    fprintf(fp, "%s", str.value);
 
     if (record->declarator == kDeclArray) {
-      printf("array of size %d ", record->info.array.size);
+      if (record->info.array.is_vla) {
+        fprintf(fp, "variable length array ");
+      } else {
+        fprintf(fp, "array of size %d ", record->info.array.size.fixed);
+      }
     } else if (record->declarator == kDeclFunction) {
-      printf("function (");
+      fprintf(fp, "function (");
       const char* sep = "";
       size_t nformals = record->info.function.prototype.length;
       for (size_t i = 0; i < nformals; i++) {
         Symbol* formal = (Symbol*)record->info.function.prototype.value.p[i];
-        printf("%s", sep);
+        fprintf(fp, "%s", sep);
         sep = ",";
-        SymbolPrint(formal);
+        SymbolPrint(formal, fp);
       }
       if (record->info.function.varargs) {
-        printf("%s...", sep);
+        fprintf(fp, "%s...", sep);
       }
       if (with_function_body) {
-        printf(") {");
+        fprintf(fp, ") {");
         CompoundStatementASTNode* body = (CompoundStatementASTNode*)
               record->info.function.body;
         size_t num_statements = body->statements->length;
         if (num_statements > 0) {
-          printf("\n");
+          fprintf(fp, "\n");
           print_newline = true;
         }
         for (size_t i = 0; i < num_statements; i++) {
           ASTNode* stmt = (ASTNode*)body->statements->value.p[i];
-          ASTNodePrint(stmt, 2);
+          ASTNodePrint(stmt, 2, fp);
         }
-        printf("} returning ");
+        fprintf(fp, "} returning ");
       } else {
-        printf(") returning ");
+        fprintf(fp, ") returning ");
       }
     }
     record = record->next;
   }
   if (print_newline) {
-    printf("\n");
+    fprintf(fp, "\n");
   }
   StringDestruct(&str);
 }
 
 // Basic type record printer without function body.  Also pretty verbose.
-void TypeRecordPrint(TypeRecord* record) {
-  TypeRecordPrintDetails(record, false);
+void TypeRecordPrint(TypeRecord* record, FILE* fp) {
+  TypeRecordPrintDetails(record, false, fp);
 }
 
 // Convert a type record to a string in C syntax.  Not verbose.
@@ -434,7 +500,7 @@ void TypeRecordToString(TypeRecord* type, String* result) {
 
     case kDeclArray:
       TypeRecordToString(type->next, result);
-      StringPrintf(result, "[%d]", type->info.array.size);
+      StringPrintf(result, "[%d]", type->info.array.size.fixed);
       break;
 
     case kDeclFunction: {
@@ -459,7 +525,7 @@ void TypeRecordToString(TypeRecord* type, String* result) {
 // type system.
 //
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
-                    Storage storage) {
+                    Storage storage, ParserContext context) {
   parser->lex = lex;
   parser->syntax = syntax;
   parser->storage = storage;
@@ -468,6 +534,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->found_void = false;
   parser->dimension_count = 0;
   parser->is_inline = false;
+  parser->context = context;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -563,7 +630,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
     Symbol* tag;
     TypeParser composite_parser;
     TypeParserInit(&composite_parser, parser->lex, parser->syntax,
-                   STO(implicit));
+                   STO(implicit), kParsingStructOrUnion);
     
     if ((type & (kTypeStruct | kTypeUnion)) != 0) {
       bool is_union = (type & kTypeUnion) != 0;
@@ -865,29 +932,34 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   return parser->symbol;
 }
 
+static Qualifiers ParseQualifiers(TypeParser* parser) {
+  Qualifiers quals = kQualPlain;
+  int num_consts = 0;
+  int num_volatiles = 0;
+  int num_restricts = 0;
+  while (!LexEof(parser->lex)) {
+    if (LexMatch(parser->lex, TOK(const))) {
+      quals |= kQualConst;
+      num_consts++;
+    } else if (LexMatch(parser->lex, TOK(volatile))) {
+      num_volatiles++;
+      quals |= kQualVolatile;
+    } else if (LexMatch(parser->lex, TOK(restrict))) {
+      num_restricts++;
+      quals |= kQualRestrict;
+    } else {
+      break;
+    }
+  }
+  if (num_consts > 1 || num_volatiles > 1 || num_restricts > 1) {
+    SyntaxError(parser->syntax, "Invalid pointer qualifier declaration");
+  }
+  return quals;
+}
+
 void TypeParserParsePointer(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(star))) {
-    Qualifiers quals = kQualPlain;
-    int num_consts = 0;
-    int num_volatiles = 0;
-    int num_restricts = 0;
-    while (!LexEof(parser->lex)) {
-      if (LexMatch(parser->lex, TOK(const))) {
-        quals |= kQualConst;
-        num_consts++;
-      } else if (LexMatch(parser->lex, TOK(volatile))) {
-        num_volatiles++;
-        quals |= kQualVolatile;
-      } else if (LexMatch(parser->lex, TOK(restrict))) {
-        num_restricts++;
-        quals |= kQualRestrict;
-      } else {
-        break;
-      }
-    }
-    if (num_consts > 1 || num_volatiles > 1 || num_restricts > 1) {
-      SyntaxError(parser->syntax, "Invalid pointer qualifier declaration");
-    }
+    Qualifiers quals = ParseQualifiers(parser);
     TypeParserParsePointer(parser);
     TypeRecord* p = NewPointerTypeRecord(quals);
     VectorAppend(&parser->stack, p);
@@ -931,8 +1003,14 @@ static void ParseFormalArgument(TypeParser* proto_parser,
       SymbolSetType(formal, ptr);
     }
     VectorAppend(&func->info.function.prototype, formal);
+    formal->flags.is_defined = true;
     formal->flags.is_argument = true;
     formal->value.arg_number = arg_number;
+    if (proto_parser->syntax->local_symbol_stack != NULL) {
+      InsertLocalSymbol(proto_parser->syntax->local_symbol_stack,
+                      formal);
+    }
+
   } else {
     SyntaxError(proto_parser->syntax, "Duplicate function argument '%s'",
                 formal->name.value);
@@ -1046,73 +1124,133 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   }
 }
 
-// Parse an array dimension expression and return the integer value.
-// Returns size if positive or:
-// -1: no size given.
-static int ParseArrayDimension(TypeParser* parser) {
-  int64_t size = 0;
-  if (!LexLookingAt(parser->lex, TOK(rsquare))) {
+static void ParseFunctionDecl(TypeParser* parser) {
+  TypeParser proto_parser;
+  TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_inline = parser->is_inline;
+  if (parser->symbol != NULL) {
+    func->info.function.symbol = parser->symbol;
+  }
+  
+  ParseFunctionPrototype(&proto_parser, func);
+
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+  VectorAppend(&parser->stack, func);
+}
+ 
+static void ParseArrayDecl(TypeParser* parser) {
+  bool is_static = false;
+  Qualifiers quals = kQualPlain;
+  // An array decl can have:
+  // [static quals ...]
+  // [quals static ...];
+  if (LexMatch(parser->lex, TOK(static))) {
+    is_static = true;
+    quals = ParseQualifiers(parser);
+  } else {
+    quals = ParseQualifiers(parser);
+    is_static = LexMatch(parser->lex, TOK(static));
+  }
+
+  // These are only allowed inside a function prototype.
+  if (parser->context != kParsingPrototype) {
+    if (is_static || quals != kQualPlain) {
+      SyntaxError(parser->syntax, "static or qualifiers used in array declarator outside function prototype");
+    }
+  }
+  
+  parser->dimension_count++;
+  TypeRecord* p = NewArrayTypeRecord(quals, is_static);
+  VectorAppend(&parser->stack, p);
+
+  bool is_vla = false;
+  bool found_star = false;
+  SourceLocation location = parser->lex->current_token_location;
+  if (LexMatch(parser->lex, TOK(rsquare))) {
+    if (parser->dimension_count != 1) {
+      SyntaxError(parser->syntax,
+             "Array dimension required after first dimension");
+    }
+    // No size expression present.
+    if (parser->context != kParsingPrototype) {
+      p->info.array.is_flexible = true;
+    }
+    return;
+  }
+  
+  // There is something in the [...]
+  if (LexMatch(parser->lex, TOK(star))) {
+    // Unfortunately * can be a unary operator and part of an expression
+    // so we need to look at the next token to see if it's a close square
+    // bracket.  We've already consumed the *.
+    found_star = true;
+  }
+  if (found_star && LexLookingAt(parser->lex, TOK(rsquare))) {
+    if (parser->context != kParsingPrototype) {
+      SyntaxError(parser->syntax, "VLA placeholder '*' is only valid in a function prototype");
+    } else {
+      is_vla = true;
+      p->info.array.is_placeholder_vla = true;
+    }
+  } else {
+    // Size expression is present.  If it's constant we have a
+    // regular fixed size array, otherwise it's a VLA.
     ASTNode* size_expr =
-    SyntaxParseExpression(parser->syntax, TC(closebra));
+        SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+    if (found_star) {
+      // There was a * before the expression, this means contents.
+      size_expr = NewUnaryASTNode(AST_OP(contents), NULL, location, size_expr);
+    }
     size_expr = AnalyzeExpression(size_expr);
+    bool delete_expr = true;
+    int64_t size;
     bool ok = EvaluateIntegerExpression(size_expr, &size);
     if (!ok) {
-      // TODO: variable sized arrays?
-      SyntaxError(parser->syntax, "Constant expression required for array size");
-      size = 1;
+      // VLA.
+      if (!TypeIsIntegral(size_expr->type)) {
+        SyntaxError(parser->syntax, "Variable length array size must be integral");
+      }
+      if (parser->context != kParsingBlockScope && parser->context != kParsingPrototype) {
+        SyntaxError(parser->syntax, "Variable length array is only allowed inside a function");
+      } else if (StorageIs(parser->storage, STO(extern)|STO(static))) {
+        SyntaxError(parser->syntax, "Variable length array cannot be static or extern");
+      } else {
+        p->info.array.size.vla.size = size_expr;
+        delete_expr = false;      // Hold on to expression.
+        is_vla = true;
+      }
     } else {
-      if (size < 0) {
-        SyntaxError(parser->syntax, "Array with negative size");
+      if (size <= 0) {
+        SyntaxError(parser->syntax, "Array with negative or zero size");
         size = 1;
       }
+      p->info.array.size.fixed = (int)size;
     }
-    ASTNodeDelete(size_expr);
-  } else {
-    if (parser->dimension_count != 1) {
-      LexError(parser->lex,
-               "Array dimension required after first dimension");
+    if (delete_expr) {
+      ASTNodeDelete(size_expr);
     }
-    size = -1;
   }
-  return (int)size;
-}
+  p->info.array.is_vla = is_vla;
   
+  if (!LexMatch(parser->lex, TOK(rsquare))) {
+    LexError(parser->lex, "Missing ]");
+  }
+}
+
 void TypeParserParseFuncOrArray(TypeParser* parser) {
   TypeParserParseBase(parser);
   while (LexLookingAt(parser->lex, TOK(lparen)) ||
          LexLookingAt(parser->lex, TOK(lsquare))) {
     // Check for function prototype declaration.
     if (LexMatch(parser->lex, TOK(lparen))) {
-      TypeParser proto_parser;
-      TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto));
-      TypeRecord* func = NewFunctionTypeRecord();
-      func->info.function.is_inline = parser->is_inline;
-      
-      if (parser->symbol != NULL) {
-        func->info.function.symbol = parser->symbol;
-      }
-      
-      ParseFunctionPrototype(&proto_parser, func);
-
-      SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
-      VectorAppend(&parser->stack, func);
+      ParseFunctionDecl(parser);
     } else if (LexMatch(parser->lex, TOK(lsquare))) {
-      parser->dimension_count++;
-      
-      int size = ParseArrayDimension(parser);
-      bool is_flexible = false;
-      if (size < 0) {
-        size = 0;
-        is_flexible = true;
-      }
-      if (!LexMatch(parser->lex, TOK(rsquare))) {
-        LexError(parser->lex, "Missing ]");
-      }
-      TypeRecord* p = NewArrayTypeRecord(kQualPlain, size, is_flexible);
-      VectorAppend(&parser->stack, p);
+      ParseArrayDecl(parser);
     }
   }
 }
+
 
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
@@ -1546,133 +1684,51 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
 // Type inference functions.
 //
 
-bool TypeIsPointer(TypeRecord* type) {
-  return type->declarator == kDeclPointer;
-}
+bool TypeIsInt(TypeRecord* type);
+bool TypeIsChar(TypeRecord* type);
+bool TypeIsShort(TypeRecord* type);
+bool TypeIsLong(TypeRecord* type);
+bool TypeIsLongLong(TypeRecord* type);
+bool TypeIsUnsignedInt(TypeRecord* type);
+bool TypeIsUnsignedChar(TypeRecord* type);
+bool TypeIsUnsignedShort(TypeRecord* type);
+bool TypeIsUnsignedLong(TypeRecord* type);
+bool TypeIsUnsignedLongLong(TypeRecord* type);
+bool TypeIsFloat(TypeRecord* type);
+bool TypeIsDouble(TypeRecord* type);
+bool TypeIsLongDouble(TypeRecord* type);
+bool TypeIsBool(TypeRecord* type);
+bool TypeIsVoid(TypeRecord* type);
 
-bool TypeIsPrimitive(TypeRecord* type) {
-  return type->declarator == kDeclPrimitive;
-}
-bool TypeIsPointerOrArray(TypeRecord* type) {
-  return type->declarator == kDeclPointer || type->declarator == kDeclArray;
-}
+bool TypeIsPointer(TypeRecord* type);
+bool TypeIsPrimitive(TypeRecord* type);
+bool TypeIsPointerOrArray(TypeRecord* type);
+bool TypeIsIntegral(TypeRecord* type);
+bool TypeIsFloatingPoint(TypeRecord* type);
+bool TypeIsFunction(TypeRecord* type);
+bool TypeIsFunctionDefinition(TypeRecord* type);
+bool TypeIsFunctionPointer(TypeRecord* type);
+bool TypeIsStructOrUnionPointer(TypeRecord* type);
+bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type);
+bool TypeIsVoidFunction(TypeRecord* type);
 
-bool TypeIsFunction(TypeRecord* type) {
-  return type->declarator == kDeclFunction;
-}
+bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2);
+bool TypeIsStructOrUnion(TypeRecord* type);
+bool TypeIsScalar(TypeRecord* type);
+bool TypeIsVoidPointer(TypeRecord* type);
+bool TypeIsArray(TypeRecord* type);
+bool TypeIsConst(TypeRecord* type);
+bool TypeIsVolatile(TypeRecord* type);
+bool TypeIsEnum(TypeRecord* type);
+bool TypeIsUnsigned(TypeRecord* type);
+bool TypeIsSigned(TypeRecord* type);
 
-bool TypeIsFunctionDefinition(TypeRecord* type) {
-  if (!TypeIsFunction(type)) {
-    return false;
-  }
-  return type->info.function.definition;
-}
 
-bool TypeIsFunctionPointer(TypeRecord* type) {
-  if (TypeIsPointer(type)) {
-    TypeRecord* subtype = type->next;
-    return TypeIsFunction(subtype);
-  }
-  return TypeIsFunction(type);
-}
-
-bool TypeIsIntegral(TypeRecord* type) {
-  return TypeIsPrimitive(type) &&
-         (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeLong |
-                        kTypeLongLong | kTypeBool | kTypeEnum)) != 0;
-}
-
-bool TypeIsFloatingPoint(TypeRecord* type) {
-  return TypeIsPrimitive(type) &&
-         (type->type & (kTypeFloat | kTypeDouble | kTypeLongDouble)) != 0;
-}
-
-bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2) {
-  return TypeIsPointer(ptr1) &&
-         ptr1->declarator == ptr2->declarator &&
-         ptr1->next->type == ptr2->next->type;
-}
-
-bool TypeIsStructOrUnion(TypeRecord* type) {
-  return TypeIsPrimitive(type) &&
-         (type->type & (kTypeStruct | kTypeUnion)) != 0;
-}
-
-bool TypeIsScalar(TypeRecord* type) { return !TypeIsStructOrUnion(type); }
-
-bool TypeIsVoid(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeVoid) != 0;
-}
-
-bool TypeIsInt(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & (kTypeInt | kTypeEnum)) != 0;
-}
-
-bool TypeIsChar(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeChar) != 0;
-}
-bool TypeIsShort(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeShort) != 0;
-}
-bool TypeIsLong(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeLong) != 0;
-}
-bool TypeIsLongLong(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeLongLong) != 0;
-}
-
-bool TypeIsUnsignedInt(TypeRecord* type) {
-  return TypeIsUnsigned(type) && TypeIsInt(type);
-}
-
-bool TypeIsUnsignedChar(TypeRecord* type) {
-  return TypeIsUnsigned(type) && TypeIsChar(type);
-}
-bool TypeIsUnsignedShort(TypeRecord* type) {
-  return TypeIsUnsigned(type) && TypeIsShort(type);
-}
-bool TypeIsUnsignedLong(TypeRecord* type) {
-  return TypeIsUnsigned(type) && TypeIsLong(type);
-}
-bool TypeIsUnsignedLongLong(TypeRecord* type) {
-  return TypeIsUnsigned(type) && TypeIsLongLong(type);
-}
-
-bool TypeIsFloat(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeFloat) != 0;
-}
-bool TypeIsDouble(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeDouble) != 0;
-}
-bool TypeIsLongDouble(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeLongDouble) != 0;
-}
-bool TypeIsBool(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeBool) != 0;
-}
-
-bool TypeIsEnum(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeEnum) != 0;
-}
-
-bool TypeIsVoidPointer(TypeRecord* type) {
-  return TypeIsPointer(type) && type->next != NULL && TypeIsVoid(type->next);
-}
-
-bool TypeIsStructOrUnionPointer(TypeRecord* type) {
-  return TypeIsPointer(type) && TypeIsStructOrUnion(type->next);
-}
-
-bool TypeIsUnsigned(TypeRecord* type) {
-  if (type == NULL) {
-    return false;
-  }
-  return TypeIsPrimitive(type) && (type->type & kTypeUnsigned) != 0;
-}
-
-bool TypeIsSigned(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
-}
+bool TypeIsIntConstant(TypeRecord* type);
+bool TypeIsFloatingPointConstant(TypeRecord* type);
+bool TypeIsUnknown(TypeRecord* type);
+bool TypeIsFixedArray(TypeRecord* type);
+bool TypeIsVLA(TypeRecord* type);
 
 static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   if (a->prototype.length != b->prototype.length) {
@@ -1697,7 +1753,7 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      return t1->info.array.size == t2->info.array.size;
+      return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:
       return TypeEqual(t1->next, t2->next);
 
@@ -1735,7 +1791,7 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       if (!TypeEqual(t1->next, t2->next)) {
         return false;
       }
-      return t1->info.array.size == t2->info.array.size;
+      return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:
       return TypeEqual(t1->next, t2->next);
 
@@ -1813,34 +1869,3 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
   StringDestruct(&error1);
 }
 
-bool TypeIsConst(TypeRecord* type) {
-  return (type->qualifiers & kQualConst) != 0;
-}
-
-bool TypeIsVolatile(TypeRecord* type) {
-  return (type->qualifiers & kQualVolatile) != 0;
-}
-
-bool TypeIsArray(TypeRecord* type) { return type->declarator == kDeclArray; }
-
-bool TypeIsIntConstant(TypeRecord* type) {
-  return TypeIsIntegral(type) && ((type->qualifiers & kQualConst) != 0);
-}
-
-bool TypeIsFloatingPointConstant(TypeRecord* type) {
-  return TypeIsFloatingPoint(type) && ((type->qualifiers & kQualConst) != 0);
-}
-
-bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type) {
-  if (TypeIsFunction(type)) {
-    return TypeIsStructOrUnion(type->next);
-  }
-  if (TypeIsPointer(type) && TypeIsFunction(type->next)) {
-    return TypeIsStructOrUnion(type->next->next);
-  }
-  return false;
-}
-
-bool TypeIsUnknown(TypeRecord* type) {
-  return (type->type & kTypeUnknown) != 0;
-}

@@ -22,6 +22,14 @@
 
 #elif defined(__p_code__)
 
+#elif defined(__6502__)
+#define SYS_EXIT 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_WRITE 4
+#define SYS_READ 5
+#define SYS_LSEEK 7
+#define SYS_ABORT 8
 #else
 #error "Unknown architecture for syscall"
 #endif
@@ -32,11 +40,14 @@
               "mv t6, a0\n" \
               "ecall" \
               )
+extern int syscall(int n, ...);
 #elif defined(__p_code__)
+extern int syscall(int n, ...);
+#elif defined(__6502__)
+extern int syscall(int n, ...);
 #else
 #error "Unknown architecture"
 #endif
 
-extern int syscall(int n, ...);
 
 #endif /* syscall_h */

@@ -81,7 +81,7 @@ int main(int argc, const char * argv[]) {
     Insert(&t, i, i * 5);
     PrintBinaryTree(&t);
   }
-  for (int i = 0; i < N; i++) {
+  for (size_t i = 0; i < N; i++) {
     BinaryTreeNode* n = BinaryTreeSearch(&t, (void*)i);
     assert(n != NULL);
   }

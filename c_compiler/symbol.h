@@ -37,6 +37,7 @@ bool StorageIs(Storage storage, Storage value);
 // A symbol.  This is a variable, function or type used in a program.
 typedef struct Symbol {
   String name;                // Symbol name.
+  int id;
   struct TypeRecord* type;    // Type.
   Storage storage;            // Storage (static, typedef, etc.)
   struct {
@@ -49,6 +50,7 @@ typedef struct Symbol {
     bool address_taken: 1;         // The address has been taken in the program.
     bool used: 1;                  // The symbol has been used.
     bool invented: 1;
+    bool is_inline_defn: 1;        // Is an inline function definition.
   } flags;
   
   struct {
@@ -66,6 +68,7 @@ typedef struct Symbol {
     double fvalue;          // Double value for constants.
     int32_t arg_number;     // Argument number in prototype.
     void* other;            // Something else.
+    struct Symbol* func_defn;      // Defintion of this func declaration.
   } value;
   
   int32_t stack_offset;     // Stack offset if local.
@@ -87,7 +90,7 @@ void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 void SymbolAddAttribute(Symbol* symbol, String* attribute);
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 
-void SymbolPrintDetails(Symbol* sym, bool with_function_body);
-void SymbolPrint(Symbol* sym);
+void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp);
+void SymbolPrint(Symbol* sym, FILE* fp);
 
 #endif /* symbol_h */

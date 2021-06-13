@@ -97,9 +97,9 @@ void DynamicLinkerDefineSymbols(Linker* linker) {
 // DSO building functions.
 //
 
-static int GetDataGOTOffset(DynamicLinker* s, Symbol* symbol) {
+static int GetDataGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
   if (symbol->got_index == -1) {
-    // Symbol is not in Global Offset Table, add it.
+    // LinkerSymbol is not in Global Offset Table, add it.
     VectorAppend(&s->global_offset_table.data_entries, symbol);
     symbol->got_index = (int)s->global_offset_table.data_entries.length - 1;
   }
@@ -109,9 +109,9 @@ static int GetDataGOTOffset(DynamicLinker* s, Symbol* symbol) {
 // NOTE: the function's GOT offset is relative to the end of
 // the data GOT entries.  We don't know how many data entries
 // there are yet, so the actual offset will need be calculated later.
-static int GetFunctionGOTOffset(DynamicLinker* s, Symbol* symbol) {
+static int GetFunctionGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
   if (symbol->got_index == -1) {
-    // Symbol is not in Global Offset Table, add it.
+    // LinkerSymbol is not in Global Offset Table, add it.
     VectorAppend(&s->global_offset_table.function_entries, symbol);
     symbol->got_index = (int)s->global_offset_table.function_entries.length - 1 +
       s->global_offset_table.num_resolver_data_entries;
@@ -119,7 +119,7 @@ static int GetFunctionGOTOffset(DynamicLinker* s, Symbol* symbol) {
   return symbol->got_index;
 }
 
-static int GetPLTOffset(DynamicLinker* s, Symbol* symbol) {
+static int GetPLTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
   if (symbol->plt_index == -1) {
     VectorAppend(&s->procedure_linkage_table.trampolines, symbol);
     symbol->plt_index = (int)s->procedure_linkage_table.trampolines.length - 1 +
@@ -130,7 +130,7 @@ static int GetPLTOffset(DynamicLinker* s, Symbol* symbol) {
 
 
 
-static void AddGOTEntry(Linker* linker, Symbol* symbol,
+static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents,
                         Vector* relocs,
                         GOTRelocation relocation_type) {
@@ -177,7 +177,7 @@ static void BuildGlobalOffsetTableContents(struct Linker* linker,
   
   Vector* func_entries = &dynamic->global_offset_table.function_entries;
   for (size_t i = 0; i < func_entries->length; i++) {
-    Symbol* symbol = func_entries->value.p[i];
+    LinkerSymbol* symbol = func_entries->value.p[i];
     AddGOTEntry(linker, symbol, got_plt_contents,
                 &dynamic->plt_relocations, kGOTRelocationFunction);
   }
@@ -210,7 +210,7 @@ void DynamicLinkerFixupGOT(Linker* linker) {
   
   Vector* func_entries = &dynamic->global_offset_table.function_entries;
   for (size_t i = 0; i < func_entries->length; i++) {
-    Symbol* symbol = func_entries->value.p[i];
+    LinkerSymbol* symbol = func_entries->value.p[i];
     // The got_index inside the symbol is the absolute index
     // into the GOT.  The plt_index is the absolute index
     // into the PLT.
@@ -220,7 +220,7 @@ void DynamicLinkerFixupGOT(Linker* linker) {
   }
 }
 
-static void AddPLTEntry(Linker* linker, Symbol* symbol,
+static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents) {
   linker->arch->add_plt_entry(linker, symbol, contents);
 }
@@ -269,7 +269,7 @@ void DynamicLinkerFixupPLT(Linker* linker) {
   
   // Fixup the actual PLT trampolines now.
   for (size_t i = 0; i < plt->trampolines.length; i++) {
-    Symbol* sym = plt->trampolines.value.p[i];
+    LinkerSymbol* sym = plt->trampolines.value.p[i];
     linker->arch->fixup_plt_entry(plt, got,
                                   sym, plt_buffer,
                                   got_address, plt_address);
@@ -285,7 +285,7 @@ void DynamicLinkerFixupPLT(Linker* linker) {
 static void ProcessPossibleDynamicRelocation(struct Linker* linker,
                                              struct ObjectFile* file,
                                              Relocation* reloc) {
-  Symbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+  LinkerSymbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
   linker->arch->handle_pic_relocation(linker->dynamic_linker,
                                         symbol,
                                         reloc,
@@ -438,6 +438,8 @@ static SectionGroup* NewDynamicLinkerGroup(Linker* linker,
   group->segment = segment;
   VectorAppend(&segment->sections, group);
   VectorAppend(&linker->section_groups, group);
+  SegmentMemoryRegion* region = SegmentDefaultRegion(segment);
+  VectorAppend(&region->sections, NewString(section->name.value));
   return group;
 }
 
@@ -682,7 +684,7 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   FixupDynamicSectionEntryValue(buffer, DT(strtab), strtab->header.addr);
   FixupDynamicSectionEntryValue(buffer, DT(strsz), strtab->header.size);
   
-  // Symbol table.
+  // LinkerSymbol table.
   ELFWriterSection* symtab = ELFWriterFindSection(elf, ".dynsym");
   assert(symtab != NULL);
   FixupDynamicSectionEntryValue(buffer, DT(symtab), symtab->header.addr);
@@ -750,7 +752,7 @@ typedef struct  {
 
 // Since we don't know the section index or value of the symbols
 // when they are added to the dynamic symbol table we need to keep
-// a reference to the Symbol inside the symbol table's memory.
+// a reference to the LinkerSymbol inside the symbol table's memory.
 // This is so that we can traverse it and insert the actual values
 // when we know them.  The union must have a max of sizeof(ELFSymbol)
 // bytes.
@@ -759,7 +761,7 @@ typedef union {
   struct {
     ELF_Word name_offset;   // 4 bytes.
     uint32_t hash;          // 4 bytes.
-    Symbol* symbol;   // 8 bytes.
+    LinkerSymbol* symbol;   // 8 bytes.
   } fixup;                  // Total: 16 bytes.
 } SymbolFixup;
 
@@ -795,7 +797,7 @@ static size_t SortDynamicSymbolTable(Buffer* dynsym) {
   assert(num_gnu_buckets > 0);
   size_t num_symbols = dynsym->length / sizeof(SymbolFixup);
   SymbolFixup* symbols = (SymbolFixup*)dynsym->value;
-  size_t def_index = -1;    // Symbol of first defined symbol.
+  size_t def_index = -1;    // LinkerSymbol of first defined symbol.
   
   // Find the first defined symbol and set def_index to the
   // index of the first defined symbol.  We start at symbol index
@@ -852,7 +854,7 @@ static void AddSymbolListToDynamicSymbolTable(void* entry, void* data) {
   Vector* bucket = entry;
   DynamicSymbolTableInfo* info = data;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value.p[i];
+    LinkerSymbol* sym = bucket->value.p[i];
     // Don't insert symbol if it has no name or it is invented by the
     // linker, like _DYNAMIC_)
     if (sym->name.length == 0 || sym->invented) {
@@ -862,7 +864,7 @@ static void AddSymbolListToDynamicSymbolTable(void* entry, void* data) {
     ELF_Word name = (ELF_Word)info->dynstr->length;
     BufferAppend(info->dynstr, sym->name.value, sym->name.length+1);
     
-    // Create Symbol fixup.  This will be replaced by the real
+    // Create LinkerSymbol fixup.  This will be replaced by the real
     // symbol when all the information is known. The SymbolFixup
     // struct is the same size as and ELFSymbol.
     SymbolFixup fixup;
@@ -1045,7 +1047,7 @@ void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
   size_t index = sizeof(SymbolFixup);
   while (index < dynsym->length){
     SymbolFixup* fixup = (SymbolFixup*)&dynsym->value[index];
-    Symbol* sym = fixup->fixup.symbol;
+    LinkerSymbol* sym = fixup->fixup.symbol;
     ELFSymbol* elfsym = &fixup->sym;
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
@@ -1054,7 +1056,7 @@ void DynamicLinkerFixupDynamicSymbolTable(Buffer* dynsym,
                   type, binding, sym->header->size,
                   sym->address);
     
-    // Set the index into the dynamic symbol table in the Symbol.
+    // Set the index into the dynamic symbol table in the LinkerSymbol.
     // This is used by the dynamic relocations.
     sym->dynamic_index = (int)index / sizeof(SymbolFixup);
     

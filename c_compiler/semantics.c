@@ -90,7 +90,26 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   }
 }
 
+static void CheckVLAArgs(Syntax* syntax, ASTNode* node) {
+  Vector* prototype = &node->type->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* arg = prototype->value.p[i];
+    if (TypeIsVLA(arg->type)) {
+      // Variable length array, check that all the dimensions are
+      // bound to variables.
+      if (arg->type->info.array.is_placeholder_vla) {
+        SemanticError(node,
+                      "Variable length array '%s' dimensions must be bound "
+                      "to a variable in function definition", arg->name.value);
+      }
+    }
+  }
+}
+
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
+  // Check Variable Langth Array arguments.
+  CheckVLAArgs(syntax, node);
+  
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);

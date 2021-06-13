@@ -69,6 +69,9 @@ static IRNode* FindVariableReference(IRNode* origin, Symbol* symbol) {
         return prev;
       }
     }
+    if (inst->opcode == IR_OP(structreturn)) {
+      return inst;
+    }
     prev = inst;
     if (IRIsLoad(inst) || IRIsStore(inst) || inst->opcode == IR_OP(adda)) {
       inst = inst->inputs.value.p[0];
@@ -115,11 +118,19 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
         assert(IRIsStore(inst));
         IRNode* ref = FindVariableReference(inst, inst->var.def);
         assert(ref != NULL);
-        IRNode* ssavar = NewIRSSAVar(inst->var.def);
-        // Emit ssavar at beginning of entry basic block.
-        BasicBlockInsertVar(gen, gen->entry_block, ssavar);
-        RenameTopVariable(var_stacks, inst->var.def, ssavar);
-        IRReplaceInput(ref, 0, ssavar);
+        
+        // Returning a struct doesn't create an SSA var.
+        if (ref->opcode != IR_OP(structreturn)) {
+          IRNode* ssavar = NewIRSSAVar(inst->var.def);
+#if 0
+          // Emit ssavar at beginning of entry basic block.
+          BasicBlockInsertVar(gen, gen->entry_block, ssavar);
+#else
+          BasicBlockInsertVar(gen, ref->block, ssavar);
+#endif
+          RenameTopVariable(var_stacks, inst->var.def, ssavar);
+          IRReplaceInput(ref, 0, ssavar);
+        }
       }
     } else if (IRIsVarRef(inst)) {
       // Node references a variable.  This will be one of the 'load' IR
@@ -162,7 +173,6 @@ static void InsertPhiNodes(Generator* gen) {
   // Inserting PHI nodes in basic blocks adds a new variable definition to the
   // block.  We need to keep trying until we get all the PHI nodes inserted.
   bool changed;
-  Vector df = {0};  // Expanded dominance frontier (easier than a BitSet to traverse).
 
   do {
     changed = false;
@@ -170,11 +180,11 @@ static void InsertPhiNodes(Generator* gen) {
       BasicBlock* block = gen->basic_blocks.value.p[i];
       for (size_t j = 0; j < block->defined_vars.length; j++) {
         Symbol* sym = block->defined_vars.values[j].key.p;
-        VectorClear(&df);
-        BitSetExpand(&block->dominance_frontier, &df);
-        for (size_t k = 0; k < df.length; k++) {
+        BitSetIterator it;
+        BitSetIteratorStart(&it, &block->dominance_frontier);
+        while (!BitSetIteratorDone(&it)) {
           BasicBlock* df_node =
-              VectorGet(&gen->basic_blocks, (BlockId)df.value.p[k]);
+              VectorGet(&gen->basic_blocks, (BlockId)BitSetIteratorValue(&it));
 
           // Insert PHI node into block.  This will not add the a PHI node to
           // the same variable more than once.  It returns true if it adds a new
@@ -189,11 +199,11 @@ static void InsertPhiNodes(Generator* gen) {
             MapInsert(&df_node->defined_vars, kv);
           }
           changed |= new_phi;
+          BitSetIteratorNext(&it);
         }
       }
     }
   } while (changed);
-  VectorDestruct(&df);
 }
 
 static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
@@ -203,7 +213,7 @@ static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
     return latest_var;
   }
   for (size_t i = 0; i < block->in_edges.length; i++) {
-    BlockId id = (BlockId)block->in_edges.value.p[i];
+    BlockId id = block->in_edges.value.w[i];
     if (BitSetContains(visited, id)) {
       continue;
     }
@@ -222,17 +232,22 @@ static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
 // to obtain the latest SSA variable for the given symbol.
 static void AddPhiInputs(Generator* gen, BasicBlock* block) {
   IRNode* inst = block->code;
-  BitSet visited;
-  BitSetInit(&visited);
+  BitSet visited = {0};
+  // ssavar nodes in the block are before the phi nodes.
+  while (inst != NULL && inst->opcode == IR_OP(ssavar)) {
+    inst = IRNext(inst);
+  }
+  // Now process all phi nodes.  These are in a contiguous
+  // block.
   while (inst != NULL && inst->opcode == IR_OP(phi)) {
     IRVariable* phi = (IRVariable*)inst;
     Symbol* sym = phi->symbol;
     for (size_t i = 0; i < block->in_edges.length; i++) {
       BasicBlock* input =
-          VectorGet(&gen->basic_blocks, (BlockId)block->in_edges.value.p[i]);
+          VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
       void* latest_var = FindSSAVar(gen, input, sym, &visited);
       if (latest_var != NULL) {
-        IRAddInput((IRNode*)phi, latest_var);
+        IRAddInput((IRNode*)phi, latest_var, false);
       }
     }
     inst = IRNext(inst);
@@ -293,6 +308,10 @@ void GeneratorConvertToSSA(Generator* gen) {
 // will be removed in a subsequent pass.
 static void RemovePhiNodes(Generator* gen, BasicBlock* block) {
   IRNode* inst = block->code;
+  // ssavar nodes in the block are before the phi nodes.
+  while (inst != NULL && inst->opcode == IR_OP(ssavar)) {
+    inst = IRNext(inst);
+  }
   while (inst != NULL && inst->opcode == IR_OP(phi)) {
     IRNode* next = IRNext(inst);
 

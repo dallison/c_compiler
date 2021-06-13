@@ -59,7 +59,7 @@ typedef struct Generator {
 } Generator;
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func);
-void GeneratorPrintIR(Generator* gen);
+void GeneratorPrintIR(Generator* gen, FILE* fp);
 void GeneratorDestruct(Generator* gen);
 
 IRNode* GeneratorGetReturnLabel(Generator* gen);
@@ -74,6 +74,8 @@ IRNode* GeneratorEmitAfter(Generator* gen, IRNode* inst, IRNode* pos);
 IRNode* GeneratorEmitConstant(Generator* gen, IRNode* inst);
 IRNode* GeneratorEmitVariable(Generator* gen, IRNode* inst);
 void GeneratorRemoveInstruction(Generator* gen, IRNode* inst);
+void GeneratorMoveInstructionBefore(Generator* gen, IRNode* inst, IRNode* pos);
+void GeneratorMoveInstructionAfter(Generator* gen, IRNode* inst, IRNode* pos);
 void GeneratorReplaceInstruction(Generator* gen, IRNode* old, IRNode* new);
 
 IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
@@ -94,4 +96,8 @@ void GeneratorWarning(Generator* gen, ASTNode* node, const char* warn,
                       const char* format, ...);
 void VGeneratorWarning(Generator* gen, ASTNode* node, const char* warn,
                        const char* format, va_list ap);
+
+void CheckForVarDef(IRNode* write, ASTNode* node);
+void CheckForVarUse(IRNode* read, ASTNode* node);
+
 #endif /* codegen_h */

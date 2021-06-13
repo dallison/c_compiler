@@ -134,7 +134,7 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
           IRNode* log2 = GeneratorGetIntConstant(
               gen, c->type, LogBase2(node->inputs.value.p[0]));
           IRRemoveInput(node, 0);
-          IRAddInput(node, log2);
+          IRAddInput(node, log2, false);
         } else if (IsIntConstantPowerOf2(node->inputs.value.p[1], maxbits)) {
           // Left is power of 2, convert to shift replaced by its log (base 2).
           node->opcode = IR_OP(lsli);
@@ -196,11 +196,61 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
 void StrengthReductionOptimization(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* block = gen->basic_blocks.value.p[i];
-    IRNode* inst = block->code;
-    while (inst != NULL && IRPrev(inst) != block->end_code) {
-      IRNode* next = IRNext(inst);
+    IRNode* next;
+    for (IRNode* inst = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+         inst = next) {
+      next = IRNext(inst);
       ReduceNodeStrength(gen, block, inst);
-      inst = next;
     }
   }
+}
+
+
+// The last IR_OP(calla) in a block whose only out edge goes
+// to a block marked with return_block is a tail call.
+// Also, if the block is a return block the last call is a
+// tail call.
+void FindTailCalls(BasicBlock* block, void* data) {
+  Generator* gen = data;
+  if (!block->return_block) {
+    if (block->out_edges.length != 1) {
+      return;
+    }
+    BlockId next_id = block->out_edges.value.w[0];
+    BasicBlock* next = VectorGet(&gen->basic_blocks, next_id);
+    if (!next->return_block) {
+      return;
+    }
+  }
+  // Look for the last call in the block.  If we see a result instruction
+  // after the call it's not a tail call.
+  for (IRNode* inst = BasicBlockRBegin(block);
+       !BasicBlockIsEmpty(block) && inst != BasicBlockREnd(block);
+       inst = IRPrev(inst)) {
+    if (IRIsResult(inst)) {
+      // Scalar result instruction.
+      IRNode* value = inst->inputs.value.p[0];
+      if (value->opcode == IR_OP(calla)) {
+        value->flags |= kIRTailCall;
+      }
+      return;
+    }
+    if (inst->opcode == IR_OP(memcpy)) {
+      IRNode* dest = inst->inputs.value.p[0];
+      if (dest->opcode == IR_OP(structreturn)) {
+        // Struct result instruction.  Can't do a tail call for this.
+        return;
+      }
+    }
+    if (inst->opcode == IR_OP(calla)) {
+      inst->flags |= kIRTailCall;
+      return;
+    }
+  }
+}
+
+void TailCallOptimization(Generator* gen) {
+  BasicBlockTraverseDominatorTree(gen, gen->entry_block,
+                                  FindTailCalls, kTraversePostOrder, gen);
 }

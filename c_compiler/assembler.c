@@ -11,9 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "elf_writer.h"
-#include "expr_evaluator.h"
-#include "expr_parser.h"
-#include "expr_semantics.h"
+#include "asm_expr.h"
+#include "errors.h"
 
 // Default label defining function.
 static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling);
@@ -148,6 +147,7 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
                                     AssemblerSymbolBinding binding,
                                     int64_t value) {
   AssemblerSymbol* sym = malloc(sizeof(AssemblerSymbol));
+  BinaryTreeNodeInit(&sym->header);
   StringInit(&sym->name, name);
   sym->type = type;
   sym->binding = binding;
@@ -159,24 +159,72 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
   sym->exported = false;
   sym->alignment = 1;
   sym->is_label = false;
+  sym->is_constant = false;
+  sym->is_forward_declared = false;
   return sym;
 }
 
 void AssemblerSymbolDelete(AssemblerSymbol* sym) { StringDestruct(&sym->name); }
 
 //
-// Symbol table.  This is a hash table of Vectors.
+// Symbol table.  This is a hash table of binary trees.
 //
 
+static int SymbolInsertCompare(BinaryTreeNode* node1,
+                                   BinaryTreeNode* node2) {
+  AssemblerSymbol* sym1 = (AssemblerSymbol*)node1;
+  AssemblerSymbol* sym2 = (AssemblerSymbol*)node2;
+  return StringCompareString(&sym1->name, &sym2->name);
+}
+
+static int SymbolSearchCompare(BinaryTreeNode* node, void* name) {
+  AssemblerSymbol* sym = (AssemblerSymbol*)node;
+  return StringCompare(&sym->name, name);
+}
+
+static void SymbolDestructor(BinaryTreeNode* node, void* delete_symbols) {
+  AssemblerSymbol* sym = (AssemblerSymbol*)node;
+  AssemblerSymbolDelete(sym);
+}
+
+// Mapping function for hash table inserter.
+static bool InsertSymbolIntoHashTable(void* table, void* node, void** parent) {
+  BinaryTree* tree = table;
+  if (table == NULL) {
+    tree = NewBinaryTree(
+                         SymbolInsertCompare,
+                         SymbolSearchCompare,
+                         SymbolDestructor);
+
+    *parent = tree;
+  }
+  return BinaryTreeInsert(tree, node);
+}
+
+// Find a symbol given its name in the given symbol table.  This
+// searches the binary tree using a recursive algorithm.
+static AssemblerSymbol* FindAssemblerSymbol(BinaryTree* table, String* name) {
+  AssemblerSymbol* node = (AssemblerSymbol*)BinaryTreeSearch(table, name);
+  return node;
+}
+
+// Mapping function for hash table searcher.
+static void* FindSymbolInHashTable(void* table, void* value) {
+  BinaryTree* tree = table;
+  return FindAssemblerSymbol(tree, value);
+}
+
+// Create a hash value from a given symbol node (passed as void* from
+// hash table inserter and searcher functions.
 static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
   const char* name;
   switch (mode) {
     case kHashInsert:
-      // For insertion we have a pointer a AssemblerSymbol.
+      // For insertion we have a pointer to symbol node.
       name = ((AssemblerSymbol*)value)->name.value;
       break;
     case kHashSearch:
-      // For search we have pointer to the name.
+      // For search we have pointer to a char containing the name
       // to find.
       name = (const char*)value;
       break;
@@ -188,41 +236,14 @@ static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
   return hash;
 }
 
-static bool InsertSymbolInHashTable(void* entry, void* value, void** parent) {
-  if (entry == NULL) {
-    entry = NewVector();
-    *parent = entry;
-  }
-  Vector* bucket = (Vector*)entry;
-  VectorAppend(bucket, value);
-  return true;
+static void DeleteSymbolTable(void* table, void* data) {
+  BinaryTreeDestruct(table, data);
+  free(table);
 }
 
-static void* FindSymbolInHashTable(void* entry, void* value) {
-  if (entry == NULL) {
-    return NULL;
-  }
-  Vector* bucket = (Vector*)entry;
-  for (size_t i = 0; i < bucket->length; i++) {
-    AssemblerSymbol* sym = bucket->value.p[i];
-    if (StringEqual(&sym->name, (char*)value)) {
-      return sym;
-    }
-  }
-  return NULL;
-}
-
-static void DeleteSymbolList(void* entry, void* data) {
-  Vector* bucket = (Vector*)entry;
-  for (size_t i = 0; i < bucket->length; i++) {
-    AssemblerSymbol* sym = bucket->value.p[i];
-    AssemblerSymbolDelete(sym);
-  }
-  VectorDelete(bucket);
-}
 
 static void ClearAssemblerSymbolTable(HashTable* table) {
-  HashTableTraverse(table, DeleteSymbolList, NULL);
+  HashTableTraverse(table, DeleteSymbolTable, NULL);
   HashTableClear(table);
 }
 
@@ -246,13 +267,6 @@ void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
     return;
   }
   HashTableInsert(&assembler->symbol_table, sym);
-
-  // Insert a symbol suitable for the Syntax Analyzer into the local
-  // syntax scope.  This is so that we can use the symbol in expressions.
-  TypeRecord* int_type = NewTypeRecord(kTypeInt, kQualPlain);
-  Symbol* syntax_sym = NewSymbol(sym->name.value, int_type, STO(assembler));
-  syntax_sym->value.other = sym;
-  SyntaxAddSymbol(&assembler->syntax, syntax_sym);
 }
 
 void AssemblerEmitWord(Assembler* assembler, int section, int32_t word) {
@@ -292,21 +306,19 @@ void AssemblerEmitLong(Assembler* assembler, int section, uint64_t l) {
 }
 
 int64_t AssemblerEvaluateExpression(Assembler* assembler) {
-  ASTNode* expr = SyntaxParseSingleExpression(&assembler->syntax, 0);
-  if (expr == NULL) {
-    return 0;
+  return AssemblerEvaluateKnownExpression(assembler, NULL);
+}
+
+int64_t AssemblerEvaluateKnownExpression(Assembler* assembler, bool* known) {
+  int64_t value = 0;
+  bool ok = AssemblerEvaluateExpressionInternal(assembler, &value);
+  if (known != NULL) {
+    *known = ok;
   }
-  expr = AnalyzeExpression(expr);
-  int64_t value;
-  if (EvaluateIntegerExpression(expr, &value)) {
-    ASTNodeDelete(expr);
-    return value;
-  }
-  if (assembler->pass == 2) {
+  if (!ok && assembler->pass == 2) {
     AssemblerError(assembler, "Invalid expression");
   }
-  ASTNodeDelete(expr);
-  return 0;
+  return value;
 }
 
 double AssemblerGetDoubleConst(Assembler* assembler) {
@@ -364,11 +376,12 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
   assembler->pass = 0;
   assembler->num_errors = 0;
   HashTableInit(&assembler->symbol_table, "assembler_symbols", 1009, HashSymbol,
-                InsertSymbolInHashTable, FindSymbolInHashTable);
+                InsertSymbolIntoHashTable, FindSymbolInHashTable);
   assembler->elf_machine_type = elf_machine_type;
   assembler->elf_flags = elf_flags;
   assembler->reloc_types = reloc_types;
   assembler->pic = false;
+  assembler->absolute = false;
 
   DwarfInit(&assembler->dwarf);
 
@@ -466,6 +479,7 @@ static int32_t SymbolTypeToELFType(AssemblerSymbolType type) {
       return STT(tls);
     default:
       assert(false);
+      return 0;
   }
 }
 
@@ -477,36 +491,46 @@ static int32_t SymbolBindingToELFBinding(AssemblerSymbolBinding binding) {
       return STB(local);
     default:
       assert(false);
+      return 0;
+  }
+}
+
+static void AddLocalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
+  ELFWriterFile* elf = data;
+  AssemblerSymbol* sym = (AssemblerSymbol*)node;
+  if (sym->exported && sym->binding == SYM_BIND(local)) {
+    int section_index = sym->section;
+    AssemblerSymbolBinding binding = sym->binding;
+    // An undefined local symbol is treated as global.
+    if (!sym->defined) {
+      section_index = 0;
+      binding = SYM_BIND(global);
+    }
+    ELFWriterAddSymbol(elf, &sym->name, section_index,
+                       SymbolTypeToELFType(sym->type),
+                       SymbolBindingToELFBinding(binding), sym->size,
+                       sym->value, &sym->index);
   }
 }
 
 // Add a local assembler symbol to the ELF file's symbol table.
 static void AddLocalSymbolToELFFile(void* entry, void* data) {
-  Vector* buckets = entry;
+  BinaryTreeTraverse(entry, AddLocalSymbolFunc, data);
+}
+
+static void AddGlobalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   ELFWriterFile* elf = data;
-  for (size_t i = 0; i < buckets->length; i++) {
-    AssemblerSymbol* sym = buckets->value.p[i];
-    if (sym->exported && sym->binding == SYM_BIND(local)) {
-      ELFWriterAddSymbol(elf, &sym->name, sym->section,
-                         SymbolTypeToELFType(sym->type),
-                         SymbolBindingToELFBinding(sym->binding), sym->size,
-                         sym->value, &sym->index);
-    }
+  AssemblerSymbol* sym = (AssemblerSymbol*)node;
+  if (sym->exported && sym->binding == SYM_BIND(global)) {
+    ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
+                       SymbolTypeToELFType(sym->type),
+                       SymbolBindingToELFBinding(sym->binding), sym->size,
+                       sym->value, &sym->index);
   }
 }
 
 static void AddGlobalSymbolToELFFile(void* entry, void* data) {
-  Vector* buckets = entry;
-  ELFWriterFile* elf = data;
-  for (size_t i = 0; i < buckets->length; i++) {
-    AssemblerSymbol* sym = buckets->value.p[i];
-    if (sym->exported && sym->binding == SYM_BIND(global)) {
-      ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
-                         SymbolTypeToELFType(sym->type),
-                         SymbolBindingToELFBinding(sym->binding), sym->size,
-                         sym->value, &sym->index);
-    }
-  }
+  BinaryTreeTraverse(entry, AddGlobalSymbolFunc, data);
 }
 
 // Default label defining function.  Copies spelling into symbol defined.
@@ -547,7 +571,7 @@ static void Assemble(Assembler* assembler,
         if (assembler->pass == 1) {
           // Only define labels in pass 1.
           assembler->define_label(assembler, &word);
-        }
+         }
       } else {
         // Try as a directive name.
         void* dir_func = MapFindPointerKey(&assembler->directives, word.value);
@@ -594,7 +618,7 @@ static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
       // Align the section length to next 8 byte boundary.
       // TODO: do we align the beginning of the section?  I don't think we do,
       // but should.
-      AssemblerSectionAlign(section, 8);
+      AssemblerSectionAlign(section, section->alignment);
     }
     
     // Add the section to the ELF file.
@@ -616,12 +640,13 @@ static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
       }
     }
     
-    // Add a symbol for the section name.
-    if (section->name != NULL) {
+    // Add a symbol for the section name as long as it's not an empty section.
+    if (section->name != NULL && ELFWriterSectionContentsGetLength(&section->contents) != 0) {
       AssemblerSymbol* section_symbol =
       NewAssemblerSymbol(section->name->value, elf_section->index,
                          SYM_TYPE(none), SYM_BIND(local), 0);
       section_symbol->exported = true;
+      section_symbol->defined = true;
       AssemblerInsertSymbol(assembler, section_symbol);
     }
     ELFWriterAddSectionSymbol(elf, &elf_section->name, elf_section->index);
@@ -659,7 +684,9 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   while (assembler->num_errors == 0 && assembler->pass < 3) {
     Assemble(assembler, run_func);  // Run the assembly pass.
     assembler->pass++;
-    AssemblerReset(assembler, false);
+    if (assembler->pass == 2) {
+      AssemblerReset(assembler, false);
+    }
   }
 
   // Produce the ELF file.
@@ -704,6 +731,17 @@ void AssemblerError(Assembler* assembler, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   VLexError(&assembler->lex, format, ap);
+  va_end(ap);
+  assembler->num_errors++;
+}
+
+void AssemblerErrorAtLocation(Assembler* assembler, SourceLocation location, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  const char* filename;
+  int lineno, s, e;
+  DecodeSourceLocation(location, &filename, &lineno, &s, &e);
+  VReportError(filename, lineno, format, ap);
   va_end(ap);
   assembler->num_errors++;
 }
@@ -924,7 +962,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   
   VectorAppend(&relocations, reloc);
   bool known_values = left->is_label && left->type == SYM_TYPE(none) &&
-      assembler->current_section == left->section;
+      assembler->current_section == left->section && !assembler->absolute;
   
   while (LexLookingAt(&assembler->lex, TOK(plus)) ||
          LexLookingAt(&assembler->lex, TOK(minus))) {
@@ -947,7 +985,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
     AssemblerRelocation* reloc = NewAssemblerRelocation(
                 right, assembler->reloc_types[reloc_type], assembler->current_section,
                             (int32_t)AssemblerCurrentAddress(assembler), 0);
-    known_values |= right->is_label && left->type == SYM_TYPE(none) &&
+    known_values &= right->is_label && left->type == SYM_TYPE(none) &&
         assembler->current_section == right->section;
     VectorAppend(&relocations, reloc);
   }
@@ -1028,10 +1066,18 @@ static void HandleDataDirective(Assembler* assembler, int bits) {
 
 static void HandleDirective_space(Assembler* assembler) {
   int64_t num_bytes = AssemblerEvaluateExpression(assembler);
+  if (num_bytes < 0) {
+    AssemblerError(assembler, "Invalid .space size %lld", num_bytes);
+    return;
+  }
+  int value = 0;
+  if (LexMatch(&assembler->lex, TOK(comma))) {
+    value = (int)AssemblerEvaluateExpression(assembler);
+  }
   AssemblerSection* sect =
       assembler->sections.value.p[assembler->current_section];
   if (assembler->pass == 2) {
-    BufferAddSpace(&sect->contents.data.buffered, num_bytes);
+    BufferFill(&sect->contents.data.buffered, num_bytes, value);
     sect->contents.size += num_bytes;
   }
   sect->address += num_bytes;
@@ -1145,6 +1191,7 @@ static void HandleDirective_section(Assembler* assembler) {
 
     int32_t flags = 0;
     int32_t type = SHT(null);
+    int alignment = 8;
     if (LexMatch(&assembler->lex, TOK(comma))) {
       if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
           LexLookingAt(&assembler->lex, TOK(string))) {
@@ -1185,11 +1232,15 @@ static void HandleDirective_section(Assembler* assembler) {
         }
       }
     }
+    // Allow alignment (extension, not present in GNU as).
+    if (LexMatch(&assembler->lex, TOK(comma))) {
+      alignment = (int)AssemblerEvaluateExpression(assembler);
+    }
     int section;
     if (assembler->pass == 1) {
       section = AssemblerFindSection(assembler, name);
       if (section == -1) {
-        section = AssemblerAddSection(assembler, name, type, flags, 8);
+        section = AssemblerAddSection(assembler, name, type, flags, alignment);
       }
     } else {
       section = AssemblerFindSection(assembler, name);
@@ -1315,17 +1366,19 @@ static void HandleDirective_set(Assembler* assembler) {
       if (sym != NULL) {
         if (!sym->defined) {
           sym->defined = true;
+          sym->is_constant = true;
           sym->section = assembler->current_section;
           sym->value = AssemblerCurrentAddress(assembler);
         } else {
           AssemblerError(assembler, "Duplicate symbol %s", name.value);
         }
       } else {
-        // Symbol is new, define it as a local.
+        // Symbol is new, define it as a local constant.
         sym = NewAssemblerSymbol(name.value, assembler->current_section,
                                  SYM_TYPE(none), SYM_BIND(local),
                                  value);
         sym->defined = true;
+        sym->is_constant = true;
         AssemblerInsertSymbol(assembler, sym);
       }
     }

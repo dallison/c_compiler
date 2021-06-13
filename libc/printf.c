@@ -158,7 +158,7 @@ typedef struct {
    return index;
 }
 
- char* PrintDecimal(ConversionFormat* fmt, long long v, char* buf, int buflen) {
+char* PrintDecimal(ConversionFormat* fmt, long long v, char* buf, int buflen) {
   int i = buflen - 1;
   if (v == 0) {
     buf[i] = '0';
@@ -190,7 +190,7 @@ typedef struct {
   return &buf[i];
 }
 
- char* PrintHex(ConversionFormat* fmt, long long v, char* buf, int buflen, bool upper) {
+char* PrintHex(ConversionFormat* fmt, long long v, char* buf, int buflen, bool upper) {
   int i = buflen - 1;
   if (v == 0) {
     buf[i] = '0';
@@ -328,15 +328,17 @@ int vfprintf(FILE* fp, const char* format, va_list ap) {
 int fprintf(FILE* fp, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  vfprintf(fp, format, ap);
+  int v = vfprintf(fp, format, ap);
   va_end(ap);
+  return v;
 }
 
 int printf(const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  vfprintf(stdout, format, ap);
+  int v = vfprintf(stdout, format, ap);
   va_end(ap);
+  return v;
 }
 
 static char* SafeMemcpy(char* to, char* end, char* from, size_t len) {
@@ -420,25 +422,26 @@ int vsnprintf(char * restrict s, size_t n,
   return s - s_start;
 }
 
+
 int vsprintf(char * restrict s,
              const char * restrict format, va_list ap) {
-  vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
+  return vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
 }
 
 int snprintf(char * restrict s, size_t n,
              const char * restrict format, ...) {
   va_list ap;
-   va_start(ap, format);
-   vsnprintf(s, n, format, ap);
-   va_end(ap);
-
+  va_start(ap, format);
+  int v = vsnprintf(s, n, format, ap);
+  va_end(ap);
+  return v;
 }
 
 int sprintf(char * restrict s,
             const char * restrict format, ...) {
   va_list ap;
   va_start(ap, format);
-  vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
+  int v = vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
   va_end(ap);
+  return v;
 }
-

@@ -118,6 +118,7 @@ ELFWriterSectionContents* NewELFWriterSectionContents(ELFWriterSectionContentsDa
       BufferInit(&contents->data.buffered);
       break;
     case kSectionContentsNobits:
+    case kSectionContentsPad:
       break;
   }
   return contents;
@@ -134,6 +135,7 @@ void ELFWriterSectionContentsDestruct(ELFWriterSectionContents* contents) {
       BufferDestruct(&contents->data.buffered);
       break;
     case kSectionContentsNobits:
+    case kSectionContentsPad:
       break;
   }
 }
@@ -159,6 +161,7 @@ size_t ELFWriterSectionContentsGetLength(ELFWriterSectionContents* contents) {
       return size;
     }
     case kSectionContentsNobits:
+    case kSectionContentsPad:
       return contents->size;
   }
 }
@@ -179,6 +182,11 @@ void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp)
       break;
     }
     case kSectionContentsNobits:
+      break;
+    case kSectionContentsPad:
+      for (size_t i = 0; i < contents->size; i++) {
+        fputc(0, fp);
+      }
       break;
   }
 }

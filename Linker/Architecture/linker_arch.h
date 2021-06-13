@@ -37,32 +37,32 @@ typedef struct LinkerArchitecture {
   // We have a relocation in the .o file.  If it's a PIC relocation
   // add the GOT and PLT entries.
   void (*handle_pic_relocation)(DynamicLinker* dynamic,
-                                Symbol* symbol,
+                                LinkerSymbol* symbol,
                                 Relocation* reloc,
-                                int (*append_data_to_got)(DynamicLinker*, Symbol*),
-                                int (*append_func_to_got)(DynamicLinker*, Symbol*),
-                               int (*append_to_plt)(DynamicLinker*, Symbol*));
+                                int (*append_data_to_got)(DynamicLinker*, LinkerSymbol*),
+                                int (*append_func_to_got)(DynamicLinker*, LinkerSymbol*),
+                               int (*append_to_plt)(DynamicLinker*, LinkerSymbol*));
   
   // Apply a relocation to the given address.
   void (*apply_relocation)(Linker* linker,
                            ObjectFile* file,
                            Relocation* reloc,
-                           Symbol* symbol,
+                           LinkerSymbol* symbol,
                            char* target_address,
                            uint64_t S, int64_t A);
   
   // Add an entry to the GOT section data for the given symbol.
-  void (*add_got_entry)(Linker* linker, Symbol* symbol,
+  void (*add_got_entry)(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents,
                         Vector* relocs,
                         GOTRelocation relocation_type);
   
   // Fixup the GOT entry for the symbol now that addresses are known.
-  void (*fixup_got_entry)(Symbol* symbol, Buffer* got_plt_buffer,
+  void (*fixup_got_entry)(LinkerSymbol* symbol, Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size);
   
   // Add entry to the PLT section for the given symbol.
-  void (*add_plt_entry)(Linker* linker, Symbol* symbol,
+  void (*add_plt_entry)(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents);
   
   // Setup the resolver entry in the PLT.  This is the first entry
@@ -76,10 +76,13 @@ typedef struct LinkerArchitecture {
   // Fixup a PLT entry now that addresses are known.
   void (*fixup_plt_entry)(ProcedureLinkageTable* plt,
                           GlobalOffsetTable* got,
-                          Symbol* symbol,
+                          LinkerSymbol* symbol,
                           Buffer* plt_buffer,
                           uint64_t got_address,
                           uint64_t plt_address);
+  
+  void (*check_options)(Linker* linker);
+  
 } LinkerArchitecture;
 
 #endif /* arch_h */

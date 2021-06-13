@@ -64,6 +64,10 @@ typedef enum {
 
   TARGET_OP(loc),       // Code location.
   TARGET_OP(named_label),     // Named label.
+  
+  // Variable assigned to registers,
+  TARGET_OP(ivarreg),
+  TARGET_OP(fvarreg),
 } TargetOpcode;
 
 typedef enum {
@@ -88,12 +92,14 @@ typedef struct TargetRegister {
 typedef struct TargetInstruction {
   ListElement header;
   TargetOpcode opcode;
-  int id;
-  int refs;                    // Number of references to this instruction.
-  int uses;                    // Current number of uses.
+  int id;                     // Unique instruction id.
+  struct TargetInstruction* dest;  // Optional destination.
   struct TargetRegister* reg;  // Register assigned by register allocator.
   struct TargetInstruction* operand[TARGET_MAX_OPERANDS];
-
+  Vector users;                // Instructions using this instruction's value.
+  int uses;                    // Current number of uses.
+  void* block;                 // Target basic block.
+  
   // Flags.  The lower 16 bits are reserved for TargetInstruction use
   // The upper 16 bits are free for code generators.
   int flags;
@@ -105,6 +111,12 @@ typedef struct TargetInstruction {
 // Register has been spilled onto the stack.
 #define TARGET_INST_SPILLED 2
 
+// Instruction has been processed by something.
+#define TARGET_INST_PROCESSED 4
+
+// A table jump instruction.
+#define TARGET_INST_TABLE_JUMP 8
+
 // A constant.
 typedef struct {
   TargetInstruction base;
@@ -114,6 +126,7 @@ typedef struct {
     double dvalue;
     String* svalue;
   } value;
+  int literal_id;
 } TargetConstant;
 
 typedef struct {
@@ -144,7 +157,31 @@ typedef struct {
   const char* name;
 } TargetNamedLabel;
 
+typedef const char* (*TargetOpcodeNameFunc)(int op);
+typedef bool (*TargetInferenceFunc)(TargetInstruction* inst);
+typedef TargetInstruction* (*TargetGetBranchTargetFunc)(TargetInstruction* inst);
+
+// Target virtual functions, provided by individual architecture specific
+// target generators.
+typedef struct {
+  TargetOpcodeNameFunc opcode_name;
+  TargetInferenceFunc is_branch;
+  TargetInferenceFunc is_return;
+  TargetInferenceFunc is_call;
+  TargetInferenceFunc is_spill;
+  TargetInferenceFunc is_label;
+  TargetInferenceFunc is_floating_point;
+  TargetInferenceFunc is_conditional_branch;
+  TargetInferenceFunc is_fixed_register;
+  TargetInferenceFunc is_const;
+  TargetInferenceFunc is_symbol;
+  TargetInferenceFunc is_expression;
+  TargetInferenceFunc is_table_entry;
+  TargetGetBranchTargetFunc get_branch_target;
+} TargetVirtuals;
+
 typedef struct TargetGenerator {
+  TargetVirtuals* virtuals;
   String function_name;   // Current function name.
   bool is_global;         // Function is global.
   int num_calls;          // Number of calls in function.
@@ -164,6 +201,10 @@ typedef struct TargetGenerator {
 
   Vector fixups;    // Fixups to be applied.
 
+  Vector basic_blocks;
+  struct TargetBasicBlock* entry_block;
+  struct TargetBasicBlock* exit_block;
+
   // We use the libc functions memcpy and memset for automatic
   // array and struct operations.
   Symbol* memcpy;
@@ -172,7 +213,7 @@ typedef struct TargetGenerator {
   Symbol* __tls_get_addr;   // Get address of TLS variable.
 } TargetGenerator;
 
-void TargetGeneratorInit(TargetGenerator* Target, Generator* gen);
+void TargetGeneratorInit(TargetGenerator* Target, Generator* gen, TargetVirtuals* virtuals);
 TargetGenerator* NewTargetGenerator(Generator* gen);
 
 void TargetGeneratorDestruct(TargetGenerator* Target);
@@ -185,6 +226,9 @@ TargetInstruction* TargetFirstInstruction(TargetGenerator* Target);
 TargetInstruction* TargetLastInstruction(TargetGenerator* Target);
 TargetInstruction* TargetNext(TargetInstruction* inst);
 TargetInstruction* TargetPrev(TargetInstruction* inst);
+
+void TargetAddUser(TargetInstruction* inst, TargetInstruction* user);
+void TargetRemoveUser(TargetInstruction* inst, TargetInstruction* user);
 
 // Lower the IR to Target.
 void TargetLower(TargetGenerator* Target, Generator* gen);
@@ -208,6 +252,10 @@ TargetInstruction* TargetNext(TargetInstruction* inst);
 TargetInstruction* TargetPrev(TargetInstruction* inst);
 
 void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst);
+void TargetReplaceInstruction(TargetGenerator* target, TargetInstruction* old, TargetInstruction* new);
+void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new);
+void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new, bool (*predicate)(TargetInstruction*));
+void TargetReplaceOperand(TargetInstruction* inst, int op, TargetInstruction* new);
 
 bool TargetIsConst(TargetInstruction* inst);
 
@@ -221,7 +269,7 @@ TargetInstruction* TargetGetLoweredNode(IRNode* node);
 TargetInstruction* TargetSetLoweredNode(IRNode* node, TargetInstruction* inst);
 
 void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode);
-void TargetUpdateRefCount(TargetInstruction* inst);
+void TargetUpdateOperandUsers(TargetInstruction* inst);
 
 TargetInstruction* TargetNewInstruction(TargetOpcode opcode);
 
@@ -235,6 +283,8 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
                                          TargetInstruction* op1,
                                          TargetInstruction* op2,
                                          TargetInstruction* op3);
+TargetInstruction* TargetSetDest(TargetInstruction* inst,
+                                 TargetInstruction* dest);
 
 TargetInstruction* TargetEmit(TargetGenerator* target, TargetInstruction* inst);
 TargetInstruction* TargetEmitBefore(TargetGenerator* target,
@@ -282,5 +332,8 @@ TargetBranchFixup* NewBranchFixup(TargetInstruction* inst, IRNode* target,
 void TargetApplyFixups(TargetGenerator* target, IRNode* label_node);
 
 void TargetRegisterInit(TargetRegister* reg, int num);
+
+// Generate the name of a symbol in the name given.
+const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len);
 
 #endif /* target_generator_h */

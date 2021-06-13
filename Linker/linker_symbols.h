@@ -17,10 +17,10 @@
 struct Linker;
 struct ObjectFile;
 
-typedef struct Symbol {
+typedef struct LinkerSymbol {
   ELFSymbol* header;
   String name;
-  bool defined;         // Symbol is defined.
+  bool defined;         // LinkerSymbol is defined.
   bool invented;
   ELFReaderSection* section;    // Section containing symbol (or NULL for COM)
   struct ObjectFile* file;
@@ -30,14 +30,14 @@ typedef struct Symbol {
   int plt_index;       // Procedure Linkage Table index (-1 = none)
   int index;            // Index into symbol table.
   int dynamic_index;    // Index into dynamic symbol table.
-} Symbol;
+} LinkerSymbol;
 
-Symbol* NewSymbol(ELFSymbol* elf_sym, struct ObjectFile* file);
-void SymbolDelete(Symbol* sym);
+LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, struct ObjectFile* file);
+void LinkerSymbolDelete(LinkerSymbol* sym);
 
-size_t SymbolHash(void* value, HashTable* table, HashMode mode);
-bool SymbolInsertInHashTable(void* entry, void* value, void** parent);
-void* SymbolFindInHashTable(void* entry, void* value);
+size_t LinkerSymbolHash(void* value, HashTable* table, HashMode mode);
+bool LinkerSymbolInsertInHashTable(void* entry, void* value, void** parent);
+void* LinkerSymbolFindInHashTable(void* entry, void* value);
 
 void LinkerPrintSymbolTables(struct Linker* linker);
 void LinkerCheckForUndefinedSymbols(struct Linker* linker);
@@ -49,7 +49,7 @@ void LinkerReadSymbol(struct Linker* linker,
                 ELFReaderFile* elf_file,
                 ELFReaderSection* strtab,
                 ELFSymbol* elf_sym);
-Symbol* LinkerInventSymbol(struct Linker* linker, const char* name, int size);
+LinkerSymbol* LinkerInventSymbol(struct Linker* linker, const char* name, int size);
 
 void LinkerAssignSectionSymbolAddresses(struct Linker* linker);
 void LinkerAssignBSSSymbolAddresses(struct Linker* linker);

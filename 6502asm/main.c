@@ -60,7 +60,7 @@ int main(int argc, char * argv[]) {
     StringInit(&output_filename, object_filename.value);
     
     if (object_filename.length == 0) {
-      StringSet(&output_filename, asm_filenames.value.p[i]);
+      StringSet(&output_filename, asm_filename->value);
       // No output file specified (no -o) so work it out.
       // If the file ends in ".s", make it ".o", otherwise append ".o".
       char* suffix = strstr(output_filename.value, ".s");
@@ -77,6 +77,7 @@ int main(int argc, char * argv[]) {
     // also handles options like -D, -I, etc.
     bool ok = CompilerInitForAssembler(asm_filename->value, &options);
     if (!ok) {
+      fprintf(stderr, "Failed to assemble\n");
       exit(1);
     }
     // Create the global symbol tables.

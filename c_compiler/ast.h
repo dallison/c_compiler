@@ -111,6 +111,7 @@ typedef enum {
   AST_OP(expr_init),
   AST_OP(braced_init),
   AST_OP(designated_init),
+  AST_OP(ptr_scale),
   
   // Type conversions.
   // Integer to...
@@ -209,7 +210,7 @@ const char* ASTOpcodeName(ASTOpcode op);
 struct ASTNode;
 
 typedef void (*ASTNodeDeleter)(struct ASTNode* node);
-typedef void (*ASTNodePrinter)(struct ASTNode* node, int indents);
+typedef void (*ASTNodePrinter)(struct ASTNode* node, int indents, FILE* fp);
 typedef void (*ASTNodeChildReplacer)(struct ASTNode* parent, int child_id,
                                      struct ASTNode* child,
                                      bool delete_old_child);
@@ -231,6 +232,7 @@ typedef void (*ASTNodeVisitor)(struct ASTNode* node,
                                             int, VisitorMode),
                                int child_id,
                                void* data);
+typedef bool (*ASTNodeUsesValueChecker)(struct ASTNode* node, struct ASTNode* value);
 
 // This is a table of pointers to functions that are provided at runtime
 // to implement late-bound functions (a.k.a virtual functions) for an
@@ -241,6 +243,7 @@ typedef struct {
   ASTNodeChildReplacer replacer;
   ASTNodeCloner cloner;
   ASTNodeVisitor visitor;
+  ASTNodeUsesValueChecker uses_value;
 } ASTNodeVirtuals;
 
 // Abstract Syntax Tree (AST) node.
@@ -255,6 +258,7 @@ typedef struct {
 
 typedef struct ASTNode {
   ASTOpcode op;             // Opcode.
+  int id;                   // Node id (for debugging).
   int flags;                // Flags
   TypeRecord* type;         // Node type (mostly set by semantic analyzer)
   struct ASTNode* parent;   // Parent node (if any).
@@ -270,6 +274,8 @@ typedef struct ASTNode {
 #define kASTStatementStart (1 << 2)  // Start of a statement.
 #define kASTAnalyzed (1 << 3)        // ASTNode has been analyzed.
 #define kASTIsDeclaration (1 << 4)   // This is a declaration.
+#define kASTRvoCall (1 << 5)         // Return Value Optimization call.
+#define kASTNrvoMarker (1 << 6)      // Named Return Value Optimization symbol.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -285,8 +291,9 @@ void ASTNodeDelete(ASTNode* node);
 void ASTNodeSetType(ASTNode* node, TypeRecord* type);
 void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
-void ASTNodePrint(ASTNode* node, int indents);
+void ASTNodePrint(ASTNode* node, int indents, FILE* fp);
 ASTNode* ASTNodeMove(ASTNode* node);
+bool ASTNodeUsesValue(ASTNode* node, ASTNode* value);
 
 // Clone the node and call func with data for every node cloned.
 ASTNode* ASTNodeClone(const ASTNode* node, ASTNode* (*func)(ASTNode*, void*),
@@ -347,6 +354,7 @@ typedef struct {
 } IdentifierASTNode;
 
 ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location);
+ASTNode* NewRawIdentifierASTNode(void* symbol, SourceLocation location);
 
 typedef struct {
   ASTNode base;
@@ -469,6 +477,7 @@ typedef struct {
   ASTNode base;
   Symbol* symbol;
   ASTNode* initializer;  // Assignment expression to initialize variable.
+  void* saved_sp;        // Used by codegen to store saved SP for VLA.
 } VariableDeclarationASTNode;
 
 ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
@@ -488,11 +497,12 @@ ASTNode* NewDeclarationListASTNode(Vector* declarations,
 typedef struct {
   ASTNode base;
   ASTNode* expr;
+  ASTNode* stmt;
   int64_t value;
   struct IRNode* label;
 } CaseLabelASTNode;
 
-ASTNode* NewCaseLabelASTNode(ASTNode* initializer, SourceLocation location);
+ASTNode* NewCaseLabelASTNode(ASTNode* expr, ASTNode* stmt, SourceLocation location);
 
 // Switch statement.
 typedef struct {
@@ -504,6 +514,7 @@ typedef struct {
   float density;
   int64_t min_case_value;
   int64_t max_case_value;
+  bool all_cases_covered;   // True if there is no need for a default.
 } SwitchStatementASTNode;
 
 ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
@@ -512,12 +523,13 @@ ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
 // Label.
 typedef struct LabelASTNode {
   ASTNode base;
+  ASTNode* stmt;
   String name;
   struct IRNode* label;
   bool named;     // Use label name in assembly output.
 } LabelASTNode;
 
-ASTNode* NewLabelASTNode(const char* name, bool named, SourceLocation location);
+ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLocation location);
 
 typedef struct {
   ASTNode base;
@@ -532,9 +544,22 @@ typedef struct {
   ASTNode base;
   String* label_name;
   ASTNode* label;  // Not owned, set by semantic analysis.
+  ASTNode* lca;    // Not owned, Lowest Common Ancestor with label.
 } GotoStatementASTNode;
 
 ASTNode* NewGotoStatementASTNode(String* label_name, SourceLocation location);
+
+// AST node for scaling a pointer by the size of its type.
+typedef struct {
+  ASTNode base;
+  TypeRecord* ref_type;
+  ASTOpcode scale_op;     // Either AST_OP(mult) or AST_OP(div)
+  ASTNode* expr;
+} PtrScaleASTNode;
+
+ASTNode* NewPtrScaleASTNode(TypeRecord* type, ASTOpcode scale_op, ASTNode* expr,
+                            SourceLocation location);
+
 
 //
 // Initialization

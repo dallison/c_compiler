@@ -122,6 +122,17 @@ void BitSetUnion(BitSet* set1, BitSet* set2, BitSet* result) {
   }
 }
 
+void BitSetUnionInPlace(BitSet* dest, BitSet* src) {
+  size_t max = dest->capacity;
+  if (max < src->capacity) {
+    max = src->capacity;
+  }
+  MakeRoom(dest, max);
+  for (size_t i = 0; i < src->capacity; i++) {
+    dest->value[i] |= src->value[i];
+  }
+}
+
 void BitSetCopy(BitSet* to, BitSet* from) {
   MakeRoom(to, from->capacity);
   memcpy(to->value, from->value, from->capacity * sizeof(uint32_t));
@@ -175,18 +186,55 @@ size_t BitSetCount(BitSet* set) {
   return count;
 }
 
-void BitSetPrint(BitSet* set) {
-  printf("{");
+void BitSetPrint(BitSet* set, FILE* fp) {
+  fprintf(fp, "{");
   const char* sep = "";
   size_t index = 0;
   for (size_t word = 0; word < set->capacity; word++) {
     for (size_t bit = 0; bit < 32; bit++) {
       if ((set->value[word] & (1 << bit)) != 0) {
-        printf("%s%zd", sep, index);
+        fprintf(fp, "%s%zd", sep, index);
         sep = ", ";
       }
       index++;
     }
   }
-  printf("}");
+  fprintf(fp, "}");
 }
+
+void BitSetIteratorStart(BitSetIterator* it, BitSet* set) {
+  it->set = set;
+  it->word_offset = 0;
+  it->bit_offset = 0;
+  size_t index = 0;
+  // Find first bit with value 1.
+  for (size_t word = 0; word < set->capacity; word++) {
+    for (size_t bit = 0; bit < 32; bit++) {
+      if ((set->value[word] & (1 << bit)) != 0) {
+        it->word_offset = word;
+        it->bit_offset = bit;
+        return;
+      }
+      index++;
+    }
+  }
+}
+
+bool BitSetIteratorDone(BitSetIterator* it);
+
+void BitSetIteratorNext(BitSetIterator* it) {
+  it->bit_offset++;
+  while (it->word_offset < it->set->capacity) {
+    while (it->bit_offset < 32 &&
+           (it->set->value[it->word_offset] & (1 << it->bit_offset)) == 0) {
+      it->bit_offset++;
+    }
+    if (it->bit_offset < 32) {
+      return;
+    }
+    it->bit_offset = 0;
+    it->word_offset++;
+  }
+}
+
+size_t BitSetIteratorValue(BitSetIterator* it);

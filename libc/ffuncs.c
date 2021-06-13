@@ -34,12 +34,16 @@ void setbuf(FILE * restrict stream,
 int setvbuf(FILE * restrict stream,
      char * restrict buf,
             int mode, size_t size) {
+  if (mode != _IONBF && mode != _IOLBF && mode != _IOFBF) {
+    return -1;
+  }
   if (stream->buf != NULL) {
     free(stream->buf);
   }
   stream->buf = buf;
   stream->bufsize = size;
   stream->buffering_mode = mode;
+  return 0;
 }
 
 size_t fwrite(const void*  ptr, size_t size, size_t n, FILE* stream) {
@@ -56,6 +60,7 @@ size_t fwrite(const void*  ptr, size_t size, size_t n, FILE* stream) {
   }
   return numchars;
 }
+
 
 int fputc(int c, FILE* fp) {
   EnsureBuffer(fp);
@@ -109,9 +114,8 @@ int fflush(FILE *stream) {
 }
 
 int puts(const char* str) {
-  fputs(str, stdout);
+  return fputs(str, stdout);
 }
-
 //size_t fread(char* ptr, size_t size, size_t n, FILE* stream) {
   
 //}

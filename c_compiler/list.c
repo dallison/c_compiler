@@ -97,11 +97,11 @@ void ListDeleteElement(List* list, ListElement* e) {
   list->length--;
 }
 
-void ListTraverse(List* list, void (*func)(ListElement*)) {
+void ListTraverse(List* list, void (*func)(ListElement*, void*), void* data) {
   ListElement* e = list->first;
   while (e != NULL) {
     ListElement* next = e->next;
-    func(e);
+    func(e, data);
     e = next;
   }
 }

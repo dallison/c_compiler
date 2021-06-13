@@ -6,8 +6,11 @@
 //  Copyright © 2018 David Allison. All rights reserved.
 //
 
+
 #ifndef risc_v_optimize_h
 #define risc_v_optimize_h
+
+#include "target_basic_block.h"
 
 struct RVGenerator;
 

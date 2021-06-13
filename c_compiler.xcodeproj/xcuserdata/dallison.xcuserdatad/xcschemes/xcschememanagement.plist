@@ -14,6 +14,31 @@
 			<key>orderHint</key>
 			<integer>15</integer>
 		</dict>
+		<key>6502dasm.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>22</integer>
+		</dict>
+		<key>6502map.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>28</integer>
+		</dict>
+		<key>6502server.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>29</integer>
+		</dict>
+		<key>Copy of Optiimized.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>19</integer>
+		</dict>
+		<key>Optiimized.xcscheme</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>18</integer>
+		</dict>
 		<key>ar.xcscheme</key>
 		<dict>
 			<key>orderHint</key>
@@ -22,7 +47,12 @@
 		<key>archvist.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>19</integer>
+			<integer>21</integer>
+		</dict>
+		<key>bitset_test.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>27</integer>
 		</dict>
 		<key>c_compiler.xcscheme</key>
 		<dict>
@@ -39,15 +69,25 @@
 			<key>orderHint</key>
 			<integer>9</integer>
 		</dict>
+		<key>config_test.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>23</integer>
+		</dict>
 		<key>davecc.xcscheme</key>
 		<dict>
 			<key>orderHint</key>
 			<integer>16</integer>
 		</dict>
+		<key>eeprom.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>30</integer>
+		</dict>
 		<key>elfdump.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>18</integer>
+			<integer>20</integer>
 		</dict>
 		<key>expr_eval.xcscheme</key>
 		<dict>
@@ -58,6 +98,11 @@
 		<dict>
 			<key>orderHint</key>
 			<integer>6</integer>
+		</dict>
+		<key>genspill.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>24</integer>
 		</dict>
 		<key>lex_test.xcscheme</key>
 		<dict>
@@ -72,7 +117,7 @@
 		<key>linkerlibrary.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>20</integer>
+			<integer>25</integer>
 		</dict>
 		<key>manual_test.xcscheme</key>
 		<dict>
@@ -112,7 +157,7 @@
 		<key>tree_test.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>21</integer>
+			<integer>26</integer>
 		</dict>
 		<key>util_test.xcscheme</key>
 		<dict>
@@ -172,6 +217,11 @@
 			<key>primary</key>
 			<true/>
 		</dict>
+		<key>E59DB51D2617F8100091BD9E</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
 		<key>E5AB5FB6208E7281006CA8FB</key>
 		<dict>
 			<key>primary</key>
@@ -218,6 +268,11 @@
 			<true/>
 		</dict>
 		<key>E5CCAA442290BABA0033AFFF</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>E5E13099252D143C00EEE6B7</key>
 		<dict>
 			<key>primary</key>
 			<true/>

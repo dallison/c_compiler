@@ -18,7 +18,7 @@ ObjectFile* NewObjectFile(ELFReaderFile* elf_file, Linker* linker, const char* f
   StringInit(&file->filename, filename);
   file->elf_file = elf_file;
   HashTableInit(&file->local_symbol_table, "local-symbol-table", 111,
-                SymbolHash, SymbolInsertInHashTable, SymbolFindInHashTable);
+                LinkerSymbolHash, LinkerSymbolInsertInHashTable, LinkerSymbolFindInHashTable);
 
   VectorInit(&file->relocations);
   file->linker = linker;
@@ -55,8 +55,8 @@ void ObjectFileDelete(ObjectFile* file) {
 
 // Find a symbol by looking in the given file and then in the global
 // symbol table.
-Symbol* ObjectFileFindSymbol(ObjectFile* file, const char *name) {
-  Symbol* sym = LinkerFindSymbol(&file->local_symbol_table, name);
+LinkerSymbol* ObjectFileFindSymbol(ObjectFile* file, const char *name) {
+  LinkerSymbol* sym = LinkerFindSymbol(&file->local_symbol_table, name);
   if (sym == NULL) {
     sym = LinkerFindSymbol(&file->linker->global_symbol_table, name);
   }

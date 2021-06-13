@@ -22,8 +22,8 @@ static void RemoveUnusedExpressions(PCodeGenerator* pcode) {
   while (inst != NULL) {
     TargetInstruction* prev = TargetPrev(inst);
     assert(inst != prev);
-    if (PCodeIsExpression((PCodeOpcode)inst->opcode)) {
-      if (inst->refs == 0) {
+    if (PCodeIsExpression(inst)) {
+      if (inst->users.length == 0) {
         // No references to an expression, remove it.
         TargetDeleteInstruction(&pcode->base, inst);
       }
@@ -31,8 +31,8 @@ static void RemoveUnusedExpressions(PCodeGenerator* pcode) {
       // An rmov can be eliminated if it has zero references and
       // its first operand is a tmp with one reference.
       TargetInstruction* src = inst->operand[0];
-      if (inst->refs == 0 && src != NULL && src->opcode == P_OP(tmp) &&
-          src->refs == 1) {
+      if (inst->users.length == 0 && src != NULL && src->opcode == P_OP(tmp) &&
+          src->users.length == 1) {
         TargetDeleteInstruction(&pcode->base, inst);
       }
     } else if ((PCodeOpcode)inst->opcode == P_OP(decsp) ||

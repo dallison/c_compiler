@@ -10,9 +10,10 @@
 #define _6502_disassembler_h
 
 #include <stdio.h>
+#include <stdint.h>
 #include "6502_machine.h"
-#include "6502_interpreter.h"
+#include "loader.h"
 
-void* Disassemble6502Instruction(_6502Interpreter* interpreter, uint16_t addr, void* p, FILE* fp);
+void* Disassemble6502Instruction(SymbolScope* current_symbol, uint16_t addr, void* p, FILE* fp);
 
 #endif /* _6502_disassembler_h */

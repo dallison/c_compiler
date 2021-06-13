@@ -11,6 +11,7 @@
 #include "loader_arch_6502.h"
 #include "6502_interpreter.h"
 #include <stdlib.h>
+#include <string.h>
 
 extern bool print_libraries_only;
 
@@ -25,10 +26,15 @@ int main(int argc, char *argv[]) {
   bool disassemble_only = false;
   bool extract = false;
   const char* extract_filename = NULL;
-  
+  bool debug = false;
+  bool cycle_accurate = false;
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
-      if (argv[i][1] == 'd') {
+      if (strcmp(argv[i], "-debug") == 0) {
+        debug = true;
+      } else if (strcmp(argv[i], "-cycle") == 0) {
+        cycle_accurate = true;
+      } else if (argv[i][1] == 'd') {
         disassemble_only = true;
       } else if (argv[i][1] == 'x') {
           extract = true;
@@ -53,10 +59,10 @@ int main(int argc, char *argv[]) {
   String filename;
   StringInit(&filename, file);
   
-  Interpreter interpreter;
+  _6502Interpreter interpreter;
   Loader loader;
   
-  InterpreterInit(&interpreter);
+  _6502InterpreterInit(&interpreter, debug, cycle_accurate);
   
   // The environment variable LD_BIND_NOW tells the dynamic loader to
   // replace the GOT entries for functions with the function address
@@ -77,9 +83,10 @@ int main(int argc, char *argv[]) {
   _6502LoaderArchitectureInit(&arch);
   
   // Initialize the loader from the given exe file.
-  bool ok = LoaderInitFromFile(&loader, &filename, lazy,
+  bool ok = LoaderInitFromFile(&loader, &filename, 0,
                                &arch,
-                               &interpreter.symbol_resolver_code);
+                               NULL,
+                               ".");
   if (!ok) {
     printf("Error Loading %s\n", filename.value);
     exit(1);
@@ -91,19 +98,19 @@ int main(int argc, char *argv[]) {
   
  
   if (disassemble_only) {
-    InterpreterDisassemble(&interpreter, &loader);
+    _6502InterpreterDisassemble(&interpreter, &loader);
   } else {
     // Run the code at its entry address.
-    InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
+    _6502InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
   }
   
   if (extract) {
     FILE* fp = fopen(extract_filename, "w");
-    InterpreterExtract(&interpreter, &loader, fp);
+    _6502InterpreterExtract(&interpreter, &loader, fp);
     fclose(fp);
     printf("Extracted to %s\n", extract_filename);
   }
-  InterpreterDestruct(&interpreter);
+  _6502InterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
 }
 

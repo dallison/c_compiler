@@ -13,8 +13,8 @@
 #include <stdlib.h>
 
 // Create a new Linker symbol based on an ELFSymbol in the ELF file.
-Symbol* NewSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
-  Symbol* symbol = malloc(sizeof(Symbol));
+LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
+  LinkerSymbol* symbol = malloc(sizeof(LinkerSymbol));
   symbol->header = elf_sym;
   StringInit(&symbol->name, "");    // Name will be set later.
   symbol->defined = false;
@@ -30,21 +30,21 @@ Symbol* NewSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
   return symbol;
 }
 
-void SymbolDelete(Symbol* sym) {
+void LinkerSymbolDelete(LinkerSymbol* sym) {
   StringDestruct(&sym->name);
   free(sym);
 }
 
 //
-// Symbol table.  This is a hash table of Vectors.  The Vectors
-// contain Symbol pointers.
+// LinkerSymbol table.  This is a hash table of Vectors.  The Vectors
+// contain LinkerSymbol pointers.
 //
-size_t SymbolHash(void* value, HashTable* table, HashMode mode) {
+size_t LinkerSymbolHash(void* value, HashTable* table, HashMode mode) {
   const char* name;
   switch (mode) {
     case kHashInsert:
-      // For insertion we have a pointer a Symbol.
-      name = ((Symbol*)value)->name.value;
+      // For insertion we have a pointer a LinkerSymbol.
+      name = ((LinkerSymbol*)value)->name.value;
       break;
     case kHashSearch:
       // For search we have pointer to the name.
@@ -59,7 +59,7 @@ size_t SymbolHash(void* value, HashTable* table, HashMode mode) {
   return hash;
 }
 
-bool SymbolInsertInHashTable(void* entry, void* value, void** parent) {
+bool LinkerSymbolInsertInHashTable(void* entry, void* value, void** parent) {
   if (entry == NULL) {
     entry = NewVector();
     *parent = entry;
@@ -69,13 +69,13 @@ bool SymbolInsertInHashTable(void* entry, void* value, void** parent) {
   return true;
 }
 
-void* SymbolFindInHashTable(void* entry, void* value) {
+void* LinkerSymbolFindInHashTable(void* entry, void* value) {
   if (entry == NULL) {
     return NULL;
   }
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value.p[i];
+    LinkerSymbol* sym = bucket->value.p[i];
     if (StringEqual(&sym->name, (char*)value)) {
       return sym;
     }
@@ -86,8 +86,8 @@ void* SymbolFindInHashTable(void* entry, void* value) {
 static void DeleteSymbolList(void* entry, void* data) {
   Vector* bucket = (Vector*)entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value.p[i];
-    SymbolDelete(sym);
+    LinkerSymbol* sym = bucket->value.p[i];
+    LinkerSymbolDelete(sym);
   }
   VectorDelete(bucket);
 }
@@ -99,7 +99,7 @@ void LinkerClearSymbolTable(HashTable* table) {
 static void PrintSymbolList(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* symbol = bucket->value.p[i];
+    LinkerSymbol* symbol = bucket->value.p[i];
     const char* info = "";
     if (!symbol->defined) {
       info = "undefined";
@@ -130,7 +130,7 @@ void LinkerPrintSymbolTables(Linker* linker) {
 static void CheckUndefined(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* symbol = bucket->value.p[i];
+    LinkerSymbol* symbol = bucket->value.p[i];
     if (!symbol->defined) {
       LinkerError(symbol->file, "Undefined symbol %s", symbol->name.value);
     }
@@ -144,11 +144,11 @@ void LinkerCheckForUndefinedSymbols(Linker* linker) {
 }
 
 // Hash table traversal function to assign symbol addreses.
-// The entry is a pointer to a vector of Symbol pointers.
+// The entry is a pointer to a vector of LinkerSymbol pointers.
 static void AssignSymbolListAddresses(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* symbol = bucket->value.p[i];
+    LinkerSymbol* symbol = bucket->value.p[i];
     ELFReaderSection* section = symbol->section;
     if (section != NULL) {
       symbol->address += section->address;
@@ -172,14 +172,14 @@ void LinkerAssignCommonSymbolAddresses(Linker* linker, uint64_t* address) {
   for (size_t i = 0; i < linker->files.length; i++) {
     ObjectFile* file = linker->files.value.p[i];
     for (size_t j = 0; j < file->common_symbols.length; j++) {
-      Symbol* sym = file->common_symbols.value.p[j];
+      LinkerSymbol* sym = file->common_symbols.value.p[j];
       sym->address = *address;
       *address += sym->size;
     }
   }
 }
 
-static void AssignSymbolSectionIndex(Symbol* sym,
+static void AssignSymbolSectionIndex(LinkerSymbol* sym,
                                      ObjectFile* file,
                                      ELFReaderFile* elf_file,
                                      ELFSymbol* elf_sym) {
@@ -196,7 +196,7 @@ static void ReadLocalSymbol(const char* sym_name,
                             ObjectFile* file,
                             ELFReaderFile* elf_file,
                             ELFSymbol* elf_sym) {
-  Symbol* sym = NewSymbol(elf_sym, file);
+  LinkerSymbol* sym = NewLinkerSymbol(elf_sym, file);
   StringSet(&sym->name, sym_name);
   
   // Assign symbol section, if it's not a reserved section index.
@@ -208,7 +208,7 @@ static void ReadLocalSymbol(const char* sym_name,
   sym->address = elf_sym->value;
 }
 
-static void RedefineSymbol(Symbol* sym,
+static void RedefineSymbol(LinkerSymbol* sym,
                            ObjectFile* file,
                            ELFReaderFile* elf_file,
                            ELFSymbol* elf_sym) {
@@ -225,7 +225,7 @@ static void RedefineSymbol(Symbol* sym,
         }
         return;
       }
-      // Symbol is already defined but we are redefining it.  This is an error.
+      // LinkerSymbol is already defined but we are redefining it.  This is an error.
       // TODO:
       LinkerError(file, "Multiple definition of symbol %s", sym->name.value);
       return;
@@ -273,16 +273,16 @@ void LinkerReadSymbol(Linker* linker,
 
   // This is a global symbol.  It might already be present in the
   // the global symbol table.  See if it already exists.
-  Symbol* sym = LinkerFindSymbol(&linker->global_symbol_table,
+  LinkerSymbol* sym = LinkerFindSymbol(&linker->global_symbol_table,
                                       (void*)sym_name);
   if (sym != NULL) {
-    // Symbol already exists.  Make sure this is not a duplicate definition.
+    // LinkerSymbol already exists.  Make sure this is not a duplicate definition.
     RedefineSymbol(sym, file, elf_file, elf_sym);
     return;
   }
 
-  // Symbol is new.  Add it to the global symbol table.
-  sym = NewSymbol(elf_sym, file);
+  // LinkerSymbol is new.  Add it to the global symbol table.
+  sym = NewLinkerSymbol(elf_sym, file);
   StringSet(&sym->name, sym_name);
   sym->defined = elf_sym->shndx != 0;
   sym->address = sym->header->value;
@@ -294,13 +294,13 @@ void LinkerReadSymbol(Linker* linker,
   LinkerInsertSymbol(&linker->global_symbol_table, sym);
 }
 
-Symbol* LinkerInventSymbol(Linker* linker, const char* name, int size) {
+LinkerSymbol* LinkerInventSymbol(Linker* linker, const char* name, int size) {
   ELFSymbol* elf_sym = malloc(sizeof(ELFSymbol));
   elf_sym->size = size;
-  Symbol* sym = NewSymbol(elf_sym, NULL);
+  LinkerSymbol* sym = NewLinkerSymbol(elf_sym, NULL);
   sym->defined = true;
   sym->invented = true;
-  // Name is not set in NewSymbol.  Normally it comes from the string
+  // Name is not set in NewLinkerSymbol.  Normally it comes from the string
   // table but we don't have that for these names.
   StringSet(&sym->name, name);
   LinkerInsertSymbol(&linker->global_symbol_table, sym);
@@ -312,7 +312,7 @@ Symbol* LinkerInventSymbol(Linker* linker, const char* name, int size) {
 static void AssignSectionAddress(MapKeyValue* kv, void* data) {
   ELFReaderSection* section = kv->value.p;
   ObjectFile* file = data;
-  Symbol* section_symbol = ObjectFileFindSymbol(file, section->name.value);
+  LinkerSymbol* section_symbol = ObjectFileFindSymbol(file, section->name.value);
   if (section_symbol != NULL) {
     section_symbol->address = section->address;
   }
@@ -335,7 +335,7 @@ void LinkerAssignSectionSymbolAddresses(Linker* linker) {
 void LinkerAssignBSSSymbolAddresses(Linker* linker) {
   for (size_t i = 0; i < linker->files.length; i++) {
     ObjectFile* file = linker->files.value.p[i];
-    Symbol* section_symbol = ObjectFileFindSymbol(file, ".bss");
+    LinkerSymbol* section_symbol = ObjectFileFindSymbol(file, ".bss");
     if (section_symbol != NULL) {
       section_symbol->address = linker->nobits_address;
     }

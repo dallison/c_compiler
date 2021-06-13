@@ -78,7 +78,9 @@ void VReportWarning(const char* filename, int lineno, const char* warn,
   } else {
     fprintf(stderr, "%s[%s]: %s:%d: %s [%s]\n", begin_text, warn, filename, lineno, buf, end_text);
   }
-  compiler->num_errors++;
+  if (compiler->convert_warnings_to_errors) {
+    compiler->num_errors++;
+  }
   if (compiler->num_errors >= compiler->max_errors) {
     fprintf(stderr, "Too many errors; terminated\n");
     exit(1);

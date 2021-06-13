@@ -15,6 +15,7 @@
 #include "hashtable.h"
 #include "map.h"
 #include "ar.h"
+#include "linker_config.h"
 
 // The linker wants to create a set of program segments.  The following
 // segments are created:
@@ -106,14 +107,16 @@
 
 struct Segment;
 struct Linker;
-struct Symbol;
+struct LinkerSymbol;
 struct ObjectFile;
 struct DynamicLinker;
 struct Architecture;
+struct SegmentMemoryRegion;
 
 typedef enum {
   kGroupedSectionExisting,
   kGroupedSectionNew,
+  kGroupedSectionPadding,
 } GroupedSectionSource;
 
 typedef struct {
@@ -121,6 +124,7 @@ typedef struct {
   union {
     ELFReaderSection* existing;   // A section from an existing file.
     ELFWriterSection* new;        // A new section.
+    ELFWriterSectionContents* padding;
   } section;
 } GroupedSection;
 
@@ -132,6 +136,7 @@ typedef struct SectionGroup {
   int64_t flags;
   int64_t alignment;
   uint64_t address;
+  struct SegmentMemoryRegion* region;
 } SectionGroup;
 
 SectionGroup* NewSectionGroup(const String* name, int32_t type,
@@ -143,14 +148,37 @@ GroupedSection* NewExistingGroupedSection(ELFReaderSection* section);
 GroupedSection* NewGroupedSection(ELFWriterSection* section);
 void GroupedSectionDestruct(GroupedSection* g);
 
+typedef struct SegmentMemoryRegion {
+  String name;
+  Vector sections;    // Names of sections in this region.
+  uint64_t start;
+  uint64_t end;       // End address or 0 for unlimited.
+  uint64_t next;      // Next address to use.
+} SegmentMemoryRegion;
+
+void SegmentMemoryRegionInit(SegmentMemoryRegion* region, ConfigRegion* config);
+SegmentMemoryRegion* NewSegmentMemoryRegion(ConfigRegion* config);
+void SegmentMemoryRegionDestruct(SegmentMemoryRegion* region);
+void SegmentMemoryRegionDelete(SegmentMemoryRegion* region);
+SegmentMemoryRegion* NewInternalSegmentMemoryRegion(void);
+
 // A segment.  This consists of a set of sections.
 typedef struct Segment {
+  ConfigSegment* config;
   Vector sections;      // Vector of SectionGroup*.
-  uint64_t address;
+  Vector regions;       // Vector of SegmentMemoryRegion*.
 } Segment;
 
-void SegmentInit(Segment* segment);
+void SegmentInit(Segment* segment, ConfigSegment* config);
 void SegmentDestruct(Segment* segment);
+
+// Allocate an address from the given segment.
+uint64_t SegmentAllocateAddress(struct Linker* linker, Segment* segment,
+                                SectionGroup* group,
+                                uint64_t size,
+                                uint64_t last_segment_end);
+
+SegmentMemoryRegion* SegmentDefaultRegion(Segment* segment);
 
 typedef struct Linker {
   String output_filename;     // Output filename.
@@ -178,12 +206,16 @@ typedef struct Linker {
   struct DynamicLinker* dynamic_linker;
   Vector needed_libraries;    // Vector of String*.
   int so_name;                // Index into dynstr or -1.
+  String entry_symbol;        // Symbol to use for entry point.
   int64_t origin;             // Origin address (or zero for default).
   
   // Debug printing.
   bool print_symbol_tables;
   bool print_relocations;
   bool print_sections;
+  
+  ConfigParser config_parser;
+  LinkerConfig config;
 } Linker;
 
 void LinkerInit(Linker* linker);
@@ -192,13 +224,13 @@ void LinkerInitDynamic(Linker* linker);
 
 bool LinkerReadObjectFile(Linker* linker, String* filename);
 void LinkerLinkAllFiles(Linker* linker);
-void LinkerWriteOutput(Linker* linker, FILE* fp);
+bool LinkerWriteOutput(Linker* linker, FILE* fp);
 
-struct Symbol* LinkerFindSymbol(HashTable* symbol_table,
+struct LinkerSymbol* LinkerFindSymbol(HashTable* symbol_table,
                                const char* name);
 
 void LinkerInsertSymbol(HashTable* symbol_table,
-                        struct Symbol* sym);
+                        struct LinkerSymbol* sym);
 
 void LinkerAddLibrarySearchDir(Linker* linker, String* dir);
 bool LinkerAddLibrary(Linker* linker, const char* name);
@@ -216,4 +248,7 @@ void VLinkerWarning(struct ObjectFile* file, const char* warn, const char* error
 
 void LinkerInitArchitecture(Linker* linker);
 
+void LinkerInitConfigLayout(Linker* linker,
+                            const char* config_file,
+                            const char* layout_type_name);
 #endif /* linker_h */

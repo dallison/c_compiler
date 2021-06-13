@@ -107,7 +107,7 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
     type_specifier &= ~kTypeInt;
     type_specifier |= kTypeLong;
   }
-  TypeRecord* type = NewTypeRecord(type_specifier, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(type_specifier, kQualPlain);
   return NewIntConstantASTNode(value, type,
                                syntax->lex->current_token_location);
 }
@@ -128,7 +128,7 @@ static ASTNode* ParseFloatingPointConstant(Syntax* syntax,
     type_specifier &= ~kTypeDouble;
     type_specifier |= kTypeLongDouble;
   }
-  TypeRecord* type = NewTypeRecord(type_specifier, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(type_specifier, kQualPlain);
   return NewRealConstantASTNode(value, type,
                                 syntax->lex->current_token_location);
 }
@@ -145,9 +145,10 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   }
   
   TypeRecord* array =
-  NewArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
+    NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
   TypeRecord* type = NewTypeRecord(kTypeChar, kQualPlain);
   TypeRecordChain(array, type);
+  TypeRecordCalculateSize(array);
   return NewStringConstantASTNode(contents, array,
                                   syntax->lex->current_token_location);
   
@@ -167,7 +168,7 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   }
   
   TypeRecord* array =
-  NewArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
+  NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
   TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
   TypeRecordChain(array, type);
   return NewWideStringConstantASTNode(contents, array,
@@ -290,7 +291,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
       if (intrinsics[intrinsic_index].opcode == AST_OP(builtin_va_arg) &&
           actuals->length == 1) {
         TypeParser parser;
-        TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
+        TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingBlockScope);
         TypeRecord* type = TypeParserParseType(&parser, true);
         Symbol* sym = TypeParserParseDeclarator(&parser, type);
         type = sym->type;
@@ -487,6 +488,36 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
   return NULL;
 }
 
+static ASTNode* CloneVLASize(ASTNode* node, void* data) {
+  return node;
+}
+
+// Expression that is the size of an array for a VLAThis is the
+// size expression of the VLA multiplied by the size of its type.
+// sizeof(t) * GetSizeofVLA(t->next)
+static ASTNode* GetSizeofVLA(TypeRecord* type, SourceLocation location) {
+  ASTNode* size = ASTNodeClone(type->info.array.size.vla.size,
+                               CloneVLASize, NULL, NULL);
+  size->location = location;
+  TypeRecord* t = type->next;
+  do {
+    ASTNode* next_size;
+    if (TypeIsVLA(t)) {
+      next_size = ASTNodeClone(t->info.array.size.vla.size,
+                               CloneVLASize, NULL, NULL);
+    } else {
+      next_size = NewIntConstantASTNode(t->size,
+                                   NewTypeRecord(
+                                                 kTypeLong |
+                                                 kTypeUnsigned,
+                                                 kQualPlain), location);
+    }
+    size = NewBinaryASTNode(AST_OP(mult), t, location, size, next_size);
+    t = t->next;
+  } while (t != NULL && TypeIsArray(t));
+  return size;
+}
+
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   bool has_brackets = LexMatch(syntax->lex, TOK(lparen));
   ASTNode* result = NULL;
@@ -501,14 +532,22 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   }
   if (sizeof_type_name) {
     TypeParser parser;
-    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
     TypeRecord* type = TypeParserParseType(&parser, true);
-    int size = type->size;
+    int size = -1;
     Symbol* sym = TypeParserParseDeclarator(&parser, type);
     if (sym != NULL) {
+      if (TypeIsVLA(sym->type)) {
+        // The size of a VLA is its size expression.
+        result = GetSizeofVLA(sym->type,
+                              syntax->lex->current_token_location);
+        SymbolDelete(sym);
+        goto done;
+      }
+      size = sym->type->size;
       SymbolDelete(sym);
     }
-    
+    assert(size != -1);
     result = NewSizeofASTNodeWithKnownSize(size,
                                            syntax->lex->current_token_location);
   } else {
@@ -516,6 +555,7 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
     result = NewSizeofASTNodeWithExpression(expr,
                                             syntax->lex->current_token_location);
   }
+done:
   if (has_brackets) {
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
   }
@@ -619,7 +659,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       LexMatch(syntax->lex, TOK(lparen))) {
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
-      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
+      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
       TypeRecord* type = TypeParserParseType(&parser, false);
       Symbol* sym = NULL;
       if (type == NULL) {
@@ -871,6 +911,7 @@ static ASTOpcode AssignASTOpcode(Syntax* syntax, Token tok) {
       return AST_OP(exoreq);
     default:
       assert(false);
+      return 0;
   }
 }
 

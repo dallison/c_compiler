@@ -91,6 +91,17 @@ void BufferAddSpace(Buffer* buf, size_t length) {
   buf->length = new_length;
 }
 
+void BufferFill(Buffer* buf, size_t length, char value) {
+  size_t new_length = buf->length + length;
+  // Make room for new contents by doubling the necessary memory,
+  if (new_length > buf->capacity) {
+    ExpandMemory(buf, new_length);
+  }
+  memset(&buf->value[buf->length], value, length);
+  buf->length = new_length;
+}
+
+
 void BufferAlignLength(Buffer* buf, int alignment) {
   size_t new_length = (buf->length + (alignment - 1)) & ~(alignment - 1);
   BufferAddSpace(buf, new_length - buf->length);

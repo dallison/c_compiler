@@ -17,6 +17,8 @@
 
 #define IR_OP(op) kIROpcode_##op
 
+void IRSetLocation(SourceLocation loc);
+
 // Intermediate Representation (IR) opcodes.
 // opN means operand #N.
 typedef enum {
@@ -57,7 +59,8 @@ typedef enum {
   IR_OP(loadf),   // Load 32-bit float from [op0]
   IR_OP(loadd),   // Load 64-bit float from [op0]
   IR_OP(loada),   // Load address from [op0]
-
+  IR_OP(structarg),  // Load struct address from [op0] for call
+  
   // stores.
   IR_OP(storei),  // Store 32-bit op1 in [op0]
   IR_OP(storeb),  // Store 8-bit op1 in [op0]
@@ -147,7 +150,7 @@ typedef enum {
   // Call and return.
   IR_OP(calla),  // Call op0 with args op1,...
   IR_OP(ret),    // Return
-
+  
   // Procedure entry and exit.
   IR_OP(enter),  // Enter procedure.
   IR_OP(leave),  // Leave procedure
@@ -177,15 +180,23 @@ typedef enum {
   IR_OP(f2i),  // (int)op0
   IR_OP(d2i),  // (double)op0
 
-  IR_OP(maski),        // op0 & op1
-  IR_OP(signextendi),  // (op0 << op1) >> op1
+  IR_OP(zeroextendi),  // shorten/lengthen by number of bits.
+  IR_OP(signextendi),  // sign extend by number of bits.
+  IR_OP(aligni),  // (op0 + (op1-1)) & ~(op1-1)
 
   IR_OP(memzero),  // memset(op0, 0, size)
   IR_OP(memcpy),   // memcpy(op0, op1, op2)
-
+  IR_OP(cast),     // Type cast.
+  
   IR_OP(phi),  // SSA form phi function.
 
   IR_OP(asm),  // Inline assembly language.
+
+  IR_OP(nrvoval),   // Named RVO value.
+  
+  IR_OP(decsp),
+  IR_OP(savesp),
+  IR_OP(restoresp),
 
   // stdarg builtins.
   IR_OP(builtin_va_start),  // va_start(op0, op1)
@@ -218,20 +229,28 @@ typedef struct IRNode {
     Symbol* def;
     Symbol* use;
   } var;
+  SourceLocation location;
+  struct IRNode* dest;     // Optional destination node.
 } IRNode;
 
 // Flags for IR nodes.
-#define kIRVarDef 1  // Defines a variable.
-#define kIRVarUse 2  // Uses a variable.
+#define kIRVarDef (1 << 0) // Defines a variable.
+#define kIRVarUse (1 << 1)  // Uses a variable.
+#define kIRTailCall (1 << 2) // Call is a tail call
+#define kIRReturnJump (1 << 3)   // Jump to return.
+#define kIRRvoCall (1 << 4)     // Return value optimized call.
+#define kIRNrvoMarker (1 << 5)  // Named Return Value optimized symbol.
+#define kIRJumpTableBranch (1 << 6)  // Jump table bra.
+#define kIRDestIsIndirect (1 << 7)  // Dest is indirect address.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);
 void IRDelete(IRNode* inst);
 void IRResetNodeId(void);
 
-void IRSetType(IRNode* node, TypeRecord* type);
+IRNode* IRSetType(IRNode* node, TypeRecord* type);
 
-void IRAddInput(IRNode* from, IRNode* to);
+void IRAddInput(IRNode* from, IRNode* to, bool copy_type);
 void IRReplaceInput(IRNode* node, size_t index, IRNode* new);
 void IRRemoveNode(IRNode* node);
 void IRRemoveInput(IRNode* node, size_t index);
@@ -250,7 +269,7 @@ IRNode* IRNext(IRNode* node);
 IRNode* IRPrev(IRNode* node);
 bool IRInList(IRNode* node);
 
-void IRPrint(IRNode* inst);
+void IRPrint(IRNode* inst, FILE* fp);
 
 typedef struct {
   IRNode base;
@@ -282,14 +301,19 @@ typedef struct {
   Symbol* symbol;
 } IRVariable;
 
+
 IRNode* NewIRVariable(Symbol* sym);
 IRNode* NewIRPhi(Symbol* sym);
 IRNode* NewIRSSAVar(Symbol* sym);
 
 bool IRIsBranch(IRNode* node);
+bool IRIsUnconditionalBranch(IRNode* node);
 bool IRIsConditionalBranch(IRNode* node);
 bool IRIsReturn(IRNode* node);
+bool IRIsCall(IRNode* node);
 bool IRIsConst(IRNode* node);
+bool IRIsIntConst(IRNode* node);
+int64_t IRIntConstValue(IRNode* node);
 bool IRIsVariable(IRNode* node);
 bool IRIsAutoVariable(IRNode* node);
 bool IRIsArgument(IRNode* node);
@@ -304,7 +328,10 @@ bool IRIsExpression(IRNode* inst);
 bool IRIsCommutative(IRNode* inst);
 
 bool IRIsComparison(IRNode* node);
+bool IRIsStoreOnly(IRNode* node);
 bool IRIsStore(IRNode* node);
 bool IRIsLoad(IRNode* node);
+
+bool IRIsResult(IRNode* node);
 
 #endif /* ir_h */

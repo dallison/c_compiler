@@ -37,6 +37,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->all_symbols);
+  syntax->context = kParsingFileScope;
 }
 
 
@@ -67,7 +68,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
 ASTNode* SyntaxNewPCLabel(SourceLocation location) {
   StringInit(&next_pc_label, NULL);
   StringPrintf(&next_pc_label, ".PC.%d", next_pc_label_id++);
-  ASTNode* node = NewLabelASTNode(next_pc_label.value, true, location);
+  ASTNode* node = NewLabelASTNode(next_pc_label.value, NULL, true, location);
   StringDestruct(&next_pc_label);
   return node;
 }
@@ -179,9 +180,12 @@ Storage SyntaxParseStorage(Syntax* syntax) {
   }
 }
 
-static bool IsDefinition(TypeParser* parser, Storage storage) {
+static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
   if (StorageIs(storage, STO(extern))) {
     return false;
+  }
+  if (sym->flags.is_argument) {
+    return true;
   }
   return LexLookingAt(parser->lex, TOK(equal)) ||
       LexLookingAt(parser->lex, TOK(lbrace));
@@ -330,7 +334,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     // body.
     while (!LexLookingAt(syntax->lex, TOK(lbrace))) {
       TypeParser arg_parser;
-      TypeParserInit(&arg_parser, syntax->lex, syntax, STO(auto));
+      TypeParserInit(&arg_parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
       TypeRecord* arg_type = TypeParserParseType(&arg_parser, true);
       if (arg_type == NULL) {
         SyntaxError(syntax, "Type expected");
@@ -357,35 +361,11 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   
   
   if (LexMatch(syntax->lex, TOK(lbrace))) {
-    // Open a scope and add the formal arguments as symbols.
-    SyntaxOpenScope(syntax);
-    
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
-      // We have a declaration that we are now defining.  The
-      // names of the formal parameters might have been changed so
-      // we need to replace their names with the current new ones.
-      Vector* decl_prototype = &old_sym->type->info.function.prototype;
-      Vector* defn_prototype = &sym->type->info.function.prototype;
-      size_t num_decl_formals = decl_prototype->length;
-      size_t num_defn_formals = defn_prototype->length;
-      for (size_t i = 0; i < num_decl_formals && i < num_defn_formals;
-           i++) {
-        Symbol* decl_formal = decl_prototype->value.p[i];
-        Symbol* defn_formal = defn_prototype->value.p[i];
-        StringSet(&decl_formal->name, defn_formal->name.value);
-      }
-      // We now refer to the previously defined symbol rather than this new
-      // one.
-      SymbolDelete(sym);
-      sym = old_sym;
+      old_sym->value.func_defn = sym;
     }
-    
-    Vector* prototype = &sym->type->info.function.prototype;
-    size_t num_formals = prototype->length;
-    for (size_t i = 0; i < num_formals; i++) {
-      InsertLocalSymbol(syntax->local_symbol_stack,
-                        (Symbol*)prototype->value.p[i]);
-    }
+    ParserContext old_context = syntax->context;
+    syntax->context = kParsingBlockScope;
     
     sym->flags.is_defined = true;
     sym->type->info.function.definition = true;
@@ -397,24 +377,37 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     
     while (syntax->lex->current_token != TOK(rbrace)) {
-      ASTNode* stmt = SyntaxParseStatement(syntax, TC(semicolon));
+      ASTNode* stmt;
+      if (SyntaxLookingAtDeclaration(syntax)) {
+        // Declaration.
+        stmt = SyntaxParseLocalDeclaration(syntax);
+      } else {
+        stmt = SyntaxParseStatement(syntax,TC(semicolon));
+      }
       if (stmt != NULL) {
         VectorAppend(body, stmt);
       }
     }
+    syntax->context = old_context;
+    
     if (compiler->debug_output) {
       VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
     }
     sym->type->info.function.body =
         NewCompoundStatementASTNode(body, syntax->lex->current_token_location);
     SyntaxNeedBracket(syntax, TOK(rbrace), TC(decl));
-    SyntaxCloseScope(syntax);
     ASTNode* decl = NewVariableDeclarationASTNode(sym, NULL,
                                                   syntax->lex->current_token_location);
     VectorAppend(declarations, decl);
     
     return NewDeclarationListASTNode(declarations,
                                      syntax->lex->current_token_location);
+  } else {
+    // Function is a declaration.  If the old symbol was inline, this is
+    // an inline definition.
+    if (old_sym != NULL && old_sym->type->info.function.is_inline) {
+      old_sym->flags.is_inline_defn = true;
+    }
   }
   return NULL;
 }
@@ -441,7 +434,7 @@ static void CheckThreadLocal(Syntax* syntax, Symbol* symbol) {
 // 3. function specifier (inline).
 // This collects them into the output variables.
 static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is_inline,
-                                      TypeRecord** type, Vector* attributes) {
+                                      TypeRecord** type, Vector* attributes, ParserContext context) {
   PartialTypeSpecifier type_specifier = {
     .type = kTypeImplicit,
     .quals = kQualPlain,
@@ -450,7 +443,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
   };
 
   TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit));
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), context);
   
   while (!LexEof(syntax->lex)) {
     Storage s = SyntaxParseStorage(syntax);
@@ -518,7 +511,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
               ok = false;
             }
           } else {
-            if (IsDefinition(parser, storage)) {
+            if (IsDefinition(parser, old_sym, storage)) {
               // This is a declaration of a previously known definition.
               SyntaxError(syntax, "Duplicate definition of symbol %s",
                           sym->name.value);
@@ -527,7 +520,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           }
         } else {
           // Old sym is a declaration.
-          if (IsDefinition(parser, storage)) {
+          if (IsDefinition(parser, sym,  storage)) {
             old_sym->flags.is_defined = true;
           } else if (!StorageIs(storage, STO(extern))) {
             old_sym->flags.is_tentative_decl = true;
@@ -561,7 +554,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         // table.
         bool ok = InsertGlobalSymbol(sym);
         assert(ok);
-        if (IsDefinition(parser, storage)) {
+        if (IsDefinition(parser, sym, storage)) {
           sym->flags.is_defined = true;
         } else if (!StorageIs(storage, STO(extern))) {
           sym->flags.is_tentative_decl = true;
@@ -588,11 +581,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     VectorClear(attributes);
   
     // Declaring or defining a function?
-    if (sym->type->declarator == kDeclFunction) {
+    if (TypeIsFunction(sym->type)) {
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
       if (result != NULL) {
         return result;
       }
+    } else if (parser->is_inline) {
+      SyntaxError(syntax, "inline can only be applied to functions");
     }
     
     if (old_sym != NULL) {
@@ -643,6 +638,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   Vector* declarations = NewVector();
   Vector attributes = {0};
+  syntax->context = kParsingFileScope;
   
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
@@ -652,21 +648,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   Storage storage = STO(implicit);
   bool is_inline = false;
   TypeRecord* type = NULL;
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes, kParsingFileScope);
 
-  if (StorageIs(storage, STO(auto)) || StorageIs(storage, STO(register))) {
+  if (StorageIs(storage, STO(auto)|STO(register))) {
     SyntaxError(syntax, "Illegal global storage specified: %s",
                 StorageIs(storage, STO(register)) ? "register" : "auto");
     storage = STO(implicit);
-  }
-
-  // We just treat inline as static for now, but the rules
-  // for C99 inlining say we must treat 'extern inline' as a definition.
-  // However, Mac OS seems to use 'extern inline' in header files (ctype.h
-  // for example has "extern inline int isascii(...)" and I don't know how
-  // this can work.
-  if (is_inline) {
-    storage = STO(static);
   }
 
   // Parse common __attribute__ syntax.
@@ -676,14 +663,19 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   // Create a type parser for the declarators.
   TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, storage);
+  TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingFileScope);
   parser.is_inline = is_inline;
-  
+ 
+  // Open a scope (local symbol stack) for the symbols declared in the
+  // type declaration list.
+  SyntaxOpenScope(syntax);
+
   // Now we get a sequence of declarations, separated by commas.
   ASTNode* result = ParseExternalDeclarationList(&parser,
                                                  type, storage,
                                                  &attributes,
                                                  declarations);
+  SyntaxCloseScope(syntax);
   if (result != NULL) {
     if (declarations->length != 1) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
@@ -748,7 +740,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
               ok = false;
             }
           } else {
-            if (IsDefinition(parser, storage)) {
+            if (IsDefinition(parser, old_sym, storage)) {
               // This is a declaration of a previously known definition.
               SyntaxError(syntax, "Duplicate definition of local symbol %s",
                           sym->name.value);
@@ -757,7 +749,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           }
         } else {
           // Old sym is a declaration.
-          if (IsDefinition(parser, storage)) {
+          if (IsDefinition(parser, sym, storage)) {
             // This is a definition so the original symbol is now defined.
             old_sym->flags.is_defined = true;
           } else if (!StorageIs(storage, STO(extern))) {
@@ -824,7 +816,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     CheckThreadLocal(syntax, sym);
 
     // Declaring or defining a function?
-    if (sym->type->declarator == kDeclFunction) {
+    if (TypeIsFunction(sym->type)) {
       if (LexMatch(syntax->lex, TOK(lbrace))) {
         // C does not supported nested functions.
         SyntaxError(syntax, "Function definition not allowed here");
@@ -834,6 +826,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         // then we will exit the loop.
       }
     } else {
+      sym->flags.is_defined = true;
+      if (parser->is_inline) {
+         SyntaxError(syntax, "inline can only be applied to functions");
+      }
       // Any initializer?
       ASTNode* initializer = NULL;
       if (LexMatch(syntax->lex, TOK(equal))) {
@@ -882,8 +878,9 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   bool is_inline = false;
   TypeRecord* type = NULL;
   Vector attributes = {0};
+  syntax->context = kParsingBlockScope;
   
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes);
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes, kParsingBlockScope);
 
   if (is_inline) {
     SyntaxError(syntax, "inline is not allowed here");
@@ -891,7 +888,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   
   // Parse the type specifier (char, unsigned int, etc.)
   TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, storage);
+  TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingBlockScope);
 
   // Now we get a sequence of declarations, separated by commas.
   ParseLocalDeclarationList(&parser, type, storage, &attributes, declarations);

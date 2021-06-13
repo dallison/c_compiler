@@ -14,7 +14,7 @@
 #include "hashtable.h"
 #include "vector.h"
 
-// Global Value Numbering optimization.
+// Global Value Numbering optimization (O2)
 
 // This is a value assigned to an expression.  In this case, we
 // are dealing with IR nodes so an expression is an IRNode that

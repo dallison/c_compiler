@@ -490,7 +490,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
     case ELF_MACHINE_TYPE_RISC_V:
       StringSet(&type, RISCVRelocType(reloc_type));
       interpreter = malloc(sizeof(RISCVInterpreter));
-      RISCVInterpreterInit(interpreter, false, false);
+      RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
       disassembler = DisassembleRISCV;
       break;
     case ELF_MACHINE_TYPE_6502:
@@ -575,7 +575,7 @@ static void Disassemble(ELFReaderFile* elf) {
        break;
     case ELF_MACHINE_TYPE_RISC_V:
       interpreter = malloc(sizeof(RISCVInterpreter));
-      RISCVInterpreterInit(interpreter, false, false);
+      RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
       break;
     case ELF_MACHINE_TYPE_6502:
       break;

@@ -13,6 +13,7 @@
 #include "symbol.h"
 #include "vector.h"
 #include "map.h"
+#include "parser_context.h"
 
 struct ASTNode;
 
@@ -103,9 +104,19 @@ typedef struct {
 } Enum;
 
 typedef struct {
-  int size;
-  bool is_flexible;
+  union {
+    struct {
+      struct ASTNode* size;   // Variable Length Array size.
+      void* codegen_info;     // Information for code generator.
+    } vla;
+    int fixed;             // Fixed array size.
+  } size;
+  bool is_flexible:1;           // Is a flexible array (inside struct).
+  bool is_static:1;             // In call, actual and formal must match.
+  bool is_vla:1;                // This is a variable length array.
+  bool is_placeholder_vla:1;    // [*] used in function prototype.
 } ArrayInfo;
+
 
 // Type record.  This represents one part of a type.
 // Each of these structs is chained into a full type by the 'next'
@@ -142,6 +153,7 @@ typedef struct {
   bool found_void;        // Flag: we've found 'void'.
   int dimension_count;    // Dimensions in array.
   bool is_inline;
+  enum ParserContext context;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
@@ -153,10 +165,11 @@ typedef struct  {
 } PartialTypeSpecifier;
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
-void TypeRecordPrint(TypeRecord* record);
-void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body);
+TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
+void TypeRecordPrint(TypeRecord* record, FILE* fp);
+void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* fp);
 void TypeRecordDelete(TypeRecord* record);
-void TypeRecordCalculateSize(TypeRecord* record);
+TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
@@ -164,8 +177,9 @@ TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
-TypeRecord* NewArrayTypeRecord(Qualifiers quals, int array_size,
-                               bool is_flexible);
+TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
+TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);
+
 TypeRecord* NewFunctionTypeRecord(void);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
 
@@ -193,7 +207,7 @@ void TypeRecordToString(TypeRecord* type, String* result);
 // This provides functions for the syntax analysis of types and declarators.
 //
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
-                    Storage storage);
+                    Storage storage, enum ParserContext context);
 void TypeParserReset(TypeParser* parser);
 
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
@@ -212,55 +226,193 @@ Symbol* TypeParserParseEnum(TypeParser* parser);
 TypeRecord* NewSizeTypeRecord(void);
 
 //
-// Type analysis.
+// Type inference.  The inline defintiions for these is in type.c.
 //
 
-bool TypeIsInt(TypeRecord* type);
-bool TypeIsChar(TypeRecord* type);
-bool TypeIsShort(TypeRecord* type);
-bool TypeIsLong(TypeRecord* type);
-bool TypeIsLongLong(TypeRecord* type);
-bool TypeIsUnsignedInt(TypeRecord* type);
-bool TypeIsUnsignedChar(TypeRecord* type);
-bool TypeIsUnsignedShort(TypeRecord* type);
-bool TypeIsUnsignedLong(TypeRecord* type);
-bool TypeIsUnsignedLongLong(TypeRecord* type);
-bool TypeIsFloat(TypeRecord* type);
-bool TypeIsDouble(TypeRecord* type);
-bool TypeIsLongDouble(TypeRecord* type);
-bool TypeIsBool(TypeRecord* type);
-bool TypeIsVoid(TypeRecord* type);
+inline bool TypeIsPointer(TypeRecord* type) {
+  return type->declarator == kDeclPointer;
+}
 
-bool TypeIsPointer(TypeRecord* type);
-bool TypeIsPrimitive(TypeRecord* type);
-bool TypeIsPointerOrArray(TypeRecord* type);
-bool TypeIsIntegral(TypeRecord* type);
-bool TypeIsFloatingPoint(TypeRecord* type);
-bool TypeIsFunction(TypeRecord* type);
-bool TypeIsFunctionDefinition(TypeRecord* type);
-bool TypeIsFunctionPointer(TypeRecord* type);
-bool TypeIsStructOrUnionPointer(TypeRecord* type);
-bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type);
+inline bool TypeIsPrimitive(TypeRecord* type) {
+  return type->declarator == kDeclPrimitive;
+}
+inline bool TypeIsPointerOrArray(TypeRecord* type) {
+  return type->declarator == kDeclPointer || type->declarator == kDeclArray;
+}
 
-bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2);
-bool TypeIsStructOrUnion(TypeRecord* type);
-bool TypeIsScalar(TypeRecord* type);
-bool TypeIsVoidPointer(TypeRecord* type);
-bool TypeIsArray(TypeRecord* type);
-bool TypeIsConst(TypeRecord* type);
-bool TypeIsVolatile(TypeRecord* type);
-bool TypeIsEnum(TypeRecord* type);
-bool TypeIsUnsigned(TypeRecord* type);
-bool TypeIsSigned(TypeRecord* type);
+inline bool TypeIsFunction(TypeRecord* type) {
+  return type->declarator == kDeclFunction;
+}
+
+inline bool TypeIsFunctionDefinition(TypeRecord* type) {
+  if (!TypeIsFunction(type)) {
+    return false;
+  }
+  return type->info.function.definition;
+}
+
+inline bool TypeIsFunctionPointer(TypeRecord* type) {
+  if (TypeIsPointer(type)) {
+    TypeRecord* subtype = type->next;
+    return TypeIsFunction(subtype);
+  }
+  return TypeIsFunction(type);
+}
+
+inline bool TypeIsVoid(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeVoid) != 0;
+}
+
+inline bool TypeIsVoidFunction(TypeRecord* type) {
+  return TypeIsFunction(type) && TypeIsVoid(type->next);
+}
+
+inline bool TypeIsUnsigned(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  return TypeIsPrimitive(type) && (type->type & kTypeUnsigned) != 0;
+}
+
+inline bool TypeIsSigned(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
+}
+
+inline bool TypeIsConst(TypeRecord* type) {
+  return (type->qualifiers & kQualConst) != 0;
+}
+
+inline bool TypeIsVolatile(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  return (type->qualifiers & kQualVolatile) != 0;
+}
+
+inline bool TypeIsArray(TypeRecord* type) { return type->declarator == kDeclArray; }
+inline bool TypeIsFixedArray(TypeRecord* type) {
+  return type->declarator == kDeclArray &&
+      !type->info.array.is_vla;
+}
+
+// A VLA passed to a function is converted to a pointer but its array info
+// remains intact.  A pointer will have all zeros in its array info.
+inline bool TypeIsVLA(TypeRecord* type) {
+  return (type->declarator == kDeclArray || type->declarator == kDeclPointer) &&
+      type->info.array.is_vla;
+}
+
+inline bool TypeIsIntegral(TypeRecord* type) {
+  return TypeIsPrimitive(type) &&
+         (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeLong |
+                        kTypeLongLong | kTypeBool | kTypeEnum)) != 0;
+}
+
+inline bool TypeIsFloatingPoint(TypeRecord* type) {
+  return TypeIsPrimitive(type) &&
+         (type->type & (kTypeFloat | kTypeDouble | kTypeLongDouble)) != 0;
+}
+
+inline bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2) {
+  return TypeIsPointer(ptr1) &&
+         ptr1->declarator == ptr2->declarator &&
+         ptr1->next->type == ptr2->next->type;
+}
+
+inline bool TypeIsStructOrUnion(TypeRecord* type) {
+  return TypeIsPrimitive(type) &&
+         (type->type & (kTypeStruct | kTypeUnion)) != 0;
+}
+
+inline bool TypeIsScalar(TypeRecord* type) { return !TypeIsStructOrUnion(type); }
+
+
+inline bool TypeIsInt(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & (kTypeInt | kTypeEnum)) != 0;
+}
+
+inline bool TypeIsChar(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeChar) != 0;
+}
+inline bool TypeIsShort(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeShort) != 0;
+}
+inline bool TypeIsLong(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeLong) != 0;
+}
+inline bool TypeIsLongLong(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeLongLong) != 0;
+}
+
+inline bool TypeIsUnsignedInt(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsInt(type);
+}
+
+inline bool TypeIsUnsignedChar(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsChar(type);
+}
+inline bool TypeIsUnsignedShort(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsShort(type);
+}
+inline bool TypeIsUnsignedLong(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsLong(type);
+}
+inline bool TypeIsUnsignedLongLong(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsLongLong(type);
+}
+
+inline bool TypeIsFloat(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeFloat) != 0;
+}
+inline bool TypeIsDouble(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeDouble) != 0;
+}
+inline bool TypeIsLongDouble(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeLongDouble) != 0;
+}
+inline bool TypeIsBool(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeBool) != 0;
+}
+
+inline bool TypeIsEnum(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeEnum) != 0;
+}
+
+inline bool TypeIsVoidPointer(TypeRecord* type) {
+  return TypeIsPointer(type) && type->next != NULL && TypeIsVoid(type->next);
+}
+
+inline bool TypeIsStructOrUnionPointer(TypeRecord* type) {
+  return TypeIsPointer(type) && TypeIsStructOrUnion(type->next);
+}
+
+
+inline bool TypeIsIntConstant(TypeRecord* type) {
+  return TypeIsIntegral(type) && ((type->qualifiers & kQualConst) != 0);
+}
+
+inline bool TypeIsFloatingPointConstant(TypeRecord* type) {
+  return TypeIsFloatingPoint(type) && ((type->qualifiers & kQualConst) != 0);
+}
+
+inline bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type) {
+  if (TypeIsFunction(type)) {
+    return TypeIsStructOrUnion(type->next);
+  }
+  if (TypeIsPointer(type) && TypeIsFunction(type->next)) {
+    return TypeIsStructOrUnion(type->next->next);
+  }
+  return false;
+}
+
+inline bool TypeIsUnknown(TypeRecord* type) {
+  return (type->type & kTypeUnknown) != 0;
+}
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);
 void TypeErrorDetails(SourceLocation location,
                       TypeRecord* t1, TypeRecord* t2);
-
-bool TypeIsIntConstant(TypeRecord* type);
-bool TypeIsFloatingPointConstant(TypeRecord* type);
-bool TypeIsUnknown(TypeRecord* type);
 
 #endif /* type_h */

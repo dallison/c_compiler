@@ -19,12 +19,145 @@ static void GenerateDeclarationList(Generator* gen,
   }
 }
 
+static ASTNode* FindEnclosingLoop(ASTNode* stmt) {
+  while (stmt != NULL) {
+    switch (stmt->op) {
+      case AST_OP(for): {
+        ForStatementASTNode* f = (ForStatementASTNode*)stmt;
+        return f->stmt;
+      }
+      case AST_OP(while):
+      case AST_OP(do): {
+        CombinedStatementASTNode* c = (CombinedStatementASTNode*)stmt;
+        return c->stmt;
+        return stmt;
+      }
+      default:
+        break;
+    }
+    stmt = stmt->parent;
+  }
+  return NULL;
+}
+
+static ASTNode* FindEnclosingLoopOrSwitch(ASTNode* stmt) {
+  while (stmt != NULL) {
+    switch (stmt->op) {
+       case AST_OP(for): {
+        ForStatementASTNode* f = (ForStatementASTNode*)stmt;
+        return f->stmt;
+      }
+      case AST_OP(while):
+      case AST_OP(do): {
+        CombinedStatementASTNode* c = (CombinedStatementASTNode*)stmt;
+        return c->stmt;
+        return stmt;
+      }
+      case AST_OP(switch): {
+        SwitchStatementASTNode *s = (SwitchStatementASTNode*)stmt;
+        return s->stmt;
+      }
+      default:
+        break;
+    }
+    stmt = stmt->parent;
+  }
+  return NULL;
+}
+
+static IRNode* ContainsVLA(DeclarationListASTNode* decl_list) {
+  for (size_t j = 0; j < decl_list->declarations->length; j++) {
+     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[j];
+     if (TypeIsVLA(decl->base.type)) {
+       return decl->saved_sp;
+     }
+  }
+  return NULL;
+}
+
+static IRNode* FindTopVLAForJump(ASTNode* jump, ASTNode* dest) {
+  ASTNode* node = jump;
+  IRNode* top_vla = NULL;
+  while (node != dest) {
+    if (node->parent != NULL && node->parent->op == AST_OP(compound)) {
+      CompoundStatementASTNode* c = (CompoundStatementASTNode*)node->parent;
+      bool found_vla = false;
+      for (size_t i = 0; !found_vla && i < c->statements->length; i++) {
+        ASTNode* stmt = c->statements->value.p[i];
+        if (stmt == node) {
+          break;
+        }
+        if (stmt->op == AST_OP(decl_list)) {
+          DeclarationListASTNode* decl_list = (DeclarationListASTNode*)stmt;
+          IRNode* vla = ContainsVLA(decl_list);
+          if (vla != NULL) {
+            top_vla = vla;
+            found_vla = true;
+          }
+        }
+      }
+    }
+    node = node->parent;
+  }
+  return top_vla;
+}
+
+IRNode* GenerateVLASize(Generator* gen, TypeRecord* type) {
+  IRNode* size_expr = GenerateExpression(gen,
+                                         type->info.array.size.vla.size);
+  IRNode* sub_size;
+  if (TypeIsVLA(type->next)) {
+    sub_size = GenerateVLASize(gen, type->next);
+  } else {
+    sub_size = GeneratorGetIntConstant(gen,
+                                       NULL,
+                                       type->next->size);
+  }
+  IRNode* result = GeneratorEmit(gen, NewIR2(IR_OP(muli), size_expr, sub_size));
+  type->info.array.size.vla.codegen_info = result;
+  return result;
+}
+
+// VLA definition.  The size of the array is an expression held in the
+// array info in the type.  This needs to be multiplied by the array's
+// subtype's size, which might also be a VLA.
+// Also writes the saved SP address into the decl node's saved_sp.
+static IRNode* GenerateVLADefinition(Generator* gen, TypeRecord* type,
+                                     VariableDeclarationASTNode* decl) {
+  // Size of array.
+  IRNode* size = GenerateVLASize(gen, type);
+  
+  // Saved stack pointer.
+  IRNode* saved_sp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), saved_sp));
+  decl->saved_sp = saved_sp;
+  
+  // Address of VLA (current stack pointer after decrement).
+  IRNode* array_addr = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+
+  // Make space for aligned array on stack.
+  IRNode* aligned = GeneratorEmit(gen, NewIR2(IR_OP(aligni),
+                                             size,
+                                             GeneratorGetIntConstant(gen,
+                                                                     NULL,
+                                                                     compiler->target->stack_alignment)));
+  GeneratorEmit(gen, NewIR1(IR_OP(decsp), aligned));
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), array_addr));
+  return array_addr;
+}
+
 static void GenerateVariableDeclaration(Generator* gen,
                                         VariableDeclarationASTNode* node) {
+  if (TypeIsVLA(node->symbol->type)) {
+    // Variable Length Array.
+    IRNode* addr = GenerateVLADefinition(gen, node->symbol->type, node);
+    node->symbol->value.other = addr;
+  }
   if (node->initializer != NULL) {
     GenerateExpression(gen, node->initializer);
   }
 }
+
 
 static void GenerateExpressionStatement(Generator* gen,
                                         ExpressionStatementASTNode* node) {
@@ -35,14 +168,51 @@ static void GenerateCompoundStatement(Generator* gen,
                                       CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
   for (size_t i = 0; i < num_statements; i++) {
-    GenerateStatement(gen, (ASTNode*)node->statements->value.p[i]);
+    ASTNode* stmt = node->statements->value.p[i];
+    GenerateStatement(gen, stmt);
+  }
+  
+  // Restore stack pointer to value saved before topmost VLA was allocated.
+  for (size_t i = 0; i < num_statements; i++) {
+    ASTNode* stmt = node->statements->value.p[i];
+    if (stmt->op == AST_OP(decl_list)) {
+      DeclarationListASTNode* decl_list = (DeclarationListASTNode*)stmt;
+      IRNode* vla = ContainsVLA(decl_list);
+      if (vla != NULL) {
+        GeneratorEmit(gen, NewIR1(IR_OP(restoresp), vla));
+        break;
+      }
+    }
   }
 }
+
+// Is the statement just a branch (possibly enclosed in a compound).
+// Return the branch if it is, NULL otherwise;
+static ASTNode* CheckSingleBranch(ASTNode* stmt, ASTOpcode opcode) {
+  if (stmt == NULL) {
+    return NULL;
+  }
+  if (OptLevel0()) {
+    return NULL;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    CompoundStatementASTNode* c = (CompoundStatementASTNode*)stmt;
+    if (c->statements->length >= 1) {
+      stmt = c->statements->value.p[0];
+    }
+  }
+  if (stmt->op == opcode) {
+    return stmt;
+  }
+  
+  return NULL;
+}
+
 
 static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   // If the condition is a constant we can omit the expression,
   // comparison and the statement as appropriate.
-  if (ASTNodeIsIntConstant(node->cond)) {
+  if (OptLevel1() && ASTNodeIsIntConstant(node->cond)) {
     ConstantASTNode* c = (ConstantASTNode*)node->cond;
     if (c->value.ivalue != 0) {
       GenerateStatement(gen, node->if_part);
@@ -57,18 +227,63 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   // cond
   IRNode* cond = GenerateExpression(gen, node->cond);
   IRNode* else_label = NewIR(IR_OP(label));
-
-  // bfalse cond, else_label
-  GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, else_label));
-
-  // if_part
-  GenerateStatement(gen, node->if_part);
+  IRNode* end_label = NULL;
   if (node->else_part != NULL) {
-    IRNode* end = NewIR(IR_OP(label));
+     end_label = NewIR(IR_OP(label));
+  }
+  
+  // Optimize branches over single break, continue, goto
+  // instructions.
+  // We want to avoid a condition branch over a branch.
+  //
+  // Say we have (as is common):
+  // if (cond) {
+  //   break;
+  // }
+  // The naive way to do this is:
+  // cond
+  // bfalse end_label
+  // bra break_label
+  // end_label:
+  //
+  // But it's more efficient to generate:
+  // cond
+  // btrue break_label
+  //
+  // Likewise for continue and goto.
+  ASTNode* break_stmt = CheckSingleBranch(node->if_part, AST_OP(break));
+  ASTNode* continue_stmt = CheckSingleBranch(node->if_part, AST_OP(continue));
+  ASTNode* goto_stmt = CheckSingleBranch(node->if_part, AST_OP(goto));
+  if (break_stmt != NULL) {
+    // if (cond) { break; } -> if(cond) goto break_label;
+    // btrue cond, break_label
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->break_label));
+  } else if (continue_stmt != NULL) {
+      // if (cond) { continue; } -> if(cond) goto continue_label;
+      // btrue cond, continue_label
+      GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->continue_label));
+  } else if (goto_stmt != NULL) {
+    GotoStatementASTNode* go = (GotoStatementASTNode*)goto_stmt;
+    LabelASTNode* label_node = (LabelASTNode*)go->label;
+    if (label_node->label == NULL) {
+      label_node->label = NewIR(IR_OP(label));
+    }
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, label_node->label));
+  } else {
+    // Regular if (cond) stmt;
+    // bfalse cond, else_label
+    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, else_label));
 
-    // bra end
-    GeneratorEmit(gen, NewIR1(IR_OP(bra), end));
+    // if_part
+    GenerateStatement(gen, node->if_part);
+    
+    if (end_label != NULL) {
+      // bra end_label
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+    }
+  }
 
+  if (node->else_part != NULL) {
     // else_label:
     GeneratorEmit(gen, else_label);
 
@@ -76,18 +291,30 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
     GenerateStatement(gen, node->else_part);
 
     // end:
-    GeneratorEmit(gen, end);
+    GeneratorEmit(gen, end_label);
   } else {
     // else_label:
     GeneratorEmit(gen, else_label);
   }
 }
 
+// Unless we are generating code for size:
+// Most processors predict that a conditional branch will be
+// taken.  A while loop has a conditional branch at the start
+// that will be be predicted as taken but will not be taken
+// on every loop iteration.  It is better to convert the
+// while loop into:
+//
+// if (cond) {
+//   do {
+//   ...
+//   } while (cond);
+// }
 static void GenerateWhileStatement(Generator* gen,
                                    CombinedStatementASTNode* node) {
   // Check for constant loop condition.
   ConstantASTNode* const_cond = NULL;
-  if (ASTNodeIsIntConstant(node->cond)) {
+  if (OptLevel1() && ASTNodeIsIntConstant(node->cond)) {
     const_cond = (ConstantASTNode*)node->cond;
     if (const_cond->value.ivalue == 0) {
       // This is while(false), omit the whole statement.
@@ -99,25 +326,54 @@ static void GenerateWhileStatement(Generator* gen,
 
   gen->break_label = NewIR(IR_OP(label));
   gen->continue_label = NewIR(IR_OP(label));
+ 
+  switch (compiler->code_preference) {
+    case kCodeForSize: {
+      // Preference is for size.  Generate the traditional loop:
+      // continue_label:
+      // bfalse cond, break_label
+      // ...
+      // bra continue_label
+      // break_label:
+      GeneratorEmit(gen, gen->continue_label);
+      IRNode* cond = GenerateExpression(gen, node->cond);
 
-  // continue_label:
-  GeneratorEmit(gen, gen->continue_label);
+      // bfalse cond, break_label
+      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
 
-  // If we have a constant condition at this point it is non-zero
-  // so this is a forever loop.
-  if (const_cond == NULL) {
-    IRNode* cond = GenerateExpression(gen, node->cond);
+      // stmt
+      GenerateStatement(gen, node->stmt);
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
+      break;
+    }
+    case kCodeForSpeed: {
+      // If we have a constant condition at this point it is non-zero
+      // so this is a forever loop.
+      if (const_cond == NULL) {
+        IRNode* cond = GenerateExpression(gen, node->cond);
 
-    // bfalse cond, break_label
-    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+        // bfalse cond, break_label
+        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      }
+     
+      // continue_label:
+      GeneratorEmit(gen, gen->continue_label);
+
+      // stmt
+      GenerateStatement(gen, node->stmt);
+
+      if (const_cond == NULL) {
+        // if (cond) goto continue_label.
+        IRNode* cond = GenerateExpression(gen, node->cond);
+        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->continue_label));
+      } else {
+        // bra continue_label
+        GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
+      }
+      break;
+    }
   }
   
-  // stmt
-  GenerateStatement(gen, node->stmt);
-
-  // bra continue_label
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
-
   // break_label:
   GeneratorEmit(gen, gen->break_label);
 
@@ -142,7 +398,7 @@ static void GenerateDoStatement(Generator* gen,
   // continue_label:
   GeneratorEmit(gen, gen->continue_label);
 
-  if (ASTNodeIsIntConstant(node->cond)) {
+  if (OptLevel1() && ASTNodeIsIntConstant(node->cond)) {
     ConstantASTNode* c = (ConstantASTNode*)node->cond;
     // do ... while(constant);
     if (c->value.ivalue != 0) {
@@ -185,15 +441,17 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
   IRNode* max =
       GeneratorGetIntConstant(gen, node->expr->type, node->max_case_value);
 
-  // Compare expr to min and branch to default if less.
-  IRNode* cmplo = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr, min));
-  GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmplo, default_label));
+  if (!node->all_cases_covered) {
+    // Compare expr to min and branch to default if less.
+    IRNode* cmplo = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr, min));
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmplo, default_label));
 
-  // Compare expr to max and branch to default if greater.
+    // Compare expr to max and branch to default if greater.
 
-  IRNode* cmphi = GeneratorEmit(gen, NewIR2(IR_OP(cmpgti), expr, max));
-  GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmphi, default_label));
-
+    IRNode* cmphi = GeneratorEmit(gen, NewIR2(IR_OP(cmpgti), expr, max));
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmphi, default_label));
+  }
+  
   // Subtract min from expr to get branch offset.
   IRNode* zeroed = GeneratorEmit(gen, NewIR2(IR_OP(subi), expr, min));
 
@@ -208,11 +466,13 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
     if (next_value != case_node->value) {
       // Fill gap in branch table with branches to the default label.
       do {
-        GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
+        IRNode* bra =GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
+        bra->flags |= kIRJumpTableBranch;
         next_value++;
       } while (next_value != case_node->value);
     }
-    GeneratorEmit(gen, NewIR1(IR_OP(bra), case_node->label));
+    IRNode* bra = GeneratorEmit(gen, NewIR1(IR_OP(bra), case_node->label));
+    bra->flags |= kIRJumpTableBranch;
     next_value++;
   }
 
@@ -261,7 +521,9 @@ static void GenerateBinaryCaseSearch(Generator* gen,
                                                       case_node->value)));
     GeneratorEmit(gen, NewIR2(IR_OP(btrue), compare, case_node->label));
   }
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
+  if (!node->all_cases_covered) {
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), default_label));
+  }
 }
 
 // Generate IR for a switch statement using a sparse comparison coding.  This
@@ -349,7 +611,7 @@ static void GenerateConstantSwitch(Generator* gen,
 // Switch statement IR generation.
 static void GenerateSwitchStatement(Generator* gen,
                                     SwitchStatementASTNode* node) {
-  if (ASTNodeIsIntConstant(node->expr)) {
+  if (OptLevel1() && ASTNodeIsIntConstant(node->expr)) {
     // Constant switch expression.  Only generate code for the case
     // that matches.
     GenerateConstantSwitch(gen, node);
@@ -379,6 +641,8 @@ static void GenerateSwitchStatement(Generator* gen,
   }
 }
 
+// Like a while loop, convert it into a tail condition loop with
+// an enclosing if statement.
 static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
   IRNode* old_break = gen->break_label;
   IRNode* old_continue = gen->continue_label;
@@ -396,12 +660,10 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
     }
   }
 
-  // loop_label:
-  GeneratorEmit(gen, loop_label);
-
-  // Condition (e2).
+  // Check for constant condition.
+  bool constant_condition = false;
   if (node->c2 != NULL) {
-    if (ASTNodeIsIntConstant(node->c2)) {
+    if (OptLevel1() && ASTNodeIsIntConstant(node->c2)) {
       ConstantASTNode* c = (ConstantASTNode*)node->c2;
       if (c->value.ivalue == 0) {
         // Condition is false, omit whole statement as it will never
@@ -409,30 +671,68 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
         gen->break_label = old_break;
         gen->continue_label = old_continue;
         return;
-      } else {
-        // Condition is always true, omit expression and bfalse.
       }
-    } else {
-      IRNode* cond = GenerateExpression(gen, node->c2);
-
-      // bfalse cond, break_label
-      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      constant_condition = true;
     }
   }
+  
+  switch (compiler->code_preference) {
+    case kCodeForSize:
+      // loop_label:
+      GeneratorEmit(gen, loop_label);
+      
+      if (node->c2 != NULL && !constant_condition) {
+        IRNode* cond = GenerateExpression(gen, node->c2);
+        // bfalse cond, break_label
+        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      }
+    
+      // stmt
+      GenerateStatement(gen, node->stmt);
 
-  // stmt
-  GenerateStatement(gen, node->stmt);
+      // Continue label.
+      GeneratorEmit(gen, gen->continue_label);
 
-  // Continue label.
-  GeneratorEmit(gen, gen->continue_label);
+      if (node->c3 != NULL) {
+        GenerateExpression(gen, node->c3);
+      }
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
+      break;
+      
+    case kCodeForSpeed:
+      // if (!cond) goto break_label
+      if (node->c2 != NULL && !constant_condition) {
+        IRNode* cond = GenerateExpression(gen, node->c2);
+        // bfalse cond, break_label
+        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      }
+      
+      // loop_label:
+      GeneratorEmit(gen, loop_label);
 
-  if (node->c3 != NULL) {
-    GenerateExpression(gen, node->c3);
+
+      // stmt
+      GenerateStatement(gen, node->stmt);
+
+      // Continue label.
+      GeneratorEmit(gen, gen->continue_label);
+
+      if (node->c3 != NULL) {
+        GenerateExpression(gen, node->c3);
+      }
+
+      if (node->c2 != NULL && !constant_condition) {
+        IRNode* cond = GenerateExpression(gen, node->c2);
+        // btrue cond, loop_label
+        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, loop_label));
+      } else {
+        // bra loop_label
+        GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
+      }
+      break;
+    
   }
-
-  // bra loop_label
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
-
+  
   // break_label:
   GeneratorEmit(gen, gen->break_label);
 
@@ -442,6 +742,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 
 static void GenerateReturnStatement(Generator* gen,
                                     CombinedStatementASTNode* node) {
+  IRNode* nrvo_expr = NULL;
   if (node->cond != NULL) {
     if (node->cond->op == AST_OP(asm)) {
       // Extension: return asm(..)
@@ -449,10 +750,22 @@ static void GenerateReturnStatement(Generator* gen,
     } else {
       IRNode* expr = GenerateExpression(gen, node->cond);
       if (TypeIsStructOrUnion(node->cond->type)) {
-        // Returning a struct, copy result to return value.
-        GeneratorEmit(gen, NewIR3(IR_OP(memcpy), gen->struct_return_value, expr,
-                                  GeneratorGetIntConstant(
-                                      gen, NULL, node->cond->type->size)));
+        if ((node->cond->flags & kASTRvoCall) != 0) {
+          // An RVO call is passed the structresult directly from the
+          // current function so there's no need to copy the result.
+        } else if ((node->cond->flags & kASTNrvoMarker) != 0) {
+          // Named RVO, nothing to do.
+          nrvo_expr = expr;
+          // GeneratorEmit(gen, NewIR1(IR_OP(nrvoval), nrvo_expr));
+        } else {
+          // Returning a struct, copy result to return value.
+          expr = GeneratorEmit(gen, NewIR1(IR_OP(addressof), expr));
+          CheckForVarUse(expr, node->cond);
+          IRNode* result = GeneratorEmit(gen, NewIR3(IR_OP(memcpy), gen->struct_return_value, expr,
+                                    GeneratorGetIntConstant(
+                                        gen, NULL, node->cond->type->size)));
+          CheckForVarDef(result, &node->base);
+        }
       } else {
         IROpcode result;
         if (TypeIsIntegral(node->cond->type)) {
@@ -473,7 +786,13 @@ static void GenerateReturnStatement(Generator* gen,
   // sequence can be large (restoring saved registers, etc).
   // So instead, we branch to the first return in the function.
   IRNode* return_label = GeneratorGetReturnLabel(gen);
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), return_label));
+  IRNode* branch = GeneratorEmit(gen, NewIR1(IR_OP(bra), return_label));
+  
+  // Help out the lower code generators.
+  branch->flags |= kIRReturnJump;
+  if (nrvo_expr != NULL) {
+    branch->flags |= kIRNrvoMarker;
+  }
 }
 
 static void GenerateCaseLabel(Generator* gen, CaseLabelASTNode* node) {
@@ -481,6 +800,7 @@ static void GenerateCaseLabel(Generator* gen, CaseLabelASTNode* node) {
     return;
   }
   GeneratorEmit(gen, node->label);
+  GenerateStatement(gen, node->stmt);
 }
 
 // The semantic analyzer sets the 'stmt' field of the CombinedStatementASTNode
@@ -492,6 +812,11 @@ static void GenerateGotoStatement(Generator* gen,
   LabelASTNode* label_node = (LabelASTNode*)node->label;
   if (label_node->label == NULL) {
     label_node->label = NewIR(IR_OP(label));
+  }
+  assert(node->lca != NULL);      // Need a Lowest Common Ancestor set.
+  IRNode* top_vla = FindTopVLAForJump(&node->base, node->lca);
+  if (top_vla != NULL) {
+    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
   }
   GeneratorEmit(gen, NewIR1(IR_OP(bra), label_node->label));
 }
@@ -509,13 +834,28 @@ static void GenerateLabel(Generator* gen, LabelASTNode* node) {
 
   // Emit label.
   GeneratorEmit(gen, node->label);
+  
+  // Emit label statement.
+  GenerateStatement(gen, node->stmt);
 }
 
 static void GenerateBreak(Generator* gen, ASTNode* node) {
+  ASTNode* loop_or_switch = FindEnclosingLoopOrSwitch(node);
+  assert(loop_or_switch != NULL);
+  IRNode* top_vla = FindTopVLAForJump(node, loop_or_switch);
+  if (top_vla != NULL) {
+    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
+  }
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->break_label));
 }
 
 static void GenerateContinue(Generator* gen, ASTNode* node) {
+  ASTNode* loop = FindEnclosingLoop(node);
+  assert(loop != NULL);
+  IRNode* top_vla = FindTopVLAForJump(node, loop);
+  if (top_vla != NULL) {
+    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), top_vla));
+  }
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
 }
 
@@ -532,6 +872,8 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
     return;
   }
 
+  IRSetLocation(node->location);
+  
   // Emit location instructions if the statement will generate code.
   if (compiler->debug_output) {
     bool emit_loc = true;

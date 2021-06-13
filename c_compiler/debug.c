@@ -447,7 +447,7 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
   DIE* die = NULL;
   switch (type->declarator) {
     case kDeclArray:
-      die = NewArrayDIE(builder, type->info.array.size,
+      die = NewArrayDIE(builder, type->info.array.size.fixed,
                         NewTypeRecordDIE(builder, type->next));
       break;
 

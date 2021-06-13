@@ -65,9 +65,17 @@ void MapInitForPointerKeys(Map* map);
 void MapInitForCaseBlindStringKeys(Map* map);
 void MapInitForCaseBlindCharPointerKeys(Map* map);
 
+Map* NewMapForStringKeys(void);
+Map* NewMapForCharPointerKeys(void);
+Map* NewMapForInt64Keys(void);
+Map* NewMapForPointerKeys(void);
+Map* NewMapForCaseBlindStringKeys(void);
+Map* NewMapForCaseBlindCharPointerKeys(void);
+
 void MapDestruct(Map* map);
 void MapDelete(Map* map);
 void MapClear(Map* map);
+void MapCopy(Map* dest, Map* src);
 
 void MapDestructWithContents(Map* map,
                              void (*func)(MapKeyValue* kv));
@@ -85,10 +93,16 @@ void* MapRemove(Map* map, MapKeyType key);
 // value to free any memory used by the old value if necessary.
 void* MapInsert(Map* map, MapKeyValue kv);
 
+// Quickly shallow clone a map.  Dest must not be initialized.
+void MapClone(Map* dest, Map* src);
+
 // Finds a value given an key.  Returns NULL if it is not found.
 void* MapFind(Map* map, MapKeyType key);
 void* MapFindPointerKey(Map* map, void* key);
 void* MapFindInt64Key(Map* map, int64_t key);
+
+// Search the map and return NULL or pointer to MapKeyValue found.
+MapValueType* MapSearch(Map* map, MapKeyType key);
 
 void MapPrint(Map* map, void (*printer)(const MapKeyValue* kv));
 void MapTraverse(Map* map,

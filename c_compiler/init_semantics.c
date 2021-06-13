@@ -112,7 +112,7 @@ static void AppendArrayINodeChildren(INode* inode, size_t min) {
   size_t first = inode->children.length;
   INode* prev = VectorLast(&inode->children);
   // Only append if we're out of nodes.
-  if (inode->current != prev || first == inode->type->info.array.size) {
+  if (inode->current != prev || first == inode->type->info.array.size.fixed) {
     return;
   }
   // Exponentially increase the size by doubling it until it goes
@@ -230,13 +230,13 @@ static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only
       if (!inode->type->info.array.is_flexible) {
         // Length with terminating zero.
         size_t string_length = c->value.string->length + 1;
-        if (string_length > inode->type->info.array.size + 1) {
+        if (string_length > inode->type->info.array.size.fixed + 1) {
           SemanticError(expr,
                         "Too many initializers for character array");
         }
       } else {
         inode->type->info.array.is_flexible = false;
-        inode->type->info.array.size = (int)c->value.string->length + 1;
+        inode->type->info.array.size.fixed = (int)c->value.string->length + 1;
         TypeRecordCalculateSize(inode->type);
       }
       inode->expr = ASTNodeMove(expr);
@@ -254,13 +254,13 @@ static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only
       if (!inode->type->info.array.is_flexible) {
         // Length with terminating zero.
         size_t string_length = c->value.string->length / sizeof(int);
-        if (string_length > inode->type->info.array.size + 1) {
+        if (string_length > inode->type->info.array.size.fixed + 1) {
            SemanticError(expr,
                         "Too many initializers for wide character array");
          }
        } else {
          inode->type->info.array.is_flexible = false;
-         inode->type->info.array.size = (int)(c->value.string->length / sizeof(int)) + 1;
+         inode->type->info.array.size.fixed = (int)(c->value.string->length / sizeof(int)) + 1;
          TypeRecordCalculateSize(inode->type);
        }
       inode->expr = ASTNodeMove(expr);
@@ -405,7 +405,7 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
         // "Flexible" array (without size).  We can set it now and add all
         // nodes for its children now that we know the size.  This only
         // occurs at the top level and never inside a struct.
-        inode->type->info.array.size = GetArraySizeFromInitializer(braced_init);
+        inode->type->info.array.size.fixed = GetArraySizeFromInitializer(braced_init);
         inode->type->info.array.is_flexible = false;
         TypeRecordCalculateSize(inode->type);
       }

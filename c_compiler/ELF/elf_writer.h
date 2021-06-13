@@ -17,12 +17,15 @@
 // The section contents can come from different places.  If an
 // assembler is creating the section the data will be in a Buffer.
 // If the linker is creating it, the section contents are either
-// in mapped memory or in the heap.  
+// in mapped memory or in the heap.  For fixed size memory regions
+// the linker can create padding sections to fill out unused
+// memory.
 typedef enum {
   kSectionContentsBuffered,   // Data is in a Buffer.
   kSectionContentsRaw,        // Data is in memory.
   kSectionContentsMulti,      // Data is in multiple parts.
   kSectionContentsNobits,     // Nothing in this section, but size is valid.
+  kSectionContentsPad,        // Pad with zeroes.
 } ELFWriterSectionContentsDataLocation;
 
 // If the data location is a buffer it may be empty (a .bss section)
@@ -49,7 +52,7 @@ void ELFWriterSectionContentsWrite(ELFWriterSectionContents* contents, FILE* fp)
 typedef struct ELFWriterSection {
   String name;              // Section name as a string.
   ELFSectionHeader header;  // Header, exactly as it will appear in file.
-  ELFWriterSectionContents* contents;     // Section contents.
+  ELFWriterSectionContents* contents;     // Section contents (not owned).
   int32_t index;            // Index into section table.
   Vector* relocations;      // Relocations (if this is a relocation section).
   uint64_t address;             // Address assigned to section.

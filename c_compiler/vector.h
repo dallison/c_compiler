@@ -36,6 +36,11 @@ Vector* NewVector(void);
 // Function pointer type to destruct contents of vector.
 typedef void (*VectorElementDestructor)(void*);
 
+// Reserve space for 'n' elements.  If n is less than the current
+// capacity this will have no effect.  Otherwise the capacity is
+// increased to n.
+void VectorReserve(Vector* vec, size_t n);
+
 // Destroys a vector by freeing up the pointer storage, not the memory
 // used by the things being pointed to.
 void VectorDestruct(Vector* vec);
@@ -73,5 +78,8 @@ bool VectorEqual(Vector* a, Vector* b);
 void VectorInsertBefore(Vector* vec, size_t index, void* value);
 void VectorInsertAfter(Vector* vec, size_t index, void* value);
 void VectorDeleteElement(Vector* vec, size_t index);
+
+void VectorSortPointers(Vector* vec, int (*compare)(const void*, const void*));
+void VectorSortInts(Vector* vec, int (*compare)(const void*, const void*));
 
 #endif /* vector_h */

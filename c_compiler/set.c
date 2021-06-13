@@ -29,6 +29,26 @@ void SetDelete(Set* set) {
 
 void SetClear(Set* set) { VectorClear(&set->vec); }
 
+static int ComparePointers(const void* a, const void* b) {
+  const void* v1 = *(const void**)a;
+  const void* v2 = *(const void**)b;
+  return (int)(v1 - v2);
+}
+
+static int CompareIntegers(const void* a, const void* b) {
+  int v1 = *(int*)a;
+  int v2 = *(int*)b;
+  return v1 - v2;
+}
+
+void SetInitForPointers(Set* set) {
+  SetInit(set, ComparePointers);
+}
+
+void SetInitForIntegers(Set* set) {
+  SetInit(set, CompareIntegers);
+}
+
 // Find the location in the set at which we should insert before
 // to keep the vector sorted.  This uses a binary search, returning
 // NULL if there is no location (location is beyond end of set).  Also

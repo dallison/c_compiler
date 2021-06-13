@@ -7,10 +7,18 @@
 //
 
 #include "ir.h"
+#include "compiler.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// To avoid passing this around to lots of functions.
+static SourceLocation current_location;
+
+void IRSetLocation(SourceLocation loc) {
+  current_location = loc;
+}
 
 static struct {
   IROpcode opcode;
@@ -53,6 +61,7 @@ static struct {
     {IR_OP(loadf), "loadf"},
     {IR_OP(loadd), "loadd"},
     {IR_OP(loada), "loada"},
+    {IR_OP(structarg), "structarg"},
 
     // stores.
     {IR_OP(storei), "storei"},
@@ -174,14 +183,21 @@ static struct {
     {IR_OP(f2i), "f2i"},
     {IR_OP(d2i), "d2i"},
 
-    {IR_OP(maski), "maski"},
+    {IR_OP(zeroextendi), "zeroextendi"},
     {IR_OP(signextendi), "signextendi"},
+  {IR_OP(aligni), "signextendi"},
 
     {IR_OP(memzero), "memzero"},
     {IR_OP(memcpy), "memcpy"},
-
+    {IR_OP(cast), "cast"},
+  
     {IR_OP(phi), "phi"},
     {IR_OP(asm), "asm"},
+    {IR_OP(nrvoval), "nvroval"},
+
+  {IR_OP(decsp), "decsp"},
+  {IR_OP(savesp), "savesp"},
+  {IR_OP(restoresp), "restoresp"},
 
     {IR_OP(builtin_va_start), "builtin_va_start"},
     {IR_OP(builtin_va_arg), "builtin_va_arg"},
@@ -205,9 +221,6 @@ void IRResetNodeId() { next_ir_id = 1; }
 void IRInit(IRNode* inst, IROpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_ir_id++;
-  if (inst->id == 143) {
-    printf("");
-  }
   inst->opcode = opcode;
   VectorInit(&inst->inputs);
   VectorInit(&inst->outputs);
@@ -216,6 +229,8 @@ void IRInit(IRNode* inst, IROpcode opcode) {
   inst->data.ptr = NULL;
   inst->var.def = NULL;
   inst->type = NULL;
+  inst->location = current_location;
+  inst->dest = NULL;
 }
 
 void IRDestruct(IRNode* inst) {
@@ -239,19 +254,24 @@ IRNode* IRNext(IRNode* node) { return (IRNode*)node->header.next; }
 
 IRNode* IRPrev(IRNode* node) { return (IRNode*)node->header.prev; }
 
-void IRSetType(IRNode* node, TypeRecord* type) {
-  if (type == NULL) {
-    return;
+IRNode* IRSetType(IRNode* node, TypeRecord* type) {
+  if (type == NULL || type == node->type) {
+    return node;
+  }
+  if (node->type != NULL) {
+    // Replacing a type.
+    TypeRecordDelete(node->type);
   }
   TypeRecordIncRef(type);
   node->type = type;
+  return node;
 }
 
 bool IRInList(IRNode* node) {
   return node->header.next != NULL || node->header.prev != NULL;
 }
 
-void IRAddInput(IRNode* from, IRNode* to) {
+void IRAddInput(IRNode* from, IRNode* to, bool copy_type) {
   if (to->opcode != IR_OP(label)) {
     // For nodes other than labels we need to have seen the input before
     // we use it.  This will be caused by forgetting to emit the instruction,
@@ -260,7 +280,9 @@ void IRAddInput(IRNode* from, IRNode* to) {
   }
   VectorAppend(&from->inputs, to);
   VectorAppend(&to->outputs, from);
-  from->type = to->type;
+  if (copy_type) {
+    IRSetType(from, to->type);
+  }
 }
 
 void IRSetVarUse(IRNode* inst, Symbol* var) {
@@ -335,32 +357,32 @@ void IRRemoveNode(IRNode* node) {
 
 IRNode* NewIR1(IROpcode opcode, IRNode* op) {
   IRNode* inst = NewIR(opcode);
-  IRAddInput(inst, op);
+  IRAddInput(inst, op, true);
   return inst;
 }
 
 IRNode* NewIR2(IROpcode opcode, IRNode* op1, IRNode* op2) {
   IRNode* inst = NewIR(opcode);
-  IRAddInput(inst, op1);
-  IRAddInput(inst, op2);
+  IRAddInput(inst, op1, true);
+  IRAddInput(inst, op2, false);
   return inst;
 }
 
 IRNode* NewIR3(IROpcode opcode, IRNode* op1, IRNode* op2, IRNode* op3) {
   IRNode* inst = NewIR(opcode);
-  IRAddInput(inst, op1);
-  IRAddInput(inst, op2);
-  IRAddInput(inst, op3);
+  IRAddInput(inst, op1, true);
+  IRAddInput(inst, op2, false);
+  IRAddInput(inst, op3, false);
   return inst;
 }
 
 IRNode* NewIR4(IROpcode opcode, IRNode* op1, IRNode* op2, IRNode* op3,
                IRNode* op4) {
   IRNode* inst = NewIR(opcode);
-  IRAddInput(inst, op1);
-  IRAddInput(inst, op2);
-  IRAddInput(inst, op3);
-  IRAddInput(inst, op4);
+  IRAddInput(inst, op1, true);
+  IRAddInput(inst, op2, false);
+  IRAddInput(inst, op3, false);
+  IRAddInput(inst, op4, false);
   return inst;
 }
 
@@ -368,12 +390,6 @@ static struct {
   bool (*type_func)(TypeRecord*);
   IROpcode opcode;
 } type_table[] = {
-    {TypeIsInt, IR_OP(consti)},
-    {TypeIsBool, IR_OP(consti)},
-    {TypeIsShort, IR_OP(consts)},
-    {TypeIsChar, IR_OP(constb)},
-    {TypeIsLong, IR_OP(constl)},
-    {TypeIsLongLong, IR_OP(constl)},
     {TypeIsFloat, IR_OP(constf)},
     {TypeIsDouble, IR_OP(constd)},
     {TypeIsLongDouble, IR_OP(constd)},
@@ -381,10 +397,47 @@ static struct {
     {NULL, IR_OP(nop)},
 };
 
+static struct {
+  int size;
+  IROpcode opcode;
+} int_size_to_opcode[] = {
+  {1, IR_OP(constb)},
+  {2, IR_OP(consts)},
+  {4, IR_OP(consti)},
+  {8, IR_OP(constl)},
+  {0, IR_OP(nop)},
+};
+
+static IROpcode IntConstOpcode(TypeRecord* type) {
+  int size = 0;
+  if (type == NULL || TypeIsInt(type)) {
+    size = compiler->int_size;
+  } else if (TypeIsShort(type)) {
+    size = compiler->short_size;
+  } else if (TypeIsBool(type)) {
+    size = compiler->bool_size;
+  } else if (TypeIsChar(type)) {
+    size = 1;
+  } else if (TypeIsLong(type)) {
+    size = compiler->long_size;
+  } else if (TypeIsLongLong(type)) {
+    size = compiler->long_long_size;
+  }
+  for (size_t i = 0; int_size_to_opcode[i].size != 0; i++) {
+    if (size == int_size_to_opcode[i].size) {
+      return int_size_to_opcode[i].opcode;
+    }
+  }
+  abort();
+}
+
 static IROpcode ConstantOpcode(TypeRecord* type) {
   if (type == NULL) {
     // Allow default of integer.
-    return IR_OP(consti);
+    return IntConstOpcode(NULL);
+  }
+  if (TypeIsIntegral(type)) {
+    return IntConstOpcode(type);
   }
   for (size_t i = 0; type_table[i].type_func != NULL; i++) {
     if (type_table[i].type_func(type)) {
@@ -392,6 +445,7 @@ static IROpcode ConstantOpcode(TypeRecord* type) {
     }
   }
   assert(false);
+  return IR_OP(nop);
 }
 
 IRNode* NewIntIRConstant(TypeRecord* type, int64_t value) {
@@ -464,24 +518,24 @@ IRNode* NewIRSSAVar(Symbol* sym) {
   return &inst->base;
 }
 
-void IRPrint(IRNode* inst) {
-  printf("$%d %s(", inst->id, IROpcodeName(inst->opcode));
+void IRPrint(IRNode* inst, FILE* fp) {
+  fprintf(fp, "$%d %s(", inst->id, IROpcodeName(inst->opcode));
   const char* sep = "";
   for (size_t i = 0; i < inst->inputs.length; i++) {
     IRNode* op = (IRNode*)inst->inputs.value.p[i];
-    printf("%s$%d", sep, op->id);
+    fprintf(fp, "%s$%d", sep, op->id);
     sep = ", ";
   }
-  printf(")");
+  fprintf(fp, ")");
   // Print outputs.
-  printf(" [");
+  fprintf(fp, " [");
   sep = "";
   for (size_t i = 0; i < inst->outputs.length; i++) {
     IRNode* op = (IRNode*)inst->outputs.value.p[i];
-    printf("%s$%d", sep, op->id);
+    fprintf(fp, "%s$%d", sep, op->id);
     sep = ", ";
   }
-  printf("]");
+  fprintf(fp, "]");
   IRConstant* constant = (IRConstant*)inst;
   IRVariable* var = (IRVariable*)inst;
   IRLocation* loc = (IRLocation*)inst;
@@ -491,10 +545,10 @@ void IRPrint(IRNode* inst) {
     case IR_OP(consts):
     case IR_OP(constl):
     case IR_OP(consta):
-      printf(" %lld", constant->value.ivalue);
+      fprintf(fp, " %lld", constant->value.ivalue);
       break;
     case IR_OP(constd):
-      printf(" %g", constant->value.fvalue);
+      fprintf(fp, " %g", constant->value.fvalue);
       break;
     case IR_OP(localvar):
     case IR_OP(externvar):
@@ -503,7 +557,7 @@ void IRPrint(IRNode* inst) {
     case IR_OP(tempvar):
     case IR_OP(phi):
     case IR_OP(ssavar):
-      printf(" %s", var->symbol->name.value);
+      fprintf(fp, " %s", var->symbol->name.value);
       break;
     case IR_OP(loc): {
       const char* filename;
@@ -511,23 +565,60 @@ void IRPrint(IRNode* inst) {
       int start;
       int end;
       DecodeSourceLocation(loc->location, &filename, &lineno, &start, &end);
-      printf(" %s, %d, %d, %d", filename, lineno, start, end);
+      fprintf(fp, " %s, %d, %d, %d", filename, lineno, start, end);
       break;
     }
-    default:;
+    case IR_OP(calla):
+      if ((inst->flags & kIRTailCall) != 0) {
+        fprintf(fp, " [tail]");
+      }
+      break;
+    default:
+      break;
   }
-  printf(" *%zd", inst->outputs.length);
+  fprintf(fp, " *%zd", inst->outputs.length);
   if (IRIsVarDef(inst)) {
-    printf(" DEF %s", inst->var.def->name.value);
+    fprintf(fp, " DEF %s", inst->var.def->name.value);
   } else if (IRIsVarRef(inst)) {
-    printf(" REF %s", inst->var.use->name.value);
+    fprintf(fp, " REF %s", inst->var.use->name.value);
   }
-  printf("\n");
+  if (inst->flags != 0) {
+    fprintf(fp, " {");
+    const char* sep = "";
+    static const char* kFlagNames[] = {
+      "vardef",
+      "varuse",
+      "tailcall",
+      "returnjump",
+      "rvocall",
+      "nrvomarker",
+      "jumptablebranch",
+    };
+    for (int i = 0; i < 32; i++) {
+      if ((inst->flags & (1 << i)) != 0) {
+        fprintf(fp,"%s%s", sep, kFlagNames[i]);
+        sep = ",";
+      }
+    }
+    fprintf(fp, "}");
+  }
+  if (inst->dest != NULL) {
+    if ((inst->flags & kIRDestIsIndirect) != 0) {
+      fprintf(fp, " -> ($%d)", inst->dest->id);
+    } else {
+      fprintf(fp, " -> $%d", inst->dest->id);
+    }
+  }
+  fprintf(fp, "\n");
 }
 
 bool IRIsBranch(IRNode* node) {
   return node->opcode == IR_OP(btrue) || node->opcode == IR_OP(bfalse) ||
          node->opcode == IR_OP(bra) || node->opcode == IR_OP(cbra);
+}
+
+bool IRIsUnconditionalBranch(IRNode* node) {
+  return node->opcode == IR_OP(bra);
 }
 
 bool IRIsConditionalBranch(IRNode* node) {
@@ -536,12 +627,23 @@ bool IRIsConditionalBranch(IRNode* node) {
 
 bool IRIsReturn(IRNode* node) { return node->opcode == IR_OP(ret); }
 
+bool IRIsCall(IRNode* node) { return node->opcode == IR_OP(calla); }
+
 bool IRIsConst(IRNode* node) {
   return node->opcode >= IR_OP(constb) && node->opcode <= IR_OP(consta);
 }
 
 bool IRIsZero(IRNode* node) {
   return IRIsConst(node) && ((IRConstant*)node)->value.ivalue == 0;
+}
+
+bool IRIsIntConst(IRNode* node) {
+  return IRIsConst(node) && node->opcode != IR_OP(constf) && node->opcode != IR_OP(constd);
+}
+
+int64_t IRIntConstValue(IRNode* node) {
+  IRConstant* c = (IRConstant*)node;
+  return c->value.ivalue;
 }
 
 bool IRIsVariable(IRNode* node) {
@@ -553,6 +655,7 @@ bool IRIsVariable(IRNode* node) {
     case IR_OP(tempvar):
     case IR_OP(ssavar):
     case IR_OP(phi):
+    case IR_OP(structreturn):
       return true;
     default:
       return false;
@@ -627,6 +730,7 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
+    case IR_OP(structarg):
 
       // Stores are expressions;
     case IR_OP(storei):
@@ -692,7 +796,7 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(f2i):
     case IR_OP(d2i):
 
-    case IR_OP(maski):
+    case IR_OP(zeroextendi):
     case IR_OP(signextendi):
     case IR_OP(phi):
     case IR_OP(calla):
@@ -727,6 +831,8 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(cmpgea):
 
     case IR_OP(literalref):
+    case IR_OP(addressof):
+    case IR_OP(cast):
       return true;
     default:
       return false;
@@ -761,7 +867,7 @@ bool IRIsComparison(IRNode* node) {
   return node->opcode >= IR_OP(cmpeqi) && node->opcode <= IR_OP(cmpgea);
 }
 
-bool IRIsStore(IRNode* node) {
+bool IRIsStoreOnly(IRNode* node) {
   switch (node->opcode) {
     case IR_OP(storei):
     case IR_OP(storeb):
@@ -775,10 +881,31 @@ bool IRIsStore(IRNode* node) {
       return false;
   }
 }
+bool IRIsStore(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(storei):
+    case IR_OP(storeb):
+    case IR_OP(stores):
+    case IR_OP(storel):
+    case IR_OP(storef):
+    case IR_OP(stored):
+    case IR_OP(storea):
+    case IR_OP(addressof):
+    case IR_OP(cast):
+    case IR_OP(builtin_va_start):
+    case IR_OP(builtin_va_end):
+    case IR_OP(builtin_va_arg):
+    case IR_OP(builtin_va_copy):
+    case IR_OP(memzero):
+    case IR_OP(memcpy):
+      return true;
+    default:
+      return false;
+  }
+}
 
 bool IRIsLoad(IRNode* node) {
   switch (node->opcode) {
-    case IR_OP(storei):
     case IR_OP(loadi):
     case IR_OP(loadb):
     case IR_OP(loadl):
@@ -789,7 +916,23 @@ bool IRIsLoad(IRNode* node) {
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
+    case IR_OP(structarg):
+    case IR_OP(addressof):
+    case IR_OP(cast):
       return true;
+    default:
+      return false;
+  }
+}
+
+bool IRIsResult(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(resulti):
+    case IR_OP(resultf):
+    case IR_OP(resultd):
+    case IR_OP(resulta):
+    case IR_OP(asm):
+       return true;
     default:
       return false;
   }

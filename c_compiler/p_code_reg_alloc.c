@@ -201,6 +201,7 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
       return kPCodeRegTypeDouble;
     default:
       assert(false);
+      return 0;
   }
 }
 
@@ -267,7 +268,7 @@ static void AllocateForRmov(PCodeRegisterAllocator* allocator,
   // See if we can reassign the src operand's register.  We can do
   // this if this is the only reference to it.  It can't be a fixed
   // register though.
-  if (src->refs == 1 && !UsesFixedRegister(src)) {
+  if (src->users.length == 1 && !UsesFixedRegister(src)) {
     FreeRegisters(allocator, inst);
     src->reg = &reg->base;
     src->uses++;
@@ -280,7 +281,7 @@ static void AllocateForRmov(PCodeRegisterAllocator* allocator,
   // register for this instruction.
   inst->operand[0]->uses++;  // Prevent this from being freed.
   FreeRegisters(allocator, inst);
-  inst->uses = inst->refs;
+  inst->uses = (int)inst->users.length;
   inst->reg = &reg->base;
   reg->base.owner = inst;
 }
@@ -416,7 +417,7 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
     }
   }
 
-  inst->uses = inst->refs;
+  inst->uses = (int)inst->users.length;
   inst->reg = &reg->base;
   reg->base.owner = inst;
 

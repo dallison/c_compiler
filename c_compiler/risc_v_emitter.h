@@ -19,8 +19,8 @@ typedef struct {
   RVRegisterAllocator* regs;
   int saved_reg_offset;
   int spill_region_size;
-  int next_spill_offset;
-  Map spilled_instructions;
+  int first_spill_offset;
+  void* current_block;
 } RVEmitter;
 
 void RVEmitterInit(RVEmitter* emitter, RVGenerator* rv);

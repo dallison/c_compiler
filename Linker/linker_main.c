@@ -13,6 +13,175 @@
 #include "linker_dynamic.h"
 #include <stdlib.h>
 
+// This is the default config for when the user doesn't specify one.
+// If you add another architecture add it here too.
+// The following architectures and layouts are supported by default:
+// 1. 6502:
+//    a: rom - 16K ROM at 0xc000
+//    b: program - loadable program at 0x200
+// 2. RISC-V:
+//    a: program - loadable program with code at 0x400000000 and data
+//                 at 0x410000000.
+// 3. PCODE:
+//    a: program - loadable program with code at 0x400000000 and data
+//                 at 0x410000000.
+const char default_config[] = {
+"  .set false 0\n"
+"  .set true 1\n"
+"  .set text 1\n"
+"  .set data 2\n"
+"  .set dynamic 3\n"
+"  .set interp 3\n"
+"\n"
+"  # ELF machine type\n"
+"  .set M_6502 6502\n"
+"  .set M_RISC_V 243\n"
+"  .set M_PCODE 6500\n"
+"\n"
+"  layout {\n"
+"    machine: M_6502\n"
+"    type: \"rom\"\n"
+"\n"
+"    segment {\n"
+"      type: text\n"
+"      region {\n"
+"        name: \"text\"\n"
+"        section: \".text\"\n"
+"        section: \".rodata\"\n"
+"        start_addr: 0xc000\n"
+"        size: 0x3f00\n"
+"        alignment: 1\n"
+"      }\n"
+"      region {\n"
+"        name: \"boot\"\n"
+"        section: \".boot\"\n"
+"        start_addr: 0xff00\n"
+"        size: 0xfa\n"
+"        alignment: 1\n"
+"      }\n"
+"      region {\n"
+"        name: \"hwvectors\"\n"
+"        section: \".hwvectors\"\n"
+"        start_addr: 0xfffa\n"
+"        size: 6\n"
+"        alignment: 1\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"\n"
+"  layout {\n"
+"    machine: M_6502\n"
+"    type: \"program\"\n"
+"   \n"
+"    segment {\n"
+"      type: text\n"
+"      region {\n"
+"        name: \"text\"\n"
+"        section: \".text\"\n"
+"        section: \".rodata\"\n"
+"        start_addr: 0x200\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: data\n"
+"      name: \"data\"\n"
+"      region {\n"
+"        name: \"data\"\n"
+"        section: \".data\"\n"
+"      }\n"
+"      region {\n"
+"        name: \"bss\"\n"
+"        section: \".bss\"\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: interp\n"
+"      region {\n"
+"        name: \"interp\"\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"\n"
+"  layout {\n"
+"    machine: M_RISC_V\n"
+"    type: \"program\"\n"
+"\n"
+"    segment {\n"
+"      type: text\n"
+"      region {\n"
+"        name: \"text\"\n"
+"        section: \".text\"\n"
+"        section: \".rodata\"\n"
+"        start_addr: 0x400000000\n"
+"        alignment: 0x1000\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: data\n"
+"      region {\n"
+"        name: \"data\"\n"
+"        section: \".data\"\n"
+"        start_addr: 0x410000000\n"
+"        alignment: 0x1000\n"
+"      }\n"
+"      region {\n"
+"        name: \"bss\"\n"
+"        section: \".bss\"\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: dynamic\n"
+"      region {\n"
+"        name: \"dynamic\"\n"
+"      }\n"
+"    segment {\n"
+"      type: interp\n"
+"      region {\n"
+"        name: \"interp\"\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"\n"
+"  layout {\n"
+"    machine: M_PCODE\n"
+"    type: \"program\"\n"
+"\n"
+"    segment {\n"
+"      type: text\n"
+"      region {\n"
+"        name: \"text\"\n"
+"        section: \".text\"\n"
+"        section: \".rodata\"\n"
+"        start_addr: 0x400000000\n"
+"        alignment: 0x1000\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: data\n"
+"      region {\n"
+"        name: \"data\"\n"
+"        section: \".data\"\n"
+"        start_addr: 0x410000000\n"
+"        alignment: 0x1000\n"
+"      }\n"
+"      region {\n"
+"        name: \"bss\"\n"
+"        section: \".bss\"\n"
+"      }\n"
+"    }\n"
+"    segment {\n"
+"      type: dynamic\n"
+"      region {\n"
+"        name: \"dynamic\"\n"
+"      }\n"
+"    segment {\n"
+"      type: interp\n"
+"      region {\n"
+"        name: \"interp\"\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"\n"};
 
 String* Link(int argc, char** argv) {
   Linker linker;
@@ -25,7 +194,10 @@ String* Link(int argc, char** argv) {
   Vector dynamic_library_names = {0};
   Vector library_search_dirs = {0};
   Vector library_searches = {0};
-
+  const char* config_file = NULL;     // -T config-file
+  const char* layout_type_name = "program";  // -t layout-type
+  bool delete_config = false;
+  
   // Process all input args and flags.
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
@@ -70,6 +242,14 @@ String* Link(int argc, char** argv) {
         }
         linker.origin = strtoll(argv[i], NULL, 0);
         option_ok = true;
+      } else if (strcmp(argv[i], "-e") == 0) {
+        i++;
+        if (i >= argc) {
+          fprintf(stderr, "-e needs a value\n");
+          break;
+        }
+        StringSet(&linker.entry_symbol, argv[i]);
+        option_ok = true;
       }
       if (!option_ok) {
         // Not a word argument, check of letter args.
@@ -97,6 +277,14 @@ String* Link(int argc, char** argv) {
           case 'I':
             // Set interpreter.
             StringSet(&linker.interpreter, &argv[i][2]);
+            break;
+          case 'T':
+            // Linker config file.
+            config_file = &argv[i][2];
+            break;
+          case 't':
+            // Layout type.
+            layout_type_name = &argv[i][2];
             break;
           default:
             fprintf(stderr, "Unknown option %s\n", argv[i]);
@@ -145,7 +333,7 @@ String* Link(int argc, char** argv) {
     String* filename = object_files.value.p[i];
     bool ok = LinkerReadObjectFile(&linker, filename);
     if (!ok) {
-      printf("Failed to read object file %s", filename->value);
+      fprintf(stderr, "Failed to read object file %s\n", filename->value);
     }
     StringDestruct(filename);
   }
@@ -155,7 +343,25 @@ String* Link(int argc, char** argv) {
     return NULL;
   }
   
+  // No config specified, copy default to a temp file.
+  if (config_file == NULL) {
+    delete_config = true;
+    char name[256];
+    snprintf(name, sizeof(name), "/tmp/link.XXXXXX");
+    mktemp(name);
+    FILE* fp = fopen(name, "w");
+    if (fp == NULL) {
+      fprintf(stderr, "Cannot open tempfile %s for config\n", name);
+      exit(1);
+    }
+    size_t len = strlen(default_config);
+    fwrite(default_config, 1, len, fp);
+    fclose(fp);
+    config_file = name;
+  }
+  
   LinkerInitArchitecture(&linker);
+  LinkerInitConfigLayout(&linker, config_file, layout_type_name);
   LinkerInitDynamic(&linker);
   
   for (size_t i = 0; i < library_search_dirs.length; i++) {
@@ -189,6 +395,9 @@ String* Link(int argc, char** argv) {
   VectorDestruct(&library_searches);
 
   if (num_errors != 0) {
+    if (delete_config) {
+      remove(config_file);
+    }
     return NULL;
   }
   if (!linker.fully_static) {
@@ -203,13 +412,20 @@ String* Link(int argc, char** argv) {
   String* output = NewString(linker.output_filename.value);
   FILE* fp = fopen(linker.output_filename.value, "w");
   if (fp == NULL) {
-    fprintf(stderr, "Can't open output file %s: %s\n", linker.output_filename.value, strerror(errno));
+    fprintf(stderr, "Can't open output file %s: %s\n",
+            linker.output_filename.value, strerror(errno));
+    if (delete_config) {
+       remove(config_file);
+     }
     return NULL;
   }
-  LinkerWriteOutput(&linker, fp);
+  int ok = LinkerWriteOutput(&linker, fp);
   fclose(fp);
   
   // We're done.
   LinkerDestruct(&linker);
-  return output;
+  if (delete_config) {
+     remove(config_file);
+  }
+  return ok ? output : NULL;
 }

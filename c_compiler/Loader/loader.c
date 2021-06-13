@@ -14,6 +14,11 @@
 #include <stdlib.h>
 #include <errno.h>
 
+// MAP_ANON seems to have an issue on Raspbian.
+#ifndef MAP_ANON
+#define MAP_ANON 0x20
+#endif
+
 const bool kPrintSymbolTableOnStart = true;
 static int num_errors;
 
@@ -21,10 +26,11 @@ int LoaderNumErrors() {
   return num_errors;
 }
 
-Region* NewRegion(void* addr, int64_t length) {
+Region* NewRegion(void* addr, int64_t length, ELFProgramHeader* segment) {
   Region* region = malloc(sizeof(Region));
   region->address = addr;
   region->length = length;
+  region->segment = segment;
   VectorInit(&region->sections);
   return region;
 }
@@ -61,18 +67,64 @@ void LoaderWarning(const char* warn, const char* error, ...) {
   
 }
 
+static bool FindStaticSymbolByAddress(Loader* loader,
+                             uint64_t address,
+                             const char** name,
+                             uint64_t* start,
+                             uint64_t* length) {
+  StaticSymbolTable* symbols = &loader->static_symbol_table;
+  // Binary search for symbols_by_addr.
+  int begin = 0;
+  int end = (int)symbols->symbols_by_addr.length - 1;
+  int mid = end / 2;
+  int num_symbols = (int)symbols->symbols_by_addr.length;
+  while (begin <= end) {
+    ELFSymbol* sym1 = symbols->symbols_by_addr.value.p[mid];
+    ELFSymbol* sym2 = NULL;
+    if (mid < num_symbols - 1) {
+      sym2 = symbols->symbols_by_addr.value.p[mid+1];
+    }
+    if (address >= sym1->value && (sym2 == NULL || address < sym2->value)) {
+      // Found between sym1 and sym2.
+      *start = sym1->value;
+      *length = sym1->size;
+      *name = symbols->strtab + sym1->name;
+      return true;
+    }
+    if (address < sym1->value) {
+      end = mid - 1;
+    } else {
+      begin = mid + 1;
+    }
+    mid = (end + begin) / 2;
+  }
+  return false;
+}
+
+static ELFSymbol* FindStaticSymbolByName(Loader* loader, const char* name) {
+  MapKeyType key = {.p = (void*)name};
+  return MapFind(&loader->static_symbol_table.symbols_by_name, key);
+}
+
 bool LoaderFindSymbol(Loader* loader,
                              uint64_t address,
                       SymbolScope* symbol) {
    uint64_t symbol_address;
    uint64_t symbol_length;
    const char* symbol_name;
-   bool found = DynamicLoaderLookupSymbolByAddress(
+  bool found;
+  if (loader->is_static) {
+    found = FindStaticSymbolByAddress(loader, address, &symbol_name,
+                             &symbol_address,
+                             &symbol_length);
+  } else {
+    found = DynamicLoaderLookupSymbolByAddress(
                                              &loader->loaded_libraries,
                                              address,
                                              &symbol_name,
                                              &symbol_address,
                                              &symbol_length);
+  }
   if (!found) {
     return false;
   }
@@ -98,6 +150,13 @@ SymbolScope* LoaderFindSymbolAndCacheResult(Loader* loader,
 
 uint64_t LoaderLookupSymbol(Loader* loader, const char* name) {
   const ELFSymbol* symbol;
+  if (loader->is_static) {
+    symbol = FindStaticSymbolByName(loader, name);
+    if (symbol == NULL) {
+      return 0;
+    }
+    return symbol->value;
+  }
   LoadedDynamicLibrary* lib;
   bool found = DynamicLoaderFindSymbol(&loader->loaded_libraries,
                                             name,
@@ -146,6 +205,72 @@ static void GetRegionSections(Loader* loader, Region* region,
     }
   }
 }
+
+
+static int CompareSymbolAddress(const void* a, const void* b) {
+  const ELFSymbol* s1 = *(const ELFSymbol**)a;
+  const ELFSymbol* s2 = *(const ELFSymbol**)b;
+  return (int)(s1->value - s2->value);
+}
+
+static void MapSymbolTable(Loader* loader, int fd,
+                           const ELFSectionHeader* symtab,
+                           const ELFSectionHeader* strtab) {
+  int64_t start;
+  int64_t end;
+  if (symtab->offset < strtab->offset) {
+    start = symtab->offset;
+    end = strtab->offset + strtab->size;
+  } else {
+    start = strtab->offset;
+    end = symtab->offset + symtab->size;
+  }
+  int64_t page_size = sysconf(_SC_PAGESIZE);
+  int64_t page_mask = page_size - 1;
+  int64_t delta = start & page_mask;    // From mapped address to start.
+  int64_t start_offset = start & ~page_mask;
+  int64_t length = AlignUp(end - start_offset, page_size);
+  void* addr = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, start_offset);
+  if (addr == MAP_FAILED) {
+    return;
+  }
+  loader->static_symbol_table.symtab = (const ELFSymbol*)((char*)addr + delta + (symtab->offset - start));
+  loader->static_symbol_table.strtab = (const char*)addr + delta + (strtab->offset - start);
+  VectorAppend(&loader->regions, NewRegion(addr, length, NULL));
+  loader->static_symbol_table.load_address = (uint64_t)addr;
+}
+
+static void FindAndLoadSymbolTable(Loader* loader, int fd) {
+  // Find the regular symbol table and string table so that we
+  // can lookup symbols by address.  This is useful for printing
+  // the location of instructions.
+  // The only way to do this is to search the sections for the
+  // SHT(symtab).
+  for (int i = 0; i < loader->elf_file->header->shnum; i++) {
+    const ELFReaderSection* section = loader->elf_file->sections.value.p[i];
+    if (section->header->type == SHT(symtab)) {
+      // Found symbol table section.  Its link field is the section
+      // index of the string table.
+      
+      loader->static_symbol_table.num_symtab_symbols = section->header->size / section->header->entsize;
+      const ELFReaderSection* strtab = loader->elf_file->sections.value.p[section->header->link];
+      MapSymbolTable(loader, fd, section->header, strtab->header);
+      
+      // Add all symbols to internal caches.
+      StaticSymbolTable* symbols = &loader->static_symbol_table;
+      for (int i = 0; i < symbols->num_symtab_symbols; i++) {
+        const ELFSymbol* symbol =  &symbols->symtab[i];
+        const char* symname = symbols->strtab + symbol->name;
+        MapKeyValue kv = {.key.p = (void*)symname, .value.p = (void*)symbol};
+        MapInsert(&symbols->symbols_by_name, kv);
+        VectorAppend(&symbols->symbols_by_addr, (void*)symbol);
+      }
+      VectorSortPointers(&symbols->symbols_by_addr, CompareSymbolAddress);
+      break;
+    }
+  }
+}
+
 
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
@@ -261,20 +386,28 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
             LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
             return false;
           }
-          VectorAppend(&loader->regions, NewRegion(zero, additional_memory));
+          VectorAppend(&loader->regions, NewRegion(zero, additional_memory, NULL));
         }
       }
       
       // Add a new region to the regions vector so that we can remove it
       // when destructed.
-      Region* region = NewRegion(segment_ptr, length);
+      Region* region = NewRegion(segment_ptr, length, segment);
       VectorAppend(&loader->regions, region);
       GetRegionSections(loader, region, segment, i);
     }
   }
+  // Open file to map symbol table.
+  int fd = open(filename->value, O_RDONLY);
+  if (fd < 0) {
+    printf("Failed to open ELF file segment\n");
+    return false;
+  }
+  FindAndLoadSymbolTable(loader, fd);
   return true;
 }
 
+// Map in the memory for the symbol table and string table.  The address
 
 // Find the .dynamic section.  Return NULL if not found.
 static DynamicSection* FindDynamicSection(Loader* loader) {
@@ -350,11 +483,14 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   loader->arch = arch;
   loader->arch_data = arch_data;
   loader->flags = flags;
+  VectorInit(&loader->static_symbol_table.symbols_by_addr);
+  MapInitForCharPointerKeys(&loader->static_symbol_table.symbols_by_name);
   
   // Load the ELF file.
   loader->elf_file = NewELFReaderFile(filename);
   bool ok = ELFReaderFileRead(loader->elf_file, 0, 0);
   if (!ok) {
+    fprintf(stderr, "Failed to read ELF file %s\n", filename->value);
     return false;
   }
 
@@ -399,7 +535,7 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
 
   // Add the whole ELF file to the regions vector.
   VectorAppend(&loader->regions, NewRegion(loader->elf_file->header,
-                                           loader->elf_file->file_length));
+                                           loader->elf_file->file_length, NULL));
 
   // Get the entry point address.
   loader->main_address = loader->elf_file->header->entry;
@@ -408,13 +544,16 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   if (loader->dynamic == NULL) {
     // No dynamic segment means this is a fully static executable.
     if (loader->elf_file->header->type != ET(exec)) {
+      fprintf(stderr, "Not a static executable\n");
       return false;
     }
     ok = LoadStaticSegments(loader, filename);
+    loader->is_static = true;
   } else {
     // This is a dynamic executable.
     ok = LoadDynamic(loader, (flags & LOADER_LAZY_RESOLVE) != 0);
-  }
+    loader->is_static = false;
+}
     
   memset(&loader->current_symbol, 0, sizeof(SymbolScope));
   
@@ -431,4 +570,6 @@ void LoaderDestruct(Loader* loader) {
   
   VectorDestructWithContents(&loader->regions,
                              (VectorElementDestructor)RegionDestruct);
+  VectorDestruct(&loader->static_symbol_table.symbols_by_addr);
+  MapDestruct(&loader->static_symbol_table.symbols_by_name);
 }

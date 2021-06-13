@@ -1,0 +1,828 @@
+//
+//  risc_v_basic_block.c
+//  c_compiler_library
+//
+//  Created by David Allison on 5/27/20.
+//  Copyright © 2020 David Allison. All rights resegened.
+//
+
+#include "target_basic_block.h"
+#include "compiler.h"
+#include <stdlib.h>
+#include <assert.h>
+
+TargetBasicBlock* NewTargetBasicBlock(TargetBlockId id) {
+  TargetBasicBlock* b = malloc(sizeof(TargetBasicBlock));
+  b->block_id = id;
+  b->code = NULL;
+  b->end_code = NULL;
+  VectorInit(&b->in_edges);
+  VectorInit(&b->out_edges);
+  BitSetInit(&b->dominators);
+  b->num_dominators = 0;
+  VectorInit(&b->dominatees);
+  BitSetInit(&b->dominance_frontier);
+  b->idom = NULL;
+  VectorInit(&b->inputs);
+  VectorInit(&b->outputs);
+  BitSetInit(&b->output_ids);
+  b->num_spills = 0;
+  b->loop_nesting = 0;
+  b->contains_call = false;
+  b->reachability_known = false;
+  b->is_unreachable = false;
+  b->uses_floating_point = false;
+  b->cookie = NULL;
+  return b;
+}
+
+void TargetBasicBlockDelete(TargetBasicBlock* b) {
+  // NOTE: the instructions are not owned by the TargetBasicBlock.  They belong to the
+  // TargetGenerator and that is responsible for deleting them.
+  VectorDestruct(&b->in_edges);
+  VectorDestruct(&b->out_edges);
+  BitSetDestruct(&b->dominators);
+  BitSetDestruct(&b->dominance_frontier);
+  VectorDestruct(&b->dominatees);
+  VectorDestruct(&b->inputs);
+  VectorDestruct(&b->outputs);
+  BitSetDestruct(&b->output_ids);
+  free(b);
+}
+
+void TargetBasicBlockAddInEdge(TargetBasicBlock* from, TargetBasicBlock* to) {
+  VectorAppend(&from->in_edges, (void*)to->block_id);
+}
+
+void TargetBasicBlockAddEdge(TargetBasicBlock* from, TargetBasicBlock* to) {
+  assert(to->block_id != 0);
+  VectorAppend(&from->out_edges, (void*)to->block_id);
+  TargetBasicBlockAddInEdge(to, from);
+}
+
+bool TargetBasicBlockCalculateDominators(TargetGenerator* gen, TargetBasicBlock* b, Vector* blocks) {
+  BitSet dominators;
+  BitSetInit(&dominators);
+  BitSetCopy(&dominators, &b->dominators);
+
+  BitSet intersection;
+  BitSetInit(&intersection);
+
+  // Calculate intersection.
+  int num_intersections = 0;
+  for (size_t i = 0; i < b->in_edges.length; i++) {
+    BlockId id = b->in_edges.value.w[i];
+    TargetBasicBlock* dom_block = blocks->value.p[id];
+
+    // Unreachable blocks do not count.
+    if (TargetBasicBlockIsUnreachable(gen, dom_block)) {
+      continue;
+    }
+    BitSetClear(&intersection);
+    BitSetIntersection(&dominators, &dom_block->dominators, &intersection);
+    BitSetClear(&dominators);
+    BitSetCopy(&dominators, &intersection);
+    num_intersections++;
+  }
+  if (num_intersections == 0) {
+    // All in edges are unreachable, so this is unreachable.
+    BitSetClear(&dominators);
+  }
+
+  // Insert this node.
+  BitSetInsert(&dominators, b->block_id);
+
+  // If we have changed, store the new dominators.
+  bool changed = !BitSetEqual(&dominators, &b->dominators);
+  if (changed) {
+    BitSetClear(&b->dominators);
+    BitSetCopy(&b->dominators, &dominators);
+  }
+
+  // Clean up.
+  BitSetDestruct(&dominators);
+  BitSetDestruct(&intersection);
+
+  // Count the number of dominators so we don't have to do it on
+  // every iteration when calculating the immediate dominator.
+  b->num_dominators = BitSetCount(&b->dominators);
+  return changed;
+}
+
+void TargetBasicBlockCalculateImmediateDominator(TargetBasicBlock* b, Vector* blocks) {
+  size_t maxndoms = 0;
+
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &b->dominators);
+  while (!BitSetIteratorDone(&it)) {
+    BlockId id = (BlockId)BitSetIteratorValue(&it);
+    if (id != b->block_id) {
+      TargetBasicBlock* block = VectorGet(blocks, id);
+      if (block->num_dominators > maxndoms) {
+        maxndoms = block->num_dominators;
+        b->idom = block;
+      }
+    }
+    BitSetIteratorNext(&it);
+  }
+}
+
+void TargetBasicBlockCalculateDominanceFrontier(TargetBasicBlock* b, Vector* blocks) {
+  if (b->in_edges.length >= 2) {
+    for (size_t i = 0; i < b->in_edges.length; i++) {
+      BlockId id = (BlockId)b->in_edges.value.p[i];
+      TargetBasicBlock* block = VectorGet(blocks, id);
+      TargetBasicBlock* runner = block;
+      while (runner != b->idom) { // TODO: this was NULL, which is right?
+        TargetBasicBlockAddToDF(runner, b->block_id);
+        runner = runner->idom;
+      }
+    }
+  }
+}
+
+void TargetBasicBlockInitDominators(TargetBasicBlock* b, bool is_start, size_t num_nodes) {
+  if (is_start) {
+    BitSetInsert(&b->dominators, b->block_id);
+  } else {
+    if (b->in_edges.length == 0) {
+      // Block is unreachable.
+      return;
+    }
+    for (size_t i = 0; i < num_nodes; ++i) {
+      BitSetInsert(&b->dominators, i);
+    }
+  }
+}
+
+void TargetBasicBlockAddToDF(TargetBasicBlock* b, BlockId id) {
+  BitSetInsert(&b->dominance_frontier, id);
+}
+
+void TargetBasicBlockPrint(TargetGenerator* gen, TargetBasicBlock* b, TargetBasicBlock* entry, TargetBasicBlock* exit, FILE* fp) {
+  fprintf(fp, "*** Target Basic block #%zd%s\n", b->block_id,
+         (b == entry ? " (ENTRY)" : (b == exit ? " (EXIT)" : "")));
+  if (TargetBasicBlockIsUnreachable(gen, b)) {
+    fprintf(fp, "** Unreachable **\n");
+  }
+  if (b->contains_call) {
+    fprintf(fp, "  [call]\n");
+  }
+  fprintf(fp, "  In:");
+  for (size_t i = 0; i < b->in_edges.length; i++) {
+    fprintf(fp, " %zd", (BlockId)b->in_edges.value.p[i]);
+  }
+  fprintf(fp, "\n  Out:");
+  for (size_t i = 0; i < b->out_edges.length; i++) {
+    fprintf(fp, " %zd", (BlockId)b->out_edges.value.p[i]);
+  }
+  fprintf(fp, "\n  Dominators: ");
+  BitSetPrint(&b->dominators, fp);
+
+  fprintf(fp, "\n  Dominatees:");
+  for (size_t i = 0; i < b->dominatees.length; i++) {
+    fprintf(fp, " %zd", (BlockId)b->dominatees.value.p[i]);
+  }
+  fprintf(fp, "\n  DF: ");
+  BitSetPrint(&b->dominance_frontier, fp);
+
+  fprintf(fp, "\n  Immediate Dominator: ");
+  if (b->idom == NULL) {
+    fprintf(fp, "NIL\n");
+  } else {
+    fprintf(fp, "%zd\n", b->idom->block_id);
+  }
+
+  fprintf(fp, "  Loop nesting: %d\n", b->loop_nesting);
+
+  fprintf(fp, "  Inputs: ");
+  for (size_t i = 0; i < b->inputs.length; i++) {
+    TargetInstruction* inst = b->inputs.value.p[i];
+    fprintf(fp, "@%d ", inst->id);
+  }
+  fprintf(fp, "\n");
+
+  fprintf(fp, "  Outputs: ");
+  for (size_t i = 0; i < b->outputs.length; i++) {
+    TargetInstruction* inst = b->outputs.value.p[i];
+    fprintf(fp, "@%d ", inst->id);
+  }
+  fprintf(fp, "\n");
+  
+  TargetInstruction* inst = b->code;
+  while (inst != b->end_code) {
+    TargetPrintInstruction(inst, gen->virtuals->opcode_name, fp);
+    inst = TargetNext(inst);
+  }
+  if (b->end_code != NULL) {
+    TargetPrintInstruction(b->end_code, gen->virtuals->opcode_name, fp);
+  }
+  fprintf(fp, "\n");
+}
+
+bool TargetBasicBlockEndsInBranchOrReturn(TargetGenerator* gen, TargetBasicBlock* b) {
+  TargetInstruction* inst = b->end_code;
+  return inst != NULL && (gen->virtuals->is_branch(inst) ||
+                          gen->virtuals->is_return(inst));
+}
+
+// Remove an instruction from a basic block and IR code.
+void TargetBasicBlockRemoveInstruction(TargetGenerator* gen, TargetBasicBlock* block,
+                                 TargetInstruction* inst) {
+  // If this instruction is the first in the basic block, move the
+  // block's code on to the next instruction.
+  if (inst == block->code) {
+    if (inst == block->end_code) {
+      // Block has no instructions now.
+      block->code = block->end_code = NULL;
+    } else {
+      block->code = TargetNext(inst);
+    }
+  }
+  if (inst == block->end_code) {
+    block->end_code = TargetPrev(inst);
+  }
+  
+  // If this instruction is referred to by another instruction then
+  // that instruction is also dead.
+  for (size_t i = 0; i < inst->users.length; i++) {
+     TargetInstruction* user = inst->users.value.p[i];
+     for (int j = 0; j < TARGET_MAX_OPERANDS; j++) {
+       if (user->operand[j] == inst) {
+         // Need to remove the user instruciton.
+         TargetBasicBlockRemoveInstruction(gen, user->block, user);
+         user = NULL;
+         break;
+       }
+     }
+     if (user != NULL && user->dest == inst) {
+       user->dest = NULL;
+     }
+   }
+  VectorClear(&inst->users);
+  TargetDeleteInstruction(gen, inst);
+}
+
+// Replace the instruction 'old' with 'new'.  Removes 'old' when
+// the replacement is done.
+void TargetBasicBlockReplaceInstruction(TargetGenerator* gen, TargetBasicBlock* block,
+                                  TargetInstruction* old, TargetInstruction* new) {
+  // If this instruction is the first in the basic block, move the
+  // block's code on to the next instruction.
+  if (old == block->code) {
+    block->code = TargetNext(old);
+  }
+  if (old == block->end_code) {
+    block->end_code = TargetPrev(old);
+  }
+  TargetReplaceInstruction(gen, old, new);
+  TargetBasicBlockRemoveInstruction(gen, block, old);
+}
+
+void TargetBasicBlockEmitBefore(struct TargetGenerator* gen, TargetBasicBlock* block,
+                          struct TargetInstruction* inst, struct TargetInstruction* pos) {
+  // If the position is the first in the block we need to move
+  // it to the new instruction.
+  if (pos == block->code) {
+    block->code = inst;
+  }
+  TargetEmitBefore(gen, inst, pos);
+  inst->block = block;
+  if (gen->virtuals->is_spill(inst)) {
+    block->num_spills++;
+  }
+}
+
+void TargetBasicBlockEmitAfter(struct TargetGenerator* gen, TargetBasicBlock* block,
+                          struct TargetInstruction* inst, struct TargetInstruction* pos) {
+  // If the position is the last in the block we need to move
+  // it to the new instruction.
+  if (pos == block->end_code) {
+    block->end_code = inst;
+  }
+  TargetEmitAfter(gen, inst, pos);
+  inst->block = block;
+  if (gen->virtuals->is_spill(inst)) {
+    block->num_spills++;
+  }
+}
+
+bool TargetBasicBlockIsUnreachable(struct TargetGenerator* gen, TargetBasicBlock* b) {
+  if (b == gen->entry_block) {
+    return false;
+  }
+  if (b->reachability_known) {
+    return b->is_unreachable;
+  }
+  b->reachability_known = true;
+  // Check if all the in edges are unreachable.
+  for (size_t i = 0; i < b->in_edges.length; i++) {
+    BlockId id = b->in_edges.value.w[i];
+    TargetBasicBlock* in = VectorGet(&gen->basic_blocks, id);
+    if (!TargetBasicBlockIsUnreachable(gen, in)) {
+      return false;
+    }
+  }
+  b->is_unreachable = true;
+  return true;
+}
+
+void TargetBasicBlockClear(struct TargetGenerator* gen, TargetBasicBlock* b) {
+  if (b->code == NULL) {
+    return;
+  }
+  TargetInstruction* next;
+  for (TargetInstruction* inst = b->code; inst != NULL && inst != b->end_code; inst = next) {
+    next = TargetNext(inst);
+    TargetDeleteInstruction(gen, inst);
+  }
+  if (b->end_code != NULL) {
+    TargetDeleteInstruction(gen, b->end_code);
+  }
+  b->code = NULL;
+  b->end_code = NULL;
+}
+
+static TargetBasicBlock* TargetGeneratorNewTargetBasicBlock(TargetGenerator* gen) {
+  TargetBasicBlock* b = NewTargetBasicBlock(gen->basic_blocks.length);
+  VectorAppend(&gen->basic_blocks, b);
+  return b;
+}
+
+static TargetBasicBlock* FindTargetBasicBlock(TargetGenerator* gen, BlockId id) {
+  return VectorGet(&gen->basic_blocks, id);
+}
+
+static void CreateTargetBasicBlocks(TargetGenerator* gen,
+                              Vector* branches) {
+  gen->entry_block = TargetGeneratorNewTargetBasicBlock(gen);
+  TargetBasicBlock* current = gen->entry_block;
+
+  // First instruction is in first block.
+  current->code = TargetFirstInstruction(gen);
+  
+  // Find the boundary TargetInstructions (labels, branches and returns).  Each
+  // one of these either ends a block or starts a new one.
+  for (TargetInstruction* inst = current->code; inst != NULL; inst = TargetNext(inst)) {
+    if (gen->virtuals->is_floating_point(inst)) {
+      current->uses_floating_point = true;
+    }
+    if (gen->virtuals->is_label(inst)) {
+      current->end_code = TargetPrev(inst);
+      
+      // A label marks the start of a block.
+      TargetBasicBlock* b = TargetGeneratorNewTargetBasicBlock(gen);
+      inst->block = b;
+      b->code = inst;
+      current = b;
+    } else if (gen->virtuals->is_branch(inst) ||
+               gen->virtuals->is_return(inst) ||
+               gen->virtuals->is_call(inst)) {
+      // Branch, return and call ends a block.
+      current->end_code = inst;
+      inst->block = current;
+      VectorAppend(branches, inst);
+      current->contains_call = gen->virtuals->is_call(inst);
+
+      // Allocate a new block starting at the next instruction provided it's
+      // not a label (because that will be created in next iteration).
+      TargetInstruction* next = TargetNext(inst);
+      if (next != NULL && !gen->virtuals->is_label(next)) {
+        TargetBasicBlock* b = TargetGeneratorNewTargetBasicBlock(gen);
+        b->code = next;
+        current = b;
+      }
+    } else {
+      inst->block = current;
+    }
+  }
+  current->end_code = TargetLastInstruction(gen);
+  
+  // Allocate exit block.
+  gen->exit_block = TargetGeneratorNewTargetBasicBlock(gen);
+}
+
+// Process all branches and link their targets to the appropriate
+// block.
+static void BuildTargetBasicBlockGraph(TargetGenerator* gen,
+                                  Vector* branches) {
+  for (size_t i = 0; i < branches->length; i++) {
+    TargetInstruction* inst = branches->value.p[i];
+    TargetBasicBlock* block = inst->block;
+    if (gen->virtuals->is_conditional_branch(inst)) {
+      // Conditional branch links to both its taken and fallthrough blocks.
+      TargetInstruction* fallthrough = TargetNext(inst);
+      TargetInstruction* taken = gen->virtuals->get_branch_target(inst);
+      TargetBasicBlockAddEdge(block, fallthrough->block);
+      TargetBasicBlockAddEdge(block, taken->block);
+    } else if ((inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+       // Table jump is followed by a branch table.  These are j instructions.
+       // Find all of them and link to this block.
+       TargetInstruction* j = TargetNext(inst);
+       while (gen->virtuals->is_table_entry(j)) {
+         TargetBasicBlockAddEdge(block, j->block);
+         j = TargetNext(j);
+       }
+    } else if (gen->virtuals->is_return(inst)) {
+      // Return always links to the exit block.
+      TargetBasicBlockAddEdge(block, gen->exit_block);
+    } else if (gen->virtuals->is_call(inst)) {
+      // Calls only link to their next block.
+      TargetInstruction* fallthrough = TargetNext(inst);
+      TargetBasicBlockAddEdge(block, fallthrough->block);
+    } else {
+      // Unconditional branch only links to its target.
+      TargetInstruction* target = inst->operand[0];
+      if (gen->virtuals->is_label(target)) {
+        // Due to tail calls we can have a jump to a symbol.  This
+        // is not an edge.  The block will have an output edge
+        // to the exit block.
+        TargetBasicBlockAddEdge(block, target->block);
+      }
+    }
+  }
+}
+
+// All blocks with no output edges link to exit block.  Also blocks
+// that do not end in a branch or return fall through to next block.
+static void AddMissingLinks(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b == gen->exit_block) {
+      continue;
+    }
+    if (!TargetBasicBlockEndsInBranchOrReturn(gen, b)) {
+      // No branch or return, fall through to next block.
+      TargetBasicBlockAddEdge(b, FindTargetBasicBlock(gen, b->block_id + 1));
+    }
+    if (b->out_edges.length == 0) {
+      TargetBasicBlockAddEdge(b, gen->exit_block);
+    }
+  }
+}
+
+// Calculate the dominators for all basic blocks.
+static void CalculateDominators(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    TargetBasicBlockInitDominators(b, b == gen->entry_block,
+                             gen->basic_blocks.length);
+  }
+  
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+      TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+      changed |= TargetBasicBlockCalculateDominators(gen, b, &gen->basic_blocks);
+    }
+  }
+}
+
+static void CalculateImmediateDominator(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    TargetBasicBlockCalculateImmediateDominator(b, &gen->basic_blocks);
+  }
+}
+
+static void CalculateDominanceFrontier(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    TargetBasicBlockCalculateDominanceFrontier(b, &gen->basic_blocks);
+  }
+}
+
+// Build dominator tree.  If a block has an
+// immediate dominator (idom) add the block to the idom's
+// dominatees set.
+static void BuildDominatorTree(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b->idom != NULL) {
+      VectorAppend(&b->idom->dominatees, (void*)b->block_id);
+    }
+  }
+}
+
+static void SaveInstructionUses(TargetBasicBlock* block, Vector* uses) {
+  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+    VectorAppend(uses, (void*)(int64_t)inst->uses);
+  }
+  if (block->end_code != NULL) {
+    VectorAppend(uses, (void*)(int64_t)block->end_code->uses);
+  }
+  for (size_t i = 0; i < block->inputs.length; i++) {
+    TargetInstruction* inst = block->inputs.value.p[i];
+    VectorAppend(uses, (void*)(int64_t)inst->uses);
+  }
+}
+
+static void RestoreInstructionUses(TargetBasicBlock* block, Vector* uses) {
+  size_t index = 0;
+  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+    inst->uses = (int)uses->value.w[index++];
+  }
+  if (block->end_code != NULL) {
+    block->end_code->uses = (int)uses->value.w[index++];
+  }
+  for (size_t i = 0; i < block->inputs.length; i++) {
+    TargetInstruction* inst = block->inputs.value.p[i];
+    inst->uses = (int)uses->value.w[index++];
+  }
+}
+
+
+static void ResetInstructionUses(TargetBasicBlock* block) {
+  for (TargetInstruction* inst = block->code;
+       inst != NULL && inst != block->end_code;
+       inst = TargetNext(inst)) {
+    inst->uses = (int)inst->users.length;
+  }
+  if (block->end_code != NULL) {
+    block->end_code->uses = (int)block->end_code->users.length;
+  }
+}
+
+static void DecrementOperandUses(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return;
+  }
+  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (inst->operand[i] != NULL) {
+      if (inst->operand[i]->uses > 0) {
+        inst->operand[i]->uses--;
+        assert(inst->operand[i]->uses >= 0);
+      }
+    }
+  }
+}
+
+static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block, TargetInstruction* inst, bool is_input) {
+  if (inst == NULL) {
+    return;
+  }
+  // A call provides a fixed register but we need to propagate it
+  // as output if its value is not used in this block.
+  if (!gen->virtuals->is_call(inst)) {
+    if (gen->virtuals->is_fixed_register(inst) || gen->virtuals->is_const(inst)
+        || gen->virtuals->is_symbol(inst) || !gen->virtuals->is_expression(inst)) {
+      return;
+    }
+  }
+  // Unless this is an input inside a call block, check for
+  // use count.  This allows all inputs to be propagated to the
+  // output in a call block.
+  if (!(compiler->callee_save && is_input && block->contains_call)) {
+    assert(inst->uses >= 0);
+    if (inst->uses == 0) {
+      return;
+    }
+  }
+
+  VectorAppend(&block->outputs, inst);
+  BitSetInsert(&block->output_ids, inst->id);
+}
+
+static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
+  // For each instruction, decrement the uses count for all its operands.
+  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+    DecrementOperandUses(inst);
+  }
+  DecrementOperandUses(block->end_code);
+
+  VectorClear(&block->outputs);
+  BitSetClear(&block->output_ids);
+  
+  // Now look for all instructions that have a uses count > 0.  Also
+  // look at the inputs.  If we don't use an input it becomes an output.
+  // Also, if the block is a call block we propagate all inputs
+  // to outputs
+  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+    AddOutput(gen, block, inst, false);
+  }
+  AddOutput(gen, block, block->end_code, false);
+  for (size_t i = 0; i < block->inputs.length; i++) {
+    AddOutput(gen, block, block->inputs.value.p[i], true);
+  }
+  
+  // Now look at the block's out edges and add the inputs of those to
+  // the output set of this block.  If a block can be reached by this one
+  // then its inputs are part of our outputs.  Blocks dominated by this one
+  // are already processed.
+  for (size_t i = 0; i < block->out_edges.length; i++) {
+    TargetBasicBlock* out = gen->basic_blocks.value.p[block->out_edges.value.w[i]];
+    for (size_t j = 0; j < out->inputs.length; j++) {
+      TargetInstruction* inst = out->inputs.value.p[j];
+      VectorAppend(&block->outputs, inst);
+      BitSetInsert(&block->output_ids, inst->id);
+    }
+  }
+}
+
+// Inputs to this block the outputs from the immediate dominator.
+static void BuildBlockInputs(TargetBasicBlock* block) {
+  if (block->idom != NULL) {
+    VectorCopy(&block->inputs, &block->idom->outputs);
+  }
+}
+
+// Traverse the dominator tree building the inputs and outputs.
+static void BuildInputsAndOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
+  if (block == NULL) {
+    return;
+  }
+  BuildBlockInputs(block);
+  BuildBlockOutputs(gen, block);
+  Vector saved_uses = {0};
+  SaveInstructionUses(block, &saved_uses);
+  for (size_t i = 0; i < block->dominatees.length; i++) {
+    TargetBlockId child_id = block->dominatees.value.w[i];
+    TargetBasicBlock* child = gen->basic_blocks.value.p[child_id];
+    BuildInputsAndOutputs(gen, child);
+    RestoreInstructionUses(block, &saved_uses);
+  }
+  VectorDestruct(&saved_uses);
+}
+
+static void ResetAllInstructionUses(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    ResetInstructionUses(b);
+  }
+}
+
+static void RemoveUnreachableBlocks(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+
+    if (TargetBasicBlockIsUnreachable(gen, b)) {
+      TargetBasicBlockClear(gen, b);
+    }
+  }
+}
+
+static void IncrementLoopNesting(TargetBasicBlock* block, void* data) {
+  block->loop_nesting++;
+}
+
+// Detect loops in the control flow graph by looking for back edges and
+// incrementing the loop_nesting counter for all blocks inside the loop
+// body.
+//
+// A back edge from A to B is an out edge from A to B for which A is
+// a dominator of B.
+//
+// For each back edge detected we traverse the dominator tree for
+// the loop header block (A in this example) and increment its
+// loop_nesting counter.
+static void DetectLoops(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    for (size_t j = 0; j < b->out_edges.length; j++) {
+      BlockId out_id = b->out_edges.value.w[j];
+      if (BitSetContains(&b->dominators, out_id)) {
+        // Out edge is a dominator, therefore this is a back-edge.
+        TargetBasicBlock* loop_head = VectorGet(&gen->basic_blocks, out_id);
+        TargetBasicBlockTraverseDominatorTree(gen, loop_head,
+                                        IncrementLoopNesting, kTraversePreOrder, NULL);
+      }
+    }
+  }
+}
+
+void TargetBuildBasicBlocks(TargetGenerator* gen) {
+  // The branches vector holds a list of all the branches we encounter in the
+  // code.  Each branch adds an edge from its block to the block starting with
+  // the label to which it is branching.
+  Vector branches;
+  VectorInit(&branches);
+
+  // Phase 1: create all basic blocks.
+  CreateTargetBasicBlocks(gen, &branches);
+  
+  // Phase 2: Link the blocks into a graph.
+  BuildTargetBasicBlockGraph(gen, &branches);
+
+  // Phase 3: all blocks with no output edges link to exit block.  Also blocks
+  // that do not end in a branch or return fall through to next block.
+  AddMissingLinks(gen);
+  
+  // RVPrintBasicBlocks(gen, stdout);
+  
+  // Phase 4: calculate dominators, dominance frontier and idom.
+  // Phase 4a: dominators.
+  CalculateDominators(gen);
+ 
+  // Phase 4b: immediate dominator.
+  CalculateImmediateDominator(gen);
+ 
+  // Phase 4c: dominance frontier.
+  //CalculateDominanceFrontier(gen);
+  
+  // Phase 5: build dominator tree.
+  BuildDominatorTree(gen);
+  
+  // RVPrintBasicBlocks(gen, stdout);
+  
+  // Detect loops.
+  DetectLoops(gen);
+  
+  // Tidy up.
+  // Delete the branches vector.
+  VectorDestruct(&branches);
+  
+  RemoveUnreachableBlocks(gen);
+  
+  TargetBuildBasicBlockInputsAndOutputs(gen);
+}
+
+// Calculate the inputs and outputs for all basic blocks.  This
+// information tells the register allocator the lifespan of
+// registers.
+void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
+   ResetAllInstructionUses(gen);
+   BuildInputsAndOutputs(gen, gen->entry_block);
+   
+   // Reset the uses count for all instructions.
+   ResetAllInstructionUses(gen);
+}
+
+void TargetPrintBasicBlocks(TargetGenerator* gen, FILE* fp) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    TargetBasicBlockPrint(gen, b, gen->entry_block, gen->exit_block, fp);
+  }
+}
+
+static void TraverseDomTree(TargetGenerator* gen,
+                            TargetBasicBlock* block, TargetTraversalFunc func,
+                            TraversalMode mode, void* data) {
+  if (block == NULL) {
+    return;
+  }
+  if (mode == kTraversePreOrder) {
+    func(block, data);
+  }
+  for (size_t i = 0; i < block->dominatees.length; i++) {
+    TargetBlockId child_id = block->dominatees.value.w[i];
+    TargetBasicBlock* child = gen->basic_blocks.value.p[child_id];
+    if (child == block) {
+      continue;
+    }
+    TraverseDomTree(gen, child, func, mode, data);
+  }
+  if (mode == kTraversePostOrder) {
+    func(block, data);
+  }
+}
+
+void TargetBasicBlockTraverseDominatorTree(TargetGenerator* gen, TargetBasicBlock* block,
+                                       TargetTraversalFunc func,
+                             TraversalMode mode,
+                             void* data) {
+  TraverseDomTree(gen, block, func, mode, data);
+}
+
+void TargetTraverseDominatorTree(TargetGenerator* gen, TargetTraversalFunc func,
+                             TraversalMode mode,
+                             void* data) {
+  TraverseDomTree(gen, gen->entry_block, func, mode, data);
+}
+
+bool TargetBasicBlockOutputs(TargetBasicBlock* block, TargetInstruction* inst) {
+  return BitSetContains(&block->output_ids, inst->id);
+}
+
+void TargetBasicBlockPropagateExpression(TargetGenerator* gen, TargetInstruction* inst, TargetBasicBlock* to) {
+  TargetBasicBlock* from = inst->block;
+  AddOutput(gen, from, inst, false);
+  VectorAppend(&to->inputs, inst);
+}
+
+TargetInstruction* TargetBasicBlockBegin(TargetBasicBlock* b) {
+  return b->code;
+}
+
+TargetInstruction* TargetBasicBlockEnd(TargetBasicBlock* b) {
+  if (b->end_code == NULL) {
+    return NULL;
+  }
+  return (TargetInstruction*)b->end_code->header.next;
+}
+
+TargetInstruction* TargetBasicBlockRBegin(TargetBasicBlock* b) {
+  return b->end_code;
+
+}
+
+TargetInstruction* TargetBasicBlockREnd(TargetBasicBlock* b) {
+  if (b->code == NULL) {
+    return NULL;
+  }
+  return (TargetInstruction*)b->code->header.prev;
+}
+
+bool TargetBasicBlockIsEmpty(TargetBasicBlock* b) {
+  return b->code == NULL || b->end_code == NULL;
+}

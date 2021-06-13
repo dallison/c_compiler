@@ -7,8 +7,9 @@
 //
 
 #include "6502_disassembler.h"
+#include "dstring.h"
 
-static void* DisassembleGroup8(uint16_t addr, void* p, int inst, FILE* fp) {
+static void* DisassembleGroup8(uint16_t addr, void* p, int inst, String* str) {
   static const char* mnemonics[16] = {
     "PHP",
     "CLC",
@@ -27,11 +28,11 @@ static void* DisassembleGroup8(uint16_t addr, void* p, int inst, FILE* fp) {
     "INX",
     "SED",
   };
-  fprintf(fp, "%s\n", mnemonics[inst]);
+  StringPrintf(str,"%s\n", mnemonics[inst]);
   return (char*)p + 1;
 }
 
-static void* DisassembleALU(uint16_t addr, void* p, int hi, int lo, FILE* fp) {
+static void* DisassembleALU(uint16_t addr, void* p, int hi, int lo, String* str) {
   static const char* mnemonic[8] = {
     "ORA",
     "AND",
@@ -43,55 +44,60 @@ static void* DisassembleALU(uint16_t addr, void* p, int hi, int lo, FILE* fp) {
     "SBC",
   };
   
-  fprintf(fp, "%s ", mnemonic[hi / 2]);
+  if (hi == 8 && lo == 9) {
+    StringPrintf(str,"BIT ");
+  } else {
+    StringPrintf(str,"%s ", mnemonic[hi / 2]);
+  }
   int operand = 0;
   switch (lo) {
     case 1:
       // Zero page indexed
       operand = *(uint8_t*)p;
       if ((hi & 1) == 0) {
-        fprintf(fp, "(0x%x,X)\n", operand);
+        StringPrintf(str,"(0x%x,X)\n", operand);
       } else {
-        fprintf(fp, "(0x%x),Y\n", operand);
+        StringPrintf(str,"(0x%x),Y\n", operand);
       }
       return (char*)p + 1;
+      
     case 5:
       // Zero page and indexed
       operand = *(uint8_t*)p;
      if ((hi & 1) == 0) {
-        fprintf(fp, "0x%x\n", operand);
+        StringPrintf(str,"0x%x\n", operand);
       } else {
-        fprintf(fp, "0x%x,X\n", operand);
+        StringPrintf(str,"0x%x,X\n", operand);
       }
       return (char*)p + 1;
 
     case 9:
-      // Immediate and absolute indexed Y
       if ((hi & 1) == 0) {
+        // Immediate and absolute indexed
         operand = *(uint8_t*)p;
-        fprintf(fp, "#0x%x\n", operand);
+        StringPrintf(str,"#0x%x\n", operand);
         return (char*)p + 1;
       } else {
         operand = *(uint16_t*)p;
-        fprintf(fp, "0x%x,Y\n", operand);
+        StringPrintf(str,"0x%x,Y\n", operand);
         return (char*)p + 2;
       }
     case 13:
       // Absolute and indexed X
       operand = *(uint16_t*)p;
       if ((hi & 1) == 0) {
-        fprintf(fp, "0x%x", operand);
+        StringPrintf(str,"0x%x", operand);
       } else {
-        fprintf(fp, "0x%x,X", operand);
+        StringPrintf(str,"0x%x,X", operand);
       }
-      fprintf(fp, "\n");
+      StringPrintf(str,"\n");
       return (char*)p + 2;
     default:
       return p;
   }
 }
 
-static void* DisassembleShiftAndMisc(uint16_t addr, void* p, int hi, int lo, FILE* fp) {
+static void* DisassembleShiftAndMisc(uint16_t addr, void* p, int hi, int lo, String* str) {
   static const char* mnemonic[8] = {
     "ASL",
     "ROL",
@@ -117,7 +123,7 @@ static void* DisassembleShiftAndMisc(uint16_t addr, void* p, int hi, int lo, FIL
   };
   
   if (lo != 10) {
-    fprintf(fp, "%s ", mnemonic[hi / 2]);
+    StringPrintf(str,"%s ", mnemonic[hi / 2]);
   }
   
   int operand = 0;
@@ -126,11 +132,11 @@ static void* DisassembleShiftAndMisc(uint16_t addr, void* p, int hi, int lo, FIL
       // Zero page and indexed
       operand = *(uint8_t*)p;
       if ((hi & 1) == 0) {
-        fprintf(fp, "0x%x", operand);
+        StringPrintf(str,"0x%x", operand);
       } else {
-        fprintf(fp, "0x%x,X", operand);
+        StringPrintf(str,"0x%x,X", operand);
       }
-      fprintf(fp, "\n");
+      StringPrintf(str,"\n");
       return (char*)p + 1;
 
     case 10:
@@ -138,46 +144,46 @@ static void* DisassembleShiftAndMisc(uint16_t addr, void* p, int hi, int lo, FIL
       if (hi < 8) {
         if ((hi & 1) == 0) {
           // Shifts and rotates.
-          fprintf(fp, "%s A", mnemonic[hi / 2]);
+          StringPrintf(str,"%s A", mnemonic[hi / 2]);
         } else {
           // Even more special.
           switch (hi) {
             case 1:
-              fprintf(fp, "INC A");
+              StringPrintf(str,"INC A");
               break;
             case 3:
-              fprintf(fp, "DEC A");
+              StringPrintf(str,"DEC A");
               break;
             case 5:
-              fprintf(fp, "PHY");
+              StringPrintf(str,"PHY");
               break;
             case 7:
-              fprintf(fp, "PLY");
+              StringPrintf(str,"PLY");
               break;
           }
         }
       } else {
-        fprintf(fp, "%s", special_mnemonic[hi - 8]);
+        StringPrintf(str,"%s", special_mnemonic[hi - 8]);
       }
-      fprintf(fp, "\n");
+      StringPrintf(str,"\n");
       return (char*)p ;
       
     case 14:
       // Absolute and indexed.
       operand = *(uint16_t*)p;
       if ((hi & 1) == 0) {
-        fprintf(fp, "0x%x", operand);
+        StringPrintf(str,"0x%x", operand);
       } else {
-        fprintf(fp, "0x%x,X", operand);
+        StringPrintf(str,"0x%x,X", operand);
       }
-      fprintf(fp, "\n");
+      StringPrintf(str,"\n");
       return (char*)p + 2;
     default:
       return p;
   }
 }
 
-static void* DisassembleGroup0(uint16_t addr, void* p, int inst, FILE* fp) {
+static void* DisassembleGroup0(uint16_t addr, void* p, int inst, String* str) {
   enum OpType {
     kNoOperand,
     kBranch,
@@ -189,7 +195,7 @@ static void* DisassembleGroup0(uint16_t addr, void* p, int inst, FILE* fp) {
     const char* mnemonic;
     enum OpType type;
   } instructions[16] = {
-    {"BRK", kImmediate},
+    {"BRK", kNoOperand},
     {"BPL", kBranch},
     {"JSR", kAbsolute},
     {"BMI", kBranch},
@@ -206,28 +212,29 @@ static void* DisassembleGroup0(uint16_t addr, void* p, int inst, FILE* fp) {
     {"CPX", kImmediate},
     {"BEQ", kBranch},
   };
-  fprintf(fp, "%s", instructions[inst].mnemonic);
+  StringPrintf(str,"%s", instructions[inst].mnemonic);
   uint16_t operand = 0;
   switch (instructions[inst].type) {
-    case kBranch:
-      operand = *(int8_t*)p;
-      fprintf(fp, " 0x%x\n", addr + operand);
+    case kBranch: {
+      int16_t s_operand = *(int8_t*)p;
+      StringPrintf(str," 0x%x\n", addr + s_operand + 2);
       return (char*)p + 1;
+    }
     case kImmediate:
       operand = *(uint8_t*)p;
-      fprintf(fp, " #0x%x\n", operand);
+      StringPrintf(str," #0x%x\n", operand);
       return (char*)p + 1;
     case kNoOperand:
-      fprintf(fp,"\n");
+      StringPrintf(str, "\n");
       return p;
     case kAbsolute:
       operand = *(uint16_t*)p;
-      fprintf(fp, " 0x%x\n", operand & 0xffff);
+      StringPrintf(str," 0x%x\n", operand & 0xffff);
       return (char*)p + 2;
   }
 }
 
-static void* DisassembleGroup4(uint16_t addr, void* p, int hi, FILE* fp) {
+static void* DisassembleGroup4(uint16_t addr, void* p, int hi, String* str) {
   static const char* mnemonic[16] = {
     "TSB",
     "TRB",
@@ -247,19 +254,19 @@ static void* DisassembleGroup4(uint16_t addr, void* p, int hi, FILE* fp) {
     "PEA",
   };
   
-  fprintf(fp, "%s ", mnemonic[hi]);
+  StringPrintf(str,"%s ", mnemonic[hi]);
   // All zero page, some indexed.
   int operand = *(uint8_t*)p;
   if (hi == 7 || hi == 9 || hi == 11) {
-    fprintf(fp, "0x%x,X", operand);
+    StringPrintf(str,"0x%x,X", operand);
   } else {
-    fprintf(fp, "0x%x", operand);
+    StringPrintf(str,"0x%x", operand);
   }
-  fprintf(fp, "\n");
+  StringPrintf(str,"\n");
   return (char*)p + 1;
 }
 
-static void* DisassembleGroup2(uint16_t addr, void* p, int hi, FILE* fp) {
+static void* DisassembleGroup2(uint16_t addr, void* p, int hi, String* str) {
   static const char* mnemonic[16] = {
     "COP",
     "ORA",
@@ -278,21 +285,22 @@ static void* DisassembleGroup2(uint16_t addr, void* p, int hi, FILE* fp) {
     "SEP",
     "SBC",
   };
-  fprintf(fp, "%s ", mnemonic[hi]);
+  StringPrintf(str,"%s ", mnemonic[hi]);
   int operand = *(uint16_t*)p;
   // Odd numbers are (zp) 65c02.
   if ((hi & 1) == 1) {
-    fprintf(fp, "(0x%x)\n", operand);
+    // (zp) - byte.
+    StringPrintf(str,"(0x%x)\n", *(uint8_t*)p);
   } else if (hi == 0xa) {
     // LDX #op
-    fprintf(fp, "#0x%x\n", operand & 0xff);
+    StringPrintf(str,"#0x%x\n", operand & 0xff);
   } else {
-    fprintf(fp, "\n");    // Not on 65c02 or 6502.
+    StringPrintf(str,"\n");    // Not on 65c02 or 6502.
   }
   return (char*)p + 1;
 }
 
-static void* DisassembleGroup12(uint16_t addr, void* p, int hi, FILE* fp) {
+static void* DisassembleGroup12(uint16_t addr, void* p, int hi, String* str) {
   static const char* mnemonic[16] = {
     "TSB",
     "TRB",
@@ -312,59 +320,89 @@ static void* DisassembleGroup12(uint16_t addr, void* p, int hi, FILE* fp) {
     "JSR",
   };
   
-  fprintf(fp, "%s ", mnemonic[hi]);
+  StringPrintf(str,"%s ", mnemonic[hi]);
   // All absolute , some indexed, some indirect
   int operand = *(uint16_t*)p;
   if (hi == 6) {
     // JMP (a)
-    fprintf(fp, "(0x%x)", operand);
+    StringPrintf(str,"(0x%x)", operand);
   } else if (hi == 7) {
     // JMP (a,X)
-    fprintf(fp, "(0x%x,X)", operand);
+    StringPrintf(str,"(0x%x,X)", operand);
   } else if (hi == 3 || hi == 11) {
-    fprintf(fp, "0x%x,X", operand);
+    StringPrintf(str,"0x%x,X", operand);
   } else {
-    fprintf(fp, "0x%x", operand);
+    StringPrintf(str,"0x%x", operand);
   }
-  fprintf(fp, "\n");
+  StringPrintf(str,"\n");
   return (char*)p + 2;
 }
 
-void* Disassemble6502Instruction(_6502Interpreter* interpreter, uint16_t addr, void* p, FILE* fp) {
-  fprintf(fp, "%4x  ", addr);
+void* Disassemble6502Instruction(SymbolScope* current_symbol, uint16_t addr, void* p, FILE* fp) {
+  const char* symbol_name = "???";
+  int offset = 0;
+  if (current_symbol != NULL) {
+    symbol_name = current_symbol->name;
+    offset = (int)(addr - current_symbol->start);
+  }
+  fprintf(fp, "%-20s+0x%04x: %04x  ", symbol_name, offset, addr);
   int lo = *(char*)p & 0xf;
   int hi = (*(char*)p & 0xf0) >> 4;
   void* operand = (char*)p + 1;
-  
+  String mnemonic = {0};
+  void* after_inst;
   switch (lo) {
     case 0:
       // Branches mostly.
-      return DisassembleGroup0(addr, operand, hi, fp);
+      after_inst = DisassembleGroup0(addr, operand, hi, &mnemonic);
+      break;
     case 1:
     case 5:
     case 9:
     case 13:
       // ALU.
-      return DisassembleALU(addr, operand, hi, lo, fp);
+      after_inst = DisassembleALU(addr, operand, hi, lo, &mnemonic);
+      break;
     case 2:
-      return DisassembleGroup2(addr, operand, hi, fp);
+      after_inst = DisassembleGroup2(addr, operand, hi, &mnemonic);
+      break;
     case 3:
     case 7:
     case 11:
     case 15:
     default:
-      fprintf(fp, "???\n");
+      StringPrintf(&mnemonic,"???\n");
       // Not used in 6502.
-      return operand;
+      after_inst = operand;
+      break;
     case 10:
     case 14:
     case 6:
-      return DisassembleShiftAndMisc(addr, operand, hi, lo, fp);
+      after_inst = DisassembleShiftAndMisc(addr, operand, hi, lo, &mnemonic);
+      break;
     case 8:
-      return DisassembleGroup8(addr, p, hi, fp);
+      after_inst = DisassembleGroup8(addr, p, hi, &mnemonic);
+      break;
     case 4:
-      return DisassembleGroup4(addr, operand, hi, fp);
+      after_inst = DisassembleGroup4(addr, operand, hi, &mnemonic);
+      break;
     case 12:
-      return DisassembleGroup12(addr, operand, hi, fp);
+      after_inst = DisassembleGroup12(addr, operand, hi, &mnemonic);
+      break;
   }
+  
+  // Print the hex of the bytes making up the instruction.
+  int count = 0;
+  while (p < after_inst) {
+    fprintf(fp, "%02x ", *(unsigned char*)p);
+    count++;
+    p++;
+  }
+  while (count < 3) {
+    fprintf(fp, "   ");
+    count++;
+  }
+  fprintf(fp, "  %s", mnemonic.value);
+  StringDestruct(&mnemonic);
+  return after_inst;
 }

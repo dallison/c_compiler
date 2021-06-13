@@ -17,6 +17,11 @@
 #include <errno.h>
 #include "loader.h"
 
+// MAP_ANON seems to have an issue on Raspbian.
+#ifndef MAP_ANON
+#define MAP_ANON 0x20
+#endif
+
 bool print_libraries_only;
 
 void DynamicLibraryRegistryInit(DynamicLibraryRegistry* reg) {

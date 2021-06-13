@@ -12,5 +12,6 @@
 #include "codegen.h"
 
 void StrengthReductionOptimization(Generator* gen);
+void TailCallOptimization(Generator* gen);
 
 #endif /* optimizer_h */

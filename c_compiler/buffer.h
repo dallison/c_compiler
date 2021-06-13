@@ -53,6 +53,7 @@ void BufferAppendLongLE(Buffer* buf, uint64_t v);
 
 // Adds some space to the buffer.
 void BufferAddSpace(Buffer* buf, size_t length);
+void BufferFill(Buffer* buf, size_t length, char value);
 
 // Align the length of the buffer to the alignment (must be a power of 2).
 void BufferAlignLength(Buffer* buf, int alignment);

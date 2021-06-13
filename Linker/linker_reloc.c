@@ -32,7 +32,7 @@ Relocation* NewRelocation(const char* symbol_name,
   return reloc;
 }
 
-Relocation* NewSymbolRelocation(Symbol* symbol, int64_t offset,
+Relocation* NewLinkerSymbolRelocation(LinkerSymbol* symbol, int64_t offset,
                                       int32_t reloc_type, int64_t addend) {
   Relocation* reloc = malloc(sizeof(Relocation));
   StringInit(&reloc->symbol_name, symbol->name.value);
@@ -120,7 +120,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   
   // Find the value of the symbol to use.  This looks in the local symbol
   // table first, then the global symbol table.
-  Symbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+  LinkerSymbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
   if (symbol == NULL) {
     // Trying to apply relocation for undefined symbol
     LinkerError(file, "Undefined symbol %s used in relocation", reloc->symbol_name.value);
@@ -130,7 +130,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   // What address are we applying the relocation to.
   char* target_address = (char*)target_section->contents + reloc->offset;
   
-  uint64_t S = symbol->address;   // Symbol address.
+  uint64_t S = symbol->address;   // LinkerSymbol address.
   int64_t A = reloc->addend;      // Addend.
   
 

@@ -35,9 +35,15 @@ BasicBlock* NewBasicBlock(BlockId id) {
   VectorInit(&b->dominatees);
   BitSetInit(&b->dominance_frontier);
   MapInit(&b->defined_vars, CompareVariable);
+  SetInitForPointers(&b->referenced_vars);
   b->idom = NULL;
+  BitSetInit(&b->in_back_edges);
   b->optimizer_data = NULL;
   b->num_calls = 0;
+  b->return_block = false;
+  b->reachability_known = false;
+  b->is_unreachable = false;
+  b->loop_nesting = 0;
   return b;
 }
 
@@ -48,21 +54,32 @@ void BasicBlockDelete(BasicBlock* b) {
   VectorDestruct(&b->out_edges);
   BitSetDestruct(&b->dominators);
   BitSetDestruct(&b->dominance_frontier);
+  BitSetDestruct(&b->in_back_edges);
   VectorDestruct(&b->dominatees);
   MapDestruct(&b->defined_vars);
+  SetDestruct(&b->referenced_vars);
   free(b);
 }
 
 void BasicBlockAddInEdge(BasicBlock* from, BasicBlock* to) {
   VectorAppend(&from->in_edges, (void*)to->block_id);
+  to->reachability_known = false;
 }
 
 void BasicBlockAddEdge(BasicBlock* from, BasicBlock* to) {
   VectorAppend(&from->out_edges, (void*)to->block_id);
   BasicBlockAddInEdge(to, from);
+  to->reachability_known = false;
 }
 
-bool BasicBlockCalculateDominators(BasicBlock* b, Vector* blocks) {
+void BasicBlockAddBackEdge(BasicBlock* from, BasicBlock* to) {
+  BitSetInsert(&to->in_back_edges, from->block_id);
+}
+
+bool BasicBlockCalculateDominators(Generator* gen, BasicBlock* b, Vector* blocks) {
+  if (b->block_id == 22) {
+    printf("");
+  }
   BitSet dominators;
   BitSetInit(&dominators);
   BitSetCopy(&dominators, &b->dominators);
@@ -70,17 +87,26 @@ bool BasicBlockCalculateDominators(BasicBlock* b, Vector* blocks) {
   BitSet intersection;
   BitSetInit(&intersection);
 
+  int num_intersections = 0;
   // Calculate intersection.
   for (size_t i = 0; i < b->in_edges.length; i++) {
     BlockId id = (BlockId)b->in_edges.value.p[i];
     BasicBlock* dom_block = blocks->value.p[id];
 
+    if (BasicBlockIsUnreachable(gen, dom_block)) {
+      continue;
+    }
     BitSetClear(&intersection);
     BitSetIntersection(&dominators, &dom_block->dominators, &intersection);
     BitSetClear(&dominators);
     BitSetCopy(&dominators, &intersection);
+    num_intersections++;
   }
 
+  if (num_intersections == 0) {
+    // All in edges are unreachable, so this is unreachable.
+    BitSetClear(&dominators);
+  }
   // Insert this node.
   BitSetInsert(&dominators, b->block_id);
 
@@ -104,32 +130,31 @@ bool BasicBlockCalculateDominators(BasicBlock* b, Vector* blocks) {
 void BasicBlockCalculateImmediateDominator(BasicBlock* b, Vector* blocks) {
   size_t maxndoms = 0;
 
-  // It's hard to iterate through a BitSet, so expand it into a temporary
-  // vector.
-  Vector dominators;
-  VectorInit(&dominators);
-  BitSetExpand(&b->dominators, &dominators);
-
-  for (size_t i = 0; i < dominators.length; i++) {
-    BlockId id = (BlockId)dominators.value.p[i];
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &b->dominators);
+  while (!BitSetIteratorDone(&it)) {
+    BlockId id = BitSetIteratorValue(&it);
     if (id != b->block_id) {
-      BasicBlock* block = VectorGet(blocks, id);
-      if (block->num_dominators > maxndoms) {
-        maxndoms = block->num_dominators;
-        b->idom = block;
-      }
-    }
+       BasicBlock* block = VectorGet(blocks, id);
+       if (block->num_dominators > maxndoms) {
+         maxndoms = block->num_dominators;
+         b->idom = block;
+       }
+     }
+    BitSetIteratorNext(&it);
   }
-  VectorDestruct(&dominators);
 }
 
-void BasicBlockCalculateDominanceFrontier(BasicBlock* b, Vector* blocks) {
+void BasicBlockCalculateDominanceFrontier(Generator* gen, BasicBlock* b, Vector* blocks) {
   if (b->in_edges.length >= 2) {
     for (size_t i = 0; i < b->in_edges.length; i++) {
       BlockId id = (BlockId)b->in_edges.value.p[i];
       BasicBlock* block = VectorGet(blocks, id);
+      if (BasicBlockIsUnreachable(gen, block)) {
+        continue;
+      }
       BasicBlock* runner = block;
-      while (runner != b->idom) { // TODO: this was NULL, which is right?
+      while (runner != NULL && runner != b->idom) { // TODO: this was NULL, which is right?
         BasicBlockAddToDF(runner, b->block_id);
         runner = runner->idom;
       }
@@ -155,68 +180,87 @@ void BasicBlockAddToDF(BasicBlock* b, BlockId id) {
   BitSetInsert(&b->dominance_frontier, id);
 }
 
-void BasicBlockPrint(BasicBlock* b, BasicBlock* entry, BasicBlock* exit) {
-  printf("*** Basic block #%zd%s\n", b->block_id,
+void BasicBlockPrint(Generator* gen, BasicBlock* b, BasicBlock* entry, BasicBlock* exit, FILE* fp) {
+  fprintf(fp, "*** Basic block #%zd%s\n", b->block_id,
          (b == entry ? " (ENTRY)" : (b == exit ? " (EXIT)" : "")));
-  if (b != entry && b->in_edges.length == 0) {
-    printf("** Unreachable **\n");
+  if (BasicBlockIsUnreachable(gen, b)) {
+    fprintf(fp, "** Unreachable **\n");
   }
-  printf("  In:");
+  if (b->return_block) {
+    fprintf(fp, "  [return]\n");
+  }
+  fprintf(fp, "  In:");
   for (size_t i = 0; i < b->in_edges.length; i++) {
-    printf(" %zd", (BlockId)b->in_edges.value.p[i]);
+    fprintf(fp, " %zd", (BlockId)b->in_edges.value.p[i]);
   }
-  printf("\n  Out:");
+  fprintf(fp, "\n  Out:");
   for (size_t i = 0; i < b->out_edges.length; i++) {
-    printf(" %zd", (BlockId)b->out_edges.value.p[i]);
+    fprintf(fp, " %zd", (BlockId)b->out_edges.value.p[i]);
   }
-  printf("\n  Dominators: ");
-  BitSetPrint(&b->dominators);
+  fprintf(fp, "\n  Back: ");
+  BitSetPrint(&b->in_back_edges, fp);
+  
+  fprintf(fp, "\n  Dominators: ");
+  BitSetPrint(&b->dominators, fp);
 
-  printf("\n  Dominatees:");
+  fprintf(fp, "\n  Dominatees:");
   for (size_t i = 0; i < b->dominatees.length; i++) {
-    printf(" %zd", (BlockId)b->dominatees.value.p[i]);
+    fprintf(fp, " %zd", (BlockId)b->dominatees.value.p[i]);
   }
-  printf("\n  DF: ");
-  BitSetPrint(&b->dominance_frontier);
+  fprintf(fp, "\n  DF: ");
+  BitSetPrint(&b->dominance_frontier, fp);
 
-  printf("\n  Immediate Dominator: ");
+  fprintf(fp, "\n  Immediate Dominator: ");
   if (b->idom == NULL) {
-    printf("NIL\n");
+    fprintf(fp, "NIL\n");
   } else {
-    printf("%zd\n", b->idom->block_id);
+    fprintf(fp, "%zd\n", b->idom->block_id);
   }
+  fprintf(fp, "  Loop nesting: %d\n", b->loop_nesting);
+  fprintf(fp, "  Number of calls: %d\n", b->num_calls);
 
-  printf("  Defined variables:");
+  fprintf(fp, "  Defined variables:");
   for (size_t i = 0; i < b->defined_vars.length; i++) {
     Symbol* sym = b->defined_vars.values[i].key.p;
-    printf(" %s", sym->name.value);
+    fprintf(fp, " %s", sym->name.value);
   }
-  printf("\n");
-
+  fprintf(fp, "\n");
+  fprintf(fp, "  Referenced variables:");
+  for (size_t i = 0; i < b->referenced_vars.vec.length; i++) {
+    Symbol* sym = b->referenced_vars.vec.value.p[i];
+    fprintf(fp, " %s", sym->name.value);
+  }
+  fprintf(fp, "\n");
+  
   IRNode* inst = b->code;
   while (inst != b->end_code) {
-    IRPrint(inst);
+    IRPrint(inst, fp);
     inst = IRNext(inst);
   }
   if (b->end_code != NULL) {
-    IRPrint(b->end_code);
+    IRPrint(b->end_code, fp);
   }
-  printf("\n");
+  fprintf(fp, "\n");
 }
 
-bool BasicBlockEndsInBranchOrReturn(BasicBlock* b) {
+bool BasicBlockEndsInBranchReturnOrCall(BasicBlock* b) {
   IRNode* node = b->end_code;
-  return node != NULL && (IRIsBranch(node) || IRIsReturn(node));
+  return node != NULL && (IRIsBranch(node) ||
+                          IRIsReturn(node) || IRIsCall(node));
 }
 
 void BasicBlockInsertVar(struct Generator* gen, BasicBlock* block,
                          struct IRNode* inst) {
+#if 0
   // Move to end of phi nodes.
   IRNode* node = block->code;
   while (node != NULL && node->opcode == IR_OP(phi)) {
     node = IRNext(node);
   }
   BasicBlockEmitBefore(gen, block, inst, node);
+#else
+  BasicBlockEmitBefore(gen, block, inst, block->code);
+#endif
 }
 
 bool BasicBlockInsertPhi(Generator* gen, BasicBlock* b, Symbol* sym) {
@@ -245,7 +289,8 @@ bool BasicBlockInsertPhi(Generator* gen, BasicBlock* b, Symbol* sym) {
   IRSetVarDef(phi, sym);
 
   b->code = GeneratorEmitBefore(gen, phi, b->code);
-
+  phi->block = b;
+  
   // Tell caller that we've added a new node.  This defines a new
   // variable so we need to iterate until there are no more PHI
   // nodes inserted.
@@ -258,13 +303,61 @@ void BasicBlockRemoveInstruction(Generator* gen, BasicBlock* block,
   // If this instruction is the first in the basic block, move the
   // block's code on to the next instruction.
   if (inst == block->code) {
-    block->code = IRNext(inst);
+    if (inst == block->end_code) {
+      // Block has no instructions now.
+      block->code = block->end_code = NULL;
+    } else {
+      block->code = IRNext(inst);
+    } 
   }
   if (inst == block->end_code) {
     block->end_code = IRPrev(inst);
   }
   GeneratorRemoveInstruction(gen, inst);
 }
+
+void BasicBlockMoveInstructionAfter(Generator* gen,
+                              IRNode* inst, IRNode* pos) {
+  BasicBlock* from = inst->block;
+  if (inst == from->code) {
+    if (inst == from->end_code) {
+      // Block has no instructions now.
+      from->code = from->end_code = NULL;
+    } else {
+      from->code = IRNext(inst);
+    }
+  }
+  if (inst == from->end_code) {
+    from->end_code = IRPrev(inst);
+  }
+  GeneratorMoveInstructionAfter(gen, inst, pos);
+  inst->block = pos->block;
+  if (pos->block->end_code == pos) {
+    pos->block->end_code = inst;
+  }
+}
+
+void BasicBlockMoveInstructionBefore(Generator* gen,
+                              IRNode* inst, IRNode* pos) {
+  BasicBlock* from = inst->block;
+  if (inst == from->code) {
+    if (inst == from->end_code) {
+        // Block has no instructions now.
+        from->code = from->end_code = NULL;
+      } else {
+        from->code = IRNext(inst);
+      }
+  }
+  if (inst == from->end_code) {
+    from->end_code = IRPrev(inst);
+  }
+  GeneratorMoveInstructionBefore(gen, inst, pos);
+  inst->block = pos->block;
+  if (pos->block->code == pos) {
+    pos->block->code = inst;
+  }
+}
+
 
 // Replace the instruction 'old' with 'new'.  Removes 'old' when
 // the replacement is done.
@@ -290,10 +383,58 @@ void BasicBlockEmitBefore(struct Generator* gen, BasicBlock* block,
     block->code = inst;
   }
   GeneratorEmitBefore(gen, inst, pos);
+  inst->block = block;
 }
 
 bool BasicBlockIsUnreachable(struct Generator* gen, BasicBlock* b) {
-  return b != gen->entry_block && b->in_edges.length == 0;
+  if (b == gen->entry_block) {
+    return false;
+  }
+  if (b->reachability_known) {
+    return b->is_unreachable;
+  }
+  b->reachability_known = true;
+  // Check if all the in edges are unreachable.
+  for (size_t i = 0; i < b->in_edges.length; i++) {
+    BlockId id = b->in_edges.value.w[i];
+    BasicBlock* in = VectorGet(&gen->basic_blocks, id);
+    if (!BasicBlockIsUnreachable(gen, in)) {
+      return false;
+    }
+  }
+  b->is_unreachable = true;
+  return true;
+}
+
+void BasicBlockRemoveInput(BasicBlock* block, BlockId block_id) {
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    BlockId input = block->in_edges.value.w[i];
+    if (input == block_id) {
+      VectorDeleteElement(&block->in_edges, i);
+      break;
+    }
+  }
+}
+
+void BasicBlockRemoveEdge(BasicBlock* from, BasicBlock* to) {
+  // Remove in edge from 'to'.
+  for (size_t i = 0; i < to->in_edges.length; i++) {
+    BlockId input = to->in_edges.value.w[i];
+    if (input == from->block_id) {
+      VectorDeleteElement(&to->in_edges, i);
+      break;
+    }
+  }
+  
+  // Remove out edge from 'from'.
+  for (size_t i = 0; i < from->out_edges.length; i++) {
+    BlockId output = from->out_edges.value.w[i];
+    if (output == to->block_id) {
+      VectorDeleteElement(&from->out_edges, i);
+      break;
+    }
+  }
+  to->reachability_known = false;
 }
 
 // Remove all instructions from the block.  Don't remove
@@ -331,4 +472,67 @@ void BasicBlockClear(struct Generator* gen, BasicBlock* b) {
   }
   b->code = first_named_label;
   b->end_code = last_named_label;
+  
+  // If this block is unreachable then we need to remove it as
+  // an input from all its outputs.
+  for (size_t i = 0; i < b->out_edges.length; i++) {
+    BlockId out = b->out_edges.value.w[i];
+    BasicBlock* out_block = VectorGet(&gen->basic_blocks, out);
+    BasicBlockRemoveInput(out_block, b->block_id);
+  }
 }
+
+static void TraverseDomTree(Generator* gen,
+                            BasicBlock* block, TraversalFunc func,
+                            TraversalMode mode, void* data) {
+  if (block == NULL) {
+    return;
+  }
+  if (mode == kTraversePreOrder) {
+    func(block, data);
+  }
+  for (size_t i = 0; i < block->dominatees.length; i++) {
+    BlockId child_id = block->dominatees.value.w[i];
+    BasicBlock* child = gen->basic_blocks.value.p[child_id];
+    if (child == block) {
+      continue;
+    }
+    TraverseDomTree(gen, child, func, mode, data);
+  }
+  if (mode == kTraversePostOrder) {
+    func(block, data);
+  }
+}
+
+void BasicBlockTraverseDominatorTree(Generator* gen, BasicBlock* block, TraversalFunc func,
+                             TraversalMode mode,
+                             void* data) {
+  TraverseDomTree(gen, block, func, mode, data);
+}
+
+IRNode* BasicBlockBegin(BasicBlock* b) {
+  return b->code;
+}
+
+IRNode* BasicBlockEnd(BasicBlock* b) {
+  if (b->end_code == NULL) {
+    return NULL;
+  }
+  return (IRNode*)b->end_code->header.next;
+}
+
+IRNode* BasicBlockRBegin(BasicBlock* b) {
+  return b->end_code;
+}
+
+IRNode* BasicBlockREnd(BasicBlock* b) {
+  if (b->code == NULL) {
+    return NULL;
+  }
+  return (IRNode*)b->code->header.prev;
+}
+
+bool BasicBlockIsEmpty(BasicBlock* b) {
+  return b->code == NULL || b->end_code == NULL;
+}
+

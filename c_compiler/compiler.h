@@ -43,6 +43,8 @@ typedef enum {
   kOptionPrintBackend,       // Debug back end.
   kOptionPrintPreprocessor,  // Debug preprocessor.
   kOptionKeepAsmFile,        // Keep asm file after assembling.
+  kOptionSaveIR,             // Save IR in file.
+  kOptionSaveAST,            // Save AST in file.
 } CompilerOption;
 
 typedef struct {
@@ -114,6 +116,8 @@ typedef struct {
   int32_t alignment;
   Vector initializers;
   bool is_tls;
+  bool is_local;    // Local (inside a function).
+  int symbol_id;
 } InitializedStaticVariable;
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var);
@@ -125,27 +129,63 @@ typedef struct {
   size_t size;
   size_t alignment;
   bool is_tls;
+  bool is_local;    // Local (inside a function).
+  int symbol_id;
 } UnintializedStaticVariable;
 
-// A string literal has an id and a value.
+// A literal has an id.  The value is in a derived class.
+typedef enum {
+  kLiteralString,
+  kLiteralBuffer,
+} LiteralType;
+
 typedef struct {
+  LiteralType type;
   int id;
-  String value;
   bool disabled;
+} Literal;
+
+typedef struct {
+  Literal base;
+  String value;
 } StringLiteral;
 
+void LiteralDelete(Literal* literal);
+
+typedef struct {
+  Literal base;
+  Buffer value;
+} BufferLiteral;
+
 int CompilerAddStringLiteral(String* value);
-void StringLiteralDelete(StringLiteral* literal);
+int CompilerAddBufferLiteral(const void* data, size_t length);
 
 void UninitializedStaticVariableDelete(InitializedStaticVariable* var);
 
 TlsModel ParseTlsModelName(String* name);
+
+// High level codegen preferences.
+typedef enum {
+  kCodeForSpeed,      // Prefer speed over size.
+  kCodeForSize        // Prefer size over speed.
+} CodePreference;
+
 
 // A compiler target back-end.  This contains pointers to
 // functions to generate code for a particlar target.
 typedef struct {
   String name;       // Name of target.
   int pointer_size;  // Size of pointer.
+  int short_size;
+  int int_size;
+  int long_size;
+  int long_long_size;
+  int bool_size;
+  int stack_alignment;      // Power of 2 stack alignment.
+  CodePreference code_preference;
+  bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
+  bool callee_save;
+  bool keep_ssa;
 
   // Function to generate code.  Returns target specific data.
   void* (*codegen)(struct Generator*);
@@ -186,8 +226,8 @@ typedef struct {
   // Emit start of string literals.
   void (*emit_literals_start)(FILE* asm_file);
 
-  // Emit a string literal.
-  void (*emit_string_literal)(StringLiteral* literal, FILE* asm_file);
+  // Emit a literal.
+  void (*emit_literal)(Literal* literal, FILE* asm_file);
 
   // Emit debug information.
   void (*emit_debug)(FILE* asm_file);
@@ -217,6 +257,16 @@ typedef struct {
   HashTable global_tag_table;
 
   int pointer_size;  // Size of a pointer.
+  int short_size;  // Size of native short int.
+  int int_size;  // Size of native int.
+  int bool_size;  // Size of native bool.
+  int long_size;  // Size of native long.
+  int long_long_size;  // Size of native long long.
+  CodePreference code_preference;
+  bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
+  bool callee_save;             // The callee saves registers.
+  bool keep_ssa;             // Keep SSA form for lowering codegen.
+
   size_t current_include_path_index;
   TypeRecord* current_function;
   TlsModel tls_model;
@@ -235,10 +285,11 @@ typedef struct {
   // (UninitializedStaticVariable*)
   Vector uninitialized_static_variables;
 
-  // String literals: each element is a StringLiteral*.
-  Vector string_literals;
+  Vector literals;     // Literals
   int next_literal_id;
 
+  int next_symbol_id; // Next symbol id.
+  
   // Flags.
   bool debug_output;
   bool optimize;
@@ -247,6 +298,11 @@ typedef struct {
   bool print_back_end;
   bool print_preprocessor;
   bool keep_asm_file;
+  bool save_ir;
+  bool save_ast;
+  FILE* ir_output_file;
+  FILE* ast_output_file;
+  int opt_level;
 } Compiler;
 
 // Globals to avoid passing these around.
@@ -265,6 +321,14 @@ String* CompileTranslationUnit(const char* filename, Vector* options);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                          Vector* options);
 int CompilerAddStringLiteral(String* value);
+int CompilerAddBufferLiteral(const void* data, size_t length);
 StringLiteral* CompilerFindStringLiteral(int literal_id);
+BufferLiteral* CompilerFindBufferLiteral(int literal_id);
+Literal* CompilerFindLiteral(int literal_id);
+
+bool OptLevel0(void);
+bool OptLevel1(void);
+bool OptLevel2(void);
+bool OptLevel3(void);
 
 #endif /* compiler_h */

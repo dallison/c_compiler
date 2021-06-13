@@ -59,11 +59,11 @@ static int64_t DataStartAddress(Linker* linker, int64_t code_start, int64_t code
   return address;
 }
 
-static void HandlePICRelocation(DynamicLinker* dynamic, Symbol* symbol,
+static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
                                 Relocation* reloc,
-                                int (*append_data_to_got)(DynamicLinker*, Symbol*),
-                                int (*append_func_to_got)(DynamicLinker*, Symbol*),
-                                int (*append_to_plt)(DynamicLinker*, Symbol*)) {
+                                int (*append_data_to_got)(DynamicLinker*, LinkerSymbol*),
+                                int (*append_func_to_got)(DynamicLinker*, LinkerSymbol*),
+                                int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
   switch (reloc->type) {
     case R_PCODE_GOT_ENTRY:
     case R_PCODE_GOT_TLS_IE:
@@ -102,7 +102,7 @@ static void HandlePICRelocation(DynamicLinker* dynamic, Symbol* symbol,
 static void ApplyRelocation(Linker* linker,
                           ObjectFile* file,
                           Relocation* reloc,
-                          Symbol* symbol,
+                          LinkerSymbol* symbol,
                           char* target_address,
                           uint64_t S, int64_t A) {
   // PC in P-Code is address of next instruction.  All the PC relative
@@ -144,7 +144,7 @@ static void ApplyRelocation(Linker* linker,
     case R_PCODE_CALL_PLT: {
       // Instruction is 96 bits long.  The relocation is applied
       // to the second and third word, in little endian format.
-      // Symbol contains a got_index that is the offset into the
+      // LinkerSymbol contains a got_index that is the offset into the
       // PLT.  The instruction will be an CALL
       // instruction that contains the offset relative to the current
       // PC.
@@ -161,7 +161,7 @@ static void ApplyRelocation(Linker* linker,
     case R_PCODE_GOT_ENTRY: {
       // Instruction is 96 bits long.  The relocation is applied
       // to the second and third word, in little endian format.
-      // Symbol contains a got_index that is the offset into the
+      // LinkerSymbol contains a got_index that is the offset into the
       // global offset table.  The instruction will be an ADR
       // instruction that contains the offset relative to the current
       // PC.
@@ -198,7 +198,7 @@ static void InitDynamicLinker(DynamicLinker* dynamic) {
 }
 
 #if 0
-static void AddGOTEntry(Linker* linker, Symbol* symbol,
+static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents,
                         Vector* relocs,
                         int32_t relocation_type) {
@@ -209,7 +209,7 @@ static void AddGOTEntry(Linker* linker, Symbol* symbol,
   BufferAppendLongLE(&contents->data.buffered, 0);
   
   // Add relocation.
-  Relocation* reloc = NewSymbolRelocation(symbol,
+  Relocation* reloc = NewLinkerSymbolRelocation(symbol,
                                           offset, relocation_type, 0);
   VectorAppend(is_function ?
                &dynamic->plt_relocations :
@@ -218,7 +218,7 @@ static void AddGOTEntry(Linker* linker, Symbol* symbol,
 }
 #endif
 
-static void AddGOTEntry(Linker* linker, Symbol* symbol,
+static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents,
                         Vector* relocs,
                         GOTRelocation relocation_type) {
@@ -241,12 +241,12 @@ static void AddGOTEntry(Linker* linker, Symbol* symbol,
   BufferAppendLongLE(&contents->data.buffered, 0);
   
   // Add relocation.
-  Relocation* reloc = NewSymbolRelocation(symbol,
+  Relocation* reloc = NewLinkerSymbolRelocation(symbol,
                                           offset, reloc_type, 0);
   VectorAppend(relocs, reloc);
 }
 
-static void FixupGOTEntry(Symbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
   // The address is set to the address of the plt +
   //    the plt_index * plt entry size + 12.  That is, it points to the
@@ -256,7 +256,7 @@ static void FixupGOTEntry(Symbol* symbol, Buffer* got_plt_buffer,
   *p = addr;
 }
 
-static void AddPLTEntry(Linker* linker, Symbol* symbol,
+static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents) {
   DynamicLinker* dynamic = linker->dynamic_linker;
   ProcedureLinkageTable* plt = &dynamic->procedure_linkage_table;
@@ -344,7 +344,7 @@ static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
 
 static void FixupPLTEntry(ProcedureLinkageTable* plt,
                           GlobalOffsetTable* got,
-                          Symbol* symbol,
+                          LinkerSymbol* symbol,
                           Buffer* plt_buffer,
                           uint64_t got_address,
                           uint64_t plt_address) {
@@ -362,6 +362,9 @@ static void FixupPLTEntry(ProcedureLinkageTable* plt,
  
 }
 
+static void CheckOptions(Linker* linker) {
+}
+
 LinkerArchitecture* NewPCodeLinkerArchitecture() {
   LinkerArchitecture* arch = malloc(sizeof(LinkerArchitecture));
   arch->machine_type = ELF_MACHINE_TYPE_PCODE;
@@ -375,5 +378,6 @@ LinkerArchitecture* NewPCodeLinkerArchitecture() {
   arch->add_plt_entry = AddPLTEntry;
   arch->setup_resolver_plt_entry = SetupResolverPLTEntry;
   arch->fixup_plt_entry = FixupPLTEntry;
+  arch->check_options = CheckOptions;
   return arch;
 }

@@ -15,12 +15,12 @@
 
 struct Linker;
 struct ObjectFile;
-struct Symbol;
+struct LinkerSymbol;
 
 // A decoded ELFRelocation.
 typedef struct Relocation {
-  String symbol_name;        // Symbol name.
-  struct Symbol* symbol;     // Decoded symbol (might be NULL).
+  String symbol_name;        // LinkerSymbol name.
+  struct LinkerSymbol* symbol;     // Decoded symbol (might be NULL).
   ELFReaderSection* section; // Target section.
   int type;                  // Relocation type.
   int64_t offset;            // Offset into section.
@@ -32,7 +32,7 @@ Relocation* NewRelocation(const char* symbol_name,
                             int64_t offset,
                             int32_t reloc_type,
                           int64_t addend);
-Relocation* NewSymbolRelocation(struct Symbol* symbol,
+Relocation* NewLinkerSymbolRelocation(struct LinkerSymbol* symbol,
                                       int64_t offset,
                                       int32_t reloc_type,
                                       int64_t addend);

@@ -47,7 +47,7 @@ void ListInsertAfter(List* list, ListElement* e, ListElement* pos);
 void ListDeleteElement(List* list, ListElement* e);
 
 // Traverses the list calling the function 'func' for every element.
-void ListTraverse(List* list, void (*func)(ListElement*));
+void ListTraverse(List* list, void (*func)(ListElement*, void*), void* data);
 
 // Finds an element in the list given a comparison function.  The function
 // should return 0 if the value matches.  The first argument passed to the

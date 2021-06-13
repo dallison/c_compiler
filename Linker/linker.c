@@ -39,7 +39,8 @@ void VLinkerError(ObjectFile* file, const char* error, va_list ap) {
   }
   char buf[1024];
   vsnprintf(buf, sizeof(buf), error, ap);
-  fprintf(stderr, "%s: linker error: %s\n", filename, buf);
+  fprintf(stderr, "%s%slinker error: %s\n", filename, file == NULL ? "" : ": ",
+          buf);
 }
 
 void LinkerWarning(ObjectFile* file, const char* warn, const char* error, ...) {
@@ -66,13 +67,58 @@ void VLinkerWarning(ObjectFile* file, const char* warn, const char* error, va_li
 }
 
 
+void LinkerInitConfigLayout(Linker* linker,
+                            const char* config_file,
+                            const char* layout_type_name) {
+  ConfigParserInit(&linker->config_parser, config_file);
+  bool ok = ConfigParserParse(&linker->config_parser);
+  if (!ok) {
+    fprintf(stderr, "Failed to parse linker config file %s\n", config_file);
+    exit(1);
+  }
+  // Find the layout in the config.  This is done by machine id and layout
+  // type name.
+  ConfigNode* layouts = ConfigObjectFind(linker->config_parser.root, "layout");
+  if (layouts == NULL) {
+    fprintf(stderr, "There are no layouts in config file %s\n", config_file);
+    exit(1);
+  }
+  ConfigNodeVectorize(layouts);
+  
+  ConfigNode* layout_found = NULL;
+  for (size_t i = 0; i < layouts->value.vector_value.length; i++) {
+    ConfigNode* layout = layouts->value.vector_value.value.p[i];
+    ConfigNode* machine = ConfigObjectFind(layout->value.object_value, "machine");
+    if (machine != NULL) {
+      if (machine->value.int_value == linker->elf_machine_type) {
+        ConfigNode* type = ConfigObjectFind(layout->value.object_value, "type");
+        if (type != NULL) {
+          if (StringEqual(&type->value.string_value, layout_type_name)) {
+            layout_found = layout;
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (layout_found == NULL) {
+    fprintf(stderr, "Cannot find layout type %s in config file %s\n", layout_type_name, config_file);
+    exit(1);
+  }
+  LinkerConfigInit(&linker->config, layout_found->value.object_value);
+  if (linker->config.errors != 0) {
+    fprintf(stderr, "Exiting due to config errors\n");
+    exit(1);
+  }
+}
+
 
 void LinkerInit(Linker* linker) {
   StringInit(&linker->output_filename, "a.out");
   VectorInit(&linker->files);
   VectorInit(&linker->architectures);
   HashTableInit(&linker->global_symbol_table, "global-symbol-table", 1009,
-                SymbolHash, SymbolInsertInHashTable, SymbolFindInHashTable);
+                LinkerSymbolHash, LinkerSymbolInsertInHashTable, LinkerSymbolFindInHashTable);
   VectorInit(&linker->section_groups);
   VectorInit(&linker->library_search_path);
   VectorInit(&linker->static_libraries);
@@ -80,6 +126,7 @@ void LinkerInit(Linker* linker) {
   VectorInit(&linker->needed_libraries);
   VectorInit(&linker->rpath);
   StringInit(&linker->interpreter, "/lib/ld.so");
+  StringInit(&linker->entry_symbol, "start");
   
   // Create the initial library search path.
   VectorAppend(&linker->library_search_path, NewString("/usr/lib"));
@@ -128,6 +175,7 @@ void LinkerInitDynamic(Linker* linker) {
 
 void LinkerDestruct(Linker* linker) {
   StringDestruct(&linker->output_filename);
+  StringDestruct(&linker->entry_symbol);
   VectorDestructWithContents(&linker->files, (VectorElementDestructor)ObjectFileDestruct);
   VectorDestructWithContents(&linker->architectures, NULL);
   LinkerClearSymbolTable(&linker->global_symbol_table);
@@ -145,6 +193,7 @@ void LinkerInitArchitecture(Linker* linker) {
     LinkerArchitecture* arch = linker->architectures.value.p[i];
     if (arch->machine_type == linker->elf_machine_type) {
       linker->arch = arch;
+      arch->check_options(linker);
       return;
     }
   }
@@ -249,13 +298,13 @@ bool LinkerFindSymbolInStaticLibraries(Linker* linker, const char* name,
   return false;
 }
 
-Symbol* LinkerFindSymbol(HashTable* symbol_table,
+LinkerSymbol* LinkerFindSymbol(HashTable* symbol_table,
                                const char* name) {
   return HashTableSearch(symbol_table, (void*)name);
 }
 
 void LinkerInsertSymbol(HashTable* symbol_table,
-                        Symbol* sym) {
+                        LinkerSymbol* sym) {
   HashTableInsert(symbol_table, sym);
 }
 
@@ -269,6 +318,7 @@ SectionGroup* NewSectionGroup(const String* name, int32_t type,
   group->alignment = alignment;
   group->segment = NULL;
   group->address = 0;
+  group->region = NULL;
   return group;
 }
 
@@ -298,19 +348,156 @@ GroupedSection* NewGroupedSection(ELFWriterSection* section) {
   return sect;
 }
 
+GroupedSection* NewGroupedSectionPadding(ELFWriterSectionContents* contents) {
+  GroupedSection* sect = malloc(sizeof(GroupedSection));
+  sect->source = kGroupedSectionPadding;
+  sect->section.padding = contents;
+  return sect;
+}
+
 void GroupedSectionDestruct(GroupedSection* g) {
-  if (g->source == kGroupedSectionNew) {
-    ELFWriterSectionDelete(g->section.new);
+  switch (g->source) {
+    case kGroupedSectionNew:
+      ELFWriterSectionDelete(g->section.new);
+      break;
+    case kGroupedSectionExisting:
+      break;
+    case kGroupedSectionPadding:
+      break;
   }
 }
 
-void SegmentInit(Segment* segment) {
+void SegmentMemoryRegionInit(SegmentMemoryRegion* region, ConfigRegion* config) {
+  StringInit(&region->name, config->name.value);
+  region->start = config->start_addr;
+  region->end = config->size == 0 ? 0 : region->start + config->size;
+  region->next = region->start;
+  VectorInit(&region->sections);
+  for (size_t i = 0; i < config->sections.length; i++) {
+    VectorAppend(&region->sections, NewString(config->sections.value.p[i]));
+  }
+}
+
+SegmentMemoryRegion* NewSegmentMemoryRegion(ConfigRegion* config) {
+  SegmentMemoryRegion* r = malloc(sizeof(SegmentMemoryRegion));
+  SegmentMemoryRegionInit(r, config);
+  return r;
+}
+
+void SegmentMemoryRegionDestruct(SegmentMemoryRegion* region) {
+  StringDestruct(&region->name);
+  VectorDestructWithContents(&region->sections, (VectorElementDestructor)StringDestruct);
+}
+
+void SegmentMemoryRegionDelete(SegmentMemoryRegion* region) {
+  SegmentMemoryRegionDestruct(region);
+  free(region);
+}
+
+SegmentMemoryRegion* NewInternalSegmentMemoryRegion(void) {
+  SegmentMemoryRegion* r = malloc(sizeof(SegmentMemoryRegion));
+  VectorInit(&r->sections);
+  r->start = 0;
+  r->end = 0;
+  r->next = 0;
+  return r;
+}
+
+void SegmentInit(Segment* segment, ConfigSegment* config) {
+  segment->config = config;
   VectorInit(&segment->sections);
-  segment->address = 0;
+  VectorInit(&segment->regions);
+  
+  if (config != NULL) {
+    // Build regions.
+    for (size_t i = 0; i < config->regions.length; i++) {
+      ConfigRegion* rconfig = config->regions.value.p[i];
+      SegmentMemoryRegion* region = NewSegmentMemoryRegion(rconfig);
+      VectorAppend(&segment->regions, region);
+    }
+  }
 }
 
 void SegmentDestruct(Segment* segment) {
   VectorDestruct(&segment->sections);
+  VectorDestructWithContents(&segment->regions, (VectorElementDestructor)SegmentMemoryRegionDestruct);
+}
+
+SegmentMemoryRegion* SegmentDefaultRegion(Segment* segment) {
+  if (segment->regions.length == 1) {
+    return segment->regions.value.p[0];
+  }
+  SegmentMemoryRegion* r = NewInternalSegmentMemoryRegion();
+  VectorAppend(&segment->regions, r);
+  return r;
+}
+
+// Assign a memory region to a segment group.
+static void AssignGroupRegion(Segment* segment, SectionGroup* group) {
+  int region_index = -1;
+   String* section_name = &group->name;
+   for (size_t i = 0; region_index == -1 && i < segment->regions.length; i++) {
+     SegmentMemoryRegion* region = segment->regions.value.p[i];
+     for (size_t j = 0; j < region->sections.length; j++) {
+       if (StringEqualString(region->sections.value.p[j], section_name)) {
+         region_index = (int)i;
+         break;
+       }
+     }
+   }
+  if (region_index == -1) {
+    // No region for this section.  Ignore.
+    return;
+  }
+  SegmentMemoryRegion* region = segment->regions.value.p[region_index];
+  group->region = region;
+}
+
+static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
+                                uint64_t size, uint64_t last_segment_end) {
+  // Make sure we have enough space in the region.
+  SegmentMemoryRegion* region = group->region;
+  assert(region != NULL);
+  if (region->end != 0) {
+    uint64_t next = region->next + size;
+    if (next > region->end) {
+      LinkerError(NULL, "Cannot add contents of section '%s' with size %zd to memory region '%s'",
+                  group->name.value, (size_t)size, region->name.value);
+      return 0;
+    }
+  }
+  if (region->next == 0) {
+    region->next = last_segment_end;
+  }
+  uint64_t addr = region->next;
+  region->next += size;
+  return addr;
+}
+
+uint64_t SegmentEndAddress(Segment* segment) {
+  if (segment->regions.length == 0) {
+    return 0;
+  }
+  SegmentMemoryRegion* region = segment->regions.value.p[segment->regions.length-1];
+  if (region->end != 0) {
+    return region->end;
+  }
+  return region->next;
+}
+
+uint64_t RegionNextAddress(SectionGroup* group) {
+  SegmentMemoryRegion* region = group->region;
+  assert(region != NULL);
+  return region->next;
+}
+
+uint64_t RegionPadding(SectionGroup* group) {
+  SegmentMemoryRegion* region = group->region;
+  assert(region != NULL);
+  if (region->end != 0) {
+    return region->end - region->next;
+  }
+  return 0;
 }
 
 // Data for passing to map traverse function to build the section groups.
@@ -482,7 +669,7 @@ static void ResolveUndefined(void* entry, void* data) {
   Vector* bucket = entry;
   Linker* linker = data;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* symbol = bucket->value.p[i];
+    LinkerSymbol* symbol = bucket->value.p[i];
     if (!symbol->defined) {
       ARArchive* archive;
       ARFile* file;
@@ -620,67 +807,132 @@ static void GroupSections(Linker* linker, int32_t section_type,
   MapDestruct(&section_map);
 }
 
+static bool SegmentContainsSection(Segment* segment, String* section_name) {
+  for (size_t i = 0; i < segment->config->regions.length; i++) {
+    ConfigRegion* region = segment->config->regions.value.p[i];
+    for (size_t j = 0; j < region->sections.length; j++) {
+      if (StringEqualString(region->sections.value.p[j], section_name)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Now we have the sections grouped we can assign each section to its
-// appropriate segment.  The assignment is done by use of the flags
-// in the SectionGroup.  Any SectionGroup that is read-only is placed
-// in the code segment.  If it is writeable is is place in the data segment.
-// If it's a TLS segment it's placed in the TLS segment.
+// appropriate segment.  TLS are always in the tls_segment but other sections
+// need to be assigned to a segment in the config file.
 static void AssignSectionGroupsToSegments(Linker* linker) {
   for (size_t i = 0; i < linker->section_groups.length; i++) {
     SectionGroup* group = linker->section_groups.value.p[i];
-    Segment* segment = &linker->code_segment;
+    Segment* segment = NULL;
     if ((group->flags & SHF(tls)) != 0) {
       segment = &linker->tls_segment;
-    } else if ((group->flags & SHF(write)) != 0) {
+    } else if (SegmentContainsSection(&linker->code_segment, &group->name)) {
+      segment = &linker->code_segment;
+    } else if (SegmentContainsSection(&linker->data_segment, &group->name)) {
       segment = &linker->data_segment;
+    }
+    if (segment == NULL) {
+      LinkerError(NULL, "Cannot find segment for section %s", group->name.value);
+      return;
     }
     group->segment = segment;
     VectorAppend(&segment->sections, group);
   }
 }
 
+static int CompareGroupRegion(const void* a, const void* b) {
+  const SectionGroup* g1 = *(const SectionGroup**)a;
+  const SectionGroup* g2 = *(const SectionGroup**)b;
+  return (int)(g1->region->start - g2->region->start);
+}
+
 // Assign addresses to all the sections held within the segment.
 // The starting address is passed and the final address is returned.
-static uint64_t AssignSegmentSectionAddresses(Segment* segment, uint64_t address) {
+static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint64_t last_segment_end) {
   int64_t offset = 0;
   for (size_t i = 0; i < segment->sections.length; i++) {
     SectionGroup* group = segment->sections.value.p[i];
-    group->address = address;
+    AssignGroupRegion(segment, group);
+    if (group->region == NULL) {
+      // No region for this group, it's not in the output.
+      continue;
+    }
+    group->address = RegionNextAddress(group);
 
     // Concatenate all the component sections, assigning
     // consecutive addresses.
     for (size_t j = 0; j < group->components.length; j++) {
       GroupedSection* gsect = group->components.value.p[j];
-      if (gsect->source == kGroupedSectionExisting) {
-        ELFReaderSection* section = gsect->section.existing;
-        section->address = address;
-        section->offset = offset;
-        address += section->header->size;
-        offset += section->header->size;
-      } else {
-        ELFWriterSection* section = gsect->section.new;
-        section->address = address;
-        address += section->contents->data.buffered.length;
+      switch (gsect->source) {
+        case kGroupedSectionExisting: {
+          ELFReaderSection* section = gsect->section.existing;
+          section->address = RegionAllocateAddress(linker,
+                                                    group,
+                                                    section->header->size,
+                                                    last_segment_end);
+          section->offset = offset;
+          offset += section->header->size;
+          break;
+        }
+        case kGroupedSectionNew: {
+          ELFWriterSection* section = gsect->section.new;
+          section->address = RegionAllocateAddress(linker,
+                                                    group,
+                                                    section->contents->data.buffered.length,
+                                                    last_segment_end);
+          break;
+        }
+        case kGroupedSectionPadding:
+          abort();      // Can't have any of these here.
+          break;
+        
       }
-     }
-  }
-  // Align to 8 byte boundary.
-  return (address + 7) & ~7;
+    }
+    uint64_t padding = RegionPadding(group);
+    if (padding == 0) {
+      continue;
+    }
+    
+    // Need some padding for this output section.  Add a padding section.
+    ELFWriterSectionContents* pad = NewELFWriterSectionContents(kSectionContentsPad);
+    pad->size = padding;
+    GroupedSection* pad_group = NewGroupedSectionPadding(pad);
+    VectorAppend(&group->components, pad_group);
+ }
+  
+  // Now we need to order the groups by region and thus address.
+  VectorSortPointers(&segment->sections, CompareGroupRegion);
 }
-
 
 // Link all files passed to the linker together.  This gathers the sections
 // with the same names into the same place and assigns addresses to the
 // sections and symbols.
 void LinkerLinkAllFiles(Linker* linker) {
-  SegmentInit(&linker->code_segment);
-  SegmentInit(&linker->data_segment);
-  SegmentInit(&linker->tls_segment);
-  if (!linker->fully_static) {
-    SegmentInit(&linker->dynamic_segment);
-  }
-  if (!linker->fully_static && !linker->building_dso) {
-    SegmentInit(&linker->interpreter_segment);
+  // Create the segments from the config.
+  for (size_t i = 0; i < linker->config.segments.length; i++) {
+    ConfigSegment* seg = linker->config.segments.value.p[i];
+    switch (seg->type) {
+      case kConfigSegmentTypeText:
+        SegmentInit(&linker->code_segment, seg);
+        break;
+      case kConfigSegmentTypeData:
+        SegmentInit(&linker->data_segment, seg);
+         break;
+      case kConfigSegmentTypeDynamic:
+        if (!linker->fully_static) {
+          SegmentInit(&linker->dynamic_segment, seg);
+        }
+        break;
+      case kConfigSegmentTypeInterp:
+        if (!linker->fully_static && !linker->building_dso) {
+           SegmentInit(&linker->interpreter_segment, seg);
+         }
+        break;
+      default:
+        break;
+    }
   }
 
   // Resolve all undefined symbols in libraries.
@@ -706,43 +958,27 @@ void LinkerLinkAllFiles(Linker* linker) {
   }
   
   // Assign addresses to all sections.
-  // This variable is updated as we assign the addresses to the sections.
-  // When the traversal is complete it will contain the address after the
-  // last section.
-  uint64_t current_address = linker->arch->code_start_address(linker);
  
-
   // Assign code segment addresses.
-  uint64_t code_segment_end = AssignSegmentSectionAddresses(&linker->code_segment,
-                                                            current_address);
-  uint64_t code_segment_length = code_segment_end - current_address;
-
-  // And now the data segment addresses.
-  current_address = linker->arch->data_start_address(linker,
-                                                     current_address,
-                                                     code_segment_length);
+  AssignSegmentSectionAddresses(linker, &linker->code_segment, 0);
 
   if (!linker->fully_static) {
     // Assign addresses to the dynamic section.
-    current_address = AssignSegmentSectionAddresses(&linker->dynamic_segment,
-                                                    current_address);
+    AssignSegmentSectionAddresses(linker, &linker->dynamic_segment, SegmentEndAddress(&linker->code_segment));
   }
   
   if (!linker->fully_static && !linker->building_dso) {
     // Assign addresses to the interpreter section.
-    current_address = AssignSegmentSectionAddresses(&linker->interpreter_segment,
-                                                    current_address);
+    AssignSegmentSectionAddresses(linker, &linker->interpreter_segment, SegmentEndAddress(&linker->dynamic_segment));
 
   }
   // Assign addresses to sections in the data segment.  This must be
   // last since it also needs to contain the .bss section.
-  current_address = AssignSegmentSectionAddresses(&linker->data_segment,
-                                                  current_address);
+  AssignSegmentSectionAddresses(linker, &linker->data_segment, 0);
 
   // The TLS segment starts at address 0 and doesn't increment the current
   // address.
-  AssignSegmentSectionAddresses(&linker->tls_segment,
-                                0);
+  AssignSegmentSectionAddresses(linker, &linker->tls_segment, SegmentEndAddress(&linker->data_segment));
   
   // Now that we know the addresses of the sections we can work
   // out the values of the symbols within those sections.
@@ -752,10 +988,11 @@ void LinkerLinkAllFiles(Linker* linker) {
   LinkerAssignSectionSymbolAddresses(linker);
   
   // The .bss (nobits) address is just after all the other sections.
-  linker->nobits_address = current_address;
+  linker->nobits_address = SegmentEndAddress(&linker->data_segment);
 
-  LinkerAssignCommonSymbolAddresses(linker, &current_address);
-  linker->nobit_size = current_address - linker->nobits_address;
+  uint64_t addr = linker->nobits_address;
+  LinkerAssignCommonSymbolAddresses(linker, &addr);
+  linker->nobit_size = addr - linker->nobits_address;
   LinkerAssignBSSSymbolAddresses(linker);
 
   if (!linker->fully_static) {
@@ -785,7 +1022,11 @@ void LinkerLinkAllFiles(Linker* linker) {
 // Build an output section from a group of sections.  Each component of the
 // group is a GroupedSection that can come from an existing file or can
 // be generated by the linker.
-static ELFWriterSection* BuildOutputSection(ELFWriterFile* elf, SectionGroup* group) {
+static void BuildOutputSection(ELFWriterFile* elf, Segment* segment,
+                                            SectionGroup* group) {
+  if (group->region == NULL) {
+    return;
+  }
   ELFWriterSectionContents* contents = NewELFWriterSectionContents(kSectionContentsMulti);
   ELFWriterSection* section = ELFWriterAddSection(elf, &group->name,
                       group->type,
@@ -795,31 +1036,39 @@ static ELFWriterSection* BuildOutputSection(ELFWriterFile* elf, SectionGroup* gr
   for (size_t i = 0; i < group->components.length; i++) {
     GroupedSection* gsect = group->components.value.p[i];
     ELFWriterSectionContents* part_contents;
-    if (gsect->source == kGroupedSectionExisting) {
-      ELFReaderSection* part = gsect->section.existing;
-      if (part->header->type == SHT(progbits)) {
-        part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
-        part_contents->size = part->header->size;
-        part_contents->data.raw = part->contents;
-      } else {
-        part_contents = NewELFWriterSectionContents(kSectionContentsNobits);
-        part_contents->size = part->header->size;
+    switch (gsect->source) {
+      case kGroupedSectionExisting: {
+        ELFReaderSection* part = gsect->section.existing;
+        if (part->header->type == SHT(progbits)) {
+          part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
+          part_contents->size = part->header->size;
+          part_contents->data.raw = part->contents;
+        } else {
+          part_contents = NewELFWriterSectionContents(kSectionContentsNobits);
+          part_contents->size = part->header->size;
+        }
+        break;
       }
-    } else {
-      part_contents = gsect->section.new->contents;
-      // Propagate entry size from component section if it is set.
-      ELF_Xword entsize = gsect->section.new->header.entsize;
-      if (entsize != 0) {
-        section->header.entsize = entsize;
+      case kGroupedSectionNew: {
+        part_contents = gsect->section.new->contents;
+        // Propagate entry size from component section if it is set.
+        ELF_Xword entsize = gsect->section.new->header.entsize;
+        if (entsize != 0) {
+          section->header.entsize = entsize;
+        }
+        // Propagate user data if it is set.
+        if (gsect->section.new->user_data != NULL) {
+          section->user_data = gsect->section.new->user_data;
+        }
+        break;
       }
-      // Propagate user data if it is set.
-      if (gsect->section.new->user_data != NULL) {
-        section->user_data = gsect->section.new->user_data;
-      }
+      case kGroupedSectionPadding:
+        part_contents = gsect->section.padding;
+        break;
     }
+
     VectorAppend(&contents->data.multi, part_contents);
   }
-  return section;
 }
 
 // Find the buffer containing the .dynsym section contents.  This
@@ -834,13 +1083,23 @@ static Buffer* FindDynamicSymbolTableBuffer(ELFWriterFile* elf) {
 }
 
 static void AssignGroupSectionIndexes(SectionGroup* group, int32_t* index_ptr) {
+  if (group->region == NULL) {
+    return;
+  }
   for (size_t i = 0; i < group->components.length; i++) {
     GroupedSection* gsect = group->components.value.p[i];
-    if (gsect->source == kGroupedSectionExisting) {
-      ELFReaderSection* section = gsect->section.existing;
-      section->output_section_index = *index_ptr;
-    } else {
-      gsect->section.new->index = *index_ptr;
+    switch (gsect->source) {
+      case kGroupedSectionExisting: {
+        ELFReaderSection* section = gsect->section.existing;
+        section->output_section_index = *index_ptr;
+        break;
+      case kGroupedSectionNew:
+        gsect->section.new->index = *index_ptr;
+        break;
+      case kGroupedSectionPadding:
+        break;
+      }
+        
     }
   }
   // Move the index on.
@@ -852,7 +1111,7 @@ static void AddSymbolListToOutput(void* entry, void* data) {
   Vector* bucket = entry;
   ELFWriterFile* elf = data;
   for (size_t i = 0; i < bucket->length; i++) {
-    Symbol* sym = bucket->value.p[i];
+    LinkerSymbol* sym = bucket->value.p[i];
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
     int32_t section_index;
@@ -879,29 +1138,29 @@ static void BuildSections(Linker* linker, ELFWriterFile* elf) {
   
   // Build output sections in code segment.
   for (size_t i = 0; i < linker->code_segment.sections.length; i++) {
-    BuildOutputSection(elf, linker->code_segment.sections.value.p[i]);
+    BuildOutputSection(elf, &linker->code_segment, linker->code_segment.sections.value.p[i]);
   }
   
   if (!linker->fully_static) {
     for (size_t i = 0; i < linker->dynamic_segment.sections.length; i++) {
-      BuildOutputSection(elf, linker->dynamic_segment.sections.value.p[i]);
+      BuildOutputSection(elf, &linker->dynamic_segment, linker->dynamic_segment.sections.value.p[i]);
     }
   }
   
   if (!linker->fully_static && !linker->building_dso) {
     for (size_t i = 0; i < linker->interpreter_segment.sections.length; i++) {
-      BuildOutputSection(elf, linker->interpreter_segment.sections.value.p[i]);
+      BuildOutputSection(elf, &linker->interpreter_segment, linker->interpreter_segment.sections.value.p[i]);
     }
   }
   
   // Build output sections in data segment.
   for (size_t i = 0; i < linker->data_segment.sections.length; i++) {
-    BuildOutputSection(elf, linker->data_segment.sections.value.p[i]);
+    BuildOutputSection(elf, &linker->data_segment, linker->data_segment.sections.value.p[i]);
   }
   
   // Build output sections in tls segment.
   for (size_t i = 0; i < linker->tls_segment.sections.length; i++) {
-    BuildOutputSection(elf, linker->tls_segment.sections.value.p[i]);
+    BuildOutputSection(elf, &linker->data_segment, linker->tls_segment.sections.value.p[i]);
   }
 
   // Add BSS section.
@@ -1025,19 +1284,20 @@ static bool SetEntryAddress(Linker* linker, ELFWriterFile* elf) {
     }
     elf->header.entry = text->address;
   } else {
-    // Find "main".  This is the entry point for the program.
-    Symbol* main = LinkerFindSymbol(&linker->global_symbol_table, "main");
-    if (main == NULL) {
-      LinkerError(NULL, "No main function found");
+    // Find the entry point for the program.
+    LinkerSymbol* entry = LinkerFindSymbol(&linker->global_symbol_table,
+                                          linker->entry_symbol.value);
+    if (entry == NULL) {
+      LinkerError(NULL, "Cannot find entry symbol '%s'", linker->entry_symbol.value);
       return false;
     }
-    elf->header.entry = main->address;
+    elf->header.entry = entry->address;
   }
   return true;
 }
 
 // Write the output file.
-void LinkerWriteOutput(Linker* linker, FILE* output) {
+bool LinkerWriteOutput(Linker* linker, FILE* output) {
   ELFWriterFile elf;
 
   ELFWriterFileInit(&elf,
@@ -1054,7 +1314,7 @@ void LinkerWriteOutput(Linker* linker, FILE* output) {
   // Set the entry address in the ELF header.
   if (!SetEntryAddress(linker, &elf)) {
     ELFWriterFileDestruct(&elf);
-    return;
+    return false;
   }
   
   // Assign the section indexes for the output sections.
@@ -1078,5 +1338,6 @@ void LinkerWriteOutput(Linker* linker, FILE* output) {
   
   // We're done with ELF file now.
   ELFWriterFileDestruct(&elf);
+  return true;
 }
 

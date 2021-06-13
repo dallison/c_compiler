@@ -1,0 +1,6 @@
+-chdir /Users/dallison/Google\ Drive/c_compiler/6502\ support/80s
+-target 6502 
+-static
+-origin 0x1000
+main.s
+-o main.exe

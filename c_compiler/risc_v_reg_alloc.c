@@ -11,6 +11,26 @@
 #include <limits.h>
 #include "risc_v_codegen.h"
 #include "risc_v_machine.h"
+#include "target_basic_block.h"
+#include "compiler.h"
+
+
+static void AllocateRegister(RVRegisterAllocator* allocator,
+                             TargetInstruction* inst);
+
+static void Trap() {}
+
+static void TrapInstruction(TargetInstruction* inst) {
+  if (inst->id == 1) {
+    Trap();
+  }
+}
+
+static void TrapBlock(TargetBasicBlock* block) {
+  if (block->block_id == 82) {
+    Trap();
+  }
+}
 
 static void InitializeRegister(RVRegister* reg, int num, RVRegisterType type) {
   TargetRegisterInit(&reg->base, num);
@@ -32,37 +52,14 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
   allocator->int_regs[RV_INT_ZERO_REG].base.reserved = true;
   allocator->int_regs[RV_FP_REG].base.reserved = true;
   allocator->int_regs[RV_SP_REG].base.reserved = true;
+  allocator->int_regs[RV_SPILL_ADDR].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
   
-  allocator->spilled_region_size = 0;
-}
-
-void RVRegisterAllocatorReserveRegisters(RVRegisterAllocator* allocator) {
-  RVGenerator* rv = allocator->rv;
-
-  // Reserve and mark register variables.
-  bool is_leaf = allocator->rv->base.num_calls == 0 &&
-      !rv->use_reg_vars;
-  int first_int_reg_var =
-      is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
-  int first_fp_reg_var =
-      is_leaf ? RV_FIRST_LEAF_FP_REG_VAR : RV_FIRST_FP_REG_VAR;
-
-  for (int i = 0; i < rv->num_int_reg_vars; i++) {
-    allocator->int_regs[first_int_reg_var + i].base.reserved = true;
-    if (!is_leaf) {
-      BitSetInsert(&allocator->used_int_regs, first_int_reg_var + i);
-    }
-  }
-
-  for (int i = 0; i < rv->num_fp_reg_vars; i++) {
-    allocator->int_regs[first_fp_reg_var + i].base.reserved = true;
-    if (!is_leaf) {
-      BitSetInsert(&allocator->used_float_regs, first_fp_reg_var + i);
-    }
-  }
+  allocator->current_spilled_region_size = 0;
+  allocator->max_spilled_region_size = 0;
+  BitSetInit(&allocator->preserved_instructions);
 }
 
 RVRegisterAllocator* NewRVRegisterAllocator(RVGenerator* pcode) {
@@ -74,6 +71,7 @@ RVRegisterAllocator* NewRVRegisterAllocator(RVGenerator* pcode) {
 void RVRegisterAllocatorDestruct(RVRegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
+  BitSetDestruct(&allocator->preserved_instructions);
 }
 
 void RVRegisterAllocatorDelete(RVRegisterAllocator* alloc) {
@@ -81,13 +79,14 @@ void RVRegisterAllocatorDelete(RVRegisterAllocator* alloc) {
   free(alloc);
 }
 
-// Find a register by searching for a free one in a set of non-overlapping
-// ranges.
+// RISC-V's ABI divides registers into various ranges, some of which are
+// temporary and some preserved across calls.  We use this array to
+// search for registers.
 static struct {
   RVRegisterType type;  // Register type.
   int start;            // Start of range.
   int end;              // End of range.
-  const char* prefix;   // Register name prefix
+  const char* prefix;   // Register name prefix.
   int base;
   bool temp;
 } register_ranges[] = {
@@ -106,34 +105,13 @@ static struct {
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
 
-static RVRegister* FindSpillVictim(RVRegisterAllocator* allocator,
-                                   RVRegisterType type) {
-  RVRegister* regs =
-      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
-  RVRegister* min_refs_reg = NULL;
-  // Find the register with the minimum number of references
-  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
-    if (register_ranges[i].type == type) {
-      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
-        if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
-          TargetInstruction* owner = regs[j].base.owner;
-          if (owner->opcode == RV_OP(rmov)) {
-            // Not rmov instruction.
-            continue;
-          }
-          if ((owner->flags & TARGET_INST_SPILLED) != 0) {
-            // Not already spilled.
-            continue;
-          }
-          if (min_refs_reg == NULL || owner->uses < min_refs_reg->base.owner->uses) {
-            min_refs_reg = &regs[j];
-          }
-        }
-      }
-    }
-  }
-  assert(min_refs_reg != NULL);
-  return min_refs_reg;
+
+static void AssignRegister(RVRegister* reg, TargetInstruction* inst) {
+  assert(inst->reg == NULL);
+  inst->reg = &reg->base;
+  reg->base.owner = inst;
+  inst->uses = (int)inst->users.length;
+  inst->flags |= TARGET_INST_PROCESSED;
 }
 
 static RVRegister* FindFreeRegister(RVRegisterAllocator* allocator,
@@ -152,8 +130,7 @@ static RVRegister* FindFreeRegister(RVRegisterAllocator* allocator,
           // If we use the return address register, we must save it and
           // therefore we are not a leaf procedure.
           if (regs[j].base.num == RV_RET_REG) {
-            // Increment call count so we can't treat this as a leaf proc.
-            allocator->rv->base.num_calls++;
+            allocator->rv->not_leaf = true;
           }
           return &regs[j];
         }
@@ -169,20 +146,51 @@ static void FreeRegister(RVRegisterAllocator* allocator, RVRegister* reg) {
   reg->base.owner = NULL;
 }
 
+// Free up any registers that are no longer needed by the instruction.  This
+// frees up all now-unused operands and destination.
 static void FreeRegisters(RVRegisterAllocator* allocator,
                           TargetInstruction* inst) {
+  int dest_id = -1;
+  if (inst->dest != NULL) {
+    dest_id = inst->dest->id;
+  }
+  bool dest_in_operands = false;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      if (op->id == dest_id) {
+        dest_in_operands = true;
+      }
+      if (RVIsFixedRegister(op)) {
+        continue;
+      }
+      if (op->opcode == RV_OP(reload) || op->opcode == RV_OP(spill)) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
-      if (reg != NULL && !reg->reserved && op->uses > 0) {
+      if (reg != NULL && !reg->reserved) {
         op->uses--;
+        assert(op->uses >= 0);
         if (op->uses == 0) {
-          FreeRegister(allocator, (RVRegister*)reg);
+          if (reg->owner == op) {
+            FreeRegister(allocator, (RVRegister*)reg);
+          }
         }
       }
     }
   }
+  
+#if 0
+  // A destination is a use of that instruction, decrement it too, as long
+  // as it's not one of the operands.
+  if (inst->dest != NULL && !dest_in_operands) {
+    inst->dest->uses--;
+    assert(inst->dest->uses >= 0);
+    if (inst->dest->uses == 0) {
+      FreeRegister(allocator, (RVRegister*)inst->dest->reg);
+    }
+  }
+#endif
 }
 
 // Is the register meant to be saved by the callee?
@@ -197,22 +205,120 @@ static bool IsSavedReg(RVRegister* reg) {
   return false;
 }
 
-static void SpillRegister(RVRegisterAllocator* allocator, RVRegister* reg) {
-  TargetInstruction* inst = reg->base.owner;
-  assert(inst != NULL);
-  inst->flags |= TARGET_INST_SPILLED;
+// Calculate the cost of spilling the instruction.  This
+// takes the number of uses and the loop nesting level into
+// account.  The cost starts out as the number of
+// uses left for the instruction.  It is then multiplied
+// by the loop nesting level for all its users that have not yet
+// got a register (+1) all the way to the top of the dominator tree.
+//
+// Blocks outside loops will have no effect on the score but
+// blocks with a loop_nesting value of 1 will double the cost.  A
+// loop_nesting value of 2 will quadruple the cost, and so on.
+static int SpillCost(TargetInstruction* inst) {
+  int cost = inst->uses;
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    if (user->reg == NULL) {
+      TargetBasicBlock* block = user->block;
+      while (block != NULL) {
+        cost *= block->loop_nesting + 1;
+        block = block->idom;
+      }
+    }
+  }
+
+  return cost;
+}
+
+static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
+                                   RVRegisterType type) {
+  RVRegister* regs =
+      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  int min_cost = INT_MAX;
+  TargetInstruction* victim = NULL;
+  // Find the instruction with the lowest spill cost.
+  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
+    if (register_ranges[i].type == type) {
+      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+        if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
+          TargetInstruction* owner = regs[j].base.owner;
+           if (owner->opcode == RV_OP(spill) || owner->opcode == RV_OP(reload)) {
+            // Not spill or reload instruction.
+            continue;
+          }
+          assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          int cost = SpillCost(owner);
+          if (cost < min_cost) {
+            min_cost = cost;
+            victim = owner;
+          }
+        }
+      }
+    }
+  }
+  assert(victim != NULL);
+  return victim;
+}
+
+static bool NotProcessed(TargetInstruction* inst) {
+  return (inst->flags & TARGET_INST_PROCESSED) == 0;
+}
+
+static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstruction* inst) {
+  RVRegister* reg = (RVRegister*)inst->reg;    // Current register.
+  
+  // Generate a spill instruction with 2 operands:
+  // 1. Instruction to spill (not set yet)
+  // 2. Offset into spill region.
+  // We don't set the spilled instruction yet because TargetRetargetInstruction
+  // will see it and retarget it to the spill.
+  TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)RV_OP(spill), NULL,
+                                                   TargetGetIntConstant(&allocator->rv->base,
+                                                                        NULL,
+                                                                        kTargetTypeWord,
+                                                                        allocator->current_spilled_region_size));
+  allocator->current_spilled_region_size += 8;    // Space for one register.
+  if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
+    allocator->max_spilled_region_size = allocator->current_spilled_region_size;
+  }
+  // printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
+ 
+  if (RVIsVarRegister(inst)) {
+    // Spilling a varreg.  This instruction is in the entry block but
+    // it can't be spilled there.  It needs to be spilled at its first
+    // use (the assignment to it).  This is going to be the first user
+    // of the instruction.
+    assert(inst->users.length > 0);
+    TargetInstruction* first_use = inst->users.value.p[0];
+    TargetBasicBlockEmitAfter(&allocator->rv->base, first_use->block, spill, first_use);
+  } else {
+    // Emit spill instruction just after spilled instruction.
+    TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, spill, inst);
+  }
+  
+  // Retarget all uses of the original instruction to the spill.  If the
+  // user has already been processed this will have no effect.
+  // NOTE: this will transfer all uses of the inst to the spill, leaving
+  // the users of inst empty and its uses count 0.
+  TargetRetargetInstructionIf(inst, spill, NotProcessed);
+  spill->operand[0] = inst;
+  spill->reg = inst->reg;
   reg->base.owner = NULL;
-  allocator->spilled_region_size += 8;    // Register size.
+  inst->flags |= TARGET_INST_SPILLED;
+  return reg;
 }
 
 static RVRegister* AllocateRegisterWithType(RVRegisterAllocator* allocator,
+                                            TargetBasicBlock* block,
+                                            TargetInstruction* inst,
                                             RVRegisterType type,
                                             bool can_use_temp) {
   RVRegister* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    reg = FindSpillVictim(allocator, type);
-    SpillRegister(allocator, reg);
+    TargetInstruction* victim = FindSpillVictim(allocator, type);
+    reg = SpillInstruction(allocator, victim);
   }
   assert(reg != NULL);
 
@@ -247,10 +353,7 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(fa5):
     case RV_OP(fa6):
     case RV_OP(fa7):
-    case RV_OP(fv0):
-    case RV_OP(fv1):
-    case RV_OP(fv2):
-    case RV_OP(fv3):
+    case RV_OP(fvarreg):
     case RV_OP(fmv_w_x):
     case RV_OP(fneg_d):
     case RV_OP(fneg_s):
@@ -279,124 +382,129 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
-static bool CanUseTemp(TargetInstruction* start_inst) {
-  TargetInstruction* inst = start_inst;
-  int num_refs = inst->refs;
-  if (num_refs == 0) {
-    return true;
-  }
-
-  // Look for all reference to this instruction by traversing
-  // the instructions forward.  If we encounter a call instruction
-  // while looking for the references we know that we can't use a temp
-  // register (call will not preserve them).
-  TargetInstruction* this = inst;
-  inst = TargetNext(inst);
-  while (inst != NULL && num_refs > 0) {
-    // If this is a call instruction we can't use a temp because the use of the
-    // register spans the call.
-    switch ((RVOpcode)inst->opcode) {
-      case RV_OP(call):
-      case RV_OP(callf):
-      case RV_OP(rcall):
-      case RV_OP(rcallf):
-        return false;
-      default:
-        break;
-    }
-
-    // Look for a reference to the instruction in the operands.
-    // If we find one, decrement the number of references we expect
-    // to see and if that reaches zero we know there are no more
-    // references and we can use a temp register.
-    for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
-      if (inst->operand[i] == this) {
-        num_refs--;
-        if (num_refs == 0) {
-          return true;
-        }
-      }
-    }
-    inst = TargetNext(inst);
-  }
-
-  // If we get here then the num_refs is still >0 and we've reached the end of
-  // the code.
-  assert(false);
+static bool CanUseTemp(RVRegisterAllocator* allocator, TargetInstruction* inst) {
+  return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 
-// We want to change the register assigned to an instruction.  This function
-// makes sure it's safe to do so.  This is used by the rmov instruction
-// to remove unnecessary mv instructions.  It's only safe to reassign
-// the register if:
-// 1. The instruction being replaced isn't a fixed register (like an argument)
-// 2. The number of references to the instruction is 1
-// 3. If we are going to replace the register with a non-saved register then
-//    it must be OK to use a temp register for the instruction.
-static bool CanReassignRegister(TargetInstruction* src, RVRegister* reg) {
-  if (RVIsFixedRegister((RVOpcode)src->opcode) || src->refs != 1) {
-    return false;
-  }
-  // If the register we want to use (reg) is temporary make sure that the
-  // src instruction can use a temp reg.
-  if (!IsSavedReg(reg)) {
-    if (!CanUseTemp(src)) {
-      return false;
-    }
-  }
-  return true;
+static void AllocateVariableRegister(RVRegisterAllocator* allocator,
+                                     TargetInstruction* inst) {
+  RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
+  
+  RVRegister* reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                 reg_type, CanUseTemp(allocator, inst));
+  AssignRegister(reg, inst);
 }
 
 static void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
+  assert(inst->opcode == RV_OP(rmov) || inst->opcode == RV_OP(rmovf) ||
+         inst->opcode == RV_OP(rmovd));
+  assert(inst->users.length == 0);
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
-  // If the source is spilled then so is the target.
-  if ((src->flags & TARGET_INST_SPILLED) != 0) {
-    if (src->uses == 1) {
-      dest->flags |= TARGET_INST_SPILLED;
-    } else {
-      // There is more than one use of the source.  This means we can't
-      // propagate the spill to the destination since the source will
-      // be used after this point.
-    }
+
+  if (RVIsVarRegister(dest) && dest->reg == NULL) {
+    // Delayed allocation of variable register.
+    AllocateVariableRegister(allocator, dest);
   }
   RVRegister* reg = (RVRegister*)dest->reg;
-  if (CanReassignRegister(src, reg)) {
-    // Safe to reassign register, merge the register into the source
-    // and eliminate the rmov.
+  assert(reg != NULL);
+  
+  if (src->opcode == RV_OP(spill)) {
+    // If we are rmoving a spill we can just load it directly into the
+    // destination register.  To do this, we convert the rmov
+    // into a reload instruction
+    inst->opcode = (TargetOpcode)RV_OP(reload);
+    inst->operand[0] = src;
+    inst->operand[1] = NULL;
+  } else {
+    if (RVIsVarRegister(src) && src->reg == NULL) {
+      // Delayed allocation of variable register.
+      AllocateVariableRegister(allocator, src);
+    }
+    inst->operand[0]->uses++;
     FreeRegisters(allocator, inst);
-    src->reg = &reg->base;
-    src->uses++;
-    reg->base.owner = src;
-    inst->reg = src->reg;
-    return;
   }
-  inst->operand[0]->uses++;  // Prevent this from being freed.
-  FreeRegisters(allocator, inst);
-  inst->uses = inst->refs;
+  
   inst->reg = &reg->base;
-  reg->base.owner = inst;
+  inst->flags |= TARGET_INST_PROCESSED;
+}
+
+
+static void ReloadSpills(RVRegisterAllocator* allocator,
+                         TargetInstruction* inst) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && op->opcode == RV_OP(spill)) {
+      TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)RV_OP(reload),
+                                                        op);
+      TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
+      inst->operand[i] = reload;
+      RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
+      RVRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
+                                     reg_type, CanUseTemp(allocator, reload));
+      AssignRegister(reg, reload);
+    }
+  }
 }
 
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+   bool is_leaf = allocator->rv->base.num_calls == 0 &&
+      compiler->optimize;
 
-  bool is_leaf = allocator->rv->base.num_calls == 0 &&
-      !allocator->rv->use_reg_vars;
+  RVOpcode opcode = (RVOpcode)inst->opcode;
+  
+  TrapInstruction(inst);
 
+  // If we already have a register allocated (as can be the case
+  // for an ivarreg that is the dest of another instruction) don't
+  // reallocate register.
+  if (inst->reg != NULL) {
+    return;
+  }
+  
+  
   // rmov instructions use the register allocated to their first
   // operand as their own register.
-  if (inst->opcode == RV_OP(rmov) || inst->opcode == RV_OP(rmovf) ||
-      inst->opcode == RV_OP(rmovd)) {
+  if (opcode == RV_OP(rmov) || opcode == RV_OP(rmovf) ||
+      opcode == RV_OP(rmovd)) {
     AllocateForRmov(allocator, inst);
+    return;
+  }
+
+  if (RVIsVarRegister(inst)) {
+    // Variable regsiter.  Delay allocation until it's assigned to.
+    // It will be assigned to by an rmov or from a destination
+    // assignemnt.
+    return;
+  }
+
+  // Reload any spilled expressions.
+  ReloadSpills(allocator, inst);
+
+  RVRegister* reg;
+
+  if (inst->dest != NULL) {
+    if (inst->dest->reg == NULL) {
+      if (RVIsVarRegister(inst->dest)) {
+        // Assignment to a variable register,
+        AllocateVariableRegister(allocator, inst->dest);
+      } else {
+        AllocateRegister(allocator, inst->dest);
+      }
+    }
+    assert(inst->dest->reg != NULL);
+    reg = (RVRegister*)inst->dest->reg;
+    inst->reg = inst->dest->reg;
+    FreeRegisters(allocator, inst);
+    inst->flags |= TARGET_INST_PROCESSED;
     return;
   }
 
   // Free up any registers we can.
   FreeRegisters(allocator, inst);
-
-  RVRegister* reg;
+  
   switch ((RVOpcode)inst->opcode) {
     case RV_OP(constb):
     case RV_OP(consth):
@@ -422,20 +530,9 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
       // These instructions do not have registers allocated to them.
       return;
 
-    case RV_OP(regarg): {
-      // A register arg points to the argument register instruction
-      // in its second operand.  The register allocated to this needs
-      // to be freed.
-      TargetInstruction* arg_reg = inst->operand[1];
-      TargetRegister* reg = arg_reg->reg;
-      assert(reg != NULL);
-      TargetInstruction* owner = reg->owner;
-      if (owner != NULL) {
-        owner->uses--;
-      }
-      reg->owner = NULL;
+    case RV_OP(regarg):
+      // Always refers to fixed register so no allocation necessry.
       return;
-    }
       
     case RV_OP(x0):
       reg = &allocator->int_regs[RV_INT_ZERO_REG];
@@ -447,6 +544,10 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
 
     case RV_OP(sp):
       reg = &allocator->int_regs[RV_SP_REG];
+      break;
+
+    case RV_OP(t0):
+      reg = &allocator->int_regs[RV_INT_TEMP_START_1];
       break;
 
     case RV_OP(a0):
@@ -461,21 +562,11 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
                  ->int_regs[(int)inst->opcode - RV_OP(a0) + RV_INT_ARG_START];
       break;
 
-    case RV_OP(v0):
-    case RV_OP(v1):
-    case RV_OP(v2):
-    case RV_OP(v3):
-    case RV_OP(v4):
-    case RV_OP(v5):
-    case RV_OP(v6):
-    case RV_OP(v7):
-    case RV_OP(v8):
-    case RV_OP(v9):
-      reg = &allocator->int_regs[(int)inst->opcode - RV_OP(v0) +
-                                 (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR
-                                          : RV_FIRST_INT_REG_VAR)];
+    case RV_OP(ivarreg):
+    case RV_OP(fvarreg):
+      assert(false);
       break;
-
+      
     case RV_OP(fa0):
     case RV_OP(fa1):
     case RV_OP(fa2):
@@ -488,25 +579,11 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
                  ->float_regs[(int)inst->opcode - RV_OP(fa0) + RV_FP_ARG_START];
       break;
 
-    case RV_OP(fv0):
-    case RV_OP(fv1):
-    case RV_OP(fv2):
-    case RV_OP(fv3):
-    case RV_OP(fv4):
-    case RV_OP(fv5):
-    case RV_OP(fv6):
-    case RV_OP(fv7):
-    case RV_OP(fv8):
-    case RV_OP(fv9):
-      reg = &allocator->float_regs[(int)inst->opcode - RV_OP(fv0) +
-                                   (is_leaf ? RV_FIRST_LEAF_FP_REG_VAR
-                                            : RV_FIRST_FP_REG_VAR)];
-      break;
-
     case RV_OP(structreturn):
       reg = &allocator->int_regs[(is_leaf ? RV_FIRST_LEAF_INT_REG_VAR
                                           : RV_FIRST_INT_REG_VAR) +
                                  allocator->rv->struct_return_reg];
+      BitSetInsert(&allocator->used_int_regs, reg->base.num);
       break;
 
     case RV_OP(resultx):
@@ -533,18 +610,18 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(feq_d):
     case RV_OP(flt_d):
     case RV_OP(fle_d):
-      reg = AllocateRegisterWithType(allocator, kRVRegTypeInt, CanUseTemp(inst));
+      reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                     kRVRegTypeInt, CanUseTemp(allocator, inst));
       break;
 
     default: {
       RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
-      reg = AllocateRegisterWithType(allocator, reg_type, CanUseTemp(inst));
+      reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                     reg_type, CanUseTemp(allocator, inst));
     }
   }
 
-  inst->uses = inst->refs;
-  inst->reg = &reg->base;
-  reg->base.owner = inst;
+  AssignRegister(reg, inst);
 
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.
@@ -553,14 +630,96 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
   }
 }
 
-void RVAllocateRegisters(RVRegisterAllocator* allocator) {
-  RVRegisterAllocatorReserveRegisters(allocator);
-
-  TargetInstruction* inst = TargetFirstInstruction(&allocator->rv->base);
-  while (inst != NULL) {
-    AllocateRegister(allocator, inst);
-    inst = TargetNext(inst);
+static void InitializeBasicBlockRegisters(RVRegisterAllocator* allocator,
+                                          TargetBasicBlock* block) {
+  for (int i = 0; i < RV_NUM_INT_REGS; i++) {
+    RVRegister* reg = &allocator->int_regs[i];
+    if (reg->base.reserved) {
+      continue;
+    }
+    reg->base.owner = NULL;
   }
+  for (int i = 0; i < RV_NUM_FLOAT_REGS; i++) {
+     RVRegister* reg = &allocator->float_regs[i];
+     if (reg->base.reserved) {
+       continue;
+     }
+     reg->base.owner = NULL;
+  }
+    
+  // Now allocate the registers to the inputs.
+  for (size_t i = 0; i < block->inputs.length; i++) {
+    TargetInstruction* inst = block->inputs.value.p[i];
+    if (RVIsVarRegister(inst) && inst->reg == NULL) {
+      continue;
+    }
+    if (inst->opcode == RV_OP(spill) ||
+        (inst->flags & TARGET_INST_SPILLED) != 0) {
+      continue;
+    }
+    if (inst->uses == 0) {
+      continue;
+    }
+    assert(inst->reg != NULL);
+    inst->reg->owner = inst;
+  }
+}
+
+static void ProcessBlock(TargetBasicBlock* block, void* data) {
+  TrapBlock(block);
+  
+  // printf("Allocating registers for block %zd\n", block->block_id);
+  RVRegisterAllocator* allocator = data;
+
+  // For a basic block, the inputs specify what instructions are alive
+  // on entry.  An alive instruction has a register allocated to it.  All
+  // other registers should be free at this point.
+  InitializeBasicBlockRegisters(allocator, block);
+  
+  // Unless we are the entry block, propagate the spill count from
+  // the idom.  Use this to calculate the current spill region size
+  // and thus offsets for spills in this block.
+  if (block->idom != NULL) {
+    block->num_spills = block->idom->num_spills;
+    allocator->current_spilled_region_size = block->num_spills * 8;
+  }
+  
+  for (TargetInstruction* inst = block->code;
+       inst != NULL && inst != block->end_code;
+       inst = TargetNext(inst)) {
+    AllocateRegister(allocator, inst);
+  }
+  if (block->end_code != NULL) {
+    AllocateRegister(allocator, block->end_code);
+  }
+}
+
+static void ProcessBasicBlock(RVRegisterAllocator* allocator,
+                              TargetBasicBlock* block) {
+  TargetTraverseDominatorTree(&allocator->rv->base, ProcessBlock,
+                          kTraversePreOrder, allocator);
+}
+
+
+// Build the preserved_instructions set, instructions that need their
+// register to be preserved across calls.  If the block contains a call
+// all outputs need to be preserved.
+static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
+  RVRegisterAllocator* allocator = data;
+  if (!block->contains_call) {
+    return;
+  }
+  // Preserve all outputs.
+  BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
+}
+
+void RVAllocateRegisters(RVRegisterAllocator* allocator) {
+  TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
+                          kTraversePreOrder, allocator);
+
+  // Process all basic blocks in the RV generator by traversing the
+  // dominator tree.
+  ProcessBasicBlock(allocator, allocator->rv->base.entry_block);
 }
 
 const char* RVRegisterName(RVRegister* reg, char* buf, size_t len) {

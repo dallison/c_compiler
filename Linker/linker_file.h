@@ -23,14 +23,14 @@ typedef struct ObjectFile {
   struct Linker* linker;
   Map sections_by_name;       // Map of section name vs ELFReaderSection* in elf_file.
   Map sections_by_type;       // Map of section type vs Vector of ELFReaderSection*
-  Vector common_symbols;      // Vector of Symbol*.
+  Vector common_symbols;      // Vector of LinkerSymbol*.
 } ObjectFile;
 
 ObjectFile* NewObjectFile(ELFReaderFile* elf_file, struct Linker* linker,
                           const char* filename);
 void ObjectFileDestruct(ObjectFile* file);
 void ObjectFileDelete(ObjectFile* file);
-Symbol* ObjectFileFindSymbol(ObjectFile* file, const char *name);
+LinkerSymbol* ObjectFileFindSymbol(ObjectFile* file, const char *name);
 ELFReaderSection* ObjectFileFindSection(ObjectFile* file, String* name);
 
 

@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include "loader_dynamic.h"
 
-struct Symbol;
+struct LinkerSymbol;
 struct Linker;
 struct ELFWriterSectionContents;
 struct DynamicLinker;
@@ -68,10 +68,10 @@ struct DynamicLinker;
 typedef struct {
   int num_resolver_data_entries;  // Number of entries for resolver data.
   int entry_size;          // Size of each entry (4 or 8).
-  Vector data_entries;     // Vector of pointers to Symbol.
-  Vector tls_ie_entries;      // Vector of pointers to Symbol.
-  Vector tls_gd_entries;      // Vector of pointers to Symbol.
-  Vector function_entries; // Vector of pointers to Symbol.
+  Vector data_entries;     // Vector of pointers to LinkerSymbol.
+  Vector tls_ie_entries;      // Vector of pointers to LinkerSymbol.
+  Vector tls_gd_entries;      // Vector of pointers to LinkerSymbol.
+  Vector function_entries; // Vector of pointers to LinkerSymbol.
 } GlobalOffsetTable;
 
 // The PLT consists of a set of trampolines that relay a call
@@ -80,7 +80,7 @@ typedef struct {
 typedef struct {
   int num_reserved_entries;       // Reserved for runtime resolver.
   int entry_size;                 // Size of each entry.
-  Vector trampolines;             // Vector of Symbol*.
+  Vector trampolines;             // Vector of LinkerSymbol*.
 } ProcedureLinkageTable;
 
 typedef struct DynamicLinker {
@@ -91,8 +91,8 @@ typedef struct DynamicLinker {
   Vector data_relocations;      // Pointers to Relocation.
   Vector needed_libraries;      // Offsets into dynstr table.
   ELF_Xword rpath;              // Offset into dynstr table.
-  struct Symbol* global_offset_table_symbol;
-  struct Symbol* dynamic_symbol;
+  struct LinkerSymbol* global_offset_table_symbol;
+  struct LinkerSymbol* dynamic_symbol;
   
   // These are the synthetic sections created by the dynamic
   // linker.  The linker always deals with groups of sections

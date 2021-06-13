@@ -16,24 +16,27 @@ static int64_t DataStartAddress(Linker* linker, int64_t code_start, int64_t code
   return code_start + code_size;
 }
 
-static void HandlePICRelocation(DynamicLinker* dynamic, Symbol* symbol,
+static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
                                 Relocation* reloc,
-                                int (*append_data_to_got)(DynamicLinker*, Symbol*),
-                                int (*append_func_to_got)(DynamicLinker*, Symbol*),
-                                int (*append_to_plt)(DynamicLinker*, Symbol*)) {
+                                int (*append_data_to_got)(DynamicLinker*, LinkerSymbol*),
+                                int (*append_func_to_got)(DynamicLinker*, LinkerSymbol*),
+                                int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
 }
 
 static void ApplyRelocation(Linker* linker,
                             ObjectFile* file,
                             Relocation* reloc,
-                            Symbol* symbol,
+                            LinkerSymbol* symbol,
                             char* target_address,
                             uint64_t S, int64_t A) {
   uint64_t value = S + A;
+  if ((value & ~0xffff) != 0) {
+    LinkerError(file, "Invalid relocation value 0x%llx doesn't fit in 16 bits", value);
+  }
   switch (reloc->type) {
     case R_6502_JSR:    // JSR - second and third bytes in little endian.
     case R_6502_JMP:    // JMP
-      *(uint16_t*)(target_address + 1) = value;
+      *(uint16_t*)(target_address+1) = value;   // Apply to offset.
       break;
       
     case R_6502_DATA16:
@@ -49,35 +52,35 @@ static void ApplyRelocation(Linker* linker,
       break;
       
     case R_6502_BYTE0:
-      *target_address = value & 0xff;
+      *(target_address) = value & 0xff;
       break;
   
     case R_6502_BYTE1:
-      *target_address = (value >> 8) & 0xff;
+      *(target_address) = (value >> 8) & 0xff;
       break;
 
     case R_6502_BYTE2:
-      *target_address = (value >> 16) & 0xff;
+      *(target_address) = (value >> 16) & 0xff;
       break;
       
     case R_6502_BYTE3:
-      *target_address = (value >> 24) & 0xff;
+      *(target_address) = (value >> 24) & 0xff;
       break;
       
     case R_6502_BYTE4:
-      *target_address = (value >> 32) & 0xff;
+      *(target_address) = (value >> 32) & 0xff;
       break;
       
     case R_6502_BYTE5:
-      *target_address = (value >> 40) & 0xff;
+      *(target_address) = (value >> 40) & 0xff;
       break;
       
     case R_6502_BYTE6:
-      *target_address = (value >> 48) & 0xff;
+      *(target_address) = (value >> 48) & 0xff;
       break;
       
     case R_6502_BYTE7:
-      *target_address = (value >> 56) & 0xff;
+      *(target_address) = (value >> 56) & 0xff;
       break;
       
    default:
@@ -94,19 +97,19 @@ static void InitDynamicLinker(DynamicLinker* dynamic) {
   dynamic->procedure_linkage_table.entry_size = 0;
 }
 
-static void AddGOTEntry(Linker* linker, Symbol* symbol,
+static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents,
                         Vector* relocs,
                         GOTRelocation relocation_type) {
 
 }
 
-static void FixupGOTEntry(Symbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
 
 }
 
-static void AddPLTEntry(Linker* linker, Symbol* symbol,
+static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents) {
 }
 
@@ -119,12 +122,23 @@ static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
 
 static void FixupPLTEntry(ProcedureLinkageTable* plt,
                           GlobalOffsetTable* got,
-                          Symbol* symbol,
+                          LinkerSymbol* symbol,
                           Buffer* plt_buffer,
                           uint64_t got_address,
                           uint64_t plt_address) {
  
   
+}
+
+static void CheckOptions(Linker* linker) {
+  if (linker->building_dso) {
+    fprintf(stderr, "Shared libraries are not supported on 6502\n");
+    exit(1);
+  }
+  if (!linker->fully_static) {
+    fprintf(stderr, "Only static executables can be build on on 6502 (pass -static)\n");
+    exit(1);
+  }
 }
 
 LinkerArchitecture* New6502LinkerArchitecture() {
@@ -140,5 +154,6 @@ LinkerArchitecture* New6502LinkerArchitecture() {
   arch->add_plt_entry = AddPLTEntry;
   arch->setup_resolver_plt_entry = SetupResolverPLTEntry;
   arch->fixup_plt_entry = FixupPLTEntry;
+  arch->check_options = CheckOptions;
   return arch;
 }

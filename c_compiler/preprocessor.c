@@ -42,6 +42,7 @@ Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
   Macro* macro = malloc(sizeof(Macro));
   BinaryTreeNodeInit(&macro->header);
   StringInit(&macro->name, name);
+  VectorInit(&macro->args);
   VectorCopy(&macro->args, args);
   StringInit(&macro->replacement_text, replacement_text->value);
   macro->is_function_like = is_function_like;
@@ -222,6 +223,8 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
              StringEqual(compiler->target_name, "riscv")) {
     PreprocessorDefineMacro(p, "__risc_v__", "1");
     PreprocessorDefineMacro(p, "__x86_64__", "1");
+  } else if (StringEqual(compiler->target_name, "6502")) {
+    PreprocessorDefineMacro(p, "__6502__", "1");
   }
 }
 
@@ -342,8 +345,8 @@ void PreprocessorInit(Preprocessor* p) {
   PredefineMacros(p);
 }
 
-void PreprocessorPrintStats(Preprocessor* p) {
-  HashTablePrintStats(&p->macros);
+void PreprocessorPrintStats(Preprocessor* p, FILE* fp) {
+  HashTablePrintStats(&p->macros, fp);
 }
 
 void PreprocessorFinishInit(Preprocessor* p, struct Lex* lex) { p->lex = lex; }

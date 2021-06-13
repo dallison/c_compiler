@@ -13,5 +13,6 @@
 #include "codegen.h"
 
 void GenerateStatement(Generator* gen, ASTNode* node);
+IRNode* GenerateVLASize(Generator* gen, TypeRecord* type);
 
 #endif /* statement_codegen_h */

@@ -199,6 +199,7 @@ DECLARE_INST_FUNC(sgtz);
 DECLARE_INST_FUNC(beqz);
 DECLARE_INST_FUNC(bnez);
 DECLARE_INST_FUNC(j);
+DECLARE_INST_FUNC(jr);
 DECLARE_INST_FUNC(call);
 DECLARE_INST_FUNC(rcall);
 DECLARE_INST_FUNC(callf);
@@ -398,6 +399,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(beqz);
   INST(bnez);
   INST(j);
+  INST(jr);
   INST(call);
   INST(rcall);
   INST(callf);
@@ -1130,11 +1132,61 @@ static void Assemble_jal(RVAssembler* assembler) {
 }
 
 static void Assemble_j(RVAssembler* assembler) {
-  // j offset   -> jal x0, offset
-  int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Missing symbol for j instruction");
+    return;
+  }
+  String symbol_name;
+  StringInit(&symbol_name, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+
+  AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
+  if (sym->is_label && sym->binding == SYM_BIND(local)) {
+    // j offset   -> jal x0, offset
+    int64_t addr = sym->value;
+    int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+    AssemblerEmitWord(&ASM, ASM.current_section,
+                      JTypeInstruction(RV_OPCODE(jal), 0, offset));
+  } else {
+    // j symbol.
+    // For PIC we use a R_RISCV_CALL_PLT and generate the auipc and jalr
+    // For non-PIC we generate a R_RISCV_JAL relocation and a jal instruction.
+    // R_RISCV_JAL relocation.
+    int reloc_type = R_RISCV_CALL;
+    if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
+      reloc_type = R_RISCV_CALL_PLT;
+    }
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+        sym, reloc_type,
+        ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), 0);
+    AssemblerAddRelocation(&ASM, reloc);
+    if (reloc_type == R_RISCV_CALL_PLT) {
+      // The general instruction sequence for a jump is:
+      // auipc t0, %hi(addr)
+      // jalr x0, t0, %lo(addr)(ra)
+      //
+      // But if the address is within range of a jal instruction immediate
+      // the linker can relax the instrucitons to a jal and a nop:
+      // jal t0, addr
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        UTypeInstruction(RV_OPCODE(auipc), RV_INT_TEMP_START_1, 0));
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                        ITypeInstruction(RV_OPCODE(jalr), 0, RV_INT_TEMP_START_1,
+                                         RV_F3(jalr), 0));
+    } else {
+      // Non-PIC.
+      AssemblerEmitWord(&ASM, ASM.current_section,
+                      JTypeInstruction(RV_OPCODE(jal), 0, 0));
+    }
+  }
+  StringDestruct(&symbol_name);
+}
+
+static void Assemble_jr(RVAssembler* assembler) {
+  int reg = Register(assembler,  kRVRegTypeInt, "integer");
   AssemblerEmitWord(&ASM, ASM.current_section,
-                    JTypeInstruction(RV_OPCODE(jal), 0, offset));
+                    ITypeInstruction(RV_OPCODE(jalr), 0, reg,
+                                     RV_F3(jalr), 0));
 }
 
 static void Assemble_call(RVAssembler* assembler) {
@@ -1531,8 +1583,11 @@ ASSEMBLE_FP_INT_TO_FLOAT(fcvt_d_l);
 ASSEMBLE_FP_INT_TO_FLOAT(fcvt_d_lu);
 ASSEMBLE_FP_INT_TO_FLOAT(fmv_d_x);
 
-// Pseudo ops
-UNDEFINED_INST(nop);
+static void Assemble_nop(RVAssembler* assembler) {
+  // Assemble as nop as addi x0, x0, 0.
+  int regs[2] = {0,0};
+  AssembleALUImm(assembler, RV_OPCODE(op_imm), RV_F3(addi), 0, regs);
+}
 
 // Assembled as xori d, s, -1
 static void Assemble_not(RVAssembler* assembler) {
@@ -1627,7 +1682,8 @@ static void Assemble_la(RVAssembler* assembler) {
     AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
     label->value = AssemblerCurrentAddress(&ASM);
     label->exported = true;
-
+    label->defined = true;
+    
     // Output relocation R_RISCV_PCREL_HI20 or R_RISCV_GOT_HI20
     //   auipc reg, 0
     AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,
@@ -1685,7 +1741,8 @@ static void Assemble_lla(RVAssembler* assembler) {
     AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
     label->value = AssemblerCurrentAddress(&ASM);
     label->exported = true;
-
+    label->defined = true;
+    
     // Output relocation R_RISCV_PCREL_HI20
     //   auipc reg, 0
     AssembleUType(assembler, RV_OPCODE(auipc), reg, &symbol_name,

@@ -27,6 +27,7 @@
 #include "map.h"
 #include "preprocessor.h"
 #include "syntax.h"
+#include "binary_tree.h"
 
 typedef struct {
   int32_t inst_address;
@@ -49,6 +50,7 @@ typedef enum {
 } AssemblerSymbolBinding;
 
 typedef struct AssemblerSymbol {
+  BinaryTreeNode header;
   String name;
   AssemblerSymbolType type;
   AssemblerSymbolBinding binding;
@@ -59,7 +61,9 @@ typedef struct AssemblerSymbol {
   int32_t index;    // Symbol index.
   bool exported;    // Symbol is to be exported to object file.
   bool is_label;    // Is a section-local label.
+  bool is_forward_declared;
   int32_t alignment;
+  bool is_constant;   // Not subject to relocation.
 } AssemblerSymbol;
 
 AssemblerSymbol* NewAssemblerSymbol(const char* name, int32_t section,
@@ -133,7 +137,7 @@ typedef struct Assembler {
   int* reloc_types;           // Relocation types.
   bool pic;                   // Position Independent Code.
   Dwarf dwarf;                // Debugging information.
-  
+  bool absolute;              // All symbols are absolute.
   // Function to define a label.  This can be overridden by architecture
   // specific assemblers to handle branches and labels.
   AssemblerSymbol* (*define_label)(struct Assembler*, String*);
@@ -161,10 +165,12 @@ void AssemblerEmitWord(Assembler* assembler, int section, int32_t word);
 void AssemblerEmitByte(Assembler* assembler, int section, uint8_t byte);
 void AssemblerEmitHalf(Assembler* assembler, int section, uint16_t half);
 void AssemblerEmitLong(Assembler* assembler, int section, uint64_t l);
+int64_t AssemblerEvaluateKnownExpression(Assembler* assembler, bool* known);
 int64_t AssemblerEvaluateExpression(Assembler* assembler);
 double AssemblerGetDoubleConst(Assembler* assembler);
 
 void AssemblerError(Assembler* assembler, const char* format, ...);
+void AssemblerErrorAtLocation(Assembler* assembler, SourceLocation location, const char* format, ...);
 void AssemblerWarning(Assembler* assembler, const char* warn,
                       const char* format, ...);
 

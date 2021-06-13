@@ -18,6 +18,8 @@ int syscall(int n, ...) {
               );
 }
 #elif defined(__p_code__)
+#elif defined(__6502__)
+// Implemented in 6502runtime.s
 #else
 #error "Unknown architecture"
 #endif

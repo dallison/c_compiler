@@ -202,7 +202,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
 
       // Output text directly into assembly output.
       fprintf(fp, "\t%s\n", lit->value.value);
-      lit->disabled = true;
+      lit->base.disabled = true;
       return;
     }
 

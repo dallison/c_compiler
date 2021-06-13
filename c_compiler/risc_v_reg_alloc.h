@@ -50,13 +50,14 @@ typedef struct {
   BitSet used_int_regs;
   BitSet used_float_regs;
   
-  int spilled_region_size;
+  int current_spilled_region_size;
+  int max_spilled_region_size;
+  BitSet preserved_instructions;    // Instructions needing preserved regs.
 } RVRegisterAllocator;
 
 void RVRegisterAllocatorInit(RVRegisterAllocator* alloc,
                              struct RVGenerator* rv);
 RVRegisterAllocator* NewRVRegisterAllocator(struct RVGenerator* pcode);
-void RVRegisterAllocatorReserveRegisters(RVRegisterAllocator* allocator);
 const char* RVRegisterNameFromNum(int num, RVRegisterType type, char* buf,
                                   size_t len);
 

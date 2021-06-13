@@ -12,6 +12,7 @@
 
 int errno;
 
+
 int open(const char* filename, int mode) {
   return syscall(SYS_OPEN, filename, mode);
 }
@@ -32,21 +33,6 @@ long lseek(int fd, fpos_t pos, int whence) {
   return syscall(SYS_LSEEK, fd, pos, whence);
 }
 
-void* malloc(size_t n) {
-  void* addr;
-  int v = syscall(SYS_MALLOC, n, &addr);
-  return v == 0 ? NULL: addr;
-}
-
-void free(void* p) {
-  syscall(SYS_FREE, (unsigned long)p);
-}
-
-void* realloc(void* p, size_t n) {
-  void* addr;
-  int v = syscall(SYS_REALLOC, p, n, &addr);
-  return v == 0 ? NULL : addr;
-}
 
 void abort() {
   syscall(SYS_ABORT);
