@@ -728,7 +728,7 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
     block->num_spills = block->idom->num_spills;
     allocator->current_spilled_region_size = block->num_spills * 8;
   }
-#endif'
+#endif
   
   for (TargetInstruction* inst = block->code;
        inst != NULL && inst != block->end_code;

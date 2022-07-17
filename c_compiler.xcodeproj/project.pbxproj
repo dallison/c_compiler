@@ -1643,6 +1643,7 @@
 				E563385320B0B39200368428 /* p_code_optimize.h */,
 				E563385420B0B39200368428 /* p_code_optimize.c */,
 				E5360BB9200411D100EDD8F1 /* p_code_target.c */,
+				E5360BBA200411D100EDD8F1 /* p_code_target.h */,
 			);
 			name = "P-Code";
 			sourceTree = "<group>";
@@ -2304,7 +2305,6 @@
 		E5E0356B20C848F8006624C7 /* Assembler */ = {
 			isa = PBXGroup;
 			children = (
-				E5360BBA200411D100EDD8F1 /* p_code_target.h */,
 				E53AB9E31FFB056100DBD2FD /* assembler.c */,
 				E53AB9E41FFB056100DBD2FD /* assembler.h */,
 				E5E13092252BC05600EEE6B7 /* asm_expr.h */,
