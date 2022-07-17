@@ -21,7 +21,19 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
 static void Trap() {}
 
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 1) {
+  if (inst->id == 63) {
+    Trap();
+  }
+}
+
+static void TrapSpill(TargetInstruction* inst) {
+  if (inst->id == 63) {
+    Trap();
+  }
+}
+
+static void TrapReload(TargetInstruction* inst) {
+  if (inst->id == 781) {
     Trap();
   }
 }
@@ -105,6 +117,26 @@ static struct {
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
 
+static void DumpRegisters(RVRegisterAllocator* allocator) {
+  char buf[32];
+  for (RVRegisterType type = kRVRegTypeInt; type <= kRVRegTypeFloat; type++) {
+    RVRegister* regs =
+        type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+    for (int i = 0; i < NUM_REG_RANGES; i++) {
+      if (register_ranges[i].type == type) {
+        for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+          if (regs[j].base.owner == NULL) {
+            printf("%s(x%d): free\n", RVRegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num);
+          } else {
+            TargetInstruction* owner = regs[j].base.owner;
+            printf("%s(x%d): owner: @%d %s\n", RVRegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num, owner->id,
+                   RVOpcodeName(owner->opcode));
+          }
+        }
+      }
+    }
+  }
+}
 
 static void AssignRegister(RVRegister* reg, TargetInstruction* inst) {
   assert(inst->reg == NULL);
@@ -164,11 +196,13 @@ static void FreeRegisters(RVRegisterAllocator* allocator,
       if (RVIsFixedRegister(op)) {
         continue;
       }
+#if 0
       if (op->opcode == RV_OP(reload) || op->opcode == RV_OP(spill)) {
         continue;
       }
+#endif
       TargetRegister* reg = op->reg;
-      if (reg != NULL && !reg->reserved) {
+      if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
         assert(op->uses >= 0);
         if (op->uses == 0) {
@@ -243,10 +277,12 @@ static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
-           if (owner->opcode == RV_OP(spill) || owner->opcode == RV_OP(reload)) {
+#if 0
+          if (owner->opcode == RV_OP(spill) || owner->opcode == RV_OP(reload)) {
             // Not spill or reload instruction.
             continue;
           }
+#endif
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
           int cost = SpillCost(owner);
           if (cost < min_cost) {
@@ -257,11 +293,14 @@ static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
       }
     }
   }
-  assert(victim != NULL);
+  if (victim == NULL) {
+    DumpRegisters(allocator);
+    abort();
+  }
   return victim;
 }
 
-static bool NotProcessed(TargetInstruction* inst) {
+static bool NotProcessed(TargetInstruction* inst, void* data) {
   return (inst->flags & TARGET_INST_PROCESSED) == 0;
 }
 
@@ -273,16 +312,17 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   // 2. Offset into spill region.
   // We don't set the spilled instruction yet because TargetRetargetInstruction
   // will see it and retarget it to the spill.
+  TrapSpill(inst);
   TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)RV_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->rv->base,
                                                                         NULL,
-                                                                        kTargetTypeWord,
+                                                                        kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
   allocator->current_spilled_region_size += 8;    // Space for one register.
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
-  // printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
+  printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
  
   if (RVIsVarRegister(inst)) {
     // Spilling a varreg.  This instruction is in the entry block but
@@ -301,7 +341,8 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   // user has already been processed this will have no effect.
   // NOTE: this will transfer all uses of the inst to the spill, leaving
   // the users of inst empty and its uses count 0.
-  TargetRetargetInstructionIf(inst, spill, NotProcessed);
+  TargetRetargetInstructionIf(inst, spill, NotProcessed, NULL);
+  spill->uses = inst->uses;
   spill->operand[0] = inst;
   spill->reg = inst->reg;
   reg->base.owner = NULL;
@@ -399,7 +440,6 @@ static void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
   assert(inst->opcode == RV_OP(rmov) || inst->opcode == RV_OP(rmovf) ||
          inst->opcode == RV_OP(rmovd));
-  assert(inst->users.length == 0);
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
@@ -417,6 +457,7 @@ static void AllocateForRmov(RVRegisterAllocator* allocator,
     inst->opcode = (TargetOpcode)RV_OP(reload);
     inst->operand[0] = src;
     inst->operand[1] = NULL;
+    TrapReload(inst);
   } else {
     if (RVIsVarRegister(src) && src->reg == NULL) {
       // Delayed allocation of variable register.
@@ -438,12 +479,15 @@ static void ReloadSpills(RVRegisterAllocator* allocator,
     if (op != NULL && op->opcode == RV_OP(spill)) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)RV_OP(reload),
                                                         op);
+      TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
       inst->operand[i] = reload;
       RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
       RVRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);
+      // This reload is for a single instruction.
+      reload->uses = 1;
     }
   }
 }
@@ -506,10 +550,10 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
   FreeRegisters(allocator, inst);
   
   switch ((RVOpcode)inst->opcode) {
-    case RV_OP(constb):
-    case RV_OP(consth):
-    case RV_OP(constw):
-    case RV_OP(constx):
+    case RV_OP(const8):
+    case RV_OP(const16):
+    case RV_OP(const32):
+    case RV_OP(const64):
     case RV_OP(constf):
     case RV_OP(constd):
     case RV_OP(symbol):
@@ -586,7 +630,7 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
       break;
 
-    case RV_OP(resultx):
+    case RV_OP(resulti):
       reg = &allocator->int_regs[RV_INT_RETURN_REG];
       break;
 
@@ -650,7 +694,7 @@ static void InitializeBasicBlockRegisters(RVRegisterAllocator* allocator,
   // Now allocate the registers to the inputs.
   for (size_t i = 0; i < block->inputs.length; i++) {
     TargetInstruction* inst = block->inputs.value.p[i];
-    if (RVIsVarRegister(inst) && inst->reg == NULL) {
+    if (inst->reg == NULL) {
       continue;
     }
     if (inst->opcode == RV_OP(spill) ||
@@ -676,6 +720,7 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   // other registers should be free at this point.
   InitializeBasicBlockRegisters(allocator, block);
   
+#if 0
   // Unless we are the entry block, propagate the spill count from
   // the idom.  Use this to calculate the current spill region size
   // and thus offsets for spills in this block.
@@ -683,6 +728,7 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
     block->num_spills = block->idom->num_spills;
     allocator->current_spilled_region_size = block->num_spills * 8;
   }
+#endif'
   
   for (TargetInstruction* inst = block->code;
        inst != NULL && inst != block->end_code;

@@ -11,7 +11,7 @@
 
 #include "loader_arch.h"
 
-void _6502LoaderArchitectureInit(LoaderArchitecture* arch);
+void W65C02LoaderArchitectureInit(LoaderArchitecture* arch);
 LoaderArchitecture* New6502LoaderArchitecture(void);
 
 #endif /* loader_arch_6502_h */

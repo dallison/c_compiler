@@ -45,10 +45,10 @@ typedef enum {
   RV_OP(tmp),
 
   // Constants.
-  RV_OP(constb),
-  RV_OP(consth),
-  RV_OP(constw),
-  RV_OP(constx),
+  RV_OP(const8),
+  RV_OP(const16),
+  RV_OP(const32),
+  RV_OP(const64),
   RV_OP(constf),
   RV_OP(constd),
 
@@ -74,7 +74,7 @@ typedef enum {
   RV_OP(tp),  // Thread pointer pseudo operation.
 
   // Function result registers.
-  RV_OP(resultx),
+  RV_OP(resulti),
   RV_OP(resultf),
   RV_OP(resultd),
 

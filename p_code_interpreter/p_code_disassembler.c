@@ -7,6 +7,7 @@
 //
 
 #include "p_code_disassembler.h"
+#include <inttypes.h>
 
 // Meaning of dest_type and src_type:
 // 'r': integer register
@@ -197,19 +198,19 @@ static void Print96(int32_t inst, int32_t* pc, int64_t value, FILE* fp) {
     case PCODE_OP(movdc):
     case PCODE_OP(movxc):
       sep = PrintOperand(DEST(inst), inst_96[opcode].dest_type, "", fp);
-      fprintf(fp, "%s#0x%llx", sep, value);
+      fprintf(fp, "%s#0x%" PRIx64 "", sep, value);
       break;
     case PCODE_OP(jmp):
     case PCODE_OP(call):
     case PCODE_OP(cjmp): {
       int64_t addr = (int64_t)pc + value;
-      fprintf(fp, "0x%llx", addr);
+      fprintf(fp, "0x%" PRIx64 "", addr);
       break;
     }
     case PCODE_OP(adr): {
       PrintOperand(DEST(inst), 'r', "", fp);
       int64_t addr = (int64_t)pc + value;
-      fprintf(fp, ", 0x%llx", addr);
+      fprintf(fp, ", 0x%" PRIx64 "", addr);
       break;
     }
   }
@@ -224,7 +225,7 @@ void* DisassemblePCodeInstruction(PCodeInterpreter* interpreter, void* p, FILE* 
     symbol_name = interpreter->current_symbol->name;
     offset = (uint64_t)p - interpreter->current_symbol->start;
   }
-  fprintf(fp, "%s+0x%llx: %p  ", symbol_name, offset, p);
+  fprintf(fp, "%s+0x%" PRIx64 ": %p  ", symbol_name, offset, p);
   int32_t inst = *pc++;
   if ((inst & 0x80000000) == 0) {
     Print32(inst, fp);

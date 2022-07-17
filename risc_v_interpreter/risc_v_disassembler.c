@@ -8,6 +8,7 @@
 
 #include "risc_v_disassembler.h"
 #include <stdbool.h>
+#include <inttypes.h>
 
 // Find a register by searching for a free one in a set of non-overlapping
 // ranges.
@@ -164,7 +165,7 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
     symbol_name = interpreter->current_symbol->name;
     offset = (uint64_t)p - interpreter->current_symbol->start;
   }
-  fprintf(fp, "%s+0x%llx: %p  ", symbol_name, offset, pc);
+  fprintf(fp, "%s+0x%" PRIx64 ": %p  ", symbol_name, offset, pc);
 
   // Fetch instruction.
   int32_t inst = *pc;
@@ -300,14 +301,14 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
       int64_t immed = inst >> 12;  // Auto sign extended to 64 bits.
       PrintMnemonic(fp, "lui");
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
-      fprintf(fp, ", 0x%llx", immed);
+      fprintf(fp, ", 0x%" PRIx64 "", immed);
       break;
     }
     case RV_OPCODE(auipc): {
       int64_t immed = inst >> 12;  // Auto sign extended to 64 bits.
       PrintMnemonic(fp, "auipc");
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
-      fprintf(fp, ", 0x%llx        // 0x%llx", immed,
+      fprintf(fp, ", 0x%" PRIx64 "        // 0x%" PRIx64 "", immed,
               (int64_t)pc + (immed << 12));
       break;
     }
@@ -321,7 +322,7 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
       immed >>= 63 - 20;
       PrintMnemonic(fp, "jal");
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
-      fprintf(fp, ", 0x%llx", (int64_t)pc + immed);
+      fprintf(fp, ", 0x%" PRIx64 "", (int64_t)pc + immed);
       break;
     }
     case RV_OPCODE(jalr): {
@@ -335,7 +336,7 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
       DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
       DisassemblePrintRegister(fp, rs1, kRegTypeInt, ", ");
       int64_t reg_value = interpreter->iregs[rs1];
-      fprintf(fp, ", %llx        // 0x%llx", immed, reg_value + immed);
+      fprintf(fp, ", %" PRIx64 "        // 0x%" PRIx64 "", immed, reg_value + immed);
       break;
     }
     case RV_OPCODE(branch): {
@@ -349,7 +350,7 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
       PrintMnemonic(fp, branches[funct3]);
       DisassemblePrintRegister(fp, rs1, kRegTypeInt, "");
       DisassemblePrintRegister(fp, rs2, kRegTypeInt, ", ");
-      fprintf(fp, ", 0x%llx", (int64_t)pc + offset);
+      fprintf(fp, ", 0x%" PRIx64 "", (int64_t)pc + offset);
       break;
     }
     case RV_OPCODE(load): {

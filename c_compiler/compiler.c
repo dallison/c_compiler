@@ -227,8 +227,14 @@ static void InitFloatingPoint(ASTNode* expr,
       float fvalue = (float)value;
       init_out->value.word = *((int32_t*)&fvalue);
     } else if (TypeIsDouble(type) || TypeIsLongDouble(type)) {
-      init_out->type = kInitTypeLong;
-      init_out->value._long = *((int32_t*)&value);
+      if (type->size == 4) {
+        init_out->type = kInitTypeWord;
+        float f = value;
+        init_out->value.word = *((int32_t*)&f);
+      } else {
+        init_out->type = kInitTypeLong ;
+        init_out->value._long = *((int64_t*)&value);
+      }
     } else {
       assert(false);
     }
@@ -242,16 +248,17 @@ static void InitFloatingPoint(ASTNode* expr,
 
 static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
                        Vector* initializers);
+static ASTNode* InitCompoundLiteral(ASTNode* node);
 
 static void InitPointer(ASTNode* expr,
                         ASTNode* subinit,
                         Initializer* init_out,
                         int offset,
                         Vector* initializers) {
-  if (expr->op == AST_OP(string)) {
+  if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
     // String literal.
     ConstantASTNode* string_node = (ConstantASTNode*)expr;
-    int literal_id = CompilerAddStringLiteral(string_node->value.string);
+    int literal_id = CompilerAddStringLiteral(string_node->value.string, expr->op == AST_OP(string_wide));
     init_out->type = kInitTypeString;
     init_out->value.literal_id = literal_id;
     init_out->offset = offset;
@@ -283,10 +290,23 @@ static void InitPointer(ASTNode* expr,
     init_out->value.symbol = id_node->symbol;
     init_out->offset = offset;
     VectorAppend(initializers, init_out);
-  } else {
-    SemanticError(var_node,
-                  "Illegal static initializer: need address of variable");
+    return;
   }
+  if (var_node->op == AST_OP(compound_literal)) {
+    // &(foo){..}
+    // The CompoundLiteralASTNode contains a symbol.  We take its address.
+    InitCompoundLiteral(var_node);
+    
+    CompoundLiteralASTNode* c = (CompoundLiteralASTNode*)var_node;
+    IdentifierASTNode* id_node = (IdentifierASTNode*)c->sym;
+    init_out->type = kInitTypeSymbol;
+    init_out->value.symbol = id_node->symbol;
+    init_out->offset = offset;
+    VectorAppend(initializers, init_out);
+    return;
+  }
+  SemanticError(var_node,
+                "Illegal static initializer: need address of variable");
 }
 
 static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
@@ -308,10 +328,10 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
       init_out->value.symbol = id_node->symbol;
       init_out->offset = offset;
       VectorAppend(initializers, init_out);
-    } else if (expr->op == AST_OP(string)) {
+    } else if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
       // String literal.
       ConstantASTNode* string_node = (ConstantASTNode*)expr;
-      int literal_id = CompilerAddStringLiteral(string_node->value.string);
+      int literal_id = CompilerAddStringLiteral(string_node->value.string, expr->op == AST_OP(string_wide));
       init_out->type = kInitTypeString;
       init_out->value.literal_id = literal_id;
       init_out->offset = offset;
@@ -372,6 +392,28 @@ static void InitArray(ASTNode* expr, ASTNode* subinit, int offset,
   VectorAppend(initializers, init_out);
 }
 
+static void ExpandBracedInitializer(BracedInitializerASTNode* init,
+                                    int dest_offset, Vector* initializers);
+
+static ASTNode* InitCompoundLiteral(ASTNode* node) {
+  CompoundLiteralASTNode* lit = (CompoundLiteralASTNode*)node;
+  IdentifierASTNode* sym_node = (IdentifierASTNode*)lit->sym;
+  
+  InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
+  StringInit(&var->name, sym_node->symbol->name.value);
+  var->is_global = !StorageIs(sym_node->symbol->storage, STO(static));
+  VectorInit(&var->initializers);
+  var->size = sym_node->symbol->type->size;
+  var->is_tls = StorageIs(sym_node->symbol->storage, STO(thread));
+  var->is_local = sym_node->symbol->flags.is_local;
+  var->symbol_id = sym_node->symbol->id;
+  var->alignment = TypeRecordAlignment(sym_node->symbol->type);
+  ExpandBracedInitializer((BracedInitializerASTNode*)lit->initializer, 0,
+                          &var->initializers);
+  VectorAppend(&compiler->initialized_static_variables, var);
+  return lit->initializer;
+}
+
 // Expand a braced initializer into the vector given.
 // The initializer has been simplified into a braced initializer
 // containing only designated initializers.
@@ -400,13 +442,41 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
         }
       }
     }
-    if (TypeIsArray(designated_init->base.type)) {
+    if (designated_init->init->op == AST_OP(compound_literal)) {
+      ASTNode* initval = InitCompoundLiteral(designated_init->init);
+      ExpandBracedInitializer((BracedInitializerASTNode*)initval, offset, initializers);
+    } else if (TypeIsArray(designated_init->base.type)) {
       InitArray(designated_init->init, subinit, offset, initializers);
     } else {
       // Whole struct is not possible at static level since they
       // are not compile-time constants.
       InitScalar(designated_init->init, subinit, offset, initializers);
     }
+  }
+}
+
+static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* init) {
+  TypeRecord* type = symbol->type;
+  if (!TypeIsScalar(type)) {
+    return;
+  }
+  if ((type->qualifiers & kQualConst) == 0) {
+    return;
+  }
+  // Take first element of braced initializer and assign it to the value of
+  // the symbol.
+  if (init->initializers->length != 1) {
+    return;
+  }
+  ASTNode* subinit = (ASTNode*)init->initializers->value.p[0];
+  assert(subinit->op == AST_OP(designated_init));
+
+  DesignatedInitializerASTNode* designated_init =
+      (DesignatedInitializerASTNode*)subinit;
+  if (TypeIsFloatingPoint(type)) {
+    symbol->flags.value_set = EvaluateFloatingPointExpression(designated_init->init, &symbol->value.fvalue);
+  } else {
+    symbol->flags.value_set = EvaluateIntegerExpression(designated_init->init, &symbol->value.ivalue);
   }
 }
 
@@ -424,6 +494,7 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
   ExpandBracedInitializer((BracedInitializerASTNode*)init, 0,
                           &var->initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
+  AssignScalarValueToConst(decl->symbol, (BracedInitializerASTNode*)init);
 }
 
 void InitializerDelete(Initializer* init) {
@@ -453,10 +524,10 @@ static void LiteralInit(Literal* lit, LiteralType type) {
   lit->disabled = false;
 }
 
-int CompilerAddStringLiteral(String* value) {
+int CompilerAddStringLiteral(String* value, bool is_wide) {
   StringLiteral* literal = malloc(sizeof(StringLiteral));
-  LiteralInit(&literal->base, kLiteralString);
-  StringInit(&literal->value, value->value);
+  LiteralInit(&literal->base, is_wide ? kLiteralWideString : kLiteralString);
+  StringInitFromSegment(&literal->value, value->value, value->length);
   VectorAppend(&compiler->literals, literal);
   return literal->base.id;
 }
@@ -478,6 +549,7 @@ StringLiteral* CompilerFindStringLiteral(int literal_id) {
 void LiteralDelete(Literal* literal) {
   switch (literal->type) {
     case kLiteralString:
+    case kLiteralWideString:
       StringDestruct(&((StringLiteral*)literal)->value);
       break;
     case kLiteralBuffer:
@@ -491,7 +563,8 @@ int CompilerAddBufferLiteral(const void* data, size_t length) {
   BufferLiteral* literal = malloc(sizeof(BufferLiteral));
   LiteralInit(&literal->base, kLiteralBuffer);
   BufferInit(&literal->value);
-  BufferAppend(&literal->value, data, length);
+  literal->base.disabled = true;          // Initially disabled.
+  BufferAppend(&literal->value, (char*)data, length);
   VectorAppend(&compiler->literals, literal);
   return literal->base.id;
 }
@@ -717,6 +790,8 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
       "#define __attribute __attribute__\n"
       "#define __inline inline\n"
       "#define __signed signed\n"
+      "#define __restrict restrict\n"
+      "#define __restrict__ restrict\n"
       "\n");
 
   Lex* old_lex = preprocessor->lex;
@@ -766,8 +841,6 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
   compiler->current_include_path_index = 0;
-  PreprocessorInit(&compiler->preprocessor);
-  SyntaxInit(&compiler->syntax, &compiler->lex);
   
   char dirname[4096];
   char* wd = getcwd(dirname, sizeof(dirname));
@@ -868,7 +941,10 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
   } else if (StringEqual(compiler->target_name, "6502")) {
     compiler->target = New6502Target();
     static_only = true;
-  } else {
+  } else if (StringEqual(compiler->target_name, "65c02")) {
+    compiler->target = New65c02Target();
+    static_only = true;
+ } else {
     fprintf(stderr, "Unknown -target architecture %s\n", compiler->target_name->value);
     exit(1);
   }
@@ -887,10 +963,17 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
   compiler->int_size = compiler->target->int_size;
   compiler->long_size = compiler->target->long_size;
   compiler->long_long_size = compiler->target->long_long_size;
+  compiler->float_size = compiler->target->float_size;
+  compiler->double_size = compiler->target->double_size;
+  compiler->wchar_size = compiler->target->wchar_size;
   compiler->code_preference = compiler->target->code_preference;
   compiler->call_return_fixed_reg = compiler->target->call_return_fixed_reg;
-  compiler->callee_save = compiler->target->callee_save;
   compiler->keep_ssa = compiler->target->keep_ssa;
+  compiler->ir_optimizations = compiler->target->ir_optimizations;
+  compiler->prepend_underscore = compiler->target->prepend_underscore;
+  compiler->target_flags = compiler->target->flags;
+  
+  compiler->alignment = compiler->target->alignment;
 
   compiler->print_front_end =
       OptionBoolValue(kOptionPrintFrontend, options, false);
@@ -913,6 +996,9 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
       exit(1);
     }
   }
+  
+  PreprocessorInit(&compiler->preprocessor);
+  SyntaxInit(&compiler->syntax, &compiler->lex);
 }
 
 // Process macro definition and include path options and process warning
@@ -1294,4 +1380,43 @@ String* CompileTranslationUnitFromString(const char* filename, const char* code,
   CompilerDelete(compiler);
   compiler = NULL;
   return object_file;
+}
+
+int CharSize() {
+  return 1;
+}
+
+int IntSize(void) {
+  return compiler->int_size;
+}
+int ShortSize(void) {
+  return compiler->short_size;
+
+}
+
+int PointerSize(void) {
+  return compiler->pointer_size;
+
+}
+
+int BoolSize(void) {
+  return compiler->bool_size;
+
+}
+
+int LongSize(void) {
+  return compiler->long_size;
+
+}
+
+int LongLongSize(void) {
+  return compiler->long_long_size;
+}
+
+int FloatSize(void) {
+  return compiler->float_size;
+}
+
+int DoubleSize(void) {
+  return compiler->double_size;
 }

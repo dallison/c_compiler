@@ -471,7 +471,7 @@ bool RVGeneratesOutput(TargetInstruction* inst) {
   switch ((RVOpcode)inst->opcode) {
     case RV_OP(ivarreg):
     case RV_OP(fvarreg):
-    case RV_OP(resultx):
+    case RV_OP(resulti):
     case RV_OP(resultf):
     case RV_OP(resultd):
       return false;
@@ -525,10 +525,10 @@ bool RVIsStore(TargetInstruction* inst) {
 
 bool RVIsIntConst(TargetInstruction* inst) {
   switch ((RVOpcode)inst->opcode) {
-    case RV_OP(constw):
-    case RV_OP(constb):
-    case RV_OP(consth):
-    case RV_OP(constx):
+    case RV_OP(const32):
+    case RV_OP(const8):
+    case RV_OP(const16):
+    case RV_OP(const64):
       return true;
     default:
       return false;
@@ -537,10 +537,10 @@ bool RVIsIntConst(TargetInstruction* inst) {
 
 bool RVIsConst(TargetInstruction* inst) {
   switch ((RVOpcode)inst->opcode) {
-    case RV_OP(constw):
-    case RV_OP(constb):
-    case RV_OP(consth):
-    case RV_OP(constx):
+    case RV_OP(const32):
+    case RV_OP(const8):
+    case RV_OP(const16):
+    case RV_OP(const64):
     case RV_OP(constf):
     case RV_OP(constd):
       return true;
@@ -660,7 +660,7 @@ bool RVIsFixedRegister(TargetInstruction* inst) {
 
 bool RVIsResult(TargetInstruction* inst) {
   switch ((RVOpcode)inst->opcode) {
-     case RV_OP(resultx):
+     case RV_OP(resulti):
       case RV_OP(resultf):
       case RV_OP(resultd):
       return true;
@@ -960,7 +960,6 @@ static TargetInstruction* FloatingPointVariableRegister(RVGenerator* rv, int var
   }
   RegisterVariable* var = malloc(sizeof(RegisterVariable));
   var->varnum = varnum;
-  var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(fvarreg));
   inst->symbol = sym;
@@ -979,7 +978,7 @@ static TargetInstruction* AddImmediate(RVGenerator* rv, TargetInstruction* src,
     imm = -immed;
   }
   TargetInstruction* immed_inst =
-      GetIntConstant(rv, NULL, kTargetTypeWord, immed);
+      GetIntConstant(rv, NULL, kTargetType32Bit, immed);
   if (imm <= 0x7ff) {
     return Emit(rv, NewInstruction2(RV_OP(addi), src, immed_inst));
   }
@@ -991,9 +990,6 @@ static TargetInstruction* SetDestOrMove(RVGenerator* rv,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
                                         RVOpcode rmov_opcode) {
-  if (to->id == 29) {
-    printf("");
-  }
   bool can_set_dest = from->dest == NULL && RVGeneratesOutput(from);
 
   if (can_set_dest) {
@@ -1098,12 +1094,12 @@ static TargetInstruction* LoadImmediate(RVGenerator* rv, RVOpcode opcode,
                                           TargetInstruction* base, int32_t offset) {
   if (RVIsPossibleImmediate(offset)) {
     return Emit(rv, NewInstruction2(opcode, base,
-                                    GetIntConstant(rv, NULL, kTargetTypeWord, offset)));
+                                    GetIntConstant(rv, NULL, kTargetType32Bit, offset)));
   }
   int32_t page_offset;
   TargetInstruction* page_inst = PagedOffsetFrom(rv, base, offset, &page_offset);
   return Emit(rv, NewInstruction2(opcode, page_inst,
-                                  GetIntConstant(rv, NULL, kTargetTypeWord, page_offset)));
+                                  GetIntConstant(rv, NULL, kTargetType32Bit, page_offset)));
 
 }
 
@@ -1111,12 +1107,12 @@ static TargetInstruction* StoreImmediate(RVGenerator* rv, RVOpcode opcode,
                                          TargetInstruction* value, TargetInstruction* base, int32_t offset) {
   if (RVIsPossibleImmediate(offset)) {
     return Emit(rv, NewInstruction3(opcode, value, base,
-                                    GetIntConstant(rv, NULL, kTargetTypeWord, offset)));
+                                    GetIntConstant(rv, NULL, kTargetType32Bit, offset)));
   }
   int32_t page_offset;
   TargetInstruction* page_inst = PagedOffsetFrom(rv, base, offset, &page_offset);
   return Emit(rv, NewInstruction3(opcode, value, page_inst,
-                                  GetIntConstant(rv, NULL, kTargetTypeWord, page_offset)));
+                                  GetIntConstant(rv, NULL, kTargetType32Bit, page_offset)));
 
 }
 
@@ -1146,7 +1142,7 @@ static TargetInstruction* Memcpy(RVGenerator* rv, TargetInstruction* dest_addr,
   // Length in a2.
   TargetInstruction* size = Emit(
       rv, NewInstruction1(RV_OP(li),
-                          GetIntConstant(rv, NULL, kTargetTypeWord, length)));
+                          GetIntConstant(rv, NULL, kTargetType32Bit, length)));
   TargetInstruction* arg2 = SetDestOrMove(rv, size, IntArgumentRegister(rv, 2),
                                            RV_OP(rmov));
   //TargetInstruction* arg2 =
@@ -1202,7 +1198,7 @@ static TargetInstruction* Memzero(RVGenerator* rv, TargetInstruction* dest_addr,
   // Third parameter to memset is the length.
   TargetInstruction* size = Emit(
       rv, NewInstruction1(RV_OP(li),
-                          GetIntConstant(rv, NULL, kTargetTypeWord, length)));
+                          GetIntConstant(rv, NULL, kTargetType32Bit, length)));
   TargetInstruction* arg2 = SetDestOrMove(rv, size, IntArgumentRegister(rv, 2), RV_OP(rmov));
   //TargetInstruction* arg2 =
   //    Emit(rv, NewInstruction2(RV_OP(rmov), IntArgumentRegister(rv, 2), size));
@@ -1400,10 +1396,10 @@ static TargetInstruction* LoadVariableValue(RVGenerator* rv, IRNode* node,
 static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
   if (IRIsConst(node)) {
     switch (node->opcode) {
-      case IR_OP(constb):
-      case IR_OP(consts):
-      case IR_OP(consti):
-      case IR_OP(constl):
+      case IR_OP(const8):
+      case IR_OP(const16):
+      case IR_OP(const32):
+      case IR_OP(const64):
       case IR_OP(consta):
         if (IRIsZero(node)) {
           // RISC-V has an explicit zero register (x0).  If we are loading
@@ -1426,7 +1422,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
         } else {
           c = Emit(rv, NewInstruction1(
                            RV_OP(li),
-                           GetIntConstant(rv, NULL, kTargetTypeWord, bits)));
+                           GetIntConstant(rv, NULL, kTargetType32Bit, bits)));
         }
         return Emit(rv, NewInstruction1(RV_OP(fmv_w_x), c));
       }
@@ -1440,7 +1436,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
           c = Emit(rv,
                    NewInstruction1(
                        RV_OP(li),
-                       GetIntConstant(rv, NULL, kTargetTypeExtended, bits)));
+                       GetIntConstant(rv, NULL, kTargetType64Bit, bits)));
         }
         return Emit(rv, NewInstruction1(RV_OP(fmv_d_x), c));
       }
@@ -1568,7 +1564,7 @@ static TargetInstruction* MultiplyByConstant(RVGenerator* rv,
         // Shift left by the bitpos.
        inst =
            Emit(rv, NewInstruction2(RV_OP(slli), input,
-                           GetIntConstant(rv, NULL, kTargetTypeWord, bitpos)));
+                           GetIntConstant(rv, NULL, kTargetType32Bit, bitpos)));
       }
       if (left == NULL) {
         left = inst;
@@ -1647,7 +1643,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
         if (RVIsPossibleImmediate(c)) {
           inst = (TargetInstruction*)NewInstruction(RV_OP(addi));
           inst->operand[0] = Materialize(rv, op1);
-          inst->operand[1] = GetIntConstant(rv, NULL, kTargetTypeWord, -c);
+          inst->operand[1] = GetIntConstant(rv, NULL, kTargetType32Bit, -c);
         }
       }
     }
@@ -1755,7 +1751,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
             c = Log2(c);
             inst =
                 NewInstruction2(opcode, Materialize(rv, op1),
-                                GetIntConstant(rv, NULL, kTargetTypeWord, c));
+                                GetIntConstant(rv, NULL, kTargetType32Bit, c));
             ref_counts_ok = true;
           }
         }
@@ -1776,7 +1772,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
         if (RVIsPossibleImmediate(mask)) {
           inst =
                  NewInstruction2(RV_OP(andi), Materialize(rv, op1),
-                                 GetIntConstant(rv, NULL, kTargetTypeWord, mask));
+                                 GetIntConstant(rv, NULL, kTargetType32Bit, mask));
           ref_counts_ok = true;
         } else {
           // It'a always better to use a move and AND than use 'rem'.
@@ -1784,7 +1780,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
           Emit(rv, NewInstruction2(RV_OP(rmov),tmp,
                                    GetIntConstant(rv,
                                                   NULL,
-                                                  kTargetTypeWord, mask)));
+                                                  kTargetType32Bit, mask)));
         
           inst = NewInstruction2(RV_OP(and), Materialize(rv, op1), tmp);
         }
@@ -1903,7 +1899,7 @@ static TargetInstruction* CompareLessThanInt(RVGenerator* rv, IRNode* node,
     // Immediate, use slti.
     return Emit(
         rv, NewInstruction2(RV_OP(slti), Materialize(rv, op1),
-                            GetIntConstant(rv, NULL, kTargetTypeWord, value)));
+                            GetIntConstant(rv, NULL, kTargetType32Bit, value)));
   }
 
   // Constant is too big for an immediate, materialize it into
@@ -2069,13 +2065,13 @@ static void GetAddressAndOffsetFrom(RVGenerator* rv,
                                  TargetInstruction** offset_inst) {
   if (RVIsPossibleImmediate(offset)) {
     *addr_inst = addr;
-    *offset_inst = GetIntConstant(rv, NULL, kTargetTypeWord, offset);
+    *offset_inst = GetIntConstant(rv, NULL, kTargetType32Bit, offset);
     return;
   }
   int page_offset;
   TargetInstruction* page_inst = PagedOffsetFrom(rv, addr, offset, &page_offset);
   *addr_inst = page_inst;
-  *offset_inst = GetIntConstant(rv, NULL, kTargetTypeWord, page_offset);
+  *offset_inst = GetIntConstant(rv, NULL, kTargetType32Bit, page_offset);
 }
 
 static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
@@ -2144,52 +2140,13 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
   return true;
 }
 
-static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
-  RVOpcode opcode;
-  assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value.p[0];
+static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opcode) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
 
   if (!on_stack) {
-    SetLoweredNode(node, addr);
     return addr;
-  }
-
-  switch (node->opcode) {
-    case IR_OP(loadi):
-      opcode = RV_OP(lw);
-      break;
-    case IR_OP(loadb):
-      opcode = RV_OP(lb);
-      break;
-    case IR_OP(loadl):
-      opcode = RV_OP(ld);
-      break;
-    case IR_OP(loads):
-      opcode = RV_OP(lh);
-      break;
-    case IR_OP(loadui):
-      opcode = RV_OP(lwu);
-      break;
-    case IR_OP(loadub):
-      opcode = RV_OP(lbu);
-      break;
-    case IR_OP(loadus):
-      opcode = RV_OP(lhu);
-      break;
-    case IR_OP(loadf):
-      opcode = RV_OP(flw);
-      break;
-    case IR_OP(loadd):
-      opcode = RV_OP(fld);
-      break;
-    case IR_OP(loada):
-      opcode = RV_OP(ld);
-      break;
-    default:
-      assert(false);
   }
 
   TargetInstruction* result = NULL;
@@ -2208,8 +2165,68 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
   if (result == NULL) {
     result = Emit(rv, NewInstruction2(opcode, addr, offset));
   }
-  SetLoweredNode(node, result);
   return result;
+}
+
+static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
+  RVOpcode opcode;
+  assert(node->inputs.length == 1);
+  IRNode* addr_node = node->inputs.value.p[0];
+  
+  switch (node->opcode) {
+    case IR_OP(load32):
+      opcode = RV_OP(lw);
+      break;
+    case IR_OP(load8):
+      opcode = RV_OP(lb);
+      break;
+    case IR_OP(load64):
+      opcode = RV_OP(ld);
+      break;
+    case IR_OP(load16):
+      opcode = RV_OP(lh);
+      break;
+    case IR_OP(loadu32):
+      opcode = RV_OP(lwu);
+      break;
+    case IR_OP(loadu8):
+      opcode = RV_OP(lbu);
+      break;
+    case IR_OP(loadu16):
+      opcode = RV_OP(lhu);
+      break;
+    case IR_OP(loadf):
+      opcode = RV_OP(flw);
+      break;
+    case IR_OP(loadd):
+      opcode = RV_OP(fld);
+      break;
+    case IR_OP(loada):
+      opcode = RV_OP(ld);
+      break;
+    default:
+      assert(false);
+  }
+
+  return SetLoweredNode(node, Load(rv, addr_node, opcode));
+}
+
+static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstruction* src, RVOpcode opcode) {
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
+  // addr is a register.
+  // if the variable is in memory offset will be an integer constant
+  // containing the offset.  Otherwise it is NULL.
+
+  // If we are not on the stack, move the src to the dest.
+  if (!on_stack) {
+    RVOpcode opcode = TypeIsFloatingPoint(addr_node->type) ? RV_OP(rmovf) : RV_OP(rmov);
+    TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
+    return result;
+  }
+
+  return Emit(rv, NewInstruction3(opcode, src, addr, offset));
 }
 
 static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
@@ -2219,37 +2236,21 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
   // Address to store to is the first operand of the store IR node.
   IRNode* addr_node = node->inputs.value.p[0];
 
-  TargetInstruction* addr;
-  TargetInstruction* offset;
-  bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
-  // addr is a register.
-  // if the variable is in memory offset will be an integer constant
-  // containing the offset.  Otherwise it is NULL.
-
   // Value to store is in second input.
   IRNode* src_node = node->inputs.value.p[1];
 
-  // If we are not on the stack, move the src to the dest.
-  if (!on_stack) {
-    TargetInstruction* src = Materialize(rv, src_node);
-    RVOpcode opcode = TypeIsFloatingPoint(addr_node->type) ? RV_OP(rmovf) : RV_OP(rmov);
-    TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
-    SetLoweredNode(node, result);
-    return result;
-  }
-
   // Work out store opcode.
   switch (node->opcode) {
-    case IR_OP(storei):
+    case IR_OP(store32):
       opcode = RV_OP(sw);
       break;
-    case IR_OP(storeb):
+    case IR_OP(store8):
       opcode = RV_OP(sb);
       break;
-    case IR_OP(storel):
+    case IR_OP(store64):
       opcode = RV_OP(sd);
       break;
-    case IR_OP(stores):
+    case IR_OP(store16):
       opcode = RV_OP(sh);
       break;
     case IR_OP(storef):
@@ -2264,14 +2265,9 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
     default:
       assert(false);
   }
-
   TargetInstruction* src = Materialize(rv, src_node);
-  TargetInstruction* result = NULL;
-  result = Emit(rv, NewInstruction3(opcode, src, addr, offset));
 
-  
-  SetLoweredNode(node, result);
-  return result;
+  return SetLoweredNode(node, Store(rv, addr_node, src, opcode));
 }
 
 static struct BranchInfo {
@@ -2488,7 +2484,7 @@ static TargetInstruction* LowerResult(RVGenerator* rv, IRNode* node) {
   switch (node->opcode) {
     case IR_OP(resulti):
     case IR_OP(resulta):
-      result_reg_opcode = RV_OP(resultx);
+      result_reg_opcode = RV_OP(resulti);
       opcode = RV_OP(rmov);
       break;
     case IR_OP(resultf):
@@ -2551,13 +2547,176 @@ static TargetInstruction* LowerZeroExtend(RVGenerator* rv, IRNode* node) {
   if (RVIsPossibleImmediate(mask)) {
     value = Emit(rv, NewInstruction2(
                          RV_OP(andi), value,
-                         GetIntConstant(rv, NULL, kTargetTypeExtended, mask)));
+                         GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
   } else {
     value = Emit(rv, NewInstruction2(RV_OP(and), value,
                                      Materialize(rv, node->inputs.value.p[1])));
   }
   SetLoweredNode(node, value);
   return value;
+}
+
+static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  RVOpcode ld_opcode;
+  RVOpcode st_opcode;
+  switch (node->opcode) {
+    case IR_OP(inc8):
+      ld_opcode = RV_OP(lb);
+      st_opcode = RV_OP(sb);
+      break;
+    case IR_OP(uinc8):
+      ld_opcode = RV_OP(lbu);
+      st_opcode = RV_OP(sb);
+      break;
+    case IR_OP(inc16):
+      ld_opcode = RV_OP(lh);
+      st_opcode = RV_OP(sh);
+      break;
+    case IR_OP(uinc16):
+      ld_opcode = RV_OP(lhu);
+      st_opcode = RV_OP(sh);
+      break;
+   case IR_OP(inc32):
+      ld_opcode = RV_OP(lw);
+      st_opcode = RV_OP(sw);
+      break;
+    case IR_OP(uinc32):
+       ld_opcode = RV_OP(lwu);
+       st_opcode = RV_OP(sw);
+       break;
+    case IR_OP(inc64):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+      ld_opcode = RV_OP(ld);
+      st_opcode = RV_OP(sd);
+     break;
+    case IR_OP(incf):
+      ld_opcode = RV_OP(flw);
+      st_opcode = RV_OP(fsw);
+     break;
+    case IR_OP(incd):
+      ld_opcode = RV_OP(fld);
+      st_opcode = RV_OP(fsd);
+     break;
+    default:
+      abort();
+  }
+  TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  TargetInstruction* inc;
+  IRNode* amount_node = node->inputs.value.p[1];
+  TargetInstruction* amount = GetLoweredNode(amount_node);
+  if (TypeIsFloatingPoint(node->type)) {
+    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? RV_OP(fadd_d) : RV_OP(fadd_s), load, amount));
+  } else  {
+    inc =  AddImmediate(rv, load, RVIntValue(amount));
+  }
+  Store(rv, addr_node, inc, st_opcode);
+  return SetLoweredNode(node, inc);
+}
+
+
+static TargetInstruction* LowerDec(RVGenerator* rv, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  RVOpcode ld_opcode;
+  RVOpcode st_opcode;
+  switch (node->opcode) {
+    case IR_OP(dec8):
+      ld_opcode = RV_OP(lb);
+      st_opcode = RV_OP(sb);
+      break;
+    case IR_OP(udec8):
+      ld_opcode = RV_OP(lbu);
+      st_opcode = RV_OP(sb);
+      break;
+    case IR_OP(dec16):
+      ld_opcode = RV_OP(lh);
+      st_opcode = RV_OP(sh);
+      break;
+    case IR_OP(udec16):
+      ld_opcode = RV_OP(lhu);
+      st_opcode = RV_OP(sh);
+      break;
+   case IR_OP(dec32):
+      ld_opcode = RV_OP(lw);
+      st_opcode = RV_OP(sw);
+      break;
+    case IR_OP(udec32):
+       ld_opcode = RV_OP(lwu);
+       st_opcode = RV_OP(sw);
+       break;
+    case IR_OP(dec64):
+    case IR_OP(udec64):
+    case IR_OP(deca):
+      ld_opcode = RV_OP(ld);
+      st_opcode = RV_OP(sd);
+     break;
+    case IR_OP(decf):
+      ld_opcode = RV_OP(flw);
+      st_opcode = RV_OP(fsw);
+     break;
+    case IR_OP(decd):
+      ld_opcode = RV_OP(fld);
+      st_opcode = RV_OP(fsd);
+     break;
+    default:
+      abort();
+  }
+  TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  TargetInstruction* inc;
+  IRNode* amount_node = node->inputs.value.p[1];
+  TargetInstruction* amount = GetLoweredNode(amount_node);
+  if (TypeIsFloatingPoint(node->type)) {
+    inc =  Emit(rv, NewInstruction2(TypeIsDouble(node->type) ? RV_OP(fsub_d) : RV_OP(fsub_s), load, amount));
+  } else  {
+    inc =  AddImmediate(rv, load, -RVIntValue(amount));
+  }
+  Store(rv, addr_node, inc, st_opcode);
+  return SetLoweredNode(node, inc);}
+
+static TargetInstruction* LowerGetBitField(RVGenerator* rv, IRNode* node) {
+  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
+  int bit_size = (int)IRIntConstValue(node->inputs.value.p[2]);
+  if (TypeIsUnsigned(node->type)) {
+    // Shift right by bit_pos
+    // Mask with bit_size
+    TargetInstruction* lsr = Emit(rv, NewInstruction2(RV_OP(srai), value, GetIntConstant(rv, NULL, kTargetType32Bit, bit_pos)));
+    uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
+    TargetInstruction* m = Emit(rv, NewInstruction2(RV_OP(andi), lsr, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
+    SetLoweredNode(node, m);
+    return m;
+  }
+  // Shift left by 64 - (bit_pos + bit_size).  Top bit in bit 63.
+  // Shift right by 64 - bit_size.
+  TargetInstruction* lsl = Emit(rv, NewInstruction2(RV_OP(slli), value, GetIntConstant(rv, NULL, kTargetType32Bit, 64 - (bit_pos + bit_size))));
+  TargetInstruction* asr = Emit(rv, NewInstruction2(RV_OP(srai), lsl, GetIntConstant(rv, NULL, kTargetType32Bit, 64 - bit_size)));
+
+  SetLoweredNode(node, asr);
+  return asr;
+}
+
+// Shift input left by bit_pos
+// Mask input to bit_size bits (in correct position)
+// Mask output by ~mask
+// Or input into output.
+static TargetInstruction* LowerSetBitField(RVGenerator* rv, IRNode* node) {
+  IRNode* output_node = node->inputs.value.p[0];
+  IRNode* input_node = node->inputs.value.p[1];
+  int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
+  int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
+  uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
+  mask <<= bit_pos;
+  
+  TargetInstruction* input = Materialize(rv, input_node);
+  TargetInstruction* output = Materialize(rv, output_node);
+  TargetInstruction* lsl = Emit(rv, NewInstruction2(RV_OP(slli), input, GetIntConstant(rv, NULL, kTargetType32Bit, bit_pos)));
+  TargetInstruction* m1 = Emit(rv, NewInstruction2(RV_OP(andi), lsl, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
+
+  TargetInstruction* m2 = Emit(rv, NewInstruction2(RV_OP(andi), output, GetIntConstant(rv, NULL, kTargetType32Bit, ~mask)));
+  TargetInstruction* result = Emit(rv, NewInstruction2(RV_OP(ori), m1, m2));
+  SetLoweredNode(node, result);
+  return result;
 }
 
 static TargetInstruction* LowerSignExtend(RVGenerator* rv, IRNode* node) {
@@ -2567,12 +2726,16 @@ static TargetInstruction* LowerSignExtend(RVGenerator* rv, IRNode* node) {
   }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
+  if (diff > 0) {
+    return SetLoweredNode(node, value);
+  }
+  diff = -diff;
   if (diff == 32) {
     // There is a word signextension instruction sext.w
     return SetLoweredNode(node,
                           Emit(rv, NewInstruction1(RV_OP(sext_w), value)));
   }
-  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetTypeWord, diff);
+  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(RV_OP(slli), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(RV_OP(srai), lsl, immed));
 
@@ -2584,8 +2747,8 @@ static TargetInstruction* LowerAlign(RVGenerator* rv, IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
   IRConstant* align = node->inputs.value.p[1];
 
-  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetTypeWord, align->value.ivalue - 1);
-  TargetInstruction* inv_immed = GetIntConstant(rv, NULL, kTargetTypeWord, ~(align->value.ivalue - 1));
+  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, align->value.ivalue - 1);
+  TargetInstruction* inv_immed = GetIntConstant(rv, NULL, kTargetType32Bit, ~(align->value.ivalue - 1));
   TargetInstruction* add = Emit(rv, NewInstruction2(RV_OP(addi), value, immed));
   TargetInstruction* and = Emit(rv, NewInstruction2(RV_OP(andi), add, inv_immed));
 
@@ -2599,7 +2762,7 @@ static TargetInstruction* PushArg(RVGenerator* rv, IRNode* node,
     // No type, use sd instruction.
     return Emit(rv, NewInstruction3(
                         RV_OP(sd), inst, StackPointer(rv),
-                        GetIntConstant(rv, node, kTargetTypeExtended, offset)));
+                        GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   RVOpcode opcode = RV_OP(sd);
   if (TypeIsFloatingPoint(node->type)) {
@@ -2607,7 +2770,7 @@ static TargetInstruction* PushArg(RVGenerator* rv, IRNode* node,
   }
   return Emit(rv, NewInstruction3(
                       opcode, inst, StackPointer(rv),
-                      GetIntConstant(rv, node, kTargetTypeExtended, offset)));
+                      GetIntConstant(rv, node, kTargetType64Bit, offset)));
 }
 
 static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
@@ -2615,7 +2778,7 @@ static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
     // No type, use ld instruction.
     return Emit(rv, NewInstruction2(
                         RV_OP(ld), StackPointer(rv),
-                        GetIntConstant(rv, node, kTargetTypeExtended, offset)));
+                        GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   RVOpcode opcode = RV_OP(ld);
   if (TypeIsFloatingPoint(node->type)) {
@@ -2623,7 +2786,7 @@ static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
   }
   return Emit(rv, NewInstruction2(
                       opcode, StackPointer(rv),
-                      GetIntConstant(rv, node, kTargetTypeExtended, offset)));
+                      GetIntConstant(rv, node, kTargetType64Bit, offset)));
 }
 
 
@@ -2961,7 +3124,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
             // need to load it.
             arg = Emit(rv, NewInstruction2(
                                RV_OP(ld), arg,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 0)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
           }
         }
         PushArg(rv, arg_node, arg, arg_location->location.offset);
@@ -2978,7 +3141,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
             // need to load it.
             arg = Emit(rv, NewInstruction2(
                                RV_OP(ld), arg,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 0)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
           }
         }
         RVOpcode mov_opcode = RV_OP(rmov);
@@ -3077,14 +3240,14 @@ static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
   TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
   TargetInstruction* slli =
       Emit(rv, NewInstruction2(RV_OP(slli), value,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 2)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 2)));
   TargetInstruction* auipc =
       Emit(rv, NewInstruction1(RV_OP(auipc),
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 0)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
   TargetInstruction* add = Emit(rv, NewInstruction2(RV_OP(add), auipc, slli));
   TargetInstruction* jalr =
       Emit(rv, NewInstruction3(RV_OP(jalr), Zero(rv), add,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 12)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 12)));
   jalr->flags |= TARGET_INST_TABLE_JUMP;
   SetLoweredNode(node, jalr);
   return jalr;
@@ -3125,12 +3288,17 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
   } else {
     ap_load = Emit(rv, NewInstruction2(RV_OP(ld), ap_addr, ap_offset));
   }
-  TargetInstruction* result =
-      Emit(rv, NewInstruction2(RV_OP(ld), ap_load,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 0)));
+  TargetInstruction* result;
+  if (TypeIsFloatingPoint(node->type)) {
+    result = Emit(rv, NewInstruction2(RV_OP(fld), ap_load,
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  } else {
+    result = Emit(rv, NewInstruction2(RV_OP(ld), ap_load,
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  }
   TargetInstruction* addi =
       Emit(rv, NewInstruction2(RV_OP(addi), ap_load,
-                               GetIntConstant(rv, NULL, kTargetTypeWord, 8)));
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
   if (on_stack) {
     Emit(rv, NewInstruction3(RV_OP(sd), addi, ap_addr, ap_offset));
   } else {
@@ -3226,20 +3394,20 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(addressof):
       return LowerAddressOf(rv, node);
 
-    case IR_OP(consti):
+    case IR_OP(const32):
     case IR_OP(consta):
-      return GetIntConstant(rv, node, kTargetTypeWord,
+      return GetIntConstant(rv, node, kTargetType32Bit,
                             ((IRConstant*)node)->value.ivalue);
-    case IR_OP(constb):
-      return GetIntConstant(rv, node, kTargetTypeByte,
-                            ((IRConstant*)node)->value.ivalue);
-
-    case IR_OP(consts):
-      return GetIntConstant(rv, node, kTargetTypeHalf,
+    case IR_OP(const8):
+      return GetIntConstant(rv, node, kTargetType8Bit,
                             ((IRConstant*)node)->value.ivalue);
 
-    case IR_OP(constl):
-      return GetIntConstant(rv, node, kTargetTypeExtended,
+    case IR_OP(const16):
+      return GetIntConstant(rv, node, kTargetType16Bit,
+                            ((IRConstant*)node)->value.ivalue);
+
+    case IR_OP(const64):
+      return GetIntConstant(rv, node, kTargetType64Bit,
                             ((IRConstant*)node)->value.ivalue);
 
     case IR_OP(constf):
@@ -3262,27 +3430,58 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(ret):
       return Emit(rv, NewInstruction(RV_OP(ret)));
       
-    case IR_OP(loadi):
-    case IR_OP(loadb):
-    case IR_OP(loadl):
-    case IR_OP(loads):
-    case IR_OP(loadui):
-    case IR_OP(loadub):
-    case IR_OP(loadus):
+    case IR_OP(load32):
+    case IR_OP(load8):
+    case IR_OP(load64):
+    case IR_OP(load16):
+    case IR_OP(loadu32):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
       return LowerLoad(rv, node);
 
       // stores.
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
       return LowerStore(rv, node);
+
+    case IR_OP(inc8):
+    case IR_OP(inc16):
+    case IR_OP(inc32):
+    case IR_OP(inc64):
+    case IR_OP(uinc8):
+    case IR_OP(uinc16):
+    case IR_OP(uinc32):
+    case IR_OP(uinc64):
+   case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
+      return LowerInc(rv, node);
+    case IR_OP(dec8):
+     case IR_OP(dec16):
+     case IR_OP(dec32):
+     case IR_OP(dec64):
+    case IR_OP(udec8):
+     case IR_OP(udec16):
+     case IR_OP(udec32):
+     case IR_OP(udec64):
+    case IR_OP(deca):
+     case IR_OP(decf):
+     case IR_OP(decd):
+    return LowerDec(rv, node);
+      
+    case IR_OP(getbit):
+      return LowerGetBitField(rv, node);
+      
+    case IR_OP(setbit):
+      return LowerSetBitField(rv, node);
 
     case IR_OP(addi):
     case IR_OP(addf):

@@ -43,7 +43,7 @@ static void ShowArchive(ARArchive* archive, const char* filename) {
   }
   for (size_t i = 0; i < archive->files.length; i++) {
     ARFile* file = archive->files.value.p[i];
-    if (file->filename.value.p[0] == '/') {
+    if (file->filename.value[0] == '/') {
       // Filenames beginning with / are special files in the archive.
       continue;
     }

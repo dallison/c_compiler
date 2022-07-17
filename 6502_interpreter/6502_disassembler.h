@@ -6,14 +6,15 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#ifndef _6502_disassembler_h
-#define _6502_disassembler_h
+#ifndef W65C02_disassembler_h
+#define W65C02_disassembler_h
 
 #include <stdio.h>
 #include <stdint.h>
 #include "6502_machine.h"
 #include "loader.h"
 
-void* Disassemble6502Instruction(SymbolScope* current_symbol, uint16_t addr, void* p, FILE* fp);
+void* Disassemble6502Instruction(Loader* loader, SymbolScope* current_symbol, uint16_t addr, void* p, FILE* fp);
+bool NamedReg(const char* name, int* value, int* size, bool* is_addr);
 
-#endif /* _6502_disassembler_h */
+#endif /* W65C02_disassembler_h */

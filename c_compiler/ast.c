@@ -14,6 +14,7 @@
 #include <string.h>
 #include "errors.h"
 #include "symbol.h"
+#include "compiler.h"
 
 static int next_ast_node_id = 1;
 
@@ -198,6 +199,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
 
     case AST_OP(ptr_scale):
       return "ptr-scale";
+      case AST_OP(compound_literal):
+        return "compound_literal";
 
     // Integer to...
     case AST_OP(i2s):
@@ -1225,7 +1228,7 @@ static ASTNodeVirtuals sizeof_vtbl = {SizeofASTNodeDelete, SizeofASTNodePrint,
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
   SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
-  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualConst);
   IntConstantASTNodeInit(&node->base, size, type, location);
   node->base.base.virtuals = &sizeof_vtbl;
   node->expr = NULL;
@@ -1236,7 +1239,7 @@ ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
 ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
                                         SourceLocation location) {
   SizeofASTNode* node = malloc(sizeof(SizeofASTNode));
-  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnsigned, kQualConst);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualConst);
   IntConstantASTNodeInit(&node->base, 0, type, location);
   node->base.base.virtuals = &sizeof_vtbl;
   node->base.base.op = AST_OP(sizeof);
@@ -1811,8 +1814,10 @@ ASTNode* NewForStatementASTNode(ASTNode* e1, ASTNode* e2, ASTNode* e3,
     e3->child_id = 2;
   }
   node->stmt = stmt;
-  stmt->parent = (ASTNode*)node;
-  stmt->child_id = 3;
+  if (stmt != NULL) {
+    stmt->parent = (ASTNode*)node;
+    stmt->child_id = 3;
+  }
   return (ASTNode*)node;
 }
 
@@ -2099,6 +2104,8 @@ static ASTNode* SwitchStatementASTNodeClone(
   to->min_case_value = LLONG_MAX;
   to->max_case_value = LLONG_MIN;
   to->all_cases_covered = false;
+  to->max_case_width = from->max_case_width;
+  to->all_cases_positive = from->all_cases_positive;
   
   // We need to perform semantic analysis again
   to->base.flags &= ~kASTAnalyzed;
@@ -2145,6 +2152,8 @@ ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
   node->min_case_value = LLONG_MAX;
   node->max_case_value = LLONG_MIN;
   node->all_cases_covered = false;
+  node->max_case_width = 0;
+  node->all_cases_positive = false;
   return (ASTNode*)node;
 }
 
@@ -2246,7 +2255,7 @@ static ASTNodeVirtuals asm_vtbl = {AsmASTNodeDelete, AsmASTNodePrint, NULL,
 ASTNode* NewAsmASTNode(String* text, bool is_volatile,
                        SourceLocation location) {
   AsmASTNode* node = malloc(sizeof(AsmASTNode));
-  TypeRecord* type = NewTypeRecord(kTypeVoid, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   ASTNodeInit(&node->base, AST_OP(asm), type, location, &asm_vtbl);
   node->text = text;
   node->is_volatile = is_volatile;
@@ -2388,9 +2397,10 @@ static ASTNodeVirtuals braced_init_vtbl = {
     BracedInitializerASTNodeVisit, NULL};
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,
+                                     TypeRecord* type,
                                      SourceLocation location) {
   BracedInitializerASTNode* node = malloc(sizeof(BracedInitializerASTNode));
-  ASTNodeInit(&node->base, AST_OP(braced_init), NULL, location,
+  ASTNodeInit(&node->base, AST_OP(braced_init), type, location,
               &braced_init_vtbl);
   node->initializers = initializers;
   for (size_t i = 0; i < node->initializers->length; i++) {
@@ -2525,3 +2535,70 @@ bool IsBitfieldReference(ASTNode* node) {
   StructMemberASTNode* member_node = (StructMemberASTNode*)dot_or_arrow->right;
   return StructMemberIsBitField(member_node->member);
 }
+
+
+// Compound literal.
+static void CompoundLiteralASTNodeDelete(ASTNode* node) {
+  CompoundLiteralASTNode* cnode = (CompoundLiteralASTNode*)node;
+  if (cnode->sym != NULL) {
+    ASTNodeDelete(cnode->sym);
+  }
+  if (cnode->initializer != NULL) {
+    ASTNodeDelete(cnode->initializer);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void CompoundLiteralASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  CompoundLiteralASTNode* cnode = (CompoundLiteralASTNode*)node;
+  ASTNodeBasePrint(node, indents, fp);
+  if (cnode->sym != NULL) {
+    ASTNodePrint(cnode->sym, indents + 2, fp);
+  }
+  if (cnode->initializer != NULL) {
+    ASTNodePrint(cnode->initializer, indents + 2, fp);
+  }
+}
+
+static void CompoundLiteralASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                    ASTNode* child, bool delete_old_child) {
+  CompoundLiteralASTNode* node = (CompoundLiteralASTNode*)parent;
+  ASTNode* old = node->initializer;
+  if (child == 0) {
+    node->sym = child;
+  } else {
+    node->initializer = child;
+  }
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* CompoundLiteralASTNodeClone(const ASTNode* node,
+                                 ASTNode* (*func)(ASTNode* node, void*),
+                                 void* data) {
+  CompoundLiteralASTNode* from = (CompoundLiteralASTNode*)node;
+  CompoundLiteralASTNode* to = malloc(sizeof(CompoundLiteralASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->sym = ASTNodeClone(from->sym, func, data, &to->base);
+  to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static ASTNodeVirtuals compound_literal_vtbl = {CompoundLiteralASTNodeDelete, CompoundLiteralASTNodePrint,
+                                    CompoundLiteralASTNodeReplaceChild, CompoundLiteralASTNodeClone, NULL,
+  NULL
+};
+
+ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,
+                        ASTNode* initializer) {
+  CompoundLiteralASTNode* node = malloc(sizeof(CompoundLiteralASTNode));
+  ASTNodeInit(&node->base, AST_OP(compound_literal), sym->type, location, &compound_literal_vtbl);
+  node->sym = sym;
+  sym->parent = (ASTNode*)node;
+  node->initializer = initializer;
+  initializer->parent = (ASTNode*)node;
+  return (ASTNode*)node;
+}
+

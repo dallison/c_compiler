@@ -9,10 +9,13 @@
 #include <stddef.h>
 
 int strncmp(const char* a, const char* b, size_t n) {
-  ssize_t len = n;
-  while (len-- > 0 && *a != '\0') {
+  while (*a != '\0') {
     if (*a != *b) {
       break;
+    }
+    n--;
+    if (n == 0) {
+       break;
     }
     a++;
     b++;

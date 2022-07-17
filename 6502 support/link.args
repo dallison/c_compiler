@@ -1,0 +1,13 @@
+-chdir /Users/dallison/Google\ Drive/c_compiler/6502\ support
+-Wl,-trom
+-static
+-o 6502rom.exe
+bootrom/6502rom.o
+acia.o
+comms.o
+console.o
+device.o
+hexdump.o
+server.o
+utils.o
+

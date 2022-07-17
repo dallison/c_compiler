@@ -25,10 +25,10 @@ typedef enum {
   TARGET_OP(tmp),       // Temporary result.
 
   // Constants.
-  TARGET_OP(constb),    // 8-bit int constant.
-  TARGET_OP(consth),    // 16-bit int constant.
-  TARGET_OP(constw),    // 32-bit int constant.
-  TARGET_OP(constx),    // 64-bit int constant.
+  TARGET_OP(const8),    // 8-bit int constant.
+  TARGET_OP(const16),    // 16-bit int constant.
+  TARGET_OP(const32),    // 32-bit int constant.
+  TARGET_OP(const64),    // 64-bit int constant.
   TARGET_OP(constf),    // 32-bit float constant.
   TARGET_OP(constd),    // 64-bit float constant.
 
@@ -54,7 +54,7 @@ typedef enum {
   TARGET_OP(tp),  // Thread pointer pseudo operation.
 
   // Function result registers.
-  TARGET_OP(resultx),     // Place in int result reg.
+  TARGET_OP(resulti),     // Place in int result reg.
   TARGET_OP(resultf),     // Place in 32-bit float result reg.
   TARGET_OP(resultd),     // Place in 64-bit float result reg.
 
@@ -71,10 +71,10 @@ typedef enum {
 } TargetOpcode;
 
 typedef enum {
-  kTargetTypeByte,       // 8-bit int.
-  kTargetTypeHalf,       // 16-bit int.
-  kTargetTypeWord,       // 32-bit int.
-  kTargetTypeExtended,   // 64-bit int.
+  kTargetType8Bit,       // 8-bit int.
+  kTargetType16Bit,       // 16-bit int.
+  kTargetType32Bit,       // 32-bit int.
+  kTargetType64Bit,   // 64-bit int.
   kTargetTypeFloat,      // 32-bit float.
   kTargetTypeDouble,     // 64-bit float.
   kTargetTypeAddress,    // 32 or 64-bit address.
@@ -89,6 +89,8 @@ typedef struct TargetRegister {
 
 #define TARGET_MAX_OPERANDS 3
 
+struct TargetBasicBlock;
+
 typedef struct TargetInstruction {
   ListElement header;
   TargetOpcode opcode;
@@ -98,7 +100,8 @@ typedef struct TargetInstruction {
   struct TargetInstruction* operand[TARGET_MAX_OPERANDS];
   Vector users;                // Instructions using this instruction's value.
   int uses;                    // Current number of uses.
-  void* block;                 // Target basic block.
+  struct TargetBasicBlock* block;                 // Target basic block.
+  int addr;                    // Calculated address for instruction.
   
   // Flags.  The lower 16 bits are reserved for TargetInstruction use
   // The upper 16 bits are free for code generators.
@@ -186,7 +189,8 @@ typedef struct TargetGenerator {
   bool is_global;         // Function is global.
   int num_calls;          // Number of calls in function.
   bool varargs;           // Function uses variable args.
-
+  bool is_void;           // Function returns void.
+  
   List code;                         // The code.
   TargetInstruction* last_constant;  // Last constant.
   TargetInstruction* first_symbol;   // First symbol.
@@ -254,7 +258,8 @@ TargetInstruction* TargetPrev(TargetInstruction* inst);
 void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst);
 void TargetReplaceInstruction(TargetGenerator* target, TargetInstruction* old, TargetInstruction* new);
 void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new);
-void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new, bool (*predicate)(TargetInstruction*));
+void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
+                                 bool (*predicate)(TargetInstruction*, void* data), void* data);
 void TargetReplaceOperand(TargetInstruction* inst, int op, TargetInstruction* new);
 
 bool TargetIsConst(TargetInstruction* inst);

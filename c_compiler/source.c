@@ -89,11 +89,10 @@ SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
   if (line_index > MAX_LINE_INDEX || length > MAX_TOKEN_LENGTH) {
     return SOURCE_LOCATION_MISSING;
   }
-  void* lineno_value = (void*)((int64_t)lineno);
   // Only append to vector if line number has changeed.
   if (file->lines.length == 0 ||
-      file->lines.value.p[file->lines.length-1] != lineno_value) {
-    VectorAppend(&file->lines, lineno_value);
+      file->lines.value.w[file->lines.length-1] != lineno) {
+    VectorAppend(&file->lines, (void*)((int64_t)lineno));
   } else {
     line_index--;     // One too far since we didn't append to vector.
   }
@@ -122,7 +121,7 @@ void DecodeSourceLocation(SourceLocation location, const char** filename,
     File* file = (File*)all_files.value.p[file_index];
     *filename = file->name.value;
     if (line_index < file->lines.length) {
-      *lineno = (int)file->lines.value.p[line_index];
+      *lineno = (int)file->lines.value.w[line_index];
     }
     *end = *start + length;
   } else {
@@ -143,7 +142,7 @@ void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
   if (file_index < all_files.length) {
     File* file = (File*)all_files.value.p[file_index];
     if (line_index < file->lines.length) {
-      *lineno = (int)file->lines.value.p[line_index];
+      *lineno = (int)file->lines.value.w[line_index];
     }
     *fileno = file_index;
   }
@@ -240,11 +239,13 @@ int SourceGetChar(Source* src) {
   }
 }
 
+
 // Read a line from the source into the 'line'.  This replaces trigraphs and
 // appends lines ending in backslash.
 void SourceReadLine(Source* src, String* line) {
   while (!SourceEof(src)) {
     String newline = {0};
+    int last_ch = '\0';
     for (;;) {
       int ch = SourceGetChar(src);
       if (ch == EOF) {
@@ -254,6 +255,7 @@ void SourceReadLine(Source* src, String* line) {
         break;
       }
       StringAppendChar(&newline, ch);
+      last_ch = ch;
     }
     src->lineno++;
 

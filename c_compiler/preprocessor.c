@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 
 #if defined(__APPLE__)
 #include <dirent.h>
@@ -174,39 +175,76 @@ static void PredefineMacros(Preprocessor* p) {
 
   // These are defined by GCC and clang and are used in header files.  We need
   // to define them too.
-  PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned long");
-  PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned long");
-  PreprocessorDefineMacro(p, "__WCHAR_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__WINT_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INTMAX_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINTMAX_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__SIG_ATOMIC_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT8_TYPE__", "char");
-  PreprocessorDefineMacro(p, "__INT16_TYPE__", "short");
-  PreprocessorDefineMacro(p, "__INT32_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT64_TYPE__", "long long");
-  PreprocessorDefineMacro(p, "__UINT8_TYPE__", "unsigned char");
-  PreprocessorDefineMacro(p, "__UINT16_TYPE__", "unsigned short");
-  PreprocessorDefineMacro(p, "__UINT32_TYPE__", "unsigned int");
-  PreprocessorDefineMacro(p, "__UINT64_TYPE__", "unsigned long long");
-  PreprocessorDefineMacro(p, "__INT_LEAST8_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_LEAST16_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_LEAST32_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_LEAST64_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_LEAST8_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_LEAST16_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_LEAST32_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_LEAST64_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_FAST8_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_FAST16_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_FAST32_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INT_FAST64_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_FAST8_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_FAST16_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_FAST32_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "int");
-  PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
-  PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
+  if (!StringEqual(compiler->target_name, "6502") &&
+      !StringEqual(compiler->target_name, "65c02")) {
+    PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned long");
+    PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned long");
+    PreprocessorDefineMacro(p, "__WCHAR_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__WINT_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INTMAX_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINTMAX_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__SIG_ATOMIC_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__INT16_TYPE__", "short");
+    PreprocessorDefineMacro(p, "__INT32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT64_TYPE__", "long long");
+    PreprocessorDefineMacro(p, "__UINT8_TYPE__", "unsigned char");
+    PreprocessorDefineMacro(p, "__UINT16_TYPE__", "unsigned short");
+    PreprocessorDefineMacro(p, "__UINT32_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__UINT64_TYPE__", "unsigned long long");
+    PreprocessorDefineMacro(p, "__INT_LEAST8_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST64_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST8_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST64_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_FAST8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__INT_FAST16_TYPE__", "short");
+    PreprocessorDefineMacro(p, "__INT_FAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_FAST64_TYPE__", "long");
+    PreprocessorDefineMacro(p, "__UINT_FAST8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__UINT_FAST16_TYPE__", "short");
+    PreprocessorDefineMacro(p, "__UINT_FAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "long");
+    PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
+    PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
+  } else {
+    PreprocessorDefineMacro(p, "__SIZE_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__PTRDIFF_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__WCHAR_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__WINT_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INTMAX_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINTMAX_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__SIG_ATOMIC_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__INT16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT32_TYPE__", "long");
+    PreprocessorDefineMacro(p, "__INT64_TYPE__", "long long");
+    PreprocessorDefineMacro(p, "__UINT8_TYPE__", "unsigned char");
+    PreprocessorDefineMacro(p, "__UINT16_TYPE__", "unsigned int");
+    PreprocessorDefineMacro(p, "__UINT32_TYPE__", "unsigned long");
+    PreprocessorDefineMacro(p, "__UINT64_TYPE__", "unsigned long long");
+    PreprocessorDefineMacro(p, "__INT_LEAST8_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_LEAST64_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST8_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST32_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_LEAST64_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_FAST8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__INT_FAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__INT_FAST32_TYPE__", "long");
+    PreprocessorDefineMacro(p, "__INT_FAST64_TYPE__", "long long");
+    PreprocessorDefineMacro(p, "__UINT_FAST8_TYPE__", "char");
+    PreprocessorDefineMacro(p, "__UINT_FAST16_TYPE__", "int");
+    PreprocessorDefineMacro(p, "__UINT_FAST32_TYPE__", "long");
+    PreprocessorDefineMacro(p, "__UINT_FAST64_TYPE__", "long long");
+    PreprocessorDefineMacro(p, "__INTPTR_TYPE__", "int*");
+    PreprocessorDefineMacro(p, "__UINTPTR_TYPE__", "unsigned int*");
+  }
 }
 
 void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
@@ -225,84 +263,10 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__x86_64__", "1");
   } else if (StringEqual(compiler->target_name, "6502")) {
     PreprocessorDefineMacro(p, "__6502__", "1");
-  }
+  } else if (StringEqual(compiler->target_name, "65c02")) {
+    PreprocessorDefineMacro(p, "__W65C02__", "1");
+    PreprocessorDefineMacro(p, "__6502__", "1"); }
 }
-
-#if defined(__APPLE__)
-// Find all dirs called "include" in the Mac OS toolchains directory
-// and add them all as system incude paths.
-static void AddMacOSIncludeDirs(Preprocessor* p, const char* root) {
-  DIR* dir = opendir(root);
-  if (dir == NULL) {
-    return;
-  }
-  struct dirent* entry;
-  while (((entry = readdir(dir)) != NULL)) {
-    if (entry->d_name[0] == '.') {
-      continue;
-    }
-    // No frameworks.
-    if (strcmp(entry->d_name, "Frameworks") == 0) {
-      continue;
-    }
-    if (strcmp(entry->d_name, "PrivateFrameworks") == 0) {
-      continue;
-    }
-    String path = {0};
-    StringPrintf(&path, "%s/%s", root, entry->d_name);
-    if (strcmp(entry->d_name, "include") == 0) {
-      PreprocessorAddSystemIncludePath(p, path.value);
-    }
-    struct stat st;
-    int e = stat(path.value, &st);
-    if (e == 0 && S_ISDIR(st.st_mode)) {
-      // Directory, recurse into it.
-      AddMacOSIncludeDirs(p, path.value);
-    }
-    StringDestruct(&path);
-  }
-  closedir(dir);
-}
-
-// On MacOS the standard C files are not inside a directory
-// named 'include'.  We need to find them and add their parent
-// directory.  We look for a file and add its parent dir.  Returns
-// true when we've found the file to prevent looking at all dirs.
-static bool AddMacOSClib(Preprocessor* p, const char* root,
-                         const char* search_file) {
-  DIR* dir = opendir(root);
-
-  if (dir == NULL) {
-    return false;
-  }
-  struct dirent* entry;
-  while (((entry = readdir(dir)) != NULL)) {
-    if (entry->d_name[0] == '.') {
-      continue;
-    }
-    String path = {0};
-    StringPrintf(&path, "%s/%s", root, entry->d_name);
-    if (strcmp(entry->d_name, search_file) == 0) {
-      PreprocessorAddSystemIncludePath(p, root);
-      StringDestruct(&path);
-      return true;
-    }
-    struct stat st;
-    int e = stat(path.value, &st);
-    if (e == 0 && S_ISDIR(st.st_mode)) {
-      // Directory, recurse into it.
-      if (AddMacOSClib(p, path.value, search_file)) {
-        StringDestruct(&path);
-        return true;
-      }
-    }
-    StringDestruct(&path);
-  }
-  closedir(dir);
-  return false;
-}
-
-#endif
 
 void PreprocessorInit(Preprocessor* p) {
   HashTableInit(&p->macros, "macros", MACROS_TABLE_SIZE, HashMacro,
@@ -313,29 +277,15 @@ void PreprocessorInit(Preprocessor* p) {
   VectorInit(&p->system_include_paths);
   p->is_compiled_in = true;
 
-#if 0
-  PreprocessorAddSystemIncludePath(p, "/usr/include");
-#ifdef __APPLE__
-  const char toolchains[] =
-      "/Applications/Xcode.app/Contents/Developer/Toolchains";
-  AddMacOSClib(p, toolchains, "stdio.h");
-  AddMacOSClib(p, toolchains, "ctype.h");
-  AddMacOSIncludeDirs(p, toolchains);
-  AddMacOSIncludeDirs(p,
-                      "/Applications/Xcode.app/Contents/Developer/"
-                      "Platforms/MacOSX.platform/"
-                      "Developer");
-#if 0
-  for (size_t i = 0; i < p->system_include_paths.length; i++) {
-    String* path = p->system_include_paths.value.p[i];
-    printf("%s\n", path->value);
-  }
-#endif
-#endif
+#ifndef DAVECC_SYSROOT_HDRS
+#error "Please define DAVECC_SYSROOT_HDRS to tell the compiler where the headers are"
 #else
-  PreprocessorAddSystemIncludePath(p, "/Users/dallison/Google Drive/c_compiler/libc/include");
+#define xstr(s) str(s)
+#define str(s) #s
+  PreprocessorAddSystemIncludePath(p, xstr(DAVECC_SYSROOT_HDRS));
+#undef str
+#undef xstr
 #endif
-  
   // Add current dir to the include paths.
   char current_dir[4096];
   getcwd(current_dir, sizeof(current_dir));
@@ -406,6 +356,38 @@ void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
     }
     VectorInsertBefore(&p->system_include_paths, 0, NewString(path));
   }
+
+static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
+  HashTable* to_table = data;
+  Macro* macro = (Macro*)node;
+  Vector* args = NewVector();
+  for (size_t i = 0; i < macro->args.length; i++) {
+    String* a = macro->args.value.p[i];
+    VectorAppend(args, NewString(a->value));
+  }
+  HashTableInsert(to_table, NewMacro(macro->name.value,
+                  macro->is_function_like, macro->varargs, args,
+                  NewString(macro->replacement_text.value),
+                  macro->location));
+
+}
+
+static void CopyMacroTree(void* m, void* data) {
+  BinaryTreeTraverse(m, CopyMacro, data);
+ }
+
+void PreprocessorCopyOptions(Preprocessor* to, Preprocessor* from) {
+  for (size_t i = 0; i < from->system_include_paths.length; i++) {
+    String* path = from->system_include_paths.value.p[i];
+    VectorAppend(&to->system_include_paths, NewString(path->value));
+  }
+  for (size_t i = 0; i < from->user_include_paths.length; i++) {
+    String* path = from->user_include_paths.value.p[i];
+    VectorAppend(&to->user_include_paths, NewString(path->value));
+  }
+  // Copy the macros.
+  HashTableTraverse(&from->macros, CopyMacroTree, &to->macros);
+}
 
 void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                              const char* value) {
@@ -508,7 +490,10 @@ typedef struct {
 } TokenIterator;
 
 // Encode the integer length into the string in LEB128.
+// Since we are putting the output in a string, a value of zero is
+// problematic since it will interfere with the string copy operations.
 static void EncodeLength(String* output, size_t v) {
+  v += 1;         // Don't encode 0 as zero (interferes with string end).
   for (;;) {
     if ((v & ~0x7fLL) == 0) {
       StringAppendChar(output, (char)(v & 0x7f));
@@ -527,7 +512,7 @@ static size_t DecodeLength(String* input, size_t pos, size_t* length) {
     char b = input->value[pos++];
     result |= (b & 0x7f) << bits;
     if ((b & 0x80) == 0) {
-      *length = result;
+      *length = result - 1;
       return pos;
     }
     bits += 7;
@@ -836,6 +821,9 @@ static bool CanStartToken(String* input, size_t pos) {
 static size_t AppendOtherToken(String* input, String* output, size_t pos) {
   size_t start = pos;
   while (pos < input->length) {
+    if (input->value[pos] == ',') {
+      break;
+    }
     if (CanStartToken(input, pos)) {
       break;
     }
@@ -890,7 +878,7 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
 // Get next char in a multi-line comment, reading new lines and appending
 // them to the current line as necessary.
 static char GetNextCommentChar(Preprocessor* p, String* line, size_t* pos) {
-  while (!LexEof(p->lex) && *pos == line->length) {
+  while (!LexEof(p->lex) && *pos >= line->length - 1) {
     SourceReadLine(p->lex->source, line);
   }
   if (LexEof(p->lex)) {
@@ -1566,6 +1554,9 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                           macro_name.value, filename, lineno);
     }
     macro->undefined = false;
+    // If macro was undefined it will have its original value.  Give it the
+    // new one.
+    StringSet(&macro->replacement_text, replacement_text.value);
   }
 
   // We're done with these strings, clean up.
@@ -1779,9 +1770,11 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
   // Allow the lexical analyzer to see the controlling expression.
   p->is_compiled_in = true;
 
+  int lineno = p->lex->source->lineno;
   Lex lex;
   Lex* prev_lex = p->lex;
   LexInitFromString(&lex, p->lex->source->filename.value, expr_string, p);
+  lex.source->lineno = lineno - 1;      // Will be incremented on first read.
   lex.preprocessor_mode = true;
   lex.assembler_mode = p->lex->assembler_mode;
   LexNextToken(&lex);
@@ -1874,6 +1867,10 @@ static void Ifdef(Preprocessor* p, String* line, size_t pos) {
     // of macros so it won't be found.
   }
   Macro* macro = HashTableSearch(&p->macros, macro_name.value);
+  // #undef marks the macro as being undefined
+  if (macro != NULL && macro->undefined) {
+    macro = NULL;
+  }
   VectorPush(&p->if_stack, macro);
   StringDestruct(&macro_name);
 
@@ -1987,14 +1984,11 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
   if (!error && CurrentToken(&ti) == PPTOK(literal)) {
     GetCurrentTokenSpelling(&ti, &filename);
     filename_set = true;
-  } else {
-    PreprocessorError(p, "Bad filename for #line directive");
-    error = true;
   }
   
   if (!error) {
     // Set the line number in the source.
-    p->lex->source->lineno = lineno;
+    p->lex->source->lineno = lineno - 1;     // Next line will have this number.
 
     if (filename_set) {
        StringSetString(&p->lex->source->filename, &filename);
@@ -2613,7 +2607,8 @@ static void ReplaceMacrosInTokenizedLine(Preprocessor* p,
   TokenIterator ti;
   TokenIteratorInit(&ti, p, tokenized_line);
   while (CurrentToken(&ti) != PPTOK(end)) {
-    if (CurrentToken(&ti) == PPTOK(identifier)) {
+    PreprocessingToken tok = CurrentToken(&ti);
+    if (tok == PPTOK(identifier) || tok == PPTOK(other_string)) {
       String possible_macro_name;
       GetCurrentTokenSpelling(&ti, &possible_macro_name);
       
@@ -2640,7 +2635,21 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
     start = SkipToEndOfComment(line, 0);
   }
   Tokenize(p, line, &tokenized_line, start, true, p->lex->assembler_mode, false);
-  ReplaceMacrosInTokenizedLine(p, &tokenized_line, false);
+  int limit = 20;
+  while (--limit > 0) {
+    String copy;
+    StringInit(&copy, tokenized_line.value);
+    ReplaceMacrosInTokenizedLine(p, &copy, false);
+    if (StringEqualString(&tokenized_line, &copy)) {
+      break;
+    }
+    StringDestruct(&tokenized_line);
+    StringInit(&tokenized_line, copy.value);
+    StringDestruct(&copy);
+  }
+  if (limit == 0) {
+    PreprocessorError(p, "Infinite macro expansion detected");
+  }
   
   // Detokenize new line into output.
   if (start != 0) {

@@ -14,15 +14,15 @@
 #include "6502_reg_alloc.h"
 
 typedef struct {
-  _6502Generator* g;
-  _6502RegisterAllocator* regs;
-} _6502Emitter;
+  W65C02Generator* g;
+  W65C02RegisterAllocator* regs;
+} W65C02Emitter;
 
-void _6502EmitterInit(_6502Emitter* emitter, _6502Generator* g);
-_6502Emitter* New6502Emitter(_6502Generator* g);
-void _6502EmitterDestruct(_6502Emitter* emitter);
-void _6502EmitterDelete(_6502Emitter* emitter);
+void W65C02EmitterInit(W65C02Emitter* emitter, W65C02Generator* g);
+W65C02Emitter* New6502Emitter(W65C02Generator* g);
+void W65C02EmitterDestruct(W65C02Emitter* emitter);
+void W65C02EmitterDelete(W65C02Emitter* emitter);
 
-void _6502PrintFunction(_6502Emitter* emitter, FILE* fp);
+void W65C02PrintFunction(W65C02Emitter* emitter, FILE* fp);
 
 #endif /* _502_emitter_h */

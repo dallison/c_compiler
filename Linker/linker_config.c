@@ -31,7 +31,7 @@ static ConfigRegion* NewConfigRegion(LinkerConfig* config, ConfigObject* region)
   StringInit(&r->name, NULL);
   r->start_addr = 0;
   r->size = 0;
-  r->alignment = 1;
+  r->falign = false;
   VectorInit(&r->sections);
   
   ConfigNode* name = ConfigObjectFind(region, "name");
@@ -48,12 +48,10 @@ static ConfigRegion* NewConfigRegion(LinkerConfig* config, ConfigObject* region)
   if (size != NULL) {
     r->size = size->value.int_value;
   }
-
-  ConfigNode* alignment = ConfigObjectFind(region, "alignment");
-  if (alignment != NULL) {
-    r->alignment = alignment->value.int_value;
+  ConfigNode* falign = ConfigObjectFind(region, "falign");
+  if (falign != NULL) {
+    r->falign = (bool)falign->value.int_value;
   }
-
   // Parse the section names. These are inserted as pointers to String
   // objects in a vector.
   ConfigNode* sections = ConfigObjectFind(region, "section");
@@ -80,6 +78,10 @@ static ConfigSegment* NewConfigSegment(LinkerConfig* config, ConfigObject* segme
     LinkerError(NULL, "Missing type for segment");
   } else {
     s->type = (ConfigSegmentType)type->value.int_value;
+  }
+  ConfigNode* alignment = ConfigObjectFind(segment, "alignment");
+  if (alignment != NULL) {
+    s->alignment = alignment->value.int_value;
   }
   ConfigNode* regions = ConfigObjectFind(segment, "region");
   if (regions != NULL) {

@@ -16,7 +16,7 @@
 #define NULL ((void*)0)
 
 #ifndef __FPOS_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int fpos_t;
 #else
 typedef long fpos_t;
@@ -25,7 +25,7 @@ typedef long fpos_t;
 #endif
 
 #ifndef __SIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -34,7 +34,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;
@@ -46,9 +46,15 @@ typedef struct {
   int fd;
   char* buf;
   int bufsize;
-  int index;
+  int rindex;     // Read index into buf.
+  int rlimit;     // Limit of chars to read.
+  int windex;     // Write index.
   int buffering_mode;
-  fpos_t pos;
+  char buffer_owned;    // The buffer is owned by this FILE.
+  char unget_index;
+  char eof_flag;
+  char error_flag;
+  char unget_buf[10];
 } FILE;
 
 // Buffering modes.
@@ -57,11 +63,19 @@ typedef struct {
 #define _IONBF 3
 
 // Default buffer size.
+#if defined(__W65C02__)
+#define BUFSIZE 64
+#else
 #define BUFSIZE 4096
+#endif
 #define BUFSIZ BUFSIZE
 
 #define FOPEN_MAX 0
+#if defined(__W65C02__)
+#define FILENAME_MAX 16
+#else
 #define FILENAME_MAX 256
+#endif
 #define L_tmpnam 16
 
 #define SEEK_CUR 0
@@ -73,6 +87,14 @@ typedef struct {
 extern FILE* stdout;
 extern FILE* stdin;
 extern FILE* stderr;
+
+#if defined(__W65C02__)
+typedef char mode_t;
+typedef char char_t;
+#else
+typedef int mode_t;
+typedef int char_t;
+#endif
 
 int remove(const char *filename);
 int rename(const char *old, const char *new);
@@ -89,11 +111,11 @@ void setbuf(FILE * restrict stream,
      char * restrict buf);
 int setvbuf(FILE * restrict stream,
      char * restrict buf,
-            int mode, size_t size);
+            mode_t mode, size_t size);
 int fprintf(FILE * restrict stream,
      const char * restrict format, ...);
 int fscanf(FILE * restrict stream,
-const char * restrict format, ...);
+           const char * restrict format, ...);
 int printf(const char * restrict format, ...);
 int scanf(const char * restrict format, ...);
 int snprintf(char * restrict s, size_t n,
@@ -103,9 +125,9 @@ int sprintf(char * restrict s,
 int sscanf(const char * restrict s,
      const char * restrict format, ...);
 int vfprintf(FILE * restrict stream,
-const char * restrict format, va_list arg);
+             const char * restrict format, va_list arg);
 int vfscanf(FILE * restrict stream,
-const char * restrict format, va_list arg);
+            const char * restrict format, va_list arg);
 int vprintf(const char * restrict format, va_list arg);
 int vscanf(const char * restrict format, va_list arg);
 int vsnprintf(char * restrict s, size_t n,
@@ -117,14 +139,13 @@ int vsscanf(const char * restrict s,
 int fgetc(FILE *stream);
 char *fgets(char * restrict s, int n,
      FILE * restrict stream);
-int fputc(int c, FILE *stream);
+int fputc(char_t c, FILE *stream);
 int fputs(const char * restrict s,
      FILE * restrict stream);
 int getc(FILE *stream);
 int getchar(void);
 char *gets(char *s);
-int putc(int c, FILE *stream);
-int putchar(int c);
+int putchar(char_t c);
 int puts(const char *s);
 int ungetc(int c, FILE *stream);
 size_t fread(void * restrict ptr, size_t size, size_t nmemb, FILE * restrict stream);
@@ -139,6 +160,7 @@ void clearerr(FILE *stream);
 int feof(FILE *stream);
 int ferror(FILE *stream);
 void perror(const char *s);
+char* strerror(int errnum);
 
 #endif /* __DAVECC__ */
 #endif /* stdio_h */

@@ -11,6 +11,9 @@
 
 #include "compiler.h"
 
+#define k65c02Target 1       // Target is 65c02.
+
 CompilerTarget* New6502Target(void);
+CompilerTarget* New65c02Target(void);
 
 #endif /* _502_target_h */

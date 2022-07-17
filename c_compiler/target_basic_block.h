@@ -33,6 +33,7 @@ typedef struct TargetBasicBlock {
   
   // Instructions that are alive on input to this block.
   Vector inputs;
+  BitSet input_ids;
   
   // Instructions alive at exit of this block.
   Vector outputs;
@@ -111,5 +112,8 @@ TargetInstruction* TargetBasicBlockRBegin(TargetBasicBlock* b);
 TargetInstruction* TargetBasicBlockREnd(TargetBasicBlock* b);
 
 bool TargetBasicBlockIsEmpty(TargetBasicBlock* b);
+
+// Is b dominated by dom (in its dominiator tree)?
+bool TargetBasicBlockDominatedBy(TargetGenerator* gen, TargetBasicBlock* dom, TargetBasicBlock* b);
 
 #endif /* risc_v_basic_block_h */

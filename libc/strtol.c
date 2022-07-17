@@ -14,7 +14,7 @@ extern int errno;
 
 #define EINVAL 22
 
-long long strtoll(const char* str, const char** end, int base) {
+long strtol(const char* str, const char** end, int base) {
   bool negative = false;
   while (*str != '\0' && isspace(*str)) {
     str++;
@@ -43,7 +43,7 @@ long long strtoll(const char* str, const char** end, int base) {
     errno = EINVAL;
     return 0;
   }
-  long long result = 0;
+  long result = 0;
   
   while (*str != '\0') {
     char ch = *str;
@@ -66,10 +66,6 @@ long long strtoll(const char* str, const char** end, int base) {
     result = -result;
   }
   return result;
-}
-
-long strtol(const char* str, const char** end, int base) {
-  return (long)strtoll(str, end, base);
 }
 
 int atoi(const char* s) {

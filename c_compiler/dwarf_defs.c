@@ -539,7 +539,7 @@ const char* DW_OPString(DW_OP op) {
       return "DW_OP_const8s";
     case DW_OP(constu):
       return "DW_OP_constu";
-    case DW_OP(consts):
+    case DW_OP(const16):
       return "DW_OP_consts";
     case DW_OP(dup):
       return "DW_OP_dup";
@@ -829,8 +829,8 @@ const char* DW_OPString(DW_OP op) {
       return "DW_OP_implicit_pointer";
     case DW_OP(addrx):
       return "DW_OP_addrx";
-    case DW_OP(constx):
-      return "DW_OP_constx";
+    case DW_OP(const64):
+      return "DW_OP_const64";
     case DW_OP(entry_value):
       return "DW_OP_entry_value";
     case DW_OP(const_type):

@@ -14,7 +14,7 @@ struct __jmp_buf {
   long regs[32];
 };
 #elif defined(__pcode__)
-#elif defined(__6502__)
+#elif defined(__W65C02__)
 #else
 #error "Unknown architecture"
 #endif

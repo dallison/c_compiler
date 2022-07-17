@@ -19,10 +19,11 @@
 #define SYS_FREE 9
 #define SYS_REALLOC 10
 #define SYS_ABORT 11
+#define SYS_EXIT 12
 
 #elif defined(__p_code__)
 
-#elif defined(__6502__)
+#elif defined(__W65C02__)
 #define SYS_EXIT 1
 #define SYS_OPEN 2
 #define SYS_CLOSE 3
@@ -43,7 +44,7 @@
 extern int syscall(int n, ...);
 #elif defined(__p_code__)
 extern int syscall(int n, ...);
-#elif defined(__6502__)
+#elif defined(__W65C02__)
 extern int syscall(int n, ...);
 #else
 #error "Unknown architecture"

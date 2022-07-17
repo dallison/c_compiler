@@ -12,12 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
+#include "compiler.h"
 
 static int next_instruction_id = 1;
 
 static void Trap() {}
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 282) {
+  if (inst->id == 52) {
     // Set breakpoint here to trap on a certain instruction id.
     Trap();
   }
@@ -28,14 +30,17 @@ void TargetPrintInstruction(TargetInstruction* inst,
   if (inst == NULL) {
     return;
   }
+  if (inst->addr != -1) {
+    fprintf(fp, "0x%04x ", inst->addr);
+  }
   fprintf(fp, "@%d %s(", inst->id, name_func(inst->opcode));
   TargetConstant* c = (TargetConstant*)inst;
   switch (inst->opcode) {
-    case TARGET_OP(constb):
-    case TARGET_OP(consth):
-    case TARGET_OP(constw):
-    case TARGET_OP(constx):
-      fprintf(fp, "#%lld", c->value.ivalue);
+    case TARGET_OP(const8):
+    case TARGET_OP(const16):
+    case TARGET_OP(const32):
+    case TARGET_OP(const64):
+      fprintf(fp, "#%" PRId64 "", c->value.ivalue);
       break;
     case TARGET_OP(constf):
     case TARGET_OP(constd):
@@ -106,14 +111,14 @@ const char* TargetOpcodeName(int op) {
       return "tmp";
 
     // Constants.
-    case TARGET_OP(constb):
+    case TARGET_OP(const8):
       return "constb";
-    case TARGET_OP(consth):
-      return "consth";
-    case TARGET_OP(constw):
-      return "constw";
-    case TARGET_OP(constx):
-      return "constx";
+    case TARGET_OP(const16):
+      return "const16";
+    case TARGET_OP(const32):
+      return "const32";
+    case TARGET_OP(const64):
+      return "const64";
     case TARGET_OP(constf):
       return "constf";
     case TARGET_OP(constd):
@@ -156,8 +161,8 @@ const char* TargetOpcodeName(int op) {
       return "tp";  // Thread pointer pseudo operation.
 
     // Function result registers.
-    case TARGET_OP(resultx):
-      return "resultx";
+    case TARGET_OP(resulti):
+      return "resulti";
     case TARGET_OP(resultf):
       return "resultf";
     case TARGET_OP(resultd):
@@ -189,7 +194,8 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->is_global = !StorageIs(func->storage, STO(static));
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
-
+  target->is_void = TypeIsVoid(func_type->next) ||
+                      TypeIsStructOrUnion(func_type->next);
   VectorInit(&target->basic_blocks);
   target->entry_block = NULL;
   target->exit_block = NULL;
@@ -288,6 +294,7 @@ void TargetAddUser(TargetInstruction* inst, TargetInstruction* user) {
     }
   }
   VectorAppend(&inst->users, user);
+  inst->uses++;
 }
 
 void TargetRemoveUser(TargetInstruction* inst, TargetInstruction* user) {
@@ -296,6 +303,10 @@ void TargetRemoveUser(TargetInstruction* inst, TargetInstruction* user) {
     if (op == user) {
       VectorDeleteElement(&inst->users, i);
       inst->uses--;
+      if (inst->uses < 0) {
+        printf("inst: %d, user: %d\n", inst->id, user->id);
+      }
+      assert(inst->uses >= 0);
       return;
     }
   }
@@ -316,11 +327,12 @@ void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new) {
   old->uses = 0;
 }
 
-void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new, bool (*predicate)(TargetInstruction*)) {
+void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
+                                 bool (*predicate)(TargetInstruction*, void* data), void* data) {
   for (size_t i = 0; i < old->users.length; i++) {
     TargetInstruction* user = old->users.value.p[i];
     for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
-      if (user->operand[j] == old && predicate(user)) {
+      if (user->operand[j] == old && predicate(user, data)) {
         user->operand[j] = new;
         TargetAddUser(new, user);
       }
@@ -379,6 +391,7 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
   inst->id = next_instruction_id++;
   inst->opcode = opcode;
   inst->uses = 0;
+  inst->addr = -1;
   inst->dest = NULL;
   inst->reg = NULL;
   inst->operand[0] = NULL;
@@ -390,6 +403,9 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
 }
 
 void TargetUpdateOperandUsers(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return;
+  }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetAddUser(inst->operand[i], inst);
@@ -534,16 +550,16 @@ TargetInstruction* TargetNewLiteral(int id) {
 
 // Constant opcodes, indexed by TargetType.
 static TargetOpcode constant_ops[] = {
-    TARGET_OP(constb), TARGET_OP(consth), TARGET_OP(constw), TARGET_OP(constx),
-    TARGET_OP(constf), TARGET_OP(constd), TARGET_OP(constx),
+    TARGET_OP(const8), TARGET_OP(const16), TARGET_OP(const32), TARGET_OP(const64),
+    TARGET_OP(constf), TARGET_OP(constd), TARGET_OP(const64),
 };
 
 bool TargetIsConst(TargetInstruction* inst) {
-  return inst->opcode >= TARGET_OP(constb) && inst->opcode <= TARGET_OP(constd);
+  return inst->opcode >= TARGET_OP(const8) && inst->opcode <= TARGET_OP(constd);
 }
 
 bool TargetIsZero(TargetInstruction* inst) {
-  if (inst->opcode >= TARGET_OP(constb) && inst->opcode <= TARGET_OP(constd)) {
+  if (inst->opcode >= TARGET_OP(const8) && inst->opcode <= TARGET_OP(constd)) {
     return TargetIntValue(inst) == 0;
   }
   return false;
@@ -663,7 +679,9 @@ void TargetApplyFixups(TargetGenerator* target, IRNode* label_node) {
   for (size_t i = 0; i < target->fixups.length; i++) {
     TargetBranchFixup* fixup = target->fixups.value.p[i];
     if (fixup->target == label_node) {
-      fixup->inst->operand[fixup->operand] = TargetGetLoweredNode(label_node);
+      TargetInstruction* label = TargetGetLoweredNode(label_node);
+      fixup->inst->operand[fixup->operand] = label;
+      TargetAddUser(label, fixup->inst);
     }
   }
 }
@@ -675,10 +693,15 @@ void TargetRegisterInit(TargetRegister* reg, int num) {
 }
 
 const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
-  if (symbol->flags.is_local) {
+  if (symbol->flags.is_local && !TypeIsFunction(symbol->type)) {
     snprintf(buf, len, ".local.%s.%d", symbol->name.value, symbol->id);
   } else {
-    strncpy(buf, symbol->name.value, len);
+    if (compiler->prepend_underscore) {
+      buf[0] = '_';
+      strncpy(buf+1, symbol->name.value, len);
+    } else {
+      strncpy(buf, symbol->name.value, len);
+    }
   }
   return buf;
 }

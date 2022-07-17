@@ -11,39 +11,23 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include "6502_machine.h"
 #include "elf.h"
 
-static void CheckBranches(_6502Assembler* assembler);
+static void CheckBranches(W65C02Assembler* assembler);
 
 // A useful resource for the encoding for the 6502 instruction set can
 // be found at:
 // http://nparker.llx.com/a2/opcodes.html
 
-static int CompareCharPointers(const void* a, const void* b) {
-  MapKeyValue* s1 = (MapKeyValue*)a;
-  MapKeyValue* s2 = (MapKeyValue*)b;
-  return strcasecmp(s1->key.p, s2->key.p);
-}
-
-static int CompareString(const void* a, const void* b) {
-  MapKeyValue* s1 = (MapKeyValue*)a;
-  MapKeyValue* s2 = (MapKeyValue*)b;
-  return StringCompare(s1->key.p, s2->key.p);
-}
-
-static int CompareSourceLocation(const void* a, const void* b) {
-  MapKeyValue* s1 = (MapKeyValue*)a;
-  MapKeyValue* s2 = (MapKeyValue*)b;
-  return (int)((SourceLocation)s1->key.w - (SourceLocation)s2->key.w);
-}
 
 //
 // Forward declarations of instruction assembly functions.
 //
 
 #define DECLARE_INST_FUNC(mnemonic) \
-  static void Assemble_##mnemonic(_6502Assembler*)
+  static void Assemble_##mnemonic(W65C02Assembler*)
 
 // 6502(A)
 DECLARE_INST_FUNC(brk);
@@ -231,15 +215,15 @@ static AssemblerSymbol* DefineLabel(Assembler* base_asm, String* spelling);
 static void LabelDestruct(Label* label);
 
 // Initialize the assembler.  Returns true if it worked.
-bool _6502AssemblerInit(_6502Assembler* assembler, String* infile,
+bool W65C02AssemblerInit(W65C02Assembler* assembler, String* infile,
                         String* outfile) {
   static int reloc_types[] = {
-      R_6502_DATA16, R_6502_DATA32, R_6502_DATA64, R_6502_ADD16, R_6502_ADD32,
-      R_6502_ADD64,  R_6502_SUB16,  R_6502_SUB32,  R_6502_SUB64,
+      R_W65C02_DATA16, R_W65C02_DATA32, R_W65C02_DATA64, R_W65C02_ADD16, R_W65C02_ADD32,
+      R_W65C02_ADD64,  R_W65C02_SUB16,  R_W65C02_SUB32,  R_W65C02_SUB64,
   };
 
   // 4 for the flags specifies the 64 bit float ABI.
-  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_6502, 1, reloc_types,
+  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPEW65C02, 1, reloc_types,
                      infile, outfile)) {
     return false;
   }
@@ -278,26 +262,26 @@ static void LabelMapDestruct(MapKeyValue* kv) {
   LabelDestruct((Label*)kv->value.p);
 }
 
-_6502Assembler* New6502Assembler(String* infile, String* outfile) {
-  _6502Assembler* assembler = malloc(sizeof(_6502Assembler));
-  _6502AssemblerInit(assembler, infile, outfile);
+W65C02Assembler* New6502Assembler(String* infile, String* outfile) {
+  W65C02Assembler* assembler = malloc(sizeof(W65C02Assembler));
+  W65C02AssemblerInit(assembler, infile, outfile);
   return assembler;
 }
 
-void _6502AssemblerFinalize(_6502Assembler* assembler) {
+void W65C02AssemblerFinalize(W65C02Assembler* assembler) {
   CheckBranches(assembler);
 }
 
 // Destruct the assembler.
-void _6502AssemblerDestruct(_6502Assembler* assembler) {
+void W65C02AssemblerDestruct(W65C02Assembler* assembler) {
   AssemblerDestruct(&assembler->base);
   MapDestruct(&assembler->instructions);
   MapDestructWithContents(&assembler->branches, BranchMapDestruct);
   MapDestructWithContents(&assembler->labels, LabelMapDestruct);
 }
 
-void _6502AssemblerDelete(_6502Assembler* assembler) {
-  _6502AssemblerDestruct(assembler);
+void W65C02AssemblerDelete(W65C02Assembler* assembler) {
+  W65C02AssemblerDestruct(assembler);
   free(assembler);
 }
 
@@ -307,11 +291,11 @@ void _6502AssemblerDelete(_6502Assembler* assembler) {
 // In pass 2 we also parse everything but we also insert the binary instructions
 //    and data into the buffers and expect all symbols to be defined.
 void Assemble6502Instruction(Assembler* base, String* word) {
-  _6502Assembler* assembler = (_6502Assembler*)base;
+  W65C02Assembler* assembler = (W65C02Assembler*)base;
 
   void* asm_func = MapFindPointerKey(&assembler->instructions, word->value);
   if (asm_func != NULL) {
-    void (*func)(_6502Assembler*) = asm_func;
+    void (*func)(W65C02Assembler*) = asm_func;
     func(assembler);
   } else {
     AssemblerError(&assembler->base, "Syntax error; unknown instruction: %s",
@@ -323,7 +307,7 @@ void Assemble6502Instruction(Assembler* base, String* word) {
 // the base assembler.
 #define ASM assembler->base
 
-static AssemblerSymbol* GetOrCreateSymbol(_6502Assembler* assembler,
+static AssemblerSymbol* GetOrCreateSymbol(W65C02Assembler* assembler,
                                           const char* symbol_name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, symbol_name);
   if (sym == NULL) {
@@ -334,7 +318,7 @@ static AssemblerSymbol* GetOrCreateSymbol(_6502Assembler* assembler,
   return sym;
 }
 
-static Branch* NewBranch(_6502OpcodeValue opcode, const char* label_name,
+static Branch* NewBranch(W65C02OpcodeValue opcode, const char* label_name,
                          SourceLocation location) {
   Branch* branch = malloc(sizeof(Branch));
   branch->opcode = opcode;
@@ -355,7 +339,7 @@ static Label* NewLabel(String* label_name, AssemblerSymbol* symbol) {
 
 static void LabelDestruct(Label* label) { VectorDestruct(&label->branches); }
 
-static void InsertBranch(_6502Assembler* assembler, int64_t addr,
+static void InsertBranch(W65C02Assembler* assembler, int64_t addr,
                          Branch* branch) {
   MapKeyValue kv;
   kv.key.w = addr;
@@ -363,7 +347,7 @@ static void InsertBranch(_6502Assembler* assembler, int64_t addr,
   MapInsert(&assembler->branches, kv);
 }
 
-static Branch* FindBranch(_6502Assembler* assembler, int64_t addr) {
+static Branch* FindBranch(W65C02Assembler* assembler, int64_t addr) {
   return MapFindInt64Key(&assembler->branches, addr);
 }
 
@@ -377,7 +361,7 @@ static void FixupBranch(MapKeyValue* kv, void* data) {
   }
 }
 
-static void FixupBranches(_6502Assembler* assembler, Label* label) {
+static void FixupBranches(W65C02Assembler* assembler, Label* label) {
   MapTraverse(&assembler->branches, FixupBranch, label);
 }
 
@@ -389,21 +373,21 @@ static void CheckBranch(MapKeyValue* kv, void* data) {
                              "Branch to unresolved label %s",
                              branch->label_name.value);
   } else {
-    int offset = (int)((branch->address + 2) - branch->label->symbol->value);
+    int offset = (int)(branch->label->symbol->value - (branch->address + 2));
     if (offset < -128 || offset > 127) {
       AssemblerErrorAtLocation(assembler, branch->location,
-                                "Branch out of range: %d; label %s is at address 0x%x and the branch is offset 0x%x",
+                                "Branch out of range: %d; label %s is at address 0x%x and the branch is address 0x%x",
                                 offset, branch->label_name.value, branch->label->symbol->value, branch->address );
     }
 
   }
 }
 
-static void CheckBranches(_6502Assembler* assembler) {
+static void CheckBranches(W65C02Assembler* assembler) {
   MapTraverse(&assembler->branches, CheckBranch, assembler);
 }
 
-static Label* InsertLabel(_6502Assembler* assembler, String* label_name,
+static Label* InsertLabel(W65C02Assembler* assembler, String* label_name,
                           AssemblerSymbol* symbol) {
   Label* label = NewLabel(label_name, symbol);
   MapKeyValue kv;
@@ -413,7 +397,7 @@ static Label* InsertLabel(_6502Assembler* assembler, String* label_name,
   return label;
 }
 
-static Label* FindLabel(_6502Assembler* assembler, String* label_name) {
+static Label* FindLabel(W65C02Assembler* assembler, String* label_name) {
   return MapFindPointerKey(&assembler->labels, label_name);
 }
 
@@ -421,7 +405,7 @@ static Label* FindLabel(_6502Assembler* assembler, String* label_name) {
 // We are defining a label.  This will be referred to by possibly
 // multiple branches.
 static AssemblerSymbol* DefineLabel(Assembler* base_asm, String* spelling) {
-  _6502Assembler* assembler = (_6502Assembler*)base_asm;
+  W65C02Assembler* assembler = (W65C02Assembler*)base_asm;
   AssemblerSymbol* sym = assembler->default_define_label(base_asm, spelling);
   Label* label = FindLabel(assembler, spelling);
   if (label == NULL) {
@@ -438,7 +422,7 @@ static AssemblerSymbol* DefineLabel(Assembler* base_asm, String* spelling) {
   return sym;
 }
 
-static bool AssemblerFunction(_6502Assembler* assembler, String* func,
+static bool AssemblerFunction(W65C02Assembler* assembler, String* func,
                               String* symbol) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     StringSet(func, ASM.lex.spelling.value);  // Already initialized.
@@ -467,7 +451,7 @@ static bool AssemblerFunction(_6502Assembler* assembler, String* func,
   }
   return true;
 }
-static void CheckWidth(_6502Assembler* assembler, int64_t value, int bits) {
+static void CheckWidth(W65C02Assembler* assembler, int64_t value, int bits) {
   int64_t v = value;
   if (v < 0) {
     v = -v;
@@ -479,7 +463,7 @@ static void CheckWidth(_6502Assembler* assembler, int64_t value, int bits) {
   }
 }
 
-static void CheckZeroPage(_6502Assembler* assembler, int64_t value) {
+static void CheckZeroPage(W65C02Assembler* assembler, int64_t value) {
   int64_t v = value;
   if (v < 0) {
     v = -v;
@@ -489,7 +473,7 @@ static void CheckZeroPage(_6502Assembler* assembler, int64_t value) {
   }
 }
 
-static void NeedIndexReg(_6502Assembler* assembler, const char* regname) {
+static void NeedIndexReg(W65C02Assembler* assembler, const char* regname) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     AssemblerError(&assembler->base, "Expected index register %s", regname);
   } else {
@@ -502,7 +486,7 @@ static void NeedIndexReg(_6502Assembler* assembler, const char* regname) {
   }
 }
 
-static bool IsAccumulator(_6502Assembler* assembler) {
+static bool IsAccumulator(W65C02Assembler* assembler) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     return false;
   }
@@ -513,19 +497,19 @@ static bool IsAccumulator(_6502Assembler* assembler) {
   return true;
 }
 
-static void NeedCloseParenthesis(_6502Assembler* assembler) {
+static void NeedCloseParenthesis(W65C02Assembler* assembler) {
   if (!LexMatch(&ASM.lex, TOK(rparen))) {
     AssemblerError(&assembler->base, "Missing )");
   }
 }
 
-static void AssembleSingleByteInstruction(_6502Assembler* assembler,
+static void AssembleSingleByteInstruction(W65C02Assembler* assembler,
                                           int opcode) {
   AssemblerEmitByte(&assembler->base, assembler->base.current_section, opcode);
 }
 
 // Emit the binary for a branch,
-static void EmitBranchBinary(_6502Assembler* assembler, Branch* branch) {
+static void EmitBranchBinary(W65C02Assembler* assembler, Branch* branch) {
   AssemblerEmitByte(&ASM, ASM.current_section, branch->opcode);
   // NOTE: PC is incremented by 2 before being added to the offset.
   int64_t offset = branch->label == NULL
@@ -534,7 +518,7 @@ static void EmitBranchBinary(_6502Assembler* assembler, Branch* branch) {
   AssemblerEmitByte(&ASM, ASM.current_section, (int8_t)offset);
 }
 
-static void AssembleBranch(_6502Assembler* assembler, int opcode) {
+static void AssembleBranch(W65C02Assembler* assembler, int opcode) {
   // The branch instruction must refer to a label.
   Branch* branch = NULL;
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
@@ -561,7 +545,7 @@ static void AssembleBranch(_6502Assembler* assembler, int opcode) {
       // Pass 2: branch must exist.
       if (branch == NULL) {
         AssemblerError(&ASM,
-                       "Phase error: branch to %s at address 0x%llx not found; "
+                       "Phase error: branch to %s at address 0x%" PRIx64 " not found; "
                        "check for forward references to labels as expressions, "
                        "possibly with abs,X mode",
                        label_name.value, branch_address);
@@ -577,10 +561,10 @@ static void AssembleBranch(_6502Assembler* assembler, int opcode) {
   EmitBranchBinary(assembler, branch);
 }
 
-static void AssembleJump(_6502Assembler* assembler) {
-  int opcode = _6502_OPCODE(jmp);
+static void AssembleJump(W65C02Assembler* assembler) {
+  int opcode = W65C02_OPCODE(jmp);
   if (LexMatch(&ASM.lex, TOK(lparen))) {
-    opcode = _6502_OPCODE(jmpr);
+    opcode = W65C02_OPCODE(jmpr);
   }
   opcode |= 0xc;  // Both JMP a and JMP (a) have the bottom bits 0xc.
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
@@ -598,13 +582,20 @@ static void AssembleJump(_6502Assembler* assembler) {
   }
   sym->exported = true;  // Needs to be exported so we can relocate to it.
   LexNextToken(&ASM.lex);
+  
+  // Allow +expr or -expr to be used for addend for relocation.
+  int addend = 0;
+  if (LexLookingAt(&ASM.lex, TOK(plus)) || LexLookingAt(&ASM.lex, TOK(minus))) {
+    addend = (int)AssemblerEvaluateExpression(&ASM);
+  }
+
   if (!sym->is_constant) {
     AssemblerRelocation* reloc =
-      NewAssemblerRelocation(sym, R_6502_JMP, ASM.current_section,
-                             (int32_t)AssemblerCurrentAddress(&ASM), 0);
+      NewAssemblerRelocation(sym, R_W65C02_JMP, ASM.current_section,
+                             (int32_t)AssemblerCurrentAddress(&ASM), addend);
     AssemblerAddRelocation(&ASM, reloc);
   }
-  if (opcode == _6502_OPCODE(jmpr) && LexMatch(&ASM.lex, TOK(comma))) {
+  if (opcode == W65C02_OPCODE(jmpr) && LexMatch(&ASM.lex, TOK(comma))) {
     // 65c02 JMP (abs,X): opcode 0x7c
     opcode = 0x7c;
     NeedIndexReg(assembler, "X");
@@ -616,7 +607,7 @@ static void AssembleJump(_6502Assembler* assembler) {
   } else {
     AssemblerEmitHalf(&ASM, ASM.current_section, 0);
   }
-  if (opcode == _6502_OPCODE(jmpr)) {
+  if (opcode == W65C02_OPCODE(jmpr)) {
     if (!LexMatch(&ASM.lex, TOK(rparen))) {
       AssemblerError(&ASM, "Missing close paren for jmp instruction");
     }
@@ -627,10 +618,10 @@ static struct {
   const char* func;
   int reloc_type;
 } assembler_functions[] = {
-    {"lo", R_6502_BYTE0},    {"hi", R_6502_BYTE1},    {"byte0", R_6502_BYTE0},
-    {"byte1", R_6502_BYTE1}, {"byte2", R_6502_BYTE2}, {"byte3", R_6502_BYTE3},
-    {"byte4", R_6502_BYTE4}, {"byte5", R_6502_BYTE5}, {"byte6", R_6502_BYTE6},
-    {"byte7", R_6502_BYTE7}, {"abs", R_6502_DATA16},
+    {"lo", R_W65C02_BYTE0},    {"hi", R_W65C02_BYTE1},    {"byte0", R_W65C02_BYTE0},
+    {"byte1", R_W65C02_BYTE1}, {"byte2", R_W65C02_BYTE2}, {"byte3", R_W65C02_BYTE3},
+    {"byte4", R_W65C02_BYTE4}, {"byte5", R_W65C02_BYTE5}, {"byte6", R_W65C02_BYTE6},
+    {"byte7", R_W65C02_BYTE7}, {"abs", R_W65C02_DATA16},
 };
 
 #define NUM_ASM_FUNCS \
@@ -639,7 +630,9 @@ static struct {
 // 'offset' is the offset from the current address to which the relocation will
 // apply.  If this is an instruction the offset will typically be 1 to
 // use the operand and not the opcode.
-static void AssembleAbsoluteAddress(_6502Assembler* assembler, int offset) {
+// Returns length of relocation.
+static int AssembleAbsoluteAddress(W65C02Assembler* assembler, int offset) {
+  int length = 1;
   String func;
   StringInit(&func, "");
   String symbol_name;
@@ -664,6 +657,9 @@ static void AssembleAbsoluteAddress(_6502Assembler* assembler, int offset) {
     goto error;
   }
 
+  if (reloc_type == R_W65C02_DATA16) {
+    length = 2;
+  }
   // Allow a +expr to be the addend for the relocation.
   int addend = 0;
   if (LexMatch(&ASM.lex, TOK(plus))) {
@@ -676,27 +672,70 @@ static void AssembleAbsoluteAddress(_6502Assembler* assembler, int offset) {
 error:
   StringDestruct(&func);
   StringDestruct(&symbol_name);
+  return length;
 }
 
-static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
+static int AbsoluteSymbolOrExpression(W65C02Assembler* assembler, bool* is_symbol) {
+  int value = 0;
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(ASM.lex.spelling.value, ASM.current_section,
+                             SYM_TYPE(func), SYM_BIND(local), 0);
+    AssemblerInsertSymbol(&ASM, sym);
+  }
+  LexNextToken(&ASM.lex);
+  bool expression_follows = false;
+  bool add = true;
+  int expr_value = 0;
+  
+  // Allow an expression to be added or subtracted from the symbol.
+  if (LexMatch(&ASM.lex, TOK(plus))) {
+    expression_follows = true;
+  } else if (LexMatch(&ASM.lex, TOK(minus))) {
+    expression_follows = true;
+    add = false;
+  }
+  if (expression_follows) {
+    expr_value = (int)AssemblerEvaluateExpression(&ASM);
+    if (!add) {
+      expr_value = -expr_value;
+    }
+  }
+
+  // If the symbol is not a constant we have a relocated symbol reference.
+  if (!sym->is_constant) {
+    sym->exported = true;  // Needs to be exported so we can relocate to it.
+    AssemblerRelocation* reloc =
+      NewAssemblerRelocation(sym, R_W65C02_JMP, ASM.current_section,
+                             (int32_t)AssemblerCurrentAddress(&ASM), expr_value);
+    AssemblerAddRelocation(&ASM, reloc);
+    *is_symbol = true;
+  } else {
+    value = (int)sym->value + expr_value;
+  }
+  return value;
+}
+
+static void AssembleMemoryInstruction(W65C02Assembler* assembler, int opcode) {
   int bbb = 0;
   int cc = opcode & 3;
   int operand_size = 1;
   int operand = 0;
-  bool value_known = false;
+  bool value_known = true;
   bool override_opcode = false;
+  bool absolute = false;
   if (LexMatch(&ASM.lex, TOK(hash))) {
     // Immediate.
     switch (cc) {
       case 0:
-        bbb = _6502_ADDR_MODE(00, imm);
+        bbb = W65C02_ADDR_MODE(00, imm);
         switch (opcode) {
-          case _6502_OPCODE(ldy):
-          case _6502_OPCODE(cpy):
-          case _6502_OPCODE(cpx):
+          case W65C02_OPCODE(ldy):
+          case W65C02_OPCODE(cpy):
+          case W65C02_OPCODE(cpx):
             break;
 
-          case _6502_OPCODE(bit):
+          case W65C02_OPCODE(bit):
             // This has opcode 0x89.
             opcode = 0x89;
             override_opcode = true;
@@ -708,23 +747,24 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
         }
         break;
       case 1:
-        bbb = _6502_ADDR_MODE(01, imm);
+        bbb = W65C02_ADDR_MODE(01, imm);
         // STA has no immediate.
-        if (opcode == _6502_OPCODE(sta)) {
+        if (opcode == W65C02_OPCODE(sta)) {
           AssemblerError(&ASM, "Invalid immediate operand for STA instruction");
         }
         break;
       case 2:
-        bbb = _6502_ADDR_MODE(10, imm);
+        bbb = W65C02_ADDR_MODE(10, imm);
         // Only LDX has an immediate variant.
-        if (opcode != _6502_OPCODE(ldx)) {
+        if (opcode != W65C02_OPCODE(ldx)) {
           AssemblerError(&ASM,
                          "Invalid immediate operand for this instruction");
         }
         break;
     }
     if (LexMatch(&ASM.lex, TOK(percent))) {
-      AssembleAbsoluteAddress(assembler, 1);
+      operand_size = AssembleAbsoluteAddress(assembler, 1);
+      absolute = operand_size == 2;
     } else {
       int64_t value = AssemblerEvaluateExpression(&ASM);
       CheckWidth(assembler, value, 8);
@@ -740,7 +780,10 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
         // 4. absolute,X
         // NOTE: this is not used for JMP or JMP (addr).
         if (LexMatch(&ASM.lex, TOK(percent))) {
-          AssembleAbsoluteAddress(assembler, 1);
+          operand_size = AssembleAbsoluteAddress(assembler, 1);
+          absolute = operand_size == 2;
+         } else if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+          operand = AbsoluteSymbolOrExpression(assembler, &absolute);
         } else {
           operand = (int)AssemblerEvaluateExpression(&ASM);
         }
@@ -748,26 +791,26 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
           NeedIndexReg(assembler, "X");
 
           // zp,X or abs,X depending on size of value.
-          if (operand >= 0 && operand < 256) {
+          if (!absolute && operand >= 0 && operand < 256) {
             // Only STY and LDY allowed.
-            if (opcode != _6502_OPCODE(sty) && opcode != _6502_OPCODE(ldy)) {
+            if (opcode != W65C02_OPCODE(sty) && opcode != W65C02_OPCODE(ldy)) {
               AssemblerError(&ASM, "Illegal zeropage,X instruction");
             }
-            bbb = _6502_ADDR_MODE(00, zpx);
+            bbb = W65C02_ADDR_MODE(00, zpx);
           } else {
             // Only LDY.
-            if (opcode != _6502_OPCODE(ldy)) {
+            if (opcode != W65C02_OPCODE(ldy)) {
               AssemblerError(&ASM, "Illegal abs,X instruction");
             }
-            bbb = _6502_ADDR_MODE(00, absx);
+            bbb = W65C02_ADDR_MODE(00, absx);
             operand_size = 2;
           }
         } else {
-          if (operand >= 0 && operand < 256) {
-            bbb = _6502_ADDR_MODE(10, zp);
+          if (!absolute && operand >= 0 && operand < 256) {
+            bbb = W65C02_ADDR_MODE(10, zp);
           } else {
             // Absolute.
-            bbb = _6502_ADDR_MODE(10, abs);
+            bbb = W65C02_ADDR_MODE(10, abs);
             operand_size = 2;
           }
         }
@@ -780,17 +823,17 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
           if (LexMatch(&ASM.lex, TOK(rparen))) {
             // (zeropage), Y or (zeropage)
             if (!LexMatch(&ASM.lex, TOK(comma))) {
-              bbb = _6502_ADDR_MODE(10, zpi);
+              bbb = W65C02_ADDR_MODE(10, zpi);
               // These have cc = 2.
               opcode &= ~03;
               opcode |= 2;
             } else {
               NeedIndexReg(assembler, "Y");
-              bbb = _6502_ADDR_MODE(01, zpy);
+              bbb = W65C02_ADDR_MODE(01, zpy);
             }
           } else if (LexMatch(&ASM.lex, TOK(comma))) {
             // (zeropage, X)
-            bbb = _6502_ADDR_MODE(01, zpx);
+            bbb = W65C02_ADDR_MODE(01, zpx);
             NeedIndexReg(assembler, "X");
             NeedCloseParenthesis(assembler);
           }
@@ -803,7 +846,13 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
           // 4. absolute,X
           // 5. absolute,Y
           if (LexMatch(&ASM.lex, TOK(percent))) {
-            AssembleAbsoluteAddress(assembler, 1);
+            operand_size = AssembleAbsoluteAddress(assembler, 1);
+             absolute = operand_size == 2;
+           } else if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+             operand = AbsoluteSymbolOrExpression(assembler, &absolute);
+             if (!absolute) {
+               CheckWidth(assembler, operand, 16);
+             }
           } else {
             operand = (int)AssemblerEvaluateKnownExpression(&ASM, &value_known);
             CheckWidth(assembler, operand, 16);
@@ -813,27 +862,27 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
             // zero page,X or absolute,X or absolute,Y
             if (LexLookingAt(&ASM.lex, TOK(identifier))) {
               bool is_zero_page =
-                  value_known ? operand >= 0 && operand < 256 : false;
+                  value_known && !absolute ? operand >= 0 && operand < 256 : false;
               operand_size = 2;
               if (StringEqualCaseBlind(&ASM.lex.spelling, "X")) {
                 if (is_zero_page) {
-                  bbb = _6502_ADDR_MODE(01, zpxa);
+                  bbb = W65C02_ADDR_MODE(01, zpxa);
                   operand_size = 1;
                 } else {
-                  bbb = _6502_ADDR_MODE(01, absx);
+                  bbb = W65C02_ADDR_MODE(01, absx);
                 }
               } else if (StringEqualCaseBlind(&ASM.lex.spelling, "Y")) {
-                bbb = _6502_ADDR_MODE(01, absy);
+                bbb = W65C02_ADDR_MODE(01, absy);
               }
               LexNextToken(&ASM.lex);
             }
           } else {
             // No comma, so this is zero page or absolute.
-            if (value_known && operand >= 0 && operand < 256) {
-              bbb = _6502_ADDR_MODE(01, zp);
+            if (value_known && !absolute && operand >= 0 && operand < 256 && operand_size == 1) {
+              bbb = W65C02_ADDR_MODE(01, zp);
             } else {
               // Absolute.
-              bbb = _6502_ADDR_MODE(01, abs);
+              bbb = W65C02_ADDR_MODE(01, abs);
               operand_size = 2;
             }
           }
@@ -852,20 +901,20 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
         if (LexMatch(&ASM.lex, TOK(lparen))) {
           AssemblerError(&ASM, "Illegal addressing mode this instruction");
         } else if (IsAccumulator(assembler) || ASM.lex.current_token == TOK(bad)) {
-          bbb = _6502_ADDR_MODE(10, acc);
+          bbb = W65C02_ADDR_MODE(10, acc);
           switch (opcode) {
             // Only shifts and rotates have accumulator mode on 6502.
             // On 65c02, we can have inc and dec.
-            case _6502_OPCODE(asl):
-            case _6502_OPCODE(rol):
-            case _6502_OPCODE(lsr):
-            case _6502_OPCODE(ror):
+            case W65C02_OPCODE(asl):
+            case W65C02_OPCODE(rol):
+            case W65C02_OPCODE(lsr):
+            case W65C02_OPCODE(ror):
               break;
-            case _6502_OPCODE(inc):
-              opcode = _6502_OPCODE(inca);
+            case W65C02_OPCODE(inc):
+              opcode = W65C02_OPCODE(inca);
               break;
-            case _6502_OPCODE(dec):
-              opcode = _6502_OPCODE(deca);
+            case W65C02_OPCODE(dec):
+              opcode = W65C02_OPCODE(deca);
               break;
             default:
               AssemblerError(&ASM, "Illegal accumulator instruction");
@@ -873,33 +922,37 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
           operand_size = 0;
         } else {
           if (LexMatch(&ASM.lex, TOK(percent))) {
-            AssembleAbsoluteAddress(assembler, 1);
-          } else {
+            operand_size = AssembleAbsoluteAddress(assembler, 1);
+             absolute = operand_size == 2;
+           } else if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+             operand = AbsoluteSymbolOrExpression(assembler, &absolute);
+           } else {
             operand = (int)AssemblerEvaluateExpression(&ASM);
           }
           if (LexMatch(&ASM.lex, TOK(comma))) {
             const char* index = "X";
-            if (opcode == _6502_OPCODE(ldx) || opcode == _6502_OPCODE(stx)) {
+            if (opcode == W65C02_OPCODE(ldx) || opcode == W65C02_OPCODE(stx)) {
               index = "Y";
             }
             NeedIndexReg(assembler, index);
 
             // zp,X or abs,X depending on size of value.
-            if (operand >= 0 && operand < 256) {
-              if (index[0] != 'Y') {
-                AssemblerError(&ASM, "zp,Y is only valid for LDX and STX");
-              }
-              bbb = _6502_ADDR_MODE(10, zpx);
+            if (!absolute && operand >= 0 && operand < 256 && operand_size == 1 && index[0] == 'X') {
+              bbb = W65C02_ADDR_MODE(10, zpx);
             } else {
-              bbb = _6502_ADDR_MODE(10, absx);
+              if (index[0] == 'X') {
+                bbb = W65C02_ADDR_MODE(10, absx);
+              } else {
+                bbb = W65C02_ADDR_MODE(01, absy);
+              }
               operand_size = 2;
             }
           } else {
-            if (operand >= 0 && operand < 256) {
-              bbb = _6502_ADDR_MODE(10, zp);
+            if (!absolute && operand >= 0 && operand < 256 && operand_size == 1) {
+              bbb = W65C02_ADDR_MODE(10, zp);
             } else {
               // Absolute.
-              bbb = _6502_ADDR_MODE(10, abs);
+              bbb = W65C02_ADDR_MODE(10, abs);
               operand_size = 2;
             }
           }
@@ -935,13 +988,13 @@ static void AssembleMemoryInstruction(_6502Assembler* assembler, int opcode) {
 }
 
 #define ASSEMBLE_SIMPLE_INST(inst)                                \
-  static void Assemble_##inst(_6502Assembler* assembler) {        \
-    AssembleSingleByteInstruction(assembler, _6502_OPCODE(inst)); \
+  static void Assemble_##inst(W65C02Assembler* assembler) {        \
+    AssembleSingleByteInstruction(assembler, W65C02_OPCODE(inst)); \
   }
 
 // BRK is a one byte instruction with an optional operand.  If the operand
 // is present it is added immediately after the instruction.
-static void Assemble_brk(_6502Assembler* assembler) {
+static void Assemble_brk(W65C02Assembler* assembler) {
   int8_t value = 0;
   bool value_present = false;
   if (LexMatch(&ASM.lex, TOK(hash))) {
@@ -949,7 +1002,7 @@ static void Assemble_brk(_6502Assembler* assembler) {
     value = AssemblerEvaluateExpression(&ASM);
     value_present = true;
   }
-  AssemblerEmitByte(&ASM, ASM.current_section, _6502_OPCODE(brk));
+  AssemblerEmitByte(&ASM, ASM.current_section, W65C02_OPCODE(brk));
   if (value_present) {
     AssemblerEmitByte(&ASM, ASM.current_section, value);
   }
@@ -981,8 +1034,8 @@ ASSEMBLE_SIMPLE_INST(tax);
 ASSEMBLE_SIMPLE_INST(tsx);
 
 #define ASSEMBLE_BRANCH(inst)                              \
-  static void Assemble_##inst(_6502Assembler* assembler) { \
-    AssembleBranch(assembler, _6502_OPCODE(inst));         \
+  static void Assemble_##inst(W65C02Assembler* assembler) { \
+    AssembleBranch(assembler, W65C02_OPCODE(inst));         \
   }
 
 ASSEMBLE_BRANCH(bpl)
@@ -995,10 +1048,10 @@ ASSEMBLE_BRANCH(bne)
 ASSEMBLE_BRANCH(beq)
 ASSEMBLE_BRANCH(bra)
 
-static void Assemble_jmp(_6502Assembler* assembler) { AssembleJump(assembler); }
+static void Assemble_jmp(W65C02Assembler* assembler) { AssembleJump(assembler); }
 
-static void Assemble_jsr(_6502Assembler* assembler) {
-  int opcode = _6502_OPCODE(jsr);
+static void Assemble_jsr(W65C02Assembler* assembler) {
+  int opcode = W65C02_OPCODE(jsr);
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     // Allow expression for non-section-relative JSR.
     int64_t operand = (int)AssemblerEvaluateExpression(&ASM);
@@ -1026,7 +1079,7 @@ static void Assemble_jsr(_6502Assembler* assembler) {
     addend = (int)AssemblerEvaluateExpression(&ASM);
   }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
-      sym, R_6502_JSR,
+      sym, R_W65C02_JSR,
       ASM.current_section, (int32_t)AssemblerCurrentAddress(&ASM), addend);
   AssemblerAddRelocation(&ASM, reloc);
   AssemblerEmitByte(&ASM, ASM.current_section, opcode);
@@ -1038,12 +1091,15 @@ static void Assemble_jsr(_6502Assembler* assembler) {
 // 2. zp, X
 // 3. abs
 // 4. abs, X
-static void Assemble_stz(_6502Assembler* assembler) {
+static void Assemble_stz(W65C02Assembler* assembler) {
   int operand = 0;
   int operand_size = 1;
   int opcode = 0;
+  bool absolute = false;
   if (LexMatch(&ASM.lex, TOK(percent))) {
-    AssembleAbsoluteAddress(assembler, 1);
+    operand_size = AssembleAbsoluteAddress(assembler, 1);
+  } else if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    operand = AbsoluteSymbolOrExpression(assembler, &absolute);
   } else {
     operand = (int)AssemblerEvaluateExpression(&ASM);
     CheckWidth(assembler, operand, 16);
@@ -1068,7 +1124,7 @@ static void Assemble_stz(_6502Assembler* assembler) {
     }
   } else {
     // No comma, so this is zero page or absolute.
-    if (operand >= 0 && operand < 256) {
+    if (!absolute && operand >= 0 && operand < 256) {
       opcode = 0x64;  // zp
     } else {
       // Absolute.
@@ -1085,8 +1141,8 @@ static void Assemble_stz(_6502Assembler* assembler) {
 }
 
 #define ASSEMBLE_MEM(inst)                                    \
-  static void Assemble_##inst(_6502Assembler* assembler) {    \
-    AssembleMemoryInstruction(assembler, _6502_OPCODE(inst)); \
+  static void Assemble_##inst(W65C02Assembler* assembler) {    \
+    AssembleMemoryInstruction(assembler, W65C02_OPCODE(inst)); \
   }
 
 ASSEMBLE_MEM(lda);
@@ -1117,7 +1173,7 @@ ASSEMBLE_MEM(dec);
 ASSEMBLE_MEM(inc);
 
 #define UNIMPLEMENTED(inst) \
-  static void Assemble_##inst(_6502Assembler* assembler) {}
+  static void Assemble_##inst(W65C02Assembler* assembler) {}
 
 UNIMPLEMENTED(tsb);
 UNIMPLEMENTED(trb);

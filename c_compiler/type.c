@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include <assert.h>
 #include "dstring.h"
@@ -25,38 +26,46 @@
 
 static int next_type_id = 0;
 
-static struct {
-  Type type;
-  int size;
-} fixed_type_sizes[] = {
-    {kTypeChar, 1},   {kTypeShort, 2},
-    {kTypeLongLong, 8}, {kTypeFloat, 4}, {kTypeDouble, 8}, {kTypeLongDouble, 8},
-    {kTypeVoid, 0},     {kTypeBool, 1},  {kTypeEnum, 4},   {kTypeImplicit, 0},
-};
+// The size of a pointer depends on the machine architecture.
+int SizeofBool(void) {
+  return compiler->bool_size;
+}
 
-static int FixedSize(Type type) {
-  for (int i = 0; fixed_type_sizes[i].type != kTypeImplicit; i++) {
-    if ((type & fixed_type_sizes[i].type) != 0) {
-       return fixed_type_sizes[i].size;
-    }
-  }
-  return -1;
+int SizeofShort(void) {
+  return compiler->short_size;
+}
+
+int SizeofChar(void) {
+  return 1;
+}
+
+int SizeofVoid(void) {
+  return 1;
 }
 
 
-// The size of a pointer depends on the machine architecture.
 int SizeofPointer(void) {
   return compiler->pointer_size;
 }
 
-// The size of a int depends on the machine architecture.
 int SizeofInt(void) {
   return compiler->int_size;
 }
 
-// The size of a int depends on the machine architecture.
 int SizeofLong(void) {
   return compiler->long_size;
+}
+
+int SizeofLongLong(void) {
+  return compiler->long_long_size;
+}
+
+int SizeofFloat(void) {
+  return compiler->float_size;
+}
+
+int SizeofDouble(void) {
+  return compiler->double_size;
 }
 
 // Mapping of type to its size in bytes.
@@ -64,22 +73,34 @@ static struct {
   Type type;
   int (*func)(void);
 } type_sizes[] = {
-    {kTypeInt, SizeofInt},    {kTypeLong, SizeofLong},
-    {kTypeImplicit, 0},
+  {kTypeChar, SizeofChar},
+  {kTypeBool, SizeofBool},
+  {kTypeShort, SizeofShort},
+  {kTypeLong, SizeofLong},
+  {kTypeLongLong, SizeofLongLong},
+  {kTypeFloat, SizeofFloat},
+  {kTypeDouble, SizeofDouble},
+  {kTypeLongDouble, SizeofDouble},
+  {kTypeInt, SizeofInt},
+  {kTypeVoid, SizeofVoid},
+  {kTypeImplicit, 0},
 };
 
 
 // What is the size in bytes of the given type?  Uses the mapping
 // above.  Returns the size or zero if the type isn't known.
 int SizeofType(Type type) {
-  int size = FixedSize(type);
-  if (size >= 0) {
-    return size;
-  }
   for (int i = 0; type_sizes[i].type != kTypeImplicit; i++) {
     if ((type & type_sizes[i].type) != 0) {
        return type_sizes[i].func();
     }
+  }
+  if ((type & kTypeEnum) != 0) {
+    // Enums are variable in size.
+    if ((type & kTypeChar) != 0) {
+      return SizeofChar();
+    }
+    return SizeofInt();
   }
   return SizeofPointer();
 }
@@ -87,6 +108,10 @@ int SizeofType(Type type) {
 
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
+  // If a plain unsigned or signed is found, this implies an int.
+  if (type == kTypeUnsigned || type == kTypeSigned) {
+    type |= kTypeInt;
+  }
   TypeRecord* record = malloc(sizeof(TypeRecord));
   record->id = next_type_id++;
   record->type = type;
@@ -135,6 +160,10 @@ void TypeRecordDelete(TypeRecord* record) {
 }
 
 int TypeRecordAlignment(TypeRecord* record) {
+  if (compiler->alignment == 1) {
+    // No alignment necessary for this target.
+    return 1;
+  }
   switch (record->declarator) {
     case kDeclArray:
       return TypeRecordAlignment(record->next);
@@ -185,8 +214,9 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
         break;
       case kDeclPrimitive:
         if (TypeIsStructOrUnion(record)) {
-          assert(record->info.struct_info != NULL);
-          record->size = record->info.struct_info->size;
+          if (record->info.struct_info != NULL) {
+            record->size = record->info.struct_info->size;
+          }
         } else {
           record->size = SizeofType(record->type);
         }
@@ -204,9 +234,6 @@ TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals) {
 // the reference count on the one pointed to.
 void TypeRecordChain(TypeRecord* from, TypeRecord* to) {
   TypeRecordIncRef(to);
-  if (to == NULL) {
-    printf("");
-  }
   from->next = to;
 }
 
@@ -294,9 +321,9 @@ TypeRecord* NewFunctionTypeRecord() {
 
 TypeRecord* NewSizeTypeRecord() {
   if (compiler->pointer_size == 8) {
-    return NewTypeRecord(kTypeLongLong | kTypeUnsigned, kQualPlain);
+    return NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
   }
-  return NewTypeRecord(kTypeInt | kTypeUnsigned, kQualPlain);
+  return NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain);
 }
 
 StructMember* NewStructMember(Symbol* symbol) {
@@ -305,6 +332,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->byte_offset = 0;
   mem->bit_offset = 0;
   mem->bit_size = 0;
+  mem->is_anon = false;
   return mem;
 }
 
@@ -344,9 +372,10 @@ void StructDelete(Struct* s) {
 }
 
 Symbol* NewEnumConstant(const char* name, int value) {
-  TypeRecord* int_type = NewTypeRecord(kTypeInt, kQualConst);
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualConst);
   Symbol* c = NewSymbol(name, int_type, STO(implicit));
   c->value.ivalue = value;
+  c->flags.value_set = true;
   return c;
 }
 
@@ -560,11 +589,9 @@ static struct {
     {TOK(unsigned), kTypeUnsigned}, {TOK(bad), kTypeImplicit},
 };
 
-
-
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
-static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
+static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
   PartialTypeSpecifier result;
   result.error = false;
   
@@ -605,7 +632,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
       quals |= kQualVolatile;
     } else if (LexMatch(lex, TOK(restrict))) {
       quals |= kQualRestrict;
-    } else if (tok == TOK(identifier)) {
+    } else if (allow_typedef && tok == TOK(identifier)) {
       // Identifier.  If this is a known typedef name consume it
       // and keep the type.
       String typedef_name;
@@ -646,6 +673,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser) {
       // and the type record will be the one inside the symbol for 'Foo'
       type_record = TypeRecordCopy(tag->type);
       type |= type_record->type;
+      
+      if (LexMatch(lex, TOK(const))) {
+        quals |= kQualConst;
+      } else if (LexMatch(lex, TOK(volatile))) {
+        quals |= kQualVolatile;
+      } else if (LexMatch(lex, TOK(restrict))) {
+        quals |= kQualRestrict;
+      }
+      type_record->qualifiers |= quals;
     }
   }
 
@@ -844,7 +880,7 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
 
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev) {
-  PartialTypeSpecifier curr = ParseTypeSpecifier(parser);
+  PartialTypeSpecifier curr = ParseTypeSpecifier(parser, prev->type == kTypeImplicit);
   if (prev->type == kTypeImplicit && prev->quals == kQualPlain) {
     return curr;
   }
@@ -855,13 +891,13 @@ PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
 // Given a ParseTypeSpecifier, build a TypeRecord.
 TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* type) {
   if (type->error) {
-    return NewTypeRecord(kTypeInt, kQualPlain);
+    return NewTypeRecordWithSize(kTypeInt, kQualPlain);
   }
   if (type->type_record == NULL) {
     if (type->type == kTypeImplicit) {
       return NULL;
     }
-    return NewTypeRecord(type->type, type->quals);
+    return NewTypeRecordWithSize(type->type, type->quals);
   } else {
     // Add qualifiers to typedef copy.
     type->type_record->qualifiers |= type->quals;
@@ -879,7 +915,10 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     .error = false };
   
   while (parser->found_void || SyntaxLookingAtType(syntax)) {
-    PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser);
+    PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit);
+    if (new_type_specifier.type == kTypeImplicit && new_type_specifier.quals == kQualPlain) {
+      break;
+    }
     if (type_specifier.type == kTypeImplicit && type_specifier.quals == kQualPlain) {
       type_specifier = new_type_specifier;
     } else {
@@ -891,7 +930,7 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     if (needed) {
       SyntaxError(parser->syntax, "Type expected");
       SyntaxRecover(parser->syntax, TC(semicolon) | TC(type));
-      return NewTypeRecord(kTypeInt, kQualPlain);
+      return NewTypeRecordWithSize(kTypeInt, kQualPlain);
     }
     return NULL;
   }
@@ -1000,6 +1039,7 @@ static void ParseFormalArgument(TypeParser* proto_parser,
       // For an array, convert the type record to a pointer.
       TypeRecord* ptr = TypeRecordCopy(formal->type);
       ptr->declarator = kDeclPointer;
+      ptr->size = compiler->pointer_size;
       SymbolSetType(formal, ptr);
     }
     VectorAppend(&func->info.function.prototype, formal);
@@ -1053,7 +1093,7 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecor
         SyntaxError(proto_parser->syntax, "Type expected for function arg");
         SyntaxRecover(proto_parser->syntax, TC(closebra));
       } else {
-        TypeRecord* unknown = NewTypeRecord(kTypeInt, kQualPlain);
+        TypeRecord* unknown = NewTypeRecordWithSize(kTypeInt, kQualPlain);
         Symbol* formal = NewSymbol(proto_parser->lex->spelling.value,
                                    unknown, STO(auto));
         LexNextToken(proto_parser->lex);
@@ -1240,10 +1280,12 @@ static void ParseArrayDecl(TypeParser* parser) {
 
 void TypeParserParseFuncOrArray(TypeParser* parser) {
   TypeParserParseBase(parser);
-  while (LexLookingAt(parser->lex, TOK(lparen)) ||
+  while (parser->syntax->found_open_paren ||
+         LexLookingAt(parser->lex, TOK(lparen)) ||
          LexLookingAt(parser->lex, TOK(lsquare))) {
     // Check for function prototype declaration.
-    if (LexMatch(parser->lex, TOK(lparen))) {
+    if (parser->syntax->found_open_paren || LexMatch(parser->lex, TOK(lparen))) {
+      parser->syntax->found_open_paren = false;
       ParseFunctionDecl(parser);
     } else if (LexMatch(parser->lex, TOK(lsquare))) {
       ParseArrayDecl(parser);
@@ -1254,6 +1296,12 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
 
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
+    if (SyntaxLookingAtType(parser->syntax) || LexLookingAt(parser->lex, TOK(rparen))) {
+      // Open paren followed by a type isn't a parenthesized decl, it's
+      // a function prototype.
+      parser->syntax->found_open_paren = true;
+      return;
+    }
     TypeParserParsePointer(parser);
     if (!LexMatch(parser->lex, TOK(rparen))) {
       LexError(parser->lex, "Missing close parenthesis in declaration");
@@ -1270,10 +1318,12 @@ void TypeParserParseBase(TypeParser* parser) {
   }
 }
 
+#if 0
 static void PrintStructMember(const MapKeyValue* kv) {
   String* name = kv->key.p;
   printf("%s", name->value);
 }
+#endif
 
 StructMember* FindStructMember(Struct* str, String* name) {
 //  MapPrint(&str->symbol_table, PrintStructMember);
@@ -1320,7 +1370,7 @@ static void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
   int word_width = member_symbol->type->size * 8;
   if (bit_width <= 0 || bit_width > word_width) {
     snprintf(error, sizeof(error),
-             "width of %lld is out of bounds for type of size %d bite",
+             "width of %" PRId64 " is out of bounds for type of size %d bits",
              bit_width, word_width);
     goto error;
   }
@@ -1358,10 +1408,85 @@ error:
   SyntaxError(parser->syntax, "Invalid bitfield; %s", error);
 }
 
+static void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union) {
+   // Update the struct offset and size based on the
+   // anonymous member.
+   if (!is_union) {
+     str->next_offset += member_type->size;
+     str->size = str->next_offset;
+   } else {
+     // The size of a union is the maximum size of its members.
+     if (member_type->size > str->size) {
+       str->size = member_type->size;
+     }
+   }
+}
+
+
+// Copy an anoymous union into the destination struct.  Members of the union
+// are inserted into the symbol table of the dest struct and each of the
+// members of the anonymous type are assigned offsets in the dest struct.
+// The members of the src struct/union are not inserted as members of the
+// dest struct (just in the symbol table, not the members vector).
+static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src ) {
+  for (size_t i = 0; i < src->members.length; i++) {
+    StructMember* member = src->members.value.p[i];
+    Symbol* symbol = member->symbol;
+    if (member->is_anon) {
+      // Anonymous member, deal with recursively.
+      CopyAnonymousMembers(parser, dest, symbol->type->info.struct_info);
+      continue;
+    }
+    if (!CheckStructMember(dest, &symbol->name)) {
+      SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                symbol->name.value);
+    } else {
+      // Add the member to the symbol table of the struct/union.
+      MapKeyValue kv;
+      kv.key.p = &symbol->name;
+      kv.value.p = member;
+      MapInsert(&dest->symbol_table, kv);
+
+      if (!src->is_union) {
+        AlignNextOffset(dest, symbol->type);
+      }
+      member->byte_offset = dest->next_offset;
+      if (!src->is_union) {
+        UpdateStructSize(dest, symbol->type, dest->is_union);
+      }
+    }
+  }
+}
+
+
 static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+    bool possible_anon = LexLookingAt(parser->lex, TOK(union)) ||
+            LexLookingAt(parser->lex, TOK(struct));
     TypeRecord* member_type = TypeParserParseType(parser, true);
     while (!LexEof(parser->lex)) {
+      if (possible_anon && LexLookingAt(parser->lex, TOK(semicolon))) {
+        TypeRecordCalculateSize(member_type);
+        AlignNextOffset(str, member_type);
+        CopyAnonymousMembers(parser, str, member_type->info.struct_info);
+        
+        // Make a fake member symbol to represent the anonymous member.  This
+        // is inserted into the members vector but not the symbol table.
+        Symbol* member_symbol = NewSymbol(SyntaxFakeName(parser->syntax),
+                                          member_type, STO(implicit));
+        StructMember* member = NewStructMember(member_symbol);
+        VectorAppend(&str->members, member);
+
+        // If we are inserting a union we haven't changed the size of the
+        // current struct yet.
+        if (member_type->info.struct_info->is_union) {
+          UpdateStructSize(str, member_type, is_union);
+        }
+        member->is_anon = true;
+        // Syntax doesn't allow anonymous members to be in a comma-separated
+        // list.
+        break;
+      }
       Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
       if (member_symbol == NULL) {
         SyntaxError(parser->syntax, "Invalid type for struct member");
@@ -1371,14 +1496,14 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
         SymbolDelete(member_symbol);
       } else {
         StructMember* member = NewStructMember(member_symbol);
-
-        // Add the member to the struct/union.
+        
+        // Add to symbol table.
         VectorAppend(&str->members, member);
         MapKeyValue kv;
         kv.key.p = &member->symbol->name;
         kv.value.p = member;
         MapInsert(&str->symbol_table, kv);
-        
+
         // Check for bitfield.
         if (LexMatch(parser->lex, TOK(colon))) {
           ParseBitField(parser, is_union, str, member_symbol, member);
@@ -1388,17 +1513,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
           member->byte_offset = str->next_offset;
           member->index = str->members.length - 1;
 
-          // Update the struct offset and size based on the
-          // member that was inserted.
-          if (!is_union) {
-            str->next_offset += member_symbol->type->size;
-            str->size = str->next_offset;
-          } else {
-            // The size of a union is the maximum size of its members.
-            if (member_symbol->type->size > str->size) {
-              str->size = member_symbol->type->size;
-            }
-          }
+          UpdateStructSize(str, member_symbol->type, is_union);
         }
       }
       if (!LexMatch(parser->lex, TOK(comma))) {
@@ -1499,8 +1614,8 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
   // and 'str' will be a pointer to the Struct information.
   ParseStructMembers(parser, str, is_union);
   
-  // Round the size of the struct to the next 8 byte boundary.
-  str->size = (str->size + 7) & ~7;
+  // Round the size of the struct to the target's alignment.
+  str->size = (str->size + (compiler->alignment - 1)) & ~(compiler->alignment - 1);
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
    
   CheckFlexibleArrays(parser, str, is_union);
@@ -1513,6 +1628,12 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
 // be a tag name or an open brace, or semicolon.  Don't consume
 // a semicolon at the end of the struct.
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
+  // Parse common __attribute__ syntax.
+  Vector attributes = {0};
+  while (LexMatch(parser->lex, TOK(attribute))) {
+    SyntaxParseAttribute(parser->syntax, &attributes);
+  }
+
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
     return NULL;
@@ -1553,7 +1674,27 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   return tag;
 }
 
-static void ParseEnumConstants(TypeParser* parser, Enum* e) {
+//  C99 6.7.2.2
+//  Each enumerated type shall be compatible with char, a signed integer type,
+//  or an unsigned integer type. The choice of type is implementation-defined,110)
+//  but shall be capable of representing the values of all the members of the
+//  enumeration. The enumerated type is incomplete until after the }
+//  that terminates the list of enumerator declarations.
+//
+//  110) An implementation may delay the choice of which integer type until
+//  all enumeration constants have been seen.
+//
+// However, it appears that using a char as a type isn't a good idea since
+// exising code might treat enums as ints and pass pointers to them.
+// TODO: add a pragma or command line option to enable chars?
+static Type ParseEnumConstants(TypeParser* parser, Enum* e) {
+  enum TypeSelection {
+    kUnsignedChar,      // Not used.
+    kSignedChar,        // Not used.
+    kUnsignedInt,
+    kSignedInt,
+  } type_selection = kUnsignedInt;
+  
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
     if (LexLookingAt(parser->lex, TOK(identifier))) {
       String const_name;
@@ -1574,6 +1715,34 @@ static void ParseEnumConstants(TypeParser* parser, Enum* e) {
         e->next_value = (int32_t)next_value;
         ASTNodeDelete(value);
       }
+      // Determine the type of the enum based on the constant value.
+      switch (type_selection) {
+        case kUnsignedInt:
+          if (e->next_value < 0) {
+            type_selection = kSignedInt;
+          }
+          break;
+        case kUnsignedChar:
+          if (e->next_value > 255) {
+            type_selection = kUnsignedInt;
+          }
+          if (e->next_value < 0) {
+            if (e->next_value < 256) {
+              type_selection = kSignedInt;
+            } else {
+              type_selection = kUnsignedInt;
+            }
+          }
+          break;
+        case kSignedInt:
+          break;
+        case kSignedChar:
+          if (e->next_value > 255) {
+            type_selection = kSignedInt;
+          }
+          break;
+      }
+
       Symbol* ec = NewEnumConstant(const_name.value, e->next_value);
       e->next_value++;
       StringDestruct(&const_name);
@@ -1592,6 +1761,16 @@ static void ParseEnumConstants(TypeParser* parser, Enum* e) {
     if (!LexMatch(parser->lex, TOK(comma))) {
       break;
     }
+  }
+  switch (type_selection) {
+    case kUnsignedInt:
+      return kTypeInt | kTypeUnsigned;
+    case kUnsignedChar:
+      return kTypeChar | kTypeUnsigned;
+    case kSignedInt:
+      return kTypeInt;
+    case kSignedChar:
+      return kTypeChar;
   }
 }
 
@@ -1615,7 +1794,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
   } else {
     // Tag doesn't exist, create one.
     e = NewEnum();
-    TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
+    TypeRecord* type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
     type->info.enum_info = e;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     e->tag_name = &tag->name;
@@ -1632,14 +1811,22 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
 
   // Now 'tag' will be the struct tag pointer
   // and 'e' will be a pointer to the Enum information.
-  ParseEnumConstants(parser, e);
-
+  Type t = ParseEnumConstants(parser, e);
+  tag->type->type |= t;
+  tag->type->size = SizeofType(t);
+  
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(expr));
   return tag;
 }
 
 // Parse an enum definition or reference.
 Symbol* TypeParserParseEnum(TypeParser* parser) {
+  // Parse common __attribute__ syntax.
+  Vector attributes = {0};
+  while (LexMatch(parser->lex, TOK(attribute))) {
+    SyntaxParseAttribute(parser->syntax, &attributes);
+  }
+
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
     return NULL;
@@ -1666,7 +1853,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     if (tag == NULL) {
       // New tag.
       Enum* e = NewEnum();
-      TypeRecord* type = NewTypeRecord(kTypeEnum, kQualPlain);
+      TypeRecord* type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
       type->info.enum_info = e;
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
@@ -1745,6 +1932,10 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
+  // Prevent knock-on errors due to unknown symbols.
+  if ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0) {
+    return true;
+  }
   if (t1->declarator != t2->declarator) {
     return false;
   }
@@ -1763,6 +1954,13 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       }
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive:
+      if (TypeIsEnum(t1) && TypeIsEnum(t2)) {
+        // Enums can be char, signed int or unsigned int.
+        int e1 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+        int e2 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+        return e1 == e2 && t1->qualifiers == t2->qualifiers;
+
+      }
       return t1->type == t2->type && t1->qualifiers == t2->qualifiers;
   }
 }

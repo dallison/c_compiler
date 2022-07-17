@@ -92,7 +92,6 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
                                IRNode* node) {
   switch (node->opcode) {
     case IR_OP(addi):
-    case IR_OP(adda):
       // Adding constant 0 is a nop.
       if (IsIntConstantWithValue(node->inputs.value.p[0], 0)) {
         BasicBlockReplaceInstruction(gen, block, node, node->inputs.value.p[1]);
@@ -254,3 +253,4 @@ void TailCallOptimization(Generator* gen) {
   BasicBlockTraverseDominatorTree(gen, gen->entry_block,
                                   FindTailCalls, kTraversePostOrder, gen);
 }
+

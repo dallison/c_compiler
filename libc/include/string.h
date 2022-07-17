@@ -11,7 +11,7 @@
 #ifdef __DAVECC__
 
 #ifndef __SIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -20,7 +20,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;
@@ -56,8 +56,7 @@ char *strpbrk(const char *s1, const char *s2);
 char *strrchr(const char *s, int c);
 size_t strspn(const char *s1, const char *s2);
 char *strstr(const char *s1, const char *s2);
-char *strtok(char * restrict s1,
-const char * restrict s2);
+char *strtok(char * restrict s1, const char * restrict s2);
 void *memset(void *s, int c, size_t n);
 char *strerror(int errnum);
 size_t strlen(const char *s);

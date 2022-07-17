@@ -315,14 +315,14 @@ static void CollectWideStringLiteral(Lex* lex) {
       int size;
       int v = EscapeChar(lex, &size);
       // Size is ignored.
-      for (int i = 0; i < 4; i++) {
+      for (int i = 0; i < compiler->wchar_size; i++) {
         StringAppendChar(&lex->spelling, (v >> i*8) & 0xff);
       }
     } else if (ch == '"') {
       break;
     } else {
       StringAppendChar(&lex->spelling, ch);
-      for (int i = 0; i < 3; i++) {
+      for (int i = 0; i < compiler->wchar_size - 1; i++) {
         StringAppendChar(&lex->spelling, '\0');
       }
     }
@@ -391,8 +391,8 @@ static int CollectWideCharConst(Lex* lex) {
       nchars++;
     }
   }
-  if (nchars > 1) {
-    LexError(lex, "Max of 1 character allowed in wide character constant");
+  if (nchars > compiler->wchar_size) {
+    LexError(lex, "Max of %d characters allowed in wide character constant", compiler->wchar_size);
   }
   if (nchars == 0 || newline) {
     LexError(lex, "Newline in character constant");
@@ -731,31 +731,19 @@ void LexDestruct(Lex* lex) {
   StringDestruct(&lex->spelling);
 }
 
-// Collects a hexadecimal or octal number.
-static void CollectHexOrOctal(Lex* lex) {
+// Collects a hexadecimal number prefixed by a $.
+static void CollectHex(Lex* lex) {
   int64_t number = 0;
-  lex->pos++;
-  if (lex->pos < lex->line.length &&
-      toupper(lex->line.value[lex->pos]) == 'X') {
-    // Collect hex number and convert to binary.
-    lex->pos++;
-    while (lex->pos < lex->line.length &&
-           isxdigit(lex->line.value[lex->pos])) {
-      char ch = lex->line.value[lex->pos++];
-      number <<= 4;
-      if (isalpha(ch)) {
-        number |= tolower(ch) - 'a' + 10;
-      } else {
-        number |= ch - '0';
-      }
+  // Collect hex number and convert to binary.
+  while (lex->pos < lex->line.length &&
+         isxdigit(lex->line.value[lex->pos])) {
+    char ch = lex->line.value[lex->pos++];
+    number <<= 4;
+    if (isalpha(ch)) {
+      number |= tolower(ch) - 'a' + 10;
+    } else {
+      number |= ch - '0';
     }
-  } else {
-    // Octal number, convert to binary.
-    while (lex->pos < lex->line.length &&
-           (lex->line.value[lex->pos] >= '0' &&
-            lex->line.value[lex->pos] <= '7')) {
-             number = (number << 3) | lex->line.value[lex->pos++] - '0';
-           }
   }
   lex->number = number;
   CollectIntegerSuffix(lex);
@@ -763,52 +751,79 @@ static void CollectHexOrOctal(Lex* lex) {
 }
 
 static void CollectNumber(Lex* lex, char ch) {
-  // If the number begins with a 0 then it is either an octal
-  // or hex number.  If the 0 is followed immediately by an x or X
-  // then it is in hex.
-  if (ch == '0' && LookaheadChar(lex) != '.') {
-    CollectHexOrOctal(lex);
+  if (lex->assembler_mode && ch == '$') {
+    lex->pos++;     // Skip $.
+    CollectHex(lex);
   } else {
     bool seenexp = false;      // Have we seen an exponent?
     bool seendot = ch == '.';  // Have we seen a dot?
     bool seensign = false;     // Have we seen a sign char?
+    bool ishex = false;        // Have seen an x or X after initial 0.
+    bool seenzero = ch == '0';     // Seen a zero at start.
+    bool isoctal = seenzero;      // Number is octal.
     
     // We are going to use spelling as our storage, so clear it ready
     // for use.
     StringClear(&lex->spelling);
     StringAppendChar(&lex->spelling, ch);
     lex->pos++;
-    
     // Collect the number into spelling.  Then, when we know
     // what type of number it is, we can do the conversion to
     // binary.
     while (!SourceEof(lex->source) && lex->pos < lex->line.length) {
       ch = lex->line.value[lex->pos];
-      if (ch == '.') {
+      if (seenzero && (ch == 'x' || ch == 'X')) {
+        // 0x or 0X.
+        ishex = true;
+        isoctal = false;
+      } else if (ch == '.') {
         if (seendot) {
           // Two dots terminate number.
           break;
         }
         seendot = true;
-      } else if (ch == 'e' || ch == 'E') {
+        isoctal = false;
+      } else if (!ishex && (ch == 'e' || ch == 'E')) {
+        // Decimal exponent.
         if (seenexp) {
           // Already seen exponent, terminate.
           break;
         }
         seenexp = true;
+        isoctal = false;
+      } else if (ishex && (ch == 'p' || ch == 'P')) {
+        // Binary exponent.
+        if (seenexp) {
+          break;
+        }
+        seenexp = true;
+        ishex = false;      // Exponents are decimal.
       } else if (ch == '+' || ch == '-') {
         if (!seenexp || seensign) {
           // Signs can only be after exponent.
           break;
         }
         seensign = true;
+      } else if (isoctal) {
+        // Octal number.
+        if (ch < '0' || ch > '7') {
+          break;
+        }
+      } else if (ishex) {
+        // Hex number.
+        if (!isxdigit(ch)) {
+          break;
+        }
       } else if (!isdigit(ch)) {
-        // Not a digit, terminate.
+        // Decimal number: not a digit, terminate.
         break;
       }
       StringAppendChar(&lex->spelling, ch);
       lex->pos++;
+      seenzero = false;
     }
+    // Terminate spelling.
+    StringAppendChar(&lex->spelling, '\0');
     
     // Now we can determine the type.  If we've seen a dot
     // or exponent then we are a floating point number.
@@ -828,7 +843,7 @@ static void CollectNumber(Lex* lex, char ch) {
       lex->fnumber = strtod(lex->spelling.value, NULL);
       lex->current_token = TOK(fnumber);
     } else {
-      lex->number = strtoll(lex->spelling.value, NULL, 10);
+      lex->number = strtoll(lex->spelling.value, NULL, 0);
       lex->current_token = TOK(number);
     }
   }
@@ -864,7 +879,10 @@ void LexNextToken(Lex* lex) {
   // Check for number or octal(or hex) constant.
   // NOTE that a floating point number can begin with . but we need to make
   // sure we don't confuse a singular dot or ellipsis (...) here.
-  if (isdigit(ch) || (ch == '.' && isdigit(LookaheadChar(lex)))) {
+  // For compatibility with other assemblers, we also allow a $ to represent
+  // a hex number.
+  if (isdigit(ch) || (lex->assembler_mode && ch == '$') ||
+      (ch == '.' && isdigit(LookaheadChar(lex)))) {
     CollectNumber(lex, ch);
     goto record_token_location;
   }
@@ -1035,7 +1053,10 @@ void LexSkipSpacesAndComments(Lex* lex) {
   }
 }
 
-bool LexEof(Lex* lex) { return SourceEof(lex->source); }
+bool LexEof(Lex* lex) {
+  return lex->pos >= lex->line.length &&
+    SourceEof(lex->source);
+}
 
 static void ReportSourceStack(Lex* lex) {
   Source* source = lex->source->prev;

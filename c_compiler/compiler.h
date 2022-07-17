@@ -136,6 +136,7 @@ typedef struct {
 // A literal has an id.  The value is in a derived class.
 typedef enum {
   kLiteralString,
+  kLiteralWideString,
   kLiteralBuffer,
 } LiteralType;
 
@@ -157,9 +158,6 @@ typedef struct {
   Buffer value;
 } BufferLiteral;
 
-int CompilerAddStringLiteral(String* value);
-int CompilerAddBufferLiteral(const void* data, size_t length);
-
 void UninitializedStaticVariableDelete(InitializedStaticVariable* var);
 
 TlsModel ParseTlsModelName(String* name);
@@ -170,6 +168,12 @@ typedef enum {
   kCodeForSize        // Prefer size over speed.
 } CodePreference;
 
+typedef struct {
+  int gvn : 1;
+  int code_motion : 1;
+  int const_prop : 1;
+  int tail_call : 1;
+} IROptimizations;
 
 // A compiler target back-end.  This contains pointers to
 // functions to generate code for a particlar target.
@@ -181,12 +185,18 @@ typedef struct {
   int long_size;
   int long_long_size;
   int bool_size;
+  int float_size;
+  int double_size;
+  int wchar_size;
   int stack_alignment;      // Power of 2 stack alignment.
   CodePreference code_preference;
   bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
-  bool callee_save;
   bool keep_ssa;
-
+  int alignment;       // Alignment to apply.
+  IROptimizations ir_optimizations;            // IR optimizations.
+  bool prepend_underscore;          // Prepend underscore to external symbols.
+  int flags;                        // Target specific flags.
+  
   // Function to generate code.  Returns target specific data.
   void* (*codegen)(struct Generator*);
 
@@ -262,11 +272,17 @@ typedef struct {
   int bool_size;  // Size of native bool.
   int long_size;  // Size of native long.
   int long_long_size;  // Size of native long long.
+  int float_size;  // Size of native float.
+  int double_size;  // Size of native double.
+  int wchar_size;
   CodePreference code_preference;
   bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
-  bool callee_save;             // The callee saves registers.
   bool keep_ssa;             // Keep SSA form for lowering codegen.
-
+  IROptimizations ir_optimizations;                  // Do IR optimizations.
+  int alignment;
+  bool prepend_underscore;          // Prepend underscore to external symbols.
+  bool target_flags;
+  
   size_t current_include_path_index;
   TypeRecord* current_function;
   TlsModel tls_model;
@@ -320,7 +336,7 @@ void CompilerDelete(Compiler* compiler);
 String* CompileTranslationUnit(const char* filename, Vector* options);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                          Vector* options);
-int CompilerAddStringLiteral(String* value);
+int CompilerAddStringLiteral(String* value, bool is_wide);
 int CompilerAddBufferLiteral(const void* data, size_t length);
 StringLiteral* CompilerFindStringLiteral(int literal_id);
 BufferLiteral* CompilerFindBufferLiteral(int literal_id);
@@ -330,5 +346,13 @@ bool OptLevel0(void);
 bool OptLevel1(void);
 bool OptLevel2(void);
 bool OptLevel3(void);
+
+int CharSize(void);
+int IntSize(void);
+int ShortSize(void);
+int PointerSize(void);
+int BoolSize(void);
+int LongSize(void);
+int LongLongSize(void);
 
 #endif /* compiler_h */

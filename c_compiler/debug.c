@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include "ast.h"
 #include "compiler.h"
 
@@ -1346,7 +1347,7 @@ static void EnumConstDIEBuild(DebugBuilder* builder, DIE* die) {
 static void EnumConstDIEPrint(DIE* die, int level) {
   DoIndent(level);
   EnumeratorDIE* e = (EnumeratorDIE*)die;
-  printf("%s: value: %lld\n", DW_TAGString(die->tag), e->value);
+  printf("%s: value: %" PRId64 "\n", DW_TAGString(die->tag), e->value);
 }
 
 static void EnumConstDIEEmit(DebugBuilder* builder, DIE* die) {

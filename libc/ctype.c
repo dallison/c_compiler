@@ -16,9 +16,9 @@
 #define L (1 << 5)    // lower
 #define U (1 << 6)    // upper
 #define X (1 << 7)    // xdigit
-#define G (1 << 8)    // graph
 
-static int char_traits[256] = {
+
+static char char_traits[256] = {
   //       00      01      02      03      04      05      06      07
   //       08      09      0a      0b      0c      0d      0e      0f
   /* 00 */ C,      C,      C,      C,      C,      C,      C,      C,
@@ -100,7 +100,7 @@ int ispunct(int c) {
 
 int isspace(int c) {
   int ch = c & 0xff;
-  return (char_traits[ch] & C) != 0;
+  return (char_traits[ch] & S) != 0;
 }
 
 int isupper(int c) {

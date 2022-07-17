@@ -21,12 +21,13 @@ struct LoaderArchitecture;
 // we are done.
 typedef struct {
   void* address;        // Virtual address.
+  int64_t offset;
   int64_t length;       // Length in bytes.
   Vector sections;      // Sections in this region (ELFReaderSection*).
   ELFProgramHeader* segment;
 } Region;
 
-Region* NewRegion(void* addr, int64_t length, ELFProgramHeader* segment);
+Region* NewRegion(void* addr, int64_t offset, int64_t length, ELFProgramHeader* segment);
 void RegionDestruct(Region* region);
 
 // A symbol scope is a region of memory that corresponds

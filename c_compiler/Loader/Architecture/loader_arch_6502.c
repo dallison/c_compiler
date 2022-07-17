@@ -30,8 +30,8 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
   
 }
 
-void _6502LoaderArchitectureInit(LoaderArchitecture* arch) {
-  arch->machine_type = ELF_MACHINE_TYPE_6502;
+void W65C02LoaderArchitectureInit(LoaderArchitecture* arch) {
+  arch->machine_type = ELF_MACHINE_TYPEW65C02;
   arch->platform = "6502";
   arch->ignore_vaddr = true;
   arch->init_got_plt = InitGOTPLT;
@@ -41,6 +41,6 @@ void _6502LoaderArchitectureInit(LoaderArchitecture* arch) {
 
 LoaderArchitecture* New6502LoaderArchitecture(void) {
   LoaderArchitecture* arch = malloc(sizeof(LoaderArchitecture));
-  _6502LoaderArchitectureInit(arch);
+  W65C02LoaderArchitectureInit(arch);
   return arch;
 }

@@ -55,6 +55,9 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       if ((type->qualifiers & kQualConst) == 0) {
         return false;
       }
+      if (!id_node->symbol->flags.value_set) {
+        return false;
+      }
       if (TypeIsIntegral(type)) {
         *result = id_node->symbol->value.ivalue;
       } else if (TypeIsFloatingPoint(type)) {
@@ -209,6 +212,7 @@ case AST_OP(ast_op): \
 
       
       EVAL_UNARY_OP(b2i, (int))
+      EVAL_UNARY_OP(c2i, (int))
       EVAL_UNARY_OP(s2i, (int))
       EVAL_UNARY_OP(l2i, (int))
       EVAL_UNARY_OP(ll2i, (int))
@@ -217,6 +221,7 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(ld2i, (int))
 
       EVAL_UNARY_OP(b2s, (short))
+      EVAL_UNARY_OP(c2s, (short))
       EVAL_UNARY_OP(i2s, (short))
       EVAL_UNARY_OP(l2s, (short))
       EVAL_UNARY_OP(ll2s, (short))
@@ -225,6 +230,7 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(ld2s, (short))
 
       EVAL_UNARY_OP(b2l, (long))
+      EVAL_UNARY_OP(c2l, (long))
       EVAL_UNARY_OP(i2l, (long))
       EVAL_UNARY_OP(s2l, (long))
       EVAL_UNARY_OP(ll2l, (long))
@@ -234,6 +240,7 @@ case AST_OP(ast_op): \
 
  
       EVAL_UNARY_OP(b2ll, (long long))
+      EVAL_UNARY_OP(c2ll, (long long))
       EVAL_UNARY_OP(i2ll, (long long))
       EVAL_UNARY_OP(s2ll, (long long))
       EVAL_UNARY_OP(l2ll, (long long))
@@ -288,11 +295,14 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       *result = const_node->value.ivalue;
       return true;
     case AST_OP(fnumber):
-      *result = (int64_t)const_node->value.fvalue;
+      *result = const_node->value.fvalue;
       return true;
     case AST_OP(identifier): {
       TypeRecord* type = id_node->symbol->type;
       if ((type->qualifiers & kQualConst) == 0) {
+        return false;
+      }
+      if (!id_node->symbol->flags.value_set) {
         return false;
       }
       if (TypeIsIntegral(type)) {

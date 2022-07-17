@@ -9,6 +9,7 @@
 #include "codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "assembler.h"
 #include "ast.h"
 #include "compiler.h"
@@ -111,7 +112,7 @@ void CheckForVarUse(IRNode* read, ASTNode* node) {
     case AST_OP(dot):
     case AST_OP(arrow): {
       BinaryASTNode* b = (BinaryASTNode*)node;
-      CheckForVarUse(read, b->right);
+      CheckForVarUse(read, b->left);
       break;
     }
     case AST_OP(subscript): {
@@ -144,7 +145,7 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
     case AST_OP(dot):
     case AST_OP(arrow): {
       BinaryASTNode* b = (BinaryASTNode*)node;
-      CheckForVarDef(write, b->right);
+      CheckForVarDef(write, b->left);
       break;
     }
     case AST_OP(address): {
@@ -541,6 +542,18 @@ static void CalculateDominators(Generator* gen) {
       changed |= BasicBlockCalculateDominators(gen, b, &gen->basic_blocks);
     }
   }
+  
+  // Now check for isolated islands where the blocks form a loop
+  // that cannot be accessed from outside the loop.  This is denoted
+  // by the dominators of the block being all the blocks.
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* b = gen->basic_blocks.value.p[i];
+    if (BitSetCount(&b->dominators) == gen->basic_blocks.length) {
+      BitSetClear(&b->dominators);
+      b->is_unreachable = true;
+      b->reachability_known = true;
+    }
+  }
 }
 
 static void CalculateImmediateDominator(Generator* gen) {
@@ -738,6 +751,8 @@ static void BuildBasicBlocks(Generator* gen) {
   // Cominators.
   CalculateDominators(gen);
  
+  // PrintBasicBlocks(gen, stdout);
+  
   // PImmediate dominator.
   CalculateImmediateDominator(gen);
  
@@ -969,6 +984,13 @@ void* GenerateFunction(Generator* gen) {
     GenerateStatement(gen, &body->base);
     
     if (gen->return_label == NULL) {
+      if (strcmp(gen->func->info.function.symbol->name.value, "main") == 0) {
+        // main: add a resulti 0.
+        IRNode* zero = GeneratorEmitConstant(gen,
+                                             NewIntIRConstant(
+                                                              NewTypeRecordWithSize(kTypeInt, kQualPlain), 0));
+        GeneratorEmit(gen, NewIR1(IR_OP(resulti), zero));
+      }
       GeneratorEmit(gen, NewIR(IR_OP(leave)));
       GeneratorEmit(gen, NewIR(IR_OP(ret)));
     } else {
@@ -1011,14 +1033,20 @@ void* GenerateFunction(Generator* gen) {
     // Perform strength reduction optimization.  This simplifies instructions.
     StrengthReductionOptimization(gen);
 
-    // Do Global Value Numbering.  This finds and uses common subexpressions.
-    GlobalValueNumberingOptimization(gen);
-
-    // Propagate constants.
-    ConstantPropagationOptimization(gen);
+    if (compiler->ir_optimizations.gvn) {
+     // Do Global Value Numbering.  This finds and uses common subexpressions.
+      GlobalValueNumberingOptimization(gen);
+    }
     
-    // Perform code motion for loops.
-    CodeMotionOptimization(gen);
+    if (compiler->ir_optimizations.const_prop) {
+    // Propagate constants.
+      ConstantPropagationOptimization(gen);
+    }
+    
+    if (compiler->ir_optimizations.code_motion) {
+      // Perform code motion for loops.
+      CodeMotionOptimization(gen);
+    }
   }
     
   // printf("AFTER otimizations\n");
@@ -1033,7 +1061,7 @@ void* GenerateFunction(Generator* gen) {
   // now, so see if we have any.
   RemoveUnreachableBlocks(gen);
 
-  if (OptLevel2()) {
+  if (OptLevel2() && compiler->ir_optimizations.tail_call) {
     // Find all tail calls when not in SSA form.
     TailCallOptimization(gen);
   }

@@ -9,9 +9,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+
 // Trivial, simple memory set.  In reality this would need to be
 // optimized for the architecture using vector operations.
 void *memset(void *s, int c, size_t n) {
+#if 1
+  char* p = s;
+  while (n-- > 0) {
+    *p++ = (char)c;
+  }
+  return s;
+#else
   size_t n64 = n / sizeof(int64_t);
   size_t n32 = n / sizeof(int32_t);
   size_t n16 = n / sizeof(int16_t);
@@ -63,4 +71,5 @@ void *memset(void *s, int c, size_t n) {
     *p++ = c;
   }
   return s;
+#endif
 }

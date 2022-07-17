@@ -16,6 +16,7 @@
 #include "risc_v_machine.h"
 #include "p_code_machine.h"
 #include "linker_dynamic.h"
+#include <inttypes.h>
 
 Relocation* NewRelocation(const char* symbol_name,
                           ELFReaderSection* target_section,
@@ -135,7 +136,7 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file,
   
 
   if (linker->print_relocations) {
-    printf("Applying relocation type %d for symbol %s(0x%llx) to offset %lld\n",
+    printf("Applying relocation type %d for symbol %s(0x%" PRIx64 ") to offset %" PRId64 "\n",
          reloc->type,
          reloc->symbol_name.value,
          symbol->address, reloc->offset);

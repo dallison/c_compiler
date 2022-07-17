@@ -12,7 +12,7 @@
 #include "linker_arch.h"
 #include "6502_machine.h"
 
-#define _6502_CODE_START 0x400
+#define W65C02_CODE_START 0x400
 
 LinkerArchitecture* New6502LinkerArchitecture(void);
 

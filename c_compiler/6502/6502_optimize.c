@@ -33,12 +33,15 @@ typedef struct {
   } value;
 } RegTracker;
 
-struct OptimizerData {
-  _6502Generator* g;
-  bool modified;
+typedef struct {
   RegTracker A;
   RegTracker X;
   RegTracker Y;
+} RegTrackers;
+
+struct OptimizerData {
+  W65C02Generator* g;
+  bool modified;
 };
 
 static AddressingMode GetAddrMode(TargetInstruction* inst) {
@@ -48,6 +51,8 @@ static AddressingMode GetAddrMode(TargetInstruction* inst) {
 }
 
 static void SetAddrMode(TargetInstruction* inst, AddressingMode mode) {
+  // Clear top bits of flags.
+  inst->flags &= 0xffff;
   inst->flags |= (int)mode << 16;
 }
 
@@ -82,17 +87,17 @@ static void TrackReg(RegTracker* tracker, TargetInstruction* inst) {
 static void IncrementReg(RegName reg, TargetInstruction* inst) {
   switch (reg) {
     case kRegA:
-      inst->opcode = (TargetOpcode)_6502_OP(inc);
+      inst->opcode = (TargetOpcode)W65C02_OP(inc);
       SetAddrMode(inst, kAddrModeAccumulator);
       TargetReplaceOperand(inst, 0, NULL);
       break;
     case kRegX:
-      inst->opcode = (TargetOpcode)_6502_OP(inx);
+      inst->opcode = (TargetOpcode)W65C02_OP(inx);
       TargetReplaceOperand(inst, 0, NULL);
       SetAddrMode(inst, kAddrModeImplied);
       break;
     case kRegY:
-      inst->opcode = (TargetOpcode)_6502_OP(iny);
+      inst->opcode = (TargetOpcode)W65C02_OP(iny);
       TargetReplaceOperand(inst, 0, NULL);
       SetAddrMode(inst, kAddrModeImplied);
       break;
@@ -102,17 +107,17 @@ static void IncrementReg(RegName reg, TargetInstruction* inst) {
 static void DecrementReg(RegName reg, TargetInstruction* inst) {
   switch (reg) {
     case kRegA:
-      inst->opcode = (TargetOpcode)_6502_OP(dec);
+      inst->opcode = (TargetOpcode)W65C02_OP(dec);
       TargetReplaceOperand(inst, 0, NULL);
       SetAddrMode(inst, kAddrModeAccumulator);
       break;
     case kRegX:
-      inst->opcode = (TargetOpcode)_6502_OP(dex);
+      inst->opcode = (TargetOpcode)W65C02_OP(dex);
       TargetReplaceOperand(inst, 0, NULL);
       SetAddrMode(inst, kAddrModeImplied);
       break;
     case kRegY:
-      inst->opcode = (TargetOpcode)_6502_OP(dey);
+      inst->opcode = (TargetOpcode)W65C02_OP(dey);
       TargetReplaceOperand(inst, 0, NULL);
       SetAddrMode(inst, kAddrModeImplied);
       break;
@@ -155,23 +160,23 @@ static bool OptimizeInstruction(struct OptimizerData* opt_data,
   return false;
 }
 
-static _6502Opcode TransferInstruction(RegName from, RegName to) {
+static W65C02Opcode TransferInstruction(RegName from, RegName to) {
   switch (from) {
     case kRegA:
       switch (to) {
         case kRegA:
           break;
         case kRegX:
-          return _6502_OP(tax);
+          return W65C02_OP(tax);
         case kRegY:
-          return _6502_OP(tay);
+          return W65C02_OP(tay);
       }
       break;
 
     case kRegX:
       switch (to) {
         case kRegA:
-          return _6502_OP(txa);
+          return W65C02_OP(txa);
         case kRegX:
           break;
         case kRegY:
@@ -181,7 +186,7 @@ static _6502Opcode TransferInstruction(RegName from, RegName to) {
     case kRegY:
       switch (to) {
         case kRegA:
-          return _6502_OP(tya);
+          return W65C02_OP(tya);
         case kRegX:
           break;
         case kRegY:
@@ -189,7 +194,7 @@ static _6502Opcode TransferInstruction(RegName from, RegName to) {
       }
       break;
   }
-  return _6502_OP(nop);
+  return W65C02_OP(nop);
 }
 
 static bool OptimizeTransfer( struct OptimizerData* opt_data,
@@ -203,8 +208,8 @@ static bool OptimizeTransfer( struct OptimizerData* opt_data,
         break;
       case kRegConstant:
         if (curr->value.c == old->value.c) {
-          _6502Opcode op = TransferInstruction(old->reg, curr->reg);
-          if (op != _6502_OP(nop)) {
+          W65C02Opcode op = TransferInstruction(old->reg, curr->reg);
+          if (op != W65C02_OP(nop)) {
             inst->opcode = (TargetOpcode)op;
             TargetReplaceOperand(inst, 0, NULL);
             opt_data->modified = true;
@@ -214,8 +219,8 @@ static bool OptimizeTransfer( struct OptimizerData* opt_data,
         break;
       case kRegExpression:
         if (curr->value.expr == old->value.expr && curr->value.c == old->value.c) {
-          _6502Opcode op = TransferInstruction(old->reg, curr->reg);
-           if (op != _6502_OP(nop)) {
+          W65C02Opcode op = TransferInstruction(old->reg, curr->reg);
+           if (op != W65C02_OP(nop)) {
              inst->opcode = (TargetOpcode)op;
              TargetReplaceOperand(inst, 0, NULL);
              TargetReplaceOperand(inst, 1, NULL);
@@ -233,17 +238,209 @@ static int GetConstantByte(TargetInstruction* v, TargetInstruction* byte_num) {
   if (byte_num == NULL) {
     return (int)TargetIntValue(v);
   }
-  return ((int)TargetIntValue(v) >> (int)TargetIntValue(byte_num) * 8) & 0xff;
+  return (TargetIntValue(v) >> TargetIntValue(byte_num) * 8) & 0xff;
 }
+
+static RegTrackers* NewTrackers() {
+  RegTrackers* t = malloc(sizeof(RegTrackers));
+  t->A.type = kRegUnknown;
+  t->A.reg = kRegA;
+  t->X.type = kRegUnknown;
+  t->X.reg = kRegX;
+  t->Y.type = kRegUnknown;
+  t->Y.reg = kRegY;
+  return t;
+}
+
+static TargetInstruction* PrevInstruction(TargetInstruction* inst) {
+  TargetInstruction* prev = inst;
+  do {
+    prev = TargetPrev(prev);
+  } while (prev != NULL && !(prev->opcode != W65C02_OP(reloadpoint) &&
+           prev->opcode != W65C02_OP(expr1) &&
+           prev->opcode != W65C02_OP(expr2) &&
+           prev->opcode != W65C02_OP(expr4) &&
+           prev->opcode != W65C02_OP(expr8)));
+  return prev;
+}
+
+// Does the given instruction change the value of A?
+static bool ModifiesA(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(lda):
+    case W65C02_OP(adc):
+    case W65C02_OP(sbc):
+    case W65C02_OP(ora):
+    case W65C02_OP(and):
+    case W65C02_OP(eor):
+    case W65C02_OP(jsr):
+    case W65C02_OP(pla):
+    case W65C02_OP(tya):
+    case W65C02_OP(txa):
+    case W65C02_OP(jumptable):
+
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case  W65C02_OP(arg_addrb):
+
+    case  W65C02_OP(var_addr_xy):
+    case  W65C02_OP(var_addrb_xy):
+    case   W65C02_OP(arg_addr_xy):
+    case   W65C02_OP(arg_addrb_xy):
+
+    case   W65C02_OP(var_value1):
+    case   W65C02_OP(var_value1b):
+
+    case   W65C02_OP(var_value2):
+    case   W65C02_OP(var_value2b):
+
+    case   W65C02_OP(var_value4):
+    case   W65C02_OP(var_value4b):
+
+    case   W65C02_OP(var_value8):
+    case   W65C02_OP(var_value8b):
+
+    case    W65C02_OP(arg_value1):
+    case    W65C02_OP(arg_value1b):
+
+    case    W65C02_OP(arg_value2):
+    case   W65C02_OP(arg_value2b):
+
+    case   W65C02_OP(arg_value4):
+    case   W65C02_OP(arg_value4b):
+
+    case   W65C02_OP(arg_value8):
+    case   W65C02_OP(arg_value8b):
+      
+    case W65C02_OP(pushreg2):
+    case W65C02_OP(pushreg4):
+    case W65C02_OP(pushreg8):
+      return true;
+      
+    case W65C02_OP(dec):
+    case W65C02_OP(inc):
+    case W65C02_OP(asl):
+    case W65C02_OP(rol):
+    case W65C02_OP(lsr):
+    case W65C02_OP(ror):
+      return GetAddrMode(inst) == kAddrModeAccumulator;
+      
+    default:
+      return false;
+  }
+}
+
+static bool UsesA(TargetInstruction* inst) {
+  if (ModifiesA(inst)) {
+    return true;
+  }
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(sta):
+    case W65C02_OP(pha):
+      return true;
+    default:
+      return false;
+  }
+  return false;
+}
+
+static TargetInstruction* PreviousModifierOfA(TargetInstruction* inst) {
+  TargetInstruction* prev = inst;
+  do {
+    prev = TargetPrev(prev);
+    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+      // Don't go past a label.
+      return NULL;
+    }
+  } while (prev != NULL && !ModifiesA(prev));
+  return prev;
+}
+
+static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
+  // return NULL;
+  TargetInstruction* prev = inst;
+  do {
+    prev = TargetPrev(prev);
+    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+      // Don't go past a label.
+      return NULL;
+    }
+  } while (prev != NULL && !UsesA(prev));
+  return prev;
+}
+
+// An expression may be removed it if's unused.  However, stores to the
+// expression count as uses so we have to count all uses that are not
+// stores.
+static bool IsUnusedExpression(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(expr1):
+    case W65C02_OP(expr2):
+    case W65C02_OP(expr4):
+    case W65C02_OP(expr8):
+    case W65C02_OP(exprf):
+    case W65C02_OP(exprd):
+      break;
+    default:
+      return false;
+  }
+  int uses = 0;
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    W65C02Opcode opcode = (W65C02Opcode)user->opcode;
+    switch (opcode) {
+      case W65C02_OP(reloadpoint):
+      case W65C02_OP(sta):
+      case W65C02_OP(stx):
+      case W65C02_OP(sty):
+      case W65C02_OP(stz): {
+        AddressingMode mode = GetAddrMode(user);
+        if (mode == kAddrModeIndirect || mode == kAddrModeIndirectIndexed ||
+            mode == kAddrModeIndexedIndirect) {
+          uses++;
+        }
+        break;
+      }
+      default:
+        uses++;
+        break;
+    }
+  }
+  return uses == 0;
+}
+
 
 static void OptimizeBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
-  opt_data->A.type = kRegUnknown;
-  opt_data->A.reg = kRegA;
-  opt_data->X.type = kRegUnknown;
-  opt_data->X.reg = kRegX;
-  opt_data->Y.type = kRegUnknown;
-  opt_data->Y.reg = kRegY;
+  // Propagate optimizar data down from idom.  All tracked register values
+  // in the idom are valid in this block because it dominates us.
+  
+  RegTrackers* dom_trackers = NULL;
+  if (block->idom != NULL) {
+    // If we have an immediate dominator we propagate the
+    // variables from it to this node.
+    dom_trackers = block->idom->cookie;
+  }
+
+  RegTrackers* trackers = NULL;
+  if (block->idom != NULL && block->idom->dominatees.length == 1) {
+    // This block is the only one dominated by the dominator so we
+    // can just reuse the trackers from the dominator.
+    trackers = dom_trackers;
+    block->idom->cookie = NULL;  // This is no longer valid.
+    block->cookie = trackers;
+  } else {
+    // There is more than one block that is dominated by my dominator.
+    // We need to copy the trackers from the dominator.
+    trackers = NewTrackers();
+    block->cookie = trackers;
+    if (dom_trackers != NULL) {
+      trackers->A = dom_trackers->A;
+      trackers->X = dom_trackers->X;
+      trackers->Y = dom_trackers->Y;
+    }
+  }
 
   RegTracker current_A = {kRegUnknown, kRegA};
   RegTracker current_X = {kRegUnknown, kRegX};
@@ -253,31 +450,56 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
        block->end_code != NULL &&
        TargetPrev(inst) != block->end_code; inst = next) {
     next = block->end_code == NULL ? NULL : TargetNext(inst);
-
-    switch ((_6502Opcode)inst->opcode) {
-      case _6502_OP(lda): {
-        TargetInstruction* prev = TargetPrev(inst);
-        if (prev->opcode == (TargetOpcode)_6502_OP(lda)) {
+     switch ((W65C02Opcode)inst->opcode) {
+      case W65C02_OP(lda): {
+        TargetInstruction* prev = PrevInstruction(inst);
+        TargetInstruction* prev_user = PreviousUserOfA(inst);
+        TargetInstruction* prev_modifier = PreviousModifierOfA(inst);
+        if (prev != NULL && prev->opcode == (TargetOpcode)W65C02_OP(lda)) {
           // LDA following an LDA, remove previous.
-          TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev);
+         TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev);
           opt_data->modified = true;
-        } else if (prev->opcode == (TargetOpcode)_6502_OP(sta)) {
+          break;
+        }
+        if (prev_modifier != NULL) {
+          // If previous modifier is the same instruction, A hasn't changed
+          // remove current instruction.
+          // This covers:
+          // LDA x
+          // instructions that don't modify A
+          // LDA x
           // STA followed by LDA, remove LDA.
-          if (prev->operand[0] == inst->operand[0] && prev->operand[1] == inst->operand[1] &&
-              GetAddrMode(prev) == GetAddrMode(inst)) {
+          if (prev_modifier->opcode == inst->opcode &&
+              prev_modifier->operand[0] == inst->operand[0] && prev_modifier->operand[1] == inst->operand[1] &&
+              GetAddrMode(prev_modifier) == GetAddrMode(inst)) {
             TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
             opt_data->modified = true;
             break;
           }
         }
+        if (prev_user != NULL && prev_user->opcode == (TargetOpcode)W65C02_OP(sta)) {
+          // STA followed by LDA, remove LDA.
+          if (prev_user->operand[0] == inst->operand[0] && prev_user->operand[1] == inst->operand[1] &&
+              GetAddrMode(prev_user) == GetAddrMode(inst)) {
+            TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+            opt_data->modified = true;
+            break;
+          }
+        }
+ 
         TrackReg(&current_A, inst);
-        OptimizeInstruction(opt_data, &opt_data->A, &current_A, block, inst) ||
-          OptimizeTransfer(opt_data, &opt_data->Y, &current_A, block, inst) ||
-                     OptimizeTransfer(opt_data, &opt_data->X, &current_A, block, inst);
-        opt_data->A = current_A;
+        OptimizeInstruction(opt_data, &trackers->A, &current_A, block, inst) ||
+          OptimizeTransfer(opt_data, &trackers->Y, &current_A, block, inst) ||
+                     OptimizeTransfer(opt_data, &trackers->X, &current_A, block, inst);
+        trackers->A = current_A;
         break;
       }
-      case _6502_OP(sta): {
+      case W65C02_OP(sta): {
+        if (IsUnusedExpression(inst->operand[0])) {
+          TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+          opt_data->modified = true;
+          break;
+        }
         AddressingMode mode = GetAddrMode(inst);
         // If the expression being stored to has only one use and this
         // instruction is it, there's no need to actually store it.
@@ -290,157 +512,446 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
             break;
           }
         }
-        if (opt_data->A.type == kRegConstant && opt_data->A.value.c == 0) {
+        if (trackers->A.type == kRegConstant && trackers->A.value.c == 0) {
           // Storing value 0 can be converted to STZ as long as the
           // addressing mode is OK.
-          if (mode != kAddrModeIndirectIndexed && mode != kAddrModeIndirect) {
-            inst->opcode = (TargetOpcode)_6502_OP(stz);
-            TargetInstruction* prev = TargetPrev(inst);
-            while (prev->opcode == (TargetOpcode)_6502_OP(lda)) {
+          if (mode != kAddrModeIndirectIndexed && mode != kAddrModeIndirect && mode != kAddrModeZeroPageIndexedX
+              && mode != kAddrModeZeroPageIndexedY) {
+            inst->opcode = (TargetOpcode)W65C02_OP(stz);
+            TargetInstruction* prev = PrevInstruction(inst);
+            while (prev->opcode == (TargetOpcode)W65C02_OP(lda)) {
                // STA following an LDA, remove previous.
                TargetInstruction* p = TargetPrev(prev);
                TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev);
                opt_data->modified = true;
                prev = p;
              }
+            // We've removed the LDA #0 so we don't know what A is now.
+            trackers->A.type = kRegUnknown;
           }
         }
         break;
       }
-      case _6502_OP(ldx):
-        TrackReg(&current_X, inst);
-        OptimizeInstruction(opt_data, &opt_data->X, &current_X, block, inst) ||
-          OptimizeTransfer(opt_data, &opt_data->A, &current_X, block, inst);
-        opt_data->X = current_X;
-        break;
-      case _6502_OP(stx):
-        TrackReg(&current_X, inst);
-        opt_data->X = current_X;
-        break;
-      case _6502_OP(inx):
-        if (opt_data->X.type == kRegConstant) {
-          opt_data->X.value.c++;
-        }
-        break;
-      case _6502_OP(dex):
-        if (opt_data->X.type == kRegConstant) {
-          opt_data->X.value.c-- ;
-        }
-        break;
-      case _6502_OP(ldy):
-        TrackReg(&current_Y, inst);
-        OptimizeInstruction(opt_data, &opt_data->Y, &current_Y, block, inst) ||
-          OptimizeTransfer(opt_data, &opt_data->A, &current_Y, block, inst);
-        opt_data->Y = current_Y;
-        break;
-      case _6502_OP(sty):
-        TrackReg(&current_Y, inst);
-        opt_data->Y = current_Y;
-        break;
-      case _6502_OP(iny):
-        if (opt_data->Y.type == kRegConstant) {
-          opt_data->Y.value.c++;
-        }
-        break;
-      case _6502_OP(dey):
-        if (opt_data->Y.type == kRegConstant) {
-          opt_data->Y.value.c-- ;
-        }
-        break;
-        
-      case _6502_OP(jsr):
-        opt_data->A.type = kRegUnknown;
-        opt_data->X.type = kRegUnknown;
-        opt_data->Y.type = kRegUnknown;
-        break;
-        
-      case _6502_OP(adc):
-      case _6502_OP(sbc):
-        // These modify the accumulator.
-         opt_data->A.type = kRegUnknown;
+         
+      case W65C02_OP(stz):
+         // STZ has no effect on registers.
          break;
-      case _6502_OP(ora):
-        opt_data->A.type = kRegUnknown;
+
+       case W65C02_OP(label):
+         if (inst->users.length == 0) {
+           // Unused label.
+           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           opt_data->modified = true;
+         } else {
+           trackers->A.type = kRegUnknown;
+           trackers->X.type = kRegUnknown;
+           trackers->Y.type = kRegUnknown;
+         }
+         break;
+         
+      case W65C02_OP(ldx):
+        TrackReg(&current_X, inst);
+        OptimizeInstruction(opt_data, &trackers->X, &current_X, block, inst) ||
+          OptimizeTransfer(opt_data, &trackers->A, &current_X, block, inst);
+        trackers->X = current_X;
+        break;
+      case W65C02_OP(stx):
+        TrackReg(&current_X, inst);
+        trackers->X = current_X;
+        break;
+      case W65C02_OP(inx):
+        if (trackers->X.type == kRegConstant) {
+          trackers->X.value.c++;
+        }
+        break;
+      case W65C02_OP(dex):
+        if (trackers->X.type == kRegConstant) {
+          trackers->X.value.c-- ;
+        }
+        break;
+      case W65C02_OP(ldy):
+        TrackReg(&current_Y, inst);
+        OptimizeInstruction(opt_data, &trackers->Y, &current_Y, block, inst) ||
+          OptimizeTransfer(opt_data, &trackers->A, &current_Y, block, inst);
+        trackers->Y = current_Y;
+        break;
+      case W65C02_OP(sty):
+        TrackReg(&current_Y, inst);
+        trackers->Y = current_Y;
+        break;
+      case W65C02_OP(iny):
+        if (trackers->Y.type == kRegConstant) {
+          trackers->Y.value.c++;
+        }
+        break;
+      case W65C02_OP(dey):
+        if (trackers->Y.type == kRegConstant) {
+          trackers->Y.value.c-- ;
+        }
+        break;
+        
+      case W65C02_OP(jsr):
+        trackers->A.type = kRegUnknown;
+        trackers->X.type = kRegUnknown;
+        trackers->Y.type = kRegUnknown;
+        break;
+        
+      case W65C02_OP(rts): {
+        // A JSR followed by an RTS can be replaced by a JMP.
+        TargetInstruction* prev = PrevInstruction(inst);
+        if (prev == NULL) {
+          break;
+        }
+        if (prev->opcode == W65C02_OP(jsr)) {
+          prev->opcode = (TargetOpcode)W65C02_OP(jmp);
+          TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+          opt_data->modified = true;
+        } else if (prev->opcode == W65C02_OP(leave) ||
+                   prev->opcode == W65C02_OP(leave_leaf)) {
+          // leave and leave_leaf can be told to use JMP instead of JSR.
+          prev->flags |= k6502JmpForJSR;
+          TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+          opt_data->modified = true;
+        }
+        break;
+      }
+        
+      case W65C02_OP(adc):
+      case W65C02_OP(sbc):
+        // These modify the accumulator.
+         trackers->A.type = kRegUnknown;
+         break;
+      case W65C02_OP(ora):
+        trackers->A.type = kRegUnknown;
         if (TargetIsConst(inst->operand[0])) {
           int v = GetConstantByte(inst->operand[0], inst->operand[1]);
           if (v == 255) {
             // ORA #255 sets A to 255.
-            opt_data->A.type = kRegConstant;
-            opt_data->A.value.c = 255;
+            trackers->A.type = kRegConstant;
+            trackers->A.value.c = 255;
             break;
           }
-          if (opt_data->A.type == kRegConstant) {
-            opt_data->A.value.c |= v;
+          if (trackers->A.type == kRegConstant) {
+            trackers->A.value.c |= v;
+          }
+        } else {
+          // ORA preceeded by an STZ with the same operand can be eliminated.
+          TargetInstruction* prev = PrevInstruction(inst);
+          if (prev->opcode == W65C02_OP(stz)) {
+            if (prev->operand[0] == inst->operand[0]) {
+              TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+              opt_data->modified = true;
+              break;
+            }
           }
         }
         break;
-      case _6502_OP(eor):
-        opt_data->A.type = kRegUnknown;
+      case W65C02_OP(eor):
+        trackers->A.type = kRegUnknown;
         if (TargetIsConst(inst->operand[0])) {
           int v = GetConstantByte(inst->operand[0], inst->operand[1]);
-          if (opt_data->A.type == kRegConstant) {
-            opt_data->A.value.c ^= v;
+          if (trackers->A.type == kRegConstant) {
+            trackers->A.value.c ^= v;
           }
         }
         break;
-      case _6502_OP(and):
-        opt_data->A.type = kRegUnknown;
+      case W65C02_OP(and):
+        trackers->A.type = kRegUnknown;
         if (TargetIsConst(inst->operand[0])) {
          int v = GetConstantByte(inst->operand[0], inst->operand[1]);
          if (v == 255) {
            // AND #255 keeps A the same.
            TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           opt_data->modified = true;
            break;
          }
           if (v == 0) {
             // AND #0 sets A to zero.
-            inst->opcode = (TargetOpcode)_6502_OP(lda);
-            opt_data->A.type = kRegConstant;
-            opt_data->A.value.c = 0;
+            inst->opcode = (TargetOpcode)W65C02_OP(lda);
+            trackers->A.type = kRegConstant;
+            trackers->A.value.c = 0;
             break;
           }
-         if (opt_data->A.type == kRegConstant) {
-           opt_data->A.value.c &= v;
+         if (trackers->A.type == kRegConstant) {
+           trackers->A.value.c &= v;
          }
        }
         break;
         
-        case _6502_OP(asl):
-        case _6502_OP(lsr):
-        case _6502_OP(rol):
-        case _6502_OP(ror):
+        case W65C02_OP(asl):
+        case W65C02_OP(lsr):
+        case W65C02_OP(rol):
+        case W65C02_OP(ror):
         // These might modify the accumulator:
         if (GetAddrMode(inst) == kAddrModeAccumulator) {
-          opt_data->A.type = kRegUnknown;
+          trackers->A.type = kRegUnknown;
         }
         break;
         
-      case _6502_OP(expr1):
-      case _6502_OP(expr2):
-      case _6502_OP(expr4):
-      case _6502_OP(expr8):
-      case _6502_OP(clc):
-      case _6502_OP(sec):
+      case W65C02_OP(expr1):
+      case W65C02_OP(expr2):
+      case W65C02_OP(expr4):
+      case W65C02_OP(expr8):
+      case W65C02_OP(exprf):
+      case W65C02_OP(exprd):
+      case W65C02_OP(clc):
+      case W65C02_OP(sec):
+      case W65C02_OP(fake_bra):
+       case W65C02_OP(reloadpoint):
+       case W65C02_OP(cpy):
+       case W65C02_OP(cpx):
+         break;
+         
+      // If CMP #0 is preceeded by LDA we can remove the CMP #0.
+      // We can also eliminate it if there's an ORA, AND or EOR
+      case W65C02_OP(cmp):
+         if (GetAddrMode(inst) == kAddrModeImmediate) {
+           TargetInstruction* prev = PrevInstruction(inst);
+           if (prev != NULL && (prev->opcode == W65C02_OP(lda) || prev->opcode == W65C02_OP(ora) ||
+                                prev->opcode == W65C02_OP(and) || prev->opcode == W65C02_OP(eor))) {
+             TargetInstruction* imm_op = inst->operand[0];
+             TargetInstruction* imm_offset = inst->operand[1];
+             if (TargetIsZero(imm_op) && (imm_offset == NULL || TargetIsZero(imm_offset))) {
+               TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+               opt_data->modified = true;
+               break;
+             }
+           }
+         }
+         break;
+       
+         // For branches, if they are a backward branch we don't know the
+         // value, but if they are forward they can be ignored.
+         // TODO: don't know if it's backward branch.
+      case W65C02_OP(bra):
+      case W65C02_OP(beq):
+      case W65C02_OP(bne):
+      case W65C02_OP(bpl):
+      case W65C02_OP(bmi):
+      case W65C02_OP(bvc):
+      case W65C02_OP(bvs):
+      case W65C02_OP(bcs):
+      case W65C02_OP(bcc): {
+        trackers->A.type = kRegUnknown;
+        trackers->X.type = kRegUnknown;
+        trackers->Y.type = kRegUnknown;
+         TargetInstruction* branch_target = inst->operand[0];
+         if (branch_target == next) {
+           // Branch to next instruction, remove branch.
+           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           break;
+         }
+ 
         break;
-        
+        }
+         
       default:
         // Not an instruction we can track, all values are unknown.
-        opt_data->A.type = kRegUnknown;
-        opt_data->X.type = kRegUnknown;
-        opt_data->Y.type = kRegUnknown;
+        trackers->A.type = kRegUnknown;
+        trackers->X.type = kRegUnknown;
+        trackers->Y.type = kRegUnknown;
         break;
     }
     inst = next;
   }
 }
 
-void _6502Optimize(_6502Generator* g) {
+void W65C02Optimize(W65C02Generator* g) {
+  // return;
   for (;;) {
     struct OptimizerData data = {g, false};
     TargetTraverseDominatorTree(&g->base, OptimizeBlock, kTraversePreOrder, &data);
+    
+    // Done with all the trackers, delete them all.
+    for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+      TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+      if (block->cookie != NULL) {
+        free(block->cookie);
+        block->cookie = NULL;
+      }
+    }
     if (!data.modified) {
       break;
     }
   }
 }
+
+// Variable reference pooler.
+struct PoolerData {
+  W65C02Generator* g;
+};
+
+static bool IsVariable(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case W65C02_OP(arg_addrb):
+#if 0
+    case W65C02_OP(var_value1):
+    case W65C02_OP(var_value2):
+    case W65C02_OP(var_value4):
+    case W65C02_OP(var_value8):
+    case W65C02_OP(var_value1b):
+    case W65C02_OP(var_value2b):
+    case W65C02_OP(var_value4b):
+    case W65C02_OP(var_value8b):
+    case W65C02_OP(arg_value1):
+    case W65C02_OP(arg_value2):
+    case W65C02_OP(arg_value4):
+    case W65C02_OP(arg_value8):
+    case W65C02_OP(arg_value1b):
+    case W65C02_OP(arg_value2b):
+    case W65C02_OP(arg_value4b):
+    case W65C02_OP(arg_value8b):
+#endif
+      return true;
+    default:
+      return false;
+  }
+}
+
+// We can pool variables from our immediate dominator only if we are
+// not a loop header.  A loop header is a block with an input edge that is
+// dominated by this block itself.  In other words, there is a path
+// from this block back to itself.
+static bool CanPoolFromDominator(TargetGenerator* g, TargetBasicBlock* block) {
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    TargetBlockId id = block->in_edges.value.w[i];
+    TargetBasicBlock* in_block = g->basic_blocks.value.p[id];
+    if (TargetBasicBlockDominatedBy(g, block, in_block)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void PoolVariables(TargetBasicBlock* block, void* data) {
+  struct PoolerData* pool_data = data;
+    W65C02Generator* g = pool_data->g;
+  Map* dominator_variables = NULL;
+  bool can_pool_from_dominator = CanPoolFromDominator(&g->base, block);
+
+  Map* vars = NULL;
+  
+  if (can_pool_from_dominator) {
+    if (block->idom != NULL) {
+      // If we have an immediate dominator we propagate the
+      // variables from it to this node.
+      dominator_variables = block->idom->cookie;
+    }
+
+    if (block->idom != NULL && block->idom->dominatees.length == 1) {
+      // This block is the only one dominated by the dominator so we
+      // can just reuse the value set from the dominator.
+      vars = dominator_variables;
+      block->idom->cookie = NULL;  // This is no longer valid.
+      block->cookie = vars;
+    } else {
+      // There is more than one block that is dominated by my dominator.
+      // We need to copy the variables from the dominator.
+      vars = NewMapForInt64Keys();
+      block->cookie = vars;
+      if (dominator_variables != NULL) {
+        MapCopy(vars, dominator_variables);
+      }
+    }
+  } else {
+    // We can't pool from our dominator, make a new variables map.
+    vars = NewMapForInt64Keys();
+    block->cookie = vars;
+  }
+  
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       block->end_code != NULL &&
+       TargetPrev(inst) != block->end_code; inst = next) {
+    next = block->end_code == NULL ? NULL : TargetNext(inst);
+
+    if (IsVariable(inst)) {
+      TargetInstruction* result = inst->operand[0];
+      TargetInstruction* var = inst->operand[1];
+      
+      // For the value in the map we use the opcode for the variable
+      // reference instruction in the upper 32 bits and the id of the
+      // variable instruction in the lower 32 bits.
+      int64_t value = (int64_t)inst->opcode << 32 | (int64_t)var->id;
+      MapKeyType key = {.w = value};
+      TargetInstruction* pooled = MapFind(vars, key);
+      if (pooled == NULL) {
+        MapKeyValue kv = {.key.w = value, .value.p = result};
+        MapInsert(vars, kv);
+      } else {
+        // Variable is in pool, replace the result instruction with the a
+        // reference to the pooled one.  Then delete the variable instruction.
+        TargetBasicBlockReplaceInstruction(&g->base, block, result, pooled);
+        TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+      }
+    }
+    inst = next;
+  }
+
+}
+
+void W65C02PoolVariables(W65C02Generator* g) {
+  struct PoolerData data = {g};
+  TargetTraverseDominatorTree(&g->base, PoolVariables, kTraversePreOrder, &data);
+  
+  // Done with all the variable maps, delete them all.
+  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
+    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
+    if (block->cookie != NULL) {
+      MapDelete((Map*)block->cookie);
+      block->cookie = NULL;
+    }
+  }
+  
+  // Inputs and outputs might have changed, recalculate them.
+  TargetBuildBasicBlockInputsAndOutputs(&g->base);
+}
+
+#if 0
+static void PoolVariables(TargetBasicBlock* block, void* data) {
+  struct PoolerData* pool_data = data;
+  W65C02Generator* g = pool_data->g;
+  
+  Map vars;
+  MapInitForInt64Keys(&vars);
+  
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       block->end_code != NULL &&
+       TargetPrev(inst) != block->end_code; inst = next) {
+    next = block->end_code == NULL ? NULL : TargetNext(inst);
+
+    if (IsVariable(inst)) {
+      TargetInstruction* result = inst->operand[0];
+      TargetInstruction* var = inst->operand[1];
+      
+      // For the value in the map we use the opcode for the variable
+      // reference instruction in the upper 32 bits and the id of the
+      // variable instruction in the lower 32 bits.
+      int64_t value = (int64_t)inst->opcode << 32 | (int64_t)var->id;
+      MapKeyType key = {.w = value};
+      TargetInstruction* pooled = MapFind(&vars, key);
+      if (pooled == NULL) {
+        MapKeyValue kv = {.key.w = value, .value.p = result};
+        MapInsert(&vars, kv);
+      } else {
+        // Variable is in pool, replace the result instruction with the a
+        // reference to the pooled one.  Then delete the variable instruction.
+        TargetBasicBlockReplaceInstruction(&g->base, block, result, pooled);
+        TargetBasicBlockRemoveInstruction(&g->base, block, inst);
+      }
+    }
+    inst = next;
+  }
+  MapDestruct(&vars);
+}
+
+void W65C02PoolVariables(W65C02Generator* g) {
+  struct PoolerData data = {g};
+  TargetTraverseDominatorTree(&g->base, PoolVariables, kTraversePreOrder, &data);
+}
+#endif
 

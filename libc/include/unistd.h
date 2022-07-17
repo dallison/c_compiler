@@ -29,7 +29,7 @@ typedef int gid_t;
 #endif
 
 #ifndef __SIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -38,7 +38,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;

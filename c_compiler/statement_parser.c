@@ -41,7 +41,7 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
       }
     }
   }
- 
+   
   if (compiler->debug_output) {
     // Label at end of statements in block.
     VectorAppend(statements, SyntaxNewPCLabel(location));

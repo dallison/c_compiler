@@ -33,6 +33,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.used = false;
   sym->flags.invented = false;
   sym->flags.is_inline_defn = false;
+  sym->flags.value_set = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->location = 0;

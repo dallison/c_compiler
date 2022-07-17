@@ -11,6 +11,7 @@
 #include "linker.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 // Create a new Linker symbol based on an ELFSymbol in the ELF file.
 LinkerSymbol* NewLinkerSymbol(ELFSymbol* elf_sym, ObjectFile* file) {
@@ -106,7 +107,7 @@ static void PrintSymbolList(void* entry, void* data) {
     } else if (symbol->section != NULL) {
       info = symbol->section->name.value;
     }
-    printf("0x%016llx: %-20s %s\n", symbol->address, symbol->name.value, info);
+    printf("0x%016" PRIx64 ": %-20s %s\n", symbol->address, symbol->name.value, info);
   }
 }
 
@@ -232,16 +233,15 @@ static void RedefineSymbol(LinkerSymbol* sym,
     }
     
     // Assign the defining section to the symbol.
-    if (elf_sym->shndx < SHN_LORESERVE) {
-      int section_index = elf_sym->shndx;
-      sym->section = elf_file->sections.value.p[section_index];
-    }
+    AssignSymbolSectionIndex(sym, file, elf_file, elf_sym);
     
     // This is now a defined symbol, so we can set the header to the definition.  Also
     // set the address.
     sym->header = elf_sym;
     sym->address = elf_sym->value;
     sym->defined = true;
+    sym->size = elf_sym->size;
+    sym->file = file;
   }
 }
 

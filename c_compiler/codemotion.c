@@ -66,6 +66,7 @@ void PerformCodeMotion(BasicBlock* block, void* data) {
        inst = next) {
     next = IRNext(inst);
     bool is_candidate = (IRIsLoad(inst) || IRIsExpression(inst)) &&
+            !IRIsStore(inst) &&
             !IRIsCall(inst) &&
             !IRIsVariable(inst) && inst->opcode != IR_OP(literalref) &&
             inst->inputs.length > 0;

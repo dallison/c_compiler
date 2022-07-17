@@ -112,7 +112,8 @@ typedef enum {
   AST_OP(braced_init),
   AST_OP(designated_init),
   AST_OP(ptr_scale),
-  
+  AST_OP(compound_literal),
+
   // Type conversions.
   // Integer to...
   AST_OP(i2s),
@@ -515,6 +516,8 @@ typedef struct {
   int64_t min_case_value;
   int64_t max_case_value;
   bool all_cases_covered;   // True if there is no need for a default.
+  int max_case_width;       // Max byte width of all case constants.
+  bool all_cases_positive;  // All case values are positive.
 } SwitchStatementASTNode;
 
 ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
@@ -581,6 +584,7 @@ typedef struct {
 } BracedInitializerASTNode;
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,
+                                     TypeRecord* type,
                                      SourceLocation location);
 
 // Designated initializer, specifying a struct member or array index and an
@@ -613,4 +617,13 @@ typedef struct {
 ASTNode* NewDesignatedInitializerASTNode(Vector* designators, ASTNode* init,
                                          SourceLocation location);
 
+// Compound literal.
+typedef struct {
+  ASTNode base;       // base.type is the literal type.
+  ASTNode* sym;
+  ASTNode* initializer;
+} CompoundLiteralASTNode;
+
+ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,
+                                   ASTNode* initializer);
 #endif /* ast_h */

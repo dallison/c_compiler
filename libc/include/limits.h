@@ -34,10 +34,26 @@
 /* Maximum value an `unsigned short int' can hold.  (Minimum is 0.)  */
 #  define USHRT_MAX  65535
 
+#if defined(__6502__)
+// 6502 uses 16-bit ints.  Longs are 32-bit.  Long long is 64 bit.
 /* Minimum and maximum values a `signed int' can hold.  */
 #  define INT_MIN  (-INT_MAX - 1)
-#  define INT_MAX  2147483647
+#  define INT_MAX  32767
 
+/* Maximum value an `unsigned int' can hold.  (Minimum is 0.)  */
+#  define UINT_MAX  65536U
+
+/* Minimum and maximum values a `signed long int' can hold.  */
+#   define LONG_MAX  2147483647L
+#  define LONG_MIN  (-LONG_MAX - 1L)
+
+/* Maximum value an `unsigned long int' can hold.  (Minimum is 0.)  */
+#   define ULONG_MAX  4294967295UL
+
+
+#else
+#  define INT_MIN  (-INT_MAX - 1)
+#  define INT_MAX  2147483647
 /* Maximum value an `unsigned int' can hold.  (Minimum is 0.)  */
 #  define UINT_MAX  4294967295U
 
@@ -47,7 +63,8 @@
 #  else
 #   define LONG_MAX  2147483647L
 #  endif
-#  define LONG_MIN  (-LONG_MAX - 1L)
+#  define LONG_MIN  (-LONG_MAX - 1L)#endif
+
 
 /* Maximum value an `unsigned long int' can hold.  (Minimum is 0.)  */
 #  if __WORDSIZE == 64
@@ -55,6 +72,8 @@
 #  else
 #   define ULONG_MAX  4294967295UL
 #  endif
+#endif
+
 
 /* Minimum and maximum values a `signed long long int' can hold.  */
 #   define LLONG_MAX  9223372036854775807LL

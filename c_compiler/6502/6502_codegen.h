@@ -6,8 +6,8 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#ifndef _6502_codegen_h
-#define _6502_codegen_h
+#ifndef W65C02_codegen_h
+#define W65C02_codegen_h
 
 #include "codegen.h"
 #include "hashtable.h"
@@ -15,6 +15,8 @@
 #include "target_generator.h"
 #include "6502_machine.h"
 #include "6502_reg_alloc.h"
+
+bool Is65c02(void);
 
 // 6502 addressing modes. The value is stored in the top
 // 16 bits of the TargetInstruction's flags member.
@@ -27,9 +29,9 @@ typedef enum {
   kAddrModeZeroPageAbsolute,   // Zero page (non register)
   kAddrModeRelative,           // PC relative (branches)
   kAddrModeAbsolute,           // Address (jmp, jsr)
-  kAddrModeAbsoluteSymbol,     // Absolute address lda %abs(symbol)
+  kAddrModeAbsoluteSymbol,     // Absolute address lda %lo(symbol)
+  kAddrModeAbsoluteSymbolIndexed,     // Absolute address lda %lo(symbol), Y
   kAddrModeZeroPage,           // Single zero-page.
-  kAddrModeZeroPageIndirect,           // Zero-page indirect.
   kAddrModeIndirect,           // (address) only for JMP (a)
   kAddrModeAbsoluteIndexedX,    // addr,X
   kAddrModeAbsoluteIndexedY,    // addr,Y
@@ -39,246 +41,319 @@ typedef enum {
   kAddrModeIndirectIndexed,    // (zp), Y
   kAddrModeSymbolLo,          // symbol (absolute) LO
   kAddrModeSymbolHi,          // symbol (abosolute) HI
+  kAddrModeSymbolAddr,        // LO or HI depending on second operand
   kAddrModeInvalid,
 } AddressingMode;
 
 // Additional 6502 flags.  Held in upper 16 bits of flags.  Lowest 6 bits
 // are the addressing mode.
-#define k6502FlagSignedLoad (1 << 22)
-#define k6502FlagContainsAddress (1 << 23)
 
-#define _6502_OP(op) k6502Op_##op
+#define W65C02_OP(op) k6502Op_##op
 
 // Mark for beginning and end of basic blocks.
-#define k6502BlockStart (1 << 24)
-#define k6502BlockEnd (1 << 25)
+#define k6502BlockStart (1 << 22)
+#define k6502BlockEnd (1 << 23)
 
 // This instruction is a call instruction.
-#define k6502InstIsCall (1 << 26)
+#define k6502InstIsCall (1 << 24)
 
 // Instruction is conditional branch.
-#define k6502InstIsCondBranch (1 << 27)
+#define k6502InstIsCondBranch (1 << 25)
 
 // Expression is result of a call.
-#define k6502ExprIsCallResult (1 << 28)
+#define k6502ExprIsCallResult (1 << 26)
 
 // This a real procedure call instruction.
-#define k6502ProcedureCall (1 << 29)
+#define k6502ProcedureCall (1 << 27)
 
 // This comparison was generated.  Used to in conditional branch.
-#define k6502ComparisonGenerated (1 << 30)
+#define k6502ComparisonGenerated (1 << 28)
+
+// Use JMP instead of JSR for call.
+#define k6502JmpForJSR (1 << 29)
+
+// Need address of symbol, not value.
+#define k6502NeedAddress (1 << 30)
 
 // These opcodes are an extension of the TargetOpcode enumeration.
 typedef enum {
-  // The initial sequence for these o_6502 must match the TargetOpcode
+  // The initial sequence for these oW65C02 must match the TargetOpcode
   // enumeration.
-  _6502_OP(save),
-  _6502_OP(restore),
+  W65C02_OP(save),
+  W65C02_OP(restore),
   
-  _6502_OP(symbol),   // Static symbol.
-  _6502_OP(literal),  // String literal.
-  _6502_OP(tmp),
+  W65C02_OP(symbol),   // Static symbol.
+  W65C02_OP(literal),  // String literal.
+  W65C02_OP(tmp),
   
   // Constants.
-  _6502_OP(constb),
-  _6502_OP(consth),
-  _6502_OP(constw),
-  _6502_OP(constx),
-  _6502_OP(constf),
-  _6502_OP(constd),
+  W65C02_OP(const8),
+  W65C02_OP(const16),
+  W65C02_OP(const32),
+  W65C02_OP(const64),
+  W65C02_OP(constf),
+  W65C02_OP(constd),
   
-  _6502_OP(mov),
-  _6502_OP(movf),
-  _6502_OP(movd),
+  W65C02_OP(mov),
+  W65C02_OP(movf),
+  W65C02_OP(movd),
   
-  _6502_OP(movc),
-  _6502_OP(movfc),
-  _6502_OP(movdc),
-  _6502_OP(movxc),
+  W65C02_OP(movc),
+  W65C02_OP(movfc),
+  W65C02_OP(movdc),
+  W65C02_OP(movxc),
 
-  _6502_OP(rmov),
-  _6502_OP(rmovf),
-  _6502_OP(rmovd),
+  W65C02_OP(rmov),
+  W65C02_OP(rmovf),
+  W65C02_OP(rmovd),
   
-  _6502_OP(ret),
+  W65C02_OP(ret),
   
-  _6502_OP(label),
+  W65C02_OP(label),
   
-  _6502_OP(fp),  // Frame pointer pseudo operation.
-  _6502_OP(sp),  // Stack pointer pseudo operation.
-  _6502_OP(tp),   // Thread pointer.
+  W65C02_OP(fp),  // Frame pointer pseudo operation.
+  W65C02_OP(sp),  // Stack pointer pseudo operation.
+  W65C02_OP(tp),   // Thread pointer.
   
   // Function result registers.
-  _6502_OP(resultx),
-  _6502_OP(resultf),
-  _6502_OP(resultd),
+  W65C02_OP(resulti),
+  W65C02_OP(resultf),
+  W65C02_OP(resultd),
   
-  _6502_OP(structreturn),  // Struct return address.
+  W65C02_OP(structreturn),  // Struct return address.
   
-  _6502_OP(asm),
+  W65C02_OP(asm),
   
-  _6502_OP(loc),
-  _6502_OP(named_label),
-  _6502_OP(ivarreg),
-  _6502_OP(fvarreg),
+  W65C02_OP(loc),
+  W65C02_OP(named_label),
+
+  // Not used here.
+  W65C02_OP(_ivarreg),
+  W65C02_OP(_fvarreg),
 
   // End of TargetOpcode enumeration.
 
-  _6502_OP(expr1),
-  _6502_OP(expr2),
-  _6502_OP(expr4),
-  _6502_OP(expr8),
-  _6502_OP(expr_addr_a),
-  _6502_OP(expr_addr_x),
-  _6502_OP(expr_addr_y),
-  _6502_OP(localvar),
-  _6502_OP(argument),
-  _6502_OP(literalreflo),   // A = literal lo
-  _6502_OP(literalrefhi),   // A = literal hi
-  _6502_OP(literalref),   // X,Y = addr of literal
-  _6502_OP(enter),
-  _6502_OP(leave),
-  _6502_OP(enter_leaf),
-  _6502_OP(leave_leaf),
-  
-  _6502_OP(var_addr),
-  _6502_OP(var_addrb),
-  _6502_OP(arg_addr),
-  _6502_OP(arg_addrb),
+  W65C02_OP(expr1),
+  W65C02_OP(expr2),
+  W65C02_OP(expr4),
+  W65C02_OP(expr8),
+  W65C02_OP(exprf),
+  W65C02_OP(exprd),
+  W65C02_OP(load_result),
+  W65C02_OP(expr_addr_a),
+  W65C02_OP(expr_addr_x),
+  W65C02_OP(expr_addr_y),
+  W65C02_OP(localvar),
+  W65C02_OP(argument),
+  W65C02_OP(literalreflo),   // A = literal lo
+  W65C02_OP(literalrefhi),   // A = literal hi
+  W65C02_OP(literalref),   // X,Y = addr of literal
+  W65C02_OP(enter),
+  W65C02_OP(leave),
+  W65C02_OP(enter_leaf),
+  W65C02_OP(leave_leaf),
 
-  _6502_OP(var_addr_xy),
-  _6502_OP(var_addrb_xy),
-  _6502_OP(arg_addr_xy),
-  _6502_OP(arg_addrb_xy),
+  W65C02_OP(var_addr),
+  W65C02_OP(var_addrb),
+  W65C02_OP(arg_addr),
+  W65C02_OP(arg_addrb),
 
-  _6502_OP(var_value1),
-  _6502_OP(var_value1b),
+  W65C02_OP(var_addr_xy),
+  W65C02_OP(var_addrb_xy),
+  W65C02_OP(arg_addr_xy),
+  W65C02_OP(arg_addrb_xy),
 
-  _6502_OP(var_value2),
-  _6502_OP(var_value2b),
+  W65C02_OP(var_value1),
+  W65C02_OP(var_value1b),
 
-  _6502_OP(var_value4),
-  _6502_OP(var_value4b),
+  W65C02_OP(var_value2),
+  W65C02_OP(var_value2b),
 
-  _6502_OP(var_value8),
-  _6502_OP(var_value8b),
+  W65C02_OP(var_value4),
+  W65C02_OP(var_value4b),
 
-  _6502_OP(arg_value1),
-  _6502_OP(arg_value1b),
+  W65C02_OP(var_value8),
+  W65C02_OP(var_value8b),
 
-  _6502_OP(arg_value2),
-  _6502_OP(arg_value2b),
+  W65C02_OP(arg_value1),
+  W65C02_OP(arg_value1b),
 
-  _6502_OP(arg_value4),
-  _6502_OP(arg_value4b),
+  W65C02_OP(arg_value2),
+  W65C02_OP(arg_value2b),
 
-  _6502_OP(arg_value8),
-  _6502_OP(arg_value8b),
+  W65C02_OP(arg_value4),
+  W65C02_OP(arg_value4b),
 
-  _6502_OP(fake_bra),
-  _6502_OP(spill1),
-  _6502_OP(spill2),
-  _6502_OP(spill4),
-  _6502_OP(spill8),
-  _6502_OP(unspill1),
-  _6502_OP(unspill2),
-  _6502_OP(unspill4),
-  _6502_OP(unspill8),
+  W65C02_OP(arg_value8),
+  W65C02_OP(arg_value8b),
 
+  W65C02_OP(fake_bra),
+  W65C02_OP(spill1),
+  W65C02_OP(spill2),
+  W65C02_OP(spill4),
+  W65C02_OP(spill8),
+  W65C02_OP(reload1),
+  W65C02_OP(reload2),
+  W65C02_OP(reload4),
+  W65C02_OP(reload8),
+  W65C02_OP(reloadpoint),
 
-    _6502_OP(brk),
+  W65C02_OP(ivarreg),
+  W65C02_OP(bvarreg),
+  W65C02_OP(lvarreg),
+  W65C02_OP(xvarreg),
+  W65C02_OP(fvarreg),
+  W65C02_OP(dvarreg),
+
+  W65C02_OP(pushreg2),
+  W65C02_OP(pushreg4),
+  W65C02_OP(pushreg8),
+
+    W65C02_OP(brk),
     
-    _6502_OP(bpl),
-    _6502_OP(bmi),
-    _6502_OP(bvc),
-    _6502_OP(bvs),
-    _6502_OP(bcc),
-    _6502_OP(bcs),
-    _6502_OP(bne),
-    _6502_OP(beq),
+    W65C02_OP(bpl),
+    W65C02_OP(bmi),
+    W65C02_OP(bvc),
+    W65C02_OP(bvs),
+    W65C02_OP(bcc),
+    W65C02_OP(bcs),
+    W65C02_OP(bne),
+    W65C02_OP(beq),
     
-    _6502_OP(jsr),
-    _6502_OP(jmp),
+    W65C02_OP(jsr),
+    W65C02_OP(jmp),
     
-    _6502_OP(rti),
-    _6502_OP(rts),
+    W65C02_OP(rti),
+    W65C02_OP(rts),
     
-    _6502_OP(lda),
-    _6502_OP(ldx),
-    _6502_OP(ldy),
-    _6502_OP(sta),
-    _6502_OP(stx),
-    _6502_OP(sty),
+    W65C02_OP(lda),
+    W65C02_OP(ldx),
+    W65C02_OP(ldy),
+    W65C02_OP(sta),
+    W65C02_OP(stx),
+    W65C02_OP(sty),
     
-    _6502_OP(cmp),
-    _6502_OP(cpy),
-    _6502_OP(cpx),
-    _6502_OP(bit),
+    W65C02_OP(cmp),
+    W65C02_OP(cpy),
+    W65C02_OP(cpx),
+    W65C02_OP(bit),
     
-    _6502_OP(ora),
-    _6502_OP(and),
-    _6502_OP(eor),
+    W65C02_OP(ora),
+    W65C02_OP(and),
+    W65C02_OP(eor),
     
-    _6502_OP(adc),
-    _6502_OP(sbc),
+    W65C02_OP(adc),
+    W65C02_OP(sbc),
     
-    _6502_OP(asl),
-    _6502_OP(rol),
-    _6502_OP(lsr),
-    _6502_OP(ror),
+    W65C02_OP(asl),
+    W65C02_OP(rol),
+    W65C02_OP(lsr),
+    W65C02_OP(ror),
     
-    _6502_OP(dec),
-    _6502_OP(inc),
-    _6502_OP(dey),
-    _6502_OP(dex),
-    _6502_OP(iny),
-    _6502_OP(inx),
+    W65C02_OP(dec),
+    W65C02_OP(inc),
+    W65C02_OP(dey),
+    W65C02_OP(dex),
+    W65C02_OP(iny),
+    W65C02_OP(inx),
     
-    _6502_OP(php),
-    _6502_OP(clc),
-    _6502_OP(plp),
-    _6502_OP(sec),
-    _6502_OP(pha),
-    _6502_OP(cli),
-    _6502_OP(pla),
-    _6502_OP(sei),
-    _6502_OP(tay),
-    _6502_OP(clv),
-    _6502_OP(cld),
-    _6502_OP(sed),
+    W65C02_OP(php),
+    W65C02_OP(clc),
+    W65C02_OP(plp),
+    W65C02_OP(sec),
+    W65C02_OP(pha),
+    W65C02_OP(cli),
+    W65C02_OP(pla),
+    W65C02_OP(sei),
+    W65C02_OP(tay),
+    W65C02_OP(clv),
+    W65C02_OP(cld),
+    W65C02_OP(sed),
     
-    _6502_OP(tya),
-    _6502_OP(txa),
-    _6502_OP(txs),
-    _6502_OP(tax),
-    _6502_OP(tsx),
+    W65C02_OP(tya),
+    W65C02_OP(txa),
+    W65C02_OP(txs),
+    W65C02_OP(tax),
+    W65C02_OP(tsx),
     
-    _6502_OP(nop),
+    W65C02_OP(nop),
     
     // 65C02
-    _6502_OP(tsb),
-    _6502_OP(trb),
-    _6502_OP(stz),
-    _6502_OP(phy),
-    _6502_OP(ply),
-    _6502_OP(phx),
-    _6502_OP(plx),
-    _6502_OP(bra),
+    W65C02_OP(tsb),
+    W65C02_OP(trb),
+    W65C02_OP(stz),
+    W65C02_OP(phy),
+    W65C02_OP(ply),
+    W65C02_OP(phx),
+    W65C02_OP(plx),
+    W65C02_OP(bra),
   
-  _6502_OP(ssavar),
-  _6502_OP(phi),
+  W65C02_OP(ssavar),
+  W65C02_OP(phi),
   
-  _6502_OP(jumptable),   // Jump table (2-byte address)
+  W65C02_OP(jumptable),   // Jump table (2-byte address)
 
   // Pseudo instructions:
-  _6502_OP(ap),
+  W65C02_OP(ap),
+} W65C02Opcode;
+
+// Number of variable registers for each type.
+#define kNumIVars 8
+#define kNumBVars 2
+#define kNumLVars 2
+#define kNumXVars 1
+#define kNumFVars 1
+
+#define kMaxVars 8
+
+typedef struct  {
+  TargetInstruction* var;
+  TargetInstruction* reg;
+} RegisterVariable;
+
+// A set of register variables.
+typedef struct {
+  int max_vars;
+  int num_vars;
+  W65C02RegisterType type;
+  W65C02Opcode opcode;
+  RegisterVariable vars[kMaxVars];  // Pointers to TargetSymbol.
+} RegisterVariableSet;
+
+#define kNumVarSets 6
+
+// These are builtin versions of common C library functions.  The idea
+// is that the hand-coded assembly language is quicker to execute than
+// the generated code as it can use zero page directly and not have to
+// get args passed on the stack.
+typedef struct {
+  Symbol* symbol;
+  int index;   
+} Intrinsic;
+
+// Known intrinsics:
+#define kIntrinsicIsalnum 1
+#define kIntrinsicIsalpha 2
+#define kIntrinsicIsblank 3
+#define kIntrinsicIscntrl 4
+#define kIntrinsicIsdigit 5
+#define kIntrinsicIsgraph 6
+#define kIntrinsicIslower 7
+#define kIntrinsicIsprint 8
+#define kIntrinsicIspunct 9
+#define kIntrinsicIsspace 10
+#define kIntrinsicIsupper 11
+#define kIntrinsicIsxdigit 12
+#define kIntrinsicTolower 13
+#define kIntrinsicToupper 14
+#define kIntrinsicMemcpy 15
+#define kIntrinsicMemset 16
 
 
-} _6502Opcode;
 
 // A 6502 Generator is derived from a TargetGenerator.  It has
 // a '.base' field that is the TargetGenerator.
-typedef struct _6502Generator {
+typedef struct W65C02Generator {
   TargetGenerator base;
   Generator* gen;
   TargetInstruction* argument_pointer;
@@ -294,7 +369,7 @@ typedef struct _6502Generator {
   Symbol* leave;
   Symbol* enter_leaf;
   Symbol* leave_leaf;
-  
+
   // Load variable address into zero page:
   // A: offset into zero page where address will be stored
   // X: low byte of offset from fp for variable
@@ -338,6 +413,54 @@ typedef struct _6502Generator {
   Symbol* var_value8b;
   Symbol* arg_value8;
   Symbol* arg_value8b;
+
+  // Setting var values.
+  Symbol* set_var_value1;
+  Symbol* set_var_value1b;
+  Symbol* set_arg_value1;
+  Symbol* set_arg_value1b;
+
+  // 2 byte value.
+  Symbol* set_var_value2;
+  Symbol* set_var_value2b;
+  Symbol* set_arg_value2;
+  Symbol* set_arg_value2b;
+
+  // 4 byte value.
+  Symbol* set_var_value4;
+  Symbol* set_var_value4b;
+  Symbol* set_arg_value4;
+  Symbol* set_arg_value4b;
+
+  // 8 byte value.
+  Symbol* set_var_value8;
+  Symbol* set_var_value8b;
+  Symbol* set_arg_value8;
+  Symbol* set_arg_value8b;
+
+  // Setting var values to zero.
+  Symbol* zero_var_value1;
+  Symbol* zero_var_value1b;
+  Symbol* zero_arg_value1;
+  Symbol* zero_arg_value1b;
+
+  // 2 byte value.
+  Symbol* zero_var_value2;
+  Symbol* zero_var_value2b;
+  Symbol* zero_arg_value2;
+  Symbol* zero_arg_value2b;
+
+  // 4 byte value.
+  Symbol* zero_var_value4;
+  Symbol* zero_var_value4b;
+  Symbol* zero_arg_value4;
+  Symbol* zero_arg_value4b;
+
+  // 8 byte value.
+  Symbol* zero_var_value8;
+  Symbol* zero_var_value8b;
+  Symbol* zero_arg_value8;
+  Symbol* zero_arg_value8b;
   
   // Push variable value onto stack.
   Symbol* push_var1;
@@ -359,6 +482,10 @@ typedef struct _6502Generator {
   Symbol* pusha;
   Symbol* pushxy;
   Symbol* pushxy0;    // Y == 0
+  Symbol* pushreg1;
+  Symbol* pushreg2;
+  Symbol* pushreg4;
+  Symbol* pushreg8;
   Symbol* push4;
   Symbol* push8;
   Symbol* push4xy;
@@ -367,18 +494,63 @@ typedef struct _6502Generator {
   Symbol* pullxy;
   Symbol* pull4;
   Symbol* pull8;
-  Symbol* incsp1;
+  Symbol* incsp;
   Symbol* incsp2;
+  Symbol* incsp4;
+  Symbol* incsp6;
+  Symbol* incsp8;
+  Symbol* incsp10;
+  Symbol* incsp12;
+  Symbol* incsp14;
+  Symbol* incsp16;
+  Symbol* incsp0;
   Symbol* pushmem1;   // 1 byte size.
   Symbol* pushmem2;   // 2 byte size.
   Symbol* copymem1;   // 1 byte size.
   Symbol* copymem2;   // 2 byte size.
   Symbol* zeromem1;   // 1 byte size.
   Symbol* zeromem2;   // 2 byte size.
+  Symbol* result1;
   Symbol* result2;
   Symbol* result4;
   Symbol* result8;
   
+  Symbol* inc1;
+  Symbol* inc2;     // inc 2 byte by n, hi != 0
+  Symbol* inc21;    // inc 2 byte by 1
+  Symbol* inc2b;    // inc 2 byte by n, hi = 0
+  Symbol* inc4;
+  Symbol* inc8;
+  Symbol* incf;
+  Symbol* incd;
+
+  Symbol* rinc1;
+  Symbol* rinc2;     // inc 2 byte by n, hi != 0
+  Symbol* rinc21;    // inc 2 byte by 1
+  Symbol* rinc2b;    // inc 2 byte by n, hi = 0
+  Symbol* rinc4;
+  Symbol* rinc8;
+  Symbol* rincf;
+  Symbol* rincd;
+
+  Symbol* dec1;
+  Symbol* dec2;
+  Symbol* dec21;
+  Symbol* dec2b;
+  Symbol* dec4;
+  Symbol* dec8;
+  Symbol* decf;
+  Symbol* decd;
+
+  Symbol* rdec1;
+  Symbol* rdec2;
+  Symbol* rdec21;
+  Symbol* rdec2b;
+  Symbol* rdec4;
+  Symbol* rdec8;
+  Symbol* rdecf;
+  Symbol* rdecd;
+
   Symbol* load_result;   // load __result from stack frame.
 
   Symbol* umul1;
@@ -390,8 +562,11 @@ typedef struct _6502Generator {
   Symbol* smul4;
   Symbol* smul8;
   Symbol* fmul;
-  Symbol* dmul;
- 
+  
+  // Multiply int by 10.
+  Symbol* umul2_10;
+  Symbol* smul2_10;
+
   Symbol* sdiv1;
   Symbol* sdiv2;
   Symbol* sdiv4;
@@ -401,7 +576,6 @@ typedef struct _6502Generator {
   Symbol* udiv4;
   Symbol* udiv8;
   Symbol* fdiv;
-  Symbol* ddiv;
 
   Symbol* smod1;
   Symbol* smod2;
@@ -416,91 +590,94 @@ typedef struct _6502Generator {
   Symbol* i2tof;
   Symbol* i4tof;
   Symbol* i8tof;
-  Symbol* i1tod;
-  Symbol* i2tod;
-  Symbol* i4tod;
-  Symbol* i8tod;
   
   Symbol* ui1tof;
   Symbol* ui2tof;
   Symbol* ui4tof;
   Symbol* ui8tof;
-  Symbol* ui1tod;
-  Symbol* ui2tod;
-  Symbol* ui4tod;
-  Symbol* ui8tod;
-
-  Symbol* ftod;
-  Symbol* dtof;
   
   Symbol* ftoi1;
   Symbol* ftoi2;
   Symbol* ftoi4;
   Symbol* ftoi8;
-  Symbol* dtoi1;
-  Symbol* dtoi2;
-  Symbol* dtoi4;
-  Symbol* dtoi8;
   Symbol* ftoui1;
   Symbol* ftoui2;
   Symbol* ftoui4;
   Symbol* ftoui8;
-  Symbol* dtoui1;
-  Symbol* dtoui2;
-  Symbol* dtoui4;
-  Symbol* dtoui8;
 
   Symbol* cmpeqf;
   Symbol* cmpnef;
   Symbol* cmpltf;
   Symbol* cmpgef;
   
-  Symbol* cmpeqd;
-  Symbol* cmpned;
-  Symbol* cmpltd;
-  Symbol* cmpged;
+  Symbol* fadd;
+  Symbol* fsub;
+  Symbol* fneg;
 
-  Symbol* jump_table;
+  Symbol* zeroreg4;
+  Symbol* zeroreg8;
 
+  Symbol* jump_table1;
+  Symbol* jump_table2;
+  Symbol* jump_table4;
+  Symbol* jump_table8;
+
+  Symbol* decsp;
+  Symbol* savesp;
+  Symbol* restoresp;
+
+  Symbol* builtin_va_arg2;
+  Symbol* builtin_va_arg4;
+  Symbol* builtin_va_arg8;
+  Symbol* builtin_va_arg;
+
+  Map intrinsics;
+  int next_intrinsic_index;
+  
   Vector branches;
   
+  TargetInstruction* struct_return_inst;
+  
+  // Register variables.  
+  RegisterVariableSet reg_vars[kNumVarSets];
+  
   // Register allocator.
-  _6502RegisterAllocator register_allocator;
-} _6502Generator;
+  W65C02RegisterAllocator register_allocator;
+} W65C02Generator;
 
-void _6502GeneratorInit(_6502Generator* g, Generator* gen);
-_6502Generator* New6502Generator(Generator* gen);
+void W65C02GeneratorInit(W65C02Generator* g, Generator* gen);
+W65C02Generator* New6502Generator(Generator* gen);
 
-void _6502GeneratorDestruct(_6502Generator* g);
-void _6502GeneratorDelete(_6502Generator* g);
+void W65C02GeneratorDestruct(W65C02Generator* g);
+void W65C02GeneratorDelete(W65C02Generator* g);
 
-// Lower the IR to _6502.
-void _6502Lower(_6502Generator* g, Generator* gen);
-void _6502Print(_6502Generator* g, FILE* fp);
-void _6502PrintInstruction(TargetInstruction* inst, FILE* fp);
+// Lower the IR to W65C02.
+void W65C02Lower(W65C02Generator* g, Generator* gen);
+void W65C02Print(W65C02Generator* g, FILE* fp);
+void W65C02PrintInstruction(TargetInstruction* inst, FILE* fp);
 
-const char* _6502OpcodeName(int op);
-bool _6502IsSignedLoad(TargetInstruction* inst);
-bool _6502IsExpression(TargetInstruction* inst);
+const char* W65C02OpcodeName(int op);
+bool W65C02IsSignedLoad(TargetInstruction* inst);
+bool W65C02IsExpression(TargetInstruction* inst);
 
-#define _6502_CMP_EXPR 0x10000      // Compare instruction is an expression.
+#define W65C02_CMP_EXPR 0x10000      // Compare instruction is an expression.
 
-bool _6502IsBranch(TargetInstruction* inst);
+bool W65C02IsBranch(TargetInstruction* inst);
 
-bool _6502IsCall(TargetInstruction* inst);
+bool W65C02IsCall(TargetInstruction* inst);
 
-bool _6502IsReturn(TargetInstruction* inst);
+bool W65C02IsReturn(TargetInstruction* inst);
 
-bool _6502IsSpill(TargetInstruction* inst);
+bool W65C02IsSpill(TargetInstruction* inst);
 
-bool _6502IsLabel(TargetInstruction* inst);
+bool W65C02IsLabel(TargetInstruction* inst);
 
-bool _6502IsFloatingPoint(TargetInstruction* inst);
-bool _6502IsConditionalBranch(TargetInstruction* inst) ;
+bool W65C02IsFloatingPoint(TargetInstruction* inst);
+bool W65C02IsConditionalBranch(TargetInstruction* inst) ;
 
-bool _6502IsFixedRegister(TargetInstruction* inst);
-bool _6502IsConst(TargetInstruction* inst);
+bool W65C02IsFixedRegister(TargetInstruction* inst);
+bool W65C02IsConst(TargetInstruction* inst);
 
-bool _6502IsSymbol(TargetInstruction* inst);
+bool W65C02IsSymbol(TargetInstruction* inst);
 
-#endif /* _6502_codegen_h */
+#endif /* W65C02_codegen_h */

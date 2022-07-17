@@ -1,0 +1,5 @@
+-chdir /Users/dallison/Google\ Drive/c_compiler/6502\ support
+-target 6502 
+-c
+6502runtime.s
+

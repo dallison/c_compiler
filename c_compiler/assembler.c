@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include "elf_writer.h"
 #include "asm_expr.h"
 #include "errors.h"
@@ -51,6 +52,7 @@ DECLARE_DIRECTIVE_FUNC(file);
 DECLARE_DIRECTIVE_FUNC(loc);
 DECLARE_DIRECTIVE_FUNC(option);
 DECLARE_DIRECTIVE_FUNC(set);
+DECLARE_DIRECTIVE_FUNC(chkaddr);
 
 #undef DECLARE_DIRECTIVE_FUNC
 
@@ -92,6 +94,7 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(loc);
   DIRECTIVE(option);
   DIRECTIVE(set);
+  DIRECTIVE(chkaddr);
 }
 
 #undef DIRECTIVE
@@ -1067,7 +1070,7 @@ static void HandleDataDirective(Assembler* assembler, int bits) {
 static void HandleDirective_space(Assembler* assembler) {
   int64_t num_bytes = AssemblerEvaluateExpression(assembler);
   if (num_bytes < 0) {
-    AssemblerError(assembler, "Invalid .space size %lld", num_bytes);
+    AssemblerError(assembler, "Invalid .space size %" PRId64 "", num_bytes);
     return;
   }
   int value = 0;
@@ -1384,3 +1387,15 @@ static void HandleDirective_set(Assembler* assembler) {
     }
   }
 }
+
+static void HandleDirective_chkaddr(Assembler* assembler) {
+  if (LexLookingAt(&assembler->lex, TOK(number))) {
+    int addr = (int)assembler->lex.number;
+    LexNextToken(&assembler->lex);
+    int curr = (int)AssemblerCurrentAddress(assembler);
+    if (addr != curr) {
+      AssemblerError(assembler, "Address mismatch: expected 0x%x(%d); got 0x%x(%d)", addr, addr, curr, curr);
+    }
+  }
+}
+

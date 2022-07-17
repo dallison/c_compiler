@@ -120,7 +120,7 @@ static ssize_t ReadCurrentRegion(LoaderStateMachine* fsm, void* buffer, size_t l
 
 static bool OpenELFFile(LoaderStateMachine* fsm, Connection* conn, const char* filename) {
   // Initialize a 6502 architecture.
-  _6502LoaderArchitectureInit(&fsm->arch);
+  W65C02LoaderArchitectureInit(&fsm->arch);
   
   // Initialize the loader from the given exe file.
   String fn = {0};
@@ -143,7 +143,7 @@ static bool OpenELFFile(LoaderStateMachine* fsm, Connection* conn, const char* f
     Region* region = fsm->loader.regions.value.p[i];
     if (region->segment != NULL) {
       if (region->segment->type == PT(load)) {
-        printf("Region %llx, length %lld\n", region->segment->vaddr, region->segment->memsz);
+        printf("Region %" PRIx64 ", length %" PRId64 "\n", region->segment->vaddr, region->segment->memsz);
         VectorAppend(&fsm->regions, region);
       }
     }

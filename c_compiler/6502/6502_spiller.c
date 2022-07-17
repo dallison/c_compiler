@@ -13,20 +13,20 @@
 #include <assert.h>
 
 struct SpillerData {
-  _6502Generator* g;
+  W65C02Generator* g;
 };
 
-static void Load(_6502Generator* g, TargetOpcode op, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) {
+static void Load(W65C02Generator* g, TargetOpcode op, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) {
   TargetInstruction* inst = TargetNewInstruction2(
-                                           op, src, TargetGetIntConstant(&g->base, NULL, kTargetTypeByte, index));
+                                           op, src, TargetGetIntConstant(&g->base, NULL, kTargetType8Bit, index));
   inst->flags |= (int)kAddrModeZeroPage << 16;
   TargetBasicBlockEmitBefore(&g->base, block, inst, pos);
 }
 
 // Operation instructions
 #define INST(op)                                                         \
-  static void op(_6502Generator* g, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) { \
-    Load(g, (TargetOpcode)_6502_OP(op), src, block, pos, index);                                \
+  static void op(W65C02Generator* g, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) { \
+    Load(g, (TargetOpcode)W65C02_OP(op), src, block, pos, index);                                \
   }
 
 INST(lda)
@@ -35,25 +35,25 @@ INST(ldy)
 
 #undef INST
 
-static void jsr(_6502Generator* g, TargetBasicBlock* block, TargetInstruction* pos, Symbol* func) {
+static void jsr(W65C02Generator* g, TargetBasicBlock* block, TargetInstruction* pos, Symbol* func) {
   TargetInstruction* inst = TargetNewInstruction1(
-                                           (TargetOpcode)_6502_OP(jsr),  TargetGetSymbol(&g->base, NULL, func));
+                                           (TargetOpcode)W65C02_OP(jsr),  TargetGetSymbol(&g->base, NULL, func));
   inst->flags |= (int)kAddrModeAbsolute << 16;
   TargetBasicBlockEmitBefore(&g->base, block, inst, pos);
 }
 
-static TargetInstruction* jsr2(_6502Generator* g, TargetBasicBlock* block, TargetInstruction* pos, Symbol* func) {
+static TargetInstruction* jsr2(W65C02Generator* g, TargetBasicBlock* block, TargetInstruction* pos, Symbol* func) {
   TargetInstruction* inst = TargetNewInstruction1(
-                                           (TargetOpcode)_6502_OP(jsr),  TargetGetSymbol(&g->base, NULL, func));
+                                           (TargetOpcode)W65C02_OP(jsr),  TargetGetSymbol(&g->base, NULL, func));
   inst->flags |= (int)kAddrModeAbsolute << 16;
   TargetBasicBlockEmitAfter(&g->base, block, inst, pos);
   return inst;
 }
 
 #define INST(op)                                                              \
-  static void op##zi(_6502Generator* g, TargetInstruction* reg, TargetBasicBlock* block, TargetInstruction* pos, int offset) { \
+  static void op##zi(W65C02Generator* g, TargetInstruction* reg, TargetBasicBlock* block, TargetInstruction* pos, int offset) { \
     TargetInstruction* inst = TargetNewInstruction2( \
-                                             (TargetOpcode)_6502_OP(op), reg, TargetGetIntConstant(&g->base, NULL, kTargetTypeByte, offset)); \
+                                             (TargetOpcode)W65C02_OP(op), reg, TargetGetIntConstant(&g->base, NULL, kTargetType8Bit, offset)); \
     inst->flags |= (int)kAddrModeZeroPageImmediate << 16; \
     TargetBasicBlockEmitBefore(&g->base, block, inst, pos); \
   }
@@ -62,9 +62,9 @@ INST(ldx)
 
 #undef INST
 
-static TargetInstruction* Store(_6502Generator* g, TargetOpcode op, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) {
+static TargetInstruction* Store(W65C02Generator* g, TargetOpcode op, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) {
   TargetInstruction* inst = TargetNewInstruction2(
-                                           op, src, TargetGetIntConstant(&g->base, NULL, kTargetTypeByte, index));
+                                           op, src, TargetGetIntConstant(&g->base, NULL, kTargetType8Bit, index));
   inst->flags |= (int)kAddrModeZeroPage << 16;
   TargetBasicBlockEmitAfter(&g->base, block, inst, pos);
   return inst;
@@ -72,8 +72,8 @@ static TargetInstruction* Store(_6502Generator* g, TargetOpcode op, TargetInstru
 
 // Operation instructions
 #define INST(op)                                                         \
-  static TargetInstruction* op(_6502Generator* g, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) { \
-    return Store(g, (TargetOpcode)_6502_OP(op), src, block, pos, index);                                \
+  static TargetInstruction* op(W65C02Generator* g, TargetInstruction* src, TargetBasicBlock* block, TargetInstruction* pos, int index) { \
+    return Store(g, (TargetOpcode)W65C02_OP(op), src, block, pos, index);                                \
   }
 
 INST(sta)
@@ -83,9 +83,9 @@ INST(sty)
 #undef INST
 
 #define INST(op)                                                              \
-  static TargetInstruction* op##zi(_6502Generator* g, TargetInstruction* reg, TargetBasicBlock* block, TargetInstruction* pos, int offset) { \
+  static TargetInstruction* op##zi(W65C02Generator* g, TargetInstruction* reg, TargetBasicBlock* block, TargetInstruction* pos, int offset) { \
     TargetInstruction* inst = TargetNewInstruction2( \
-                                             (TargetOpcode)_6502_OP(op), reg, TargetGetIntConstant(&g->base, NULL, kTargetTypeByte, offset)); \
+                                             (TargetOpcode)W65C02_OP(op), reg, TargetGetIntConstant(&g->base, NULL, kTargetType8Bit, offset)); \
     inst->flags |= (int)kAddrModeZeroPageImmediate << 16; \
     TargetBasicBlockEmitAfter(&g->base, block, inst, pos); \
     return inst; \
@@ -94,24 +94,24 @@ INST(sty)
 INST(stx)
 
 #undef INST
-static void PushExpression(_6502Generator* g, TargetInstruction* inst, TargetBasicBlock* block, TargetInstruction* pos) {
-  switch ((_6502Opcode)inst->opcode) {
-  case _6502_OP(expr1):
+static void PushExpression(W65C02Generator* g, TargetInstruction* inst, TargetBasicBlock* block, TargetInstruction* pos) {
+  switch ((W65C02Opcode)inst->opcode) {
+  case W65C02_OP(expr1):
     lda(g, inst, block, pos, 0);
     jsr(g, block, pos, g->pusha);
     break;
-  case _6502_OP(expr2):
+  case W65C02_OP(expr2):
     ldx(g, inst, block, pos, 0);
     ldy(g, inst, block, pos, 1);
     jsr(g, block, pos, g->pushxy);
     break;
 
-  case _6502_OP(expr4):
+  case W65C02_OP(expr4):
     ldxzi(g, inst, block, pos, 0);
     jsr(g, block, pos, g->push4);
     break;
 
-  case _6502_OP(expr8):
+  case W65C02_OP(expr8):
     ldxzi(g, inst, block, pos, 0);
     jsr(g, block, pos, g->push8);
     break;
@@ -120,21 +120,23 @@ static void PushExpression(_6502Generator* g, TargetInstruction* inst, TargetBas
   }
 }
 
-static TargetInstruction* PullExpression(_6502Generator* g, TargetInstruction* inst, TargetBasicBlock* block, TargetInstruction* pos) {
-  switch ((_6502Opcode)inst->opcode) {
-  case _6502_OP(expr1):
+static TargetInstruction* PullExpression(W65C02Generator* g, TargetInstruction* inst, TargetBasicBlock* block, TargetInstruction* pos) {
+  switch ((W65C02Opcode)inst->opcode) {
+  case W65C02_OP(expr1):
     pos = jsr2(g, block, pos, g->pulla);
     return sta(g, inst, block, pos, 0);
-  case _6502_OP(expr2):
+  case W65C02_OP(expr2):
     pos = jsr2(g, block, pos, g->pullxy);
     pos = stx(g, inst, block, pos, 0);
     return sty(g, inst, block, pos, 1);
 
-  case _6502_OP(expr4):
+  case W65C02_OP(expr4):
+  case W65C02_OP(exprf):
     pos = jsr2(g, block, pos, g->pull4);
     return stxzi(g, inst, block, pos, 0);
 
-  case _6502_OP(expr8):
+  case W65C02_OP(expr8):
+  case W65C02_OP(exprd):
     pos = jsr2(g, block, pos, g->pull8);
     return stxzi(g, inst, block, pos, 0);
   default:
@@ -152,14 +154,27 @@ static void SpillExpressions(TargetBasicBlock* block, void* data) {
     return;
   }
   struct SpillerData* spill_data = data;
-   _6502Generator* g = spill_data->g;
+   W65C02Generator* g = spill_data->g;
+  
+  // Get set of nodes written to (used as destination) in this block.  If
+  // these appear in the inputs or outputs we don't save them as they are
+  // generated by the block.
+  BitSet writes = {0};                // Nodes written to in this block.
+  TargetInstruction* inst = block->code;
+  while (inst != NULL && TargetPrev(inst) != block->end_code) {
+    if (inst->dest != NULL) {
+      BitSetInsert(&writes, inst->dest->id);
+    }
+    inst = TargetNext(inst);
+  }
   
   Vector pushed_instructions = {0};   // Pushed instructions.
   BitSet pushes = {0};                // Set to detect already pushed.
   for (size_t i = 0; i < block->inputs.length; i++) {
     TargetInstruction* input = block->inputs.value.p[i];
     if (BitSetContains(&block->output_ids, input->id)) {
-      if (!BitSetContains(&pushes, input->id)) {
+      if (!BitSetContains(&pushes, input->id) &&
+          !BitSetContains(&writes, input->id)) {
         VectorAppend(&pushed_instructions, input);
         BitSetInsert(&pushes, input->id);
       }
@@ -168,7 +183,7 @@ static void SpillExpressions(TargetBasicBlock* block, void* data) {
   
   // Push all instructions before the first instruction in the block.
   TargetInstruction* first = block->code;
-  while (first != block->end_code && _6502IsLabel(first)) {
+  while (first != block->end_code && W65C02IsLabel(first)) {
     first = TargetNext(first);
   }
   
@@ -179,7 +194,7 @@ static void SpillExpressions(TargetBasicBlock* block, void* data) {
   
   // Pull all instructions after the last instruction in the block.
   TargetInstruction* last = block->end_code;
-  while (last != block->code && _6502IsBranch(last)) {
+  while (last != block->code && W65C02IsBranch(last)) {
     last = TargetPrev(last);
   }
   
@@ -189,112 +204,12 @@ static void SpillExpressions(TargetBasicBlock* block, void* data) {
   }
   VectorDestruct(&pushed_instructions);
   BitSetDestruct(&pushes);
+  BitSetDestruct(&writes);
 }
 
 
-void _6502SpillExpressions(_6502Generator* g) {
-  struct SpillerData data = {g};
-  TargetTraverseDominatorTree(&g->base, SpillExpressions, kTraversePreOrder, &data);
+void W65C02SpillExpressions(W65C02Generator* g) {
+  // struct SpillerData data = {g};
+  //TargetTraverseDominatorTree(&g->base, SpillExpressions, kTraversePreOrder, &data);
 }
 
-struct PoolerData {
-  _6502Generator* g;
-};
-
-static bool IsVariable(TargetInstruction* inst) {
-  switch ((_6502Opcode)inst->opcode) {
-    case _6502_OP(var_addr):
-    case _6502_OP(var_addrb):
-    case _6502_OP(arg_addr):
-    case _6502_OP(arg_addrb):
-    case _6502_OP(var_value1):
-    case _6502_OP(var_value2):
-    case _6502_OP(var_value4):
-    case _6502_OP(var_value8):
-    case _6502_OP(var_value1b):
-    case _6502_OP(var_value2b):
-    case _6502_OP(var_value4b):
-    case _6502_OP(var_value8b):
-    case _6502_OP(arg_value1):
-    case _6502_OP(arg_value2):
-    case _6502_OP(arg_value4):
-    case _6502_OP(arg_value8):
-    case _6502_OP(arg_value1b):
-    case _6502_OP(arg_value2b):
-    case _6502_OP(arg_value4b):
-    case _6502_OP(arg_value8b):
-      return true;
-    default:
-      return false;
-  }
-}
-
-static void PoolVariables(TargetBasicBlock* block, void* data) {
-  struct PoolerData* pool_data = data;
-    _6502Generator* g = pool_data->g;
-  Map* dominator_variables = NULL;
-  if (block->idom != NULL) {
-    // If we have an immediate dominator we propagate the
-    // variables from it to this node.
-    dominator_variables = block->idom->cookie;
-  }
-
-  Map* vars = NULL;
-  if (block->idom != NULL && block->idom->dominatees.length == 1) {
-    // This block is the only one dominated by the dominator so we
-    // can just reuse the value set from the dominator.
-    vars = dominator_variables;
-    block->idom->cookie = NULL;  // This is no longer valid.
-    block->cookie = vars;
-  } else {
-    // There is more than one block that is dominated by my dominator.
-    // We need to copy the variables from the dominator.
-    vars = NewMapForPointerKeys();
-    block->cookie = vars;
-    if (dominator_variables != NULL) {
-      MapCopy(vars, dominator_variables);
-    }
-  }
-  
-  TargetInstruction* next = NULL;
-  for (TargetInstruction* inst = block->code; inst != NULL &&
-       block->end_code != NULL &&
-       TargetPrev(inst) != block->end_code; inst = next) {
-    next = block->end_code == NULL ? NULL : TargetNext(inst);
-
-    if (IsVariable(inst)) {
-      TargetInstruction* result = inst->operand[0];
-      TargetInstruction* var = inst->operand[1];
-      MapKeyType key = {.p = var};
-      TargetInstruction* pooled = MapFind(vars, key);
-      if (pooled == NULL) {
-        MapKeyValue kv = {.key.p = var, .value.p = result};
-        MapInsert(vars, kv);
-      } else {
-        // Variable is in pool, replace the result instruction with the a
-        // reference to the pooled one.  Then delete the variable instruction.
-        TargetBasicBlockReplaceInstruction(&g->base, block, result, pooled);
-        TargetBasicBlockRemoveInstruction(&g->base, block, inst);
-      }
-    }
-    inst = next;
-  }
-
-}
-
-void _6502PoolVariables(_6502Generator* g) {
-  struct PoolerData data = {g};
-  TargetTraverseDominatorTree(&g->base, PoolVariables, kTraversePreOrder, &data);
-  
-  // Done with all the variable maps, delete them all.
-  for (size_t i = 0; i < g->base.basic_blocks.length; i++) {
-    TargetBasicBlock* block = g->base.basic_blocks.value.p[i];
-    if (block->cookie != NULL) {
-      MapDelete((Map*)block->cookie);
-      block->cookie = NULL;
-    }
-  }
-  
-  // Inputs and outputs might have changed, recalculate them.
-  TargetBuildBasicBlockInputsAndOutputs(&g->base);
-}

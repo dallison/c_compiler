@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 // To avoid passing this around to lots of functions.
 static SourceLocation current_location;
@@ -28,10 +29,10 @@ static struct {
     {IR_OP(tmp), "tmp"},
 
     // Constants.
-    {IR_OP(consti), "consti"},
-    {IR_OP(constb), "constb"},
-    {IR_OP(consts), "consts"},
-    {IR_OP(constl), "constl"},
+    {IR_OP(const32), "const32"},
+    {IR_OP(const8), "const8"},
+    {IR_OP(const16), "const16"},
+    {IR_OP(const64), "const64"},
     {IR_OP(constf), "constf"},
     {IR_OP(constd), "constd"},
     {IR_OP(consta), "consta"},
@@ -51,26 +52,31 @@ static struct {
     {IR_OP(named_label), "namedlabel"},
 
     // loads.
-    {IR_OP(loadi), "loadi"},
-    {IR_OP(loadb), "loadb"},
-    {IR_OP(loadl), "loadl"},
-    {IR_OP(loads), "loads"},
-    {IR_OP(loadui), "loadui"},
-    {IR_OP(loadub), "loadub"},
-    {IR_OP(loadus), "loadus"},
+    {IR_OP(load32), "load32"},
+    {IR_OP(load8), "load8"},
+    {IR_OP(load64), "load64"},
+    {IR_OP(load16), "load16"},
+    {IR_OP(loadu32), "loadu32"},
+    {IR_OP(loadu8), "loadu8"},
+    {IR_OP(loadu16), "loadu16"},
     {IR_OP(loadf), "loadf"},
     {IR_OP(loadd), "loadd"},
     {IR_OP(loada), "loada"},
     {IR_OP(structarg), "structarg"},
 
     // stores.
-    {IR_OP(storei), "storei"},
-    {IR_OP(storeb), "storeb"},
-    {IR_OP(stores), "stores"},
-    {IR_OP(storel), "storel"},
+    {IR_OP(store32), "store32"},
+    {IR_OP(store8), "store8"},
+    {IR_OP(store16), "store16"},
+    {IR_OP(store64), "store64"},
     {IR_OP(storef), "storef"},
     {IR_OP(stored), "stored"},
     {IR_OP(storea), "storea"},
+
+    {IR_OP(getbit), "getbit"},
+
+    // Store bit field in value of given size.
+    {IR_OP(setbit), "setbit"},
 
     // Add.
     {IR_OP(addi), "addi"},
@@ -203,7 +209,31 @@ static struct {
     {IR_OP(builtin_va_arg), "builtin_va_arg"},
     {IR_OP(builtin_va_end), "builtin_va_end"},
     {IR_OP(builtin_va_copy), "builtin_va_copy"},
-};
+  
+  {IR_OP(inc8), "inc8"},
+  {IR_OP(inc16), "inc16"},
+  {IR_OP(inc32), "inc32"},
+  {IR_OP(inc64), "inc64"},
+  {IR_OP(uinc8), "uinc8"},
+  {IR_OP(uinc16), "uinc16"},
+  {IR_OP(uinc32), "uinc32"},
+  {IR_OP(uinc64), "uinc64"},
+ {IR_OP(inca), "inca"},
+  {IR_OP(incf), "incf"},
+  {IR_OP(incd), "incd"},
+  
+    {IR_OP(dec8), "dec8"},
+    {IR_OP(dec16), "dec16"},
+    {IR_OP(dec32), "dec32"},
+    {IR_OP(dec64), "dec64"},
+  {IR_OP(udec8), "udec8"},
+  {IR_OP(udec16), "udec16"},
+  {IR_OP(udec32), "udec32"},
+  {IR_OP(udec64), "udec64"},
+   {IR_OP(deca), "deca"},
+    {IR_OP(decf), "decf"},
+    {IR_OP(decd), "decd"},
+  };
 
 const char* IROpcodeName(IROpcode opcode) {
   for (int i = 0; i < last_ir_opcode; i++) {
@@ -393,7 +423,8 @@ static struct {
     {TypeIsFloat, IR_OP(constf)},
     {TypeIsDouble, IR_OP(constd)},
     {TypeIsLongDouble, IR_OP(constd)},
-    {TypeIsPointerOrArray, IR_OP(consta)},
+  {TypeIsPointerOrArray, IR_OP(consta)},
+  {TypeIsStructOrUnion, IR_OP(consta)},
     {NULL, IR_OP(nop)},
 };
 
@@ -401,16 +432,16 @@ static struct {
   int size;
   IROpcode opcode;
 } int_size_to_opcode[] = {
-  {1, IR_OP(constb)},
-  {2, IR_OP(consts)},
-  {4, IR_OP(consti)},
-  {8, IR_OP(constl)},
+  {1, IR_OP(const8)},
+  {2, IR_OP(const16)},
+  {4, IR_OP(const32)},
+  {8, IR_OP(const64)},
   {0, IR_OP(nop)},
 };
 
 static IROpcode IntConstOpcode(TypeRecord* type) {
   int size = 0;
-  if (type == NULL || TypeIsInt(type)) {
+  if (type == NULL) {
     size = compiler->int_size;
   } else if (TypeIsShort(type)) {
     size = compiler->short_size;
@@ -422,6 +453,8 @@ static IROpcode IntConstOpcode(TypeRecord* type) {
     size = compiler->long_size;
   } else if (TypeIsLongLong(type)) {
     size = compiler->long_long_size;
+  } else if (TypeIsInt(type)) {
+    size = compiler->int_size;
   }
   for (size_t i = 0; int_size_to_opcode[i].size != 0; i++) {
     if (size == int_size_to_opcode[i].size) {
@@ -540,12 +573,12 @@ void IRPrint(IRNode* inst, FILE* fp) {
   IRVariable* var = (IRVariable*)inst;
   IRLocation* loc = (IRLocation*)inst;
   switch (inst->opcode) {
-    case IR_OP(consti):
-    case IR_OP(constb):
-    case IR_OP(consts):
-    case IR_OP(constl):
+    case IR_OP(const32):
+    case IR_OP(const8):
+    case IR_OP(const16):
+    case IR_OP(const64):
     case IR_OP(consta):
-      fprintf(fp, " %lld", constant->value.ivalue);
+      fprintf(fp, " %" PRId64 "", constant->value.ivalue);
       break;
     case IR_OP(constd):
       fprintf(fp, " %g", constant->value.fvalue);
@@ -603,11 +636,7 @@ void IRPrint(IRNode* inst, FILE* fp) {
     fprintf(fp, "}");
   }
   if (inst->dest != NULL) {
-    if ((inst->flags & kIRDestIsIndirect) != 0) {
-      fprintf(fp, " -> ($%d)", inst->dest->id);
-    } else {
-      fprintf(fp, " -> $%d", inst->dest->id);
-    }
+    fprintf(fp, " -> $%d", inst->dest->id);
   }
   fprintf(fp, "\n");
 }
@@ -630,7 +659,7 @@ bool IRIsReturn(IRNode* node) { return node->opcode == IR_OP(ret); }
 bool IRIsCall(IRNode* node) { return node->opcode == IR_OP(calla); }
 
 bool IRIsConst(IRNode* node) {
-  return node->opcode >= IR_OP(constb) && node->opcode <= IR_OP(consta);
+  return node->opcode >= IR_OP(const8) && node->opcode <= IR_OP(consta);
 }
 
 bool IRIsZero(IRNode* node) {
@@ -701,10 +730,10 @@ bool IRIsVarRef(IRNode* inst) { return (inst->flags & kIRVarUse) != 0; }
 
 bool IRIsExpression(IRNode* inst) {
   switch (inst->opcode) {
-    case IR_OP(consti):
-    case IR_OP(constb):
-    case IR_OP(consts):
-    case IR_OP(constl):
+    case IR_OP(const32):
+    case IR_OP(const8):
+    case IR_OP(const16):
+    case IR_OP(const64):
     case IR_OP(constf):
     case IR_OP(constd):
     case IR_OP(consta):
@@ -720,23 +749,23 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(rmova):
     case IR_OP(tmp):
 
-    case IR_OP(loadi):
-    case IR_OP(loadb):
-    case IR_OP(loadl):
-    case IR_OP(loads):
-    case IR_OP(loadui):
-    case IR_OP(loadub):
-    case IR_OP(loadus):
+    case IR_OP(load32):
+    case IR_OP(load8):
+    case IR_OP(load64):
+    case IR_OP(load16):
+    case IR_OP(loadu32):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
     case IR_OP(structarg):
 
       // Stores are expressions;
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
@@ -833,7 +862,15 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(literalref):
     case IR_OP(addressof):
     case IR_OP(cast):
-      return true;
+    case IR_OP(inc8):
+    case IR_OP(inc16):
+    case IR_OP(inc32):
+    case IR_OP(inc64):
+    case IR_OP(dec8):
+    case IR_OP(dec16):
+    case IR_OP(dec32):
+    case IR_OP(dec64):
+     return true;
     default:
       return false;
   }
@@ -869,10 +906,10 @@ bool IRIsComparison(IRNode* node) {
 
 bool IRIsStoreOnly(IRNode* node) {
   switch (node->opcode) {
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
@@ -883,10 +920,10 @@ bool IRIsStoreOnly(IRNode* node) {
 }
 bool IRIsStore(IRNode* node) {
   switch (node->opcode) {
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
@@ -898,33 +935,96 @@ bool IRIsStore(IRNode* node) {
     case IR_OP(builtin_va_copy):
     case IR_OP(memzero):
     case IR_OP(memcpy):
+    case IR_OP(inc8):
+    case IR_OP(inc16):
+    case IR_OP(inc32):
+    case IR_OP(inc64):
+    case IR_OP(uinc8):
+    case IR_OP(uinc16):
+    case IR_OP(uinc32):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
+    case IR_OP(dec8):
+    case IR_OP(dec16):
+    case IR_OP(dec32):
+    case IR_OP(dec64):
+    case IR_OP(udec8):
+    case IR_OP(udec16):
+    case IR_OP(udec32):
+    case IR_OP(udec64):
+    case IR_OP(deca):
+    case IR_OP(decf):
+    case IR_OP(decd):
+    case IR_OP(setbit):
+     return true;
+    default:
+      return IRIsIncDec(node);
+  }
+}
+
+bool IRIsIncDec(IRNode* node) {
+  switch (node->opcode) {
+      case IR_OP(inc8):
+    case IR_OP(inc16):
+    case IR_OP(inc32):
+    case IR_OP(inc64):
+    case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
+    case IR_OP(dec16):
+    case IR_OP(dec32):
+    case IR_OP(dec64):
+    case IR_OP(deca):
+    case IR_OP(decf):
+    case IR_OP(decd):
       return true;
     default:
       return false;
   }
 }
-
+  
 bool IRIsLoad(IRNode* node) {
   switch (node->opcode) {
-    case IR_OP(loadi):
-    case IR_OP(loadb):
-    case IR_OP(loadl):
-    case IR_OP(loads):
-    case IR_OP(loadui):
-    case IR_OP(loadub):
-    case IR_OP(loadus):
+    case IR_OP(load32):
+    case IR_OP(load8):
+    case IR_OP(load64):
+    case IR_OP(load16):
+    case IR_OP(loadu32):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
     case IR_OP(structarg):
     case IR_OP(addressof):
     case IR_OP(cast):
+    case IR_OP(getbit):
+      return true;
+    default:
+      return IRIsIncDec(node);
+  }
+}
+
+
+bool IRIsLoadOnly(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(load32):
+    case IR_OP(load8):
+    case IR_OP(load64):
+    case IR_OP(load16):
+    case IR_OP(loadu32):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
+    case IR_OP(loadf):
+    case IR_OP(loadd):
+    case IR_OP(loada):
       return true;
     default:
       return false;
   }
 }
-
 bool IRIsResult(IRNode* node) {
   switch (node->opcode) {
     case IR_OP(resulti):

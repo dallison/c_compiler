@@ -26,10 +26,10 @@ typedef enum {
   IR_OP(tmp),  // Temporary result.
 
   // Constants.
-  IR_OP(constb),  // 8-bit constant.
-  IR_OP(consts),  // 16-bit constant.
-  IR_OP(consti),  // 32-bit constant.
-  IR_OP(constl),  // 64-bit constant.
+  IR_OP(const8),  // 8-bit constant.
+  IR_OP(const16),  // 16-bit constant.
+  IR_OP(const32),  // 32-bit constant.
+  IR_OP(const64),  // 64-bit constant.
   IR_OP(constf),  // Single precision floating point.
   IR_OP(constd),  // Double precision floating point.
   IR_OP(consta),  // Address.
@@ -49,26 +49,34 @@ typedef enum {
   IR_OP(named_label),  // Named label.
 
   // loads.
-  IR_OP(loadi),   // Load signed 32-bit from [op0]
-  IR_OP(loadb),   // Load signed 8-bit from [op0]
-  IR_OP(loadl),   // Load 64-bit from [op0]
-  IR_OP(loads),   // Load 16-bit from [op0]
-  IR_OP(loadui),  // Load unsigned 32-bit from [op0]
-  IR_OP(loadub),  // Load unsigned 8-bit from [op0]
-  IR_OP(loadus),  // Load unsigned 16-bit from [op0]
+  IR_OP(load32),   // Load signed 32-bit from [op0]
+  IR_OP(load8),   // Load signed 8-bit from [op0]
+  IR_OP(load64),   // Load 64-bit from [op0]
+  IR_OP(load16),   // Load 16-bit from [op0]
+  IR_OP(loadu32),  // Load unsigned 32-bit from [op0]
+  IR_OP(loadu8),  // Load unsigned 8-bit from [op0]
+  IR_OP(loadu16),  // Load unsigned 16-bit from [op0]
   IR_OP(loadf),   // Load 32-bit float from [op0]
   IR_OP(loadd),   // Load 64-bit float from [op0]
   IR_OP(loada),   // Load address from [op0]
   IR_OP(structarg),  // Load struct address from [op0] for call
   
   // stores.
-  IR_OP(storei),  // Store 32-bit op1 in [op0]
-  IR_OP(storeb),  // Store 8-bit op1 in [op0]
-  IR_OP(stores),  // Store 16-bit op1 in [op0]
-  IR_OP(storel),  // Store 64-bit op1 in [op0]
+  IR_OP(store32),  // Store 32-bit op1 in [op0]
+  IR_OP(store8),  // Store 8-bit op1 in [op0]
+  IR_OP(store16),  // Store 16-bit op1 in [op0]
+  IR_OP(store64),  // Store 64-bit op1 in [op0]
   IR_OP(storef),  // Store 32-bit float op1 in [op0]
   IR_OP(stored),  // Store 64-bit float op1 in [op0]
   IR_OP(storea),  // Store address op1 in [op0]
+
+  // Bitfields
+  // Load bit field from value.  Inputs are:
+  // (bit_offaet, bit_size)
+  IR_OP(getbit),
+
+  // Store bit field in value.
+  IR_OP(setbit),
 
   // Add.
   IR_OP(addi),  // op0 + op1 (ints)
@@ -204,6 +212,35 @@ typedef enum {
   IR_OP(builtin_va_end),    // va_end(op0)
   IR_OP(builtin_va_copy),   // va_copy(op0, op1)
 
+  // Increment and decrement.  First input is the operand, second is
+  // a constant for the increment or decrement.
+  IR_OP(inc8),
+  IR_OP(inc16),
+  IR_OP(inc32),
+  IR_OP(inc64),
+
+  IR_OP(uinc8),
+  IR_OP(uinc16),
+  IR_OP(uinc32),
+  IR_OP(uinc64),
+
+  IR_OP(inca),
+  IR_OP(incf),
+  IR_OP(incd),
+
+  IR_OP(dec8),
+  IR_OP(dec16),
+  IR_OP(dec32),
+  IR_OP(dec64),
+
+  IR_OP(udec8),
+  IR_OP(udec16),
+  IR_OP(udec32),
+  IR_OP(udec64),
+
+  IR_OP(deca),
+  IR_OP(decf),
+  IR_OP(decd),
   last_ir_opcode,
 } IROpcode;
 
@@ -241,7 +278,7 @@ typedef struct IRNode {
 #define kIRRvoCall (1 << 4)     // Return value optimized call.
 #define kIRNrvoMarker (1 << 5)  // Named Return Value optimized symbol.
 #define kIRJumpTableBranch (1 << 6)  // Jump table bra.
-#define kIRDestIsIndirect (1 << 7)  // Dest is indirect address.
+#define kIRFakeUnsigned (1 << 7)  // This type is not really unsigned.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);
@@ -331,6 +368,8 @@ bool IRIsComparison(IRNode* node);
 bool IRIsStoreOnly(IRNode* node);
 bool IRIsStore(IRNode* node);
 bool IRIsLoad(IRNode* node);
+bool IRIsLoadOnly(IRNode* node);
+bool IRIsIncDec(IRNode* node);
 
 bool IRIsResult(IRNode* node);
 

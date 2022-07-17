@@ -51,6 +51,7 @@ typedef struct Symbol {
     bool used: 1;                  // The symbol has been used.
     bool invented: 1;
     bool is_inline_defn: 1;        // Is an inline function definition.
+    bool value_set : 1;            // Value has been set (for const).
   } flags;
   
   struct {
@@ -70,7 +71,6 @@ typedef struct Symbol {
     void* other;            // Something else.
     struct Symbol* func_defn;      // Defintion of this func declaration.
   } value;
-  
   int32_t stack_offset;     // Stack offset if local.
   struct DIE* die;
 } Symbol;

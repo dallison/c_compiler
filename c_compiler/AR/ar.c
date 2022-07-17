@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 //
 // Symbol table.  This is a hash table of Vectors.  The Vectors
@@ -93,7 +94,7 @@ static void PrintSymbolList(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
     ARSymbol* symbol = bucket->value.p[i];
-    printf("%-30s %-20s @0x%llx\n", symbol->name.value,
+    printf("%-30s %-20s @0x%" PRIx64 "\n", symbol->name.value,
            symbol->file->filename.value,
            symbol->file->file_offset);
   }
@@ -229,7 +230,7 @@ static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
     ARSymbol* symbol = NewARSymbol("");
     symbol->file = MapFindInt64Key(&archive->file_offsets, file_offset);
     if (symbol->file == NULL) {
-      fprintf(stderr, "Corrupted symbol table\n");
+      fprintf(stderr, "Corrupted symbol table: unknown offset %" PRId64 "\n", file_offset);
       exit(1);
     }
     VectorAppend(&symbols, symbol);
@@ -563,7 +564,9 @@ static void BuildFileHeader(ARFileHeader* header, const char* filename,
 static void WriteFile(ARArchiveBuilder* archive, ARFile* file, FILE* fp) {
   // Record header offset.  This will be used by the symbol table to
   // refer to the file.
-  file->file_offset = ftell(fp);
+  int64_t offset = ftell(fp);
+  assert (offset == file->file_offset);
+  file->file_offset = offset;
   
   ARFileHeader header;
   if (file->filename.length > 15) {

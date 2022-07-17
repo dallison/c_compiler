@@ -59,7 +59,7 @@ static ASTNode* UnaryExpression(Lex* lex) {
 }
 
 // Multiple or divide.
-static ASTNode* MultplicativeExpression(Lex* lex) {
+static ASTNode* MultiplicativeExpression(Lex* lex) {
   ASTNode* result = UnaryExpression(lex);
   for (;;) {
     if (LexMatch(lex, TOK(star))) {
@@ -79,14 +79,14 @@ static ASTNode* MultplicativeExpression(Lex* lex) {
 
 // Add or subtract.
 static ASTNode* AdditiveExpression(Lex* lex) {
-  ASTNode* result = MultplicativeExpression(lex);
+  ASTNode* result = MultiplicativeExpression(lex);
   for (;;) {
     if (LexMatch(lex, TOK(plus))) {
-      ASTNode* right = MultplicativeExpression(lex);
+      ASTNode* right = MultiplicativeExpression(lex);
       result = NewBinaryASTNode(AST_OP(plus), NULL, lex->current_token_location,
                                 result, right);
     } else if (LexMatch(lex, TOK(minus))) {
-      ASTNode* right = MultplicativeExpression(lex);
+      ASTNode* right = MultiplicativeExpression(lex);
       result = NewBinaryASTNode(AST_OP(minus), NULL,
                                 lex->current_token_location, result, right);
     } else {

@@ -83,12 +83,12 @@ int main(int argc, char * argv[]) {
     // Create the global symbol tables.
     CreateGlobalSymbolTables();
     
-    _6502Assembler assembler;
-    _6502AssemblerInit(&assembler, asm_filename, &output_filename);
+    W65C02Assembler assembler;
+    W65C02AssemblerInit(&assembler, asm_filename, &output_filename);
     AssemblerRun(&assembler.base, Assemble6502Instruction);
     
     int num_errors = assembler.base.num_errors;
-    _6502AssemblerDestruct(&assembler);
+    W65C02AssemblerDestruct(&assembler);
     if (num_errors != 0) {
       exit(1);
     }

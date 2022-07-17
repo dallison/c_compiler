@@ -9,6 +9,7 @@
 #include "statement_semantics.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "compiler.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
@@ -113,7 +114,69 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
    }
 }
 
-static void AnalyzeEnumSwitch(SwitchStatementASTNode* node) {
+// Look at all the cases for the switch and determine what integer type
+// we should use for the control expression.
+static Type DetermineControlType(SwitchStatementASTNode* node) {
+  size_t num_cases = node->cases.length;
+
+  // Calculate the max bit width for all case constants.  This can be used
+  // by the backend to optimize comparisons.
+  for (size_t i = 0; i < num_cases; i++) {
+    int64_t case_value = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
+    if (case_value < 0) {
+      case_value = -case_value;
+    }
+    if (case_value == 0) {
+      continue;
+    }
+    int width = 8;
+    if (case_value < (1LL << 8)) {
+      width = 1;
+    } else if (case_value < (1LL << 16)) {
+      width = 2;
+    } else if (case_value < (1LL << 32)) {
+      width = 4;
+    }
+    if (width > node->max_case_width) {
+      node->max_case_width = width;
+    }
+  }
+  
+  // Determine int type to which to convert control expression.  This is based
+  // on the max width of the cases in the statement.
+  Type control_type = kTypeInt;
+  switch (node->max_case_width) {
+    case 1:
+      control_type = kTypeChar;
+      break;
+    case 2:
+      if (compiler->int_size == 2) {
+        control_type = kTypeInt;
+      } else {
+        control_type = kTypeShort;
+      }
+      break;
+    case 4:
+      if (compiler->long_size == 4) {
+        control_type = kTypeLong;
+      } else {
+        control_type = kTypeInt;
+      }
+      break;
+    case 8:
+      if (compiler->long_size == 8) {
+        control_type = kTypeLong;
+      } else {
+        control_type = kTypeLongLong;
+      }
+      break;
+
+  }
+  return control_type;
+}
+
+
+static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   BitSet enum_constants = {0};
   BitSet found_constants = {0};
   Enum* info = node->expr->type->info.enum_info;
@@ -131,7 +194,7 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node) {
        BitSetInsert(&found_constants, case_value);
      } else {
        SemanticWarning(&node->base, "switch-bad-case",
-                       "Case value %lld is not valid for enumeration %s",
+                       "Case value %" PRId64 " is not valid for enumeration %s",
                        case_value, info->tag_name->value);
      }
   }
@@ -148,7 +211,7 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node) {
     if (missing_constants.length > 4) {
       Symbol* ec = missing_constants.value.p[0];
       SemanticWarning(&node->base, "missing-switch-enum",
-                      "Enum constant %s and %lld others are not present in switch statement",
+                      "Enum constant %s and %" PRId64 " others are not present in switch statement",
                       ec->name.value, missing_constants.length - 1);
 
     } else {
@@ -165,6 +228,15 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node) {
       node->all_cases_covered = true;
     }
   }
+
+  // Convert expr to int.  The conversion is to signed or unsigned
+  if (node->all_cases_positive) {
+    SemanticConvertType(node->expr,
+                        NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertNormal);
+  } else {
+    SemanticConvertType(node->expr,
+                        NewTypeRecordWithSize(control_type, kQualPlain), kConvertNormal);
+  }
   
   VectorDestruct(&missing_constants);
   BitSetDestruct(&enum_constants);
@@ -175,13 +247,9 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->expr);
+
   if (!TypeIsIntegral(node->expr->type)) {
     SemanticError(node->expr, "Switch statements need an integer type");
-    return;
-  }
-
-  // The case statement must be a compound statement.
-  if (node->stmt->op != AST_OP(compound)) {
     return;
   }
   
@@ -194,6 +262,38 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // case and defaults.
   ASTNodeVisit(&node->base, ResolveSwitchStatement, 0, &resolver);
 
+  size_t num_cases = node->cases.length;
+  
+  bool negative_cases = false;
+  for (size_t i = 0; i < num_cases; i++) {
+    int64_t case_value = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
+    if (case_value < 0) {
+      negative_cases = true;
+      break;
+    }
+  }
+  node->all_cases_positive = !negative_cases;
+  
+  // Determine int type to which to convert control expression.  This is based
+  // on the max width of the cases in the statement.
+  Type control_type = DetermineControlType(node);
+ 
+  // If not an enum convert to int.  We want to handle the conversion for
+  // an enum differently.  If it has only positive cases we can convert to
+  // unsigned int as that makes for better code generation (no sign extension).
+  // This conversion is done in AnalyzeEnumSwitch.
+  if (!TypeIsEnum(node->expr->type)) {
+    // Convert expr to int.  The conversion is to signed or unsigned.
+    if (TypeIsUnsigned(node->expr->type)) {
+      SemanticConvertType(node->expr,
+                          NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertNormal);
+    } else {
+      SemanticConvertType(node->expr,
+                          NewTypeRecordWithSize(control_type, kQualPlain), kConvertNormal);
+    }
+  }
+  
+  
   // Get an idea of the case density.
   // Density is mass/volume.  Let's say that the number of cases is the
   // masss and the distance between the min and max values is the volume.
@@ -211,7 +311,6 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // Check the case labels for duplicates. Since they are sorted we only need
   // to check for two adjacent values being the same.  This is faster than doing
   // an n^2 search for each value;
-  size_t num_cases = node->cases.length;
   for (size_t i = 0; i < num_cases - 1; i++) {
     int64_t case_value1 = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
     int64_t case_value2 =
@@ -233,7 +332,7 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // cases are part of the enumeration and set the all_cases_covered
   // flag if we have all the valid enumeration constants.
   if (TypeIsEnum(node->expr->type)) {
-    AnalyzeEnumSwitch(node);
+    AnalyzeEnumSwitch(node, control_type);
   }
 }
 
@@ -408,9 +507,6 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
 }
 
 static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
-  if (node->base.id == 4368) {
-    printf("");
-  }
   if (node->expr != NULL) {
     // A case with no expression is used for 'default'.
     node->expr = AnalyzeExpression(node->expr);

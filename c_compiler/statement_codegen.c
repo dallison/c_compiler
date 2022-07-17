@@ -129,12 +129,14 @@ static IRNode* GenerateVLADefinition(Generator* gen, TypeRecord* type,
   
   // Saved stack pointer.
   IRNode* saved_sp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+  IRSetType(saved_sp, NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
   GeneratorEmit(gen, NewIR1(IR_OP(savesp), saved_sp));
   decl->saved_sp = saved_sp;
   
   // Address of VLA (current stack pointer after decrement).
   IRNode* array_addr = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-
+  IRSetType(array_addr, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  
   // Make space for aligned array on stack.
   IRNode* aligned = GeneratorEmit(gen, NewIR2(IR_OP(aligni),
                                              size,
@@ -442,18 +444,35 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
       GeneratorGetIntConstant(gen, node->expr->type, node->max_case_value);
 
   if (!node->all_cases_covered) {
+    // If all cases are positive we can generate a negative comparison and
+    // branch to default if true.  We can then use an unsigned comparison
+    // for the values, which is faster on some processors.
+    if (TypeIsSigned(node->expr->type) && node->all_cases_positive) {
+      IRNode* cmp0 = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr,
+                                               GeneratorGetIntConstant(gen, node->expr->type, 0)));
+      GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmp0, default_label));
+      
+      // Use an unsigned comparison by resetting the node's type.
+      TypeRecord* unsigned_type = TypeRecordCopy(expr->type);
+      unsigned_type->type |= kTypeUnsigned;
+      IRSetType(expr, unsigned_type);
+      expr->flags |= kIRFakeUnsigned;     // This isn't really unsigned.
+    }
     // Compare expr to min and branch to default if less.
     IRNode* cmplo = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr, min));
     GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmplo, default_label));
 
     // Compare expr to max and branch to default if greater.
-
     IRNode* cmphi = GeneratorEmit(gen, NewIR2(IR_OP(cmpgti), expr, max));
     GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmphi, default_label));
   }
   
-  // Subtract min from expr to get branch offset.
-  IRNode* zeroed = GeneratorEmit(gen, NewIR2(IR_OP(subi), expr, min));
+  // Subtract min from expr to get branch offset, unless min is zero (no
+  // point in subtracting zero).
+  IRNode* zeroed = expr;
+  if (node->min_case_value != 0) {
+    zeroed = GeneratorEmit(gen, NewIR2(IR_OP(subi), expr, min));
+  }
 
   // Computed branch via jump table.
   GeneratorEmit(gen, NewIR1(IR_OP(cbra), zeroed));
@@ -632,9 +651,18 @@ static void GenerateSwitchStatement(Generator* gen,
     default_node->label = label;
   }
 
+  // A dense switch is only good if the comparisons to set it up do
+  // not exceed the advantage of the jump table.
+  int min_dense_cases = 4;     // TODO: configure this per target.
+  if (!node->all_cases_covered) {
+    min_dense_cases += 2;     // Two extra comparisons.
+    if (TypeIsSigned(node->expr->type) && node->all_cases_positive) {
+      min_dense_cases += 1;     // One extra comparison.
+    }
+  }
   // Use density calculated from semantic analysis to determine what
   // type of switch to generate.
-  if (node->density > 0.5) {
+  if (node->cases.length > min_dense_cases && node->density > 0.5) {
     GenerateDenseSwitch(gen, node);
   } else {
     GenerateSparseSwitch(gen, node);
@@ -861,7 +889,7 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
 
 // Assembly language IR node.  This refers to a string literal.
 static void GenerateAsm(Generator* gen, AsmASTNode* node) {
-  int literal_id = CompilerAddStringLiteral(node->text);
+  int literal_id = CompilerAddStringLiteral(node->text, false);
 
   GeneratorEmit(
       gen, NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id)));

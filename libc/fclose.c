@@ -14,7 +14,19 @@ int fclose(FILE* fp) {
   if (fp == NULL) {
     return EOF;
   }
+  fflush(fp);
   int e = close(fp->fd);
-  free(fp->buf);
-  return e == 0 ? 0 : EOF;
+  if (e == -1) {
+    return EOF;
+  }
+  // If the buffer is owned (set by setvbuf), free it.
+  if (fp->buffer_owned) {
+    free(fp->buf);
+  }
+  // For all except standard streams the FILE is allocated on the
+  // heap.  Free it.
+  if (fp->fd > 2) {
+    free(fp);
+  }
+  return 0;
 }

@@ -189,6 +189,9 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(asm_files, NewString(argv[i]));
     } else if (StringEndsWith(&arg, ".o")) {
       VectorAppend(linker_args, argv[i]);
+    } else {
+      // Unknown extension, add to linker args.
+      VectorAppend(linker_args, argv[i]);
     }
   }
   return i + 1;
@@ -304,11 +307,11 @@ int main(int argc, char * argv[]) {
       AssemblerFinalizer finalizer = NULL;
       AssemblerDestructor destructor;
 
-      if (StringEqual(&target, "6502")) {
+      if (StringEqual(&target, "6502") || StringEqual(&target, "65c02")) {
         assembler = (Assembler*)New6502Assembler(asm_filename, &output_filename);
         asm_run = Assemble6502Instruction;
-        destructor = (AssemblerDestructor)_6502AssemblerDestruct;
-        finalizer = (AssemblerFinalizer)_6502AssemblerFinalize;
+        destructor = (AssemblerDestructor)W65C02AssemblerDestruct;
+        finalizer = (AssemblerFinalizer)W65C02AssemblerFinalize;
       } else if (StringEqual(&target, "risc-v")) {
         assembler = (Assembler*)NewRVAssembler(asm_filename, &output_filename);
         asm_run = AssembleRVInstruction;
@@ -321,6 +324,7 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "Unknown assembler architecture %s\n", target.value);
         exit(1);
       }
+      PreprocessorCopyOptions(&assembler->preprocessor, &compiler->preprocessor);
       AssemblerRun(assembler, asm_run);
       if (finalizer != NULL) {
         finalizer(assembler);

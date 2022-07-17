@@ -36,6 +36,11 @@ static int GetIntrinsicIndex(const char* name) {
   return -1;
 }
 
+// Forward declarations.
+static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers);
+static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers);
+static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type);
+
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
@@ -58,7 +63,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // In assembler mode we have symbols but we pre-declare them
       // if they don't exist.  They are declared as variables with
       // type unsigned long.
-      TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
+      TypeRecord* type = NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
       symbol = NewSymbol(name.value, type, STO(implicit));
       symbol->flags.is_forward_declared = true;
     } else if (LexLookingAt(lex, TOK(lparen))) {
@@ -70,7 +75,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       
       // Declare the function so we don't get more warnings for the same
       // function.
-      TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+      TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       TypeRecord* func_type = NewFunctionTypeRecord();
       func_type->info.function.unknown_args = true;
       TypeRecordChain(func_type, type);
@@ -78,9 +83,10 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       symbol->flags.is_forward_declared = true;
     } else {
       SyntaxError(syntax, "No such symbol \"%s\"", name.value);
-      TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
-      symbol = NewSymbol(SyntaxFakeName(syntax), type, STO(implicit));
+      TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      symbol = NewSymbol(name.value, type, STO(implicit));
       symbol->flags.invented = true;
+      SyntaxAddSymbol(syntax, symbol);
     }
   }
   StringDestruct(&name);
@@ -146,7 +152,7 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   
   TypeRecord* array =
     NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
-  TypeRecord* type = NewTypeRecord(kTypeChar, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
   TypeRecordChain(array, type);
   TypeRecordCalculateSize(array);
   return NewStringConstantASTNode(contents, array,
@@ -169,7 +175,7 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   
   TypeRecord* array =
   NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
-  TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   TypeRecordChain(array, type);
   return NewWideStringConstantASTNode(contents, array,
                                  syntax->lex->current_token_location);
@@ -180,7 +186,7 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
   Lex* lex = syntax->lex;
   int value = (int)lex->number;
   LexNextToken(lex);
-  TypeRecord* type = NewTypeRecord(kTypeChar, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
   return NewCharConstantASTNode(value, type,
                                 syntax->lex->current_token_location);
 }
@@ -190,7 +196,7 @@ static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
   Lex* lex = syntax->lex;
   int value = (int)lex->number;
   LexNextToken(lex);
-  TypeRecord* type = NewTypeRecord(kTypeInt, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   return NewCharConstantASTNode(value, type,
                                 syntax->lex->current_token_location);
 }
@@ -267,7 +273,7 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   // Invalid primary expression, error out, recover and return 0.
   SyntaxError(syntax, "Expression syntax error; primary expression expected");
   SyntaxRecover(syntax, followers);
-  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   return (ASTNode*)NewIntConstantASTNode(0, type,
                                          syntax->lex->current_token_location);
 }
@@ -370,6 +376,14 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                           member_node);
 }
 
+static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type) {
+  SourceLocation location = syntax->lex->current_token_location;
+  Symbol* sym = SyntaxNewTemporary(syntax, type);
+  ASTNode* initializer = SyntaxParseInitializer(syntax, sym, syntax->init_storage);
+  return NewCompoundLiteralASTNode(NewIdentifierASTNode(sym, location),
+                                   location, initializer);
+}
+
 // Parse a postfix-expression.  This is a primary expression with a postfixed
 // operator.  The syntax is:
 
@@ -389,6 +403,14 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
 //   argument-expression-list , assignment-expression
 
 static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
+  // A compound literal looks exactly like a cast except it is followed
+  // by an initializer (in braces).  We've already consumed the ( type-name )
+  // and determined it's not a cast, so we can parse the
+  if (syntax->compound_literal_type != NULL && LexLookingAt(syntax->lex, TOK(lbrace))) {
+    TypeRecord* type = syntax->compound_literal_type;
+    syntax->compound_literal_type = NULL;
+    return ParseCompoundLiteral(syntax, type);
+  }
   ASTNode* result = ParsePrimaryExpression(syntax, followers);
   if (syntax->lex->assembler_mode) {
     // No postfix expressions in assembler mode.
@@ -418,9 +440,6 @@ static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
-// Forward declarations.
-static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers);
-static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers);
 
 static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
                                                   TokenClass followers) {
@@ -442,7 +461,7 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
     }
     Macro* macro =
     PreprocessorFindMacro(syntax->lex->preprocessor, &macro_name);
-    TypeRecord* int_type = NewTypeRecord(kTypeInt, kQualPlain);
+    TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
     return NewIntConstantASTNode(macro == NULL ? 0 : 1, int_type,
                                  syntax->lex->current_token_location);
   } else if (StringEqual(&syntax->lex->spelling, "__has_feature")) {
@@ -453,7 +472,7 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
         LexNextToken(syntax->lex);
       }
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
-      return NewIntConstantASTNode(0, NewTypeRecord(kTypeInt, kQualPlain),
+      return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                    syntax->lex->current_token_location);
     }
   } else if (StringEqual(&syntax->lex->spelling, "__has_include") ||
@@ -481,7 +500,7 @@ static ASTNode* ParsePossiblePreprocessorFunction(Syntax* syntax,
       LexNextToken(syntax->lex);
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
       return NewIntConstantASTNode(value,
-                                   NewTypeRecord(kTypeInt, kQualPlain),
+                                   NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                    syntax->lex->current_token_location);
     }
   }
@@ -507,7 +526,7 @@ static ASTNode* GetSizeofVLA(TypeRecord* type, SourceLocation location) {
                                CloneVLASize, NULL, NULL);
     } else {
       next_size = NewIntConstantASTNode(t->size,
-                                   NewTypeRecord(
+                                   NewTypeRecordWithSize(
                                                  kTypeLong |
                                                  kTypeUnsigned,
                                                  kQualPlain), location);
@@ -551,6 +570,10 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
     result = NewSizeofASTNodeWithKnownSize(size,
                                            syntax->lex->current_token_location);
   } else {
+    if (has_brackets) {
+      syntax->found_open_paren = true;
+      has_brackets = false;
+    }
     ASTNode* expr = ParseUnaryExpression(syntax, followers);
     result = NewSizeofASTNodeWithExpression(expr,
                                             syntax->lex->current_token_location);
@@ -654,6 +677,8 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 // cast-expression:
 //    unary-expression
 //    ( type-name ) cast-expression
+//
+// This also handles compound literals, which are actually postfix expressions.
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
   if (!syntax->lex->preprocessor_mode && !syntax->lex->assembler_mode &&
       LexMatch(syntax->lex, TOK(lparen))) {
@@ -663,13 +688,28 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       TypeRecord* type = TypeParserParseType(&parser, false);
       Symbol* sym = NULL;
       if (type == NULL) {
-        SyntaxError(syntax, "Invalid cast");
-        type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+        SyntaxError(syntax, "Invalid type name");
+        type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       } else {
         sym = TypeParserParseDeclarator(&parser, type);
         type = sym->type;
       }
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      // If the (type-name) is followed by an initializer list we have
+      // a compound literal.  This is actually a postfix expression so we
+      // save the parsed type and move forward.  The initializer will be
+      // parsed by the postfix expression parser.
+      if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+        TypeRecord* saved_type = syntax->compound_literal_type;
+        syntax->compound_literal_type = type;
+        ASTNode* result = ParseCastExpression(syntax, followers);
+        syntax->compound_literal_type = saved_type;
+        if (sym != NULL) {
+          // The compound literal will create its own symbol.
+          SymbolDelete(sym);
+        }
+        return result;
+      }
       ASTNode* expr = ParseCastExpression(syntax, followers);
       // The cast AST node will take ownership of the TypeRecord pointer.
       ASTNode* result =
@@ -921,32 +961,28 @@ static ASTNode* ParseAssignmentExpression(Syntax* syntax,
   if (syntax->lex->preprocessor_mode || syntax->lex->assembler_mode) {
     return result;
   }
-  bool done = false;
-  while (!done) {
-    switch (syntax->lex->current_token) {
-      case TOK(equal):
-      case TOK(pluseq):
-      case TOK(minuseq):
-      case TOK(stareq):
-      case TOK(slasheq):
-      case TOK(percenteq):
-      case TOK(lesslesseq):
-      case TOK(greatergreatereq):
-      case TOK(ampeq):
-      case TOK(bareq):
-      case TOK(careteq): {
-        Token tok = syntax->lex->current_token;
-        LexNextToken(syntax->lex);
-        ASTNode* right = ParseConditionalExpression(syntax, followers);
-        result = NewBinaryASTNode(AssignASTOpcode(syntax, tok), NULL,
-                                  syntax->lex->current_token_location, result,
-                                  right);
-        break;
-      }
-      default:
-        done = true;
-        break;
+  switch (syntax->lex->current_token) {
+    case TOK(equal):
+    case TOK(pluseq):
+    case TOK(minuseq):
+    case TOK(stareq):
+    case TOK(slasheq):
+    case TOK(percenteq):
+    case TOK(lesslesseq):
+    case TOK(greatergreatereq):
+    case TOK(ampeq):
+    case TOK(bareq):
+    case TOK(careteq): {
+      Token tok = syntax->lex->current_token;
+      LexNextToken(syntax->lex);
+      ASTNode* right = ParseAssignmentExpression(syntax, followers);
+      result = NewBinaryASTNode(AssignASTOpcode(syntax, tok), NULL,
+                                syntax->lex->current_token_location, result,
+                                right);
+      break;
     }
+    default:
+      break;
   }
   return result;
 }

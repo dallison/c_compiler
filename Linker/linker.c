@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include "errors.h"
 #include <assert.h>
 #include "elf_reader.h"
@@ -126,7 +127,7 @@ void LinkerInit(Linker* linker) {
   VectorInit(&linker->needed_libraries);
   VectorInit(&linker->rpath);
   StringInit(&linker->interpreter, "/lib/ld.so");
-  StringInit(&linker->entry_symbol, "start");
+  StringInit(&linker->entry_symbol, "_start");
   
   // Create the initial library search path.
   VectorAppend(&linker->library_search_path, NewString("/usr/lib"));
@@ -153,12 +154,11 @@ void LinkerInit(Linker* linker) {
   if (ld_library_path != NULL) {
     char* start = ld_library_path;
     while (*start != '\0') {
-      char* p = ld_library_path;
+      char* p = start;
       while (*p != ':' && *p != '\0') {
         p++;
       }
-      String* dir = NewString("");
-      StringAppendSegment(dir, start, p - start);
+      String* dir = NewStringWithLength(start, p - start);
       VectorAppend(&linker->library_search_path, dir);
       start = p;
       if (*start == ':') {
@@ -370,8 +370,10 @@ void GroupedSectionDestruct(GroupedSection* g) {
 void SegmentMemoryRegionInit(SegmentMemoryRegion* region, ConfigRegion* config) {
   StringInit(&region->name, config->name.value);
   region->start = config->start_addr;
-  region->end = config->size == 0 ? 0 : region->start + config->size;
+  region->config_end =  config->size == 0 ? 0 : region->start + config->size;
+  region->actual_end = 0;
   region->next = region->start;
+  region->falign = config->falign;
   VectorInit(&region->sections);
   for (size_t i = 0; i < config->sections.length; i++) {
     VectorAppend(&region->sections, NewString(config->sections.value.p[i]));
@@ -398,8 +400,9 @@ SegmentMemoryRegion* NewInternalSegmentMemoryRegion(void) {
   SegmentMemoryRegion* r = malloc(sizeof(SegmentMemoryRegion));
   VectorInit(&r->sections);
   r->start = 0;
-  r->end = 0;
+  r->actual_end = r->config_end = 0;
   r->next = 0;
+  r->falign = false;
   return r;
 }
 
@@ -458,9 +461,9 @@ static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
   // Make sure we have enough space in the region.
   SegmentMemoryRegion* region = group->region;
   assert(region != NULL);
-  if (region->end != 0) {
+  if (region->config_end != 0) {
     uint64_t next = region->next + size;
-    if (next > region->end) {
+    if (next > region->config_end) {
       LinkerError(NULL, "Cannot add contents of section '%s' with size %zd to memory region '%s'",
                   group->name.value, (size_t)size, region->name.value);
       return 0;
@@ -475,14 +478,40 @@ static uint64_t RegionAllocateAddress(Linker* linker, SectionGroup* group,
 }
 
 uint64_t SegmentEndAddress(Segment* segment) {
-  if (segment->regions.length == 0) {
-    return 0;
+  for (ssize_t i = segment->regions.length-1; i >= 0; i--) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    if (region->start != 0) {
+      if (region->config_end != 0) {
+        return region->config_end;
+      }
+      return region->next;
+    } else if (region->next != 0) {
+      return region->next;
+    }
   }
-  SegmentMemoryRegion* region = segment->regions.value.p[segment->regions.length-1];
-  if (region->end != 0) {
-    return region->end;
+ 
+  return 0;
+}
+
+
+void SetSegmentStartAddress(Segment* segment, uint64_t addr) {
+  for (size_t i = 0; i < segment->regions.length; i++) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    if (region->start == 0) {
+      region->start = addr;
+      return;
+    }
   }
-  return region->next;
+}
+
+void SetSegmentEndAddress(Segment* segment, uint64_t addr) {
+  for (ssize_t i = segment->regions.length-1; i >= 0; i--) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    if (region->start != 0) {
+      region->actual_end = addr;
+      return;
+    }
+  }
 }
 
 uint64_t RegionNextAddress(SectionGroup* group) {
@@ -494,8 +523,8 @@ uint64_t RegionNextAddress(SectionGroup* group) {
 uint64_t RegionPadding(SectionGroup* group) {
   SegmentMemoryRegion* region = group->region;
   assert(region != NULL);
-  if (region->end != 0) {
-    return region->end - region->next;
+  if (region->config_end != 0) {
+    return region->config_end - region->next;
   }
   return 0;
 }
@@ -697,9 +726,34 @@ static void ResolveUndefined(void* entry, void* data) {
   }
 }
 
+static void ResolveEntrySymbol(Linker* linker) {
+  String* entry_name = &linker->entry_symbol;
+  ARArchive* archive;
+   ARFile* file;
+   bool found = LinkerFindSymbolInStaticLibraries(linker, entry_name->value,
+                                            &archive, &file);
+   if (found) {
+     LinkerReadObjectFileFromArchive(linker, archive, file);
+     return;
+   }
+   
+   // Look in dynamic libraries.  If it is found, mark it as
+   // resolved externally but don't link in the library.  It will
+   // be done at runtime.
+   const ELFSymbol* dynamic_sym;
+   LoadedDynamicLibrary* found_lib;
+   DynamicLoaderFindSymbol(
+                       &linker->dynamic_linker->loaded_dynamic_libraries,
+                       entry_name->value,
+                                     &dynamic_sym,
+                                     &found_lib);
+
+}
+
 // Resolve all undefined symbols in the libraries.  Loop until we get no more
 // symbols added to the global table from loaded libraries.
 static void ResolveUndefinedSymbols(Linker* linker) {
+  ResolveEntrySymbol(linker);
   size_t old_num_symbols, new_num_symbols;
   do {
     old_num_symbols = linker->global_symbol_table.object_count;
@@ -745,7 +799,7 @@ static void PrintSectionMapKV(MapKeyValue* kv, void* data) {
   printf("Name: %s\n", name->value);
   for (size_t i = 0; i < sections->length; i++) {
     ELFReaderSection* section = sections->value.p[i];
-    printf("  [%zd]: %s %p @%llx\n", i, section->name.value, section->contents, section->address);
+    printf("  [%zd]: %s %p @%" PRIx64 "\n", i, section->name.value, section->contents, section->address);
   }
 }
 
@@ -842,25 +896,80 @@ static void AssignSectionGroupsToSegments(Linker* linker) {
   }
 }
 
+static LinkerSymbol* InventSymbol(Linker* linker, const char* name, int size, uint64_t address) {
+  LinkerSymbol* sym = LinkerFindSymbol(&linker->global_symbol_table, name);
+  if (sym == NULL) {
+    sym = LinkerInventSymbol(linker, name, size);
+  }
+  sym->defined = true;
+  sym->size = size;
+  sym->address = address;
+  return sym;
+}
+
 static int CompareGroupRegion(const void* a, const void* b) {
   const SectionGroup* g1 = *(const SectionGroup**)a;
   const SectionGroup* g2 = *(const SectionGroup**)b;
   return (int)(g1->region->start - g2->region->start);
 }
 
+static uint64_t AlignedStartAddress(SegmentMemoryRegion* region, uint64_t file_offset) {
+  uint64_t start_addr = region->start;
+  if (region->falign) {
+    start_addr += file_offset;
+    region->next += file_offset;
+  }
+  return start_addr;
+}
+
 // Assign addresses to all the sections held within the segment.
-// The starting address is passed and the final address is returned.
-static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint64_t last_segment_end) {
-  int64_t offset = 0;
+// The starting address is passed.
+static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint64_t last_segment_end, uint64_t file_offset) {
   for (size_t i = 0; i < segment->sections.length; i++) {
     SectionGroup* group = segment->sections.value.p[i];
     AssignGroupRegion(segment, group);
+  }
+  // Sort regions in address order.
+  VectorSortPointers(&segment->sections, CompareGroupRegion);
+  uint64_t addr = last_segment_end;
+  if (addr != 0) {
+    // If we know the start address, set it now.  Otherwise we delay until we
+    // know it.
+    // See if we have a start address in the group's regions.  If so
+    // we need to use that.
+    uint64_t start_addr = 0;
+    for (size_t i = 0; i < segment->sections.length; i++) {
+      SectionGroup* group = segment->sections.value.p[i];
+      if (group->region != NULL && group->region->start != 0) {
+        start_addr = AlignedStartAddress(group->region, file_offset);
+        break;
+      }
+    }
+    // 6502 has the start_addr as zero here because the data segment is
+    // placed immediately after the code segment.
+    // TODO: does this break other configs?
+    if (start_addr != 0) {
+      SetSegmentStartAddress(segment, start_addr);
+      addr = start_addr;
+    }
+  }
+  
+  int64_t offset = 0;
+  for (size_t i = 0; i < segment->sections.length; i++) {
+    SectionGroup* group = segment->sections.value.p[i];
     if (group->region == NULL) {
       // No region for this group, it's not in the output.
       continue;
     }
+    if (addr == 0) {
+      uint64_t start_addr = AlignedStartAddress(group->region, file_offset);
+      SetSegmentStartAddress(segment, start_addr);
+      addr = start_addr;
+    }
     group->address = RegionNextAddress(group);
-
+    if (group->address == 0) {
+      group->address = last_segment_end;
+    }
     // Concatenate all the component sections, assigning
     // consecutive addresses.
     for (size_t j = 0; j < group->components.length; j++) {
@@ -871,9 +980,10 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
           section->address = RegionAllocateAddress(linker,
                                                     group,
                                                     section->header->size,
-                                                    last_segment_end);
+                                                    addr);
           section->offset = offset;
           offset += section->header->size;
+          addr += section->header->size;
           break;
         }
         case kGroupedSectionNew: {
@@ -881,7 +991,8 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
           section->address = RegionAllocateAddress(linker,
                                                     group,
                                                     section->contents->data.buffered.length,
-                                                    last_segment_end);
+                                                    addr);
+          addr += section->contents->size;
           break;
         }
         case kGroupedSectionPadding:
@@ -898,12 +1009,21 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
     // Need some padding for this output section.  Add a padding section.
     ELFWriterSectionContents* pad = NewELFWriterSectionContents(kSectionContentsPad);
     pad->size = padding;
+    addr += padding;
     GroupedSection* pad_group = NewGroupedSectionPadding(pad);
     VectorAppend(&group->components, pad_group);
  }
   
+  SetSegmentEndAddress(segment, addr);
+  
   // Now we need to order the groups by region and thus address.
-  VectorSortPointers(&segment->sections, CompareGroupRegion);
+  // VectorSortPointers(&segment->sections, CompareGroupRegion);
+}
+
+static ConfigSegment* FakeConfigSegment() {
+  ConfigSegment* s = malloc(sizeof(ConfigSegment));
+  VectorInit(&s->regions);
+  return s;
 }
 
 // Link all files passed to the linker together.  This gathers the sections
@@ -911,14 +1031,19 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
 // sections and symbols.
 void LinkerLinkAllFiles(Linker* linker) {
   // Create the segments from the config.
+  bool code_init_done = false;
+  bool data_init_done = false;
+
   for (size_t i = 0; i < linker->config.segments.length; i++) {
     ConfigSegment* seg = linker->config.segments.value.p[i];
     switch (seg->type) {
       case kConfigSegmentTypeText:
         SegmentInit(&linker->code_segment, seg);
+        code_init_done = true;
         break;
       case kConfigSegmentTypeData:
         SegmentInit(&linker->data_segment, seg);
+        data_init_done = true;
          break;
       case kConfigSegmentTypeDynamic:
         if (!linker->fully_static) {
@@ -934,7 +1059,13 @@ void LinkerLinkAllFiles(Linker* linker) {
         break;
     }
   }
-
+  SegmentInit(&linker->tls_segment, FakeConfigSegment());
+  if (!code_init_done) {
+    SegmentInit(&linker->code_segment, FakeConfigSegment());
+  }
+  if (!data_init_done) {
+    SegmentInit(&linker->data_segment, FakeConfigSegment());
+  }
   // Resolve all undefined symbols in libraries.
   ResolveUndefinedSymbols(linker);
   
@@ -959,27 +1090,44 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   // Assign addresses to all sections.
  
+  int num_program_headers = 5;
+  int num_sections = 18;
+  
+  uint64_t text_file_offset = sizeof(ELFHeader) + sizeof(ELFProgramHeader) * num_program_headers +
+  sizeof(ELFSectionHeader) * num_sections;
+  uint64_t code_size = 0;
+  
   // Assign code segment addresses.
-  AssignSegmentSectionAddresses(linker, &linker->code_segment, 0);
+  AssignSegmentSectionAddresses(linker, &linker->code_segment, 0, text_file_offset);
 
+  uint64_t end_of_segments =  SegmentEndAddress(&linker->code_segment);
   if (!linker->fully_static) {
     // Assign addresses to the dynamic section.
-    AssignSegmentSectionAddresses(linker, &linker->dynamic_segment, SegmentEndAddress(&linker->code_segment));
+    AssignSegmentSectionAddresses(linker, &linker->dynamic_segment, end_of_segments, 0);
   }
   
   if (!linker->fully_static && !linker->building_dso) {
     // Assign addresses to the interpreter section.
-    AssignSegmentSectionAddresses(linker, &linker->interpreter_segment, SegmentEndAddress(&linker->dynamic_segment));
-
+    end_of_segments = SegmentEndAddress(&linker->dynamic_segment);
+    AssignSegmentSectionAddresses(linker, &linker->interpreter_segment, end_of_segments, 0);
   }
+  
+  // Define the '_etext' symbol for the last assigned address.
+  InventSymbol(linker, "_etext", 8, end_of_segments);
+
   // Assign addresses to sections in the data segment.  This must be
   // last since it also needs to contain the .bss section.
-  AssignSegmentSectionAddresses(linker, &linker->data_segment, 0);
+  uint64_t data_file_offset = text_file_offset ;
+
+  AssignSegmentSectionAddresses(linker, &linker->data_segment, end_of_segments, data_file_offset);
 
   // The TLS segment starts at address 0 and doesn't increment the current
   // address.
-  AssignSegmentSectionAddresses(linker, &linker->tls_segment, SegmentEndAddress(&linker->data_segment));
-  
+  AssignSegmentSectionAddresses(linker, &linker->tls_segment, SegmentEndAddress(&linker->data_segment), 0);
+ 
+  // Define the '_edata' symbol for the last assigned address.
+  InventSymbol(linker, "_edata", 8, SegmentEndAddress(&linker->data_segment));
+
   // Now that we know the addresses of the sections we can work
   // out the values of the symbols within those sections.
   LinkerAssignSymbolAddresses(linker);
@@ -989,12 +1137,16 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   // The .bss (nobits) address is just after all the other sections.
   linker->nobits_address = SegmentEndAddress(&linker->data_segment);
-
+  assert(linker->nobits_address != 0);
+  
   uint64_t addr = linker->nobits_address;
   LinkerAssignCommonSymbolAddresses(linker, &addr);
   linker->nobit_size = addr - linker->nobits_address;
   LinkerAssignBSSSymbolAddresses(linker);
 
+  // Define the '_end' symbol for the last assigned address.
+  InventSymbol(linker, "_end", 8, addr);
+  
   if (!linker->fully_static) {
     // Define the dynamic linker symbols.  This includes
     // _GLOBAL_OFFSET_TABLE_ and _DYNAMIC_.
@@ -1216,18 +1368,16 @@ static void AssignSectionIndexes(Linker* linker, ELFWriterFile* elf) {
 // Now that we have all the sections assigned to their segments, insert
 // the segments into the ELF file.
 static void InsertSegments(Linker* linker, ELFWriterFile* elf) {
-  int alignment = linker->building_dso ?
-  LINKER_DYNAMIC_SEGMENT_ALIGNMENT :
-  LINKER_SEGMENT_ALIGNMENT;
   ELFWriterSegment* code_segment = NewELFWriterSegment(PT(load),
                                                        PF(r) | PF(x),
-                                                       alignment);
+                                                       linker->code_segment.config->alignment);
   ELFWriterSegment* data_segment = NewELFWriterSegment(PT(load),
                                                        PF(r) | PF(w),
-                                                       alignment);
+                                                       linker->data_segment.config->alignment);
+  // TODO: TLS alignment.
   ELFWriterSegment* tls_segment = NewELFWriterSegment(PT(tls),
                                                        PF(r),
-                                                       alignment);
+                                                       linker->data_segment.config->alignment);
   ELFWriterSegment* dynamic_segment = NULL;
   ELFWriterSegment* interpreter_segment = NULL;
   if (!linker->fully_static) {

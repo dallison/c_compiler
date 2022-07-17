@@ -32,6 +32,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->local_tag_stack = NULL;
   syntax->fake_name_index = 1;
   syntax->found_open_paren = false;
+  syntax->compound_literal_type = NULL;
   syntax->loop_count = 0;
   syntax->switch_count = 0;
   VectorInit(&syntax->all_local_symbols);
@@ -59,6 +60,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->local_symbol_stack = NULL;
   syntax->local_tag_stack = NULL;
   syntax->found_open_paren = false;
+  syntax->compound_literal_type = NULL;
   syntax->loop_count = 0;
   syntax->switch_count = 0;
   VectorInit(&syntax->all_local_symbols);
@@ -109,6 +111,7 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
     if (symbol != NULL) {
       return symbol;
     }
+    return NULL;
   }
   return FindGlobalTag(name);
 }
@@ -274,11 +277,11 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
     }
   }
   SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebra));
-  return NewBracedInitializerASTNode(initializers, location);
+  return NewBracedInitializerASTNode(initializers, NULL, location);
 }
 
 // Parses a symbol initializer.
-static ASTNode* ParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
+ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
   if (StorageIs(storage, STO(extern))) {
     SyntaxWarning(syntax, "extern-with-init", "extern with initializer");
   }
@@ -299,7 +302,7 @@ static ASTNode* ParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
 }
 
 // Parse attributes and return a bitmask containing them.
-void ParseAttribute(Syntax* syntax, Vector* attrs) {
+void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
   String attribute_list = {0};
   LexReadAttributes(syntax->lex, &attribute_list);
   StringSplit(&attribute_list, ',', attrs);
@@ -376,7 +379,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
     }
     
-    while (syntax->lex->current_token != TOK(rbrace)) {
+    while (syntax->lex->current_token != TOK(rbrace) &&
+           syntax->lex->current_token != TOK(eof)) {
       ASTNode* stmt;
       if (SyntaxLookingAtDeclaration(syntax)) {
         // Declaration.
@@ -471,7 +475,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
                (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
     } else if (LexMatch(syntax->lex, TOK(attribute))) {
-      ParseAttribute(syntax, attributes);
+      SyntaxParseAttribute(syntax, attributes);
     } else {
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
       return;
@@ -574,7 +578,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
 
     // Parse common __attribute__ syntax.
     while (LexMatch(syntax->lex, TOK(attribute))) {
-      ParseAttribute(syntax, attributes);
+      SyntaxParseAttribute(syntax, attributes);
     }
     
     VectorCopy(&sym->attributes, attributes);
@@ -611,7 +615,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     // Any initializer?
     ASTNode* initializer = NULL;
     if (LexMatch(syntax->lex, TOK(equal))) {
-      initializer = ParseInitializer(syntax, sym, storage);
+      syntax->init_storage = storage;
+      initializer = SyntaxParseInitializer(syntax, sym, storage);
     }
     ASTNode* decl = NewVariableDeclarationASTNode(
         sym, initializer, syntax->lex->current_token_location);
@@ -642,7 +647,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
-    ParseAttribute(syntax, &attributes);
+    SyntaxParseAttribute(syntax, &attributes);
   }
 
   Storage storage = STO(implicit);
@@ -658,7 +663,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
-    ParseAttribute(syntax, &attributes);
+    SyntaxParseAttribute(syntax, &attributes);
   }
 
   // Create a type parser for the declarators.
@@ -833,7 +838,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       // Any initializer?
       ASTNode* initializer = NULL;
       if (LexMatch(syntax->lex, TOK(equal))) {
-        initializer = ParseInitializer(syntax, sym, storage);
+        syntax->init_storage = storage;
+        initializer = SyntaxParseInitializer(syntax, sym, storage);
 
         ASTNode* decl_id =
             NewIdentifierASTNode(sym, syntax->lex->current_token_location);
@@ -1004,7 +1010,7 @@ TokenClass ClassifyToken(Token tok) {
   switch (tok) {
     case TOK(bad):
     case TOK(eof):
-      return TC(stmt);
+      return 0;
 
     case TOK(number):
     case TOK(string):

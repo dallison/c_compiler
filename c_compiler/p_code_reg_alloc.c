@@ -162,7 +162,7 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(sp):
     case P_OP(ap):
     case P_OP(tp):
-    case P_OP(resultx):
+    case P_OP(resulti):
     case P_OP(call):
     case P_OP(tmp):
     case P_OP(structreturn):
@@ -289,10 +289,10 @@ static void AllocateForRmov(PCodeRegisterAllocator* allocator,
 // Does the instruction need a register allocated for it?
 static bool NeedsRegister(TargetInstruction* inst) {
   switch ((PCodeOpcode)inst->opcode) {
-    case P_OP(constb):
-    case P_OP(consth):
-    case P_OP(constw):
-    case P_OP(constx):
+    case P_OP(const8):
+    case P_OP(const16):
+    case P_OP(const32):
+    case P_OP(const64):
     case P_OP(constf):
     case P_OP(constd):
     case P_OP(symbol):
@@ -362,7 +362,7 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
       reg = &allocator->int_regs[0];
       break;
 
-    case P_OP(resultx):
+    case P_OP(resulti):
       reg = &allocator->int_regs[0];
       break;
 

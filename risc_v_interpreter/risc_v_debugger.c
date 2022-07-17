@@ -8,6 +8,7 @@
 
 #include "risc_v_debugger.h"
 #include "risc_v_disassembler.h"
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -80,7 +81,7 @@ static void CreateBreakpoint(RISCVDebugger* debugger, int64_t addr, bool is_temp
   ListAppend(&debugger->breakpoints, &bp->header);
   InsertBreakpoint(bp);
   if (!is_temp) {
-    printf("Breakpoint %d set at address 0x%llx\n", bp->num, addr);
+    printf("Breakpoint %d set at address 0x%" PRIx64 "\n", bp->num, addr);
   }
 }
 

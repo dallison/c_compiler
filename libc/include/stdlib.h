@@ -14,7 +14,7 @@
 #define NULL ((void*)0)
 
 #ifndef __SIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -23,7 +23,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;
@@ -33,17 +33,26 @@ typedef long ssize_t;
 
 
 #ifndef __DIV_T
-typedef int div_t;
+typedef struct {
+  int quot;
+  int rem;
+} div_t;
 #define __DIV_T
 #endif
 
 #ifndef __LDIV_T
-typedef int ldiv_t;
+typedef struct {
+  long int quot;
+  long int rem;
+} ldiv_t;
 #define __LDIV_T
 #endif
 
 #ifndef __LLDIV_T
-typedef int lldiv_t;
+typedef struct {
+  long long int quot;
+  long long int rem;
+} lldiv_t;
 #define __LLDIV_T
 #endif
 
@@ -100,8 +109,7 @@ long int labs(long int j);
 long long int llabs(long long int j);
 div_t div(int numer, int denom);
 ldiv_t ldiv(long int numer, long int denom);
-lldiv_t lldiv(long long int numer,
-long long int denom);
+lldiv_t lldiv(long long int numer, long long int denom);
 int mblen(const char *s, size_t n);
 int mbtowc(wchar_t * restrict pwc,
    const char * restrict s, size_t n);

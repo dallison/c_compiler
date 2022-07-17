@@ -6,8 +6,8 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#ifndef _6502_machine_h
-#define _6502_machine_h
+#ifndef W65C02_machine_h
+#define W65C02_machine_h
 
 // 6502 Runtime
 // -------------
@@ -45,12 +45,6 @@
 // 0x48..0x4c: f2
 // 0x4c..0x4f: f3
 //
-// Double precision float - 64 bits
-// 0x50..0x57: d0
-// 0x58..0x5f: d1
-// 0x60..0x67: d2
-// 0x68..0x6f: d3
-//
 // Stack pointer: 16 bits - address of top of stack.
 // 0x70/0x71: sp
 //
@@ -79,30 +73,43 @@
 // starts just above the end of the program and extends up to the
 // stack.  When they collide we are out of memory.
 
-#define _6502_NUM_B_REGS 8
-#define _6502_NUM_I_REGS 16
-#define _6502_NUM_L_REGS 8
-#define _6502_NUM_X_REGS 4
-#define _6502_NUM_F_REGS 4
-#define _6502_NUM_D_REGS 4
+// Floating point double registers are the same as single precision regs.
+#define W65C02_NUM_TEMP_B_REGS 2
+#define W65C02_NUM_PRESERVED_B_REGS 6
+#define W65C02_NUM_B_REGS (W65C02_NUM_TEMP_B_REGS + W65C02_NUM_PRESERVED_B_REGS)
 
-#define _6502_B_REG_START 0
-#define _6502_I_REG_START (_6502_B_REG_START + _6502_NUM_B_REGS)
-#define _6502_L_REG_START (_6502_I_REG_START + _6502_NUM_I_REGS*2)
-#define _6502_X_REG_START (_6502_I_REG_START + _6502_NUM_I_REGS*4)
-#define _6502_F_REG_START (_6502_X_REG_START + _6502_NUM_X_REGS*8)
-#define _6502_D_REG_START (_6502_F_REG_START + _6502_NUM_F_REGS*4)
+#define W65C02_NUM_TEMP_I_REGS 4
+#define W65C02_NUM_PRESERVED_I_REGS 12
+#define W65C02_NUM_I_REGS (W65C02_NUM_TEMP_I_REGS + W65C02_NUM_PRESERVED_I_REGS)
 
-#define _6502_SP_REG (_6502_D_REG_START + _6502_NUM_D_REGS*8)
-#define _6502_FP_REG (_6502_SP_REG + 2)
-#define _6502_RESULT_REG (_6502_FP_REG + 2)
-#define _6502_T0_REG (_6502_RESULT_REG + 2)
-#define _6502_T1_REG (_6502_T0_REG + 1)
-#define _6502_T2_REG (_6502_T1_REG + 1)
-#define _6502_T3_REG (_6502_T2_REG + 1)
-#define _6502_MSRC_REG (_6502_T3_REG + 1)
-#define _6502_MDST_REG (_6502_MSRC_REG + 2)
-#define _6502_MSZ_REG (_6502_MDST_REG + 2)
+#define W65C02_NUM_TEMP_L_REGS 2
+#define W65C02_NUM_PRESERVED_L_REGS 6
+#define W65C02_NUM_L_REGS (W65C02_NUM_TEMP_L_REGS + W65C02_NUM_PRESERVED_L_REGS)
+
+#define W65C02_NUM_TEMP_X_REGS 1
+#define W65C02_NUM_PRESERVED_X_REGS 3
+#define W65C02_NUM_X_REGS (W65C02_NUM_TEMP_X_REGS + W65C02_NUM_PRESERVED_X_REGS)
+
+#define W65C02_NUM_TEMP_F_REGS 1
+#define W65C02_NUM_PRESERVED_F_REGS 3
+#define W65C02_NUM_F_REGS (W65C02_NUM_TEMP_F_REGS + W65C02_NUM_PRESERVED_F_REGS)
+
+#define W65C02_B_REG_START 0
+#define W65C02_I_REG_START (W65C02_B_REG_START + W65C02_NUM_B_REGS)
+#define W65C02_L_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*2)
+#define W65C02_X_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*4)
+#define W65C02_F_REG_START (W65C02_X_REG_START + W65C02_NUM_X_REGS*8)
+
+#define W65C02_SP_REG (W65C02_F_REG_START + W65C02_NUM_F_REGS*4)
+#define W65C02_FP_REG (W65C02_SP_REG + 2)
+#define W65C02_RESULT_REG (W65C02_FP_REG + 2)
+#define W65C02_T0_REG (W65C02_RESULT_REG + 2)
+#define W65C02_T1_REG (W65C02_T0_REG + 1)
+#define W65C02_T2_REG (W65C02_T1_REG + 1)
+#define W65C02_T3_REG (W65C02_T2_REG + 1)
+#define W65C02_MSRC_REG (W65C02_T3_REG + 1)
+#define W65C02_MDST_REG (W65C02_MSRC_REG + 2)
+#define W65C02_MSZ_REG (W65C02_MDST_REG + 2)
 
 
 // The opcodes are in the first byte.  Most of them fall into the form
@@ -114,116 +121,116 @@
 // The values of aaa and cc are given for each opcode.
 // The opcodes that do not fit into the standard form are given full values.
 
-#define _6502_OPCODE(op) k6502Opcode##op
+#define W65C02_OPCODE(op) k6502Opcode##op
 typedef enum {
   // cc= 01
-  _6502_OPCODE(ora) = 0 << 5 | 1,
-  _6502_OPCODE(and) = 1 << 5 | 1,
-  _6502_OPCODE(eor) = 2 << 5 | 1,
-  _6502_OPCODE(adc) = 3 << 5 | 1,
-  _6502_OPCODE(sta) = 4 << 5 | 1,
-  _6502_OPCODE(lda) = 5 << 5 | 1,
-  _6502_OPCODE(cmp) = 6 << 5 | 1,
-  _6502_OPCODE(sbc) = 7 << 5 | 1,
+  W65C02_OPCODE(ora) = 0 << 5 | 1,
+  W65C02_OPCODE(and) = 1 << 5 | 1,
+  W65C02_OPCODE(eor) = 2 << 5 | 1,
+  W65C02_OPCODE(adc) = 3 << 5 | 1,
+  W65C02_OPCODE(sta) = 4 << 5 | 1,
+  W65C02_OPCODE(lda) = 5 << 5 | 1,
+  W65C02_OPCODE(cmp) = 6 << 5 | 1,
+  W65C02_OPCODE(sbc) = 7 << 5 | 1,
 
   // cc= 10
-  _6502_OPCODE(asl) = 0 << 5 | 2,
-  _6502_OPCODE(rol) = 1 << 5 | 2,
-  _6502_OPCODE(lsr) = 2 << 5 | 2,
-  _6502_OPCODE(ror) = 3 << 5 | 2,
-  _6502_OPCODE(stx) = 4 << 5 | 2,
-  _6502_OPCODE(ldx) = 5 << 5 | 2,
-  _6502_OPCODE(dec) = 6 << 5 | 2,
-  _6502_OPCODE(inc) = 7 << 5 | 2,
+  W65C02_OPCODE(asl) = 0 << 5 | 2,
+  W65C02_OPCODE(rol) = 1 << 5 | 2,
+  W65C02_OPCODE(lsr) = 2 << 5 | 2,
+  W65C02_OPCODE(ror) = 3 << 5 | 2,
+  W65C02_OPCODE(stx) = 4 << 5 | 2,
+  W65C02_OPCODE(ldx) = 5 << 5 | 2,
+  W65C02_OPCODE(dec) = 6 << 5 | 2,
+  W65C02_OPCODE(inc) = 7 << 5 | 2,
 
   // cc= 00
-  _6502_OPCODE(bit) = 1 << 5 | 0,
-  _6502_OPCODE(jmp) = 2 << 5 | 0,
-  _6502_OPCODE(jmpr) = 3 << 5 | 0,
-  _6502_OPCODE(sty) = 4 << 5 | 0,
-  _6502_OPCODE(ldy) = 5 << 5 | 0,
-  _6502_OPCODE(cpy) = 6 << 5 | 0,
-  _6502_OPCODE(cpx) = 7 << 5 | 0,
+  W65C02_OPCODE(bit) = 1 << 5 | 0,
+  W65C02_OPCODE(jmp) = 2 << 5 | 0,
+  W65C02_OPCODE(jmpr) = 3 << 5 | 0,
+  W65C02_OPCODE(sty) = 4 << 5 | 0,
+  W65C02_OPCODE(ldy) = 5 << 5 | 0,
+  W65C02_OPCODE(cpy) = 6 << 5 | 0,
+  W65C02_OPCODE(cpx) = 7 << 5 | 0,
 
   // Branches.
-  _6502_OPCODE(bpl) = 0x10,
-  _6502_OPCODE(bmi) = 0x30,
-  _6502_OPCODE(bvc) = 0x50,
-  _6502_OPCODE(bvs) = 0x70,
-  _6502_OPCODE(bcc) = 0x90,
-  _6502_OPCODE(bcs) = 0xb0,
-  _6502_OPCODE(bne) = 0xd0,
-  _6502_OPCODE(beq) = 0xf0,
-  _6502_OPCODE(bra) = 0x80,
+  W65C02_OPCODE(bpl) = 0x10,
+  W65C02_OPCODE(bmi) = 0x30,
+  W65C02_OPCODE(bvc) = 0x50,
+  W65C02_OPCODE(bvs) = 0x70,
+  W65C02_OPCODE(bcc) = 0x90,
+  W65C02_OPCODE(bcs) = 0xb0,
+  W65C02_OPCODE(bne) = 0xd0,
+  W65C02_OPCODE(beq) = 0xf0,
+  W65C02_OPCODE(bra) = 0x80,
 
-  _6502_OPCODE(brk) = 0x00,
-  _6502_OPCODE(jsr) = 0x20,
-  _6502_OPCODE(rti) = 0x40,
-  _6502_OPCODE(rts) = 0x60,
+  W65C02_OPCODE(brk) = 0x00,
+  W65C02_OPCODE(jsr) = 0x20,
+  W65C02_OPCODE(rti) = 0x40,
+  W65C02_OPCODE(rts) = 0x60,
 
-  _6502_OPCODE(php) = 0x08,
-  _6502_OPCODE(plp) = 0x28,
-  _6502_OPCODE(pha) = 0x48,
-  _6502_OPCODE(pla) = 0x68,
-  _6502_OPCODE(dey) = 0x88,
-  _6502_OPCODE(tay) = 0xa8,
-  _6502_OPCODE(iny) = 0xc8,
-  _6502_OPCODE(inx) = 0xe8,
-  _6502_OPCODE(clc) = 0x18,
-  _6502_OPCODE(sec) = 0x38,
-  _6502_OPCODE(cli) = 0x58,
-  _6502_OPCODE(sei) = 0x78,
-  _6502_OPCODE(tya) = 0x98,
-  _6502_OPCODE(clv) = 0xb8,
-  _6502_OPCODE(cld) = 0xd8,
-  _6502_OPCODE(sed) = 0xf8,
-  _6502_OPCODE(txa) = 0x8a,
-  _6502_OPCODE(txs) = 0x9a,
-  _6502_OPCODE(tax) = 0xaa,
-  _6502_OPCODE(tsx) = 0xba,
-  _6502_OPCODE(dex) = 0xca,
-  _6502_OPCODE(nop) = 0xea,
+  W65C02_OPCODE(php) = 0x08,
+  W65C02_OPCODE(plp) = 0x28,
+  W65C02_OPCODE(pha) = 0x48,
+  W65C02_OPCODE(pla) = 0x68,
+  W65C02_OPCODE(dey) = 0x88,
+  W65C02_OPCODE(tay) = 0xa8,
+  W65C02_OPCODE(iny) = 0xc8,
+  W65C02_OPCODE(inx) = 0xe8,
+  W65C02_OPCODE(clc) = 0x18,
+  W65C02_OPCODE(sec) = 0x38,
+  W65C02_OPCODE(cli) = 0x58,
+  W65C02_OPCODE(sei) = 0x78,
+  W65C02_OPCODE(tya) = 0x98,
+  W65C02_OPCODE(clv) = 0xb8,
+  W65C02_OPCODE(cld) = 0xd8,
+  W65C02_OPCODE(sed) = 0xf8,
+  W65C02_OPCODE(txa) = 0x8a,
+  W65C02_OPCODE(txs) = 0x9a,
+  W65C02_OPCODE(tax) = 0xaa,
+  W65C02_OPCODE(tsx) = 0xba,
+  W65C02_OPCODE(dex) = 0xca,
+  W65C02_OPCODE(nop) = 0xea,
   
   // 65C02
-  _6502_OPCODE(inca) = 0x1a,
-  _6502_OPCODE(deca) = 0x3a,
-  _6502_OPCODE(phy) = 0x5a,
-  _6502_OPCODE(ply) = 0x7a,
-  _6502_OPCODE(phx) = 0xda,
-  _6502_OPCODE(plx) = 0xfa,
-} _6502OpcodeValue;
+  W65C02_OPCODE(inca) = 0x1a,
+  W65C02_OPCODE(deca) = 0x3a,
+  W65C02_OPCODE(phy) = 0x5a,
+  W65C02_OPCODE(ply) = 0x7a,
+  W65C02_OPCODE(phx) = 0xda,
+  W65C02_OPCODE(plx) = 0xfa,
+} W65C02OpcodeValue;
 
 // Addressing modes are dependent on the value of cc.
-#define _6502_ADDR_MODE(cc,x) k6502AddrMode_##cc##_##x
+#define W65C02_ADDR_MODE(cc,x) k6502AddrMode_##cc##_##x
 typedef enum {
   // cc = 01
-  _6502_ADDR_MODE(01, zpx) = 0,
-  _6502_ADDR_MODE(01, zp) = 1,
-  _6502_ADDR_MODE(01, imm) = 2,
-  _6502_ADDR_MODE(01, abs) = 3,
-  _6502_ADDR_MODE(01, zpy) = 4,
-  _6502_ADDR_MODE(01, zpxa) = 5,
-  _6502_ADDR_MODE(01, absy) = 6,
-  _6502_ADDR_MODE(01, absx) = 7,
+  W65C02_ADDR_MODE(01, zpx) = 0,
+  W65C02_ADDR_MODE(01, zp) = 1,
+  W65C02_ADDR_MODE(01, imm) = 2,
+  W65C02_ADDR_MODE(01, abs) = 3,
+  W65C02_ADDR_MODE(01, zpy) = 4,
+  W65C02_ADDR_MODE(01, zpxa) = 5,
+  W65C02_ADDR_MODE(01, absy) = 6,
+  W65C02_ADDR_MODE(01, absx) = 7,
   
   // cc = 10
-  _6502_ADDR_MODE(10, imm) = 0,
-  _6502_ADDR_MODE(10, zp) = 1,
-  _6502_ADDR_MODE(10, acc) = 2,
-  _6502_ADDR_MODE(10, abs) = 3,
-  _6502_ADDR_MODE(10, zpi) = 4,
-  _6502_ADDR_MODE(10, zpx) = 5,
-  _6502_ADDR_MODE(10, absx) = 7,
+  W65C02_ADDR_MODE(10, imm) = 0,
+  W65C02_ADDR_MODE(10, zp) = 1,
+  W65C02_ADDR_MODE(10, acc) = 2,
+  W65C02_ADDR_MODE(10, abs) = 3,
+  W65C02_ADDR_MODE(10, zpi) = 4,
+  W65C02_ADDR_MODE(10, zpx) = 5,
+  W65C02_ADDR_MODE(10, absx) = 7,
 
   // cc = 00
-  _6502_ADDR_MODE(00, imm) = 0,
-  _6502_ADDR_MODE(00, zp) = 1,
-  _6502_ADDR_MODE(00, abs) = 3,
-  _6502_ADDR_MODE(00, zpx) = 5,
-  _6502_ADDR_MODE(00, absx) = 7,
-  _6502_ADDR_MODE(00, bit) = 9,
-} _6502AddrMode;
+  W65C02_ADDR_MODE(00, imm) = 0,
+  W65C02_ADDR_MODE(00, zp) = 1,
+  W65C02_ADDR_MODE(00, abs) = 3,
+  W65C02_ADDR_MODE(00, zpx) = 5,
+  W65C02_ADDR_MODE(00, absx) = 7,
+  W65C02_ADDR_MODE(00, bit) = 9,
+} W65C02AddrMode;
 
 
 
-#endif /* _6502_machine_h */
+#endif /* W65C02_machine_h */

@@ -13,6 +13,7 @@
 #include "risc_v_emitter.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "compiler.h"
 #include "risc_v_assembler.h"
 #include "risc_v_codegen.h"
@@ -34,7 +35,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case RV_OP(sp):
     case RV_OP(literal):
     case RV_OP(structreturn):
-    case RV_OP(resultx):
+    case RV_OP(resulti):
     case RV_OP(resultf):
     case RV_OP(resultd):
     case RV_OP(a0):
@@ -593,7 +594,13 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
   if (!IsPrintable(inst)) {
     return;
   }
+  
+  const bool show_id = 1;
 
+  if (show_id) {
+    fprintf(fp, "/* @%d */ ", inst->id);
+  }
+  
   // Buffers for register name printing.
   char buf1[8];
   char buf2[8];
@@ -713,7 +720,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                  RVRegisterNameFromNum(spill_addr, kRVRegTypeInt, buf2, sizeof(buf2)),
                  spill->operand[0]->id);
       } else {
-        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
+        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Reloaded spilled @%d\n",
                  reg->type == kRVRegTypeInt ? "ld" : "fld",
                  RVRegisterName(reg, buf1, sizeof(buf1)),
                  offset,
@@ -895,7 +902,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(li): {
       int64_t value = TargetIntValue(inst->operand[0]);
       
-      fprintf(fp, "%s, %lld\t\t// 0x%llx",
+      fprintf(fp, "%s, %" PRId64 "\t\t// 0x%" PRIx64 "",
               GetRegisterName(inst, buf1, sizeof(buf1)),
               value,
               value);
@@ -921,7 +928,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       for (int i = 0; i < 2; i++) {
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
-            fprintf(fp, "%s%lld", sep, TargetIntValue(inst->operand[i]));
+            fprintf(fp, "%s%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
           } else if (inst->operand[i]->opcode == RV_OP(symbol)) {
             if ((inst->flags & RV_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,

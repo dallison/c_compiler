@@ -29,10 +29,10 @@ typedef enum {
   P_OP(tmp),
 
   // Constants.
-  P_OP(constb),
-  P_OP(consth),
-  P_OP(constw),
-  P_OP(constx),
+  P_OP(const8),
+  P_OP(const16),
+  P_OP(const32),
+  P_OP(const64),
   P_OP(constf),
   P_OP(constd),
 
@@ -58,7 +58,7 @@ typedef enum {
   P_OP(tp),   // Thread pointer.
 
   // Function result registers.
-  P_OP(resultx),
+  P_OP(resulti),
   P_OP(resultf),
   P_OP(resultd),
 

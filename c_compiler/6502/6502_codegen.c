@@ -8,325 +8,362 @@
 
 #include "6502_codegen.h"
 #include <assert.h>
+#include <string.h>
 #include <stdlib.h>
 #include "6502_branches.h"
 #include "6502_spiller.h"
 #include "6502_optimize.h"
 #include "compiler.h"
 #include "target_basic_block.h"
+#include "6502_target.h"
 
-static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node);
+static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node);
+static void LowerVariables(W65C02Generator* g);
 
-const char* _6502OpcodeName(int op) {
-  _6502Opcode opcode = op;
+#define PRINT_PRELOWER 0
+
+bool Is65c02(void) {
+  return (compiler->target_flags & k65c02Target) != 0;
+}
+
+const char* W65C02OpcodeName(int op) {
+  W65C02Opcode opcode = op;
   switch (opcode) {
     default:
       // Use the generic TargetOpcodeName for all non-6502 specific
       // opcodes.
       return TargetOpcodeName((TargetOpcode)opcode);
 
-    case _6502_OP(expr1):
+    case W65C02_OP(expr1):
       return "expr1";
-    case _6502_OP(expr2):
+    case W65C02_OP(expr2):
       return "expr2";
-    case _6502_OP(expr4):
+    case W65C02_OP(expr4):
       return "expr4";
-    case _6502_OP(expr8):
+    case W65C02_OP(expr8):
       return "expr8";
-    case _6502_OP(expr_addr_a):
+    case W65C02_OP(exprf):
+      return "exprf";
+    case W65C02_OP(exprd):
+      return "exprd";
+    case W65C02_OP(load_result):
+      return "load_result";
+    case W65C02_OP(expr_addr_a):
       return "expr_addr_a";
-    case _6502_OP(expr_addr_x):
+    case W65C02_OP(expr_addr_x):
       return "expr_addr_x";
-    case _6502_OP(expr_addr_y):
+    case W65C02_OP(expr_addr_y):
       return "expr_addr_y";
-    case _6502_OP(enter):
+    case W65C02_OP(enter):
       return "enter";
-    case _6502_OP(leave):
+    case W65C02_OP(leave):
       return "leave";
-    case _6502_OP(localvar):
+    case W65C02_OP(localvar):
       return "localvar";
-    case _6502_OP(argument):
+    case W65C02_OP(argument):
       return "argument";
-    case _6502_OP(literalreflo):
+    case W65C02_OP(literalreflo):
       return "literalreflo";
-    case _6502_OP(literalrefhi):
+    case W65C02_OP(literalrefhi):
       return "literalrefhi";
-      case _6502_OP(literalref):
+      case W65C02_OP(literalref):
         return "literalrefl";
 
-    case _6502_OP(enter_leaf):
+    case W65C02_OP(enter_leaf):
       return "enter_leaf";
-    case _6502_OP(leave_leaf):
+    case W65C02_OP(leave_leaf):
       return "leave_leaf";
 
-    case _6502_OP(var_addr):
+    case W65C02_OP(var_addr):
       return "var_addr";
-    case _6502_OP(var_addrb):
+    case W65C02_OP(var_addrb):
       return "var_addrb";
 
-    case _6502_OP(arg_addr):
+    case W65C02_OP(arg_addr):
       return "arg_addr";
-    case _6502_OP(arg_addrb):
+    case W65C02_OP(arg_addrb):
       return "arg_addrb";
 
-      case _6502_OP(var_addr_xy):
+      case W65C02_OP(var_addr_xy):
          return "var_addr_xy";
-      case _6502_OP(var_addrb_xy):
+      case W65C02_OP(var_addrb_xy):
          return "var_addrb_xy";
 
-      case _6502_OP(arg_addr_xy):
+      case W65C02_OP(arg_addr_xy):
          return "arg_addr_xy";
-      case _6502_OP(arg_addrb_xy):
+      case W65C02_OP(arg_addrb_xy):
          return "arg_addrb_xy";
 
-    case _6502_OP(var_value1):
+    case W65C02_OP(var_value1):
       return "var_value1";
-    case _6502_OP(var_value1b):
+    case W65C02_OP(var_value1b):
       return "var_value1b";
-    case _6502_OP(var_value2):
+    case W65C02_OP(var_value2):
       return "var_value2";
-    case _6502_OP(var_value2b):
+    case W65C02_OP(var_value2b):
       return "var_value2b";
-    case _6502_OP(var_value4):
+    case W65C02_OP(var_value4):
       return "var_value4";
-    case _6502_OP(var_value4b):
+    case W65C02_OP(var_value4b):
       return "var_value4b";
-    case _6502_OP(var_value8):
+    case W65C02_OP(var_value8):
       return "var_value8";
-    case _6502_OP(var_value8b):
+    case W65C02_OP(var_value8b):
       return "var_value8b";
-    case _6502_OP(arg_value1):
+    case W65C02_OP(arg_value1):
       return "arg_value1";
-    case _6502_OP(arg_value1b):
+    case W65C02_OP(arg_value1b):
       return "arg_value1b";
-    case _6502_OP(arg_value2):
+    case W65C02_OP(arg_value2):
       return "arg_value2";
-    case _6502_OP(arg_value2b):
+    case W65C02_OP(arg_value2b):
       return "arg_value2b";
-    case _6502_OP(arg_value4):
+    case W65C02_OP(arg_value4):
       return "arg_value4";
-    case _6502_OP(arg_value4b):
+    case W65C02_OP(arg_value4b):
       return "arg_value4b";
-    case _6502_OP(arg_value8):
+    case W65C02_OP(arg_value8):
       return "arg_value8";
-    case _6502_OP(arg_value8b):
+    case W65C02_OP(arg_value8b):
       return "arg_value8b";
-    case _6502_OP(fake_bra):
+    
+    case W65C02_OP(pushreg2):
+      return "pushreg2";
+    case W65C02_OP(pushreg4):
+      return "pushreg4";
+    case W65C02_OP(pushreg8):
+      return "pushreg8";
+
+    case W65C02_OP(fake_bra):
       return "fake_bra";
 
-      case _6502_OP(spill1):
+      case W65C02_OP(spill1):
          return "spill1";
-      case _6502_OP(spill2):
+      case W65C02_OP(spill2):
           return "spill2";
-      case _6502_OP(spill4):
+      case W65C02_OP(spill4):
           return "spill4";
-      case _6502_OP(spill8):
+      case W65C02_OP(spill8):
           return "spill8";
-      case _6502_OP(unspill1):
-           return "unspill1";
-      case _6502_OP(unspill2):
-           return "unspill2";
-      case _6502_OP(unspill4):
-           return "unspill4";
-      case _6502_OP(unspill8):
-           return "unspill8";
+      case W65C02_OP(reload1):
+           return "reload1";
+ case W65C02_OP(reload2):
+      return "reload2";
+      case W65C02_OP(reload4):
+           return "reload4";
+      case W65C02_OP(reload8):
+           return "reload8";
+    case W65C02_OP(reloadpoint):
+      return "reloadpoint";
 
-    case _6502_OP(brk):
+    case W65C02_OP(brk):
       return "brk";
 
-    case _6502_OP(bpl):
+    case W65C02_OP(bpl):
       return "bpl";
-    case _6502_OP(bmi):
+    case W65C02_OP(bmi):
       return "bmi";
-    case _6502_OP(bvc):
+    case W65C02_OP(bvc):
       return "bvc";
-    case _6502_OP(bvs):
+    case W65C02_OP(bvs):
       return "bvs";
-    case _6502_OP(bcc):
+    case W65C02_OP(bcc):
       return "bcc";
-    case _6502_OP(bcs):
+    case W65C02_OP(bcs):
       return "bcs";
-    case _6502_OP(bne):
+    case W65C02_OP(bne):
       return "bne";
-    case _6502_OP(beq):
+    case W65C02_OP(beq):
       return "beq";
 
-    case _6502_OP(jsr):
+    case W65C02_OP(jsr):
       return "jsr";
-    case _6502_OP(jmp):
+    case W65C02_OP(jmp):
       return "jmp";
 
-    case _6502_OP(rti):
+    case W65C02_OP(rti):
       return "rti";
-    case _6502_OP(rts):
+    case W65C02_OP(rts):
       return "rts";
 
-    case _6502_OP(lda):
+    case W65C02_OP(lda):
       return "lda";
-    case _6502_OP(ldx):
+    case W65C02_OP(ldx):
       return "ldx";
-    case _6502_OP(ldy):
+    case W65C02_OP(ldy):
       return "ldy";
-    case _6502_OP(sta):
+    case W65C02_OP(sta):
       return "sta";
-    case _6502_OP(stx):
+    case W65C02_OP(stx):
       return "stx";
-    case _6502_OP(sty):
+    case W65C02_OP(sty):
       return "sty";
 
-    case _6502_OP(cmp):
+    case W65C02_OP(cmp):
       return "cmp";
-    case _6502_OP(cpy):
+    case W65C02_OP(cpy):
       return "cpy";
-    case _6502_OP(cpx):
+    case W65C02_OP(cpx):
       return "cpx";
-    case _6502_OP(bit):
+    case W65C02_OP(bit):
       return "bit";
 
-    case _6502_OP(ora):
+    case W65C02_OP(ora):
       return "ora";
-    case _6502_OP(and):
+    case W65C02_OP(and):
       return "and";
-    case _6502_OP(eor):
+    case W65C02_OP(eor):
       return "eor";
 
-    case _6502_OP(adc):
+    case W65C02_OP(adc):
       return "adc";
-    case _6502_OP(sbc):
+    case W65C02_OP(sbc):
       return "sbc";
 
-    case _6502_OP(asl):
+    case W65C02_OP(asl):
       return "asl";
-    case _6502_OP(rol):
+    case W65C02_OP(rol):
       return "rol";
-    case _6502_OP(lsr):
+    case W65C02_OP(lsr):
       return "lsr";
-    case _6502_OP(ror):
+    case W65C02_OP(ror):
       return "ror";
 
-    case _6502_OP(dec):
+    case W65C02_OP(dec):
       return "dec";
-    case _6502_OP(inc):
+    case W65C02_OP(inc):
       return "inc";
-    case _6502_OP(dey):
+    case W65C02_OP(dey):
       return "dey";
-    case _6502_OP(dex):
+    case W65C02_OP(dex):
       return "dex";
-    case _6502_OP(iny):
+    case W65C02_OP(iny):
       return "iny";
-    case _6502_OP(inx):
+    case W65C02_OP(inx):
       return "inx";
 
-    case _6502_OP(php):
+    case W65C02_OP(php):
       return "php";
-    case _6502_OP(clc):
+    case W65C02_OP(clc):
       return "clc";
-    case _6502_OP(plp):
+    case W65C02_OP(plp):
       return "plp";
-    case _6502_OP(sec):
+    case W65C02_OP(sec):
       return "sec";
-    case _6502_OP(pha):
+    case W65C02_OP(pha):
       return "pha";
-    case _6502_OP(cli):
+    case W65C02_OP(cli):
       return "cli";
-    case _6502_OP(pla):
+    case W65C02_OP(pla):
       return "pla";
-    case _6502_OP(sei):
+    case W65C02_OP(sei):
       return "sei";
-    case _6502_OP(tay):
+    case W65C02_OP(tay):
       return "tay";
-    case _6502_OP(clv):
+    case W65C02_OP(clv):
       return "clv";
-    case _6502_OP(cld):
+    case W65C02_OP(cld):
       return "cld";
-    case _6502_OP(sed):
+    case W65C02_OP(sed):
       return "sed";
 
-    case _6502_OP(tya):
+    case W65C02_OP(tya):
       return "tya";
-    case _6502_OP(txa):
+    case W65C02_OP(txa):
       return "txa";
-    case _6502_OP(txs):
+    case W65C02_OP(txs):
       return "txs";
-    case _6502_OP(tax):
+    case W65C02_OP(tax):
       return "tax";
-    case _6502_OP(tsx):
+    case W65C02_OP(tsx):
       return "tsx";
 
-    case _6502_OP(nop):
+    case W65C02_OP(nop):
       return "nop";
 
     // 65C02
-    case _6502_OP(tsb):
+    case W65C02_OP(tsb):
       return "tsb";
-    case _6502_OP(trb):
+    case W65C02_OP(trb):
       return "trb";
-    case _6502_OP(stz):
+    case W65C02_OP(stz):
       return "stz";
-    case _6502_OP(phy):
+    case W65C02_OP(phy):
       return "phy";
-    case _6502_OP(ply):
+    case W65C02_OP(ply):
       return "ply";
-    case _6502_OP(phx):
+    case W65C02_OP(phx):
       return "phx";
-    case _6502_OP(plx):
+    case W65C02_OP(plx):
       return "plz";
-    case _6502_OP(bra):
+    case W65C02_OP(bra):
       return "bra";
-    case _6502_OP(ap):
+    case W65C02_OP(ap):
       return "ap";
-    case _6502_OP(ssavar):
+    case W65C02_OP(ssavar):
       return "ssavar";
-    case _6502_OP(phi):
+    case W65C02_OP(phi):
       return "phi";
-    case _6502_OP(jumptable):
+    case W65C02_OP(jumptable):
       return "jumptable";
+    case W65C02_OP(ivarreg):
+      return "ivarreg";
+    case W65C02_OP(bvarreg):
+      return "bvarreg";
+    case W65C02_OP(lvarreg):
+      return "lvarreg";
+    case W65C02_OP(xvarreg):
+      return "xvarreg";
+    case W65C02_OP(fvarreg):
+      return "fvarreg";
+    case W65C02_OP(dvarreg):
+      return "dvarreg";
   }
 }
 
-static TargetInstruction* ArgumentPointer(_6502Generator* g) {
+static TargetInstruction* ArgumentPointer(W65C02Generator* g) {
   if (g->argument_pointer == NULL) {
     g->argument_pointer =
-        TargetEmit(&g->base, TargetNewInstruction((TargetOpcode)_6502_OP(ap)));
+        TargetEmit(&g->base, TargetNewInstruction((TargetOpcode)W65C02_OP(ap)));
   }
   return g->argument_pointer;
 }
 
-bool _6502IsBranch(TargetInstruction* inst) {
+bool W65C02IsBranch(TargetInstruction* inst) {
   return (inst->flags & k6502BlockEnd) != 0;
 }
 
-bool _6502IsCall(TargetInstruction* inst) {
+bool W65C02IsCall(TargetInstruction* inst) {
   return (inst->flags & k6502InstIsCall) != 0;
 }
 
-bool _6502IsReturn(TargetInstruction* inst) {
-  return inst->opcode == (TargetOpcode)_6502_OP(rts);
+bool W65C02IsReturn(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)W65C02_OP(rts);
 }
 
-bool _6502IsSpill(TargetInstruction* inst) { return false; }
+bool W65C02IsSpill(TargetInstruction* inst) { return false; }
 
-bool _6502IsLabel(TargetInstruction* inst) {
+bool W65C02IsLabel(TargetInstruction* inst) {
   return (inst->flags & k6502BlockStart) != 0;
 }
 
-bool _6502IsFloatingPoint(TargetInstruction* inst) { return false; }
-bool _6502IsConditionalBranch(TargetInstruction* inst) {
+bool W65C02IsFloatingPoint(TargetInstruction* inst) { return false; }
+bool W65C02IsConditionalBranch(TargetInstruction* inst) {
   return (inst->flags & k6502InstIsCondBranch) != 0;
 }
 
-bool _6502IsFixedRegister(TargetInstruction* inst) {
+bool W65C02IsFixedRegister(TargetInstruction* inst) {
   return false;
 }
 
-bool _6502IsConst(TargetInstruction* inst) {
-  switch ((_6502Opcode)inst->opcode) {
-    case _6502_OP(constb):
-    case _6502_OP(consth):
-    case _6502_OP(constw):
-    case _6502_OP(constx):
-    case _6502_OP(constf):
-    case _6502_OP(constd):
+bool W65C02IsConst(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(const8):
+    case W65C02_OP(const16):
+    case W65C02_OP(const32):
+    case W65C02_OP(const64):
+    case W65C02_OP(constf):
+    case W65C02_OP(constd):
 
       return true;
     default:
@@ -334,51 +371,76 @@ bool _6502IsConst(TargetInstruction* inst) {
   }
 }
 
-bool _6502IsSymbol(TargetInstruction* inst) {
-  switch ((_6502Opcode)inst->opcode) {
-    case _6502_OP(symbol):
+bool W65C02IsSymbol(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(symbol):
       return true;
     default:
       return false;
   }
 }
 
-bool _6502IsJumpTableEntry(TargetInstruction* inst) {
-  return inst->opcode == (TargetOpcode)_6502_OP(jumptable);
+bool W65C02IsJumpTableEntry(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)W65C02_OP(jumptable);
 }
 
-static TargetInstruction* _6502GetBranchTarget(TargetInstruction* inst) {
+static TargetInstruction* W65C02GetBranchTarget(TargetInstruction* inst) {
   return inst->operand[0];
 }
 
 static TargetVirtuals virtuals = {
-    .opcode_name = _6502OpcodeName,
-    .is_branch = _6502IsBranch,
-    .is_call = _6502IsCall,
-    .is_return = _6502IsReturn,
-    .is_spill = _6502IsSpill,
-    .is_label = _6502IsLabel,
-    .is_floating_point = _6502IsFloatingPoint,
-    .is_conditional_branch = _6502IsConditionalBranch,
-    .is_fixed_register = _6502IsFixedRegister,
-    .is_const = _6502IsConst,
-    .is_symbol = _6502IsSymbol,
-    .is_expression = _6502IsExpression,
-    .is_table_entry = _6502IsJumpTableEntry,
-    .get_branch_target = _6502GetBranchTarget,
+    .opcode_name = W65C02OpcodeName,
+    .is_branch = W65C02IsBranch,
+    .is_call = W65C02IsCall,
+    .is_return = W65C02IsReturn,
+    .is_spill = W65C02IsSpill,
+    .is_label = W65C02IsLabel,
+    .is_floating_point = W65C02IsFloatingPoint,
+    .is_conditional_branch = W65C02IsConditionalBranch,
+    .is_fixed_register = W65C02IsFixedRegister,
+    .is_const = W65C02IsConst,
+    .is_symbol = W65C02IsSymbol,
+    .is_expression = W65C02IsExpression,
+    .is_table_entry = W65C02IsJumpTableEntry,
+    .get_branch_target = W65C02GetBranchTarget,
 };
 
-static bool IsLeaf(_6502Generator* g) {
+static bool IsLeaf(W65C02Generator* g) {
   bool is_leaf = g->base.num_calls == 0 /*&& OptLevel1()*/;
   return is_leaf;
 }
 
-static Symbol* CreateRuntimeSymbol(_6502Generator* g, const char* name) {
+static Symbol* CreateRuntimeSymbol(W65C02Generator* g, const char* name) {
   TypeRecord* base = NewTypeRecord(kTypeVoid, kQualPlain);
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.unknown_args = true;
   TypeRecordChain(func, base);
   return NewSymbol(name, func, STO(extern));
+}
+
+static Intrinsic* CreatePlainIntrinsic(W65C02Generator* g, const char* name, Type type) {
+  TypeRecord* base = NewTypeRecord(type, kQualPlain);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.unknown_args = true;
+  TypeRecordChain(func, base);
+  Symbol* sym = NewSymbol(name, func, STO(extern));
+  Intrinsic* intrinsic = malloc(sizeof(Intrinsic));
+  intrinsic->symbol = sym;
+  intrinsic->index = g->next_intrinsic_index++;
+  return intrinsic;
+}
+
+static Intrinsic* CreatePointerIntrinsic(W65C02Generator* g, const char* name, Type type) {
+  TypeRecord* base = NewTypeRecord(type, kQualPlain);
+  TypeRecord* ptr = NewPointerTo(kQualPlain, base);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.unknown_args = true;
+  TypeRecordChain(func, ptr);
+  Symbol* sym = NewSymbol(name, func, STO(extern));
+  Intrinsic* intrinsic = malloc(sizeof(Intrinsic));
+  intrinsic->symbol = sym;
+  intrinsic->index = g->next_intrinsic_index++;
+  return intrinsic;
 }
 
 static IRNode* FindPooledVariable(Generator* gen, Symbol* sym) {
@@ -392,10 +454,19 @@ static IRNode* FindPooledVariable(Generator* gen, Symbol* sym) {
   abort();
 }
 
-void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
+
+static void InitRegVars(RegisterVariableSet* vars, int max, W65C02RegisterType type, W65C02Opcode opcode) {
+  memset(&vars->vars, 0, sizeof(vars->vars));
+  vars->max_vars = max;
+  vars->num_vars = 0;
+  vars->type = type;
+  vars->opcode = opcode;
+}
+
+void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   TargetGeneratorInit(&g->base, gen, &virtuals);
   g->gen = gen;
-
+  
 #define RUNTIME_SYM(name) g->name = CreateRuntimeSymbol(g, "__" #name)
 
   RUNTIME_SYM(enter);
@@ -433,6 +504,46 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(arg_value8);
   RUNTIME_SYM(arg_value8b);
 
+  RUNTIME_SYM(set_var_value1);
+  RUNTIME_SYM(set_var_value1b);
+  RUNTIME_SYM(set_arg_value1);
+  RUNTIME_SYM(set_arg_value1b);
+
+  RUNTIME_SYM(set_var_value2);
+  RUNTIME_SYM(set_var_value2b);
+  RUNTIME_SYM(set_arg_value2);
+  RUNTIME_SYM(set_arg_value2b);
+
+  RUNTIME_SYM(set_var_value4);
+  RUNTIME_SYM(set_var_value4b);
+  RUNTIME_SYM(set_arg_value4);
+  RUNTIME_SYM(set_arg_value4b);
+
+  RUNTIME_SYM(set_var_value8);
+  RUNTIME_SYM(set_var_value8b);
+  RUNTIME_SYM(set_arg_value8);
+  RUNTIME_SYM(set_arg_value8b);
+  
+  RUNTIME_SYM(zero_var_value1);
+  RUNTIME_SYM(zero_var_value1b);
+  RUNTIME_SYM(zero_arg_value1);
+  RUNTIME_SYM(zero_arg_value1b);
+
+  RUNTIME_SYM(zero_var_value2);
+  RUNTIME_SYM(zero_var_value2b);
+  RUNTIME_SYM(zero_arg_value2);
+  RUNTIME_SYM(zero_arg_value2b);
+
+  RUNTIME_SYM(zero_var_value4);
+  RUNTIME_SYM(zero_var_value4b);
+  RUNTIME_SYM(zero_arg_value4);
+  RUNTIME_SYM(zero_arg_value4b);
+
+  RUNTIME_SYM(zero_var_value8);
+  RUNTIME_SYM(zero_var_value8b);
+  RUNTIME_SYM(zero_arg_value8);
+  RUNTIME_SYM(zero_arg_value8b);
+
   RUNTIME_SYM(push_var1);
   RUNTIME_SYM(push_var1b);
   RUNTIME_SYM(push_var2);
@@ -452,6 +563,10 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(pusha);
   RUNTIME_SYM(pushxy);
   RUNTIME_SYM(pushxy0);
+  RUNTIME_SYM(pushreg1);
+  RUNTIME_SYM(pushreg2);
+  RUNTIME_SYM(pushreg4);
+  RUNTIME_SYM(pushreg8);
   RUNTIME_SYM(push4);
   RUNTIME_SYM(push8);
   RUNTIME_SYM(push4xy);
@@ -460,18 +575,67 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(pullxy);
   RUNTIME_SYM(pull4);
   RUNTIME_SYM(pull8);
-  RUNTIME_SYM(incsp1);
+  RUNTIME_SYM(incsp);
   RUNTIME_SYM(incsp2);
+  RUNTIME_SYM(incsp4);
+  RUNTIME_SYM(incsp6);
+  RUNTIME_SYM(incsp8);
+  RUNTIME_SYM(incsp10);
+  RUNTIME_SYM(incsp12);
+  RUNTIME_SYM(incsp14);
+  RUNTIME_SYM(incsp16);
+  RUNTIME_SYM(incsp0);
   RUNTIME_SYM(pushmem1);
   RUNTIME_SYM(pushmem2);
   RUNTIME_SYM(copymem1);
   RUNTIME_SYM(copymem2);
   RUNTIME_SYM(zeromem1);
   RUNTIME_SYM(zeromem2);
+  RUNTIME_SYM(result1);
   RUNTIME_SYM(result2);
   RUNTIME_SYM(result4);
   RUNTIME_SYM(result8);
   RUNTIME_SYM(load_result);
+
+  RUNTIME_SYM(inc1);
+  RUNTIME_SYM(inc2);
+  RUNTIME_SYM(inc21);
+  RUNTIME_SYM(inc4);
+  RUNTIME_SYM(inc8);
+  RUNTIME_SYM(incf);
+  RUNTIME_SYM(incd);
+
+  RUNTIME_SYM(inc2b);
+
+  RUNTIME_SYM(rinc1);
+  RUNTIME_SYM(rinc2);
+  RUNTIME_SYM(rinc21);
+  RUNTIME_SYM(rinc4);
+  RUNTIME_SYM(rinc8);
+  RUNTIME_SYM(rincf);
+  RUNTIME_SYM(rincd);
+
+  RUNTIME_SYM(rinc2b);
+
+  RUNTIME_SYM(dec1);
+  RUNTIME_SYM(dec2);
+  RUNTIME_SYM(dec21);
+  RUNTIME_SYM(dec4);
+  RUNTIME_SYM(dec8);
+  RUNTIME_SYM(decf);
+  RUNTIME_SYM(decd);
+
+  RUNTIME_SYM(dec2b);
+
+  RUNTIME_SYM(rdec1);
+  RUNTIME_SYM(rdec2);
+  RUNTIME_SYM(rdec21);
+  RUNTIME_SYM(rdec4);
+  RUNTIME_SYM(rdec8);
+  RUNTIME_SYM(rdecf);
+  RUNTIME_SYM(rdecd);
+
+  RUNTIME_SYM(rdec2b);
 
   RUNTIME_SYM(umul1);
   RUNTIME_SYM(umul2);
@@ -482,7 +646,9 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(smul4);
   RUNTIME_SYM(smul8);
   RUNTIME_SYM(fmul);
-  RUNTIME_SYM(dmul);
+
+  RUNTIME_SYM(umul2_10);
+  RUNTIME_SYM(smul2_10);
 
   RUNTIME_SYM(sdiv1);
   RUNTIME_SYM(sdiv2);
@@ -494,7 +660,6 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(udiv4);
   RUNTIME_SYM(udiv8);
   RUNTIME_SYM(fdiv);
-  RUNTIME_SYM(ddiv);
 
   RUNTIME_SYM(smod1);
   RUNTIME_SYM(smod2);
@@ -510,70 +675,100 @@ void _6502GeneratorInit(_6502Generator* g, Generator* gen) {
   RUNTIME_SYM(i2tof);
   RUNTIME_SYM(i4tof);
   RUNTIME_SYM(i8tof);
-  RUNTIME_SYM(i1tod);
-  RUNTIME_SYM(i2tod);
-  RUNTIME_SYM(i4tod);
-  RUNTIME_SYM(i8tod);
   RUNTIME_SYM(ui1tof);
   RUNTIME_SYM(ui2tof);
   RUNTIME_SYM(ui4tof);
   RUNTIME_SYM(ui8tof);
-  RUNTIME_SYM(ui1tod);
-  RUNTIME_SYM(ui2tod);
-  RUNTIME_SYM(ui4tod);
-  RUNTIME_SYM(ui8tod);
-
-  RUNTIME_SYM(ftod);
-  RUNTIME_SYM(dtof);
 
   RUNTIME_SYM(ftoi1);
   RUNTIME_SYM(ftoi2);
   RUNTIME_SYM(ftoi4);
   RUNTIME_SYM(ftoi8);
-  RUNTIME_SYM(dtoi1);
-  RUNTIME_SYM(dtoi2);
-  RUNTIME_SYM(dtoi4);
-  RUNTIME_SYM(dtoi8);
   RUNTIME_SYM(ftoui1);
   RUNTIME_SYM(ftoui2);
   RUNTIME_SYM(ftoui4);
   RUNTIME_SYM(ftoui8);
-  RUNTIME_SYM(dtoui1);
-  RUNTIME_SYM(dtoui2);
-  RUNTIME_SYM(dtoui4);
-  RUNTIME_SYM(dtoui8);
 
   RUNTIME_SYM(cmpeqf);
   RUNTIME_SYM(cmpnef);
   RUNTIME_SYM(cmpltf);
   RUNTIME_SYM(cmpgef);
+ 
+  RUNTIME_SYM(fadd);
+  RUNTIME_SYM(fsub);
+  RUNTIME_SYM(fneg);
+  RUNTIME_SYM(zeroreg4);
+  RUNTIME_SYM(zeroreg8);
 
-  RUNTIME_SYM(cmpeqd);
-  RUNTIME_SYM(cmpned);
-  RUNTIME_SYM(cmpltd);
-  RUNTIME_SYM(cmpged);
+  RUNTIME_SYM(jump_table1);
+  RUNTIME_SYM(jump_table2);
+  RUNTIME_SYM(jump_table4);
+  RUNTIME_SYM(jump_table8);
+
+  RUNTIME_SYM(decsp);
+  RUNTIME_SYM(savesp);
+  RUNTIME_SYM(restoresp);
+  RUNTIME_SYM(builtin_va_arg2);
+  RUNTIME_SYM(builtin_va_arg4);
+  RUNTIME_SYM(builtin_va_arg8);
+  RUNTIME_SYM(builtin_va_arg);
+
+  MapInitForCharPointerKeys(&g->intrinsics);
+  g->next_intrinsic_index = 1;
   
-  RUNTIME_SYM(jump_table);
+#define PLAIN_INTRINSIC(name, type) { \
+MapKeyValue kv = {.key = #name, .value = CreatePlainIntrinsic(g, "__builtin_" #name, kType##type)}; \
+  MapInsert(&g->intrinsics, kv); \
+}
 
+#define POINTER_INTRINSIC(name, type) { \
+MapKeyValue kv = {.key = #name, .value = CreatePointerIntrinsic(g, "__builtin_" #name, kType##type)}; \
+  MapInsert(&g->intrinsics, kv); \
+}
+  
+  PLAIN_INTRINSIC(isalnum, Bool);
+  PLAIN_INTRINSIC(isalpha, Bool);
+  PLAIN_INTRINSIC(isblank, Bool);
+  PLAIN_INTRINSIC(iscntrl, Bool);
+  PLAIN_INTRINSIC(isdigit, Bool);
+  PLAIN_INTRINSIC(isgraph, Bool);
+  PLAIN_INTRINSIC(islower, Bool);
+  PLAIN_INTRINSIC(isprint, Bool);
+  PLAIN_INTRINSIC(ispunct, Bool);
+  PLAIN_INTRINSIC(isspace, Bool);
+  PLAIN_INTRINSIC(isupper, Bool);
+  PLAIN_INTRINSIC(isxdigit, Bool);
+  PLAIN_INTRINSIC(tolower, Int);
+  PLAIN_INTRINSIC(toupper, Int);
+  POINTER_INTRINSIC(memcpy, Void);
+  POINTER_INTRINSIC(memset, Void);
+
+  g->struct_return_inst = NULL;
   VectorInit(&g->branches);
-  _6502RegisterAllocatorInit(&g->register_allocator, g);
+  InitRegVars(&g->reg_vars[0], kNumIVars, k6502RegTypeI, W65C02_OP(ivarreg));
+  InitRegVars(&g->reg_vars[1], kNumBVars, k6502RegTypeB, W65C02_OP(bvarreg));
+  InitRegVars(&g->reg_vars[2], kNumLVars, k6502RegTypeL, W65C02_OP(lvarreg));
+  InitRegVars(&g->reg_vars[3], kNumXVars, k6502RegTypeX, W65C02_OP(xvarreg));
+  InitRegVars(&g->reg_vars[4], kNumFVars, k6502RegTypeF, W65C02_OP(fvarreg));
+
+  W65C02RegisterAllocatorInit(&g->register_allocator, g);
 }
 #undef RUNTIME_SYM
 
-_6502Generator* New6502Generator(Generator* gen) {
-  _6502Generator* g = malloc(sizeof(_6502Generator));
-  _6502GeneratorInit(g, gen);
+W65C02Generator* New6502Generator(Generator* gen) {
+  W65C02Generator* g = malloc(sizeof(W65C02Generator));
+  W65C02GeneratorInit(g, gen);
   return g;
 }
 
-void _6502GeneratorDestruct(_6502Generator* g) {
+void W65C02GeneratorDestruct(W65C02Generator* g) {
   TargetGeneratorDestruct(&g->base);
   VectorDestruct(&g->branches);
-  _6502RegisterAllocatorDestruct(&g->register_allocator);
+  W65C02RegisterAllocatorDestruct(&g->register_allocator);
 }
 
-void _6502GeneratorDelete(_6502Generator* g) {
-  _6502GeneratorDestruct(g);
+void W65C02GeneratorDelete(W65C02Generator* g) {
+  W65C02GeneratorDestruct(g);
   free(g);
 }
 
@@ -584,6 +779,7 @@ static AddressingMode GetAddrMode(TargetInstruction* inst) {
 }
 
 static void SetAddrMode(TargetInstruction* inst, AddressingMode mode) {
+  inst->flags &= ~0xffff0000;        // Clear current addressing mode.
   inst->flags |= (int)mode << 16;
 }
 
@@ -592,73 +788,85 @@ static bool IsIndirectMode(TargetInstruction* inst) {
   return mode == kAddrModeIndirectIndexed || mode == kAddrModeIndirect;
 }
 
+static void CheckAddrMode(W65C02Opcode opcode, int addressing_mode) {
+  if (!Is65c02()) {
+    if (opcode != W65C02_OP(jmp)) {
+      assert(addressing_mode != kAddrModeIndirect);
+    }
+  }
+}
+
 // Some static utility functions that map to generic target functions.
-static TargetInstruction* NewInstruction1(_6502Opcode opcode,
+static TargetInstruction* NewInstruction1(W65C02Opcode opcode,
                                           TargetInstruction* op1,
                                           int addressing_mode) {
+  CheckAddrMode(opcode, addressing_mode);
   TargetInstruction* inst = TargetNewInstruction1((TargetOpcode)opcode, op1);
   SetAddrMode(inst, addressing_mode);
   return inst;
 }
 
-static TargetInstruction* NewInstruction2(_6502Opcode opcode,
+static TargetInstruction* NewInstruction2(W65C02Opcode opcode,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2,
                                           int addressing_mode) {
-  TargetInstruction* inst =
+
+  CheckAddrMode(opcode, addressing_mode);
+ TargetInstruction* inst =
       TargetNewInstruction2((TargetOpcode)opcode, op1, op2);
   SetAddrMode(inst, addressing_mode);
   return inst;
 }
 
-static TargetInstruction* NewInstruction3(_6502Opcode opcode,
+static TargetInstruction* NewInstruction3(W65C02Opcode opcode,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2,
                                           TargetInstruction* op3,
                                           int addressing_mode) {
-  TargetInstruction* inst =
+  CheckAddrMode(opcode, addressing_mode);
+ TargetInstruction* inst =
       TargetNewInstruction3((TargetOpcode)opcode, op1, op2, op3);
   SetAddrMode(inst, addressing_mode);
   return inst;
 }
 
-static TargetInstruction* Emit(_6502Generator* g, TargetInstruction* inst) {
+static TargetInstruction* Emit(W65C02Generator* g, TargetInstruction* inst) {
 #if 0
-  _6502PrintInstruction(inst, stdout);
+  W65C02PrintInstruction(inst, stdout);
 #endif
   return TargetEmit(&g->base, inst);
 }
 
-static TargetInstruction* EmitBefore(_6502Generator* g, TargetInstruction* inst,
+static TargetInstruction* EmitBefore(W65C02Generator* g, TargetInstruction* inst,
                                      TargetInstruction* pos) {
   return TargetEmitBefore(&g->base, inst, pos);
 }
 
-static TargetInstruction* EmitAfter(_6502Generator* g, TargetInstruction* inst,
+static TargetInstruction* EmitAfter(W65C02Generator* g, TargetInstruction* inst,
                                     TargetInstruction* pos) {
   return TargetEmitAfter(&g->base, inst, pos);
 }
 
-static TargetInstruction* EmitConstant(_6502Generator* g,
+static TargetInstruction* EmitConstant(W65C02Generator* g,
                                        TargetInstruction* c) {
   return TargetEmitConstant(&g->base, c);
 }
 
-static TargetInstruction* EmitSymbol(_6502Generator* g, TargetInstruction* c) {
+static TargetInstruction* EmitSymbol(W65C02Generator* g, TargetInstruction* c) {
   return TargetEmitSymbol(&g->base, c);
 }
 
-static TargetInstruction* FramePointer(_6502Generator* g, AddressingMode mode) {
+static TargetInstruction* FramePointer(W65C02Generator* g, AddressingMode mode) {
   TargetInstruction* inst = TargetFramePointer(&g->base);
   SetAddrMode(inst, mode);
   return inst;
 }
 
-static TargetInstruction* StackPointer(_6502Generator* g) {
+static TargetInstruction* StackPointer(W65C02Generator* g) {
   return TargetStackPointer(&g->base);
 }
 
-static TargetInstruction* ThreadPointer(_6502Generator* g) {
+static TargetInstruction* ThreadPointer(W65C02Generator* g) {
   return TargetThreadPointer(&g->base);
 }
 
@@ -675,57 +883,133 @@ static TargetInstruction* SetLoweredNode(IRNode* node,
   return TargetSetLoweredNode(node, inst);
 }
 
-static TargetInstruction* GetIntConstant(_6502Generator* g, IRNode* node,
+static TargetInstruction* GetIntConstant(W65C02Generator* g, IRNode* node,
                                          TargetType type, int64_t value) {
   TargetInstruction* inst = TargetGetIntConstant(&g->base, node, type, value);
   SetAddrMode(inst, kAddrModeImmediate);
   return inst;
 }
 
-static TargetInstruction* ByteConst(_6502Generator* g, int value) {
-  return GetIntConstant(g, NULL, kTargetTypeByte, value);
+static TargetInstruction* ByteConst(W65C02Generator* g, int value) {
+  return GetIntConstant(g, NULL, kTargetType8Bit, value);
 }
 
-static TargetInstruction* Zero(_6502Generator* g) {
-  return GetIntConstant(g, NULL, kTargetTypeByte, 0);
+static TargetInstruction* Zero(W65C02Generator* g) {
+  return GetIntConstant(g, NULL, kTargetType8Bit, 0);
 }
 
-static TargetInstruction* One(_6502Generator* g) {
-  return GetIntConstant(g, NULL, kTargetTypeByte, 1);
+static TargetInstruction* One(W65C02Generator* g) {
+  return GetIntConstant(g, NULL, kTargetType8Bit, 1);
 }
 
-static TargetInstruction* GetFloatingPointConstant(_6502Generator* g,
+static int Sizeof(TypeRecord* type) {
+  if (type == NULL) {
+    return 2;
+  }
+  if (TypeIsPointerOrArray(type) || TypeIsFunction(type)) {
+    return 2;
+  }
+  assert(type->size != 0);
+  return type->size;
+}
+
+static int SizeofArray(TypeRecord* type) {
+  if (type == NULL) {
+    return 2;
+  }
+  if (TypeIsArray(type)) {
+    return type->size;
+  }
+  if (TypeIsPointer(type) || TypeIsFunction(type)) {
+    return 2;
+  }
+  assert(type->size != 0);
+  return type->size;
+}
+
+static TargetInstruction* CreateVariableRegister(W65C02Generator* g,
+                                                      RegisterVariableSet* set,
+                                                 TargetInstruction* var,
+                                                      Symbol* sym) {
+  int i = set->num_vars++;
+  TargetSymbol* inst = malloc(sizeof(TargetSymbol));
+  TargetInitInstruction(&inst->base, (TargetOpcode)set->opcode);
+  SetAddrMode(&inst->base, kAddrModeZeroPage);
+  inst->symbol = sym;
+  set->vars[i].reg = &inst->base;
+  set->vars[i].var = var;
+  return Emit(g, set->vars[i].reg);
+}
+
+// Add a spill point for the given expression as the last emitted
+// instruction.
+static TargetInstruction* AddSpillPoint(W65C02Generator* g, TargetInstruction* expr) {
+  W65C02RegisterAllocatorAddSpillPoint(&g->register_allocator,
+                                         expr->id, TargetLastInstruction(&g->base));
+  return expr;
+}
+
+static bool IsExpression(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(expr1):
+    case W65C02_OP(expr2):
+    case W65C02_OP(expr4):
+    case W65C02_OP(expr8):
+    case W65C02_OP(exprf):
+    case W65C02_OP(exprd):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void AddReloadPoint(W65C02Generator* g, TargetInstruction* expr) {
+  switch ((W65C02Opcode)expr->opcode) {
+    case W65C02_OP(expr1):
+    case W65C02_OP(expr2):
+    case W65C02_OP(expr4):
+    case W65C02_OP(expr8):
+    case W65C02_OP(exprf):
+    case W65C02_OP(exprd):
+      Emit(g, NewInstruction1(W65C02_OP(reloadpoint), expr, kAddrModeImplied));
+    default:
+      break;
+  }
+}
+
+static TargetInstruction* GetFloatingPointConstant(W65C02Generator* g,
                                                    IRNode* node,
                                                    TargetType type,
                                                    double value) {
   return TargetGetFloatingPointConstant(&g->base, node, type, value);
 }
 
-static TargetInstruction* GetSymbol(_6502Generator* g, IRNode* node,
+static TargetInstruction* GetSymbol(W65C02Generator* g, IRNode* node,
                                     Symbol* symbol) {
   return TargetGetSymbol(&g->base, node, symbol);
 }
 
-static TargetInstruction* NewInstruction(_6502Opcode opcode,
+static TargetInstruction* NewInstruction(W65C02Opcode opcode,
                                          int addressing_mode) {
   TargetInstruction* inst = TargetNewInstruction((TargetOpcode)opcode);
   SetAddrMode(inst, addressing_mode);
   return inst;
 }
 
-static TargetInstruction* EmitBranch(_6502Generator* g, _6502Opcode op,
+static TargetInstruction* EmitBranch(W65C02Generator* g, W65C02Opcode op,
                                      IRNode* target_node) {
   TargetInstruction* bra = Emit(g, NewInstruction(op, kAddrModeRelative));
   if (target_node->data.ptr == NULL) {
     VectorAppend(&g->base.fixups, NewBranchFixup(bra, target_node, 0));
   } else {
     bra->operand[0] = target_node->data.ptr;
+    TargetAddUser(target_node->data.ptr, bra);
   }
   VectorAppend(&g->branches, bra);
   return bra;
 }
 
-static TargetInstruction* EmitLabelReference(_6502Generator* g,
+static TargetInstruction* EmitLabelReference(W65C02Generator* g,
                                              TargetInstruction* label,
                                              IRNode* target_node) {
   Emit(g, label);
@@ -733,11 +1017,12 @@ static TargetInstruction* EmitLabelReference(_6502Generator* g,
     VectorAppend(&g->base.fixups, NewBranchFixup(label, target_node, 0));
   } else {
     label->operand[0] = target_node->data.ptr;
+    TargetAddUser(label, target_node->data.ptr);
   }
   return label;
 }
 
-static void EmitResolvedBranch(_6502Generator* g, _6502Opcode op,
+static void EmitResolvedBranch(W65C02Generator* g, W65C02Opcode op,
                                TargetInstruction* target) {
   VectorAppend(&g->branches,
                Emit(g, NewInstruction1(op, target, kAddrModeRelative)));
@@ -745,27 +1030,43 @@ static void EmitResolvedBranch(_6502Generator* g, _6502Opcode op,
 
 // The 6502 isn't RISC so instructions can load and store directly
 // to memory.  Returns next node or NULL.
-static IRNode* Preoptimize(_6502Generator* g, Generator* gen, IRNode* node, bool* changed) {
-  if (IRIsLoad(node)) {
+static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* changed) {
+  if (IRIsLoadOnly(node)) {
     // A load can be removed if it has only one use and that use isn't
-    // a store or a load.  It's input can't also be a load.
-    if (!IRIsLoad(node->inputs.value.p[0]) && node->outputs.length == 1) {
-      IRNode* use = node->outputs.value.p[0];
-      if (!IRIsStoreOnly(use) && !IRIsLoad(use)) {
-        IRNode* input = node->inputs.value.p[0];
-        GeneratorReplaceInstruction(gen, node, input);
-        BasicBlockRemoveInstruction(gen, node->block, node);
-        *changed = true;
+    // a store or a load.  It's input can't also be a load or a call.
+    IRNode* src = node->inputs.value.p[0];
+    if (src->opcode == IR_OP(adda)) {
+      // If the source address is formed by adding a constant, we
+      // can put the constant into the load as an offset as the
+      // second arg.
+      IRNode* op1 = src->inputs.value.p[0];
+      IRNode* op2 = src->inputs.value.p[1];
+      if (IRIsConst(op2)) {
+        int64_t value = IRIntConstValue(op2);
+        int size = Sizeof(node->type);
+        // Max index for Y is 255, but we need to allow for 'size' bytes
+        // above the start index.
+        if (value < (256 - size)) {
+          IRAddInput(node, op2, false);     // Add 2nd operand to store.
+          IRReplaceInput(node, 0, op1);
+          if (src->outputs.length == 0) {
+            GeneratorRemoveInstruction(gen, src);
+            *changed = true;
+          }
+        }
       }
     }
   } else if (IRIsStoreOnly(node)) {
     // A store be eliminated if its input has one use (the store instruction)
     IRNode* dest = node->inputs.value.p[0];
     IRNode* src = node->inputs.value.p[1];
-    if (!IRIsConst(src) && !IRIsVariable(src)) {
-      if (src->outputs.length == 1 && src->dest == NULL) {
+    if (!IRIsConst(src) && !IRIsVariable(src) && src->opcode != IR_OP(cast)
+        && !TypeIsArray(dest->type) && !TypeIsStructOrUnion(dest->type)
+        && (!IRIsExpression(dest) || IRIsVariable(dest))) {
+      if (node->inputs.length == 2 && src->outputs.length == 1 &&
+          src->dest == NULL && node->block == src->block &&
+          (node->block == dest->block || IRIsVariable(dest))) {
         src->dest = dest;
-        src->flags |= kIRDestIsIndirect;      // Dest is indirect address.
         IRNode* next = IRNext(node);
         BasicBlockRemoveInstruction(gen, node->block, node);
         *changed = true;
@@ -780,10 +1081,10 @@ static IRNode* Preoptimize(_6502Generator* g, Generator* gen, IRNode* node, bool
       IRNode* op2 = dest->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t value = IRIntConstValue(op2);
-        int size = node->type->size;
+        int size = Sizeof(node->type);
         // Max index for Y is 255, but we need to allow for 'size' bytes
         // above the start index.
-        if (value < (256 - size)) {
+        if (value >= 0 && value < (256 - size)) {
           IRAddInput(node, op2, false);     // Add 3rd operand to store.
           IRReplaceInput(node, 0, op1);
           if (dest->outputs.length == 0) {
@@ -798,21 +1099,30 @@ static IRNode* Preoptimize(_6502Generator* g, Generator* gen, IRNode* node, bool
     // We can eliminate rmov by assigning the dest of the src.
     IRNode* dest = node->inputs.value.p[0];
     IRNode* src = node->inputs.value.p[1];
-    if (src->dest == NULL) {
+    if (!IRIsConst(src) && !IRIsVariable(src) && src->opcode != IR_OP(cast) &&
+        src->dest == NULL &&
+        src->opcode != IR_OP(tmp)) {
       src->dest = dest;
       IRNode* next = IRNext(node);
       BasicBlockRemoveInstruction(gen, node->block, node);
       *changed = true;
       return next;
     }
+  } else if (node->opcode == IR_OP(f2d) || node->opcode == IR_OP(d2f)) {
+    // Float and double are the same thing on 6502.  Remove these instructions.
+    IRNode* next = IRNext(node);
+    GeneratorReplaceInstruction(gen, node, node->inputs.value.p[0]);
+    BasicBlockRemoveInstruction(gen, node->block, node);
+    *changed = true;
+    return next;
   }
   return IRNext(node);
 }
 
-static void Operate(_6502Generator* g, _6502Opcode op, TargetInstruction* src,
+static void Operate(W65C02Generator* g, W65C02Opcode op, TargetInstruction* src,
                     int index) {
   AddressingMode mode = GetAddrMode(src);
-  if (mode == kAddrModeIndirectIndexed && index == 0) {
+  if (Is65c02() && mode == kAddrModeIndirectIndexed && index == 0) {
     // An index of 0 can use a kAddrModeIndirect: lda (xxx)
     mode = kAddrModeIndirect;
   }
@@ -822,8 +1132,8 @@ static void Operate(_6502Generator* g, _6502Opcode op, TargetInstruction* src,
 
 // Operation instructions
 #define INST(op)                                                         \
-  static void op(_6502Generator* g, TargetInstruction* src, int index) { \
-    Operate(g, _6502_OP(op), src, index);                                \
+  static void op(W65C02Generator* g, TargetInstruction* src, int index) { \
+    Operate(g, W65C02_OP(op), src, index);                                \
   }
 
 INST(lda)
@@ -840,8 +1150,8 @@ INST(dec)
 // Immediate instructions:
 // ldai(g, value);
 #define INST(op)                                                             \
-  static void op##i(_6502Generator* g, int value) {                          \
-    Emit(g, NewInstruction1(_6502_OP(op),                                    \
+  static void op##i(W65C02Generator* g, int value) {                          \
+    Emit(g, NewInstruction1(W65C02_OP(op),                                    \
                             ByteConst(g, value), \
                             kAddrModeImmediate));                            \
   }
@@ -851,9 +1161,11 @@ INST(ldx)
 INST(ldy)
 INST(ora)
 INST(eor)
+INST(and)
 INST(adc)
 INST(sbc)
 INST(cmp)
+INST(cpy)
 
 #undef INST
 
@@ -861,8 +1173,8 @@ INST(cmp)
 // ldazi(g, value);
 // These load the immediate value of a zero page location.
 #define INST(op)                                                              \
-  static void op##zi(_6502Generator* g, TargetInstruction* reg, int offset) { \
-    Emit(g, NewInstruction2(_6502_OP(op), reg,                                \
+  static void op##zi(W65C02Generator* g, TargetInstruction* reg, int offset) { \
+    Emit(g, NewInstruction2(W65C02_OP(op), reg,                                \
                             ByteConst(g, offset), \
                             kAddrModeZeroPageImmediate));                     \
   }
@@ -874,8 +1186,8 @@ INST(ldy)
 #undef INST
 // Single instructions.
 #define INST(op)                                             \
-  static void op(_6502Generator* g) {                        \
-    Emit(g, NewInstruction(_6502_OP(op), kAddrModeImplied)); \
+  static void op(W65C02Generator* g) {                        \
+    Emit(g, NewInstruction(W65C02_OP(op), kAddrModeImplied)); \
   }
 
 INST(inx)
@@ -891,94 +1203,280 @@ INST(tay)
 
 #undef INST
 
-static void ldx(_6502Generator* g, TargetInstruction* src, int index) {
+static TargetInstruction* ldx(W65C02Generator* g, TargetInstruction* src, int index) {
   AddressingMode mode = GetAddrMode(src);
-  Emit(g,
-       NewInstruction2(_6502_OP(ldx), src,
+  return Emit(g,
+       NewInstruction2(W65C02_OP(ldx), src,
                        ByteConst(g, index), mode));
 }
 
-static void ldy(_6502Generator* g, TargetInstruction* src, int index) {
+static TargetInstruction* ldy(W65C02Generator* g, TargetInstruction* src, int index) {
   AddressingMode mode = GetAddrMode(src);
-  Emit(g,
-       NewInstruction2(_6502_OP(ldy), src,
+  return Emit(g,
+       NewInstruction2(W65C02_OP(ldy), src,
                        ByteConst(g, index), mode));
 }
 
-static void sta(_6502Generator* g, TargetInstruction* dest, int index) {
+static TargetInstruction* sta(W65C02Generator* g, TargetInstruction* dest, int index) {
   AddressingMode mode = GetAddrMode(dest);
-  if (mode == kAddrModeIndirectIndexed && index == 0) {
+  if (Is65c02() && mode == kAddrModeIndirectIndexed && index == 0) {
     mode = kAddrModeIndirect;
   }
-  Emit(g,
-       NewInstruction2(_6502_OP(sta), dest,
+  return Emit(g,
+       NewInstruction2(W65C02_OP(sta), dest,
                        ByteConst(g, index), mode));
 }
 
-static void stx(_6502Generator* g, TargetInstruction* dest, int index) {
-  Emit(g, NewInstruction2(_6502_OP(stx), dest,
+static TargetInstruction* stx(W65C02Generator* g, TargetInstruction* dest, int index) {
+  return Emit(g, NewInstruction2(W65C02_OP(stx), dest,
                           ByteConst(g, index),
                           GetAddrMode(dest)));
 }
 
-static void sty(_6502Generator* g, TargetInstruction* dest, int index) {
-  Emit(g, NewInstruction2(_6502_OP(sty), dest,
+static TargetInstruction* sty(W65C02Generator* g, TargetInstruction* dest, int index) {
+  return Emit(g, NewInstruction2(W65C02_OP(sty), dest,
                           ByteConst(g, index),
                           GetAddrMode(dest)));
 }
 
-static void stz(_6502Generator* g, TargetInstruction* dest, int index) {
-  Emit(g, NewInstruction2(_6502_OP(stz), dest,
+static TargetInstruction* stz(W65C02Generator* g, TargetInstruction* dest, int index) {
+  return Emit(g, NewInstruction2(W65C02_OP(stz), dest,
                           ByteConst(g, index),
                           GetAddrMode(dest)));
 }
 
-static TargetInstruction* jsr(_6502Generator* g, Symbol* func) {
-  return Emit(g, NewInstruction1(_6502_OP(jsr), GetSymbol(g, NULL, func),
+static TargetInstruction* jsr(W65C02Generator* g, Symbol* func) {
+  return Emit(g, NewInstruction1(W65C02_OP(jsr), GetSymbol(g, NULL, func),
                                  kAddrModeAbsolute));
 }
 
 // If either the src or dest needs an index in Y reg, load it.  If
-static void SetIndexReg(_6502Generator* g, TargetInstruction* src,
+static void SetIndexReg(W65C02Generator* g, TargetInstruction* src,
                         TargetInstruction* dest, int index) {
+  if (!Is65c02()) {
+    if (GetAddrMode(src) == kAddrModeIndirect ||
+        GetAddrMode(dest) == kAddrModeIndirect) {
+      ldyi(g, index);
+    }
+  }
   if (GetAddrMode(src) == kAddrModeIndirectIndexed ||
       GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    if (index == 1) {
-      ldyi(g, 1);
-    } else if (index > 1) {
-      iny(g);
-    }
+    ldyi(g, index);
   }
 }
 
-static void SetIndexReg2(_6502Generator* g, TargetInstruction* src1,
+static void SetIndexReg2(W65C02Generator* g, TargetInstruction* src1,
                          TargetInstruction* src2, TargetInstruction* dest,
                          int index) {
+  if (!Is65c02()) {
+    if (GetAddrMode(src1) == kAddrModeIndirect ||
+        GetAddrMode(src2) == kAddrModeIndirect||
+        GetAddrMode(dest) == kAddrModeIndirect) {
+      ldyi(g, index);
+      return;
+    }
+  }
   if (GetAddrMode(src1) == kAddrModeIndirectIndexed ||
       GetAddrMode(src2) == kAddrModeIndirectIndexed ||
       GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    if (index == 1) {
-      ldyi(g, 1);
-    } else if (index > 1) {
-      iny(g);
-    }
+    ldyi(g, index);
   }
 }
 
-static void SetIndexRegDown(_6502Generator* g, TargetInstruction* src,
+static void SetIndexRegDown(W65C02Generator* g, TargetInstruction* src,
                             TargetInstruction* dest, int index, int limit) {
-  if (GetAddrMode(src) == kAddrModeIndirectIndexed ||
-      GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    if (index == limit - 1) {
+  if (!Is65c02()) {
+    if (GetAddrMode(src) == kAddrModeIndirect ||
+        GetAddrMode(dest) == kAddrModeIndirect) {
       ldyi(g, limit - 1);
-    } else if (index > 0) {
-      dey(g);
+      return;
     }
   }
+  if (GetAddrMode(src) == kAddrModeIndirectIndexed ||
+      GetAddrMode(dest) == kAddrModeIndirectIndexed) {
+    ldyi(g, limit - 1);
+  }
+}
+
+// Copy memory in the fewest bytes possible.
+static void Copy(W65C02Generator* g, TargetInstruction* to,
+                 TargetInstruction* from, int from_start_index,
+                 int to_start_index,
+                 int size,
+                 AddressingMode from_mode,
+                 AddressingMode to_mode) {
+  AddReloadPoint(g, to);
+  AddReloadPoint(g, from);
+
+  bool to_is_indirect = to_mode == kAddrModeIndirectIndexed || to_mode == kAddrModeIndirect;
+  bool from_is_indirect = from_mode == kAddrModeIndirectIndexed || from_mode == kAddrModeIndirect;
+  AddressingMode old_to = GetAddrMode(to);
+  AddressingMode old_from = GetAddrMode(from);
+  
+  if (from_start_index == 0 && to_start_index == 0) {
+   // If the src is in zero page we can copy using Y as an index
+   // starting at the size-1.
+
+   // Copy from zero page to indirect
+   if (to_is_indirect && from_mode == kAddrModeZeroPage && size > 2) {
+     SetAddrMode(from, kAddrModeZeroPageIndexedY);
+     SetAddrMode(to, to_mode);
+     ldyi(g, size-1);
+     TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+     lda(g, from, -1);
+     sta(g, to, -1);
+     dey(g);
+     EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+     SetAddrMode(to, old_to);
+     SetAddrMode(from, old_from);
+     return;
+   }
+    // Copy from indirect indexed to zero page
+   if (to_mode == kAddrModeZeroPage && from_is_indirect && size > 2) {
+     SetAddrMode(to, kAddrModeZeroPageIndexedY);
+     SetAddrMode(from, from_mode);
+     ldyi(g, size-1);
+     TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+     lda(g, from, -1);
+     sta(g, to, -1);
+     dey(g);
+     EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+     SetAddrMode(to, old_to);
+     SetAddrMode(from, old_from);
+     return;
+   }
+  if (from_mode == kAddrModeImmediate && to_is_indirect) {
+     // From an immediate value.  Likely the value will contain multiple
+     // contiguous zeros.
+     if (TargetIsZero(from) && size > 2) {
+       // All zeros.
+       int to_index = -1;
+       if (to_mode == kAddrModeAbsoluteSymbolIndexed) {
+         SetAddrMode(to, to_mode);
+         to_index = 0;
+       } else {
+          SetAddrMode(to, to_is_indirect ? kAddrModeIndirectIndexed : kAddrModeZeroPageIndexedY);
+       }
+       // Writing zero:
+       ldyi(g, size-1);
+       ldai(g, 0);
+       TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+       sta(g, to, to_index);
+       dey(g);
+       EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+       SetAddrMode(to, old_to);
+       SetAddrMode(from, old_from);
+       return;
+     }
+     if (size > 2) {
+       // Not all zeroes, find contiguous zeroes.
+       char bytes[8];
+       uint64_t imm_value = TargetIntValue(from);
+       for (int i = 0; i < size; i++) {
+         bytes[i] = (imm_value >> (i*8)) & 0xff;
+       }
+       int first_zero = -1;
+       int last_zero = -1;
+       for (int i = 0; i < size; i++) {
+         if (bytes[i] == 0) {
+           if (first_zero == -1) {
+             first_zero = i;
+           }
+         } else if (last_zero == -1) {
+           last_zero = i - 1;
+         }
+       }
+       if (first_zero != -1) {
+        if (last_zero == -1) {
+           last_zero = size;
+         }
+         SetAddrMode(to, kAddrModeIndirectIndexed);
+         for (int i = 0; i < size; i++) {
+           if (i >= first_zero && i <= last_zero) {
+             continue;
+           }
+          lda(g, from, i);
+          ldyi(g, i);
+          sta(g, to, 0);
+         }
+         // Now do a loop, setting the contiguous zeroes.
+         ldyi(g, first_zero);
+         ldai(g, 0);
+         TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+         sta(g, to, 1);
+         iny(g);
+         cpyi(g, last_zero);
+         EmitResolvedBranch(g, W65C02_OP(bne), loop);
+         SetAddrMode(to, old_to);
+         SetAddrMode(from, old_from);
+         return;
+       }
+     }
+   }
+    
+    // Copy from zero page to zero page.
+    if (!from_is_indirect && !to_is_indirect &&
+        to_mode == kAddrModeZeroPage && from_mode == kAddrModeZeroPage) {
+      if (size > 2) {
+        SetAddrMode(to, kAddrModeZeroPageIndexedX);
+        SetAddrMode(from, kAddrModeZeroPageIndexedX);
+        ldxi(g, size-1);
+        TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+        lda(g, from, -1);
+        sta(g, to, -1);
+        dex(g);
+        EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+        SetAddrMode(to, old_to);
+        SetAddrMode(from, old_from);
+        return;
+      }
+      // Inline copy.
+      for (int i = 0; i < size; i++) {
+        lda(g, from, i);
+        sta(g, to, i);
+      }
+      return;
+    }
+  }
+  
+  
+  // Not possible to do as a loop, inline load/stores.
+  int j = to_start_index;
+  int k = from_start_index;
+  if (to_is_indirect && to_start_index == 0) {
+    to_mode = Is65c02() ? kAddrModeIndirect : kAddrModeIndirectIndexed;
+  }
+  if (from_is_indirect && from_start_index == 0) {
+    from_mode = Is65c02() ? kAddrModeIndirect : kAddrModeIndirectIndexed;
+  }
+
+  // Can't use indexed operations when the loop is expanded.
+  if (from_mode == kAddrModeAbsoluteSymbolIndexed) {
+    from_mode = kAddrModeAbsoluteSymbol;
+  }
+  if (to_mode == kAddrModeAbsoluteSymbolIndexed) {
+    to_mode = kAddrModeAbsoluteSymbol;
+  }
+  for (int i = 0; i < size; i++, j++, k++) {
+   SetAddrMode(to, to_mode);
+   SetAddrMode(from, from_mode);
+   SetIndexReg(g, from, from, k);
+   lda(g, from, k);
+    SetIndexReg(g, to, to, j);
+    sta(g, to, j);
+    if (to_is_indirect) {
+      to_mode = kAddrModeIndirectIndexed;
+    }
+    if (from_is_indirect) {
+      from_mode = kAddrModeIndirectIndexed;
+    }
+  }
+  SetAddrMode(from, old_from);
+  SetAddrMode(to, old_to);
 }
 
 // TODO: allow override of tls model per variable.
-static TargetInstruction* GetTlsVariableAddress(_6502Generator* g,
+static TargetInstruction* GetTlsVariableAddress(W65C02Generator* g,
                                                 IRNode* node) {
   switch (compiler->tls_model) {
     default:
@@ -1004,7 +1502,7 @@ static TargetInstruction* GetTlsVariableAddress(_6502Generator* g,
   }
 }
 
-static void GetTlsAddressAndOffset(_6502Generator* g, IRNode* addr_node,
+static void GetTlsAddressAndOffset(W65C02Generator* g, IRNode* addr_node,
                                    TargetInstruction** addr,
                                    TargetInstruction** offset) {
   switch (compiler->tls_model) {
@@ -1031,143 +1529,203 @@ static void GetTlsAddressAndOffset(_6502Generator* g, IRNode* addr_node,
   }
 }
 
-static void ApplyFixups(_6502Generator* g, IRNode* label_node) {
+static void ApplyFixups(W65C02Generator* g, IRNode* label_node) {
   TargetApplyFixups(&g->base, label_node);
 }
 
-// Do some strength reduction if we can.  Returns NULL or new instruciton
-static TargetInstruction* ReduceExpressionStrength(_6502Generator* g,
-                                                   IRNode* node,
-                                                   _6502Opcode opcode) {
-  return NULL;
-}
-
 // Temp expression in zero page holding value.
-static TargetInstruction* TempRegister(_6502Generator* g, int size) {
+static TargetInstruction* TempRegister(W65C02Generator* g, TypeRecord* type, int size) {
+  if (TypeIsFloat(type)) {
+    return Emit(g, NewInstruction(W65C02_OP(exprf), kAddrModeZeroPage));
+  }
+  if (TypeIsDouble(type)) {
+    return Emit(g, NewInstruction(W65C02_OP(exprd), kAddrModeZeroPage));
+  }
   switch (size) {
     case 1:
-      return Emit(g, NewInstruction(_6502_OP(expr1), kAddrModeZeroPage));
+      return Emit(g, NewInstruction(W65C02_OP(expr1), kAddrModeZeroPage));
     default:        // Any other size is handled as a pointer.
     case 2:
-      return Emit(g, NewInstruction(_6502_OP(expr2), kAddrModeZeroPage));
+      return Emit(g, NewInstruction(W65C02_OP(expr2), kAddrModeZeroPage));
     case 4:
-      return Emit(g, NewInstruction(_6502_OP(expr4), kAddrModeZeroPage));
+      return Emit(g, NewInstruction(W65C02_OP(expr4), kAddrModeZeroPage));
     case 8:
-      return Emit(g, NewInstruction(_6502_OP(expr8), kAddrModeZeroPage));
+      return Emit(g, NewInstruction(W65C02_OP(expr8), kAddrModeZeroPage));
   }
 }
 
 // Temp expression in zero page containing address of something.
-static TargetInstruction* TempExpressionAddress(_6502Generator* g, AddressingMode mode) {
-  return Emit(g, NewInstruction(_6502_OP(expr2), mode));
+static TargetInstruction* TempExpressionAddress(W65C02Generator* g, AddressingMode mode) {
+  return Emit(g, NewInstruction(W65C02_OP(expr2), mode));
 }
 
-static _6502Opcode VarValueFunction(int size, bool highzero) {
+static W65C02Opcode VarValueFunction(int size, bool highzero) {
   switch (size) {
     case 1:
-      return highzero ? _6502_OP(var_value1) : _6502_OP(var_value1b);
+      return highzero ? W65C02_OP(var_value1) : W65C02_OP(var_value1b);
     case 2:
-      return highzero ? _6502_OP(var_value2) : _6502_OP(var_value2b);
+      return highzero ? W65C02_OP(var_value2) : W65C02_OP(var_value2b);
     case 4:
-      return highzero ? _6502_OP(var_value4) : _6502_OP(var_value4b);
+      return highzero ? W65C02_OP(var_value4) : W65C02_OP(var_value4b);
     case 8:
-      return highzero ? _6502_OP(var_value8) : _6502_OP(var_value8b);
+      return highzero ? W65C02_OP(var_value8) : W65C02_OP(var_value8b);
     default:
       abort();
   }
 }
 
-static _6502Opcode ArgValueFunction(int size, bool highzero) {
+static W65C02Opcode ArgValueFunction(int size, bool highzero) {
   switch (size) {
     case 1:
-      return highzero ? _6502_OP(arg_value1) : _6502_OP(arg_value1b);
+      return highzero ? W65C02_OP(arg_value1) : W65C02_OP(arg_value1b);
     case 2:
-      return highzero ? _6502_OP(arg_value2)
-                      : _6502_OP(arg_value2b;) case 4 : return highzero
-                                                        ? _6502_OP(arg_value4)
-                                                        : _6502_OP(arg_value4b);
+      return highzero ? W65C02_OP(arg_value2)
+                      : W65C02_OP(arg_value2b;) case 4 : return highzero
+                                                        ? W65C02_OP(arg_value4)
+                                                        : W65C02_OP(arg_value4b);
     case 8:
-      return highzero ? _6502_OP(arg_value8) : _6502_OP(arg_value8b);
+      return highzero ? W65C02_OP(arg_value8) : W65C02_OP(arg_value8b);
     default:
       abort();
   }
 }
 
-static TargetInstruction* Materialize(_6502Generator* g, IRNode* node) {
+static IRNode* IgnoreCasts(IRNode* node) {
+  while (node->opcode == IR_OP(cast)) {
+    node = node->inputs.value.p[0];
+  }
+  return node;
+}
+
+static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size, bool put_in_zero_page) {
   TargetInstruction* inst = GetLoweredNode(node);
+  AddReloadPoint(g, inst);
   TargetInstruction* result = NULL;
   int offset;
-  int size = node->type->size;
+  if (size == -1) {
+    size = Sizeof(node->type);
+  }
+  node = IgnoreCasts(node);
+  
   if (IRIsConst(node)) {
+    if (!put_in_zero_page) {
+      return inst;
+    }
     // Load a constant.
-    result = TempRegister(g, node->type->size);
-    uint64_t value = TargetIntValue(inst);
+    result = TempRegister(g, node->type, Sizeof(node->type));
+    TargetConstant* c = (TargetConstant*)inst;
+    int64_t value;      // Contains binary for whole value.
+    switch (c->type) {
+      case kTargetTypeFloat:
+      case kTargetTypeDouble: {
+        float f = c->value.dvalue;    // Convert to float.
+        value = *(int32_t*)&f;
+        break;
+      }
+      default:
+        value = c->value.ivalue;
+        break;
+    }
     for (int i = 0; i < size; i++) {
       SetIndexReg(g, result, result, i);
       ldai(g, (int)(value >> (i * 8)) & 0xff);
       sta(g, result, i);
     }
+    AddSpillPoint(g, result);
   } else {
-    switch ((_6502Opcode)inst->opcode) {
-      case _6502_OP(argument):
-      case _6502_OP(localvar): {
+    switch ((W65C02Opcode)inst->opcode) {
+      case W65C02_OP(argument):
+      case W65C02_OP(localvar): {
         // Variable or argument.  Load value using one of the runtime helper
         // functions.
         offset = (int)TargetIntValue(inst->operand[0]);
-        result = TempRegister(g, node->type->size);
+        int size = Sizeof(node->type);
+        if (TypeIsStructOrUnion(node->type)) {
+          size = 2;
+        }
+        result = TempRegister(g, node->type, size);
         bool highzero = offset < 256;
         // Macro instruction, expands to:
         // lda #dest_addr
         // ldx #offset lo
         // ldy #offset hi (removed for single byte case)
         // JSR __var_value[b] (or arg_value[b])
-        _6502Opcode var_value_op = inst->opcode == _6502_OP(argument)
-                                       ? ArgValueFunction(size, highzero)
-                                       : VarValueFunction(size, highzero);
-        Emit(g,
-             NewInstruction2(var_value_op, result,
-                             inst,
-                             kAddrModeImplied));
+        if (inst->opcode == W65C02_OP(argument) &&
+            ((inst->flags & k6502NeedAddress) != 0 ||
+             TypeIsStructOrUnion(node->type))) {
+           W65C02Opcode arg_addr_op = offset >= 256 ? W65C02_OP(arg_addrb) : W65C02_OP(arg_addr);
+          
+            Emit(g,
+                  NewInstruction2(arg_addr_op, result,
+                                  inst,
+                                  kAddrModeImplied));
+
+        } else if (inst->opcode == W65C02_OP(localvar) &&
+            ((inst->flags & k6502NeedAddress) != 0 ||
+             TypeIsPointerOrArray(node->type) || TypeIsStructOrUnion(node->type))) {
+          W65C02Opcode var_addr_op = offset >= 256 ? W65C02_OP(var_addrb) : W65C02_OP(var_addr);
+        
+          Emit(g,
+                NewInstruction2(var_addr_op, result,
+                                inst,
+                                kAddrModeImplied));
+        } else {
+          W65C02Opcode var_value_op = inst->opcode == W65C02_OP(argument)
+                                         ? ArgValueFunction(size, highzero)
+                                         : VarValueFunction(size, highzero);
+          Emit(g,
+               NewInstruction2(var_value_op, result,
+                               inst,
+                               kAddrModeZeroPage));
+        }
+        AddSpillPoint(g, result);
         break;
       }
 
-      case _6502_OP(ssavar):
-      case _6502_OP(phi): {
+      case W65C02_OP(ssavar):
+      case W65C02_OP(phi): {
         TargetInstruction* var = inst->operand[0];
         offset = (int)TargetIntValue(var->operand[0]);
-        result = TempRegister(g, node->type->size);
+        result = TempRegister(g, node->type, Sizeof(node->type));
         bool highzero = offset < 256;
         // Macro instruction, expands to:
         // lda #dest_addr
         // ldx #offset lo
         // ldy #offset hi (removed for single byte case)
         // JSR __var_value[b] (or arg_value[b])
-        _6502Opcode var_value_op = var->opcode == _6502_OP(argument)
+        W65C02Opcode var_value_op = var->opcode == W65C02_OP(argument)
                                          ? ArgValueFunction(size, highzero)
                                          : VarValueFunction(size, highzero);
         Emit(g,
                NewInstruction2(var_value_op, result,
-                               var,
+                               inst,
                                kAddrModeImplied));
+        AddSpillPoint(g, result);
         break;
         }
       
-
-      case _6502_OP(symbol): {
+      case W65C02_OP(symbol): {
+        if (!put_in_zero_page && (inst->flags & k6502NeedAddress) == 0) {
+          return inst;
+        }
         // lda symbol+0
         // sta result+0
         // ldy #1
         // lda symbol+1, Y
         // sta result+1
-        result = TempRegister(g, node->type->size);
-        for (int i = 0; i < node->type->size; i++) {
-          SetIndexReg(g, inst, result, i);
-          lda(g, inst, i);
-          sta(g, result, i);
+        AddressingMode mode = kAddrModeAbsoluteSymbol;
+        if (TypeIsArray(node->type) ||
+            TypeIsFunction(node->type) ||
+            TypeIsStructOrUnion(node->type) ||
+                                (inst->flags & k6502NeedAddress) != 0) {
+          mode = kAddrModeSymbolAddr;
         }
-        SetLoweredNode(node, result);
+        result = TempRegister(g, node->type, Sizeof(node->type));
+        Copy(g, result, inst, 0, 0, Sizeof(node->type), mode, GetAddrMode(result));
+        AddSpillPoint(g, result);
         break;
       }
+
       default:
         // An expression already in zero page.
         result = GetLoweredNode(node);
@@ -1177,12 +1735,29 @@ static TargetInstruction* Materialize(_6502Generator* g, IRNode* node) {
   return result;
 }
 
-static TargetInstruction* GetAddressFromTarget(_6502Generator* g, TargetInstruction* addr, AddressingMode mode) {
+static TargetInstruction* GetAddress(W65C02Generator* g, IRNode* addr_node, bool put_in_zero_page) {
+  addr_node = IgnoreCasts(addr_node);
+  
+  AddressingMode mode;
+  addr_node = IgnoreCasts(addr_node);
+  if (TypeIsArray(addr_node->type) || TypeIsStructOrUnion(addr_node->type)) {
+    mode = kAddrModeZeroPage;
+  } else {
+    mode = kAddrModeIndirectIndexed;
+  }
+  
+  TargetInstruction* addr = GetLoweredNode(addr_node);
   TargetInstruction* result = NULL;
   int offset;
-  switch ((_6502Opcode)addr->opcode) {
-    case _6502_OP(argument):
-    case _6502_OP(localvar): {
+  switch ((W65C02Opcode)addr->opcode) {
+    case W65C02_OP(argument):
+    case W65C02_OP(localvar): {
+      if (addr_node != NULL && (addr_node->flags & kIRNrvoMarker) != 0) {
+        // This is an Named RVO variable.  It's address is the same
+        // as the structreturn address.
+        assert(g->struct_return_inst != NULL);
+        return g->struct_return_inst;
+      }
       offset = (int)TargetIntValue(addr->operand[0]);
       result = TempExpressionAddress(g, mode);
       // Macro instruction expands to:
@@ -1190,40 +1765,43 @@ static TargetInstruction* GetAddressFromTarget(_6502Generator* g, TargetInstruct
       // ldx #offset lo
       // ldy #offset hi (removed for single byte case)
       // JSR __var_addr[b] (or arg_addr[b])
-      _6502Opcode var_addr_op = addr->opcode == _6502_OP(argument)
-                                    ? _6502_OP(arg_addr)
-                                    : _6502_OP(var_addr);
+      W65C02Opcode var_addr_op = addr->opcode == W65C02_OP(argument)
+                                    ? W65C02_OP(arg_addr)
+                                    : W65C02_OP(var_addr);
       if (offset >= 256) {
-        var_addr_op = addr->opcode == _6502_OP(argument) ? _6502_OP(arg_addrb)
-                                                         : _6502_OP(var_addrb);
+        var_addr_op = addr->opcode == W65C02_OP(argument) ? W65C02_OP(arg_addrb)
+                                                         : W65C02_OP(var_addrb);
       }
       Emit(g, NewInstruction2(var_addr_op, result,
                               addr,
-                              kAddrModeImplied));
+                              mode));
+      AddSpillPoint(g, result);
       break;
     }
 
-    case _6502_OP(ssavar):
-    case _6502_OP(phi): {
-      TargetInstruction* var = addr->operand[0];
-      return GetAddressFromTarget(g, var, mode);
-    }
-
-    case _6502_OP(symbol): {
-      // lda #%abs(symbol)+0
+    case W65C02_OP(symbol): {
+      // lda #%lo(symbol)
       // sta result
-      // lda #%abs(symbol)+1
+      // lda #%hi(symbol)
       // sta result+1
-      TargetSymbol* symbol = (TargetSymbol*)addr;
-      printf("symbol: %p", symbol);
-      result = TempRegister(g, 2);
+      if (!put_in_zero_page) {
+        return addr;
+      }
+      result = TempRegister(g, addr_node->type, 2);
+      AddressingMode mode = kAddrModeSymbolAddr;
       for (int i = 0; i < 2; i++) {
         SetIndexReg(g, addr, result, i);
-        Emit(g, NewInstruction2(_6502_OP(lda), addr,
+        Emit(g, NewInstruction2(W65C02_OP(lda), addr,
                                 ByteConst(g, i),
-                                kAddrModeAbsoluteSymbol));
+                                mode));
         sta(g, result, i);
       }
+      mode = kAddrModeIndirectIndexed;
+      if (TypeIsArray(addr_node->type) || TypeIsFunction(addr_node->type) || TypeIsStructOrUnion(addr_node->type)) {
+        mode = kAddrModeZeroPage;
+      }
+      SetAddrMode(result, mode);
+      AddSpillPoint(g, result);
       break;
     }
     default:
@@ -1233,36 +1811,33 @@ static TargetInstruction* GetAddressFromTarget(_6502Generator* g, TargetInstruct
   return result;
 }
 
-// Gets the address of a variable into zero page.
-static TargetInstruction* GetAddress(_6502Generator* g, IRNode* addr_node) {
-  AddressingMode mode;
-  if (TypeIsArray(addr_node->type) || TypeIsStructOrUnion(addr_node->type)) {
-    mode = kAddrModeZeroPage;
-  } else {
-    mode = kAddrModeIndirectIndexed;
-  }
+static void GetAddressXY(W65C02Generator* g, IRNode* addr_node) {
   TargetInstruction* addr = GetLoweredNode(addr_node);
-  return GetAddressFromTarget(g, addr, mode);
-}
-
-static void GetAddressXY(_6502Generator* g, IRNode* addr_node) {
-  TargetInstruction* addr = GetLoweredNode(addr_node);
+  AddReloadPoint(g, addr);
   int offset;
-  switch ((_6502Opcode)addr->opcode) {
-    case _6502_OP(argument):
-    case _6502_OP(localvar): {
+  switch ((W65C02Opcode)addr->opcode) {
+    case W65C02_OP(argument):
+    case W65C02_OP(localvar): {
+      if ((addr_node->flags & kIRNrvoMarker) != 0) {
+        // This is an Named RVO variable.  It's address is the same
+        // as the structreturn address.
+        assert(g->struct_return_inst != NULL);
+        ldx(g, g->struct_return_inst, 0);
+        ldy(g, g->struct_return_inst, 0);  // ,1?
+        return;
+      }
       offset = (int)TargetIntValue(addr->operand[0]);
       // Macro instruction expands to:
       // ldx #offset lo
       // ldy #offset hi (removed for single byte case)
       // JSR __var_addr_xy (or arg_addr_xy)
-      _6502Opcode var_addr_op = addr->opcode == _6502_OP(argument)
-                                    ? _6502_OP(arg_addr_xy)
-                                    : _6502_OP(var_addr_xy);
+      W65C02Opcode var_addr_op = addr->opcode == W65C02_OP(argument)
+                                    ? W65C02_OP(arg_addr_xy)
+                                    : W65C02_OP(var_addr_xy);
   
       if (offset >= 256) {
-        var_addr_op = addr->opcode == _6502_OP(argument) ? _6502_OP(arg_addrb_xy)
-                                                         : _6502_OP(var_addrb_xy);
+        var_addr_op = addr->opcode == W65C02_OP(argument) ? W65C02_OP(arg_addrb_xy)
+                                                         : W65C02_OP(var_addrb_xy);
       }
       Emit(g, NewInstruction1(var_addr_op,
                               addr,
@@ -1270,20 +1845,20 @@ static void GetAddressXY(_6502Generator* g, IRNode* addr_node) {
       break;
     }
 
-    case _6502_OP(ssavar):
-    case _6502_OP(phi): {
+    case W65C02_OP(ssavar):
+    case W65C02_OP(phi): {
       TargetInstruction* var = addr->operand[0];
       offset = (int)TargetIntValue(var->operand[0]);
       // Macro instruction expands to:
       // ldx #offset lo
       // ldy #offset hi (removed for single byte case)
       // JSR __var_addr_xy (or arg_addr_xy)
-      _6502Opcode var_addr_op = var->opcode == _6502_OP(argument)
-                                    ? _6502_OP(arg_addr_xy)
-                                    : _6502_OP(var_addr_xy);
+      W65C02Opcode var_addr_op = var->opcode == W65C02_OP(argument)
+                                    ? W65C02_OP(arg_addr_xy)
+                                    : W65C02_OP(var_addr_xy);
       if (offset >= 256) {
-        var_addr_op = addr->opcode == _6502_OP(argument) ? _6502_OP(arg_addrb_xy)
-                                                         : _6502_OP(var_addrb_xy);
+        var_addr_op = addr->opcode == W65C02_OP(argument) ? W65C02_OP(arg_addrb_xy)
+                                                         : W65C02_OP(var_addrb_xy);
       }
       Emit(g, NewInstruction1(var_addr_op,
                               var,
@@ -1291,17 +1866,17 @@ static void GetAddressXY(_6502Generator* g, IRNode* addr_node) {
       break;
     }
 
-    case _6502_OP(symbol): {
-      // ldx #%abs(symbol)+0
-      // ldy #%abs(symbol)+1
+    case W65C02_OP(symbol): {
+      // ldx #%lo(symbol)
+      // ldy #%hi(symbol)
       SetIndexReg(g, addr, addr, 0);
-      Emit(g, NewInstruction2(_6502_OP(ldx), addr,
+      Emit(g, NewInstruction2(W65C02_OP(ldx), addr,
                               ByteConst(g, 0),
-                              kAddrModeAbsoluteSymbol));
+                              kAddrModeSymbolAddr));
       SetIndexReg(g, addr, addr, 1);
-      Emit(g, NewInstruction2(_6502_OP(ldy), addr,
+      Emit(g, NewInstruction2(W65C02_OP(ldy), addr,
                               ByteConst(g, 1),
-                              kAddrModeAbsoluteSymbol));
+                              kAddrModeSymbolAddr));
       break;
     }
     default:
@@ -1310,52 +1885,66 @@ static void GetAddressXY(_6502Generator* g, IRNode* addr_node) {
   }
 }
 
-static TargetInstruction* GetDestAddress(_6502Generator* g, IRNode* node) {
+static TargetInstruction* GetDestAddress(W65C02Generator* g, IRNode* node, bool put_in_zero_page) {
   if (node->dest != NULL) {
     // Dest node might not be lowered yet (ssavar might be after this
     // node).  Lower it now.
     LowerIRNode(g, node->dest);
-    return GetAddress(g, node->dest);
+    return GetAddress(g, node->dest, put_in_zero_page);
+  }
+  if (node->opcode == IR_OP(structreturn)) {
+    return GetLoweredNode(node);
   }
   if (node->opcode == IR_OP(rmovi) ||node->opcode == IR_OP(rmova)  ||
       node->opcode == IR_OP(rmovf) ||
       node->opcode == IR_OP(rmovd)) {
-    return GetAddress(g, node->inputs.value.p[0]);
+    return GetAddress(g, node->inputs.value.p[0], put_in_zero_page);
   }
-  return TempRegister(g, node->type->size);
+  return TempRegister(g, node->type, Sizeof(node->type));
 }
 
-static TargetInstruction* AddSubInteger(_6502Generator* g, IRNode* node,
-                                        _6502Opcode op, _6502Opcode carry_ctl,
+static TargetInstruction* AddSubInteger(W65C02Generator* g, IRNode* node,
+                                        W65C02Opcode op, W65C02Opcode carry_ctl,
                                         int size, TargetInstruction* dest,
                                         TargetInstruction* op1,
                                         TargetInstruction* op2) {
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, op2);
+  AddReloadPoint(g, dest);
   Emit(g, NewInstruction(carry_ctl, kAddrModeImplied));
+  bool is_const = GetAddrMode(op2) == kAddrModeImmediate;
   for (int i = 0; i < size; i++) {
     SetIndexReg2(g, op1, op2, dest, i);
     lda(g, op1, i);
-    Operate(g, op, op2, i);
+    if (i == 0 && is_const) {
+      // There's no point in adding or subtracting 0 from the lower byte,
+      if (ByteConst(g, 0) != 0) {
+        Operate(g, op, op2, i);
+      }
+    } else {
+      Operate(g, op, op2, i);
+    }
     sta(g, dest, i);
   }
   return dest;
 }
 
-static bool IsIdempotentOperation(_6502Opcode op, TargetInstruction* operand, AddressingMode mode, int index) {
+static bool IsIdempotentOperation(W65C02Opcode op, TargetInstruction* operand, AddressingMode mode, int index) {
   switch (op) {
-    case _6502_OP(ora):
+    case W65C02_OP(ora):
       // ORA #0 is idempotent
       if (mode == kAddrModeImmediate) {
-        int immed = (int)TargetIntValue(operand);
+        int64_t immed = TargetIntValue(operand);
         immed = (immed >> (index * 8)) & 0xff;
         if (immed == 0) {
           return true;
         }
       }
       break;
-    case _6502_OP(and):
+    case W65C02_OP(and):
       // AND #255 is idempotent
       if (mode == kAddrModeImmediate) {
-        int immed = (int)TargetIntValue(operand);
+        int64_t immed = TargetIntValue(operand);
         immed = (immed >> (index * 8)) & 0xff;
         if (immed == 255) {
           return true;
@@ -1368,11 +1957,14 @@ static bool IsIdempotentOperation(_6502Opcode op, TargetInstruction* operand, Ad
   return false;
 }
 
-static TargetInstruction* SimpleIntegerOp(_6502Generator* g, IRNode* node,
-                                          _6502Opcode op, int size,
+static TargetInstruction* SimpleIntegerOp(W65C02Generator* g, IRNode* node,
+                                          W65C02Opcode op, int size,
                                           TargetInstruction* dest,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2) {
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, op2);
+  AddReloadPoint(g, dest);
   for (int i = 0; i < size; i++) {
     bool idempotent = IsIdempotentOperation(op, op2, GetAddrMode(op2), i);
     SetIndexReg2(g, op1, op2, dest, i);
@@ -1386,30 +1978,62 @@ static TargetInstruction* SimpleIntegerOp(_6502Generator* g, IRNode* node,
   return dest;
 }
 
+static TargetInstruction* AndOp(W65C02Generator* g, IRNode* node,
+                                          int size,
+                                          TargetInstruction* dest,
+                                          TargetInstruction* op1,
+                                          TargetInstruction* op2) {
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, op2);
+  AddReloadPoint(g, dest);
+  AddressingMode mode = GetAddrMode(op2);
+  bool is_immediate = mode == kAddrModeImmediate;
+  for (int i = 0; i < size; i++) {
+    int64_t immed = -1;
+    if (is_immediate) {
+      immed = TargetIntValue(op2);
+      immed = (immed >> (i * 8)) & 0xff;
+    }
+    SetIndexReg2(g, op1, op2, dest, i);
+    if (is_immediate && immed == 0) {
+      // AND #0 is zero.
+      ldai(g, 0);
+    } else {
+      lda(g, op1, i);
+      if (!is_immediate || immed != 255) {
+        // Omit AND #255
+        Operate(g, W65C02_OP(and), op2, i);
+      }
+    }
+    sta(g, dest, i);
+  }
+
+  return dest;
+}
 // Unary not, equivalent to.
 // dest = (src == 0) ? 1 : 0
 //
 // For 2 byte:
-//  ldx #0
 //  lda src lo
-//  ORA src hi
-//  BEQ zero_label
-//  INX
-// zero_label:
-//  stx dest
+//  ora src hi
+//  beq label
+//  lda #255
+// label:
+//  inc a
+//  sta dest
 //    Rest of dest is zeroed out.
-static TargetInstruction* UnaryNotOp(_6502Generator* g, IRNode* src_node,
+static TargetInstruction* UnaryNotOp(W65C02Generator* g, IRNode* src_node,
                                      TargetInstruction* dest,
                                      TargetInstruction* src, int dest_size) {
-  int size = src_node->type->size;
+  int size = Sizeof(src_node->type);
+  AddReloadPoint(g, src);
+  AddReloadPoint(g, dest);
   TargetInstruction* zero_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
 
   AddressingMode dest_mode = GetAddrMode(dest);
 
-  Emit(g, NewInstruction1(_6502_OP(ldx),
-                          Zero(g),
-                          kAddrModeImmediate));
+  // TODO optimize this for size > 2
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, src, dest, i);
     if (i == 0) {
@@ -1418,21 +2042,26 @@ static TargetInstruction* UnaryNotOp(_6502Generator* g, IRNode* src_node,
       ora(g, src, i);
     }
   }
-
-  EmitResolvedBranch(g, _6502_OP(beq), zero_label);
-  Emit(g, NewInstruction(_6502_OP(inx), kAddrModeImplied));
+  cmpi(g, 0);
+  EmitResolvedBranch(g, W65C02_OP(beq), zero_label);
+  ldai(g, 255);
   Emit(g, zero_label);
-
-  // Store X in dest.  It's stored in low byte and the upper bytes are zeroed.
+  Emit(g, NewInstruction(W65C02_OP(inc), kAddrModeAccumulator));
+  
+  // Store A in dest.  It's stored in low byte and the upper bytes are zeroed.
   // Dest will be in zero page.
   if (dest_mode != kAddrModeIndirectIndexed) {
-    stx(g, dest, 0);
+    sta(g, dest, 0);
     for (int i = 1; i < dest_size; i++) {
-       stz(g, dest, i);
+      if (Is65c02()) {
+         stz(g, dest, i);
+      } else {
+        ldai(g, 0);
+        sta(g, dest, i);
+      }
      }
     
   } else {
-    txa(g);
     sta(g, dest, 0);
     ldai(g, 0);
     for (int i = 1; i < dest_size; i++) {
@@ -1447,14 +2076,33 @@ static TargetInstruction* UnaryNotOp(_6502Generator* g, IRNode* src_node,
 // lda src
 // EOR #0xff
 // sta dest
-static TargetInstruction* OnesComplement(_6502Generator* g, IRNode* src_node,
+static TargetInstruction* OnesComplement(W65C02Generator* g, IRNode* src_node,
                                          TargetInstruction* dest,
                                          TargetInstruction* src, int size) {
-  for (int i = 0; i < size; i++) {
-    SetIndexReg(g, src, dest, i);
-    lda(g, src, i);
+  AddReloadPoint(g, src);
+  AddReloadPoint(g, dest);
+  AddressingMode src_mode = GetAddrMode(src);
+  AddressingMode dest_mode = GetAddrMode(dest);
+  if (size > 2 && src_mode == kAddrModeZeroPage && dest_mode == kAddrModeZeroPage) {
+    TargetInstruction* loop = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    SetAddrMode(src, kAddrModeZeroPageIndexedX);
+    SetAddrMode(dest, kAddrModeZeroPageIndexedX);
+    ldxi(g, size-1);
+    Emit(g, loop);
+    lda(g, src, -1);
     eori(g, 0xff);
-    sta(g, dest, i);
+    sta(g, dest, -1);
+    dex(g);
+    EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+    SetAddrMode(src, src_mode);
+    SetAddrMode(dest, dest_mode);
+  } else {
+    for (int i = 0; i < size; i++) {
+      SetIndexReg(g, src, dest, i);
+      lda(g, src, i);
+      eori(g, 0xff);
+      sta(g, dest, i);
+    }
   }
   return dest;
 }
@@ -1464,27 +2112,64 @@ static TargetInstruction* OnesComplement(_6502Generator* g, IRNode* src_node,
 // SBC src
 // sta dest
 // ...
-static TargetInstruction* NegateInteger(_6502Generator* g, IRNode* src_node,
+static TargetInstruction* NegateInteger(W65C02Generator* g, IRNode* src_node,
                                         TargetInstruction* dest,
                                         TargetInstruction* src, int size) {
-  Emit(g, NewInstruction(_6502_OP(sec), kAddrModeImplied));
-  for (int i = 0; i < size; i++) {
-    SetIndexReg(g, src, dest, i);
+  AddReloadPoint(g, src);
+  AddReloadPoint(g, dest);
+  AddressingMode src_mode = GetAddrMode(src);
+  AddressingMode dest_mode = GetAddrMode(dest);
+  Emit(g, NewInstruction(W65C02_OP(sec), kAddrModeImplied));
+  if (size > 2 && src_mode == kAddrModeZeroPage && dest_mode == kAddrModeZeroPage) {
+    TargetInstruction* loop = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    SetAddrMode(src, kAddrModeZeroPageIndexedX);
+    SetAddrMode(dest, kAddrModeZeroPageIndexedX);
+    ldyi(g, size);
+    ldxi(g, 0);
+    Emit(g, loop);
     ldai(g, 0);
-    Operate(g, _6502_OP(sbc), src, i);
-    sta(g, dest, i);
+    Operate(g, W65C02_OP(sbc), src, -1);
+    sta(g, dest, -1);
+    inx(g);
+    dey(g);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop);
+    SetAddrMode(src, src_mode);
+    SetAddrMode(dest, dest_mode);
+  } else {
+    for (int i = 0; i < size; i++) {
+      SetIndexReg(g, src, dest, i);
+      ldai(g, 0);
+      Operate(g, W65C02_OP(sbc), src, i);
+      sta(g, dest, i);
+    }
   }
   return dest;
 }
 
-static void ShiftOnce(_6502Generator* g, IRNode* node, _6502Opcode op,
-                      _6502Opcode second_op, int size, TargetInstruction* dest,
+// To negate a floating point value, flip the sign bit (top bit).
+static TargetInstruction* NegateFloatingPoint(W65C02Generator* g, IRNode* src_node,
+                                              TargetInstruction* dest,
+                                              TargetInstruction* src, int size) {
+  if (src != dest) {
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+    src = dest;
+  }
+  ldyi(g, size-1);
+  lda(g, src, size-1);
+  eori(g, 0x80);
+  sta(g, dest, size-1);
+  return dest;
+}
+
+static void ShiftOnce(W65C02Generator* g, IRNode* node, W65C02Opcode op,
+                      W65C02Opcode second_op, int size, TargetInstruction* dest,
                       TargetInstruction* op1) {
-  if (op == _6502_OP(asl)) {
+  AddressingMode mode = GetAddrMode(dest);
+  if (op == W65C02_OP(asl)) {
     // Shifting left, start at lsb
     for (int i = 0; i < size; i++) {
       SetIndexReg(g, op1, dest, i);
-      if (dest == op1) {
+      if (dest == op1 && mode != kAddrModeIndirect && mode != kAddrModeIndirectIndexed) {
         // Source and dest are the same, operate directly on the operand.
         Emit(g, NewInstruction2(i == 0 ? op : second_op, dest,
                                 ByteConst(g, i),
@@ -1499,7 +2184,7 @@ static void ShiftOnce(_6502Generator* g, IRNode* node, _6502Opcode op,
     // Shifting right, start at msb
     for (int i = size-1; i >= 0; i--) {
       SetIndexReg(g, op1, dest, i);
-      if (dest == op1) {
+      if (dest == op1 && mode != kAddrModeIndirect && mode != kAddrModeIndirectIndexed) {
         // Source and dest are the same, operate directly on the operand.
         Emit(g, NewInstruction2(i == size-1 ? op : second_op, dest,
                                 ByteConst(g, i),
@@ -1513,13 +2198,111 @@ static void ShiftOnce(_6502Generator* g, IRNode* node, _6502Opcode op,
   }
 }
 
-static TargetInstruction* ShiftOp(_6502Generator* g, IRNode* node,
-                                  _6502Opcode op, _6502Opcode second_op,
+static TargetInstruction* ShiftLeftByMultipleOf8(W65C02Generator* g, IRNode* node,
+                                  int size, TargetInstruction* dest,
+                                  TargetInstruction* src, int count) {
+  int bytes = count / 8;
+  int from_offset = size - bytes - 1;
+  int to_offset = size - 1;
+  while (from_offset >= 0) {
+    SetIndexReg(g, src, dest, from_offset);
+    lda(g, src, from_offset);
+    sta(g, dest, to_offset);
+    from_offset--;
+    to_offset--;
+  }
+  ldai(g, 0);
+  for (int i = 0; i < bytes; i++) {
+    SetIndexReg(g, dest, dest, i);
+    sta(g, dest, i);
+  }
+  return dest;
+}
+
+static void ShiftRightByMultipleOf8(W65C02Generator* g, IRNode* node,
+                                                  bool is_unsigned,
+                                  int size, TargetInstruction* dest,
+                                  TargetInstruction* src, int count) {
+  int bytes = count / 8;
+  int from_offset = bytes;
+  int to_offset = 0;
+  while (from_offset < size) {
+    SetIndexReg(g, src, dest, from_offset);
+    lda(g, src, from_offset);
+    sta(g, dest, to_offset);
+    from_offset++;
+    to_offset++;
+  }
+  if (!is_unsigned) {
+    // A = top byte of src.
+    // eor #0x80
+    // cmp #0x80      // Carry set = positive
+    // lda #0
+    // sbc #0         // 255 if negative, zero if positive
+    
+    SetIndexReg(g, src, src, size-1);
+    eori(g, 0x80);
+    cmpi(g, 0x80);            // Set carry flag if top bit set.
+    ldai(g, 0);
+    sbci(g, 0);         // 255 if negative, zero if positive
+  } else {
+    ldai(g, 0);
+  }
+  for (int i = size - bytes; i < size; i++) {
+    SetIndexReg(g, dest, dest, i);
+    sta(g, dest, i);
+  }
+}
+
+static void ShiftByMultipleOf8(W65C02Generator* g, IRNode* node,
+                                  W65C02Opcode op, W65C02Opcode second_op,
+                                  int size, TargetInstruction* dest,
+                                  TargetInstruction* op1, int count) {
+  if (op == W65C02_OP(asl)) {
+     ShiftLeftByMultipleOf8(g, node, size, dest, op1, count);
+     return;
+  }
+  ShiftRightByMultipleOf8(g, node, op != W65C02_OP(ror), size, dest, op1, count);
+}
+
+static TargetInstruction* ConstantShiftOp(W65C02Generator* g, IRNode* node,
+                                  W65C02Opcode op, W65C02Opcode second_op,
                                   int size, TargetInstruction* dest,
                                   TargetInstruction* op1, int count) {
   if (count == 0) {
     return dest;
   }
+  if (count >= size * 8) {
+    Copy(g, dest, Zero(g), 0, 0, size, kAddrModeImmediate, GetAddrMode(dest));
+    return dest;
+  }
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, dest);
+  AddressingMode mode = GetAddrMode(dest);
+  if (count >= 8) {
+    // Shifting by a multiple of 8.  We can do that by bytes instead of bits.
+    ShiftByMultipleOf8(g, node, op, second_op, size, dest, op1, count);
+    
+    // We've shifted by a multiple of 8.  Now we can shift the remaining
+    // 0-7 bits.
+    count &= 7;
+    if (count == 0) {
+      return dest;
+    }
+    op1 = dest;
+  }
+  
+  if (count > 1 && dest == op1 && mode != kAddrModeIndirect && mode != kAddrModeIndirectIndexed) {
+    // Dest and src are the same and valid shift instruction operands.
+    TargetInstruction* loop = NULL;
+    ldxi(g, count);
+    loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+    ShiftOnce(g, node, op, second_op, size, dest, dest);
+    dex(g);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop);
+    return dest;
+  }
+  
   // Shift the first iteration.
   ShiftOnce(g, node, op, second_op, size, dest, op1);
   if (count == 1) {
@@ -1528,105 +2311,254 @@ static TargetInstruction* ShiftOp(_6502Generator* g, IRNode* node,
   // If there are more iterations, shift in a loop with src and dest the same.
   TargetInstruction* loop = NULL;
   if (count > 2) {
-    ldxi(g, size-1);
-    loop = Emit(g, NewInstruction(_6502_OP(label), kAddrModeImplied));
+    ldxi(g, count-1);
+    loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   }
   ShiftOnce(g, node, op, second_op, size, dest, dest);
   if (loop != NULL) {
     dex(g);
-    EmitResolvedBranch(g, _6502_OP(bne), loop);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop);
   }
   return dest;
 }
 
-static void ShiftOnceArithmeticRight(_6502Generator* g, IRNode* node,
+static TargetInstruction* ShiftOp(W65C02Generator* g, IRNode* node,
+                                  W65C02Opcode op, W65C02Opcode second_op,
+                                  int size, TargetInstruction* dest,
+                                  TargetInstruction* op1, TargetInstruction* count) {
+  if (TargetIsConst(count)) {
+    return ConstantShiftOp(g, node, op, second_op, size, dest, op1, (int)TargetIntValue(count));
+  }
+  
+  // ldx count
+  // beq skip
+  // shift once
+  // dex
+  // loop:
+  // shift once
+  // dex
+  // bne loop
+  // skip:
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, dest);
+  AddReloadPoint(g, count);
+  ldx(g, count, 0);
+  TargetInstruction* skip = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), skip);
+  // Shift the first iteration.
+  ShiftOnce(g, node, op, second_op, size, dest, op1);
+  dex(g);
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  ShiftOnce(g, node, op, second_op, size, dest, dest);
+  dex(g);
+  EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  Emit(g, skip);
+  return dest;
+}
+
+static void ShiftOnceArithmeticRight(W65C02Generator* g, IRNode* node,
                                      int size, TargetInstruction* dest,
                       TargetInstruction* src) {
+  cmpi(g, 0x80);            // Set carry flag if top bit set.
   AddressingMode addrmode = GetAddrMode(src);
   for (int j = size - 1; j >= 0; j--) {
      AddressingMode mode = addrmode;
      SetIndexRegDown(g, src, dest, j, size);
-     if (addrmode == kAddrModeIndirectIndexed && j == 0) {
+     if (Is65c02() && addrmode == kAddrModeIndirectIndexed && j == 0) {
        mode = kAddrModeIndirect;
      }
-     if (dest == src) {
-       Emit(g, NewInstruction2(_6502_OP(ror), src, ByteConst(g, j), mode));
+    // ROR is used here because we've already set the carry flag to the sign.
+     if (dest == src && mode != kAddrModeIndirect && mode != kAddrModeIndirectIndexed) {
+        Emit(g, NewInstruction2(W65C02_OP(ror), src, ByteConst(g, j), mode));
      } else {
        lda(g, src, j);
-       Emit(g, NewInstruction(_6502_OP(ror),  kAddrModeAccumulator));
+        Emit(g, NewInstruction(W65C02_OP(ror),  kAddrModeAccumulator));
        sta(g, dest, j);
      }
    }
 }
 
-static TargetInstruction* ArithmeticRightShiftOp(_6502Generator* g,
+
+static TargetInstruction* ConstantArithmeticRightShiftOp(W65C02Generator* g,
                                                  IRNode* node, int size,
                                                  TargetInstruction* dest,
                                                  TargetInstruction* src,
                                                  int count) {
+  if (count == 0) {
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+    return dest;
+  }
+  if (count >= size * 8) {
+    Copy(g, dest, Zero(g), 0, 0, size, kAddrModeImmediate, GetAddrMode(dest));
+    return dest;
+  }
   // lda hi
   // cmp $0x80
   // ror hi
   // ror lo
-  SetIndexReg(g, src, dest, size-1);
-  lda(g, src, size-1);
-  cmpi(g, 0x80);            // Set carry flag if top bit set.
+  AddReloadPoint(g, src);
+  AddReloadPoint(g, dest);
+  bool long_shift = count >= 8;
+  if (long_shift) {
+    ShiftRightByMultipleOf8(g, node, false, size, dest, src, count);
+    // We've shifted by a multiple of 8.  Now we can shift the remaining
+    // 0-7 bits.
+    count &= 7;
+    if (count == 0) {
+      return dest;
+    }
+    src = dest;
+  }
   
-  // Firat shift puts src into dest.
+  TargetInstruction* loop = NULL;
+  if (src == dest) {
+    if (count == 1) {
+      SetIndexReg(g, src, dest, size-1);
+      if (!long_shift) {
+        lda(g, src, size-1);    // For a long shift (>8) A contains top byte.
+      }
+      ShiftOnceArithmeticRight(g, node, size, dest, src);
+    } else {
+      ldxi(g, count);
+      loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+      SetIndexReg(g, src, dest, size-1);
+      lda(g, src, size-1);
+      ShiftOnceArithmeticRight(g, node, size, dest, src);
+      dex(g);
+      EmitResolvedBranch(g, W65C02_OP(bne), loop);
+    }
+    return dest;
+  }
+  // First shift puts src into dest.
   ShiftOnceArithmeticRight(g, node, size, dest, src);
   if (count == 1) {
     // Only one shift, we're done.
     return dest;
   }
-  TargetInstruction* loop = NULL;
   if (count > 2) {
     // Need a loop.
-    ldxi(g, size - 1);
-    loop = Emit(g, NewInstruction(_6502_OP(label), kAddrModeImplied));
+    ldxi(g, count - 1);
+    loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   }
   // Rest of shifts use dest only.
   SetIndexReg(g, dest, dest, size-1);
   lda(g, dest, size-1);
-  cmpi(g, 0x80);            // Set carry flag if top bit set.
   ShiftOnceArithmeticRight(g, node, size, dest, dest);
   if (loop != NULL) {
     dex(g);
-    EmitResolvedBranch(g, _6502_OP(bne), loop);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop);
   }
   return dest;
 }
 
-static TargetInstruction* CallArithmeticBinaryRuntime(
-    _6502Generator* g, IRNode* node, TargetInstruction* dest,
-    TargetInstruction* op1, TargetInstruction* op2, Symbol* func) {
-  TargetInstruction* tmp = NULL;
-  if ((node->flags & kIRDestIsIndirect) != 0) {
-    tmp = TempRegister(g, node->type->size);
-    Emit(g, NewInstruction1(_6502_OP(expr_addr_a), tmp, kAddrModeImplied));
-  } else {
-    Emit(g, NewInstruction1(_6502_OP(expr_addr_a), dest, kAddrModeImplied));
+
+static TargetInstruction* ArithmeticRightShiftOp(W65C02Generator* g,
+                                                 IRNode* node, int size,
+                                                 TargetInstruction* dest,
+                                                 TargetInstruction* src,
+                                                 TargetInstruction* count) {
+  if (TargetIsConst(count)) {
+    return ConstantArithmeticRightShiftOp(g, node, size, dest, src, (int)TargetIntValue(count));
   }
+  // ldx count
+  // beq skip
+  // lda hi
+  // cmp $0x80
+  // ror hi
+  // ror lo
+  // dex:
+  // loop:
+  // shift
+  // dex
+  // bne skip
+  // skip:
+  AddReloadPoint(g, src);
+  AddReloadPoint(g, dest);
+  AddReloadPoint(g, count);
+  ldx(g, count, 0);
+  TargetInstruction* skip = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), skip);
+  SetIndexReg(g, src, dest, size-1);
+  lda(g, src, size-1);
+  
+  // Firat shift puts src into dest.
+  ShiftOnceArithmeticRight(g, node, size, dest, src);
+
+  dex(g);
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  // Rest of shifts use dest only.
+  SetIndexReg(g, dest, dest, size-1);
+  lda(g, dest, size-1);
+  ShiftOnceArithmeticRight(g, node, size, dest, dest);
+  dex(g);
+  EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  Emit(g, skip);
+  return dest;
+}
+
+static bool DestInZeroPage(TargetInstruction* dest) {
+  switch ((W65C02Opcode)dest->opcode) {
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
+    case W65C02_OP(expr1):
+    case W65C02_OP(expr4):
+    case W65C02_OP(expr8):
+    case W65C02_OP(exprf):
+    case W65C02_OP(exprd):
+      return true;
+    case W65C02_OP(expr2):
+      return GetAddrMode(dest) == kAddrModeZeroPage;
+    default:
+      break;
+  }
+  return false;
+}
+
+static TargetInstruction* CallArithmeticBinaryRuntime(
+    W65C02Generator* g, IRNode* node, TargetInstruction* dest,
+    TargetInstruction* op1, TargetInstruction* op2, Symbol* func) {
+  AddReloadPoint(g, op1);
+  AddReloadPoint(g, op2);
+  AddReloadPoint(g, dest);
+  bool dest_in_zero_page = DestInZeroPage(dest);
+  
+  TargetInstruction* tmp = NULL;
+  
+  if (dest_in_zero_page) {
+    Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), dest, kAddrModeImplied));
+  } else {
+    tmp = TempRegister(g, node->type, Sizeof(node->type));
+    AddSpillPoint(g, tmp);
+    Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), tmp, kAddrModeImplied));
+  }
+  
   // lda #dest
   // ldx #src1
   // ldy #src2
   // jsr func
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_x), op1, kAddrModeImplied));
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_y), op2, kAddrModeImplied));
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), op1, kAddrModeImplied));
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_y), op2, kAddrModeImplied));
   jsr(g, func);
-  if ((node->flags & kIRDestIsIndirect) != 0) {
+  if (!dest_in_zero_page) {
+    AddReloadPoint(g, tmp);
     // Dest is indirect, copy to it.
     AddressingMode mode = kAddrModeIndirect;
-    for (int i = 0; i < node->type->size; i++) {
+    for (int i = 0; i < Sizeof(node->type); i++) {
        SetIndexReg(g, tmp, dest, i);
-       Emit(g, NewInstruction2(_6502_OP(lda), tmp, ByteConst(g, i), kAddrModeZeroPage));
-       Emit(g, NewInstruction2(_6502_OP(sta), dest, ByteConst(g, i), mode));
+       Emit(g, NewInstruction2(W65C02_OP(lda), tmp, ByteConst(g, i), kAddrModeZeroPage));
+       Emit(g, NewInstruction2(W65C02_OP(sta), dest, ByteConst(g, i), mode));
        mode = kAddrModeIndirectIndexed;
      }
+     dest = tmp;
   }
   return dest;
 }
 
-static TargetInstruction* CallArithmeticUnaryRuntime(_6502Generator* g,
+static TargetInstruction* CallArithmeticUnaryRuntime(W65C02Generator* g,
                                                      IRNode* node,
                                                      TargetInstruction* dest,
                                                      TargetInstruction* op,
@@ -1634,8 +2566,10 @@ static TargetInstruction* CallArithmeticUnaryRuntime(_6502Generator* g,
   // lda #dest
   // ldx #src1
   // JSR func
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_a), dest, kAddrModeImplied));
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_x), op, kAddrModeImplied));
+  AddReloadPoint(g, op);
+  AddReloadPoint(g, dest);
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), dest, kAddrModeImplied));
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), op, kAddrModeImplied));
   jsr(g, func);
   return dest;
 }
@@ -1643,26 +2577,26 @@ static TargetInstruction* CallArithmeticUnaryRuntime(_6502Generator* g,
 // These macros fill out the arithmetic_runtimes array.  The
 // preprocessor magic builds the name of a runtime function from
 // an arithmetic opcode, signedness and size.  The functions
-// are encoded as offsets into the _6502Generator struct.
+// are encoded as offsets into the W65C02Generator struct.
 #define ALUFUNC1(op, s, u)                                   \
-  {IR_OP(op), true, 1, offsetof(_6502Generator, u##1)},      \
-      {IR_OP(op), false, 1, offsetof(_6502Generator, s##1)}, \
-      {IR_OP(op), true, 2, offsetof(_6502Generator, u##2)},  \
-      {IR_OP(op), false, 2, offsetof(_6502Generator, s##2)}, \
-      {IR_OP(op), true, 4, offsetof(_6502Generator, u##4)},  \
-      {IR_OP(op), false, 4, offsetof(_6502Generator, s##4)}, \
-      {IR_OP(op), true, 8, offsetof(_6502Generator, u##8)},  \
-      {IR_OP(op), false, 8, offsetof(_6502Generator, s##8)},
+  {IR_OP(op), true, 1, offsetof(W65C02Generator, u##1)},      \
+      {IR_OP(op), false, 1, offsetof(W65C02Generator, s##1)}, \
+      {IR_OP(op), true, 2, offsetof(W65C02Generator, u##2)},  \
+      {IR_OP(op), false, 2, offsetof(W65C02Generator, s##2)}, \
+      {IR_OP(op), true, 4, offsetof(W65C02Generator, u##4)},  \
+      {IR_OP(op), false, 4, offsetof(W65C02Generator, s##4)}, \
+      {IR_OP(op), true, 8, offsetof(W65C02Generator, u##8)},  \
+      {IR_OP(op), false, 8, offsetof(W65C02Generator, s##8)},
 
 #define ALUFUNC2(op, s1, s2, u1, u2)                              \
-  {IR_OP(op), true, 1, offsetof(_6502Generator, u1##1##u2)},      \
-      {IR_OP(op), false, 1, offsetof(_6502Generator, s1##1##s2)}, \
-      {IR_OP(op), true, 2, offsetof(_6502Generator, u1##2##u2)},  \
-      {IR_OP(op), false, 2, offsetof(_6502Generator, s1##2##s2)}, \
-      {IR_OP(op), true, 4, offsetof(_6502Generator, u1##4##u2)},  \
-      {IR_OP(op), false, 4, offsetof(_6502Generator, s1##4##s2)}, \
-      {IR_OP(op), true, 8, offsetof(_6502Generator, u1##8##u2)},  \
-      {IR_OP(op), false, 8, offsetof(_6502Generator, s1##8##s2)},
+  {IR_OP(op), true, 1, offsetof(W65C02Generator, u1##1##u2)},      \
+      {IR_OP(op), false, 1, offsetof(W65C02Generator, s1##1##s2)}, \
+      {IR_OP(op), true, 2, offsetof(W65C02Generator, u1##2##u2)},  \
+      {IR_OP(op), false, 2, offsetof(W65C02Generator, s1##2##s2)}, \
+      {IR_OP(op), true, 4, offsetof(W65C02Generator, u1##4##u2)},  \
+      {IR_OP(op), false, 4, offsetof(W65C02Generator, s1##4##s2)}, \
+      {IR_OP(op), true, 8, offsetof(W65C02Generator, u1##8##u2)},  \
+      {IR_OP(op), false, 8, offsetof(W65C02Generator, s1##8##s2)},
 
 static struct {
   IROpcode opcode;
@@ -1670,18 +2604,20 @@ static struct {
   int size;
   int func_offset;
 } arithmetic_runtimes[] = {
-    ALUFUNC1(muli, umul, smul)  // muli -> umul[1,2,4,8] (size is inserted)
-    ALUFUNC1(divi, udiv, sdiv) ALUFUNC1(modi, umod, smod)
-        ALUFUNC2(i2f, i, tof, ui, tof) ALUFUNC2(i2d, i, tod, ui, tod)
-            ALUFUNC2(f2i, ftoi, , ftoui, )  // Size is appended to these
-    ALUFUNC2(d2i, dtoi, , dtoui, ){IR_OP(nop)}};
+    ALUFUNC1(muli, smul, umul)  // muli -> umul[1,2,4,8] (size is inserted)
+    ALUFUNC1(divi, sdiv, udiv) ALUFUNC1(modi, smod, umod)
+        ALUFUNC2(i2f, i, tof, ui, tof)
+            ALUFUNC2(f2i, ftoi, , ftoui, )
+  ALUFUNC2(i2d, i, tof, ui, tof)
+      ALUFUNC2(d2i, ftoi, , ftoui, )
+  {IR_OP(nop)}};
 
 #undef ALUFUNC1
 #undef ALUFUNC2
 
 // Given an opcode, signedness and size, return a pointer to the symbol
 // to be used for the arithmetic operation.
-static Symbol* RuntimeFunction(_6502Generator* g, IROpcode opcode,
+static Symbol* RuntimeFunction(W65C02Generator* g, IROpcode opcode,
                                bool is_unsigned, int size) {
   for (int i = 0; arithmetic_runtimes[i].opcode != IR_OP(nop); i++) {
     if (arithmetic_runtimes[i].opcode == opcode &&
@@ -1697,7 +2633,7 @@ static Symbol* RuntimeFunction(_6502Generator* g, IROpcode opcode,
 
 // Some arithmetic operations need addresses for their operand and some
 // need the values.
-static void GetOpInstructions(_6502Generator* g, IRNode* node,
+static void GetOpInstructions(W65C02Generator* g, IRNode* node,
                               TargetInstruction** ops) {
   for (size_t i = 0; i < node->inputs.length; i++) {
     IRNode* input = node->inputs.value.p[i];
@@ -1716,7 +2652,11 @@ static void GetOpInstructions(_6502Generator* g, IRNode* node,
       case IR_OP(nota):
       case IR_OP(onescomp):
       case IR_OP(negi):
-        ops[i] = GetAddress(g, input);
+      case IR_OP(rmovi):
+      case IR_OP(rmovf):
+      case IR_OP(rmovd):
+      case IR_OP(rmova):
+        ops[i] = GetAddress(g, input, true);
         break;
 
       case IR_OP(addf):
@@ -1738,10 +2678,7 @@ static void GetOpInstructions(_6502Generator* g, IRNode* node,
       case IR_OP(d2i):
       case IR_OP(f2d):
       case IR_OP(d2f):
-      case IR_OP(rmovi):
-      case IR_OP(rmovf):
-      case IR_OP(rmovd):
-        ops[i] = Materialize(g, input);
+        ops[i] = Materialize(g, input, Sizeof(input->type), true);
         break;
         break;
       default:
@@ -1750,13 +2687,13 @@ static void GetOpInstructions(_6502Generator* g, IRNode* node,
   }
 }
 
-static void IncrementOnce(_6502Generator* g, IRNode* node, TargetInstruction* src) {
-  int size = node->type->size;
+static void IncrementOnce(W65C02Generator* g, IRNode* node, TargetInstruction* src) {
+  int size = Sizeof(node->type);
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, src, src, i);
     if (i > 0) {
-      TargetInstruction* label = NewInstruction(_6502_OP(label), kAddrModeImplied);
-      EmitResolvedBranch(g, _6502_OP(bne), label);
+      TargetInstruction* label = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+      EmitResolvedBranch(g, W65C02_OP(bne), label);
       inc(g, src, i);
       Emit(g, label);
     } else {
@@ -1766,7 +2703,7 @@ static void IncrementOnce(_6502Generator* g, IRNode* node, TargetInstruction* sr
 }
 
 // Increment op1 by op2.  op2 will be a constant.
-static TargetInstruction* Increment(_6502Generator* g, IRNode* node, IRNode* op1, IRNode* op2) {
+static TargetInstruction* Increment(W65C02Generator* g, IRNode* node, IRNode* op1, IRNode* op2) {
   // For a 2-byte increment.  If only one iteration, omit loop.
   //  LDX #op2
   // loop:
@@ -1775,20 +2712,21 @@ static TargetInstruction* Increment(_6502Generator* g, IRNode* node, IRNode* op1
   //  INC op1+1
   // xx:
   //  DEX
-  //  BME loop
+  //  BNE loop
   int amount = (int)IRIntConstValue(op2);
   if (amount == 0) {
     return NULL;
   }
-  TargetInstruction* src = GetAddress(g, op1);
-  
+  TargetInstruction* src = GetAddress(g, op1, true);
+  AddReloadPoint(g, src);
+
   AddressingMode mode = GetAddrMode(src);
-  int size = node->type->size;
+  int size = Sizeof(node->type);
   
   if (mode == kAddrModeIndirect || mode == kAddrModeIndirectIndexed) {
     // No INC instructions for these addressing modes.  We need to add 1
     // to the src and store it back.
-    return AddSubInteger(g, node, _6502_OP(adc), _6502_OP(clc), size, src,
+    return AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), size, src,
                           src, ByteConst(g, amount));
 }
   
@@ -1796,10 +2734,10 @@ static TargetInstruction* Increment(_6502Generator* g, IRNode* node, IRNode* op1
      IncrementOnce(g, node, src);
   } else {
     ldxi(g, amount);
-    TargetInstruction* loop_label = Emit(g, NewInstruction(_6502_OP(label), kAddrModeImplied));
+    TargetInstruction* loop_label = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
     IncrementOnce(g, node, src);
     dex(g);
-    EmitResolvedBranch(g, _6502_OP(bne), loop_label);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop_label);
   }
   
   TargetSetLoweredNode(node, src);
@@ -1820,7 +2758,16 @@ static int Log2(int64_t v) {
   return MultiplyDeBruijnBitPosition2[(uint32_t)(v * 0x077CB531U) >> 27];
 }
 
-static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node) {
+static TargetInstruction* MultiplyBy10(W65C02Generator* g,
+                                       IRNode* node,
+                                       TargetInstruction* dest,
+                                       TargetInstruction* op) {
+  Symbol* mul_func = TypeIsUnsigned(node->type) ? g->umul2_10 : g->smul2_10;
+  return SetLoweredNode(node, CallArithmeticUnaryRuntime(g, node, dest, op, mul_func));
+}
+
+static TargetInstruction* ReduceMultiplyOrDivide(W65C02Generator* g, IRNode* node) {
+  TargetInstruction* result = NULL;
   switch (node->opcode) {
     case IR_OP(muli): {
       assert(node->inputs.length == 2);
@@ -1830,10 +2777,14 @@ static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node
         if (IRIsConst(op1) && IRIsConst(op2)) {
           break;
         }
-        TargetInstruction* dest = GetDestAddress(g, node);
+        TargetInstruction* dest = GetDestAddress(g, node, true);
         TypeRecord* type = node->type;
-        int size = type == NULL ? 2 : type->size;
+        int size = Sizeof(type);
 
+        if (size == 2 && IRIsConst(op2) && IRIntConstValue(op2) == 10) {
+          // We have a special optimized multiply by 10 function.
+          return MultiplyBy10(g, node, dest, Materialize(g, op1, 2, true));
+        }
         // One is constant, if it's a power of 2 we can create a loop
         // of shifts.
         if (IRIsConst(op1)) {
@@ -1845,8 +2796,10 @@ static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node
              return SetLoweredNode(node, GetLoweredNode(op2));
            }
           if (IsPowerOf2(c)) {
-            return SetLoweredNode(node, ShiftOp(g, node, _6502_OP(asl), _6502_OP(rol), size, dest, GetAddress(g, op2),
+            result = SetLoweredNode(node, ConstantShiftOp(g, node, W65C02_OP(asl), W65C02_OP(rol), size, dest, GetAddress(g, op2, true),
                            Log2(c)));
+            AddSpillPoint(g, dest);
+            return result;
 
           }
         } else {
@@ -1858,8 +2811,10 @@ static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node
             return SetLoweredNode(node, GetLoweredNode(op1));
           }
           if (IsPowerOf2(c)) {
-            return SetLoweredNode(node, ShiftOp(g, node, _6502_OP(asl), _6502_OP(rol), size, dest, GetAddress(g, op1),
+            result = SetLoweredNode(node, ConstantShiftOp(g, node, W65C02_OP(asl), W65C02_OP(rol), size, dest, GetAddress(g, op1, true),
                             Log2(c)));
+            AddSpillPoint(g, dest);
+             return result;
           }
         }
       }
@@ -1870,9 +2825,9 @@ static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
-        TargetInstruction* dest = GetDestAddress(g, node);
+        TargetInstruction* dest = GetDestAddress(g, node, true);
         TypeRecord* type = node->type;
-        int size = type == NULL ? 2 : type->size;
+        int size = Sizeof(type);
         bool is_unsigned = type != NULL && TypeIsUnsigned(type);
 
         // One is constant, if it's a power of 2 we can create a loop
@@ -1881,12 +2836,13 @@ static TargetInstruction* ReduceMultiplyOrDivide(_6502Generator* g, IRNode* node
           int64_t c = ((IRConstant*)op2)->value.ivalue;
           if (IsPowerOf2(c)) {
             if (is_unsigned) {
-                return SetLoweredNode(node, ShiftOp(g, node, _6502_OP(lsr), _6502_OP(ror), size, dest, GetAddress(g, op1),
+                return SetLoweredNode(node, ConstantShiftOp(g, node, W65C02_OP(lsr), W65C02_OP(ror), size, dest, GetAddress(g, op1, true),
                                 Log2(c)));
             } else {
-              return SetLoweredNode(node, ArithmeticRightShiftOp(g, node, size, dest, GetAddress(g, op1),
+              result = SetLoweredNode(node, ConstantArithmeticRightShiftOp(g, node, size, dest, GetAddress(g, op1, true),
                                              Log2(c)));
-              
+              AddSpillPoint(g, dest);
+               return result;
             }
           }
         }
@@ -1907,15 +2863,23 @@ static bool IsVariableNode(IRNode* node) {
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(staticvar):
+    case IR_OP(externvar):
     case IR_OP(ssavar):
     case IR_OP(phi):
+    case W65C02_OP(ivarreg):
+      case W65C02_OP(bvarreg):
+      case W65C02_OP(lvarreg):
+      case W65C02_OP(xvarreg):
+      case W65C02_OP(fvarreg):
+      case W65C02_OP(dvarreg):
+      
       return true;
     default:
       return false;
   }
 }
 
-static bool IsSameVariable(_6502Generator* g, IRNode* node1, IRNode* node2) {
+static bool IsSameVariable(W65C02Generator* g, IRNode* node1, IRNode* node2) {
   IRNode* var1 = node1;
   IRNode* var2 = node2;
   if (node1->opcode == IR_OP(phi) || node1->opcode == IR_OP(ssavar)) {
@@ -1929,7 +2893,7 @@ static bool IsSameVariable(_6502Generator* g, IRNode* node1, IRNode* node2) {
   return var1 == var2;
 }
 
-static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
     return node->data.ptr;
@@ -1943,7 +2907,7 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
     if (IRIsConst(op2) && node->dest != NULL) {
       // Adding a constant less than 4?
       if (IRIntConstValue(op2) < 4) {
-        if (op1->opcode == IR_OP(loadi)) {
+        if (op1->opcode == IR_OP(load32)) {
           IRNode* loaded = op1->inputs.value.p[0];
           if (node->dest->id == loaded->id) {
             // Adding to itself.
@@ -1966,34 +2930,44 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
   assert(node->inputs.length < 3);
   GetOpInstructions(g, node, ops);
 
-  TargetInstruction* dest = GetDestAddress(g, node);
+  TargetInstruction* dest = GetDestAddress(g, node, false);
   TypeRecord* type = node->type;
-  int size = type == NULL ? 2 : type->size;
+  int size = Sizeof(type);
   bool is_unsigned = type != NULL && TypeIsUnsigned(type);
 
   switch (op) {
     case IR_OP(addi):
-      inst = AddSubInteger(g, node, _6502_OP(adc), _6502_OP(clc), size, dest,
+      inst = AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), size, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(adda):
-      inst = AddSubInteger(g, node, _6502_OP(adc), _6502_OP(clc), 2, dest,
+      inst = AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(addf):
+      inst =
+          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fadd);
+      break;
     case IR_OP(addd):
+      inst =
+          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fadd);
       break;
 
     case IR_OP(subi):
-      inst = AddSubInteger(g, node, _6502_OP(sbc), _6502_OP(sec), size, dest,
+      inst = AddSubInteger(g, node, W65C02_OP(sbc), W65C02_OP(sec), size, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(suba):
-      inst = AddSubInteger(g, node, _6502_OP(sbc), _6502_OP(sec), 2, dest,
+      inst = AddSubInteger(g, node, W65C02_OP(sbc), W65C02_OP(sec), 2, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(subf):
+      inst =
+          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fsub);
+      break;
     case IR_OP(subd):
+      inst =
+           CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fsub);
       break;
 
     case IR_OP(muli):
@@ -2010,7 +2984,7 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(muld):
       inst =
-          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->dmul);
+          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fmul);
       break;
     case IR_OP(divf):
       inst =
@@ -2018,38 +2992,39 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(divd):
       inst =
-          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->ddiv);
+          CallArithmeticBinaryRuntime(g, node, dest, ops[0], ops[1], g->fdiv);
       break;
 
     case IR_OP(lsri):
-      inst = ShiftOp(g, node, _6502_OP(lsr), _6502_OP(ror), size, dest, ops[0],
-                     (int)TargetIntValue(ops[1]));
+      inst = ShiftOp(g, node, W65C02_OP(lsr), W65C02_OP(ror), size, dest, ops[0],
+                     ops[1]);
       break;
     case IR_OP(asri): {
       // Copy sign bit to carry bit.
-      // TargetInstruction* carry = NewInstruction1(_6502_OP(cmp),
-      // GetIntConstant(g, node, kTargetTypeByte, 0x80), kAddrModeImmediate);
+      // TargetInstruction* carry = NewInstruction1(W65C02_OP(cmp),
+      // GetIntConstant(g, node, kTargetType8Bit, 0x80), kAddrModeImmediate);
       inst = ArithmeticRightShiftOp(g, node, size, dest, ops[0],
-                                    (int)TargetIntValue(ops[1]));
+                                    ops[1]);
       break;
     }
     case IR_OP(lsli):
-      inst = ShiftOp(g, node, _6502_OP(asl), _6502_OP(rol), size, dest, ops[0],
-                     (int)TargetIntValue(ops[1]));
+      inst = ShiftOp(g, node, W65C02_OP(asl), W65C02_OP(rol), size, dest, ops[0],
+                     ops[1]);
       break;
 
     case IR_OP(ori):
       inst =
-          SimpleIntegerOp(g, node, _6502_OP(ora), size, dest, ops[0], ops[1]);
+          SimpleIntegerOp(g, node, W65C02_OP(ora), size, dest, ops[0], ops[1]);
       break;
 
     case IR_OP(andi):
-      inst =
-          SimpleIntegerOp(g, node, _6502_OP(and), size, dest, ops[0], ops[1]);
+      inst = AndOp(g, node, size, dest, ops[0], ops[1]);
+      //inst =
+      //    SimpleIntegerOp(g, node, W65C02_OP(and), size, dest, ops[0], ops[1]);
       break;
     case IR_OP(xori):
       inst =
-          SimpleIntegerOp(g, node, _6502_OP(eor), size, dest, ops[0], ops[1]);
+          SimpleIntegerOp(g, node, W65C02_OP(eor), size, dest, ops[0], ops[1]);
       break;
 
     case IR_OP(noti):
@@ -2065,31 +3040,43 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
 
     case IR_OP(negf):
     case IR_OP(negd):
-      abort();
+      inst = NegateFloatingPoint(g, node->inputs.value.p[0], dest, ops[0], size);
+//      inst = CallArithmeticUnaryRuntime(
+//          g, node, dest, ops[0], g->fneg);
       break;
+//    case IR_OP(negd):
+//      inst = CallArithmeticUnaryRuntime(
+//          g, node, dest, ops[0], g->fneg);
+//      break;
 
     case IR_OP(i2f):
-    case IR_OP(i2d):
+    case IR_OP(i2d): {
+      IRNode* i = node->inputs.value.p[0];
+      size = Sizeof(i->type);
+      is_unsigned = TypeIsUnsigned(i->type);
+      inst = CallArithmeticUnaryRuntime(
+          g, node, dest, ops[0], RuntimeFunction(g, op, is_unsigned, size));
+      break;
+      }
     case IR_OP(f2i):
     case IR_OP(d2i):
       inst = CallArithmeticUnaryRuntime(
           g, node, dest, ops[0], RuntimeFunction(g, op, is_unsigned, size));
       break;
     case IR_OP(f2d):
-      inst = CallArithmeticUnaryRuntime(g, node, dest, ops[0], g->ftod);
-      break;
     case IR_OP(d2f):
-      inst = CallArithmeticUnaryRuntime(g, node, dest, ops[0], g->dtof);
+      abort();
       break;
-
+      
     case IR_OP(movi):
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova): {
-      inst = GetDestAddress(g, node);
-      TargetInstruction* src = GetAddress(g, node->inputs.value.p[0]);
+      inst = GetDestAddress(g, node, true);
+      TargetInstruction* src = GetAddress(g, node->inputs.value.p[0], true);
+      AddReloadPoint(g, src);
 
-      for (int i = 0; i < node->type->size; i++) {
+      for (int i = 0; i < Sizeof(node->type); i++) {
         SetIndexReg(g, ops[i], inst, i);
         lda(g, src, i);
         sta(g, dest, i);
@@ -2104,20 +3091,25 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
       if (move_dest->outputs.length == 1) {
         // The only output from the destination of the rmov is the
         // rmov itself.  We can omit the rmov.
-        return NULL;
+        goto done;
       }
-      inst = GetDestAddress(g, node->inputs.value.p[0]);
-      TargetInstruction* src = GetAddress(g, node->inputs.value.p[1]);
+      inst = GetDestAddress(g, move_dest, false);
+      TargetInstruction* src = ops[1];
+      AddReloadPoint(g, src);
+      AddReloadPoint(g, dest);
 
-      for (int i = 0; i < node->type->size; i++) {
-        SetIndexReg(g, ops[i], inst, i);
+      int size = Sizeof(node->type);
+      for (int i = 0; i < size; i++) {
+        SetIndexReg(g, ops[1], inst, i);
         lda(g, src, i);
         sta(g, dest, i);
       }
       break;
     }
     case IR_OP(tmp):
-      inst = TempRegister(g, size);
+      inst = TempRegister(g, node->type, size);
+      AddSpillPoint(g, dest);
+      dest = inst;
       break;
     default:
       abort();
@@ -2126,20 +3118,24 @@ static TargetInstruction* LowerExpression(_6502Generator* g, IRNode* node) {
   }
 
   TargetUpdateOperandUsers(inst);
+done:
   SetLoweredNode(node, inst);
+  AddSpillPoint(g, dest);
   return Emit(g, inst);
 }
 
-static void CompareEqualZero(_6502Generator* g, IRNode* value_node,
+static void CompareEqualZero(W65C02Generator* g, IRNode* value_node,
                              IRNode* target_node) {
   // For 2 byte:
   //  lda byte1
   //  ORA byte2
   //  BEQ true_label
 
-  int size = ((IRNode*)(value_node))->type->size;
-  TargetInstruction* value = GetAddress(g, value_node);
+  int size = Sizeof(value_node->type);
+  TargetInstruction* value = GetAddress(g, value_node, true);
+  AddReloadPoint(g, value);
 
+  // TODO optimize for size > 2
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, value, value, i);
     if (i == 0) {
@@ -2148,11 +3144,12 @@ static void CompareEqualZero(_6502Generator* g, IRNode* value_node,
       ora(g, value, i);
     }
   }
-  TargetInstruction* bra = EmitBranch(g, _6502_OP(beq), target_node);
+  cmpi(g, 0);
+  TargetInstruction* bra = EmitBranch(g, W65C02_OP(beq), target_node);
   bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
-static void CompareEqualInteger(_6502Generator* g, IRNode* cmp_node,
+static void CompareEqualInteger(W65C02Generator* g, IRNode* cmp_node,
                                 IRNode* target_node) {
   // For 2 byte:
   //  lda byte1
@@ -2174,40 +3171,44 @@ static void CompareEqualInteger(_6502Generator* g, IRNode* cmp_node,
     return;
   }
 
-  int size = ((IRNode*)(cmp_node->inputs.value.p[0]))->type->size;
-  TargetInstruction* value1 = GetAddress(g, cmp_node->inputs.value.p[0]);
-  TargetInstruction* value2 = GetAddress(g, cmp_node->inputs.value.p[1]);
+  int size = Sizeof(((IRNode*)(cmp_node->inputs.value.p[0]))->type);
+  TargetInstruction* value1 = GetAddress(g, cmp_node->inputs.value.p[0], true);
+  TargetInstruction* value2 = GetAddress(g, cmp_node->inputs.value.p[1], true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
 
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, value1, value2, i);
     lda(g, value1, i);
     cmp(g, value2, i);
     if (i < (size - 1)) {
-      EmitResolvedBranch(g, _6502_OP(bne), false_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), false_label);
     } else {
-      EmitBranch(g, _6502_OP(beq), target_node);
+      EmitBranch(g, W65C02_OP(beq), target_node);
     }
   }
   Emit(g, false_label);
 
   TargetInstruction* fake_branch =
-      NewInstruction(_6502_OP(fake_bra), kAddrModeImplied);
+      NewInstruction(W65C02_OP(fake_bra), kAddrModeImplied);
   EmitLabelReference(g, fake_branch, target_node);
   fake_branch->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
-static void CompareNotEqualZero(_6502Generator* g, IRNode* value_node,
+static void CompareNotEqualZero(W65C02Generator* g, IRNode* value_node,
                                 IRNode* target_node) {
   // For 2 byte:
   //  lda byte1
   //  ORA byte2
   //  BNE true_label
 
-  int size = ((IRNode*)(value_node))->type->size;
-  TargetInstruction* value = GetAddress(g, value_node);
+  int size = Sizeof(value_node->type);
+  TargetInstruction* value = GetAddress(g, value_node, true);
+  AddReloadPoint(g, value);
 
+  // TODO optimize for size > 2
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, value, value, i);
     if (i == 0) {
@@ -2216,11 +3217,11 @@ static void CompareNotEqualZero(_6502Generator* g, IRNode* value_node,
       ora(g, value, i);
     }
   }
-  TargetInstruction* bra = EmitBranch(g, _6502_OP(bne), target_node);
+  TargetInstruction* bra = EmitBranch(g, W65C02_OP(bne), target_node);
   bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
-static void CompareNotEqualInteger(_6502Generator* g, IRNode* cmp_node,
+static void CompareNotEqualInteger(W65C02Generator* g, IRNode* cmp_node,
                                    IRNode* target_node) {
   // For 2 byte:
   //  lda byte1
@@ -2242,27 +3243,29 @@ static void CompareNotEqualInteger(_6502Generator* g, IRNode* cmp_node,
     return;
   }
 
-  int size = ((IRNode*)(cmp_node->inputs.value.p[0]))->type->size;
-  TargetInstruction* value1 = GetAddress(g, cmp_node->inputs.value.p[0]);
-  TargetInstruction* value2 = GetAddress(g, cmp_node->inputs.value.p[1]);
+  int size = Sizeof(((IRNode*)(cmp_node->inputs.value.p[0]))->type);
+  TargetInstruction* value1 = GetAddress(g, cmp_node->inputs.value.p[0], true);
+  TargetInstruction* value2 = GetAddress(g, cmp_node->inputs.value.p[1], true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
 
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, value1, value2, i);
     lda(g, value1, i);
     cmp(g, value2, i);
-    EmitBranch(g, _6502_OP(bne), target_node);
+    EmitBranch(g, W65C02_OP(bne), target_node);
   }
   Emit(g, false_label);
 
   TargetInstruction* fake_branch =
-      NewInstruction(_6502_OP(fake_bra), kAddrModeImplied);
+      NewInstruction(W65C02_OP(fake_bra), kAddrModeImplied);
   EmitLabelReference(g, fake_branch, target_node);
   fake_branch->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
-static void CompareLessUnsignedInteger(_6502Generator* g, IRNode* lhs_node,
+static void CompareLessUnsignedInteger(W65C02Generator* g, IRNode* lhs_node,
                                        IRNode* rhs_node, IRNode* target_node) {
   // For 2 byte:
   //  lda byte2
@@ -2274,7 +3277,7 @@ static void CompareLessUnsignedInteger(_6502Generator* g, IRNode* lhs_node,
   //  BCC true_label
   // false_label:
 
-  if (IRIsZero(rhs_node)) {
+  if (IRIsZero(rhs_node) && ((lhs_node->flags & kIRFakeUnsigned) == 0)) {
     // x < 0
     // Always false.
     return;
@@ -2286,30 +3289,32 @@ static void CompareLessUnsignedInteger(_6502Generator* g, IRNode* lhs_node,
     return;
   }
 
-  int size = lhs_node->type->size;
-  TargetInstruction* value1 = GetAddress(g, lhs_node);
-  TargetInstruction* value2 = GetAddress(g, rhs_node);
+  int size = Sizeof(lhs_node->type);
+  TargetInstruction* value1 = GetAddress(g, lhs_node, true);
+  TargetInstruction* value2 = GetAddress(g, rhs_node, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
 
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   for (int i = size - 1; i >= 0; i--) {
     SetIndexRegDown(g, value1, value2, i, size);
     lda(g, value1, i);
     cmp(g, value2, i);
-    EmitBranch(g, _6502_OP(bcc), target_node);
+    EmitBranch(g, W65C02_OP(bcc), target_node);
     if (i > 0) {
-      EmitResolvedBranch(g, _6502_OP(bne), false_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), false_label);
     }
   }
   Emit(g, false_label);
 
   TargetInstruction* fake_branch =
-      NewInstruction(_6502_OP(fake_bra), kAddrModeImplied);
+      NewInstruction(W65C02_OP(fake_bra), kAddrModeImplied);
   EmitLabelReference(g, fake_branch, target_node);
   fake_branch->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
-static void CompareGreaterOrEqualUnsignedInteger(_6502Generator* g,
+static void CompareGreaterOrEqualUnsignedInteger(W65C02Generator* g,
                                                  IRNode* lhs_node,
                                                  IRNode* rhs_node,
                                                  IRNode* target_node) {
@@ -2334,7 +3339,7 @@ static void CompareGreaterOrEqualUnsignedInteger(_6502Generator* g,
   if (IRIsZero(rhs_node)) {
     // x >= 0
     // Always true.
-    TargetInstruction* lab = EmitBranch(g, _6502_OP(bra), target_node);
+    TargetInstruction* lab = EmitBranch(g, Is65c02() ? W65C02_OP(bra) : W65C02_OP(jmp), target_node);
     lab->flags |= k6502BlockEnd | k6502InstIsCondBranch;
     return;
   }
@@ -2345,38 +3350,110 @@ static void CompareGreaterOrEqualUnsignedInteger(_6502Generator* g,
     return;
   }
 
-  int size = lhs_node->type->size;
-  TargetInstruction* value1 = GetAddress(g, lhs_node);
-  TargetInstruction* value2 = GetAddress(g, rhs_node);
+  int size = Sizeof(lhs_node->type);
+  TargetInstruction* value1 = GetAddress(g, lhs_node, true);
+  TargetInstruction* value2 = GetAddress(g, rhs_node, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
 
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   for (int i = size - 1; i >= 0; i--) {
     SetIndexRegDown(g, value1, value2, i, size);
 
     lda(g, value1, i);
     cmp(g, value2, i);
     if (i == 0) {
-      EmitBranch(g, _6502_OP(bcs), target_node);
+      EmitBranch(g, W65C02_OP(bcs), target_node);
     } else {
-      EmitResolvedBranch(g, _6502_OP(bcc), false_label);
-      EmitBranch(g, _6502_OP(bne), target_node);
+      EmitResolvedBranch(g, W65C02_OP(bcc), false_label);
+      EmitBranch(g, W65C02_OP(bne), target_node);
     }
   }
   Emit(g, false_label);
 
   TargetInstruction* fake_branch =
-      NewInstruction(_6502_OP(fake_bra), kAddrModeImplied);
+      NewInstruction(W65C02_OP(fake_bra), kAddrModeImplied);
   EmitLabelReference(g, fake_branch, target_node);
   fake_branch->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
+static void CompareFloatingExpression(W65C02Generator* g, IRNode* lhs, IRNode* rhs,
+                                      TargetInstruction* dest, int size,
+                                      Symbol* func) {
+  // lda #dest
+  // ldx #src1
+  // ldy #src2
+  // jsr func
+  // Put result (1 or 0) in dest byte.
+  TargetInstruction* value1 = Materialize(g, lhs, size, true);
+  TargetInstruction* value2 = Materialize(g, rhs, size, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), dest, kAddrModeImplied));
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), value1, kAddrModeImplied));
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_y), value2, kAddrModeImplied));
+  jsr(g, func);
+}
+
+static void CompareFloatingPoint(W65C02Generator* g,
+                                 IRNode* node, TargetInstruction* dest,
+                                 IRNode* lhs,
+                                 IRNode* rhs) {
+  int size = 4;
+  switch (node->opcode) {
+  case IR_OP(cmpeqf):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqf);
+    break;
+  case IR_OP(cmpnef):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpnef);
+    break;
+  case IR_OP(cmpltf):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpltf);
+    break;
+  case IR_OP(cmplef):
+    CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpgef);
+    break;
+  case IR_OP(cmpgtf):
+    CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpltf);
+    break;
+  case IR_OP(cmpgef):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpgef);
+    break;
+  case IR_OP(cmpeqd):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqf);
+    break;
+  case IR_OP(cmpned):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpnef);
+    break;
+  case IR_OP(cmpltd):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpltf);
+    break;
+  case IR_OP(cmpled):
+    CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpgef);
+    break;
+  case IR_OP(cmpgtd):
+    CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpltf);
+    break;
+  case IR_OP(cmpged):
+    CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpgef);
+    break;
+    default:
+      abort();
+  }
+}
+
 // Compares 2 signed integers for < or >=.  Branches to target
-static void CompareSignedInteger(_6502Generator* g,
+static void CompareSignedInteger(W65C02Generator* g,
                                            IRNode* lhs_node,
                                            IRNode* rhs_node,
                                            IRNode* target_node,
                                            bool less_than) {
+  TargetInstruction* value1 = GetAddress(g, lhs_node, true);
+  AddReloadPoint(g, value1);
+  int size = Sizeof(lhs_node->type);
+
+  
   //  lda byte1
   //  CMP value1
   //  lda byte2
@@ -2387,32 +3464,42 @@ static void CompareSignedInteger(_6502Generator* g,
   //  bmi target_node [or bpl for >=)
 
 
-  TargetInstruction* value1 = GetAddress(g, lhs_node);
-  TargetInstruction* value2 = GetAddress(g, rhs_node);
+  TargetInstruction* value2 = GetAddress(g, rhs_node, true);
+  AddReloadPoint(g, value2);
   TargetInstruction* skip_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
-  sec(g);
-  int size = lhs_node->type->size;
-  for (int i = 0; i < size; i++) {
-    SetIndexReg(g, value1, value2, i);
-    lda(g, value1, i);
-    if (i == 0) {
-      cmp(g, value2, i);
-    } else {
-      sbc(g, value2, i);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+
+  if (IRIsZero(rhs_node)) {
+    // Compare less or greater zero.  Just load the top byte of value1.
+    lda(g, value1, size-1);
+  //} else if (IRIsZero(lhs_node)) {
+  //  lda(g, value2, size-1);
+  } else {
+    if (size == 1) {
+      sec(g);
     }
+    for (int i = 0; i < size; i++) {
+      SetIndexReg(g, value1, value2, i);
+      lda(g, value1, i);
+      if (i == 0 && size > 1) {
+        cmp(g, value2, i);
+      } else {
+        sbc(g, value2, i);
+      }
+    }
+    
+    EmitResolvedBranch(g, W65C02_OP(bvc), skip_label);
+    eori(g, 0x80);
+    Emit(g, skip_label);
   }
-  EmitResolvedBranch(g, _6502_OP(bvc), skip_label);
-  eori(g, 0x80);
-  Emit(g, skip_label);
-  TargetInstruction* bra = EmitBranch(g, less_than ? _6502_OP(bmi) : _6502_OP(bpl), target_node);
+  TargetInstruction* bra = EmitBranch(g, less_than ? W65C02_OP(bmi) : W65C02_OP(bpl), target_node);
   bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
 // If the branch comes from a comparison node we combine the comparison
 // with the branch.  If it comes from another node we generate an equality
 // comparison of that node with zero.
-static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
+static TargetInstruction* LowerConditionalBranch(W65C02Generator* g,
                                                  IRNode* node) {
   bool reverse = node->opcode == IR_OP(bfalse);
 
@@ -2427,11 +3514,31 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
     compare_with_zero = (comp->flags & k6502ComparisonGenerated) != 0;
   }
   if (compare_with_zero) {
-    // Generate equality comparison with zero.
-    if (reverse) {
-      CompareEqualZero(g, expr, target_node);
-    } else {
-      CompareNotEqualZero(g, expr, target_node);
+    if (IRIsConst(input)) {
+      // Compare constant.
+      // If constant is zero, BRA is comparing false
+      // otherwise, BRA is comparing true.
+      int64_t cval = IRIntConstValue(input);
+      TargetInstruction* bra = NULL;
+      if (cval == 0) {
+        if (node->opcode == IR_OP(bfalse)) {
+          bra = EmitBranch(g, W65C02_OP(bra), target_node);
+        }
+      } else {
+        if (node->opcode == IR_OP(btrue)) {
+          bra = EmitBranch(g, W65C02_OP(bra), target_node);
+        }
+      }
+      if (bra != NULL) {
+        bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
+      }
+   } else {
+      // Generate equality comparison with zero.
+      if (reverse) {
+        CompareEqualZero(g, expr, target_node);
+      } else {
+        CompareNotEqualZero(g, expr, target_node);
+      }
     }
     return NULL;
   }
@@ -2442,6 +3549,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
   switch (expr->opcode) {
     case IR_OP(cmpeqi):
     case IR_OP(cmpeqa):
+    case IR_OP(cmpeqf):
+    case IR_OP(cmpeqd):
       if (reverse) {
           CompareNotEqualInteger(g, input, target_node);
        } else {
@@ -2450,6 +3559,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
       break;
     case IR_OP(cmpnei):
     case IR_OP(cmpnea):
+    case IR_OP(cmpnef):
+    case IR_OP(cmpned):
       if (reverse) {
         CompareEqualInteger(g, input, target_node);
       } else {
@@ -2459,6 +3570,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
       
     case IR_OP(cmplti):
     case IR_OP(cmplta):
+    case IR_OP(cmpltf):
+    case IR_OP(cmpltd):
       if (reverse) {
         if (is_unsigned) {
           CompareGreaterOrEqualUnsignedInteger(
@@ -2477,6 +3590,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
       break;
     case IR_OP(cmplei):
     case IR_OP(cmplea):
+    case IR_OP(cmplef):
+    case IR_OP(cmpled):
       if (reverse) {
         // > comparison
         if (is_unsigned) {
@@ -2496,6 +3611,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
       break;
     case IR_OP(cmpgti):
     case IR_OP(cmpgta):
+    case IR_OP(cmpgtf):
+    case IR_OP(cmpgtd):
       if (reverse) {
         if (is_unsigned) {
           CompareGreaterOrEqualUnsignedInteger(
@@ -2513,6 +3630,8 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
       break;
     case IR_OP(cmpgei):
     case IR_OP(cmpgea):
+    case IR_OP(cmpgef):
+    case IR_OP(cmpged):
       if (reverse) {
         if (is_unsigned) {
           CompareLessUnsignedInteger(g, lhs, rhs, target_node);
@@ -2528,6 +3647,7 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
         }
       }
       break;
+#if 0
     case IR_OP(cmpeqf):
     case IR_OP(cmpnef):
     case IR_OP(cmpltf):
@@ -2539,8 +3659,15 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
     case IR_OP(cmpltd):
     case IR_OP(cmpled):
     case IR_OP(cmpgtd):
-    case IR_OP(cmpged):
+    case IR_OP(cmpged): {
+      TargetInstruction* dest = TempRegister(g, node->type, 1);
+      CompareFloatingPoint(g, expr, dest, lhs, rhs);
+      lda(g, dest, 0);
+      TargetInstruction* bra = EmitBranch(g, reverse ? W65C02_OP(beq) : W65C02_OP(bne), target_node);
+      bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
       break;
+    }
+#endif
     default:
       abort();
   }
@@ -2548,14 +3675,14 @@ static TargetInstruction* LowerConditionalBranch(_6502Generator* g,
   return NULL;
 }
 
-static TargetInstruction* LowerBranch(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerBranch(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
-  _6502Opcode opcode = _6502_OP(bra);
+  W65C02Opcode opcode = Is65c02() ? W65C02_OP(bra) : W65C02_OP(jmp);
   if ((node->flags & kIRJumpTableBranch) != 0) {
     // Need all jump table entries to be the same length.
-    opcode = _6502_OP(jumptable);
+    opcode = W65C02_OP(jumptable);
   }
   TargetInstruction* b = EmitBranch(g, opcode, target_node);
   b->flags |= k6502BlockEnd;
@@ -2565,27 +3692,43 @@ static TargetInstruction* LowerBranch(_6502Generator* g, IRNode* node) {
 // Computed branch.  This is followed by a series of jumptable entries, each
 // of which is 2 bytes long.
 // LDA #X
-// JSR __jump_table
+// JSR __jump_tableN
 // Table starts here.
-static TargetInstruction* LowerComputedBranch(_6502Generator* g, IRNode* node) {
-  TargetInstruction* byte_offset = Materialize(g, node->inputs.value.p[0]);
+static TargetInstruction* LowerComputedBranch(W65C02Generator* g, IRNode* node) {
+  TargetInstruction* byte_offset = Materialize(g, node->inputs.value.p[0], -1, true);
   ldazi(g, byte_offset, 0);
-  TargetInstruction* jump = jsr(g, g->jump_table);
+  TargetInstruction* jump;
+  switch (node->type->size) {
+    case 1:
+      jump = jsr(g, g->jump_table1);
+      break;
+    case 2:
+      jump = jsr(g, g->jump_table2);
+      break;
+    case 4:
+      jump = jsr(g, g->jump_table4);
+      break;
+    case 8:
+      jump = jsr(g, g->jump_table8);
+      break;
+    default:
+      abort();
+  }
   jump->flags |= TARGET_INST_TABLE_JUMP | k6502BlockEnd;
   SetLoweredNode(node, jump);
   return jump;
 }
 
-static TargetInstruction* LowerLabel(_6502Generator* g, IRNode* label) {
+static TargetInstruction* LowerLabel(W65C02Generator* g, IRNode* label) {
   TargetInstruction* inst =
-      Emit(g, NewInstruction(_6502_OP(label), kAddrModeImplied));
+      Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   label->data.ptr = inst;
   inst->flags |= k6502BlockStart;
   ApplyFixups(g, label);
   return inst;
 }
 
-static TargetInstruction* LowerNamedLabel(_6502Generator* rv, IRNode* label) {
+static TargetInstruction* LowerNamedLabel(W65C02Generator* rv, IRNode* label) {
   IRNamedLabel* n = (IRNamedLabel*)label;
   TargetInstruction* inst = Emit(rv, TargetNewNamedLabel(n->name));
   inst->flags |= k6502BlockStart;
@@ -2593,84 +3736,661 @@ static TargetInstruction* LowerNamedLabel(_6502Generator* rv, IRNode* label) {
   return inst;
 }
 
-static TargetInstruction* LowerLoad(_6502Generator* g, IRNode* node) {
-  assert(node->inputs.length == 1);
-  IRNode* addr_node = node->inputs.value.p[0];
+static int GetStartIndex(IRNode* node, int i) {
+  int index = 0;
+  while (i < node->inputs.length) {
+    index += (int)IRIntConstValue(node->inputs.value.p[i]);
+    i++;
+  }
+  return index;
+}
 
-  TargetInstruction* dest = GetDestAddress(g, node);
+static TargetInstruction* LoadFromRegVariable(W65C02Generator* g, IRNode* load, IRNode* var, int size) {
+  TargetInstruction* result;
+  TargetInstruction* src = GetLoweredNode(var);
+  if (load->dest == NULL && load->outputs.length == 1) {
+    IRNode* output = load->outputs.value.p[0];
+    AddSpillPoint(g, src);
+    return SetLoweredNode(load, src);
+  }
+  if (load->dest == NULL) {
+    result = TempRegister(g, load->type, size);
+  } else {
+    result = GetAddress(g, load->dest, true);
+  }
+  Copy(g, result, src, 0, 0, size, GetAddrMode(src), GetAddrMode(result));
+  AddSpillPoint(g, result);
+  return SetLoweredNode(load, result);
+}
+
+// Load from a stack variable.
+static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRNode* var, bool is_arg, int size) {
+  TargetInstruction* inst = GetLoweredNode(var);
+  switch ((W65C02Opcode)inst->opcode) {
+      case W65C02_OP(ivarreg):
+      case W65C02_OP(bvarreg):
+      case W65C02_OP(lvarreg):
+      case W65C02_OP(xvarreg):
+      case W65C02_OP(fvarreg):
+      case W65C02_OP(dvarreg):
+        return LoadFromRegVariable(g, load, var, size);
+    default:
+      break;
+  }
+  AddReloadPoint(g, inst);
+  TargetInstruction* result = NULL;
+  int offset;
+
+  load = IgnoreCasts(load);
+  
+ 
+  // Variable or argument.  Load value using one of the runtime helper
+  // functions.
+  offset = (int)TargetIntValue(inst->operand[0]);
+  result = TempRegister(g, load->type, size);
+  bool highzero = offset < 256;
+  // Macro instruction, expands to:
+  // lda #dest_addr
+  // ldx #offset lo
+  // ldy #offset hi (removed for single byte case)
+  // JSR __var_value[b] (or arg_value[b])
+  W65C02Opcode op;
+  AddressingMode mode = kAddrModeZeroPage;
+  if (is_arg) {
+    // Argument.
+    if (TypeIsStructOrUnion(load->type)) {
+      // Address.
+      op = offset >= 256 ? W65C02_OP(arg_addrb) : W65C02_OP(arg_addr);
+    } else {
+      op = ArgValueFunction(size, highzero);
+    }
+  } else {
+    // Variable.
+    if (TypeIsStructOrUnion(load->type) || TypeIsArray(load->type)) {
+      // Address.
+      op = offset >= 256 ? W65C02_OP(var_addrb) : W65C02_OP(var_addr);
+      mode = kAddrModeIndirect;
+    } else {
+      op = VarValueFunction(size, highzero);
+    }
+  }
+
+  Emit(g,
+        NewInstruction2(op, result,
+                        inst,
+                        mode));
+ 
+  AddSpillPoint(g, result);
+  if (load->dest != NULL) {
+    // We have a location to put the result.
+    TargetInstruction* dest = GetAddress(g, load->dest, true);
+    Copy(g, dest, result, 0, 0, size, kAddrModeZeroPage, GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+  }
+  return SetLoweredNode(load, result);
+}
+
+
+static TargetInstruction* LoadFromStaticVariable(W65C02Generator* g, IRNode* load, IRNode* var, int size) {
+  TargetInstruction* result;
+  if (load->dest == NULL && load->outputs.length == 1 && IRIsVariable(var)) {
+    result = GetLoweredNode(var);
+  } else {
+    TargetInstruction* src = Materialize(g, var, size, false);
+    result = GetDestAddress(g, load, false);
+    Copy(g, result, src, 0, 0, size, GetAddrMode(src), GetAddrMode(result));
+    AddSpillPoint(g, result);
+  }
+  return SetLoweredNode(load, result);
+}
+
+static TargetInstruction* LoadIndirect(W65C02Generator* g, IRNode* load, IRNode* var, int size, int start_index) {
+  TargetInstruction* dest;
+  if (load->dest != NULL) {
+    dest = GetAddress(g, load->dest, true);
+  } else {
+    dest = TempRegister(g, load->type, size);
+  }
+  TargetInstruction* src = Materialize(g, var, size, true);
+  if (dest == src) {
+    // On 6502, because each byte is loaded independently, we can't have the
+    // destination and src be the same.
+    TargetInstruction* tmp = TempRegister(g, var->type, size);
+    Copy(g, tmp, src, start_index, 0, size, kAddrModeZeroPage, kAddrModeZeroPage);
+    src = tmp;
+ }
+  Copy(g, dest, src, start_index, 0, size, kAddrModeIndirectIndexed, GetAddrMode(dest));
+  AddSpillPoint(g, dest);
+  return SetLoweredNode(load, dest);
+}
+
+static TargetInstruction* LowerLoad(W65C02Generator* g, IRNode* node) {
+  int size = 2;
+  int start_index = GetStartIndex(node, 1);
+  bool is_signed = true;
+  if (!TypeIsStructOrUnion(node->type) && !TypeIsArray(node->type)) {
+    switch (node->opcode) {
+      case IR_OP(loadu8):
+        is_signed = false;
+      case IR_OP(load8):
+        size = 1;
+        break;
+      case IR_OP(loadu16):
+      case IR_OP(loada):
+         is_signed = false;
+       case IR_OP(load16):
+         size = 2;
+         break;
+      case IR_OP(loadu32):
+      case IR_OP(loadf):
+      case IR_OP(loadd):
+       is_signed = false;
+      case IR_OP(load32):
+        size = 4;
+        break;
+      case IR_OP(load64):
+         size = 8;
+         break;
+      default:
+        break;
+    }
+  }
+  IRNode* src_node = node->inputs.value.p[0];
+  if (node->inputs.length > 1) {
+    // Load indirect with offset.
+    return LoadIndirect(g, node, src_node, size, start_index);
+
+  }
+  bool is_arg = true;
+  switch (src_node->opcode) {
+    case IR_OP(localvar):
+      is_arg = false;
+    case IR_OP(argument):
+      return LoadFromVariable(g, node, src_node, is_arg, size);
+    case IR_OP(staticvar):
+    case IR_OP(externvar):
+      return LoadFromStaticVariable(g, node, src_node, size);
+      
+    default:
+      // Loading from an expression.
+      return LoadIndirect(g, node, src_node, size, start_index);
+  }
+  
+#if 0
+  int src_start_index = GetStartIndex(node, 1);
+  addr_node = IgnoreCasts(addr_node);
+  
+  bool load_from_regvar = false;
+  switch ((W65C02Opcode)GetLoweredNode(addr_node)->opcode) {
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
+      load_from_regvar = true;
+    break;
+    default:
+      break;
+  }
+
+  if (load_from_regvar) {
+    TargetInstruction* src = GetLoweredNode(addr_node);
+    bool need_copy = true;
+    // If we have only output and we're loading from a variable, we can
+    // just use the variable itself instead of making a copy.
+    if (IRIsVariable(addr_node) && node->outputs.length == 1 && node->dest == NULL) {
+      need_copy = false;
+    }
+    if (!need_copy) {
+      AddSpillPoint(g, src);
+      return SetLoweredNode(node, src);
+    }
+    int size = Sizeof(node->type);
+    AddressingMode src_mode = GetAddrMode(src);
+    if (!IRIsVariable(addr_node)) {
+      src_mode = kAddrModeIndirectIndexed;
+    }
+    TargetInstruction* dest = GetDestAddress(g, node, false);
+    Copy(g, dest, src, src_start_index, 0, size, src_mode, GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+    return SetLoweredNode(node, dest);
+  }
+  
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  if (IRIsVariable(addr_node) && GetAddrMode(dest) == kAddrModeZeroPage && !TypeIsStructOrUnion(addr_node->type)) {
+    // Loading from a variable into a reg, use var_value or arg_value instead
+    // of splitting into a var_addr and instructions.
+    return SetLoweredNode(node, Materialize(g, addr_node));
+  }
+  
   TargetInstruction* src = GetAddress(g, addr_node);
-  AddressingMode src_mode = kAddrModeIndirect;
-  AddressingMode dest_mode = (node->flags & kIRDestIsIndirect) != 0 ? kAddrModeIndirect : GetAddrMode(dest);
+  AddressingMode src_mode = GetAddrMode(src);
+  if (IsExpression(src)) {
+    src_mode = src_start_index == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
+  }
+  AddressingMode dest_mode = DestInZeroPage(dest) ?  GetAddrMode(dest) : kAddrModeIndirect;
 
-  for (int i = 0; i < node->type->size; i++) {
-    SetIndexReg(g, src, dest, i);
-    Emit(g, NewInstruction2(_6502_OP(lda), src, ByteConst(g, i), src_mode));
-    Emit(g, NewInstruction2(_6502_OP(sta), dest, ByteConst(g, i), dest_mode));
-    src_mode = kAddrModeIndirectIndexed;
+  int size = Sizeof(node->type);
+  Copy(g, dest, src, src_start_index, 0, size, src_mode, dest_mode);
+#if 0
+  int j = start_index;
+  for (int i = 0; i < Sizeof(node->type); i++, j++) {
+    if (src_mode == kAddrModeIndirectIndexed) {
+      ldyi(g, j);
+    }
+    Emit(g, NewInstruction2(W65C02_OP(lda), src, ByteConst(g, i), src_mode));
+    if (dest_mode == kAddrModeIndirectIndexed && i != j) {
+      ldyi(g, i);
+    }
+    Emit(g, NewInstruction2(W65C02_OP(sta), dest, ByteConst(g, i), dest_mode));
     if (dest_mode == kAddrModeIndirect) {
       dest_mode = kAddrModeIndirectIndexed;
     }
+    if (src_mode == kAddrModeIndirect) {
+      src_mode = kAddrModeIndirectIndexed;
+    }
   }
+#endif
+  AddSpillPoint(g, dest);
+
   SetLoweredNode(node, dest);
   return dest;
+#endif
 }
 
-static TargetInstruction* LowerStore(_6502Generator* g, IRNode* node) {
-  assert(node->inputs.length >= 2);
+static TargetInstruction* StoreIntoRegVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size) {
+  TargetInstruction* src = Materialize(g, src_node, size, false);
+  TargetInstruction* dest = GetAddress(g, dest_node, false);
+  Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+  return SetLoweredNode(store, src);
+}
 
-  // Address to store to is the first operand of the store IR node.
-  // The value to store is the second operand.
-  IRNode* addr_node = node->inputs.value.p[0];
-  IRNode* src_node = node->inputs.value.p[1];
-  int start_index = 0;
-  
-  // We might have a 3rd argument - starting index for the store.
-  if (node->inputs.length == 3) {
-    start_index = (int)IRIntConstValue(node->inputs.value.p[2]);
+static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, bool is_arg, int size) {
+  TargetInstruction* dest = GetLoweredNode(dest_node);
+  switch ((W65C02Opcode)dest->opcode) {
+      case W65C02_OP(ivarreg):
+      case W65C02_OP(bvarreg):
+      case W65C02_OP(lvarreg):
+      case W65C02_OP(xvarreg):
+      case W65C02_OP(fvarreg):
+      case W65C02_OP(dvarreg):
+        return StoreIntoRegVariable(g, store, dest_node, src_node, size);
+    default:
+      break;
   }
   
-  TargetInstruction* src = GetAddress(g, src_node);
+  TargetInstruction* src = Materialize(g, src_node, size, true);
+  int offset = (int)TargetIntValue(dest->operand[0]);
+  bool highzero = offset < 256;
+  Symbol* func;
+
+  if ((dest_node->flags & kIRNrvoMarker) != 0) {
+    // This is an Named RVO variable.  It's address is the same
+    // as the structreturn address.
+    assert(g->struct_return_inst != NULL);
+    dest = g->struct_return_inst;
+  
+
+    // var_addr is the address of the variable.
+    // lda src+0
+    // sta (var_addr)
+    // ldy #1 or INY
+    // lda src+1
+    // sta (var_addr), Y
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+  } else {
+    bool is_zero = TargetIsZero(src);
+    if (is_zero) {
+      // Storing zero.
+      switch (size) {
+         case 1:
+           if (highzero) {
+             func = is_arg ? g->zero_arg_value1 : g->zero_var_value1;
+           } else {
+             func = is_arg ? g->zero_arg_value1b : g->zero_var_value1b;
+           }
+           break;
+         case 2:
+           if (highzero) {
+             func = is_arg ? g->zero_arg_value2 : g->zero_var_value2;
+           } else {
+             func = is_arg ? g->zero_arg_value2b : g->zero_var_value2b;
+           }
+           break;
+         case 4:
+           if (highzero) {
+             func = is_arg ? g->zero_arg_value4 : g->zero_var_value4;
+           } else {
+             func = is_arg ? g->zero_arg_value4b : g->zero_var_value4b;
+           }
+           break;
+         case 8:
+           if (highzero) {
+             func = is_arg ? g->zero_arg_value8 : g->zero_var_value8;
+           } else {
+               func = is_arg ? g->zero_arg_value8b : g->zero_var_value8b;
+           }
+            break;
+         default:
+           abort();
+           break;
+       }
+    } else {
+      switch (size) {
+         case 1:
+           if (highzero) {
+             func = is_arg ? g->set_arg_value1 : g->set_var_value1;
+           } else {
+             func = is_arg ? g->set_arg_value1b : g->set_var_value1b;
+           }
+           break;
+         case 2:
+           if (highzero) {
+             func = is_arg ? g->set_arg_value2 : g->set_var_value2;
+           } else {
+             func = is_arg ? g->set_arg_value2b : g->set_var_value2b;
+           }
+           break;
+         case 4:
+           if (highzero) {
+             func = is_arg ? g->set_arg_value4 : g->set_var_value4;
+           } else {
+             func = is_arg ? g->set_arg_value4b : g->set_var_value4b;
+           }
+           break;
+         case 8:
+           if (highzero) {
+             func = is_arg ? g->set_arg_value8 : g->set_var_value8;
+           } else {
+               func = is_arg ? g->set_arg_value8b : g->set_var_value8b;
+           }
+             break;
+         default:
+           abort();
+           break;
+       }
+    }
+    
+    // lda #src (not for zero)
+    // ldx #var addr lo
+    // ldy #var addr hi (omitted for hi == 0)
+    // jsr func
+    if (!is_zero) {
+      Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), src, kAddrModeImplied));
+    }
+    ldxi(g, offset & 0xff);
+    if (!highzero) {
+      ldyi(g, (offset >> 8) & 0xff);
+    }
+    jsr(g, func);
+  }
+  return SetLoweredNode(store, src);
+}
+
+
+static TargetInstruction* StoreIntoStaticVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size) {
+  TargetInstruction* src = GetAddress(g,src_node, false);
+  TargetInstruction* dest = GetAddress(g,dest_node, false);
+  Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+  return SetLoweredNode(store, src);
+}
+
+
+static TargetInstruction* StoreIndirect(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size, int start_index) {
+  TargetInstruction* src = Materialize(g, src_node, size, false);
+  TargetInstruction* dest = Materialize(g, dest_node, size, true);
+  Copy(g, dest, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+  return SetLoweredNode(store, src);
+}
+
+static TargetInstruction* LowerStore(W65C02Generator* g, IRNode* node) {
+  assert(node->inputs.length >= 2);
+
+  // The value to store is the second operand.
+  IRNode* dest_node = node->inputs.value.p[0];
+  IRNode* src_node = node->inputs.value.p[1];
+  int start_index = GetStartIndex(node, 2);
+  
+  dest_node = IgnoreCasts(dest_node);
+  
+  int size;
+  switch (node->opcode) {
+   case IR_OP(store8):
+     size = 1;
+     break;
+   case IR_OP(storea):
+   case IR_OP(store16):
+     size = 2;
+     break;
+   case IR_OP(store32):
+   case IR_OP(storef):
+   case IR_OP(stored):
+     size = 4;
+     break;
+   case IR_OP(store64):
+     size = 8;
+     break;
+   default:
+     abort();
+  }
+  
+  bool is_arg = false;
+  
+  if (node->inputs.length > 2) {
+    // Storing indirect with an offset.
+    return StoreIndirect(g, node, dest_node, src_node, size, start_index);
+  }
+  switch (dest_node->opcode) {
+    case IR_OP(argument):
+      is_arg = true;
+    case IR_OP(localvar):
+      return StoreIntoVariable(g, node, dest_node, src_node, is_arg, size);
+
+    case IR_OP(staticvar):
+    case IR_OP(externvar):
+      return StoreIntoStaticVariable(g, node, dest_node, src_node, size);
+    default:
+      return StoreIndirect(g, node, dest_node, src_node, size, start_index);
+  }
+
+#if 0
   AddressingMode src_mode = GetAddrMode(src);
   switch (addr_node->opcode) {
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(ssavar):
     case IR_OP(phi): {
-      // Store to a local variable.
-      TargetInstruction* addr = GetAddress(g, addr_node);
-       assert(node->inputs.length == 2);
-      TargetInstruction* addr_inst = GetLoweredNode(addr_node);
-      if (addr_node->opcode == IR_OP(ssavar) || addr_node->opcode == IR_OP(phi)) {
-        addr_inst = addr_inst->operand[0];
+      TargetInstruction* addr = GetLoweredNode(addr_node);
+      switch ((W65C02Opcode)addr->opcode) {
+        case W65C02_OP(ivarreg):
+        case W65C02_OP(bvarreg):
+        case W65C02_OP(lvarreg):
+        case W65C02_OP(xvarreg):
+        case W65C02_OP(fvarreg):
+        case W65C02_OP(dvarreg): {
+          Copy(g, addr, src, 0, start_index, size, src_mode, GetAddrMode(addr));
+          return SetLoweredNode(node, addr);
+        }
+        default:
+          break;
       }
-        int offset = (int)TargetIntValue(addr_inst->operand[0]);
+      bool done = false;
+      if (start_index == 0 && (addr_node->flags & kIRNrvoMarker) == 0) {
+        int offset = (int)TargetIntValue(addr->operand[0]);
+        bool highzero = offset < 256;
+        Symbol* func;
+        
+        if (GetAddrMode(src) == kAddrModeZeroPage) {
+          // Use the set_var/set_arg runtime function.
+          switch (size) {
+            case 1:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value1 : g->set_var_value1;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value1b : g->set_var_value1b;
+              }
+              break;
+            case 2:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value2 : g->set_var_value2;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value2b : g->set_var_value2b;
+              }
+              break;
+            case 4:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value4 : g->set_var_value4;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value4b : g->set_var_value4b;
+              }
+              break;
+            case 8:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value8 : g->set_var_value8;
+              } else {
+                  func = addr_node->opcode == IR_OP(argument) ? g->set_arg_value8b : g->set_var_value8b;
+              }
+                break;
+            default:
+              abort();
+              break;
+          }
+           // lda #src
+           // ldx #var addr lo
+           // ldy #var addr hi (omitted for hi == 0)
+           // jsr func
+           Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), src, kAddrModeImplied));
+           ldxi(g, offset & 0xff);
+           if (!highzero) {
+             ldyi(g, (offset >> 8) & 0xff);
+           }
+           jsr(g, func);
+          done = true;
+        }
+        
+        if (!done && GetAddrMode(src) == kAddrModeImmediate && TargetIsZero(src)) {
+          // Use the zero_var/set_arg runtime function.
+          switch (size) {
+            case 1:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value1 : g->zero_var_value1;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value1b : g->zero_var_value1b;
+              }
+              break;
+            case 2:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value2 : g->zero_var_value2;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value2b : g->zero_var_value2b;
+              }
+              break;
+            case 4:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value4 : g->zero_var_value4;
+              } else {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value4b : g->zero_var_value4b;
+              }
+              break;
+            case 8:
+              if (highzero) {
+                func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value8 : g->zero_var_value8;
+              } else {
+                  func = addr_node->opcode == IR_OP(argument) ? g->zero_arg_value8b : g->zero_var_value8b;
+              }
+                break;
+            default:
+              abort();
+              break;
+          }
+          // ldx #var addr lo
+          // ldy #var addr hi (omitted for hi == 0)
+          // jsr func
+          ldxi(g, offset & 0xff);
+          if (!highzero) {
+            ldyi(g, (offset >> 8) & 0xff);
+          }
+          jsr(g, func);
+          done = true;
+        }
+      }
+      
+      if (!done) {
+        TargetInstruction* addr;
+        if ((addr_node->flags & kIRNrvoMarker) != 0) {
+          // This is an Named RVO variable.  It's address is the same
+          // as the structreturn address.
+          assert(g->struct_return_inst != NULL);
+          addr = g->struct_return_inst;
+        } else {
+          // Store to a local variable.
+          addr = GetAddress(g, addr_node);
+        }
+        if (addr_node->opcode == IR_OP(ssavar) || addr_node->opcode == IR_OP(phi)) {
+          addr = addr->operand[0];
+        }
+
         // var_addr is the address of the variable.
         // lda src+0
         // sta (var_addr)
         // ldy #1 or INY
         // lda src+1
         // sta (var_addr), Y
-        for (int i = 0; i < node->type->size; i++) {
-          SetIndexReg(g, src, addr, i);
-          lda(g, src, i);
-          sta(g, addr, i);
-        }
-        break;
+        Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
       }
+#if 0
+      AddressingMode src_mode = GetAddrMode(src);
+      if (size > 2 && j == 0) {
+        if (src_mode == kAddrModeZeroPage) {
+          SetAddrMode(src, kAddrModeZeroPageIndexedY);
+          SetAddrMode(addr, kAddrModeIndirectIndexed);
+          // Use loop with src index in Y.
+          ldyi(g, size-1);
+          TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+          lda(g, src, 0);
+          sta(g, addr, 0);
+          dey(g);
+          EmitResolvedBranch(g, W65C02_OP(bne), loop);
+          break;
+        }
+        if (src_mode == kAddrModeImmediate) {
+          // Use loop with src index in Y.
+          SetAddrMode(addr, kAddrModeIndirectIndexed);
+          ldyi(g, size-1);
+          TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+          lda(g, src, 0);
+          sta(g, addr, 0);
+          dey(g);
+          EmitResolvedBranch(g, W65C02_OP(bne), loop);
+          break;
+        }
+      }
+       for (int i = 0; i < size; i++, j++) {
+        SetIndexReg(g, src, src, i);
+        lda(g, src, i);
+        ldyi(g, j);
+        Emit(g, NewInstruction2(W65C02_OP(sta), addr, Zero(g), dest_mode));
+        dest_mode = kAddrModeIndirectIndexed;
+      }
+#endif
+      break;
+      }
+    case IR_OP(externvar):
     case IR_OP(staticvar): {
       // Store to a static variable.
-      assert(node->inputs.length == 2);
-      TargetInstruction* addr = GetAddress(g, addr_node);
-      for (int i = 0; i < node->type->size; i++) {
+      TargetInstruction* addr = GetLoweredNode(addr_node);
+      Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeAbsoluteSymbolIndexed);
+#if 0
+      for (int i = 0; i < Sizeof(node->type); i++, j++) {
         SetIndexReg(g, src, addr, i);
         lda(g, src, i);
-        Emit(g, NewInstruction2(_6502_OP(lda), src,
-                                ByteConst(g, i),
-                                src_mode));
-        Emit(g, NewInstruction2(_6502_OP(sta), addr,
-                               ByteConst(g, i),
-                                kAddrModeAbsoluteSymbol));
+        ldyi(g, j);
+        Emit(g, NewInstruction2(W65C02_OP(sta), addr,
+                               ByteConst(g, j),
+                                kAddrModeAbsoluteSymbolIndexed));
       }
+#endif
       break;
     }
       
@@ -2678,147 +4398,396 @@ static TargetInstruction* LowerStore(_6502Generator* g, IRNode* node) {
       TargetInstruction* addr = Materialize(g, addr_node);
       int store_size;
       switch (node->opcode) {
-        case IR_OP(storeb):
+        case IR_OP(store8):
           store_size = 1;
           break;
         case IR_OP(storea):
-        case IR_OP(stores):
+        case IR_OP(store16):
           store_size = 2;
           break;
-        case IR_OP(storei):
         case IR_OP(storef):
+        case IR_OP(store32):
+        case IR_OP(stored):
           store_size = 4;
           break;
-        case IR_OP(storel):
-        case IR_OP(stored):
+        case IR_OP(store64):
           store_size = 8;
           break;
         default:
           abort();
       }
       // Store indirect via addr.
+      Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+#if 0
       AddressingMode dest_mode = start_index == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
       int j = start_index;
       for (int i = 0; i < store_size; i++, j++) {
-        SetIndexReg(g, src, src, i);
+        SetIndexReg(g, src, addr, i);
         lda(g, src, i);
         if (i != j) {
           ldyi(g, j);
         }
-        Emit(g, NewInstruction2(_6502_OP(sta), addr, Zero(g), dest_mode));
+        Emit(g, NewInstruction2(W65C02_OP(sta), addr, Zero(g), dest_mode));
         dest_mode = kAddrModeIndirectIndexed;
       }
+#endif
       break;
     }
   }
+  return SetLoweredNode(node, src);
+#endif
+}
+
+static int BitSizeToByteSize(int bit_size) {
+  if (bit_size > 32) {
+    return 8;
+  }
+  if (bit_size > 16) {
+    return 4;
+  }
+  if (bit_size > 8) {
+    return 2;
+  }
+  return 1;
+}
+// Node inputs are:
+// 0: value containing bit field
+// 1: bit field position (0 = LSB)
+// 2: bit field size (in bits)
+//
+// If bitfield is unsigned:
+// Right shift by position and mask with 1's
+// But right shifting is slow so we want to use an LDA to load the appropriate
+// bytes
+static TargetInstruction* LowerGetBitField(W65C02Generator* g, IRNode* node) {
+  IRNode* input_node = node->inputs.value.p[0];
+  int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
+  int bit_size = (int)IRIntConstValue(node->inputs.value.p[2]);
+  int byte_size = BitSizeToByteSize(bit_size);
+  TargetInstruction* input = Materialize(g, input_node, Sizeof(input_node->type), true);
+  int output_size = Sizeof(input_node->type);
+  TargetInstruction* output = TempRegister(g, input_node->type, output_size);
   
-#if 0
-  TargetInstruction* addr = Materialize(g, addr_node);
-  int offset;
-  switch ((_6502Opcode)addr->opcode) {
-    case _6502_OP(argument):
-    case _6502_OP(localvar): {
-      assert(node->inputs.length == 2);
-      offset = (int)TargetIntValue(addr->operand[0]);
-      // lda #dest_addr (_6502_OP(expr_addr_a))
-      // ldx #offset lo
-      // ldy #offset hi (removed for single byte case)
-      // JSR __var_addr[1,2]
-      ldxi(g, offset & 0xff);
-      Symbol* var_addr_sym =
-          addr->opcode == _6502_OP(argument) ? g->arg_addr : g->var_addr;
-      if (offset >= 256) {
-        ldyi(g, offset >> 8);
-        var_addr_sym =
-            addr->opcode == _6502_OP(argument) ? g->arg_addrb : g->var_addrb;
+  // input is in a zero page register.
+  int byte_index = bit_pos / 8;
+  uint64_t mask = (1 << bit_size) - 1;
+  int hi_pos = bit_pos % 8;
+  for (int i = byte_index; i < byte_index + byte_size; i++) {
+    lda(g, input, i);
+    if (hi_pos > 0) {
+      // Shift to right of byte.
+      for (int j = 0; j < hi_pos; j++) {
+        Emit(g, NewInstruction(W65C02_OP(lsr), kAddrModeAccumulator));
       }
-      jsr(g, var_addr_sym);
-
-      // var_addr is the address of the variable.
-      // lda src+0
-      // sta (var_addr)
-      // ldy #1 or INY
-      // lda src+1
-      // sta (var_addr), Y
-      for (int i = 0; i < node->type->size; i++) {
-        SetIndexReg(g, src, addr, i);
-        lda(g, src, i);
-        sta(g, addr, i);
-      }
-      break;
     }
-
-    case _6502_OP(symbol): {
-      // lda src+0
-      // sta %abs(symbol)
-      // lda src+1
-      // sta %abs(symbol)+1
-      // ...
-      assert(node->inputs.length == 2);
-      for (int i = 0; i < node->type->size; i++) {
-        SetIndexReg(g, src, addr, i);
-        lda(g, src, i);
-        Emit(g, NewInstruction2(_6502_OP(lda), src,
-                                ByteConst(g, i),
-                                src_mode));
-        Emit(g, NewInstruction2(_6502_OP(sta), addr,
-                               ByteConst(g, i),
-                                kAddrModeAbsoluteSymbol));
-      }
-      break;
+    uint64_t byte_mask = mask & 0xff;
+    if (byte_mask != 0xff) {
+      // Mask to correct width in byte.
+      andi(g, (int)byte_mask);
     }
-    case _6502_OP(expr2): {
-      // Store indirect via addr.
-      AddressingMode dest_mode = start_index == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
-      int j = start_index;
-      for (int i = 0; i < node->type->size; i++, j++) {
-        SetIndexReg(g, src, src, i);
-        lda(g, src, i);
-        ldyi(g, j);
-        Emit(g, NewInstruction2(_6502_OP(sta), addr, Zero(g), dest_mode));
-        dest_mode = kAddrModeIndirectIndexed;
-      }
-      break;
-      }
-    default:
-      abort();
+    sta(g, output, i);
+    mask >>= 8;
   }
-  #endif
+  if (TypeIsUnsigned(node->type)) {
+    // Remaining bytes of result are zero.
+    ldai(g, 0);
+    for (int i = byte_index + byte_size; i < output_size; i++) {
+      sta(g, output, i);
+    }
+  } else {
+    // If the top bit of the input is set fill the remaining bytes with
+    // 0xff, otherwise fill them with zero.
+    lda(g, input, byte_index + byte_size - 1);
+    int top_bit = 1 << (((bit_pos + bit_size) % 8)- 1);
+    int upper_bits = ~((1 << (bit_size % 8)) - 1) & 0xff;
+    bool need_upper_bytes_set = (byte_index + byte_size) < output_size;
+    if (need_upper_bytes_set) {
+      ldxi(g, 0);
+    }
+    andi(g, top_bit);
+    TargetInstruction* label = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    EmitResolvedBranch(g, W65C02_OP(beq), label);
+    ldai(g, upper_bits);
+    if (need_upper_bytes_set) {
+      ldxi(g, 0xff);
+    }
+    Emit(g, label);
+    ora(g, output, byte_index + byte_size - 1);
+    sta(g, output,  byte_index + byte_size - 1);
+    for (int i = byte_index + byte_size; i < output_size; i++) {
+      stx(g, output, i);
+    }
+  }
+  return SetLoweredNode(node, output);
+}
 
-  return NULL;
+// This is a load-modify-write operation.  Normally this is done using shifts
+// ands and ors but on 6502 this is very expensive.  Instead we load the bytes
+// individually, shift and mask them and store them back again.
+// Inputs are:
+// 0: address of where to store result
+// 1: input value (normalized to bottom of word)
+// 2: bit offset into output
+// 3: bit size.
+//
+// Operation:
+// Load value of destination.
+// for each byte in bitfield:
+//   if whole byte:
+//     store byte in destination directly
+//   else
+//     load byte from destination address
+//     AND with 1's in upper bits not used
+//     ORA with used lower bits
+//     store byte in destination
+static TargetInstruction* LowerSetBitField(W65C02Generator* g, IRNode* node) {
+  IRNode* output_node = node->inputs.value.p[0];
+  IRNode* input_node = node->inputs.value.p[1];
+  int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
+  int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
+  int byte_size = BitSizeToByteSize(bit_size);
+  int output_size = Sizeof(output_node->type);
+
+  int output_byte_index = bit_pos / 8;
+  int output_bit_index = bit_pos % 8;
+  int first_whole_byte = 0;
+  int lshifted_bits = 0;
+
+  TargetInstruction* input = Materialize(g, input_node, Sizeof(input_node->type), true);
+  TargetInstruction* output = Materialize(g, output_node, output_size, false);
+  
+
+  if (output_bit_index != 0) {
+    // Not on a byte boundary.  Shift input left by bit_pos bits.
+    for (int i = 0; i < bit_pos; i++) {
+      Emit(g, NewInstruction2(W65C02_OP(asl), input, ByteConst(g, 0), kAddrModeZeroPage));
+      for (int j = 1; j < output_size; j++) {
+        Emit(g, NewInstruction2(W65C02_OP(rol), input, ByteConst(g, j), kAddrModeZeroPage));
+      }
+    }
+    lshifted_bits = bit_pos;
+    
+    // Load first output byte, mask it and or in the shifted input byte.
+    lda(g, output, output_byte_index);
+    int mask = (1 << bit_pos) - 1;
+    andi(g, mask);
+    ora(g, input, 0);
+    sta(g, output, output_byte_index);
+    first_whole_byte = 1;
+  }
+  // Middle bytes are whole.
+  for (int i = first_whole_byte; i < byte_size - 1; i++) {
+    lda(g, input, i);
+    sta(g, output, output_byte_index + i);
+  }
+  // Now top byte.
+  int bits_in_top_byte = (bit_size + lshifted_bits) % 8;
+  int in_mask = (1 << bits_in_top_byte) - 1;
+  int out_mask = ~in_mask & 0xff;
+  if (bits_in_top_byte != 0) {
+    lda(g, output, output_byte_index + byte_size - 1);
+    andi(g, out_mask);
+    sta(g, output, output_byte_index + byte_size - 1);
+    lda(g, input, byte_size - 1);
+    ora(g, output, output_byte_index + byte_size - 1);
+    sta(g, output, output_byte_index + byte_size - 1);
+  } else {
+    lda(g, input, byte_size - 1);
+    sta(g, output, output_byte_index + byte_size - 1);
+  }
+  return SetLoweredNode(node, output);
+}
+
+static TargetInstruction* LowerInc(W65C02Generator* g, IRNode* node) {
+  IRNode* var = node->inputs.value.p[0];
+  bool is_reg = false;
+  TargetInstruction* addr = GetAddress(g, var, true);
+  if (IRIsVariable(var)) {
+    switch ((W65C02Opcode)addr->opcode) {
+      case W65C02_OP(ivarreg):
+      case W65C02_OP(bvarreg):
+      case W65C02_OP(lvarreg):
+      case W65C02_OP(xvarreg):
+      case W65C02_OP(fvarreg):
+      case W65C02_OP(dvarreg):
+        is_reg = true;
+        break;
+      default:
+        break;
+    }
+  }
+  AddReloadPoint(g, addr);
+  assert(IRIsConst(node->inputs.value.p[1]));
+  TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
+  int amount_i = (int)TargetIntValue(amount);
+  bool big = amount_i > 255;
+  Symbol* func;
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), addr, kAddrModeImplied));
+  if (amount_i != 1) {
+    ldxi(g, amount_i & 0xff);
+    if (big) {
+      ldyi(g, (amount_i >> 8) & 0xff);
+    }
+  }
+  int size = Sizeof(node->type);
+  if (TypeIsDouble(node->type)) {
+    func = is_reg ? g->rincd :g->incd;
+    size = 4;
+  } else if (TypeIsFloat(node->type)) {
+    func = is_reg ? g->rincf : g->incf;
+    size = 8;
+  } else {
+    switch (size) {
+      case 1:
+        func = is_reg ? g->rinc1 : g->inc1;
+        break;
+      case 2:
+        if (amount_i == 1) {
+          func = is_reg ? g->rinc21 : g->inc21;
+        } else {
+          func = big ? (is_reg ? g->rinc2b : g->inc2b) : (is_reg ? g->rinc2 : g->inc2);
+        }
+        break;
+      case 4:
+        func = is_reg ? g->rinc4 : g->inc4;
+        break;
+      case 8:
+        func = is_reg ? g->rinc8 : g->inc8;
+        break;
+      default:
+        abort();
+    }
+  }
+  jsr(g, func);
+  TargetInstruction* result = addr;
+  if (node->outputs.length > 0 || node->dest != NULL) {
+    // The value is used.  Need to load the incrementee into a temporary.
+    TargetInstruction* dest;
+    if (node->dest == NULL) {
+      dest = TempRegister(g, node->type, size);
+    } else {
+       dest = GetAddress(g, node->dest, true);
+    }
+    AddReloadPoint(g, dest);
+    Copy(g, dest, result, 0, 0, size, GetAddrMode(addr), GetAddrMode(dest));
+    result = dest;
+  }
+  SetLoweredNode(node, result);
+  AddSpillPoint(g, result);
+  return result;
+}
+
+static TargetInstruction* LowerDec(W65C02Generator* g, IRNode* node) {
+  IRNode* var = node->inputs.value.p[0];
+  bool is_reg = false;
+  TargetInstruction* addr = GetAddress(g, var, true);
+  if (IRIsVariable(var)) {
+    switch ((W65C02Opcode)addr->opcode) {
+      case W65C02_OP(ivarreg):
+      case W65C02_OP(bvarreg):
+      case W65C02_OP(lvarreg):
+      case W65C02_OP(xvarreg):
+      case W65C02_OP(fvarreg):
+      case W65C02_OP(dvarreg):
+        is_reg = true;
+        break;
+      default:
+        break;
+    }
+  }
+  AddReloadPoint(g, addr);
+  TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
+  int amount_i = (int)TargetIntValue(amount);
+  Symbol* func;
+  Emit(g, NewInstruction1(W65C02_OP(expr_addr_a), addr, kAddrModeImplied));
+  bool big = amount_i > 255;
+  if (amount_i != 1) {
+    ldxi(g, amount_i & 0xff);
+    if (big) {
+      ldyi(g, (amount_i >> 8) & 0xff);
+    }
+  }
+  int size = Sizeof(node->type);
+  if (TypeIsDouble(node->type)) {
+    func = is_reg ? g->rdecd : g->decd;
+  } else if (TypeIsFloat(node->type)) {
+    func = is_reg ? g->rdecf : g->decf;
+  } else {
+    switch (size) {
+      case 1:
+        func = is_reg ? g->rdec1 : g->dec1;
+        break;
+      case 2:
+        if (amount_i == 1) {
+          func = is_reg ? g->rdec21 : g->dec21;
+        } else {
+          func = big ? (is_reg ? g->rdec2b : g->dec2b) : (is_reg ? g->rdec2 : g->dec2);
+        }
+        break;
+      case 4:
+        func = is_reg ? g->rdec4 : g->dec4;
+        break;
+      case 8:
+        func = is_reg ? g->rdecd : g->dec8;
+      default:
+        abort();
+    }
+  }
+  jsr(g, func);
+  TargetInstruction* result = addr;
+  if (node->outputs.length > 0 || node->dest != NULL) {
+    // The value is used.  Need to load the incrementee into a temporary.
+    TargetInstruction* dest;
+    if (node->dest == NULL) {
+      dest = TempRegister(g, node->type, size);
+    } else {
+       dest = GetAddress(g, node->dest, true);
+    }
+    AddReloadPoint(g, dest);
+    Copy(g, dest, result, 0, 0, size, GetAddrMode(addr), GetAddrMode(dest));
+    result = dest;
+  }
+  SetLoweredNode(node, result);
+  AddSpillPoint(g, result);
+  return result;
 }
 
 static struct {
   bool (*type_func)(TypeRecord*);
   int size;
+  int pushed_size;
 } push_map[] = {
-    {TypeIsInt, 2},      {TypeIsShort, 2},         {TypeIsChar, 1},
-    {TypeIsLong, 4},     {TypeIsLongLong, 8},      {TypeIsFloat, 4},
-    {TypeIsDouble, 8},   {TypeIsLongDouble, 8},    {TypeIsPointerOrArray, 2},
-  {TypeIsFunction, 2}, {TypeIsStructOrUnion, 2}, {TypeIsBool, 1}, {NULL, 0},
+    {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},         {TypeIsChar, 1, 2},
+    {TypeIsLong, 4, 4},     {TypeIsLongLong, 8, 8},      {TypeIsFloat, 4, 4},
+    {TypeIsDouble, 4, 4},   {TypeIsLongDouble, 4, 4},    {TypeIsPointerOrArray, 2, 2},
+  {TypeIsFunction, 2, 2}, {TypeIsStructOrUnion, 2, 2}, {TypeIsBool, 1, 2}, {NULL, 0},
 };
 
-static void PushExpression(_6502Generator* g, IRNode* node,
+
+
+static void PushExpression(W65C02Generator* g, IRNode* node,
                            TargetInstruction* inst, int size) {
   switch (size) {
     case 1:
       lda(g, inst, 0);
-      jsr(g, g->pusha);
+      jsr(g, g->pusha);     // Pushed as 2 bytes.
       break;
-    case 2:
-      ldx(g, inst, 0);
-      ldy(g, inst, 1);
-      jsr(g, g->pushxy);
+    case 2: {
+      Emit(g, NewInstruction1(W65C02_OP(pushreg2), inst, kAddrModeImplied));
+      // ldxzi(g, inst, 0);
+      // jsr(g, g->pushreg2);
       break;
-
+    }
     case 4:
-      ldxzi(g, inst, 0);
-      jsr(g, g->push4);
+      Emit(g, NewInstruction1(W65C02_OP(pushreg4), inst, kAddrModeImplied));
+      // ldxzi(g, inst, 0);
+      // jsr(g, g->pushreg4);
       break;
 
     case 8:
-      ldxzi(g, inst, 0);
-      jsr(g, g->push8);
+      Emit(g, NewInstruction1(W65C02_OP(pushreg8), inst, kAddrModeImplied));
+    // ldxzi(g, inst, 0);
+      // jsr(g, g->pushreg8);
       break;
 
     default:
@@ -2832,25 +4801,24 @@ static void PushExpression(_6502Generator* g, IRNode* node,
 // For 4 and 8 byte constants we load the address of the constant literal into
 // X,Y and call the push function.
 
-static void PushConstant(_6502Generator* g, IRNode* node, int size) {
+static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
   uint64_t value = IRIntConstValue(node);
   switch (size) {
-    case 1:
+    case 1:         // Pushed as 2 bytes.
       Emit(g, NewInstruction1(
-                  _6502_OP(lda),
+                  W65C02_OP(lda),
                   ByteConst(g, value & 0xff),
                   kAddrModeImmediate));
-      jsr(g, g->pusha);
+      jsr(g, g->pusha);           // Pushes 2 bytes.
       break;
-
     case 2:
       Emit(g, NewInstruction1(
-                  _6502_OP(ldx),
+                  W65C02_OP(ldx),
                   ByteConst(g, value & 0xff),
                   kAddrModeImmediate));
       if (value > 255) {
         Emit(g, NewInstruction1(
-                                _6502_OP(ldy),
+                                W65C02_OP(ldy),
                                 ByteConst(g, (value >> 8) & 0xff),
                                 kAddrModeImmediate));
         jsr(g, g->pushxy);
@@ -2859,28 +4827,39 @@ static void PushConstant(_6502Generator* g, IRNode* node, int size) {
       }
       break;
 
-    case 4:
+    case 4: {
+      TargetConstant* literal = (TargetConstant*)GetLoweredNode(node);
+      Literal* lit = CompilerFindLiteral(literal->literal_id);
+      assert(lit != NULL);
+      lit->disabled = false;
       Emit(g, NewInstruction1(
-                  _6502_OP(literalref),
-                              GetLoweredNode(node),
+                  W65C02_OP(literalref),
+                              &literal->base,
                   kAddrModeAbsolute));
       jsr(g, g->push4xy);
       break;
-
-    case 8:
+    }
+    case 8: {
+      TargetConstant* literal = (TargetConstant*)GetLoweredNode(node);
+      Literal* lit = CompilerFindLiteral(literal->literal_id);
+      assert(lit != NULL);
+      lit->disabled = false;
       Emit(g, NewInstruction1(
-                  _6502_OP(literalref),
-                  GetLoweredNode(node),
+                  W65C02_OP(literalref),
+                  &literal->base,
                   kAddrModeAbsolute));
       jsr(g, g->push8xy);
       break;
-
+    }
+      
     default:
       abort();
   }
 }
 
-static void PushVariable(_6502Generator* g, IRNode* node, int size) {
+// Although we would like to push a boolean or char as a single byte
+// we can't because C says that they need to be passed as ints.
+static void PushVariable(W65C02Generator* g, IRNode* node, int size) {
   TargetInstruction* addr = GetLoweredNode(node);
   int offset = (int)TargetIntValue(addr->operand[0]);
   struct {
@@ -2890,7 +4869,7 @@ static void PushVariable(_6502Generator* g, IRNode* node, int size) {
     Symbol* push_varb;  // 2-byte offset
     Symbol* push_argb;  // 2-byte offset
   } var_pushes[] = {
-      {1, g->push_var1, g->push_arg1, g->push_var1b, g->push_arg1b},
+      {1, g->push_var1, g->push_arg1, g->push_var1b, g->push_arg1b},    // pushed as 2 bytes.
       {2, g->push_var2, g->push_arg2, g->push_var2b, g->push_arg2b},
       {4, g->push_var4, g->push_arg4, g->push_var4b, g->push_arg4b},
       {8, g->push_var8, g->push_arg8, g->push_var8b, g->push_arg8b},
@@ -2899,25 +4878,25 @@ static void PushVariable(_6502Generator* g, IRNode* node, int size) {
   Symbol* push_sym = NULL;
   if (TypeIsArray(node->type) || TypeIsStructOrUnion(node->type)) {
     // Get the address of these and push them.
-    _6502Opcode addr_op;
+    W65C02Opcode addr_op;
     if (offset >= 256) {
-      addr_op = addr->opcode == _6502_OP(argument) ? _6502_OP(arg_addrb_xy)
-                                                    : _6502_OP(var_addrb_xy);
+      addr_op = addr->opcode == W65C02_OP(argument) ? W65C02_OP(arg_addrb_xy)
+                                                    : W65C02_OP(var_addrb_xy);
     } else {
-      addr_op = addr->opcode == _6502_OP(argument) ? _6502_OP(arg_addr_xy)
-                                                    : _6502_OP(var_addr_xy);
+      addr_op = addr->opcode == W65C02_OP(argument) ? W65C02_OP(arg_addr_xy)
+                                                    : W65C02_OP(var_addr_xy);
     }
-    Emit(g, NewInstruction1(addr_op, addr, kAddrModeImplied));
+    Emit(g, NewInstruction1(addr_op, addr, kAddrModeIndirect));
     jsr(g, g->pushxy);
     return;
   }
   for (size_t i = 0; i < var_pushes[i].size != 0; i++) {
     if (var_pushes[i].size == size) {
       if (offset >= 256) {
-        push_sym = addr->opcode == _6502_OP(argument) ? var_pushes[i].push_argb
+        push_sym = addr->opcode == W65C02_OP(argument) ? var_pushes[i].push_argb
                                                       : var_pushes[i].push_varb;
       } else {
-        push_sym = addr->opcode == _6502_OP(argument) ? var_pushes[i].push_arg
+        push_sym = addr->opcode == W65C02_OP(argument) ? var_pushes[i].push_arg
                                                       : var_pushes[i].push_var;
       }
       break;
@@ -2935,7 +4914,7 @@ static void PushVariable(_6502Generator* g, IRNode* node, int size) {
 }
 
 
-static void Push(_6502Generator* g, IRNode* node, int size) {
+static void Push(W65C02Generator* g, IRNode* node, int size) {
   TargetInstruction* inst = NULL;
   switch (node->opcode) {
     case IR_OP(argument):
@@ -2954,21 +4933,21 @@ static void Push(_6502Generator* g, IRNode* node, int size) {
       if (IRIsConst(node)) {
         PushConstant(g, node, size);
       } else {
-        inst = Materialize(g, node);
+        inst = Materialize(g, node, size, true);
         PushExpression(g, node, inst, size);
       }
       break;
   }
 }
 
-static void PushArg(_6502Generator* g, IRNode* node, size_t* size) {
+static void PushArg(W65C02Generator* g, IRNode* node, size_t* size) {
   if (node->type == NULL) {
     Push(g, node, 2);
   }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(node->type)) {
       if (size != NULL) {
-        *size += push_map[i].size;
+        *size += push_map[i].pushed_size;
       }
       Push(g, node, push_map[i].size);
       return;
@@ -2982,51 +4961,243 @@ static void PushArg(_6502Generator* g, IRNode* node, size_t* size) {
 // mem_src: source address
 // mem_size: size of memory
 // JSR pushmem
-static void PushStructArg(_6502Generator* g, IRNode* node, size_t* args_size) {
-  size_t struct_size = node->type->size;
+static void PushStructArg(W65C02Generator* g, IRNode* node, size_t* args_size) {
+  size_t struct_size = Sizeof(node->type);
   *args_size += struct_size;
   Symbol* pushmem = g->pushmem1;
 
   // Put size in __mem_size.
   Emit(g, NewInstruction1(
-              _6502_OP(lda),
+              W65C02_OP(lda),
               ByteConst(g,  struct_size & 0xff),
               kAddrModeImmediate));
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g, _6502_MSZ_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MSZ_REG),
                        kAddrModeZeroPageAbsolute));
   if (struct_size >= 256) {
     pushmem = g->pushmem2;
-    Emit(g, NewInstruction1(_6502_OP(lda),
+    Emit(g, NewInstruction1(W65C02_OP(lda),
                             ByteConst(g,
                                            (struct_size >> 8) & 0xff),
                             kAddrModeImmediate));
     Emit(g, NewInstruction1(
-                _6502_OP(sta),
-                ByteConst(g, _6502_MSZ_REG + 1),
+                W65C02_OP(sta),
+                ByteConst(g, W65C02_MSZ_REG + 1),
                 kAddrModeZeroPageAbsolute));
   }
 
   // Put src in __mem_src
-  TargetInstruction* src = GetAddress(g, node);
-  Emit(g, NewInstruction2(_6502_OP(lda), src,
+  TargetInstruction* src = GetAddress(g, node, true);
+  AddReloadPoint(g, src);
+  Emit(g, NewInstruction2(W65C02_OP(lda), src,
                           Zero(g),
                           GetAddrMode(src)));
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       GetIntConstant(g, NULL, kTargetTypeByte, _6502_MSRC_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       GetIntConstant(g, NULL, kTargetType8Bit, W65C02_MSRC_REG),
                        kAddrModeZeroPageAbsolute));
-  Emit(g, NewInstruction2(_6502_OP(lda), src,
+  Emit(g, NewInstruction2(W65C02_OP(lda), src,
                           One(g),
                           GetAddrMode(src)));
   Emit(g, NewInstruction1(
-              _6502_OP(sta),
-              ByteConst(g, _6502_MSRC_REG + 1),
+              W65C02_OP(sta),
+              ByteConst(g, W65C02_MSRC_REG + 1),
               kAddrModeZeroPageAbsolute));
 
   // JSR pushmem
   jsr(g, pushmem);
+}
+
+static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
+  IRNode* callee = node->inputs.value.p[0];
+  if (callee->opcode == IR_OP(staticvar)) {
+    IRVariable* var = (IRVariable*)callee;
+    if (StorageIs(var->symbol->storage, STO(static)|STO(auto))) {
+      return NULL;
+    }
+    MapKeyType k = {.p = var->symbol->name.value};
+    Intrinsic* in = MapFind(&g->intrinsics, k);
+    if (in == NULL) {
+      return NULL;
+    }
+    
+    TargetInstruction* result = NULL;
+    if (node->dest != NULL) {
+      LowerIRNode(g, node->dest);
+      result = GetLoweredNode(node->dest);
+    } else {
+      result = TempRegister(g, node->type, Sizeof(node->type));
+    }
+    if (result != NULL) {
+      result->flags |= k6502ExprIsCallResult;
+    }
+  
+    switch (in->index) {
+      case kIntrinsicIsalnum:
+      case kIntrinsicIsalpha:
+      case kIntrinsicIsblank:
+      case kIntrinsicIscntrl:
+      case kIntrinsicIsdigit:
+      case kIntrinsicIsgraph:
+      case kIntrinsicIslower:
+      case kIntrinsicIsprint:
+      case kIntrinsicIspunct:
+      case kIntrinsicIsspace:
+      case kIntrinsicIsupper:
+      case kIntrinsicIsxdigit:
+      case kIntrinsicTolower:
+      case kIntrinsicToupper: {
+        IRNode* arg_node = node->inputs.value.p[1];
+        TargetInstruction* arg = Materialize(g, arg_node, 2, true);
+        ldx(g, arg, 0);
+        ldy(g, arg, 1);
+        jsr(g, in->symbol);   // Call intrinsic, result in A.
+        SetIndexReg(g, result, result, 0);
+        sta(g, result, 0);
+        stz(g, result, 1);
+        return SetLoweredNode(node, result);
+      }
+         break;
+      case kIntrinsicMemcpy: {
+        // Put size in __mem_size.
+        TargetInstruction* size = GetLoweredNode(node->inputs.value.p[3]);
+        AddReloadPoint(g, size);
+        SetIndexReg(g, size, size, 0);
+        lda(g, size, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MSZ_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, size, size, 1);
+        lda(g, size, 1);
+        Emit(g, NewInstruction1(
+                    W65C02_OP(sta),
+                    ByteConst(g,  W65C02_MSZ_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+
+        // Put src in __mem_src
+        TargetInstruction* src = GetAddress(g, node->inputs.value.p[2], true);
+        AddReloadPoint(g, src);
+        SetIndexReg(g, src, src, 0);
+        lda(g, src, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MSRC_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, src, src, 1);
+        lda(g, src, 1);
+        Emit(g, NewInstruction1(
+                    W65C02_OP(sta),
+                    ByteConst(g,  W65C02_MSRC_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+
+        // Put dest in __mem_dest.
+        TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
+        AddReloadPoint(g, dest);
+        SetIndexReg(g, dest, dest, 1);
+        lda(g, dest, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MDST_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, dest, dest, 1);
+        lda(g, dest, 1);
+        Emit(g, NewInstruction1(
+                    W65C02_OP(sta),
+                    ByteConst(g,  W65C02_MDST_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+
+        // JSR __builtin_memcpy
+        jsr(g, in->symbol);
+
+        if (node->outputs.length > 0) {
+          // Result is in __mem_dest.
+          Emit(g,
+               NewInstruction1(W65C02_OP(lda),
+                               ByteConst(g, W65C02_MDST_REG),
+                               kAddrModeZeroPageAbsolute));
+          SetIndexReg(g, result, result, 0);
+          sta(g, result, 0);
+          
+          Emit(g,
+               NewInstruction1(W65C02_OP(lda),
+                               ByteConst(g, W65C02_MDST_REG+1),
+                               kAddrModeZeroPageAbsolute));
+
+          SetIndexReg(g, result, result, 0);
+          sta(g, result, 1);
+        }
+        return SetLoweredNode(node, result);
+      }
+      case kIntrinsicMemset: {
+        // Put size in __mem_size.
+        TargetInstruction* size = GetLoweredNode(node->inputs.value.p[3]);
+        AddReloadPoint(g, size);
+        SetIndexReg(g, size, size, 0);
+        lda(g, size, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MSZ_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, size, size, 1);
+        lda(g, size, 1);
+        Emit(g, NewInstruction1(
+                    W65C02_OP(sta),
+                    ByteConst(g,  W65C02_MSZ_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+
+        // Put value in __mem_src.  One byte only.
+        TargetInstruction* src = GetLoweredNode(node->inputs.value.p[2]);
+        AddReloadPoint(g, src);
+        SetIndexReg(g, src, src, 0);
+        lda(g, src, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MSRC_REG),
+                             kAddrModeZeroPageAbsolute));
+        
+        // Put dest in __mem_dest.
+        TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
+        AddReloadPoint(g, dest);
+        lda(g, dest, 0);
+        Emit(g,
+             NewInstruction1(W65C02_OP(sta),
+                             ByteConst(g, W65C02_MDST_REG),
+                             kAddrModeZeroPageAbsolute));
+        lda(g, dest, 1);
+        Emit(g, NewInstruction1(
+                    W65C02_OP(sta),
+                    ByteConst(g,  W65C02_MDST_REG + 1),
+                    kAddrModeZeroPageAbsolute));
+        jsr(g, in->symbol);
+        
+        // Result is in __mem_dest.
+        if (node->outputs.length > 0) {
+          Emit(g,
+               NewInstruction1(W65C02_OP(lda),
+                               ByteConst(g, W65C02_MDST_REG),
+                               kAddrModeZeroPageAbsolute));
+          SetIndexReg(g, result, result, 0);
+          sta(g, result, 0);
+          
+          Emit(g,
+               NewInstruction1(W65C02_OP(lda),
+                               ByteConst(g, W65C02_MDST_REG+1),
+                               kAddrModeZeroPageAbsolute));
+
+          SetIndexReg(g, result, result, 0);
+          sta(g, result, 1);
+        }
+        return SetLoweredNode(node, result);
+      }
+      default:
+        fprintf(stderr, "Unknown intrinsic index %d for %s\n", in->index, in->symbol->name.value);
+        abort();
+    }
+  }
+ 
+  return NULL;
 }
 
 // First push all the args onto the stack right to left.
@@ -3042,24 +5213,39 @@ static void PushStructArg(_6502Generator* g, IRNode* node, size_t* args_size) {
 // yy:
 //
 // Then, increment the sp by the number of bytes pushed.
-static TargetInstruction* LowerCall(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerCall(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
+  IRNode* callee = node->inputs.value.p[0];
+  
+  TargetInstruction* instrinsic_call = CallIntrinsic(g, node);
+  if (instrinsic_call != NULL) {
+    return instrinsic_call;
+  }
+  
   size_t args_size = 0;
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (TypeIsStructOrUnion(arg_node->type)) {
+    if (arg_node->opcode == IR_OP(structreturn)) {
+      // Passing structreturn to another function, push address.
+      PushArg(g, arg_node, &args_size);
+    } else if (TypeIsStructOrUnion(arg_node->type)) {
       PushStructArg(g, arg_node, &args_size);
     } else {
       PushArg(g, arg_node, &args_size);
     }
   }
-  // Load return address into A (in zero page).
+  
+  // Load return address into X,Y,
   TargetInstruction* result = NULL;
-  if (!TypeIsVoid(node->type)) {
+  // If the function returns a struct/union its result is in address specified
+  // by first arg.
+  if (TypeIsStructOrUnion(node->type)) {
+    result = GetLoweredNode(node->inputs.value.p[1]);
+  } else if (!TypeIsVoid(node->type)) {
     if (node->dest != NULL) {
       LowerIRNode(g, node->dest);
       result = GetLoweredNode(node->dest);
-      if (_6502IsExpression(result)) {
+      if (W65C02IsExpression(result)) {
         ldxzi(g, result, 0);
         ldyi(g, 0);
       } else {
@@ -3067,71 +5253,108 @@ static TargetInstruction* LowerCall(_6502Generator* g, IRNode* node) {
         GetAddressXY(g, node->dest);
       }
     } else {
-      result = TempRegister(g, node->type->size);
+      result = TempRegister(g, node->type, Sizeof(node->type));
       ldxzi(g, result, 0);
       ldyi(g, 0);
     }
-    result->flags |= k6502ExprIsCallResult;
+    if (result != NULL) {
+      result->flags |= k6502ExprIsCallResult;
+    }
   }
-  TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
+  // TargetInstruction* addr = GetLoweredNode(callee);
+  TargetInstruction* addr = Materialize(g, callee, 2, false);
   TargetInstruction* call = NULL;
-  if (addr->opcode == _6502_OP(symbol)) {
-    call = Emit(g, NewInstruction1(_6502_OP(jsr), addr, kAddrModeAbsolute));
+  if (addr->opcode == W65C02_OP(symbol) && TypeIsFunction(callee->type)) {
+    call = Emit(g, NewInstruction1(W65C02_OP(jsr), addr, kAddrModeAbsolute));
     call->flags |= k6502ProcedureCall;
   } else {
     // Calling an expression.
-    addr = Materialize(g, node->inputs.value.p[0]);     // Address to call.
+    addr = Materialize(g, node->inputs.value.p[0], -1, true);     // Address to call.
     TargetInstruction* call_label =
-        NewInstruction(_6502_OP(label), kAddrModeImplied);
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
     TargetInstruction* end_label =
-        NewInstruction(_6502_OP(label), kAddrModeImplied);
-    call = Emit(g, NewInstruction1(_6502_OP(jsr), call_label, kAddrModeAbsolute));
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    call = Emit(g, NewInstruction1(W65C02_OP(jsr), call_label, kAddrModeAbsolute));
     call->flags |= k6502ProcedureCall;
-    Emit(g, NewInstruction1(_6502_OP(bra), end_label, kAddrModeAbsolute));
+    Emit(g, NewInstruction1(Is65c02() ? W65C02_OP(bra) : W65C02_OP(jmp), end_label, kAddrModeAbsolute));
     Emit(g, call_label);
-    Emit(g, NewInstruction1(_6502_OP(jmp), addr, kAddrModeIndirect));
+    Emit(g, NewInstruction1(W65C02_OP(jmp), addr, kAddrModeIndirect));
     call = Emit(g, end_label);
   }
   if (args_size > 0) {
-    Symbol* incsp = g->incsp1;
-    Emit(g, NewInstruction1(
-                _6502_OP(ldx),
-                ByteConst(g, args_size & 0xff),
-                kAddrModeImmediate));
-    if (args_size >= 256) {
-      Emit(g, NewInstruction1(
-                  _6502_OP(ldy),
-                  ByteConst(g, (args_size >> 8) & 0xff),
-                  kAddrModeImmediate));
-      incsp = g->incsp2;
+    if (TypeIsStructOrUnion(node->type)) {
+      // Result is a struct/union.  Pop the first arg (the result address)
+      // back into an expr2 so that we know were it was.
+      jsr(g, g->pullxy);
+      stx(g, result, 0);
+      call = sty(g, result, 1);
+      args_size -= 2;
     }
+    if (args_size > 0) {
+      Symbol* incsp;
+      switch (args_size) {
+        case 2:
+          incsp = g->incsp2;
+          break;
+        case 4:
+          incsp = g->incsp4;
+          break;
+        case 6:
+          incsp = g->incsp6;
+          break;
+        case 8:
+          incsp = g->incsp8;
+          break;
+        case 10:
+          incsp = g->incsp10;
+          break;
+        case 12:
+          incsp = g->incsp12;
+          break;
+        case 14:
+          incsp = g->incsp14;
+          break;
+        case 16:
+          incsp = g->incsp16;
+          break;
+        default:
+          incsp = g->incsp;
+          Emit(g, NewInstruction1(
+                      W65C02_OP(ldx),
+                      ByteConst(g, args_size & 0xff),
+                      kAddrModeImmediate));
+          if (args_size >= 256) {
+            Emit(g, NewInstruction1(
+                        W65C02_OP(ldy),
+                        ByteConst(g, (args_size >> 8) & 0xff),
+                        kAddrModeImmediate));
+            incsp = g->incsp0;
+         }
+         break;
+      }
 
-    call = jsr(g, incsp);
+      call = jsr(g, incsp);
+    }
   }
-  call->flags |= k6502InstIsCall;
+  call->flags |= k6502InstIsCall | k6502BlockEnd;
   if (result == NULL) {
     result = call;
   }
   SetLoweredNode(node, result);
+  AddSpillPoint(g, result);
   return result;
 }
 
 // Input is the value of the result in zero page.
 // Calls:
-// JSR resultX (where X is 2,4,8)
-// or, for single byte.
-// LDA v
-// STA (__result)
-static void AssignResult(_6502Generator* g, TargetInstruction* inst, int size) {
+// JSR resulti (where X is 2,4,8)
+static void AssignResult(W65C02Generator* g, TargetInstruction* inst, int size) {
   Symbol* result_func;
   switch (size) {
     case 1:
-      lda(g, inst, 0);
-      Emit(g, NewInstruction1(
-                   _6502_OP(sta),
-                   ByteConst(g,  _6502_RESULT_REG),
-                   kAddrModeIndirect));
-      return;
+       ldazi(g, inst, 0);
+       result_func = g->result1;
+       break;
     case 2:
       ldazi(g, inst, 0);
       result_func = g->result2;
@@ -3151,12 +5374,21 @@ static void AssignResult(_6502Generator* g, TargetInstruction* inst, int size) {
   jsr(g, result_func);
 }
 
-static TargetInstruction* LowerResult(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerResult(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
-  int size = node->type->size;
-  TargetInstruction* rnode = Materialize(g, node->inputs.value.p[0]);
+  int size = Sizeof(node->type);
+  IRNode* result = node->inputs.value.p[0];
+  TargetInstruction* rnode = Materialize(g, result, -1, true);
   if (!IsLeaf(g)) {
-    jsr(g, g->load_result);
+    // For 2 byte frame size:
+    // ldx #frame_size LO
+    // ldy #frame_size HI
+    // jsr __load_result+2
+    //
+    // For 1 byte frame size:
+    // ldx #frame_size LO
+    // jsr __load_result
+    Emit(g, NewInstruction(W65C02_OP(load_result), kAddrModeImplied));
   }
   switch (node->opcode) {
     case IR_OP(resulti):
@@ -3169,7 +5401,7 @@ static TargetInstruction* LowerResult(_6502Generator* g, IRNode* node) {
       AssignResult(g, rnode, 4);
       break;
     case IR_OP(resultd):
-      AssignResult(g, rnode, 8);
+      AssignResult(g, rnode, 4);
       break;
     default:
       assert(false);
@@ -3181,37 +5413,164 @@ static TargetInstruction* LowerResult(_6502Generator* g, IRNode* node) {
 // A literal reference is a move of the literal offset (the first input
 // to the literalref node) to the 'literal' with the given id.  This will
 // be assembled as a reference to a symbol with the name .str.%d.
-static TargetInstruction* LowerLiteralReference(_6502Generator* g,
+static TargetInstruction* LowerLiteralReference(W65C02Generator* g,
                                                 IRNode* node) {
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
   TargetInstruction* dest = NULL;
   if (node->dest != NULL) {
-    dest = GetAddress(g, node->dest);
+    dest = GetAddress(g, node->dest, true);
   } else {
-    dest = TempRegister(g, 2);
+    dest = TempRegister(g, node->type, 2);
   }
 
-  Emit(g, NewInstruction1(_6502_OP(literalreflo), literal,
+  Emit(g, NewInstruction1(W65C02_OP(literalreflo), literal,
                           kAddrModeImplied));
   SetIndexReg(g, dest, dest, 0);
   sta(g, dest, 0);
-  Emit(g, NewInstruction1(_6502_OP(literalrefhi), literal,
+  Emit(g, NewInstruction1(W65C02_OP(literalrefhi), literal,
                           kAddrModeImplied));
   SetIndexReg(g, dest, dest, 1);
   sta(g, dest, 1);
   SetLoweredNode(node, dest);
+  AddSpillPoint(g, dest);
   return dest;
 }
 
-static TargetInstruction* LowerAddressOf(_6502Generator* g, IRNode* node) {
-  TargetInstruction* result = GetAddress(g, node->inputs.value.p[0]);
-  SetLoweredNode(node, result);
-  return result;
+static TargetInstruction* AddressOfRegVariable(W65C02Generator* g, IRNode* node, IRNode* var) {
+  TargetInstruction* result = GetLoweredNode(var);
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetLoweredNode(node->dest);
+    Copy(g, dest, result, 0, 0, 2, kAddrModeZeroPage, GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+    result = dest;
+  }
+  return SetLoweredNode(node, result);
 }
 
-static TargetInstruction* LowerMemcpy(_6502Generator* g, IRNode* node) {
+static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IRNode* var, bool is_arg) {
+  TargetInstruction* inst = GetLoweredNode(var);
+  AddReloadPoint(g, inst);
+  
+  switch ((W65C02Opcode)var->opcode) {
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
+      return AddressOfRegVariable(g, node, var);
+    default:
+      break;
+  }
+  TargetInstruction* result = NULL;
+  int offset;
+
+  var = IgnoreCasts(var);
+   
+  // Variable or argument.  Load value using one of the runtime helper
+  // functions.
+  offset = (int)TargetIntValue(inst->operand[0]);
+
+  bool dest_set = false;
+  // If we have a destination set and it's an expression we can write the
+  // result of the var_addr into it.
+  if (node->dest != NULL && IsExpression(GetLoweredNode(node->dest))) {
+    result = GetLoweredNode(node->dest);
+    dest_set = true;
+  } else {
+    result = TempRegister(g, node->type, 2);
+  }
+  W65C02Opcode addr_op;
+  if (IRIsArgument(var)) {
+      addr_op = offset >= 256 ? W65C02_OP(arg_addrb) : W65C02_OP(arg_addr);
+  } else {
+    addr_op = offset >= 256 ? W65C02_OP(var_addrb) : W65C02_OP(var_addr);
+  }
+  Emit(g,
+        NewInstruction2(addr_op, result,
+                        inst,
+                        kAddrModeImplied));
+
+  AddSpillPoint(g, result);
+  if (!dest_set && node->dest != NULL) {
+    // We have a location to put the result.
+    TargetInstruction* dest = GetAddress(g, node->dest, true);
+    Copy(g, dest, result, 0, 0, 2, kAddrModeZeroPage, GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+    result = dest;
+  }
+  return SetLoweredNode(node, result);
+}
+
+
+static TargetInstruction* AddressOfStaticVariable(W65C02Generator* g, IRNode* node, IRNode* var) {
+  TargetInstruction* result = GetAddress(g, var, false);
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetAddress(g, node->dest, true);
+    Copy(g, dest, result, 0, 0, 2, kAddrModeSymbolAddr, GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+    result = dest;
+  }
+  result->flags |= k6502NeedAddress;
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* AddressOfExpression(W65C02Generator* g, IRNode* node, IRNode* expr) {
+  TargetInstruction* result = GetAddress(g, expr, true);
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetAddress(g, node->dest, true);
+    Copy(g, dest, result, 0, 0, 2, GetAddrMode(result), GetAddrMode(dest));
+    AddSpillPoint(g, dest);
+    result = dest;
+  }
+  result->flags |= k6502NeedAddress;
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerAddressOf(W65C02Generator* g, IRNode* node) {
+  IRNode* src_node = node->inputs.value.p[0];
+  TargetInstruction* src = GetLoweredNode(src_node);
+  bool is_arg = true;
+  switch (src_node->opcode) {
+    case IR_OP(localvar):
+      is_arg = false;
+    case IR_OP(argument):
+      return AddressOfVariable(g, node, src_node, is_arg);
+    
+    case IR_OP(externvar):
+    case IR_OP(staticvar):
+      return AddressOfStaticVariable(g, node, src_node);
+      
+    default:
+      return AddressOfExpression(g, node, src_node);
+      break;
+  }
+#if 0
+  assert(node->inputs.length == 1);
+  TargetInstruction* src = GetAddress(g, node->inputs.value.p[0]);
+  // The addressing mode for the src is always in zero page.
+  SetAddrMode(src, kAddrModeZeroPage);
+  AddReloadPoint(g, src);
+
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetDestAddress(g, node, false);
+    for (int i = 0; i < 2; i++) {
+      SetIndexReg(g, src, dest, i);
+      Emit(g, NewInstruction2(W65C02_OP(lda), src, ByteConst(g, i), kAddrModeZeroPage));
+      sta(g, dest, i);
+    }
+    SetLoweredNode(node, dest);
+    AddSpillPoint(g, dest);
+    return dest;
+  }
+  SetLoweredNode(node, src);
+  return src;
+#endif
+}
+
+static TargetInstruction* LowerMemcpy(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 3);
   Symbol* copymem = g->copymem1;
 
@@ -3220,42 +5579,44 @@ static TargetInstruction* LowerMemcpy(_6502Generator* g, IRNode* node) {
   int64_t size = TargetIntValue(size_node);
   ldai(g, size & 0xff);
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g, _6502_MSZ_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MSZ_REG),
                        kAddrModeZeroPageAbsolute));
   if (size >= 256) {
     copymem = g->copymem2;
     ldai(g, (size >> 8) & 0xff);
     Emit(g, NewInstruction1(
-                _6502_OP(sta),
-                ByteConst(g,  _6502_MSZ_REG + 1),
+                W65C02_OP(sta),
+                ByteConst(g,  W65C02_MSZ_REG + 1),
                 kAddrModeZeroPageAbsolute));
   }
 
   // Put src in __mem_src
-  TargetInstruction* src = GetAddress(g, node->inputs.value.p[1]);
+  TargetInstruction* src = GetAddress(g, node->inputs.value.p[1], true);
+  AddReloadPoint(g, src);
   lda(g, src, 0);
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g, _6502_MSRC_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MSRC_REG),
                        kAddrModeZeroPageAbsolute));
   lda(g, src, 1);
   Emit(g, NewInstruction1(
-              _6502_OP(sta),
-              ByteConst(g,  _6502_MSRC_REG + 1),
+              W65C02_OP(sta),
+              ByteConst(g,  W65C02_MSRC_REG + 1),
               kAddrModeZeroPageAbsolute));
 
   // Put dest in __mem_dest.
-  TargetInstruction* dest = GetDestAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* dest = GetAddress(g, node->inputs.value.p[0], true);
+  AddReloadPoint(g, dest);
   lda(g, dest, 0);
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g, _6502_MSRC_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MDST_REG),
                        kAddrModeZeroPageAbsolute));
-  lda(g, dest, 0);
+  lda(g, dest, 1);
   Emit(g, NewInstruction1(
-              _6502_OP(sta),
-              ByteConst(g,  _6502_MSRC_REG + 1),
+              W65C02_OP(sta),
+              ByteConst(g,  W65C02_MDST_REG + 1),
               kAddrModeZeroPageAbsolute));
 
   // JSR copymem
@@ -3263,38 +5624,39 @@ static TargetInstruction* LowerMemcpy(_6502Generator* g, IRNode* node) {
   return NULL;
 }
 
-static TargetInstruction* LowerMemzero(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerMemzero(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   Symbol* zeromem = g->zeromem1;
 
   // Put size in __mem_size.
-  TargetInstruction* size_node = GetLoweredNode(node->inputs.value.p[2]);
-  int64_t size = TargetIntValue(size_node);
+  IRNode* dest_node = node->inputs.value.p[0];
+  int size = SizeofArray(node->type);
   ldai(g, size & 0xff);
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g,  _6502_MSZ_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g,  W65C02_MSZ_REG),
                        kAddrModeZeroPageAbsolute));
   if (size >= 256) {
     zeromem = g->zeromem2;
     ldai(g, (size >> 8) & 0xff);
     Emit(g, NewInstruction1(
-                _6502_OP(sta),
-                ByteConst(g,  _6502_MSZ_REG + 1),
+                W65C02_OP(sta),
+                ByteConst(g,  W65C02_MSZ_REG + 1),
                 kAddrModeZeroPageAbsolute));
   }
 
   // Put dest in __mem_dest.
-  TargetInstruction* dest = GetDestAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* dest = GetAddress(g, dest_node, true);
+  AddReloadPoint(g, dest);
   lda(g, dest, 0);
   Emit(g,
-       NewInstruction1(_6502_OP(sta),
-                       ByteConst(g, _6502_MSRC_REG),
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MDST_REG),
                        kAddrModeZeroPageAbsolute));
-  lda(g, dest, 0);
+  lda(g, dest, 1);
   Emit(g, NewInstruction1(
-              _6502_OP(sta),
-              ByteConst(g,  _6502_MSRC_REG + 1),
+              W65C02_OP(sta),
+              ByteConst(g,  W65C02_MDST_REG + 1),
               kAddrModeZeroPageAbsolute));
 
   // JSR zeromem
@@ -3302,48 +5664,100 @@ static TargetInstruction* LowerMemzero(_6502Generator* g, IRNode* node) {
   return NULL;
 }
 
-static TargetInstruction* LowerZeroExtend(_6502Generator* g, IRNode* node) {
-  if (node->outputs.length == 0) {
-    // No users of this, ignore.
-    return NULL;
-  }
-  IRNode* src = node->inputs.value.p[0];
-  TargetInstruction* value = Materialize(g, src);
-  TargetInstruction* dest = GetDestAddress(g, node);
-  value = SimpleIntegerOp(g, node, _6502_OP(and), node->type->size, dest, value,
-                          GetLoweredNode(node->inputs.value.p[1]));
-  SetLoweredNode(node, value);
-  return value;
-}
-
-static TargetInstruction* LowerSignExtend(_6502Generator* g, IRNode* node) {
-  if (node->outputs.length == 0) {
+static TargetInstruction* LowerZeroExtend(W65C02Generator* g, IRNode* node) {
+  if (node->outputs.length == 0 && node->dest == NULL) {
     // No users of this, ignore.
     return NULL;
   }
   IRNode* src_node = node->inputs.value.p[0];
-  int src_size = src_node->type->size;
-  TargetInstruction* src = GetAddress(g, src_node);
+  TargetInstruction* src = Materialize(g, src_node, -1, false);
+  AddReloadPoint(g, src);
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  int src_size = Sizeof(src_node->type);
+  int dest_size = Sizeof(node->type);
 
-  TargetInstruction* dest = GetDestAddress(g, node);
+  // Second operand is number of bits to mask to.
+  int bits = (int)IRIntConstValue(node->inputs.value.p[1]);
+  if (bits > 0) {
+    // Lengthen
+    // E.g. from 2 to 4
+    // lda src+0
+    // sta dest+0
+    // lda src+1
+    // sta dest+1
+    // lda #0
+    // sta dest+2
+    // sta dest+3
+    for (int i = 0; i < src_size; i++) {
+      SetIndexReg(g, src, dest, i);
+      lda(g, src, i);
+      sta(g, dest, i);
+    }
+    ldai(g, 0);
+
+    int remaining = dest_size - src_size;
+    if (remaining > 2 && IsExpression(dest)) {
+      AddressingMode dest_mode = GetAddrMode(dest);
+      if (dest_mode != kAddrModeIndirectIndexed && dest_mode != kAddrModeIndirect) {
+        SetAddrMode(dest, kAddrModeZeroPageIndexedY);
+      }
+      ldyi(g, dest_size-1);
+      TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+      sta(g, dest, -1);
+      dey(g);
+      cpyi(g, src_size);
+      EmitResolvedBranch(g, W65C02_OP(bne), loop);
+      SetAddrMode(dest, dest_mode);
+    } else {
+      for (int i = src_size; i < dest_size; i++) {
+        SetIndexReg(g, dest, dest, i);
+        sta(g, dest, i);
+      }
+    }
+  } else {
+    // Shorten
+    // E.g. from 2 to 1
+    // lda src+0
+    // sta dest+0
+    for (int i = 0; i < dest_size; i++) {
+      SetIndexReg(g, src, dest, i);
+      lda(g, src, i);
+      sta(g, dest, i);
+    }
+  }
+  SetLoweredNode(node, dest);
+  AddSpillPoint(g, dest);
+  return dest;
+}
+
+static TargetInstruction* LowerSignExtend(W65C02Generator* g, IRNode* node) {
+  if (node->outputs.length == 0 && node->dest == NULL) {
+    // No users of this, ignore.
+    return NULL;
+  }
+  IRNode* src_node = node->inputs.value.p[0];
+  int src_size = Sizeof(src_node->type);
+  TargetInstruction* src = GetAddress(g, src_node, true);
+  AddReloadPoint(g, src);
+
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  AddReloadPoint(g, dest);
 
   IRConstant* diff_value = node->inputs.value.p[1];
   int diff = (int)diff_value->value.ivalue;  // In bits.
   diff /= 8;                                 // In bytes.
-  int dest_size = src_size - diff;
-  if (diff < 0) {
+  int dest_size = src_size + diff;
+  if (diff > 0) {
     // Lengthen int.
     // Say from 2 to 4 bytes.
     //  lda src+0
     //  sta dest+0
     //  lda src+1
     //  sta dest+1
-    //  ldx #0
     //  AND #0x80
     //  BEQ xx
-    //  DEX
+    //  LDA #255
     // xx:
-    //  TXA
     //  sta dest+2
     //  sta dest+3
 
@@ -3352,22 +5766,29 @@ static TargetInstruction* LowerSignExtend(_6502Generator* g, IRNode* node) {
       lda(g, src, i);
       sta(g, dest, i);
     }
-    Emit(g, NewInstruction1(_6502_OP(ldx),
-                            Zero(g),
-                            kAddrModeImmediate));
-    Emit(g, NewInstruction1(_6502_OP(and),
+    Emit(g, NewInstruction1(W65C02_OP(and),
                             ByteConst(g,  0x80),
                             kAddrModeImmediate));
     TargetInstruction* label =
-        NewInstruction(_6502_OP(label), kAddrModeImplied);
-    EmitResolvedBranch(g, _6502_OP(beq), label);
-    Emit(g, NewInstruction(_6502_OP(dex), kAddrModeImplied));
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    EmitResolvedBranch(g, W65C02_OP(beq), label);
+    ldai(g, 255);
     Emit(g, label);
-    Emit(g, NewInstruction(_6502_OP(txa), kAddrModeImplied));
 
-    for (int i = src_size; i < dest_size; i++) {
-      SetIndexReg(g, dest, dest, i);
-      sta(g, dest, i);
+    int remaining = dest_size - src_size;
+    if (remaining > 2) {
+      // SetAddrMode(dest, kAddrModeIndirectIndexed);
+      ldyi(g, dest_size-1);
+      TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+      sta(g, dest, 1);
+      dey(g);
+      cpyi(g, src_size);
+      EmitResolvedBranch(g, W65C02_OP(bne), loop);
+    } else {
+      for (int i = src_size; i < dest_size; i++) {
+        SetIndexReg(g, dest, dest, i);
+        sta(g, dest, i);
+      }
     }
   } else {
     // Shorten
@@ -3389,44 +5810,44 @@ static TargetInstruction* LowerSignExtend(_6502Generator* g, IRNode* node) {
     }
 
     Emit(g,
-         NewInstruction2(_6502_OP(lda), src,
+         NewInstruction2(W65C02_OP(lda), src,
                          ByteConst(g, src_size - 1),
                          GetAddrMode(src)));
-    Emit(g, NewInstruction1(_6502_OP(and),
+    Emit(g, NewInstruction1(W65C02_OP(and),
                             ByteConst(g, 0x80),
                             kAddrModeImmediate));
     Emit(g, NewInstruction2(
-                _6502_OP(ora), src,
+                W65C02_OP(ora), src,
                 ByteConst(g,  dest_size - 1),
                 GetAddrMode(src)));
     Emit(g, NewInstruction2(
-                _6502_OP(sta), dest,
+                W65C02_OP(sta), dest,
                 ByteConst(g, dest_size - 1),
                 GetAddrMode(dest)));
   }
   SetLoweredNode(node, dest);
+  AddSpillPoint(g, dest);
   return dest;
 }
 
-static TargetInstruction* LowerAlign(_6502Generator* g, IRNode* node) {
-  // TODO:
-  return NULL;
+static TargetInstruction* LowerAlign(W65C02Generator* g, IRNode* node) {
+  return SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
 }
 
-static TargetInstruction* LowerAsm(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerAsm(W65C02Generator* g, IRNode* node) {
   // The first argument is a literal containing the assembly language.
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
 
   TargetInstruction* result =
-      Emit(g, NewInstruction1(_6502_OP(asm), literal, kAddrModeImplied));
+      Emit(g, NewInstruction1(W65C02_OP(asm), literal, kAddrModeImplied));
 
   SetLoweredNode(node, result);
   return result;
 }
 
-static TargetInstruction* LowerLocation(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerLocation(W65C02Generator* g, IRNode* node) {
   IRLocation* loc = (IRLocation*)node;
   return SetLoweredNode(node, Emit(g, TargetNewLocation(loc)));
 }
@@ -3434,56 +5855,181 @@ static TargetInstruction* LowerLocation(_6502Generator* g, IRNode* node) {
 // The first input is the address of the 'ap' variable.  The second is the
 // address of the last function argument.  The ap variable is set to the
 // address of the last argument + 2.
-static TargetInstruction* LowerBuiltinVaStart(_6502Generator* g, IRNode* node) {
-  TargetInstruction* ap = GetAddress(g, node->inputs.value.p[0]);
-  TargetInstruction* arg = GetAddress(g, node->inputs.value.p[1]);
+static TargetInstruction* LowerBuiltinVaStart(W65C02Generator* g, IRNode* node) {
+  TargetInstruction* ap = GetAddress(g, node->inputs.value.p[0], true);
+  TargetInstruction* arg = GetAddress(g, node->inputs.value.p[1], true);
+  SetAddrMode(arg, kAddrModeZeroPage);
   
-  AddSubInteger(g, node, _6502_OP(adc), _6502_OP(clc), 2, ap, arg, ByteConst(g, 2));
+  AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, ap, arg, ByteConst(g, 2));
   
   return SetLoweredNode(node, ap);
 }
 
-static TargetInstruction* LowerBuiltinVaArg(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
+  IRNode* ap_node = node->inputs.value.p[0];
+#if 0
+  
+#if 0
   // Load value of first arg.
-  TargetInstruction* ap_addr = GetAddress(g, node->inputs.value.p[0]);
-
+  TargetInstruction* ap_addr = GetAddress(g, ap_node, true);
+  AddReloadPoint(g, ap_addr);
+  
   // Load the contents of ap into a tmp.
-  TargetInstruction* ap = TempRegister(g, 2);
+  TargetInstruction* ap = TempRegister(g, node->type, 2);
+  AddReloadPoint(g, ap);
 
   for (int i = 0; i < 2; i++) {
     SetIndexReg(g, ap_addr, ap, i);
     lda(g, ap_addr, i);
     sta(g, ap, i);
   }
+#endif
+  // Load the value of ap.
+  TargetInstruction* ap = Materialize(g, ap_node, 2, true);
   
   // Now load the contents of the arg, via ap.
-  TargetInstruction* dest = GetDestAddress(g, node);
-  for (int i = 0; i < node->type->size; i++) {
-    SetIndexReg(g, ap, dest, i);
-    // Load the contents of (ap).
-    AddressingMode mode = i == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
-    Emit(g, NewInstruction2(_6502_OP(lda), ap, ByteConst(g, i), mode));
-    sta(g, dest, i);
-  }
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  AddReloadPoint(g, dest);
+  Copy(g, dest, ap, 0, 0, Sizeof(node->type), kAddrModeIndirectIndexed, GetAddrMode(dest));
+  AddSpillPoint(g, dest);
+#if 0
+    for (int i = 0; i < size; i++) {
+      SetIndexReg(g, ap, dest, i);
+      // Load the contents of (ap).
+      AddressingMode mode = i == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
+      Emit(g, NewInstruction2(W65C02_OP(lda), ap, ByteConst(g, i), mode));
+      sta(g, dest, i);
+    }
+#endif
   
   // Increment ap by size.
   int size = (int)IRIntConstValue(node->inputs.value.p[1]);
-  AddSubInteger(g, node, _6502_OP(adc), _6502_OP(clc), 2, ap_addr, ap, ByteConst(g,  size));
+  if (size < 2) {
+    size = 2;         // Min 2 bytes.
+  }
+#if 0
+  AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, ap_addr, ap, ByteConst(g,  size));
+  AddSpillPoint(g, ap);
+  AddSpillPoint(g, dest);
+#endif
+  
+  AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, ap, ap, ByteConst(g, size));
+  AddSpillPoint(g, ap);
+  
+  // In order to store the new value of ap back into the ap_node we need an
+  // IRNode.  We don't have one because there's no IR_STORE node for this.
+  // We have rhe second arg for the builtin_va_arg that we've already used
+  // to get the size.  We can use that node if we convert it to something that
+  // refers to the new value of ap.
+  IRNode* new_ap_node = node->inputs.value.p[1];
+  // Can't use SetLoweredNode becuase it's already been set.  Bypass the check.
+  new_ap_node->data.ptr = ap;
+  
+  // Now store the new value of ap back.
+  bool is_arg = false;
+  switch (ap_node->opcode) {
+    case IR_OP(argument):
+      is_arg = true;
+    case IR_OP(localvar):
+      return StoreIntoVariable(g, node, ap_node, new_ap_node, is_arg, 2);
 
-  return  SetLoweredNode(node, dest);
-;
+    case IR_OP(staticvar):
+    case IR_OP(externvar):
+      return StoreIntoStaticVariable(g, node, new_ap_node, ap_node, 2);
+    default:
+      return StoreIndirect(g, node, ap_node, new_ap_node, size, 0);
+  }
+  return SetLoweredNode(node, dest);
+#endif
+  // Call the __builtin_va_arg intrinsic.
+  // __mem_src: address of ap
+  // X,Y: size of type
+  
+  // Load __mem_src.  It will be zero page.
+  TargetInstruction* ap_addr = GetAddress(g, ap_node, true);
+  AddReloadPoint(g, ap_addr);
+  SetAddrMode(ap_addr, kAddrModeZeroPage);
+  
+  lda(g, ap_addr, 0);
+  Emit(g,
+       NewInstruction1(W65C02_OP(sta),
+                       ByteConst(g, W65C02_MSRC_REG),
+                       kAddrModeZeroPageAbsolute));
+  lda(g, ap_addr, 1);
+  Emit(g, NewInstruction1(
+              W65C02_OP(sta),
+              ByteConst(g,  W65C02_MSRC_REG + 1),
+              kAddrModeZeroPageAbsolute));
+  
+  // Load __mem_dest.  This will point to a zero page
+  TargetInstruction* dest = GetDestAddress(g, node, true);
+  AddReloadPoint(g, dest);
+  
+  if (DestInZeroPage(dest)) {
+    ldazi(g, dest, 0);
+    Emit(g,
+         NewInstruction1(W65C02_OP(sta),
+                         ByteConst(g, W65C02_MDST_REG),
+                         kAddrModeZeroPageAbsolute));
+    Emit(g, NewInstruction1(
+                W65C02_OP(stz),
+                ByteConst(g,  W65C02_MDST_REG + 1),
+                kAddrModeZeroPageAbsolute));
+    
+  } else {
+    SetIndexReg(g, dest, dest, 0);
+    lda(g, dest, 0);
+    Emit(g, NewInstruction1(
+              W65C02_OP(stz),
+              ByteConst(g,  W65C02_MDST_REG),
+              kAddrModeZeroPageAbsolute));
+    SetIndexReg(g, dest, dest, 1);
+    lda(g, dest, 1);
+    Emit(g, NewInstruction1(
+              W65C02_OP(stz),
+              ByteConst(g,  W65C02_MDST_REG + 1),
+              kAddrModeZeroPageAbsolute));
+    
+  }
+  
+  int size = (int)IRIntConstValue(node->inputs.value.p[1]);
+  if (size < 2) {
+    size = 2;         // Min 2 bytes.
+  }
+
+  Symbol* va_arg_sym;
+  switch (size) {
+    case 2:
+      va_arg_sym = g->builtin_va_arg2;
+      break;
+    case 4:
+      va_arg_sym = g->builtin_va_arg4;
+      break;
+    case 8:
+      va_arg_sym = g->builtin_va_arg8;
+      break;
+    default:
+      va_arg_sym = g->builtin_va_arg;
+      ldxi(g, size & 0xff);
+      ldyi(g, (size >> 8) & 0xff);
+      break;
+  }
+
+  jsr(g, va_arg_sym);
+
+  return SetLoweredNode(node, dest);
 }
 
-static TargetInstruction* LowerBuiltinVaEnd(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerBuiltinVaEnd(W65C02Generator* g, IRNode* node) {
   // Nothing to do for va_end.
   return NULL;
 }
 
-static TargetInstruction* LowerBuiltinVaCopy(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerBuiltinVaCopy(W65C02Generator* g, IRNode* node) {
   return NULL;  // TODO
 }
 
-static void CompareEqualIntegerZeroExpression(_6502Generator* g, IRNode* node,
+static void CompareEqualIntegerZeroExpression(W65C02Generator* g, IRNode* node,
                                           TargetInstruction* dest, int size) {
   // For 2 byte:
   //  ldx #1
@@ -3496,11 +6042,12 @@ static void CompareEqualIntegerZeroExpression(_6502Generator* g, IRNode* node,
   //  txa
   //  sta result
 
-  TargetInstruction* value = GetAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* value = GetAddress(g, node->inputs.value.p[0], true);
+  AddReloadPoint(g, value);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 1);
   
   for (int i = 0; i < size; i++) {
@@ -3511,7 +6058,8 @@ static void CompareEqualIntegerZeroExpression(_6502Generator* g, IRNode* node,
       ora(g, value, i);
     }
    }
-  EmitResolvedBranch(g, _6502_OP(beq), true_label);
+  cmpi(g, 0);
+  EmitResolvedBranch(g, W65C02_OP(beq), true_label);
   Emit(g, false_label);
   dex(g);
   Emit(g, true_label);
@@ -3523,7 +6071,7 @@ static void CompareEqualIntegerZeroExpression(_6502Generator* g, IRNode* node,
   }
 }
 
-static void CompareEqualIntegerExpression(_6502Generator* g, IRNode* node,
+static void CompareEqualIntegerExpression(W65C02Generator* g, IRNode* node,
                                           TargetInstruction* dest, int size) {
   // For 2 byte:
   //  ldx #1
@@ -3539,12 +6087,14 @@ static void CompareEqualIntegerExpression(_6502Generator* g, IRNode* node,
   //  txa
   //  sta result
 
-  TargetInstruction* value1 = GetAddress(g, node->inputs.value.p[0]);
-  TargetInstruction* value2 = GetAddress(g, node->inputs.value.p[1]);
+  TargetInstruction* value1 = GetAddress(g, node->inputs.value.p[0], true);
+  TargetInstruction* value2 = GetAddress(g, node->inputs.value.p[1], true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 1);
   
   for (int i = 0; i < size; i++) {
@@ -3552,9 +6102,9 @@ static void CompareEqualIntegerExpression(_6502Generator* g, IRNode* node,
     lda(g, value1, i);
     cmp(g, value2, i);
     if (i < (size - 1)) {
-      EmitResolvedBranch(g, _6502_OP(bne), false_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), false_label);
     } else {
-      EmitResolvedBranch(g, _6502_OP(beq), true_label);
+      EmitResolvedBranch(g, W65C02_OP(beq), true_label);
     }
   }
   Emit(g, false_label);
@@ -3568,7 +6118,7 @@ static void CompareEqualIntegerExpression(_6502Generator* g, IRNode* node,
   }
 }
      
-static void CompareNotEqualIntegerZeroExpression(_6502Generator* g, IRNode* node,
+static void CompareNotEqualIntegerZeroExpression(W65C02Generator* g, IRNode* node,
                                           TargetInstruction* dest, int size) {
   // For 2 byte:
   //  ldx #1
@@ -3581,11 +6131,12 @@ static void CompareNotEqualIntegerZeroExpression(_6502Generator* g, IRNode* node
   //  txa
   //  sta result
 
-  TargetInstruction* value = GetAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* value = GetAddress(g, node->inputs.value.p[0], true);
+  AddReloadPoint(g, value);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 1);
   
   for (int i = 0; i < size; i++) {
@@ -3596,7 +6147,8 @@ static void CompareNotEqualIntegerZeroExpression(_6502Generator* g, IRNode* node
       ora(g, value, i);
     }
    }
-  EmitResolvedBranch(g, _6502_OP(bne), true_label);
+  cmpi(g, 0);
+  EmitResolvedBranch(g, W65C02_OP(bne), true_label);
   Emit(g, false_label);
   dex(g);
   Emit(g, true_label);
@@ -3608,7 +6160,7 @@ static void CompareNotEqualIntegerZeroExpression(_6502Generator* g, IRNode* node
   }
 }
 
-static void CompareNotEqualIntegerExpression(_6502Generator* g, IRNode* node,
+static void CompareNotEqualIntegerExpression(W65C02Generator* g, IRNode* node,
                                           TargetInstruction* dest, int size) {
   // For 2 byte:
   //  ldx #0
@@ -3624,12 +6176,14 @@ static void CompareNotEqualIntegerExpression(_6502Generator* g, IRNode* node,
   //  txa
   //  sta result
 
-  TargetInstruction* value1 = GetAddress(g, node->inputs.value.p[0]);
-  TargetInstruction* value2 = GetAddress(g, node->inputs.value.p[1]);
+  TargetInstruction* value1 = GetAddress(g, node->inputs.value.p[0], true);
+  TargetInstruction* value2 = GetAddress(g, node->inputs.value.p[1], true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 0);
   
   for (int i = 0; i < size; i++) {
@@ -3637,9 +6191,9 @@ static void CompareNotEqualIntegerExpression(_6502Generator* g, IRNode* node,
     lda(g, value1, i);
     cmp(g, value2, i);
     if (i < (size - 1)) {
-      EmitResolvedBranch(g, _6502_OP(bne), true_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), true_label);
     } else {
-      EmitResolvedBranch(g, _6502_OP(beq), false_label);
+      EmitResolvedBranch(g, W65C02_OP(beq), false_label);
     }
   }
   Emit(g, true_label);
@@ -3653,7 +6207,7 @@ static void CompareNotEqualIntegerExpression(_6502Generator* g, IRNode* node,
   }
 }
 
-static void CompareLessUnsignedIntegerExpression(_6502Generator* g, IRNode* lhs,
+static void CompareLessUnsignedIntegerExpression(W65C02Generator* g, IRNode* lhs,
                                                  IRNode* rhs,
                                           TargetInstruction* dest, int size) {
   //  ldx #1
@@ -3670,21 +6224,23 @@ static void CompareLessUnsignedIntegerExpression(_6502Generator* g, IRNode* lhs,
   // stx dest
 
 
-  TargetInstruction* value1 = GetAddress(g, lhs);
-  TargetInstruction* value2 = GetAddress(g, rhs);
+  TargetInstruction* value1 = GetAddress(g, lhs, true);
+  TargetInstruction* value2 = GetAddress(g, rhs, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 1);
   
   for (int i = size-1; i >= 0; i--) {
     SetIndexReg(g, value1, value2, i);
     lda(g, value1, i);
     cmp(g, value2, i);
-    EmitResolvedBranch(g, _6502_OP(bcc), true_label);
+    EmitResolvedBranch(g, W65C02_OP(bcc), true_label);
     if (i > 0) {
-      EmitResolvedBranch(g, _6502_OP(bne), false_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), false_label);
     }
   }
   Emit(g, false_label);
@@ -3699,7 +6255,7 @@ static void CompareLessUnsignedIntegerExpression(_6502Generator* g, IRNode* lhs,
 }
 
 // Compares 2 signed integers for < or >=.  Puts result in dest.
-static void CompareSignedIntegerExpression(_6502Generator* g, IRNode* lhs,
+static void CompareSignedIntegerExpression(W65C02Generator* g, IRNode* lhs,
                                                  IRNode* rhs,
                                           TargetInstruction* dest, int size,
                                            bool less_than) {
@@ -3717,29 +6273,36 @@ static void CompareSignedIntegerExpression(_6502Generator* g, IRNode* lhs,
   // false_label:
   //  stx dest
 
-
-  TargetInstruction* value1 = GetAddress(g, lhs);
-  TargetInstruction* value2 = GetAddress(g, rhs);
+  TargetInstruction* value1 = GetAddress(g, lhs, true);
+  AddReloadPoint(g, value1);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
-  TargetInstruction* skip_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 0);
-  sec(g);
-  
-  for (int i = 0; i < size; i++) {
-    SetIndexReg(g, value1, value2, i);
-    lda(g, value1, i);
-    if (i == 0) {
-      cmp(g, value2, i);
-    } else {
-      sbc(g, value2, i);
+  if (IRIsZero(rhs)) {
+    lda(g, value1, size-1);
+  } else {
+    TargetInstruction* value2 = GetAddress(g, rhs, true);
+    AddReloadPoint(g, value2);
+    TargetInstruction* skip_label =
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    if (size == 1) {
+      sec(g);
     }
+    
+    for (int i = 0; i < size; i++) {
+      SetIndexReg(g, value1, value2, i);
+      lda(g, value1, i);
+      if (i == 0 && size > 1) {
+        cmp(g, value2, i);
+      } else {
+        sbc(g, value2, i);
+      }
+    }
+    EmitResolvedBranch(g, W65C02_OP(bvc), skip_label);
+    eori(g, 0x80);
+    Emit(g, skip_label);
   }
-  EmitResolvedBranch(g, _6502_OP(bvc), skip_label);
-  eori(g, 0x80);
-  Emit(g, skip_label);
-  EmitResolvedBranch(g, less_than ? _6502_OP(bpl) : _6502_OP(bmi), false_label);
+  EmitResolvedBranch(g, less_than ? W65C02_OP(bpl) : W65C02_OP(bmi), false_label);
   inx(g);
   Emit(g, false_label);
   if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
@@ -3751,7 +6314,7 @@ static void CompareSignedIntegerExpression(_6502Generator* g, IRNode* lhs,
 }
 
 
-static void CompareGreaterOrEqualUnsignedIntegerExpression(_6502Generator* g,
+static void CompareGreaterOrEqualUnsignedIntegerExpression(W65C02Generator* g,
                                                  IRNode* lhs, IRNode* rhs,
                                                  TargetInstruction* dest, int size) {
   // For 4 byte:
@@ -3776,12 +6339,14 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(_6502Generator* g,
   // true_label:
   //  stx dest
 
-  TargetInstruction* value1 = GetAddress(g, lhs);
-  TargetInstruction* value2 = GetAddress(g, rhs);
+  TargetInstruction* value1 = GetAddress(g, lhs, true);
+  TargetInstruction* value2 = GetAddress(g, rhs, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
   TargetInstruction* false_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   TargetInstruction* true_label =
-      NewInstruction(_6502_OP(label), kAddrModeImplied);
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 1);
   for (int i = size - 1; i >= 0; i--) {
     SetIndexRegDown(g, value1, value2, i, size);
@@ -3789,10 +6354,10 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(_6502Generator* g,
     lda(g, value1, i);
     cmp(g, value2, i);
     if (i == 0) {
-      EmitResolvedBranch(g, _6502_OP(bcs), true_label);
+      EmitResolvedBranch(g, W65C02_OP(bcs), true_label);
     } else {
-      EmitResolvedBranch(g, _6502_OP(bcc), false_label);
-      EmitResolvedBranch(g, _6502_OP(bne), true_label);
+      EmitResolvedBranch(g, W65C02_OP(bcc), false_label);
+      EmitResolvedBranch(g, W65C02_OP(bne), true_label);
     }
   }
   Emit(g, false_label);
@@ -3806,23 +6371,7 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(_6502Generator* g,
   }
 }
 
-static void CompareFloatingExpression(_6502Generator* g, IRNode* lhs, IRNode* rhs,
-                                      TargetInstruction* dest, int size,
-                                      Symbol* func) {
-  // lda #dest
-  // ldx #src1
-  // ldy #src2
-  // jsr func
-  // Put result (1 or 0) in dest byte.
-  TargetInstruction* value1 = Materialize(g, lhs);
-  TargetInstruction* value2 = Materialize(g, rhs);
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_a), dest, kAddrModeImplied));
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_x), value1, kAddrModeImplied));
-  Emit(g, NewInstruction1(_6502_OP(expr_addr_y), value2, kAddrModeImplied));
-  jsr(g, func);
-}
-
-static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerComparison(W65C02Generator* g, IRNode* node) {
   // Check if any the outputs of the node are not branches.  If all
   // the uses are branches we defer the generation of the comparison
   // to the branch.
@@ -3838,17 +6387,20 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
   if (!is_expression) {
     return NULL;
   }
-  TargetInstruction* dest = GetDestAddress(g, node);
+  TargetInstruction* dest = GetDestAddress(g, node, false);
   // Size is the size of the inputs.  They will all be the same.
   IRNode* op1 = node->inputs.value.p[0];
-  int size = op1->type->size;
+  int size = Sizeof(op1->type);
   bool is_unsigned = TypeIsUnsigned(op1->type);
-  
+  AddReloadPoint(g, dest);
+
   IRNode* lhs = node->inputs.value.p[0];
   IRNode* rhs = node->inputs.value.p[1];
   switch (node->opcode) {
     case IR_OP(cmpeqi):
     case IR_OP(cmpeqa):
+    case IR_OP(cmpeqf):
+    case IR_OP(cmpeqd):
       if (IRIsZero(node->inputs.value.p[1])) {
         CompareEqualIntegerZeroExpression(g, node, dest, size);
       } else {
@@ -3857,6 +6409,8 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(cmpnei):
     case IR_OP(cmpnea):
+    case IR_OP(cmpnef):
+    case IR_OP(cmpned):
       if (IRIsZero(node->inputs.value.p[1])) {
         CompareNotEqualIntegerZeroExpression(g, node, dest, size);
       } else {
@@ -3865,6 +6419,8 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(cmplti):
     case IR_OP(cmplta):
+    case IR_OP(cmpltf):
+    case IR_OP(cmpltd):
       if (is_unsigned) {
         CompareLessUnsignedIntegerExpression(g, lhs, rhs, dest, size);
       } else {
@@ -3873,6 +6429,8 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(cmplei):
     case IR_OP(cmplea):
+    case IR_OP(cmplef):
+    case IR_OP(cmpled):
       // Same as >= with args reversed.
       if (is_unsigned) {
         CompareGreaterOrEqualUnsignedIntegerExpression(g, lhs, rhs, dest, size);
@@ -3882,6 +6440,8 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(cmpgti):
     case IR_OP(cmpgta):
+    case IR_OP(cmpgtf):
+    case IR_OP(cmpgtd):
       // Same as less with args reversed.
       if (is_unsigned) {
         CompareLessUnsignedIntegerExpression(g, rhs, lhs, dest, size);
@@ -3891,12 +6451,15 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       break;
     case IR_OP(cmpgei):
     case IR_OP(cmpgea):
+    case IR_OP(cmpgef):
+    case IR_OP(cmpged):
       if (is_unsigned) {
         CompareGreaterOrEqualUnsignedIntegerExpression(g, lhs, rhs, dest, size);
       } else {
         CompareSignedIntegerExpression(g, lhs, rhs, dest, size, false);
       }
       break;
+#if 0
     case IR_OP(cmpeqf):
       CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqf);
       break;
@@ -3916,23 +6479,24 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
       CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpgef);
       break;
     case IR_OP(cmpeqd):
-      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqd);
+      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpeqf);
       break;
     case IR_OP(cmpned):
-      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpned);
+      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpnef);
       break;
     case IR_OP(cmpltd):
-      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpltd);
+      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpltf);
       break;
     case IR_OP(cmpled):
-      CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpged);
+      CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpgef);
       break;
     case IR_OP(cmpgtd):
-      CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpltd);
+      CompareFloatingExpression(g, rhs, lhs, dest, size, g->cmpltf);
       break;
     case IR_OP(cmpged):
-      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpged);
+      CompareFloatingExpression(g, lhs, rhs, dest, size, g->cmpgef);
       break;
+#endif
     default:
       abort();
   }
@@ -3941,24 +6505,58 @@ static TargetInstruction* LowerComparison(_6502Generator* g, IRNode* node) {
   return SetLoweredNode(node, dest);
 }
 
-static TargetInstruction* LowerSSAVar(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerSSAVar(W65C02Generator* g, IRNode* node) {
   IRVariable* var = (IRVariable*)node;
   IRNode* symbol = FindPooledVariable(g->gen, var->symbol);
-  return SetLoweredNode(node, Emit(g, NewInstruction1(_6502_OP(ssavar), GetLoweredNode(symbol), kAddrModeImplied)));
+  return SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(ssavar), GetLoweredNode(symbol), kAddrModeImplied)));
 }
 
-static TargetInstruction* LowerPhiNode(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerPhiNode(W65C02Generator* g, IRNode* node) {
   IRVariable* var = (IRVariable*)node;
   IRNode* symbol = FindPooledVariable(g->gen, var->symbol);
-  return SetLoweredNode(node, Emit(g, NewInstruction1(_6502_OP(phi), GetLoweredNode(symbol), kAddrModeImplied)));
+  return SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(phi), GetLoweredNode(symbol), kAddrModeImplied)));
 }
 
-static void AddLiteral(_6502Generator* g, TargetConstant* con, const void* data,
+static TargetInstruction* LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(decsp): {
+      // ldx #reg
+      // jsr __decsp
+      TargetInstruction* size = Materialize(g, node->inputs.value.p[0], 2, true);
+      Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), size, kAddrModeImplied));
+      return SetLoweredNode(node, jsr(g, g->decsp));
+    }
+      
+    case IR_OP(savesp): {
+      // One operand, a temp to hold stack pointer.
+      TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
+      Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
+      return SetLoweredNode(node, jsr(g, g->savesp));
+    }
+    case IR_OP(restoresp): {
+      TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
+      Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
+      return SetLoweredNode(node, jsr(g, g->restoresp));
+    }
+    default:
+      assert(false);
+      return NULL;
+  }
+  
+}
+
+static void AddLiteral(W65C02Generator* g, TargetConstant* con, const void* data,
                        size_t length) {
   con->literal_id = CompilerAddBufferLiteral(data, length);
 }
 
-static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
+static TargetInstruction* LowerStructReturn(W65C02Generator* g, IRNode* node) {
+  TargetInstruction* inst = Emit(g, NewInstruction(W65C02_OP(structreturn), kAddrModeZeroPage));
+  g->struct_return_inst = inst;
+  return SetLoweredNode(node, inst);
+}
+
+static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
     return node->data.ptr;
@@ -3969,14 +6567,14 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
     case IR_OP(tempvar):
     case IR_OP(staticvar):
     case IR_OP(externvar):
-      break;
+      return NULL;
 
     case IR_OP(structreturn):
-    // return Emit(g, NewInstruction(_6502_OP(structreturn)));
+      return LowerStructReturn(g, node);
 
     case IR_OP(structarg):
       // Same as its input.
-      return SetLoweredNode(node, GetAddress(g, node->inputs.value.p[0]));
+      return SetLoweredNode(node, GetAddress(g, node->inputs.value.p[0], true));
 
     case IR_OP(nop):
     case last_ir_opcode:
@@ -3987,7 +6585,6 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
       
     case IR_OP(phi):
       return LowerPhiNode(g, node);
-      break;
 
     case IR_OP(literalref):
       return LowerLiteralReference(g, node);
@@ -3995,35 +6592,35 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
     case IR_OP(addressof):
       return LowerAddressOf(g, node);
 
-    case IR_OP(consti): {
+    case IR_OP(const32): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
-          GetIntConstant(g, node, kTargetTypeWord, c->value.ivalue);
+          GetIntConstant(g, node, kTargetType32Bit, c->value.ivalue);
       AddLiteral(g, (TargetConstant*)inst, &c->value.ivalue, 4);
       return inst;
     }
-    case IR_OP(constb): {
+    case IR_OP(const8): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
-          GetIntConstant(g, node, kTargetTypeByte, c->value.ivalue);
+          GetIntConstant(g, node, kTargetType8Bit, c->value.ivalue);
       return inst;
     }
-    case IR_OP(consts): {
+    case IR_OP(const16): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
-          GetIntConstant(g, node, kTargetTypeHalf, c->value.ivalue);
+          GetIntConstant(g, node, kTargetType16Bit, c->value.ivalue);
       return inst;
     }
     case IR_OP(consta): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
-          GetIntConstant(g, node, kTargetTypeAddress, c->value.ivalue);
+          GetIntConstant(g, node, kTargetType32Bit, c->value.ivalue);
       return inst;
     }
-    case IR_OP(constl): {
+    case IR_OP(const64): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
-          GetIntConstant(g, node, kTargetTypeExtended, c->value.ivalue);
+          GetIntConstant(g, node, kTargetType64Bit, c->value.ivalue);
       AddLiteral(g, (TargetConstant*)inst, &c->value.ivalue, 8);
       return inst;
     }
@@ -4031,41 +6628,45 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetTypeFloat, c->value.ivalue);
-      AddLiteral(g, (TargetConstant*)inst, &c->value.fvalue, 4);
+      float v = c->value.fvalue;
+      AddLiteral(g, (TargetConstant*)inst, &v, 4);
       return inst;
     }
     case IR_OP(constd): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetTypeDouble, c->value.ivalue);
-      AddLiteral(g, (TargetConstant*)inst, &c->value.fvalue, 8);
+      float v = c->value.fvalue;
+      AddLiteral(g, (TargetConstant*)inst, &v, 4);
       return inst;
     }
     case IR_OP(enter): {
       // Entry sequence:
-      // stx __result (if not void)
-      // sty __result+1 (if not void)
+      // stx __result (if not void and not struct)
+      // sty __result+1 (if not void and not struct)
       // This macro instruction expands to:
       // (frame size is size of total frame)
       // ldx #frame_size lo
       // ldy #frame-size hi
       // JSR __enter
       //
-      if (!TypeIsVoid(compiler->current_function->next)) {
+      if (!TypeIsVoid(compiler->current_function->next) &&
+          !TypeIsStructOrUnion(compiler->current_function->next)) {
         Emit(g, NewInstruction1(
-                    _6502_OP(stx),
-                    ByteConst(g,  _6502_RESULT_REG),
+                    W65C02_OP(stx),
+                    ByteConst(g,  W65C02_RESULT_REG),
                     kAddrModeZeroPageAbsolute));
         Emit(g, NewInstruction1(
-                    _6502_OP(sty),
-                    ByteConst(g,  _6502_RESULT_REG+1),
+                    W65C02_OP(sty),
+                    ByteConst(g,  W65C02_RESULT_REG+1),
                     kAddrModeZeroPageAbsolute));
       }
       if (IsLeaf(g)) {
-        Emit(g, NewInstruction(_6502_OP(enter_leaf), kAddrModeImplied));
+        Emit(g, NewInstruction(W65C02_OP(enter_leaf), kAddrModeImplied));
       } else {
-        Emit(g, NewInstruction(_6502_OP(enter), kAddrModeImplied));
+        Emit(g, NewInstruction(W65C02_OP(enter), kAddrModeImplied));
       }
+      LowerVariables(g);
       return NULL;
     }
     case IR_OP(leave): {
@@ -4073,40 +6674,71 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
       // This macro instruction expands to:
       // ldx #frame_size lo
       // ldy #frame-size hi
-      // JSR __leave
+      // JSR __leave      
       if (IsLeaf(g)) {
-        Emit(g, NewInstruction(_6502_OP(leave_leaf), kAddrModeImplied));
+        Emit(g, NewInstruction(W65C02_OP(leave_leaf), kAddrModeImplied));
       } else {
-        Emit(g, NewInstruction(_6502_OP(leave), kAddrModeImplied));
+        Emit(g, NewInstruction(W65C02_OP(leave), kAddrModeImplied));
       }
       return NULL;
     }
 
     case IR_OP(ret):
-      return Emit(g, NewInstruction(_6502_OP(rts), kAddrModeImplied));
+      return Emit(g, NewInstruction(W65C02_OP(rts), kAddrModeImplied));
 
-    case IR_OP(loadi):
-    case IR_OP(loadb):
-    case IR_OP(loadl):
-    case IR_OP(loads):
-    case IR_OP(loadui):
-    case IR_OP(loadub):
-    case IR_OP(loadus):
+    case IR_OP(load32):
+    case IR_OP(load8):
+    case IR_OP(load64):
+    case IR_OP(load16):
+    case IR_OP(loadu32):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
     case IR_OP(loadf):
     case IR_OP(loadd):
     case IR_OP(loada):
       return LowerLoad(g, node);
 
     // stores.
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
       return LowerStore(g, node);
 
+    case IR_OP(getbit):
+      return LowerGetBitField(g, node);
+      
+    case IR_OP(setbit):
+      return LowerSetBitField(g, node);
+
+      case IR_OP(inc8):
+      case IR_OP(inc16):
+      case IR_OP(inc32):
+      case IR_OP(inc64):
+    case IR_OP(uinc8):
+    case IR_OP(uinc16):
+    case IR_OP(uinc32):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+      case IR_OP(incf):
+      case IR_OP(incd):
+        return LowerInc(g, node);
+      case IR_OP(dec8):
+       case IR_OP(dec16):
+       case IR_OP(dec32):
+       case IR_OP(dec64):
+    case IR_OP(udec8):
+     case IR_OP(udec16):
+     case IR_OP(udec32):
+     case IR_OP(udec64):
+      case IR_OP(deca):
+       case IR_OP(decf):
+       case IR_OP(decd):
+      return LowerDec(g, node);
+      
     case IR_OP(addi):
     case IR_OP(addf):
     case IR_OP(addd):
@@ -4221,7 +6853,7 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
       return LowerMemcpy(g, node);
 
     case IR_OP(cast):
-      return SetLoweredNode(node, Materialize(g, node->inputs.value.p[0]));
+      return SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(g, node);
@@ -4249,6 +6881,14 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
 
     case IR_OP(builtin_va_copy):
       return LowerBuiltinVaCopy(g, node);
+      
+    case IR_OP(decsp):
+    case IR_OP(savesp):
+    case IR_OP(restoresp):
+      return LowerStackPointerOps(g, node);
+      
+    case IR_OP(nrvoval):
+      abort();      // TODO
   }
   // If we get here we've failed to handle the IR node.
   assert(false);
@@ -4259,7 +6899,7 @@ static TargetInstruction* LowerIRNode(_6502Generator* g, IRNode* node) {
 static int64_t CalculateArgumentSize(Symbol* arg) {
   if (TypeIsFloatingPoint(arg->type)) {
     if (TypeIsDouble(arg->type)) {
-      return 8;
+      return 4;
     }
     return 4;
   }
@@ -4269,13 +6909,200 @@ static int64_t CalculateArgumentSize(Symbol* arg) {
   if (TypeIsStructOrUnion(arg->type)) {
     return arg->type->info.struct_info->size;
   }
-  return arg->type->size;
+  int size = Sizeof(arg->type);
+  return size < 2 ? 2 : size;
 }
 
-void _6502Lower(_6502Generator* g, Generator* gen) {
+static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord* type) {
+  W65C02RegisterType reg_type;
+  if (TypeIsFloat(type) || TypeIsDouble(type)) {
+    reg_type = k6502RegTypeF;
+  } else if (TypeIsChar(type) || TypeIsBool(type)) {
+    reg_type = k6502RegTypeB;
+  } else if (TypeIsLong(type)) {
+    reg_type = k6502RegTypeL;
+  } else if (TypeIsLongLong(type)) {
+    reg_type = k6502RegTypeX;
+  } else {
+    reg_type = k6502RegTypeI;
+  }
+  for (int i = 0; i < kNumVarSets; i++) {
+    if (g->reg_vars[i].type == reg_type) {
+      return &g->reg_vars[i];
+    }
+  }
+  abort();
+}
+
+static RegisterVariableSet* MaybeUseRegister(W65C02Generator* g, PoolEntry* entry) {
+  TypeRecord* type = entry->value.symbol->type;
+  if (TypeIsArray(type) || !TypeIsScalar(type)) {
+    return false;
+  }
+  if (entry->value.symbol->flags.address_taken) {
+    return false;
+  }
+  RegisterVariableSet* set = TypeToRegisterVarSet(g, type);
+  if (entry->value.symbol->usage_info.reads == 1) {
+    // No point in putting a single read into a register.
+    return NULL;
+  }
+  if (set->num_vars < set->max_vars) {
+    return set;
+  }
+  return NULL;
+}
+
+static void LoadArgValueIntoReg(W65C02Generator* g, PoolEntry* entry, TargetInstruction* var) {
+  Symbol* arg = entry->value.symbol;
+  int offset = arg->stack_offset;
+  TargetInstruction* result = entry->pooled->data.ptr;
+  int size = Sizeof(entry->value.symbol->type);
+  bool highzero = offset < 256;
+  // Macro instruction, expands to:
+  // lda #dest_addr
+  // ldx #offset lo
+  // ldy #offset hi (removed for single byte case)
+  // JSR __var_value[b] (or arg_value[b])
+  W65C02Opcode var_value_op = ArgValueFunction(size, highzero);
+  Emit(g,
+       NewInstruction2(var_value_op, result,
+                       var,
+                       kAddrModeImplied));
+  AddSpillPoint(g, result);
+
+}
+
+static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
+                                   Vector* args, int* var_offset) {
+  TargetInstruction* inst;
+  RegisterVariableSet* varset;
+  if (entry->pooled->opcode == IR_OP(localvar) ||
+      entry->pooled->opcode == IR_OP(tempvar)) {
+    varset = MaybeUseRegister(g, entry);
+    if (varset == NULL) {
+      // Make space for variable on the stack.
+      int32_t size = entry->value.symbol->type->size;
+       *var_offset += size;
+    }
+    IRVariable* var = (IRVariable*)entry->pooled;
+    inst = NewTargetSymbol(var->symbol);
+    inst->operand[0] =
+        GetIntConstant(g, entry->pooled, kTargetTypeAddress, *var_offset);
+    inst->opcode = (TargetOpcode)W65C02_OP(localvar);
+    SetAddrMode(inst, kAddrModeImplied);
+    if (TypeIsStructOrUnion(entry->value.symbol->type)) {
+      inst->flags |= k6502NeedAddress;
+    }
+    inst = Emit(g, inst);
+    if (varset != NULL) {
+      entry->pooled->data.ptr = CreateVariableRegister(g, varset, inst, entry->value.symbol);
+     } else {
+      entry->pooled->data.ptr = inst;
+    }
+  } else if (entry->pooled->opcode == IR_OP(argument)) {
+    IRVariable* var = (IRVariable*)entry->pooled;
+    inst = NewTargetSymbol(var->symbol);
+    inst->operand[0] = GetIntConstant(g, entry->pooled, kTargetTypeAddress,
+                                      var->symbol->stack_offset);
+    inst->opcode = (TargetOpcode)W65C02_OP(argument);
+    SetAddrMode(inst, kAddrModeImplied);
+    if (TypeIsStructOrUnion(entry->value.symbol->type)) {
+      inst->flags |= k6502NeedAddress;
+    }
+    inst = Emit(g, inst);
+    
+    if ((varset = MaybeUseRegister(g, entry)) != NULL) {
+      entry->pooled->data.ptr = CreateVariableRegister(g, varset, inst, entry->value.symbol);
+      // Load the register from the stacked argument.
+      LoadArgValueIntoReg(g, entry, inst);
+    } else {
+      entry->pooled->data.ptr = inst;
+    }
+  }
+}
+
+static int CompareRegisterVar(const void* a, const void* b) {
+  const PoolEntry* var1 = *(const PoolEntry**)a;
+  const PoolEntry* var2 = *(const PoolEntry**)b;
+
+  Symbol* sym1 = var1->value.symbol;
+  Symbol* sym2 = var2->value.symbol;
+  int weight1 = sym1->usage_info.reads * (sym1->usage_info.used_in_loop + 1);
+  int weight2 = sym2->usage_info.reads * (sym2->usage_info.used_in_loop + 1);
+
+  return weight2 - weight1;
+}
+
+static void AssignRegisterVars(W65C02Generator* g, Vector* vars, Vector* args) {
+  // Variables are allocated below the frame, arguments are above or in
+  // registers.
+  // If the argument is in a register, the top bit of the data.ivalue is
+  // set and the low order bits are the register number.
+
+  // Sort the pooled local variables in reverse order of usage.  Those
+  // with the largest number of references will be at the start of the
+  // vector.
+  qsort(vars->value.p, vars->length, sizeof(IRNode*), CompareRegisterVar);
+
+  int32_t var_offset = 3;       // 3 bytes for reg save mask.
+
+  for (size_t i = 0; i < vars->length; i++) {
+    PoolEntry* entry = vars->value.p[i];
+    AssignRegisterOrOffset(g, entry, args, &var_offset);
+  }
+  
+  // We now know the stack frame size.
+  g->base.stack_frame_size = (int32_t)var_offset;
+}
+
+static void LowerVariables(W65C02Generator* g) {
+  Vector local_vars = {0};
+  
+  // Collect all local variables so that we can assign some of them
+  // to registers.
+  for (size_t i = 0; i < g->gen->variable_pool.length; i++) {
+    PoolEntry* entry = (PoolEntry*)g->gen->variable_pool.value.p[i];
+    switch (entry->pooled->opcode) {
+      case IR_OP(localvar):
+        if (TypeIsFunction(entry->value.symbol->type)) {
+          // Local function is treated as an extern.
+          goto function;
+        }
+        // Fall through.
+      case IR_OP(tempvar):
+        VectorAppend(&local_vars, entry);
+        break;
+      case IR_OP(argument):
+        VectorAppend(&local_vars, entry);
+        break;
+      function:
+      default: {
+        // Static variables are referenced by a symbol instruction.
+        IRVariable* var = (IRVariable*)entry->pooled;
+        TargetInstruction* inst = GetSymbol(g, NULL, var->symbol);
+        if (TypeIsStructOrUnion(var->symbol->type) || TypeIsArray(var->symbol->type) || TypeIsFunction(var->symbol->type)) {
+          SetAddrMode(inst, kAddrModeSymbolAddr);
+        } else {
+          SetAddrMode(inst, kAddrModeAbsoluteSymbol);
+        }
+        entry->pooled->data.ptr = inst;
+        break;
+      }
+    }
+  }
+
+  AssignRegisterVars(g, &local_vars,
+                     &compiler->current_function->info.function.prototype);
+  VectorDestruct(&local_vars);
+}
+
+void W65C02Lower(W65C02Generator* g, Generator* gen) {
   // Variables are allocated below the frame, arguments are above.
-  int32_t var_offset = 0;
   int32_t arg_offset = 0;
+  if (TypeIsFunctionReturningStructOrUnion(compiler->current_function)) {
+    arg_offset = 2;
+  }
 
   // Calculate the offset on the stack for all the arguments.  Store this offset
   // in the stack_offset field of the Symbol.
@@ -4286,56 +7113,19 @@ void _6502Lower(_6502Generator* g, Generator* gen) {
     int64_t size = CalculateArgumentSize(arg);
     arg_offset += size;
   }
-
-  for (size_t i = 0; i < gen->variable_pool.length; i++) {
-    PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
-    TargetInstruction* inst;
-    if (entry->pooled->opcode == IR_OP(localvar) ||
-        entry->pooled->opcode == IR_OP(tempvar)) {
-      int32_t size = entry->value.symbol->type->size;
-      var_offset += size;
-      IRVariable* var = (IRVariable*)entry->pooled;
-      inst = NewTargetSymbol(var->symbol);
-      inst->operand[0] =
-          GetIntConstant(g, entry->pooled, kTargetTypeAddress, var_offset);
-      inst->opcode = (TargetOpcode)_6502_OP(localvar);
-      SetAddrMode(inst, kAddrModeImplied);
-      inst = Emit(g, inst);
-      entry->pooled->data.ptr = inst;
-    } else if (entry->pooled->opcode == IR_OP(argument)) {
-      IRVariable* var = (IRVariable*)entry->pooled;
-      inst = NewTargetSymbol(var->symbol);
-      inst->operand[0] = GetIntConstant(g, entry->pooled, kTargetTypeAddress,
-                                        var->symbol->stack_offset);
-      inst->opcode = (TargetOpcode)_6502_OP(argument);
-      SetAddrMode(inst, kAddrModeImplied);
-      inst = Emit(g, inst);
-      entry->pooled->data.ptr = inst;
-    } else if (entry->pooled->opcode == IR_OP(staticvar) ||
-               entry->pooled->opcode == IR_OP(externvar)) {
-      // Static variables are referenced by a symbol instruction.
-      IRVariable* var = (IRVariable*)entry->pooled;
-      TargetInstruction* inst = GetSymbol(g, NULL, var->symbol);
-      SetAddrMode(inst, kAddrModeAbsoluteSymbol);
-      entry->pooled->data.ptr = inst;
-    }
-  }
-
-  // We now know the stack frame size.
-  g->base.stack_frame_size = (int32_t)var_offset;
-
+  
   // Run through IR pre-optimizing it for CISC.
   bool changed;
   do {
     changed = false;
     IRNode* node = GeneratorFirstInstruction(gen);
     while (node != NULL) {
-      node = Preoptimize(g, gen, node, &changed);
+      node = PreLower(g, gen, node, &changed);
     }
   } while (changed);
 
-#if 0
-  printf("Preoptimized IR\n");
+#if PRINT_PRELOWER
+  printf("Prelowered IR\n");
   GeneratorPrintIR(gen, stdout);
   printf("===============\n");
 #endif
@@ -4345,10 +7135,10 @@ void _6502Lower(_6502Generator* g, Generator* gen) {
     node = IRNext(node);
   }
 
-  _6502CalculateInstructionAddresses(g);
+  W65C02CalculateInstructionAddresses(g);
 
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {
-    _6502Print(g, compiler->ir_output_file);
+    W65C02Print(g, compiler->ir_output_file);
   }
 
   // Build basic blocks for.
@@ -4357,41 +7147,50 @@ void _6502Lower(_6502Generator* g, Generator* gen) {
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {
     TargetPrintBasicBlocks(&g->base, compiler->ir_output_file);
   }
-  // Pool all the variables.
-  _6502PoolVariables(g);
   
-   _6502SpillExpressions(g);
+  // Pool all the variables.
+  W65C02PoolVariables(g);
+  
+  // Disbled when moved to callee save
+  // W65C02SpillExpressions(g);
  
   // Process branches to check their ranges.
-  _6502ProcessBranches(g);
+  // W65C02ProcessBranches(g);
 
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {
      TargetPrintBasicBlocks(&g->base, compiler->ir_output_file);
    }
 
-  _6502Optimize(g);
-
+  if (OptLevel1()) {
+    W65C02Optimize(g);
+  }
+  
   // Allocate registers to the instructions.
-  _6502AllocateRegisters(&g->register_allocator);
+  W65C02AllocateRegisters(&g->register_allocator);
+
+  // Process branches to check their ranges.
+  W65C02ProcessBranches(g);
+
 }
 
-void _6502PrintInstruction(TargetInstruction* inst, FILE* fp) {
-  TargetPrintInstruction(inst, _6502OpcodeName, fp);
+void W65C02PrintInstruction(TargetInstruction* inst, FILE* fp) {
+  TargetPrintInstruction(inst, W65C02OpcodeName, fp);
 }
 
-void _6502Print(_6502Generator* g, FILE* fp) {
+void W65C02Print(W65C02Generator* g, FILE* fp) {
   TargetInstruction* inst = TargetFirstInstruction(&g->base);
   while (inst != NULL) {
-    TargetPrintInstruction(inst, _6502OpcodeName, fp);
+    TargetPrintInstruction(inst, W65C02OpcodeName, fp);
     inst = TargetNext(inst);
   }
 }
 
-bool _6502IsExpression(TargetInstruction* inst) {
-  return (_6502Opcode)inst->opcode >= _6502_OP(expr1) &&
-         (_6502Opcode)inst->opcode <= _6502_OP(expr8);
+bool W65C02IsExpression(TargetInstruction* inst) {
+  return ((W65C02Opcode)inst->opcode >= W65C02_OP(expr1) &&
+         (W65C02Opcode)inst->opcode <= W65C02_OP(expr8)) || ((W65C02Opcode)inst->opcode >= W65C02_OP(ivarreg) &&
+         (W65C02Opcode)inst->opcode <= W65C02_OP(dvarreg));
 }
 
-bool _6502IsSignedLoad(TargetInstruction* inst) {
+bool W65C02IsSignedLoad(TargetInstruction* inst) {
   return false;
 }

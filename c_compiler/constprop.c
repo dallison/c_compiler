@@ -74,10 +74,10 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
        inst = next) {
     next = IRNext(inst);
     switch (inst->opcode) {
-      case IR_OP(storei):
-      case IR_OP(storeb):
-      case IR_OP(stores):
-      case IR_OP(storel):
+      case IR_OP(store32):
+      case IR_OP(store8):
+      case IR_OP(store16):
+      case IR_OP(store64):
         if (IsVariableReference(inst->inputs.value.p[0])) {
           if (IRIsIntConst(inst->inputs.value.p[1])) {
             // Store of a constant to a variable.
@@ -94,13 +94,13 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         }
         break;
         
-      case IR_OP(loadi):   // Load signed 32-bit from [op0]
-      case IR_OP(loadb):   // Load signed 8-bit from [op0]
-      case IR_OP(loadl):   // Load 64-bit from [op0]
-      case IR_OP(loads):   // Load 16-bit from [op0]
-      case IR_OP(loadui):  // Load unsigned 32-bit from [op0]
-      case IR_OP(loadub):  // Load unsigned 8-bit from [op0]
-      case IR_OP(loadus):  // Load unsigned 16-bit from [op0]
+      case IR_OP(load32):   // Load signed 32-bit from [op0]
+      case IR_OP(load8):   // Load signed 8-bit from [op0]
+      case IR_OP(load64):   // Load 64-bit from [op0]
+      case IR_OP(load16):   // Load 16-bit from [op0]
+      case IR_OP(loadu32):  // Load unsigned 32-bit from [op0]
+      case IR_OP(loadu8):  // Load unsigned 8-bit from [op0]
+      case IR_OP(loadu16):  // Load unsigned 16-bit from [op0]
         if (IsVariableReference(inst->inputs.value.p[0])) {
           IRNode* var = inst->inputs.value.p[0];
           IRConstant* con = MapFindPointerKey(&p->constants, var);
@@ -109,25 +109,25 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
           }
           IRNode* const_inst = NULL;
           switch (inst->opcode) {
-            case IR_OP(loadi):   // Load signed 32-bit from [op0]
+            case IR_OP(load32):   // Load signed 32-bit from [op0]
               const_inst = SignExtendedConstant(gen, con, 32);
               break;
-            case IR_OP(loadb):   // Load signed 8-bit from [op0]
+            case IR_OP(load8):   // Load signed 8-bit from [op0]
               const_inst = SignExtendedConstant(gen, con, 8);
               break;
-            case IR_OP(loadl):   // Load 64-bit from [op0]
+            case IR_OP(load64):   // Load 64-bit from [op0]
               const_inst = SignExtendedConstant(gen, con, 64);
               break;
-            case IR_OP(loads):   // Load 16-bit from [op0]
+            case IR_OP(load16):   // Load 16-bit from [op0]
               const_inst = SignExtendedConstant(gen, con, 16);
               break;
-            case IR_OP(loadui):  // Load unsigned 32-bit from [op0]
+            case IR_OP(loadu32):  // Load unsigned 32-bit from [op0]
               const_inst = TruncatedConstant(gen, con, 32);
               break;
-            case IR_OP(loadub):  // Load unsigned 8-bit from [op0]
+            case IR_OP(loadu8):  // Load unsigned 8-bit from [op0]
               const_inst = TruncatedConstant(gen, con, 8);
               break;
-            case IR_OP(loadus):  // Load unsigned 16-bit from [op0]
+            case IR_OP(loadu16):  // Load unsigned 16-bit from [op0]
               const_inst = TruncatedConstant(gen, con, 16);
               break;
             // case IR_OP(loadf):   // Load 32-bit float from [op0]
@@ -222,7 +222,7 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         FOLD_BINARY(<=);
         break;
       case IR_OP(cmpgti):
-        FOLD_BINARY(>=);
+        FOLD_BINARY(>);
         break;
       case IR_OP(cmpgei):
         FOLD_BINARY(>=);
@@ -248,7 +248,23 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
           BasicBlockRemoveInstruction(gen, block, inst);
         }
         break;
-      default:
+      case IR_OP(btrue):
+        if (IRIsIntConst(inst->inputs.value.p[0])) {
+          int64_t v = IRIntConstValue(inst->inputs.value.p[0]);
+          if (v == 0) {
+            BasicBlockRemoveInstruction(gen, block, inst);
+          }
+        }
+        break;
+      case IR_OP(bfalse):
+        if (IRIsIntConst(inst->inputs.value.p[0])) {
+          int64_t v = IRIntConstValue(inst->inputs.value.p[0]);
+          if (v != 0) {
+            BasicBlockRemoveInstruction(gen, block, inst);
+          }
+        }
+        break;
+     default:
         break;
     }
     inst = next;

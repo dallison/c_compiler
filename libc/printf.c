@@ -12,6 +12,21 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <stdint.h>
+
+#if 0
+#define STATIC static
+#else
+#define STATIC 
+#endif
+
+// Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
+void Break() {}
+
+// These are in ftoa.c.
+extern char* __PrintFloatFormat(double f, int precision, char* buf, size_t size);
+extern char* __PrintScientificFormat(double f, int precision, char* buf, size_t size);
+extern char* __PrintGeneralFormat(double f,  int precision, char* buf, size_t size);
 
 // Values for field_width and precision.  Positive numbers
 // are specified by user.  Negative numbers below -1 mean
@@ -38,7 +53,7 @@ typedef struct {
   Width field_width;
   Width precision;
   bool left_justify;
-  char fill_char;
+  bool fill_zero;
   bool prepend_sign;
   bool prepend_space;
   bool alternate_form;
@@ -48,400 +63,619 @@ typedef struct {
   int next_arg_value[2];    // [0]: width, [1]: precision
 } ConversionFormat;
 
- const char* CollectFormat(const char* p, ConversionFormat* format) {
+// Function to write a string with length to the entity in data.
+typedef int (*Writer)(const char* s, size_t len, void* data);
+
+#if 1
+STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->field_width = kWidthDefault;
   format->precision = kWidthDefault;
-  format->fill_char = ' ';
+  format->fill_zero = false;
+  format->modifier = kModNone;
   
-  switch (*p) {
-    case '-':
-      p++;
-      format->left_justify = true;
-      break;
-    case '0':
-      if (!format->left_justify) {
-        format->fill_char = '0';
-      }
-      p++;
-      break;
-    case '#':
-      format->alternate_form = true;
-      p++;
-      break;
-    case ' ':
-      format->prepend_space = true;
-      p++;
-      break;
-    case '+':
-      format->prepend_sign = true;
-      p++;
-      break;
+  int n = 0;
+  bool done = false;
+  while (!done && *p != '\0') {
+    switch (*p) {
+      case '-':
+        p++;
+        format->left_justify = true;
+        break;
+      case '0':
+        if (!format->left_justify) {
+          format->fill_zero = true;
+        }
+        p++;
+        break;
+      case '#':
+        format->alternate_form = true;
+        p++;
+        break;
+      case ' ':
+        format->prepend_space = true;
+        p++;
+        break;
+      case '+':
+        format->prepend_sign = true;
+        p++;
+        break;
+      default:
+        done = true;
+        break;
+    }
   }
   if (*p == '*') {
     p++;
     format->field_width = kWidthNextArg;
+    return p;
     // TODO: *m$ to specify arg number.
-  } else {
-    int n = 0;
+  }
+
+  // Field width.
+  if (isdigit(*p)) {
     while (isdigit(*p)) {
       n = n * 10 + *p++ - '0';
     }
-    if (n > 0) {
-      format->field_width = n;
-    }
+    format->field_width = n;
   }
+  
+  // Precision.
   if (*p == '.') {
     p++;
     if (*p == '*') {
       p++;
       format->precision = kWidthNextArg;
+      return p;
       // TODO: *m$ to specify arg number.
-    } else {
-      int n = 0;
+    }
+    if (isdigit(*p)) {
       while (isdigit(*p)) {
         n = n * 10 + *p++ - '0';
       }
-      if (n > 0) {
-        format->precision = n;
-      }
+      format->precision = n;
     }
   }
+  
+  // Modifier (length field).
+  switch (*p) {
+    case 'l':     // l or ll
+      if (p[1] == 'l') {
+        format->modifier = kModLongLong;
+        p++;
+      } else {
+        format->modifier = kModLong;
+      }
+      p++;
+      break;
+    case 'h':   // h or hh
+      if (p[1] == 'h') {
+        format->modifier = kModChar;
+        p++;
+      } else {
+        format->modifier = kModShort;
+      }
+      p++;
+      break;
+    case 'L':
+      format->modifier = kModLongDouble;
+      p++;
+      break;
+    case 'z':
+      format->modifier = kModSize_t;
+      p++;
+      break;
+    case 'j':
+      format->modifier = kModIntMax;
+      p++;
+      break;
+    case 't':
+      format->modifier = kModPtrdiff_t;
+      p++;
+      break;
+    default:
+      break;
+  }
+
   return p;
 }
 
-// Index is the start of the converted field in the buffer which is created
-// backwards, right justified.
-// This is used if a field width has been specified.
-// Returns index into buffer
- int FillField(char* buf, int buflen, int index,
-                      ConversionFormat* fmt) {
- 
-  int precision = fmt->precision;
+#if 1
+STATIC void ResolvePrecision(ConversionFormat* fmt, va_list* ap) {
   if (fmt->precision == kWidthNextArg) {
-    precision = fmt->next_arg_value[1];
+    fmt->precision = va_arg(*ap, int);
   }
-  
-  int len = buflen - index;     // Existing length.
-   if (precision != kWidthDefault) {
-     if (len < fmt->precision) {
-       while (len < precision) {
-         buf[--index] = '0';
-         len++;
-       }
-     }
-  }
-   
-  if (fmt->field_width == kWidthDefault) {
-    return index;
-  }
-  int field_width = fmt->field_width;
-  if (field_width == kWidthNextArg) {
-     field_width = fmt->next_arg_value[0];
-  }
-  
-  if (fmt->left_justify) {
-    // Left justify to start of buffer.
-    int new_index = buflen - field_width;
-    char* left = &buf[new_index];
-    memmove(left, &buf[index], len);
-    index = new_index + len;
-    while (len < field_width) {
-       buf[index++] = fmt->fill_char;
-       len++;
-    }
-    return new_index;
-  }
-  while (len < field_width) {
-    buf[--index] = fmt->fill_char;
-    len++;
-  }
-   return index;
 }
 
-char* PrintDecimal(ConversionFormat* fmt, long long v, char* buf, int buflen) {
-  int i = buflen - 1;
-  if (v == 0) {
-    buf[i] = '0';
-    i = FillField(buf, buflen, i, fmt);
-    return &buf[i];
+STATIC void ResolveFieldWidth(ConversionFormat* fmt, va_list* ap) {
+  if (fmt->field_width == kWidthNextArg) {
+    fmt->field_width = va_arg(*ap, int);
   }
-  bool negative = false;
-  if (v < 0) {
-    negative = true;
-    v = -v;
+}
+
+STATIC void FixFloatPrecision(ConversionFormat* fmt, size_t max) {
+  if (fmt->precision == kWidthDefault) {
+    fmt->precision = 6;
+  }
+  if (fmt->precision <= 0) {
+    fmt->precision = 6;
+  }
+  if (fmt->precision > max) {
+    fmt->precision = max;
+  }
+}
+
+// buf is guaranteed to be long enough.  Returns pointer to start of
+// decimal output in buffer.
+STATIC char* ConvertDecimalInt(unsigned int v, char* buf, int buflen) {
+  char* p = &buf[buflen-1];
+  if (v == 0) {
+    *p = '0';
+    return p;
   }
   while (v != 0) {
     char ch = (v % 10) + '0';
-    buf[i--] = ch;
+    *p-- = ch;
     v /= 10;
   }
-  if (negative) {
-    buf[i--] = '-';
-  } else {
-    if (fmt->prepend_sign) {
-      buf[i--] = '+';
-    } else if (fmt->prepend_space) {
-      buf[i--] = ' ';
-    }
-  }
   // i is one less than the first char.
-  i++;
-  i = FillField(buf, buflen, i, fmt);
-  return &buf[i];
+  return p+1;
 }
 
-char* PrintHex(ConversionFormat* fmt, long long v, char* buf, int buflen, bool upper) {
-  int i = buflen - 1;
+STATIC char* ConvertDecimalLong(unsigned long v, char* buf, int buflen) {
+  char* p = &buf[buflen-1];
   if (v == 0) {
-    buf[i] = '0';
-    i = FillField(buf, buflen, i, fmt);
-    return &buf[i];
+    *p = '0';
+    return p;
   }
   while (v != 0) {
-    int n = v & 0xf;
+    char ch = (v % 10) + '0';
+    *p-- = ch;
+    v /= 10;
+  }
+  // i is one less than the first char.
+  return p+1;
+}
+
+
+STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf, int buflen) {
+  char* p = &buf[buflen-1];
+  if (v == 0) {
+    *p = '0';
+    return p;
+  }
+  while (v != 0) {
+    char ch = (v % 10) + '0';
+    *p-- = ch;
+    v /= 10;
+  }
+  // i is one less than the first char.
+  return p+1;
+}
+
+STATIC char* ConvertHexInt(unsigned int v, char* buf, int buflen, bool upper) {
+  char* p = &buf[buflen-1];
+  if (v == 0) {
+    *p = '0';
+    return p;
+  }
+  while (v != 0) {
+    uint8_t n = v & 0xf;
     char ch;
     if (n > 9) {
       ch = n - 10 + (upper ? 'A' : 'a');
     } else {
       ch = n + '0';
     }
-    buf[i--] = ch;
+    *p-- = ch;
     v >>= 4;
   }
-  i++;
-  i = FillField(buf, buflen, i, fmt);
-  return &buf[i];
+  return p+1;
 }
 
-char* PrintString(ConversionFormat* fmt, const char* s, int len, char* buf,
-                  int buflen) {
-  int i = buflen - 1;     // Last pos in buffer.
-  fmt->fill_char = ' ';   // Don't use fill char
-  char* p = buf + i;
-  s += len - 1;               // Last char in s.
-  
-  // Copy s to p, backwards.
-  while (len-- > 0) {
-    *p-- = *s--;
-    i--;
+STATIC char* ConvertHexLong(unsigned long v, char* buf, int buflen, bool upper) {
+  char* p = &buf[buflen-1];
+  if (v == 0) {
+    *p = '0';
+    return p;
   }
-  // i is the index of first char in buf.
-  i = FillField(buf, buflen, i, fmt);
-  return &buf[i];
-}
-
- void EnsureBuffer(char* default_buffer, char** buf, int* buflen, Width width, va_list ap) {
-  if (width == kWidthDefault) {
-    return;
-  }
-  int width_needed = *buflen;
-  if (width == kWidthNextArg) {
-    width_needed = va_arg(ap, int);
-  } else {
-    width_needed = -(width + 2);
-  }
-  if (width_needed > *buflen) {
-    if (*buf == default_buffer) {
-      *buf = malloc(width_needed);
+  while (v != 0) {
+    uint8_t n = v & 0xf;
+    char ch;
+    if (n > 9) {
+      ch = n - 10 + (upper ? 'A' : 'a');
     } else {
-      *buf = realloc(*buf, width_needed);
+      ch = n + '0';
     }
-    *buflen = width_needed;
+    *p-- = ch;
+    v >>= 4;
   }
+  return p+1;
 }
 
-int vfprintf(FILE* fp, const char* format, va_list ap) {
-  char default_buffer[4096];
-  int buflen = sizeof(default_buffer);
-  char* buf = default_buffer;
+STATIC char* ConvertHexLongLong(unsigned long long v, char* buf, int buflen, bool upper) {
+  char* p = &buf[buflen-1];
+  if (v == 0) {
+    *p = '0';
+    return p;
+  }
+  while (v != 0) {
+    uint8_t n = v & 0xf;
+    char ch;
+    if (n > 9) {
+      ch = n - 10 + (upper ? 'A' : 'a');
+    } else {
+      ch = n + '0';
+    }
+    *p-- = ch;
+    v >>= 4;
+  }
+  return p+1;
+}
+
+STATIC char* ConvertHexPointer(void* ptr, char* buf, int buflen, bool upper) {
+  char* p;
+  if (ptr == NULL) {
+    // Write (null) (choice - it's up to the implementation what is printed.
+    p = &buf[buflen-6];
+    strcpy(p, "(null)");
+    return p;
+  }
+  p = &buf[buflen-1];
+#if defined(__6502__)
+  unsigned int v = (unsigned int)ptr;
+#else
+  unsigned long v = (unsigned long)ptr;
+#endif
+  while (v != 0) {
+    uint8_t n = v & 0xf;
+    char ch;
+    if (n > 9) {
+      ch = n - 10 + (upper ? 'A' : 'a');
+    } else {
+      ch = n + '0';
+    }
+    *p-- = ch;
+    v >>= 4;
+  }
+  *p-- = 'x';
+  *p = '0';
+  return p;
+}
+
+static const char spaces[] = "        ";
+static const char zeroes[] = "00000000";
+
+STATIC int Pad(Writer writer, void* data, int n, bool zero) {
+  const size_t kBlockSize = sizeof(spaces);
+  const char* pad = zero ? zeroes : spaces;
+  while (n > 0) {
+    int len = n;
+    if (len > kBlockSize) {
+      len = kBlockSize;
+    }
+    writer(pad, len, data);
+    n -= len;
+  }
+  return n;
+
+}
+
+STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
+                    bool negative, bool suppress_write) {
+  if (negative) {
+    if (!suppress_write) {
+      writer("-", 1, data);
+    }
+    return true;
+  }
+  if (fmt->prepend_sign) {
+    if (!suppress_write) {
+      writer("+", 1, data);
+    }
+    return true;
+  }
+  if (fmt->prepend_space) {
+    if (!suppress_write) {
+      writer(" ", 1, data);
+    }
+    return true;
+  }
+  return false;
+}
+
+
+STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
+                          const char* s, size_t len, bool negative) {
+  int result = 0;
+  if (fmt->field_width != kWidthDefault) {
+    if (len <= fmt->field_width) {
+      int padding = fmt->field_width - (int)len;
+      if (fmt->left_justify) {
+        // Left justify.  Pad to the right with spaces.
+        if (Prepend(writer, data, fmt, negative, false)) {
+          --padding;
+        }
+        result += writer(s, len, data);
+        result += Pad(writer, data, padding, false);
+      } else {
+        // Right justify.  Pad to left with space or '0'.  The sign is
+        // prepended to the left if padding with zeroes and after the
+        // padding if padding with spaces.
+        if (Prepend(writer, data, fmt, negative, !fmt->fill_zero)) {
+          --padding;
+        }
+        result += Pad(writer, data, padding, fmt->fill_zero);
+        if (!fmt->fill_zero) {
+          Prepend(writer, data, fmt, negative, false);
+        }
+        result += writer(s, len, data);
+      }
+      return result;
+    }
+  }
+  if (negative) {
+    writer("-", 1, data);
+  }
+  return writer(s, len, data);
+}
+
+STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
+  char buf[256];
   char* v;
-  int len;
+  size_t len;
+  const char* end = buf + sizeof(buf);
   const char* p = format;
   int count = 0;
+  long long value_ll;
+  long value_l;
+  int value_i;
+  const char* value_s;
+  char value_c;
+  double value_f;
+  void* value_p;
+
   while (*p != '\0') {
     if (*p == '%') {
       p++;
       ConversionFormat fmt = {0};
       p = CollectFormat(p, &fmt);
-      EnsureBuffer(default_buffer, &buf, &buflen, fmt.field_width, ap);
-      EnsureBuffer(default_buffer, &buf, &buflen, fmt.precision, ap);
-      char* end = buf + buflen;
+      bool l_convert = false;
+      bool ll_convert = false;
+      bool negative = false;
+      bool is_unsigned = false;
+      
+      // If * is specified for field width or precision, fetch them
+      // from the arg list now.
+      ResolveFieldWidth(&fmt, &ap);
+      ResolvePrecision(&fmt, &ap);
+      
+      // Get value from arg list based on conversion.
+      switch (*p) {
+        case 'd':
+        case 'u':
+        case 'i':
+        case 'x':
+        case 'X':
+          is_unsigned = *p == 'u';
+          if (fmt.modifier == kModLong) {
+             value_l = va_arg(ap, long);
+            l_convert = true;
+            if (!is_unsigned && value_l < 0) {
+              negative = true;
+              value_l = -value_l;
+            }
+           } else if (fmt.modifier == kModLongLong) {
+             value_ll = va_arg(ap, long long);
+             ll_convert = true;
+            if (!is_unsigned && value_ll < 0) {
+              negative = true;
+              value_ll = -value_ll;
+            }
+          } else if (fmt.modifier == kModChar) {
+            value_i = (int)va_arg(ap, int) & 0xff;
+            if (!is_unsigned && value_i < 0) {
+              negative = true;
+              value_i = -value_i;
+            }
+          } else if (fmt.modifier == kModShort) {
+            value_i = (int)va_arg(ap, short)& 0xffff;
+            if (!is_unsigned && value_i < 0) {
+              negative = true;
+              value_i = -value_i;
+            }
+          } else {
+            value_i = va_arg(ap, int);
+            if (!is_unsigned && value_i < 0) {
+              negative = true;
+              value_i = -value_i;
+            }
+          }
+          break;
+        case 'p':
+          value_p = va_arg(ap, void*);
+          break;
+        case 'f':
+        case 'g':
+        case 'e':
+          value_f = va_arg(ap, double);
+          break;
+        case 's':
+          value_s = va_arg(ap, const char*);
+          break;
+        case 'c':
+          value_c = va_arg(ap, int);
+          break;
+        default:
+          break;
+      }
+       
+      // Convert the arg value and write it.
       switch (*p) {
         case 'd':
         case 'i':
+        case 'u':
           p++;
-          v = PrintDecimal(&fmt, va_arg(ap, int), buf, buflen);
+          if (l_convert) {
+            v = ConvertDecimalLong(value_l, buf, sizeof(buf));
+          } else if (ll_convert) {
+            v = ConvertDecimalLongLong(value_ll, buf, sizeof(buf));
+          } else {
+             v = ConvertDecimalInt(value_i, buf, sizeof(buf));
+          }
           len = end - v;
-          count += fwrite(v, 1, len, fp);
-          break;
-        case 'l':
-          p++;
-          v = PrintDecimal(&fmt, va_arg(ap, long), buf, buflen);
-          len = end - v;
-          count += fwrite(v, 1, len, fp);
-          break;
-        case 'h':
-          p++;
-          v = PrintDecimal(&fmt, va_arg(ap, short), buf, buflen);
-          len = end - v;
-          count += fwrite(v, 1, len, fp);
+          count += WriteFormatted(writer, data, &fmt, v, len, !is_unsigned && negative);
           break;
         case 'x':
-        case 'X':
+        case 'X': {
+          bool upper = *p == 'X';
           p++;
-          v = PrintHex(&fmt, va_arg(ap, int), buf, buflen, p[-1] == 'X');
+          if (l_convert) {
+             v = ConvertHexLong(value_l, buf, sizeof(buf), upper);
+           } else if (ll_convert) {
+             v = ConvertHexLongLong(value_ll, buf, sizeof(buf), upper);
+           } else {
+              v = ConvertHexInt(value_i, buf, sizeof(buf), upper);
+           }
           len = end - v;
-          count += fwrite(v, 1, len, fp);
+          count += WriteFormatted(writer, data, &fmt, v, len, false);
           break;
-        case 'c': {
+          }
+        case 'p':
           p++;
-          char b[1] = {va_arg(ap, char)};
-          v = PrintString(&fmt, b, 1, buf, buflen);
+          v = ConvertHexPointer(value_p, buf, sizeof(buf), false);
           len = end - v;
-          count += fwrite(v, 1, len, fp);
+          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          break;
+        case 'f':
+          FixFloatPrecision(&fmt, sizeof(buf) - 2);
+          p++;
+          v = __PrintFloatFormat(value_f, fmt.precision, buf, sizeof(buf));
+          len = strlen(v);
+          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          break;
+        case 'e':
+          FixFloatPrecision(&fmt, sizeof(buf) - 5);
+          p++;
+          v = __PrintScientificFormat(value_f, fmt.precision, buf, sizeof(buf));
+          len = strlen(v);
+          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          break;
+        case 'g':
+          FixFloatPrecision(&fmt, sizeof(buf) - 5);
+          p++;
+          v = __PrintGeneralFormat(value_f, fmt.precision, buf, sizeof(buf));
+          len = strlen(v);
+          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          break;
+       case 'c': {
+          p++;
+          char b[1] = {value_c};
+          count += WriteFormatted(writer, data, &fmt, b, 1, false);
           break;
         }
-        case 's': {
+        case 's':
           p++;
-          char* s = va_arg(ap, char*);
-          v = PrintString(&fmt, s, strlen(s), buf, buflen);
-          len = end - v;
-          count += fwrite(v, 1, len, fp);
+          len = strlen(value_s);
+          fmt.fill_zero = false;
+          fmt.prepend_sign = false;
+          fmt.prepend_space = false;
+          count += WriteFormatted(writer, data, &fmt, value_s, len, false);
           break;
-        }
         default:
-          fputc(*p++, fp);
-          count++;
+          count += writer(p++, 1, data);
           break;
+        
       }
     } else {
-      fputc(*p++, fp);
-      count++;
+      count += writer(p++, 1, data);
     }
-  }
-  if (buf != default_buffer) {
-    free(buf);
   }
   return count;
 }
 
+// Writer function to write to a FILE pointer.
+STATIC int FILEWriter(const char* s, size_t len, void* data) {
+  FILE* fp = data;
+  return fwrite(s, 1, len, fp);
+}
+
+typedef struct {
+  char* p;            // Current place to write to.
+  ssize_t len;        // Remaining space.
+} StringData;
+
+// Writer function to write to a string pointer.
+STATIC int StringWriter(const char* s, size_t len, void* data) {
+  StringData* str = data;
+  if (str->len > 0 && len > str->len) {
+    len = str->len;
+  }
+  memcpy(str->p, s, len);
+  str->p += len;
+  str->len -= len;
+  return len;
+}
+
+#if !defined(__6502__) && !defined(__risc_v__)
+#define fprintf __fprintf
+#define printf __printf
+#define sprintf __sprintf
+#define snprintf __snprintf
+#endif
+
 int fprintf(FILE* fp, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  int v = vfprintf(fp, format, ap);
+  int v = Printf(FILEWriter, fp, format, ap);
   va_end(ap);
   return v;
+}
+
+int vfprintf(FILE * restrict stream,
+             const char * restrict format, va_list arg) {
+  return Printf(FILEWriter, stream, format, arg);
 }
 
 int printf(const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  int v = vfprintf(stdout, format, ap);
+  int v = Printf(FILEWriter, stdout, format, ap);
   va_end(ap);
   return v;
 }
 
-static char* SafeMemcpy(char* to, char* end, char* from, size_t len) {
-  if ((to + len) > end) {
-    len = end - to;
-  }
-  memcpy(to, from, len);
-  return to + len;
+int vprintf(const char * restrict format, va_list arg) {
+  return Printf(FILEWriter, stdout, format, arg);
+}
+
+int sprintf(char* s, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, -1};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
+}
+
+int vsprintf(char * restrict s,
+             const char * restrict format, va_list arg) {
+  StringData data = {s, -1};
+  return Printf(StringWriter, &data, format, arg);
+}
+
+int snprintf(char* s, size_t len, const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  StringData data = {s, len};
+  int v = Printf(StringWriter, &data, format, ap);
+  va_end(ap);
+  return v;
 }
 
 int vsnprintf(char * restrict s, size_t n,
-              const char * restrict format, va_list ap) {
-  char default_buffer[4096];
-  int buflen = sizeof(default_buffer);
-  char* buf = default_buffer;
-  char* v;
-  int len;
-  const char* p = format;
-
-  char* s_start = s;
-  char* s_end = s + n;
-  
-  while (*p != '\0' && s < s_end) {
-    if (*p == '%') {
-      p++;
-      ConversionFormat fmt;
-      p = CollectFormat(p, &fmt);
-      EnsureBuffer(default_buffer, &buf, &buflen, fmt.field_width, ap);
-      EnsureBuffer(default_buffer, &buf, &buflen, fmt.precision, ap);
-      char* end = buf + buflen;
-      switch (*p) {
-        case 'd':
-        case 'i':
-          p++;
-          v = PrintDecimal(&fmt, va_arg(ap, int), buf, buflen);
-          len = end - v;
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        case 'l':
-          p++;
-          v = PrintDecimal(&fmt, va_arg(ap, long), buf, sizeof(buf));
-          len = end - v;
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        case 'h':
-          p++;
-          v = PrintDecimal(&fmt, va_arg(ap, short), buf, sizeof(buf));
-          len = end - v;
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        case 'x':
-        case 'X':
-          p++;
-          v = PrintHex(&fmt, va_arg(ap, int), buf, sizeof(buf), p[-1] == 'X');
-          len = end - v;
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        case 'c': {
-          p++;
-          char b[1] = {va_arg(ap, char)};
-          v = PrintString(&fmt, b, 1, buf, buflen);
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        }
-        case 's': {
-          p++;
-          char* s = va_arg(ap, char*);
-          v = PrintString(&fmt, s, strlen(s), buf, buflen);
-          len = end - v;
-          s = SafeMemcpy(s, s_end, v, len);
-          break;
-        }
-        default:
-          *s++ = *p++;
-          break;
-      }
-    } else {
-      *s++ = *p++;
-    }
-  }
-  return s - s_start;
+              const char * restrict format, va_list arg) {
+  StringData data = {s, n};
+  return Printf(StringWriter, &data, format, arg);
 }
 
-
-int vsprintf(char * restrict s,
-             const char * restrict format, va_list ap) {
-  return vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
-}
-
-int snprintf(char * restrict s, size_t n,
-             const char * restrict format, ...) {
-  va_list ap;
-  va_start(ap, format);
-  int v = vsnprintf(s, n, format, ap);
-  va_end(ap);
-  return v;
-}
-
-int sprintf(char * restrict s,
-            const char * restrict format, ...) {
-  va_list ap;
-  va_start(ap, format);
-  int v = vsnprintf(s, 0x7fffffffffffffffLL, format, ap);
-  va_end(ap);
-  return v;
-}
+#endif

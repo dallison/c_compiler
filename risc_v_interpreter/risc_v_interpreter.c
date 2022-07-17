@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include "risc_v_disassembler.h"
 
@@ -20,14 +21,14 @@ void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter) {
   for (int i = 0; i < RV_NUM_INT_REGS; i += 2) {
     DisassemblePrintRegister(stdout, i, kRegTypeInt, "");
 
-    int n = printf("  0x%016llx (%lld)", interpreter->iregs[i],
+    int n = printf("  0x%016llx (%" PRId64 ")", interpreter->iregs[i],
            interpreter->iregs[i]);
     n = kWidth - n;
     while (n-- > 0) {
       putchar(' ');
     }
     DisassemblePrintRegister(stdout, i+1, kRegTypeInt, "");
-    printf("  0x%016llx (%lld)", interpreter->iregs[i+1],
+    printf("  0x%016llx (%" PRId64 ")", interpreter->iregs[i+1],
            interpreter->iregs[i+1]);
     printf("\n");
   }
@@ -42,7 +43,7 @@ void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter) {
     printf("  %g", interpreter->fregs[i+1]);
     printf("\n");
   }
-  printf("pc: 0x%llx (%lld)\n", interpreter->pc, interpreter->pc);
+  printf("pc: 0x%" PRIx64 " (%" PRId64 ")\n", interpreter->pc, interpreter->pc);
 }
 
 static void DumpStateAndExit(RISCVInterpreter* interpreter) {

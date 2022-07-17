@@ -24,6 +24,7 @@ TargetBasicBlock* NewTargetBasicBlock(TargetBlockId id) {
   BitSetInit(&b->dominance_frontier);
   b->idom = NULL;
   VectorInit(&b->inputs);
+  BitSetInit(&b->input_ids);
   VectorInit(&b->outputs);
   BitSetInit(&b->output_ids);
   b->num_spills = 0;
@@ -45,6 +46,7 @@ void TargetBasicBlockDelete(TargetBasicBlock* b) {
   BitSetDestruct(&b->dominance_frontier);
   VectorDestruct(&b->dominatees);
   VectorDestruct(&b->inputs);
+  BitSetDestruct(&b->input_ids);
   VectorDestruct(&b->outputs);
   BitSetDestruct(&b->output_ids);
   free(b);
@@ -210,7 +212,7 @@ void TargetBasicBlockPrint(TargetGenerator* gen, TargetBasicBlock* b, TargetBasi
   fprintf(fp, "\n");
   
   TargetInstruction* inst = b->code;
-  while (inst != b->end_code) {
+  while (inst != NULL && inst != b->end_code) {
     TargetPrintInstruction(inst, gen->virtuals->opcode_name, fp);
     inst = TargetNext(inst);
   }
@@ -477,6 +479,18 @@ static void CalculateDominators(TargetGenerator* gen) {
       changed |= TargetBasicBlockCalculateDominators(gen, b, &gen->basic_blocks);
     }
   }
+  
+  // Now check for isolated islands where the blocks form a loop
+  // that cannot be accessed from outside the loop.  This is denoted
+  // by the dominators of the block being all the blocks.
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (BitSetCount(&b->dominators) == gen->basic_blocks.length) {
+      BitSetClear(&b->dominators);
+      b->is_unreachable = true;
+      b->reachability_known = true;
+    }
+  }
 }
 
 static void CalculateImmediateDominator(TargetGenerator* gen) {
@@ -486,12 +500,6 @@ static void CalculateImmediateDominator(TargetGenerator* gen) {
   }
 }
 
-static void CalculateDominanceFrontier(TargetGenerator* gen) {
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
-    TargetBasicBlockCalculateDominanceFrontier(b, &gen->basic_blocks);
-  }
-}
 
 // Build dominator tree.  If a block has an
 // immediate dominator (idom) add the block to the idom's
@@ -506,7 +514,8 @@ static void BuildDominatorTree(TargetGenerator* gen) {
 }
 
 static void SaveInstructionUses(TargetBasicBlock* block, Vector* uses) {
-  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       inst != block->end_code; inst = TargetNext(inst)) {
     VectorAppend(uses, (void*)(int64_t)inst->uses);
   }
   if (block->end_code != NULL) {
@@ -520,7 +529,9 @@ static void SaveInstructionUses(TargetBasicBlock* block, Vector* uses) {
 
 static void RestoreInstructionUses(TargetBasicBlock* block, Vector* uses) {
   size_t index = 0;
-  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       inst != block->end_code; inst = TargetNext(inst)) {
+    assert(index < uses->length);
     inst->uses = (int)uses->value.w[index++];
   }
   if (block->end_code != NULL) {
@@ -528,6 +539,12 @@ static void RestoreInstructionUses(TargetBasicBlock* block, Vector* uses) {
   }
   for (size_t i = 0; i < block->inputs.length; i++) {
     TargetInstruction* inst = block->inputs.value.p[i];
+    // We may have added an ourput by PropagateNewOutputUpwards, in which case it's not
+    // part of the saved uses counts.
+    if (index >= uses->length) {
+      break;
+    }
+    assert(index < uses->length);
     inst->uses = (int)uses->value.w[index++];
   }
 }
@@ -573,20 +590,47 @@ static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block, TargetInstr
   // Unless this is an input inside a call block, check for
   // use count.  This allows all inputs to be propagated to the
   // output in a call block.
-  if (!(compiler->callee_save && is_input && block->contains_call)) {
+  if (!(is_input && block->contains_call)) {
+    if (inst->uses < 0) {
+      fprintf(stderr, "%s: block: %d, inst: %d\n",
+              gen->function_name.value, block->block_id, inst->id);
+    }
     assert(inst->uses >= 0);
     if (inst->uses == 0) {
       return;
     }
   }
 
-  VectorAppend(&block->outputs, inst);
-  BitSetInsert(&block->output_ids, inst->id);
+  if (!BitSetContains(&block->output_ids, inst->id)) {
+    VectorAppend(&block->outputs, inst);
+    BitSetInsert(&block->output_ids, inst->id);
+  }
+}
+
+static void PropagateNewOutputUpwards(TargetGenerator* gen,
+                                      TargetBasicBlock* block,
+                                      TargetInstruction* inst) {
+  
+  if (!BitSetContains(&block->output_ids, inst->id)) {
+    VectorAppend(&block->outputs, inst);
+    BitSetInsert(&block->output_ids, inst->id);
+    
+    // If this instruction is not in our input set we need to add it
+    // there too.
+    if (!BitSetContains(&block->input_ids, inst->id)) {
+      VectorAppend(&block->inputs, inst);
+      BitSetInsert(&block->input_ids, inst->id);
+    }
+    if (block->idom != NULL) {
+      PropagateNewOutputUpwards(gen, block->idom, inst);
+    }
+  }
 }
 
 static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
   // For each instruction, decrement the uses count for all its operands.
-  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       inst != block->end_code; inst = TargetNext(inst)) {
     DecrementOperandUses(inst);
   }
   DecrementOperandUses(block->end_code);
@@ -598,7 +642,8 @@ static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
   // look at the inputs.  If we don't use an input it becomes an output.
   // Also, if the block is a call block we propagate all inputs
   // to outputs
-  for (TargetInstruction* inst = block->code; inst != block->end_code; inst = TargetNext(inst)) {
+  for (TargetInstruction* inst = block->code; inst != NULL &&
+       inst != block->end_code; inst = TargetNext(inst)) {
     AddOutput(gen, block, inst, false);
   }
   AddOutput(gen, block, block->end_code, false);
@@ -614,8 +659,7 @@ static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
     TargetBasicBlock* out = gen->basic_blocks.value.p[block->out_edges.value.w[i]];
     for (size_t j = 0; j < out->inputs.length; j++) {
       TargetInstruction* inst = out->inputs.value.p[j];
-      VectorAppend(&block->outputs, inst);
-      BitSetInsert(&block->output_ids, inst->id);
+      PropagateNewOutputUpwards(gen, block, inst);
     }
   }
 }
@@ -624,10 +668,15 @@ static void BuildBlockOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
 static void BuildBlockInputs(TargetBasicBlock* block) {
   if (block->idom != NULL) {
     VectorCopy(&block->inputs, &block->idom->outputs);
+    for (size_t i = 0; i < block->inputs.length; i++) {
+      TargetInstruction* inst = block->inputs.value.p[i];
+      BitSetInsert(&block->input_ids, inst->id);
+    }
   }
 }
 
 // Traverse the dominator tree building the inputs and outputs.
+// Returns true if there are any changes.
 static void BuildInputsAndOutputs(TargetGenerator* gen, TargetBasicBlock* block) {
   if (block == NULL) {
     return;
@@ -644,6 +693,7 @@ static void BuildInputsAndOutputs(TargetGenerator* gen, TargetBasicBlock* block)
   }
   VectorDestruct(&saved_uses);
 }
+
 
 static void ResetAllInstructionUses(TargetGenerator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
@@ -714,6 +764,8 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
   // Phase 4a: dominators.
   CalculateDominators(gen);
  
+  // TargetPrintBasicBlocks(gen, stdout);
+  
   // Phase 4b: immediate dominator.
   CalculateImmediateDominator(gen);
  
@@ -825,4 +877,18 @@ TargetInstruction* TargetBasicBlockREnd(TargetBasicBlock* b) {
 
 bool TargetBasicBlockIsEmpty(TargetBasicBlock* b) {
   return b->code == NULL || b->end_code == NULL;
+}
+
+bool TargetBasicBlockDominatedBy(TargetGenerator* gen, TargetBasicBlock* dom, TargetBasicBlock* b) {
+  for (size_t i = 0; i < dom->dominatees.length; i++) {
+    TargetBlockId child_id = dom->dominatees.value.w[i];
+    TargetBasicBlock* child = gen->basic_blocks.value.p[child_id];
+    if (b == child) {
+      return true;
+    }
+    if (TargetBasicBlockDominatedBy(gen, child, b)) {
+      return true;
+    }
+  }
+  return false;
 }

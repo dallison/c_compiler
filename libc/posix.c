@@ -9,12 +9,18 @@
 #include <fcntl.h>
 #include <syscall.h>
 #include <stddef.h>
+#include <stdarg.h>
 
+#if !defined(__6502__)
 int errno;
+#endif
 
-
-int open(const char* filename, int mode) {
-  return syscall(SYS_OPEN, filename, mode);
+// The open function can take an extra arg for the open mode
+// if O_CREAT is in the flags.
+int open(const char* filename, int flags, ...) {
+  va_list ap;
+  va_start(ap, flags);
+  return syscall(SYS_OPEN, filename, flags, va_arg(ap, int));
 }
 
 int close(int fd) {
@@ -38,3 +44,6 @@ void abort() {
   syscall(SYS_ABORT);
 }
 
+void _Exit(int status) {
+  syscall(SYS_EXIT, status);
+}

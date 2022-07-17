@@ -25,25 +25,33 @@ FILE* fopen(const char* filename, const char* mode) {
     }
     m++;
   }
-  if ((open_mode & 3) == 3) {
+  if (open_mode == 3) {
     open_mode = O_RDWR;
-  } else if ((open_mode & 1) == 1) {
+  } else if (open_mode == 1) {
     open_mode = O_RDONLY;
-  } else if ((open_mode & 2) == 2) {
-      open_mode = O_WRONLY | O_TRUNC;
-  } else if ((open_mode & 4) == 4) {
-    open_mode = O_WRONLY | O_APPEND;
+  } else if (open_mode == 2) {
+    open_mode = O_WRONLY | O_TRUNC | O_CREAT;
+  } else if (open_mode == 4) {
+    open_mode = O_WRONLY | O_APPEND | O_CREAT;
   }
-  int fd = open(filename, open_mode);
+  int fd = open(filename, open_mode, 0777);
   if (fd == -1) {
     return NULL;
   }
-  FILE* fp = malloc(sizeof(FILE));
+  // Allocate the FILE and buffer in one block.
+  FILE* fp = malloc(sizeof(FILE) + BUFSIZE);
+  if (fp == NULL) {
+    return NULL;
+  }
+  fp->buf = (char*)fp + sizeof(FILE);
   fp->fd = fd;
-  fp->buf = NULL;
-  fp->bufsize = 4096;
-  fp->index = 0;
+  fp->bufsize = BUFSIZE;
+  fp->windex = 0;
+  fp->rindex = fp->bufsize;
+  fp->buffer_owned = 0;       // Buffer doesn't need to be freed.
   fp->buffering_mode = _IOFBF;    // Fully buffered.
-  fp->pos = 0;    // TODO: append should be at end.
+  fp->unget_index = -1;
+  fp->eof_flag = 0;
+  fp->error_flag = 0;
   return fp;
 }

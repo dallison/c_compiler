@@ -31,6 +31,7 @@ typedef struct Syntax {
   char fake_name_buffer[32];            // Buffer to generate fake names.
   int fake_name_index;                  // Next fake name index.
   bool found_open_paren;                // We've consumed an open paren.
+  TypeRecord* compound_literal_type;            // Parsed compound literal type.
   int loop_count;                       // Number of nested loops.
   int switch_count;                     // Number of nested switch statements.
   Vector all_local_symbols;  // All symbols defined in a function (owned by this
@@ -39,6 +40,7 @@ typedef struct Syntax {
   Vector all_symbols;        // All symbols (needed by assembler).
   
   ParserContext context;     // Parser context.
+  Storage init_storage;      // Current storage for symbol being initialized.
 } Syntax;
 
 // Token classes allow us to recover from syntax errors by
@@ -91,5 +93,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
+ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
+void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
 
 #endif /* syntax_h */

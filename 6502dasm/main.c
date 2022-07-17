@@ -42,7 +42,7 @@ int main(int argc, const char * argv[]) {
   
   // Initialize a 6502 architecture.
   LoaderArchitecture arch;
-  _6502LoaderArchitectureInit(&arch);
+  W65C02LoaderArchitectureInit(&arch);
   
   // Initialize the loader from the given exe file.
   bool ok = LoaderInitFromFile(&loader, &filename, 0,
@@ -67,7 +67,7 @@ int main(int argc, const char * argv[]) {
         }
         while (addr <= end_addr) {
           if (pc >= start_addr_range && pc <= end_addr_range) {
-            void* new_addr = Disassemble6502Instruction(pc, addr, stdout);
+            void* new_addr = Disassemble6502Instruction(NULL, NULL, pc, addr, stdout);
             pc += new_addr - addr;
             addr = new_addr;
           } else {

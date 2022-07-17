@@ -80,13 +80,14 @@ typedef struct {
   int bit_offset;   // Bit offset into word.
   int bit_size;     // Bitfield size in bits.
   size_t index;     // Index into members vector.
-} StructMember;
+  bool is_anon;     // This is an anonymous member.
+  } StructMember;
 
 // A struct or union type.
-typedef struct {
+typedef struct Struct {
   int refs;
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
-  Vector members;    // Vector of StructMember*.
+  Vector members;    // Vector of StructMember* (owns StructMembers)
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
   int size;          // Size of struct in bytes.
@@ -268,10 +269,7 @@ inline bool TypeIsVoidFunction(TypeRecord* type) {
 }
 
 inline bool TypeIsUnsigned(TypeRecord* type) {
-  if (type == NULL) {
-    return false;
-  }
-  return TypeIsPrimitive(type) && (type->type & kTypeUnsigned) != 0;
+  return TypeIsPrimitive(type) && (type->type & (kTypeUnsigned | kTypeBool)) != 0;
 }
 
 inline bool TypeIsSigned(TypeRecord* type) {
@@ -305,7 +303,8 @@ inline bool TypeIsVLA(TypeRecord* type) {
 inline bool TypeIsIntegral(TypeRecord* type) {
   return TypeIsPrimitive(type) &&
          (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeLong |
-                        kTypeLongLong | kTypeBool | kTypeEnum)) != 0;
+                        kTypeLongLong | kTypeBool | kTypeEnum | kTypeUnsigned |
+                        kTypeSigned)) != 0;
 }
 
 inline bool TypeIsFloatingPoint(TypeRecord* type) {
@@ -328,12 +327,32 @@ inline bool TypeIsScalar(TypeRecord* type) { return !TypeIsStructOrUnion(type); 
 
 
 inline bool TypeIsInt(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & (kTypeInt | kTypeEnum)) != 0;
+  if (!TypeIsPrimitive(type)) {
+    return false;
+  }
+  if ((type->type & kTypeEnum) != 0) {
+    if ((type->type & kTypeInt) != 0) {
+      return true;
+    }
+    return false;
+  }
+  return (type->type & kTypeInt) != 0 &&
+    (type->type & (kTypeShort | kTypeLong | kTypeLongLong)) == 0;
 }
 
 inline bool TypeIsChar(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeChar) != 0;
+  if (!TypeIsPrimitive(type)) {
+    return false;
+  }
+  if ((type->type & kTypeEnum) != 0) {
+    if ((type->type & kTypeChar) != 0) {
+      return true;
+    }
+    return false;
+  }
+  return (type->type & kTypeChar) != 0;
 }
+
 inline bool TypeIsShort(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeShort) != 0;
 }
@@ -383,7 +402,7 @@ inline bool TypeIsVoidPointer(TypeRecord* type) {
 }
 
 inline bool TypeIsStructOrUnionPointer(TypeRecord* type) {
-  return TypeIsPointer(type) && TypeIsStructOrUnion(type->next);
+  return TypeIsPointerOrArray(type) && TypeIsStructOrUnion(type->next);
 }
 
 

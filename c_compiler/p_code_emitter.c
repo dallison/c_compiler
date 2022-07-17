@@ -34,7 +34,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case P_OP(tp):
     case P_OP(literal):
     case P_OP(structreturn):
-    case P_OP(resultx):
+    case P_OP(resulti):
     case P_OP(resultf):
     case P_OP(resultd):
       return false;
@@ -85,21 +85,21 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
   Vector regs = {0};
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+    int reg = (int)regs.value.w[i];
     fprintf(fp, "\tpushx   r%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+    int reg = (int)regs.value.w[i];
     fprintf(fp, "\tpushf    f%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
-    int reg = (int)regs.value.p[i];
+    int reg = (int)regs.value.w[i];
     fprintf(fp, "\tpushd    d%d\n", reg);
   }
   VectorDestruct(&regs);
@@ -112,21 +112,21 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
 
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value.p[i - 1];
+    int reg = (int)regs.value.w[i - 1];
     fprintf(fp, "\tpopd    d%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value.p[i - 1];
+    int reg = (int)regs.value.w[i - 1];
     fprintf(fp, "\tpopf    f%d\n", reg);
   }
   VectorClear(&regs);
 
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
-    int reg = (int)regs.value.p[i - 1];
+    int reg = (int)regs.value.w[i - 1];
     fprintf(fp, "\tpopx    r%d\n", reg);
   }
   VectorDestruct(&regs);

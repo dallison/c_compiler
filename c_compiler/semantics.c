@@ -106,6 +106,27 @@ static void CheckVLAArgs(Syntax* syntax, ASTNode* node) {
   }
 }
 
+static bool NodeIsZero(ASTNode* node) {
+  switch (node->op) {
+    case AST_OP(number): {
+      ConstantASTNode* c = (ConstantASTNode*)node;
+      return c->value.ivalue == 0;
+      }
+    case AST_OP(question): {      // Conditional expression:
+      node = ((BinaryASTNode*)node)->right;     // Colon.
+      ASTNode* left = ((BinaryASTNode*)node)->left;
+      ASTNode* right = ((BinaryASTNode*)node)->right;
+      return NodeIsZero(left) && NodeIsZero(right);
+    }
+    case AST_OP(cast): {      // cast
+      CastASTNode* c = (CastASTNode*)node;
+      return c->expr != NULL && NodeIsZero(c->expr);
+    }
+    default:
+    return false;
+  }
+}
+
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
@@ -244,14 +265,15 @@ static ASTNode* SignExtendIntConstant(ConstantASTNode* c, int bits) {
 }
 
 static ASTNode* ConvertIntToDouble(ConstantASTNode* c, int bits) {
-  if (!TypeIsUnsigned(c->base.type)) {
+  if (TypeIsUnsigned(c->base.type)) {
     int64_t mask = (1LL << bits) - 1LL;
     c->value.ivalue &= mask;
   } else {
     c->value.ivalue <<= 64 - bits;
     c->value.ivalue >>= 64 - bits;
   }
-  c->value.fvalue = (double)c->value.ivalue;
+  double v = (double)c->value.ivalue;
+  c->value.fvalue = v;
   c->base.op = AST_OP(fnumber);
   return (ASTNode*)c;
 }
@@ -398,6 +420,8 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   }
 
   if (TypeEqualIgnoringSign(from->type, to)) {
+    // Use the 'to' type as the node type.
+    ASTNodeSetType(from, to);
     return;
   }
 
@@ -461,11 +485,8 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
           return;
         }
         // The only integer we can convert to void* is NULL.
-        if (from->op == AST_OP(number)) {
-          ConstantASTNode* c = (ConstantASTNode*)from;
-          if (c->value.ivalue == 0) {
-            return;
-          }
+        if (NodeIsZero(from)) {
+          return;
         }
       }
       if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
@@ -476,7 +497,12 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         }
         return;
       }
-
+      
+      // Pointers to int or bool is fine.
+      if (TypeIsPointerOrArray(from->type) && (TypeIsInt(to) || TypeIsBool(to))) {
+        return;
+      }
+      
       // Treat enum and ints as same.
       if ((TypeIsEnum(from->type) && TypeIsInt(to)) ||
           (TypeIsInt(from->type) && TypeIsEnum(to))) {
@@ -484,11 +510,8 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       }
 
       // Allow the number 0 (explicitly) to be converted to a pointer.
-      if (from->op == AST_OP(number) && TypeIsPointer(to)) {
-        ConstantASTNode* const_node = (ConstantASTNode*)from;
-        if (TypeIsInt(const_node->base.type) && const_node->value.ivalue == 0) {
+      if (NodeIsZero(from) && TypeIsPointer(to)) {
           return;
-        }
       }
 
       if (TypeIsFunction(from->type) && TypeIsFunctionPointer(to)) {
@@ -502,6 +525,11 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         // Unknown types don't cause errors.
         return;
       }
+      
+      if (TypeIsIntegral(to) && TypeIsIntegral(from->type)) {
+        return;
+      }
+      
       SemanticTypeConversionError(
           from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
       break;

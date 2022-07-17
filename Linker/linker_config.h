@@ -18,8 +18,8 @@ typedef struct {
   String name;
   uint64_t start_addr;
   uint64_t size;
-  uint64_t alignment;
   Vector sections;
+  bool falign;
 } ConfigRegion;
 
 typedef enum  {
@@ -32,6 +32,7 @@ typedef enum  {
 
 typedef struct {
   ConfigSegmentType type;
+  uint64_t alignment;
   Vector regions;
 } ConfigSegment;
 

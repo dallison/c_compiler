@@ -25,7 +25,7 @@ static int InsertCompare(BinaryTreeNode* node1, BinaryTreeNode* node2) {
 
 static int SearchCompare(BinaryTreeNode* node, void* key) {
   Node* v = (Node*)node;
-  return v->key - (int)key;
+  return v->key - (int)(uint64_t)key;
 }
 
 static void Destructor(BinaryTreeNode* node, void* data) {

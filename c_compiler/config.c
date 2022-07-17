@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <inttypes.h>
 
 void ConfigNodeInit(ConfigNode* node) {
   node->type = kConfigNone;
@@ -462,7 +463,7 @@ static void PrintConfigNode(ConfigNode* node, struct PrintData* data) {
       fprintf(fp, "}%s", data->sep);
       break;
     case kConfigInt:
-      fprintf(fp, "%s%lld", data->sep, node->value.int_value);
+      fprintf(fp, "%s%" PRId64 "", data->sep, node->value.int_value);
       break;
     case kConfigString:
       fprintf(fp, "%s\"%s\"", data->sep, node->value.string_value.value);
@@ -539,6 +540,7 @@ void ConfigParserDestruct(ConfigParser* parser) {
 bool ConfigParserParse(ConfigParser* parser) {
   parser->fp = fopen(parser->filename.value, "r");
   if (parser->fp == NULL) {
+    fprintf(stderr, "Linker config file '%s' not found\n", parser->filename.value);
     return false;
   }
   parser->root = ParseConfig(parser);

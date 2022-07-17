@@ -99,6 +99,9 @@ void BasicBlockClear(struct Generator* gen, BasicBlock* b);
 void BasicBlockRemoveInput(BasicBlock* block, BlockId block_id);
 void BasicBlockRemoveEdge(BasicBlock* from, BasicBlock* to);
 
+// Is b dominated by dom (in its dominiator tree)?
+bool BasicBlockDominatedBy(struct Generator* gen, BasicBlock* dom, BasicBlock* b);
+
 typedef enum {
   kTraversePreOrder,
   kTraversePostOrder,

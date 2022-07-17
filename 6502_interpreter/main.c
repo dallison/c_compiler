@@ -28,10 +28,14 @@ int main(int argc, char *argv[]) {
   const char* extract_filename = NULL;
   bool debug = false;
   bool cycle_accurate = false;
+  bool trace = false;
+  const char* rom_filename = NULL;
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
       if (strcmp(argv[i], "-debug") == 0) {
         debug = true;
+      } else if (strcmp(argv[i], "-trace") == 0) {
+          trace = true;
       } else if (strcmp(argv[i], "-cycle") == 0) {
         cycle_accurate = true;
       } else if (argv[i][1] == 'd') {
@@ -42,6 +46,11 @@ int main(int argc, char *argv[]) {
           Usage();
         }
         extract_filename = argv[++i];
+      } else if (strcmp(argv[i], "-rom") == 0) {
+        if (i == argc - 1) {
+          Usage();
+        }
+        rom_filename = argv[++i];
       } else {
         Usage();
       }
@@ -59,10 +68,14 @@ int main(int argc, char *argv[]) {
   String filename;
   StringInit(&filename, file);
   
-  _6502Interpreter interpreter;
+  W65C02Interpreter interpreter;
   Loader loader;
   
-  _6502InterpreterInit(&interpreter, debug, cycle_accurate);
+  if (rom_filename == NULL) {
+    fprintf(stderr, "No ROM filename provided, please pass -rom <introm.exe>\n");
+    exit(1);
+  }
+  W65C02InterpreterInit(&interpreter, debug, cycle_accurate, trace, rom_filename);
   
   // The environment variable LD_BIND_NOW tells the dynamic loader to
   // replace the GOT entries for functions with the function address
@@ -80,7 +93,7 @@ int main(int argc, char *argv[]) {
   
   // Initialize a 6502 architecture.
   LoaderArchitecture arch;
-  _6502LoaderArchitectureInit(&arch);
+  W65C02LoaderArchitectureInit(&arch);
   
   // Initialize the loader from the given exe file.
   bool ok = LoaderInitFromFile(&loader, &filename, 0,
@@ -98,19 +111,19 @@ int main(int argc, char *argv[]) {
   
  
   if (disassemble_only) {
-    _6502InterpreterDisassemble(&interpreter, &loader);
+    W65C02InterpreterDisassemble(&interpreter, &loader);
   } else {
     // Run the code at its entry address.
-    _6502InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
+    W65C02InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv, program_arg_offset);
   }
   
   if (extract) {
     FILE* fp = fopen(extract_filename, "w");
-    _6502InterpreterExtract(&interpreter, &loader, fp);
+    W65C02InterpreterExtract(&interpreter, &loader, fp);
     fclose(fp);
     printf("Extracted to %s\n", extract_filename);
   }
-  _6502InterpreterDestruct(&interpreter);
+  W65C02InterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
 }
 

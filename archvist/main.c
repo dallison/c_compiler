@@ -19,6 +19,7 @@
 #include "elf_reader.h"
 #include "vector.h"
 #include "dstring.h"
+#include "set.h"
 
 typedef enum  {
   kNone = 0,
@@ -174,9 +175,24 @@ static void ReplaceFile(ARArchiveBuilder* builder, ELFReaderFile* elf, Command c
 static void ReplaceFiles(String* archive_name, Vector* filenames, Command command) {
   // Read all the ELF files.
   Vector elf_files = {0};
+  Vector known_files = {0};
   for (size_t i = 0; i < filenames->length; i++) {
     String filename;
     StringInit(&filename, filenames->value.p[i]);
+    // Remove duplicate file.
+    bool dup = false;
+    for (size_t j = 0; j < known_files.length; j++) {
+      if (strcmp(filenames->value.p[i], known_files.value.p[j]) == 0) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) {
+      continue;
+    }
+    VectorAppend(&known_files, filenames->value.p[i]);
+    
+    // Check that the file is not already in the list.
     ELFReaderFile* elf = NewELFReaderFile(&filename);
     StringDestruct(&filename);
     if (!ELFReaderFileRead(elf, 0, 0)) {
@@ -185,6 +201,7 @@ static void ReplaceFiles(String* archive_name, Vector* filenames, Command comman
     }
     VectorAppend(&elf_files, elf);
   }
+  VectorDestruct(&known_files);
   
   ARArchiveBuilder builder;
   String temp_name = {0};

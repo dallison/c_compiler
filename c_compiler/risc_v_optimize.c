@@ -17,7 +17,7 @@ static void Trap(){}
 // Set breakpoints in these and change the instuction id to
 // trap the instruction optimization passes.
 static void TrapRemoveInstruction(TargetInstruction* inst) {
-  if (inst->id == 53) {
+  if (inst->id == 99) {
     Trap();
   }
 }
@@ -65,7 +65,7 @@ struct OptimizerData {
 // The algorithm uses a filter to determine if the result
 // of an expression is needed at the output of this basic block.  The
 // filter is initialized with the block's outputs.
-// Then we go backwards through the instrucitons.  If the instruction's
+// Then we go backwards through the instructions.  If the instruction's
 // result is not in the filter it means that the result will be ignored
 // and it is removed.
 // If the instruction is not removed, all of its operands are added to the
@@ -83,7 +83,6 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockREnd(block);
        inst = prev) {
     prev = TargetPrev(inst);
-    TrapRemoveInstruction(inst);
 
     RVOpcode opcode = (RVOpcode)inst->opcode;
     if (RVIsExpression(inst) &&
@@ -102,19 +101,24 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
         is_candidate = false;
       }
 
-      // If destination is not in the output filter than if the
+      // If destination is not in the output filter then if the
       // expression is not used in this block it can be removed.
       if (is_candidate && inst->opcode != RV_OP(tmp) &&
           !RVIsFixedRegister(inst) &&
           !BitSetContains(&filter, inst->id)) {
+        TrapRemoveInstruction(inst);
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
         continue;
       }
       } else if (inst->opcode == RV_OP(rmov)) {
        TargetInstruction* result = inst->operand[0];
-       if (inst->dest != NULL) {
+       if (inst->users.length > 0) {
+         // Result of rmov is being used.  This overrides the destination
+         // as the result
+         result = inst;
+       } else if (inst->dest != NULL) {
          result = inst->dest;
-       }
+       } 
        if (RVIsResult(result)) {
          goto dont_optimize;
        }
@@ -123,6 +127,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
        }
       TargetInstruction* src = inst->operand[1];
       if (!BitSetContains(&filter, result->id)) {
+         TrapRemoveInstruction(inst);
          TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
          continue;
       }
@@ -150,6 +155,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
 #endif
         TargetRetargetInstruction(result, src);
         BitSetInsert(&filter, result->id);
+        TrapRemoveInstruction(inst);
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
       }
     }
@@ -227,10 +233,11 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
                                                              &rv->base,
                                                              NULL,
-                                                             kTargetTypeWord,
+                                                             kTargetType32Bit,
                                                              offset + immed));
           if (base->users.length == 0) {
-            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
+            TrapRemoveInstruction(base);
+           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
          }
       }
@@ -256,10 +263,11 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
                                                              &rv->base,
                                                              NULL,
-                                                             kTargetTypeWord,
+                                                             kTargetType32Bit,
                                                              offset + immed));
           if (base->users.length == 0) {
-            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
+            TrapRemoveInstruction(base);
+           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
         }
       }
@@ -302,6 +310,7 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
             TargetReplaceOperand(inst, i,  mv->operand[0]);
             
             // We can now eliminate the mv instruction.
+            TrapRemoveInstruction(mv);
             TargetBasicBlockRemoveInstruction(&rv->base, block, mv);
           }
         }
@@ -376,6 +385,7 @@ static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
         // Found a pooled li instruction for same constant.  Replace all
         // references to this instruction with the pooled one.
         TargetRetargetInstruction(inst, pooled);
+        TrapRemoveInstruction(inst);
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
         if (pooled->block != block) {
           // In dominator block, add as input to this block and output
@@ -418,7 +428,7 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
        inst = next) {
     next = TargetNext(inst);
     if (inst->opcode == (TargetOpcode)RV_OP(rmov)) {
-      TargetInstruction* inst_dest = inst->operand[0];
+       TargetInstruction* inst_dest = inst->operand[0];
       TargetInstruction* inst_src = inst->operand[1];
       TargetInstruction* prev_prev;
       for (TargetInstruction* prev = TargetPrev(inst);
@@ -429,7 +439,15 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
           // src or dest haveu been assigned to, not candidate.
           continue;
         }
-        if (prev->opcode == (TargetOpcode)RV_OP(rmov)) {
+        if (!RVIsVarRegister(inst_dest) &&
+            RVIsExpression(prev) && prev->users.length == 1) {
+           // rmov an expression to a register, just retarget the
+          // expression to the register.  We use rmov to assign to a
+          // register variable so we don't eliminate that.
+          prev->dest = inst_dest;
+          TrapRemoveInstruction(inst);
+          TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
+        } else if (prev->opcode == (TargetOpcode)RV_OP(rmov)) {
           TargetInstruction* prev_dest = prev->operand[0];
           TargetInstruction* prev_src = prev->operand[1];
           if (inst_dest == prev_src && inst_src == prev_dest) {
@@ -437,6 +455,7 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
             // ...
             // rmov b,a
             // Eliminate second rmov instructions.
+            TrapRemoveInstruction(inst);
             TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
             break;
           }
@@ -448,7 +467,7 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
 }
 
 static void EliminateMoves(RVGenerator* rv) {
-  EliminateMovesInBlock(rv->base.entry_block, rv);
+  TargetTraverseDominatorTree(&rv->base, EliminateMovesInBlock, kTraversePostOrder, rv);
 }
 
 void RVOptimize(RVGenerator* rv) {  

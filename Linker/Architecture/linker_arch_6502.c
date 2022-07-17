@@ -6,10 +6,11 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 #include <stdlib.h>
+#include <inttypes.h>
 #include "linker_arch_6502.h"
 
 static int64_t CodeStartAddress(Linker* linker) {
-  return linker->origin == 0 ?_6502_CODE_START : linker->origin;
+  return linker->origin == 0 ?W65C02_CODE_START : linker->origin;
 }
 
 static int64_t DataStartAddress(Linker* linker, int64_t code_start, int64_t code_size) {
@@ -31,55 +32,55 @@ static void ApplyRelocation(Linker* linker,
                             uint64_t S, int64_t A) {
   uint64_t value = S + A;
   if ((value & ~0xffff) != 0) {
-    LinkerError(file, "Invalid relocation value 0x%llx doesn't fit in 16 bits", value);
+    LinkerError(file, "Invalid relocation value 0x%" PRIx64 " doesn't fit in 16 bits", value);
   }
   switch (reloc->type) {
-    case R_6502_JSR:    // JSR - second and third bytes in little endian.
-    case R_6502_JMP:    // JMP
+    case R_W65C02_JSR:    // JSR - second and third bytes in little endian.
+    case R_W65C02_JMP:    // JMP
       *(uint16_t*)(target_address+1) = value;   // Apply to offset.
       break;
       
-    case R_6502_DATA16:
+    case R_W65C02_DATA16:
       *((uint16_t*)(target_address)) = value;
       break;
 
-    case R_6502_DATA64:
+    case R_W65C02_DATA64:
       *((uint64_t*)(target_address)) = value;
       break;
       
-    case R_6502_DATA32:
+    case R_W65C02_DATA32:
       *((uint32_t*)(target_address)) = (uint32_t)value;
       break;
       
-    case R_6502_BYTE0:
+    case R_W65C02_BYTE0:
       *(target_address) = value & 0xff;
       break;
   
-    case R_6502_BYTE1:
+    case R_W65C02_BYTE1:
       *(target_address) = (value >> 8) & 0xff;
       break;
 
-    case R_6502_BYTE2:
+    case R_W65C02_BYTE2:
       *(target_address) = (value >> 16) & 0xff;
       break;
       
-    case R_6502_BYTE3:
+    case R_W65C02_BYTE3:
       *(target_address) = (value >> 24) & 0xff;
       break;
       
-    case R_6502_BYTE4:
+    case R_W65C02_BYTE4:
       *(target_address) = (value >> 32) & 0xff;
       break;
       
-    case R_6502_BYTE5:
+    case R_W65C02_BYTE5:
       *(target_address) = (value >> 40) & 0xff;
       break;
       
-    case R_6502_BYTE6:
+    case R_W65C02_BYTE6:
       *(target_address) = (value >> 48) & 0xff;
       break;
       
-    case R_6502_BYTE7:
+    case R_W65C02_BYTE7:
       *(target_address) = (value >> 56) & 0xff;
       break;
       
@@ -136,14 +137,14 @@ static void CheckOptions(Linker* linker) {
     exit(1);
   }
   if (!linker->fully_static) {
-    fprintf(stderr, "Only static executables can be build on on 6502 (pass -static)\n");
+    fprintf(stderr, "Only static executables can be build on the 6502 target (pass -static)\n");
     exit(1);
   }
 }
 
 LinkerArchitecture* New6502LinkerArchitecture() {
   LinkerArchitecture* arch = malloc(sizeof(LinkerArchitecture));
-  arch->machine_type = ELF_MACHINE_TYPE_6502;
+  arch->machine_type = ELF_MACHINE_TYPEW65C02;
   arch->code_start_address = CodeStartAddress;
   arch->data_start_address = DataStartAddress;
   arch->handle_pic_relocation = HandlePICRelocation;

@@ -10,11 +10,14 @@
 
 char* strncpy(char* dest, const char* src, size_t len) {
   char* p = dest;
-  while (len-- > 0 && *src != '\0') {
+  while (len > 0 && *src != '\0') {
     *p++ = *src++;
+    --len;
   }
-  if (len > 0) {
-    *p = '\0';
+  // Fill remainder with '\0'
+  while (len > 0) {
+    *p++ = '\0';
+    --len;
   }
   return dest;
 }

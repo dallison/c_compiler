@@ -552,6 +552,7 @@ static SectionGroup* AddPLTRelocationsSection(Linker* linker) {
                                &linker->code_segment);
 }
 
+#if 0
 static SectionGroup* AddDataRelocationsSection(Linker* linker) {
   ELFWriterSectionContents* contents =
   NewELFWriterSectionContents(kSectionContentsBuffered);
@@ -569,6 +570,7 @@ static SectionGroup* AddDataRelocationsSection(Linker* linker) {
                                 section,
                                 &linker->code_segment);
 }
+#endif
 
 // The .interp section (and segment) is for finding the dynamic
 // loader at runtime.
@@ -608,7 +610,7 @@ static void WriteDynamicSectionEntryWithValue(Buffer* buffer,
 static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   // Write out DT_NEEDED entries
   for (size_t i = 0; i < linker->dynamic_linker->needed_libraries.length; i++) {
-    ELF_Word str_offset = (int)linker->dynamic_linker->needed_libraries.value.p[i];
+    ELF_Word str_offset = (int)linker->dynamic_linker->needed_libraries.value.w[i];
     WriteDynamicSectionEntryWithValue(buffer, DT(needed), str_offset);
   }
   
@@ -887,6 +889,7 @@ static uint64_t NextPowerOf2(uint64_t v) {
   return v + 1;
 }
 
+#if 0
 static void DebugPrintHashTable(Buffer* hashtable, size_t num_symbols) {
   DynamicLoaderGNUHashTableHeader* header = (DynamicLoaderGNUHashTableHeader*)hashtable->value;
   printf("nbuckets: %d\n", header->num_buckets);
@@ -898,7 +901,7 @@ static void DebugPrintHashTable(Buffer* hashtable, size_t num_symbols) {
   uint32_t* chains = buckets + header->num_buckets;
   
   for (int i = 0; i < header->bloom_size; i++) {
-    printf("bloom[%d] = %llx\n", i, bloom_filter[i]);
+    printf("bloom[%d] = %" PRIx64 "\n", i, bloom_filter[i]);
   }
   for (int i = 0; i < header->num_buckets; i++) {
     printf("bucket[%d]: %d\n", i, buckets[i]);
@@ -907,6 +910,7 @@ static void DebugPrintHashTable(Buffer* hashtable, size_t num_symbols) {
     printf("chain[%d]: %x\n", i, chains[i]);
   }
 }
+#endif
 
 static DynamicLoaderGNUHashTableHeader WriteHeader(Buffer* dynsym,
                                                    Buffer* hashtable,

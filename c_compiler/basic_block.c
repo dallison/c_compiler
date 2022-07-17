@@ -77,9 +77,6 @@ void BasicBlockAddBackEdge(BasicBlock* from, BasicBlock* to) {
 }
 
 bool BasicBlockCalculateDominators(Generator* gen, BasicBlock* b, Vector* blocks) {
-  if (b->block_id == 22) {
-    printf("");
-  }
   BitSet dominators;
   BitSetInit(&dominators);
   BitSetCopy(&dominators, &b->dominators);
@@ -144,6 +141,21 @@ void BasicBlockCalculateImmediateDominator(BasicBlock* b, Vector* blocks) {
     BitSetIteratorNext(&it);
   }
 }
+
+bool BasicBlockDominatedBy(Generator* gen, BasicBlock* dom, BasicBlock* b) {
+  for (size_t i = 0; i < dom->dominatees.length; i++) {
+    BlockId child_id = dom->dominatees.value.w[i];
+    BasicBlock* child = gen->basic_blocks.value.p[child_id];
+    if (b == child) {
+      return true;
+    }
+    if (BasicBlockDominatedBy(gen, child, b)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 
 void BasicBlockCalculateDominanceFrontier(Generator* gen, BasicBlock* b, Vector* blocks) {
   if (b->in_edges.length >= 2) {

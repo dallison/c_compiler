@@ -12,75 +12,138 @@
 static int BytesByAddressingMode(AddressingMode addr_mode) {
   switch (addr_mode) {
     case kAddrModeAbsolute:
+    case kAddrModeAbsoluteSymbol:
+    case kAddrModeAbsoluteSymbolIndexed:
       return 3;
     case kAddrModeAccumulator:
       return 1;
+    case kAddrModeZeroPageIndexedY:
+      return 3;         // Really abs,Y.  There is no zero-page,Y
     default:
       return 2;
   }
 }
 
+static int FrameSize(W65C02Generator* g, bool is_leaf) {
+  return g->base.stack_frame_size +
+      g->register_allocator.max_spilled_region_size + 2 +
+      (is_leaf ? 0 : 2);
+}
+
 // How many bytes in the instruction?
 // Based on opcode and addressing mode:
-static int BytesInInstruction(_6502Generator* g, TargetInstruction* inst) {
+static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
   AddressingMode addr_mode = (AddressingMode)((inst->flags >> 16) & 0xff);
 
-  switch ((_6502Opcode)inst->opcode) {
-    case _6502_OP(expr1):
-    case _6502_OP(expr2):
-    case _6502_OP(expr4):
-    case _6502_OP(expr8):
-    case _6502_OP(fake_bra):
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(expr1):
+    case W65C02_OP(expr2):
+    case W65C02_OP(expr4):
+    case W65C02_OP(expr8):
+    case W65C02_OP(exprf):
+    case W65C02_OP(exprd):
+    case W65C02_OP(fake_bra):
+    case W65C02_OP(ivarreg):
+    case W65C02_OP(bvarreg):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(xvarreg):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(dvarreg):
       return 0;
 
-    case _6502_OP(expr_addr_a):
-    case _6502_OP(expr_addr_x):
-    case _6502_OP(expr_addr_y):
+    case W65C02_OP(expr_addr_a):
+    case W65C02_OP(expr_addr_x):
+    case W65C02_OP(expr_addr_y):
       return 2;
 
-    case _6502_OP(localvar):
-    case _6502_OP(argument):
-    case _6502_OP(ssavar):
-    case _6502_OP(phi):
+    case W65C02_OP(localvar):
+    case W65C02_OP(argument):
+    case W65C02_OP(ssavar):
+    case W65C02_OP(phi):
       return 0;
-    case _6502_OP(literalreflo):
-    case _6502_OP(literalrefhi):
+    case W65C02_OP(literalreflo):
+    case W65C02_OP(literalrefhi):
       return 2;
-    case _6502_OP(literalref):  // X:Y = addr of literal
+    case W65C02_OP(literalref):  // X:Y = addr of literal
       return 4;
       
-    case _6502_OP(enter):
-    case _6502_OP(enter_leaf):
-    case _6502_OP(leave):
-    case _6502_OP(leave_leaf): {
-      int frame_size = g->base.stack_frame_size + 2;
+    case W65C02_OP(enter): {
+      int frame_size = FrameSize(g, true);
+      if (frame_size >= 256) {
+        return 10;
+      }
+      return 8;
+    }
+    case W65C02_OP(spill1):
+    case W65C02_OP(spill2):
+    case W65C02_OP(spill4):
+    case W65C02_OP(spill8):
+    case W65C02_OP(reload1):
+    case W65C02_OP(reload2):
+    case W65C02_OP(reload4):
+    case W65C02_OP(reload8):
+      return 6;
+      
+    case W65C02_OP(enter_leaf): {
+      int frame_size = FrameSize(g, true);
+      if (frame_size >= 256) {
+        return 10;
+      }
+      return 8;
+    }
+      
+    case W65C02_OP(leave): {
+      int frame_size = FrameSize(g, false);
+      if (frame_size >= 256) {
+        return 7;
+      }
+      return 5;
+    }
+    case W65C02_OP(leave_leaf): {
+      int frame_size = FrameSize(g, true);
       if (frame_size >= 256) {
         return 7;
       }
       return 5;
     }
 
-    case _6502_OP(var_addr):
-    case _6502_OP(var_addrb):
-    case _6502_OP(arg_addr):
-    case _6502_OP(arg_addrb):
-    case _6502_OP(var_value1):
-    case _6502_OP(var_value1b):
-    case _6502_OP(var_value2):
-    case _6502_OP(var_value2b):
-    case _6502_OP(var_value4):
-    case _6502_OP(var_value4b):
-    case _6502_OP(var_value8):
-    case _6502_OP(var_value8b):
-    case _6502_OP(arg_value1):
-    case _6502_OP(arg_value1b):
-    case _6502_OP(arg_value2):
-    case _6502_OP(arg_value2b):
-    case _6502_OP(arg_value4):
-    case _6502_OP(arg_value4b):
-    case _6502_OP(arg_value8):
-    case _6502_OP(arg_value8b): {
+      case W65C02_OP(load_result): {
+        int frame_size = FrameSize(g, true);
+        if (frame_size >= 256) {
+          return 7;
+        }
+        return 5;
+      }
+
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case W65C02_OP(arg_addrb):
+    case W65C02_OP(var_value1):
+    case W65C02_OP(var_value1b):
+    case W65C02_OP(var_value2):
+    case W65C02_OP(var_value2b):
+    case W65C02_OP(var_value4):
+    case W65C02_OP(var_value4b):
+    case W65C02_OP(var_value8):
+    case W65C02_OP(var_value8b):
+    case W65C02_OP(arg_value1):
+    case W65C02_OP(arg_value1b):
+    case W65C02_OP(arg_value2):
+    case W65C02_OP(arg_value2b):
+    case W65C02_OP(arg_value4):
+    case W65C02_OP(arg_value4b):
+    case W65C02_OP(arg_value8):
+    case W65C02_OP(arg_value8b): {
       TargetInstruction* var = inst->operand[1];
+      switch ((W65C02Opcode)var->opcode) {
+        case W65C02_OP(phi):
+        case W65C02_OP(ssavar):
+          var = var->operand[0];
+          break;
+        default:
+          break;
+      }
       int offset = (int)TargetIntValue(var->operand[0]);
       if (offset >= 256) {
         return 9;
@@ -88,10 +151,10 @@ static int BytesInInstruction(_6502Generator* g, TargetInstruction* inst) {
       return 7;
     }
 
-      case _6502_OP(var_addr_xy):
-      case _6502_OP(var_addrb_xy):
-      case _6502_OP(arg_addr_xy):
-      case _6502_OP(arg_addrb_xy): {
+      case W65C02_OP(var_addr_xy):
+      case W65C02_OP(var_addrb_xy):
+      case W65C02_OP(arg_addr_xy):
+      case W65C02_OP(arg_addrb_xy): {
       TargetInstruction* var = inst->operand[0];
       int offset = (int)TargetIntValue(var->operand[0]);
       if (offset >= 256) {
@@ -101,155 +164,161 @@ static int BytesInInstruction(_6502Generator* g, TargetInstruction* inst) {
       break;
     }
       
-    case _6502_OP(brk):
+    case W65C02_OP(brk):
       return 1;
 
-    case _6502_OP(bpl):
-    case _6502_OP(bmi):
-    case _6502_OP(bvc):
-    case _6502_OP(bvs):
-    case _6502_OP(bcc):
-    case _6502_OP(bcs):
-    case _6502_OP(bne):
-    case _6502_OP(beq):
+    case W65C02_OP(bpl):
+    case W65C02_OP(bmi):
+    case W65C02_OP(bvc):
+    case W65C02_OP(bvs):
+    case W65C02_OP(bcc):
+    case W65C02_OP(bcs):
+    case W65C02_OP(bne):
+    case W65C02_OP(beq):
       return 2;
 
-    case _6502_OP(jsr):
-    case _6502_OP(jmp):
+    case W65C02_OP(jsr):
+    case W65C02_OP(jmp):
       return 3;
-    case _6502_OP(rti):
-    case _6502_OP(rts):
+    case W65C02_OP(rti):
+    case W65C02_OP(rts):
       return 1;
 
-    case _6502_OP(lda):
-    case _6502_OP(ldx):
-    case _6502_OP(ldy):
-    case _6502_OP(sta):
-    case _6502_OP(stx):
-    case _6502_OP(sty):
-    case _6502_OP(cmp):
-    case _6502_OP(cpy):
-    case _6502_OP(cpx):
-    case _6502_OP(bit):
+    case W65C02_OP(lda):
+    case W65C02_OP(ldx):
+    case W65C02_OP(ldy):
+    case W65C02_OP(sta):
+    case W65C02_OP(stx):
+    case W65C02_OP(sty):
+    case W65C02_OP(cmp):
+    case W65C02_OP(cpy):
+    case W65C02_OP(cpx):
+    case W65C02_OP(bit):
 
-    case _6502_OP(ora):
-    case _6502_OP(and):
-    case _6502_OP(eor):
+    case W65C02_OP(ora):
+    case W65C02_OP(and):
+    case W65C02_OP(eor):
 
-    case _6502_OP(adc):
-    case _6502_OP(sbc):
+    case W65C02_OP(adc):
+    case W65C02_OP(sbc):
 
-    case _6502_OP(asl):
-    case _6502_OP(rol):
-    case _6502_OP(lsr):
-    case _6502_OP(ror):
+    case W65C02_OP(asl):
+    case W65C02_OP(rol):
+    case W65C02_OP(lsr):
+    case W65C02_OP(ror):
 
-    case _6502_OP(dec):
-    case _6502_OP(inc):
+    case W65C02_OP(dec):
+    case W65C02_OP(inc):
       return BytesByAddressingMode(addr_mode);
 
-    case _6502_OP(dey):
-    case _6502_OP(dex):
-    case _6502_OP(iny):
-    case _6502_OP(inx):
+    case W65C02_OP(dey):
+    case W65C02_OP(dex):
+    case W65C02_OP(iny):
+    case W65C02_OP(inx):
 
-    case _6502_OP(php):
-    case _6502_OP(clc):
-    case _6502_OP(plp):
-    case _6502_OP(sec):
-    case _6502_OP(pha):
-    case _6502_OP(cli):
-    case _6502_OP(pla):
-    case _6502_OP(sei):
-    case _6502_OP(tay):
-    case _6502_OP(clv):
-    case _6502_OP(cld):
-    case _6502_OP(sed):
+    case W65C02_OP(php):
+    case W65C02_OP(clc):
+    case W65C02_OP(plp):
+    case W65C02_OP(sec):
+    case W65C02_OP(pha):
+    case W65C02_OP(cli):
+    case W65C02_OP(pla):
+    case W65C02_OP(sei):
+    case W65C02_OP(tay):
+    case W65C02_OP(clv):
+    case W65C02_OP(cld):
+    case W65C02_OP(sed):
 
-    case _6502_OP(tya):
-    case _6502_OP(txa):
-    case _6502_OP(txs):
-    case _6502_OP(tax):
-    case _6502_OP(tsx):
+    case W65C02_OP(tya):
+    case W65C02_OP(txa):
+    case W65C02_OP(txs):
+    case W65C02_OP(tax):
+    case W65C02_OP(tsx):
 
-    case _6502_OP(nop):
+    case W65C02_OP(nop):
       return 1;
 
     // 65C02
-    case _6502_OP(tsb):
-    case _6502_OP(trb):
+    case W65C02_OP(tsb):
+    case W65C02_OP(trb):
       return 1;
-    case _6502_OP(stz):
+    case W65C02_OP(stz):
       return BytesByAddressingMode(addr_mode);
 
-    case _6502_OP(phy):
-    case _6502_OP(ply):
-    case _6502_OP(phx):
-    case _6502_OP(plx):
+    case W65C02_OP(phy):
+    case W65C02_OP(ply):
+    case W65C02_OP(phx):
+    case W65C02_OP(plx):
       return 1;
-    case _6502_OP(bra):
+    case W65C02_OP(bra):
       return 2;
       break;
-    case _6502_OP(symbol):   // Static symbol.
-    case _6502_OP(literal):  // String literal.
-    case _6502_OP(tmp):
+    case W65C02_OP(symbol):   // Static symbol.
+    case W65C02_OP(literal):  // String literal.
+    case W65C02_OP(tmp):
 
-    case _6502_OP(constb):
-    case _6502_OP(consth):
-    case _6502_OP(constw):
-    case _6502_OP(constx):
-    case _6502_OP(constf):
-    case _6502_OP(constd):
+    case W65C02_OP(const8):
+    case W65C02_OP(const16):
+    case W65C02_OP(const32):
+    case W65C02_OP(const64):
+    case W65C02_OP(constf):
+    case W65C02_OP(constd):
 
-    case _6502_OP(mov):
-    case _6502_OP(movf):
-    case _6502_OP(movd):
+    case W65C02_OP(mov):
+    case W65C02_OP(movf):
+    case W65C02_OP(movd):
 
-    case _6502_OP(movc):
-    case _6502_OP(movfc):
-    case _6502_OP(movdc):
-    case _6502_OP(movxc):
+    case W65C02_OP(movc):
+    case W65C02_OP(movfc):
+    case W65C02_OP(movdc):
+    case W65C02_OP(movxc):
 
-    case _6502_OP(rmov):
-    case _6502_OP(rmovf):
-    case _6502_OP(rmovd):
+    case W65C02_OP(rmov):
+    case W65C02_OP(rmovf):
+    case W65C02_OP(rmovd):
 
-    case _6502_OP(ret):
+    case W65C02_OP(ret):
 
-    case _6502_OP(label):
+    case W65C02_OP(label):
 
-    case _6502_OP(fp):  // Frame pointer pseudo operation.
-    case _6502_OP(sp):  // Stack pointer pseudo operation.
-    case _6502_OP(tp):  // Thread pointer.
+    case W65C02_OP(fp):  // Frame pointer pseudo operation.
+    case W65C02_OP(sp):  // Stack pointer pseudo operation.
+    case W65C02_OP(tp):  // Thread pointer.
 
     // Function result registers.
-    case _6502_OP(resultx):
-    case _6502_OP(resultf):
-    case _6502_OP(resultd):
+    case W65C02_OP(resulti):
+    case W65C02_OP(resultf):
+    case W65C02_OP(resultd):
 
-    case _6502_OP(structreturn):  // Struct return address.
+    case W65C02_OP(structreturn):  // Struct return address.
 
-    case _6502_OP(asm):
+    case W65C02_OP(asm):
 
-    case _6502_OP(loc):
-    case _6502_OP(named_label):
-    case _6502_OP(ivarreg):
-    case _6502_OP(fvarreg):
+    case W65C02_OP(loc):
+    case W65C02_OP(named_label):
       return 0;
 
-    case _6502_OP(jumptable):
+    case W65C02_OP(jumptable):
       return 2;
+    
+    case W65C02_OP(reloadpoint):
+      return 0;
+     
+    case W65C02_OP(pushreg2):
+    case W65C02_OP(pushreg4):
+    case W65C02_OP(pushreg8):
+      return 3;
       
     default:
       abort();
   }
 }
 
-void _6502CalculateInstructionAddresses(_6502Generator* g) {
+void W65C02CalculateInstructionAddresses(W65C02Generator* g) {
   int addr = 0;
   TargetInstruction* inst = TargetFirstInstruction(&g->base);
   while (inst != NULL) {
-    inst->uses = addr;
+    inst->addr = addr;
     // printf("instruction @%d is at address %d\n", inst->id, addr);
     addr += BytesInInstruction(g, inst);
     inst = TargetNext(inst);
@@ -267,46 +336,46 @@ void _6502CalculateInstructionAddresses(_6502Generator* g) {
 // Except:
 // bra label -> jmp label
 
-static bool ConvertBranch(_6502Generator* g, TargetInstruction* bra,
+static bool ConvertBranch(W65C02Generator* g, TargetInstruction* bra,
                           TargetInstruction* target) {
-  if (bra->opcode == (TargetOpcode)_6502_OP(jmp)) {
+  if (bra->opcode == (TargetOpcode)W65C02_OP(jmp)) {
     // Already converted.
     return false;
   }
-  if (bra->opcode == (TargetOpcode)_6502_OP(bra)) {
+  if (bra->opcode == (TargetOpcode)W65C02_OP(bra)) {
     // printf("Converted unconditional branch @%d to jmp\n", bra->id);
-    bra->opcode = (TargetOpcode)_6502_OP(jmp);
+    bra->opcode = (TargetOpcode)W65C02_OP(jmp);
     return true;
   }
   TargetInstruction* label =
-      TargetNewInstruction((TargetOpcode)_6502_OP(label));
+      TargetNewInstruction((TargetOpcode)W65C02_OP(label));
   label->flags |= (int)kAddrModeImplied << 16;
 
-  _6502Opcode new_op;
-  switch ((_6502Opcode)bra->opcode) {
-    case _6502_OP(bpl):
-      new_op = _6502_OP(bmi);
+  W65C02Opcode new_op;
+  switch ((W65C02Opcode)bra->opcode) {
+    case W65C02_OP(bpl):
+      new_op = W65C02_OP(bmi);
       break;
-    case _6502_OP(bmi):
-      new_op = _6502_OP(bpl);
+    case W65C02_OP(bmi):
+      new_op = W65C02_OP(bpl);
       break;
-    case _6502_OP(bvc):
-      new_op = _6502_OP(bcs);
+    case W65C02_OP(bvc):
+      new_op = W65C02_OP(bcs);
       break;
-    case _6502_OP(bvs):
-      new_op = _6502_OP(bvc);
+    case W65C02_OP(bvs):
+      new_op = W65C02_OP(bvc);
       break;
-    case _6502_OP(bcc):
-      new_op = _6502_OP(bcs);
+    case W65C02_OP(bcc):
+      new_op = W65C02_OP(bcs);
       break;
-    case _6502_OP(bcs):
-      new_op = _6502_OP(bcc);
+    case W65C02_OP(bcs):
+      new_op = W65C02_OP(bcc);
       break;
-    case _6502_OP(bne):
-      new_op = _6502_OP(beq);
+    case W65C02_OP(bne):
+      new_op = W65C02_OP(beq);
       break;
-    case _6502_OP(beq):
-      new_op = _6502_OP(bne);
+    case W65C02_OP(beq):
+      new_op = W65C02_OP(bne);
       break;
     default:
       abort();
@@ -314,21 +383,23 @@ static bool ConvertBranch(_6502Generator* g, TargetInstruction* bra,
   bra->opcode = (TargetOpcode)new_op;
   TargetReplaceOperand(bra, 0, label);
   TargetInstruction* jmp =
-      TargetNewInstruction1((TargetOpcode)_6502_OP(jmp), target);
+      TargetNewInstruction1((TargetOpcode)W65C02_OP(jmp), target);
   jmp->flags |= (int)kAddrModeAbsolute << 16;
   TargetEmitAfter(&g->base, jmp, bra);
   TargetEmitAfter(&g->base, label, jmp);
   return true;
 }
 
-static bool CheckBranchRanges(_6502Generator* g) {
+static bool CheckBranchRanges(W65C02Generator* g) {
   bool changed = false;
   for (size_t i = 0; i < g->branches.length; i++) {
     TargetInstruction* bra = g->branches.value.p[i];
     TargetInstruction* target = bra->operand[0];
     assert(target != NULL);
-
-    int diff = target->uses - (bra->uses + 2);
+    if (bra->opcode == W65C02_OP(jumptable)) {
+      continue;
+    }
+    int diff = target->addr - (bra->addr + 2);
     if (diff < 0) {
       // Back branch.
       if (diff < -128) {
@@ -343,10 +414,17 @@ static bool CheckBranchRanges(_6502Generator* g) {
   return changed;
 }
 
-void _6502ProcessBranches(_6502Generator* g) {
+void W65C02ProcessBranches(W65C02Generator* g) {
   bool changed;
   do {
-    _6502CalculateInstructionAddresses(g);
+    W65C02CalculateInstructionAddresses(g);
     changed = CheckBranchRanges(g);
   } while (changed);
+#if 0
+  // Debug print all branch addresses.
+  for (size_t i = 0; i < g->branches.length; i++) {
+    TargetInstruction* bra = g->branches.value.p[i];
+    printf("branch at 0x%x\n", bra->addr);
+  }
+#endif
 }

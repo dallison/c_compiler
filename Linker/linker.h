@@ -152,7 +152,9 @@ typedef struct SegmentMemoryRegion {
   String name;
   Vector sections;    // Names of sections in this region.
   uint64_t start;
-  uint64_t end;       // End address or 0 for unlimited.
+  bool falign;                // Align to file offset.
+  uint64_t config_end;       // Configured end address or 0 for unlimited.
+  uint64_t actual_end;              // End address calculated by linker
   uint64_t next;      // Next address to use.
 } SegmentMemoryRegion;
 

@@ -6,42 +6,33 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#ifndef _6502_interpreter_h
-#define _6502_interpreter_h
+#ifndef W65C02_interpreter_h
+#define W65C02_interpreter_h
 
 #include "loader.h"
 #include "6502_machine.h"
 #include "6502_debugger.h"
 
-#define _6502_STACK_SIZE 1024
-
-// Escape codes for interpreter.
-#define _6502_ESC_UNDEF_INST 0
-#define _6502_ESC_DIV_ZERO 1
-#define _6502_ESC_WRITE 2       // Output an array.
-#define _6502_ESC_READ 3        // Input an array.
-#define _6502_ESC_HALT 4           // Halt interpreter.
-#define _6502_ESC_DEBUG 5         // Debug escape.
-#define _6502_ESC_RESOLVE 6      // Resolve symbol.
-// Start of user escape codes.
-#define _6502_ESC_USER_START  256
+#define W65C02_STACK_SIZE 1024
 
 // Use undefined 65c02 instructions for special purposes.
-#define _6502_BRK 0xef            // BRK handler
-#define _6502_BREAKPOINT 0xff     // Breakpoint.
+#define W65C02_BRK 0xef            // syscall handler
+#define W65C02_BREAKPOINT 0xff     // Breakpoint.
 
 // Mapped I/O region.
-#define _6502_IO_START 0xfe00
-#define _6502_IO_END 0xfeff
+#define W65C02_IO_START 0xfe00
+#define W65C02_IO_END 0xfeff
 
-struct _6502Interpreter;
+#define W65C02_MAX_OPEN_FILES 10
 
-typedef struct _6502Interpreter {
+struct W65C02Interpreter;
+
+typedef struct W65C02Interpreter {
   Loader* loader;
   uint8_t* memory;         // 64K of memory
   uint8_t* zero_page;
   uint8_t* stack;
-  int8_t a;             // Accumulator.
+  uint8_t a;            // Accumulator.
   uint8_t x;            // X index.
   uint8_t y;            // Y index.
   uint8_t s;            // 6502 stack pointer.
@@ -62,6 +53,7 @@ typedef struct _6502Interpreter {
   
   SymbolScope* current_symbol;
   Vector breakpoints;
+  Vector watchpoints;
   bool debug;
   bool stop_at_next_instruction;
   Breakpoint* current_bp;
@@ -71,16 +63,22 @@ typedef struct _6502Interpreter {
   bool trace;
   Vector devices;
   bool cycle_accurate;
-} _6502Interpreter;
+  uint16_t enter_func;        // Address of __enter (treated specially)
+  uint16_t enter_leaf_func;        // Address of __enter_leaf (treated specially)
+  String rom_filename;
+  int open_files[W65C02_MAX_OPEN_FILES];
+} W65C02Interpreter;
 
-void _6502InterpreterInit(_6502Interpreter* interpreter, bool debug, bool cycle_accurate);
+void W65C02InterpreterInit(W65C02Interpreter* interpreter, bool debug,
+                           bool cycle_accurate,
+                           bool trace, const char* rom_filename);
 
-void _6502InterpreterRun(_6502Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
-void _6502InterpreterDisassemble(_6502Interpreter* interpreter, Loader* loader);
-void _6502InterpreterExtract(_6502Interpreter* interpreter, Loader* loader, FILE* fp);
-void _6502InterpreterDestruct(_6502Interpreter* interpreter);
+void W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,  int first_arg);
+void W65C02InterpreterDisassemble(W65C02Interpreter* interpreter, Loader* loader);
+void W65C02InterpreterExtract(W65C02Interpreter* interpreter, Loader* loader, FILE* fp);
+void W65C02InterpreterDestruct(W65C02Interpreter* interpreter);
 
-void _6502DisassemblePc(_6502Interpreter* interpreter);
-void _6502Reset(_6502Interpreter* interpreter);
+void W65C02DisassemblePc(W65C02Interpreter* interpreter);
+void W65C02Reset(W65C02Interpreter* interpreter);
 
-#endif /* _6502_interpreter_h */
+#endif /* W65C02_interpreter_h */

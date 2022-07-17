@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <assert.h>
+#include <inttypes.h>
 
 // MAP_ANON seems to have an issue on Raspbian.
 #ifndef MAP_ANON
@@ -26,9 +28,10 @@ int LoaderNumErrors() {
   return num_errors;
 }
 
-Region* NewRegion(void* addr, int64_t length, ELFProgramHeader* segment) {
+Region* NewRegion(void* addr, int64_t offset, int64_t length, ELFProgramHeader* segment) {
   Region* region = malloc(sizeof(Region));
   region->address = addr;
+  region->offset = offset;
   region->length = length;
   region->segment = segment;
   VectorInit(&region->sections);
@@ -236,7 +239,7 @@ static void MapSymbolTable(Loader* loader, int fd,
   }
   loader->static_symbol_table.symtab = (const ELFSymbol*)((char*)addr + delta + (symtab->offset - start));
   loader->static_symbol_table.strtab = (const char*)addr + delta + (strtab->offset - start);
-  VectorAppend(&loader->regions, NewRegion(addr, length, NULL));
+  VectorAppend(&loader->regions, NewRegion(addr, start_offset, length, NULL));
   loader->static_symbol_table.load_address = (uint64_t)addr;
 }
 
@@ -271,6 +274,8 @@ static void FindAndLoadSymbolTable(Loader* loader, int fd) {
   }
 }
 
+#define PRINT_DEBUG 0
+#define DPRINTF(...) if (PRINT_DEBUG) printf(__VA_ARGS__)
 
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
@@ -290,19 +295,41 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         break;
       }
       
-      uint64_t addr = loader->arch->ignore_vaddr ? 0 : segment->vaddr;       // Address to place segment at.
+      uint64_t mmap_addr = loader->arch->ignore_vaddr ? 0 : segment->vaddr;       // Address to place segment at.
+      uint64_t vaddr = segment->vaddr;
+      DPRINTF("mmap_addr: %" PRIx64 "\n", mmap_addr);
+      DPRINTF("vaddr: %" PRIx64 "\n", vaddr);
+
       uint64_t offset = segment->offset;    // Offset into file.
-      
+      DPRINTF("offset: %" PRIx64 "\n", offset);
+
       // Align address to the segment alignment.
       uint64_t alignment_mask = segment->align - 1;
-      addr &= ~alignment_mask;
+      mmap_addr &= ~alignment_mask;
       
       // Align address and offset to lower page boundary.  The address and
       // file offset must be page-aligned for the mmap function to operate
       // correctly (it will error out if this is not the case).
-      addr = AlignDown(addr, page_size);
+      mmap_addr = AlignDown(mmap_addr, page_size);
+      DPRINTF("aligned mmap_addr: %" PRIx64 "\n", mmap_addr);
+      vaddr = AlignDown(vaddr, page_size);
+      DPRINTF("aligned vaddr: %" PRIx64 "\n", vaddr);
       offset = AlignDown(offset, page_size);
+      int64_t offset_diff =  segment->offset - offset;
+
+      // Difference between vaddr and aligned address.
+      uint64_t mem_delta = segment->vaddr - vaddr;
+      DPRINTF("mem_delta: %" PRIx64 "\n", mem_delta);
+
+      // Length of segment in memory.  We can map memory up the next
+      // page boundary beyond the end of the file.  If the memsz is
+      // beyond that we need to mmap a new ANON segment for it.
+      uint64_t length = offset_diff + segment->filesz;
+      DPRINTF("length: %" PRIx64 "\n", length);
       
+      length = AlignUp(length, page_size);
+      DPRINTF("aligned length: %" PRIx64 "\n", length);
+
       // Protection for mmap and open.  We have to open the file in order the mmap it.
       // If the mapping is going to allow writes to the pages we need to open the file
       // in read-write mode, but we won't be writing to it.
@@ -319,16 +346,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         prot |= PROT_EXEC;
       }
       
-      // Difference between vaddr and aligned address.
-       uint64_t delta = segment->vaddr - (uint64_t)addr;
-       
-       // Length of segment in memory.  We can map memory up the next
-       // page boundary beyond the end of the file.  If the memsz is
-       // beyond that we need to mmap a new ANON segment for it.
-       uint64_t length = delta + segment->filesz;
-       length = AlignUp(length, page_size);
-
-      // Open the ELF file again to get a file descriptor that we can use
+             // Open the ELF file again to get a file descriptor that we can use
       // for mmap.
       int fd = open(filename->value, file_prot);
       if (fd < 0) {
@@ -341,7 +359,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       }
       
       int flags = MAP_PRIVATE;
-      if (addr != 0) {
+      if (mmap_addr != 0) {
         flags |= MAP_FIXED;
       }
       // Map in the segment at the address specified in the ELF file.  This is done using
@@ -351,7 +369,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       // flag says that we are providing the address to map the pages at.  Normally mmap
       // chooses the address, but in this case we need them at the same virtual address
       // that he Loader chose and specified in the segment header.
-      void* segment_ptr = mmap((void*)addr, length, prot, flags, fd, offset);
+      void* segment_ptr = mmap((void*)mmap_addr, length, prot, flags, fd, offset);
       if (segment_ptr == MAP_FAILED) {
         printf("Failed to map in ELF segment: %s\n", strerror(errno));
         return false;
@@ -360,6 +378,9 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       // Don't need the file descriptor now.
       close(fd);
       
+      DPRINTF("aligned segment loaded at %p\n", segment_ptr);
+      DPRINTF("loaded length: %" PRIx64 "\n", length);
+      DPRINTF("offset diff: %" PRIx64 "\n", offset_diff);
       // Zero out any difference between memsz and filesz.  This will really only
       // be the .bss section.  We have mapped the contents of the file but some of
       // it will need to be zeroed out.  We also need to allocate a contiguous
@@ -367,18 +388,26 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       // We need the .bss to be all zeroes before thae program starts.
       if ((prot & PROT_WRITE) != 0) {
         void* zeroed_region = (loader->arch->ignore_vaddr ?
-                               segment_ptr : (char*)segment->vaddr) +
+                               (segment_ptr + offset_diff): (char*)segment->vaddr) +
             segment->filesz;   // Start of zero memory.
+        DPRINTF("zeroed region at %p (segment file size: %" PRIx64 ", mem size: %" PRIx64 "\n", zeroed_region,
+               segment->filesz, segment->memsz);
         // Calculate end of mapped memory.  The 'length' contains the total length
         // of the mapped memory.
         uint64_t end_of_mapped_memory = (loader->arch->ignore_vaddr ?
-                                         (uint64_t)segment_ptr : addr) +
+                                         (uint64_t)segment_ptr : mmap_addr) +
                                           length;
-        int64_t zeroed_region_size = end_of_mapped_memory - (uint64_t)zeroed_region;
-        memset(zeroed_region, 0, zeroed_region_size);
+        DPRINTF("end of mapped memory at %" PRIx64 "\n", end_of_mapped_memory);
         
+        int64_t zeroed_region_size = end_of_mapped_memory - (uint64_t)zeroed_region;
+        DPRINTF("zeroed region size: %" PRIx64 "\n", zeroed_region_size);
+        if (zeroed_region_size > 0) {
+          DPRINTF("zeroing %p for %" PRIx64 " bytes\n", zeroed_region, zeroed_region_size);
+          memset(zeroed_region, 0, zeroed_region_size);
+        }
         // Any additional memory beyond the file.
         int64_t additional_memory = AlignUp(segment->memsz - length, page_size);
+        DPRINTF("additional mempory: %" PRId64 "\n", additional_memory);
         if (additional_memory > 0) {
           void* zero = (char*)end_of_mapped_memory;
           zero = mmap(zero, additional_memory, PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, 0, 0);
@@ -386,13 +415,13 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
             LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
             return false;
           }
-          VectorAppend(&loader->regions, NewRegion(zero, additional_memory, NULL));
+          VectorAppend(&loader->regions, NewRegion(zero, 0, additional_memory, NULL));
         }
       }
       
       // Add a new region to the regions vector so that we can remove it
       // when destructed.
-      Region* region = NewRegion(segment_ptr, length, segment);
+      Region* region = NewRegion(segment_ptr, offset, length, segment);
       VectorAppend(&loader->regions, region);
       GetRegionSections(loader, region, segment, i);
     }
@@ -534,7 +563,7 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   VectorInit(&loader->regions);
 
   // Add the whole ELF file to the regions vector.
-  VectorAppend(&loader->regions, NewRegion(loader->elf_file->header,
+  VectorAppend(&loader->regions, NewRegion(loader->elf_file->header, 0,
                                            loader->elf_file->file_length, NULL));
 
   // Get the entry point address.

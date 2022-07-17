@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include "elf.h"
 #include "risc_v_machine.h"
 
@@ -734,7 +735,7 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
       }
     }
   }
-  // printf("LoadImmediate %lld, bit width: %d\n", immed, bit_width);
+  // printf("LoadImmediate %" PRId64 ", bit width: %d\n", immed, bit_width);
   if (bit_width < 12) {
     AssemblerEmitWord(
         &ASM, ASM.current_section,
@@ -1677,7 +1678,7 @@ static void Assemble_la(RVAssembler* assembler) {
     // the LO12_I relocation.  For PIC code the first reloation is
     // R_RISCV_GOT_HI20.
     char label_name[256];
-    snprintf(label_name, sizeof(label_name), ".la_label_%lld",
+    snprintf(label_name, sizeof(label_name), ".la_label_%" PRId64 "",
              AssemblerCurrentAddress(&ASM));
     AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
     label->value = AssemblerCurrentAddress(&ASM);
@@ -1736,7 +1737,7 @@ static void Assemble_lla(RVAssembler* assembler) {
     // auipc instruction relocation (PCREL_HI20).  This label is referred to by
     // the LO12_I relocation.
     char label_name[256];
-    snprintf(label_name, sizeof(label_name), ".la_label_%lld",
+    snprintf(label_name, sizeof(label_name), ".la_label_%" PRId64 "",
              AssemblerCurrentAddress(&ASM));
     AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
     label->value = AssemblerCurrentAddress(&ASM);

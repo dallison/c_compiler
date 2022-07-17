@@ -43,7 +43,8 @@ typedef struct INode {
   struct INode* next;     // Not owned.
   struct INode* current;  // Not owned.
   Vector children;
-  size_t index;
+  size_t index;             // Index into parent.
+  int num_initializers;  // Number of initializers for this node.
 } INode;
 
 INode* BuildINode(TypeRecord* type, INode* parent);
@@ -57,6 +58,7 @@ static INode* NewINode(IKind kind, TypeRecord* type, INode* parent) {
   inode->next = NULL;
   inode->current = NULL;
   inode->index = 0;
+  inode->num_initializers = 0;
   VectorInit(&inode->children);
   return inode;
 }
@@ -90,8 +92,10 @@ static void AppendStructMembers(INode* inode) {
       prev = child;
     }
   }
-  // Current node is first child.
-  inode->current = (INode*)inode->children.value.p[0];
+  if (inode->children.length > 0) {
+    // Current node is first child.
+    inode->current = (INode*)inode->children.value.p[0];
+  }
 }
 
 // Append more elements into the array INode.  Exponentially
@@ -112,15 +116,16 @@ static void AppendArrayINodeChildren(INode* inode, size_t min) {
   size_t first = inode->children.length;
   INode* prev = VectorLast(&inode->children);
   // Only append if we're out of nodes.
-  if (inode->current != prev || first == inode->type->info.array.size.fixed) {
+  if (inode->current != prev ||
+      (!inode->type->info.array.is_flexible && first == inode->type->info.array.size.fixed)) {
     return;
   }
   // Exponentially increase the size by doubling it until it goes
   // beyond the length.
   size_t last = first == 0 ? 1 : first * 2;
-  if (min > 0 && last < min) {
+  if (min > 0 && last <= min) {
     // Make sure we add the minimum amount.
-    last = min;
+    last = min + 1;
   }
   for (size_t i = first; i < last; i++) {
     INode* child = BuildINode(inode->type->next, inode);
@@ -276,17 +281,35 @@ static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only
   return InitCurrentAndAdvance(inode->current, expr, constants_only);
 }
 
+static bool HasStaticAddress(ASTNode* expr) {
+  if (TypeIsArray(expr->type) || TypeIsFunction(expr->type)) {
+    return true;
+  }
+  if (expr->op == AST_OP(address)) {
+    return true;
+  }
+  return false;
+}
+
 // Initialize the current node and advance to the next.  Returns true
 // if the initialization is valid.
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
+  if (inode == NULL) {
+    return false;
+  }
   if (inode->expr != NULL) {
     return false;
   }
   expr = AnalyzeExpression(expr);
   switch (inode->kind) {
     case kIScalar:
-      if (constants_only && !IsConstantExpression(expr)) {
-        SemanticError(expr, "Expression is not a compile-time constant");
+      if (constants_only) {
+        // Complile-time constants are constant expressions of anything
+        // that can be done using a single relocation (something that
+        // has a static address).
+        if (!IsConstantExpression(expr) && !HasStaticAddress(expr)) {
+          SemanticError(expr, "Expression is not a compile-time constant");
+        }
       }
       inode->expr = ASTNodeMove(expr);
       assert(inode->expr->op != AST_OP(braced_init));
@@ -396,20 +419,12 @@ static int GetArraySizeFromInitializer(BracedInitializerASTNode* braced_init) {
 static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only) {
   switch (init_expr->op) {
     case AST_OP(expr_init): {
+      inode->num_initializers++;
       ExpressionInitializerASTNode* expr_init = (ExpressionInitializerASTNode*)init_expr;
       return InitCurrentAndAdvance(inode, expr_init->expr, constants_only);
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
-      if (inode->kind == kIArray && inode->type->info.array.is_flexible) {
-        // "Flexible" array (without size).  We can set it now and add all
-        // nodes for its children now that we know the size.  This only
-        // occurs at the top level and never inside a struct.
-        inode->type->info.array.size.fixed = GetArraySizeFromInitializer(braced_init);
-        inode->type->info.array.is_flexible = false;
-        TypeRecordCalculateSize(inode->type);
-      }
-      
       LazyInitINode(inode);
       INode* parent = inode->parent;
       inode->parent = NULL;
@@ -420,6 +435,23 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
                         "Too many initializers");
           break;
         }
+      }
+      if (inode->kind == kIArray && inode->type->info.array.is_flexible) {
+        // "Flexible" array (without size).  We can set it now and add all
+        // nodes for its children now that we know the size.  This only
+        // occurs at the top level and never inside a struct.
+        // We look for the last child with an initializer.  There can be gaps
+        // if designated initializers are used.
+        for (ssize_t i = inode->children.length - 1; i >= 0; i--) {
+          INode* child = inode->children.value.p[i];
+          if (child->num_initializers > 0) {
+            inode->num_initializers = (int)i + 1;
+            break;
+          }
+        }
+        inode->type->info.array.size.fixed = inode->num_initializers;
+        inode->type->info.array.is_flexible = false;
+        TypeRecordCalculateSize(inode->type);
       }
       inode->parent = parent;
       return AdvanceCurrent(parent);
@@ -507,7 +539,7 @@ ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_
   INode* inode = BuildINode(type, NULL);
   InitializeINode(inode, ast_node, constants_only);
   // PrintINode(inode, 0);
-  ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), ast_node->location);
+  ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), type, ast_node->location);
   FlattenINode(inode, (BracedInitializerASTNode*)braced_init);
   // ASTNodePrint(braced_init, 0);
   DeleteINode(inode);

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include "loader.h"
+#include <inttypes.h>
 
 // MAP_ANON seems to have an issue on Raspbian.
 #ifndef MAP_ANON
@@ -448,7 +449,7 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
 static int MapDynamicLibraryHeader(String* filename,
                              const void** addr, size_t* length) {
   // Open the file.
-  int fd = open(filename->value, O_RDONLY);
+  int fd = open(filename->value, O_RDWR);
   if (fd < 0) {
     return fd;
   }
@@ -783,7 +784,7 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
   if (print_libraries_only) {
     uint64_t base_address = lib->load_address;
     if (base_address != 0) {
-      printf("\t%s => %s (0x%llx)\n", lib->libname.value,
+      printf("\t%s => %s (0x%" PRIx64 ")\n", lib->libname.value,
              lib->filename.value, base_address);
     }
   }
@@ -1050,14 +1051,16 @@ static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
   // of the mapped memory.
   uint64_t end_of_segment = addr + aligned_length;
 
+  int flags = MAP_PRIVATE|MAP_FIXED;
   // Map in the segment at an address chosen by the OS.  This is done using
   // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
   // will be copied to a new physical address if they are written to, otherwise they
   // are shared with other physical pages that map the same file in.
   void* segment_ptr = mmap((void*)addr, *length, prot,
-                           MAP_PRIVATE|MAP_FIXED, lib->fd, offset);
+                           flags, lib->fd, offset);
   if (segment_ptr == MAP_FAILED) {
-    LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
+    LoaderError("Failed to map in dynamic segment at address %p: %s\n",
+                (void*)addr, strerror(errno));
     return NULL;
   }
 

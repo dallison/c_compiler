@@ -13,6 +13,13 @@
 // using vector operations.
 void *memcpy(void *dest, const void *src, size_t n) {
   char* p = dest;
+#if defined(__6502__)
+  const char* s = src;
+  while (n-- > 0) {
+    *p++ = *s++;
+  }
+  return dest;
+#else
   size_t n64 = n / sizeof(int64_t);
   size_t n32 = n / sizeof(int32_t);
   size_t n16 = n / sizeof(int16_t);
@@ -58,4 +65,6 @@ void *memcpy(void *dest, const void *src, size_t n) {
     *p++ = *s++;
   }
   return dest;
+#endif
 }
+

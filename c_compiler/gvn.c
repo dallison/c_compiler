@@ -9,6 +9,7 @@
 #include "gvn.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 Value* NewValue(int64_t key, int32_t value_number, IRNode* inst) {
   Value* v = malloc(sizeof(Value));
@@ -100,6 +101,17 @@ void ValueSetDelete(ValueSet* set) {
   HashTableDestruct(&set->values);
 }
 
+static bool CanPoolFromDominator(Generator* gen, BasicBlock* block) {
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    BlockId id = block->in_edges.value.w[i];
+    BasicBlock* in_block = gen->basic_blocks.value.p[id];
+    if (BasicBlockDominatedBy(gen, block, in_block)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // This is the main function to calculate a unique key for
 // an instruction.  The key is constructed as a 64 bit number as follows:
 //
@@ -125,10 +137,10 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
   // or constant we use the node id since we are pooling these.
   switch (inst->opcode) {
     case IR_OP(ssavar):
-    case IR_OP(consti):
-    case IR_OP(constb):
-    case IR_OP(consts):
-    case IR_OP(constl):
+    case IR_OP(const32):
+    case IR_OP(const8):
+    case IR_OP(const16):
+    case IR_OP(const64):
     case IR_OP(constd):
     case IR_OP(constf):
     case IR_OP(consta):
@@ -141,13 +153,35 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     case IR_OP(phi):
     case IR_OP(calla):
     case IR_OP(tmp):
-    case IR_OP(storei):
-    case IR_OP(storeb):
-    case IR_OP(stores):
-    case IR_OP(storel):
+    case IR_OP(store32):
+    case IR_OP(store8):
+    case IR_OP(store16):
+    case IR_OP(store64):
     case IR_OP(storef):
     case IR_OP(stored):
     case IR_OP(storea):
+    case IR_OP(inc8):
+    case IR_OP(inc16):
+    case IR_OP(inc32):
+    case IR_OP(inc64):
+    case IR_OP(uinc8):
+    case IR_OP(uinc16):
+    case IR_OP(uinc32):
+    case IR_OP(uinc64):
+    case IR_OP(inca):
+    case IR_OP(incf):
+    case IR_OP(incd):
+    case IR_OP(dec8):
+    case IR_OP(dec16):
+    case IR_OP(dec32):
+    case IR_OP(dec64):
+    case IR_OP(udec8):
+    case IR_OP(udec16):
+    case IR_OP(udec32):
+    case IR_OP(udec64):
+    case IR_OP(deca):
+    case IR_OP(decf):
+    case IR_OP(decd):
       id = inst->id + last_ir_opcode;
       break;
     default:
@@ -182,12 +216,13 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     return key;
   }
   
-  // We can only deal with 1 or 2 operands.
-  assert(inst->inputs.length <= 2);
+  // We can only deal with 1 or 2 operands but inc and dec instructions
+  // might have 3 inputs, third of which isn't really an input.
   int32_t op_values[2] = {0, 0};
-
+  size_t n = inst->inputs.length > 2 ? 2 : inst->inputs.length;
+  
   // Get the values for the operands.
-  for (size_t i = 0; i < inst->inputs.length; i++) {
+  for (size_t i = 0; i < n; i++) {
     IRNode* input = inst->inputs.value.p[i];
     int64_t input_key = CalculateInstructionKey(table, input);
     Value* v = HashTableSearch(table, (void*)input_key);
@@ -248,7 +283,7 @@ static void* CopyValueList(void* list) {
 }
 
 static void PrintValue(Value* value) {
-  printf("key: 0x%llx, value number: %d, node: $%d\n", value->key,
+  printf("key: 0x%" PRIx64 ", value number: %d, node: $%d\n", value->key,
          value->value_number, value->instruction->id);
 }
 
@@ -297,28 +332,36 @@ static void DoLocalValueNumbering(Generator* gen, ValueSet* set,
 // the value set from the dominator to the current block.
 static void DoGlobalValueNumbering(Generator* gen, BasicBlock* block) {
   ValueSet* dominator_value_set = NULL;
-  if (block->idom != NULL) {
-    // If we have an immediate dominator we propagate the
-    // value set from it to this node.
-    dominator_value_set = block->idom->optimizer_data;
-  }
-
+  // TODO: check this and fix it.
+  bool can_pool_from_dominator = true; // CanPoolFromDominator(gen, block);
+  
   ValueSet* set = NULL;
-  if (block->idom != NULL && block->idom->dominatees.length == 1) {
-    // This block is the only one dominated by the dominator so we
-    // can just reuse the value set from the dominator.
-    set = dominator_value_set;
-    block->idom->optimizer_data = NULL;  // This is no longer valid.
-    block->optimizer_data = set;
+  if (can_pool_from_dominator) {
+    if (block->idom != NULL) {
+      // If we have an immediate dominator we propagate the
+      // value set from it to this node.
+      dominator_value_set = block->idom->optimizer_data;
+    }
+
+    if (block->idom != NULL && block->idom->dominatees.length == 1) {
+      // This block is the only one dominated by the dominator so we
+      // can just reuse the value set from the dominator.
+      set = dominator_value_set;
+      block->idom->optimizer_data = NULL;  // This is no longer valid.
+      block->optimizer_data = set;
+    } else {
+      // There is more than one block that is dominated by my dominator.
+      // We need to copy the value set from the dominator.
+      set = NewValueSet();
+      block->optimizer_data = set;
+      if (dominator_value_set != NULL) {
+        HashTableCopy(&set->values, &dominator_value_set->values, CopyValueList);
+        set->next_value_number = dominator_value_set->next_value_number;
+      }
+    }
   } else {
-    // There is more than one block that is dominated by my dominator.
-    // We need to copy the value set from the dominator.
     set = NewValueSet();
     block->optimizer_data = set;
-    if (dominator_value_set != NULL) {
-      HashTableCopy(&set->values, &dominator_value_set->values, CopyValueList);
-      set->next_value_number = dominator_value_set->next_value_number;
-    }
   }
   
   // Apply local value numbering algorithm on the block.

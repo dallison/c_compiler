@@ -10,9 +10,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "elf_reader.h"
 #include "risc_v_interpreter.h"
 #include "risc_v_disassembler.h"
+#include "6502_interpreter.h"
+#include "6502_disassembler.h"
 
 static void Usage(void) {
   fprintf(stderr, "usage: elfdump filename\n");
@@ -61,7 +64,7 @@ static void PrintHeader(ELFReaderFile* elf) {
     case ELF_MACHINE_TYPE_RISC_V:
       machine = "RISC-V";
       break;
-    case ELF_MACHINE_TYPE_6502:
+    case ELF_MACHINE_TYPEW65C02:
       machine = "6502";
       break;
   }
@@ -453,6 +456,11 @@ static void DisassembleRISCV(void* interpreter, void* addr) {
   DisassembleRiscVInstruction((RISCVInterpreter*)interpreter, addr, stdout);
 }
 
+static int Disassemble6502(void* interpreter, void* addr) {
+  void* next = Disassemble6502Instruction(NULL, NULL, (uint16_t)addr, addr, stdout);
+  return (int)((char*)next - (char*)addr);
+}
+
 static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
                             const char* symbol_table_address,
                             ELFReaderSection* reloc_section,
@@ -493,9 +501,9 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
       RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
       disassembler = DisassembleRISCV;
       break;
-    case ELF_MACHINE_TYPE_6502:
+    case ELF_MACHINE_TYPEW65C02:
       StringPrintf(&type, "%08x", reloc_type);
-      disassembler = NULL;
+      disassembler = Disassemble6502;
       break;
   }
   String sym_name = {0};
@@ -509,7 +517,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
          reloc->offset, type.value,
          sym_name.value);
   if (addend != 0) {
-    printf(" + %lld", addend);
+    printf(" + %" PRId64 "", addend);
   }
   void* target = (char*)target_section->contents + reloc->offset;
   if ((target_section->header->flags & SHF(execinstr)) != 0
@@ -577,7 +585,7 @@ static void Disassemble(ELFReaderFile* elf) {
       interpreter = malloc(sizeof(RISCVInterpreter));
       RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
       break;
-    case ELF_MACHINE_TYPE_6502:
+    case ELF_MACHINE_TYPEW65C02:
       break;
   }
   
@@ -597,7 +605,8 @@ static void Disassemble(ELFReaderFile* elf) {
             DisassembleRISCV(interpreter, p);
             p += 4;
             break;
-          case ELF_MACHINE_TYPE_6502:
+          case ELF_MACHINE_TYPEW65C02:
+            p += Disassemble6502(interpreter, p);
             break;
         }
       }
@@ -848,7 +857,7 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
           break;
         default:
           // Integers
-           printf("%lld\n", entry->un.val);
+           printf("%" PRId64 "\n", entry->un.val);
           break;
           
         // Hex.
@@ -864,7 +873,7 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
         case DT(gnu_hash):
         case DT(strtab):
         case DT(symtab):
-          printf("0x%llx\n", entry->un.ptr);
+          printf("0x%" PRIx64 "\n", entry->un.ptr);
           break;
       }
       p += sizeof(*entry);
@@ -874,7 +883,7 @@ static void PrintDynamicSection(ELFReaderFile* elf) {
   VectorDestruct(&dynamic_sections);
 }
 
-void Hexdump(const void* addr, int size) {
+static void Hexdump(const void* addr, int size) {
   char buf[16];
   const char* caddr = (const char*)addr;
   const char* endaddr = caddr + size;

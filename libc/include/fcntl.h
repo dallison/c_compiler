@@ -11,7 +11,7 @@
 
 
 #ifndef __SIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef unsigned int size_t;
 #else
 typedef unsigned long size_t;
@@ -20,7 +20,7 @@ typedef unsigned long size_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
+#if defined(__W65C02__)
 typedef int ssize_t;
 #else
 typedef long ssize_t;
@@ -131,7 +131,7 @@ typedef long fpos_t;
 #define SEEK_SET 2
 
 #include <unistd.h>
-int open(const char* filename, int mode);
+int open(const char* filename, int mode, ...);
 int close(int fd);
 
 
