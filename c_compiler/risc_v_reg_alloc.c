@@ -438,8 +438,8 @@ static void AllocateVariableRegister(RVRegisterAllocator* allocator,
 
 static void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
-  assert(inst->opcode == RV_OP(rmov) || inst->opcode == RV_OP(rmovf) ||
-         inst->opcode == RV_OP(rmovd));
+  assert(inst->opcode == RV_OP(mv) || inst->opcode == RV_OP(fmv_s) ||
+         inst->opcode == RV_OP(fmv_d));
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
@@ -511,8 +511,8 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
   
   // rmov instructions use the register allocated to their first
   // operand as their own register.
-  if (opcode == RV_OP(rmov) || opcode == RV_OP(rmovf) ||
-      opcode == RV_OP(rmovd)) {
+  if ((opcode == RV_OP(mv) || opcode == RV_OP(fmv_s) ||
+      opcode == RV_OP(fmv_d)) && inst->dest != NULL) {
     AllocateForRmov(allocator, inst);
     return;
   }
@@ -602,8 +602,7 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(a5):
     case RV_OP(a6):
     case RV_OP(a7):
-      reg = &allocator
-                 ->int_regs[(int)inst->opcode - RV_OP(a0) + RV_INT_ARG_START];
+      reg = &allocator->int_regs[(int)inst->opcode - RV_OP(a0) + RV_INT_ARG_START];
       break;
 
     case RV_OP(ivarreg):

@@ -313,8 +313,8 @@ static bool PCodeIsFloatingPoint(TargetInstruction* inst) {
   case  P_OP(constd):
   case P_OP(movf):
   case P_OP(movd):
-  case P_OP(rmovf):
-  case P_OP(rmovd):
+//  case P_OP(rmovf):
+//  case P_OP(rmovd):
   case P_OP(resultf):
   case P_OP(resultd):
   case P_OP(pushf):
@@ -877,14 +877,14 @@ static PCodeOpcode IR2PCode(IROpcode op, bool is_unsigned) {
       return P_OP(movd);
     case IR_OP(mova):
       return P_OP(mov);
-    case IR_OP(rmovi):
-      return P_OP(rmov);
-    case IR_OP(rmovf):
-      return P_OP(rmovf);
-    case IR_OP(rmovd):
-      return P_OP(rmovd);
-    case IR_OP(rmova):
-      return P_OP(rmov);
+//    case IR_OP(rmovi):
+//      return P_OP(rmov);
+//    case IR_OP(rmovf):
+//      return P_OP(rmovf);
+//    case IR_OP(rmovd):
+//      return P_OP(rmovd);
+//    case IR_OP(rmova):
+//      return P_OP(rmov);
     case IR_OP(tmp):
       return P_OP(tmp);
     default:
@@ -1419,15 +1419,15 @@ static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(resulti):
     case IR_OP(resulta):
       result_reg_opcode = P_OP(resulti);
-      opcode = P_OP(rmov);
+      opcode = P_OP(mov);
       break;
     case IR_OP(resultf):
       result_reg_opcode = P_OP(resultf);
-      opcode = P_OP(rmovf);
+      opcode = P_OP(movf);
       break;
     case IR_OP(resultd):
       result_reg_opcode = P_OP(resultd);
-      opcode = P_OP(rmovd);
+      opcode = P_OP(movd);
       break;
     default:
       assert(false);
@@ -1435,7 +1435,9 @@ static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* result = Materialize(pcode, node->inputs.value.p[0]);
   TargetInstruction* result_reg =
       Emit(pcode, NewInstruction(result_reg_opcode));
-  return Emit(pcode, NewInstruction2(opcode, result_reg, result));
+  TargetInstruction* mov = Emit(pcode, NewInstruction1(opcode, result));
+  mov->dest = result_reg;
+  return mov;
 }
 
 // A literal reference is a move of the literal offset (the first input
@@ -1774,12 +1776,15 @@ static TargetInstruction* LowerStackPointerOps(PCodeGenerator* pcode, IRNode* no
     }
     case IR_OP(savesp): {
       // One operand, a temp to hold stack pointer.
-      TargetInstruction* tmp = Materialize(pcode, node->inputs.value.p[0]);
-      return Emit(pcode, NewInstruction2(P_OP(rmov), tmp, StackPointer(pcode)));
+      TargetInstruction* mov =  Emit(pcode, NewInstruction1(P_OP(mov), StackPointer(pcode)));
+      mov->dest = Materialize(pcode, node->inputs.value.p[0]);
+      return mov;
     }
     case IR_OP(restoresp): {
       TargetInstruction* tmp = Materialize(pcode, node->inputs.value.p[0]);
-      return Emit(pcode, NewInstruction2(P_OP(rmov), StackPointer(pcode), tmp));
+      TargetInstruction* mov =  Emit(pcode, NewInstruction1(P_OP(mov), tmp));
+      mov->dest = StackPointer(pcode);
+      return mov;
     }
     default:
       assert(false);
@@ -1921,7 +1926,7 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
       return GetFloatingPointConstant(pcode, node, kTargetTypeDouble,
                                       ((IRConstant*)node)->value.fvalue);
 
-    case IR_OP(enter):
+    case IR_OP(enter): {
       // Entry sequence:
       // pushx ap
       // mov ap, sp
@@ -1930,13 +1935,15 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
       // mov fp, sp
       // decsp #frame_size
       Emit(pcode, NewInstruction1(P_OP(pushx), ArgumentPointer(pcode)));
-      Emit(pcode, NewInstruction2(P_OP(rmov), ArgumentPointer(pcode),
+      TargetInstruction* mov = Emit(pcode, NewInstruction1(P_OP(mov),
                                   StackPointer(pcode)));
+      mov->dest = ArgumentPointer(pcode);
       Emit(pcode, NewInstruction(P_OP(save)));
       Emit(pcode, NewInstruction1(P_OP(pushx), FramePointer(pcode)));
       TargetInstruction* result =
-          Emit(pcode, NewInstruction2(P_OP(rmov), FramePointer(pcode),
+          Emit(pcode, NewInstruction1(P_OP(mov),
                                       StackPointer(pcode)));
+      result->dest = FramePointer(pcode);
       if (pcode->base.stack_frame_size > 0) {
         return Emit(pcode, NewInstruction1(
                                P_OP(decsp),
@@ -1944,6 +1951,7 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
                                               pcode->base.stack_frame_size)));
       }
       return result;
+    }
     case IR_OP(leave): {
       // Exit sequence:
       // incsp #frame_size
@@ -2091,10 +2099,10 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova):
-    case IR_OP(rmovi):
-    case IR_OP(rmovf):
-    case IR_OP(rmovd):
-    case IR_OP(rmova):
+//    case IR_OP(rmovi):
+//    case IR_OP(rmovf):
+//    case IR_OP(rmovd):
+//    case IR_OP(rmova):
     case IR_OP(tmp):
       return LowerExpression(pcode, node);
 
@@ -2287,9 +2295,9 @@ bool PCodeIsExpression(TargetInstruction* inst) {
     case P_OP(rcallf):
     case P_OP(rcalld):
     case P_OP(ret):
-    case P_OP(rmov):
-    case P_OP(rmovf):
-    case P_OP(rmovd):
+//    case P_OP(rmov):
+//    case P_OP(rmovf):
+//    case P_OP(rmovd):
     case P_OP(loc):
     case P_OP(named_label):
       return false;

@@ -17,7 +17,7 @@
 #include "target_basic_block.h"
 #include "6502_target.h"
 
-static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node);
+static void LowerIRNode(W65C02Generator* g, IRNode* node);
 static void LowerVariables(W65C02Generator* g);
 
 #define PRINT_PRELOWER 0
@@ -1094,20 +1094,20 @@ static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* 
         }
       }
     }
-  } else if (node->opcode == IR_OP(rmovi) || node->opcode == IR_OP(rmova) ||
-             node->opcode == IR_OP(rmovf) ||  node->opcode == IR_OP(rmovd)) {
-    // We can eliminate rmov by assigning the dest of the src.
-    IRNode* dest = node->inputs.value.p[0];
-    IRNode* src = node->inputs.value.p[1];
-    if (!IRIsConst(src) && !IRIsVariable(src) && src->opcode != IR_OP(cast) &&
-        src->dest == NULL &&
-        src->opcode != IR_OP(tmp)) {
-      src->dest = dest;
-      IRNode* next = IRNext(node);
-      BasicBlockRemoveInstruction(gen, node->block, node);
-      *changed = true;
-      return next;
-    }
+//  } else if (node->opcode == IR_OP(rmovi) || node->opcode == IR_OP(rmova) ||
+//             node->opcode == IR_OP(rmovf) ||  node->opcode == IR_OP(rmovd)) {
+//    // We can eliminate rmov by assigning the dest of the src.
+//    IRNode* dest = node->inputs.value.p[0];
+//    IRNode* src = node->inputs.value.p[1];
+//    if (!IRIsConst(src) && !IRIsVariable(src) && src->opcode != IR_OP(cast) &&
+//        src->dest == NULL &&
+//        src->opcode != IR_OP(tmp)) {
+//      src->dest = dest;
+//      IRNode* next = IRNext(node);
+//      BasicBlockRemoveInstruction(gen, node->block, node);
+//      *changed = true;
+//      return next;
+//    }
   } else if (node->opcode == IR_OP(f2d) || node->opcode == IR_OP(d2f)) {
     // Float and double are the same thing on 6502.  Remove these instructions.
     IRNode* next = IRNext(node);
@@ -1886,20 +1886,21 @@ static void GetAddressXY(W65C02Generator* g, IRNode* addr_node) {
 }
 
 static TargetInstruction* GetDestAddress(W65C02Generator* g, IRNode* node, bool put_in_zero_page) {
+  // TODO: multiple destinations?
   if (node->dest != NULL) {
-    // Dest node might not be lowered yet (ssavar might be after this
-    // node).  Lower it now.
-    LowerIRNode(g, node->dest);
-    return GetAddress(g, node->dest, put_in_zero_page);
+    IRNode* dest = node->dest;
+    LowerIRNode(g, dest);
+    return GetAddress(g, dest, put_in_zero_page);
   }
+ 
   if (node->opcode == IR_OP(structreturn)) {
     return GetLoweredNode(node);
   }
-  if (node->opcode == IR_OP(rmovi) ||node->opcode == IR_OP(rmova)  ||
-      node->opcode == IR_OP(rmovf) ||
-      node->opcode == IR_OP(rmovd)) {
-    return GetAddress(g, node->inputs.value.p[0], put_in_zero_page);
-  }
+//  if (node->opcode == IR_OP(rmovi) ||node->opcode == IR_OP(rmova)  ||
+//      node->opcode == IR_OP(rmovf) ||
+//      node->opcode == IR_OP(rmovd)) {
+//    return GetAddress(g, node->inputs.value.p[0], put_in_zero_page);
+//  }
   return TempRegister(g, node->type, Sizeof(node->type));
 }
 
@@ -2652,10 +2653,10 @@ static void GetOpInstructions(W65C02Generator* g, IRNode* node,
       case IR_OP(nota):
       case IR_OP(onescomp):
       case IR_OP(negi):
-      case IR_OP(rmovi):
-      case IR_OP(rmovf):
-      case IR_OP(rmovd):
-      case IR_OP(rmova):
+      case IR_OP(movi):
+      case IR_OP(movf):
+      case IR_OP(movd):
+      case IR_OP(mova):
         ops[i] = GetAddress(g, input, true);
         break;
 
@@ -2893,10 +2894,10 @@ static bool IsSameVariable(W65C02Generator* g, IRNode* node1, IRNode* node2) {
   return var1 == var2;
 }
 
-static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
+static void LowerExpression(W65C02Generator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
-    return node->data.ptr;
+    return;
   }
   IROpcode op = node->opcode;
   
@@ -2905,17 +2906,20 @@ static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
     IRNode* op1 = node->inputs.value.p[0];
     IRNode* op2 = node->inputs.value.p[1];
     if (IRIsConst(op2) && node->dest != NULL) {
+      IRNode* dest = node->dest;
       // Adding a constant less than 4?
       if (IRIntConstValue(op2) < 4) {
         if (op1->opcode == IR_OP(load32)) {
           IRNode* loaded = op1->inputs.value.p[0];
-          if (node->dest->id == loaded->id) {
+          if (dest->id == loaded->id) {
             // Adding to itself.
-            return Increment(g, node, loaded, op2);
+            Increment(g, node, loaded, op2);
+            return;
           }
-        } else if (IsVariableNode(op1) && IsVariableNode(node->dest)) {
-          if (IsSameVariable(g, op1, node->dest)) {
-            return Increment(g, node, op1, op2);
+        } else if (IsVariableNode(op1) && IsVariableNode(dest)) {
+          if (IsSameVariable(g, op1, dest)) {
+            Increment(g, node, op1, op2);
+            return;
           }
         }
       }
@@ -2923,7 +2927,7 @@ static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
   }
   TargetInstruction* inst = ReduceMultiplyOrDivide(g, node);
   if (inst != NULL) {
-    return inst;
+    return;
   }
   
   TargetInstruction* ops[2] = {NULL, NULL};
@@ -3076,36 +3080,32 @@ static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
       TargetInstruction* src = GetAddress(g, node->inputs.value.p[0], true);
       AddReloadPoint(g, src);
 
-      for (int i = 0; i < Sizeof(node->type); i++) {
-        SetIndexReg(g, ops[i], inst, i);
-        lda(g, src, i);
-        sta(g, dest, i);
-      }
+      Copy(g, dest, src, 0, 0, Sizeof(node->type), GetAddrMode(src), GetAddrMode(dest));
       break;
     }
-    case IR_OP(rmovi):
-    case IR_OP(rmovf):
-    case IR_OP(rmovd):
-    case IR_OP(rmova): {
-      IRNode* move_dest = node->inputs.value.p[0];
-      if (move_dest->outputs.length == 1) {
-        // The only output from the destination of the rmov is the
-        // rmov itself.  We can omit the rmov.
-        goto done;
-      }
-      inst = GetDestAddress(g, move_dest, false);
-      TargetInstruction* src = ops[1];
-      AddReloadPoint(g, src);
-      AddReloadPoint(g, dest);
-
-      int size = Sizeof(node->type);
-      for (int i = 0; i < size; i++) {
-        SetIndexReg(g, ops[1], inst, i);
-        lda(g, src, i);
-        sta(g, dest, i);
-      }
-      break;
-    }
+//    case IR_OP(rmovi):
+//    case IR_OP(rmovf):
+//    case IR_OP(rmovd):
+//    case IR_OP(rmova): {
+//      IRNode* move_dest = node->inputs.value.p[0];
+//      if (move_dest->outputs.length == 1) {
+//        // The only output from the destination of the rmov is the
+//        // rmov itself.  We can omit the rmov.
+//        goto done;
+//      }
+//      inst = GetDestAddress(g, move_dest, false);
+//      TargetInstruction* src = ops[1];
+//      AddReloadPoint(g, src);
+//      AddReloadPoint(g, dest);
+//
+//      int size = Sizeof(node->type);
+//      for (int i = 0; i < size; i++) {
+//        SetIndexReg(g, ops[1], inst, i);
+//        lda(g, src, i);
+//        sta(g, dest, i);
+//      }
+//      break;
+//    }
     case IR_OP(tmp):
       inst = TempRegister(g, node->type, size);
       AddSpillPoint(g, dest);
@@ -3114,14 +3114,14 @@ static TargetInstruction* LowerExpression(W65C02Generator* g, IRNode* node) {
     default:
       abort();
       assert(false);
-      return 0;
+      return;
   }
 
   TargetUpdateOperandUsers(inst);
 done:
   SetLoweredNode(node, inst);
   AddSpillPoint(g, dest);
-  return Emit(g, inst);
+  Emit(g, inst);
 }
 
 static void CompareEqualZero(W65C02Generator* g, IRNode* value_node,
@@ -3499,7 +3499,7 @@ static void CompareSignedInteger(W65C02Generator* g,
 // If the branch comes from a comparison node we combine the comparison
 // with the branch.  If it comes from another node we generate an equality
 // comparison of that node with zero.
-static TargetInstruction* LowerConditionalBranch(W65C02Generator* g,
+static void LowerConditionalBranch(W65C02Generator* g,
                                                  IRNode* node) {
   bool reverse = node->opcode == IR_OP(bfalse);
 
@@ -3540,7 +3540,7 @@ static TargetInstruction* LowerConditionalBranch(W65C02Generator* g,
         CompareNotEqualZero(g, expr, target_node);
       }
     }
-    return NULL;
+    return;
   }
   IRNode* lhs = input->inputs.value.p[0];
   IRNode* rhs = input->inputs.value.p[1];
@@ -3672,10 +3672,9 @@ static TargetInstruction* LowerConditionalBranch(W65C02Generator* g,
       abort();
   }
 
-  return NULL;
 }
 
-static TargetInstruction* LowerBranch(W65C02Generator* g, IRNode* node) {
+static void LowerBranch(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
@@ -3686,7 +3685,6 @@ static TargetInstruction* LowerBranch(W65C02Generator* g, IRNode* node) {
   }
   TargetInstruction* b = EmitBranch(g, opcode, target_node);
   b->flags |= k6502BlockEnd;
-  return NULL;
 }
 
 // Computed branch.  This is followed by a series of jumptable entries, each
@@ -3694,7 +3692,7 @@ static TargetInstruction* LowerBranch(W65C02Generator* g, IRNode* node) {
 // LDA #X
 // JSR __jump_tableN
 // Table starts here.
-static TargetInstruction* LowerComputedBranch(W65C02Generator* g, IRNode* node) {
+static void LowerComputedBranch(W65C02Generator* g, IRNode* node) {
   TargetInstruction* byte_offset = Materialize(g, node->inputs.value.p[0], -1, true);
   ldazi(g, byte_offset, 0);
   TargetInstruction* jump;
@@ -3716,24 +3714,21 @@ static TargetInstruction* LowerComputedBranch(W65C02Generator* g, IRNode* node) 
   }
   jump->flags |= TARGET_INST_TABLE_JUMP | k6502BlockEnd;
   SetLoweredNode(node, jump);
-  return jump;
 }
 
-static TargetInstruction* LowerLabel(W65C02Generator* g, IRNode* label) {
+static void LowerLabel(W65C02Generator* g, IRNode* label) {
   TargetInstruction* inst =
       Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   label->data.ptr = inst;
   inst->flags |= k6502BlockStart;
   ApplyFixups(g, label);
-  return inst;
 }
 
-static TargetInstruction* LowerNamedLabel(W65C02Generator* rv, IRNode* label) {
+static void LowerNamedLabel(W65C02Generator* rv, IRNode* label) {
   IRNamedLabel* n = (IRNamedLabel*)label;
   TargetInstruction* inst = Emit(rv, TargetNewNamedLabel(n->name));
   inst->flags |= k6502BlockStart;
   label->data.ptr = inst;
-  return inst;
 }
 
 static int GetStartIndex(IRNode* node, int i) {
@@ -3864,7 +3859,7 @@ static TargetInstruction* LoadIndirect(W65C02Generator* g, IRNode* load, IRNode*
   return SetLoweredNode(load, dest);
 }
 
-static TargetInstruction* LowerLoad(W65C02Generator* g, IRNode* node) {
+static void LowerLoad(W65C02Generator* g, IRNode* node) {
   int size = 2;
   int start_index = GetStartIndex(node, 1);
   bool is_signed = true;
@@ -3898,22 +3893,24 @@ static TargetInstruction* LowerLoad(W65C02Generator* g, IRNode* node) {
   IRNode* src_node = node->inputs.value.p[0];
   if (node->inputs.length > 1) {
     // Load indirect with offset.
-    return LoadIndirect(g, node, src_node, size, start_index);
-
+    LoadIndirect(g, node, src_node, size, start_index);
+    return;
   }
   bool is_arg = true;
   switch (src_node->opcode) {
     case IR_OP(localvar):
       is_arg = false;
     case IR_OP(argument):
-      return LoadFromVariable(g, node, src_node, is_arg, size);
+      LoadFromVariable(g, node, src_node, is_arg, size);
+      return;
     case IR_OP(staticvar):
     case IR_OP(externvar):
-      return LoadFromStaticVariable(g, node, src_node, size);
-      
+      LoadFromStaticVariable(g, node, src_node, size);
+      return;
     default:
       // Loading from an expression.
-      return LoadIndirect(g, node, src_node, size, start_index);
+      LoadIndirect(g, node, src_node, size, start_index);
+      return;
   }
   
 #if 0
@@ -4144,7 +4141,7 @@ static TargetInstruction* StoreIndirect(W65C02Generator* g, IRNode* store, IRNod
   return SetLoweredNode(store, src);
 }
 
-static TargetInstruction* LowerStore(W65C02Generator* g, IRNode* node) {
+static void LowerStore(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length >= 2);
 
   // The value to store is the second operand.
@@ -4179,19 +4176,23 @@ static TargetInstruction* LowerStore(W65C02Generator* g, IRNode* node) {
   
   if (node->inputs.length > 2) {
     // Storing indirect with an offset.
-    return StoreIndirect(g, node, dest_node, src_node, size, start_index);
+     StoreIndirect(g, node, dest_node, src_node, size, start_index);
+    return;
   }
   switch (dest_node->opcode) {
     case IR_OP(argument):
       is_arg = true;
     case IR_OP(localvar):
-      return StoreIntoVariable(g, node, dest_node, src_node, is_arg, size);
+       StoreIntoVariable(g, node, dest_node, src_node, is_arg, size);
+      return;
 
     case IR_OP(staticvar):
     case IR_OP(externvar):
-      return StoreIntoStaticVariable(g, node, dest_node, src_node, size);
+       StoreIntoStaticVariable(g, node, dest_node, src_node, size);
+      return;
     default:
-      return StoreIndirect(g, node, dest_node, src_node, size, start_index);
+       StoreIndirect(g, node, dest_node, src_node, size, start_index);
+      return;
   }
 
 #if 0
@@ -4459,7 +4460,7 @@ static int BitSizeToByteSize(int bit_size) {
 // Right shift by position and mask with 1's
 // But right shifting is slow so we want to use an LDA to load the appropriate
 // bytes
-static TargetInstruction* LowerGetBitField(W65C02Generator* g, IRNode* node) {
+static void LowerGetBitField(W65C02Generator* g, IRNode* node) {
   IRNode* input_node = node->inputs.value.p[0];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[2]);
@@ -4518,7 +4519,7 @@ static TargetInstruction* LowerGetBitField(W65C02Generator* g, IRNode* node) {
       stx(g, output, i);
     }
   }
-  return SetLoweredNode(node, output);
+  SetLoweredNode(node, output);
 }
 
 // This is a load-modify-write operation.  Normally this is done using shifts
@@ -4540,7 +4541,7 @@ static TargetInstruction* LowerGetBitField(W65C02Generator* g, IRNode* node) {
 //     AND with 1's in upper bits not used
 //     ORA with used lower bits
 //     store byte in destination
-static TargetInstruction* LowerSetBitField(W65C02Generator* g, IRNode* node) {
+static void LowerSetBitField(W65C02Generator* g, IRNode* node) {
   IRNode* output_node = node->inputs.value.p[0];
   IRNode* input_node = node->inputs.value.p[1];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
@@ -4595,10 +4596,10 @@ static TargetInstruction* LowerSetBitField(W65C02Generator* g, IRNode* node) {
     lda(g, input, byte_size - 1);
     sta(g, output, output_byte_index + byte_size - 1);
   }
-  return SetLoweredNode(node, output);
+  SetLoweredNode(node, output);
 }
 
-static TargetInstruction* LowerInc(W65C02Generator* g, IRNode* node) {
+static void LowerInc(W65C02Generator* g, IRNode* node) {
   IRNode* var = node->inputs.value.p[0];
   bool is_reg = false;
   TargetInstruction* addr = GetAddress(g, var, true);
@@ -4674,10 +4675,9 @@ static TargetInstruction* LowerInc(W65C02Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, result);
   AddSpillPoint(g, result);
-  return result;
 }
 
-static TargetInstruction* LowerDec(W65C02Generator* g, IRNode* node) {
+static void LowerDec(W65C02Generator* g, IRNode* node) {
   IRNode* var = node->inputs.value.p[0];
   bool is_reg = false;
   TargetInstruction* addr = GetAddress(g, var, true);
@@ -4749,7 +4749,6 @@ static TargetInstruction* LowerDec(W65C02Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, result);
   AddSpillPoint(g, result);
-  return result;
 }
 
 static struct {
@@ -5213,13 +5212,13 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
 // yy:
 //
 // Then, increment the sp by the number of bytes pushed.
-static TargetInstruction* LowerCall(W65C02Generator* g, IRNode* node) {
+static void LowerCall(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   IRNode* callee = node->inputs.value.p[0];
   
   TargetInstruction* instrinsic_call = CallIntrinsic(g, node);
   if (instrinsic_call != NULL) {
-    return instrinsic_call;
+    return;
   }
   
   size_t args_size = 0;
@@ -5342,7 +5341,6 @@ static TargetInstruction* LowerCall(W65C02Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, result);
   AddSpillPoint(g, result);
-  return result;
 }
 
 // Input is the value of the result in zero page.
@@ -5374,7 +5372,7 @@ static void AssignResult(W65C02Generator* g, TargetInstruction* inst, int size) 
   jsr(g, result_func);
 }
 
-static TargetInstruction* LowerResult(W65C02Generator* g, IRNode* node) {
+static void LowerResult(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   int size = Sizeof(node->type);
   IRNode* result = node->inputs.value.p[0];
@@ -5407,13 +5405,12 @@ static TargetInstruction* LowerResult(W65C02Generator* g, IRNode* node) {
       assert(false);
       break;
   }
-  return NULL;
 }
 
 // A literal reference is a move of the literal offset (the first input
 // to the literalref node) to the 'literal' with the given id.  This will
 // be assembled as a reference to a symbol with the name .str.%d.
-static TargetInstruction* LowerLiteralReference(W65C02Generator* g,
+static void LowerLiteralReference(W65C02Generator* g,
                                                 IRNode* node) {
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
@@ -5435,7 +5432,6 @@ static TargetInstruction* LowerLiteralReference(W65C02Generator* g,
   sta(g, dest, 1);
   SetLoweredNode(node, dest);
   AddSpillPoint(g, dest);
-  return dest;
 }
 
 static TargetInstruction* AddressOfRegVariable(W65C02Generator* g, IRNode* node, IRNode* var) {
@@ -5529,7 +5525,7 @@ static TargetInstruction* AddressOfExpression(W65C02Generator* g, IRNode* node, 
   return SetLoweredNode(node, result);
 }
 
-static TargetInstruction* LowerAddressOf(W65C02Generator* g, IRNode* node) {
+static void LowerAddressOf(W65C02Generator* g, IRNode* node) {
   IRNode* src_node = node->inputs.value.p[0];
   TargetInstruction* src = GetLoweredNode(src_node);
   bool is_arg = true;
@@ -5537,40 +5533,20 @@ static TargetInstruction* LowerAddressOf(W65C02Generator* g, IRNode* node) {
     case IR_OP(localvar):
       is_arg = false;
     case IR_OP(argument):
-      return AddressOfVariable(g, node, src_node, is_arg);
-    
+       AddressOfVariable(g, node, src_node, is_arg);
+      break;
     case IR_OP(externvar):
     case IR_OP(staticvar):
-      return AddressOfStaticVariable(g, node, src_node);
+       AddressOfStaticVariable(g, node, src_node);
+      break;
       
     default:
-      return AddressOfExpression(g, node, src_node);
+      AddressOfExpression(g, node, src_node);
       break;
   }
-#if 0
-  assert(node->inputs.length == 1);
-  TargetInstruction* src = GetAddress(g, node->inputs.value.p[0]);
-  // The addressing mode for the src is always in zero page.
-  SetAddrMode(src, kAddrModeZeroPage);
-  AddReloadPoint(g, src);
-
-  if (node->dest != NULL) {
-    TargetInstruction* dest = GetDestAddress(g, node, false);
-    for (int i = 0; i < 2; i++) {
-      SetIndexReg(g, src, dest, i);
-      Emit(g, NewInstruction2(W65C02_OP(lda), src, ByteConst(g, i), kAddrModeZeroPage));
-      sta(g, dest, i);
-    }
-    SetLoweredNode(node, dest);
-    AddSpillPoint(g, dest);
-    return dest;
-  }
-  SetLoweredNode(node, src);
-  return src;
-#endif
 }
 
-static TargetInstruction* LowerMemcpy(W65C02Generator* g, IRNode* node) {
+static void LowerMemcpy(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 3);
   Symbol* copymem = g->copymem1;
 
@@ -5621,10 +5597,9 @@ static TargetInstruction* LowerMemcpy(W65C02Generator* g, IRNode* node) {
 
   // JSR copymem
   jsr(g, copymem);
-  return NULL;
 }
 
-static TargetInstruction* LowerMemzero(W65C02Generator* g, IRNode* node) {
+static void LowerMemzero(W65C02Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   Symbol* zeromem = g->zeromem1;
 
@@ -5661,13 +5636,12 @@ static TargetInstruction* LowerMemzero(W65C02Generator* g, IRNode* node) {
 
   // JSR zeromem
   jsr(g, zeromem);
-  return NULL;
 }
 
-static TargetInstruction* LowerZeroExtend(W65C02Generator* g, IRNode* node) {
+static void LowerZeroExtend(W65C02Generator* g, IRNode* node) {
   if (node->outputs.length == 0 && node->dest == NULL) {
     // No users of this, ignore.
-    return NULL;
+    return;
   }
   IRNode* src_node = node->inputs.value.p[0];
   TargetInstruction* src = Materialize(g, src_node, -1, false);
@@ -5727,13 +5701,12 @@ static TargetInstruction* LowerZeroExtend(W65C02Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, dest);
   AddSpillPoint(g, dest);
-  return dest;
 }
 
-static TargetInstruction* LowerSignExtend(W65C02Generator* g, IRNode* node) {
+static void LowerSignExtend(W65C02Generator* g, IRNode* node) {
   if (node->outputs.length == 0 && node->dest == NULL) {
     // No users of this, ignore.
-    return NULL;
+    return ;
   }
   IRNode* src_node = node->inputs.value.p[0];
   int src_size = Sizeof(src_node->type);
@@ -5827,14 +5800,13 @@ static TargetInstruction* LowerSignExtend(W65C02Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, dest);
   AddSpillPoint(g, dest);
-  return dest;
 }
 
-static TargetInstruction* LowerAlign(W65C02Generator* g, IRNode* node) {
-  return SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+static void LowerAlign(W65C02Generator* g, IRNode* node) {
+   SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
 }
 
-static TargetInstruction* LowerAsm(W65C02Generator* g, IRNode* node) {
+static void LowerAsm(W65C02Generator* g, IRNode* node) {
   // The first argument is a literal containing the assembly language.
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
@@ -5844,28 +5816,27 @@ static TargetInstruction* LowerAsm(W65C02Generator* g, IRNode* node) {
       Emit(g, NewInstruction1(W65C02_OP(asm), literal, kAddrModeImplied));
 
   SetLoweredNode(node, result);
-  return result;
 }
 
-static TargetInstruction* LowerLocation(W65C02Generator* g, IRNode* node) {
+static void LowerLocation(W65C02Generator* g, IRNode* node) {
   IRLocation* loc = (IRLocation*)node;
-  return SetLoweredNode(node, Emit(g, TargetNewLocation(loc)));
+  SetLoweredNode(node, Emit(g, TargetNewLocation(loc)));
 }
 
 // The first input is the address of the 'ap' variable.  The second is the
 // address of the last function argument.  The ap variable is set to the
 // address of the last argument + 2.
-static TargetInstruction* LowerBuiltinVaStart(W65C02Generator* g, IRNode* node) {
+static void LowerBuiltinVaStart(W65C02Generator* g, IRNode* node) {
   TargetInstruction* ap = GetAddress(g, node->inputs.value.p[0], true);
   TargetInstruction* arg = GetAddress(g, node->inputs.value.p[1], true);
   SetAddrMode(arg, kAddrModeZeroPage);
   
   AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, ap, arg, ByteConst(g, 2));
   
-  return SetLoweredNode(node, ap);
+   SetLoweredNode(node, ap);
 }
 
-static TargetInstruction* LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
+static void LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
   IRNode* ap_node = node->inputs.value.p[0];
 #if 0
   
@@ -6017,16 +5988,14 @@ static TargetInstruction* LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
 
   jsr(g, va_arg_sym);
 
-  return SetLoweredNode(node, dest);
+  SetLoweredNode(node, dest);
 }
 
-static TargetInstruction* LowerBuiltinVaEnd(W65C02Generator* g, IRNode* node) {
+static void LowerBuiltinVaEnd(W65C02Generator* g, IRNode* node) {
   // Nothing to do for va_end.
-  return NULL;
 }
 
-static TargetInstruction* LowerBuiltinVaCopy(W65C02Generator* g, IRNode* node) {
-  return NULL;  // TODO
+static void LowerBuiltinVaCopy(W65C02Generator* g, IRNode* node) {
 }
 
 static void CompareEqualIntegerZeroExpression(W65C02Generator* g, IRNode* node,
@@ -6371,7 +6340,7 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(W65C02Generator* g,
   }
 }
 
-static TargetInstruction* LowerComparison(W65C02Generator* g, IRNode* node) {
+static void LowerComparison(W65C02Generator* g, IRNode* node) {
   // Check if any the outputs of the node are not branches.  If all
   // the uses are branches we defer the generation of the comparison
   // to the branch.
@@ -6385,7 +6354,7 @@ static TargetInstruction* LowerComparison(W65C02Generator* g, IRNode* node) {
     }
   }
   if (!is_expression) {
-    return NULL;
+    return;
   }
   TargetInstruction* dest = GetDestAddress(g, node, false);
   // Size is the size of the inputs.  They will all be the same.
@@ -6502,45 +6471,47 @@ static TargetInstruction* LowerComparison(W65C02Generator* g, IRNode* node) {
   }
   // Mark result as having comparison generated.
   dest->flags |= k6502ComparisonGenerated;
-  return SetLoweredNode(node, dest);
+   SetLoweredNode(node, dest);
 }
 
-static TargetInstruction* LowerSSAVar(W65C02Generator* g, IRNode* node) {
+static void LowerSSAVar(W65C02Generator* g, IRNode* node) {
   IRVariable* var = (IRVariable*)node;
   IRNode* symbol = FindPooledVariable(g->gen, var->symbol);
-  return SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(ssavar), GetLoweredNode(symbol), kAddrModeImplied)));
+   SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(ssavar), GetLoweredNode(symbol), kAddrModeImplied)));
 }
 
-static TargetInstruction* LowerPhiNode(W65C02Generator* g, IRNode* node) {
+static void LowerPhiNode(W65C02Generator* g, IRNode* node) {
   IRVariable* var = (IRVariable*)node;
   IRNode* symbol = FindPooledVariable(g->gen, var->symbol);
-  return SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(phi), GetLoweredNode(symbol), kAddrModeImplied)));
+   SetLoweredNode(node, Emit(g, NewInstruction1(W65C02_OP(phi), GetLoweredNode(symbol), kAddrModeImplied)));
 }
 
-static TargetInstruction* LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
+static void LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
   switch (node->opcode) {
     case IR_OP(decsp): {
       // ldx #reg
       // jsr __decsp
       TargetInstruction* size = Materialize(g, node->inputs.value.p[0], 2, true);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), size, kAddrModeImplied));
-      return SetLoweredNode(node, jsr(g, g->decsp));
+       SetLoweredNode(node, jsr(g, g->decsp));
+      break;
     }
       
     case IR_OP(savesp): {
       // One operand, a temp to hold stack pointer.
       TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
-      return SetLoweredNode(node, jsr(g, g->savesp));
+       SetLoweredNode(node, jsr(g, g->savesp));
+      break;
     }
     case IR_OP(restoresp): {
       TargetInstruction* tmp = GetAddress(g, node->inputs.value.p[0], true);
       Emit(g, NewInstruction1(W65C02_OP(expr_addr_x), tmp, kAddrModeImplied));
-      return SetLoweredNode(node, jsr(g, g->restoresp));
+       SetLoweredNode(node, jsr(g, g->restoresp));
+      break;
     }
     default:
       assert(false);
-      return NULL;
   }
   
 }
@@ -6550,16 +6521,16 @@ static void AddLiteral(W65C02Generator* g, TargetConstant* con, const void* data
   con->literal_id = CompilerAddBufferLiteral(data, length);
 }
 
-static TargetInstruction* LowerStructReturn(W65C02Generator* g, IRNode* node) {
+static void LowerStructReturn(W65C02Generator* g, IRNode* node) {
   TargetInstruction* inst = Emit(g, NewInstruction(W65C02_OP(structreturn), kAddrModeZeroPage));
   g->struct_return_inst = inst;
-  return SetLoweredNode(node, inst);
+   SetLoweredNode(node, inst);
 }
 
-static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
+static void LowerIRNode(W65C02Generator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
-    return node->data.ptr;
+    return;
   }
   switch (node->opcode) {
     case IR_OP(localvar):
@@ -6567,18 +6538,19 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
     case IR_OP(tempvar):
     case IR_OP(staticvar):
     case IR_OP(externvar):
-      return NULL;
+      return;
 
     case IR_OP(structreturn):
       return LowerStructReturn(g, node);
 
     case IR_OP(structarg):
       // Same as its input.
-      return SetLoweredNode(node, GetAddress(g, node->inputs.value.p[0], true));
+       SetLoweredNode(node, GetAddress(g, node->inputs.value.p[0], true));
+      return;
 
     case IR_OP(nop):
     case last_ir_opcode:
-      return NULL;
+      return ;
 
     case IR_OP(ssavar):
       return LowerSSAVar(g, node);
@@ -6597,32 +6569,32 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType32Bit, c->value.ivalue);
       AddLiteral(g, (TargetConstant*)inst, &c->value.ivalue, 4);
-      return inst;
+      return ;
     }
     case IR_OP(const8): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType8Bit, c->value.ivalue);
-      return inst;
+      return ;
     }
     case IR_OP(const16): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType16Bit, c->value.ivalue);
-      return inst;
+      return ;
     }
     case IR_OP(consta): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType32Bit, c->value.ivalue);
-      return inst;
+      return ;
     }
     case IR_OP(const64): {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType64Bit, c->value.ivalue);
       AddLiteral(g, (TargetConstant*)inst, &c->value.ivalue, 8);
-      return inst;
+      return ;
     }
     case IR_OP(constf): {
       IRConstant* c = (IRConstant*)node;
@@ -6630,7 +6602,7 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
           GetIntConstant(g, node, kTargetTypeFloat, c->value.ivalue);
       float v = c->value.fvalue;
       AddLiteral(g, (TargetConstant*)inst, &v, 4);
-      return inst;
+      return ;
     }
     case IR_OP(constd): {
       IRConstant* c = (IRConstant*)node;
@@ -6638,7 +6610,7 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
           GetIntConstant(g, node, kTargetTypeDouble, c->value.ivalue);
       float v = c->value.fvalue;
       AddLiteral(g, (TargetConstant*)inst, &v, 4);
-      return inst;
+      return ;
     }
     case IR_OP(enter): {
       // Entry sequence:
@@ -6667,7 +6639,7 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
         Emit(g, NewInstruction(W65C02_OP(enter), kAddrModeImplied));
       }
       LowerVariables(g);
-      return NULL;
+      return ;
     }
     case IR_OP(leave): {
       // Exit sequence (non-leaf)
@@ -6680,12 +6652,13 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
       } else {
         Emit(g, NewInstruction(W65C02_OP(leave), kAddrModeImplied));
       }
-      return NULL;
+      return ;
     }
 
     case IR_OP(ret):
-      return Emit(g, NewInstruction(W65C02_OP(rts), kAddrModeImplied));
-
+       Emit(g, NewInstruction(W65C02_OP(rts), kAddrModeImplied));
+      return;
+      
     case IR_OP(load32):
     case IR_OP(load8):
     case IR_OP(load64):
@@ -6785,10 +6758,10 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova):
-    case IR_OP(rmovi):
-    case IR_OP(rmovf):
-    case IR_OP(rmovd):
-    case IR_OP(rmova):
+//    case IR_OP(rmovi):
+//    case IR_OP(rmovf):
+//    case IR_OP(rmovd):
+//    case IR_OP(rmova):
     case IR_OP(tmp):
       return LowerExpression(g, node);
 
@@ -6853,8 +6826,9 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
       return LowerMemcpy(g, node);
 
     case IR_OP(cast):
-      return SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
-
+       SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+      return;
+      
     case IR_OP(zeroextendi):
       return LowerZeroExtend(g, node);
 
@@ -6892,7 +6866,6 @@ static TargetInstruction* LowerIRNode(W65C02Generator* g, IRNode* node) {
   }
   // If we get here we've failed to handle the IR node.
   assert(false);
-  return NULL;
 }
 
 // Calculate the size of an argument based on its type.

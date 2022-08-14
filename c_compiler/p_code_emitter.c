@@ -49,24 +49,24 @@ static bool IsPrintable(TargetInstruction* inst) {
 static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
                       FILE* fp) {
   assert(inst->operand[0] != NULL);
-  assert(inst->operand[1] != NULL);
+  assert(inst->dest != NULL);
   assert(inst->operand[0]->reg != NULL);
-  assert(inst->operand[1]->reg != NULL);
+  assert(inst->dest->reg != NULL);
 
   // Don't output mov rx,rx.
-  if (inst->operand[0]->reg == inst->operand[1]->reg) {
+  if (inst->dest->reg == inst->operand[1]->reg) {
     return;
   }
 
   const char* mnemonic = "";
   switch (inst->opcode) {
-    case P_OP(rmov):
+    case P_OP(mov):
       mnemonic = "mov";
       break;
-    case P_OP(rmovf):
+    case P_OP(movf):
       mnemonic = "movf";
       break;
-    case P_OP(rmovd):
+    case P_OP(movd):
       mnemonic = "movd";
       break;
     default:
@@ -74,9 +74,9 @@ static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
   }
   char buf1[8], buf2[8];
   fprintf(fp, "\t%-8s%s, %s\n", mnemonic,
-          PCodeRegisterName((PCodeRegister*)inst->operand[0]->reg, buf1,
+          PCodeRegisterName((PCodeRegister*)inst->dest->reg, buf1,
                             sizeof(buf1)),
-          PCodeRegisterName((PCodeRegister*)inst->operand[1]->reg, buf2,
+          PCodeRegisterName((PCodeRegister*)inst->operand[0]->reg, buf2,
                             sizeof(buf2)));
 }
 
@@ -156,10 +156,13 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
 
   // Special case instructions.
   switch ((PCodeOpcode)inst->opcode) {
-    case P_OP(rmov):
-    case P_OP(rmovf):
-    case P_OP(rmovd):
-      PrintRmov(emitter, inst, fp);
+    case P_OP(mov):
+    case P_OP(movf):
+    case P_OP(movd):
+      if (inst->dest != NULL) {
+        PrintRmov(emitter, inst, fp);
+        return;
+      }
       return;
     case P_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;

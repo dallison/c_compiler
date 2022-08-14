@@ -536,13 +536,13 @@ static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
 
   const char* mnemonic = "";
   switch (inst->opcode) {
-    case RV_OP(rmov):
+    case RV_OP(mv):
       mnemonic = "mv";
       break;
-    case RV_OP(rmovf):
+    case RV_OP(fmv_s):
       mnemonic = "fmv.s";
       break;
-    case RV_OP(rmovd):
+    case RV_OP(fmv_d):
       mnemonic = "fmv.d";
       break;
     default:
@@ -607,15 +607,19 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 
   // Special case instructions.
   switch ((RVOpcode)inst->opcode) {
-    case RV_OP(rmov):
-    case RV_OP(rmovf):
-    case RV_OP(rmovd):
-      PrintRmov(emitter, inst, fp);
-      return;
+//    case RV_OP(rmov):
+//    case RV_OP(rmovf):
+//    case RV_OP(rmovd):
+//      PrintRmov(emitter, inst, fp);
+//      return;
 
     case RV_OP(mv):
       // Don't emit mv x, x.
       if (inst->operand[0]->reg == inst->reg) {
+        return;
+      }
+      if (inst->dest != NULL) {
+        PrintRmov(emitter, inst, fp);
         return;
       }
       break;

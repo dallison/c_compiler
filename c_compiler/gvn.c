@@ -216,6 +216,11 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     return key;
   }
   
+  // If we have a destination set, keep unique.
+  if (inst->dest != NULL) {
+    return key;
+  }
+  
   // We can only deal with 1 or 2 operands but inc and dec instructions
   // might have 3 inputs, third of which isn't really an input.
   int32_t op_values[2] = {0, 0};

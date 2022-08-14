@@ -20,8 +20,10 @@
 #define STATIC 
 #endif
 
+#if 1
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
 void Break() {}
+#endif
 
 // These are in ftoa.c.
 extern char* __PrintFloatFormat(double f, int precision, char* buf, size_t size);
@@ -179,7 +181,6 @@ STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   return p;
 }
 
-#if 1
 STATIC void ResolvePrecision(ConversionFormat* fmt, va_list* ap) {
   if (fmt->precision == kWidthNextArg) {
     fmt->precision = va_arg(*ap, int);
@@ -384,6 +385,7 @@ STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
 }
 
 
+#endif
 STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
                           const char* s, size_t len, bool negative) {
   int result = 0;
@@ -678,4 +680,3 @@ int vsnprintf(char * restrict s, size_t n,
   return Printf(StringWriter, &data, format, arg);
 }
 
-#endif

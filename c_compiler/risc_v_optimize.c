@@ -110,7 +110,8 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
         continue;
       }
-      } else if (inst->opcode == RV_OP(rmov)) {
+#if 0
+    } else if (inst->opcode == RV_OP(rmov)) {
        TargetInstruction* result = inst->operand[0];
        if (inst->users.length > 0) {
          // Result of rmov is being used.  This overrides the destination
@@ -158,6 +159,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
         TrapRemoveInstruction(inst);
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
       }
+#endif
     }
 dont_optimize:;
     // Add all of the instruction's operands to the filter.
@@ -427,9 +429,12 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
        inst = next) {
     next = TargetNext(inst);
-    if (inst->opcode == (TargetOpcode)RV_OP(rmov)) {
-       TargetInstruction* inst_dest = inst->operand[0];
-      TargetInstruction* inst_src = inst->operand[1];
+    if (inst->opcode == (TargetOpcode)RV_OP(mv)) {
+       TargetInstruction* inst_dest = inst->dest;
+      if (inst_dest == NULL) {
+        continue;
+      }
+      TargetInstruction* inst_src = inst->operand[0];
       TargetInstruction* prev_prev;
       for (TargetInstruction* prev = TargetPrev(inst);
            prev != NULL && TargetNext(prev) != block->code;
@@ -447,13 +452,13 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
           prev->dest = inst_dest;
           TrapRemoveInstruction(inst);
           TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
-        } else if (prev->opcode == (TargetOpcode)RV_OP(rmov)) {
-          TargetInstruction* prev_dest = prev->operand[0];
-          TargetInstruction* prev_src = prev->operand[1];
+        } else if (prev->opcode == (TargetOpcode)RV_OP(mv)) {
+          TargetInstruction* prev_dest = prev->dest;
+          TargetInstruction* prev_src = prev->operand[0];
           if (inst_dest == prev_src && inst_src == prev_dest) {
-            // rmov a,b
+            // mov a,b
             // ...
-            // rmov b,a
+            // mov b,a
             // Eliminate second rmov instructions.
             TrapRemoveInstruction(inst);
             TargetBasicBlockRemoveInstruction(&rv->base, block, inst);

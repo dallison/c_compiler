@@ -247,17 +247,17 @@ static IRNode* GenerateLiteral(Generator* gen, ConstantASTNode* node) {
 static struct {
   bool (*type_func)(TypeRecord*);
   IROpcode opcode;
-} rmov_opcodes[] = {
-    {TypeIsIntegral, IR_OP(rmovi)},       {TypeIsFloat, IR_OP(rmovf)},
-    {TypeIsDouble, IR_OP(rmovd)},         {TypeIsStructOrUnion, IR_OP(rmova)},
-    {TypeIsPointerOrArray, IR_OP(rmova)}, {TypeIsFunction, IR_OP(rmova)},
-    {TypeIsVoid, IR_OP(rmova)},           {NULL, 0},
+} mov_opcodes[] = {
+    {TypeIsIntegral, IR_OP(movi)},       {TypeIsFloat, IR_OP(movf)},
+    {TypeIsDouble, IR_OP(movd)},         {TypeIsStructOrUnion, IR_OP(mova)},
+    {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsFunction, IR_OP(mova)},
+    {TypeIsVoid, IR_OP(mova)},           {NULL, 0},
 };
 
 static IROpcode MoveToTmpOpcode(TypeRecord* type) {
-  for (size_t i = 0; rmov_opcodes[i].type_func != NULL; i++) {
-    if (rmov_opcodes[i].type_func(type)) {
-      return rmov_opcodes[i].opcode;
+  for (size_t i = 0; mov_opcodes[i].type_func != NULL; i++) {
+    if (mov_opcodes[i].type_func(type)) {
+      return mov_opcodes[i].opcode;
     }
   }
   assert(false);
@@ -291,9 +291,10 @@ static IRNode* RemoveUnnecesaryShortening(Generator* gen, IRNode* value,
 // Stash the result of a calla node into a temporary.
 static IRNode* StashCallResult(Generator* gen, IRNode* node) {
   IRNode* tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-  IROpcode op = MoveToTmpOpcode(node->type);
-  IRNode* rmov = GeneratorEmit(gen, NewIR2(op, tmp, node));
-  IRSetType(rmov, node->type);
+  node->dest = tmp;
+  // IROpcode op = MoveToTmpOpcode(node->type);
+  // IRNode* rmov = GeneratorEmit(gen, NewIR2(op, tmp, node));
+  //IRSetType(rmov, node->type);
   IRSetType(tmp, node->type);
   return tmp;
 }
@@ -548,28 +549,28 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
                               bool is_inc) {
   IRNode* addr = GenerateExpression(gen, node->sub);
   IRNode* inc_amount;
-  IROpcode mov_op;
+  // IROpcode mov_op;
   TypeRecord* type = node->base.type;
   if (TypeIsPointer(node->sub->type)) {
     if (TypeIsVLA(node->sub->type->next)) {
       inc_amount = node->sub->type->next->info.array.size.vla.codegen_info;
-      mov_op = IR_OP(rmova);
+     // mov_op = IR_OP(rmova);
     } else {
       // Increment by size of thing pointed to.
       inc_amount = GeneratorGetIntConstant(gen, type,
                                            node->sub->type->next->size);
-      mov_op = IR_OP(rmova);
+      //mov_op = IR_OP(rmova);
       type = node->sub->type;
     }
   } else {
     // Increment or decrement by one.
-    mov_op = IR_OP(rmovi);
+   // mov_op = IR_OP(rmovi);
     if (TypeIsFloatingPoint(node->sub->type)) {
-      if (TypeIsFloat(node->sub->type)) {
-        mov_op = IR_OP(rmovf);
-      } else {
-        mov_op = IR_OP(rmovd);
-      }
+//      if (TypeIsFloat(node->sub->type)) {
+//        mov_op = IR_OP(rmovf);
+//      } else {
+//        mov_op = IR_OP(rmovd);
+//      }
       inc_amount = GeneratorGetFloatingPointConstant(gen, type, 1);
     } else {
       inc_amount = GeneratorGetIntConstant(gen, type, 1);
@@ -598,8 +599,9 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
     // the pre-incremented value in a temporary.
     tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
     IRSetType(tmp, load->type);
-    IRNode* move = GeneratorEmit(gen, NewIR2(mov_op, tmp, load));
-    IRSetType(move, load->type);
+    load->dest = tmp;
+    // IRNode* move = GeneratorEmit(gen, NewIR2(mov_op, tmp, load));
+    // IRSetType(move, load->type);
   }
   IROpcode op = IncDecArithmeticOp(node->sub, is_inc);
 
@@ -630,7 +632,6 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
 
   // Post increment operation, store value and return pre-incremented value.
   return tmp;
-  
 }
 
 // Increment and decrement, both pre and post.
@@ -648,23 +649,23 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
   // for optimizations at lowering time.
   IRNode* addr = GenerateExpression(gen, node->sub);
   IRNode* inc_amount;
-  IROpcode mov_op;
+  // IROpcode mov_op;
   TypeRecord* type = node->base.type;
   if (TypeIsPointer(node->sub->type)) {
     // Increment by size of thing pointed to.
     inc_amount = GeneratorGetIntConstant(gen, type,
                                          node->sub->type->next->size);
-    mov_op = IR_OP(rmova);
+    // mov_op = IR_OP(rmova);
     type = node->sub->type;
   } else {
     // Increment or decrement by one.
-    mov_op = IR_OP(rmovi);
+   //  mov_op = IR_OP(rmovi);
     if (TypeIsFloatingPoint(node->sub->type)) {
-      if (TypeIsFloat(node->sub->type)) {
-        mov_op = IR_OP(rmovf);
-      } else {
-        mov_op = IR_OP(rmovd);
-      }
+//      if (TypeIsFloat(node->sub->type)) {
+//        mov_op = IR_OP(rmovf);
+//      } else {
+//        mov_op = IR_OP(rmovd);
+//      }
       inc_amount = GeneratorGetFloatingPointConstant(gen, type, 1);
     } else {
       inc_amount = GeneratorGetIntConstant(gen, type, 1);
@@ -1264,7 +1265,8 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
   
   // Put result of left node in tmp.
   if (value_is_used) {
-    IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, left)), left->type);
+    left->dest = tmp;
+    // IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, left)), left->type);
   }
   
   // Short circuit.
@@ -1275,7 +1277,8 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
   // Evaluate right node and place result in tmp.
   IRNode* right = GenerateExpression(gen, node->right);
   if (value_is_used) {
-    IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, right)), right->type);
+    right->dest = tmp;
+//    IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, right)), right->type);
   }
 
   GeneratorEmit(gen, label);
@@ -1319,7 +1322,11 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   // Generate true branch.
   IRNode* left = GenerateExpression(gen, colon->left);
   if (value_is_used) {
-    IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left)), colon->left->type);
+    if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left)) {
+      left = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), left)), colon->left->type);
+   }
+    left->dest = tmp;
+    // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left)), colon->left->type);
   }
   
   // Branch to end.
@@ -1331,7 +1338,11 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   // Generate false branch,
   IRNode* right = GenerateExpression(gen, colon->right);
   if (value_is_used) {
-    IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right)), colon->right->type);
+    if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right)) {
+      right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), right)), colon->left->type);
+   }
+    right->dest = tmp;
+    // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right)), colon->right->type);
   }
   // end_label:
   GeneratorEmit(gen, end_label);

@@ -73,6 +73,9 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
        !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
        inst = next) {
     next = IRNext(inst);
+    if (inst->dest != NULL) {
+      continue;
+    }
     switch (inst->opcode) {
       case IR_OP(store32):
       case IR_OP(store8):

@@ -13,15 +13,17 @@
 #include "6502_machine.h"
 #include "target_basic_block.h"
 
+static void DumpRegisters(W65C02RegisterAllocator* allocator);
+
 static void Trap() {}
-static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 520) {
+static void TrapInstruction(W65C02RegisterAllocator* allocator, TargetInstruction* inst) {
+  if (inst->id == 795) {
     // Set breakpoint here to trap on a certain ianstruction id.
     Trap();
   }
 }
 
-static void TrapRegister(W65C02Register* reg) {
+static void TrapRegister(W65C02RegisterAllocator* allocator, W65C02Register* reg) {
   W65C02RegisterType type = k6502RegTypeI;
   int num = 1;
   if (reg->type == type && reg->base.num == num) {
@@ -29,15 +31,16 @@ static void TrapRegister(W65C02Register* reg) {
   }
 }
 
-static void TrapAllocRegister(W65C02Register* reg) {
-  W65C02RegisterType type = k6502RegTypeI;
-  int num = 4;
+static void TrapAllocRegister(W65C02RegisterAllocator* allocator, W65C02Register* reg) {
+  W65C02RegisterType type = k6502RegTypeB;
+  int num = 6;
   if (reg->type == type && reg->base.num == num) {
+    DumpRegisters(allocator);
     Trap();
   }
 }
 
-static void TrapFreeRegister(W65C02Register* reg) {
+static void TrapFreeRegister(W65C02RegisterAllocator* allocator, W65C02Register* reg) {
   W65C02RegisterType type = k6502RegTypeI;
   int num = 4;
   if (reg->type == type && reg->base.num == num) {
@@ -451,8 +454,8 @@ static W65C02Register* FindFreeRegister(W65C02RegisterAllocator* allocator,
 
 static void FreeRegister(W65C02RegisterAllocator* allocator,
                          W65C02Register* reg) {
-  TrapRegister(reg);
-  TrapFreeRegister(reg);
+  TrapRegister(allocator, reg);
+  TrapFreeRegister(allocator, reg);
   reg->base.owner = NULL;
 }
 
@@ -563,8 +566,8 @@ static W65C02Register* AllocateRegisterWithType(
     FindSpillVictim(allocator, type, &victim, &spill_point);
     reg = SpillInstruction(allocator, victim, spill_point);
   }
-  TrapRegister(reg);
-  TrapAllocRegister(reg);
+  TrapRegister(allocator, reg);
+  TrapAllocRegister(allocator, reg);
   assert(reg != NULL);
   if (reg->temp) {
     // A temp register isn't recorded as being used.
@@ -758,7 +761,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
     return;
   }
 #endif
-  TrapInstruction(inst);
+  TrapInstruction(allocator, inst);
 
   if (inst->opcode == (TargetOpcode)W65C02_OP(reloadpoint)) {
     FreeRegisters(allocator, inst);

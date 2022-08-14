@@ -110,7 +110,6 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(adr):
     case P_OP(adrs):
     case P_OP(adrtls):
-    case P_OP(rmov):
     case P_OP(ldw):
     case P_OP(ldh):
     case P_OP(ldb):
@@ -170,7 +169,6 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
 
     case P_OP(movf):
     case P_OP(movfc):
-    case P_OP(rmovf):
     case P_OP(ldf):
     case P_OP(stf):
     case P_OP(addf):
@@ -186,7 +184,6 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
 
     case P_OP(movd):
     case P_OP(movdc):
-    case P_OP(rmovd):
     case P_OP(ldd):
     case P_OP(std):
     case P_OP(addd):
@@ -326,13 +323,27 @@ static bool NeedsRegister(TargetInstruction* inst) {
 
 static void AllocateRegister(PCodeRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  PCodeRegister* reg;
+  if (inst->dest != NULL) {
+     if (inst->dest->reg == NULL) {
+         AllocateRegister(allocator, inst->dest);
+     }
+     assert(inst->dest->reg != NULL);
+     reg = (PCodeRegister*)inst->dest->reg;
+     inst->reg = inst->dest->reg;
+     FreeRegisters(allocator, inst);
+     return;
+   }
+  
+#if 0
   // Treat rmov instructions specially.
   if (inst->opcode == P_OP(rmov) || inst->opcode == P_OP(rmovf) ||
       inst->opcode == P_OP(rmovd)) {
     AllocateForRmov(allocator, inst);
     return;
   }
-
+#endif
+  
   // Free up any registers we can.
   FreeRegisters(allocator, inst);
 
@@ -340,7 +351,6 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
     return;
   }
   
-  PCodeRegister* reg;
   switch ((PCodeOpcode)inst->opcode) {
     case P_OP(fp):
       reg = &allocator->int_regs[PCODE_FP_REG];

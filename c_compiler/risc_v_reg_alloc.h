@@ -9,7 +9,7 @@
 #ifndef risc_v_reg_alloc_h
 #define risc_v_reg_alloc_h
 
-// P-Code register allocator.
+// RISC-V register allocator.
 
 #include <stdbool.h>
 #include <stdio.h>

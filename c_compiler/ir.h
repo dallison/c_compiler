@@ -40,10 +40,10 @@ typedef enum {
   IR_OP(movd),  // Move double op0.
   IR_OP(mova),  // Move address op0.
 
-  IR_OP(rmovi),  // Move int op1 to op0
-  IR_OP(rmovf),  // Move float op1 to op0
-  IR_OP(rmovd),  // Move double op1 to op0
-  IR_OP(rmova),  // Move address op1 to op0
+//  IR_OP(rmovi),  // Move int op1 to op0
+//  IR_OP(rmovf),  // Move float op1 to op0
+//  IR_OP(rmovd),  // Move double op1 to op0
+//  IR_OP(rmova),  // Move address op1 to op0
 
   IR_OP(label),  // Label.
   IR_OP(named_label),  // Named label.
@@ -267,7 +267,7 @@ typedef struct IRNode {
     Symbol* use;
   } var;
   SourceLocation location;
-  struct IRNode* dest;     // Optional destination node.
+  struct IRNode* dest;             // Result goes into here (optional).
 } IRNode;
 
 // Flags for IR nodes.
@@ -362,6 +362,7 @@ bool IRIsVarDef(IRNode* inst);
 bool IRIsVarRef(IRNode* inst);
 
 bool IRIsExpression(IRNode* inst);
+bool IRIsConstant(IRNode* inst);
 bool IRIsCommutative(IRNode* inst);
 
 bool IRIsComparison(IRNode* node);

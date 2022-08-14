@@ -61,9 +61,9 @@ typedef enum {
   RV_OP(movdc),
   RV_OP(movxc),
 
-  RV_OP(rmov),
-  RV_OP(rmovf),
-  RV_OP(rmovd),
+//  RV_OP(rmov),
+//  RV_OP(rmovf),
+//  RV_OP(rmovd),
 
   RV_OP(ret),
 

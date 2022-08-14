@@ -45,9 +45,9 @@ typedef enum {
   P_OP(movdc),
   P_OP(movxc),
 
-  P_OP(rmov),
-  P_OP(rmovf),
-  P_OP(rmovd),
+//  P_OP(rmov),
+//  P_OP(rmovf),
+//  P_OP(rmovd),
 
   P_OP(ret),
 

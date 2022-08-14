@@ -41,9 +41,9 @@ typedef enum {
   TARGET_OP(movdc),     // Move 64-bit float constant.
   TARGET_OP(movxc),     // Move 64-bit int constant.
 
-  TARGET_OP(rmov),      // Move int reg to reg.
-  TARGET_OP(rmovf),     // Move 32-bit float reg to reg.
-  TARGET_OP(rmovd),     // Move 64 bit float reg to reg.
+//  TARGET_OP(rmov),      // Move int reg to reg.
+//  TARGET_OP(rmovf),     // Move 32-bit float reg to reg.
+//  TARGET_OP(rmovd),     // Move 64 bit float reg to reg.
 
   TARGET_OP(ret),       // Return from subroutine.
 

@@ -43,10 +43,10 @@ static struct {
     {IR_OP(movd), "movd"},
     {IR_OP(mova), "mova"},
 
-    {IR_OP(rmovi), "rmovi"},
-    {IR_OP(rmovf), "rmovf"},
-    {IR_OP(rmovd), "rmovd"},
-    {IR_OP(rmova), "rmova"},
+//    {IR_OP(rmovi), "rmovi"},
+//    {IR_OP(rmovf), "rmovf"},
+//    {IR_OP(rmovd), "rmovd"},
+//    {IR_OP(rmova), "rmova"},
 
     {IR_OP(label), "label"},
     {IR_OP(named_label), "namedlabel"},
@@ -635,6 +635,7 @@ void IRPrint(IRNode* inst, FILE* fp) {
     }
     fprintf(fp, "}");
   }
+ 
   if (inst->dest != NULL) {
     fprintf(fp, " -> $%d", inst->dest->id);
   }
@@ -728,6 +729,21 @@ bool IRIsVarDef(IRNode* inst) { return (inst->flags & kIRVarDef) != 0; }
 
 bool IRIsVarRef(IRNode* inst) { return (inst->flags & kIRVarUse) != 0; }
 
+bool IRIsConstant(IRNode* inst) {
+  switch (inst->opcode) {
+    case IR_OP(const32):
+    case IR_OP(const8):
+    case IR_OP(const16):
+    case IR_OP(const64):
+    case IR_OP(constf):
+    case IR_OP(constd):
+    case IR_OP(consta):
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool IRIsExpression(IRNode* inst) {
   switch (inst->opcode) {
     case IR_OP(const32):
@@ -743,10 +759,10 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova):
-    case IR_OP(rmovi):
-    case IR_OP(rmovf):
-    case IR_OP(rmovd):
-    case IR_OP(rmova):
+//    case IR_OP(rmovi):
+//    case IR_OP(rmovf):
+//    case IR_OP(rmovd):
+//    case IR_OP(rmova):
     case IR_OP(tmp):
 
     case IR_OP(load32):

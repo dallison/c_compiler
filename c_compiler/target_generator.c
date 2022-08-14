@@ -19,7 +19,7 @@ static int next_instruction_id = 1;
 
 static void Trap() {}
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 52) {
+  if (inst->id == 44) {
     // Set breakpoint here to trap on a certain instruction id.
     Trap();
   }
@@ -140,12 +140,12 @@ const char* TargetOpcodeName(int op) {
     case TARGET_OP(movxc):
       return "movxc";
 
-    case TARGET_OP(rmov):
-      return "rmov";
-    case TARGET_OP(rmovf):
-      return "rmovf";
-    case TARGET_OP(rmovd):
-      return "rmovd";
+//    case TARGET_OP(rmov):
+//      return "rmov";
+//    case TARGET_OP(rmovf):
+//      return "rmovf";
+//    case TARGET_OP(rmovd):
+//      return "rmovd";
 
     case TARGET_OP(ret):
       return "ret";
