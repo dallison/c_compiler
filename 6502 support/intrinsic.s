@@ -347,6 +347,9 @@ __builtin_va_arg4:
   STA __mem_src+1
   PLA
   STA __mem_src
+  LDA #4
+  STA __mem_size
+  STZ __mem_size+1
   JMP __builtin_memcpy
 
 __builtin_va_arg8:
@@ -371,4 +374,7 @@ __builtin_va_arg8:
   STA __mem_src+1
   PLA
   STA __mem_src
+  LDA #8
+  STA __mem_size
+  STZ __mem_size+1
   JMP __builtin_memcpy

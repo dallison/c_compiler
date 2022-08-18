@@ -23,6 +23,7 @@
 __i1tof:
   PHA
   LDA 0,X       // Check for zero
+  STA mt1+0
   BNE i1tof_nonzero
   JMP __fzero
 i1tof_nonzero:
@@ -33,8 +34,8 @@ i1tof_nonzero:
   STA fsign      // Sign bit set.
   SEC
   LDA #0        // Negate int value.
-  SBC 0,X
-  STA 0,X
+  SBC mt1+0
+  STA mt1+0
 pos_i1tof:
   LDA #127        // Set exponent to bias value.
   STA fexp
@@ -47,7 +48,8 @@ i1tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 0,X
+  LSR mt1+0
+
   // All bits shifted out?
   BEQ tof_done
   INC fexp
@@ -63,6 +65,7 @@ tof_done:
 __ui1tof:
   PHA
   LDA 0,X       // Check for zero
+  STA mt1+0
   BNE ui1tof_nonzero
   JMP __fzero
 ui1tof_nonzero:
@@ -79,7 +82,8 @@ ui1tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 0,X
+  LSR mt1+0
+
   // All bits shifted out?
   BEQ tof_done
   INC fexp
@@ -88,24 +92,27 @@ ui1tof_loop:
 __i2tof:
   PHA
   LDA 0,X       // Check for zero
-  ORA 1,X
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  ORA mt1+0
   BNE i2tof_nonzero
   JMP __fzero
 i2tof_nonzero:
 
   // Not zero, check for negative.
   STZ fsign
-  LDA 1,X       // Top byte of source
+  LDA mt1+1       // Top byte of source
   BPL pos_i2tof
   LDA #0x80
   STA fsign      // Sign bit set.
   SEC
   LDA #0        // Negate int value.
-  SBC 0,X
-  STA 0,X
+  SBC mt1+0
+  STA mt1+0
   LDA #0
-  SBC 1,X
-  STA 1,X
+  SBC mt1+1
+  STA mt1+1
 pos_i2tof:
   LDA #127        // Set exponent to bias value.
   STA fexp
@@ -118,12 +125,12 @@ i2tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 1,X
-  ROR 0,X
+  LSR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
+  LDA mt1+0
+  ORA mt1+1
   BEQ tof_done
   INC fexp
   BRA i2tof_loop
@@ -131,7 +138,10 @@ i2tof_loop:
 __ui2tof:
   PHA
   LDA 0,X       // Check for zero
-  ORA 1,X
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  ORA mt1+0
   BNE ui2tof_nonzero
   JMP __fzero
 ui2tof_nonzero:
@@ -149,12 +159,12 @@ ui2tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 1,X
-  ROR 0,X
+  LSR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
+  LDA mt1+0
+  ORA mt1+1
   BEQ tof_done2
   INC fexp
   BRA ui2tof_loop
@@ -171,32 +181,39 @@ tof_done2:
 __i4tof:
   PHA
   LDA 0,X       // Check for zero
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  LDA 2,X
+  STA mt1+2
+  LDA 3,X
+  STA mt1+3
+  ORA mt1+0
+  ORA mt1+1
+  ORA mt1+2
   BNE i4tof_nonzero
   JMP __fzero
 i4tof_nonzero:
 
   // Not zero, check for negative.
   STZ fsign
-  LDA 3,X       // Top byte of source
+  LDA mt1+3       // Top byte of source
   BPL pos_i4tof
   LDA #0x80
   STA fsign      // Sign bit set.
   SEC
   LDA #0        // Negate int value.
-  SBC 0,X
-  STA 0,X
+  SBC mt1+0
+  STA mt1+0
   LDA #0
-  SBC 1,X
-  STA 1,X
+  SBC mt1+1
+  STA mt1+1
   LDA #0
-  SBC 2,X
-  STA 2,X
+  SBC mt1+2
+  STA mt1+2
   LDA #0
-  SBC 3,X
-  STA 3,X
+  SBC mt1+3
+  STA mt1+3
 pos_i4tof:
   LDA #127        // Set exponent to bias value.
   STA fexp
@@ -209,16 +226,16 @@ i4tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 3,X
-  ROR 2,X
-  ROR 1,X
-  ROR 0,X
+  LSR mt1+3
+  ROR mt1+2
+  ROR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
+  LDA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
   BEQ tof_done3
   INC fexp
   BRA i4tof_loop
@@ -226,9 +243,16 @@ i4tof_loop:
 __ui4tof:
   PHA
   LDA 0,X       // Check for zero
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  LDA 2,X
+  STA mt1+2
+  LDA 3,X
+  STA mt1+3
+  ORA mt1+0
+  ORA mt1+1
+  ORA mt1+2
   BNE ui4tof_nonzero
   JMP __fzero
 ui4tof_nonzero:
@@ -246,16 +270,16 @@ ui4tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 3,X
-  ROR 2,X
-  ROR 1,X
-  ROR 0,X
+  LSR mt1+3
+  ROR mt1+2
+  ROR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
+  LDA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
   BEQ tof_done3
   INC fexp
   BRA ui4tof_loop
@@ -271,48 +295,63 @@ tof_done3:
 __i8tof:
   PHA
   LDA 0,X       // Check for zero
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
-  ORA 4,X
-  ORA 5,X
-  ORA 6,X
-  ORA 7,X
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  LDA 2,X
+  STA mt1+2
+  LDA 3,X
+  STA mt1+3
+  LDA 4,X
+  STA mt1+4
+  LDA 5,X
+  STA mt1+5
+  LDA 6,X
+  STA mt1+6
+  LDA 7,X
+  STA mt1+7
+  ORA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
+  ORA mt1+4
+  ORA mt1+5
+  ORA mt1+6
   BNE i8tof_nonzero
   JMP __fzero
 i8tof_nonzero:
 
   // Not zero, check for negative.
   STZ fsign
-  LDA 3,X       // Top byte of source
+  LDA mt1+6       // Top byte of source
   BPL pos_i8tof
   LDA #0x80
   STA fsign      // Sign bit set.
   SEC
   LDA #0        // Negate int value.
-  SBC 0,X
-  STA 0,X
+  SBC mt1+1
+  STA mt1+0
   LDA #0
-  SBC 1,X
-  STA 1,X
+  SBC mt1+1
+  STA mt1+1
   LDA #0
-  SBC 2,X
-  STA 2,X
+  SBC mt1+2
+  STA mt1+2
   LDA #0
-  SBC 3,X
-  STA 3,X
+  SBC mt1+3
+  STA mt1+3
   LDA #0
-  SBC 4,X
-  STA 4,X
+  SBC mt1+4
+  STA mt1+4
   LDA #0
-  SBC 5,X
-  STA 5,X
+  SBC mt1+5
+  STA mt1+5
   LDA #0
-  SBC 6,X
-  STA 6,X
+  SBC mt1+6
+  STA mt1+6
   LDA #0
-  SBC 7,X
-  STA 7,X
+  SBC mt1+7
+  STA mt1+7
 pos_i8tof:
   LDA #127        // Set exponent to bias value.
   STA fexp
@@ -325,37 +364,53 @@ i8tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 7,X
-  ROR 6,X
-  ROR 5,X
-  ROR 4,X
-  ROR 3,X
-  ROR 2,X
-  ROR 1,X
-  ROR 0,X
+  LSR mt1+7
+  ROR mt1+6
+  ROR mt1+5
+  ROR mt1+4
+  ROR mt1+3
+  ROR mt1+2
+  ROR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
-  ORA 4,X
-  ORA 5,X
-  ORA 6,X
-  ORA 7,X
+  LDA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
+  ORA mt1+4
+  ORA mt1+5
+  ORA mt1+6
+  ORA mt1+7
   BEQ tof_done4
   INC fexp
   BRA i8tof_loop
 
 __ui8tof:
   PHA
-  LDA 0,X       // Check for zero
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
-  ORA 4,X
-  ORA 5,X
-  ORA 6,X
+  LDA 0,X       // Check for zero  LDA 0,X       // Check for zero
+  STA mt1+0
+  LDA 1,X
+  STA mt1+1
+  LDA 2,X
+  STA mt1+2
+  LDA 3,X
+  STA mt1+3
+  LDA 4,X
+  STA mt1+4
+  LDA 5,X
+  STA mt1+5
+  LDA 6,X
+  STA mt1+6
+  LDA 7,X
+  STA mt1+7
+  ORA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
+  ORA mt1+4
+  ORA mt1+5
+  ORA mt1+6
   ORA 7,X
   BNE ui8tof_nonzero
   JMP __fzero
@@ -374,24 +429,24 @@ ui8tof_loop:
   ROR fmantissa+1
 
   // Shift int with low bit in C.
-  LSR 7,X
-  ROR 6,X
-  ROR 5,X
-  ROR 4,X
-  ROR 3,X
-  ROR 2,X
-  ROR 1,X
-  ROR 0,X
+  LSR mt1+7
+  ROR mt1+6
+  ROR mt1+5
+  ROR mt1+4
+  ROR mt1+3
+  ROR mt1+2
+  ROR mt1+1
+  ROR mt1+0
 
   // All bits shifted out?
-  LDA 0,X
-  ORA 1,X
-  ORA 2,X
-  ORA 3,X
-  ORA 4,X
-  ORA 5,X
-  ORA 6,X
-  ORA 7,X
+  LDA mt1+0
+  ORA mt1+1
+  ORA mt1+2
+  ORA mt1+3
+  ORA mt1+4
+  ORA mt1+5
+  ORA mt1+6
+  ORA mt1+7
   BEQ tof_done4
   INC fexp
   BRA ui8tof_loop

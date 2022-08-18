@@ -35,7 +35,7 @@ static void TrapAllocRegister(W65C02RegisterAllocator* allocator, W65C02Register
   W65C02RegisterType type = k6502RegTypeB;
   int num = 6;
   if (reg->type == type && reg->base.num == num) {
-    DumpRegisters(allocator);
+  //  DumpRegisters(allocator);
     Trap();
   }
 }
