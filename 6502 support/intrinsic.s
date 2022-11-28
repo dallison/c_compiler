@@ -25,6 +25,7 @@
 .global __builtin_toupper
 .global __builtin_memcpy
 .global __builtin_memset
+.global __builtin_memcmp
 .global __builtin_va_arg2
 .global __builtin_va_arg4
 .global __builtin_va_arg8
@@ -261,6 +262,60 @@ memset_small_loop:
   BRA memset_small_loop
 end_memset:
   RTS
+
+// __mem_dest (arg 0)
+// __mem_src (arg 1)
+// __mem_size bytes
+// Result in X,Y
+__builtin_memcmp:
+  LDA __mem_size+1
+  BEQ memcmp_small
+
+  LDY #0
+memcmp_large_loop:
+  LDA __mem__size
+  ORA __mem_size+1
+  BEQ memcmp_end1
+  SEC
+  LDA (__mem_dest),Y
+  SBC (__mem_src),Y
+  BNE memcmp_end
+  INC __mem_dest
+  BNE mcmp1
+  INC __mem_dest+1
+mcmp1:
+  INC __mem_src
+  BNE mcmp2
+  INC __mem_src+1
+mcmp2:
+  DEC __mem_size
+  BPL memcmp_large_loop
+  DEC __mem_size+1
+  BRA memcmp_large_loop
+
+memcmp_small:
+  LDY #0
+memcmp_loop:
+  CPY __mem_size
+  BEQ memcmp_end1
+  SEC
+  LDA (__mem_dest), Y
+  SBC (__mem_src), Y
+  BNE memcmp_end
+  INY
+  BRA memcmp_loop
+memcmp_end1:
+  LDA #0
+memcmp_end:
+  TAX               // Low byte of result in X
+  BPL memcmp_end2
+  LDY #255
+  RTS
+memcmp_end2:
+  LDY #0
+  RTS
+
+
 
 // Input:
 // __mem_src,+1: address of va_list

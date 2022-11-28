@@ -92,6 +92,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case W65C02_OP(xvarreg):
     case W65C02_OP(fvarreg):
     case W65C02_OP(dvarreg):
+    case W65C02_OP(literalrefX):
       return false;
     default:
       break;
@@ -183,9 +184,13 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
       offset = (int)TargetIntValue(inst->operand[1]);
       fprintf(fp, "%s+%d", TargetSymbolName(((TargetSymbol*)operand)->symbol, buf, sizeof(buf)),  offset);
       break;
-    case kAddrModeAbsoluteSymbolIndexed:
+    case kAddrModeAbsoluteSymbolIndexedY:
       offset = (int)TargetIntValue(inst->operand[1]);
       fprintf(fp, "%s+%d, Y", TargetSymbolName(((TargetSymbol*)operand)->symbol, buf, sizeof(buf)),  offset);
+      break;
+    case kAddrModeAbsoluteSymbolIndexedX:
+      offset = (int)TargetIntValue(inst->operand[1]);
+      fprintf(fp, "%s+%d, X", TargetSymbolName(((TargetSymbol*)operand)->symbol, buf, sizeof(buf)),  offset);
       break;
     case kAddrModeImplied:
       break;
@@ -258,6 +263,15 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
       break;
     case kAddrModeAbsoluteIndexedX:
       break;
+    case kAddrModeLiteralIndexedX: {
+      assert(operand->opcode == W65C02_OP(literalrefX));
+      TargetConstant* literal = (TargetConstant*)operand->operand[0];
+      Literal* lit = CompilerFindLiteral(literal->literal_id);
+      assert(lit != NULL);
+      const char* label = lit->type == kLiteralBuffer ? "lit" : "str";
+      fprintf(fp, ".%s.%d, X", label, literal->literal_id);
+      break;
+    }
     case kAddrModeZeroPageIndexedX:
       assert(reg != NULL);
       offset = (int)TargetIntValue(inst->operand[1]);
@@ -278,6 +292,9 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
 // Main instruction printer.
 static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
+  if ((inst->flags & k6502DontEmit) != 0) {
+    return;
+  }
   const bool trace = false;     // Print IR instructions.
   const bool show_id = true;    // Show IR instruction id in output.
   const bool chkaddr = false;   // Set to true to check instruction addresses.
@@ -344,6 +361,18 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
    break;
  }
 
+    case W65C02_OP(stringliteralref): {
+      TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
+      Literal* lit = CompilerFindLiteral(literal->literal_id);
+      assert(lit != NULL);
+      const char* label = "str";
+      fprintf(fp, "\tldx         #%%lo(.%s.%d)\n", label,
+              literal->literal_id);
+      fprintf(fp, "\tldy         #%%hi(.%s.%d)\n", label,
+               literal->literal_id);
+      break;
+    }
+      
     case W65C02_OP(load_result): {
       // X,Y = offset from fp to result address which is frame_size + 3 - 2
       int offset = FrameSize(emitter, false) + 1;

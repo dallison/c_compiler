@@ -29,8 +29,9 @@ typedef enum {
   kAddrModeZeroPageAbsolute,   // Zero page (non register)
   kAddrModeRelative,           // PC relative (branches)
   kAddrModeAbsolute,           // Address (jmp, jsr)
-  kAddrModeAbsoluteSymbol,     // Absolute address lda %lo(symbol)
-  kAddrModeAbsoluteSymbolIndexed,     // Absolute address lda %lo(symbol), Y
+  kAddrModeAbsoluteSymbol,     // Absolute address
+  kAddrModeAbsoluteSymbolIndexedY,     // Absolute address, Y
+  kAddrModeAbsoluteSymbolIndexedX,     // Absolute address, X
   kAddrModeZeroPage,           // Single zero-page.
   kAddrModeIndirect,           // (address) only for JMP (a)
   kAddrModeAbsoluteIndexedX,    // addr,X
@@ -42,6 +43,7 @@ typedef enum {
   kAddrModeSymbolLo,          // symbol (absolute) LO
   kAddrModeSymbolHi,          // symbol (abosolute) HI
   kAddrModeSymbolAddr,        // LO or HI depending on second operand
+  kAddrModeLiteralIndexedX,     // literal, X
   kAddrModeInvalid,
 } AddressingMode;
 
@@ -66,6 +68,9 @@ typedef enum {
 // This a real procedure call instruction.
 #define k6502ProcedureCall (1 << 27)
 
+// This instruction generates flags.
+#define k6502GeneratesFlags (1 << 27)
+
 // This comparison was generated.  Used to in conditional branch.
 #define k6502ComparisonGenerated (1 << 28)
 
@@ -74,6 +79,10 @@ typedef enum {
 
 // Need address of symbol, not value.
 #define k6502NeedAddress (1 << 30)
+
+// Don't emit this instruction.  Used when we can't delete the instruction
+// but need it not to be emitted (for example, a CMP #0).
+#define k6502DontEmit (1 << 31)
 
 // These opcodes are an extension of the TargetOpcode enumeration.
 typedef enum {
@@ -148,6 +157,9 @@ typedef enum {
   W65C02_OP(literalreflo),   // A = literal lo
   W65C02_OP(literalrefhi),   // A = literal hi
   W65C02_OP(literalref),   // X,Y = addr of literal
+  W65C02_OP(stringliteralref),   // X,Y = addr of literal
+  W65C02_OP(literalrefX),     // literal,X
+
   W65C02_OP(enter),
   W65C02_OP(leave),
   W65C02_OP(enter_leaf),
@@ -348,6 +360,7 @@ typedef struct {
 #define kIntrinsicToupper 14
 #define kIntrinsicMemcpy 15
 #define kIntrinsicMemset 16
+#define kIntrinsicMemcmp 17
 
 
 
@@ -506,6 +519,8 @@ typedef struct W65C02Generator {
   Symbol* incsp0;
   Symbol* pushmem1;   // 1 byte size.
   Symbol* pushmem2;   // 2 byte size.
+  Symbol* pushmem_xy1;   // 1 byte size, src in Y,X
+  Symbol* pushmem_xy2;   // 2 byte size, src in Y,X
   Symbol* copymem1;   // 1 byte size.
   Symbol* copymem2;   // 2 byte size.
   Symbol* zeromem1;   // 1 byte size.

@@ -6,10 +6,11 @@
 //  Copyright © 2021 David Allison. All rights reserved.
 //
 
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stddef.h>
 
 #if defined(__6502__)
 
@@ -26,10 +27,10 @@ extern void Free(void* p);
 #endif
 
 void* Calloc(size_t n, size_t m) {
-  void* p = Malloc(n*m);
+  void* p = Malloc(n * m);
   if (p == NULL) {
     return NULL;
   }
-  memset(p, 0, n*m);
+  memset(p, 0, n * m);
   return p;
 }

@@ -16,6 +16,8 @@
 .global __pull8
 .global __pushmem1
 .global __pushmem2
+.global __pushmem_xy1
+.global __pushmem_xy2
 .global __copymem1
 .global __copymem2
 .global __zeromem1
@@ -75,17 +77,17 @@
 .global __pushx2
 .global __pushx3
 
-// X: number of bytes to increment sp by
+// t0: number of bytes to increment sp by
 __incsp:
-  LDY #0
+  STZ __t1
 
-// X,Y: number of bytes to increment sp by
+// t0,t1: number of bytes to increment sp by
 __incsp0:
-  TXA
+  LDA __t0
   CLC
   ADC __sp
   STA __sp
-  TYA
+  LDA __t1
   ADC __sp+1
   STA __sp+1
   RTS
@@ -115,7 +117,8 @@ __decsp2:
   RTS
 
 __incsp2:
-  LDX #2
+  LDA #2
+  STA __t0
   BRA __incsp
 
 __decsp4:
@@ -129,12 +132,14 @@ __decsp4:
   RTS
 
 __incsp4:
-  LDX #4
+  LDA #4
+  STA __t0
   BRA __incsp
 
 
 __incsp6:
-  LDX #6
+  LDA #6
+  STA __t0
   BRA __incsp
 
 
@@ -149,23 +154,28 @@ __decsp8:
   RTS
 
 __incsp8:
-  LDX #8
+  LDA #8
+  STA __t0
   BRA __incsp
 
 __incsp10:
-  LDX #10
+  LDA #10
+  STA __t0
   BRA __incsp
 
 __incsp12:
-  LDX #12
+  LDA #12
+  STA __t0
   JMP __incsp
 
 __incsp14:
-  LDX #14
+  LDA #14
+  STA __t0
   BRA __incsp
 
 __incsp16:
-  LDX #16
+  LDA #16
+  STA __t0
   BRA __incsp
 
 
@@ -413,6 +423,10 @@ pl8l:
   BNE pl8l
   JMP __incsp8
 
+__pushmem_xy1:
+  STX __mem_src
+  STY __mem_src+1
+  
 __pushmem1:
   // Decrement sp by __mem_size (1 byte)
   SEC
@@ -436,6 +450,10 @@ pm1l:
 end_pm1:
   RTS
 
+__pushmem_xy2:
+  STX __mem_src
+  STY __mem_src+1
+  
 __pushmem2:
   // Decrement sp by __mem_size and store sp
   SEC

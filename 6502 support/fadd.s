@@ -74,31 +74,48 @@ fadd_A_smaller:
 
 // Exponents are the same.  Add mantissas, putting result in fmantissa
 fadd_same_exp:
+  // Negate the numbers is sign is set.
   LDA fsignA
-  STA fsign
-  EOR fsignB
-  BEQ fadd_same_sign
-
-  // Signs are different, subtract mantissas.
+  BPL fadd_a_pos
   SEC
-  LDA fmanA+0
-  SBC fmanB+0
-  STA fmantissa+0
-  LDA fmanA+1
-  SBC fmanB+1
-  STA fmantissa+1
-  LDA fmanA+2
-  SBC fmanB+2
-  STA fmantissa+2
-  LDA fmanA+3
-  SBC fmanB+3
-  STA fmantissa+3
-  LDA fmanA+4
-  SBC fmanB+4
-  STA fmantissa+4
-  BRA fadd_rpos
+  LDA #0
+  SBC fmanA+0
+  STA fmanA+0
+  LDA #0
+  SBC fmanA+1
+  STA fmanA+1
+  LDA #0
+  SBC fmanA+2
+  STA fmanA+2
+  LDA #0
+  SBC fmanA+3
+  STA fmanA+3
+  LDA #0
+  SBC fmanA+4
+  STA fmanA+4
 
-fadd_same_sign:
+fadd_a_pos:
+  LDA fsignB
+  BPL fadd_b_pos
+  SEC
+  LDA #0
+  SBC fmanB+0
+  STA fmanB+0
+  LDA #0
+  SBC fmanB+1
+  STA fmanB+1
+  LDA #0
+  SBC fmanB+2
+  STA fmanB+2
+  LDA #0
+  SBC fmanB+3
+  STA fmanB+3
+  LDA #0
+  SBC fmanB+4
+  STA fmanB+4
+
+fadd_b_pos:
+  // Add the mantissas.
   CLC
   LDA fmanA+0
   ADC fmanB+0
@@ -119,8 +136,7 @@ fadd_same_sign:
 fadd_rpos:
   BPL fadd_pos_result
   // Mantissa is negative.
-  LDA fsign
-  EOR #0x80
+  LDA #0x80
   STA fsign
   JSR __fnegmantissa
 
@@ -130,6 +146,7 @@ fadd_pos_result:
   BEQ fadd_res_0
 
   JSR __fnormalize
+  JSR __fround
   PLX
   JMP __fassemble
 

@@ -14,13 +14,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#if 0
+#if 1
 #define STATIC static
 #else
 #define STATIC 
 #endif
 
-#if 1
+#if 0
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
 void Break() {}
 #endif
@@ -68,10 +68,10 @@ typedef struct {
 // Function to write a string with length to the entity in data.
 typedef int (*Writer)(const char* s, size_t len, void* data);
 
-#if 1
 STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->field_width = kWidthDefault;
   format->precision = kWidthDefault;
+  format->left_justify = false;
   format->fill_zero = false;
   format->modifier = kModNone;
   
@@ -205,39 +205,6 @@ STATIC void FixFloatPrecision(ConversionFormat* fmt, size_t max) {
   }
 }
 
-// buf is guaranteed to be long enough.  Returns pointer to start of
-// decimal output in buffer.
-STATIC char* ConvertDecimalInt(unsigned int v, char* buf, int buflen) {
-  char* p = &buf[buflen-1];
-  if (v == 0) {
-    *p = '0';
-    return p;
-  }
-  while (v != 0) {
-    char ch = (v % 10) + '0';
-    *p-- = ch;
-    v /= 10;
-  }
-  // i is one less than the first char.
-  return p+1;
-}
-
-STATIC char* ConvertDecimalLong(unsigned long v, char* buf, int buflen) {
-  char* p = &buf[buflen-1];
-  if (v == 0) {
-    *p = '0';
-    return p;
-  }
-  while (v != 0) {
-    char ch = (v % 10) + '0';
-    *p-- = ch;
-    v /= 10;
-  }
-  // i is one less than the first char.
-  return p+1;
-}
-
-
 STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf, int buflen) {
   char* p = &buf[buflen-1];
   if (v == 0) {
@@ -245,53 +212,15 @@ STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf, int buflen)
     return p;
   }
   while (v != 0) {
-    char ch = (v % 10) + '0';
+    lldiv_t qr = lldiv(v, 10);
+    char ch = qr.rem + '0';
     *p-- = ch;
-    v /= 10;
+    v = qr.quot;
   }
   // i is one less than the first char.
   return p+1;
 }
 
-STATIC char* ConvertHexInt(unsigned int v, char* buf, int buflen, bool upper) {
-  char* p = &buf[buflen-1];
-  if (v == 0) {
-    *p = '0';
-    return p;
-  }
-  while (v != 0) {
-    uint8_t n = v & 0xf;
-    char ch;
-    if (n > 9) {
-      ch = n - 10 + (upper ? 'A' : 'a');
-    } else {
-      ch = n + '0';
-    }
-    *p-- = ch;
-    v >>= 4;
-  }
-  return p+1;
-}
-
-STATIC char* ConvertHexLong(unsigned long v, char* buf, int buflen, bool upper) {
-  char* p = &buf[buflen-1];
-  if (v == 0) {
-    *p = '0';
-    return p;
-  }
-  while (v != 0) {
-    uint8_t n = v & 0xf;
-    char ch;
-    if (n > 9) {
-      ch = n - 10 + (upper ? 'A' : 'a');
-    } else {
-      ch = n + '0';
-    }
-    *p-- = ch;
-    v >>= 4;
-  }
-  return p+1;
-}
 
 STATIC char* ConvertHexLongLong(unsigned long long v, char* buf, int buflen, bool upper) {
   char* p = &buf[buflen-1];
@@ -343,6 +272,7 @@ STATIC char* ConvertHexPointer(void* ptr, char* buf, int buflen, bool upper) {
   return p;
 }
 
+
 static const char spaces[] = "        ";
 static const char zeroes[] = "00000000";
 
@@ -384,8 +314,6 @@ STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
   return false;
 }
 
-
-#endif
 STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
                           const char* s, size_t len, bool negative) {
   int result = 0;
@@ -429,8 +357,6 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   const char* p = format;
   int count = 0;
   long long value_ll;
-  long value_l;
-  int value_i;
   const char* value_s;
   char value_c;
   double value_f;
@@ -441,8 +367,6 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
       p++;
       ConversionFormat fmt = {0};
       p = CollectFormat(p, &fmt);
-      bool l_convert = false;
-      bool ll_convert = false;
       bool negative = false;
       bool is_unsigned = false;
       
@@ -458,41 +382,29 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
         case 'i':
         case 'x':
         case 'X':
-          is_unsigned = *p == 'u';
-          if (fmt.modifier == kModLong) {
-             value_l = va_arg(ap, long);
-            l_convert = true;
-            if (!is_unsigned && value_l < 0) {
-              negative = true;
-              value_l = -value_l;
-            }
-           } else if (fmt.modifier == kModLongLong) {
-             value_ll = va_arg(ap, long long);
-             ll_convert = true;
-            if (!is_unsigned && value_ll < 0) {
-              negative = true;
-              value_ll = -value_ll;
-            }
-          } else if (fmt.modifier == kModChar) {
-            value_i = (int)va_arg(ap, int) & 0xff;
-            if (!is_unsigned && value_i < 0) {
-              negative = true;
-              value_i = -value_i;
-            }
-          } else if (fmt.modifier == kModShort) {
-            value_i = (int)va_arg(ap, short)& 0xffff;
-            if (!is_unsigned && value_i < 0) {
-              negative = true;
-              value_i = -value_i;
-            }
-          } else {
-            value_i = va_arg(ap, int);
-            if (!is_unsigned && value_i < 0) {
-              negative = true;
-              value_i = -value_i;
-            }
+          is_unsigned = *p == 'u' || *p == 'x' || *p == 'X';
+          switch (fmt.modifier) {
+            case kModLong:
+              value_ll = va_arg(ap, long);
+              break;
+            case kModLongLong:
+              value_ll = va_arg(ap, long long);
+              break;
+           case kModChar:
+              value_ll = (int)va_arg(ap, int) & 0xff;
+              break;
+           case kModShort:
+              value_ll = (int)va_arg(ap, short) & 0xffff;
+              break;
+           default:
+              value_ll = (int)va_arg(ap, int);
+              break;
+           }
+          if (!is_unsigned && value_ll < 0) {
+            negative = true;
+            value_ll = -value_ll;
           }
-          break;
+         break;
         case 'p':
           value_p = va_arg(ap, void*);
           break;
@@ -517,13 +429,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
         case 'i':
         case 'u':
           p++;
-          if (l_convert) {
-            v = ConvertDecimalLong(value_l, buf, sizeof(buf));
-          } else if (ll_convert) {
-            v = ConvertDecimalLongLong(value_ll, buf, sizeof(buf));
-          } else {
-             v = ConvertDecimalInt(value_i, buf, sizeof(buf));
-          }
+          v = ConvertDecimalLongLong(value_ll, buf, sizeof(buf));
           len = end - v;
           count += WriteFormatted(writer, data, &fmt, v, len, !is_unsigned && negative);
           break;
@@ -531,13 +437,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
         case 'X': {
           bool upper = *p == 'X';
           p++;
-          if (l_convert) {
-             v = ConvertHexLong(value_l, buf, sizeof(buf), upper);
-           } else if (ll_convert) {
-             v = ConvertHexLongLong(value_ll, buf, sizeof(buf), upper);
-           } else {
-              v = ConvertHexInt(value_i, buf, sizeof(buf), upper);
-           }
+          v = ConvertHexLongLong(value_ll, buf, sizeof(buf), upper);
           len = end - v;
           count += WriteFormatted(writer, data, &fmt, v, len, false);
           break;

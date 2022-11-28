@@ -67,7 +67,11 @@ const char* W65C02OpcodeName(int op) {
     case W65C02_OP(literalrefhi):
       return "literalrefhi";
       case W65C02_OP(literalref):
-        return "literalrefl";
+        return "literalref";
+    case W65C02_OP(stringliteralref):
+      return "stringliteralref";
+  case W65C02_OP(literalrefX):
+      return "literalrefX";
 
     case W65C02_OP(enter_leaf):
       return "enter_leaf";
@@ -587,6 +591,8 @@ void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   RUNTIME_SYM(incsp0);
   RUNTIME_SYM(pushmem1);
   RUNTIME_SYM(pushmem2);
+  RUNTIME_SYM(pushmem_xy1);
+  RUNTIME_SYM(pushmem_xy2);
   RUNTIME_SYM(copymem1);
   RUNTIME_SYM(copymem2);
   RUNTIME_SYM(zeromem1);
@@ -742,6 +748,7 @@ MapKeyValue kv = {.key = #name, .value = CreatePointerIntrinsic(g, "__builtin_" 
   PLAIN_INTRINSIC(toupper, Int);
   POINTER_INTRINSIC(memcpy, Void);
   POINTER_INTRINSIC(memset, Void);
+  PLAIN_INTRINSIC(memcmp, Int);
 
   g->struct_return_inst = NULL;
   VectorInit(&g->branches);
@@ -900,6 +907,12 @@ static TargetInstruction* Zero(W65C02Generator* g) {
 
 static TargetInstruction* One(W65C02Generator* g) {
   return GetIntConstant(g, NULL, kTargetType8Bit, 1);
+}
+
+
+static void AddLiteral(W65C02Generator* g, TargetConstant* con, const void* data,
+                       size_t length) {
+  con->literal_id = CompilerAddBufferLiteral(data, length);
 }
 
 static int Sizeof(TypeRecord* type) {
@@ -1064,7 +1077,9 @@ static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* 
         && !TypeIsArray(dest->type) && !TypeIsStructOrUnion(dest->type)
         && (!IRIsExpression(dest) || IRIsVariable(dest))) {
       if (node->inputs.length == 2 && src->outputs.length == 1 &&
-          src->dest == NULL && node->block == src->block &&
+          src->dest == NULL && BasicBlockDominatedBy(gen,
+                                                    src->block,
+                                                    node->block) &&
           (node->block == dest->block || IRIsVariable(dest))) {
         src->dest = dest;
         IRNode* next = IRNext(node);
@@ -1094,9 +1109,16 @@ static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* 
         }
       }
     }
-//  } else if (node->opcode == IR_OP(rmovi) || node->opcode == IR_OP(rmova) ||
-//             node->opcode == IR_OP(rmovf) ||  node->opcode == IR_OP(rmovd)) {
-//    // We can eliminate rmov by assigning the dest of the src.
+//  } else if (node->opcode == IR_OP(movi) || node->opcode == IR_OP(mova) ||
+//             node->opcode == IR_OP(movf) ||  node->opcode == IR_OP(movd)) {
+//    // We can eliminate a mov if it has only one output.
+//    if (node->outputs.length == 1) {
+//      IRNode* next = IRNext(node);
+//      BasicBlockRemoveInstruction(gen, node->block, node);
+//      *changed = true;
+//      return next;
+//    }
+    // This was for rmov.
 //    IRNode* dest = node->inputs.value.p[0];
 //    IRNode* src = node->inputs.value.p[1];
 //    if (!IRIsConst(src) && !IRIsVariable(src) && src->opcode != IR_OP(cast) &&
@@ -1119,21 +1141,21 @@ static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* 
   return IRNext(node);
 }
 
-static void Operate(W65C02Generator* g, W65C02Opcode op, TargetInstruction* src,
+static TargetInstruction* Operate(W65C02Generator* g, W65C02Opcode op, TargetInstruction* src,
                     int index) {
   AddressingMode mode = GetAddrMode(src);
   if (Is65c02() && mode == kAddrModeIndirectIndexed && index == 0) {
     // An index of 0 can use a kAddrModeIndirect: lda (xxx)
     mode = kAddrModeIndirect;
   }
-  Emit(g, NewInstruction2(
+  return Emit(g, NewInstruction2(
               op, src, ByteConst(g, index), mode));
 }
 
 // Operation instructions
 #define INST(op)                                                         \
-  static void op(W65C02Generator* g, TargetInstruction* src, int index) { \
-    Operate(g, W65C02_OP(op), src, index);                                \
+  static TargetInstruction* op(W65C02Generator* g, TargetInstruction* src, int index) { \
+    return Operate(g, W65C02_OP(op), src, index);                                \
   }
 
 INST(lda)
@@ -1166,6 +1188,7 @@ INST(adc)
 INST(sbc)
 INST(cmp)
 INST(cpy)
+INST(cpx)
 
 #undef INST
 
@@ -1257,6 +1280,7 @@ static void SetIndexReg(W65C02Generator* g, TargetInstruction* src,
     if (GetAddrMode(src) == kAddrModeIndirect ||
         GetAddrMode(dest) == kAddrModeIndirect) {
       ldyi(g, index);
+      return;
     }
   }
   if (GetAddrMode(src) == kAddrModeIndirectIndexed ||
@@ -1298,178 +1322,385 @@ static void SetIndexRegDown(W65C02Generator* g, TargetInstruction* src,
   }
 }
 
+// Inline copy with no indexing.
+static void InlineCopy(W65C02Generator* g, TargetInstruction* to,
+                       TargetInstruction* from, int size, int to_index,
+                       int from_index) {
+  for (int i = 0; i < size; i++) {
+    SetIndexReg(g, from, from, from_index);
+    lda(g, from, from_index++);
+    SetIndexReg(g, to, to, to_index);
+    sta(g, to, to_index++);
+  }
+}
+
+static void InlineCopyToIndirectIndexed(W65C02Generator* g, TargetInstruction* to,
+                                        TargetInstruction* from, int size, int to_index,
+                                        int from_index, AddressingMode from_mode) {
+  AddressingMode old_to = GetAddrMode(to);
+  AddressingMode to_mode = old_to;
+  int j = to_index;
+  int k = from_index;
+  if (Is65c02() && j == 0) {
+    to_mode = kAddrModeIndirect;
+  }
+  for (int i = 0; i < size; i++, j++, k++) {
+    SetAddrMode(to, to_mode);
+    SetIndexReg(g, from, from, k);
+    lda(g, from, k);
+    SetIndexReg(g, to, to, j);
+    sta(g, to, j);
+    to_mode = kAddrModeIndirectIndexed;
+  }
+  SetAddrMode(to, old_to);
+}
+
+// Loop to copy from:
+// 1. (addr),Y (or addr,Y) to zp,X.
+// 2. addr,X to (addr),Y or addr,Y
+// if to_index is 0 the loop runs backwards from from_start_index + size - 1
+// to 0 using X
+// If to_index is not zero it runs forwards with a cpx at the end.
+static void CopyWithLoopXY(W65C02Generator* g, TargetInstruction* to,
+                         TargetInstruction* from, int size, int to_index,
+                         int from_index, AddressingMode to_mode, AddressingMode from_mode) {
+  AddressingMode old_to = GetAddrMode(to);
+  AddressingMode old_from = GetAddrMode(from);
+
+  SetAddrMode(to, to_mode);
+  SetAddrMode(from, from_mode);
+
+  ldyi(g, size + from_index - 1);
+  if (to_index == 0) {
+    ldxi(g, size + to_index - 1);
+  } else {
+    ldxi(g, to_index);
+  }
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  lda(g, from, -1);
+  sta(g, to, -1);
+  dey(g);
+  if (to_index == 0) {
+    dex(g);
+    EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+  } else {
+    inx(g);
+    cpxi(g, size+to_index);
+    EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  }
+  
+  SetAddrMode(to, old_to);
+  SetAddrMode(from, old_from);
+}
+
+
+// Copy from addr,X to (addr),Y or addr,Y.
+//   LDY #to_index+size-1
+//   LDX #from_index+size-1
+// loop:
+//   LDA from,X
+//   STA (to),Y
+//   DEY
+//   DEX
+//   CPX #from_index
+//   BPL loop
+static void CopyWithLoopYX(W65C02Generator* g, TargetInstruction* to,
+                         TargetInstruction* from, int size, int to_index,
+                         int from_index, AddressingMode to_mode, AddressingMode from_mode) {
+  AddressingMode old_to = GetAddrMode(to);
+  AddressingMode old_from = GetAddrMode(from);
+
+  SetAddrMode(to, to_mode);
+  SetAddrMode(from, from_mode);
+
+  ldyi(g, size + to_index - 1);
+  ldxi(g, size + from_index - 1);
+
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  lda(g, from, -1);
+  sta(g, to, -1);
+  dey(g);
+  dex(g);
+  if (from_index != 0) {
+    cpxi(g, from_index);
+  }
+  EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+  
+  SetAddrMode(to, old_to);
+  SetAddrMode(from, old_from);
+}
+
+// Copy with loop using X as index for both to and from.
+static void CopyWithLoopX(W65C02Generator* g, TargetInstruction* to,
+                         TargetInstruction* from, int size, int to_index,
+                         int from_index, AddressingMode to_mode, AddressingMode from_mode) {
+  AddressingMode old_to = GetAddrMode(to);
+  AddressingMode old_from = GetAddrMode(from);
+
+  SetAddrMode(to, to_mode);
+  SetAddrMode(from, from_mode);
+
+  ldxi(g, size + to_index - 1);
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  lda(g, from, -1);
+  sta(g, to, -1);
+  dex(g);
+  EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+  
+  SetAddrMode(to, old_to);
+  SetAddrMode(from, old_from);
+}
+
+static TargetInstruction* GetImmediateLiteral(W65C02Generator* g, TargetInstruction* from) {
+  TargetConstant* c = (TargetConstant*)from;
+  Literal* lit = CompilerFindLiteral(c->literal_id);
+  assert(lit != NULL);
+  lit->disabled = false;
+  // Copy from literal into zero page.  Uses literal,X
+  return Emit(g, NewInstruction1(
+              W65C02_OP(literalrefX),
+              &c->base,
+              kAddrModeImplied));
+}
+
+// Copy from memory to absolute acddress.
+static void CopyToAbsolute(W65C02Generator* g, TargetInstruction* to,
+                           TargetInstruction* from, int to_start_index,
+                           int from_start_index,
+                           int size, AddressingMode to_mode,
+                           AddressingMode from_mode) {
+
+  AddressingMode loop_to_mode = to_mode;
+  switch (to_mode) {
+    case kAddrModeZeroPage:
+      loop_to_mode = kAddrModeZeroPageIndexedX;
+      break;
+    case kAddrModeAbsoluteSymbol:
+      loop_to_mode = kAddrModeAbsoluteSymbolIndexedY;
+      break;
+    default:
+      abort();
+      
+  }
+  AddressingMode loop_from_mode = from_mode;
+  switch (from_mode) {
+    case kAddrModeImmediate:
+      loop_from_mode = kAddrModeLiteralIndexedX;
+      break;
+    case kAddrModeZeroPage:
+      loop_from_mode = kAddrModeZeroPageIndexedX;
+      break;
+    case kAddrModeSymbolAddr:
+      break;
+    case kAddrModeAbsoluteSymbol:
+      loop_from_mode = kAddrModeAbsoluteSymbolIndexedY;
+      break;
+    case kAddrModeIndirectIndexed:   // (zp),Y
+      break;
+    default:
+      abort();
+  }
+  
+  switch (from_mode) {
+    case kAddrModeIndirectIndexed: {  // (zp),Y
+      if (size > 2) {
+        CopyWithLoopXY(g, to, from, size, to_start_index, from_start_index, loop_to_mode, from_mode);
+      } else {
+        // Inline copy from (addr),Y to absolute.
+        int j = to_start_index;
+        int k = from_start_index;
+        if (Is65c02() && k == 0) {
+          from_mode = kAddrModeIndirect;
+        }
+        for (int i = 0; i < size; i++, j++, k++) {
+          SetAddrMode(from, from_mode);
+          if (from_mode != kAddrModeIndirect) {
+            SetIndexReg(g, from, from, k);
+          }
+          lda(g, from, k);
+          sta(g, to, j);
+          from_mode = kAddrModeIndirectIndexed;
+        }
+      }
+      break;
+    }
+      
+    case kAddrModeSymbolAddr:
+      InlineCopy(g, to, from, size, to_start_index, from_start_index);
+      break;
+      
+    case kAddrModeAbsoluteSymbol:
+      if (size > 2) {
+        // Loop to copy from addr,Y to zp,X.
+         CopyWithLoopXY(g, to, from, size, to_start_index, from_start_index,
+                       loop_to_mode,loop_from_mode);
+      } else {
+        // Inline copy from addr,Y to absolute.
+        InlineCopy(g, to, from, size, to_start_index, from_start_index);
+      }
+     break;
+      
+    case kAddrModeImmediate:
+      // Copy from immediate into zero page.  More than 2 bytes are copied
+      // using a loop.  If non-zero, copy from literal for >2 bytes.
+      if (TargetIsZero(from)) {
+        if (size > 2) {
+          // Store 0 into zero page with an indexed X loop.
+          SetAddrMode(to, loop_to_mode);
+          if (to_start_index == 0) {
+            ldxi(g, size-1);
+            ldai(g, 0);
+            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+            sta(g, to, -1);     // There is no STZ zp,X
+            dex(g);
+            EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+          } else {
+            ldxi(g, to_start_index);
+            ldai(g, 0);
+            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+            sta(g, to, -1);     // There is no STZ zp,X
+            inx(g);
+            cpxi(g, to_start_index+size);
+            EmitResolvedBranch(g, W65C02_OP(bne), loop);
+          }
+        } else {
+          // Inline store.
+          for (int i = 0; i < size; i++) {
+            stz(g, to, i);
+          }
+        }
+        break;
+      }
+      if (size > 2) {
+        // 4 or 8 byte constant.  There is a literal for it.
+        from = GetImmediateLiteral(g, from);
+        CopyWithLoopX(g, to, from, size, to_start_index, 0,
+                      loop_to_mode, loop_from_mode);
+      } else {
+        InlineCopy(g, to, from, size, to_start_index, 0);
+      }
+      break;
+      
+    case kAddrModeZeroPage:
+      assert(from_start_index < size);
+      
+      if (size > 2) {
+        CopyWithLoopX(g, to, from, size, to_start_index,
+                      from_start_index, loop_to_mode, loop_from_mode);
+      } else {
+        InlineCopy(g, to, from, size, to_start_index, from_start_index);
+      }
+      break;
+    default:
+      abort();
+      break;
+  }
+}
+
+static void CopyToMemoryIndirectIndexed(W65C02Generator* g, TargetInstruction* to,
+                           TargetInstruction* from, int to_start_index,
+                         int from_start_index,
+                           int size,
+                         AddressingMode from_mode) {
+  switch (from_mode) {
+    case kAddrModeIndirectIndexed:
+      break;
+    case kAddrModeZeroPage:
+      assert(from_start_index < size);
+      // Fall through.
+      
+   case kAddrModeAbsoluteSymbol:
+      // Copying more than 1 byte to indirect is longer than a loop.
+      if (size > 2) {
+        CopyWithLoopYX(g, to, from, size, to_start_index, from_start_index,
+                       kAddrModeIndirectIndexed, kAddrModeZeroPageIndexedX);
+      } else {
+        // Inline copy from zero page to (addr),Y.
+        InlineCopyToIndirectIndexed(g, to, from, size, to_start_index, from_start_index,
+                                    from_mode);
+      }
+      break;
+      
+    case kAddrModeSymbolAddr:
+      InlineCopy(g, to, from, size, to_start_index, from_start_index);
+      break;
+      
+    case kAddrModeImmediate:
+      // Copy from immediate to (addr),Y.
+      if (TargetIsZero(from)) {
+        if (size > 1) {
+          // Store 0 into (addr),Y with an indexed Y loop.
+          if (to_start_index == 0) {
+            // Y goes from size-1 to 0.
+            ldyi(g, size-1);
+            ldai(g, 0);
+            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+            sta(g, to, -1);
+            dey(g);
+            EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+          } else {
+            // Y isn't zero-based.  Need to compare against size+start_index.
+            ldyi(g, to_start_index);
+            ldai(g, 0);
+            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+            sta(g, to, -1);
+            iny(g);
+            cpyi(g, size + to_start_index);
+            EmitResolvedBranch(g, W65C02_OP(bne), loop);
+          }
+        } else {
+          int j = to_start_index;
+          ldai(g, 0);
+          for (int i = 0; i < size; i++, j++) {
+            SetIndexReg(g, to, to, j);
+            sta(g, to, j);
+          }
+        }
+        break;
+      }
+      if (size > 2) {
+        // 4 or 8 byte constant.  There is a literal for it.
+        from = GetImmediateLiteral(g, from);
+        CopyWithLoopYX(g, to, from, size, 0, 0,
+                      kAddrModeIndirectIndexed, kAddrModeLiteralIndexedX);
+      } else {
+        InlineCopy(g, to, from, size, to_start_index, from_start_index);
+      }
+      break;
+    default:
+      abort();
+      break;
+  }
+}
+
 // Copy memory in the fewest bytes possible.
 static void Copy(W65C02Generator* g, TargetInstruction* to,
                  TargetInstruction* from, int from_start_index,
                  int to_start_index,
                  int size,
-                 AddressingMode from_mode,
-                 AddressingMode to_mode) {
+                 AddressingMode to_mode,
+                 AddressingMode from_mode) {
   AddReloadPoint(g, to);
   AddReloadPoint(g, from);
 
-  bool to_is_indirect = to_mode == kAddrModeIndirectIndexed || to_mode == kAddrModeIndirect;
-  bool from_is_indirect = from_mode == kAddrModeIndirectIndexed || from_mode == kAddrModeIndirect;
   AddressingMode old_to = GetAddrMode(to);
   AddressingMode old_from = GetAddrMode(from);
+  SetAddrMode(from, from_mode);
+  SetAddrMode(to, to_mode);
   
-  if (from_start_index == 0 && to_start_index == 0) {
-   // If the src is in zero page we can copy using Y as an index
-   // starting at the size-1.
-
-   // Copy from zero page to indirect
-   if (to_is_indirect && from_mode == kAddrModeZeroPage && size > 2) {
-     SetAddrMode(from, kAddrModeZeroPageIndexedY);
-     SetAddrMode(to, to_mode);
-     ldyi(g, size-1);
-     TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-     lda(g, from, -1);
-     sta(g, to, -1);
-     dey(g);
-     EmitResolvedBranch(g, W65C02_OP(bpl), loop);
-     SetAddrMode(to, old_to);
-     SetAddrMode(from, old_from);
-     return;
-   }
-    // Copy from indirect indexed to zero page
-   if (to_mode == kAddrModeZeroPage && from_is_indirect && size > 2) {
-     SetAddrMode(to, kAddrModeZeroPageIndexedY);
-     SetAddrMode(from, from_mode);
-     ldyi(g, size-1);
-     TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-     lda(g, from, -1);
-     sta(g, to, -1);
-     dey(g);
-     EmitResolvedBranch(g, W65C02_OP(bpl), loop);
-     SetAddrMode(to, old_to);
-     SetAddrMode(from, old_from);
-     return;
-   }
-  if (from_mode == kAddrModeImmediate && to_is_indirect) {
-     // From an immediate value.  Likely the value will contain multiple
-     // contiguous zeros.
-     if (TargetIsZero(from) && size > 2) {
-       // All zeros.
-       int to_index = -1;
-       if (to_mode == kAddrModeAbsoluteSymbolIndexed) {
-         SetAddrMode(to, to_mode);
-         to_index = 0;
-       } else {
-          SetAddrMode(to, to_is_indirect ? kAddrModeIndirectIndexed : kAddrModeZeroPageIndexedY);
-       }
-       // Writing zero:
-       ldyi(g, size-1);
-       ldai(g, 0);
-       TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-       sta(g, to, to_index);
-       dey(g);
-       EmitResolvedBranch(g, W65C02_OP(bpl), loop);
-       SetAddrMode(to, old_to);
-       SetAddrMode(from, old_from);
-       return;
-     }
-     if (size > 2) {
-       // Not all zeroes, find contiguous zeroes.
-       char bytes[8];
-       uint64_t imm_value = TargetIntValue(from);
-       for (int i = 0; i < size; i++) {
-         bytes[i] = (imm_value >> (i*8)) & 0xff;
-       }
-       int first_zero = -1;
-       int last_zero = -1;
-       for (int i = 0; i < size; i++) {
-         if (bytes[i] == 0) {
-           if (first_zero == -1) {
-             first_zero = i;
-           }
-         } else if (last_zero == -1) {
-           last_zero = i - 1;
-         }
-       }
-       if (first_zero != -1) {
-        if (last_zero == -1) {
-           last_zero = size;
-         }
-         SetAddrMode(to, kAddrModeIndirectIndexed);
-         for (int i = 0; i < size; i++) {
-           if (i >= first_zero && i <= last_zero) {
-             continue;
-           }
-          lda(g, from, i);
-          ldyi(g, i);
-          sta(g, to, 0);
-         }
-         // Now do a loop, setting the contiguous zeroes.
-         ldyi(g, first_zero);
-         ldai(g, 0);
-         TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-         sta(g, to, 1);
-         iny(g);
-         cpyi(g, last_zero);
-         EmitResolvedBranch(g, W65C02_OP(bne), loop);
-         SetAddrMode(to, old_to);
-         SetAddrMode(from, old_from);
-         return;
-       }
-     }
-   }
-    
-    // Copy from zero page to zero page.
-    if (!from_is_indirect && !to_is_indirect &&
-        to_mode == kAddrModeZeroPage && from_mode == kAddrModeZeroPage) {
-      if (size > 2) {
-        SetAddrMode(to, kAddrModeZeroPageIndexedX);
-        SetAddrMode(from, kAddrModeZeroPageIndexedX);
-        ldxi(g, size-1);
-        TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-        lda(g, from, -1);
-        sta(g, to, -1);
-        dex(g);
-        EmitResolvedBranch(g, W65C02_OP(bpl), loop);
-        SetAddrMode(to, old_to);
-        SetAddrMode(from, old_from);
-        return;
-      }
-      // Inline copy.
-      for (int i = 0; i < size; i++) {
-        lda(g, from, i);
-        sta(g, to, i);
-      }
-      return;
-    }
-  }
-  
-  
-  // Not possible to do as a loop, inline load/stores.
-  int j = to_start_index;
-  int k = from_start_index;
-  if (to_is_indirect && to_start_index == 0) {
-    to_mode = Is65c02() ? kAddrModeIndirect : kAddrModeIndirectIndexed;
-  }
-  if (from_is_indirect && from_start_index == 0) {
-    from_mode = Is65c02() ? kAddrModeIndirect : kAddrModeIndirectIndexed;
-  }
-
-  // Can't use indexed operations when the loop is expanded.
-  if (from_mode == kAddrModeAbsoluteSymbolIndexed) {
-    from_mode = kAddrModeAbsoluteSymbol;
-  }
-  if (to_mode == kAddrModeAbsoluteSymbolIndexed) {
-    to_mode = kAddrModeAbsoluteSymbol;
-  }
-  for (int i = 0; i < size; i++, j++, k++) {
-   SetAddrMode(to, to_mode);
-   SetAddrMode(from, from_mode);
-   SetIndexReg(g, from, from, k);
-   lda(g, from, k);
-    SetIndexReg(g, to, to, j);
-    sta(g, to, j);
-    if (to_is_indirect) {
-      to_mode = kAddrModeIndirectIndexed;
-    }
-    if (from_is_indirect) {
-      from_mode = kAddrModeIndirectIndexed;
-    }
+  switch (to_mode) {
+    case kAddrModeZeroPage:
+      assert(to_start_index < size);
+      // Fall through
+      
+    case kAddrModeAbsoluteSymbol:
+      CopyToAbsolute(g, to, from, to_start_index, from_start_index, size, to_mode, from_mode);
+      break;
+    case kAddrModeIndirectIndexed:
+      CopyToMemoryIndirectIndexed(g, to, from, to_start_index, from_start_index, size, from_mode);
+      break;
+    default:
+      abort();
   }
   SetAddrMode(from, old_from);
   SetAddrMode(to, old_to);
@@ -1598,6 +1829,10 @@ static IRNode* IgnoreCasts(IRNode* node) {
 }
 
 static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size, bool put_in_zero_page) {
+  // If the node is an argument push, indirect to its expression.
+  if (node->opcode == IR_OP(pusharg)) {
+    node = node->inputs.value.p[0];
+  }
   TargetInstruction* inst = GetLoweredNode(node);
   AddReloadPoint(g, inst);
   TargetInstruction* result = NULL;
@@ -1611,6 +1846,9 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
     if (!put_in_zero_page) {
       return inst;
     }
+    result = TempRegister(g, node->type, Sizeof(node->type));
+    Copy(g, result, inst, 0, 0, size, GetAddrMode(result), GetAddrMode(inst));
+#if 0
     // Load a constant.
     result = TempRegister(g, node->type, Sizeof(node->type));
     TargetConstant* c = (TargetConstant*)inst;
@@ -1632,6 +1870,7 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
       sta(g, result, i);
     }
     AddSpillPoint(g, result);
+#endif
   } else {
     switch ((W65C02Opcode)inst->opcode) {
       case W65C02_OP(argument):
@@ -1721,7 +1960,7 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
           mode = kAddrModeSymbolAddr;
         }
         result = TempRegister(g, node->type, Sizeof(node->type));
-        Copy(g, result, inst, 0, 0, Sizeof(node->type), mode, GetAddrMode(result));
+        Copy(g, result, inst, 0, 0, Sizeof(node->type), GetAddrMode(result), mode);
         AddSpillPoint(g, result);
         break;
       }
@@ -1788,15 +2027,9 @@ static TargetInstruction* GetAddress(W65C02Generator* g, IRNode* addr_node, bool
         return addr;
       }
       result = TempRegister(g, addr_node->type, 2);
-      AddressingMode mode = kAddrModeSymbolAddr;
-      for (int i = 0; i < 2; i++) {
-        SetIndexReg(g, addr, result, i);
-        Emit(g, NewInstruction2(W65C02_OP(lda), addr,
-                                ByteConst(g, i),
-                                mode));
-        sta(g, result, i);
-      }
-      mode = kAddrModeIndirectIndexed;
+      Copy(g, result, addr, 0, 0, 2, GetAddrMode(result), kAddrModeSymbolAddr);
+     
+      AddressingMode mode = kAddrModeIndirectIndexed;
       if (TypeIsArray(addr_node->type) || TypeIsFunction(addr_node->type) || TypeIsStructOrUnion(addr_node->type)) {
         mode = kAddrModeZeroPage;
       }
@@ -1904,6 +2137,131 @@ static TargetInstruction* GetDestAddress(W65C02Generator* g, IRNode* node, bool 
   return TempRegister(g, node->type, Sizeof(node->type));
 }
 
+// General case (we can't use CMP, CPX or CPY because those set the carry).
+// If we need Y we use __t0 as a counter that decrements to zero.
+//   LDA #size
+//   STA __t0
+//   LDY #0
+//   LDX #0
+//   CLC/SEC
+// loop:
+//   LDA op1
+//   ADC op2/SBC op2
+//   STA dest
+//   INX
+//   INY
+//   DEC __t0
+//   BNE loop
+//
+// If we don't need Y we can use it as a counter.
+//   LDY #size
+//   LDX #0
+//   CLC/SEC
+// loop:
+//   LDA op1
+//   ADC op2/SBC op2
+//   STA dest
+//   INX
+//   DEY
+//   BNE loop
+static void AddSubIntegerLoop(W65C02Generator* g, IRNode* node,
+                                            W65C02Opcode op, W65C02Opcode carry_ctl,
+                                            int size, TargetInstruction* dest,
+                                            TargetInstruction* op1,
+                                            TargetInstruction* op2) {
+  AddressingMode op1_mode = GetAddrMode(op1);
+  AddressingMode op2_mode = GetAddrMode(op2);
+  AddressingMode dest_mode = GetAddrMode(dest);
+  
+  AddressingMode op1_loop_mode = op1_mode;
+  AddressingMode op2_loop_mode = op2_mode;
+  AddressingMode dest_loop_mode = dest_mode;
+  bool op1_needs_y = false;
+  bool op2_needs_y = false;
+  bool dest_needs_y = false;
+  
+  switch (op1_mode) {
+    case kAddrModeZeroPage:
+      op1_loop_mode = kAddrModeZeroPageIndexedX;
+      break;
+      
+    case kAddrModeIndirectIndexed:
+      op1_needs_y = true;
+      break;
+    case kAddrModeImmediate:
+      if (!TargetIsZero(op1)) {
+        op1 = GetImmediateLiteral(g, op1);
+        op1_loop_mode = kAddrModeLiteralIndexedX;
+      }
+      break;
+      
+    default:
+      break;
+  }
+  
+  switch (op2_mode) {
+    case kAddrModeZeroPage:
+      op2_loop_mode = kAddrModeZeroPageIndexedX;
+      break;
+      
+    case kAddrModeIndirectIndexed:
+      op2_needs_y = true;
+      break;
+    case kAddrModeImmediate:
+      if (!TargetIsZero(op2)) {
+        op2 = GetImmediateLiteral(g, op2);
+        op2_loop_mode = kAddrModeLiteralIndexedX;
+      }
+      break;
+      
+    default:
+      break;
+  }
+ 
+  switch (dest_mode) {
+    case kAddrModeZeroPage:
+      dest_loop_mode = kAddrModeZeroPageIndexedX;
+      break;
+      
+    case kAddrModeIndirectIndexed:
+      dest_needs_y = true;
+      break;
+      
+    default:
+      break;
+  }
+  
+  SetAddrMode(op1, op1_loop_mode);
+  SetAddrMode(op2, op2_loop_mode);
+  SetAddrMode(dest, dest_loop_mode);
+
+  bool need_y = op1_needs_y || op2_needs_y || dest_needs_y;
+  
+  if (need_y) {
+    ldai(g, size);
+    Emit(g, NewInstruction1(W65C02_OP(sta), ByteConst(g, W65C02_T0_REG), kAddrModeZeroPageAbsolute));
+    ldyi(g, 0);
+  } else {
+    ldyi(g, size);
+  }
+  ldxi(g, 0);
+  TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+  lda(g, op1, -1);
+  Operate(g, op, op2, -1);
+  sta(g, dest, -1);
+  inx(g);
+  if (need_y) {
+    iny(g);
+    Emit(g, NewInstruction1(W65C02_OP(dec), ByteConst(g, W65C02_T0_REG), kAddrModeZeroPageAbsolute));
+  } else {
+    dey(g);
+  }
+  EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  SetAddrMode(op1, op1_mode);
+  SetAddrMode(op2, op2_mode);
+  SetAddrMode(dest, dest_mode);
+}
+
 static TargetInstruction* AddSubInteger(W65C02Generator* g, IRNode* node,
                                         W65C02Opcode op, W65C02Opcode carry_ctl,
                                         int size, TargetInstruction* dest,
@@ -1914,6 +2272,10 @@ static TargetInstruction* AddSubInteger(W65C02Generator* g, IRNode* node,
   AddReloadPoint(g, dest);
   Emit(g, NewInstruction(carry_ctl, kAddrModeImplied));
   bool is_const = GetAddrMode(op2) == kAddrModeImmediate;
+  if (size > 2) {
+    AddSubIntegerLoop(g, node, op, carry_ctl, size, dest, op1, op2);
+    return dest;
+  }
   for (int i = 0; i < size; i++) {
     SetIndexReg2(g, op1, op2, dest, i);
     lda(g, op1, i);
@@ -2116,35 +2478,29 @@ static TargetInstruction* OnesComplement(W65C02Generator* g, IRNode* src_node,
 static TargetInstruction* NegateInteger(W65C02Generator* g, IRNode* src_node,
                                         TargetInstruction* dest,
                                         TargetInstruction* src, int size) {
-  AddReloadPoint(g, src);
-  AddReloadPoint(g, dest);
-  AddressingMode src_mode = GetAddrMode(src);
-  AddressingMode dest_mode = GetAddrMode(dest);
-  Emit(g, NewInstruction(W65C02_OP(sec), kAddrModeImplied));
-  if (size > 2 && src_mode == kAddrModeZeroPage && dest_mode == kAddrModeZeroPage) {
-    TargetInstruction* loop = NewInstruction(W65C02_OP(label), kAddrModeImplied);
-    SetAddrMode(src, kAddrModeZeroPageIndexedX);
-    SetAddrMode(dest, kAddrModeZeroPageIndexedX);
-    ldyi(g, size);
-    ldxi(g, 0);
-    Emit(g, loop);
-    ldai(g, 0);
-    Operate(g, W65C02_OP(sbc), src, -1);
-    sta(g, dest, -1);
-    inx(g);
-    dey(g);
-    EmitResolvedBranch(g, W65C02_OP(bne), loop);
-    SetAddrMode(src, src_mode);
-    SetAddrMode(dest, dest_mode);
-  } else {
-    for (int i = 0; i < size; i++) {
-      SetIndexReg(g, src, dest, i);
-      ldai(g, 0);
-      Operate(g, W65C02_OP(sbc), src, i);
-      sta(g, dest, i);
-    }
+  TargetType target_type;
+  switch (size) {
+    case 1:
+      target_type = kTargetType8Bit;
+      break;
+    case 2:
+      target_type = kTargetType16Bit;
+      break;
+    case 4:
+      target_type = kTargetType32Bit;
+      break;
+    case 8:
+      target_type = kTargetType64Bit;
+      break;
+    default:
+      abort();
+
   }
-  return dest;
+  TargetInstruction* zero =
+      GetIntConstant(g, NULL, target_type, 0);
+  
+  return AddSubInteger(g, src_node, W65C02_OP(sbc),
+                       W65C02_OP(sec), size, dest, zero, src);
 }
 
 // To negate a floating point value, flip the sign bit (top bit).
@@ -2152,7 +2508,7 @@ static TargetInstruction* NegateFloatingPoint(W65C02Generator* g, IRNode* src_no
                                               TargetInstruction* dest,
                                               TargetInstruction* src, int size) {
   if (src != dest) {
-    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
     src = dest;
   }
   ldyi(g, size-1);
@@ -2274,7 +2630,7 @@ static TargetInstruction* ConstantShiftOp(W65C02Generator* g, IRNode* node,
     return dest;
   }
   if (count >= size * 8) {
-    Copy(g, dest, Zero(g), 0, 0, size, kAddrModeImmediate, GetAddrMode(dest));
+    Copy(g, dest, Zero(g), 0, 0, size, GetAddrMode(dest), kAddrModeImmediate);
     return dest;
   }
   AddReloadPoint(g, op1);
@@ -2386,11 +2742,11 @@ static TargetInstruction* ConstantArithmeticRightShiftOp(W65C02Generator* g,
                                                  TargetInstruction* src,
                                                  int count) {
   if (count == 0) {
-    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
     return dest;
   }
   if (count >= size * 8) {
-    Copy(g, dest, Zero(g), 0, 0, size, kAddrModeImmediate, GetAddrMode(dest));
+    Copy(g, dest, Zero(g), 0, 0, size, GetAddrMode(dest), kAddrModeImmediate);
     return dest;
   }
   // lda hi
@@ -2653,13 +3009,9 @@ static void GetOpInstructions(W65C02Generator* g, IRNode* node,
       case IR_OP(nota):
       case IR_OP(onescomp):
       case IR_OP(negi):
-      case IR_OP(movi):
-      case IR_OP(movf):
-      case IR_OP(movd):
-      case IR_OP(mova):
-        ops[i] = GetAddress(g, input, true);
+         ops[i] = GetAddress(g, input, true);
         break;
-
+        
       case IR_OP(addf):
       case IR_OP(addd):
       case IR_OP(subf):
@@ -2679,8 +3031,19 @@ static void GetOpInstructions(W65C02Generator* g, IRNode* node,
       case IR_OP(d2i):
       case IR_OP(f2d):
       case IR_OP(d2f):
-        ops[i] = Materialize(g, input, Sizeof(input->type), true);
+         ops[i] = Materialize(g, input, Sizeof(input->type), true);
         break;
+     
+      case IR_OP(movi):
+      case IR_OP(movf):
+      case IR_OP(movd):
+      case IR_OP(mova):
+        if (node->dest != NULL && node->outputs.length == 0) {
+          // Just an assignment to another node, no copy needed.
+          ops[i] = GetLoweredNode(input);
+        } else {
+          ops[i] = Materialize(g, input, Sizeof(input->type), true);
+        }
         break;
       default:
         abort();
@@ -2867,13 +3230,14 @@ static bool IsVariableNode(IRNode* node) {
     case IR_OP(externvar):
     case IR_OP(ssavar):
     case IR_OP(phi):
+#if 0  // Eh?  What are these doing here?
     case W65C02_OP(ivarreg):
       case W65C02_OP(bvarreg):
       case W65C02_OP(lvarreg):
       case W65C02_OP(xvarreg):
       case W65C02_OP(fvarreg):
       case W65C02_OP(dvarreg):
-      
+#endif
       return true;
     default:
       return false;
@@ -3076,11 +3440,12 @@ static void LowerExpression(W65C02Generator* g, IRNode* node) {
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova): {
-      inst = GetDestAddress(g, node, true);
-      TargetInstruction* src = GetAddress(g, node->inputs.value.p[0], true);
-      AddReloadPoint(g, src);
+      // inst = GetDestAddress(g, node, true);
+      inst = dest;
+      TargetInstruction* src = ops[0];
+      // AddReloadPoint(g, src);
 
-      Copy(g, dest, src, 0, 0, Sizeof(node->type), GetAddrMode(src), GetAddrMode(dest));
+      Copy(g, dest, src, 0, 0, Sizeof(node->type), GetAddrMode(dest), GetAddrMode(src));
       break;
     }
 //    case IR_OP(rmovi):
@@ -3135,7 +3500,6 @@ static void CompareEqualZero(W65C02Generator* g, IRNode* value_node,
   TargetInstruction* value = GetAddress(g, value_node, true);
   AddReloadPoint(g, value);
 
-  // TODO optimize for size > 2
   for (int i = 0; i < size; i++) {
     SetIndexReg(g, value, value, i);
     if (i == 0) {
@@ -3144,6 +3508,7 @@ static void CompareEqualZero(W65C02Generator* g, IRNode* value_node,
       ora(g, value, i);
     }
   }
+  
   cmpi(g, 0);
   TargetInstruction* bra = EmitBranch(g, W65C02_OP(beq), target_node);
   bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
@@ -3252,7 +3617,9 @@ static void CompareNotEqualInteger(W65C02Generator* g, IRNode* cmp_node,
   TargetInstruction* false_label =
       NewInstruction(W65C02_OP(label), kAddrModeImplied);
   for (int i = 0; i < size; i++) {
-    SetIndexReg(g, value1, value2, i);
+    if (!Is65c02() || i > 0) {
+      SetIndexReg(g, value1, value2, i);
+    }
     lda(g, value1, i);
     cmp(g, value2, i);
     EmitBranch(g, W65C02_OP(bne), target_node);
@@ -3300,7 +3667,7 @@ static void CompareLessUnsignedInteger(W65C02Generator* g, IRNode* lhs_node,
   for (int i = size - 1; i >= 0; i--) {
     SetIndexRegDown(g, value1, value2, i, size);
     lda(g, value1, i);
-    cmp(g, value2, i);
+    cmp(g, value2, i)->flags |= k6502GeneratesFlags;
     EmitBranch(g, W65C02_OP(bcc), target_node);
     if (i > 0) {
       EmitResolvedBranch(g, W65C02_OP(bne), false_label);
@@ -3362,7 +3729,7 @@ static void CompareGreaterOrEqualUnsignedInteger(W65C02Generator* g,
     SetIndexRegDown(g, value1, value2, i, size);
 
     lda(g, value1, i);
-    cmp(g, value2, i);
+    cmp(g, value2, i)->flags |= k6502GeneratesFlags;
     if (i == 0) {
       EmitBranch(g, W65C02_OP(bcs), target_node);
     } else {
@@ -3753,7 +4120,7 @@ static TargetInstruction* LoadFromRegVariable(W65C02Generator* g, IRNode* load, 
   } else {
     result = GetAddress(g, load->dest, true);
   }
-  Copy(g, result, src, 0, 0, size, GetAddrMode(src), GetAddrMode(result));
+  Copy(g, result, src, 0, 0, size, GetAddrMode(result), GetAddrMode(src));
   AddSpillPoint(g, result);
   return SetLoweredNode(load, result);
 }
@@ -3819,7 +4186,7 @@ static TargetInstruction* LoadFromVariable(W65C02Generator* g, IRNode* load, IRN
   if (load->dest != NULL) {
     // We have a location to put the result.
     TargetInstruction* dest = GetAddress(g, load->dest, true);
-    Copy(g, dest, result, 0, 0, size, kAddrModeZeroPage, GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, size, GetAddrMode(dest), kAddrModeZeroPage);
     AddSpillPoint(g, dest);
   }
   return SetLoweredNode(load, result);
@@ -3833,7 +4200,7 @@ static TargetInstruction* LoadFromStaticVariable(W65C02Generator* g, IRNode* loa
   } else {
     TargetInstruction* src = Materialize(g, var, size, false);
     result = GetDestAddress(g, load, false);
-    Copy(g, result, src, 0, 0, size, GetAddrMode(src), GetAddrMode(result));
+    Copy(g, result, src, 0, 0, size, GetAddrMode(result), GetAddrMode(src));
     AddSpillPoint(g, result);
   }
   return SetLoweredNode(load, result);
@@ -3847,14 +4214,17 @@ static TargetInstruction* LoadIndirect(W65C02Generator* g, IRNode* load, IRNode*
     dest = TempRegister(g, load->type, size);
   }
   TargetInstruction* src = Materialize(g, var, size, true);
+  AddressingMode src_mode = kAddrModeIndirectIndexed;
   if (dest == src) {
     // On 6502, because each byte is loaded independently, we can't have the
     // destination and src be the same.
     TargetInstruction* tmp = TempRegister(g, var->type, size);
-    Copy(g, tmp, src, start_index, 0, size, kAddrModeZeroPage, kAddrModeZeroPage);
+    Copy(g, tmp, src, start_index, 0, size, kAddrModeZeroPage, kAddrModeIndirectIndexed);
     src = tmp;
+    src_mode = kAddrModeZeroPage;
+    start_index = 0;
  }
-  Copy(g, dest, src, start_index, 0, size, kAddrModeIndirectIndexed, GetAddrMode(dest));
+  Copy(g, dest, src, start_index, 0, size, GetAddrMode(dest), src_mode);
   AddSpillPoint(g, dest);
   return SetLoweredNode(load, dest);
 }
@@ -3949,7 +4319,7 @@ static void LowerLoad(W65C02Generator* g, IRNode* node) {
       src_mode = kAddrModeIndirectIndexed;
     }
     TargetInstruction* dest = GetDestAddress(g, node, false);
-    Copy(g, dest, src, src_start_index, 0, size, src_mode, GetAddrMode(dest));
+    Copy(g, dest, src, src_start_index, 0, size, GetAddrMode(dest), src_mode);
     AddSpillPoint(g, dest);
     return SetLoweredNode(node, dest);
   }
@@ -3969,7 +4339,7 @@ static void LowerLoad(W65C02Generator* g, IRNode* node) {
   AddressingMode dest_mode = DestInZeroPage(dest) ?  GetAddrMode(dest) : kAddrModeIndirect;
 
   int size = Sizeof(node->type);
-  Copy(g, dest, src, src_start_index, 0, size, src_mode, dest_mode);
+  Copy(g, dest, src, src_start_index, 0, size, dest_mode, src_mode);
 #if 0
   int j = start_index;
   for (int i = 0; i < Sizeof(node->type); i++, j++) {
@@ -3999,7 +4369,7 @@ static void LowerLoad(W65C02Generator* g, IRNode* node) {
 static TargetInstruction* StoreIntoRegVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size) {
   TargetInstruction* src = Materialize(g, src_node, size, false);
   TargetInstruction* dest = GetAddress(g, dest_node, false);
-  Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+  Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
   return SetLoweredNode(store, src);
 }
 
@@ -4035,7 +4405,7 @@ static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, I
     // ldy #1 or INY
     // lda src+1
     // sta (var_addr), Y
-    Copy(g, dest, src, 0, 0, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+    Copy(g, dest, src, 0, 0, size, kAddrModeIndirectIndexed, GetAddrMode(src));
   } else {
     bool is_zero = TargetIsZero(src);
     if (is_zero) {
@@ -4129,7 +4499,7 @@ static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, I
 static TargetInstruction* StoreIntoStaticVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size) {
   TargetInstruction* src = GetAddress(g,src_node, false);
   TargetInstruction* dest = GetAddress(g,dest_node, false);
-  Copy(g, dest, src, 0, 0, size, GetAddrMode(src), GetAddrMode(dest));
+  Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
   return SetLoweredNode(store, src);
 }
 
@@ -4137,7 +4507,7 @@ static TargetInstruction* StoreIntoStaticVariable(W65C02Generator* g, IRNode* st
 static TargetInstruction* StoreIndirect(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size, int start_index) {
   TargetInstruction* src = Materialize(g, src_node, size, false);
   TargetInstruction* dest = Materialize(g, dest_node, size, true);
-  Copy(g, dest, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+  Copy(g, dest, src, 0, start_index, size, kAddrModeIndirectIndexed, GetAddrMode(src));
   return SetLoweredNode(store, src);
 }
 
@@ -4210,7 +4580,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
         case W65C02_OP(xvarreg):
         case W65C02_OP(fvarreg):
         case W65C02_OP(dvarreg): {
-          Copy(g, addr, src, 0, start_index, size, src_mode, GetAddrMode(addr));
+          Copy(g, addr, src, 0, start_index, size, GetAddrMode(addr), src_mode);
           return SetLoweredNode(node, addr);
         }
         default:
@@ -4338,7 +4708,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
         // ldy #1 or INY
         // lda src+1
         // sta (var_addr), Y
-        Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+        Copy(g, addr, src, 0, start_index, size, kAddrModeIndirectIndexed, GetAddrMode(src));
       }
 #if 0
       AddressingMode src_mode = GetAddrMode(src);
@@ -4381,7 +4751,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
     case IR_OP(staticvar): {
       // Store to a static variable.
       TargetInstruction* addr = GetLoweredNode(addr_node);
-      Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeAbsoluteSymbolIndexed);
+      Copy(g, addr, src, 0, start_index, size, kAddrModeAbsoluteSymbolIndexed, GetAddrMode(src));
 #if 0
       for (int i = 0; i < Sizeof(node->type); i++, j++) {
         SetIndexReg(g, src, addr, i);
@@ -4418,7 +4788,7 @@ static void LowerStore(W65C02Generator* g, IRNode* node) {
           abort();
       }
       // Store indirect via addr.
-      Copy(g, addr, src, 0, start_index, size, GetAddrMode(src), kAddrModeIndirectIndexed);
+      Copy(g, addr, src, 0, start_index, size, kAddrModeIndirectIndexed, GetAddrMode(src));
 #if 0
       AddressingMode dest_mode = start_index == 0 ? kAddrModeIndirect : kAddrModeIndirectIndexed;
       int j = start_index;
@@ -4670,7 +5040,7 @@ static void LowerInc(W65C02Generator* g, IRNode* node) {
        dest = GetAddress(g, node->dest, true);
     }
     AddReloadPoint(g, dest);
-    Copy(g, dest, result, 0, 0, size, GetAddrMode(addr), GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, size, GetAddrMode(dest), GetAddrMode(addr));
     result = dest;
   }
   SetLoweredNode(node, result);
@@ -4744,7 +5114,7 @@ static void LowerDec(W65C02Generator* g, IRNode* node) {
        dest = GetAddress(g, node->dest, true);
     }
     AddReloadPoint(g, dest);
-    Copy(g, dest, result, 0, 0, size, GetAddrMode(addr), GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, size, GetAddrMode(dest), GetAddrMode(addr));
     result = dest;
   }
   SetLoweredNode(node, result);
@@ -4764,30 +5134,20 @@ static struct {
 
 
 
-static void PushExpression(W65C02Generator* g, IRNode* node,
+static TargetInstruction* PushExpression(W65C02Generator* g, IRNode* node,
                            TargetInstruction* inst, int size) {
+  
   switch (size) {
     case 1:
       lda(g, inst, 0);
-      jsr(g, g->pusha);     // Pushed as 2 bytes.
-      break;
-    case 2: {
-      Emit(g, NewInstruction1(W65C02_OP(pushreg2), inst, kAddrModeImplied));
-      // ldxzi(g, inst, 0);
-      // jsr(g, g->pushreg2);
-      break;
-    }
+      return jsr(g, g->pusha);     // Pushed as 2 bytes.
+    case 2:
+      return Emit(g, NewInstruction1(W65C02_OP(pushreg2), inst, kAddrModeImplied));
     case 4:
-      Emit(g, NewInstruction1(W65C02_OP(pushreg4), inst, kAddrModeImplied));
-      // ldxzi(g, inst, 0);
-      // jsr(g, g->pushreg4);
-      break;
+      return Emit(g, NewInstruction1(W65C02_OP(pushreg4), inst, kAddrModeImplied));
 
     case 8:
-      Emit(g, NewInstruction1(W65C02_OP(pushreg8), inst, kAddrModeImplied));
-    // ldxzi(g, inst, 0);
-      // jsr(g, g->pushreg8);
-      break;
+      return Emit(g, NewInstruction1(W65C02_OP(pushreg8), inst, kAddrModeImplied));
 
     default:
       abort();
@@ -4800,7 +5160,7 @@ static void PushExpression(W65C02Generator* g, IRNode* node,
 // For 4 and 8 byte constants we load the address of the constant literal into
 // X,Y and call the push function.
 
-static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
+static TargetInstruction* PushConstant(W65C02Generator* g, IRNode* node, int size) {
   uint64_t value = IRIntConstValue(node);
   switch (size) {
     case 1:         // Pushed as 2 bytes.
@@ -4808,7 +5168,7 @@ static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
                   W65C02_OP(lda),
                   ByteConst(g, value & 0xff),
                   kAddrModeImmediate));
-      jsr(g, g->pusha);           // Pushes 2 bytes.
+      return jsr(g, g->pusha);           // Pushes 2 bytes.
       break;
     case 2:
       Emit(g, NewInstruction1(
@@ -4820,9 +5180,9 @@ static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
                                 W65C02_OP(ldy),
                                 ByteConst(g, (value >> 8) & 0xff),
                                 kAddrModeImmediate));
-        jsr(g, g->pushxy);
+        return jsr(g, g->pushxy);
       } else {
-        jsr(g, g->pushxy0);
+        return jsr(g, g->pushxy0);
       }
       break;
 
@@ -4835,7 +5195,7 @@ static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
                   W65C02_OP(literalref),
                               &literal->base,
                   kAddrModeAbsolute));
-      jsr(g, g->push4xy);
+      return jsr(g, g->push4xy);
       break;
     }
     case 8: {
@@ -4847,7 +5207,7 @@ static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
                   W65C02_OP(literalref),
                   &literal->base,
                   kAddrModeAbsolute));
-      jsr(g, g->push8xy);
+      return jsr(g, g->push8xy);
       break;
     }
       
@@ -4856,9 +5216,20 @@ static void PushConstant(W65C02Generator* g, IRNode* node, int size) {
   }
 }
 
+static TargetInstruction* PushLiteralRef(W65C02Generator* g, IRNode* node) {
+  IRConstant* id_node = node->inputs.value.p[0];
+  TargetInstruction* literal =
+      Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
+  Emit(g, NewInstruction1(
+              W65C02_OP(stringliteralref),
+              literal,
+              kAddrModeAbsolute));
+  return jsr(g, g->pushxy);
+}
+
 // Although we would like to push a boolean or char as a single byte
 // we can't because C says that they need to be passed as ints.
-static void PushVariable(W65C02Generator* g, IRNode* node, int size) {
+static TargetInstruction* PushVariable(W65C02Generator* g, IRNode* node, int size) {
   TargetInstruction* addr = GetLoweredNode(node);
   int offset = (int)TargetIntValue(addr->operand[0]);
   struct {
@@ -4886,8 +5257,7 @@ static void PushVariable(W65C02Generator* g, IRNode* node, int size) {
                                                     : W65C02_OP(var_addr_xy);
     }
     Emit(g, NewInstruction1(addr_op, addr, kAddrModeIndirect));
-    jsr(g, g->pushxy);
-    return;
+    return jsr(g, g->pushxy);
   }
   for (size_t i = 0; i < var_pushes[i].size != 0; i++) {
     if (var_pushes[i].size == size) {
@@ -4909,47 +5279,59 @@ static void PushVariable(W65C02Generator* g, IRNode* node, int size) {
    if (offset >= 256) {
      ldyi(g, offset >> 8);
    }
-    jsr(g, push_sym);
+   return jsr(g, push_sym);
 }
 
 
-static void Push(W65C02Generator* g, IRNode* node, int size) {
+static TargetInstruction* Push(W65C02Generator* g, IRNode* node, int size) {
   TargetInstruction* inst = NULL;
   switch (node->opcode) {
     case IR_OP(argument):
     case IR_OP(localvar):
-      PushVariable(g, node, size);
-      break;
+      return PushVariable(g, node, size);
       
     case IR_OP(ssavar):
     case IR_OP(phi): {
       IRVariable* var = (IRVariable*)node;
       IRNode* symbol = FindPooledVariable(g->gen, var->symbol);
-      PushVariable(g, symbol, size);
-      break;
+      return PushVariable(g, symbol, size);
     }
+    case IR_OP(literalref):
+      return PushLiteralRef(g, node);
+      
     default:
       if (IRIsConst(node)) {
-        PushConstant(g, node, size);
+        return PushConstant(g, node, size);
       } else {
         inst = Materialize(g, node, size, true);
-        PushExpression(g, node, inst, size);
+        AddReloadPoint(g, inst);
+        return PushExpression(g, node, inst, size);
       }
-      break;
   }
 }
 
-static void PushArg(W65C02Generator* g, IRNode* node, size_t* size) {
+static TargetInstruction* PushArg(W65C02Generator* g, IRNode* node) {
   if (node->type == NULL) {
-    Push(g, node, 2);
+    return Push(g, node, 2);
   }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(node->type)) {
-      if (size != NULL) {
-        *size += push_map[i].pushed_size;
-      }
-      Push(g, node, push_map[i].size);
-      return;
+      return Push(g, node, push_map[i].size);
+    }
+  }
+  assert(false);
+}
+
+// Get the number of bytes pushed for an argument.
+static size_t GetPushedSize(IRNode* node) {
+  assert(node->opcode == IR_OP(pusharg));
+  IRNode* expr = node->inputs.value.p[0];
+  if (expr->type == NULL) {
+    return 2;
+  }
+  for (size_t i = 0; push_map[i].type_func != NULL; i++) {
+    if (push_map[i].type_func(expr->type)) {
+      return push_map[i].pushed_size;
     }
   }
   assert(false);
@@ -4963,7 +5345,8 @@ static void PushArg(W65C02Generator* g, IRNode* node, size_t* size) {
 static void PushStructArg(W65C02Generator* g, IRNode* node, size_t* args_size) {
   size_t struct_size = Sizeof(node->type);
   *args_size += struct_size;
-  Symbol* pushmem = g->pushmem1;
+  bool from_call = (node->flags & kIRFromCall) != 0;
+  Symbol* pushmem = from_call ? g->pushmem_xy1 : g->pushmem1;
 
   // Put size in __mem_size.
   Emit(g, NewInstruction1(
@@ -4975,7 +5358,7 @@ static void PushStructArg(W65C02Generator* g, IRNode* node, size_t* args_size) {
                        ByteConst(g, W65C02_MSZ_REG),
                        kAddrModeZeroPageAbsolute));
   if (struct_size >= 256) {
-    pushmem = g->pushmem2;
+    pushmem = from_call ? g->pushmem_xy2 : g->pushmem2;
     Emit(g, NewInstruction1(W65C02_OP(lda),
                             ByteConst(g,
                                            (struct_size >> 8) & 0xff),
@@ -4986,6 +5369,7 @@ static void PushStructArg(W65C02Generator* g, IRNode* node, size_t* args_size) {
                 kAddrModeZeroPageAbsolute));
   }
 
+  if (!from_call) {
   // Put src in __mem_src
   TargetInstruction* src = GetAddress(g, node, true);
   AddReloadPoint(g, src);
@@ -5003,200 +5387,282 @@ static void PushStructArg(W65C02Generator* g, IRNode* node, size_t* args_size) {
               W65C02_OP(sta),
               ByteConst(g, W65C02_MSRC_REG + 1),
               kAddrModeZeroPageAbsolute));
-
+  }
+  
   // JSR pushmem
   jsr(g, pushmem);
 }
 
-static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
+static bool IsIntrinsicCall(W65C02Generator* g, IRNode* node) {
   IRNode* callee = node->inputs.value.p[0];
   if (callee->opcode == IR_OP(staticvar)) {
     IRVariable* var = (IRVariable*)callee;
     if (StorageIs(var->symbol->storage, STO(static)|STO(auto))) {
-      return NULL;
+      return false;
     }
     MapKeyType k = {.p = var->symbol->name.value};
     Intrinsic* in = MapFind(&g->intrinsics, k);
-    if (in == NULL) {
-      return NULL;
-    }
-    
-    TargetInstruction* result = NULL;
-    if (node->dest != NULL) {
-      LowerIRNode(g, node->dest);
-      result = GetLoweredNode(node->dest);
-    } else {
-      result = TempRegister(g, node->type, Sizeof(node->type));
-    }
-    if (result != NULL) {
-      result->flags |= k6502ExprIsCallResult;
-    }
-  
-    switch (in->index) {
-      case kIntrinsicIsalnum:
-      case kIntrinsicIsalpha:
-      case kIntrinsicIsblank:
-      case kIntrinsicIscntrl:
-      case kIntrinsicIsdigit:
-      case kIntrinsicIsgraph:
-      case kIntrinsicIslower:
-      case kIntrinsicIsprint:
-      case kIntrinsicIspunct:
-      case kIntrinsicIsspace:
-      case kIntrinsicIsupper:
-      case kIntrinsicIsxdigit:
-      case kIntrinsicTolower:
-      case kIntrinsicToupper: {
-        IRNode* arg_node = node->inputs.value.p[1];
-        TargetInstruction* arg = Materialize(g, arg_node, 2, true);
-        ldx(g, arg, 0);
-        ldy(g, arg, 1);
-        jsr(g, in->symbol);   // Call intrinsic, result in A.
-        SetIndexReg(g, result, result, 0);
-        sta(g, result, 0);
-        stz(g, result, 1);
-        return SetLoweredNode(node, result);
-      }
-         break;
-      case kIntrinsicMemcpy: {
-        // Put size in __mem_size.
-        TargetInstruction* size = GetLoweredNode(node->inputs.value.p[3]);
-        AddReloadPoint(g, size);
-        SetIndexReg(g, size, size, 0);
-        lda(g, size, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MSZ_REG),
-                             kAddrModeZeroPageAbsolute));
-        SetIndexReg(g, size, size, 1);
-        lda(g, size, 1);
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sta),
-                    ByteConst(g,  W65C02_MSZ_REG + 1),
-                    kAddrModeZeroPageAbsolute));
-
-        // Put src in __mem_src
-        TargetInstruction* src = GetAddress(g, node->inputs.value.p[2], true);
-        AddReloadPoint(g, src);
-        SetIndexReg(g, src, src, 0);
-        lda(g, src, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MSRC_REG),
-                             kAddrModeZeroPageAbsolute));
-        SetIndexReg(g, src, src, 1);
-        lda(g, src, 1);
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sta),
-                    ByteConst(g,  W65C02_MSRC_REG + 1),
-                    kAddrModeZeroPageAbsolute));
-
-        // Put dest in __mem_dest.
-        TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
-        AddReloadPoint(g, dest);
-        SetIndexReg(g, dest, dest, 1);
-        lda(g, dest, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MDST_REG),
-                             kAddrModeZeroPageAbsolute));
-        SetIndexReg(g, dest, dest, 1);
-        lda(g, dest, 1);
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sta),
-                    ByteConst(g,  W65C02_MDST_REG + 1),
-                    kAddrModeZeroPageAbsolute));
-
-        // JSR __builtin_memcpy
-        jsr(g, in->symbol);
-
-        if (node->outputs.length > 0) {
-          // Result is in __mem_dest.
-          Emit(g,
-               NewInstruction1(W65C02_OP(lda),
-                               ByteConst(g, W65C02_MDST_REG),
-                               kAddrModeZeroPageAbsolute));
-          SetIndexReg(g, result, result, 0);
-          sta(g, result, 0);
-          
-          Emit(g,
-               NewInstruction1(W65C02_OP(lda),
-                               ByteConst(g, W65C02_MDST_REG+1),
-                               kAddrModeZeroPageAbsolute));
-
-          SetIndexReg(g, result, result, 0);
-          sta(g, result, 1);
-        }
-        return SetLoweredNode(node, result);
-      }
-      case kIntrinsicMemset: {
-        // Put size in __mem_size.
-        TargetInstruction* size = GetLoweredNode(node->inputs.value.p[3]);
-        AddReloadPoint(g, size);
-        SetIndexReg(g, size, size, 0);
-        lda(g, size, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MSZ_REG),
-                             kAddrModeZeroPageAbsolute));
-        SetIndexReg(g, size, size, 1);
-        lda(g, size, 1);
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sta),
-                    ByteConst(g,  W65C02_MSZ_REG + 1),
-                    kAddrModeZeroPageAbsolute));
-
-        // Put value in __mem_src.  One byte only.
-        TargetInstruction* src = GetLoweredNode(node->inputs.value.p[2]);
-        AddReloadPoint(g, src);
-        SetIndexReg(g, src, src, 0);
-        lda(g, src, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MSRC_REG),
-                             kAddrModeZeroPageAbsolute));
-        
-        // Put dest in __mem_dest.
-        TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
-        AddReloadPoint(g, dest);
-        lda(g, dest, 0);
-        Emit(g,
-             NewInstruction1(W65C02_OP(sta),
-                             ByteConst(g, W65C02_MDST_REG),
-                             kAddrModeZeroPageAbsolute));
-        lda(g, dest, 1);
-        Emit(g, NewInstruction1(
-                    W65C02_OP(sta),
-                    ByteConst(g,  W65C02_MDST_REG + 1),
-                    kAddrModeZeroPageAbsolute));
-        jsr(g, in->symbol);
-        
-        // Result is in __mem_dest.
-        if (node->outputs.length > 0) {
-          Emit(g,
-               NewInstruction1(W65C02_OP(lda),
-                               ByteConst(g, W65C02_MDST_REG),
-                               kAddrModeZeroPageAbsolute));
-          SetIndexReg(g, result, result, 0);
-          sta(g, result, 0);
-          
-          Emit(g,
-               NewInstruction1(W65C02_OP(lda),
-                               ByteConst(g, W65C02_MDST_REG+1),
-                               kAddrModeZeroPageAbsolute));
-
-          SetIndexReg(g, result, result, 0);
-          sta(g, result, 1);
-        }
-        return SetLoweredNode(node, result);
-      }
-      default:
-        fprintf(stderr, "Unknown intrinsic index %d for %s\n", in->index, in->symbol->name.value);
-        abort();
+    if (in != NULL) {
+      return true;
     }
   }
- 
+  return false;
+}
+
+static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
+  if (!IsIntrinsicCall(g, node)) {
+    return NULL;
+  }
+  IRNode* callee = node->inputs.value.p[0];
+  assert(callee->opcode == IR_OP(staticvar));
+  IRVariable* var = (IRVariable*)callee;
+  assert(!StorageIs(var->symbol->storage, STO(static)|STO(auto)));
+  MapKeyType k = {.p = var->symbol->name.value};
+  Intrinsic* in = MapFind(&g->intrinsics, k);
+  assert(in != NULL);
+  
+  TargetInstruction* result = NULL;
+  if (node->dest != NULL) {
+    LowerIRNode(g, node->dest);
+    result = GetLoweredNode(node->dest);
+  } else {
+    result = TempRegister(g, node->type, Sizeof(node->type));
+  }
+  if (result != NULL) {
+    result->flags |= k6502ExprIsCallResult;
+  }
+
+  switch (in->index) {
+    case kIntrinsicIsalnum:
+    case kIntrinsicIsalpha:
+    case kIntrinsicIsblank:
+    case kIntrinsicIscntrl:
+    case kIntrinsicIsdigit:
+    case kIntrinsicIsgraph:
+    case kIntrinsicIslower:
+    case kIntrinsicIsprint:
+    case kIntrinsicIspunct:
+    case kIntrinsicIsspace:
+    case kIntrinsicIsupper:
+    case kIntrinsicIsxdigit:
+    case kIntrinsicTolower:
+    case kIntrinsicToupper: {
+      IRNode* arg_node = node->inputs.value.p[1];
+      TargetInstruction* arg = Materialize(g, arg_node, 2, true);
+      ldx(g, arg, 0);
+      ldy(g, arg, 1);
+      jsr(g, in->symbol);   // Call intrinsic, result in A.
+      SetIndexReg(g, result, result, 0);
+      sta(g, result, 0);
+      stz(g, result, 1);
+      return SetLoweredNode(node, result);
+    }
+       break;
+    case kIntrinsicMemcpy: {
+      // Put size in __mem_size.
+      TargetInstruction* size = Materialize(g, node->inputs.value.p[3], 2, true);
+      AddReloadPoint(g, size);
+      SetIndexReg(g, size, size, 0);
+      lda(g, size, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSZ_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, size, size, 1);
+      lda(g, size, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MSZ_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // Put src in __mem_src
+      TargetInstruction* src = GetAddress(g, node->inputs.value.p[2], true);
+      AddReloadPoint(g, src);
+      SetIndexReg(g, src, src, 0);
+      lda(g, src, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSRC_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, src, src, 1);
+      lda(g, src, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MSRC_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // Put dest in __mem_dest.
+      TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
+      AddReloadPoint(g, dest);
+      SetIndexReg(g, dest, dest, 1);
+      lda(g, dest, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MDST_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, dest, dest, 1);
+      lda(g, dest, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MDST_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // JSR __builtin_memcpy
+      jsr(g, in->symbol);
+
+      if (node->outputs.length > 0) {
+        // Result is in __mem_dest.
+        Emit(g,
+             NewInstruction1(W65C02_OP(lda),
+                             ByteConst(g, W65C02_MDST_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, result, result, 0);
+        sta(g, result, 0);
+        
+        Emit(g,
+             NewInstruction1(W65C02_OP(lda),
+                             ByteConst(g, W65C02_MDST_REG+1),
+                             kAddrModeZeroPageAbsolute));
+
+        SetIndexReg(g, result, result, 0);
+        sta(g, result, 1);
+      }
+      return SetLoweredNode(node, result);
+    }
+    case kIntrinsicMemset: {
+      // Put size in __mem_size.
+      TargetInstruction* size = Materialize(g, node->inputs.value.p[3], 2, true);
+      AddReloadPoint(g, size);
+      SetIndexReg(g, size, size, 0);
+      lda(g, size, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSZ_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, size, size, 1);
+      lda(g, size, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MSZ_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // Put value in __mem_src.  One byte only.
+      TargetInstruction* src = GetLoweredNode(node->inputs.value.p[2]);
+      AddReloadPoint(g, src);
+      SetIndexReg(g, src, src, 0);
+      lda(g, src, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSRC_REG),
+                           kAddrModeZeroPageAbsolute));
+      
+      // Put dest in __mem_dest.
+      TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
+      AddReloadPoint(g, dest);
+      lda(g, dest, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MDST_REG),
+                           kAddrModeZeroPageAbsolute));
+      lda(g, dest, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MDST_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+      jsr(g, in->symbol);
+      
+      // Result is in __mem_dest.
+      if (node->outputs.length > 0) {
+        Emit(g,
+             NewInstruction1(W65C02_OP(lda),
+                             ByteConst(g, W65C02_MDST_REG),
+                             kAddrModeZeroPageAbsolute));
+        SetIndexReg(g, result, result, 0);
+        sta(g, result, 0);
+        
+        Emit(g,
+             NewInstruction1(W65C02_OP(lda),
+                             ByteConst(g, W65C02_MDST_REG+1),
+                             kAddrModeZeroPageAbsolute));
+
+        SetIndexReg(g, result, result, 0);
+        sta(g, result, 1);
+      }
+      return SetLoweredNode(node, result);
+    }
+    case kIntrinsicMemcmp: {
+      // Put size in __mem_size.
+      TargetInstruction* size = Materialize(g, node->inputs.value.p[3], 2, true);
+      AddReloadPoint(g, size);
+      SetIndexReg(g, size, size, 0);
+      lda(g, size, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSZ_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, size, size, 1);
+      lda(g, size, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MSZ_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // Put s2 in __mem_src
+      TargetInstruction* src = GetAddress(g, node->inputs.value.p[2], true);
+      AddReloadPoint(g, src);
+      SetIndexReg(g, src, src, 0);
+      lda(g, src, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MSRC_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, src, src, 1);
+      lda(g, src, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MSRC_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // Put s1 in __mem_dest.
+      TargetInstruction* dest = GetAddress(g, node->inputs.value.p[1], true);
+      AddReloadPoint(g, dest);
+      SetIndexReg(g, dest, dest, 1);
+      lda(g, dest, 0);
+      Emit(g,
+           NewInstruction1(W65C02_OP(sta),
+                           ByteConst(g, W65C02_MDST_REG),
+                           kAddrModeZeroPageAbsolute));
+      SetIndexReg(g, dest, dest, 1);
+      lda(g, dest, 1);
+      Emit(g, NewInstruction1(
+                  W65C02_OP(sta),
+                  ByteConst(g,  W65C02_MDST_REG + 1),
+                  kAddrModeZeroPageAbsolute));
+
+      // JSR __builtin_memcmp
+      jsr(g, in->symbol);
+      
+      SetIndexReg(g, result, result, 0);
+      stx(g, result, 0);
+      sty(g, result, 1);
+      return SetLoweredNode(node, result);
+    }
+    default:
+      fprintf(stderr, "Unknown intrinsic index %d for %s\n", in->index, in->symbol->name.value);
+      abort();
+  }
+
   return NULL;
+}
+
+static void LowerPushArg(W65C02Generator* g, IRNode* node) {
+  IRNode* call = node->outputs.value.p[0];
+  if (IsIntrinsicCall(g, call)) {
+    // Intrinsics don't push their arguments.
+    SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+    return;
+  }
+  SetLoweredNode(node, PushArg(g, node->inputs.value.p[0]));
 }
 
 // First push all the args onto the stack right to left.
@@ -5222,24 +5688,19 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
   }
   
   size_t args_size = 0;
-  for (size_t i = node->inputs.length - 1; i >= 1; i--) {
+  for (size_t i = 1; i < node->inputs.length;  i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (arg_node->opcode == IR_OP(structreturn)) {
-      // Passing structreturn to another function, push address.
-      PushArg(g, arg_node, &args_size);
-    } else if (TypeIsStructOrUnion(arg_node->type)) {
-      PushStructArg(g, arg_node, &args_size);
-    } else {
-      PushArg(g, arg_node, &args_size);
-    }
+    args_size += GetPushedSize(arg_node);
   }
+
   
   // Load return address into X,Y,
   TargetInstruction* result = NULL;
   // If the function returns a struct/union its result is in address specified
   // by first arg.
   if (TypeIsStructOrUnion(node->type)) {
-    result = GetLoweredNode(node->inputs.value.p[1]);
+    IRNode* push = node->inputs.value.p[1];   // pusharg instruction.
+    result = GetLoweredNode(push->inputs.value.p[0]);   // Arg value.
   } else if (!TypeIsVoid(node->type)) {
     if (node->dest != NULL) {
       LowerIRNode(g, node->dest);
@@ -5285,6 +5746,8 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
       // Result is a struct/union.  Pop the first arg (the result address)
       // back into an expr2 so that we know were it was.
       jsr(g, g->pullxy);
+      // TODO: optimize this out of we can.  It might be possible to check
+      // if the result is used somehow.
       stx(g, result, 0);
       call = sty(g, result, 1);
       args_size -= 2;
@@ -5319,14 +5782,22 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
         default:
           incsp = g->incsp;
           Emit(g, NewInstruction1(
-                      W65C02_OP(ldx),
+                      W65C02_OP(lda),
                       ByteConst(g, args_size & 0xff),
                       kAddrModeImmediate));
+          Emit(g,
+               NewInstruction1(W65C02_OP(sta),
+                               ByteConst(g, W65C02_T0_REG),
+                               kAddrModeZeroPageAbsolute));
           if (args_size >= 256) {
             Emit(g, NewInstruction1(
-                        W65C02_OP(ldy),
+                        W65C02_OP(lda),
                         ByteConst(g, (args_size >> 8) & 0xff),
                         kAddrModeImmediate));
+            Emit(g,
+                 NewInstruction1(W65C02_OP(sta),
+                                 ByteConst(g, W65C02_T1_REG),
+                                 kAddrModeZeroPageAbsolute));
             incsp = g->incsp0;
          }
          break;
@@ -5412,6 +5883,13 @@ static void LowerResult(W65C02Generator* g, IRNode* node) {
 // be assembled as a reference to a symbol with the name .str.%d.
 static void LowerLiteralReference(W65C02Generator* g,
                                                 IRNode* node) {
+  // If we pushing this as an arg we don't lower it here.
+  if (node->outputs.length == 1) {
+    IRNode* user = node->outputs.value.p[0];
+    if (user->opcode == IR_OP(pusharg)) {
+      return;
+    }
+  }
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
@@ -5438,7 +5916,7 @@ static TargetInstruction* AddressOfRegVariable(W65C02Generator* g, IRNode* node,
   TargetInstruction* result = GetLoweredNode(var);
   if (node->dest != NULL) {
     TargetInstruction* dest = GetLoweredNode(node->dest);
-    Copy(g, dest, result, 0, 0, 2, kAddrModeZeroPage, GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest), kAddrModeZeroPage);
     AddSpillPoint(g, dest);
     result = dest;
   }
@@ -5449,7 +5927,7 @@ static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IR
   TargetInstruction* inst = GetLoweredNode(var);
   AddReloadPoint(g, inst);
   
-  switch ((W65C02Opcode)var->opcode) {
+  switch ((W65C02Opcode)inst->opcode) {
     case W65C02_OP(ivarreg):
     case W65C02_OP(bvarreg):
     case W65C02_OP(lvarreg):
@@ -5493,7 +5971,7 @@ static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IR
   if (!dest_set && node->dest != NULL) {
     // We have a location to put the result.
     TargetInstruction* dest = GetAddress(g, node->dest, true);
-    Copy(g, dest, result, 0, 0, 2, kAddrModeZeroPage, GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest), kAddrModeZeroPage);
     AddSpillPoint(g, dest);
     result = dest;
   }
@@ -5505,7 +5983,7 @@ static TargetInstruction* AddressOfStaticVariable(W65C02Generator* g, IRNode* no
   TargetInstruction* result = GetAddress(g, var, false);
   if (node->dest != NULL) {
     TargetInstruction* dest = GetAddress(g, node->dest, true);
-    Copy(g, dest, result, 0, 0, 2, kAddrModeSymbolAddr, GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest), kAddrModeSymbolAddr);
     AddSpillPoint(g, dest);
     result = dest;
   }
@@ -5517,7 +5995,7 @@ static TargetInstruction* AddressOfExpression(W65C02Generator* g, IRNode* node, 
   TargetInstruction* result = GetAddress(g, expr, true);
   if (node->dest != NULL) {
     TargetInstruction* dest = GetAddress(g, node->dest, true);
-    Copy(g, dest, result, 0, 0, 2, GetAddrMode(result), GetAddrMode(dest));
+    Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest), GetAddrMode(result));
     AddSpillPoint(g, dest);
     result = dest;
   }
@@ -5679,7 +6157,7 @@ static void LowerZeroExtend(W65C02Generator* g, IRNode* node) {
       TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
       sta(g, dest, -1);
       dey(g);
-      cpyi(g, src_size);
+      cpyi(g, src_size-1);
       EmitResolvedBranch(g, W65C02_OP(bne), loop);
       SetAddrMode(dest, dest_mode);
     } else {
@@ -5755,7 +6233,7 @@ static void LowerSignExtend(W65C02Generator* g, IRNode* node) {
       TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
       sta(g, dest, 1);
       dey(g);
-      cpyi(g, src_size);
+      cpyi(g, src_size-1);
       EmitResolvedBranch(g, W65C02_OP(bne), loop);
     } else {
       for (int i = src_size; i < dest_size; i++) {
@@ -5861,7 +6339,7 @@ static void LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
   // Now load the contents of the arg, via ap.
   TargetInstruction* dest = GetDestAddress(g, node, false);
   AddReloadPoint(g, dest);
-  Copy(g, dest, ap, 0, 0, Sizeof(node->type), kAddrModeIndirectIndexed, GetAddrMode(dest));
+  Copy(g, dest, ap, 0, 0, Sizeof(node->type), GetAddrMode(dest), kAddrModeIndirectIndexed);
   AddSpillPoint(g, dest);
 #if 0
     for (int i = 0; i < size; i++) {
@@ -6206,7 +6684,7 @@ static void CompareLessUnsignedIntegerExpression(W65C02Generator* g, IRNode* lhs
   for (int i = size-1; i >= 0; i--) {
     SetIndexReg(g, value1, value2, i);
     lda(g, value1, i);
-    cmp(g, value2, i);
+    cmp(g, value2, i)->flags |= k6502GeneratesFlags;
     EmitResolvedBranch(g, W65C02_OP(bcc), true_label);
     if (i > 0) {
       EmitResolvedBranch(g, W65C02_OP(bne), false_label);
@@ -6321,7 +6799,7 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(W65C02Generator* g,
     SetIndexRegDown(g, value1, value2, i, size);
 
     lda(g, value1, i);
-    cmp(g, value2, i);
+    cmp(g, value2, i)->flags |= k6502GeneratesFlags;
     if (i == 0) {
       EmitResolvedBranch(g, W65C02_OP(bcs), true_label);
     } else {
@@ -6516,11 +6994,6 @@ static void LowerStackPointerOps(W65C02Generator* g, IRNode* node) {
   
 }
 
-static void AddLiteral(W65C02Generator* g, TargetConstant* con, const void* data,
-                       size_t length) {
-  con->literal_id = CompilerAddBufferLiteral(data, length);
-}
-
 static void LowerStructReturn(W65C02Generator* g, IRNode* node) {
   TargetInstruction* inst = Emit(g, NewInstruction(W65C02_OP(structreturn), kAddrModeZeroPage));
   g->struct_return_inst = inst;
@@ -6581,6 +7054,7 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       IRConstant* c = (IRConstant*)node;
       TargetInstruction* inst =
           GetIntConstant(g, node, kTargetType16Bit, c->value.ivalue);
+      AddLiteral(g, (TargetConstant*)inst, &c->value.ivalue, 4);
       return ;
     }
     case IR_OP(consta): {
@@ -6758,10 +7232,6 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
     case IR_OP(movf):
     case IR_OP(movd):
     case IR_OP(mova):
-//    case IR_OP(rmovi):
-//    case IR_OP(rmovf):
-//    case IR_OP(rmovd):
-//    case IR_OP(rmova):
     case IR_OP(tmp):
       return LowerExpression(g, node);
 
@@ -6809,6 +7279,9 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
 
     case IR_OP(named_label):
       return LowerNamedLabel(g, node);
+
+    case IR_OP(pusharg):
+      return LowerPushArg(g, node);
 
     case IR_OP(calla):
       return LowerCall(g, node);

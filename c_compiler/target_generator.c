@@ -19,7 +19,7 @@ static int next_instruction_id = 1;
 
 static void Trap() {}
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 44) {
+  if (inst->id == 27) {
     // Set breakpoint here to trap on a certain instruction id.
     Trap();
   }
@@ -329,17 +329,25 @@ void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new) {
 
 void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
                                  bool (*predicate)(TargetInstruction*, void* data), void* data) {
+  size_t num_retargeted = 0;
   for (size_t i = 0; i < old->users.length; i++) {
     TargetInstruction* user = old->users.value.p[i];
     for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
       if (user->operand[j] == old && predicate(user, data)) {
         user->operand[j] = new;
         TargetAddUser(new, user);
+        num_retargeted++;
       }
     }
   }
-  VectorClear(&old->users);
-  old->uses = 0;
+  old->uses = old->users.length - num_retargeted;
+  if (old->uses == 0) {
+    if (old->id == 30) {
+      printf("");
+    }
+    VectorClear(&old->users);
+  }
+ 
 }
 
 void TargetReplaceInstruction(TargetGenerator* target,

@@ -145,22 +145,6 @@ static void AnalyzeBinaryExpression(BinaryASTNode* node) {
   SemanticCheckScalarType(node->right);
 }
 
-// Analyze a unary expression by analyzing the sub expression
-// and propagating the type up.  Also checks that the expression
-// is scalar.
-static void AnalyzeUnaryExpression(UnaryASTNode* node) {
-  if (node == NULL) {
-    return;
-  }
-  node->sub = AnalyzeExpression(node->sub);
-  SemanticCheckScalarType(node->sub);
-  if (node->base.op == AST_OP(not)) {
-    // Not operator is boolean.
-    NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
-  }
-  ASTNodeSetType((ASTNode*)node, node->sub->type);
-}
-
 // Ranks for types.  Larger ranks are closer to the end
 // of the array.  These are pointers to functions that return true
 // if the type is of the requested value.
@@ -170,16 +154,51 @@ bool (*type_ranks[])(TypeRecord*) = {
     TypeIsLongDouble, TypeIsVoid,     NULL,
 };
 
+// The 'int' rank, for promotion to int.
+#define kIntRank 4
+
 // Given a type, what is its rank.  According to the standard, types with higher
 // precision are higher in rank, with _Bool being the lowest rank.  Floating
 // point types have the highest rank.
 static int GetRank(TypeRecord* type) {
   for (int i = 0; type_ranks[i] != NULL; i++) {
     if (type_ranks[i](type)) {
-      return i;
+      return i+1;
     }
   }
   return -1;
+}
+
+// Analyze a unary expression by analyzing the sub expression
+// and propagating the type up.  Also checks that the expression
+// is scalar and promotes types smaller than int to int if needed.
+static void AnalyzeUnaryExpression(UnaryASTNode* node) {
+  if (node == NULL) {
+    return;
+  }
+  node->sub = AnalyzeExpression(node->sub);
+  SemanticCheckScalarType(node->sub);
+  switch (node->base.op) {
+    case AST_OP(not):
+      // Not operator is boolean.
+      NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+      break;
+    case AST_OP(uminus): {
+      int rank = GetRank(node->sub->type);
+      if (rank < kIntRank) {
+        Type t = kTypeInt;
+        if (TypeIsUnsigned(node->sub->type)) {
+          t |= kTypeUnsigned;
+        }
+        NormalConversion(node->sub, NewTypeRecordWithSize(t, kQualPlain));
+      }
+      break;
+    }
+    default:
+      break;
+      
+  }
+  ASTNodeSetType((ASTNode*)node, node->sub->type);
 }
 
 static bool IsIntConstant(ASTNode* node) {
@@ -188,7 +207,7 @@ static bool IsIntConstant(ASTNode* node) {
 
 // Check that we have a valid operands for a numeric expression
 // and insert conversions as necessary.
-static void InsertNumericConversions(BinaryASTNode* node) {
+static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeIsStructOrUnion(node->right->type)) {
     SemanticTypeConversionError(node->left, node->right->type,
@@ -225,9 +244,28 @@ static void InsertNumericConversions(BinaryASTNode* node) {
       ASTNodeSetType((ASTNode*)node, ptr->type);
     }
   } else {
-    // Convert smaller rank to larger.
     int left_rank = IsIntConstant(node->left) ? 0 : GetRank(node->left->type);
     int right_rank = IsIntConstant(node->right) ? 0 : GetRank(node->right->type);
+    if (promote_to_int) {
+      // Promote values smaller than int to int.
+      if (left_rank > 0 && left_rank < kIntRank) {
+        Type t = kTypeInt;
+        if (TypeIsUnsigned(node->left->type)) {
+          t |= kTypeUnsigned;
+        }
+        NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
+        ASTNodeSetType((ASTNode*)node, node->left->type);
+      }
+      if (right_rank > 0 && right_rank < kIntRank) {
+        Type t = kTypeInt;
+        if (TypeIsUnsigned(node->right->type)) {
+          t |= kTypeUnsigned;
+        }
+        NormalConversion(node->right, NewTypeRecordWithSize(t, kQualPlain));
+        ASTNodeSetType((ASTNode*)node, node->right->type);
+      }
+    }
+    // Convert smaller rank to larger.
     assert(left_rank != -1 && right_rank != -1);
     if (left_rank > right_rank) {
       // Convert right to left.
@@ -288,7 +326,7 @@ static void AnalyzePlusOperator(BinaryASTNode* node) {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
     }
   } else {
-    InsertNumericConversions(node);
+    InsertNumericConversions(node, true);
   }
 }
 
@@ -355,7 +393,7 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
       SemanticError((ASTNode*)node, "Illegal pointer subtraction operation");
     }
   } else {
-    InsertNumericConversions(node);
+    InsertNumericConversions(node, true);
   }
   return &node->base;
 }
@@ -366,6 +404,8 @@ static void AnalyzeShift(BinaryASTNode* node) {
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Shift operator needs integral types");
   }
+
+  InsertNumericConversions(node, true);
 
   // Convert node opcode to correct shift type.   An unsigned type uses a
   // logical shift an a signed type uses an arithmetic (sign extension) shift.
@@ -385,13 +425,13 @@ static void AnalyzeBitwiseOperator(BinaryASTNode* node) {
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Bitwise operator needs integral types");
   } else {
-    InsertNumericConversions(node);
+    InsertNumericConversions(node, true);
   }
 }
 
 static void AnalyzeComparisonOperator(BinaryASTNode* node) {
   AnalyzeBinaryExpression(node);
-  InsertNumericConversions(node);
+  InsertNumericConversions(node, true);
 
   // Comparison operators produce boolean values.
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
@@ -408,7 +448,7 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
   colon->left = AnalyzeExpression(colon->left);
   colon->right = AnalyzeExpression(colon->right);
-  InsertNumericConversions(colon);
+  InsertNumericConversions(colon, false);
   ASTNodeSetType((ASTNode*)node, colon->left->type);
 
   ASTNodeSetType((ASTNode*)node, colon->base.type);
@@ -1124,12 +1164,12 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(mult):
     case AST_OP(div):
       AnalyzeBinaryExpression(binary_node);
-      InsertNumericConversions(binary_node);
+      InsertNumericConversions(binary_node, true);
       break;
 
     case AST_OP(mod):
       AnalyzeBinaryExpression(binary_node);
-      InsertNumericConversions(binary_node);
+      InsertNumericConversions(binary_node, true);
       if (!TypeIsIntegral(binary_node->left->type)) {
         SemanticError(node, "Modulus operator needs an integral type");
       }

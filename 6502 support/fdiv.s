@@ -34,7 +34,7 @@
 .set divisor fmanB
 // Result goes directly into fmantissa.  It will be 24 bits wide but will
 // be in the upper 24 bits.
-//.global udiv6
+.global udiv6
 udiv6:
   LDX #24
   BRA udiv61        // First iteration, no shifts.
@@ -74,6 +74,57 @@ udiv61:
 udiv6_l2:
   DEX
   BNE udiv6_l1
+  RTS
+
+// 40 bit division.
+.global udiv40
+udiv40:
+  LDX #40
+  BRA udiv401        // First iteration, no shifts.
+udiv40_l1:
+  // Shift remainder left.  This is a 40 bit shift starting at bit 0.
+  ASL remainder+0
+  ROL remainder+1
+  ROL remainder+2
+  ROL remainder+3
+  ROL remainder+4
+  // Shift quotient left.
+  ASL quotient+0
+  ROL quotient+1
+  ROL quotient+2
+  ROL quotient+3
+  ROL quotient+4
+udiv401:
+  // Trial subtraction.  This is a 40 bit subtraction starting at bit 0.
+  LDA remainder+0
+  SEC
+  SBC divisor+0
+  TAY
+  LDA remainder+1
+  SBC divisor+1
+  STA mt1+0     // Unused temp location
+  LDA remainder+2
+  SBC divisor+2
+  STA mt1+1    // Unused temp location
+  LDA remainder+3
+  SBC divisor+3
+  STA mt1+2      // Unused temp location
+  LDA remainder+4
+  SBC divisor+4
+  BCC udiv40_l2       // Did subtraction succeed?
+
+  STA remainder+4   // If yes, save it
+  LDA mt1+2
+  STA remainder+3
+  LDA mt1+1
+  STA remainder+2
+  LDA mt1+0
+  STA remainder+1
+  STY remainder+0
+  INC quotient+0    // and record a 1 in the quotient
+udiv40_l2:
+  DEX
+  BNE udiv40_l1
   RTS
 
 // Zero result
@@ -147,26 +198,27 @@ __fdiv:
 
   // Divide the mantissas.  This is a special 24 bit division putting
   // the result in fmantissa.
-  JSR udiv6
+  // JSR udiv6
+  JSR udiv40
 
-  // Round.  If either of the top 2 bits of remainder+3 non-zero, meaning
-  // that the remainder is >= 0.5, add 1 to the fmantissa.
-  LDA remainder+3
-  AND #0xc0
-  BEQ fdiv_no_round
-  CLC
-  LDA fmantissa+1
-  ADC #1
-  STA fmantissa+1
-  LDA fmantissa+2
-  ADC #0
-  STA fmantissa+2
-  LDA fmantissa+3
-  ADC #0
-  STA fmantissa+3
+  // If byte 4 of the mantissa is non-zero, continually shift the mantissa
+  // right.
+fdiv_loop:
+  LDA fmantissa+4
+  BEQ fdiv_end
+  LSR fmantissa+4
+  ROR fmantissa+3
+  ROR fmantissa+2
+  ROR fmantissa+1
+  ROR fmantissa+0
+  INC fexp
+  BRA fdiv_loop
 
-fdiv_no_round:
+fdiv_end:
+  // For some reason we need to decrement the exponent.  I don't know why.
+  DEC fexp
   // Normalize result and assemble into destination.
   JSR __fnormalize
+  JSR __fround
   PLX
   JMP __fassemble

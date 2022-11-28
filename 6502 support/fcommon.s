@@ -84,11 +84,16 @@ __fmantissa_is_zero:
   RTS
 
 
-// X: index of float in zero page.
+// Input:
+//   X: index of float in zero page.
+// Output:
+//   fexpA: exponent with bias
+//   fmanA: middle 3 bytes set to mantissa
+//   fsignA: sign (0x80 or 0)
 __funpackA:
   LDA 3,X
   STA fexpA      // Bottom 7 bits of exponent (with sign bit)
-  AND #0x80     // Get sign bit.
+  AND #0x80      // Get sign bit.
   STA fsignA
 
   // Put 23 bit mantissa in middle bytes of fmanA.
@@ -174,6 +179,33 @@ fnorm_left:
   DEC fexp
   BNE fnorm_left
 fendnorm:
+  RTS
+
+// Round the fmantissa using IEEE754 round to zero even rule.
+__fround:
+  LDA fmantissa+0
+  BIT #0x80     // Lowest byte top bit set?
+  BEQ fendnorm  // No, no rounding needed.
+
+  CMP #0x80     // Exactly half?
+  BNE round_up
+
+  // Check if remaining mantissa is even
+  LDA fmantissa+1
+  BIT #0x1
+  BNE fendnorm      // Number is odd, no rounding.
+
+round_up:
+  CLC
+  LDA fmantissa+1
+  ADC #1
+  STA fmantissa+1
+  LDA fmantissa+2
+  ADC #0
+  STA fmantissa+2
+  LDA fmantissa+3
+  ADC #0
+  STA fmantissa+3
   RTS
 
 // X: offset of A in zero page in IEE754 format.
@@ -302,6 +334,7 @@ __finf:
 // X: offset into zero page
 __fisnanA:
   LDA 0,X
+  AND #0x7f
   CMP #0x7f
   BNE notnaninf
   LDA 1,X
@@ -319,6 +352,7 @@ notnaninf:
 // Y: offset into zero page
 __fisnanB:
   LDA 0,Y
+  AND #0x7f
   CMP #0x7f
   BNE notnaninf
   LDA 1,Y
@@ -330,6 +364,7 @@ __fisnanB:
 // X: offset into zero page
 __fisinfA:
   LDA 0,X
+  AND #0x7f
   CMP #0x7f
   BNE notnaninf
   LDA 1,X
@@ -346,6 +381,7 @@ checkinfhi:
 // Y: offset into zero page
 __fisinfB:
   LDA 0,Y
+  AND #0x7f
   CMP #0x7f
   BNE notnaninf
   LDA 1,Y

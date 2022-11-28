@@ -539,6 +539,7 @@ static void FreeRegisters(W65C02RegisterAllocator* allocator,
   if (IsSpillOnly(inst)) {
     return;
   }
+
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
@@ -716,6 +717,9 @@ static void AllocateForRmov(W65C02RegisterAllocator* allocator,
 
 // Does the instruction need a register allocated for it?
 static bool NeedsRegister(TargetInstruction* inst) {
+  if ((inst->flags & k6502DontEmit) != 0) {
+    return false;
+  }
   switch ((W65C02Opcode)inst->opcode) {
     case W65C02_OP(expr1):
     case W65C02_OP(expr2):
@@ -821,7 +825,7 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
     case W65C02_OP(structreturn): {
       W65C02RegisterType reg_type = RegisterTypeFromInstruction(inst);
       reg = AllocateRegisterWithType(allocator, reg_type, CanUseTemp(allocator, inst));
-      reg->locked = true;
+      reg->base.reserved = true;
       break;
     }
       

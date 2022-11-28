@@ -43,6 +43,7 @@
 
 .global __fassemble
 .global __fnormalize
+.global __fround
 .global __funpackA
 .global __funpackB
 .global __fzero

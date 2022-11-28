@@ -33,11 +33,11 @@
 // This is a 24-bit bitmask immediately after the __enter and __enter_leaf
 // calls.  Consists of a number of registers to save for each of the
 // register types in this order:
-// i regs (12)   - 5 bits
-// b regs (8)    - 4 bits
-// l regs (8)    - 4 bits
-// x regs (4)    - 3 bits
-// f regs (4)    - 3 bits
+// i regs (12)   - 5 bits  0..4
+// b regs (8)    - 4 bits  5..8
+// l regs (8)    - 4 bits  9..12
+// x regs (4)    - 3 bits  13..15
+// f regs (4)    - 3 bits  16..18
 //    total      =========
 //                 19 bits
 //

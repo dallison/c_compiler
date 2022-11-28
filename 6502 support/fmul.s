@@ -30,7 +30,7 @@ manmul_l1:
   ADC product_hi+0
   STA product_hi+0
   LDA multiplicand+1
-  ADC product_hi+2
+  ADC product_hi+1
   STA product_hi+1
   LDA multiplicand+2
   ADC product_hi+2
@@ -115,6 +115,7 @@ __fmul:
 
   // Normalize result and assemble into destination.
   JSR __fnormalize
+  JSR __fround
   PLX
   JMP __fassemble
 

@@ -46,6 +46,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
+#include <errno.h>
+#include <limits.h>
 
 #include "errors.h"
 #include "vector.h"
@@ -843,7 +845,15 @@ static void CollectNumber(Lex* lex, char ch) {
       lex->fnumber = strtod(lex->spelling.value, NULL);
       lex->current_token = TOK(fnumber);
     } else {
-      lex->number = strtoll(lex->spelling.value, NULL, 0);
+      errno = 0;
+      lex->number = strtoull(lex->spelling.value, NULL, 0);
+      if (lex->number == ULLONG_MAX) {
+        // Possible overflow.
+        if (errno == ERANGE) {
+          LexError(lex, "Invalid integer literal %s", lex->spelling);
+          lex->number = 0;
+        }
+      }
       lex->current_token = TOK(number);
     }
   }

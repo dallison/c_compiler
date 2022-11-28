@@ -1,18 +1,17 @@
 //
-//  strtol.c
+//  strtoull.c
 //  c_compiler
 //
-//  Created by David Allison on 1/4/19.
-//  Copyright © 2019 David Allison. All rights reserved.
+//  Created by David Allison on 12/2/21.
+//  Copyright © 2021 David Allison. All rights reserved.
 //
-
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <limits.h>
 #include <errno.h>
 
-long strtol(const char* str, const char** end, int base) {
+unsigned long long strtoull(const char* str, const char** end, int base) {
   bool negative = false;
   while (*str != '\0' && isspace(*str)) {
     str++;
@@ -42,7 +41,7 @@ long strtol(const char* str, const char** end, int base) {
     errno = EINVAL;
     return 0;
   }
-  long result = 0;
+  unsigned long long result = 0;
   
   while (*str != '\0') {
     char ch = *str;
@@ -55,7 +54,13 @@ long strtol(const char* str, const char** end, int base) {
     if (v >= base) {
       break;
     }
-    result = result * base + v;
+    unsigned long long nresult = result * base + v;
+    if (nresult < result) {
+      // Overflow
+      errno = ERANGE;
+      return ULLONG_MAX;
+    }
+    result = nresult;
     str++;
   }
   if (str == start) {
@@ -65,22 +70,8 @@ long strtol(const char* str, const char** end, int base) {
   if (end != NULL) {
     *end = str;
   }
-  if (result < 0) {
-    // Overflow or underflow.
-    result = negative ? LONG_MIN : LONG_MAX;
-    errno = ERANGE;
-    return result;
-  }
   if (negative) {
     result = -result;
   }
   return result;
-}
-
-int atoi(const char* s) {
-  return (int)strtol(s, NULL, 10);
-}
-
-long atol(const char* s) {
-  return strtol(s, NULL, 10);
 }

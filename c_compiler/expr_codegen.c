@@ -839,9 +839,13 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       if (init->base.type != NULL &&
           (TypeIsArray(init->base.type) || TypeIsStructOrUnion(init->base.type)) &&
           IRIsZero(value)) {
-        // No need to store zero.
-        continue;
-      }
+        // If we have eliminated a memzero for a union we have to store the zero
+        // and can't eliminate it.
+        if ((init->base.type->type & kTypeUnion) == 0) {
+          // No need to store zero.
+          continue;
+        }
+       }
       IROpcode store = GetStoreOpcode(subinit);
       write = IRSetType(GeneratorEmit(gen, NewIR2(store, destaddr,
                                 RemoveUnnecesaryShortening(gen, value, store))), node->type);
@@ -861,6 +865,19 @@ static bool CanElideMemzero(BracedInitializerASTNode* node) {
     return false;
   }
   DesignatedInitializerASTNode* init = node->initializers->value.p[0];
+  TypeRecord* type = node->base.type;
+  if (TypeIsStructOrUnion(type)) {
+    // Initializing a struct or union.  We can eliminate the memzero if
+    // it is a union and the size of the member we are initializing is
+    // the same as the initializer size.
+    if ((type->type & kTypeUnion) != 0) {
+      // Type is a union.  Can eliminate if the size of the type we are
+      // using to initialize is the same as the size of tne union.
+      if (type->size == init->init->type->size) {
+        return true;
+      }
+    }
+  }
   return TypeIsStructOrUnion(init->init->type) || TypeIsArray(init->init->type);
 }
 
@@ -1065,6 +1082,20 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   return IRSetType(result, node->base.type);
 }
 
+static void PushArg(Generator* gen, IRNode* call,
+                    IRNode* expr, size_t argnum, Vector* callargs) {
+  // Generate an IR_OP(pusharg) containing the expression to push and the
+  // argument number.  Some backends will use this to either push the
+  // expression onto the stack or put it in a register.
+  IRNode* arg_num = GeneratorGetIntConstant(gen,
+                                            NewTypeRecordWithSize(kTypeInt,
+                                                          kQualPlain),
+                                            argnum);
+  IRNode* push = NewIR2(IR_OP(pusharg), expr, arg_num);
+  IRSetType(push, expr->type);
+  VectorAppend(callargs, GeneratorEmit(gen, push));
+}
+
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // Address to call.
   IRNode* func = GenerateExpression(gen, node->left);
@@ -1073,13 +1104,44 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   IRNode* call = NewIR1(IR_OP(calla), func);
   
   bool returns_struct = TypeIsStructOrUnion(node->base.type);
+
+  Vector args_right_to_left = {0};
+  
+  // All arguments, in reverse order.
+  for (ssize_t i = node->children->length-1; i >= 0; i--) {
+    size_t argnum = returns_struct ? i + 1 : i;
+    ASTNode* arg = (ASTNode*)node->children->value.p[i];
+    IRNode* arg_value = GenerateExpression(gen, arg);
+
+    if (TypeIsStructOrUnion(arg->type)) {
+      // If the argument is the result of another call it may
+      // have been converted to an IR_OP(addressof) which is no longer
+      // a struct type (we want its address, not its value)
+      if (TypeIsStructOrUnion(arg_value->type)) {
+        arg_value = GeneratorEmit(gen,
+                               NewIR1(IR_OP(structarg),
+                                      arg_value));
+        if (arg->op == AST_OP(call)) {
+          arg_value->flags |= kIRFromCall;
+        }
+        CheckForVarUse(arg_value, arg);
+      }
+    } else if (TypeIsArray(arg->type) &&
+               arg->op != AST_OP(string) && arg->op != AST_OP(string_wide)) {
+       arg_value = GeneratorEmit(gen,
+                                 NewIR1(IR_OP(addressof), arg_value));
+       CheckForVarUse(arg_value, arg);
+    }
+    PushArg(gen, call, arg_value, argnum, &args_right_to_left);
+  }
+
   // If we are returning a struct or union we need to add an invisible
   // first argument holding the address of where the function is to
   // store the result.
   if (returns_struct) {
     if ((node->base.flags & kASTRvoCall) != 0) {
       // Return Value Optimization call.
-      IRAddInput(call, gen->struct_return_value, false);
+      PushArg(gen, call, gen->struct_return_value, 0, &args_right_to_left);
       call->flags |= kIRRvoCall;
     } else {
       if (gen->current_struct_address == NULL) {
@@ -1088,49 +1150,34 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         IRNode* var = GeneratorGetVariable(gen, tmp);
         IRNode* ref = GeneratorEmit(gen, NewIR1(IR_OP(addressof), var));
         IRSetType(ref, NewPointerTo(kQualPlain, node->base.type));
-        IRAddInput(call, ref, false);
+        PushArg(gen, call, ref, 0, &args_right_to_left);
       } else {
         // We have a destination address, add it to the args.
-        IRAddInput(call, gen->current_struct_address, false);
+        PushArg(gen, call, gen->current_struct_address, 0, &args_right_to_left);
       }
     }
   }
-
-  // All arguments.
-  for (size_t i = 0; i < node->children->length; i++) {
-    ASTNode* arg = (ASTNode*)node->children->value.p[i];
-    if (TypeIsStructOrUnion(arg->type)) {
-      IRNode* arg_value = GenerateExpression(gen, arg);
-      // If the argument is the result of another call it may
-      // have been converted to an IR_OP(addressof) which is no longer
-      // a struct type (we want its address, not its value)
-      if (TypeIsStructOrUnion(arg_value->type)) {
-        IRNode* structarg = GeneratorEmit(gen,
-                               NewIR1(IR_OP(structarg),
-                                      arg_value));
-        CheckForVarUse(structarg, arg);
-        IRAddInput(call, structarg, false);
-      } else {
-        IRAddInput(call, arg_value, false);
-      }
-    } else if (TypeIsArray(arg->type)) {
-      IRNode* arrayarg = GeneratorEmit(gen,
-                                NewIR1(IR_OP(addressof),
-                                       GenerateExpression(gen, arg)));
-       CheckForVarUse(arrayarg, arg);
-       IRAddInput(call, arrayarg, false);
-    } else {
-      IRAddInput(call, GenerateExpression(gen, arg), false);
-    }
+  
+  // Add all the pusharg instructions, left to right.
+  for (ssize_t i = args_right_to_left.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args_right_to_left.value.p[i]), false);
   }
-
+  VectorDestruct(&args_right_to_left);
+  
   // Emit call instruction.
   call = IRSetType(GeneratorEmit(gen, call), node->base.type);
   if (returns_struct) {
     // We are returning a struct.  The result in whatever was passed
     // as the first arguments to the call (the second input to the
     // calla instruction).
-    return call->inputs.value.p[1];
+    // However this is going to be an IR_OP(addressof) and the function
+    // is returning the struct itself.
+    IRNode* ret = call->inputs.value.p[1];
+    if (ret->opcode == IR_OP(addressof)) {
+      return ret->inputs.value.p[0];
+    } else {
+      return ret;
+    }
   }
   return call;
 }
@@ -1200,7 +1247,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       gen,
       NewIR2(IR_OP(adda), addr,
              GeneratorGetIntConstant(gen, NULL, member->member->byte_offset)));
-  IRSetType(addr, node->base.type);
+  IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
   if ((node->base.flags & kASTNeedAddress) != 0) {
     // Only address needed.
     return addr;
@@ -1217,6 +1264,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     // Unless it's an array or struct/union.
     if (TypeIsArray(member->member->symbol->type) ||
         TypeIsStructOrUnion(member->member->symbol->type)) {
+      IRSetType(addr, node->base.type);
       return addr;
     }
     IROpcode load_op = GetLoadOpcode((ASTNode*)node);
@@ -1228,64 +1276,79 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
 }
 
 
+
+
 static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
-  // If the left node is constant we can omit the comparison and branches.
-  if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
-    ConstantASTNode* c = (ConstantASTNode*)node->left;
-    if (node->base.op == AST_OP(logand)) {
-      if (c->value.ivalue == 0) {
-        // Left of && is zero, no need to evaluate the right, result is
-        // zero.
-        return GenerateExpression(gen, node->left);
-      }
-      // Left of && is non-zero, result is the right.
-      return GenerateExpression(gen, node->right);
-    }
-    
-    // Logical OR
-    if (c->value.ivalue != 0) {
-      // Left of || is non-zero, no need to evaluate the right, result is
-      // left.
-      return GenerateExpression(gen, node->left);
-    }
-    // Left of || is zero, result is the right.
-    return GenerateExpression(gen, node->right);
-  }
-  bool value_is_used = OptLevel0() ||
-        ASTNodeUsesValue(node->base.parent, &node->base);
-  // Non-constant logical operation, generate comparison and branches.
-  IRNode* label = NewIR(IR_OP(label));
-  IRNode* tmp = NULL;
-  if (value_is_used) {
-    tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
-  }
+ // If the left node is constant we can omit the comparison and branches.
+ if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
+   ConstantASTNode* c = (ConstantASTNode*)node->left;
+   if (node->base.op == AST_OP(logand)) {
+     if (c->value.ivalue == 0) {
+       // Left of && is zero, no need to evaluate the right, result is
+       // zero.
+       return GenerateExpression(gen, node->left);
+     }
+     // Left of && is non-zero, result is the right.
+     return GenerateExpression(gen, node->right);
+   }
+   
+   // Logical OR
+   if (c->value.ivalue != 0) {
+     // Left of || is non-zero, no need to evaluate the right, result is
+     // left.
+     return GenerateExpression(gen, node->left);
+   }
+   // Left of || is zero, result is the right.
+   return GenerateExpression(gen, node->right);
+ }
+ bool value_is_used = OptLevel0() ||
+       ASTNodeUsesValue(node->base.parent, &node->base);
+ // Non-constant logical operation, generate comparison and branches.
+ IRNode* label = NewIR(IR_OP(label));
+ IRNode* tmp = NULL;
+ if (value_is_used) {
+   tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
+ }
 
-  // Evaluate left node.
-  IRNode* left = GenerateExpression(gen, node->left);
-  
-  // Put result of left node in tmp.
-  if (value_is_used) {
-    left->dest = tmp;
-    // IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, left)), left->type);
-  }
-  
-  // Short circuit.
-  GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
-                                                            : IR_OP(btrue),
-                            left, label));
+ // Evaluate left node.
+ IRNode* left = GenerateExpression(gen, node->left);
+ 
+ if (value_is_used) {
+   // If left is a tmp, use it as our temp, ignoring the one we've allocated.
+   if (left->opcode == IR_OP(tmp)) {
+     GeneratorRemoveInstruction(gen, tmp);
+     tmp = left;
+   } else {
+     left->dest = tmp;
+   }
+ }
 
-  // Evaluate right node and place result in tmp.
-  IRNode* right = GenerateExpression(gen, node->right);
-  if (value_is_used) {
-    right->dest = tmp;
-//    IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(rmovi), tmp, right)), right->type);
-  }
 
-  GeneratorEmit(gen, label);
-  if (tmp != NULL) {
-    IRSetType(tmp, NewTypeRecordWithSize(kTypeBool, kQualPlain));
-  }
-  return value_is_used ? tmp : right;
+ // Short circuit.
+ GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
+                                                           : IR_OP(btrue),
+                           left, label));
+
+ // Evaluate right node and place result in tmp.
+ IRNode* right = GenerateExpression(gen, node->right);
+ if (value_is_used) {
+   if (right->opcode != IR_OP(tmp)) {
+     right->dest = tmp;
+   } else {
+     // Right is in a tmp, if this isn't the same temp as left, copy
+     // it.
+     if (right != tmp) {
+       IRNode* copy = GeneratorEmit(gen, NewIR1(IR_OP(movi), right));
+       copy->dest = tmp;
+     }
+   }
+ }
+
+ GeneratorEmit(gen, label);
+ if (tmp != NULL) {
+   IRSetType(tmp, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+ }
+ return value_is_used ? tmp : right;
 }
 
 static IRNode* GenerateConditionalExpression(Generator* gen,

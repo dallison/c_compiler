@@ -177,6 +177,8 @@ static struct {
     {IR_OP(loc), "loc"},
     {IR_OP(named_label), "label"},
 
+    {IR_OP(pusharg), "pusharg"},
+
     {IR_OP(resulti), "resulti"},
     {IR_OP(resultf), "resultf"},
     {IR_OP(resultd), "resultd"},
@@ -626,6 +628,7 @@ void IRPrint(IRNode* inst, FILE* fp) {
       "rvocall",
       "nrvomarker",
       "jumptablebranch",
+      "fromcall",
     };
     for (int i = 0; i < 32; i++) {
       if ((inst->flags & (1 << i)) != 0) {
@@ -686,6 +689,7 @@ bool IRIsVariable(IRNode* node) {
     case IR_OP(ssavar):
     case IR_OP(phi):
     case IR_OP(structreturn):
+    case IR_OP(tmp):
       return true;
     default:
       return false;
@@ -1014,6 +1018,7 @@ bool IRIsLoad(IRNode* node) {
     case IR_OP(loadd):
     case IR_OP(loada):
     case IR_OP(structarg):
+    case IR_OP(pusharg):
     case IR_OP(addressof):
     case IR_OP(cast):
     case IR_OP(getbit):

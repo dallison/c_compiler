@@ -13,12 +13,15 @@ static int BytesByAddressingMode(AddressingMode addr_mode) {
   switch (addr_mode) {
     case kAddrModeAbsolute:
     case kAddrModeAbsoluteSymbol:
-    case kAddrModeAbsoluteSymbolIndexed:
+    case kAddrModeAbsoluteSymbolIndexedX:
+    case kAddrModeAbsoluteSymbolIndexedY:
+    case kAddrModeLiteralIndexedX:
       return 3;
     case kAddrModeAccumulator:
       return 1;
     case kAddrModeZeroPageIndexedY:
       return 3;         // Really abs,Y.  There is no zero-page,Y
+      
     default:
       return 2;
   }
@@ -65,7 +68,10 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(literalrefhi):
       return 2;
     case W65C02_OP(literalref):  // X:Y = addr of literal
+    case W65C02_OP(stringliteralref):  // X:Y = addr of literal
       return 4;
+    case W65C02_OP(literalrefX):  // Placeholder for literal reference.
+      return 0;
       
     case W65C02_OP(enter): {
       int frame_size = FrameSize(g, true);

@@ -21,6 +21,12 @@ typedef struct FreeBlockHeader {
   struct FreeBlockHeader* next;
 } FreeBlockHeader;
 
+// Global variable holding the start of the free list - a linked list
+// of FreeBlockHeader structs ordered by increasing address.
 extern FreeBlockHeader* __free_list;
+
+#if !defined(__6502)
+#define ALIGN 1
+#endif
 
 #endif /* _malloc_h */

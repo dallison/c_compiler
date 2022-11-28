@@ -190,7 +190,13 @@ umul8b:
   PLA
 umul8c:
   LDA #0       // Initialize product to 0
-  STA product+6
+STA product+14
+STA product+13
+STA product+12
+STA product+11
+STA product+10
+STA product+9
+STA product+8
   LDX #64      // There are 64 bits in NUM2
 umul8_l1:
   LSR multiplier+7   // Get low bit of NUM2

@@ -175,6 +175,8 @@ typedef enum {
   IR_OP(literalref),  // Load literal op0
   IR_OP(loc),         // Source location
 
+  IR_OP(pusharg),     // Push function arg (optional)
+  
   // Function results.
   IR_OP(resulti),  // Int result is op0
   IR_OP(resultf),  // Float result is op0
@@ -279,6 +281,7 @@ typedef struct IRNode {
 #define kIRNrvoMarker (1 << 5)  // Named Return Value optimized symbol.
 #define kIRJumpTableBranch (1 << 6)  // Jump table bra.
 #define kIRFakeUnsigned (1 << 7)  // This type is not really unsigned.
+#define kIRFromCall (1 << 8)  // Struct arg is from a call.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);

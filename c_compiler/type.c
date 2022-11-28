@@ -26,6 +26,12 @@
 
 static int next_type_id = 0;
 
+static void Trap(TypeRecord* r) {
+  if (r->id == 1234) {
+    printf("");
+  }
+}
+
 // The size of a pointer depends on the machine architecture.
 int SizeofBool(void) {
   return compiler->bool_size;
@@ -121,6 +127,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->next = NULL;
   record->declarator = kDeclPrimitive;
   memset(&record->info, 0, sizeof(record->info));
+  Trap(record);
   return record;
 }
 

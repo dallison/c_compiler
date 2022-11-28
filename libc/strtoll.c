@@ -8,10 +8,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
-
-extern int errno;
-
-#define EINVAL 22
+#include <limits.h>
+#include <errno.h>
 
 long long strtoll(const char* str, const char** end, int base) {
   bool negative = false;
@@ -24,6 +22,7 @@ long long strtoll(const char* str, const char** end, int base) {
   } else if (*str == '+') {
     str++;
   }
+  const char* start = str;
   if (base == 16 || base == 0) {
     if (str[0] == '0' && tolower(str[1]) == 'x') {
       str += 2;
@@ -58,11 +57,25 @@ long long strtoll(const char* str, const char** end, int base) {
     result = result * base + v;
     str++;
   }
+  if (str == start) {
+    errno = EINVAL;
+    return 0;
+  }
   if (end != NULL) {
     *end = str;
+  }
+  if (result < 0) {
+    // Overflow or underflow.
+    result = negative ? LLONG_MIN : LLONG_MAX;
+    errno = ERANGE;
+    return result;
   }
   if (negative) {
     result = -result;
   }
   return result;
+}
+
+long long atoll(const char* s) {
+  return strtoll(s, NULL, 10);
 }

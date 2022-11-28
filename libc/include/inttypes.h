@@ -19,17 +19,27 @@
 #  define __PRIPTR_PREFIX
 # endif
 
+# if defined(__6502__)
+# define __PRI_INT_PREFIX "l"
+# define __SCN_INT_PREFIX "l"
+# define __SCN_SHORT_PREFIX
+# else
+# define __PRI_INT_PREFIX
+# define __SCN_INT_PREFIX
+# define __SCN_SHORT_PREFIX "h"
+# endif
+
 /* Macros for printing format specifiers.  */
 
 /* Decimal notation.  */
 # define PRId8    "d"
 # define PRId16    "d"
-# define PRId32    "d"
+# define PRId32    PRI_INT_PREFIX "d"
 # define PRId64    __PRI64_PREFIX "d"
 
 # define PRIdLEAST8  "d"
 # define PRIdLEAST16  "d"
-# define PRIdLEAST32  "d"
+# define PRIdLEAST32  __PRI_INT_PREFIX "d"
 # define PRIdLEAST64  __PRI64_PREFIX "d"
 
 # define PRIdFAST8  "d"
@@ -40,12 +50,12 @@
 
 # define PRIi8    "i"
 # define PRIi16    "i"
-# define PRIi32    "i"
+# define PRIi32    __PRI_INT_PREFIX "i"
 # define PRIi64    __PRI64_PREFIX "i"
 
 # define PRIiLEAST8  "i"
 # define PRIiLEAST16  "i"
-# define PRIiLEAST32  "i"
+# define PRIiLEAST32  __PRI_INT_PREFIX "i"
 # define PRIiLEAST64  __PRI64_PREFIX "i"
 
 # define PRIiFAST8  "i"
@@ -56,12 +66,12 @@
 /* Octal notation.  */
 # define PRIo8    "o"
 # define PRIo16    "o"
-# define PRIo32    "o"
+# define PRIo32    __PRI_INT_PREFIX "o"
 # define PRIo64    __PRI64_PREFIX "o"
 
 # define PRIoLEAST8  "o"
 # define PRIoLEAST16  "o"
-# define PRIoLEAST32  "o"
+# define PRIoLEAST32  __PRI_INT_PREFIX "o"
 # define PRIoLEAST64  __PRI64_PREFIX "o"
 
 # define PRIoFAST8  "o"
@@ -72,12 +82,12 @@
 /* Unsigned integers.  */
 # define PRIu8    "u"
 # define PRIu16    "u"
-# define PRIu32    "u"
+# define PRIu32    __PRI_INT_PREFIX "u"
 # define PRIu64    __PRI64_PREFIX "u"
 
 # define PRIuLEAST8  "u"
 # define PRIuLEAST16  "u"
-# define PRIuLEAST32  "u"
+# define PRIuLEAST32  __PRI_INT_PREFIX "u"
 # define PRIuLEAST64  __PRI64_PREFIX "u"
 
 # define PRIuFAST8  "u"
@@ -88,12 +98,12 @@
 /* lowercase hexadecimal notation.  */
 # define PRIx8    "x"
 # define PRIx16    "x"
-# define PRIx32    "x"
+# define PRIx32    __PRI_INT_PREFIX "x"
 # define PRIx64    __PRI64_PREFIX "x"
 
 # define PRIxLEAST8  "x"
 # define PRIxLEAST16  "x"
-# define PRIxLEAST32  "x"
+# define PRIxLEAST32  __PRI_INT_PREFIX "x"
 # define PRIxLEAST64  __PRI64_PREFIX "x"
 
 # define PRIxFAST8  "x"
@@ -104,12 +114,12 @@
 /* UPPERCASE hexadecimal notation.  */
 # define PRIX8    "X"
 # define PRIX16    "X"
-# define PRIX32    "X"
+# define PRIX32    __PRI_INT_PREFIX "X"
 # define PRIX64    __PRI64_PREFIX "X"
 
 # define PRIXLEAST8  "X"
 # define PRIXLEAST16  "X"
-# define PRIXLEAST32  "X"
+# define PRIXLEAST32  __PRI_INT_PREFIX "X"
 # define PRIXLEAST64  __PRI64_PREFIX "X"
 
 # define PRIXFAST8  "X"
@@ -140,13 +150,13 @@
 
 /* Signed decimal notation.  */
 # define SCNd8    "hhd"
-# define SCNd16    "hd"
-# define SCNd32    "d"
+# define SCNd16    __SCN_SHORT_PREFIX "d"
+# define SCNd32    __SCN_INT_PREFIX "d"
 # define SCNd64    __PRI64_PREFIX "d"
 
 # define SCNdLEAST8  "hhd"
-# define SCNdLEAST16  "hd"
-# define SCNdLEAST32  "d"
+# define SCNdLEAST16  __SCN_SHORT_PREFIX "d"
+# define SCNdLEAST32  __SCN_INT_PREFIX "d"
 # define SCNdLEAST64  __PRI64_PREFIX "d"
 
 # define SCNdFAST8  "hhd"
@@ -156,13 +166,13 @@
 
 /* Signed decimal notation.  */
 # define SCNi8    "hhi"
-# define SCNi16    "hi"
-# define SCNi32    "i"
+# define SCNi16    __SCN_SHORT_PREFIX "i"
+# define SCNi32    __SCN_INT_PREFIX "i"
 # define SCNi64    __PRI64_PREFIX "i"
 
 # define SCNiLEAST8  "hhi"
-# define SCNiLEAST16  "hi"
-# define SCNiLEAST32  "i"
+# define SCNiLEAST16  __SCN_SHORT_PREFIX "i"
+# define SCNiLEAST32  __SCN_INT_PREFIX "i"
 # define SCNiLEAST64  __PRI64_PREFIX "i"
 
 # define SCNiFAST8  "hhi"
@@ -172,13 +182,13 @@
 
 /* Unsigned decimal notation.  */
 # define SCNu8    "hhu"
-# define SCNu16    "hu"
-# define SCNu32    "u"
+# define SCNu16    __SCN_SHORT_PREFIX "u"
+# define SCNu32    __SCN_INT_PREFIX "u"
 # define SCNu64    __PRI64_PREFIX "u"
 
 # define SCNuLEAST8  "hhu"
-# define SCNuLEAST16  "hu"
-# define SCNuLEAST32  "u"
+# define SCNuLEAST16  __SCN_SHORT_PREFIX "u"
+# define SCNuLEAST32  __SCN_INT_PREFIX "u"
 # define SCNuLEAST64  __PRI64_PREFIX "u"
 
 # define SCNuFAST8  "hhu"
@@ -188,13 +198,13 @@
 
 /* Octal notation.  */
 # define SCNo8    "hho"
-# define SCNo16    "ho"
-# define SCNo32    "o"
+# define SCNo16    __SCN_SHORT_PREFIX "o"
+# define SCNo32    __SCN_INT_PREFIX "o"
 # define SCNo64    __PRI64_PREFIX "o"
 
 # define SCNoLEAST8  "hho"
-# define SCNoLEAST16  "ho"
-# define SCNoLEAST32  "o"
+# define SCNoLEAST16  __SCN_SHORT_PREFIX "o"
+# define SCNoLEAST32  __SCN_INT_PREFIX "o"
 # define SCNoLEAST64  __PRI64_PREFIX "o"
 
 # define SCNoFAST8  "hho"
@@ -204,13 +214,13 @@
 
 /* Hexadecimal notation.  */
 # define SCNx8    "hhx"
-# define SCNx16    "hx"
-# define SCNx32    "x"
+# define SCNx16    __SCN_SHORT_PREFIX "x"
+# define SCNx32    __SCN_INT_PREFIX "x"
 # define SCNx64    __PRI64_PREFIX "x"
 
 # define SCNxLEAST8  "hhx"
-# define SCNxLEAST16  "hx"
-# define SCNxLEAST32  "x"
+# define SCNxLEAST16  __SCN_SHORT_PREFIX "h"
+# define SCNxLEAST32  __SCN_INT_PREFIX "x"
 # define SCNxLEAST64  __PRI64_PREFIX "x"
 
 # define SCNxFAST8  "hhx"

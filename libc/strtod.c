@@ -44,7 +44,7 @@ extern void Break();
 // part.  We do this by shifting left or right, counting the number of
 // shifts until we have only a 1 in the top half of the fixed point
 // number.  The number of times we shift is the binary exponent.  The
-// to bits of the bottom half of the fixed point number is the binary mantissa.
+// bits of the bottom half of the fixed point number is the binary mantissa.
 //
 // Finally we assemble the IEEE754 number (either single precision or double
 // precision depending on the architecture).

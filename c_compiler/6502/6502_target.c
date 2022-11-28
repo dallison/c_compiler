@@ -102,7 +102,7 @@ CompilerTarget* New6502Target() {
   target->ir_optimizations.gvn = false;      // Makes 6502 worse.
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = false;  // Increases spills.
-  target->ir_optimizations.tail_call = false;   // Not possible in 6502.
+  target->ir_optimizations.tail_call = false;   // Possible in 6502?
 
   target->prepend_underscore = false;
   target->flags = 0;

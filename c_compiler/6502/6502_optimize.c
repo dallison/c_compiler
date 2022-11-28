@@ -66,6 +66,14 @@ static int ImmediateValue(TargetInstruction* inst) {
   return (value >> (byte * 8) & 0xff);
 }
 
+// This only works for 8-bit values (like an LDY instruction).
+static void SetImmediateValue(struct OptimizerData* opt_data, TargetInstruction* inst, int value) {
+  assert(GetAddrMode(inst) == kAddrModeImmediate);
+  assert(inst->operand[1] == NULL);
+  TargetInstruction* new_value = TargetGetIntConstant(&opt_data->g->base, NULL, kTargetType8Bit, value);
+  inst->operand[0] = new_value;
+}
+
 static void TrackReg(RegTracker* tracker, TargetInstruction* inst) {
   AddressingMode mode = GetAddrMode(inst);
   switch (mode) {
@@ -331,14 +339,143 @@ static bool ModifiesA(TargetInstruction* inst) {
   }
 }
 
-static bool UsesA(TargetInstruction* inst) {
-  if (ModifiesA(inst)) {
-    return true;
+static bool ModifiesFlags(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(lda):
+    case W65C02_OP(ldx):
+    case W65C02_OP(ldy):
+    case W65C02_OP(adc):
+    case W65C02_OP(sbc):
+    case W65C02_OP(ora):
+    case W65C02_OP(and):
+    case W65C02_OP(eor):
+    case W65C02_OP(jsr):
+    case W65C02_OP(pla):
+    case W65C02_OP(ply):
+    case W65C02_OP(plx):
+    case W65C02_OP(tya):
+    case W65C02_OP(txa):
+    case W65C02_OP(tay):
+    case W65C02_OP(tax):
+    case W65C02_OP(dey):
+    case W65C02_OP(iny):
+    case W65C02_OP(dex):
+    case W65C02_OP(inx):
+    case W65C02_OP(jumptable):
+
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case  W65C02_OP(arg_addrb):
+
+    case  W65C02_OP(var_addr_xy):
+    case  W65C02_OP(var_addrb_xy):
+    case   W65C02_OP(arg_addr_xy):
+    case   W65C02_OP(arg_addrb_xy):
+
+    case   W65C02_OP(var_value1):
+    case   W65C02_OP(var_value1b):
+
+    case   W65C02_OP(var_value2):
+    case   W65C02_OP(var_value2b):
+
+    case   W65C02_OP(var_value4):
+    case   W65C02_OP(var_value4b):
+
+    case   W65C02_OP(var_value8):
+    case   W65C02_OP(var_value8b):
+
+    case    W65C02_OP(arg_value1):
+    case    W65C02_OP(arg_value1b):
+
+    case    W65C02_OP(arg_value2):
+    case   W65C02_OP(arg_value2b):
+
+    case   W65C02_OP(arg_value4):
+    case   W65C02_OP(arg_value4b):
+
+    case   W65C02_OP(arg_value8):
+    case   W65C02_OP(arg_value8b):
+      
+    case W65C02_OP(pushreg2):
+    case W65C02_OP(pushreg4):
+    case W65C02_OP(pushreg8):
+      return true;
+      
+    case W65C02_OP(dec):
+    case W65C02_OP(inc):
+    case W65C02_OP(asl):
+    case W65C02_OP(rol):
+    case W65C02_OP(lsr):
+    case W65C02_OP(ror):
+      return GetAddrMode(inst) == kAddrModeAccumulator;
+      
+    default:
+      return false;
   }
+}
+static bool UsesA(TargetInstruction* inst) {
   switch ((W65C02Opcode)inst->opcode) {
     case W65C02_OP(sta):
     case W65C02_OP(pha):
-      return true;
+    case W65C02_OP(cmp):
+    case W65C02_OP(adc):
+    case W65C02_OP(sbc):
+    case W65C02_OP(ora):
+    case W65C02_OP(and):
+    case W65C02_OP(eor):
+    case W65C02_OP(tay):
+    case W65C02_OP(tax):
+    case W65C02_OP(jsr):
+    case W65C02_OP(jumptable):
+
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case  W65C02_OP(arg_addrb):
+
+    case  W65C02_OP(var_addr_xy):
+    case  W65C02_OP(var_addrb_xy):
+    case   W65C02_OP(arg_addr_xy):
+    case   W65C02_OP(arg_addrb_xy):
+
+    case   W65C02_OP(var_value1):
+    case   W65C02_OP(var_value1b):
+
+    case   W65C02_OP(var_value2):
+    case   W65C02_OP(var_value2b):
+
+    case   W65C02_OP(var_value4):
+    case   W65C02_OP(var_value4b):
+
+    case   W65C02_OP(var_value8):
+    case   W65C02_OP(var_value8b):
+
+    case    W65C02_OP(arg_value1):
+    case    W65C02_OP(arg_value1b):
+
+    case    W65C02_OP(arg_value2):
+    case   W65C02_OP(arg_value2b):
+
+    case   W65C02_OP(arg_value4):
+    case   W65C02_OP(arg_value4b):
+
+    case   W65C02_OP(arg_value8):
+    case   W65C02_OP(arg_value8b):
+      
+    case W65C02_OP(pushreg2):
+    case W65C02_OP(pushreg4):
+    case W65C02_OP(pushreg8):
+     return true;
+      
+    case W65C02_OP(dec):
+    case W65C02_OP(inc):
+    case W65C02_OP(asl):
+    case W65C02_OP(rol):
+    case W65C02_OP(lsr):
+    case W65C02_OP(ror):
+      return GetAddrMode(inst) == kAddrModeAccumulator;
+      
     default:
       return false;
   }
@@ -353,7 +490,35 @@ static TargetInstruction* PreviousModifierOfA(TargetInstruction* inst) {
       // Don't go past a label.
       return NULL;
     }
+    // Don't cross basic blocks.
+    if (prev->block != inst->block) {
+      return NULL;
+    }
+    if (UsesA(prev)) {
+      // LDA
+      // ...
+      // STA   <- don't go past this.
+      // ...
+      // LDA
+      return NULL;
+    }
   } while (prev != NULL && !ModifiesA(prev));
+  return prev;
+}
+
+static TargetInstruction* PreviousModifierOfFlags(TargetInstruction* inst) {
+  TargetInstruction* prev = inst;
+  do {
+    prev = TargetPrev(prev);
+    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+      // Don't go past a label.
+      return NULL;
+    }
+    // Don't cross basic blocks.
+    if (prev->block != inst->block) {
+      return NULL;
+    }
+  } while (prev != NULL && !ModifiesFlags(prev));
   return prev;
 }
 
@@ -366,8 +531,28 @@ static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
       // Don't go past a label.
       return NULL;
     }
+    // Don't cross basic blocks.
+    if (prev->block != inst->block) {
+      return NULL;
+    }
   } while (prev != NULL && !UsesA(prev));
   return prev;
+}
+
+// Do we pass over inst between start and end, going backwards.
+static bool PassesOverBackwards(TargetInstruction* start, TargetInstruction* end, TargetInstruction* inst) {
+  TargetInstruction* prev = TargetPrev(start);
+  while (prev != NULL && prev != end) {
+    // Don't cross basic blocks.
+    if (prev->block != start->block) {
+      return true;
+    }
+    if (prev == inst) {
+      return true;
+    }
+    prev = TargetPrev(prev);
+  }
+  return false;
 }
 
 // An expression may be removed it if's unused.  However, stores to the
@@ -402,6 +587,9 @@ static bool IsUnusedExpression(TargetInstruction* inst) {
         }
         break;
       }
+      case W65C02_OP(var_addr):
+        break;
+        
       default:
         uses++;
         break;
@@ -450,16 +638,22 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
        block->end_code != NULL &&
        TargetPrev(inst) != block->end_code; inst = next) {
     next = block->end_code == NULL ? NULL : TargetNext(inst);
+    if ((inst->flags & k6502DontEmit) != 0) {
+      // Don't look at pseudo-deleted instructions.
+      continue;
+    }
      switch ((W65C02Opcode)inst->opcode) {
       case W65C02_OP(lda): {
         TargetInstruction* prev = PrevInstruction(inst);
         TargetInstruction* prev_user = PreviousUserOfA(inst);
         TargetInstruction* prev_modifier = PreviousModifierOfA(inst);
-        if (prev != NULL && prev->opcode == (TargetOpcode)W65C02_OP(lda)) {
-          // LDA following an LDA, remove previous.
-         TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev);
-          opt_data->modified = true;
-          break;
+        if (prev_modifier != NULL && prev_modifier->opcode == (TargetOpcode)W65C02_OP(lda)) {
+          if (!PassesOverBackwards(inst, prev_modifier, prev_user)){
+            // LDA following an LDA, remove previous.
+            TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, prev_modifier);
+            opt_data->modified = true;
+            break;
+          }
         }
         if (prev_modifier != NULL) {
           // If previous modifier is the same instruction, A hasn't changed
@@ -479,8 +673,12 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         }
         if (prev_user != NULL && prev_user->opcode == (TargetOpcode)W65C02_OP(sta)) {
           // STA followed by LDA, remove LDA.
+          // But we need to check that if the addressing mode is indirect (Y or X), the index
+          // hasn't been modified.  We can't really know that, so prevent removal for indirect
+          // addressing modes.
           if (prev_user->operand[0] == inst->operand[0] && prev_user->operand[1] == inst->operand[1] &&
-              GetAddrMode(prev_user) == GetAddrMode(inst)) {
+              GetAddrMode(prev_user) == GetAddrMode(inst) &&
+              GetAddrMode(inst) != kAddrModeIndirectIndexed && GetAddrMode(inst) != kAddrModeIndirect) {
             TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
             opt_data->modified = true;
             break;
@@ -556,6 +754,11 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         trackers->X = current_X;
         break;
       case W65C02_OP(stx):
+         if (IsUnusedExpression(inst->operand[0])) {
+           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           opt_data->modified = true;
+           break;
+         }
         TrackReg(&current_X, inst);
         trackers->X = current_X;
         break;
@@ -576,14 +779,38 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         trackers->Y = current_Y;
         break;
       case W65C02_OP(sty):
-        TrackReg(&current_Y, inst);
+         if (IsUnusedExpression(inst->operand[0])) {
+           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           opt_data->modified = true;
+           break;
+         }
+         TrackReg(&current_Y, inst);
         trackers->Y = current_Y;
         break;
-      case W65C02_OP(iny):
+       case W65C02_OP(iny): {
         if (trackers->Y.type == kRegConstant) {
           trackers->Y.value.c++;
         }
+
+         // An INY immediately preceded by LDY.  We can just increment the
+         // LDY provided it's an immediate, and remove the INY.  This can
+         // happen as we remove unused expressions and instructions.  We can
+         // get a sequence of instructions like
+         // LDY #2
+         // INY
+         // INY
+         // INY
+         //
+         // We can remove the INY and set the LDY instruction to the newly
+         // calculated value.
+         TargetInstruction* prev = PrevInstruction(inst);
+         if (prev->opcode == W65C02_OP(ldy) && GetAddrMode(prev) == kAddrModeImmediate) {
+           SetImmediateValue(opt_data, prev, trackers->Y.value.c);
+           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+           opt_data->modified = true;
+        }
         break;
+       }
       case W65C02_OP(dey):
         if (trackers->Y.type == kRegConstant) {
           trackers->Y.value.c-- ;
@@ -702,17 +929,18 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
        case W65C02_OP(cpx):
          break;
          
-      // If CMP #0 is preceeded by LDA we can remove the CMP #0.
-      // We can also eliminate it if there's an ORA, AND or EOR
+      // If CMP #0 is preceeded by LDA, ORA, AND, EOR, INC or DEC we can
+      // remove the CMP #0.
       case W65C02_OP(cmp):
-         if (GetAddrMode(inst) == kAddrModeImmediate) {
-           TargetInstruction* prev = PrevInstruction(inst);
+         if ((inst->flags & k6502GeneratesFlags) == 0 && GetAddrMode(inst) == kAddrModeImmediate) {
+           TargetInstruction* prev = PreviousModifierOfFlags(inst);
            if (prev != NULL && (prev->opcode == W65C02_OP(lda) || prev->opcode == W65C02_OP(ora) ||
-                                prev->opcode == W65C02_OP(and) || prev->opcode == W65C02_OP(eor))) {
-             TargetInstruction* imm_op = inst->operand[0];
-             TargetInstruction* imm_offset = inst->operand[1];
-             if (TargetIsZero(imm_op) && (imm_offset == NULL || TargetIsZero(imm_offset))) {
-               TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
+                                prev->opcode == W65C02_OP(and) || prev->opcode == W65C02_OP(eor)
+                                || prev->opcode == W65C02_OP(inc) || prev->opcode == W65C02_OP(dec))) {
+             if (ImmediateValue(inst) == 0) {
+               // We can't remove this instruction because it's a user of A
+               // and it will make other optimizations incorrect.
+               inst->flags |= k6502DontEmit;
                opt_data->modified = true;
                break;
              }

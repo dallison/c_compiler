@@ -25,7 +25,7 @@
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
-  if (inst->id == 36) {
+  if (inst->id == 22) {
     Trap();
   }
 }
@@ -327,7 +327,9 @@ IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
       return entry->pooled;
     }
   }
-
+  if (value == 42) {
+    printf("");
+  }
   // No constant found, add a new one.
   entry = malloc(sizeof(PoolEntry));
   entry->value.ivalue = value;
@@ -339,6 +341,7 @@ IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
   if (type == NULL) {
     type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   }
+
   entry->pooled = GeneratorEmitConstant(gen, NewIntIRConstant(type, value));
   VectorAppend(&gen->int_constant_pool, entry);
   return entry->pooled;
