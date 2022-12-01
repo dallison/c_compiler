@@ -19,7 +19,8 @@
 
 static void LowerIRNode(W65C02Generator* g, IRNode* node);
 static void LowerVariables(W65C02Generator* g);
-
+static void LowerLiteralReference(W65C02Generator* g,
+                                  IRNode* node, bool force);
 #define PRINT_PRELOWER 0
 
 bool Is65c02(void) {
@@ -5659,7 +5660,13 @@ static void LowerPushArg(W65C02Generator* g, IRNode* node) {
   IRNode* call = node->outputs.value.p[0];
   if (IsIntrinsicCall(g, call)) {
     // Intrinsics don't push their arguments.
-    SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+    // Literal references are normally lowered from pusharg, but since we
+    // are not pushing any arguments, we need to lower that now.
+    IRNode* arg = node->inputs.value.p[0];
+    if (arg->opcode == IR_OP(literalref)) {
+      LowerLiteralReference(g, arg, true);
+    }
+    SetLoweredNode(node, GetLoweredNode(arg));
     return;
   }
   SetLoweredNode(node, PushArg(g, node->inputs.value.p[0]));
@@ -5882,9 +5889,9 @@ static void LowerResult(W65C02Generator* g, IRNode* node) {
 // to the literalref node) to the 'literal' with the given id.  This will
 // be assembled as a reference to a symbol with the name .str.%d.
 static void LowerLiteralReference(W65C02Generator* g,
-                                                IRNode* node) {
+                                                IRNode* node, bool force) {
   // If we pushing this as an arg we don't lower it here.
-  if (node->outputs.length == 1) {
+  if (!force && node->outputs.length == 1) {
     IRNode* user = node->outputs.value.p[0];
     if (user->opcode == IR_OP(pusharg)) {
       return;
@@ -6228,13 +6235,26 @@ static void LowerSignExtend(W65C02Generator* g, IRNode* node) {
 
     int remaining = dest_size - src_size;
     if (remaining > 2) {
-      // SetAddrMode(dest, kAddrModeIndirectIndexed);
+      AddressingMode old = GetAddrMode(dest);
+      switch (old) {
+        case kAddrModeZeroPage:
+          SetAddrMode(dest, kAddrModeZeroPageIndexedY);
+          break;
+        case kAddrModeIndirectIndexed:
+          break;
+        case kAddrModeAbsoluteSymbol:
+          SetAddrMode(dest, kAddrModeAbsoluteIndexedY);
+          break;
+        default:
+          abort();
+      }
       ldyi(g, dest_size-1);
       TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-      sta(g, dest, 1);
+      sta(g, dest, -1);
       dey(g);
       cpyi(g, src_size-1);
       EmitResolvedBranch(g, W65C02_OP(bne), loop);
+      SetAddrMode(dest, old);
     } else {
       for (int i = src_size; i < dest_size; i++) {
         SetIndexReg(g, dest, dest, i);
@@ -6818,6 +6838,17 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(W65C02Generator* g,
   }
 }
 
+static void LowerCast(W65C02Generator* g, IRNode* node) {
+  TargetInstruction* expr = GetLoweredNode(node->inputs.value.p[0]);
+  if (node->dest != NULL) {
+    LowerIRNode(g, node->dest);
+    TargetInstruction* dest = GetLoweredNode(node->dest);
+    Copy(g, dest, expr, 0, 0, Sizeof(node->type), GetAddrMode(dest), GetAddrMode(expr));
+    return;
+  }
+  SetLoweredNode(node, expr);
+}
+
 static void LowerComparison(W65C02Generator* g, IRNode* node) {
   // Check if any the outputs of the node are not branches.  If all
   // the uses are branches we defer the generation of the comparison
@@ -7032,7 +7063,7 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       return LowerPhiNode(g, node);
 
     case IR_OP(literalref):
-      return LowerLiteralReference(g, node);
+      return LowerLiteralReference(g, node, false);
 
     case IR_OP(addressof):
       return LowerAddressOf(g, node);
@@ -7299,7 +7330,7 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       return LowerMemcpy(g, node);
 
     case IR_OP(cast):
-       SetLoweredNode(node, GetLoweredNode(node->inputs.value.p[0]));
+      LowerCast(g, node);
       return;
       
     case IR_OP(zeroextendi):

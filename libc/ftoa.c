@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include "_fpfuncs.h"
 
-#if 0
+#if 1
 #define STATIC 
 #else
 #define STATIC static

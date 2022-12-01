@@ -273,7 +273,7 @@ __builtin_memcmp:
 
   LDY #0
 memcmp_large_loop:
-  LDA __mem__size
+  LDA __mem_size
   ORA __mem_size+1
   BEQ memcmp_end1
   SEC

@@ -19,7 +19,7 @@ static int next_instruction_id = 1;
 
 static void Trap() {}
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 27) {
+  if (inst->id == 71) {
     // Set breakpoint here to trap on a certain instruction id.
     Trap();
   }

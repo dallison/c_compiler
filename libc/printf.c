@@ -14,13 +14,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#if 1
+#if 0
 #define STATIC static
 #else
 #define STATIC 
 #endif
 
-#if 0
+#if 1
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
 void Break() {}
 #endif
@@ -399,7 +399,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
            default:
               value_ll = (int)va_arg(ap, int);
               break;
-           }
+          }
           if (!is_unsigned && value_ll < 0) {
             negative = true;
             value_ll = -value_ll;
@@ -449,6 +449,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           count += WriteFormatted(writer, data, &fmt, v, len, false);
           break;
         case 'f':
+          Break();
           FixFloatPrecision(&fmt, sizeof(buf) - 2);
           p++;
           v = __PrintFloatFormat(value_f, fmt.precision, buf, sizeof(buf));
