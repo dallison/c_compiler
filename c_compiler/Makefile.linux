@@ -1,11 +1,13 @@
 default: libcompiler_linux.a
 
+DAVECC_SYSROOT_HDRS = libc/include
 CC = clang
 CFLAGS = \
 	-I. \
 	-IELF \
 	-I6502 \
-	-g
+	-g \
+ 	-DDAVECC_SYSROOT_HDRS=$(DAVECC_SYSROOT_HDRS)
 
 UTILS_OBJS = \
     dstring.o \
