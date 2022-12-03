@@ -3594,6 +3594,9 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(named_label):
       return LowerNamedLabel(rv, node);
 
+    case IR_OP(pusharg):
+      break;
+      
     case IR_OP(calla):
       return LowerCall(rv, node);
 

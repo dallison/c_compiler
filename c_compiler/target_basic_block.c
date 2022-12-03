@@ -591,10 +591,6 @@ static void AddOutput(TargetGenerator* gen, TargetBasicBlock* block, TargetInstr
   // use count.  This allows all inputs to be propagated to the
   // output in a call block.
   if (!(is_input && block->contains_call)) {
-    if (inst->uses < 0) {
-      fprintf(stderr, "%s: block: %d, inst: %d\n",
-              gen->function_name.value, block->block_id, inst->id);
-    }
     assert(inst->uses >= 0);
     if (inst->uses == 0) {
       return;

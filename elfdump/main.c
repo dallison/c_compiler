@@ -452,12 +452,13 @@ static const char* RISCVRelocType(int32_t reloc_type) {
   return type;
 }
 
-static void DisassembleRISCV(void* interpreter, void* addr) {
+static int DisassembleRISCV(void* interpreter, void* addr) {
   DisassembleRiscVInstruction((RISCVInterpreter*)interpreter, addr, stdout);
+  return 0;
 }
 
 static int Disassemble6502(void* interpreter, void* addr) {
-  void* next = Disassemble6502Instruction(NULL, NULL, (uint16_t)addr, addr, stdout);
+  void* next = Disassemble6502Instruction(NULL, NULL, (uint16_t)(uintptr_t)addr, addr, stdout);
   return (int)((char*)next - (char*)addr);
 }
 
@@ -487,7 +488,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
   const char* string_table_address = (const char*)elf->header +
        strtab->header->offset;
 
-  void (*disassembler)(void*, void*) = NULL;
+  int (*disassembler)(void*, void*) = NULL;
   void *interpreter = NULL;
   String type = {0};
   switch (elf->header->machine) {

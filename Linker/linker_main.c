@@ -18,7 +18,7 @@
 // The following architectures and layouts are supported by default:
 // 1. 6502:
 //    a: rom - 16K ROM at 0xc000
-//    b: program - loadable program at 0x200
+//    b: program - loadable program at 0x800
 // 2. RISC-V:
 //    a: program - loadable program with code at 0x400000000 and data
 //                 at 0x410000000.

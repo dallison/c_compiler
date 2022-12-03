@@ -2122,6 +2122,9 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(named_label):
         return LowerNamedLabel(pcode, node);
 
+    case IR_OP(pusharg):
+      break;
+
     case IR_OP(calla):
       return LowerCall(pcode, node);
 
