@@ -22,5 +22,5 @@ $(EXE): $(LIB) $(EXE_OBJS)
 	$(CC) -o $@ $(EXE_OBJS) $(LIB) $(LDFLAGS)
 
 clean:
-	rm $(EXE) $(LIB) $(LIB_OBJS) $(EXE_OBJS)
+	rm -f $(EXE) $(LIB) $(LIB_OBJS) $(EXE_OBJS)
 

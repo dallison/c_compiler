@@ -20,5 +20,5 @@ LIBRARIES =  \
 	$(CC) -o $@  $(OBJS) $(LIBRARIES)
 
 clean:
-	rm $(OBJS) 6502dasm
+	rm -f $(OBJS) 6502dasm
 

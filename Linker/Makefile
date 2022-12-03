@@ -30,4 +30,4 @@ $(LIB): $(LINKER_OBJS)
 	$(AR) -r $@  $(LINKER_OBJS)
 
 clean:
-	rm $(LINKER_OBJS) $(LIB)
+	rm -f $(LINKER_OBJS) $(LIB)
