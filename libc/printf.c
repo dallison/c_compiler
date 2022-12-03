@@ -14,13 +14,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#if 0
+#if 1
 #define STATIC static
 #else
 #define STATIC 
 #endif
 
-#if 1
+#if 0
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
 void Break() {}
 #endif
@@ -251,11 +251,7 @@ STATIC char* ConvertHexPointer(void* ptr, char* buf, int buflen, bool upper) {
     return p;
   }
   p = &buf[buflen-1];
-#if defined(__6502__)
-  unsigned int v = (unsigned int)ptr;
-#else
-  unsigned long v = (unsigned long)ptr;
-#endif
+  uintptr_t v = (uintptr_t)ptr;
   while (v != 0) {
     uint8_t n = v & 0xf;
     char ch;
@@ -291,6 +287,8 @@ STATIC int Pad(Writer writer, void* data, int n, bool zero) {
 
 }
 
+// Returns true if we have written a character or would have done so if it
+// wasn't suppressed.
 STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
                     bool negative, bool suppress_write) {
   if (negative) {
@@ -317,6 +315,7 @@ STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
 STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
                           const char* s, size_t len, bool negative) {
   int result = 0;
+  // Are we going to pad the output with spaces or zeroes?
   if (fmt->field_width != kWidthDefault) {
     if (len <= fmt->field_width) {
       int padding = fmt->field_width - (int)len;
@@ -343,16 +342,24 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
       return result;
     }
   }
+  // No padding, just write the data.
   if (negative) {
     writer("-", 1, data);
+  } else if (fmt->prepend_sign) {
+    writer("+", 1, data);
   }
   return writer(s, len, data);
+}
+
+STATIC void RemoveFormatting(Conversion* fmt) {
+  fmt->fill_zero = false;
+  fmt->prepend_sign = false;
+  fmt->prepend_space = false;
 }
 
 STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   char buf[256];
   char* v;
-  size_t len;
   const char* end = buf + sizeof(buf);
   const char* p = format;
   int count = 0;
@@ -430,59 +437,53 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
         case 'u':
           p++;
           v = ConvertDecimalLongLong(value_ll, buf, sizeof(buf));
-          len = end - v;
-          count += WriteFormatted(writer, data, &fmt, v, len, !is_unsigned && negative);
+          count += WriteFormatted(writer, data, &fmt, v, end - v,
+                                  !is_unsigned && negative);
           break;
         case 'x':
         case 'X': {
           bool upper = *p == 'X';
           p++;
           v = ConvertHexLongLong(value_ll, buf, sizeof(buf), upper);
-          len = end - v;
-          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          count += WriteFormatted(writer, data, &fmt, v, end - v, false);
           break;
           }
         case 'p':
           p++;
           v = ConvertHexPointer(value_p, buf, sizeof(buf), false);
-          len = end - v;
-          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          count += WriteFormatted(writer, data, &fmt, v, end - v, false);
           break;
         case 'f':
-          Break();
           FixFloatPrecision(&fmt, sizeof(buf) - 2);
           p++;
           v = __PrintFloatFormat(value_f, fmt.precision, buf, sizeof(buf));
-          len = strlen(v);
-          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          count += WriteFormatted(writer, data, &fmt, v, strlen(v), false);
           break;
         case 'e':
           FixFloatPrecision(&fmt, sizeof(buf) - 5);
           p++;
           v = __PrintScientificFormat(value_f, fmt.precision, buf, sizeof(buf));
-          len = strlen(v);
-          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          count += WriteFormatted(writer, data, &fmt, v, strlen(v), false);
           break;
         case 'g':
           FixFloatPrecision(&fmt, sizeof(buf) - 5);
           p++;
           v = __PrintGeneralFormat(value_f, fmt.precision, buf, sizeof(buf));
-          len = strlen(v);
-          count += WriteFormatted(writer, data, &fmt, v, len, false);
+          count += WriteFormatted(writer, data, &fmt, v, strlen(v), false);
           break;
        case 'c': {
           p++;
           char b[1] = {value_c};
+          // Don't fill or prepend characters.
+          RemoveFormatting(&fmt);
           count += WriteFormatted(writer, data, &fmt, b, 1, false);
           break;
         }
         case 's':
           p++;
-          len = strlen(value_s);
-          fmt.fill_zero = false;
-          fmt.prepend_sign = false;
-          fmt.prepend_space = false;
-          count += WriteFormatted(writer, data, &fmt, value_s, len, false);
+          // Don't fill or prepend strings.
+          RemoveFormatting(&fmt);
+          count += WriteFormatted(writer, data, &fmt, value_s, strlen(value_s), false);
           break;
         default:
           count += writer(p++, 1, data);
