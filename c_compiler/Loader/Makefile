@@ -1,15 +1,12 @@
-LIB = libloader.so
+LIB = libloader_linux.a
 default: $(LIB)
 
-CC = davecc
-CFLAGS = -target risc-v -fPIC \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader/Architecture \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler \
-	-I/Users/dallison/Google\ Drive/c_compiler/libc/include \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/ELF \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/6502 \
-    -Xkeep-asm
+CC = clang
+CFLAGS = -I. \
+	-IArchitecture \
+	-I.. \
+	-I../ELF \
+	-I../6502 \
 
 ARCH_OBJS = \
 	Architecture/loader_arch_riscv.o \
@@ -21,11 +18,9 @@ LINKER_OBJS = \
 	loader_dynamic.o \
 	$(ARCH_OBJS)
 
-LDFLAGS = -L/Users/dallison/Google\ Drive/c_compiler/libc -lc \
-	-rpath /Users/dallison/Google\ Drive/c_compiler/libc
-
 $(LIB): $(LINKER_OBJS)
-	$(CC) -o $@  -shared $(LINKER_OBJS) $(LDFLAGS)
+	$(AR) -r $@  $(LINKER_OBJS)
 
 clean:
-	rm $(LINKER_OBJS) $(LIB)
+	rm -f $(LINKER_OBJS) $(LIB)
+

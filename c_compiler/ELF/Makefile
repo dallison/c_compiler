@@ -1,18 +1,17 @@
-CC = davecc
-CFLAGS = -target risc-v -fPIC -I/Users/dallison/Google\ Drive/c_compiler/c_compiler -Xkeep-asm
+CC = clang
+CFLAGS =  -I..
 
 OBJS = \
   elf_reader.o \
   elf_writer.o
 
-LDFLAGS = -L/Users/dallison/Google\ Drive/c_compiler/libc -lc \
-		-L/Users/dallison/Google\ Drive/c_compiler/c_compiler -lutils \
-	-rpath /Users/dallison/Google\ Drive/c_compiler/libc:/Users/dallison/Google\ Drive/c_compiler/c_compiler
+LDFLAGS = -L.. -lutils_linux \
 
-LIB = libelf.so
+LIB = libelf_linux.a
 
 $(LIB): $(OBJS)
-	$(CC) -o $@  -shared $(OBJS) $(LDFLAGS)
+	$(AR) -r $@  $(OBJS)
 
 clean:
-	rm $(OBJS) $(LIB)
+	rm -f $(OBJS) $(LIB)
+
