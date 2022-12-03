@@ -16,4 +16,3 @@ $(LIB): $(OBJS)
 
 clean:
 	rm $(OBJS) $(LIB)
-

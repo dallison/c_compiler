@@ -1,0 +1,305 @@
+//
+//  debug.c
+//  c_compiler_library
+//
+//  Created by David Allison on 4/5/20.
+//  Copyright © 2020 David Allison. All rights reserved.
+//
+
+#include <assert.h>
+#include <stdlib.h>
+#include "debug.h"
+#include "ast.h"
+
+static DIE* SymbolToDIE(DebugBuilder* db, Symbol* symbol, int tag);
+static DIE* MemberToDIE(DebugBuilder* db, StructMember* member);
+static DIE* EnumConstToDIE(Symbol* c);
+
+void DebugBuilderInit(DebugBuilder* db) {
+  MapInitForCharPointerKeys(&db->tags);
+}
+
+void DebugBuilderDestruct(DebugBuilder* db) {
+  MapDestruct(&db->tags);
+}
+
+DIE* BuildDIE(DebugBuilder* db, Symbol* sym, int tag) {
+  return SymbolToDIE(db, sym, tag);
+}
+
+static BaseTypeDIE base_types[] = {
+  {{DW_TAG_base_type, NULL}, TypeIsChar, "char", DW_ATE_signed_char, 1},
+  {{DW_TAG_base_type, NULL}, TypeIsShort, "short", DW_ATE_signed, 2},
+  {{DW_TAG_base_type, NULL}, TypeIsInt, "int", DW_ATE_signed, 4},
+  {{DW_TAG_base_type, NULL}, TypeIsLong, "long", DW_ATE_signed, 8},
+  {{DW_TAG_base_type, NULL}, TypeIsUnsignedChar, "unsigned char", DW_ATE_unsigned_char, 1},
+  {{DW_TAG_base_type, NULL}, TypeIsUnsignedShort, "unsigned short", DW_ATE_unsigned, 2},
+  {{DW_TAG_base_type, NULL}, TypeIsUnsignedInt, "unsigned int", DW_ATE_unsigned, 4},
+  {{DW_TAG_base_type, NULL}, TypeIsUnsignedLong, "unsigned long", DW_ATE_unsigned, 8},
+  {{DW_TAG_base_type, NULL}, TypeIsFloat, "float", DW_ATE_float, 4},
+  {{DW_TAG_base_type, NULL}, TypeIsDouble, "double", DW_ATE_float, 8},
+  {{DW_TAG_base_type, NULL}, TypeIsBool, "bool", DW_ATE_boolean, 1},
+  {{DW_TAG_unspecified_type, NULL}, TypeIsVoid, "void"},
+};
+
+#define NUM_BASE_TYPES (sizeof(base_types) / sizeof(BaseTypeDIE))
+
+static DIE* PrimitiveToDIE(TypeRecord* type) {
+  for (int i = 0; i < NUM_BASE_TYPES; i++) {
+    if (base_types[i].func(type)) {
+      return &base_types[i].die;
+    }
+  }
+  assert(false);
+  return NULL;
+}
+
+static void FreeDIE(DIE* die) {
+  free(die);
+}
+
+void DestructDIE(DIE* die) {
+  if (die == NULL) {
+    return;
+  }
+  if (die->destructor != NULL) {
+    die->destructor(die);
+  }
+}
+
+static DIE* NewArrayDIE(int num_elements, DIE* subtype) {
+  ArrayTypeDIE* array = malloc(sizeof(ArrayTypeDIE));
+  array->die.tag = DW_TAG_array_type;
+  array->die.destructor = FreeDIE;
+  array->num_elements = num_elements;
+  array->subtype = subtype;
+  return &array->die;
+}
+
+static DIE* NewPointerDIE(DIE* subtype) {
+  ArrayTypeDIE* ptr = malloc(sizeof(PointerTypeDIE));
+  ptr->die.tag = DW_TAG_pointer_type;
+  ptr->die.destructor = FreeDIE;
+  ptr->subtype = subtype;
+  return &ptr->die;
+}
+
+static void LexicalScopeDestruct(DIE* die) {
+  LexicalScopeDIE* scope = (LexicalScopeDIE*)die;
+  VectorDestructWithContents(&scope->variables, (VectorElementDestructor)DestructDIE);
+  VectorDestructWithContents(&scope->lexical_scopes, (VectorElementDestructor)DestructDIE);
+  FreeDIE(die);
+}
+
+static LexicalScopeDIE* NewLexicalScopeInit(int tag, LexicalScopeDIE* parent) {
+  LexicalScopeDIE* scope = malloc(sizeof(LexicalScopeDIE));
+  scope->die.tag = tag;
+  scope->die.destructor = LexicalScopeDestruct;
+  VectorInit(&scope->variables);
+  VectorInit(&scope->lexical_scopes);
+  scope->parent = parent;
+  return scope;
+}
+
+static void DestructFunctionDIE(DIE* die) {
+  FunctionTypeDIE* func = (FunctionTypeDIE*)die;
+  DestructDIE(&func->top_scope->die);
+  FreeDIE(die);
+}
+
+
+static DIE* NewFunctionDIE(DIE* subtype) {
+  FunctionTypeDIE* func = malloc(sizeof(FunctionTypeDIE));
+  func->die.tag = DW_TAG_pointer_type;
+  func->die.destructor = DestructFunctionDIE;
+  func->subtype = subtype;
+  func->top_scope = NewLexicalScopeInit(0, NULL);
+  return &func->die;
+}
+
+static void DestructStructDIE(DIE* die) {
+  StructDIE* s = (StructDIE*)die;
+  VectorDestructWithContents(&s->members, (VectorElementDestructor)DestructDIE);
+  FreeDIE(die);
+}
+
+static DIE* StructToDIE(TypeRecord* type) {
+  StructDIE* die = malloc(sizeof(StructDIE));
+  die->die.tag = type->info.struct_info->is_union ? DW_TAG_union_type : DW_TAG_structure_type;
+  die->die.destructor = DestructStructDIE;
+  die->name = type->info.struct_info->tag_name->value;
+  VectorInit(&die->members);
+  return &die->die;
+}
+
+static void DestructEnumDIE(DIE* die) {
+  EnumDIE* s = (EnumDIE*)die;
+  VectorDestructWithContents(&s->enumerators, (VectorElementDestructor)DestructDIE);
+  FreeDIE(die);
+}
+
+static DIE* EnumToDIE(TypeRecord* type) {
+  EnumDIE* die = malloc(sizeof(EnumDIE));
+  die->die.tag = DW_TAG_enumeration_type;
+  die->die.destructor = DestructEnumDIE;
+  die->name = type->info.struct_info->tag_name->value;
+  VectorInit(&die->enumerators);
+  return &die->die;
+}
+
+static DIE* FindTag(DebugBuilder* db, const char* name) {
+  MapKeyType key = {.p = (void*)name};
+  return MapFind(&db->tags, key);
+}
+
+typedef struct {
+  DebugBuilder* db;
+  LexicalScopeDIE* current;
+  int level;
+} LexicalScopeBuilder;
+
+static void LexicalScopeVisitor(ASTNode* node, void* data, VisitorMode mode) {
+  LexicalScopeBuilder* builder = data;
+  if (node->op == AST_OP(compound)) {
+    if (mode == kVisitPreChildren) {
+      if (builder->level > 0) {
+        LexicalScopeDIE* new_scope = NewLexicalScopeInit(DW_TAG_lexical_block,
+                                                         builder->current);
+        VectorAppend(&builder->current->lexical_scopes, new_scope);
+        builder->current = new_scope;
+      }
+      builder->level++;
+    } else {
+      builder->level--;
+      if (builder->level > 0) {
+        builder->current = builder->current->parent;
+      }
+    }
+  } else if (node->op == AST_OP(vardecl)) {
+    if (mode == kVisitPreChildren) {
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+      VectorAppend(&builder->current->variables,
+                   SymbolToDIE(builder->db, decl->symbol, DW_TAG_variable));
+    }
+  }
+}
+
+static void BuildLexicalScopes(DebugBuilder* db,
+                               TypeRecord* func_type,
+                               FunctionTypeDIE* die) {
+  LexicalScopeBuilder builder = {db, die->top_scope, 0};
+  ASTNodeVisit(func_type->info.function.body, LexicalScopeVisitor, &builder);
+}
+
+static DIE* TypeRecordToDIE(DebugBuilder* db, TypeRecord* type) {
+  DIE* die = NULL;
+  switch (type->declarator) {
+    case kDeclArray:
+      die = NewArrayDIE(type->info.array.size.fixed, TypeRecordToDIE(db, type->next));
+      break;
+      
+    case kDeclPointer:
+      die = NewPointerDIE(TypeRecordToDIE(db, type->next));
+      break;
+      
+    case kDeclFunction:
+      die = NewFunctionDIE(TypeRecordToDIE(db, type->next));
+      FunctionTypeDIE* func = (FunctionTypeDIE*)die;
+      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+        Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
+        DIE* arg = SymbolToDIE(db, formal, DW_TAG_formal_parameter);
+        VectorAppend(&func->top_scope->variables, arg);
+      }
+      BuildLexicalScopes(db, type, func);
+      break;
+      
+    case kDeclPrimitive:
+      if (TypeIsStructOrUnion(type)) {
+        die = FindTag(db, type->info.struct_info->tag_name->value);
+        if (die == NULL) {
+          die = StructToDIE(type);
+          for (size_t i = 0; i < type->info.struct_info->members.length; i++) {
+            DIE* member = MemberToDIE(db, (StructMember*)type->info.struct_info->members.value.p[i]);
+            StructDIE* s = (StructDIE*)die;
+            VectorAppend(&s->members, member);
+          }
+          MapKeyValue kv = {
+            .key.p = type->info.struct_info->tag_name->value,
+            .value.p = die
+          };
+          MapInsert(&db->tags, kv);
+        }
+      } else if (TypeIsEnum(type)) {
+        die = FindTag(db, type->info.enum_info->tag_name->value);
+         if (die == NULL) {
+           die = EnumToDIE(type);
+           for (size_t i = 0; i < type->info.enum_info->constants.length; i++) {
+             DIE* c = EnumConstToDIE((Symbol*)type->info.enum_info->constants.value.p[i]);
+             EnumDIE* e = (EnumDIE*)die;
+             VectorAppend(&e->enumerators, c);
+           }
+           MapKeyValue kv = {
+             .key.p = type->info.enum_info->tag_name->value,
+             .value.p = die
+           };
+           MapInsert(&db->tags, kv);
+         }
+      } else {
+        die = PrimitiveToDIE(type);
+      }
+      break;
+  }
+  assert(die != NULL);
+  
+  // Handle const and volatile.
+  if (TypeIsConst(type)) {
+    ConstVolatileDIE* cv = malloc(sizeof(ConstVolatileDIE));
+    cv->die.tag = DW_TAG_const_type;
+    cv->die.destructor = FreeDIE;
+    cv->subtype = die;
+    die = &cv->die;
+  }
+  if (TypeIsVolatile(type)) {
+    ConstVolatileDIE* cv = malloc(sizeof(ConstVolatileDIE));
+    cv->die.tag = DW_TAG_volatile_type;
+    cv->die.destructor = FreeDIE;
+    cv->subtype = die;
+    die = &cv->die;
+  }
+
+  return die;
+}
+
+static DIE* SymbolToDIE(DebugBuilder* db, Symbol* symbol, int tag) {
+  VariableDIE* var = malloc(sizeof(VariableDIE));
+  var->die.tag = tag;
+  var->die.destructor = FreeDIE;
+  var->is_declaration = !symbol->is_defined;
+  var->is_external = symbol->is_forward_declared;
+  var->name = symbol->name.value;
+  var->type = TypeRecordToDIE(db, symbol->type);
+  return &var->die;
+}
+
+static DIE* MemberToDIE(DebugBuilder* db, StructMember* member) {
+  MemberDIE* mem = malloc(sizeof(MemberDIE));
+  mem->var.die.tag = DW_TAG_member;
+  mem->var.die.destructor = FreeDIE;
+  mem->var.is_declaration = false;
+  mem->var.is_external = false;
+  mem->var.name = member->symbol->name.value;
+  mem->byte_offset = member->byte_offset;
+  mem->bit_offset = member->bit_offset;
+  mem->bit_size = member->bit_size;
+  mem->var.type = TypeRecordToDIE(db, member->symbol->type);
+  return &mem->var.die;
+}
+
+static DIE* EnumConstToDIE(Symbol* c) {
+  EnumeratorDIE* e = malloc(sizeof(EnumeratorDIE));
+  e->die.tag = DW_TAG_enumerator;
+  e->die.destructor = DestructDIE;
+  e->name = c->name.value;
+  e->value = c->value.ivalue;
+  return &e->die;
+}

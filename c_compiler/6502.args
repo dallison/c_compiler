@@ -1,0 +1,5 @@
+-chdir /Users/dallison/Google\ Drive/c_compiler
+-target 6502
+-c
+6502\ support/6502rom.s
+

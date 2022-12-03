@@ -1,0 +1,15 @@
+-isystem /Users/dallison/Google\ Drive/c_compiler/libc/include 
+-isystem /Users/dallison/Google\ Drive/c_compiler/posix
+-chdir /Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader
+-target risc-v
+-fPIC
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader/Architecture
+-I/Users/dallison/Google\ Drive/c_compiler/libc/include
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/ELF
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/6502
+-c
+loader.c
+-Xkeep-asm
+

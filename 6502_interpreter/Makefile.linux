@@ -1,0 +1,53 @@
+CC = clang
+EXE = 6502
+
+CFLAGS = -I../c_compiler \
+	-I../c_compiler/6502 \
+	-I../c_compiler/Loader \
+	-I../c_compiler/ELF \
+	-I../c_compiler/Loader/Architecture
+
+UTILS_OBJS = \
+    ../c_compiler/dstring.o \
+    ../c_compiler/vector.o \
+    ../c_compiler/hashtable.o \
+    ../c_compiler/map.o \
+    ../c_compiler/list.o \
+    ../c_compiler/binary_tree.o \
+    ../c_compiler/set.o \
+    ../c_compiler/bitset.o \
+    ../c_compiler/buffer.o \
+    ../c_compiler/config.o
+
+ELF_OBJS = \
+  ../c_compiler/ELF/elf_reader.o \
+  ../c_compiler/ELF/elf_writer.o
+
+
+LOADER_ARCH_OBJS = \
+    ../c_compiler/Loader/Architecture/loader_arch_riscv.o \
+    ../c_compiler/Loader/Architecture/loader_arch_pcode.o \
+    ../c_compiler/Loader/Architecture/loader_arch_6502.o \
+
+LOADER_OBJS = \
+    ../c_compiler/Loader/loader.o \
+    ../c_compiler/Loader/loader_dynamic.o \
+    $(LOADER_ARCH_OBJS)
+
+
+
+MAIN_OBJS = \
+  main.o \
+  6502_disassembler.o \
+  6502_interpreter.o \
+  6502_debugger.o \
+  6502_devices.o \
+
+OBJS = $(MAIN_OBJS) $(UTILS_OBJS) $(LOADER_OBJS) $(ELF_OBJS)
+
+$(EXE): $(OBJS)
+	$(CC) -o $@  $(OBJS) 
+
+clean:
+	rm $(OBJS) $(EXE)
+

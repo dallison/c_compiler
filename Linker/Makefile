@@ -35,4 +35,3 @@ $(LIB): $(LINKER_OBJS)
 
 clean:
 	rm $(LINKER_OBJS) $(LIB)
-

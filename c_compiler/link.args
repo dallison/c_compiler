@@ -1,0 +1,8 @@
+-shared
+-o /Users/dallison/Google\ Drive/c_compiler/c_compiler/libutils.so
+/Users/dallison/Google\ Drive/c_compiler/c_compiler/dstring.o
+/Users/dallison/Google\ Drive/c_compiler/c_compiler/vector.o
+/Users/dallison/Google\ Drive/c_compiler/c_compiler/hashtable.o
+-L/Users/dallison/Google\ Drive/c_compiler/libc
+-lc
+-Wl,-rpath\ /Users/dallison/Google\ Drive/c_compiler

@@ -1,0 +1,38 @@
+CC = clang
+
+CFLAGS= \
+        -I../c_compiler \
+        -I../c_compiler/ELF \
+        -I../c_compiler/6502 \
+        -I../c_compiler/AR \
+        -I../Linker \
+        -I../Linker/Architecture \
+        -I../c_compiler/Loader \
+        -I../c_compiler/Loader/Architecture \
+    -Wno-unused-function \
+        -g \
+
+
+EXE = archivist
+
+UTILS_OBJS = \
+    ../c_compiler/dstring.o \
+    ../c_compiler/vector.o \
+    ../c_compiler/hashtable.o \
+    ../c_compiler/map.o \
+    ../c_compiler/list.o \
+    ../c_compiler/binary_tree.o \
+    ../c_compiler/set.o \
+    ../c_compiler/bitset.o \
+    ../c_compiler/buffer.o \
+    ../c_compiler/config.o
+
+
+OBJS =  main.o ../c_compiler/AR/ar.o ../c_compiler/ELF/elf_reader.o $(UTILS_OBJS)
+
+$(EXE) : $(OBJS)
+	$(CC) -o $@ $(OBJS)
+
+clean:
+	rm -f $(OBJS) $(EXE)
+

@@ -1,0 +1,64 @@
+#!/bin/bash -x
+
+# Build libc for 6502
+support_src="../6502 support"
+libc_src="."
+CC=davecc
+CFLAGS="-target 6502 -c -Xkeep-asm"
+ar_opts=r
+if [[ "$(uname)" == "darwin" ]]; then
+  AR=archivist
+else
+  AR=ar
+  ar_opts=rs
+fi
+
+function run() {
+  cmd="$1"
+  echo $cmd
+  $cmd
+}
+
+# Build 6502 runtime
+files=( start.s enter.s var_addr.s var_value.s push.s incdec.s \
+        mul.s longmul.s longlongmul.s div.s longdiv.s longlongdiv.s spill.s \
+        fcommon.s fadd.s fconv.s fcmp.s fneg.s fmul.s fdiv.s syscall.s \
+        fmodf.s fldexp.s )
+srcfiles=()
+runtime_objfiles=()
+rm -f "${runtime_objfiles[@]}"
+
+for f in ${files[@]}; do
+  runtime_objfiles+=( ${f%.s}.o )
+  srcfiles+=( "$support_src/$f" )
+done
+
+for f in "${srcfiles[@]}"; do
+    filename=$(basename "$f")
+    objname=${filename%.s}.o
+    ${CC} ${CFLAGS} "-I${support_src}" "$f" -o $objname || exit 1
+done
+
+# Build libc
+files=( strcmp.c strlen.c strcpy.c printf.c strncpy.c strrchr.c \
+        ctype.c malloc.c free.c calloc.c realloc.c memset.c posix.c memcmp.c memcpy.c memmove.c strcat.c strchr.c \
+        strncat.c strncmp.c strstr.c strtol.c strtoll.c ftoa.c fpfuncs.c strtod.c \
+        fread.c fwrite.c stdio.c fputc.c fputs.c fflush.c fgetc.c ungetc.c fgets.c gets.c fopen.c fclose.c fseek.c \
+        perror.c modf.c ldexp.c sincos.c \
+)
+libc_objfiles=()
+srcfiles=()
+for f in ${files[@]}; do
+  libc_objfiles+=( ${f%.c}.o )
+  srcfiles+=( "$libc_src/$f" )
+done
+rm -f "${libc_objfiles[@]}"
+
+for f in "${srcfiles[@]}"; do
+    filename=$(basename "$f")
+    objname=${filename%.c}.o
+    ${CC} ${CFLAGS} "$f" -o $objname || exit 1
+done
+
+rm -f libc6502.a
+$AR ${ar_opts} libc6502.a ${runtime_objfiles[@]} ${libc_objfiles[@]}

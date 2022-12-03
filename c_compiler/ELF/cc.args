@@ -1,0 +1,12 @@
+-isystem /Users/dallison/Google\ Drive/c_compiler/libc/include 
+-isystem /Users/dallison/Google\ Drive/c_compiler/posix
+-chdir /Users/dallison/Google\ Drive/c_compiler/c_compiler/ELF
+-target risc-v
+-fPIC
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler
+-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/ELF
+-c
+-Xkeep-asm
+elf_reader.c
+elf_writer.c
+

@@ -1,0 +1,7 @@
+-chdir /home/dallison/c_compiler/6502\ support/Interpreter\ ROM
+-target 6502
+-Wl,-Tintrom.map
+-Wl,-tintrom
+-static
+introm.s
+-o introm.exe

@@ -1,0 +1,46 @@
+#!/bin/bash
+
+all=false
+if [[ $# > 0 ]]; then
+  if [[ "$1" == all ]]; then
+    all=true
+  fi
+fi
+
+dest=pi@192.168.86.52:6502server
+utils_dir=../c_compiler
+utils_files=( dstring vector hashtable list binary_tree set bitset buffer map )
+loader_dir=../c_compiler/Loader
+loader_files=( loader loader_dynamic Architecture/loader_arch_6502 Architecture/loader_arch )
+
+if [[ "$all" == true ]]; then
+	for f in ${utils_files[@]}; do
+	  echo $utils_dir/$f
+	  rsync $utils_dir/${f}.{c,h} $dest
+	done
+
+	elf_dir=../c_compiler/ELF
+	elf_files=( elf_writer elf_reader )
+
+	scp $elf_dir/elf.h pi@192.168.86.52:6502server
+	for f in ${elf_files[@]}; do
+	  echo $elf_dir/$f
+	  rsync $elf_dir/${f}.{c,h} $dest
+	done
+
+	for f in ${loader_files[@]}; do
+	  echo $loader_dir/$f
+	  rsync $loader_dir/${f}.{c,h} $dest
+	done
+
+fi
+
+files=( Makefile main.c comms.h comms.c fs.c fs.h packet.c packet.h \
+	file_loader.h file_loader.c)
+for f in ${files[@]}; do
+  echo $f
+  rsync ${f} $dest
+done
+
+
+

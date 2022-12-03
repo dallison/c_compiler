@@ -18,4 +18,3 @@ libar.so: $(AR_OBJS)
 
 clean:
 	rm $(AR_OBJS) libar.so
-

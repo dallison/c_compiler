@@ -1,0 +1,25 @@
+-shared
+-o /Users/dallison/Google\ Drive/c_compiler/libc/libc.so
+/Users/dallison/Google\ Drive/c_compiler/libc/fclose.o
+/Users/dallison/Google\ Drive/c_compiler/libc/ffuncs.o
+/Users/dallison/Google\ Drive/c_compiler/libc/fopen.o
+/Users/dallison/Google\ Drive/c_compiler/libc/malloc.o
+/Users/dallison/Google\ Drive/c_compiler/libc/memcmp.o
+/Users/dallison/Google\ Drive/c_compiler/libc/memcpy.o
+/Users/dallison/Google\ Drive/c_compiler/libc/memmove.o
+/Users/dallison/Google\ Drive/c_compiler/libc/memset.o
+/Users/dallison/Google\ Drive/c_compiler/libc/printf.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strcat.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strchr.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strcmp.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strcpy.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strlen.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strncat.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strncmp.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strncpy.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strrchr.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strstr.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strtol.o
+/Users/dallison/Google\ Drive/c_compiler/libc/ctype.o
+/Users/dallison/Google\ Drive/c_compiler/libc/strings.o
+
