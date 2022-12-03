@@ -1,18 +1,26 @@
-CC = davecc
-CFLAGS = -target risc-v -fPIC -I/Users/dallison/Google\ Drive/c_compiler/c_compiler -Xkeep-asm
+CC = clang
+CFLAGS = -I../c_compiler -I../c_compiler/ELF -I../c_compiler/AR -I../c_compiler/6502 -I../Linker -I../c_compiler/Loader -I../c_compiler/Loader/Architecture
+LDFLAGS = -L../c_compiler -lutils -lcompiler -L../Linker -llinker -L../c_compiler/Loader -lloader -L../c_compiler/ELF -lelf 
 
-OBJS = \
-  main.o \
+
+LIB_OBJS = \
   risc_v_disassembler.o \
-  risc_v_interpreter.o
+  risc_v_interpreter.o \
+  risc_v_debugger.o
 
-LDFLAGS = -L/Users/dallison/Google\ Drive/c_compiler/libc -lc \
-		-L/Users/dallison/Google\ Drive/c_compiler/c_compiler -lutils \
-	-rpath /Users/dallison/Google\ Drive/c_compiler/libc:/Users/dallison/Google\ Drive/c_compiler/c_compiler
+EXE_OBJS = \
+  main.o 
 
-libutils.so: $(OBJS)
-	$(CC) -o $@  -shared $(OBJS) $(LDFLAGS)
+LIB = librisc_v.a
+EXE = riscv
+default: $(EXE)
+
+$(LIB): $(LIB_OBJS)
+	$(AR) -r $@ $(LIB_OBJS)
+
+$(EXE): $(LIB) $(EXE_OBJS)
+	$(CC) -o $@ $(EXE_OBJS) $(LIB) $(LDFLAGS)
 
 clean:
-	rm $(OBJS) libutils.so
+	rm $(EXE) $(LIB) $(LIB_OBJS) $(EXE_OBJS)
 

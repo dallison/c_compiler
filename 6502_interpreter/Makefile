@@ -1,20 +1,26 @@
 CFLAGS = -I../c_compiler -I../c_compiler/ELF -I../c_compiler/6502 -I../Linker -I../c_compiler/Loader -I../c_compiler/Loader/Architecture
-LDFLAGS = -L../c_compiler -lutils -lcompiler -L../Linker -llink -L../c_compiler/Loader -lloader -L../c_compiler/ELF -lcelf \
-	  -Wl,-rpath $(PWD)/../c_compiler \
-	  -Wl,-rpath $(PWD)/../c_compiler/ELF \
-	  -Wl,-rpath $(PWD)/../Linker -Wl,-rpath $(PWD)/../c_compiler/Loader
-OBJS = \
+LDFLAGS = -L../c_compiler -lutils -lcompiler -L../Linker -llinker -L../c_compiler/Loader -lloader -L../c_compiler/ELF -lelf 
+
+LIB_OBJS = \
 	6502_debugger.o \
 	6502_devices.o \
 	6502_disassembler.o \
 	6502_interpreter.o \
+
+EXE_OBJS = \
 	main.o
 
-EXE = 6502
+LIB = lib6502.a
 
-$(EXE) : $(OBJS)
-	$(CC) -o $(EXE) $(OBJS) $(LDFLAGS)
+EXE = 6502
+default: $(EXE) 
+
+$(LIB) : $(LIB_OBJS)
+	$(AR) -r $@ $(LIB_OBJS)
+
+$(EXE) : $(EXE_OBJS) $(LIB)
+	$(CC) -o $(EXE) $(EXE_OBJS) $(LIB_OBJS) $(LDFLAGS)
 
 clean:
-	$(RM) -f $(OBJS) $(EXE)
+	$(RM) -f $(EXE_OBJS) $(LIB_OBJS) $(EXE)
 

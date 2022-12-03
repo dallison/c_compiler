@@ -1,4 +1,4 @@
-default: libcompiler_linux.a
+default: libcompiler.a
 
 DAVECC_SYSROOT_HDRS = libc/include
 CC = clang
@@ -81,6 +81,7 @@ COMPILER_OBJS = \
 	optimizer.o \
 	target_generator.o \
         target_basic_block.o \
+	common_emitter.o \
 	assembler.o \
 	asm_expr.o \
 	dwarf.o \
@@ -90,12 +91,12 @@ COMPILER_OBJS = \
 
 
     
-libutils_linux.a: $(UTILS_OBJS)
+libutils.a: $(UTILS_OBJS)
 	$(AR) -r $@  $(UTILS_OBJS)
 
-libcompiler_linux.a: $(COMPILER_OBJS) libutils_linux.a
+libcompiler.a: $(COMPILER_OBJS) libutils.a
 	$(AR) -r $@ $(COMPILER_OBJS)
 
 clean:
-	rm -f $(UTILS_OBJS) $(COMPILER_OBJS) libutils_linux.a
+	rm -f $(UTILS_OBJS) $(COMPILER_OBJS) libutils.a
 

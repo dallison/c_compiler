@@ -8,9 +8,11 @@ CFLAGS =  \
 AR_OBJS = \
 	ar.o
 
-libar_linux.a: $(AR_OBJS)
+LIB = libar.a
+
+$(LIB): $(AR_OBJS)
 	$(AR) -r $@ $(AR_OBJS) 
 
 clean:
-	rm -f $(AR_OBJS) libar_linux.a
+	rm -f $(AR_OBJS) $(LIB)
 

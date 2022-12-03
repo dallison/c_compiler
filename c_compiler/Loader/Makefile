@@ -1,4 +1,4 @@
-LIB = libloader_linux.a
+LIB = libloader.a
 default: $(LIB)
 
 CC = clang

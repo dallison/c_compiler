@@ -1,17 +1,15 @@
-LIB = liblinker.so
+LIB = liblinker.a
 default: $(LIB)
 
-CC = davecc
-CFLAGS = -target risc-v -fPIC -O2 \
-	-I/Users/dallison/Google\ Drive/c_compiler/Linker \
-	-I/Users/dallison/Google\ Drive/c_compiler/Linker/Architecture \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/Loader \
-	-I/Users/dallison/Google\ Drive/c_compiler/libc/include \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/ELF \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/6502 \
-	-I/Users/dallison/Google\ Drive/c_compiler/c_compiler/AR \
-    -Xkeep-asm
+CC = clang
+CFLAGS = \
+    -I. \
+	-IArchitecture \
+	-I../c_compiler \
+	-I../c_compiler/Loader \
+	-I../c_compiler/ELF \
+	-I../c_compiler/6502 \
+	-I../c_compiler/AR \
 
 ARCH_OBJS = \
 	Architecture/linker_arch_riscv.o \
@@ -25,13 +23,11 @@ LINKER_OBJS = \
 	linker_symbols.o \
 	linker_reloc.o \
 	linker_dynamic.o \
+	linker_config.o \
 	$(ARCH_OBJS)
 
-LDFLAGS = -L/Users/dallison/Google\ Drive/c_compiler/libc -lc \
-	-rpath /Users/dallison/Google\ Drive/c_compiler/libc
-
 $(LIB): $(LINKER_OBJS)
-	$(CC) -o $@  -shared $(LINKER_OBJS) $(LDFLAGS)
+	$(AR) -r $@  $(LINKER_OBJS)
 
 clean:
 	rm $(LINKER_OBJS) $(LIB)

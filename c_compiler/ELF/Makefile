@@ -5,9 +5,9 @@ OBJS = \
   elf_reader.o \
   elf_writer.o
 
-LDFLAGS = -L.. -lutils_linux \
+LDFLAGS = -L.. -lutils \
 
-LIB = libelf_linux.a
+LIB = libelf.a
 
 $(LIB): $(OBJS)
 	$(AR) -r $@  $(OBJS)
