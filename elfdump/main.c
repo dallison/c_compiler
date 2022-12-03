@@ -168,7 +168,7 @@ static void PrintSections(ELFReaderFile* elf) {
     AddFlag(section->header->flags, SHF(tls), "t", &flags);
     
     ELFReaderSection* link = elf->sections.value.p[section->header->link];
-    printf("%3zd: %-20s %-8s %-4s %08llx %08llx %08llx %-8s %-3d\n", i, section->name.value, type, flags.value,
+    printf("%3zd: %-20s %-8s %-4s %08" PRIx64 " %08" PRIx64 " %08" PRIx64 " %-8s %-3d\n", i, section->name.value, type, flags.value,
            section->header->offset, section->header->addr, section->header->size,
            link->name.value, section->header->info);
     StringDestruct(&flags);
@@ -214,7 +214,7 @@ static void PrintSegments(ELFReaderFile* elf) {
         StringPrintf(&info, "%zd entries", segment->filesz / sizeof(ELFDynamicSectionEntry));
         break;
     }
-    printf("%3zd: %-8s %-4s %08llx %08llx %08llx %08llx %08llx %s\n", i, type, flags.value,
+    printf("%3zd: %-8s %-4s %08" PRIx64 " %08" PRIx64 " %08" PRIx64 " %08" PRIx64 " %08" PRIx64 " %s\n", i, type, flags.value,
            segment->offset, segment->vaddr,
            segment->filesz, segment->memsz,
            segment->align,
@@ -277,7 +277,7 @@ static void PrintSymbol(ELFReaderFile* elf,
     }
   }
   
-  printf("%3zd: %08llx %5lld %-8s %-6s %-8s(%d) %s\n", index,
+  printf("%3zd: %08" PRIx64 " %5" PRId64 " %-8s %-6s %-8s(%d) %s\n", index,
          sym->value, sym->size,
          type, bind, section_name, sym->shndx, sym_name);
   
@@ -514,7 +514,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
     StringInit(&sym_name, string_table_address + elf_sym->name);
   }
   ELFReaderSection* target_section = elf->sections.value.p[target_section_index];
-  printf("%3zd: %-8s %08llx %-24s %-16s\t", i, target_section->name.value,
+  printf("%3zd: %-8s %08" PRIx64 " %-24s %-16s\t", i, target_section->name.value,
          reloc->offset, type.value,
          sym_name.value);
   if (addend != 0) {

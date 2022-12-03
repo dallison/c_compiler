@@ -21,14 +21,14 @@ void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter) {
   for (int i = 0; i < RV_NUM_INT_REGS; i += 2) {
     DisassemblePrintRegister(stdout, i, kRegTypeInt, "");
 
-    int n = printf("  0x%016llx (%" PRId64 ")", interpreter->iregs[i],
+    int n = printf("  0x%016" PRIx64 " (%" PRId64 ")", interpreter->iregs[i],
            interpreter->iregs[i]);
     n = kWidth - n;
     while (n-- > 0) {
       putchar(' ');
     }
     DisassemblePrintRegister(stdout, i+1, kRegTypeInt, "");
-    printf("  0x%016llx (%" PRId64 ")", interpreter->iregs[i+1],
+    printf("  0x%016" PRIx64 " (%" PRId64 ")", interpreter->iregs[i+1],
            interpreter->iregs[i+1]);
     printf("\n");
   }
@@ -140,7 +140,7 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
     }
     case RISC_V_ECALL_LSEEK: {
       int fd = (int)interpreter->iregs[REG(a1)];
-      fpos_t pos = (int)interpreter->iregs[REG(a2)];
+      off_t pos = (off_t)interpreter->iregs[REG(a2)];
       int whence = (int)interpreter->iregs[REG(a3)];
       interpreter->iregs[REG(a0)] = lseek(fd, pos, whence);
       break;
@@ -190,7 +190,7 @@ static void DumpRegChanges(RISCVInterpreter* interpreter) {
   for (int i = 0; i < RV_NUM_INT_REGS; i++) {
     if (interpreter->iregs[i] != interpreter->old_iregs[i]) {
       DisassemblePrintRegister(stdout, i, kRegTypeInt, "");
-      printf(": %08llx -> %08llx\n", interpreter->old_iregs[i],
+      printf(": %08" PRIx64 " -> %08" PRIx64 "\n", interpreter->old_iregs[i],
              interpreter->iregs[i]);
     }
   }

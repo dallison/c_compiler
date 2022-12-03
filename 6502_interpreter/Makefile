@@ -1,5 +1,5 @@
 CFLAGS = -I../c_compiler -I../c_compiler/ELF -I../c_compiler/6502 -I../Linker -I../c_compiler/Loader -I../c_compiler/Loader/Architecture
-LDFLAGS = -L../c_compiler -lutils -lcompiler -L../Linker -llinker -L../c_compiler/Loader -lloader -L../c_compiler/ELF -lelf 
+LDFLAGS = -L../c_compiler/Loader -lloader -L../c_compiler -lutils -L../Linker -llinker -L../c_compiler/ELF -lelf 
 
 LIB_OBJS = \
 	6502_debugger.o \
@@ -22,5 +22,5 @@ $(EXE) : $(EXE_OBJS) $(LIB)
 	$(CC) -o $(EXE) $(EXE_OBJS) $(LIB_OBJS) $(LDFLAGS)
 
 clean:
-	$(RM) -f $(EXE_OBJS) $(LIB_OBJS) $(EXE)
+	$(RM) -f $(EXE_OBJS) $(LIB_OBJS) $(EXE) $(LIB)
 

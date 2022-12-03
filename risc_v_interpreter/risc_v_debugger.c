@@ -99,7 +99,7 @@ void RISCVDebuggerInit(RISCVDebugger* debugger,
 
 static void ShowLocation(RISCVDebugger* debugger, uint64_t pc, SymbolScope* symbol, int frame_id) {
   printf("%-3s", frame_id == debugger->current_frame_id ? "=>" : "");
-  printf("%-3d 0x%016llx %s\n", frame_id, pc, symbol == NULL ? "" : symbol->name);
+  printf("%-3d 0x%016" PRIx64 " %s\n", frame_id, pc, symbol == NULL ? "" : symbol->name);
 }
 
 

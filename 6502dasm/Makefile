@@ -11,9 +11,9 @@ OBJS = \
   main.o 
 
 LIBRARIES =  \
-	-L../c_compiler -lutils\
-	-L../c_compiler/ELF -lelf \
 	-L../c_compiler/Loader -lloader \
+	-L../c_compiler/ELF -lelf \
+	-L../c_compiler -lutils\
 	-L../6502_interpreter -l6502 
 
 6502dasm: $(OBJS)

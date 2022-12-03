@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -I../c_compiler -I../c_compiler/ELF -I../c_compiler/AR -I../c_compiler/6502 -I../Linker -I../c_compiler/Loader -I../c_compiler/Loader/Architecture
-LDFLAGS = -L../c_compiler -lutils -lcompiler -L../Linker -llinker -L../c_compiler/Loader -lloader -L../c_compiler/ELF -lelf 
+LDFLAGS = -L../c_compiler/Loader -lloader -L../c_compiler -lutils -L../Linker -llinker  -L../c_compiler/ELF -lelf  -lm
 
 
 LIB_OBJS = \

@@ -4,7 +4,7 @@
 support_src="../6502 support"
 libc_src="."
 CC=davecc
-CFLAGS="-target 6502 -c -Xkeep-asm"
+CFLAGS="-target 65c02 -c -Xkeep-asm"
 ar_opts=r
 if [[ "$(uname)" == "darwin" ]]; then
   AR=archivist
