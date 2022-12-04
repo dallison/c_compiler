@@ -17,7 +17,7 @@ static void DumpRegisters(W65C02RegisterAllocator* allocator);
 
 static void Trap() {}
 static void TrapInstruction(W65C02RegisterAllocator* allocator, TargetInstruction* inst) {
-  if (inst->id == 795) {
+  if (inst->id == 15) {
     // Set breakpoint here to trap on a certain ianstruction id.
     Trap();
   }

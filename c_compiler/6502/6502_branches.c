@@ -279,9 +279,9 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(movdc):
     case W65C02_OP(movxc):
 
-    case W65C02_OP(rmov):
-    case W65C02_OP(rmovf):
-    case W65C02_OP(rmovd):
+//    case W65C02_OP(rmov):
+//    case W65C02_OP(rmovf):
+//    case W65C02_OP(rmovd):
 
     case W65C02_OP(ret):
 

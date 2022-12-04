@@ -7664,8 +7664,10 @@ void W65C02Print(W65C02Generator* g, FILE* fp) {
 
 bool W65C02IsExpression(TargetInstruction* inst) {
   return ((W65C02Opcode)inst->opcode >= W65C02_OP(expr1) &&
-         (W65C02Opcode)inst->opcode <= W65C02_OP(expr8)) || ((W65C02Opcode)inst->opcode >= W65C02_OP(ivarreg) &&
-         (W65C02Opcode)inst->opcode <= W65C02_OP(dvarreg));
+         (W65C02Opcode)inst->opcode <= W65C02_OP(expr8)) ||
+  ((W65C02Opcode)inst->opcode >= W65C02_OP(ivarreg) &&
+         (W65C02Opcode)inst->opcode <= W65C02_OP(dvarreg)) ||
+  (W65C02Opcode)inst->opcode == W65C02_OP(structreturn);
 }
 
 bool W65C02IsSignedLoad(TargetInstruction* inst) {

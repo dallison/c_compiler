@@ -25,7 +25,7 @@
 
 static void Trap() {}
 static void TrapInstruction(IRNode* inst) {
-  if (inst->id == 22) {
+  if (inst->id == 19) {
     Trap();
   }
 }

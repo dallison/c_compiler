@@ -622,8 +622,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1828"
-            endingLineNumber = "1828"
+            startingLineNumber = "1831"
+            endingLineNumber = "1831"
             landmarkName = "GenerateExpression(gen, node)"
             landmarkType = "9">
          </BreakpointContent>
@@ -894,8 +894,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1528"
-            endingLineNumber = "1528"
+            startingLineNumber = "1531"
+            endingLineNumber = "1531"
             landmarkName = "LengthenInt(gen, node, sub)"
             landmarkType = "9">
          </BreakpointContent>
@@ -910,8 +910,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1457"
-            endingLineNumber = "1457"
+            startingLineNumber = "1460"
+            endingLineNumber = "1460"
             landmarkName = "GenerateZeroExtend(gen, node, input)"
             landmarkType = "9">
          </BreakpointContent>
@@ -942,8 +942,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1460"
-            endingLineNumber = "1460"
+            startingLineNumber = "1463"
+            endingLineNumber = "1463"
             landmarkName = "GenerateZeroExtend(gen, node, input)"
             landmarkType = "9">
          </BreakpointContent>
@@ -1517,8 +1517,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1481"
-            endingLineNumber = "1481"
+            startingLineNumber = "1484"
+            endingLineNumber = "1484"
             landmarkName = "GenerateSignExtend(gen, from, to)"
             landmarkType = "9">
          </BreakpointContent>
@@ -2460,8 +2460,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1261"
-            endingLineNumber = "1261"
+            startingLineNumber = "1264"
+            endingLineNumber = "1264"
             landmarkName = "GenerateMemberReference(gen, node)"
             landmarkType = "9">
             <Locations>
@@ -2651,8 +2651,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1259"
-            endingLineNumber = "1259"
+            startingLineNumber = "1262"
+            endingLineNumber = "1262"
             landmarkName = "GenerateMemberReference(gen, node)"
             landmarkType = "9">
          </BreakpointContent>
@@ -2778,8 +2778,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1524"
-            endingLineNumber = "1524"
+            startingLineNumber = "1527"
+            endingLineNumber = "1527"
             landmarkName = "LengthenInt(gen, node, sub)"
             landmarkType = "9">
          </BreakpointContent>
@@ -7222,8 +7222,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1388"
-            endingLineNumber = "1388"
+            startingLineNumber = "1391"
+            endingLineNumber = "1391"
             landmarkName = "GenerateConditionalExpression(gen, node)"
             landmarkType = "9">
          </BreakpointContent>
@@ -7990,8 +7990,8 @@
             filePath = "c_compiler/expr_codegen.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1176"
-            endingLineNumber = "1176"
+            startingLineNumber = "1177"
+            endingLineNumber = "1177"
             landmarkName = "GenerateFunctionCall(gen, node)"
             landmarkType = "9">
          </BreakpointContent>
@@ -9113,6 +9113,70 @@
                   offsetFromSymbolStart = "68">
                </Location>
             </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "46B594DB-A498-48CA-8FB7-A38B4985CC28"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/6502/6502_codegen.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "6056"
+            endingLineNumber = "6056"
+            landmarkName = "LowerMemcpy(g, node)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "F7DC4514-C376-46C6-806E-DE43D14DD04B"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/statement_codegen.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "790"
+            endingLineNumber = "790"
+            landmarkName = "GenerateReturnStatement(gen, node)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "90CEAC45-A2A8-4E56-A2A7-6F7B2491C614"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/statement_codegen.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "779"
+            endingLineNumber = "779"
+            landmarkName = "GenerateReturnStatement(gen, node)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "F59740F1-09AD-426B-B2E0-4BE4D54CB19D"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/target_basic_block.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "584"
+            endingLineNumber = "584"
+            landmarkName = "AddOutput(gen, block, inst, is_input)"
+            landmarkType = "9">
          </BreakpointContent>
       </BreakpointProxy>
    </Breakpoints>

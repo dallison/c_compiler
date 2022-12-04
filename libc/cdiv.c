@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 
+#if 0
 // Integer division as a single operation.
 
 div_t div(int numer, int denom) {
@@ -35,6 +36,7 @@ ldiv_t ldiv(long int numer, long int denom) {
   return r;
 #endif
 }
+#endif
 
 lldiv_t lldiv(long long int numer, long long int denom) {
 #if defined(__6502__)

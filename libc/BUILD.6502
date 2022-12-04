@@ -6,7 +6,7 @@ libc_src="."
 CC=../davecc/davecc
 CFLAGS="-target 65c02 -c -Xkeep-asm"
 ar_opts=r
-if [[ "$(uname)" == "darwin" ]]; then
+if [[ "$(uname)" == "Darwin" ]]; then
   AR=archivist
 else
   AR=ar
@@ -20,10 +20,11 @@ function run() {
 }
 
 # Build 6502 runtime
-files=( start.s enter.s var_addr.s var_value.s push.s incdec.s \
+files=( start.s enter.s var_addr.s var_value.s push.s incdec.s jump_table.s \
         mul.s longmul.s longlongmul.s div.s longdiv.s longlongdiv.s spill.s \
         fcommon.s fadd.s fconv.s fcmp.s fneg.s fmul.s fdiv.s syscall.s \
-        fmodf.s fldexp.s )
+        fmodf.s fldexp.s intrinsic.s)
+
 srcfiles=()
 runtime_objfiles=()
 rm -f "${runtime_objfiles[@]}"

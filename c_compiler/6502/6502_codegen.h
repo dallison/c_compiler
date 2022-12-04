@@ -112,10 +112,10 @@ typedef enum {
   W65C02_OP(movdc),
   W65C02_OP(movxc),
 
-  W65C02_OP(rmov),
-  W65C02_OP(rmovf),
-  W65C02_OP(rmovd),
-  
+//  W65C02_OP(rmov),
+//  W65C02_OP(rmovf),
+//  W65C02_OP(rmovd),
+//
   W65C02_OP(ret),
   
   W65C02_OP(label),

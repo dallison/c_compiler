@@ -1173,11 +1173,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     // However this is going to be an IR_OP(addressof) and the function
     // is returning the struct itself.
     IRNode* ret = call->inputs.value.p[1];
+    assert(ret->opcode == IR_OP(pusharg));
+    // This will be a pusharg so dereference its first operand to get
+    // the value being pushed,
+    ret = ret->inputs.value.p[0];
     if (ret->opcode == IR_OP(addressof)) {
-      return ret->inputs.value.p[0];
-    } else {
-      return ret;
+      ret = ret->inputs.value.p[0];
     }
+    return ret;
   }
   return call;
 }

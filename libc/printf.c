@@ -351,7 +351,7 @@ STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
   return writer(s, len, data);
 }
 
-STATIC void RemoveFormatting(Conversion* fmt) {
+STATIC void RemoveFormatting(ConversionFormat* fmt) {
   fmt->fill_zero = false;
   fmt->prepend_sign = false;
   fmt->prepend_space = false;
