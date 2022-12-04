@@ -1,6 +1,6 @@
 default: libcompiler.a
 
-DAVECC_SYSROOT_HDRS = libc/include
+DAVECC_SYSROOT_HDRS = $(PREFIX)/libc/include
 CC = clang
 CFLAGS = \
 	-I. \
@@ -98,5 +98,5 @@ libcompiler.a: $(COMPILER_OBJS) libutils.a
 	$(AR) -r $@ $(COMPILER_OBJS)
 
 clean:
-	rm -f $(UTILS_OBJS) $(COMPILER_OBJS) libutils.a
+	rm -f $(UTILS_OBJS) $(COMPILER_OBJS) libutils.a libcompiler.a
 
