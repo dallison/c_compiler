@@ -10,6 +10,7 @@ CFLAGS = \
 	-I../c_compiler/ELF \
 	-I../c_compiler/6502 \
 	-I../c_compiler/AR \
+	$(OPT_DEBUG)
 
 ARCH_OBJS = \
 	Architecture/linker_arch_riscv.o \

@@ -6,7 +6,7 @@ CFLAGS = \
 	-I. \
 	-IELF \
 	-I6502 \
-	-g \
+	$(OPT_DEBUG) \
  	-DDAVECC_SYSROOT_HDRS=$(DAVECC_SYSROOT_HDRS)
 
 UTILS_OBJS = \

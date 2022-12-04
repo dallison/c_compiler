@@ -5,7 +5,8 @@ CFLAGS = -I../c_compiler \
 	-I../6502_interpreter \
 	-I../c_compiler/Loader \
 	-I../c_compiler/ELF \
-	-I../c_compiler/Loader/Architecture
+	-I../c_compiler/Loader/Architecture \
+	$(OPT_DEBUG)
 
 OBJS = \
   main.o 

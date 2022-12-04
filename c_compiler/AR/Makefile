@@ -4,6 +4,7 @@ CFLAGS =  \
 	-I.. \
 	-I../ELF \
 	-I../6502 \
+	$(OPT_DEBUG)
 
 AR_OBJS = \
 	ar.o

@@ -1,16 +1,33 @@
-all:
-	make -C c_compiler
-	make -C Linker
-	make -C c_compiler/ELF
-	make -C c_compiler/AR
-	make -C c_compiler/Loader
-	make -C 6502_interpreter
-	make -C risc_v_interpreter
-	make -C archivist
-	make -C elfdump
-	make -C davecc
-	make -C 6502asm
-	make -C 6502dasm
+all: opt
+
+opt:
+	make -C c_compiler OPT_DEBUG=-O2
+	make -C Linker OPT_DEBUG=-O2
+	make -C c_compiler/ELF OPT_DEBUG=-O2
+	make -C c_compiler/AR OPT_DEBUG=-O2
+	make -C c_compiler/Loader OPT_DEBUG=-O2
+	make -C 6502_interpreter OPT_DEBUG=-O2
+	make -C risc_v_interpreter OPT_DEBUG=-O2
+	make -C archivist OPT_DEBUG=-O2
+	make -C elfdump OPT_DEBUG=-O2
+	make -C davecc OPT_DEBUG=-O2
+	make -C 6502asm OPT_DEBUG=-O2
+	make -C 6502dasm OPT_DEBUG=-O2
+
+
+debug:
+	make -C c_compiler OPT_DEBUG=-g
+	make -C Linker OPT_DEBUG=-g
+	make -C c_compiler/ELF OPT_DEBUG=-g
+	make -C c_compiler/AR OPT_DEBUG=-g
+	make -C c_compiler/Loader OPT_DEBUG=-g
+	make -C 6502_interpreter OPT_DEBUG=-g
+	make -C risc_v_interpreter OPT_DEBUG=-g
+	make -C archivist OPT_DEBUG=-g
+	make -C elfdump OPT_DEBUG=-g
+	make -C davecc OPT_DEBUG=-g
+	make -C 6502asm OPT_DEBUG=-g
+	make -C 6502dasm OPT_DEBUG=-g
 
 
 clean:

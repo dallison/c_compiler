@@ -1,5 +1,15 @@
-CFLAGS = -I../c_compiler -I../c_compiler/ELF -I../c_compiler/6502 -I../Linker -I../c_compiler/Loader -I../c_compiler/Loader/Architecture
-LDFLAGS = -L../c_compiler/Loader -lloader -L../c_compiler -lutils -L../Linker -llinker -L../c_compiler/ELF -lelf 
+CFLAGS = -I../c_compiler \
+	-I../c_compiler/ELF \
+	-I../c_compiler/6502 \
+	-I../Linker \
+	-I../c_compiler/Loader \
+	-I../c_compiler/Loader/Architecture \
+	$(OPT_DEBUG)
+
+LDFLAGS = -L../c_compiler/Loader -lloader \
+	-L../c_compiler -lutils \
+	-L../Linker -llinker \
+	-L../c_compiler/ELF -lelf 
 
 LIB_OBJS = \
 	6502_debugger.o \

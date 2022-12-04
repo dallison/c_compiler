@@ -1,11 +1,11 @@
 CC = clang
-CFLAGS =  -I..
+CFLAGS =  -I.. $(OPT_DEBUG)
 
 OBJS = \
   elf_reader.o \
   elf_writer.o
 
-LDFLAGS = -L.. -lutils \
+LDFLAGS = -L.. -lutils 
 
 LIB = libelf.a
 
