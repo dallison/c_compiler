@@ -67,6 +67,9 @@ static void PrintHeader(ELFReaderFile* elf) {
     case ELF_MACHINE_TYPEW65C02:
       machine = "6502";
       break;
+    case ELF_MACHINE_TYPE_AARCH64:
+      machine = "AARCH64";
+      break;
   }
   printf("Machine:\t%s\n", machine);
   switch (header->type) {

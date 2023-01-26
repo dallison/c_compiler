@@ -7,7 +7,6 @@
 //
 
 #include <stdio.h>
-#include <fcntl.h>
 
 int fseek(FILE *stream, long int offset, int whence) {
   fflush(stream);
@@ -15,7 +14,8 @@ int fseek(FILE *stream, long int offset, int whence) {
   if (e == -1) {
     return e;
   }
-  stream->error_flag = stream->eof_flag = 0;
+  stream->eof_flag = 0;
+  stream->unget_index = 0;
   return 0;
 }
 
@@ -42,5 +42,8 @@ int fsetpos(FILE *stream, const fpos_t *pos) {
 }
 
 void rewind(FILE *stream) {
-  fseek(stream, 0, SEEK_SET);
+  int e = fseek(stream, 0, SEEK_SET);
+  if (e == 0) {
+    stream->eof_flag = 0;
+  }
 }

@@ -661,8 +661,8 @@ typedef enum {
 #define DW_ISA(x) kDW_ISA_##x
 typedef enum {
   DW_ISA(UNKNOWN) = 0,
-  DW_ISA(ARM_thumb) = 1,
-  DW_ISA(ARM_arm) = 2,
+  DW_ISA(AARCH64_thumb) = 1,
+  DW_ISA(AARCH64_arm) = 2,
 } DW_ISA;
 
 #define DW_MACRO(x) kDW_MACRO_##x

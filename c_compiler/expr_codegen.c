@@ -15,20 +15,21 @@ static struct {
   ASTOpcode node_op;
   bool (*type_func)(TypeRecord*);
   IROpcode ir_op;
+  bool commutative;
 } expr_operators[] = {
-    {AST_OP(plus), TypeIsIntegral, IR_OP(addi)},
-    {AST_OP(plus), TypeIsFloat, IR_OP(addf)},
-    {AST_OP(plus), TypeIsDouble, IR_OP(addd)},
-    {AST_OP(plus), TypeIsPointerOrArray, IR_OP(adda)},
+    {AST_OP(plus), TypeIsIntegral, IR_OP(addi), true},
+    {AST_OP(plus), TypeIsFloat, IR_OP(addf), true},
+    {AST_OP(plus), TypeIsDouble, IR_OP(addd), true},
+    {AST_OP(plus), TypeIsPointerOrArray, IR_OP(adda), true},
 
     {AST_OP(minus), TypeIsIntegral, IR_OP(subi)},
     {AST_OP(minus), TypeIsFloat, IR_OP(subf)},
     {AST_OP(minus), TypeIsDouble, IR_OP(subd)},
     {AST_OP(minus), TypeIsPointerOrArray, IR_OP(suba)},
 
-    {AST_OP(mult), TypeIsIntegral, IR_OP(muli)},
-    {AST_OP(mult), TypeIsFloat, IR_OP(mulf)},
-    {AST_OP(mult), TypeIsDouble, IR_OP(muld)},
+    {AST_OP(mult), TypeIsIntegral, IR_OP(muli), true},
+    {AST_OP(mult), TypeIsFloat, IR_OP(mulf), true},
+    {AST_OP(mult), TypeIsDouble, IR_OP(muld), true},
 
     {AST_OP(div), TypeIsIntegral, IR_OP(divi)},
     {AST_OP(div), TypeIsFloat, IR_OP(divf)},
@@ -40,33 +41,33 @@ static struct {
     {AST_OP(rshiftl), TypeIsIntegral, IR_OP(lsri)},
     {AST_OP(rshifta), TypeIsIntegral, IR_OP(asri)},
 
-    {AST_OP(and), TypeIsIntegral, IR_OP(andi)},
-    {AST_OP(bitor), TypeIsIntegral, IR_OP(ori)},
-    {AST_OP(exor), TypeIsIntegral, IR_OP(xori)},
+    {AST_OP(and), TypeIsIntegral, IR_OP(andi), true},
+    {AST_OP(bitor), TypeIsIntegral, IR_OP(ori), true},
+    {AST_OP(exor), TypeIsIntegral, IR_OP(xori), true},
 
-    {AST_OP(equal), TypeIsIntegral, IR_OP(cmpeqi)},
-    {AST_OP(noteq), TypeIsIntegral, IR_OP(cmpnei)},
+    {AST_OP(equal), TypeIsIntegral, IR_OP(cmpeqi), true},
+    {AST_OP(noteq), TypeIsIntegral, IR_OP(cmpnei), true},
     {AST_OP(less), TypeIsIntegral, IR_OP(cmplti)},
     {AST_OP(lesseq), TypeIsIntegral, IR_OP(cmplei)},
     {AST_OP(greater), TypeIsIntegral, IR_OP(cmpgti)},
     {AST_OP(greatereq), TypeIsIntegral, IR_OP(cmpgei)},
 
-    {AST_OP(equal), TypeIsFloat, IR_OP(cmpeqf)},
-    {AST_OP(noteq), TypeIsFloat, IR_OP(cmpnef)},
+    {AST_OP(equal), TypeIsFloat, IR_OP(cmpeqf), true},
+    {AST_OP(noteq), TypeIsFloat, IR_OP(cmpnef), true},
     {AST_OP(less), TypeIsFloat, IR_OP(cmpltf)},
     {AST_OP(lesseq), TypeIsFloat, IR_OP(cmplef)},
     {AST_OP(greater), TypeIsFloat, IR_OP(cmpgtf)},
     {AST_OP(greatereq), TypeIsFloat, IR_OP(cmpgef)},
 
-    {AST_OP(equal), TypeIsDouble, IR_OP(cmpeqd)},
-    {AST_OP(noteq), TypeIsDouble, IR_OP(cmpned)},
+    {AST_OP(equal), TypeIsDouble, IR_OP(cmpeqd), true},
+    {AST_OP(noteq), TypeIsDouble, IR_OP(cmpned), true},
     {AST_OP(less), TypeIsDouble, IR_OP(cmpltd)},
     {AST_OP(lesseq), TypeIsDouble, IR_OP(cmpled)},
     {AST_OP(greater), TypeIsDouble, IR_OP(cmpgtd)},
     {AST_OP(greatereq), TypeIsDouble, IR_OP(cmpged)},
 
-    {AST_OP(equal), TypeIsPointerOrArray, IR_OP(cmpeqa)},
-    {AST_OP(noteq), TypeIsPointerOrArray, IR_OP(cmpnea)},
+    {AST_OP(equal), TypeIsPointerOrArray, IR_OP(cmpeqa), true},
+    {AST_OP(noteq), TypeIsPointerOrArray, IR_OP(cmpnea), true},
     {AST_OP(less), TypeIsPointerOrArray, IR_OP(cmplta)},
     {AST_OP(lesseq), TypeIsPointerOrArray, IR_OP(cmplea)},
     {AST_OP(greater), TypeIsPointerOrArray, IR_OP(cmpgta)},
@@ -95,6 +96,16 @@ static IROpcode FindIROpcode(ASTNode* node, ASTOpcode op) {
   }
   assert(false);
   return IR_OP(nop);
+}
+
+static bool IsCommutative(ASTOpcode op) {
+  for (size_t i = 0; expr_operators[i].node_op != AST_OP(bad); i++) {
+    if (expr_operators[i].node_op == op) {
+      return expr_operators[i].commutative;
+    }
+  }
+  assert(false);
+  return false;
 }
 
 // Table to translate a type into a size.
@@ -323,11 +334,23 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
       ContainsCall(node->left) &&
       ContainsCall(node->right);
   
-  IRNode* left = GenerateExpression(gen, node->left);
+  ASTNode* lhs = node->left;
+  ASTNode* rhs = node->right;
+  bool is_commutative = IsCommutative(node->base.op);
+  // If the operation is commutative, put a constant on the right side so that
+  // it's easier to fold constants.
+  if (is_commutative) {
+    if (ASTNodeIsIntConstant(node->left) && !ASTNodeIsIntConstant(node->right)) {
+      ASTNode* tmp = lhs;
+      lhs = rhs;
+      rhs = tmp;
+    }
+  }
+  IRNode* left = GenerateExpression(gen, lhs);
   if (stash_call_results) {
     left = StashCallResult(gen, left);
   }
-  IRNode* right = GenerateExpression(gen, node->right);
+  IRNode* right = GenerateExpression(gen, rhs);
   if (stash_call_results) {
     right = StashCallResult(gen, right);
   }

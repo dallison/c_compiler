@@ -10,12 +10,20 @@
 #include <fcntl.h>
 #include <stdlib.h>
 
+extern void Break();
 
 int fputc(char_t c, FILE* stream) {
   if (stream->buf == NULL) {
     char ch = c;
-    int e = write(stream->fd, &ch, 1);
-    return e == 1 ? c : EOF;
+    ssize_t remaining = 1;
+    while (remaining > 0) {
+      ssize_t n = write(stream->fd, &ch, 1);
+      if (n < 0) {
+        return EOF;
+      }
+      remaining -= n;
+    }
+    return c;
   }
   // Buffer full?
   if (stream->windex == stream->bufsize) {
@@ -27,6 +35,7 @@ int fputc(char_t c, FILE* stream) {
   // Add to next position in buffer.
   stream->buf[stream->windex++] = c;
   
+  Break();
   if (c == '\n' && stream->buffering_mode == _IOLBF) {
     // Flush on newline.
     return fflush(stream);

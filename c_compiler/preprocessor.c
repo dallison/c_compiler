@@ -251,8 +251,8 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   // Architecture macros.
   if (StringEqual(compiler->target_name, "x86_64")) {
     PreprocessorDefineMacro(p, "__x86_64__", "1");
-  } else if (StringEqual(compiler->target_name, "arm")) {
-    PreprocessorDefineMacro(p, "__arm__", "1");
+  } else if (StringEqual(compiler->target_name, "aarch64")) {
+    PreprocessorDefineMacro(p, "__aarch64__", "1");
   } else if (StringEqual(compiler->target_name, "p-code") ||
              StringEqual(compiler->target_name, "pcode")) {
     PreprocessorDefineMacro(p, "__p_code__", "1");

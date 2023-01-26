@@ -73,7 +73,8 @@ static IRNode* FindVariableReference(IRNode* origin, Symbol* symbol) {
       return inst;
     }
     prev = inst;
-    if (IRIsLoad(inst) || IRIsStore(inst) || inst->opcode == IR_OP(adda)) {
+    if (IRIsLoad(inst) || IRIsStore(inst) ||
+        inst->opcode == IR_OP(adda)) {
       inst = inst->inputs.value.p[0];
       continue;
     }

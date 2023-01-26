@@ -98,7 +98,8 @@ CompilerTarget* New6502Target() {
   target->code_preference = kCodeForSize;
   target->call_return_fixed_reg = false;
   target->keep_ssa = false;
-  
+  target->plain_char_is_signed = false;
+
   target->ir_optimizations.gvn = false;      // Makes 6502 worse.
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = false;  // Increases spills.

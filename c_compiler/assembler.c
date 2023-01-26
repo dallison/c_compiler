@@ -805,6 +805,10 @@ static void HandleDirective_comm(Assembler* assembler) {
     AssemblerSymbol* sym =
         AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
     if (sym != NULL) {
+      if (assembler->pass == 1 && sym->defined) {
+        AssemblerError(assembler, "Duplicate common symbol %s", sym->name.value);
+        return;
+      }
       sym->exported = true;
       sym->defined = true;
       sym->section = SHN_COM;

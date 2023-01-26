@@ -126,9 +126,9 @@ typedef long fpos_t;
 #define LOCK_WRITE 128
 #define LOCK_RW 192  
 
-#define SEEK_CUR 0
-#define SEET_END 1
-#define SEEK_SET 2
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEET_END 2
 
 #include <unistd.h>
 int open(const char* filename, int mode, ...);

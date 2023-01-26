@@ -36,13 +36,13 @@
 #strtod.c
 #gets.c
 #free.c
-#stdio.c
+stdio.c
 #sincos.c
 #fgetc.c
 #fpfuncs.c
-cdiv.c
+#cdiv.c
 #scanf.c
 #strtok.c
 #strtoll.c
 #exit.c
-
+#fflush.c

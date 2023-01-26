@@ -20,7 +20,11 @@ int fputs(const char* str, FILE* stream) {
   return 0;
 }
 
-int puts(const char* stream) {
-  return fputs(stream, stdout);
+int puts(const char* str) {
+  int e = fputs(str, stdout);
+  if (e != 0) {
+    return e;
+  }
+  return fputc('\n', stdout);
 }
 

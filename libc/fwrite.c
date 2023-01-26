@@ -13,7 +13,7 @@
 size_t fwrite(const void*  ptr, size_t size, size_t n, FILE* stream) {
   char* p = ptr;
   size_t len = size * n;
-  int numchars = 0;
+  size_t numchars = 0;
   while (len > 0) {
     int v = fputc(*p++, stream);
     if (v == EOF) {

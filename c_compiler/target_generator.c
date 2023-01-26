@@ -19,7 +19,7 @@ static int next_instruction_id = 1;
 
 static void Trap() {}
 static void TrapInstruction(TargetInstruction* inst) {
-  if (inst->id == 24) {
+  if (inst->id == 134) {
     // Set breakpoint here to trap on a certain instruction id.
     Trap();
   }
@@ -65,7 +65,7 @@ void TargetPrintInstruction(TargetInstruction* inst,
 
     default: {
       const char* sep = "";
-      for (size_t i = 0; i < 3; i++) {
+      for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
         if (inst->operand[i] != NULL) {
           fprintf(fp, "%s@%d", sep, inst->operand[i]->id);
           sep = ", ";
@@ -402,9 +402,9 @@ void TargetInitInstruction(TargetInstruction* inst, TargetOpcode opcode) {
   inst->addr = -1;
   inst->dest = NULL;
   inst->reg = NULL;
-  inst->operand[0] = NULL;
-  inst->operand[1] = NULL;
-  inst->operand[2] = NULL;
+  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    inst->operand[i] = NULL;
+  }
   VectorInit(&inst->users);
   inst->block = NULL;
   inst->flags = 0;
@@ -460,6 +460,24 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
   inst->operand[0] = op1;
   inst->operand[1] = op2;
   inst->operand[2] = op3;
+  TargetUpdateOperandUsers(inst);
+  return inst;
+}
+
+TargetInstruction* TargetNewInstruction4(TargetOpcode opcode,
+                                         TargetInstruction* op1,
+                                         TargetInstruction* op2,
+                                         TargetInstruction* op3,
+                                         TargetInstruction* op4) {
+  TargetInstruction* inst = (TargetInstruction*)TargetNewInstruction(opcode);
+  assert(inst != op1);
+  assert(inst != op2);
+  assert(inst != op3);
+  assert(inst != op4);
+  inst->operand[0] = op1;
+  inst->operand[1] = op2;
+  inst->operand[2] = op3;
+  inst->operand[3] = op4;
   TargetUpdateOperandUsers(inst);
   return inst;
 }

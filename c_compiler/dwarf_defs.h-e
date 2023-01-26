@@ -685,8 +685,8 @@ DW_ISA(x) kDW_ISA_##x
 typedef enum {
 DW_ISA_UNKNOWN   0
 
-DW_ISA_ARM_thumb 1
-DW_ISA_ARM_arm   2
+DW_ISA_AARCH64_thumb 1
+DW_ISA_AARCH64_arm   2
 } DW_ISA:
 
 DW_MACRO(x) kDW_MACRO_##x

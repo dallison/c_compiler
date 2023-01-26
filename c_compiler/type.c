@@ -1914,8 +1914,20 @@ bool TypeIsArray(TypeRecord* type);
 bool TypeIsConst(TypeRecord* type);
 bool TypeIsVolatile(TypeRecord* type);
 bool TypeIsEnum(TypeRecord* type);
-bool TypeIsUnsigned(TypeRecord* type);
-bool TypeIsSigned(TypeRecord* type);
+
+bool TypeIsUnsigned(TypeRecord* type) {
+  if (!compiler->plain_char_is_signed && type->type == kTypeChar) {
+    return true;
+  }
+  return TypeIsPrimitive(type) && (type->type & (kTypeUnsigned | kTypeBool)) != 0;
+}
+
+bool TypeIsSigned(TypeRecord* type) {
+  if (compiler->plain_char_is_signed && type->type == kTypeChar) {
+    return true;
+  }
+  return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
+}
 
 
 bool TypeIsIntConstant(TypeRecord* type);

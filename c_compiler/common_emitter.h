@@ -16,14 +16,14 @@
 FILE* EmitAssemblyFile(String* src_file, String* asm_file);
 void EmitDataStart(FILE* fp);
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp);
-void EmitBSSVariable(UnintializedStaticVariable* var, FILE* fp);
+void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitStringLiteralSection(FILE* fp);
 void EmitLiteral(Literal* literal, FILE* fp);
 void EmitDebug(FILE* fp);
 void EmitP2Align(int alignment, FILE* fp);
 void EmitTlsDataStart(FILE* fp);
 void EmitTlsBSSStart(FILE* fp);
-void EmitTlsBSSVariable(UnintializedStaticVariable* var, FILE* fp);
+void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitTlsVariable(InitializedStaticVariable* var, FILE* fp);
 
 #endif /* common_emitter_h */

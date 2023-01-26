@@ -12,7 +12,7 @@
 
 FILE* fopen(const char* filename, const char* mode) {
   int open_mode = 0;
-  char* m = mode;
+  const char* m = mode;
   while (*m != '\0') {
     if (*m == 'r') {
       open_mode |= 1;
@@ -48,10 +48,17 @@ FILE* fopen(const char* filename, const char* mode) {
   fp->bufsize = BUFSIZE;
   fp->windex = 0;
   fp->rindex = fp->bufsize;
+  fp->rlimit = 0;
   fp->buffer_owned = 0;       // Buffer doesn't need to be freed.
   fp->buffering_mode = _IOFBF;    // Fully buffered.
-  fp->unget_index = -1;
+  fp->unget_index = 0;
   fp->eof_flag = 0;
   fp->error_flag = 0;
+  fp->next = NULL;
+  
+  // Link into global list of all files.
+  __last_file->next = fp;
+  fp->prev = __last_file;
+  __last_file = fp;
   return fp;
 }

@@ -14,11 +14,28 @@ int fclose(FILE* fp) {
   if (fp == NULL) {
     return EOF;
   }
-  fflush(fp);
-  int e = close(fp->fd);
+  int e = fflush(fp);
+  if (e == EOF) {
+    return EOF;
+  }
+  e = close(fp->fd);
   if (e == -1) {
     return EOF;
   }
+  // Unlink from previous.
+  if (fp->prev == NULL) {
+    __all_files = fp->next;
+  } else {
+    fp->prev->next = fp->next;
+  }
+  
+  // Unlink from next.
+  if (fp->next == NULL) {
+    __last_file = fp->prev;
+  } else {
+    fp->next->prev = fp->prev;
+  }
+
   // If the buffer is owned (set by setvbuf), free it.
   if (fp->buffer_owned) {
     free(fp->buf);

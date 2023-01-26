@@ -1,32 +1,32 @@
 //
-//  arm_target.c
+//  aarch64_target.c
 //  c_compiler
 //
 //  Created by David Allison on 7/20/22.
-//  Copyright © 2022 David Allison. All rights reseARMed.
+//  Copyright © 2022 David Allison. All rights reseAARCH64ed.
 //
 
-#include "arm_target.h"
+#include "aarch64_target.h"
 
 #include <assert.h>
 #include <string.h>
-#include "arm_assembler.h"
-#include "arm_codegen.h"
-#include "arm_emitter.h"
-#include "arm_reg_alloc.h"
+#include "aarch64_assembler.h"
+#include "aarch64_codegen.h"
+#include "aarch64_emitter.h"
+#include "aarch64_reg_alloc.h"
 #include "common_emitter.h"
 
 static void* GenerateCode(Generator* gen) {
-  ARMGenerator* ARM = NewARMGenerator(gen);
-  ARMLower(ARM, gen);
-  return ARM;
+  AARCH64Generator* g = NewAARCH64Generator(gen);
+  AARCH64Lower(g, gen);
+  return g;
 }
 
 static void EmitFunctionAssembly(void* code, FILE* asm_file) {
-  ARMEmitter emitter;
-  ARMEmitterInit(&emitter, (ARMGenerator*)code);
-  ARMPrintFunction(&emitter, asm_file);
-  ARMEmitterDestruct(&emitter);
+  AARCH64Emitter emitter;
+  AARCH64EmitterInit(&emitter, (AARCH64Generator*)code);
+  AARCH64PrintFunction(&emitter, asm_file);
+  AARCH64EmitterDestruct(&emitter);
 }
 
 static void FilePrinter(int index, File* file, void* data) {
@@ -49,23 +49,23 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
 }
 
 static bool Assemble(String* asm_filename, String* object_filename) {
-  ARMAssembler assembler;
-  ARMAssemblerInit(&assembler, asm_filename, object_filename);
-  AssemblerRun(&assembler.base, AssembleARMInstruction);
+  AARCH64Assembler assembler;
+  AARCH64AssemblerInit(&assembler, asm_filename, object_filename);
+  AssemblerRun(&assembler.base, AssembleAARCH64Instruction);
 
   int num_errors = assembler.base.num_errors;
-  ARMAssemblerDestruct(&assembler);
+  AARCH64AssemblerDestruct(&assembler);
   return num_errors == 0;
 }
 
 
-static void Cleanup(void* code) { ARMGeneratorDelete(code); }
+static void Cleanup(void* code) { AARCH64GeneratorDelete(code); }
 
-// Create a new ARM target.  The functions are called by the
+// Create a new AARCH64 target.  The functions are called by the
 // compiler.
-CompilerTarget* NewARMTarget() {
+CompilerTarget* NewAARCH64Target() {
   CompilerTarget* target = malloc(sizeof(CompilerTarget));
-  StringInit(&target->name, "ARM");
+  StringInit(&target->name, "aarch64");
   target->pointer_size = 8;
   target->int_size = 4;
   target->bool_size = 4;
@@ -78,12 +78,14 @@ CompilerTarget* NewARMTarget() {
   target->stack_alignment = 16;
   target->code_preference = kCodeForSpeed;
   target->call_return_fixed_reg = true;
+
   target->keep_ssa = false;
   target->ir_optimizations.gvn = true;
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
-  target->prepend_underscore = false;
+  target->prepend_underscore = true;
+  target->plain_char_is_signed = false;
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;

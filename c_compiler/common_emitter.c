@@ -54,27 +54,27 @@ void EmitDataStart(FILE* fp) { fprintf(fp, "\t.data\n"); }
 
 static const char* VarName(InitializedStaticVariable* var, char* buf, size_t len) {
   if (var->is_local) {
-    snprintf(buf, len, ".local.%s.%d", var->name.value, var->symbol_id);
+    snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
   } else {
     if (compiler->prepend_underscore) {
       buf[0] = '_';
-      strncpy(buf+1, var->name.value, len);
+      strncpy(buf+1, var->symbol->name.value, len);
     } else {
-      strncpy(buf, var->name.value, len);
+      strncpy(buf, var->symbol->name.value, len);
     }
   }
   return buf;
 }
 
-static const char* VarName2(UnintializedStaticVariable* var, char* buf, size_t len) {
+static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t len) {
   if (var->is_local) {
-    snprintf(buf, len, ".local.%s.%d", var->name.value, var->symbol_id);
+    snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
   } else {
     if (compiler->prepend_underscore) {
       buf[0] = '_';
-      strncpy(buf+1, var->name.value, len);
+      strncpy(buf+1, var->symbol->name.value, len);
     } else {
-      strncpy(buf, var->name.value, len);
+      strncpy(buf, var->symbol->name.value, len);
     }
   }
   return buf;
@@ -90,31 +90,31 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   } else {
     fprintf(fp, "\t.local  %s\n", VarName(var, buf, sizeof(buf)));
   }
-  fprintf(fp, "\t.size   %s,%zd\n", VarName(var, buf, sizeof(buf)), var->size);
+  fprintf(fp, "\t.size   %s,%d\n", VarName(var, buf, sizeof(buf)), var->symbol->type->size);
 
   int next_offset = 0;
   for (size_t i = 0; i < var->initializers.length; i++) {
     Initializer* init = var->initializers.value.p[i];
     if (init->offset > next_offset) {
       int diff = init->offset - next_offset;
-      fprintf(fp, "\t.space  %d\n", diff);
+      fprintf(fp, "\t.space  %d\t\t// offset %d\n", diff, next_offset);
       next_offset += diff;
     }
     switch (init->type) {
       case kInitTypeByte:
-        fprintf(fp, "\t.byte   %d\n", (int32_t)init->value.byte);
+        fprintf(fp, "\t.byte   %d\t\t// offset %d\n", (int32_t)init->value.byte, next_offset);
         next_offset += 1;
         break;
       case kInitTypeHalf:
-        fprintf(fp, "\t.short   %d\n", (int32_t)init->value.half);
+        fprintf(fp, "\t.short   %d\t\t// offset %d\n", (int32_t)init->value.half, next_offset);
         next_offset += 2;
         break;
       case kInitTypeWord:
-        fprintf(fp, "\t.word   %d\n", init->value.word);
+        fprintf(fp, "\t.word   %d\t\t// offset %d\n", init->value.word, next_offset);
         next_offset += 4;
         break;
       case kInitTypeLong:
-        fprintf(fp, "\t.long   %" PRId64 "\n", (int64_t)init->value.byte);
+        fprintf(fp, "\t.long   %" PRId64 "\t\t// offset %d\n", (int64_t)init->value.byte, next_offset);
         next_offset += 8;
         break;
       case kInitTypeSymbol:
@@ -123,17 +123,18 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         } else {
           fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
         }
-        fprintf(fp, "\t.hword    %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
-        next_offset += 8;
+        fprintf(fp, "\t.hword    %s\t\t// offset %d\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)), next_offset);
+        next_offset += compiler->pointer_size;
         break;
       case kInitTypeString:
-        fprintf(fp, "\t.hword    .str.%d\n", init->value.literal_id);
-        next_offset += 8;
+        fprintf(fp, "\t.hword    .str.%d\t\t// offset %d\n", init->value.literal_id, next_offset);
+        next_offset += compiler->pointer_size;
         break;
       case kInitTypeMemory: {
         int byte_count = 0;
         const char* sep = "";
         const int kByteLimit = 16;  // 16 bytes per line.
+        fprintf(fp, "\t// offset %d\n", next_offset);
         for (size_t i = 0; i < init->value.memory.length; i++) {
           if (byte_count == 0) {
             fprintf(fp, "\t.byte ");
@@ -162,7 +163,7 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
 }
 
 
-void EmitBSSVariable(UnintializedStaticVariable* var, FILE* fp) {
+void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
   char buf[256];
   fprintf(fp, "\t.type   %s,@object\n", VarName2(var, buf, sizeof(buf)));
   if (var->is_global) {
@@ -270,15 +271,15 @@ void EmitP2Align(int alignment, FILE* fp) {
 void EmitTlsDataStart(FILE* fp) { fprintf(fp, "\t.section \".tdata\", \"awT\", @progbits\n"); }
 void EmitTlsBSSStart(FILE* fp) { fprintf(fp, "\t.section \".tbss\", \"awT\", @nobits\n"); }
 
-void EmitTlsBSSVariable(UnintializedStaticVariable* var, FILE* fp) {
-  fprintf(fp, "\t.type   %s,@object\n", var->name.value);
+void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
+  fprintf(fp, "\t.type   %s,@object\n", var->symbol->name.value);
   if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", var->name.value);
+    fprintf(fp, "\t.global %s\n", var->symbol->name.value);
   } else {
-    fprintf(fp, "\t.local  %s\n", var->name.value);
+    fprintf(fp, "\t.local  %s\n", var->symbol->name.value);
   }
   EmitP2Align((int)var->alignment, fp);
-  fprintf(fp, "%s:\n", var->name.value);
+  fprintf(fp, "%s:\n", var->symbol->name.value);
   fprintf(fp, "\t.space   %zd\n", var->size);
   fprintf(fp, "\n");
 }

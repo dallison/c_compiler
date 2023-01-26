@@ -14,13 +14,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#if 1
+#if 0
 #define STATIC static
 #else
 #define STATIC 
 #endif
 
-#if 0
+#if 1
 // Add a call to this where you want a breakpoint.  Then set a breakpoint in Break.
 void Break() {}
 #endif
@@ -68,6 +68,7 @@ typedef struct {
 // Function to write a string with length to the entity in data.
 typedef int (*Writer)(const char* s, size_t len, void* data);
 
+#if 1
 STATIC const char* CollectFormat(const char* p, ConversionFormat* format) {
   format->field_width = kWidthDefault;
   format->precision = kWidthDefault;
@@ -357,6 +358,39 @@ STATIC void RemoveFormatting(ConversionFormat* fmt) {
   fmt->prepend_space = false;
 }
 
+// Write the value of count into the address specified by p (for %n)
+STATIC void WriteCount(ConversionFormat* fmt, int count, void* p) {
+  switch (fmt->modifier) {
+    case kModLong:
+      *(long*)p = count;
+      break;
+    case kModLongLong:
+      *(long long*)p = count;
+      break;
+   case kModChar:
+      *(char*)p = count;
+      break;
+   case kModShort:
+      *(short*)p = count;
+      break;
+   default:
+      *(int*)p = count;
+      break;
+  }
+}
+
+#else
+STATIC const char* CollectFormat(const char* p, ConversionFormat* format);
+STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf, int buflen);
+STATIC char* ConvertHexLongLong(unsigned long long v, char* buf, int buflen, bool upper);
+STATIC char* ConvertHexPointer(void* ptr, char* buf, int buflen, bool upper);
+STATIC bool Prepend(Writer writer, void* data, ConversionFormat* fmt,
+                    bool negative, bool suppress_write);
+STATIC int WriteFormatted(Writer writer, void* data, ConversionFormat* fmt,
+                          const char* s, size_t len, bool negative);
+STATIC void WriteCount(ConversionFormat* fmt, int count, void* p);
+#endif
+
 STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   char buf[256];
   char* v;
@@ -413,6 +447,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           }
          break;
         case 'p':
+        case 'n':
           value_p = va_arg(ap, void*);
           break;
         case 'f':
@@ -485,6 +520,10 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           RemoveFormatting(&fmt);
           count += WriteFormatted(writer, data, &fmt, value_s, strlen(value_s), false);
           break;
+        case 'n':
+          p++;
+          WriteCount(&fmt, count, value_p);
+          break;
         default:
           count += writer(p++, 1, data);
           break;
@@ -497,6 +536,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   return count;
 }
 
+#if 1
 // Writer function to write to a FILE pointer.
 STATIC int FILEWriter(const char* s, size_t len, void* data) {
   FILE* fp = data;
@@ -581,4 +621,6 @@ int vsnprintf(char * restrict s, size_t n,
   StringData data = {s, n};
   return Printf(StringWriter, &data, format, arg);
 }
+
+#endif
 

@@ -268,13 +268,9 @@ inline bool TypeIsVoidFunction(TypeRecord* type) {
   return TypeIsFunction(type) && TypeIsVoid(type->next);
 }
 
-inline bool TypeIsUnsigned(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & (kTypeUnsigned | kTypeBool)) != 0;
-}
+bool TypeIsUnsigned(TypeRecord* type);
+bool TypeIsSigned(TypeRecord* type);
 
-inline bool TypeIsSigned(TypeRecord* type) {
-  return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
-}
 
 inline bool TypeIsConst(TypeRecord* type) {
   return (type->qualifiers & kQualConst) != 0;

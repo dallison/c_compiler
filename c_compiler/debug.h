@@ -105,7 +105,7 @@ typedef struct {
 
 typedef struct {
   DIE die;
-  bool (*func)(TypeRecord*);
+  bool (*func)(struct TypeRecord*);
   const char* name;
   DW_ATE encoding;
   int byte_size;

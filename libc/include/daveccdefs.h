@@ -1,15 +1,44 @@
 //
-//  stdio.h
+//  daveccdefs.h
 //  c_compiler
 //
-//  Created by David Allison on 1/11/20.
-//  Copyright © 2020 David Allison. All rights reserved.
+//  Created by David Allison on 12/13/22.
+//  Copyright © 2022 David Allison. All rights reserved.
 //
 
-#ifndef stdio_h
-#define stdio_h
+#ifndef daveccdefs_h
+#define daveccdefs_h
 
-#ifdef __DAVECC__
+// If we are not compiling using davecc, rename the stdio functions so we
+// don't clash with the OS-provided ones.
+#define FILE __FILE
+#define setbuf __setbuf
+#define setvbuf __setvbuf
+#define fopen __fopen
+#define fclose __fclose
+#define fflush __fflush
+#define fputc __fputc
+#define fgetc __fgetc
+#define ungetc __ungetc
+#define fwrite __fwrite
+#define fread __fread
+#define fputs __fputs
+#define puts __puts
+#define putchar __putchar
+#define getc __getc
+#define fgetc __fgetc
+#define getchar __getchar
+#define fgets __fgets
+#define gets __gets
+#define fseek __fseek
+#define ftell __ftell
+#define fgetpos __fgetpos
+#define fsetpos __fsetpos
+#define rewind __rewind
+#define stdout __stdout
+#define stdin __stdin
+#define stderr __stderr
+
 #include <stdarg.h>
 
 #define EOF (-1)
@@ -42,14 +71,6 @@ typedef long ssize_t;
 #define __SSIZE_T
 #endif
 
-#if defined(__W65C02__)
-typedef char mode_t;
-typedef char char_t;
-#else
-typedef int mode_t;
-typedef int char_t;
-#endif
-
 typedef struct FILE {
   int fd;         // OS file descriptor.
   char* buf;      // Buffer (or NULL).
@@ -57,7 +78,7 @@ typedef struct FILE {
   int rindex;     // Read index into buf.
   int rlimit;     // Limit of chars to read.
   int windex;     // Write index.
-  mode_t buffering_mode;   // _IOFBF, _IOLBF or _IONBF
+  int buffering_mode;   // _IOFBF, _IOLBF or _IONBF
   char buffer_owned;    // The buffer is owned by this FILE.
   char unget_index;     // Index into unget_buf for ungotten bytes.
   char eof_flag;        // 1 if EOF reached.
@@ -101,6 +122,14 @@ extern FILE* stderr;
 extern FILE* __all_files;
 extern FILE* __last_file;
 
+#if defined(__W65C02__)
+typedef char mode_t;
+typedef char char_t;
+#else
+typedef int mode_t;
+typedef int char_t;
+#endif
+
 
 int remove(const char *filename);
 int rename(const char *old, const char *new);
@@ -130,18 +159,6 @@ int sprintf(char * restrict s,
      const char * restrict format, ...);
 int sscanf(const char * restrict s,
      const char * restrict format, ...);
-int vfprintf(FILE * restrict stream,
-             const char * restrict format, va_list arg);
-int vfscanf(FILE * restrict stream,
-            const char * restrict format, va_list arg);
-int vprintf(const char * restrict format, va_list arg);
-int vscanf(const char * restrict format, va_list arg);
-int vsnprintf(char * restrict s, size_t n,
-              const char * restrict format, va_list arg);
-int vsprintf(char * restrict s,
-             const char * restrict format, va_list arg);
-int vsscanf(const char * restrict s,
-            const char * restrict format, va_list arg);
 int fgetc(FILE *stream);
 char *fgets(char * restrict s, int n,
      FILE * restrict stream);
@@ -168,5 +185,4 @@ int ferror(FILE *stream);
 void perror(const char *s);
 char* strerror(int errnum);
 
-#endif
-#endif /* stdio_h */
+#endif /* daveccdefs_h */

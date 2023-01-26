@@ -393,7 +393,7 @@ void InitializedStaticVariableDelete(InitializedStaticVariable* var) {
   free(var);
 }
 
-void UninitializedStaticVariableDelete(InitializedStaticVariable* var) {
+void UninitializedStaticVariableDelete(UninitializedStaticVariable* var) {
   StringDestruct(&var->name);
   free(var);
 }
@@ -433,8 +433,8 @@ static void AddLocalStatics(Syntax* syntax) {
         (VariableDeclarationASTNode*)syntax->local_statics.value.p[i];
     if (decl->initializer == NULL) {
       // No initializer.  Add as unitialized static variable.
-      UnintializedStaticVariable* var =
-          malloc(sizeof(UnintializedStaticVariable));
+      UninitializedStaticVariable* var =
+          malloc(sizeof(UninitializedStaticVariable));
       StringInit(&var->name, decl->symbol->name.value);
       var->is_global = false;
       var->size = decl->symbol->type->size;
@@ -511,8 +511,8 @@ static void CompileDeclaration(Syntax* syntax) {
               // Extern or static variable definition.
               if (decl->initializer == NULL) {
                 // No initializer.  Add as unitialized static variable.
-                UnintializedStaticVariable* var =
-                    malloc(sizeof(UnintializedStaticVariable));
+                UninitializedStaticVariable* var =
+                    malloc(sizeof(UninitializedStaticVariable));
                 StringInit(&var->name, decl->symbol->name.value);
                 var->is_global = !StorageIs(decl->symbol->storage, STO(static));
                 var->size = decl->symbol->type->size;
@@ -849,7 +849,7 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
 
   // Uninitialized variables.
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
-    UnintializedStaticVariable* var =
+    UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
     if (!var->is_tls) {
       compiler->target->emit_bss_space(var, asm_file);
@@ -883,7 +883,7 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
 
     for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
          i++) {
-      UnintializedStaticVariable* var =
+      UninitializedStaticVariable* var =
           compiler->uninitialized_static_variables.value.p[i];
       if (var->is_tls) {
         compiler->target->emit_tbss_space(var, asm_file);

@@ -18,7 +18,7 @@ static void SetErrorOrEof(FILE* stream, ssize_t n) {
   }
 }
 
- void ReadFullBuffer(FILE* stream) {
+ static void ReadFullBuffer(FILE* stream) {
   char* p = stream->buf;
   int remaining = stream->bufsize;
   while (remaining > 0) {
@@ -48,7 +48,7 @@ int getc(FILE* stream) {
   }
   // Any chars pushed with ungetc?
   if (stream->unget_index > 0) {
-    return stream->buf[--stream->unget_index];
+    return stream->unget_buf[--stream->unget_index];
   }
   if (stream->rindex < stream->rlimit) {
     // Char available in buffer.
@@ -81,6 +81,9 @@ int getc(FILE* stream) {
       }
     }
   }
+  if (stream->error_flag != 0 || stream->eof_flag != 0) {
+    return EOF;
+  }
   return stream->buf[stream->rindex++];
 }
 
@@ -88,6 +91,6 @@ int fgetc(FILE* stream) {
   return getc(stream);
 }
 
-int getchar() {
+int getchar(void) {
   return getc(stdin);
 }

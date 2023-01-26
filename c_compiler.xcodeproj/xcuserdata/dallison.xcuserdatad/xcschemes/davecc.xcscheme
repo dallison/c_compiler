@@ -86,7 +86,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "@/Users/dallison/Google\ Drive/c_compiler/libc/cc.args"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "@/Users/dallison/Google\ Drive/c_compiler/floating_point/cc.args"
@@ -99,6 +99,10 @@
          <CommandLineArgument
             argument = "@/Users/dallison/Library/Developer/Xcode/DerivedData/c_compiler-adwiqtsoilcrkpbctrvzybaptreb/Build/Products/Debug/riscv.args"
             isEnabled = "NO">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "@/Users/dallison/Library/Developer/Xcode/DerivedData/c_compiler-adwiqtsoilcrkpbctrvzybaptreb/Build/Products/Debug/arm.args"
+            isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-o"
@@ -154,7 +158,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-target"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "riscv"
@@ -162,7 +166,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "65c02"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-Wl,-tprogram"

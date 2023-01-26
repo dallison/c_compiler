@@ -83,6 +83,8 @@ CompilerTarget* NewRVTarget() {
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
   target->prepend_underscore = false;
+  target->plain_char_is_signed = false;
+
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;

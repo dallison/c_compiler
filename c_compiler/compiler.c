@@ -24,6 +24,7 @@
 #include "6502_target.h"
 #include "p_code_target.h"
 #include "risc_v_target.h"
+#include "aarch64_target.h"
 
 // This is global to avoid having to pass it around everywhere.
 Compiler* compiler;
@@ -400,13 +401,12 @@ static ASTNode* InitCompoundLiteral(ASTNode* node) {
   IdentifierASTNode* sym_node = (IdentifierASTNode*)lit->sym;
   
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
-  StringInit(&var->name, sym_node->symbol->name.value);
+  var->symbol = sym_node->symbol;
   var->is_global = !StorageIs(sym_node->symbol->storage, STO(static));
   VectorInit(&var->initializers);
   var->size = sym_node->symbol->type->size;
   var->is_tls = StorageIs(sym_node->symbol->storage, STO(thread));
   var->is_local = sym_node->symbol->flags.is_local;
-  var->symbol_id = sym_node->symbol->id;
   var->alignment = TypeRecordAlignment(sym_node->symbol->type);
   ExpandBracedInitializer((BracedInitializerASTNode*)lit->initializer, 0,
                           &var->initializers);
@@ -483,13 +483,12 @@ static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* i
 static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
                                          ASTNode* init) {
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
-  StringInit(&var->name, decl->symbol->name.value);
+  var->symbol = decl->symbol;
   var->is_global = !StorageIs(decl->symbol->storage, STO(static));
   VectorInit(&var->initializers);
   var->size = decl->symbol->type->size;
   var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
   var->is_local = decl->symbol->flags.is_local;
-  var->symbol_id = decl->symbol->id;
   var->alignment = TypeRecordAlignment(decl->symbol->type);
   ExpandBracedInitializer((BracedInitializerASTNode*)init, 0,
                           &var->initializers);
@@ -505,7 +504,6 @@ void InitializerDelete(Initializer* init) {
 }
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var) {
-  StringDestruct(&var->name);
   for (size_t i = 0; i < var->initializers.length; i++) {
     InitializerDelete(var->initializers.value.p[i]);
   }
@@ -513,8 +511,7 @@ void InitializedStaticVariableDelete(InitializedStaticVariable* var) {
   free(var);
 }
 
-void UninitializedStaticVariableDelete(InitializedStaticVariable* var) {
-  StringDestruct(&var->name);
+void UninitializedStaticVariableDelete(UninitializedStaticVariable* var) {
   free(var);
 }
 
@@ -585,15 +582,14 @@ static void AddLocalStatics(Syntax* syntax) {
         (VariableDeclarationASTNode*)syntax->local_statics.value.p[i];
     if (decl->initializer == NULL) {
       // No initializer.  Add as unitialized static variable.
-      UnintializedStaticVariable* var =
-          malloc(sizeof(UnintializedStaticVariable));
-      StringInit(&var->name, decl->symbol->name.value);
+      UninitializedStaticVariable* var =
+          malloc(sizeof(UninitializedStaticVariable));
+      var->symbol = decl->symbol;
       var->is_global = false;
       var->size = decl->symbol->type->size;
       var->alignment = TypeRecordAlignment(decl->symbol->type);
       var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
       var->is_local = decl->symbol->flags.is_local;
-      var->symbol_id = decl->symbol->id;
       VectorAppend(&compiler->uninitialized_static_variables, var);
     } else {
       BinaryASTNode* init_node = (BinaryASTNode*)decl->initializer;
@@ -745,15 +741,16 @@ static void CompileDeclaration(Syntax* syntax) {
               // Extern or static variable definition.
               if (decl->initializer == NULL) {
                 // No initializer.  Add as unitialized static variable.
-                UnintializedStaticVariable* var =
-                    malloc(sizeof(UnintializedStaticVariable));
-                StringInit(&var->name, decl->symbol->name.value);
+                UninitializedStaticVariable* var =
+                    malloc(sizeof(UninitializedStaticVariable));
+                var->symbol = decl->symbol;
                 var->is_global = !StorageIs(decl->symbol->storage, STO(static));
                 var->size = decl->symbol->type->size;
                 var->alignment = TypeRecordAlignment(decl->symbol->type);
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                 VectorAppend(&compiler->uninitialized_static_variables, var);
               } else {
+                decl->symbol->flags.is_tentative_decl = false;
                 ASTNode* simplified_init = AnalyzeInitializer(
                     decl->base.type, decl->initializer, true);
                 // This is an initialized static variable.  The initializer has
@@ -934,10 +931,16 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
   bool static_only = false;
   if (StringEqual(compiler->target_name, "pcode") ||
       StringEqual(compiler->target_name, "p-code")) {
+    StringSet(compiler->target_name, "pcode");
     compiler->target = NewPCodeTarget();
   } else if (StringEqual(compiler->target_name, "riscv") ||
              StringEqual(compiler->target_name, "risc-v")) {
     compiler->target = NewRVTarget();
+    StringSet(compiler->target_name, "riscv");
+  } else if (StringEqual(compiler->target_name, "aarch64") ||
+             StringEqual(compiler->target_name, "armv8")) {
+    compiler->target = NewAARCH64Target();
+    StringSet(compiler->target_name, "aarch64");
   } else if (StringEqual(compiler->target_name, "6502")) {
     compiler->target = New6502Target();
     static_only = true;
@@ -971,6 +974,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
   compiler->keep_ssa = compiler->target->keep_ssa;
   compiler->ir_optimizations = compiler->target->ir_optimizations;
   compiler->prepend_underscore = compiler->target->prepend_underscore;
+  compiler->plain_char_is_signed = compiler->target->plain_char_is_signed;
   compiler->target_flags = compiler->target->flags;
   
   compiler->alignment = compiler->target->alignment;
@@ -1201,9 +1205,9 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
 
   // Uninitialized variables.
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
-    UnintializedStaticVariable* var =
+    UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
-    if (!var->is_tls) {
+    if (!var->is_tls && var->symbol->flags.is_tentative_decl) {
       compiler->target->emit_bss_space(var, asm_file);
     }
     contains_tls_vars |= var->is_tls;
@@ -1235,7 +1239,7 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
 
     for (size_t i = 0; i < compiler->uninitialized_static_variables.length;
          i++) {
-      UnintializedStaticVariable* var =
+      UninitializedStaticVariable* var =
           compiler->uninitialized_static_variables.value.p[i];
       if (var->is_tls) {
         compiler->target->emit_tbss_space(var, asm_file);

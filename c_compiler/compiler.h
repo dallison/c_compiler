@@ -110,28 +110,26 @@ void InitializerDelete(Initializer* init);
 // An initialized static variable.  The values of these are set at compile
 // time from the initializer supplied by the user.
 typedef struct {
-  String name;     // Variable name
+  Symbol* symbol;
   bool is_global;  // Variable is global (can be seen outside of file).
   size_t size;
   int32_t alignment;
   Vector initializers;
   bool is_tls;
   bool is_local;    // Local (inside a function).
-  int symbol_id;
 } InitializedStaticVariable;
 
 void InitializedStaticVariableDelete(InitializedStaticVariable* var);
 
-// An uninitiaized static variable.  These have just a name and a size.
+// An uninitiaized static variable.
 typedef struct {
-  String name;
+  Symbol* symbol;
   bool is_global;  // Variable is global (can be seen outside of file).
   size_t size;
   size_t alignment;
   bool is_tls;
   bool is_local;    // Local (inside a function).
-  int symbol_id;
-} UnintializedStaticVariable;
+} UninitializedStaticVariable;
 
 // A literal has an id.  The value is in a derived class.
 typedef enum {
@@ -158,7 +156,7 @@ typedef struct {
   Buffer value;
 } BufferLiteral;
 
-void UninitializedStaticVariableDelete(InitializedStaticVariable* var);
+void UninitializedStaticVariableDelete(UninitializedStaticVariable* var);
 
 TlsModel ParseTlsModelName(String* name);
 
@@ -189,6 +187,7 @@ typedef struct {
   int double_size;
   int wchar_size;
   int stack_alignment;      // Power of 2 stack alignment.
+  bool plain_char_is_signed;
   CodePreference code_preference;
   bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
   bool keep_ssa;
@@ -219,7 +218,7 @@ typedef struct {
 
   // Emit BSS (uninitialized variable) to the assembly file.
   // NOTE: BSS is an old term meaning Block Started by Symbol.
-  void (*emit_bss_space)(UnintializedStaticVariable* var, FILE* asm_file);
+  void (*emit_bss_space)(UninitializedStaticVariable* var, FILE* asm_file);
 
   // Emit start of tdata section to asm file.
   void (*emit_tdata_start)(FILE* asm_file);
@@ -231,7 +230,7 @@ typedef struct {
   void (*emit_tls_variable)(InitializedStaticVariable* var, FILE* asm_file);
 
   // Emit tbss (uninitialized tls variable) to the assembly file.
-  void (*emit_tbss_space)(UnintializedStaticVariable* var, FILE* asm_file);
+  void (*emit_tbss_space)(UninitializedStaticVariable* var, FILE* asm_file);
 
   // Emit start of string literals.
   void (*emit_literals_start)(FILE* asm_file);
@@ -275,6 +274,8 @@ typedef struct {
   int float_size;  // Size of native float.
   int double_size;  // Size of native double.
   int wchar_size;
+  bool plain_char_is_signed;
+  
   CodePreference code_preference;
   bool call_return_fixed_reg;   // Is the value of a call in a fixed register?
   bool keep_ssa;             // Keep SSA form for lowering codegen.

@@ -571,11 +571,14 @@ static bool IsUnusedExpression(TargetInstruction* inst) {
       return false;
   }
   int uses = 0;
+  int num_stores = 0;
+  int64_t store_offset = -1;
+  bool store_offset_set = false;
+  bool all_store_offsets_same = true;
   for (size_t i = 0; i < inst->users.length; i++) {
     TargetInstruction* user = inst->users.value.p[i];
     W65C02Opcode opcode = (W65C02Opcode)user->opcode;
     switch (opcode) {
-      case W65C02_OP(reloadpoint):
       case W65C02_OP(sta):
       case W65C02_OP(stx):
       case W65C02_OP(sty):
@@ -583,19 +586,43 @@ static bool IsUnusedExpression(TargetInstruction* inst) {
         AddressingMode mode = GetAddrMode(user);
         if (mode == kAddrModeIndirect || mode == kAddrModeIndirectIndexed ||
             mode == kAddrModeIndexedIndirect) {
+          // This is a read.
           uses++;
+        } else {
+          // This is store to a variable.
+          uses++;
+          num_stores++;
+          // Get offset into variable and check against current.
+          int64_t offset = TargetIntValue(user->operand[1]);
+          if (store_offset_set) {
+            if (store_offset != offset) {
+              all_store_offsets_same = false;
+            }
+          } else {
+            store_offset = offset;
+            store_offset_set = true;
+          }
+
         }
         break;
       }
       case W65C02_OP(var_addr):
+      case W65C02_OP(reloadpoint):
         break;
-        
+
       default:
         uses++;
         break;
     }
   }
-  return uses == 0;
+  if (uses == 0) {
+    return true;
+  }
+  if (uses == num_stores && all_store_offsets_same) {
+    // All uses are stores.
+    return true;
+  }
+  return false;
 }
 
 
@@ -713,7 +740,7 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         if (trackers->A.type == kRegConstant && trackers->A.value.c == 0) {
           // Storing value 0 can be converted to STZ as long as the
           // addressing mode is OK.
-          if (mode != kAddrModeIndirectIndexed && mode != kAddrModeIndirect && mode != kAddrModeZeroPageIndexedX
+          if (Is65c02() && mode != kAddrModeIndirectIndexed && mode != kAddrModeIndirect && mode != kAddrModeZeroPageIndexedX
               && mode != kAddrModeZeroPageIndexedY) {
             inst->opcode = (TargetOpcode)W65C02_OP(stz);
             TargetInstruction* prev = PrevInstruction(inst);
@@ -862,6 +889,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
             trackers->A.value.c |= v;
           }
         } else {
+          // We can't remove the ORA because the flags aren't set.
+          //
           // ORA preceeded by an STZ with the same operand can be eliminated.
           TargetInstruction* prev = PrevInstruction(inst);
           if (prev->opcode == W65C02_OP(stz)) {

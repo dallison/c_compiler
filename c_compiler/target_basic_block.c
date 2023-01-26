@@ -404,6 +404,38 @@ static void CreateTargetBasicBlocks(TargetGenerator* gen,
   gen->exit_block = TargetGeneratorNewTargetBasicBlock(gen);
 }
 
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+int CopyFile(const char* from, const char* to) {
+  int infd = open(from, O_RDONLY);
+  if (infd == -1) {
+    return errno;
+  }
+  int outfd = open(to, O_WRONLY|O_CREAT|O_TRUNC, 0444);
+  if (outfd == -1) {
+    close(infd);
+    return errno;
+  }
+  char buf[256];
+  for (;;) {
+    ssize_t n = read(infd, buf, sizeof(buf));
+    if (n < 0) {
+      return errno;
+    }
+    if (n == 0) {
+      break;
+    }
+    n = write(outfd, buf, n);
+    if (n < 0) {
+      return errno;
+    }
+  }
+  close(infd);
+  close(outfd);
+  return 0;
+}
+
 // Process all branches and link their targets to the appropriate
 // block.
 static void BuildTargetBasicBlockGraph(TargetGenerator* gen,
@@ -434,7 +466,7 @@ static void BuildTargetBasicBlockGraph(TargetGenerator* gen,
       TargetBasicBlockAddEdge(block, fallthrough->block);
     } else {
       // Unconditional branch only links to its target.
-      TargetInstruction* target = inst->operand[0];
+      TargetInstruction* target = gen->virtuals->get_branch_target(inst);
       if (gen->virtuals->is_label(target)) {
         // Due to tail calls we can have a jump to a symbol.  This
         // is not an edge.  The block will have an output edge

@@ -626,6 +626,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       break;
     }
     TypeParserReset(parser);
+    
+    // All declarations in the list share the same storage.
+    parser->storage = storage;
   }
   if (type != NULL && (TypeIsEnum(type) || TypeIsStructOrUnion(type))) {
     // Declaring a struct/union/enum with no symbol still needs to

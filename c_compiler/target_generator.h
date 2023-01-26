@@ -87,7 +87,7 @@ typedef struct TargetRegister {
   struct TargetInstruction* owner;  // Owner instruction.
 } TargetRegister;
 
-#define TARGET_MAX_OPERANDS 3
+#define TARGET_MAX_OPERANDS 4
 
 struct TargetBasicBlock;
 
@@ -288,6 +288,11 @@ TargetInstruction* TargetNewInstruction3(TargetOpcode opcode,
                                          TargetInstruction* op1,
                                          TargetInstruction* op2,
                                          TargetInstruction* op3);
+TargetInstruction* TargetNewInstruction4(TargetOpcode opcode,
+                                         TargetInstruction* op1,
+                                         TargetInstruction* op2,
+                                         TargetInstruction* op3,
+                                         TargetInstruction* op4);
 TargetInstruction* TargetSetDest(TargetInstruction* inst,
                                  TargetInstruction* dest);
 
