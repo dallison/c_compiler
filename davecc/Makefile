@@ -5,7 +5,7 @@ CFLAGS = -I../c_compiler \
 	-I../Linker \
 	-I../c_compiler/Loader \
 	-I../c_compiler/Loader/Architecture \
-	$(OPT_DEBUG)
+	$(OPT_DEBUG) $(ADD_FLAGS)
 
 LDFLAGS = -L../Linker -llinker \
 	-L../c_compiler -lcompiler -lutils \

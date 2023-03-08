@@ -7,7 +7,7 @@ CFLAGS = -I. \
 	-I.. \
 	-I../ELF \
 	-I../6502 \
-	$(OPT_DEBUG)
+	$(OPT_DEBUG) $(ADD_FLAGS)
 
 ARCH_OBJS = \
 	Architecture/loader_arch_riscv.o \

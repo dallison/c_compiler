@@ -1,6 +1,6 @@
 CFLAGS = -I../c_compiler \
 	-I../c_compiler/AR \
-	$(OPT_DEBUG)
+	$(OPT_DEBUG) $(ADD_FLAGS)
 
 LDFLAGS = -L../c_compiler -lutils \
 	-L../c_compiler/AR -lar 

@@ -6,7 +6,7 @@ CFLAGS = -I../c_compiler \
 	-I../c_compiler/Loader/Architecture \
 	-I../risc_v_interpreter \
 	-I../6502_interpreter \
-	$(OPT_DEBUG)
+	$(OPT_DEBUG) $(ADD_FLAGS)
 
 LDFLAGS = -L../risc_v_interpreter -lrisc_v \
 	-L../6502_interpreter -l6502 \

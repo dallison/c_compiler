@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS =  -I.. $(OPT_DEBUG)
+CFLAGS =  -I.. $(OPT_DEBUG) $(ADD_FLAGS)
 
 OBJS = \
   elf_reader.o \
