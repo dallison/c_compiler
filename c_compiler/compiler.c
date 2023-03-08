@@ -723,6 +723,7 @@ static void CompileDeclaration(Syntax* syntax) {
                 var->size = decl->symbol->type->size;
                 var->alignment = TypeRecordAlignment(decl->symbol->type);
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                var->is_local = decl->symbol->flags.is_local;
                 VectorAppend(&compiler->uninitialized_static_variables, var);
               } else {
                 decl->symbol->flags.is_tentative_decl = false;
