@@ -29,6 +29,13 @@ RISC_V_OBJS = \
     risc_v_optimize.o \
     risc_v_target.o \
 
+AARCH64_OBJS = \
+    aarch64_reg_alloc.o \
+    aarch64_codegen.o \
+    aarch64_emitter.o \
+    aarch64_assembler.o \
+    aarch64_target.o \
+
 P_CODE_OBJS = \
     p_code_reg_alloc.o \
     p_code_codegen.o \
@@ -56,6 +63,7 @@ COMPILER_OBJS = \
     ast.o \
     errors.o \
     compiler.o \
+    options.o \
 	type.o \
     debug.o \
     dwarf_defs.o \
@@ -86,6 +94,7 @@ COMPILER_OBJS = \
 	asm_expr.o \
 	dwarf.o \
 	$(RISC_V_OBJS) \
+	$(AARCH64_OBJS) \
 	$(P_CODE_OBJS) \
 	$(6502_OBJS) \
 

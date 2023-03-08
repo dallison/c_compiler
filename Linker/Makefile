@@ -16,6 +16,7 @@ ARCH_OBJS = \
 	Architecture/linker_arch_riscv.o \
 	Architecture/linker_arch_pcode.o \
 	Architecture/linker_arch_6502.o \
+	Architecture/linker_arch_aarch64.o \
 
 LINKER_OBJS = \
 	linker.o \

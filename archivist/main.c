@@ -242,7 +242,7 @@ static void ReplaceFiles(String* archive_name, Vector* filenames, Command comman
     rename(temp_name.value, archive_name->value);
     StringDestruct(&temp_name);
   }
-  VectorDestructWithContents(&elf_files, (VectorElementDestructor)ELFReaderFileDestruct);
+  VectorDestructWithContents(&elf_files, (VectorElementDestructor)ELFReaderFileDestruct, true);
 }
 
 // rw-rw-r-- 1000/1000   1904 Jan 27 08:58 2018 long_file_name_program.o

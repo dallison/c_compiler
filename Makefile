@@ -1,4 +1,4 @@
-ADD_FLAGS="$(PIC_FLAG)" PREFIX=$(shell pwd | sed 's/ /\\ /g')
+PREFIX=$(shell pwd | sed 's/ /\\ /g')
 
 all: opt
 

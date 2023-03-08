@@ -13,6 +13,7 @@ ARCH_OBJS = \
 	Architecture/loader_arch_riscv.o \
 	Architecture/loader_arch_pcode.o \
 	Architecture/loader_arch_6502.o \
+	Architecture/loader_arch_aarch64.o \
 
 LINKER_OBJS = \
 	loader.o \
