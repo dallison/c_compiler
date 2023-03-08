@@ -651,9 +651,9 @@ AARCH64Generator* NewAARCH64Generator(Generator* gen) {
 
 void AARCH64GeneratorDestruct(AARCH64Generator* g) {
   TargetGeneratorDestruct(&g->base);
-  VectorDestructWithContents(&g->var_regs, NULL);
-  VectorDestructWithContents(&g->saved_regs, NULL);
-  VectorDestructWithContents(&g->offsets, NULL);
+  VectorDestructWithContents(&g->var_regs, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&g->saved_regs, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&g->offsets, NULL, /*free_element=*/true);
   MapDestruct(&g->conditions);
   AARCH64RegisterAllocatorDestruct(&g->register_allocator);
 }
@@ -3156,7 +3156,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   }
   SetLoweredNode(node, call);
 
-  VectorDestructWithContents(&arg_locations, NULL);
+  VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
   return call;
 }
 

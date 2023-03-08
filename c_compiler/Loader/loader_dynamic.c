@@ -32,7 +32,7 @@ void DynamicLibraryRegistryInit(DynamicLibraryRegistry* reg) {
 
 void DynamicLibraryRegistryDestruct(DynamicLibraryRegistry* reg) {
   VectorDestructWithContents(&reg->search,
-                             (VectorElementDestructor)LoadedDynamicLibraryDestruct);
+                             (VectorElementDestructor)LoadedDynamicLibraryDestruct, /*free_element=*/true);
   MapDestruct(&reg->loaded_libraries);
 }
 
@@ -852,9 +852,9 @@ void LoadedDynamicLibraryDestruct(LoadedDynamicLibrary* lib) {
   }
   close(lib->fd);
   VectorDestructWithContents(&lib->mapped_segments,
-                             (VectorElementDestructor)MappedSegmentDestruct);
+                             (VectorElementDestructor)MappedSegmentDestruct, /*free_element=*/true);
   VectorDestructWithContents(&lib->runtime_search_path,
-                             (VectorElementDestructor)StringDestruct);
+                             (VectorElementDestructor)StringDestruct, /*free_element=*/true);
 }
 
 void LoadedDynamicLibraryDelete(LoadedDynamicLibrary* lib) {

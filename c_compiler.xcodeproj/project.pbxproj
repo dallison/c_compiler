@@ -328,6 +328,11 @@
 		E5E63AD22887EB9400909B3D /* aarch64_assembler.h in Headers */ = {isa = PBXBuildFile; fileRef = E5E63AD02887EB9400909B3D /* aarch64_assembler.h */; };
 		E5E63AD32887EB9400909B3D /* aarch64_assembler.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E63AD12887EB9400909B3D /* aarch64_assembler.c */; };
 		E5E63ADC28BAB37C00909B3D /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E63ADB28BAB37C00909B3D /* main.c */; };
+		E5F8024B298203AE00203082 /* loader_arch_aarch64.c in Sources */ = {isa = PBXBuildFile; fileRef = E5F8024A298203A700203082 /* loader_arch_aarch64.c */; };
+		E5F8024E298204B800203082 /* linker_arch_aarch64.c in Sources */ = {isa = PBXBuildFile; fileRef = E5F8024D298204B200203082 /* linker_arch_aarch64.c */; };
+		E5F8024F298DD1DC00203082 /* fpfuncs.c in Sources */ = {isa = PBXBuildFile; fileRef = E53A2CC82758525100F34504 /* fpfuncs.c */; };
+		E5F80252299EE67B00203082 /* options.h in Headers */ = {isa = PBXBuildFile; fileRef = E5F80250299EE67B00203082 /* options.h */; };
+		E5F80253299EE67B00203082 /* options.c in Sources */ = {isa = PBXBuildFile; fileRef = E5F80251299EE67B00203082 /* options.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1184,6 +1189,13 @@
 		E5E63AD928BAB37C00909B3D /* floating_point */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = floating_point; sourceTree = BUILT_PRODUCTS_DIR; };
 		E5E63ADB28BAB37C00909B3D /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		E5F802482967A7AF00203082 /* setjmp.s */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = setjmp.s; sourceTree = "<group>"; };
+		E5F802492982036300203082 /* loader_arch_aarch64.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = loader_arch_aarch64.h; sourceTree = "<group>"; };
+		E5F8024A298203A700203082 /* loader_arch_aarch64.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = loader_arch_aarch64.c; sourceTree = "<group>"; };
+		E5F8024C298204B200203082 /* linker_arch_aarch64.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = linker_arch_aarch64.h; sourceTree = "<group>"; };
+		E5F8024D298204B200203082 /* linker_arch_aarch64.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = linker_arch_aarch64.c; sourceTree = "<group>"; };
+		E5F80250299EE67B00203082 /* options.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = options.h; sourceTree = "<group>"; };
+		E5F80251299EE67B00203082 /* options.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = options.c; sourceTree = "<group>"; };
+		E5F8025429B91C6700203082 /* romsyscalls.s */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = romsyscalls.s; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1939,6 +1951,7 @@
 				E5E130A3252FA04000EEE6B7 /* server.s */,
 				E5CD7B4A26421D0F00EC6073 /* comms.h */,
 				E5E130BE253625B000EEE6B7 /* comms.s */,
+				E5F8025429B91C6700203082 /* romsyscalls.s */,
 				E58B5AD6257D904E006660EA /* kernel */,
 			);
 			path = "6502 support";
@@ -1953,6 +1966,8 @@
 				E57CB94622C2CE890068119C /* linker_arch_6502.c */,
 				E581DD932232104B00A3BD39 /* linker_arch_riscv.h */,
 				E581DD942232104B00A3BD39 /* linker_arch_riscv.c */,
+				E5F8024C298204B200203082 /* linker_arch_aarch64.h */,
+				E5F8024D298204B200203082 /* linker_arch_aarch64.c */,
 				E581DD982232F11100A3BD39 /* linker_arch.h */,
 			);
 			path = Architecture;
@@ -1968,6 +1983,8 @@
 				E57CB94922C302A40068119C /* loader_arch_6502.c */,
 				E581DDA02233042300A3BD39 /* loader_arch_riscv.h */,
 				E581DDA12233042300A3BD39 /* loader_arch_riscv.c */,
+				E5F802492982036300203082 /* loader_arch_aarch64.h */,
+				E5F8024A298203A700203082 /* loader_arch_aarch64.c */,
 			);
 			path = Architecture;
 			sourceTree = "<group>";
@@ -2187,6 +2204,8 @@
 				E544B7F61FB4020200F2C59B /* Syntax Analysis */,
 				E544B7E11FAAB7B600F2C59B /* compiler.c */,
 				E544B7E21FAAB7B600F2C59B /* compiler.h */,
+				E5F80250299EE67B00203082 /* options.h */,
+				E5F80251299EE67B00203082 /* options.c */,
 				E5BC31731FA4F40D00C7691B /* errors.c */,
 				E5BC31741FA4F40D00C7691B /* errors.h */,
 				E544B7F71FB4025700F2C59B /* Semantic Analysis */,
@@ -2577,6 +2596,7 @@
 				E544B7EC1FB2259B00F2C59B /* expr_semantics.h in Headers */,
 				E508F5FF24B3F17700DDDBF1 /* codemotion.h in Headers */,
 				E574B088204A35CD00191108 /* risc_v_target.h in Headers */,
+				E5F80252299EE67B00203082 /* options.h in Headers */,
 				E5377187203D201E00330B42 /* risc_v_codegen.h in Headers */,
 				E537718B203DDE5700330B42 /* risc_v_reg_alloc.h in Headers */,
 				E5907471247F3408006CF348 /* target_basic_block.h in Headers */,
@@ -3666,6 +3686,7 @@
 				E57CB94B22C302AB0068119C /* loader_arch_6502.c in Sources */,
 				E5360BE82005963B00EDD8F1 /* list.c in Sources */,
 				E5360BDE2005963B00EDD8F1 /* hashtable.c in Sources */,
+				E5F8024B298203AE00203082 /* loader_arch_aarch64.c in Sources */,
 				E599A531221B9E1000CC72DB /* loader_dynamic.c in Sources */,
 				E52CE167200AB88F00F631BA /* elf_writer.c in Sources */,
 				E581DDA32233042300A3BD39 /* loader_arch_riscv.c in Sources */,
@@ -3784,6 +3805,7 @@
 				E57CB96122C5A2780068119C /* linkerlibrary.m in Sources */,
 				E57CB96822C5A2B40068119C /* linker_dynamic.c in Sources */,
 				E57CB96922C5A2BA0068119C /* linker.c in Sources */,
+				E5F8024E298204B800203082 /* linker_arch_aarch64.c in Sources */,
 				E57CB96C22C5A2C90068119C /* linker_arch_riscv.c in Sources */,
 				E57CB96622C5A2AB0068119C /* linker_file.c in Sources */,
 				E57CB96A22C5A2C00068119C /* linker_arch_pcode.c in Sources */,
@@ -3809,6 +3831,7 @@
 				E59A5917269A74220089E664 /* printf.c in Sources */,
 				E5D360A0274EDF6D003F75B6 /* ftoa.c in Sources */,
 				E59A5913269A74170089E664 /* main.c in Sources */,
+				E5F8024F298DD1DC00203082 /* fpfuncs.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -3908,6 +3931,7 @@
 				E53AB9DC1FF5A16C00DBD2FD /* p_code_emitter.c in Sources */,
 				E5CD7B4E264B4A6100EC6073 /* 6502_optimize.c in Sources */,
 				E544B7E71FAD313600F2C59B /* expr_evaluator.c in Sources */,
+				E5F80253299EE67B00203082 /* options.c in Sources */,
 				E574B08B204A365400191108 /* risc_v_emitter.c in Sources */,
 				E544B8241FC531A000F2C59B /* statement_codegen.c in Sources */,
 				E5BC31811FA513CE00C7691B /* symbol.c in Sources */,

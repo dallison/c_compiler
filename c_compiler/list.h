@@ -11,6 +11,9 @@
 
 #include <stdio.h>
 
+// This is an invasive list.  Each element in the list must have a ListElement
+// struct at offset 0.
+
 // A list element header.  This should be placed at the very beginning
 // of any type to be inserted into a list
 typedef struct ListElement {

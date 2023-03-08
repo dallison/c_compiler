@@ -664,7 +664,7 @@ static void FixupPLTEntry(ProcedureLinkageTable* plt,
 static void CheckOptions(Linker* linker) {
 }
 
-LinkerArchitecture* NewRISCVLinkerArchitecture() {
+LinkerArchitecture* NewRISCVLinkerArchitecture(void) {
   LinkerArchitecture* arch = malloc(sizeof(LinkerArchitecture));
   arch->code_start_address = CodeStartAddress;
   arch->data_start_address = DataStartAddress;

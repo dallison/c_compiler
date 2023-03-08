@@ -45,11 +45,26 @@ void VectorReserve(Vector* vec, size_t n);
 // used by the things being pointed to.
 void VectorDestruct(Vector* vec);
 void VectorDelete(Vector* vec);
-void VectorDestructWithContents(Vector* vec,
-                                VectorElementDestructor destructor);
-void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor);
 
+// Destroys the vector and the contents by calling the destructor function
+// for each element.  The destructor is called for each element but it should
+// not free the element.  Id free_element is true, his function will free the
+// element, in which case the elements must be allocated using malloc.
+void VectorDestructWithContents(Vector* vec,
+                                VectorElementDestructor destructor,
+                                bool free_element);
+void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor,
+                              bool free_element);
+
+// Clears the vector but doesn't touch the elements - just sets the length to
+// zero and leaves the capacity as is.
 void VectorClear(Vector* vec);
+
+// Clears the vector and also destruct and frees the elements if free_element
+// is true.  The elements must be allocated using malloc if free_element is
+// true.
+void VectorClearWithContents(Vector* vec, VectorElementDestructor destructor,
+                             bool free_element);
 
 // Appends a pointer to the vector, reallocating the space
 // as necessary.

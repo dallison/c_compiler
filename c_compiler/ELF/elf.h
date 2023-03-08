@@ -210,33 +210,24 @@ typedef struct  {
 #define R_W65C02_JSR 1         // Call direct to symbol.
 #define R_W65C02_JMP 2         // Move symbol address to reg.
 #define R_W65C02_DATA16 3      // 16-bit data.
-#define R_W65C02_JSR_PLT 4    // Call via PLT.
-#define R_W65C02_GOT_ENTRY 5  // Address of GOT entry for data.
-#define R_W65C02_GOT_DATA 6       // Value of data in GOT.
-#define R_W65C02_GOT_FUNC 7       // Value of function in GOT.
-#define R_W65C02_PCREL 8        // PC relative address.
-#define R_W65C02_GOT_TLS_IE 9    // TLS IE GOT entry.
-#define R_W65C02_GOT_TLS_GD 10    // TLS GD GOT entry.
-#define R_W65C02_TLS_TP_OFF 11    // TLS Thread pointer offset.
-#define R_W65C02_GOT_TLS_OFFSET 12
-#define R_W65C02_GOT_TLS_MODID 13
-#define R_W65C02_ADD16 14       // Add 16-bit.
-#define R_W65C02_ADD32 15       // Add 32-bit.
-#define R_W65C02_ADD64 16       // Add 64-bit.
-#define R_W65C02_SUB16 17       // Subtract 16-bit.
-#define R_W65C02_SUB32 18      // Subtract 32-bit.
-#define R_W65C02_SUB64 19      // Subtract 64-bit.
-#define R_W65C02_DATA32 21      // 32-bit data.
-#define R_W65C02_DATA64 22      // 64-bit data.
-#define R_W65C02_BYTE0 23
-#define R_W65C02_BYTE1 24
-#define R_W65C02_BYTE2 25
-#define R_W65C02_BYTE3 26
-#define R_W65C02_BYTE4 27
-#define R_W65C02_BYTE5 28
-#define R_W65C02_BYTE6 29
-#define R_W65C02_BYTE7 30
-#define R_W65C02_RELATIVE 31
+#define R_W65C02_DATA32 4      // 32-bit data.
+#define R_W65C02_DATA64 5      // 64-bit data.
+#define R_W65C02_BYTE0 6
+#define R_W65C02_BYTE1 7
+#define R_W65C02_BYTE2 8
+#define R_W65C02_BYTE3 9
+#define R_W65C02_BYTE4 10
+#define R_W65C02_BYTE5 11
+#define R_W65C02_BYTE6 12
+#define R_W65C02_BYTE7 13
+#define R_W65C02_ADD8 14         // Add 8 bits.
+#define R_W65C02_ADD16 15        // Add 16 bits.
+#define R_W65C02_ADD32 16        // Add 32 bits.
+#define R_W65C02_ADD64 17        // Add 64 bits.
+#define R_W65C02_SUB8 18         // Subtract 8 bits.
+#define R_W65C02_SUB16 19        // Subtract 16 bits.
+#define R_W65C02_SUB32 20        // Subtract 32 bits.
+#define R_W65C02_SUB64 21        // Subtract 64 bits.
 
 // AARCH64v8 (AARCH64) relocation types.
 #define R_AARCH64_NONE            0  // No relocation.

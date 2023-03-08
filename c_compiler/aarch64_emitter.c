@@ -231,7 +231,7 @@ static bool IsPrintable(TargetInstruction* inst) {
 // for the local variables.
 static int StackFrameSize(AARCH64Emitter* emitter) {
   // Start off with local variable space.  This also includes
-  // 16 bytes for the saved ra and s0.
+  // 16 bytes for the saved x29 and x30.
   int stack_frame_size = emitter->g->base.stack_frame_size + 16;
 
   bool varargs = emitter->g->base.varargs;
@@ -247,7 +247,7 @@ static int StackFrameSize(AARCH64Emitter* emitter) {
   // A non-leaf procedure saves register variables on the stack as these
   // will be in saved registers.
   // if (!is_leaf) {
-  //  stack_frame_size += emitter->aarch64num_int_reg_vars*8 +
+  //  stack_frame_size += emitter->g->base.num_int_reg_vars*8 +
   //  emitter->aarch64num_fp_reg_vars * 8;
   //}
 
@@ -272,6 +272,9 @@ static void DecrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
 
 static void IncrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
                                   FILE* fp) {
+  if (stack_frame_size <= 0) {
+    return;
+  }
   AddSubImmediate(emitter, "sp",  NULL, /*add=*/true, stack_frame_size, NULL, fp);
 }
 
@@ -425,39 +428,35 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
     fprintf(fp, "add x29, sp, #16\n");
     DecrementStackPointer(emitter, stack_frame_size, fp);
 
-#if 0
     if (varargs) {
-      int num_pushed_arg_regs = AARCH64_NUM_INT_ARGS - emitter->aarch64num_int_arg_regs;
+      int num_pushed_arg_regs = AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs;
       int offset_from_frame_pointer = 0;
       fprintf(fp, "\t// varargs function with %d declared args\n",
-              emitter->aarch64num_int_arg_regs);
+              emitter->g->num_int_arg_regs);
       for (int i = AARCH64_NUM_INT_ARGS - num_pushed_arg_regs; i < AARCH64_NUM_INT_ARGS;
            i++) {
-        fprintf(fp, "\tsd a%d, %d(s0)\n", i, offset_from_frame_pointer);
+        fprintf(fp, "\tstr x%d, [sp, #-8]!\n", i);
         offset_from_frame_pointer += 8;
       }
     }
-#endif
   }
 
   char buf1[8], buf2[8];
 
-#if 0
 
-  if (emitter->aarch64saved_regs.length > 0) {
+  if (emitter->g->saved_regs.length > 0) {
     fprintf(fp, "\t// Saved argument registers.\n");
   }
-  for (size_t i = 0; i < emitter->aarch64saved_regs.length; i++) {
-    SavedArgumentRegister* saved_reg = emitter->aarch64saved_regs.value.p[i];
+  for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
+    SavedArgumentRegister* saved_reg = emitter->g->saved_regs.value.p[i];
     int offset = saved_reg->offset;
-    fprintf(fp, "\tstr %s, [%d(%s)\n",
-            AARCH64RegisterNameFromNum(saved_reg->reg_num, kAARCH64RegTypeInt, buf1,
+    fprintf(fp, "\tstr %s, [%s, #%d]\n",
+            AARCH64RegisterNameFromNum(saved_reg->reg_num, kAARCH64RegTypeInt, kSize64Bit, buf1,
                                   sizeof(buf1)),
-                                  offset,
-            AARCH64RegisterNameFromNum(saved_reg->base_reg_num, kAARCH64RegTypeInt,
-                                  buf2, sizeof(buf2)));
+            AARCH64RegisterNameFromNum(saved_reg->base_reg_num, kAARCH64RegTypeInt, kSize64Bit,
+                                  buf2, sizeof(buf2)),
+            offset);
   }
-#endif
   
   if (!is_leaf) {
     fprintf(fp, "\t// Local vars at offset -%d(s0)\n", local_vars);
@@ -520,7 +519,7 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
 static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // Exit sequence:
-  // ld s0, S-8(sp)   - restore frame pointer.
+  // ldr s0, S-8(sp)   - restore frame pointer.
   // addi sp, sp, S   - increment sp
 
   int stack_frame_size = StackFrameSize(emitter);
@@ -573,7 +572,7 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
   } else {
-    IncrementStackPointer(emitter, stack_frame_size, fp);
+    IncrementStackPointer(emitter, stack_frame_size-32, fp);
     fprintf(fp, "\tldp x29, x30, [sp, #16]\n");
     fprintf(fp, "\tadd sp, sp, #32\n");
   }

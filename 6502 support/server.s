@@ -16,8 +16,15 @@
 
 .global ping
 ping:
+  JSR console_write_string
+  .asciz "building ping\r\n"
   JSR build_ping
+  JSR console_write_string
+  .asciz "sending ping request\r\n"
   JSR send_packet
+  BCC bad_ping
+  JSR console_write_string
+  .asciz "reading ping response\r\n"
   JSR read_packet
   BCS ping_ok
   JSR console_write_string
@@ -31,6 +38,7 @@ ping_ok:
   LDA #ping_command_code
   JSR acknowledge
   JSR send_packet
+bad_ping:
   RTS
   
 .global ls

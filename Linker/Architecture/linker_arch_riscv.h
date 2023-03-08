@@ -6,11 +6,11 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
-#include "linker_arch.h"
-#include "risc_v_machine.h"
-
 #ifndef linker_arch_riscv_h
 #define linker_arch_riscv_h
+
+#include "linker_arch.h"
+#include "risc_v_machine.h"
 
 LinkerArchitecture* NewRISCVLinkerArchitecture(void);
 

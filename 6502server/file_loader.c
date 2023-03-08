@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <string.h>
 #include "loader.h"
+#include <inttypes.h>
 
 void LoaderStateMachineInit(LoaderStateMachine* fsm) {
   fsm->state = kLoaderIdle;
@@ -18,6 +19,7 @@ void LoaderStateMachineInit(LoaderStateMachine* fsm) {
   fsm->next_addr = 0;
   fsm->next_segment_addr = NULL;
   fsm->next_offset = 0;
+  fsm->loading_elf = false;
   VectorInit(&fsm->regions);
 }
 

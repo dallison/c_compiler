@@ -40,7 +40,7 @@ void ObjectFileDestruct(ObjectFile* file) {
   HashTableDestruct(&file->local_symbol_table);
   MapDestruct(&file->sections_by_name);
 
-  VectorDestructWithContents(&file->relocations, (VectorElementDestructor)RelocationDestruct);
+  VectorDestructWithContents(&file->relocations, (VectorElementDestructor)RelocationDestruct, /*free_element=*/true);
 
   MapTraverse(&file->sections_by_type, DeleteSectionMapEntry, NULL);
   MapDestruct(&file->sections_by_type);

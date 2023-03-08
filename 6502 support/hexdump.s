@@ -27,6 +27,7 @@ print_as_hex2:
   PLX
   RTS
 
+
 // Output A as hex to console.
 .global print_as_hex
 print_as_hex:

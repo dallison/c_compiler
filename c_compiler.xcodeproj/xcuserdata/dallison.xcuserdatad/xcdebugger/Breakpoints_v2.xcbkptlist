@@ -126,8 +126,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "226"
-            endingLineNumber = "226"
+            startingLineNumber = "201"
+            endingLineNumber = "201"
             landmarkName = "InitFloatingPoint(expr, init_out, offset, initializers)"
             landmarkType = "9">
          </BreakpointContent>
@@ -254,8 +254,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "671"
-            endingLineNumber = "671"
+            startingLineNumber = "646"
+            endingLineNumber = "646"
             landmarkName = "CompileDeclaration(syntax)"
             landmarkType = "9">
          </BreakpointContent>
@@ -382,8 +382,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "802"
-            endingLineNumber = "802"
+            startingLineNumber = "777"
+            endingLineNumber = "777"
             landmarkName = "DeclarePredefinedTypesAndMacros(preprocessor)"
             landmarkType = "9">
          </BreakpointContent>
@@ -686,8 +686,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "180"
-            endingLineNumber = "180"
+            startingLineNumber = "155"
+            endingLineNumber = "155"
             landmarkName = "InitInteger(expr, init_out, offset, initializers)"
             landmarkType = "9">
          </BreakpointContent>
@@ -702,8 +702,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "446"
-            endingLineNumber = "446"
+            startingLineNumber = "421"
+            endingLineNumber = "421"
             landmarkName = "ExpandBracedInitializer(init, dest_offset, initializers)"
             landmarkType = "9">
          </BreakpointContent>
@@ -974,8 +974,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "561"
-            endingLineNumber = "561"
+            startingLineNumber = "536"
+            endingLineNumber = "536"
             landmarkName = "CompilerAddBufferLiteral(data, length)"
             landmarkType = "9">
          </BreakpointContent>
@@ -1622,22 +1622,6 @@
       <BreakpointProxy
          BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
          <BreakpointContent
-            uuid = "078AD528-7450-4228-B1C7-BBA8FD7D8652"
-            shouldBeEnabled = "No"
-            ignoreCount = "0"
-            continueAfterRunningActions = "No"
-            filePath = "libc/printf.c"
-            startingColumnNumber = "9223372036854775807"
-            endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "316"
-            endingLineNumber = "316"
-            landmarkName = "WriteFormatted(writer, data, fmt, s, len, negative)"
-            landmarkType = "9">
-         </BreakpointContent>
-      </BreakpointProxy>
-      <BreakpointProxy
-         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
-         <BreakpointContent
             uuid = "FE948685-15B7-41E6-B882-6B54714B35BE"
             shouldBeEnabled = "No"
             ignoreCount = "0"
@@ -2092,8 +2076,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "198"
-            endingLineNumber = "198"
+            startingLineNumber = "173"
+            endingLineNumber = "173"
             landmarkName = "InitInteger(expr, init_out, offset, initializers)"
             landmarkType = "9">
          </BreakpointContent>
@@ -3146,8 +3130,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1010"
-            endingLineNumber = "1010"
+            startingLineNumber = "1012"
+            endingLineNumber = "1012"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
          </BreakpointContent>
@@ -3162,8 +3146,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1004"
-            endingLineNumber = "1004"
+            startingLineNumber = "1006"
+            endingLineNumber = "1006"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -3210,8 +3194,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "935"
-            endingLineNumber = "935"
+            startingLineNumber = "937"
+            endingLineNumber = "937"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -3466,8 +3450,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "763"
-            endingLineNumber = "763"
+            startingLineNumber = "738"
+            endingLineNumber = "738"
             landmarkName = "CompileDeclaration(syntax)"
             landmarkType = "9">
             <Locations>
@@ -3514,8 +3498,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "496"
-            endingLineNumber = "496"
+            startingLineNumber = "471"
+            endingLineNumber = "471"
             landmarkName = "AddInitializedStaticVariable(decl, init)"
             landmarkType = "9">
             <Locations>
@@ -3834,8 +3818,8 @@
             filePath = "c_compiler/optimizer.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "232"
-            endingLineNumber = "232"
+            startingLineNumber = "231"
+            endingLineNumber = "231"
             landmarkName = "FindTailCalls(block, data)"
             landmarkType = "9">
          </BreakpointContent>
@@ -4727,8 +4711,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1039"
-            endingLineNumber = "1039"
+            startingLineNumber = "1041"
+            endingLineNumber = "1041"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -4983,8 +4967,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1101"
-            endingLineNumber = "1101"
+            startingLineNumber = "1103"
+            endingLineNumber = "1103"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -4999,8 +4983,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "966"
-            endingLineNumber = "966"
+            startingLineNumber = "968"
+            endingLineNumber = "968"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -5047,8 +5031,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1122"
-            endingLineNumber = "1122"
+            startingLineNumber = "1125"
+            endingLineNumber = "1125"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -5110,8 +5094,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "952"
-            endingLineNumber = "952"
+            startingLineNumber = "954"
+            endingLineNumber = "954"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -5158,8 +5142,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "941"
-            endingLineNumber = "941"
+            startingLineNumber = "943"
+            endingLineNumber = "943"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5174,8 +5158,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1111"
-            endingLineNumber = "1111"
+            startingLineNumber = "1113"
+            endingLineNumber = "1113"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5190,8 +5174,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1110"
-            endingLineNumber = "1110"
+            startingLineNumber = "1112"
+            endingLineNumber = "1112"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5638,8 +5622,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1139"
-            endingLineNumber = "1139"
+            startingLineNumber = "1142"
+            endingLineNumber = "1142"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -6118,8 +6102,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1145"
-            endingLineNumber = "1145"
+            startingLineNumber = "1148"
+            endingLineNumber = "1148"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -6150,8 +6134,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1143"
-            endingLineNumber = "1143"
+            startingLineNumber = "1146"
+            endingLineNumber = "1146"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -6230,8 +6214,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "690"
-            endingLineNumber = "690"
+            startingLineNumber = "692"
+            endingLineNumber = "692"
             landmarkName = "LinkerReadObjectFileFromArchive(linker, archive, ar_file)"
             landmarkType = "9">
             <Locations>
@@ -6278,8 +6262,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "635"
-            endingLineNumber = "635"
+            startingLineNumber = "637"
+            endingLineNumber = "637"
             landmarkName = "ReadELFContents(linker, elf_file, file)"
             landmarkType = "9">
          </BreakpointContent>
@@ -6358,8 +6342,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1166"
-            endingLineNumber = "1166"
+            startingLineNumber = "1172"
+            endingLineNumber = "1172"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -9765,8 +9749,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "580"
-            endingLineNumber = "580"
+            startingLineNumber = "555"
+            endingLineNumber = "555"
             landmarkName = "AddLocalStatics(syntax)"
             landmarkType = "9">
          </BreakpointContent>
@@ -9797,8 +9781,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "751"
-            endingLineNumber = "751"
+            startingLineNumber = "726"
+            endingLineNumber = "726"
             landmarkName = "CompileDeclaration(syntax)"
             landmarkType = "9">
          </BreakpointContent>
@@ -10253,22 +10237,6 @@
       <BreakpointProxy
          BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
          <BreakpointContent
-            uuid = "9D06B8A6-7756-4281-ABF8-90079192FFAD"
-            shouldBeEnabled = "No"
-            ignoreCount = "0"
-            continueAfterRunningActions = "No"
-            filePath = "c_compiler/compiler.c"
-            startingColumnNumber = "9223372036854775807"
-            endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "942"
-            endingLineNumber = "942"
-            landmarkName = "InitBasicOptionsOrDie(compiler, options)"
-            landmarkType = "9">
-         </BreakpointContent>
-      </BreakpointProxy>
-      <BreakpointProxy
-         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
-         <BreakpointContent
             uuid = "14AC02C0-D7DF-4AAC-A796-1E585B9AE826"
             shouldBeEnabled = "No"
             ignoreCount = "0"
@@ -10324,8 +10292,8 @@
             filePath = "c_compiler/compiler.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "707"
-            endingLineNumber = "707"
+            startingLineNumber = "682"
+            endingLineNumber = "682"
             landmarkName = "CompileDeclaration(syntax)"
             landmarkType = "9">
          </BreakpointContent>
@@ -10375,6 +10343,342 @@
             startingLineNumber = "20"
             endingLineNumber = "20"
             landmarkName = "GenerateCode(gen)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "B485EAEC-B012-4213-A7DF-8087B438D8BD"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/aarch64_emitter.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "278"
+            endingLineNumber = "278"
+            landmarkName = "IncrementStackPointer(emitter, stack_frame_size, fp)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "6FB93FA6-412B-44A2-9595-AA30FFA3159E"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/aarch64_emitter.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "575"
+            endingLineNumber = "575"
+            landmarkName = "RestoreRegisters(emitter, fp)"
+            landmarkType = "9">
+            <Locations>
+               <Location
+                  uuid = "6FB93FA6-412B-44A2-9595-AA30FFA3159E - 7de0e4da19531359"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "RestoreRegisters"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/aarch64_emitter.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "574"
+                  endingLineNumber = "574"
+                  offsetFromSymbolStart = "648">
+               </Location>
+               <Location
+                  uuid = "6FB93FA6-412B-44A2-9595-AA30FFA3159E - 7de0e4da195312b8"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "RestoreRegisters"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/aarch64_emitter.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "575"
+                  endingLineNumber = "575"
+                  offsetFromSymbolStart = "612">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "D69CC222-4380-4202-8D02-0DACF0EABFC8"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "libc/printf.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "621"
+            endingLineNumber = "621"
+            landmarkName = "Printf(writer, data, format, ap)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "47D974C7-FA4E-4DA9-BBF0-B444F288D0A9"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "libc/printf.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "79"
+            endingLineNumber = "79"
+            landmarkName = "CollectFormat(p, format)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "86ED0299-1D4D-4AD1-AC7F-AD5F582C4233"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "libc/printf.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "568"
+            endingLineNumber = "568"
+            landmarkName = "Printf(writer, data, format, ap)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "E1717AA2-8748-44BF-8363-CC0E9ED484D5"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "libc/printf.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "362"
+            endingLineNumber = "362"
+            landmarkName = "WriteFormatted(writer, data, fmt, s, len, negative, use_precision)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "C18A6A0F-5DBA-44CD-9FC8-5F8CB4D5F872"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "davecc/main.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "245"
+            endingLineNumber = "245"
+            landmarkName = "main(argc, argv)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "7CF448DF-D735-4A9A-A0E7-AE37619D09EB"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/compiler.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "143"
+            endingLineNumber = "143"
+            landmarkName = "ParseOptions(argc, argv, options)"
+            landmarkType = "9">
+            <Locations>
+               <Location
+                  uuid = "7CF448DF-D735-4A9A-A0E7-AE37619D09EB - e9dffbecc60af0d4"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "ParseOptions"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/compiler.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "94"
+                  endingLineNumber = "94"
+                  offsetFromSymbolStart = "252">
+               </Location>
+               <Location
+                  uuid = "7CF448DF-D735-4A9A-A0E7-AE37619D09EB - e9dffbecc60af0d4"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "ParseOptions"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/compiler.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "94"
+                  endingLineNumber = "94"
+                  offsetFromSymbolStart = "244">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "0C38D5F6-78D4-4D7B-A1F3-DE59F3E27488"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/6502/6502_target.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "90"
+            endingLineNumber = "90"
+            landmarkName = "HandleOptions(options)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "4C20B3C6-3BA0-414E-A637-6E80C3276983"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/compiler.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "976"
+            endingLineNumber = "976"
+            landmarkName = "InitBasicOptionsOrDie(compiler, options, target_opts)"
+            landmarkType = "9">
+            <Locations>
+               <Location
+                  uuid = "4C20B3C6-3BA0-414E-A637-6E80C3276983 - f077f87dee649fa1"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "InitBasicOptionsOrDie"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/compiler.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "938"
+                  endingLineNumber = "938"
+                  offsetFromSymbolStart = "1468">
+               </Location>
+               <Location
+                  uuid = "4C20B3C6-3BA0-414E-A637-6E80C3276983 - f077f87dee649fa1"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "InitBasicOptionsOrDie"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/compiler.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "938"
+                  endingLineNumber = "938"
+                  offsetFromSymbolStart = "1504">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "1C3BBFB0-4C30-4FA6-9B10-301F38D1FF26"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/compiler.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "898"
+            endingLineNumber = "898"
+            landmarkName = "InitBasicOptionsOrDie(compiler, options, target_opts)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "0A26119E-A772-47F2-B4C5-ACAC2CC06884"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/options.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "116"
+            endingLineNumber = "116"
+            landmarkName = "ParseOptionSet(compiler_options, strings, options)"
+            landmarkType = "9">
+            <Locations>
+               <Location
+                  uuid = "0A26119E-A772-47F2-B4C5-ACAC2CC06884 - 117226b7662678b3"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "ParseOptionSet"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/options.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "100"
+                  endingLineNumber = "100"
+                  offsetFromSymbolStart = "276">
+               </Location>
+               <Location
+                  uuid = "0A26119E-A772-47F2-B4C5-ACAC2CC06884 - 117226b7662678b3"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "ParseOptionSet"
+                  moduleName = "libc_compiler_library.dylib"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/dallison/Google%20Drive/c_compiler/c_compiler/options.c"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "100"
+                  endingLineNumber = "100"
+                  offsetFromSymbolStart = "76">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "6FDD9B93-4D14-484C-8C7E-1F8B153BC646"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/6502/6502_target.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "47"
+            endingLineNumber = "47"
+            landmarkName = "CreateAssemblyFile(src_file, asm_file)"
             landmarkType = "9">
          </BreakpointContent>
       </BreakpointProxy>

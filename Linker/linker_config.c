@@ -23,7 +23,7 @@ static void ConfigError(LinkerConfig* config, const char* fmt, ...) {
 
 static void ConfigRegionDestruct(ConfigRegion* r) {
   StringDestruct(&r->name);
-  VectorDestructWithContents(&r->sections, (VectorElementDestructor)StringDestruct);
+  VectorDestructWithContents(&r->sections, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
 }
 
 static ConfigRegion* NewConfigRegion(LinkerConfig* config, ConfigObject* region) {
@@ -66,7 +66,7 @@ static ConfigRegion* NewConfigRegion(LinkerConfig* config, ConfigObject* region)
 }
 
 static void ConfigSegmentDestruct(ConfigSegment* s) {
-  VectorDestructWithContents(&s->regions, (VectorElementDestructor)ConfigRegionDestruct);
+  VectorDestructWithContents(&s->regions, (VectorElementDestructor)ConfigRegionDestruct, /*free_element=*/true);
 }
 
 static ConfigSegment* NewConfigSegment(LinkerConfig* config, ConfigObject* segment) {
@@ -122,7 +122,7 @@ void LinkerConfigInit(LinkerConfig* config, ConfigObject* layout) {
 }
 
 void LinkerConfigDestruct(LinkerConfig* config) {
-  VectorDestructWithContents(&config->segments, (VectorElementDestructor)ConfigSegmentDestruct);
+  VectorDestructWithContents(&config->segments, (VectorElementDestructor)ConfigSegmentDestruct, /*free_element=*/true);
 }
 
 struct Segment* LinkerConfigSegmentForSection(LinkerConfig* config, String* section) {

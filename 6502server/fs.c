@@ -52,7 +52,7 @@ void FileSystemStateMachineInit(FileSystemStateMachine* fsm) {
 }
 
 void FileSystemStateMachineDestruct(FileSystemStateMachine* fsm) {
-  VectorDestructWithContents(&fsm->files, (VectorElementDestructor)FileDestruct);
+  VectorDestructWithContents(&fsm->files, (VectorElementDestructor)FileDestruct, /*free_element=*/true);
 }
 
 static bool ListFiles(FileSystemStateMachine* fsm, Connection* conn, ListFilesCommand* command) {

@@ -39,22 +39,42 @@ void VectorDelete(Vector* vec) {
 }
 
 void VectorDestructWithContents(Vector* vec,
-                                VectorElementDestructor destructor) {
+                                VectorElementDestructor destructor, bool free_element) {
   for (size_t i = 0; i < vec->length; i++) {
+    if (vec->value.p[i] == NULL) {
+      continue;
+    }
     if (destructor != NULL) {
       (*destructor)(vec->value.p[i]);
     }
-    free(vec->value.p[i]);
+    if (free_element) {
+      free(vec->value.p[i]);
+    }
   }
   VectorDestruct(vec);
 }
 
-void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor) {
-  VectorDestructWithContents(vec, destructor);
+void VectorDeleteWithContents(Vector* vec, VectorElementDestructor destructor, bool free_element) {
+  VectorDestructWithContents(vec, destructor, free_element);
   free(vec);
 }
 
 void VectorClear(Vector* vec) { vec->length = 0; }
+
+void VectorClearWithContents(Vector* vec, VectorElementDestructor destructor, bool free_element) {
+  for (size_t i = 0; i < vec->length; i++) {
+    if (vec->value.p[i] == NULL) {
+      continue;
+    }
+    if (destructor != NULL) {
+      (*destructor)(vec->value.p[i]);
+    }
+    if (free_element) {
+      free(vec->value.p[i]);
+    }
+  }
+  vec->length = 0;
+}
 
 static void MakeSpace(Vector* vec) {
   // If the vector is initially empty, allocate it with default capacity.

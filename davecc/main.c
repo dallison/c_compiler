@@ -223,16 +223,26 @@ int main(int argc, char * argv[]) {
   bool run_compiler = false;
   
   int i = 1;
+  bool help = false;
   while (i < argc) {
+    if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0) {
+      help = true;
+      break;
+    }
     i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
                  &asm_files, &args_from_file, &run_compiler, &compile_only);
   }
   
+  if (help) {
+    PrintCompilerHelp();
+    exit(0);
+  }
   // Parse compiler options for C and asm files.
   Vector compiler_options;
   VectorInit(&compiler_options);
+  Vector* target_opts = NULL;
   if (run_compiler || asm_files.length > 0) {
-    ParseOptions((int)compiler_args.length,
+    target_opts = ParseOptions((int)compiler_args.length,
                  (char**)compiler_args.value.p,
                  &compiler_options);
   }
@@ -242,7 +252,7 @@ int main(int argc, char * argv[]) {
     for (size_t i = 0; i < compiler_options.length; i++) {
       CompilerOptionValue* opt = compiler_options.value.p[i];
       if (opt->opt == kOptionInputFile) {
-        String* object_file = CompileTranslationUnit(opt->value.svalue.value, &compiler_options);
+        String* object_file = CompileTranslationUnit(opt->value.svalue.value, &compiler_options, target_opts);
         if (object_file != NULL) {
           VectorAppend(&linker_args, object_file->value);
         } else {

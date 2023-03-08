@@ -13,7 +13,7 @@
 #include <stddef.h>
 
 //
-// This is a balanced binary tree using the very clever red-black tree
+// This is a balanced binary tree using the red-black tree
 // algorithm developed by Xerox PARC in 1972.  Information about
 // how this works is available on the internet but a couple of good
 // sources are:

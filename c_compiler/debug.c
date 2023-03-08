@@ -73,7 +73,7 @@ void DebugBuilderDestruct(DebugBuilder* builder) {
   VectorDestruct(&builder->abbreviations);
   BufferDestruct(&builder->string_table);
   VectorDestructWithContents(&builder->all_dies,
-                             (VectorElementDestructor)DIEDestruct);
+                             (VectorElementDestructor)DIEDestruct, /*free_element=*/true);
   VectorDestruct(&builder->top_dies);
   BufferDestruct(&builder->bytes);
 }
@@ -203,7 +203,7 @@ static DIE* FindBaseType(bool (*func)(TypeRecord*)) {
 
 static void DIEBaseDestruct(DIE* die) {
   VectorDestructWithContents(
-      &die->attr_values, (VectorElementDestructor)DebugAttributeValueDestruct);
+      &die->attr_values, (VectorElementDestructor)DebugAttributeValueDestruct, /*free_element=*/true);
 }
 
 void DIEDestruct(DIE* die) {

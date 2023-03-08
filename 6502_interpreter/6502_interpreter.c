@@ -1129,8 +1129,8 @@ void W65C02InterpreterDisassemble(W65C02Interpreter* interpreter, Loader* loader
         SymbolScope* symbol = NULL;
         while (addr <= end_addr) {
           symbol =
-              LoaderFindSymbolAndCacheResult(interpreter->loader, pc);
-          void* new_addr = Disassemble6502Instruction(interpreter->loader, symbol, pc, addr, stdout);
+              LoaderFindSymbolAndCacheResult(loader, pc);
+          void* new_addr = Disassemble6502Instruction(loader, symbol, pc, addr, stdout);
           pc += new_addr - addr;
           addr = new_addr;
         }

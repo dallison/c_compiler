@@ -65,6 +65,14 @@
             isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
+            argument = "-badopt"
+            isEnabled = "NO">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "-freg-start=0x50"
+            isEnabled = "NO">
+         </CommandLineArgument>
+         <CommandLineArgument
             argument = "-S"
             isEnabled = "NO">
          </CommandLineArgument>
@@ -82,7 +90,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "@/Users/dallison/Google\ Drive/c_compiler/6502\ support/cc.args"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "@/Users/dallison/Google\ Drive/c_compiler/libc/cc.args"
@@ -102,7 +110,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "@/Users/dallison/Library/Developer/Xcode/DerivedData/c_compiler-adwiqtsoilcrkpbctrvzybaptreb/Build/Products/Debug/arm.args"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-o"

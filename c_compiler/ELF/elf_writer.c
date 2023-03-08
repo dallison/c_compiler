@@ -56,13 +56,13 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
 
 void ELFWriterFileDestruct(ELFWriterFile* elf) {
   VectorDestructWithContents(&elf->sections,
-                             (VectorElementDestructor)ELFWriterSectionDestruct);
+                             (VectorElementDestructor)ELFWriterSectionDestruct, /*free_element=*/true);
   VectorDestructWithContents(&elf->segments,
-                             (VectorElementDestructor)ELFWriterSegmentDestruct);
+                             (VectorElementDestructor)ELFWriterSegmentDestruct, /*free_element=*/true);
   BufferDestruct(&elf->string_table);
-  VectorDestructWithContents(&elf->symbol_table, NULL);
+  VectorDestructWithContents(&elf->symbol_table, NULL, /*free_element=*/true);
   BufferDestruct(&elf->section_names);
-  VectorDestructWithContents(&elf->section_fixups, NULL);
+  VectorDestructWithContents(&elf->section_fixups, NULL, /*free_element=*/true);
 }
 
 void ELFWriterAddSectionFixupByName(ELFWriterFile* elf,

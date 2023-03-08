@@ -791,9 +791,9 @@ RVGenerator* NewRVGenerator(Generator* gen) {
 
 void RVGeneratorDestruct(RVGenerator* rv) {
   TargetGeneratorDestruct(&rv->base);
-  VectorDestructWithContents(&rv->var_regs, NULL);
-  VectorDestructWithContents(&rv->saved_regs, NULL);
-  VectorDestructWithContents(&rv->offsets, NULL);
+  VectorDestructWithContents(&rv->var_regs, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&rv->saved_regs, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&rv->offsets, NULL, /*free_element=*/true);
   RVRegisterAllocatorDestruct(&rv->register_allocator);
   
 }
@@ -3221,7 +3221,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   }
   SetLoweredNode(node, call);
 
-  VectorDestructWithContents(&arg_locations, NULL);
+  VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
   return call;
 }
 

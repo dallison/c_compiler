@@ -1,4 +1,5 @@
-CFLAGS = -std=c99
+CC = clang
+CFLAGS = -std=c99 -g
 OBJS = main.o \
     file_loader.o\
     fs.o\
@@ -24,4 +25,7 @@ EXE = 6502server
 
 $(EXE): $(OBJS)
 	$(CC) -o $(EXE) $(OBJS)
+
+clean:
+	rm -f $(EXE) $(OBJS)
 

@@ -95,8 +95,18 @@ console_read_char:
   STA ACIA1_DATA
   RTS
 
+.global console_poll_in
+console_poll_in:
+  LDA ACIA1_CSR
+  AND #1
+  RTS
 
-
+.global console_poll_out
+console_poll_out:
+  LDA ACIA1_CSR
+  AND #2
+  RTS
+  
 // Read a line into console_input_buffer.
 // Returns length in Y.
 .global console_read_line

@@ -61,6 +61,10 @@ static bool Assemble(String* asm_filename, String* object_filename) {
 
 static void Cleanup(void* code) { AARCH64GeneratorDelete(code); }
 
+static void HandleOptions(Vector* options) {
+  
+}
+
 // Create a new AARCH64 target.  The functions are called by the
 // compiler.
 CompilerTarget* NewAARCH64Target() {
@@ -78,6 +82,8 @@ CompilerTarget* NewAARCH64Target() {
   target->stack_alignment = 16;
   target->code_preference = kCodeForSpeed;
   target->call_return_fixed_reg = true;
+
+  target->options = NULL;
 
   target->keep_ssa = false;
   target->ir_optimizations.gvn = true;
@@ -103,5 +109,6 @@ CompilerTarget* NewAARCH64Target() {
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;
   target->emit_tbss_space = EmitTlsBSSVariable;
+  target->handle_options = HandleOptions;
   return target;
 }

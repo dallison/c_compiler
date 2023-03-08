@@ -17,57 +17,9 @@
 #include "type.h"
 #include "vector.h"
 #include "debug.h"
+#include "options.h"
 
 struct Generator;
-
-typedef enum {
-  kOptionInputFile,          // File being compiled.
-  kOptionDebug,              // Generate debug output.
-  kOptionOptimize,           // Optimize code.
-  kOptionTarget,             // Target architecture.
-  kOptionCompileOnly,        // Compile only, don't link.
-  kOptionAssemblyOutput,     // Output asembly only, dont assemble.
-  kOptionOutputFile,         // Output file name.
-  kOptionIncludePath,        // Add to user include search path.
-  kOptionSystemIncludePath,  // Add to system include search path.
-  kOptionDefineMacro,        // Define a macro.
-  kOptionUndefineMacro,      // Undefine a macro.
-  kOptionPic,                // Position Independent Code.
-  kOptionWarning,            // Disable warning.
-  kOptionWerror,             // All warnings are errors.
-  kOptionWall,               // Enable all warnings.
-  kOptionErrorLimit,         // Max error limit.
-  kOptionTlsModel,           // TLS model.
-  kOptionChdir,              // Change dir before running.
-  kOptionPrintFrontend,      // Debug front end.
-  kOptionPrintBackend,       // Debug back end.
-  kOptionPrintPreprocessor,  // Debug preprocessor.
-  kOptionKeepAsmFile,        // Keep asm file after assembling.
-  kOptionSaveIR,             // Save IR in file.
-  kOptionSaveAST,            // Save AST in file.
-} CompilerOption;
-
-typedef struct {
-  CompilerOption opt;   // Option identifier.
-  union {
-    int ivalue;         // Integer value.
-    String svalue;      // String value.
-    bool bvalue;        // Boolean value.
-  } value;
-} CompilerOptionValue;
-
-typedef enum {
-  kCompilerOptionString,
-  kCompilerOptionInt,
-  kCompilerOptionBool,
-} CompilerOptionType;
-
-typedef struct {
-  const char* name;  // -name ("" means positional arg)
-  CompilerOptionType type;
-  CompilerOption opt;
-  bool is_prefix;
-} CompilerOptionDefinition;
 
 // Thread local storage model.
 #define TLS(x) kTls_##x
@@ -78,8 +30,6 @@ typedef enum {
   TLS(initial_exec),
   TLS(local_exec),
 } TlsModel;
-
-void ParseOptions(int argc, char** argv, Vector* options);
 
 typedef enum {
   kInitTypeByte,    // 8-bit constant.
@@ -196,6 +146,9 @@ typedef struct {
   bool prepend_underscore;          // Prepend underscore to external symbols.
   int flags;                        // Target specific flags.
   
+  // Target supplied options;
+  CompilerOptionDefinition* options;
+  
   // Function to generate code.  Returns target specific data.
   void* (*codegen)(struct Generator*);
 
@@ -243,7 +196,12 @@ typedef struct {
 
   // Clean up all memory used by the target for the given code.
   void (*cleanup)(void* code);
+  
+  // Handle target specific option values.
+  void (*handle_options)(Vector* opts);
 } CompilerTarget;
+
+void DeleteCompilerTarget(CompilerTarget* t);
 
 typedef struct {
   String infile;
@@ -326,7 +284,7 @@ typedef struct {
 extern Compiler* compiler;
 
 bool CompilerInitFromFile(Compiler* compiler, const char* filename,
-                          Vector* options);
+                          Vector* options, Vector* target_opts);
 bool CompilerInitFromString(Compiler* compiler, const char* filename,
                             const char* code, Vector* options);
 bool CompilerInitForAssembler(const char* filename, Vector* options);
@@ -334,7 +292,7 @@ bool CompilerInitForAssembler(const char* filename, Vector* options);
 void CompilerDestruct(Compiler* compiler);
 void CompilerDelete(Compiler* compiler);
 
-String* CompileTranslationUnit(const char* filename, Vector* options);
+String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                          Vector* options);
 int CompilerAddStringLiteral(String* value, bool is_wide);
@@ -355,5 +313,7 @@ int PointerSize(void);
 int BoolSize(void);
 int LongSize(void);
 int LongLongSize(void);
+
+void PrintCompilerHelp(void);
 
 #endif /* compiler_h */

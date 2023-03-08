@@ -296,7 +296,7 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     return;
   }
   const bool trace = false;     // Print IR instructions.
-  const bool show_id = true;    // Show IR instruction id in output.
+  const bool show_id = false;    // Show IR instruction id in output.
   const bool chkaddr = false;   // Set to true to check instruction addresses.
   if (trace) {
     fprintf(fp, "// ");

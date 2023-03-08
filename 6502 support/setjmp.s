@@ -210,6 +210,13 @@ longjmploop:
   LDY #1
   STA (__result),Y
 
+  // Check for zero and return 1 if so.
+  DEY
+  ORA (__result),Y
+  BNE result_not0
+  LDA #1
+  STA (__result),Y
+result_not0:
   // Restore sp, fp.
   LDY #0
   LDA (__t0),Y

@@ -30,30 +30,30 @@
 Compiler* compiler;
 
 static CompilerOptionDefinition compiler_options[] = {
-    {"-g", kCompilerOptionBool, kOptionDebug, false},
-    {"-O", kCompilerOptionString, kOptionOptimize, true},
-    {"-target", kCompilerOptionString, kOptionTarget, false},
-    {"-c", kCompilerOptionBool, kOptionCompileOnly, false},
-    {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false},
-    {"-o", kCompilerOptionString, kOptionOutputFile, false},
-    {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false},
-    {"-I", kCompilerOptionString, kOptionIncludePath, true},
-    {"-D", kCompilerOptionString, kOptionDefineMacro, true},
-    {"-U", kCompilerOptionString, kOptionUndefineMacro, true},
-    {"-fPIC", kCompilerOptionBool, kOptionPic, false},
-    {"-fpic", kCompilerOptionBool, kOptionPic, false},
-    {"-Werror", kCompilerOptionBool, kOptionWerror, false},
-    {"-Wall", kCompilerOptionBool, kOptionWall, false},
-    {"-W", kCompilerOptionString, kOptionWarning, true},
-    {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false},
-    {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false},
-    {"-chdir", kCompilerOptionString, kOptionChdir, false},
-    {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false},
-    {"-Xbe-print", kCompilerOptionBool, kOptionPrintBackend, false},
-    {"-Xpp-print", kCompilerOptionBool, kOptionPrintPreprocessor, false},
-    {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false},
-    {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false},
-    {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false},
+    {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info"},
+    {"-O", kCompilerOptionString, kOptionOptimize, true, "Optimize with level (-O0, -O1, -O2)"},
+    {"-target", kCompilerOptionString, kOptionTarget, false, "Specify one target architecture"},
+    {"-c", kCompilerOptionBool, kOptionCompileOnly, false, "Compile only to object file"},
+    {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false, "Generate assembly language"},
+    {"-o", kCompilerOptionString, kOptionOutputFile, false, "Output filename"},
+    {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false, "Add system include path"},
+    {"-I", kCompilerOptionString, kOptionIncludePath, true, "Add a user include path -Ipath"},
+    {"-D", kCompilerOptionString, kOptionDefineMacro, true, "Define a macro -Dmacro[=value]"},
+    {"-U", kCompilerOptionString, kOptionUndefineMacro, true, "Undefine a macro"},
+    {"-fPIC", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
+    {"-fpic", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
+    {"-Werror", kCompilerOptionBool, kOptionWerror, false, "Warnings are errors"},
+    {"-Wall", kCompilerOptionBool, kOptionWall, false, "All warnings producesd"},
+    {"-W", kCompilerOptionString, kOptionWarning, true, "Turn warning on or off"},
+    {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
+    {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
+    {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
+    {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false, "Print fron end dump"},
+    {"-Xbe-print", kCompilerOptionBool, kOptionPrintBackend, false, "Print back end dump"},
+    {"-Xpp-print", kCompilerOptionBool, kOptionPrintPreprocessor, false, "Print preprocessor dump"},
+    {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false, "Keep assembly file"},
+    {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false, "Save IR to .ir file"},
+    {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false, "Save AST to .ast file"},
     {NULL, 0, 0, false},
 };
 
@@ -73,104 +73,79 @@ bool OptLevel3(void) {
   return compiler->optimize && compiler->opt_level >= 3;
 }
 
-void ParseOptions(int argc, char** argv, Vector* options) {
-  // Temporary vector of parts of args.  Values are copied
-  // out into other vectors.  Retains ownership of strings.
-  Vector parts = {0};
-  for (int i = 1; i < argc; i++) {
-    // If arg starts with - check for = and split into two.
-    char* equals = argv[i][0] != '-' ? NULL : strchr(argv[i], '=');
-    if (equals != NULL) {
-      String* s = NewString(NULL);
-      StringAppendSegment(s, argv[i], equals - argv[i]);
-      VectorAppend(&parts, s);
-      s = NewString(NULL);
-      StringAppend(s, equals + 1);
-      VectorAppend(&parts, s);
-    } else {
-      // Not an option or no equals.
-      VectorAppend(&parts, NewString(argv[i]));
-    }
-  }
+// Add new targets here.
+#define kMaxTargetNames 3
+static struct CompilerTargetDefinition{
+  const char* canonical_name;
+  const char* names[kMaxTargetNames];
+  CompilerTarget* (*factory)(void);
+  bool static_linkage_only;
+} compiler_targets[] = {
+  {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false},
+  {"riscv", {"riscv", "risc-v"}, NewRVTarget, false},
+  {"aarch64", {"aaarch64", "armv8"}, NewAARCH64Target, false},
+  {"6502", {"6502"}, New6502Target, true},
+  {"65c02", {"65c02", "65C02"}, New65c02Target, true},
+};
 
-  for (int i = 0; i < parts.length; i++) {
-    String* s = parts.value.p[i];
-    if (s->value[0] == '-') {
-      for (size_t opt = 0; compiler_options[opt].name != NULL; opt++) {
-        if (compiler_options[opt].is_prefix &&
-            s->value[1] == compiler_options[opt].name[1]) {
-          CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-          o->opt = compiler_options[opt].opt;
-          // Prefixed options are always a string.
-          String* v = parts.value.p[i];
-          StringInit(&o->value.svalue, &v->value[2]);
-          VectorAppend(options, o);
-          break;
-        } else if (StringEqual(s, compiler_options[opt].name)) {
-          CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-          o->opt = compiler_options[opt].opt;
-          switch (compiler_options[opt].type) {
-            case kCompilerOptionString:
-              i++;
-              if (i < parts.length) {
-                String* s = parts.value.p[i];
-                StringInit(&o->value.svalue, s->value);
-              }
-              break;
-            case kCompilerOptionBool:
-              o->value.bvalue = true;
-              break;
-            case kCompilerOptionInt:
-              i++;
-              if (i < parts.length) {
-                String* s = parts.value.p[i];
-                o->value.ivalue = atoi(s->value);
-              }
-              break;
-          }
-          VectorAppend(options, o);
-          break;
-        }
+#define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))
+
+static struct CompilerTargetDefinition* FindTarget(String* name) {
+  for (size_t i = 0 ; i < kNumTargets; i++) {
+    for (size_t j = 0; j < kMaxTargetNames; j++) {
+      if (compiler_targets[i].names[j] == NULL) {
+        continue;
       }
-    } else {
-      CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);
-      o->opt = kOptionInputFile;
-      StringInit(&o->value.svalue, s->value);
-      VectorAppend(options, o);
-    }
-  }
-  VectorDestructWithContents(&parts, (VectorElementDestructor)StringDestruct);
-}
-
-static String* OptionStringValue(CompilerOption option, Vector* options) {
-  for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value.p[i - 1];
-    if (opt->opt == option) {
-      return &opt->value.svalue;
+      if (StringEqual(name, compiler_targets[i].names[j])) {
+        return &compiler_targets[i];
+      }
     }
   }
   return NULL;
 }
 
-static int OptionIntValue(CompilerOption option, Vector* options, int def) {
-  for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value.p[i - 1];
-    if (opt->opt == option) {
-      return opt->value.ivalue;
-    }
-  }
-  return def;
+void DeleteCompilerTarget(CompilerTarget* t){
+  StringDestruct(&t->name);
+  free(t);
 }
 
-static bool OptionBoolValue(CompilerOption option, Vector* options, bool def) {
-  for (size_t i = options->length; i > 0; i--) {
-    CompilerOptionValue* opt = options->value.p[i - 1];
-    if (opt->opt == option) {
-      return opt->value.bvalue;
+void PrintCompilerHelp(void) {
+  printf("DaveCC compiler options\n");
+  PrintAllOptions(compiler_options);
+  
+  // Print help from all targets.
+  for (size_t i = 0; i < kNumTargets; i++) {
+    CompilerTarget* t = compiler_targets[i].factory();
+    if (t->options != NULL) {
+      printf("\nOptions for target '%s'\n", t->name.value);
+      PrintAllOptions(t->options);
+    }
+     DeleteCompilerTarget(t);
+  }
+}
+
+Vector* ParseOptions(int argc, char** argv, Vector* options) {
+  // Temporary vector of parts of args.  Values are copied
+  // out into other vectors.  Retains ownership of strings.
+  Vector strings = {0};
+  for (int i = 1; i < argc; i++) {
+    // If arg starts with - check for = and split into two.
+    char* equals = argv[i][0] != '-' ? NULL : strchr(argv[i], '=');
+    if (equals != NULL) {
+      CompilerOptionString* str = NewOptionStringWithValue(argv[i], equals - argv[i], equals+1);
+      VectorAppend(&strings, str);
+    } else {
+      // Not an option or no equals.
+      VectorAppend(&strings, NewOptionString(argv[i]));
     }
   }
-  return def;
+
+  return ParseOptionSet(compiler_options, &strings, options);
 }
+
+
+
+
 
 static void InitInteger(ASTNode* expr,
                         Initializer* init_out,
@@ -918,7 +893,8 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
   
 }
 
-static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
+static void InitBasicOptionsOrDie(Compiler* compiler,
+                                  Vector* options, Vector* target_opts) {
   compiler->max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
   compiler->convert_warnings_to_errors =
       OptionBoolValue(kOptionWerror, options, false);
@@ -928,33 +904,18 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
     fprintf(stderr, "No target specified; please specify -target option\n");
     exit(1);
   }
-  bool static_only = false;
-  if (StringEqual(compiler->target_name, "pcode") ||
-      StringEqual(compiler->target_name, "p-code")) {
-    StringSet(compiler->target_name, "pcode");
-    compiler->target = NewPCodeTarget();
-  } else if (StringEqual(compiler->target_name, "riscv") ||
-             StringEqual(compiler->target_name, "risc-v")) {
-    compiler->target = NewRVTarget();
-    StringSet(compiler->target_name, "riscv");
-  } else if (StringEqual(compiler->target_name, "aarch64") ||
-             StringEqual(compiler->target_name, "armv8")) {
-    compiler->target = NewAARCH64Target();
-    StringSet(compiler->target_name, "aarch64");
-  } else if (StringEqual(compiler->target_name, "6502")) {
-    compiler->target = New6502Target();
-    static_only = true;
-  } else if (StringEqual(compiler->target_name, "65c02")) {
-    compiler->target = New65c02Target();
-    static_only = true;
- } else {
+  struct CompilerTargetDefinition* target = FindTarget(compiler->target_name);
+  if (target == NULL) {
     fprintf(stderr, "Unknown -target architecture %s\n", compiler->target_name->value);
     exit(1);
   }
+  compiler->target = target->factory();
+  StringSet(compiler->target_name, target->canonical_name);
+
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
   ParseOptimizationOption(compiler, options);
   compiler->pic = OptionBoolValue(kOptionPic, options, false);
-  if (static_only && compiler->pic) {
+  if (target->static_linkage_only && compiler->pic) {
     fprintf(stderr, "-fPIC is not supported on this target");
     exit(1);
   }
@@ -990,7 +951,14 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
   compiler->print_preprocessor =
       OptionBoolValue(kOptionPrintPreprocessor, options, false);
   compiler->keep_asm_file = OptionBoolValue(kOptionKeepAsmFile, options, false);
-
+  if (compiler->save_ast) {
+    compiler->print_front_end = true;
+  }
+  if (compiler->save_ir) {
+    compiler->print_back_end = true;
+  }
+  // Parse target-specific options.
+  
   // TLS model.
   String* tls_model = OptionStringValue(kOptionTlsModel, options);
   if (tls_model != NULL) {
@@ -1000,6 +968,29 @@ static void InitBasicOptionsOrDie(Compiler* compiler, Vector* options) {
       exit(1);
     }
   }
+  
+  Vector target_options = {0};
+  if (target_opts != NULL && compiler->target->options != NULL) {
+    // NOTE: this will destruct the target_opts vector and return a new one
+    // containing unknown options.
+    target_opts = ParseOptionSet(compiler->target->options, target_opts, &target_options);
+  }
+
+  if (target_opts != NULL) {
+    // Print out unknown options,
+    if (target_opts->length != 0) {
+      for (size_t i = 0; i < target_opts->length; i++) {
+        String* s = target_opts->value.p[i];
+        fprintf(stderr, "Unknown option %s\n", s->value);
+      }
+      exit(1);
+    }
+    
+    VectorDestructWithContents(target_opts, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
+  }
+
+  compiler->target->handle_options(&target_options);
+  VectorDestructWithContents(&target_options, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   
   PreprocessorInit(&compiler->preprocessor);
   SyntaxInit(&compiler->syntax, &compiler->lex);
@@ -1058,11 +1049,11 @@ static void InitComplexOptions(Compiler* compiler, Vector* options) {
 }
 
 static bool CompilerInitCommon(Compiler* compiler, const char* filename,
-                               Vector* options) {
+                               Vector* options, Vector* target_opts) {
   InitBasic(compiler, filename);
 
   // Basic option initialization.
-  InitBasicOptionsOrDie(compiler, options);
+  InitBasicOptionsOrDie(compiler, options, target_opts);
 
   // Chdir if asked.
   String* dir = OptionStringValue(kOptionChdir, options);
@@ -1129,8 +1120,8 @@ void CompilerDelete(Compiler* compiler) {
 }
 
 bool CompilerInitFromFile(Compiler* compiler, const char* filename,
-                          Vector* options) {
-  bool ok = CompilerInitCommon(compiler, filename, options);
+                          Vector* options, Vector* target_opts) {
+  bool ok = CompilerInitCommon(compiler, filename, options, target_opts);
   if (!ok) {
     return false;
   }
@@ -1143,7 +1134,7 @@ bool CompilerInitFromFile(Compiler* compiler, const char* filename,
 
 bool CompilerInitFromString(Compiler* compiler, const char* filename,
                             const char* code, Vector* options) {
-  bool ok = CompilerInitCommon(compiler, filename, options);
+  bool ok = CompilerInitCommon(compiler, filename, options, NULL);
   if (!ok) {
     return false;
   }
@@ -1156,7 +1147,7 @@ bool CompilerInitFromString(Compiler* compiler, const char* filename,
 
 bool CompilerInitForAssembler(const char* filename, Vector* options) {
   compiler = malloc(sizeof(Compiler));
-  bool ok = CompilerInitCommon(compiler, filename, options);
+  bool ok = CompilerInitCommon(compiler, filename, options, NULL);
   if (!ok) {
     return false;
   }
@@ -1360,11 +1351,11 @@ static String* Compile(Compiler* compiler, Vector* options) {
   return object_filename;
 }
 
-String* CompileTranslationUnit(const char* filename, Vector* options) {
+String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts) {
   ClearAllFiles();
 
   compiler = malloc(sizeof(Compiler));
-  if (!CompilerInitFromFile(compiler, filename, options)) {
+  if (!CompilerInitFromFile(compiler, filename, options, target_opts)) {
     fprintf(stderr, "Cannot open file %s\n", filename);
     return NULL;
   }

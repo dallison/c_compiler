@@ -8,7 +8,9 @@
 .text
 
 .global main
+.global _start
 main:
+_start:
   LDX #0xff
   TXS
   CLD

@@ -70,9 +70,10 @@ void BuildPacket(Packet* packet,  int datalen) {
 
 int ProcessPacket(Packet* packet) {
   printf("Incoming... %d bytes\n", packet->length);
-  // Hexdump(packet, packet->length);
+  Hexdump(packet, packet->length);
   uint16_t crc = CRC16(packet->data, packet->length - 2, 0);
   if (crc != packet->crc) {
+    printf("Bad CRC: calc: %x, sent: %x\n", crc, packet->crc);
     return -1;
   }
   return packet->length;

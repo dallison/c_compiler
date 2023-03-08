@@ -132,11 +132,25 @@ process_packet:
   RTS               // Carry is set.
 bad_crc:
   PLY               // Length doesn't matter.
+  JSR console_write_string
+  .asciz "Bad CRC\r\n"
+  LDA input_buffer+packet_crc+1
+  JSR print_as_hex
+  LDA input_buffer+packet_crc+0
+  JSR print_as_hex
+  LDA #'/'
+  JSR console_write_char
+  LDA crc+1
+  JSR print_as_hex
+  LDA crc+0
+  JSR print_as_hex
+  JSR console_crlf
   CLC
   RTS
 
 // Y: packet length
 // output_buffer: packet
+// Carry: set = good
 .global send_packet
 send_packet:
   JSR build_packet
@@ -158,17 +172,23 @@ send_packet:
   CMP output_buffer+packet_length   // Compare against length.
   BNE bad_len_ack
   
+  // ACK the ACK
+  // JSR ack_byte
+  
   // Move to first byte of rest of packet.
   INC temp_addr
   
   // Send rest of packet.
   LDY output_buffer+packet_length
   LDA #acia2_device_id
-  JMP device_write
+  JSR device_write
+  SEC
+  RTS
 
 bad_len_ack:
   JSR console_write_string
   .asciz "Protocol error: invalid len ACK\r\n"
+  CLC
   RTS
   
 // Ackknowledge the receipt of an packet.  The input buffer
@@ -194,7 +214,7 @@ acknowledge:
   RTS
   
   
-// Serial input is added to the input ring buffer on an NMI interrrupt
+// Serial input is added to the input ring buffer on an IRQ interrrupt
 // from the ACIA.  It uses:
 // serial_num_bytes: number of bytes in the ring buffer
 // serial_read_index: index of first unread byte
@@ -204,24 +224,62 @@ acknowledge:
 // number of bytes.
 // Entry:
 // Y: number of bytes to wait for.
+// Saves X, corrupts A.
 wait_for_input:
+  PHX
+  // Timeout in X,A
+  
+#if 0
+  TYA
+  JSR print_as_hex
+  LDA #':'
+  JSR console_write_char
+#endif
+
+  LDA #255
+  LDX #50
+wait_for_input_loop:
+#if 0
+  PHA
+  LDA serial_num_bytes
+  JSR print_as_hex
+  LDA #'/'
+  JSR console_write_char
+  PLA
+#endif
   CPY serial_num_bytes
+  BCC input_wait_done
   BEQ input_wait_done
-  BCS wait_for_input
+  DEC A
+  BNE wfi
+  DEX
+wfi:
+  CPX #0
+  BNE wait_for_input_loop
+  CMP #0
+  BNE wait_for_input_loop
+  JSR console_write_string
+  .asciz "Timeout waiting for serial data\r\n"
 input_wait_done:
+  PLX
   RTS
 
+  
 // Read next input byte, result in A.
 .global next_input_byte
 next_input_byte:
   PHX
   LDX serial_read_index
+  TXA
+  INC A
+  AND #0X7F                 // Wrap to buffer size (0x80)
+  STA serial_read_index
   LDA input_ring_buffer,X
-  INC serial_read_index
   DEC serial_num_bytes
   PLX
   RTS
- 
+
+
 // Read the specified number of bytes from the input ring buffer and
 // place them in the input buffer starting at index 1.
 // Y: num bytes to read
@@ -234,7 +292,11 @@ read_ring_buffer:
 read_ring_loop:
   LDA input_ring_buffer,X       // Load next byte from ring buffer.
   STA input_buffer,Y            // Store in input buffer.
-  INX
+  // JSR print_as_hex
+  TXA
+  INC A
+  AND #0x7f
+  TAX
   INY
   DEC serial_num_bytes          // One byte less to read.
   DEC byteA
@@ -293,7 +355,7 @@ build_ping:
   LDA #5
   STA output_buffer,Y       // Size is 5
   INY
-  LDA #0x13
+  LDA #'p'
   STA output_buffer,Y
   INY
   LDA #'i'

@@ -11,6 +11,9 @@
 
 #include "vector.h"
 
+// Function pointer type to destruct contents of set.
+typedef void (*SetElementDestructor)(void*);
+
 // A set is a vector of items, each of which is the same type
 // and can be compared using a comparision function.  A set contains
 // only unique items.  If you try to insert an item that will compare
@@ -26,6 +29,10 @@ Set* NewSet(SetCompareFunc func);
 void SetDestruct(Set* set);
 void SetDelete(Set* set);
 void SetClear(Set* set);
+
+void SetDestructWithContents(Set* set, SetElementDestructor destructor, bool free_contents);
+void SetDeleteWithContents(Set* set, SetElementDestructor destructor, bool free_contents);
+void SetClearWithContents(Set* set, SetElementDestructor destructor, bool free_contents);
 
 void SetInitForPointers(Set* set);
 void SetInitForIntegers(Set* set);

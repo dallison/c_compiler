@@ -25,6 +25,7 @@
 #include "linker_arch_pcode.h"
 #include "linker_arch_riscv.h"
 #include "linker_arch_6502.h"
+#include "linker_arch_aarch64.h"
 
 void LinkerError(ObjectFile* file, const char* error, ...) {
   va_list ap;
@@ -148,6 +149,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->architectures, NewPCodeLinkerArchitecture());
   VectorAppend(&linker->architectures, NewRISCVLinkerArchitecture());
   VectorAppend(&linker->architectures, New6502LinkerArchitecture());
+  VectorAppend(&linker->architectures, NewAARCH64LinkerArchitecture());
 
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");
@@ -176,16 +178,16 @@ void LinkerInitDynamic(Linker* linker) {
 void LinkerDestruct(Linker* linker) {
   StringDestruct(&linker->output_filename);
   StringDestruct(&linker->entry_symbol);
-  VectorDestructWithContents(&linker->files, (VectorElementDestructor)ObjectFileDestruct);
-  VectorDestructWithContents(&linker->architectures, NULL);
+  VectorDestructWithContents(&linker->files, (VectorElementDestructor)ObjectFileDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->architectures, NULL, /*free_element=*/true);
   LinkerClearSymbolTable(&linker->global_symbol_table);
   HashTableDestruct(&linker->global_symbol_table);
-  VectorDestructWithContents(&linker->section_groups, (VectorElementDestructor)SectionGroupDestruct);
-  VectorDestructWithContents(&linker->static_libraries, (VectorElementDestructor)ARArchiveDestruct);
-  VectorDestructWithContents(&linker->dynamic_libraries, (VectorElementDestructor)LoadedDynamicLibraryDestruct);
-  VectorDestructWithContents(&linker->library_search_path, (VectorElementDestructor)StringDestruct);
-  VectorDestructWithContents(&linker->needed_libraries, (VectorElementDestructor)StringDestruct);
-  VectorDestructWithContents(&linker->rpath, (VectorElementDestructor)StringDestruct);
+  VectorDestructWithContents(&linker->section_groups, (VectorElementDestructor)SectionGroupDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->static_libraries, (VectorElementDestructor)ARArchiveDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->dynamic_libraries, (VectorElementDestructor)LoadedDynamicLibraryDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->library_search_path, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->needed_libraries, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->rpath, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
 }
 
 void LinkerInitArchitecture(Linker* linker) {
@@ -325,7 +327,7 @@ SectionGroup* NewSectionGroup(const String* name, int32_t type,
 void SectionGroupDestruct(SectionGroup* group) {
   StringDestruct(&group->name);
   VectorDestructWithContents(&group->components,
-                             (VectorElementDestructor)GroupedSectionDestruct);
+                             (VectorElementDestructor)GroupedSectionDestruct, /*free_element=*/true);
 }
 
 void SectionGroupDelete(SectionGroup* group) {
@@ -388,7 +390,7 @@ SegmentMemoryRegion* NewSegmentMemoryRegion(ConfigRegion* config) {
 
 void SegmentMemoryRegionDestruct(SegmentMemoryRegion* region) {
   StringDestruct(&region->name);
-  VectorDestructWithContents(&region->sections, (VectorElementDestructor)StringDestruct);
+  VectorDestructWithContents(&region->sections, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
 }
 
 void SegmentMemoryRegionDelete(SegmentMemoryRegion* region) {
@@ -423,7 +425,7 @@ void SegmentInit(Segment* segment, ConfigSegment* config) {
 
 void SegmentDestruct(Segment* segment) {
   VectorDestruct(&segment->sections);
-  VectorDestructWithContents(&segment->regions, (VectorElementDestructor)SegmentMemoryRegionDestruct);
+  VectorDestructWithContents(&segment->regions, (VectorElementDestructor)SegmentMemoryRegionDestruct, /*free_element=*/true);
 }
 
 SegmentMemoryRegion* SegmentDefaultRegion(Segment* segment) {
@@ -1114,6 +1116,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   // Define the '_etext' symbol for the last assigned address.
   InventSymbol(linker, "_etext", 8, end_of_segments);
+  uint64_t addr = end_of_segments;
 
   // Assign addresses to sections in the data segment.  This must be
   // last since it also needs to contain the .bss section.
@@ -1137,12 +1140,15 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   // The .bss (nobits) address is just after all the other sections.
   linker->nobits_address = SegmentEndAddress(&linker->data_segment);
-  assert(linker->nobits_address != 0);
+  if (linker->nobits_address != 0) {
   
-  uint64_t addr = linker->nobits_address;
-  LinkerAssignCommonSymbolAddresses(linker, &addr);
-  linker->nobit_size = addr - linker->nobits_address;
-  LinkerAssignBSSSymbolAddresses(linker);
+    addr = linker->nobits_address;
+    LinkerAssignCommonSymbolAddresses(linker, &addr);
+    linker->nobit_size = addr - linker->nobits_address;
+    LinkerAssignBSSSymbolAddresses(linker);
+  } else {
+    linker->nobit_size = 0;
+  }
 
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);

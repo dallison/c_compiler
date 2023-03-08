@@ -277,7 +277,7 @@
 .set __mem_src 0xa2
 .set __mem_size 0xa6
 .set __t4 __mem_dest
-.set __t5 -_mem_dest+1
+.set __t5 __mem_dest+1
 
 .set stack_bottom 0xc000
 .set sys_exit 1

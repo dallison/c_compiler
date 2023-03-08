@@ -24,6 +24,7 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
                                 int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
 }
 
+
 static void ApplyRelocation(Linker* linker,
                             ObjectFile* file,
                             Relocation* reloc,

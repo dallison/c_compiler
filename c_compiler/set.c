@@ -29,6 +29,19 @@ void SetDelete(Set* set) {
 
 void SetClear(Set* set) { VectorClear(&set->vec); }
 
+void SetDestructWithContents(Set* set, SetElementDestructor destructor, bool free_contents) {
+  VectorDestructWithContents(&set->vec, (VectorElementDestructor)destructor, free_contents);
+}
+
+void SetDeleteWithContents(Set* set, SetElementDestructor destructor, bool free_contents) {
+  VectorDestructWithContents(&set->vec, (VectorElementDestructor)destructor, free_contents);
+  free(set);
+}
+
+void SetClearWithContents(Set* set, SetElementDestructor destructor, bool free_contents) {
+  VectorClearWithContents(&set->vec, (VectorElementDestructor)destructor, free_contents);
+}
+
 static int ComparePointers(const void* a, const void* b) {
   const void* v1 = *(const void**)a;
   const void* v2 = *(const void**)b;

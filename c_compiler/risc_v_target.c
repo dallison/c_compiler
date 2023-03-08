@@ -60,6 +60,10 @@ static bool Assemble(String* asm_filename, String* object_filename) {
 
 static void Cleanup(void* code) { RVGeneratorDelete(code); }
 
+static void HandleOptions(Vector* options) {
+  
+}
+
 // Create a new RV target.  The functions are called by the
 // compiler.
 CompilerTarget* NewRVTarget() {
@@ -85,6 +89,8 @@ CompilerTarget* NewRVTarget() {
   target->prepend_underscore = false;
   target->plain_char_is_signed = false;
 
+  target->options = NULL;
+
   target->flags = 0;
   target->alignment = 8;
   target->codegen = GenerateCode;
@@ -102,5 +108,6 @@ CompilerTarget* NewRVTarget() {
   target->emit_tbss_start = EmitTlsBSSStart;
   target->emit_tls_variable = EmitTlsVariable;
   target->emit_tbss_space = EmitTlsBSSVariable;
+  target->handle_options = HandleOptions;
   return target;
 }

@@ -15,75 +15,76 @@
 .set ROM_VECTORS 0xfffa
 
 // Static memory.
+// We have a page of RAM at 0xfd00.  It could be used for vectors or something.
 // Vectors at 0xfd00.  Each is a JMP instruction to an address.
 // These are in RAM and can be overwritten by second stage OS.
 .set vector_ram 0xfd00
-.set irqv 0xfd00
-.set nmiv 0xfd03
-.set brkv 0xfd06
-.set console_writev 0xfd09
 
 // Console buffer.
 .set console_input_buffer_addr 0x300
 
-.set temp_buffer 0x400
-.set input_ring_buffer 0x500
-.set input_buffer 0x600
-.set output_buffer 0x700
+// Each of these is 128 bytes long.
+.set temp_buffer 0x380
+.set input_ring_buffer 0x400
+.set input_buffer 0x480
+.set output_buffer 0x500 // ... 0x57f
 
-// Zero page.
+// Zero page.  We use some zero page locations for ths ROM.  They
+// start above the C ABI's reserved space, at 0xbb.
+.set zp_start 0xbb
 
 // Temporary address.
-.set temp_addr 0x00 //,1
-.set rega 0x02              // Shadow for REGA.
+.set temp_addr zp_start + 0x00 //,1
+.set rega zp_start + 0x02              // Shadow for REGA.
 
-.set console_input_buffer 0x03 // 0x04
+.set console_input_buffer zp_start + 0x03 // 0x04
 
 // Temporary register work locations.
-.set addrA 0x05 // and 0x06
-.set addrB 0x07 // and 0x08
-.set addrC 0x09 // and 0x0a
+.set addrA zp_start + 0x05 // and 0x06
+.set addrB zp_start + 0x07 // and 0x08
+.set addrC zp_start + 0x09 // and 0x0a
 
-.set byteA 0x0b
-.set byteB 0x0c
-.set byteC 0x0d
+.set byteA zp_start + 0x0b
+.set byteB zp_start + 0x0c
+.set byteC zp_start + 0x0d
 
-.set device_ptr 0x0e // and 0x0f
-.set crc 0x10 // and 0x11
-.set crc_addr 0x12 // and 0x13
-.set crc_num 0x14   // and 0x15
-.set seqnum 0x16
+.set device_ptr zp_start + 0x0e // and 0x0f
+.set crc zp_start + 0x10 // and 0x11
+.set crc_addr zp_start + 0x12 // and 0x13
+.set crc_num zp_start + 0x14   // and 0x15
+.set seqnum zp_start + 0x16
 
-.set ls_count 0x17 // and 0x18
-.set dump_addr 0x19 // and 0x20
-.set dump_end_addr 0x21 // and 0x22
-.set dump_length 0x23 // and 0x24
+.set ls_count zp_start + 0x17 // and 0x18
+.set dump_addr zp_start + 0x19 // and 0x20
+.set dump_end_addr zp_start + 0x21 // and 0x22
+.set dump_length zp_start + 0x23 // and 0x24
 
 // Serial input buffer indexes and count.
-.set serial_read_index 0x25         // First unread byte.
-.set serial_write_index 0x26        // Next byte to write.
-.set serial_num_bytes 0x27          // Num bytes available.
+.set serial_read_index zp_start + 0x25         // First unread byte.
+.set serial_write_index zp_start + 0x26        // Next byte to write.
+.set serial_num_bytes zp_start + 0x27          // Num bytes available.
 
-.set brk_addr 0x28 // and 0x29
+.set brk_addr zp_start + 0x28 // and 0x29
 
-.set decimal_out 0x2a // and 0x2b and 0x2c
-.set decimal_in 0x2d // and 0x2e
+.set decimal_out zp_start + 0x2a // and 0x2b and 0x2c
+.set decimal_in zp_start + 0x2d // and 0x2e
 
-.set file_length 0x2f // and 0x30
+.set file_length zp_start + 0x2f // and 0x30
 
 // Function to call for incoming file block.
-.set block_handler 0x31 // and 0x32
-.set load_addr 0x33 // and 0x34
+.set block_handler zp_start + 0x31 // and 0x32
+.set load_addr zp_start + 0x33 // and 0x34
 
 // Start address of loaded file.
-.set exe_addr 0x35 // and 0x36
+.set exe_addr zp_start + 0x35 // and 0x36
 
-// ACIA2 interrupt serial data and status, read early on IRQ.
-.set serial_input_data 0x37
-.set serial_input_status 0x38
+// System call scratch space.
+.set syscall_vector zp_start + 0x37 // and 0x38
+.set syscall_code zp_start + 0x39 // and 0x3a
+// End is at 0xf5
 
-// Place to save A and X on IRQ.
-.set irq_accum 0xfe
-.set irq_x 0xff
-
+// IRQ scratch space
+.set irq_accum 0xfd
+.set irq_x 0xfe
+.set irq_y 0xff
 #endif /* zeropage_h */

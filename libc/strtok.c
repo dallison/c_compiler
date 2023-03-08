@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 
+
 char *strtok(char * restrict s1, const char * restrict s2) {
   static char* saved;
   // NULL call, start at 'saved'.

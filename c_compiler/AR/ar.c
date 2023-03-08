@@ -441,8 +441,8 @@ void ARArchiveBuilderInit(ARArchiveBuilder* archive, const char* filename) {
 
 void ARArchiveBuilderDestruct(ARArchiveBuilder* archive) {
   StringDestruct(&archive->filename);
-  VectorDestructWithContents(&archive->files, (VectorElementDestructor)ARFileDestruct);
-  VectorDestructWithContents(&archive->symbols, (VectorElementDestructor)ARSymbolDestruct);
+  VectorDestructWithContents(&archive->files, (VectorElementDestructor)ARFileDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&archive->symbols, (VectorElementDestructor)ARSymbolDestruct, /*free_element=*/true);
   VectorDestruct(&archive->long_filenames);
   MapDestruct(&archive->file_offsets);
 }

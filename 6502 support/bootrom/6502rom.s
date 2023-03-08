@@ -12,8 +12,8 @@
 .text
 
 // The ROM starts at 0xc000 and is 16K long.
-.global start
-start:
+.global _start
+_start:
   JSR init_devices
   STZ exe_addr
   STZ exe_addr+1
@@ -24,8 +24,12 @@ start:
   LDA #(console_input_buffer_addr >> 8)
   STA console_input_buffer+1
 
+  // Set up the file descriptors for libc.
+  JSR setup_fds
+  
   JSR console_write_string
   .asciz "\033[2J\033[1;1HWelcome to the 80s...\n\r"
+  
 loop:
   JSR console_prompt
   JSR console_read_line
@@ -71,6 +75,7 @@ get_string_end:
   STZ temp_buffer,X
   RTS
 
+  
 compare_command:
   PHY
   PHX
@@ -91,6 +96,7 @@ cc_end:
   RTS
   
 // Parse a command in console_input_buffer.
+.global parse_command
 parse_command:
   LDY #0
   JSR skip_spaces
@@ -267,6 +273,7 @@ boot_command:
 #endif
 
 .p2align 8
+.global commands
 commands:
   .byte 5
   .asciz "dump"
@@ -319,69 +326,6 @@ reset_handler:
   SEI
   CLD
   
-  // Set up vectors in vector_ram as JMP instructions.
-  LDX #0        // Index into vectors.
-  LDY #0        // Index into vector_ram
-vector_loop:
-  // Load vector into addrA.
-  LDA %abs(vectors), X
-  STA addrA
-  INX
-  LDA %abs(vectors), X
-  STA addrA+1
-  INX
-  
-  // Check for zero, end if so.
-  ORA addrA
-  BEQ end_vectors
-  
-  // Write JMP abs instruction into next vector_ram location.
-  LDA #0x4c       // JMP abs
-  STA vector_ram, Y
-  INY
-  LDA addrA
-  STA vector_ram, Y
-  INY
-  LDA addrA+1
-  STA vector_ram, Y
-  INY
-  JMP vector_loop
-
-vectors:
-  .hword rom_irq
-  .hword rom_nmi
-  .hword rom_brk
-  .hword console_write_string
-  .hword 0
-  
-end_vectors:
-
-#if 0
-  // Setup IRQV.
-  LDA #0x4c       // JMP abs
-  STA irqv
-  LDA #%lo(rom_irq)
-  STA irqv+1
-  LDA #%hi(rom_irq)
-  STA irqv+2
-  
-  // Setup NMIV.
-  LDA #0x4c       // JMP abs
-  STA nmiv
-  LDA #%lo(rom_nmi)
-  STA nmiv+1
-  LDA #%hi(rom_nmi)
-  STA nmiv+2
-  
-  // Setup BRKV.
-  LDA #0x4c       // JMP abs
-  STA brkv
-  LDA #%lo(rom_brk)
-  STA brkv+1
-  LDA #%hi(rom_brk)
-  STA brkv+2
-#endif
-
   // Reset stack pointer.
   LDX #0xff
   TXS
@@ -390,9 +334,8 @@ end_vectors:
   CLI
 
   // Main loop.
-  JMP start
+  JMP _start
 
-  
 // Stack on entry:
 // +-------------------+
 // |                   |
@@ -409,72 +352,57 @@ end_vectors:
 // The serial port runs at 115200 Hz.  The CPU is
 // running at 2MHz.  There are 10 bits per byte
 // so bytes will arrive at 11520Hz which gives us
-// about 173 cycles to read the port after the byte
+// about 17.3 cycles to read the port after the byte
 // arrives.
 
 irq_handler:
   STA irq_accum             // 2 cycles - 9
   STX irq_x                 // 2 cycles - 11
-  LDA ACIA2_CSR             // 4 cycles - 15
-  STA serial_input_status   // 2 cycles - 17
-  BIT #0x80         // Check IRQ bit 3 cycles - 20
-  BEQ not_acia2a            // 2 cycles - 22
-  BIT #0x01         // Check RDFR.  3 cycles - 25
-  BEQ not_acia2a     // 2 cycles - 27
-not_acia2a:
-  LDA ACIA2_DATA            // 4 cycles - 31 (read complete)
-  STA serial_input_data
+
+  LDA ACIA2_CSR     // 4 cycles
+  AND #0x81         // Check IRQ and RDFR bits: 2 cycles
+  BEQ not_acia2
+  LDA ACIA2_DATA                      // Load data from serial port (4 cycles)
+  LDX serial_write_index              // Get serial write index.
+  STA input_ring_buffer,X             // Store byte in input ring buffer.
+  LDA serial_write_index              // Move forward one byte.
+  INC A
+  AND #0x7f                           // Limit to buffer size.
+  STA serial_write_index
+  INC serial_num_bytes                // One more byte.
   
+not_acia2:
   // Check for BRK.
-  // TSX
-  // LDA 0x102,X // get the status register from the stack
-  // AND #0x10   // mask B flag
-  // BNE brk_handler
-  
-  // IRQ: invoke IRQV
-  JSR irqv
+  TSX
+  LDA 0x101,X
+  AND #0x10
+  BNE brk_handler
+
+end_irq:
   LDA irq_accum
   LDX irq_x
   RTI
-
+  
 brk_handler:
-  // BRK: invoke BRKV
-  JSR brkv
-  PLA
-  PLX
-  RTI
+  STY irq_y
+  // Get address of BRK
+  TSX
+  LDA 0x102,X
+  CLD
+  SEC
+  SBC #1
+  STA syscall_vector
+  LDA 0x103,X
+  SBC #0
+  STA syscall_vector+1
+  LDA (syscall_vector)
+  JSR __syscall_handler
+  
+  LDY irq_y
+  BRA end_irq
 
 nmi_handler:
-  JSR nmiv
   RTI
-
-rom_nmi:
-  RTS
-  
-// ROM IRQ handler.
-// These handlers use RTS to return, not RTI.
-.global rom_irq
-rom_irq:
-  // ROM IRQ checks.
-  // Check for IRQ on ACIA2.
-
-  LDA serial_input_status
-  BIT #0x80         // Check IRQ bit
-  BEQ not_acia2
-  BIT #0x01         // Check RDFR.
-  BEQ not_acia2
-  LDA serial_input_data               // Load data from serial port
-  LDX serial_write_index              // Get serial write index.
-  STA input_ring_buffer,X             // Store byte in input ring buffer.
-  INC serial_write_index              // Move forward one byte.
-  INC serial_num_bytes                // One more byte.
-not_acia2:
-  RTS
-  
-rom_brk:
-  RTS
-  
-
 
 end_of_rom:
 

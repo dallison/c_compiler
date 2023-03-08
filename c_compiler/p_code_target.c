@@ -49,6 +49,9 @@ static bool Assemble(String* asm_filename, String* object_filename) {
   return assembler.base.num_errors == 0;
 }
 
+static void HandleOptions(Vector* options) {
+  
+}
 
 static void Cleanup(void* code) { PCodeGeneratorDelete(code); }
 
@@ -76,6 +79,8 @@ CompilerTarget* NewPCodeTarget() {
   target->prepend_underscore = false;
   target->plain_char_is_signed = false;
 
+  target->options = NULL;
+
   target->flags = 0;
   target->alignment = 8;
   target->stack_alignment = 8;
@@ -94,5 +99,6 @@ CompilerTarget* NewPCodeTarget() {
   target->emit_literals_start = EmitStringLiteralSection;
   target->emit_literal = EmitLiteral;
   target->emit_debug = EmitDebug;
+  target->handle_options = HandleOptions;
   return target;
 }

@@ -12,17 +12,66 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <termios.h>
+#include <errno.h>
 
 #define kMaxPacket 256
 
-const char root_dir[] = "/home/pi/6502root";
+const char root_dir[] = "../6502root";
+
+// Write to the serial port with an ack for every byte written.
+ssize_t SlowWrite(int fd, const char* s, size_t n) {
+  char buf[1];
+  for (size_t i = 0; i < n; i++) {
+    ssize_t r = write(fd, s, 1);
+    if (r <= 0) {
+      return r;
+    }
+#if 0
+    // Read an ACK that is the inverse of byte sent.
+    r = read(fd, buf, 1);
+    if (r <= 0) {
+      return r;
+    }
+    printf("ACK: %x\n", buf[0]);
+    if (buf[0] != *s) {
+      printf("Bad byte ACK: recv: %x, expected: %x\n", buf[0], *s);
+    }
+#endif
+    //usleep(500);
+    s++;
+  }
+  return n;
+}
 
 void ConnectionInit(Connection* conn, int fd) {
   conn->fd = fd;
   conn->next_seqnum = 1;
   conn->last_ack = 0;
   conn->read_func = read;
-  conn->write_func = write;
+  conn->write_func = SlowWrite;
+  
+  // Configure port in raw mode.
+  struct termios tty = {0};
+  const int kBaud = B115200;
+  
+  tcgetattr(fd, &tty);
+  
+  cfsetospeed(&tty, (speed_t)kBaud);
+  cfsetispeed(&tty, (speed_t)kBaud);
+
+  tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
+                      | INLCR | IGNCR | ICRNL | IXON | IXOFF);
+  tty.c_oflag &= ~OPOST;
+  tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+  tty.c_cflag &= ~(CSIZE | PARENB);
+  tty.c_cflag |= CS8;
+  
+  cfmakeraw(&tty);
+  
+  if (tcsetattr(fd, TCSANOW, &tty) == -1) {
+    fprintf(stderr, "Unable to set TTY to raw: %s", strerror(errno));
+  }
 }
 
 static void InitDatagram(Datagram* gram) {
@@ -42,7 +91,7 @@ bool ConnectionSend(Connection* conn, bool ack, int acknum, const void* data, in
   BuildPacket(packet, sizeof(*gram) + len);
   int nbytes = packet->length+1;
   printf("sending %d bytes\n", nbytes);
-  // Hexdump(conn->packet, nbytes);
+  Hexdump(conn->packet, nbytes);
   
   // Send length byte.
   uint8_t lenbuf[1];
@@ -75,19 +124,21 @@ bool ConnectionSend(Connection* conn, bool ack, int acknum, const void* data, in
 }
 
 int ConnectionReceive(Connection* conn, void* buffer, int buflen) {
+  printf("Waiting for packet\n");
   ssize_t n = conn->read_func(conn->fd, conn->packet, 1);        // Read length.
   if (n != 1) {
     printf("Failed to read packet length\n");
     return -1;
   }
   uint8_t datalen = *(uint8_t*)(conn->packet);
-  
+  printf("got length %d\n", datalen);
   // Ack length by writing inverted value.
   // If we don't ack here we might miss the first byte of the next read
   // because they are done using separate read calls.  There's no hardware
   // flow control.
   char ack[1];
   ack[0] = ~datalen;
+  printf("sending ACK %x\n", ack[0]);
   n = conn->write_func(conn->fd, ack, 1);
   
   // Now we can read the rest of the packet.

@@ -29,7 +29,7 @@ void ConfigNodeDestruct(ConfigNode* node) {
       StringDestruct(&node->value.string_value);
       break;
     case kConfigVector:
-      VectorDestructWithContents(&node->value.vector_value, (VectorElementDestructor)ConfigNodeDestruct);
+      VectorDestructWithContents(&node->value.vector_value, (VectorElementDestructor)ConfigNodeDestruct, /*free_element=*/true);
       break;
     case kConfigObject:
       ConfigObjectDelete(node->value.object_value);
@@ -344,7 +344,7 @@ void ConfigNodeVectorize(ConfigNode* node) {
     case kConfigVector:
       VectorInit(&new_node->value.vector_value);
       VectorCopy(&new_node->value.vector_value, &node->value.vector_value);
-      VectorDestructWithContents(&node->value.vector_value, (VectorElementDestructor)ConfigNodeDestruct);
+      VectorDestructWithContents(&node->value.vector_value, (VectorElementDestructor)ConfigNodeDestruct, /*free_element=*/true);
       break;
     case kConfigString:
       StringInit(&new_node->value.string_value, node->value.string_value.value);

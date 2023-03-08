@@ -44,7 +44,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
 
 void SyntaxDestruct(Syntax* syntax) {
   VectorDestructWithContents(&syntax->all_local_symbols,
-                             (VectorElementDestructor)SymbolDestruct);
+                             (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
   VectorDestruct(&syntax->local_statics);
   ASTNodeDelete(syntax->ast);
 }

@@ -415,12 +415,17 @@ typedef enum {
   kW,
   kX,
   kS,
-  kD
+  kD,
+  kB,
+  kH,
+  kQ,
 } RegisterWidth;
 
 typedef struct {
   int num;
   RegisterWidth width;
+  bool fp_or_simd;
+  int size;     // Size field for load/store.
 } Register;
 
 typedef enum {
@@ -488,17 +493,40 @@ static Register GetRegister(AARCH64Assembler* assembler) {
   switch (prefix) {
     case 'W':
       reg.width = kW;
+      reg.fp_or_simd = false;
+      reg.size = 2;
       break;
     case 'X':
       reg.width = kX;
+      reg.fp_or_simd = false;
+      reg.size = 3;
       break;
-   case 'S':
+    case 'S':
       reg.width = kS;
+      reg.fp_or_simd = true;
+      reg.size = 2;
       break;
     case 'D':
       reg.width = kD;
+      reg.fp_or_simd = true;
+      reg.size = 3;
       break;
-    default:
+    case 'B':
+      reg.width = kB;
+      reg.fp_or_simd = true;
+      reg.size = 0;
+       break;
+    case 'H':
+      reg.width = kH;
+      reg.fp_or_simd = true;
+      reg.size = 1;
+      break;
+    case 'Q':
+      reg.width = kQ;
+      reg.fp_or_simd = true;
+      reg.size = 3;
+      break;
+   default:
       AssemblerError(&ASM, "Invalid register name %s", ASM.lex.spelling.value);
       break;
   }
@@ -1323,11 +1351,94 @@ static void Assemble_ret(AARCH64Assembler* assembler) {
                     (reg << 5));
 }
 
-UNDEFINED_INST(cbnz);
-UNDEFINED_INST(cbz);
-UNDEFINED_INST(tbnz);
-UNDEFINED_INST(tbz);
 
+static void AssembleCompareAndBranch(AARCH64Assembler* assembler, int op) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  
+  int64_t addr = AssemblerEvaluateExpression(&ASM);
+  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+
+  // We have a 19 bit immediate which is a multiple of 4, so this give us
+  // 21 bits of range.
+  int32_t off = offset < 0 ? -offset : offset;
+  if (off > (1 << 21)) {
+    AssemblerError(&ASM, "Branch offset out of range");
+    return;
+  }
+  if ((off & 3) != 0) {
+    AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
+    return;
+  }
+  int sf = rt.width == kX;
+  int imm19 = off >> 2;
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+                    (sf << 31) |
+                    (0x1a << 25) |
+                    (op << 24) |
+                    (imm19 << 5) |
+                    (rt.num));
+}
+
+
+static void Assemble_cbnz(AARCH64Assembler* assembler) {
+  AssembleCompareAndBranch(assembler, 1);
+}
+
+static void Assemble_cbz(AARCH64Assembler* assembler) {
+  AssembleCompareAndBranch(assembler, 0);
+}
+
+static void AssembleTestAndBranch(AARCH64Assembler* assembler, int op) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+
+  LexMatch(&ASM.lex, TOK(hash));
+  int imm = (int)AssemblerEvaluateExpression(&ASM);
+
+  NeedComma(assembler);
+  int64_t addr = AssemblerEvaluateExpression(&ASM);
+  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+
+  // We have a 14 bit immediate which is a multiple of 4, so this give us
+  // 16 bits of range.
+  int32_t off = offset < 0 ? -offset : offset;
+  if (off > (1 << 16)) {
+    AssemblerError(&ASM, "Branch offset out of range");
+    return;
+  }
+  if ((off & 3) != 0) {
+    AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
+    return;
+  }
+  // Validate bit in imm.
+  int max_bit = rt.width == kX ? 63 : 31;
+  if (imm < 0 || imm > max_bit) {
+    AssemblerError(&ASM, "Invalid bit number, need 0..%d", max_bit);
+    return;
+  }
+  int b5 = imm >> 5;      // Bit 5.
+  int b40 = imm & 0x1f;   // Bits 4 to 0.
+  
+  int imm14 = off >> 2;
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+                    (b5 << 31) |
+                    (0x1b << 25) |
+                    (op << 24) |
+                    (b40 << 19) |
+                    (imm14 << 5) |
+                    (rt.num));
+}
+
+static void Assemble_tbnz(AARCH64Assembler* assembler) {
+  AssembleTestAndBranch(assembler, 1);
+}
+
+static void Assemble_tbz(AARCH64Assembler* assembler) {
+  AssembleTestAndBranch(assembler, 0);
+}
 
 UNDEFINED_INST(ccmn);
 UNDEFINED_INST(ccmni);
@@ -1358,7 +1469,7 @@ static void AssembleLoadLiteral(AARCH64Assembler* assembler, Register* rt,
 }
 
 static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt,
-                                  Register* rn, int size,
+                                  Register* rn, int size, int fp,
                                 int opc, int v, int pre_index,
                                 int32_t imm9) {
   CheckImmediateWidth(assembler, imm9, 9);
@@ -1366,6 +1477,7 @@ static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt
       &ASM, ASM.current_section,
                     (size << 30) |
                     (0x7 << 27) |
+                    (fp << 26) |
                     (opc << 22) |
                     (v << 26) |
                     (imm9 << 12) |
@@ -1416,7 +1528,6 @@ static void AssembleLoadStorePair(AARCH64Assembler* assembler, Register* rt,
                     (rt->num));
 }
 
-
 // Page C4-571.
 static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
                               int size,
@@ -1427,9 +1538,17 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
   if (is_pair) {
     rt2 = GetRegister(assembler);
     NeedComma(assembler);
+    if (rt.fp_or_simd || rt2.fp_or_simd) {
+      AssemblerError(&ASM, "LDP/STP require non FP/SIMD registers");
+      return;
+    }
   }
   if (LexMatch(&ASM.lex, TOK(lsquare))) {
     Register rn = GetRegister(assembler);
+    if (rn.fp_or_simd) {
+      AssemblerError(&ASM, "Base must be an integer register");
+      return;
+    }
     Operand offset;
     bool pre_indexed = false;
     bool post_indexed = false;
@@ -1462,85 +1581,76 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
       writeback = true;
     }
 
-    if (rt.width == kX || rt.width == kW) {
-      if (is_pair) {
-        int imm7 = offset.i / (rt.width == kX ? 8 : 4);
-        AssembleLoadStorePair(assembler, &rt, &rt2, &rn, rt.width == kX, 0, is_load, imm7);
-      } else {
-        // Integer LDR/STR.
-        if (offset.type == kRegister) {
-          // Register offset.
-          // A register offset can have a shift.
-          if (LexMatch(&ASM.lex, TOK(comma))) {
-            if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
-              AssemblerError(&ASM, "Expected register shift LSL, UXTW, SXTW or SXTX");
-              return;
-            }
-            int option = 3;
-            if (StringEqualCaseBlind(&ASM.lex.spelling, "LSL")) {
-            } else if (StringEqualCaseBlind(&ASM.lex.spelling, "UXTW")) {
-              option = 2;
-            } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTW")) {
-              option = 6;
-            } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTX")) {
-              option = 7;
-            } else {
-              AssemblerError(&ASM, "Invalid register shift");
-              return;
-            }
-            LexMatch(&ASM.lex, TOK(hash));
-            int amount = (int)AssemblerEvaluateExpression(&ASM);
-            // Validate shift amount and encode in S.
-            int s = 1;
-            switch (amount) {
-              case 0:
-                s = 0;
-                break;
-              case 2:
-                if (rt.width != kW) {
-                  AssemblerError(&ASM, "Invalid register shift amount");
-                  return;
-                }
-                break;
-              case 3:
-                if (rt.width != kX) {
-                  AssemblerError(&ASM, "Invalid register shift amount");
-                  return;
-                }
-                break;
-              default:
+    if (is_pair) {
+      int imm7 = offset.i / (rt.width == kX ? 8 : 4);
+      AssembleLoadStorePair(assembler, &rt, &rt2, &rn, rt.width == kX, 0, is_load, imm7);
+    } else {
+      if (offset.type == kRegister) {
+        // Register offset.
+        // A register offset can have a shift.
+        if (LexMatch(&ASM.lex, TOK(comma))) {
+          if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+            AssemblerError(&ASM, "Expected register shift LSL, UXTW, SXTW or SXTX");
+            return;
+          }
+          int option = 3;
+          if (StringEqualCaseBlind(&ASM.lex.spelling, "LSL")) {
+          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "UXTW")) {
+            option = 2;
+          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTW")) {
+            option = 6;
+          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTX")) {
+            option = 7;
+          } else {
+            AssemblerError(&ASM, "Invalid register shift");
+            return;
+          }
+          LexMatch(&ASM.lex, TOK(hash));
+          int amount = (int)AssemblerEvaluateExpression(&ASM);
+          // Validate shift amount and encode in S.
+          int s = 1;
+          switch (amount) {
+            case 0:
+              s = 0;
+              break;
+            case 2:
+              if (rt.width != kW) {
                 AssemblerError(&ASM, "Invalid register shift amount");
                 return;
-            }
-            if (size > 1) {
-              // LDR/STR 32 and 64 bit determined by rt.
-              size = rt.width == kW ? 2 : 3;
-            }
-            int opc = is_load;
-            // TODO: extended register variant.
-            AssembleLoadStoreRegister(assembler, &rt, &rn, &offset.reg, size, opc, 0, option, s);
+              }
+              break;
+            case 3:
+              if (rt.width != kX) {
+                AssemblerError(&ASM, "Invalid register shift amount");
+                return;
+              }
+              break;
+            default:
+              AssemblerError(&ASM, "Invalid register shift amount");
+              return;
           }
-        } else if (offset.type == kIntImmediate){
-          // Immediate offset.
-          // TODO: check imm9 size.
-          int opc = is_signed << 1 | is_load;
-
-          if (size > 1) {
-            // LDR/STR 32 and 64 bit determined by rt.
-            size = rt.width == kW ? 2 : 3;
+          int opc = is_load;
+          if (rt.width == kX || rt.width == kW) {
+            size = rt.size;
           }
-          int imm9 = offset.i / size;
-          AssembleLoadStoreImmediate(assembler, &rt, &rn, size, opc, 0, pre_indexed, imm9);
-        } else {
-          AssemblerError(&ASM, "Invalid offset for LDR/STR");
-         return;
+          // TODO: extended register variant.
+          AssembleLoadStoreRegister(assembler, &rt, &rn, &offset.reg, size, opc, 0, option, s);
         }
+      } else if (offset.type == kIntImmediate){
+        // Immediate offset.
+        // TODO: check imm9 size.
+        int opc = is_signed << 1 | is_load;
+        if (rt.width == kX || rt.width == kW) {
+          size = rt.size;
+        }
+
+        int imm9 = offset.i / size;
+        AssembleLoadStoreImmediate(assembler, &rt, &rn, size, rt.fp_or_simd, opc, 0, pre_indexed, imm9);
+      } else {
+        AssemblerError(&ASM, "Invalid offset for LDR/STR");
+       return;
       }
-    } else {
-      // Floating point/SIMD.
-      // TODO: implement.
     }
-      
   } else {
     // Literal.
     if (!is_load) {

@@ -598,7 +598,7 @@ void LoaderDestruct(Loader* loader) {
   DynamicLibraryRegistryInit(&loader->loaded_libraries);
   
   VectorDestructWithContents(&loader->regions,
-                             (VectorElementDestructor)RegionDestruct);
+                             (VectorElementDestructor)RegionDestruct, /*free_element=*/true);
   VectorDestruct(&loader->static_symbol_table.symbols_by_addr);
   MapDestruct(&loader->static_symbol_table.symbols_by_name);
 }

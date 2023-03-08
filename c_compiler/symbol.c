@@ -55,7 +55,7 @@ Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
 void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->name);
   TypeRecordDelete(symbol->type);
-  VectorDestructWithContents(&symbol->attributes, (VectorElementDestructor)StringDestruct);
+  VectorDestructWithContents(&symbol->attributes, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
 }
 
 void SymbolDelete(Symbol* symbol) {

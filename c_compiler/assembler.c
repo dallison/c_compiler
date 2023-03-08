@@ -406,10 +406,10 @@ void AssemblerDestruct(Assembler* assembler) {
   PreprocessorDestruct(&assembler->preprocessor);
 
   VectorDestructWithContents(&assembler->sections,
-                             (VectorElementDestructor)AssemblerSectionDestruct);
+                             (VectorElementDestructor)AssemblerSectionDestruct, /*free_element=*/true);
   VectorDestructWithContents(
       &assembler->relocations,
-      (VectorElementDestructor)AssemblerRelocationDestruct);
+      (VectorElementDestructor)AssemblerRelocationDestruct, /*free_element=*/true);
 
   ClearAssemblerSymbolTable(&assembler->symbol_table);
   HashTableDestruct(&assembler->symbol_table);
@@ -1010,7 +1010,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
       }
     }
     VectorDestructWithContents(&relocations,
-                               (VectorElementDestructor)AssemblerRelocationDestruct);
+                               (VectorElementDestructor)AssemblerRelocationDestruct, /*free_element=*/true);
   } else {
     for (size_t i = 0; i < relocations.length; i++) {
       AssemblerAddRelocation(assembler, relocations.value.p[i]);

@@ -1,14 +1,14 @@
 CC = davecc
 AS = davecc
-ASFLAGS = -target 6502 -c
-CFLAGS = -target 6502 
-LDFLAGS = -Wl,-trom -target 6503 -static 
+ASFLAGS = -target 65c02 -c
+CFLAGS = -target 65c02 
+LDFLAGS = -Wl,-trom -target 65c02 -static 
 
 EXE = 6502rom.exe
 BIN = 6502rom.bin
 DIS = 6502rom.dis
 
-OBJS = bootrom/6502rom.o acia.o comms.o console.o device.o hexdump.o server.o utils.o
+OBJS = bootrom/6502rom.o acia.o comms.o console.o device.o hexdump.o server.o utils.o romsyscalls.o
 
 $(BIN): $(OBJS)
 	$(CC) $(LDFLAGS) $(OBJS) -o $(EXE)

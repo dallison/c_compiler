@@ -86,6 +86,10 @@ String* NewStringWithLength(const char* init, size_t length) {
   return s;
 }
 
+String* NewEmptyString(void) {
+  return NewString(NULL);
+}
+
 void StringDestruct(String* str) {
   if (str->capacity != STRING_IMMUTABLE &&
       str->value != str->buffer) {

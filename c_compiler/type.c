@@ -157,7 +157,7 @@ void TypeRecordDelete(TypeRecord* record) {
       }
     } else if (TypeIsFunction(record)) {
       VectorDestructWithContents(&record->info.function.prototype,
-                                (VectorElementDestructor)SymbolDestruct);
+                                (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
@@ -373,7 +373,7 @@ Struct* NewStruct(bool is_union) {
 
 void StructDelete(Struct* s) {
   VectorDestructWithContents(&s->members,
-                             (VectorElementDestructor)StructMemberDelete);
+                             (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
   MapDestruct(&s->symbol_table);
   free(s);
 }

@@ -22,6 +22,45 @@ struct Vector;
 // or changed.  The memory is either in a small array inside the
 // String struct or is allocated using malloc.  The memory
 // will expand as needed as the string changes.
+//
+// The value of the string may not contain a NUL byte.  This makes
+// it a direct mapping onto the C string functions.  If you need to put
+// a zero byte in an expandable buffer, use a Buffer instead.
+//
+// To access the string, the following fields are available:
+// length: the length of the string not including the zero byte
+// value: the address of the first character in the string.  All characters
+//        are contiguous.
+//
+// An empty string may be creaated by:
+// String s = {0};
+//
+// To create one with an initial value on the stack.
+// String s;
+// StringInit(&s, "hello");
+//
+// When the string needs to persist beyond the function, create it in
+// static memory or:
+// String* s = NewEmptyString();
+// or:
+// String* s = NewString("foobar");
+//
+// A string must be destroyed when you are done with it, otherwise you
+// get a memory leak.  To destroy a string on the stack or static memory:
+//
+// StringDestruct(&s);
+//
+// For one on the heap:
+// StringDelete(s);
+//
+// Strings are always mutable, meaning that you can modify them after
+// they are created.  You may also create an immutable string that can't
+// be modified.  NOTE: This does not copy the value so make sure it's lifetime
+// is longer than the string itself (a string literal, for example). This
+// exists to avoid a malloc and memcpy for strings that never change.
+//
+// String s;
+// StringInitImmutable("value");
 
 #define STRING_BUFFER_SIZE 16
 #define STRING_IMMUTABLE ((size_t)-1)
@@ -44,16 +83,19 @@ typedef struct {
 void StringInit(String* str, const char* init);
 // Allocates a new string from the heap using malloc and initializes it.
 String* NewString(const char* init);
+String* NewEmptyString(void);
 String* NewStringWithLength(const char* init, size_t length);
 
+// Initializes the string from a pointer to a character and the length.
 void StringInitFromSegment(String* str, const char* init, size_t length);
 
 // Initialize an immutable string from a character pointer.
 void StringInitImmutable(String* str, const char* init);
 
-// Destroys a string, freeing up the memory.
+// Destroys a string.
 void StringDestruct(String* str);
 
+// Deletes a string allocated using malloc.
 void StringDelete(String* str);
 
 // Get a character at the given index in the string.

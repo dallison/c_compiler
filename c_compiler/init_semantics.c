@@ -169,13 +169,13 @@ void LazyInitINode(INode* inode) {
 
 static void DeleteINodeChild(INode* child) {
   VectorDestructWithContents(&child->children,
-                            (VectorElementDestructor)DeleteINodeChild);
+                            (VectorElementDestructor)DeleteINodeChild, /*free_element=*/true);
 
 }
 
 static void DeleteINode(INode* inode) {
   VectorDestructWithContents(&inode->children,
-                           (VectorElementDestructor)DeleteINodeChild);
+                           (VectorElementDestructor)DeleteINodeChild, /*free_element=*/true);
   free(inode);
 }
 
