@@ -7,7 +7,7 @@ CFLAGS = -I../c_compiler \
 	-I../risc_v_interpreter \
 	-I../6502_interpreter \
 	-I../c_compiler/AR \
-	$(OPT_DEBUG)
+	$(OPT_DEBUG) $(ADD_FLAGS)
 
 LDFLAGS = -L../c_compiler/AR -lar \
 	-L../risc_v_interpreter -lrisc_v \
