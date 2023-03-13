@@ -364,14 +364,12 @@ irq_handler:
   BEQ not_acia2
   LDA ACIA2_DATA                      // Load data from serial port (4 cycles)
   LDX serial_write_index              // Get serial write index.
-  STA input_ring_buffer,X             // Store byte in input ring buffer.
-  LDA serial_write_index              // Move forward one byte.
-  INC A
-  AND #0x7f                           // Limit to buffer size.
-  STA serial_write_index
-  INC serial_num_bytes                // One more byte.
+  STA input_buffer,X                  // Store byte in input buffer.
+  INX
+  STX serial_write_index
+  INC serial_num_bytes
   
-not_acia2:
+chk_brk:
   // Check for BRK.
   TSX
   LDA 0x101,X
@@ -382,6 +380,9 @@ end_irq:
   LDA irq_accum
   LDX irq_x
   RTI
+
+not_acia2:
+  BRA chk_brk
   
 brk_handler:
   STY irq_y

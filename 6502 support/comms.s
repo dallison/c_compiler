@@ -12,7 +12,15 @@
 
 .text
 
-
+.global reset_receiver
+  reset_receiver:
+  //SEI
+  STZ serial_read_index
+  STZ serial_write_index
+  STZ serial_num_bytes
+  //CLI
+  RTS
+  
 // Calculate an XMODEM 16-bit CRC from data in memory. This code is as
 // tight and as fast as it can be, moving as much code out of inner
 // loops as possible.
@@ -158,7 +166,8 @@ send_packet:
   STA temp_addr     // Move output_buffer into temp_addr for device_write
   LDA #(output_buffer >> 8)
   STA temp_addr+1
-  
+
+#if 0
   // First send length byte.
   LDY #1                  // One byte.
   LDA #acia2_device_id
@@ -179,7 +188,9 @@ send_packet:
   INC temp_addr
   
   // Send rest of packet.
+#endif
   LDY output_buffer+packet_length
+  INY
   LDA #acia2_device_id
   JSR device_write
   SEC
@@ -192,7 +203,7 @@ bad_len_ack:
   RTS
   
 // Ackknowledge the receipt of an packet.  The input buffer
-// contains the packet.
+// contains the packet.  THIS RESETS THE RECEIVER.
 // Entry:
 // input_buffer: packet to ack.
 // A: command code
@@ -201,6 +212,7 @@ bad_len_ack:
 // output_buffer: datagram ready to send
 .global acknowledge
 acknowledge:
+  JSR reset_receiver
   // Datagram header
   STA output_buffer+datagram_data+message_command
   LDA input_buffer+datagram_seqnum
@@ -214,40 +226,24 @@ acknowledge:
   RTS
   
   
-// Serial input is added to the input ring buffer on an IRQ interrrupt
+// Serial input is added to the input buffer on an IRQ interrrupt
 // from the ACIA.  It uses:
-// serial_num_bytes: number of bytes in the ring buffer
 // serial_read_index: index of first unread byte
 // serial_write_index: index of next byte to write.
 
-// This subroutine waits for the ring buffer to contain the specified
+// This subroutine waits for the buffer to contain the specified
 // number of bytes.
 // Entry:
-// Y: number of bytes to wait for.
-// Saves X, corrupts A.
+// Y: number of bytes to wait for (absolute index into input buffer)
+// Saves X, Y, corrupts A.
 wait_for_input:
+  PHY
   PHX
   // Timeout in X,A
-  
-#if 0
-  TYA
-  JSR print_as_hex
-  LDA #':'
-  JSR console_write_char
-#endif
-
   LDA #255
   LDX #50
 wait_for_input_loop:
-#if 0
-  PHA
-  LDA serial_num_bytes
-  JSR print_as_hex
-  LDA #'/'
-  JSR console_write_char
-  PLA
-#endif
-  CPY serial_num_bytes
+  CPY serial_write_index
   BCC input_wait_done
   BEQ input_wait_done
   DEC A
@@ -258,10 +254,38 @@ wfi:
   BNE wait_for_input_loop
   CMP #0
   BNE wait_for_input_loop
+  
+  PHY
+  PHX
+  PHA
   JSR console_write_string
-  .asciz "Timeout waiting for serial data\r\n"
+  .asciz "Timeout waiting for serial data: "
+  
+  // Print A
+  PLA
+  JSR print_as_hex
+  LDA #'/'
+  JSR console_write_char
+  
+  // Print X
+  PLA
+  JSR print_as_hex
+  LDA #'/'
+  JSR console_write_char
+  
+  // Print Y
+  PLA
+  JSR print_as_hex
+  LDA #'/'
+  JSR console_write_char
+  
+  // Print serial_write_index
+  LDA serial_write_index
+  JSR print_as_hex
+  JSR console_crlf
 input_wait_done:
   PLX
+  PLY
   RTS
 
   
@@ -270,41 +294,12 @@ input_wait_done:
 next_input_byte:
   PHX
   LDX serial_read_index
-  TXA
-  INC A
-  AND #0X7F                 // Wrap to buffer size (0x80)
-  STA serial_read_index
-  LDA input_ring_buffer,X
-  DEC serial_num_bytes
+  LDA input_buffer,X
+  INX
+  STX serial_read_index
   PLX
   RTS
 
-
-// Read the specified number of bytes from the input ring buffer and
-// place them in the input buffer starting at index 1.
-// Y: num bytes to read
-read_ring_buffer:
-  STY byteA                     // Number of bytes to read.
-  PHX
-  PHY
-  LDX serial_read_index         // First unread index.
-  LDY #1                        // Start at index 1.
-read_ring_loop:
-  LDA input_ring_buffer,X       // Load next byte from ring buffer.
-  STA input_buffer,Y            // Store in input buffer.
-  // JSR print_as_hex
-  TXA
-  INC A
-  AND #0x7f
-  TAX
-  INY
-  DEC serial_num_bytes          // One byte less to read.
-  DEC byteA
-  BNE read_ring_loop
-  STX serial_read_index         // Update read index.
-  PLY
-  PLX
-  RTS
   
 // place packet in input_buffer.
 // Exit as in process_packet.
@@ -314,9 +309,9 @@ read_packet:
   LDY #1                  // 1 byte
   JSR wait_for_input
   JSR next_input_byte
-  STA input_buffer        // Store in first byte of input buffer.
   PHA
-  
+
+#if 0
   // Send ACK of len (inverted value).
   EOR #0xff
   STA output_buffer       // In first byte of output_buffer.
@@ -329,10 +324,12 @@ read_packet:
   LDY #1                  // One byte.
   LDA #acia2_device_id
   JSR device_write        // Write first byte in output_buffer.
-  
+
+#endif
+
   PLY                     // Number of bytes to read.
+  INY                     // Include byte already seen.
   JSR wait_for_input      // Wait for this number of bytes.
-  JSR read_ring_buffer    // Read ring buffer into input buffer
   JMP process_packet
   
   
@@ -467,7 +464,7 @@ lf_name_loop:
   JMP lf_name_loop
 lf_name_done:
   JSR console_crlf
-
+  
   // Acknowledge dir entry.
   LDA #dir_entry_code
   JSR acknowledge
@@ -479,7 +476,7 @@ lf_name_done:
   DEC ls_count+1
 lf1:
   DEC ls_count
-  
+    
   // Back for another file.
   LDA ls_count
   ORA ls_count+1

@@ -3130,8 +3130,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1012"
-            endingLineNumber = "1012"
+            startingLineNumber = "1016"
+            endingLineNumber = "1016"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
          </BreakpointContent>
@@ -3146,8 +3146,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1006"
-            endingLineNumber = "1006"
+            startingLineNumber = "1010"
+            endingLineNumber = "1010"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -3194,8 +3194,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "937"
-            endingLineNumber = "937"
+            startingLineNumber = "941"
+            endingLineNumber = "941"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -4711,8 +4711,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1041"
-            endingLineNumber = "1041"
+            startingLineNumber = "1045"
+            endingLineNumber = "1045"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -4967,8 +4967,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1103"
-            endingLineNumber = "1103"
+            startingLineNumber = "1107"
+            endingLineNumber = "1107"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -4983,8 +4983,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "968"
-            endingLineNumber = "968"
+            startingLineNumber = "972"
+            endingLineNumber = "972"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -5031,8 +5031,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1125"
-            endingLineNumber = "1125"
+            startingLineNumber = "1129"
+            endingLineNumber = "1129"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -5094,8 +5094,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "954"
-            endingLineNumber = "954"
+            startingLineNumber = "958"
+            endingLineNumber = "958"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
             <Locations>
@@ -5142,8 +5142,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "943"
-            endingLineNumber = "943"
+            startingLineNumber = "947"
+            endingLineNumber = "947"
             landmarkName = "AssignSegmentSectionAddresses(linker, segment, last_segment_end, file_offset)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5158,8 +5158,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1113"
-            endingLineNumber = "1113"
+            startingLineNumber = "1117"
+            endingLineNumber = "1117"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5174,8 +5174,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1112"
-            endingLineNumber = "1112"
+            startingLineNumber = "1116"
+            endingLineNumber = "1116"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -5622,8 +5622,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1142"
-            endingLineNumber = "1142"
+            startingLineNumber = "1146"
+            endingLineNumber = "1146"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -6102,8 +6102,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1148"
-            endingLineNumber = "1148"
+            startingLineNumber = "1152"
+            endingLineNumber = "1152"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -6134,8 +6134,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1146"
-            endingLineNumber = "1146"
+            startingLineNumber = "1150"
+            endingLineNumber = "1150"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
             <Locations>
@@ -6214,8 +6214,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "692"
-            endingLineNumber = "692"
+            startingLineNumber = "696"
+            endingLineNumber = "696"
             landmarkName = "LinkerReadObjectFileFromArchive(linker, archive, ar_file)"
             landmarkType = "9">
             <Locations>
@@ -6262,8 +6262,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "637"
-            endingLineNumber = "637"
+            startingLineNumber = "641"
+            endingLineNumber = "641"
             landmarkName = "ReadELFContents(linker, elf_file, file)"
             landmarkType = "9">
          </BreakpointContent>
@@ -6342,8 +6342,8 @@
             filePath = "Linker/linker.c"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "1172"
-            endingLineNumber = "1172"
+            startingLineNumber = "1176"
+            endingLineNumber = "1176"
             landmarkName = "LinkerLinkAllFiles(linker)"
             landmarkType = "9">
          </BreakpointContent>
@@ -10663,6 +10663,38 @@
             startingLineNumber = "47"
             endingLineNumber = "47"
             landmarkName = "CreateAssemblyFile(src_file, asm_file)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "0280BDC9-D8B2-4549-9D0A-120D02648469"
+            shouldBeEnabled = "Yes"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/compiler.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "719"
+            endingLineNumber = "719"
+            landmarkName = "CompileDeclaration(syntax)"
+            landmarkType = "9">
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "8C8C24D0-EBC8-4182-AB3A-19817732841F"
+            shouldBeEnabled = "Yes"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "c_compiler/common_emitter.c"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "70"
+            endingLineNumber = "70"
+            landmarkName = "VarName2(var, buf, len)"
             landmarkType = "9">
          </BreakpointContent>
       </BreakpointProxy>

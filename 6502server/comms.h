@@ -55,7 +55,7 @@ typedef struct {
 } PingPongCommand;
 
 typedef struct {
-  char filter[128];
+  char filter[64];
 } ListFilesCommand;
 
 typedef struct {
@@ -70,7 +70,7 @@ typedef enum {
 typedef struct {
   int16_t length;
   int8_t type;      // File or dir.
-  char name[128];
+  char name[64];
 } DirEntryResult;
 
 typedef enum {
@@ -80,13 +80,13 @@ typedef enum {
 
 typedef struct {
   int8_t mode;
-  char name[128];
+  char name[64];
 } LoadFileCommand;
 
 typedef struct {
   int16_t length;   // -1 = error.
   int16_t entry_addr;
-  char error[128];
+  char error[64];
 } LoadFileResult;
 
 // Max block size is 256 minus the message header (command and size)

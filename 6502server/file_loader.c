@@ -244,7 +244,7 @@ void AdvanceLoader(LoaderStateMachine* fsm, Connection* conn, bool ack, Message*
     }
   } else {
     if (fsm->state != kLoaderIdle) {
-      printf("Unexpected message, aborting\n");
+      printf("Unexpected loader message, aborting\n");
       Reset(fsm);
     } else {
       Reset(fsm);

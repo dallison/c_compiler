@@ -218,6 +218,8 @@ typedef struct Linker {
   
   ConfigParser config_parser;
   LinkerConfig config;
+  
+  int num_errors;
 } Linker;
 
 void LinkerInit(Linker* linker);

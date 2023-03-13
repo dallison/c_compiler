@@ -22,12 +22,11 @@
 
 // Console buffer.
 .set console_input_buffer_addr 0x300
-
-// Each of these is 128 bytes long.
 .set temp_buffer 0x380
-.set input_ring_buffer 0x400
-.set input_buffer 0x480
-.set output_buffer 0x500 // ... 0x57f
+
+// Serial input output buffers, 256 bytes long.
+.set input_buffer 0x400
+.set output_buffer 0x500
 
 // Zero page.  We use some zero page locations for ths ROM.  They
 // start above the C ABI's reserved space, at 0xbb.
@@ -62,26 +61,26 @@
 // Serial input buffer indexes and count.
 .set serial_read_index zp_start + 0x25         // First unread byte.
 .set serial_write_index zp_start + 0x26        // Next byte to write.
-.set serial_num_bytes zp_start + 0x27          // Num bytes available.
 
-.set brk_addr zp_start + 0x28 // and 0x29
+.set serial_num_bytes zp_start + 0x27
+// 0x28 free
 
-.set decimal_out zp_start + 0x2a // and 0x2b and 0x2c
-.set decimal_in zp_start + 0x2d // and 0x2e
+.set decimal_out zp_start + 0x29 // and 0x2a and 0x2b
+.set decimal_in zp_start + 0x2c // and 0x2d
 
-.set file_length zp_start + 0x2f // and 0x30
+.set file_length zp_start + 0x2e // and 0x2f
 
 // Function to call for incoming file block.
-.set block_handler zp_start + 0x31 // and 0x32
-.set load_addr zp_start + 0x33 // and 0x34
+.set block_handler zp_start + 0x30 // and 0x31
+.set load_addr zp_start + 0x32 // and 0x33
 
 // Start address of loaded file.
-.set exe_addr zp_start + 0x35 // and 0x36
+.set exe_addr zp_start + 0x34 // and 0x35
 
 // System call scratch space.
-.set syscall_vector zp_start + 0x37 // and 0x38
-.set syscall_code zp_start + 0x39 // and 0x3a
-// End is at 0xf5
+.set syscall_vector zp_start + 0x36 // and 0x37
+.set syscall_code zp_start + 0x38 // and 0x39
+// End is at 0xf4
 
 // IRQ scratch space
 .set irq_accum 0xfd

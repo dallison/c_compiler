@@ -16,6 +16,8 @@
 
 .global ping
 ping:
+  JSR reset_receiver
+
   JSR console_write_string
   .asciz "building ping\r\n"
   JSR build_ping
@@ -43,6 +45,8 @@ bad_ping:
   
 .global ls
 ls:
+  JSR reset_receiver
+
   JSR build_list_files
   JSR send_packet
   JSR read_packet
@@ -68,6 +72,8 @@ ls_failed:
 // temp_buffer: filename to cat
 .global cat
 cat:
+  JSR reset_receiver
+
   LDA #load_raw
   JSR build_load_file
   JSR send_packet
@@ -93,6 +99,7 @@ cat_failed:
 
 .global load
 load:
+  JSR reset_receiver
   LDA #load_binary
   JSR build_load_file
   JSR send_packet
@@ -118,6 +125,9 @@ load_failed:
 
 .global boot
 boot:
+  // Reset comms counters.
+  JSR reset_receiver
+
   LDY #0
   // Copy name to temp_buffer.
 boot_loop:

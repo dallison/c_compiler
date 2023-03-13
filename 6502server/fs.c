@@ -153,7 +153,7 @@ void AdvanceFileSystem(FileSystemStateMachine* fsm, Connection* conn, bool ack, 
     }
   } else {
     if (fsm->state != kFsIdle) {
-      printf("Unexpected message, aborting\n");
+      printf("Unexpected fs message, aborting\n");
       Reset(fsm);
     } else {
       // Send number of files:

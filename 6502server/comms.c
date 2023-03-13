@@ -92,7 +92,7 @@ bool ConnectionSend(Connection* conn, bool ack, int acknum, const void* data, in
   int nbytes = packet->length+1;
   printf("sending %d bytes\n", nbytes);
   Hexdump(conn->packet, nbytes);
-  
+#if 0
   // Send length byte.
   uint8_t lenbuf[1];
   lenbuf[0] = packet->length;
@@ -109,11 +109,12 @@ bool ConnectionSend(Connection* conn, bool ack, int acknum, const void* data, in
     printf("Invalid len ack value %x/%x\n", lenbuf[0], (uint8_t)packet->length);
     return false;
   }
+#endif
   
   // Now send the rest of the packet.
-  n = conn->write_func(conn->fd, conn->packet+1, packet->length);
-  if (n != packet->length) {
-    printf("Failed to send %d bytes\n", packet->length);
+  size_t n = conn->write_func(conn->fd, conn->packet, nbytes);
+  if (n != nbytes) {
+    printf("Failed to send %d bytes\n", nbytes);
     return false;
   }
   conn->next_seqnum += n;
@@ -132,6 +133,7 @@ int ConnectionReceive(Connection* conn, void* buffer, int buflen) {
   }
   uint8_t datalen = *(uint8_t*)(conn->packet);
   printf("got length %d\n", datalen);
+#if 0
   // Ack length by writing inverted value.
   // If we don't ack here we might miss the first byte of the next read
   // because they are done using separate read calls.  There's no hardware
@@ -140,6 +142,7 @@ int ConnectionReceive(Connection* conn, void* buffer, int buflen) {
   ack[0] = ~datalen;
   printf("sending ACK %x\n", ack[0]);
   n = conn->write_func(conn->fd, ack, 1);
+#endif
   
   // Now we can read the rest of the packet.
   n = conn->read_func(conn->fd, conn->packet+1, datalen);    // Read data.

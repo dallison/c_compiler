@@ -43,6 +43,9 @@ void VLinkerError(ObjectFile* file, const char* error, va_list ap) {
   vsnprintf(buf, sizeof(buf), error, ap);
   fprintf(stderr, "%s%slinker error: %s\n", filename, file == NULL ? "" : ": ",
           buf);
+  if (file != NULL && file->linker != NULL) {
+    file->linker->num_errors++;
+  }
 }
 
 void LinkerWarning(ObjectFile* file, const char* warn, const char* error, ...) {
@@ -140,7 +143,8 @@ void LinkerInit(Linker* linker) {
   linker->so_name = -1;
   linker->fully_static = false;
   linker->origin = 0;
-  
+  linker->num_errors = 0;
+
   linker->print_relocations = false;
   linker->print_symbol_tables = false;
   linker->print_sections = false;

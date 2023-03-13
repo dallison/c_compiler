@@ -403,7 +403,6 @@ String* Link(int argc, char** argv) {
   VectorDestruct(&dynamic_library_names);
   VectorDestruct(&library_search_dirs);
   VectorDestruct(&library_searches);
-
   if (num_errors != 0) {
     if (delete_config) {
       remove(config_file);
@@ -418,6 +417,13 @@ String* Link(int argc, char** argv) {
   // Link all the files together.
   LinkerLinkAllFiles(&linker);
   
+  if (linker.num_errors != 0) {
+    LinkerDestruct(&linker);
+    if (delete_config) {
+       remove(config_file);
+    }
+    return NULL;
+  }
   // Open the output file and write the ELF file.
   String* output = NewString(linker.output_filename.value);
   FILE* fp = fopen(linker.output_filename.value, "w");

@@ -43,9 +43,7 @@ acia2_reset_loop:
   // Read interrupt enabled.
   LDA # (1 | (4 << 2) | (0 << 5) | (1 << 7))
   STA device_base_addr+ACIA2_BASE
-  STZ serial_read_index
-  STZ serial_write_index
-  STZ serial_num_bytes
+  JSR reset_receiver
   RTS
 
 acia2_write_char:
