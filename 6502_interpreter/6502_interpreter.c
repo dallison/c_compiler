@@ -978,7 +978,7 @@ static inline uint64_t TimeNow() {
 #endif
 }
 
-  
+
 static void StepOneInstruction(W65C02Interpreter* interpreter, bool cycle_accurate) {
   if (interpreter->trace) {
     W65C02DisassemblePc(interpreter);
