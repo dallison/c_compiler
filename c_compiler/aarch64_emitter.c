@@ -599,7 +599,7 @@ static void PrintRmov(AARCH64Emitter* emitter, TargetInstruction* inst, FILE* fp
   }
 
   const char* mnemonic = "";
-  switch (inst->opcode) {
+  switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(mov):
       mnemonic = "mov";
       break;

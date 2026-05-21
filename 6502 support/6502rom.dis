@@ -384,445 +384,444 @@ acia2_device        +0x000e: c2d5  00         BRK
 acia2_device        +0x000f: c2d6  00         BRK
 acia2_device        +0x0010: c2d7  00         BRK
 reset_receiver      +0x0000: c2d8  64 e0      STZ 0xe0
-reset_receiver      +0x0002: c2da  64 e2      STZ 0xe2
-reset_receiver      +0x0004: c2dc  60         RTS
-crc16               +0x0000: c2dd  a2 08      LDX #0x8
-crc16               +0x0002: c2df  a1 c5      LDA (0xc5,X)
-crc16               +0x0004: c2e1  45 cc      EOR 0xcc
-crc16               +0x0006: c2e3  06 cb      ASL 0xcb
-crc16               +0x0008: c2e5  2a         ROL A
-crc16               +0x0009: c2e6  90 0a      BCC 0xc2f2
-crc16               +0x000b: c2e8  a8         TAY
-crc16               +0x000c: c2e9  a5 cb      LDA 0xcb
-crc16               +0x000e: c2eb  49 21      EOR #0x21
-crc16               +0x0010: c2ed  85 cb      STA 0xcb
-crc16               +0x0012: c2ef  98         TYA
-crc16               +0x0013: c2f0  49 10      EOR #0x10
-crc16               +0x0015: c2f2  ca         DEX
-crc16               +0x0016: c2f3  d0 ee      BNE 0xc2e3
-crc16               +0x0018: c2f5  85 cc      STA 0xcc
-crc16               +0x001a: c2f7  e6 cd      INC 0xcd
-crc16               +0x001c: c2f9  a5 cf      LDA 0xcf
-crc16               +0x001e: c2fb  d0 02      BNE 0xc2ff
-crc16               +0x0020: c2fd  c6 d0      DEC 0xd0
-crc16               +0x0022: c2ff  c6 cf      DEC 0xcf
-crc16               +0x0024: c301  d0 da      BNE 0xc2dd
-crc16               +0x0026: c303  a5 d0      LDA 0xd0
-crc16               +0x0028: c305  d0 d6      BNE 0xc2dd
-crc16               +0x002a: c307  60         RTS
-crc16               +0x002b: c308  84 cf      STY 0xcf
-crc16               +0x002d: c30a  64 d0      STZ 0xd0
-crc16               +0x002f: c30c  64 cb      STZ 0xcb
-crc16               +0x0031: c30e  64 cc      STZ 0xcc
-crc16               +0x0033: c310  c8         INY
-crc16               +0x0034: c311  c8         INY
-crc16               +0x0035: c312  8c 00 05   STY 
-crc16               +0x0038: c315  a9 03      LDA #0x3
-crc16               +0x003a: c317  85 cd      STA 0xcd
-crc16               +0x003c: c319  a9 05      LDA #0x5
-crc16               +0x003e: c31b  85 ce      STA 0xce
-crc16               +0x0040: c31d  20 dd c2   JSR crc16
-crc16               +0x0043: c320  a5 cb      LDA 0xcb
-crc16               +0x0045: c322  8d 01 05   STA 
-crc16               +0x0048: c325  a5 cc      LDA 0xcc
-crc16               +0x004a: c327  8d 02 05   STA 
-crc16               +0x004d: c32a  60         RTS
-crc16               +0x004e: c32b  ac 00 04   LDY 
-crc16               +0x0051: c32e  88         DEY
-crc16               +0x0052: c32f  88         DEY
-crc16               +0x0053: c330  5a         PHY
-crc16               +0x0054: c331  84 cf      STY 0xcf
-crc16               +0x0056: c333  64 d0      STZ 0xd0
-crc16               +0x0058: c335  64 cb      STZ 0xcb
-crc16               +0x005a: c337  64 cc      STZ 0xcc
-crc16               +0x005c: c339  a9 03      LDA #0x3
-crc16               +0x005e: c33b  85 cd      STA 0xcd
-crc16               +0x0060: c33d  a9 04      LDA #0x4
-crc16               +0x0062: c33f  85 ce      STA 0xce
-crc16               +0x0064: c341  20 dd c2   JSR crc16
-crc16               +0x0067: c344  ad 01 04   LDA 
-crc16               +0x006a: c347  c5 cb      CMP 0xcb
-crc16               +0x006c: c349  d0 09      BNE 0xc354
-crc16               +0x006e: c34b  ad 02 04   LDA 
-crc16               +0x0071: c34e  c5 cc      CMP 0xcc
-crc16               +0x0073: c350  d0 02      BNE 0xc354
-crc16               +0x0075: c352  7a         PLY
-crc16               +0x0076: c353  60         RTS
-crc16               +0x0077: c354  7a         PLY
-crc16               +0x0078: c355  20 7a c6   JSR console_write_string
-crc16               +0x007b: c358  42 61      WDM 
-crc16               +0x007d: c35a  64 20      STZ i12
-crc16               +0x007f: c35c  43         ???
-crc16               +0x0080: c35d  52 43      EOR (l6+3)
-crc16               +0x0082: c35f  0d 0a 00   ORA 
-crc16               +0x0085: c362  ad 02 04   LDA 
-crc16               +0x0088: c365  20 7e c7   JSR print_as_hex
-crc16               +0x008b: c368  ad 01 04   LDA 
-crc16               +0x008e: c36b  20 7e c7   JSR print_as_hex
-crc16               +0x0091: c36e  a9 2f      LDA #0x2f
-crc16               +0x0093: c370  20 ad c6   JSR console_write_char
-crc16               +0x0096: c373  a5 cc      LDA 0xcc
-crc16               +0x0098: c375  20 7e c7   JSR print_as_hex
-crc16               +0x009b: c378  a5 cb      LDA 0xcb
-crc16               +0x009d: c37a  20 7e c7   JSR print_as_hex
-crc16               +0x00a0: c37d  20 73 c6   JSR console_crlf
-crc16               +0x00a3: c380  18         CLC
-crc16               +0x00a4: c381  60         RTS
-send_packet         +0x0000: c382  20 08 c3   JSR crc16
-send_packet         +0x0003: c385  a9 00      LDA #0x0
-send_packet         +0x0005: c387  85 bb      STA 0xbb
-send_packet         +0x0007: c389  a9 05      LDA #0x5
-send_packet         +0x0009: c38b  85 bc      STA 0xbc
-send_packet         +0x000b: c38d  ac 00 05   LDY 
-send_packet         +0x000e: c390  c8         INY
-send_packet         +0x000f: c391  a9 01      LDA #0x1
-send_packet         +0x0011: c393  20 28 c7   JSR device_write
-send_packet         +0x0014: c396  38         SEC
-send_packet         +0x0015: c397  60         RTS
-send_packet         +0x0016: c398  20 7a c6   JSR console_write_string
-send_packet         +0x0019: c39b  50 72      BVC 0xc40f
-send_packet         +0x001b: c39d  6f         ???
-send_packet         +0x001c: c39e  74 6f      STZ 0x6f,X
-send_packet         +0x001e: c3a0  63         ???
-send_packet         +0x001f: c3a1  6f         ???
-send_packet         +0x0020: c3a2  6c 20 65   JMP (0x6520)
-send_packet         +0x0023: c3a5  72 72      ADC (f2+2)
-send_packet         +0x0025: c3a7  6f         ???
-send_packet         +0x0026: c3a8  72 3a      ADC (l4+2)
-send_packet         +0x0028: c3aa  20 69 6e   JSR 
-send_packet         +0x002b: c3ad  76 61      ROR 0x61,X
-send_packet         +0x002d: c3af  6c 69 64   JMP (0x6469)
-send_packet         +0x0030: c3b2  20 6c 65   JSR 
-send_packet         +0x0033: c3b5  6e 20 41   ROR 0x4120
-send_packet         +0x0036: c3b8  43         ???
-send_packet         +0x0037: c3b9  4b         ???
-send_packet         +0x0038: c3ba  0d 0a 00   ORA 
-send_packet         +0x003b: c3bd  18         CLC
-send_packet         +0x003c: c3be  60         RTS
-acknowledge         +0x0000: c3bf  20 d8 c2   JSR reset_receiver
-acknowledge         +0x0003: c3c2  8d 06 05   STA 
-acknowledge         +0x0006: c3c5  ad 03 04   LDA 
-acknowledge         +0x0009: c3c8  8d 04 05   STA 
-acknowledge         +0x000c: c3cb  a9 00      LDA #0x0
-acknowledge         +0x000e: c3cd  8d 03 05   STA 
-acknowledge         +0x0011: c3d0  a9 01      LDA #0x1
-acknowledge         +0x0013: c3d2  8d 05 05   STA 
-acknowledge         +0x0016: c3d5  9c 07 05   STZ 
-acknowledge         +0x0019: c3d8  a0 05      LDY #0x5
-acknowledge         +0x001b: c3da  60         RTS
-acknowledge         +0x001c: c3db  5a         PHY
-acknowledge         +0x001d: c3dc  da         PHX
-acknowledge         +0x001e: c3dd  a9 ff      LDA #0xff
-acknowledge         +0x0020: c3df  a2 32      LDX #0x32
-acknowledge         +0x0022: c3e1  c4 e2      CPY 0xe2
-acknowledge         +0x0024: c3e3  90 59      BCC 0xc43e
-acknowledge         +0x0026: c3e5  f0 57      BEQ 0xc43e
-acknowledge         +0x0028: c3e7  3a         DEC A
-acknowledge         +0x0029: c3e8  d0 01      BNE 0xc3eb
-acknowledge         +0x002b: c3ea  ca         DEX
-acknowledge         +0x002c: c3eb  e0 00      CPX #0x0
-acknowledge         +0x002e: c3ed  d0 f2      BNE 0xc3e1
-acknowledge         +0x0030: c3ef  c9 00      CMP #0x0
-acknowledge         +0x0032: c3f1  d0 ee      BNE 0xc3e1
-acknowledge         +0x0034: c3f3  5a         PHY
-acknowledge         +0x0035: c3f4  da         PHX
-acknowledge         +0x0036: c3f5  48         PHA
-acknowledge         +0x0037: c3f6  20 7a c6   JSR console_write_string
-acknowledge         +0x003a: c3f9  54 69      MVN f0+1
-acknowledge         +0x003c: c3fb  6d 65 6f   ADC 
-acknowledge         +0x003f: c3fe  75 74      ADC 0x74,X
-acknowledge         +0x0041: c400  20 77 61   JSR 
-acknowledge         +0x0044: c403  69 74      ADC #0x74
-acknowledge         +0x0046: c405  69 6e      ADC #0x6e
-acknowledge         +0x0048: c407  67         ???
-acknowledge         +0x0049: c408  20 66 6f   JSR 
-acknowledge         +0x004c: c40b  72 20      ADC (i12)
-acknowledge         +0x004e: c40d  73         ???
-acknowledge         +0x004f: c40e  65 72      ADC f2+2
-acknowledge         +0x0051: c410  69 61      ADC #0x61
-acknowledge         +0x0053: c412  6c 20 64   JMP (0x6420)
-acknowledge         +0x0056: c415  61 74      ADC (f3,X)
-acknowledge         +0x0058: c417  61 3a      ADC (l4+2,X)
-acknowledge         +0x005a: c419  20 00 68   JSR 
-acknowledge         +0x005d: c41c  20 7e c7   JSR print_as_hex
-acknowledge         +0x0060: c41f  a9 2f      LDA #0x2f
-acknowledge         +0x0062: c421  20 ad c6   JSR console_write_char
-acknowledge         +0x0065: c424  68         PLA
-acknowledge         +0x0066: c425  20 7e c7   JSR print_as_hex
-acknowledge         +0x0069: c428  a9 2f      LDA #0x2f
-acknowledge         +0x006b: c42a  20 ad c6   JSR console_write_char
-acknowledge         +0x006e: c42d  68         PLA
-acknowledge         +0x006f: c42e  20 7e c7   JSR print_as_hex
-acknowledge         +0x0072: c431  a9 2f      LDA #0x2f
-acknowledge         +0x0074: c433  20 ad c6   JSR console_write_char
-acknowledge         +0x0077: c436  a5 e2      LDA 0xe2
-acknowledge         +0x0079: c438  20 7e c7   JSR print_as_hex
-acknowledge         +0x007c: c43b  20 73 c6   JSR console_crlf
-acknowledge         +0x007f: c43e  fa         PLX
-acknowledge         +0x0080: c43f  7a         PLY
-acknowledge         +0x0081: c440  60         RTS
-next_input_byte     +0x0000: c441  da         PHX
-next_input_byte     +0x0001: c442  a6 e0      LDX 0xe0
-next_input_byte     +0x0003: c444  bd 00 04   LDA 0x400,X
-next_input_byte     +0x0006: c447  e8         INX
-next_input_byte     +0x0007: c448  86 e0      STX 0xe0
-next_input_byte     +0x0009: c44a  fa         PLX
-next_input_byte     +0x000a: c44b  60         RTS
-read_packet         +0x0000: c44c  a0 01      LDY #0x1
-read_packet         +0x0002: c44e  20 db c3   JSR acknowledge
-read_packet         +0x0005: c451  20 41 c4   JSR next_input_byte
-read_packet         +0x0008: c454  48         PHA
-read_packet         +0x0009: c455  7a         PLY
-read_packet         +0x000a: c456  c8         INY
-read_packet         +0x000b: c457  20 db c3   JSR acknowledge
-read_packet         +0x000e: c45a  4c 2b c3   JMP crc16
-build_ping          +0x0000: c45d  a9 01      LDA #0x1
-build_ping          +0x0002: c45f  8d 03 05   STA 
-build_ping          +0x0005: c462  a9 00      LDA #0x0
-build_ping          +0x0007: c464  8d 04 05   STA 
-build_ping          +0x000a: c467  8d 05 05   STA 
-build_ping          +0x000d: c46a  a0 06      LDY #0x6
-build_ping          +0x000f: c46c  a9 01      LDA #0x1
-build_ping          +0x0011: c46e  99 00 05   STA 0x500,Y
-build_ping          +0x0014: c471  c8         INY
-build_ping          +0x0015: c472  a9 05      LDA #0x5
-build_ping          +0x0017: c474  99 00 05   STA 0x500,Y
-build_ping          +0x001a: c477  c8         INY
-build_ping          +0x001b: c478  a9 70      LDA #0x70
-build_ping          +0x001d: c47a  99 00 05   STA 0x500,Y
-build_ping          +0x0020: c47d  c8         INY
-build_ping          +0x0021: c47e  a9 69      LDA #0x69
-build_ping          +0x0023: c480  99 00 05   STA 0x500,Y
-build_ping          +0x0026: c483  c8         INY
-build_ping          +0x0027: c484  a9 6e      LDA #0x6e
-build_ping          +0x0029: c486  99 00 05   STA 0x500,Y
-build_ping          +0x002c: c489  c8         INY
-build_ping          +0x002d: c48a  a9 67      LDA #0x67
-build_ping          +0x002f: c48c  99 00 05   STA 0x500,Y
-build_ping          +0x0032: c48f  c8         INY
-build_ping          +0x0033: c490  a9 00      LDA #0x0
-build_ping          +0x0035: c492  99 00 05   STA 0x500,Y
-build_ping          +0x0038: c495  a0 0a      LDY #0xa
-build_ping          +0x003a: c497  60         RTS
-build_list_files    +0x0000: c498  a9 01      LDA #0x1
-build_list_files    +0x0002: c49a  8d 03 05   STA 
-build_list_files    +0x0005: c49d  a9 00      LDA #0x0
-build_list_files    +0x0007: c49f  8d 04 05   STA 
-build_list_files    +0x000a: c4a2  8d 05 05   STA 
-build_list_files    +0x000d: c4a5  a0 06      LDY #0x6
-build_list_files    +0x000f: c4a7  a9 02      LDA #0x2
-build_list_files    +0x0011: c4a9  99 00 05   STA 0x500,Y
-build_list_files    +0x0014: c4ac  c8         INY
-build_list_files    +0x0015: c4ad  a9 02      LDA #0x2
-build_list_files    +0x0017: c4af  99 00 05   STA 0x500,Y
-build_list_files    +0x001a: c4b2  c8         INY
-build_list_files    +0x001b: c4b3  a9 2e      LDA #0x2e
-build_list_files    +0x001d: c4b5  99 00 05   STA 0x500,Y
-build_list_files    +0x0020: c4b8  c8         INY
-build_list_files    +0x0021: c4b9  a9 00      LDA #0x0
-build_list_files    +0x0023: c4bb  99 00 05   STA 0x500,Y
-build_list_files    +0x0026: c4be  a0 07      LDY #0x7
-build_list_files    +0x0028: c4c0  60         RTS
-parse_list_files_result+0x0000: c4c1  ad 06 04   LDA 
-parse_list_files_result+0x0003: c4c4  c9 03      CMP #0x3
-parse_list_files_result+0x0005: c4c6  d0 07      BNE 0xc4cf
-parse_list_files_result+0x0007: c4c8  ae 08 04   LDX 0x408
-parse_list_files_result+0x000a: c4cb  ac 09 04   LDY 
-parse_list_files_result+0x000d: c4ce  60         RTS
-parse_list_files_result+0x000e: c4cf  a2 00      LDX #0x0
-parse_list_files_result+0x0010: c4d1  a0 00      LDY #0x0
-parse_list_files_result+0x0012: c4d3  60         RTS
-list_files          +0x0000: c4d4  86 d2      STX 0xd2
-list_files          +0x0002: c4d6  84 d3      STY 0xd3
-list_files          +0x0004: c4d8  8a         TXA
-list_files          +0x0005: c4d9  05 d3      ORA 0xd3
-list_files          +0x0007: c4db  f0 72      BEQ 0xc54f
-list_files          +0x0009: c4dd  20 4c c4   JSR read_packet
-list_files          +0x000c: c4e0  90 52      BCC 0xc534
-list_files          +0x000e: c4e2  ad 06 04   LDA 
-list_files          +0x0011: c4e5  c9 04      CMP #0x4
-list_files          +0x0013: c4e7  d0 4b      BNE 0xc534
-list_files          +0x0015: c4e9  ad 0a 04   LDA 
-list_files          +0x0018: c4ec  c9 00      CMP #0x0
-list_files          +0x001a: c4ee  f0 04      BEQ 0xc4f4
-list_files          +0x001c: c4f0  a9 46      LDA #0x46
-list_files          +0x001e: c4f2  d0 02      BNE 0xc4f6
-list_files          +0x0020: c4f4  a9 44      LDA #0x44
-list_files          +0x0022: c4f6  20 ad c6   JSR console_write_char
-list_files          +0x0025: c4f9  a9 20      LDA #0x20
-list_files          +0x0027: c4fb  20 ad c6   JSR console_write_char
-list_files          +0x002a: c4fe  ae 08 04   LDX 0x408
-list_files          +0x002d: c501  ac 09 04   LDY 
-list_files          +0x0030: c504  20 70 c7   JSR print_as_hex2
-list_files          +0x0033: c507  a9 20      LDA #0x20
-list_files          +0x0035: c509  20 ad c6   JSR console_write_char
-list_files          +0x0038: c50c  a0 0b      LDY #0xb
-list_files          +0x003a: c50e  b9 00 04   LDA 0x400,Y
-list_files          +0x003d: c511  f0 07      BEQ 0xc51a
-list_files          +0x003f: c513  20 ad c6   JSR console_write_char
-list_files          +0x0042: c516  c8         INY
-list_files          +0x0043: c517  4c 0e c5   JMP list_files
-list_files          +0x0046: c51a  20 73 c6   JSR console_crlf
-list_files          +0x0049: c51d  a9 04      LDA #0x4
-list_files          +0x004b: c51f  20 bf c3   JSR acknowledge
-list_files          +0x004e: c522  20 82 c3   JSR send_packet
-list_files          +0x0051: c525  a5 d2      LDA 0xd2
-list_files          +0x0053: c527  d0 02      BNE 0xc52b
-list_files          +0x0055: c529  c6 d3      DEC 0xd3
-list_files          +0x0057: c52b  c6 d2      DEC 0xd2
-list_files          +0x0059: c52d  a5 d2      LDA 0xd2
-list_files          +0x005b: c52f  05 d3      ORA 0xd3
-list_files          +0x005d: c531  d0 aa      BNE 0xc4dd
-list_files          +0x005f: c533  60         RTS
-list_files          +0x0060: c534  20 7a c6   JSR console_write_string
-list_files          +0x0063: c537  42 61      WDM 
-list_files          +0x0065: c539  64 20      STZ i12
-list_files          +0x0067: c53b  64 69      STZ f0+1
-list_files          +0x0069: c53d  72 20      ADC (i12)
-list_files          +0x006b: c53f  65 6e      ADC f1+2
-list_files          +0x006d: c541  74 72      STZ 0x72,X
-list_files          +0x006f: c543  79 20 72   ADC 0x7220,Y
-list_files          +0x0072: c546  65 73      ADC f2+3
-list_files          +0x0074: c548  75 6c      ADC 0x6c,X
-list_files          +0x0076: c54a  74 0d      STZ 0xd,X
-list_files          +0x0078: c54c  0a         ASL A
-list_files          +0x0079: c54d  00         BRK
-list_files          +0x007a: c54e  60         RTS
-list_files          +0x007b: c54f  20 7a c6   JSR console_write_string
-list_files          +0x007e: c552  4e 6f 20   LSR 0x206f
-list_files          +0x0081: c555  66 69      ROR f0+1
-list_files          +0x0083: c557  6c 65 73   JMP (0x7365)
-list_files          +0x0086: c55a  0d 0a 00   ORA 
-list_files          +0x0089: c55d  60         RTS
-build_load_file     +0x0000: c55e  48         PHA
-build_load_file     +0x0001: c55f  a9 01      LDA #0x1
-build_load_file     +0x0003: c561  8d 03 05   STA 
-build_load_file     +0x0006: c564  a9 00      LDA #0x0
-build_load_file     +0x0008: c566  8d 04 05   STA 
-build_load_file     +0x000b: c569  8d 05 05   STA 
-build_load_file     +0x000e: c56c  a2 06      LDX #0x6
-build_load_file     +0x0010: c56e  a9 05      LDA #0x5
-build_load_file     +0x0012: c570  9d 00 05   STA 0x500,X
-build_load_file     +0x0015: c573  e8         INX
-build_load_file     +0x0016: c574  68         PLA
-build_load_file     +0x0017: c575  e8         INX
-build_load_file     +0x0018: c576  9d 00 05   STA 0x500,X
-build_load_file     +0x001b: c579  e8         INX
-build_load_file     +0x001c: c57a  a0 00      LDY #0x0
-build_load_file     +0x001e: c57c  b9 80 03   LDA 0x380,Y
-build_load_file     +0x0021: c57f  9d 00 05   STA 0x500,X
-build_load_file     +0x0024: c582  f0 04      BEQ 0xc588
-build_load_file     +0x0026: c584  c8         INY
-build_load_file     +0x0027: c585  e8         INX
-build_load_file     +0x0028: c586  d0 f4      BNE 0xc57c
-build_load_file     +0x002a: c588  c8         INY
-build_load_file     +0x002b: c589  8c 07 05   STY 
-build_load_file     +0x002e: c58c  98         TYA
-build_load_file     +0x002f: c58d  18         CLC
-build_load_file     +0x0030: c58e  69 06      ADC #0x6
-build_load_file     +0x0032: c590  a8         TAY
-build_load_file     +0x0033: c591  60         RTS
-parse_load_file_result+0x0000: c592  ad 06 04   LDA 
-parse_load_file_result+0x0003: c595  c9 06      CMP #0x6
-parse_load_file_result+0x0005: c597  d0 11      BNE 0xc5aa
-parse_load_file_result+0x0007: c599  ae 08 04   LDX 0x408
-parse_load_file_result+0x000a: c59c  ac 09 04   LDY 
-parse_load_file_result+0x000d: c59f  ad 0a 04   LDA 
-parse_load_file_result+0x0010: c5a2  85 ef      STA 0xef
-parse_load_file_result+0x0012: c5a4  ad 0b 04   LDA 
-parse_load_file_result+0x0015: c5a7  85 f0      STA 0xf0
-parse_load_file_result+0x0017: c5a9  60         RTS
-parse_load_file_result+0x0018: c5aa  20 7a c6   JSR console_write_string
-parse_load_file_result+0x001b: c5ad  42 61      WDM 
-parse_load_file_result+0x001d: c5af  64 20      STZ i12
-parse_load_file_result+0x001f: c5b1  6c 6f 61   JMP (0x616f)
-parse_load_file_result+0x0022: c5b4  64 20      STZ i12
-parse_load_file_result+0x0024: c5b6  72 65      ADC (x3+5)
-parse_load_file_result+0x0026: c5b8  73         ???
-parse_load_file_result+0x0027: c5b9  75 6c      ADC 0x6c,X
-parse_load_file_result+0x0029: c5bb  74 0d      STZ 0xd,X
-parse_load_file_result+0x002b: c5bd  0a         ASL A
-parse_load_file_result+0x002c: c5be  00         BRK
-parse_load_file_result+0x002d: c5bf  a2 00      LDX #0x0
-parse_load_file_result+0x002f: c5c1  a0 00      LDY #0x0
-parse_load_file_result+0x0031: c5c3  60         RTS
-load_blocks         +0x0000: c5c4  86 e9      STX 0xe9
-load_blocks         +0x0002: c5c6  84 ea      STY 0xea
-load_blocks         +0x0004: c5c8  8a         TXA
-load_blocks         +0x0005: c5c9  25 ea      AND 0xea
-load_blocks         +0x0007: c5cb  c9 ff      CMP #0xff
-load_blocks         +0x0009: c5cd  d0 0e      BNE 0xc5dd
-load_blocks         +0x000b: c5cf  a9 0a      LDA #0xa
-load_blocks         +0x000d: c5d1  85 bb      STA 0xbb
-load_blocks         +0x000f: c5d3  a9 04      LDA #0x4
-load_blocks         +0x0011: c5d5  85 bc      STA 0xbc
-load_blocks         +0x0013: c5d7  20 9f c6   JSR console_print_string
-load_blocks         +0x0016: c5da  4c 73 c6   JMP console_crlf
-load_blocks         +0x0019: c5dd  a5 e9      LDA 0xe9
-load_blocks         +0x001b: c5df  05 ea      ORA 0xea
-load_blocks         +0x001d: c5e1  f0 49      BEQ 0xc62c
-load_blocks         +0x001f: c5e3  20 4c c4   JSR read_packet
-load_blocks         +0x0022: c5e6  90 2c      BCC 0xc614
-load_blocks         +0x0024: c5e8  ad 06 04   LDA 
-load_blocks         +0x0027: c5eb  c9 07      CMP #0x7
-load_blocks         +0x0029: c5ed  d0 25      BNE 0xc614
-load_blocks         +0x002b: c5ef  ce 07 04   DEC 0x407
-load_blocks         +0x002e: c5f2  ce 07 04   DEC 0x407
-load_blocks         +0x0031: c5f5  a5 e9      LDA 0xe9
-load_blocks         +0x0033: c5f7  38         SEC
-load_blocks         +0x0034: c5f8  ed 07 04   SBC 
-load_blocks         +0x0037: c5fb  85 e9      STA 0xe9
-load_blocks         +0x0039: c5fd  a5 ea      LDA 0xea
-load_blocks         +0x003b: c5ff  e9 00      SBC #0x0
-load_blocks         +0x003d: c601  85 ea      STA 0xea
-load_blocks         +0x003f: c603  20 11 c6   JSR load_blocks
-load_blocks         +0x0042: c606  a9 07      LDA #0x7
-load_blocks         +0x0044: c608  20 bf c3   JSR acknowledge
-load_blocks         +0x0047: c60b  20 82 c3   JSR send_packet
-load_blocks         +0x004a: c60e  4c dd c5   JMP load_blocks
-load_blocks         +0x004d: c611  6c eb 00   JMP (0xeb)
-load_blocks         +0x0050: c614  20 7a c6   JSR console_write_string
-load_blocks         +0x0053: c617  45 72      EOR f2+2
-load_blocks         +0x0055: c619  72 6f      ADC (f1+3)
-load_blocks         +0x0057: c61b  72 20      ADC (i12)
-load_blocks         +0x0059: c61d  72 65      ADC (x3+5)
-load_blocks         +0x005b: c61f  61 64      ADC (x3+4,X)
-load_blocks         +0x005d: c621  69 6e      ADC #0x6e
-load_blocks         +0x005f: c623  67         ???
-load_blocks         +0x0060: c624  20 66 69   JSR 
-load_blocks         +0x0063: c627  6c 65 0d   JMP (0xd65)
-load_blocks         +0x0066: c62a  0a         ASL A
-load_blocks         +0x0067: c62b  00         BRK
-load_blocks         +0x0068: c62c  60         RTS
-write_block_to_console+0x0000: c62d  a2 00      LDX #0x0
-write_block_to_console+0x0002: c62f  ec 07 04   CPX 
-write_block_to_console+0x0005: c632  f0 15      BEQ 0xc649
-write_block_to_console+0x0007: c634  bd 0a 04   LDA 0x40a,X
-write_block_to_console+0x000a: c637  c9 0a      CMP #0xa
-write_block_to_console+0x000c: c639  d0 07      BNE 0xc642
-write_block_to_console+0x000e: c63b  48         PHA
-write_block_to_console+0x000f: c63c  a9 0d      LDA #0xd
-write_block_to_console+0x0011: c63e  20 ad c6   JSR console_write_char
-write_block_to_console+0x0014: c641  68         PLA
-write_block_to_console+0x0015: c642  20 ad c6   JSR console_write_char
-write_block_to_console+0x0018: c645  e8         INX
-write_block_to_console+0x0019: c646  4c 2f c6   JMP write_block_to_console
-write_block_to_console+0x001c: c649  60         RTS
-load_block          +0x0000: c64a  ad 08 04   LDA 
-load_block          +0x0003: c64d  85 ed      STA 0xed
-load_block          +0x0005: c64f  ad 09 04   LDA 
-load_block          +0x0008: c652  85 ee      STA 0xee
-load_block          +0x000a: c654  a0 00      LDY #0x0
-load_block          +0x000c: c656  cc 07 04   CPY 
-load_block          +0x000f: c659  f0 09      BEQ 0xc664
-load_block          +0x0011: c65b  b9 0a 04   LDA 0x40a,Y
-load_block          +0x0014: c65e  91 ed      STA (0xed),Y
-load_block          +0x0016: c660  c8         INY
-load_block          +0x0017: c661  4c 56 c6   JMP load_block
-load_block          +0x001a: c664  60         RTS
-load_block          +0x001b: c665  00         BRK
-load_block          +0x001c: c666  00         BRK
-load_block          +0x001d: c667  00         BRK
+reset_receiver      +0x0002: c2da  64 e1      STZ 0xe1
+reset_receiver      +0x0004: c2dc  64 e2      STZ 0xe2
+reset_receiver      +0x0006: c2de  60         RTS
+crc16               +0x0000: c2df  a2 08      LDX #0x8
+crc16               +0x0002: c2e1  a1 c5      LDA (0xc5,X)
+crc16               +0x0004: c2e3  45 cc      EOR 0xcc
+crc16               +0x0006: c2e5  06 cb      ASL 0xcb
+crc16               +0x0008: c2e7  2a         ROL A
+crc16               +0x0009: c2e8  90 0a      BCC 0xc2f4
+crc16               +0x000b: c2ea  a8         TAY
+crc16               +0x000c: c2eb  a5 cb      LDA 0xcb
+crc16               +0x000e: c2ed  49 21      EOR #0x21
+crc16               +0x0010: c2ef  85 cb      STA 0xcb
+crc16               +0x0012: c2f1  98         TYA
+crc16               +0x0013: c2f2  49 10      EOR #0x10
+crc16               +0x0015: c2f4  ca         DEX
+crc16               +0x0016: c2f5  d0 ee      BNE 0xc2e5
+crc16               +0x0018: c2f7  85 cc      STA 0xcc
+crc16               +0x001a: c2f9  e6 cd      INC 0xcd
+crc16               +0x001c: c2fb  a5 cf      LDA 0xcf
+crc16               +0x001e: c2fd  d0 02      BNE 0xc301
+crc16               +0x0020: c2ff  c6 d0      DEC 0xd0
+crc16               +0x0022: c301  c6 cf      DEC 0xcf
+crc16               +0x0024: c303  d0 da      BNE 0xc2df
+crc16               +0x0026: c305  a5 d0      LDA 0xd0
+crc16               +0x0028: c307  d0 d6      BNE 0xc2df
+crc16               +0x002a: c309  60         RTS
+crc16               +0x002b: c30a  84 cf      STY 0xcf
+crc16               +0x002d: c30c  64 d0      STZ 0xd0
+crc16               +0x002f: c30e  64 cb      STZ 0xcb
+crc16               +0x0031: c310  64 cc      STZ 0xcc
+crc16               +0x0033: c312  c8         INY
+crc16               +0x0034: c313  c8         INY
+crc16               +0x0035: c314  8c 00 05   STY 
+crc16               +0x0038: c317  a9 03      LDA #0x3
+crc16               +0x003a: c319  85 cd      STA 0xcd
+crc16               +0x003c: c31b  a9 05      LDA #0x5
+crc16               +0x003e: c31d  85 ce      STA 0xce
+crc16               +0x0040: c31f  20 df c2   JSR crc16
+crc16               +0x0043: c322  a5 cb      LDA 0xcb
+crc16               +0x0045: c324  8d 01 05   STA 
+crc16               +0x0048: c327  a5 cc      LDA 0xcc
+crc16               +0x004a: c329  8d 02 05   STA 
+crc16               +0x004d: c32c  60         RTS
+crc16               +0x004e: c32d  ac 00 04   LDY 
+crc16               +0x0051: c330  88         DEY
+crc16               +0x0052: c331  88         DEY
+crc16               +0x0053: c332  5a         PHY
+crc16               +0x0054: c333  84 cf      STY 0xcf
+crc16               +0x0056: c335  64 d0      STZ 0xd0
+crc16               +0x0058: c337  64 cb      STZ 0xcb
+crc16               +0x005a: c339  64 cc      STZ 0xcc
+crc16               +0x005c: c33b  a9 03      LDA #0x3
+crc16               +0x005e: c33d  85 cd      STA 0xcd
+crc16               +0x0060: c33f  a9 04      LDA #0x4
+crc16               +0x0062: c341  85 ce      STA 0xce
+crc16               +0x0064: c343  20 df c2   JSR crc16
+crc16               +0x0067: c346  ad 01 04   LDA 
+crc16               +0x006a: c349  c5 cb      CMP 0xcb
+crc16               +0x006c: c34b  d0 09      BNE 0xc356
+crc16               +0x006e: c34d  ad 02 04   LDA 
+crc16               +0x0071: c350  c5 cc      CMP 0xcc
+crc16               +0x0073: c352  d0 02      BNE 0xc356
+crc16               +0x0075: c354  7a         PLY
+crc16               +0x0076: c355  60         RTS
+crc16               +0x0077: c356  7a         PLY
+crc16               +0x0078: c357  20 7a c6   JSR console_write_string
+crc16               +0x007b: c35a  42 61      WDM 
+crc16               +0x007d: c35c  64 20      STZ i12
+crc16               +0x007f: c35e  43         ???
+crc16               +0x0080: c35f  52 43      EOR (l6+3)
+crc16               +0x0082: c361  0d 0a 00   ORA 
+crc16               +0x0085: c364  ad 02 04   LDA 
+crc16               +0x0088: c367  20 7e c7   JSR print_as_hex
+crc16               +0x008b: c36a  ad 01 04   LDA 
+crc16               +0x008e: c36d  20 7e c7   JSR print_as_hex
+crc16               +0x0091: c370  a9 2f      LDA #0x2f
+crc16               +0x0093: c372  20 ad c6   JSR console_write_char
+crc16               +0x0096: c375  a5 cc      LDA 0xcc
+crc16               +0x0098: c377  20 7e c7   JSR print_as_hex
+crc16               +0x009b: c37a  a5 cb      LDA 0xcb
+crc16               +0x009d: c37c  20 7e c7   JSR print_as_hex
+crc16               +0x00a0: c37f  20 73 c6   JSR console_crlf
+crc16               +0x00a3: c382  18         CLC
+crc16               +0x00a4: c383  60         RTS
+send_packet         +0x0000: c384  20 0a c3   JSR crc16
+send_packet         +0x0003: c387  a9 00      LDA #0x0
+send_packet         +0x0005: c389  85 bb      STA 0xbb
+send_packet         +0x0007: c38b  a9 05      LDA #0x5
+send_packet         +0x0009: c38d  85 bc      STA 0xbc
+send_packet         +0x000b: c38f  ac 00 05   LDY 
+send_packet         +0x000e: c392  c8         INY
+send_packet         +0x000f: c393  a9 01      LDA #0x1
+send_packet         +0x0011: c395  20 28 c7   JSR device_write
+send_packet         +0x0014: c398  38         SEC
+send_packet         +0x0015: c399  60         RTS
+send_packet         +0x0016: c39a  20 7a c6   JSR console_write_string
+send_packet         +0x0019: c39d  50 72      BVC 0xc411
+send_packet         +0x001b: c39f  6f         ???
+send_packet         +0x001c: c3a0  74 6f      STZ 0x6f,X
+send_packet         +0x001e: c3a2  63         ???
+send_packet         +0x001f: c3a3  6f         ???
+send_packet         +0x0020: c3a4  6c 20 65   JMP (0x6520)
+send_packet         +0x0023: c3a7  72 72      ADC (f2+2)
+send_packet         +0x0025: c3a9  6f         ???
+send_packet         +0x0026: c3aa  72 3a      ADC (l4+2)
+send_packet         +0x0028: c3ac  20 69 6e   JSR 
+send_packet         +0x002b: c3af  76 61      ROR 0x61,X
+send_packet         +0x002d: c3b1  6c 69 64   JMP (0x6469)
+send_packet         +0x0030: c3b4  20 6c 65   JSR 
+send_packet         +0x0033: c3b7  6e 20 41   ROR 0x4120
+send_packet         +0x0036: c3ba  43         ???
+send_packet         +0x0037: c3bb  4b         ???
+send_packet         +0x0038: c3bc  0d 0a 00   ORA 
+send_packet         +0x003b: c3bf  18         CLC
+send_packet         +0x003c: c3c0  60         RTS
+acknowledge         +0x0000: c3c1  20 d8 c2   JSR reset_receiver
+acknowledge         +0x0003: c3c4  8d 06 05   STA 
+acknowledge         +0x0006: c3c7  ad 03 04   LDA 
+acknowledge         +0x0009: c3ca  8d 04 05   STA 
+acknowledge         +0x000c: c3cd  a9 00      LDA #0x0
+acknowledge         +0x000e: c3cf  8d 03 05   STA 
+acknowledge         +0x0011: c3d2  a9 01      LDA #0x1
+acknowledge         +0x0013: c3d4  8d 05 05   STA 
+acknowledge         +0x0016: c3d7  9c 07 05   STZ 
+acknowledge         +0x0019: c3da  a0 05      LDY #0x5
+acknowledge         +0x001b: c3dc  60         RTS
+acknowledge         +0x001c: c3dd  5a         PHY
+acknowledge         +0x001d: c3de  da         PHX
+acknowledge         +0x001e: c3df  a9 ff      LDA #0xff
+acknowledge         +0x0020: c3e1  a2 32      LDX #0x32
+acknowledge         +0x0022: c3e3  c4 e1      CPY 0xe1
+acknowledge         +0x0024: c3e5  90 59      BCC 0xc440
+acknowledge         +0x0026: c3e7  f0 57      BEQ 0xc440
+acknowledge         +0x0028: c3e9  3a         DEC A
+acknowledge         +0x0029: c3ea  d0 01      BNE 0xc3ed
+acknowledge         +0x002b: c3ec  ca         DEX
+acknowledge         +0x002c: c3ed  e0 00      CPX #0x0
+acknowledge         +0x002e: c3ef  d0 f2      BNE 0xc3e3
+acknowledge         +0x0030: c3f1  c9 00      CMP #0x0
+acknowledge         +0x0032: c3f3  d0 ee      BNE 0xc3e3
+acknowledge         +0x0034: c3f5  5a         PHY
+acknowledge         +0x0035: c3f6  da         PHX
+acknowledge         +0x0036: c3f7  48         PHA
+acknowledge         +0x0037: c3f8  20 7a c6   JSR console_write_string
+acknowledge         +0x003a: c3fb  54 69      MVN f0+1
+acknowledge         +0x003c: c3fd  6d 65 6f   ADC 
+acknowledge         +0x003f: c400  75 74      ADC 0x74,X
+acknowledge         +0x0041: c402  20 77 61   JSR 
+acknowledge         +0x0044: c405  69 74      ADC #0x74
+acknowledge         +0x0046: c407  69 6e      ADC #0x6e
+acknowledge         +0x0048: c409  67         ???
+acknowledge         +0x0049: c40a  20 66 6f   JSR 
+acknowledge         +0x004c: c40d  72 20      ADC (i12)
+acknowledge         +0x004e: c40f  73         ???
+acknowledge         +0x004f: c410  65 72      ADC f2+2
+acknowledge         +0x0051: c412  69 61      ADC #0x61
+acknowledge         +0x0053: c414  6c 20 64   JMP (0x6420)
+acknowledge         +0x0056: c417  61 74      ADC (f3,X)
+acknowledge         +0x0058: c419  61 3a      ADC (l4+2,X)
+acknowledge         +0x005a: c41b  20 00 68   JSR 
+acknowledge         +0x005d: c41e  20 7e c7   JSR print_as_hex
+acknowledge         +0x0060: c421  a9 2f      LDA #0x2f
+acknowledge         +0x0062: c423  20 ad c6   JSR console_write_char
+acknowledge         +0x0065: c426  68         PLA
+acknowledge         +0x0066: c427  20 7e c7   JSR print_as_hex
+acknowledge         +0x0069: c42a  a9 2f      LDA #0x2f
+acknowledge         +0x006b: c42c  20 ad c6   JSR console_write_char
+acknowledge         +0x006e: c42f  68         PLA
+acknowledge         +0x006f: c430  20 7e c7   JSR print_as_hex
+acknowledge         +0x0072: c433  a9 2f      LDA #0x2f
+acknowledge         +0x0074: c435  20 ad c6   JSR console_write_char
+acknowledge         +0x0077: c438  a5 e1      LDA 0xe1
+acknowledge         +0x0079: c43a  20 7e c7   JSR print_as_hex
+acknowledge         +0x007c: c43d  20 73 c6   JSR console_crlf
+acknowledge         +0x007f: c440  fa         PLX
+acknowledge         +0x0080: c441  7a         PLY
+acknowledge         +0x0081: c442  60         RTS
+next_input_byte     +0x0000: c443  da         PHX
+next_input_byte     +0x0001: c444  a6 e0      LDX 0xe0
+next_input_byte     +0x0003: c446  bd 00 04   LDA 0x400,X
+next_input_byte     +0x0006: c449  e8         INX
+next_input_byte     +0x0007: c44a  86 e0      STX 0xe0
+next_input_byte     +0x0009: c44c  fa         PLX
+next_input_byte     +0x000a: c44d  60         RTS
+read_packet         +0x0000: c44e  a0 01      LDY #0x1
+read_packet         +0x0002: c450  20 dd c3   JSR acknowledge
+read_packet         +0x0005: c453  20 43 c4   JSR next_input_byte
+read_packet         +0x0008: c456  48         PHA
+read_packet         +0x0009: c457  7a         PLY
+read_packet         +0x000a: c458  c8         INY
+read_packet         +0x000b: c459  20 dd c3   JSR acknowledge
+read_packet         +0x000e: c45c  4c 2d c3   JMP crc16
+build_ping          +0x0000: c45f  a9 01      LDA #0x1
+build_ping          +0x0002: c461  8d 03 05   STA 
+build_ping          +0x0005: c464  a9 00      LDA #0x0
+build_ping          +0x0007: c466  8d 04 05   STA 
+build_ping          +0x000a: c469  8d 05 05   STA 
+build_ping          +0x000d: c46c  a0 06      LDY #0x6
+build_ping          +0x000f: c46e  a9 01      LDA #0x1
+build_ping          +0x0011: c470  99 00 05   STA 0x500,Y
+build_ping          +0x0014: c473  c8         INY
+build_ping          +0x0015: c474  a9 05      LDA #0x5
+build_ping          +0x0017: c476  99 00 05   STA 0x500,Y
+build_ping          +0x001a: c479  c8         INY
+build_ping          +0x001b: c47a  a9 70      LDA #0x70
+build_ping          +0x001d: c47c  99 00 05   STA 0x500,Y
+build_ping          +0x0020: c47f  c8         INY
+build_ping          +0x0021: c480  a9 69      LDA #0x69
+build_ping          +0x0023: c482  99 00 05   STA 0x500,Y
+build_ping          +0x0026: c485  c8         INY
+build_ping          +0x0027: c486  a9 6e      LDA #0x6e
+build_ping          +0x0029: c488  99 00 05   STA 0x500,Y
+build_ping          +0x002c: c48b  c8         INY
+build_ping          +0x002d: c48c  a9 67      LDA #0x67
+build_ping          +0x002f: c48e  99 00 05   STA 0x500,Y
+build_ping          +0x0032: c491  c8         INY
+build_ping          +0x0033: c492  a9 00      LDA #0x0
+build_ping          +0x0035: c494  99 00 05   STA 0x500,Y
+build_ping          +0x0038: c497  a0 0a      LDY #0xa
+build_ping          +0x003a: c499  60         RTS
+build_list_files    +0x0000: c49a  a9 01      LDA #0x1
+build_list_files    +0x0002: c49c  8d 03 05   STA 
+build_list_files    +0x0005: c49f  a9 00      LDA #0x0
+build_list_files    +0x0007: c4a1  8d 04 05   STA 
+build_list_files    +0x000a: c4a4  8d 05 05   STA 
+build_list_files    +0x000d: c4a7  a0 06      LDY #0x6
+build_list_files    +0x000f: c4a9  a9 02      LDA #0x2
+build_list_files    +0x0011: c4ab  99 00 05   STA 0x500,Y
+build_list_files    +0x0014: c4ae  c8         INY
+build_list_files    +0x0015: c4af  a9 02      LDA #0x2
+build_list_files    +0x0017: c4b1  99 00 05   STA 0x500,Y
+build_list_files    +0x001a: c4b4  c8         INY
+build_list_files    +0x001b: c4b5  a9 2e      LDA #0x2e
+build_list_files    +0x001d: c4b7  99 00 05   STA 0x500,Y
+build_list_files    +0x0020: c4ba  c8         INY
+build_list_files    +0x0021: c4bb  a9 00      LDA #0x0
+build_list_files    +0x0023: c4bd  99 00 05   STA 0x500,Y
+build_list_files    +0x0026: c4c0  a0 07      LDY #0x7
+build_list_files    +0x0028: c4c2  60         RTS
+parse_list_files_result+0x0000: c4c3  ad 06 04   LDA 
+parse_list_files_result+0x0003: c4c6  c9 03      CMP #0x3
+parse_list_files_result+0x0005: c4c8  d0 07      BNE 0xc4d1
+parse_list_files_result+0x0007: c4ca  ae 08 04   LDX 0x408
+parse_list_files_result+0x000a: c4cd  ac 09 04   LDY 
+parse_list_files_result+0x000d: c4d0  60         RTS
+parse_list_files_result+0x000e: c4d1  a2 00      LDX #0x0
+parse_list_files_result+0x0010: c4d3  a0 00      LDY #0x0
+parse_list_files_result+0x0012: c4d5  60         RTS
+list_files          +0x0000: c4d6  86 d2      STX 0xd2
+list_files          +0x0002: c4d8  84 d3      STY 0xd3
+list_files          +0x0004: c4da  8a         TXA
+list_files          +0x0005: c4db  05 d3      ORA 0xd3
+list_files          +0x0007: c4dd  f0 72      BEQ 0xc551
+list_files          +0x0009: c4df  20 4e c4   JSR read_packet
+list_files          +0x000c: c4e2  90 52      BCC 0xc536
+list_files          +0x000e: c4e4  ad 06 04   LDA 
+list_files          +0x0011: c4e7  c9 04      CMP #0x4
+list_files          +0x0013: c4e9  d0 4b      BNE 0xc536
+list_files          +0x0015: c4eb  ad 0a 04   LDA 
+list_files          +0x0018: c4ee  c9 00      CMP #0x0
+list_files          +0x001a: c4f0  f0 04      BEQ 0xc4f6
+list_files          +0x001c: c4f2  a9 46      LDA #0x46
+list_files          +0x001e: c4f4  d0 02      BNE 0xc4f8
+list_files          +0x0020: c4f6  a9 44      LDA #0x44
+list_files          +0x0022: c4f8  20 ad c6   JSR console_write_char
+list_files          +0x0025: c4fb  a9 20      LDA #0x20
+list_files          +0x0027: c4fd  20 ad c6   JSR console_write_char
+list_files          +0x002a: c500  ae 08 04   LDX 0x408
+list_files          +0x002d: c503  ac 09 04   LDY 
+list_files          +0x0030: c506  20 70 c7   JSR print_as_hex2
+list_files          +0x0033: c509  a9 20      LDA #0x20
+list_files          +0x0035: c50b  20 ad c6   JSR console_write_char
+list_files          +0x0038: c50e  a0 0b      LDY #0xb
+list_files          +0x003a: c510  b9 00 04   LDA 0x400,Y
+list_files          +0x003d: c513  f0 07      BEQ 0xc51c
+list_files          +0x003f: c515  20 ad c6   JSR console_write_char
+list_files          +0x0042: c518  c8         INY
+list_files          +0x0043: c519  4c 10 c5   JMP list_files
+list_files          +0x0046: c51c  20 73 c6   JSR console_crlf
+list_files          +0x0049: c51f  a9 04      LDA #0x4
+list_files          +0x004b: c521  20 c1 c3   JSR acknowledge
+list_files          +0x004e: c524  20 84 c3   JSR send_packet
+list_files          +0x0051: c527  a5 d2      LDA 0xd2
+list_files          +0x0053: c529  d0 02      BNE 0xc52d
+list_files          +0x0055: c52b  c6 d3      DEC 0xd3
+list_files          +0x0057: c52d  c6 d2      DEC 0xd2
+list_files          +0x0059: c52f  a5 d2      LDA 0xd2
+list_files          +0x005b: c531  05 d3      ORA 0xd3
+list_files          +0x005d: c533  d0 aa      BNE 0xc4df
+list_files          +0x005f: c535  60         RTS
+list_files          +0x0060: c536  20 7a c6   JSR console_write_string
+list_files          +0x0063: c539  42 61      WDM 
+list_files          +0x0065: c53b  64 20      STZ i12
+list_files          +0x0067: c53d  64 69      STZ f0+1
+list_files          +0x0069: c53f  72 20      ADC (i12)
+list_files          +0x006b: c541  65 6e      ADC f1+2
+list_files          +0x006d: c543  74 72      STZ 0x72,X
+list_files          +0x006f: c545  79 20 72   ADC 0x7220,Y
+list_files          +0x0072: c548  65 73      ADC f2+3
+list_files          +0x0074: c54a  75 6c      ADC 0x6c,X
+list_files          +0x0076: c54c  74 0d      STZ 0xd,X
+list_files          +0x0078: c54e  0a         ASL A
+list_files          +0x0079: c54f  00         BRK
+list_files          +0x007a: c550  60         RTS
+list_files          +0x007b: c551  20 7a c6   JSR console_write_string
+list_files          +0x007e: c554  4e 6f 20   LSR 0x206f
+list_files          +0x0081: c557  66 69      ROR f0+1
+list_files          +0x0083: c559  6c 65 73   JMP (0x7365)
+list_files          +0x0086: c55c  0d 0a 00   ORA 
+list_files          +0x0089: c55f  60         RTS
+build_load_file     +0x0000: c560  48         PHA
+build_load_file     +0x0001: c561  a9 01      LDA #0x1
+build_load_file     +0x0003: c563  8d 03 05   STA 
+build_load_file     +0x0006: c566  a9 00      LDA #0x0
+build_load_file     +0x0008: c568  8d 04 05   STA 
+build_load_file     +0x000b: c56b  8d 05 05   STA 
+build_load_file     +0x000e: c56e  a2 06      LDX #0x6
+build_load_file     +0x0010: c570  a9 05      LDA #0x5
+build_load_file     +0x0012: c572  9d 00 05   STA 0x500,X
+build_load_file     +0x0015: c575  e8         INX
+build_load_file     +0x0016: c576  68         PLA
+build_load_file     +0x0017: c577  e8         INX
+build_load_file     +0x0018: c578  9d 00 05   STA 0x500,X
+build_load_file     +0x001b: c57b  e8         INX
+build_load_file     +0x001c: c57c  a0 00      LDY #0x0
+build_load_file     +0x001e: c57e  b9 80 03   LDA 0x380,Y
+build_load_file     +0x0021: c581  9d 00 05   STA 0x500,X
+build_load_file     +0x0024: c584  f0 04      BEQ 0xc58a
+build_load_file     +0x0026: c586  c8         INY
+build_load_file     +0x0027: c587  e8         INX
+build_load_file     +0x0028: c588  d0 f4      BNE 0xc57e
+build_load_file     +0x002a: c58a  c8         INY
+build_load_file     +0x002b: c58b  8c 07 05   STY 
+build_load_file     +0x002e: c58e  98         TYA
+build_load_file     +0x002f: c58f  18         CLC
+build_load_file     +0x0030: c590  69 06      ADC #0x6
+build_load_file     +0x0032: c592  a8         TAY
+build_load_file     +0x0033: c593  60         RTS
+parse_load_file_result+0x0000: c594  ad 06 04   LDA 
+parse_load_file_result+0x0003: c597  c9 06      CMP #0x6
+parse_load_file_result+0x0005: c599  d0 11      BNE 0xc5ac
+parse_load_file_result+0x0007: c59b  ae 08 04   LDX 0x408
+parse_load_file_result+0x000a: c59e  ac 09 04   LDY 
+parse_load_file_result+0x000d: c5a1  ad 0a 04   LDA 
+parse_load_file_result+0x0010: c5a4  85 ef      STA 0xef
+parse_load_file_result+0x0012: c5a6  ad 0b 04   LDA 
+parse_load_file_result+0x0015: c5a9  85 f0      STA 0xf0
+parse_load_file_result+0x0017: c5ab  60         RTS
+parse_load_file_result+0x0018: c5ac  20 7a c6   JSR console_write_string
+parse_load_file_result+0x001b: c5af  42 61      WDM 
+parse_load_file_result+0x001d: c5b1  64 20      STZ i12
+parse_load_file_result+0x001f: c5b3  6c 6f 61   JMP (0x616f)
+parse_load_file_result+0x0022: c5b6  64 20      STZ i12
+parse_load_file_result+0x0024: c5b8  72 65      ADC (x3+5)
+parse_load_file_result+0x0026: c5ba  73         ???
+parse_load_file_result+0x0027: c5bb  75 6c      ADC 0x6c,X
+parse_load_file_result+0x0029: c5bd  74 0d      STZ 0xd,X
+parse_load_file_result+0x002b: c5bf  0a         ASL A
+parse_load_file_result+0x002c: c5c0  00         BRK
+parse_load_file_result+0x002d: c5c1  a2 00      LDX #0x0
+parse_load_file_result+0x002f: c5c3  a0 00      LDY #0x0
+parse_load_file_result+0x0031: c5c5  60         RTS
+load_blocks         +0x0000: c5c6  86 e9      STX 0xe9
+load_blocks         +0x0002: c5c8  84 ea      STY 0xea
+load_blocks         +0x0004: c5ca  8a         TXA
+load_blocks         +0x0005: c5cb  25 ea      AND 0xea
+load_blocks         +0x0007: c5cd  c9 ff      CMP #0xff
+load_blocks         +0x0009: c5cf  d0 0e      BNE 0xc5df
+load_blocks         +0x000b: c5d1  a9 0a      LDA #0xa
+load_blocks         +0x000d: c5d3  85 bb      STA 0xbb
+load_blocks         +0x000f: c5d5  a9 04      LDA #0x4
+load_blocks         +0x0011: c5d7  85 bc      STA 0xbc
+load_blocks         +0x0013: c5d9  20 9f c6   JSR console_print_string
+load_blocks         +0x0016: c5dc  4c 73 c6   JMP console_crlf
+load_blocks         +0x0019: c5df  a5 e9      LDA 0xe9
+load_blocks         +0x001b: c5e1  05 ea      ORA 0xea
+load_blocks         +0x001d: c5e3  f0 49      BEQ 0xc62e
+load_blocks         +0x001f: c5e5  20 4e c4   JSR read_packet
+load_blocks         +0x0022: c5e8  90 2c      BCC 0xc616
+load_blocks         +0x0024: c5ea  ad 06 04   LDA 
+load_blocks         +0x0027: c5ed  c9 07      CMP #0x7
+load_blocks         +0x0029: c5ef  d0 25      BNE 0xc616
+load_blocks         +0x002b: c5f1  ce 07 04   DEC 0x407
+load_blocks         +0x002e: c5f4  ce 07 04   DEC 0x407
+load_blocks         +0x0031: c5f7  a5 e9      LDA 0xe9
+load_blocks         +0x0033: c5f9  38         SEC
+load_blocks         +0x0034: c5fa  ed 07 04   SBC 
+load_blocks         +0x0037: c5fd  85 e9      STA 0xe9
+load_blocks         +0x0039: c5ff  a5 ea      LDA 0xea
+load_blocks         +0x003b: c601  e9 00      SBC #0x0
+load_blocks         +0x003d: c603  85 ea      STA 0xea
+load_blocks         +0x003f: c605  20 13 c6   JSR load_blocks
+load_blocks         +0x0042: c608  a9 07      LDA #0x7
+load_blocks         +0x0044: c60a  20 c1 c3   JSR acknowledge
+load_blocks         +0x0047: c60d  20 84 c3   JSR send_packet
+load_blocks         +0x004a: c610  4c df c5   JMP load_blocks
+load_blocks         +0x004d: c613  6c eb 00   JMP (0xeb)
+load_blocks         +0x0050: c616  20 7a c6   JSR console_write_string
+load_blocks         +0x0053: c619  45 72      EOR f2+2
+load_blocks         +0x0055: c61b  72 6f      ADC (f1+3)
+load_blocks         +0x0057: c61d  72 20      ADC (i12)
+load_blocks         +0x0059: c61f  72 65      ADC (x3+5)
+load_blocks         +0x005b: c621  61 64      ADC (x3+4,X)
+load_blocks         +0x005d: c623  69 6e      ADC #0x6e
+load_blocks         +0x005f: c625  67         ???
+load_blocks         +0x0060: c626  20 66 69   JSR 
+load_blocks         +0x0063: c629  6c 65 0d   JMP (0xd65)
+load_blocks         +0x0066: c62c  0a         ASL A
+load_blocks         +0x0067: c62d  00         BRK
+load_blocks         +0x0068: c62e  60         RTS
+write_block_to_console+0x0000: c62f  a2 00      LDX #0x0
+write_block_to_console+0x0002: c631  ec 07 04   CPX 
+write_block_to_console+0x0005: c634  f0 15      BEQ 0xc64b
+write_block_to_console+0x0007: c636  bd 0a 04   LDA 0x40a,X
+write_block_to_console+0x000a: c639  c9 0a      CMP #0xa
+write_block_to_console+0x000c: c63b  d0 07      BNE 0xc644
+write_block_to_console+0x000e: c63d  48         PHA
+write_block_to_console+0x000f: c63e  a9 0d      LDA #0xd
+write_block_to_console+0x0011: c640  20 ad c6   JSR console_write_char
+write_block_to_console+0x0014: c643  68         PLA
+write_block_to_console+0x0015: c644  20 ad c6   JSR console_write_char
+write_block_to_console+0x0018: c647  e8         INX
+write_block_to_console+0x0019: c648  4c 31 c6   JMP write_block_to_console
+write_block_to_console+0x001c: c64b  60         RTS
+load_block          +0x0000: c64c  ad 08 04   LDA 
+load_block          +0x0003: c64f  85 ed      STA 0xed
+load_block          +0x0005: c651  ad 09 04   LDA 
+load_block          +0x0008: c654  85 ee      STA 0xee
+load_block          +0x000a: c656  a0 00      LDY #0x0
+load_block          +0x000c: c658  cc 07 04   CPY 
+load_block          +0x000f: c65b  f0 09      BEQ 0xc666
+load_block          +0x0011: c65d  b9 0a 04   LDA 0x40a,Y
+load_block          +0x0014: c660  91 ed      STA (0xed),Y
+load_block          +0x0016: c662  c8         INY
+load_block          +0x0017: c663  4c 58 c6   JMP load_block
+load_block          +0x001a: c666  60         RTS
+load_block          +0x001b: c667  00         BRK
 console_prompt      +0x0000: c668  20 7a c6   JSR console_write_string
 console_prompt      +0x0003: c66b  31 39      AND (l4+1),Y
 console_prompt      +0x0005: c66d  38         SEC
@@ -1077,7 +1076,7 @@ ping                +0x000f: c837  70 69      BVS 0xc8a2
 ping                +0x0011: c839  6e 67 0d   ROR 0xd67
 ping                +0x0014: c83c  0a         ASL A
 ping                +0x0015: c83d  00         BRK
-ping                +0x0016: c83e  20 5d c4   JSR build_ping
+ping                +0x0016: c83e  20 5f c4   JSR build_ping
 ping                +0x0019: c841  20 7a c6   JSR console_write_string
 ping                +0x001c: c844  73         ???
 ping                +0x001d: c845  65 6e      ADC f1+2
@@ -1091,7 +1090,7 @@ ping                +0x002d: c855  65 73      ADC f2+3
 ping                +0x002f: c857  74 0d      STZ 0xd,X
 ping                +0x0031: c859  0a         ASL A
 ping                +0x0032: c85a  00         BRK
-ping                +0x0033: c85b  20 82 c3   JSR send_packet
+ping                +0x0033: c85b  20 84 c3   JSR send_packet
 ping                +0x0036: c85e  90 4a      BCC 0xc8aa
 ping                +0x0038: c860  20 7a c6   JSR console_write_string
 ping                +0x003b: c863  72 65      ADC (x3+5)
@@ -1105,7 +1104,7 @@ ping                +0x004a: c872  73         ???
 ping                +0x004b: c873  70 6f      BVS 0xc8e4
 ping                +0x004d: c875  6e 73 65   ROR 0x6573
 ping                +0x0050: c878  0d 0a 00   ORA 
-ping                +0x0053: c87b  20 4c c4   JSR read_packet
+ping                +0x0053: c87b  20 4e c4   JSR read_packet
 ping                +0x0056: c87e  b0 18      BCS 0xc898
 ping                +0x0058: c880  20 7a c6   JSR console_write_string
 ping                +0x005b: c883  42 61      WDM 
@@ -1124,19 +1123,19 @@ ping                +0x0075: c89d  6e 67 0d   ROR 0xd67
 ping                +0x0078: c8a0  0a         ASL A
 ping                +0x0079: c8a1  00         BRK
 ping                +0x007a: c8a2  a9 01      LDA #0x1
-ping                +0x007c: c8a4  20 bf c3   JSR acknowledge
-ping                +0x007f: c8a7  20 82 c3   JSR send_packet
+ping                +0x007c: c8a4  20 c1 c3   JSR acknowledge
+ping                +0x007f: c8a7  20 84 c3   JSR send_packet
 ping                +0x0082: c8aa  60         RTS
 ls                  +0x0000: c8ab  20 d8 c2   JSR reset_receiver
-ls                  +0x0003: c8ae  20 98 c4   JSR build_list_files
-ls                  +0x0006: c8b1  20 82 c3   JSR send_packet
-ls                  +0x0009: c8b4  20 4c c4   JSR read_packet
+ls                  +0x0003: c8ae  20 9a c4   JSR build_list_files
+ls                  +0x0006: c8b1  20 84 c3   JSR send_packet
+ls                  +0x0009: c8b4  20 4e c4   JSR read_packet
 ls                  +0x000c: c8b7  90 0f      BCC 0xc8c8
 ls                  +0x000e: c8b9  a9 03      LDA #0x3
-ls                  +0x0010: c8bb  20 bf c3   JSR acknowledge
-ls                  +0x0013: c8be  20 82 c3   JSR send_packet
-ls                  +0x0016: c8c1  20 c1 c4   JSR parse_list_files_result
-ls                  +0x0019: c8c4  20 d4 c4   JSR list_files
+ls                  +0x0010: c8bb  20 c1 c3   JSR acknowledge
+ls                  +0x0013: c8be  20 84 c3   JSR send_packet
+ls                  +0x0016: c8c1  20 c3 c4   JSR parse_list_files_result
+ls                  +0x0019: c8c4  20 d6 c4   JSR list_files
 ls                  +0x001c: c8c7  60         RTS
 ls                  +0x001d: c8c8  20 7a c6   JSR console_write_string
 ls                  +0x0020: c8cb  46 61      LSR x3+1
@@ -1152,19 +1151,19 @@ ls                  +0x0034: c8df  0d 0a 00   ORA
 ls                  +0x0037: c8e2  60         RTS
 cat                 +0x0000: c8e3  20 d8 c2   JSR reset_receiver
 cat                 +0x0003: c8e6  a9 00      LDA #0x0
-cat                 +0x0005: c8e8  20 5e c5   JSR build_load_file
-cat                 +0x0008: c8eb  20 82 c3   JSR send_packet
-cat                 +0x000b: c8ee  20 4c c4   JSR read_packet
+cat                 +0x0005: c8e8  20 60 c5   JSR build_load_file
+cat                 +0x0008: c8eb  20 84 c3   JSR send_packet
+cat                 +0x000b: c8ee  20 4e c4   JSR read_packet
 cat                 +0x000e: c8f1  90 16      BCC 0xc909
 cat                 +0x0010: c8f3  a9 05      LDA #0x5
-cat                 +0x0012: c8f5  20 bf c3   JSR acknowledge
-cat                 +0x0015: c8f8  20 82 c3   JSR send_packet
-cat                 +0x0018: c8fb  20 92 c5   JSR parse_load_file_result
-cat                 +0x001b: c8fe  a9 2d      LDA #0x2d
+cat                 +0x0012: c8f5  20 c1 c3   JSR acknowledge
+cat                 +0x0015: c8f8  20 84 c3   JSR send_packet
+cat                 +0x0018: c8fb  20 94 c5   JSR parse_load_file_result
+cat                 +0x001b: c8fe  a9 2f      LDA #0x2f
 cat                 +0x001d: c900  85 eb      STA 0xeb
 cat                 +0x001f: c902  a9 c6      LDA #0xc6
 cat                 +0x0021: c904  85 ec      STA 0xec
-cat                 +0x0023: c906  4c c4 c5   JMP load_blocks
+cat                 +0x0023: c906  4c c6 c5   JMP load_blocks
 cat                 +0x0026: c909  20 7a c6   JSR console_write_string
 cat                 +0x0029: c90c  46 61      LSR x3+1
 cat                 +0x002b: c90e  69 6c      ADC #0x6c
@@ -1179,19 +1178,19 @@ cat                 +0x003d: c920  00         BRK
 cat                 +0x003e: c921  60         RTS
 load                +0x0000: c922  20 d8 c2   JSR reset_receiver
 load                +0x0003: c925  a9 01      LDA #0x1
-load                +0x0005: c927  20 5e c5   JSR build_load_file
-load                +0x0008: c92a  20 82 c3   JSR send_packet
-load                +0x000b: c92d  20 4c c4   JSR read_packet
+load                +0x0005: c927  20 60 c5   JSR build_load_file
+load                +0x0008: c92a  20 84 c3   JSR send_packet
+load                +0x000b: c92d  20 4e c4   JSR read_packet
 load                +0x000e: c930  90 16      BCC 0xc948
 load                +0x0010: c932  a9 05      LDA #0x5
-load                +0x0012: c934  20 bf c3   JSR acknowledge
-load                +0x0015: c937  20 82 c3   JSR send_packet
-load                +0x0018: c93a  20 92 c5   JSR parse_load_file_result
-load                +0x001b: c93d  a9 4a      LDA #0x4a
+load                +0x0012: c934  20 c1 c3   JSR acknowledge
+load                +0x0015: c937  20 84 c3   JSR send_packet
+load                +0x0018: c93a  20 94 c5   JSR parse_load_file_result
+load                +0x001b: c93d  a9 4c      LDA #0x4c
 load                +0x001d: c93f  85 eb      STA 0xeb
 load                +0x001f: c941  a9 c6      LDA #0xc6
 load                +0x0021: c943  85 ec      STA 0xec
-load                +0x0023: c945  4c c4 c5   JMP load_blocks
+load                +0x0023: c945  4c c6 c5   JMP load_blocks
 load                +0x0026: c948  20 7a c6   JSR console_write_string
 load                +0x0029: c94b  46 61      LSR x3+1
 load                +0x002b: c94d  69 6c      ADC #0x6c
@@ -14546,37 +14545,36 @@ perm_rom            +0x0009: ff09  85 fd      STA 0xfd
 perm_rom            +0x000b: ff0b  86 fe      STX 0xfe
 perm_rom            +0x000d: ff0d  ad 40 fe   LDA __open
 perm_rom            +0x0010: ff10  29 81      AND #0x81
-perm_rom            +0x0012: ff12  f0 18      BEQ 0xff2c
+perm_rom            +0x0012: ff12  f0 1a      BEQ 0xff2e
 perm_rom            +0x0014: ff14  ad 41 fe   LDA __open
-perm_rom            +0x0017: ff17  a6 e2      LDX 0xe2
+perm_rom            +0x0017: ff17  a6 e1      LDX 0xe1
 perm_rom            +0x0019: ff19  9d 00 04   STA 0x400,X
 perm_rom            +0x001c: ff1c  e8         INX
-perm_rom            +0x001d: ff1d  86 e2      STX 0xe2
-perm_rom            +0x001f: ff1f  ba         TSX
-perm_rom            +0x0020: ff20  bd 01 01   LDA 0x101,X
-perm_rom            +0x0023: ff23  29 10      AND #0x10
-perm_rom            +0x0025: ff25  d0 07      BNE 0xff2e
-perm_rom            +0x0027: ff27  a5 fd      LDA 0xfd
-perm_rom            +0x0029: ff29  a6 fe      LDX 0xfe
-perm_rom            +0x002b: ff2b  40         RTI
-perm_rom            +0x002c: ff2c  80 f1      BRA 0xff1f
-perm_rom            +0x002e: ff2e  84 ff      STY 0xff
-perm_rom            +0x0030: ff30  ba         TSX
-perm_rom            +0x0031: ff31  bd 02 01   LDA 0x102,X
-perm_rom            +0x0034: ff34  d8         CLD
-perm_rom            +0x0035: ff35  38         SEC
-perm_rom            +0x0036: ff36  e9 01      SBC #0x1
-perm_rom            +0x0038: ff38  85 f1      STA 0xf1
-perm_rom            +0x003a: ff3a  bd 03 01   LDA 0x103,X
-perm_rom            +0x003d: ff3d  e9 00      SBC #0x0
-perm_rom            +0x003f: ff3f  85 f2      STA 0xf2
-perm_rom            +0x0041: ff41  b2 f1      LDA (0xf1)
-perm_rom            +0x0043: ff43  20 b8 cb   JSR __syscall_handler
-perm_rom            +0x0046: ff46  a4 ff      LDY 0xff
-perm_rom            +0x0048: ff48  80 dd      BRA 0xff27
-perm_rom            +0x004a: ff4a  40         RTI
-perm_rom            +0x004b: ff4b  00         BRK
-perm_rom            +0x004c: ff4c  00         BRK
+perm_rom            +0x001d: ff1d  86 e1      STX 0xe1
+perm_rom            +0x001f: ff1f  e6 e2      INC 0xe2
+perm_rom            +0x0021: ff21  ba         TSX
+perm_rom            +0x0022: ff22  bd 01 01   LDA 0x101,X
+perm_rom            +0x0025: ff25  29 10      AND #0x10
+perm_rom            +0x0027: ff27  d0 07      BNE 0xff30
+perm_rom            +0x0029: ff29  a5 fd      LDA 0xfd
+perm_rom            +0x002b: ff2b  a6 fe      LDX 0xfe
+perm_rom            +0x002d: ff2d  40         RTI
+perm_rom            +0x002e: ff2e  80 f1      BRA 0xff21
+perm_rom            +0x0030: ff30  84 ff      STY 0xff
+perm_rom            +0x0032: ff32  ba         TSX
+perm_rom            +0x0033: ff33  bd 02 01   LDA 0x102,X
+perm_rom            +0x0036: ff36  d8         CLD
+perm_rom            +0x0037: ff37  38         SEC
+perm_rom            +0x0038: ff38  e9 01      SBC #0x1
+perm_rom            +0x003a: ff3a  85 f1      STA 0xf1
+perm_rom            +0x003c: ff3c  bd 03 01   LDA 0x103,X
+perm_rom            +0x003f: ff3f  e9 00      SBC #0x0
+perm_rom            +0x0041: ff41  85 f2      STA 0xf2
+perm_rom            +0x0043: ff43  b2 f1      LDA (0xf1)
+perm_rom            +0x0045: ff45  20 b8 cb   JSR __syscall_handler
+perm_rom            +0x0048: ff48  a4 ff      LDY 0xff
+perm_rom            +0x004a: ff4a  80 dd      BRA 0xff29
+perm_rom            +0x004c: ff4c  40         RTI
 perm_rom            +0x004d: ff4d  00         BRK
 perm_rom            +0x004e: ff4e  00         BRK
 perm_rom            +0x004f: ff4f  00         BRK
@@ -14750,10 +14748,8 @@ perm_rom            +0x00f6: fff6  00         BRK
 perm_rom            +0x00f7: fff7  00         BRK
 perm_rom            +0x00f8: fff8  00         BRK
 perm_rom            +0x00f9: fff9  00         BRK
-hwvectors           +0x0000: fffa  4a         LSR A
-hwvectors           +0x0000: fffa  4a         LSR A
-hwvectors           +0x0001: fffb  ff         ???
-hwvectors           +0x0002: fffc  00         BRK
+hwvectors           +0x0000: fffa  4c ff 00   JMP 
+hwvectors           +0x0000: fffa  4c ff 00   JMP 
 hwvectors           +0x0003: fffd  ff         ???
 hwvectors           +0x0004: fffe  09 ff      ORA #0xff
                     +0x0000: 0000  00         BRK

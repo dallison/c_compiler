@@ -89,7 +89,7 @@ SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
   if (line_index > MAX_LINE_INDEX || length > MAX_TOKEN_LENGTH) {
     return SOURCE_LOCATION_MISSING;
   }
-  // Only append to vector if line number has changeed.
+  // Only append to vector if line number has changed.
   if (file->lines.length == 0 ||
       file->lines.value.w[file->lines.length-1] != lineno) {
     VectorAppend(&file->lines, (void*)((int64_t)lineno));

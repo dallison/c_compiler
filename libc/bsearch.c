@@ -14,8 +14,8 @@
 // do the comparison (strcmp semantics).
 void *bsearch(const void *key, const void *base,
               size_t nmemb, size_t size,
-              int (*compar)(const void *
-                            , const void *)) {
+              int (*compar)(const void *,
+                            const void *)) {
   size_t low = 0;
   size_t len = nmemb * size;
   size_t high = len;              // One beyond end of array.

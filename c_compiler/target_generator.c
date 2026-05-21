@@ -340,7 +340,7 @@ void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
       }
     }
   }
-  old->uses = old->users.length - num_retargeted;
+  old->uses = (int)(old->users.length - num_retargeted);
   if (old->uses == 0) {
     if (old->id == 30) {
       printf("");

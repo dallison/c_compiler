@@ -836,6 +836,7 @@
 		E5377189203DDE5700330B42 /* risc_v_reg_alloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = risc_v_reg_alloc.h; sourceTree = "<group>"; };
 		E537718A203DDE5700330B42 /* risc_v_reg_alloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = risc_v_reg_alloc.c; sourceTree = "<group>"; };
 		E537718D203DDF3300330B42 /* risc_v_machine.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = risc_v_machine.h; sourceTree = "<group>"; };
+		E538E8F82ABD136E00E81764 /* 6502test.s */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = 6502test.s; sourceTree = "<group>"; };
 		E53A2CC7275851B700F34504 /* strtod.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strtod.c; sourceTree = "<group>"; };
 		E53A2CC82758525100F34504 /* fpfuncs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = fpfuncs.c; sourceTree = "<group>"; };
 		E53A2CC927585A4300F34504 /* _fpfuncs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = _fpfuncs.h; sourceTree = "<group>"; };
@@ -2009,6 +2010,7 @@
 			isa = PBXGroup;
 			children = (
 				E57CB97922CA761F0068119C /* 6502rom.s */,
+				E538E8F82ABD136E00E81764 /* 6502test.s */,
 			);
 			path = bootrom;
 			sourceTree = "<group>";
