@@ -1,0 +1,6 @@
+# Bazel output directories and symlinks
+/bazel-*
+
+# Compiled object and archive artifacts
+*.o
+*.a

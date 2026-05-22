@@ -296,7 +296,7 @@ static void LoadRegisterFromFrame(AARCH64Emitter* emitter, int reg,
     MoveImmediate(emitter, "x9", offset, fp);
     fprintf(fp, "\t%s %s, [x29, x9]", instruction,
     AARCH64RegisterNameFromNum(reg,
-                          reg_type, buf, kSize64Bit, sizeof(buf)));
+                          reg_type, kSize64Bit, buf, sizeof(buf)));
   }
   fprintf(fp, "\t\t// %s\n", symbol_name);
 }

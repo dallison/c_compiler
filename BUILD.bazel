@@ -1,0 +1,542 @@
+package(default_visibility = ["//visibility:public"])
+
+COMMON_COPTS = [
+    "-std=c99",
+    "-fPIC",
+]
+
+COMMON_INCLUDES = [
+    "6502_interpreter",
+    "Linker",
+    "Linker/Architecture",
+    "c_compiler",
+    "c_compiler/6502",
+    "c_compiler/AR",
+    "c_compiler/ELF",
+    "c_compiler/Loader",
+    "c_compiler/Loader/Architecture",
+    "risc_v_interpreter",
+]
+
+LIBC_SRCS = [
+    "libc/abs.c",
+    "libc/bsearch.c",
+    "libc/calloc.c",
+    "libc/cdiv.c",
+    "libc/ctype.c",
+    "libc/exit.c",
+    "libc/fclose.c",
+    "libc/fflush.c",
+    "libc/fgetc.c",
+    "libc/fgets.c",
+    "libc/fopen.c",
+    "libc/fpfuncs.c",
+    "libc/fputc.c",
+    "libc/fputs.c",
+    "libc/fread.c",
+    "libc/free.c",
+    "libc/fseek.c",
+    "libc/ftoa.c",
+    "libc/fwrite.c",
+    "libc/getenv.c",
+    "libc/gets.c",
+    "libc/ldexp.c",
+    "libc/libc_test.c",
+    "libc/malloc.c",
+    "libc/memchr.c",
+    "libc/memcmp.c",
+    "libc/memcpy.c",
+    "libc/memmove.c",
+    "libc/memset.c",
+    "libc/modf.c",
+    "libc/perror.c",
+    "libc/posix.c",
+    "libc/printf.c",
+    "libc/qsort.c",
+    "libc/rand.c",
+    "libc/realloc.c",
+    "libc/scanf.c",
+    "libc/sincos.c",
+    "libc/stdio.c",
+    "libc/strcat.c",
+    "libc/strchr.c",
+    "libc/strcmp.c",
+    "libc/strcpy.c",
+    "libc/strcspn.c",
+    "libc/strerror.c",
+    "libc/strings.c",
+    "libc/strlen.c",
+    "libc/strncat.c",
+    "libc/strncmp.c",
+    "libc/strncpy.c",
+    "libc/strpbrk.c",
+    "libc/strrchr.c",
+    "libc/strspn.c",
+    "libc/strstr.c",
+    "libc/strtod.c",
+    "libc/strtok.c",
+    "libc/strtol.c",
+    "libc/strtoll.c",
+    "libc/strtoul.c",
+    "libc/strtoull.c",
+    "libc/ungetc.c",
+]
+
+cc_library(
+    name = "utils",
+    srcs = [
+        "c_compiler/binary_tree.c",
+        "c_compiler/bitset.c",
+        "c_compiler/buffer.c",
+        "c_compiler/config.c",
+        "c_compiler/dstring.c",
+        "c_compiler/hashtable.c",
+        "c_compiler/list.c",
+        "c_compiler/map.c",
+        "c_compiler/set.c",
+        "c_compiler/vector.c",
+    ],
+    hdrs = glob([
+        "c_compiler/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+)
+
+cc_library(
+    name = "elf",
+    srcs = [
+        "c_compiler/ELF/elf_reader.c",
+        "c_compiler/ELF/elf_writer.c",
+    ],
+    hdrs = glob([
+        "c_compiler/ELF/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":utils"],
+)
+
+cc_library(
+    name = "ar_lib",
+    srcs = [
+        "c_compiler/AR/ar.c",
+    ],
+    hdrs = glob([
+        "c_compiler/AR/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "loader",
+    srcs = [
+        "c_compiler/Loader/Architecture/loader_arch_6502.c",
+        "c_compiler/Loader/Architecture/loader_arch_aarch64.c",
+        "c_compiler/Loader/Architecture/loader_arch_pcode.c",
+        "c_compiler/Loader/Architecture/loader_arch_riscv.c",
+        "c_compiler/Loader/loader.c",
+        "c_compiler/Loader/loader_dynamic.c",
+    ],
+    hdrs = glob([
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "linker",
+    srcs = [
+        "Linker/Architecture/linker_arch_6502.c",
+        "Linker/Architecture/linker_arch_aarch64.c",
+        "Linker/Architecture/linker_arch_pcode.c",
+        "Linker/Architecture/linker_arch_riscv.c",
+        "Linker/linker.c",
+        "Linker/linker_config.c",
+        "Linker/linker_dynamic.c",
+        "Linker/linker_file.c",
+        "Linker/linker_main.c",
+        "Linker/linker_reloc.c",
+        "Linker/linker_symbols.c",
+    ],
+    hdrs = glob([
+        "Linker/*.h",
+        "Linker/Architecture/*.h",
+        "c_compiler/6502/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":ar_lib",
+        ":elf",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "compiler",
+    srcs = [
+        "c_compiler/6502/6502_assembler.c",
+        "c_compiler/6502/6502_branches.c",
+        "c_compiler/6502/6502_codegen.c",
+        "c_compiler/6502/6502_emitter.c",
+        "c_compiler/6502/6502_optimize.c",
+        "c_compiler/6502/6502_reg_alloc.c",
+        "c_compiler/6502/6502_spiller.c",
+        "c_compiler/6502/6502_target.c",
+        "c_compiler/aarch64_assembler.c",
+        "c_compiler/aarch64_codegen.c",
+        "c_compiler/aarch64_emitter.c",
+        "c_compiler/aarch64_reg_alloc.c",
+        "c_compiler/aarch64_target.c",
+        "c_compiler/asm_expr.c",
+        "c_compiler/assembler.c",
+        "c_compiler/ast.c",
+        "c_compiler/basic_block.c",
+        "c_compiler/codegen.c",
+        "c_compiler/codemotion.c",
+        "c_compiler/common_emitter.c",
+        "c_compiler/compiler.c",
+        "c_compiler/constprop.c",
+        "c_compiler/debug.c",
+        "c_compiler/dwarf.c",
+        "c_compiler/dwarf_defs.c",
+        "c_compiler/errors.c",
+        "c_compiler/expr_codegen.c",
+        "c_compiler/expr_evaluator.c",
+        "c_compiler/expr_parser.c",
+        "c_compiler/expr_semantics.c",
+        "c_compiler/gvn.c",
+        "c_compiler/init_semantics.c",
+        "c_compiler/ir.c",
+        "c_compiler/lex.c",
+        "c_compiler/optimizer.c",
+        "c_compiler/options.c",
+        "c_compiler/p_code_assembler.c",
+        "c_compiler/p_code_codegen.c",
+        "c_compiler/p_code_emitter.c",
+        "c_compiler/p_code_optimize.c",
+        "c_compiler/p_code_reg_alloc.c",
+        "c_compiler/p_code_target.c",
+        "c_compiler/preprocessor.c",
+        "c_compiler/risc_v_assembler.c",
+        "c_compiler/risc_v_codegen.c",
+        "c_compiler/risc_v_emitter.c",
+        "c_compiler/risc_v_optimize.c",
+        "c_compiler/risc_v_reg_alloc.c",
+        "c_compiler/risc_v_target.c",
+        "c_compiler/semantics.c",
+        "c_compiler/source.c",
+        "c_compiler/ssa.c",
+        "c_compiler/statement_codegen.c",
+        "c_compiler/statement_parser.c",
+        "c_compiler/statement_semantics.c",
+        "c_compiler/symbol.c",
+        "c_compiler/symbol_table.c",
+        "c_compiler/syntax.c",
+        "c_compiler/target_basic_block.c",
+        "c_compiler/target_generator.c",
+        "c_compiler/tokens.c",
+        "c_compiler/type.c",
+    ],
+    hdrs = glob([
+        "c_compiler/*.h",
+        "c_compiler/6502/*.h",
+    ]),
+    copts = COMMON_COPTS + [
+        "-DDAVECC_SYSROOT_HDRS=libc/include",
+    ],
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "6502_lib",
+    srcs = [
+        "6502_interpreter/6502_debugger.c",
+        "6502_interpreter/6502_devices.c",
+        "6502_interpreter/6502_disassembler.c",
+        "6502_interpreter/6502_interpreter.c",
+    ],
+    hdrs = glob([
+        "6502_interpreter/*.h",
+        "c_compiler/*.h",
+        "c_compiler/6502/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "risc_v_lib",
+    srcs = [
+        "risc_v_interpreter/risc_v_debugger.c",
+        "risc_v_interpreter/risc_v_disassembler.c",
+        "risc_v_interpreter/risc_v_interpreter.c",
+    ],
+    hdrs = glob([
+        "c_compiler/*.h",
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+        "risc_v_interpreter/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "6502",
+    srcs = ["6502_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":6502_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "6502asm",
+    srcs = ["6502asm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "6502dasm",
+    srcs = ["6502dasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":6502_lib",
+        ":elf",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "archivist",
+    srcs = ["archivist/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":6502_lib",
+        ":ar_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":risc_v_lib",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "davecc",
+    srcs = ["davecc/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":ar_lib",
+        ":compiler",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "elfdump",
+    srcs = ["elfdump/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":6502_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":risc_v_lib",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "riscv",
+    srcs = ["risc_v_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    linkopts = ["-lm"],
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":risc_v_lib",
+        ":utils",
+    ],
+)
+
+genrule(
+    name = "libc_65c02",
+    srcs = LIBC_SRCS + glob([
+        "6502 support/*.h",
+        "6502 support/*.s",
+        "libc/include/**/*.h",
+    ]),
+    outs = ["libc/libc65c02.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libc65c02.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$(location :davecc)"
+archivist="$(location :archivist)"
+cflags=(-target 65c02 -c -Xkeep-asm)
+
+runtime_srcs=(
+  "6502 support/start.s"
+  "6502 support/enter.s"
+  "6502 support/var_addr.s"
+  "6502 support/var_value.s"
+  "6502 support/push.s"
+  "6502 support/incdec.s"
+  "6502 support/jump_table.s"
+  "6502 support/mul.s"
+  "6502 support/longmul.s"
+  "6502 support/longlongmul.s"
+  "6502 support/div.s"
+  "6502 support/longdiv.s"
+  "6502 support/longlongdiv.s"
+  "6502 support/spill.s"
+  "6502 support/fcommon.s"
+  "6502 support/fadd.s"
+  "6502 support/fconv.s"
+  "6502 support/fcmp.s"
+  "6502 support/fneg.s"
+  "6502 support/fmul.s"
+  "6502 support/fdiv.s"
+  "6502 support/syscall.s"
+  "6502 support/fmodf.s"
+  "6502 support/fldexp.s"
+  "6502 support/intrinsic.s"
+  "6502 support/setjmp.s"
+)
+
+runtime_objs=()
+for src in "$${runtime_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" -I"6502 support" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
+
+libc_srcs=(
+  "libc/abs.c"
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ctype.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/libc_test.c"
+  "libc/malloc.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/posix.c"
+  "libc/printf.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/ungetc.c"
+)
+
+libc_objs=()
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}"
+""",
+    tools = [
+        ":archivist",
+        ":davecc",
+    ],
+)
