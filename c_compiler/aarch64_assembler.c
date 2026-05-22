@@ -273,6 +273,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(ubxt);
   INST(ubxtb);
   INST(ubxth);
+  INST2(ubxtb, uxtb);
+  INST2(ubxth, uxth);
   INST(sxtb);
   INST(sxth);
   INST(sxtw);
@@ -284,7 +286,6 @@ static void InitializeInstructions(Map* instructions) {
   INST(bic);
   INST(bics);
   INST(eon);
-  INST(eons);
   INST(lsl);
   INST(lsr);
   INST(mov);
@@ -639,7 +640,7 @@ static bool GetShift(AARCH64Assembler* assembler, Operand* op, int max_shift) {
     op->shift.type = kLSL;
   } else if (StringEqualCaseBlind(&ASM.lex.spelling, "LSR")) {
     op->shift.type = kLSR;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ASL")) {
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ASR")) {
     op->shift.type = kASR;
   } else {
     AssemblerError(&ASM, "Invalid shift %s", ASM.lex.spelling.value);
@@ -1446,7 +1447,7 @@ static void Assemble_extr(AARCH64Assembler* assembler) {
   AssemblerEmitWord(
       &ASM, ASM.current_section,
       ((rd.width == kX) << 31) | (0x13 << 24) |
-      ((rd.width == kX) << 22) | (rm.num << 16) |
+      (1 << 23) | ((rd.width == kX) << 22) | (rm.num << 16) |
       ((int)lsb << 10) | (rn.num << 5) | rd.num);
 }
 
@@ -1659,7 +1660,7 @@ static void Assemble_ror(AARCH64Assembler* assembler) {
   AssemblerEmitWord(
       &ASM, ASM.current_section,
       ((rd.width == kX) << 31) | (0x13 << 24) |
-      ((rd.width == kX) << 22) | (rn.num << 16) |
+      (1 << 23) | ((rd.width == kX) << 22) | (rn.num << 16) |
       ((int)shift << 10) | (rn.num << 5) | rd.num);
 }
 
@@ -1723,7 +1724,7 @@ static void AssembleConditionalBranch(AARCH64Assembler* assembler,
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (0x2a << 25) |
-                    ((offset >> 2) << 5) |    // imm19.
+                    (((offset >> 2) & 0x7ffff) << 5) |    // imm19.
                     (consistent << 4) | cond);
 }
 
@@ -1864,7 +1865,7 @@ static void AssembleCompareAndBranch(AARCH64Assembler* assembler, int op) {
     return;
   }
   int sf = rt.width == kX;
-  int imm19 = off >> 2;
+  int imm19 = (offset >> 2) & 0x7ffff;
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (sf << 31) |
@@ -1914,7 +1915,7 @@ static void AssembleTestAndBranch(AARCH64Assembler* assembler, int op) {
   int b5 = imm >> 5;      // Bit 5.
   int b40 = imm & 0x1f;   // Bits 4 to 0.
   
-  int imm14 = off >> 2;
+  int imm14 = (offset >> 2) & 0x3fff;
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (b5 << 31) |
@@ -2082,7 +2083,7 @@ static void AssembleLoadLiteral(AARCH64Assembler* assembler, Register* rt,
 
 static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt,
                                   Register* rn, int size, int fp,
-                                int opc, int v, int pre_index,
+                                int opc, int v, int addr_mode,
                                 int32_t imm9) {
   CheckImmediateWidth(assembler, imm9, 9);
   AssemblerEmitWord(
@@ -2093,8 +2094,30 @@ static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt
                     (opc << 22) |
                     (v << 26) |
                     (imm9 << 12) |
-                    (pre_index << 11) |
-                    (1 << 10) |
+                    (addr_mode << 10) |
+                    (rn->num << 5) |
+                    (rt->num));
+}
+
+static void AssembleLoadStoreUnsignedImmediate(AARCH64Assembler* assembler,
+                                               Register* rt, Register* rn,
+                                               int size, int fp, int opc,
+                                               int v, int32_t offset) {
+  int scale = 1 << size;
+  if ((offset & (scale - 1)) != 0) {
+    AssemblerError(&ASM, "Invalid load/store offset alignment");
+    return;
+  }
+  int imm12 = offset / scale;
+  CheckImmediateWidth(assembler, imm12, 12);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+                    (size << 30) |
+                    (0x39 << 24) |
+                    (fp << 26) |
+                    (opc << 22) |
+                    (v << 26) |
+                    (imm12 << 10) |
                     (rn->num << 5) |
                     (rt->num));
 }
@@ -2128,14 +2151,11 @@ static void AssembleLoadStorePair(AARCH64Assembler* assembler, Register* rt,
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (opc << 30) |
-                    (0x5 << 27) |
-                    (opc << 22) |
+                    (0x29 << 24) |
                     (v << 26) |
-                    (0x2 << 23) |
                     (l << 22) |
-                    (imm7 << 15) |
+                    ((imm7 & 0x7f) << 15) |
                     (rt2->num << 10) |
-                    (1 << 10) |
                     (rn->num << 5) |
                     (rt->num));
 }
@@ -2162,6 +2182,8 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
       return;
     }
     Operand offset;
+    offset.type = kIntImmediate;
+    offset.i = 0;
     bool pre_indexed = false;
     bool post_indexed = false;
     bool writeback = false;
@@ -2195,7 +2217,7 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
 
     if (is_pair) {
       int imm7 = offset.i / (rt.width == kX ? 8 : 4);
-      AssembleLoadStorePair(assembler, &rt, &rt2, &rn, rt.width == kX, 0, is_load, imm7);
+      AssembleLoadStorePair(assembler, &rt, &rt2, &rn, rt.width == kX ? 2 : 0, 0, is_load, imm7);
     } else {
       if (offset.type == kRegister) {
         // Register offset.
@@ -2250,14 +2272,19 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         }
       } else if (offset.type == kIntImmediate){
         // Immediate offset.
-        // TODO: check imm9 size.
-        int opc = is_signed << 1 | is_load;
+        int opc = is_signed && is_load ? (rt.width == kX ? 2 : 3) : is_load;
         if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
           size = rt.size;
         }
-
-        int imm9 = offset.i;
-        AssembleLoadStoreImmediate(assembler, &rt, &rn, size, rt.fp_or_simd, opc, 0, pre_indexed, imm9);
+        if (!post_indexed && !writeback && offset.i >= 0) {
+          AssembleLoadStoreUnsignedImmediate(assembler, &rt, &rn, size,
+                                             rt.fp_or_simd, opc, 0, offset.i);
+        } else {
+          int imm9 = offset.i;
+          int mode = post_indexed ? 1 : (writeback ? 3 : 0);
+          AssembleLoadStoreImmediate(assembler, &rt, &rn, size,
+                                     rt.fp_or_simd, opc, 0, mode, imm9);
+        }
       } else {
         AssemblerError(&ASM, "Invalid offset for LDR/STR");
        return;
@@ -2494,24 +2521,24 @@ static void AssembleFPDataProcessing2(AARCH64Assembler* assembler, int opcode) {
   int ftype = rd.width == kD;
   AssemblerEmitWord(
       &ASM, ASM.current_section,
-      0x1e200000 | (ftype << 22) | (opcode << 12) |
+      0x1e200000 | (ftype << 22) | (opcode << 10) |
       (rm.num << 16) | (rn.num << 5) | rd.num);
 }
 
 static void Assemble_fadd(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x28);
+  AssembleFPDataProcessing2(assembler, 0xa);
 }
 
 static void Assemble_fsub(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x38);
+  AssembleFPDataProcessing2(assembler, 0xe);
 }
 
 static void Assemble_fmul(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x08);
+  AssembleFPDataProcessing2(assembler, 0x2);
 }
 
 static void Assemble_fdiv(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x18);
+  AssembleFPDataProcessing2(assembler, 0x6);
 }
 
 static void Assemble_fsqrt(AARCH64Assembler* assembler) {
@@ -2529,11 +2556,11 @@ static void Assemble_fsqrt(AARCH64Assembler* assembler) {
 }
 
 static void Assemble_fmin(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x58);
+  AssembleFPDataProcessing2(assembler, 0x16);
 }
 
 static void Assemble_fmax(AARCH64Assembler* assembler) {
-  AssembleFPDataProcessing2(assembler, 0x48);
+  AssembleFPDataProcessing2(assembler, 0x12);
 }
 
 static void AssembleFPIntBitcast(AARCH64Assembler* assembler, Register* rd,
