@@ -665,11 +665,13 @@ void AARCH64GeneratorDelete(AARCH64Generator* g) {
 
 static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
                                                        int base_reg_num,
-                                                       int offset) {
+                                                       int offset,
+                                                       bool is_fp) {
   SavedArgumentRegister* reg = malloc(sizeof(SavedArgumentRegister));
   reg->base_reg_num = base_reg_num;
   reg->reg_num = reg_num;
   reg->offset = offset;
+  reg->is_fp = is_fp;
   return reg;
 }
 
@@ -1192,11 +1194,11 @@ static AARCH64Opcode IR2RV(IROpcode op, bool is_unsigned) {
       return AARCH64_OP(eor);
 
     case IR_OP(noti):
-      return AARCH64_OP(not);
+      return AARCH64_OP(mvn);
     case IR_OP(nota):
-      return AARCH64_OP(not);
+      return AARCH64_OP(mvn);
     case IR_OP(onescomp):
-      return AARCH64_OP(not);
+      return AARCH64_OP(mvn);
     case IR_OP(negi):
       return AARCH64_OP(neg);
     case IR_OP(negf):
@@ -1505,6 +1507,19 @@ static TargetInstruction* MultiplyByConstant(AARCH64Generator* g,
   return left;
 }
 
+static TargetInstruction* LowerModulo(AARCH64Generator* g, IRNode* node,
+                                      AARCH64Opcode div_opcode) {
+  IRNode* op1 = node->inputs.value.p[0];
+  IRNode* op2 = node->inputs.value.p[1];
+  TargetInstruction* lhs = Materialize(g, op1);
+  TargetInstruction* rhs = Materialize(g, op2);
+  TargetInstruction* quotient_tmp = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+  TargetInstruction* divide = Emit(
+      g, CopyInstructionSize(NewInstruction2(div_opcode, lhs, rhs), 0));
+  divide->dest = quotient_tmp;
+  return NewInstruction3(AARCH64_OP(msub), quotient_tmp, rhs, lhs);
+}
+
 
 static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -1681,30 +1696,25 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
 
     case AARCH64_OP(umod):
     case AARCH64_OP(smod): {
-      // If we are moding by a constant power of 2 we can use an AND.
+      // If we are moding an unsigned value by a constant power of 2 we can use
+      // an AND. Signed modulo needs truncation toward zero, so use div/msub.
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
-        int64_t mask = c - 1;
-        if (AARCH64IsPossibleImmediate(mask)) {
+        if (opcode == AARCH64_OP(umod) && IsPowerOf2(c)) {
+          int64_t mask = c - 1;
           inst =
                  NewInstruction2(AARCH64_OP(and), Materialize(g, op1),
                                  GetIntConstant(g, NULL, kTargetType32Bit, mask));
           ref_counts_ok = true;
-        } else {
-          // It'a always better to use a move and AND than use 'rem'.
-          TargetInstruction* tmp = Emit(g, NewInstruction(AARCH64_OP(tmp)));
-          TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov),
-                                   GetIntConstant(g,
-                                                  NULL,
-                                                  kTargetType32Bit, mask)));
-          mv->dest = tmp;
-        
-          inst = NewInstruction2(AARCH64_OP(and), Materialize(g, op1), tmp);
         }
+      }
+      if (inst == NULL) {
+        inst = LowerModulo(g, node, opcode == AARCH64_OP(umod) ? AARCH64_OP(udiv) : AARCH64_OP(sdiv));
+        ref_counts_ok = true;
       }
       break;
     }
@@ -1778,113 +1788,87 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
   if (!is_expression) {
     return NULL;
   }
-  TargetInstruction* dest = Materialize(g, node);
   // Size is the size of the inputs.  They will all be the same.
   IRNode* op1 = node->inputs.value.p[0];
   bool is_unsigned = TypeIsUnsigned(op1->type);
 
   IRNode* lhs = node->inputs.value.p[0];
   IRNode* rhs = node->inputs.value.p[1];
-  int size = kSize32Bit;
+  int compare_size = kSize32Bit;
+  if (op1->type->size > 4) {
+    compare_size = kSize64Bit;
+  }
+  int result_size = kSize32Bit;
   if (node->type->size > 4) {
-    size = kSize64Bit;
+    result_size = kSize64Bit;
   }
   TargetInstruction* result = NULL;
+#define CMP_SET(cond)                                                       \
+  do {                                                                      \
+    Emit(g, SetInstructionSize(                                             \
+                NewInstruction2(TypeIsFloatingPoint(op1->type)              \
+                                    ? AARCH64_OP(fcmp)                      \
+                                    : AARCH64_OP(cmp),                      \
+                                Materialize(g, lhs), Materialize(g, rhs)),  \
+                compare_size));                                             \
+    result = SetInstructionSize(                                            \
+        NewInstruction1(AARCH64_OP(cset), Condition(g, cond, result_size)),  \
+        result_size);                                                       \
+  } while (0)
   switch (node->opcode) {
     case IR_OP(cmpeqi):
     case IR_OP(cmpeqa):
-      if (IRIsZero(node->inputs.value.p[1])) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), ZeroImm(g)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(eq), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(eq), size)));
-      }
+    case IR_OP(cmpeqf):
+    case IR_OP(cmpeqd):
+      CMP_SET(AARCH64_OP(eq));
       break;
     case IR_OP(cmpnei):
     case IR_OP(cmpnea):
-      if (IRIsZero(node->inputs.value.p[1])) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), ZeroImm(g)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(ne), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(ne), size)));
-      }
+    case IR_OP(cmpnef):
+    case IR_OP(cmpned):
+      CMP_SET(AARCH64_OP(ne));
       break;
     case IR_OP(cmplti):
     case IR_OP(cmplta):
-       if (is_unsigned) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(lo), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(lt), size)));
-      }
+      CMP_SET(is_unsigned ? AARCH64_OP(lo) : AARCH64_OP(lt));
+      break;
+    case IR_OP(cmpltf):
+    case IR_OP(cmpltd):
+      CMP_SET(AARCH64_OP(lt));
       break;
     case IR_OP(cmplei):
     case IR_OP(cmplea):
-      if (is_unsigned) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(ls), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(le), size)));
-      }
+      CMP_SET(is_unsigned ? AARCH64_OP(ls) : AARCH64_OP(le));
+      break;
+    case IR_OP(cmplef):
+    case IR_OP(cmpled):
+      CMP_SET(AARCH64_OP(le));
       break;
     case IR_OP(cmpgti):
     case IR_OP(cmpgta):
-      // Same as less with args reversed.
-      if (is_unsigned) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(hi), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(gt), size)));
-      }
+      CMP_SET(is_unsigned ? AARCH64_OP(hi) : AARCH64_OP(gt));
+      break;
+    case IR_OP(cmpgtf):
+    case IR_OP(cmpgtd):
+      CMP_SET(AARCH64_OP(gt));
       break;
     case IR_OP(cmpgei):
     case IR_OP(cmpgea):
-      if (is_unsigned) {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(hs), size)));
-      } else {
-        result = Emit(g, NewInstruction2(AARCH64_OP(cmp), Materialize(g, lhs), Materialize(g, rhs)));
-        result = Emit(g, NewInstruction2(AARCH64_OP(cset), result, Condition(g, AARCH64_OP(ge), size)));
-      }
-      break;
-    case IR_OP(cmpeqf):
-      break;
-    case IR_OP(cmpnef):
-      break;
-    case IR_OP(cmpltf):
-      break;
-    case IR_OP(cmplef):
-      break;
-    case IR_OP(cmpgtf):
+      CMP_SET(is_unsigned ? AARCH64_OP(hs) : AARCH64_OP(ge));
       break;
     case IR_OP(cmpgef):
-      break;
-    case IR_OP(cmpeqd):
-      break;
-    case IR_OP(cmpned):
-      break;
-    case IR_OP(cmpltd):
-      break;
-    case IR_OP(cmpled):
-      break;
-    case IR_OP(cmpgtd):
-      break;
     case IR_OP(cmpged):
+      CMP_SET(AARCH64_OP(ge));
       break;
     default:
       abort();
   }
+#undef CMP_SET
   // Mark result as having comparison generated.
   if (result != NULL) {
     result->flags |= kAARCH64ComparisonGenerated;
   }
-  SetLoweredNode(node, result);
-  return result;
+  return Emit(g, SetLoweredNode(node, result));
 }
 
 static void GetAddressAndOffsetFrom(AARCH64Generator* g,
@@ -2529,7 +2513,8 @@ static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(g, NewInstruction2(AARCH64_OP(fldr), load, amount));
+    amount = Materialize(g, amount_node);
+    inc =  Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(fadd), load, amount), size));
   } else  {
     inc =  AddImmediate(g, load, AARCH64IntValue(amount));
   }
@@ -2593,7 +2578,8 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
-    inc =  Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(fldr), load, amount), size));
+    amount = Materialize(g, amount_node);
+    inc =  Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(fsub), load, amount), size));
   } else  {
     inc =  AddImmediate(g, load, -AARCH64IntValue(amount));
   }
@@ -3779,10 +3765,22 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
         LoadFpArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
       }
     } else {
-      AlignOffset(entry, var_offset);
-      entry->pooled->data.ivalue = *var_offset;
-      SetDebugStackLocation(entry, *var_offset);
-      *var_offset += size;
+      if (is_arg) {
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          int offset = -24 - (int)g->saved_regs.length * 8;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, AARCH64_FP_REG, offset, true);
+          entry->pooled->data.ivalue = offset;
+          VectorAppend(&g->saved_regs, saved);
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        }
+      } else {
+        AlignOffset(entry, var_offset);
+        entry->pooled->data.ivalue = *var_offset;
+        SetDebugStackLocation(entry, *var_offset);
+        *var_offset += size;
+      }
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
@@ -3865,7 +3863,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
           // below the previous stack pointer).
           int offset = -24 - (int)g->saved_regs.length * 8;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
-              (int)location.location.offset, AARCH64_FP_REG, offset);
+              (int)location.location.offset, AARCH64_FP_REG, offset, false);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
           g->num_int_arg_regs++;  // Argument was passed in a register.

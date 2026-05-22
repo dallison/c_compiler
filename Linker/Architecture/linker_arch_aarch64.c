@@ -178,8 +178,16 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_LD_PREL_LO19:
       break;
 
-    case R_AARCH64_ADR_PREL_LO21:
-      break;
+    case R_AARCH64_ADR_PREL_LO21: {
+      int64_t offset = (int64_t)(S + A - P);
+      uint32_t instruction = *(uint32_t*)target_address;
+      hi21 = (int32_t)((offset >> 2) & 0x7ffff);
+      lo12 = (int32_t)(offset & 0x3);
+      instruction &= ~((0x3u << 29) | (0x7ffffu << 5));
+      instruction |= (lo12 << 29) | (hi21 << 5);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_ADR_PREL_PG_HI21:
       break;
@@ -199,11 +207,23 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_CONDBR19:
       break;
 
-    case R_AARCH64_JUMP26:
-      break;
+    case R_AARCH64_JUMP26: {
+      int64_t offset = (int64_t)(S + A - P);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~0x03ffffffu;
+      instruction |= (uint32_t)((offset >> 2) & 0x03ffffff);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
-    case R_AARCH64_CALL26:
-      break;
+    case R_AARCH64_CALL26: {
+      int64_t offset = (int64_t)(S + A - P);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~0x03ffffffu;
+      instruction |= (uint32_t)((offset >> 2) & 0x03ffffff);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_LDST16_ABS_LO12_NC:
       break;

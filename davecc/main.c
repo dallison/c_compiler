@@ -19,6 +19,10 @@
 #include "compiler.h"
 #include "linker_main.h"
 
+Assembler* NewAARCH64Assembler(String* infile, String* outfile);
+void AARCH64AssemblerDestruct(Assembler* assembler);
+void AssembleAARCH64Instruction(Assembler* assembler, String* word);
+
 static int ParseArg(int i, int argc, char** argv,
                     Vector* compiler_args,
                     Vector* linker_args,
@@ -326,6 +330,10 @@ int main(int argc, char * argv[]) {
         assembler = (Assembler*)NewRVAssembler(asm_filename, &output_filename);
         asm_run = AssembleRVInstruction;
         destructor = (AssemblerDestructor)RVAssemblerDestruct;
+      } else if (StringEqual(&target, "aarch64")) {
+        assembler = NewAARCH64Assembler(asm_filename, &output_filename);
+        asm_run = AssembleAARCH64Instruction;
+        destructor = (AssemblerDestructor)AARCH64AssemblerDestruct;
       } else if (StringEqual(&target, "pcode")) {
         assembler = (Assembler*)NewPCodeAssembler(asm_filename, &output_filename);
         asm_run = AssemblePCodeInstruction;

@@ -450,9 +450,12 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
     SavedArgumentRegister* saved_reg = emitter->g->saved_regs.value.p[i];
     int offset = saved_reg->offset;
-    fprintf(fp, "\tstr %s, [%s, #%d]\n",
-            AARCH64RegisterNameFromNum(saved_reg->reg_num, kAARCH64RegTypeInt, kSize64Bit, buf1,
-                                  sizeof(buf1)),
+    AARCH64RegisterType reg_type =
+        saved_reg->is_fp ? kAARCH64RegTypeFloat : kAARCH64RegTypeInt;
+    fprintf(fp, "\t%s %s, [%s, #%d]\n",
+            saved_reg->is_fp ? "fstr" : "str",
+            AARCH64RegisterNameFromNum(saved_reg->reg_num, reg_type, kSize64Bit,
+                                  buf1, sizeof(buf1)),
             AARCH64RegisterNameFromNum(saved_reg->base_reg_num, kAARCH64RegTypeInt, kSize64Bit,
                                   buf2, sizeof(buf2)),
             offset);
@@ -943,6 +946,14 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "%s\n",
               GetRegisterName(inst->operand[0], kSize64Bit, buf1,
                              sizeof(buf1)));
+      break;
+
+    case AARCH64_OP(cset):
+    case AARCH64_OP(csetm):
+      assert(inst->operand[0] != NULL);
+      fprintf(fp, "%s, %s\n",
+              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+              AARCH64OpcodeName(inst->operand[0]->opcode));
       break;
       
     case AARCH64_OP(blr):

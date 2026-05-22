@@ -83,7 +83,7 @@ static struct CompilerTargetDefinition{
 } compiler_targets[] = {
   {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false},
   {"riscv", {"riscv", "risc-v"}, NewRVTarget, false},
-  {"aarch64", {"aaarch64", "armv8"}, NewAARCH64Target, false},
+  {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false},
   {"6502", {"6502"}, New6502Target, true},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true},
 };

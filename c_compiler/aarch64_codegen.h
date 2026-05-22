@@ -322,6 +322,7 @@ typedef struct {
   int reg_num;
   int base_reg_num;
   int offset;  // Negative offset from frame pointer (or zero).
+  bool is_fp;
 } SavedArgumentRegister;
 
 // For large offsets that don't fit into an immediate field

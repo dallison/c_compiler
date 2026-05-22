@@ -949,28 +949,268 @@ static void Assemble_sbcs(AARCH64Assembler* assembler) {
   AssembleAddSubWithCarry(assembler, 1, 1);
 }
 
-UNDEFINED_INST(adr);
-UNDEFINED_INST(adrp);
-UNDEFINED_INST(madd);
-UNDEFINED_INST(mneg);
-UNDEFINED_INST(msub);
-UNDEFINED_INST(mul);
-UNDEFINED_INST(neg);
-UNDEFINED_INST(ngc);
-UNDEFINED_INST(negs);
-UNDEFINED_INST(ngcs);
-UNDEFINED_INST(sdiv);
-UNDEFINED_INST(smaddl);
-UNDEFINED_INST(smnegl);
-UNDEFINED_INST(smsubl);
-UNDEFINED_INST(smulh);
-UNDEFINED_INST(smull);
-UNDEFINED_INST(udiv);
-UNDEFINED_INST(umaddl);
-UNDEFINED_INST(umnegl);
-UNDEFINED_INST(umsubl);
-UNDEFINED_INST(umulh);
-UNDEFINED_INST(umull);
+static void AssembleADR(AARCH64Assembler* assembler, int op) {
+  Register rd = GetRegister(assembler);
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
+  bool known = false;
+  int64_t addr = 0;
+  AssemblerSymbol* sym = NULL;
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+    known = sym->defined && sym->section == ASM.current_section;
+    addr = sym->value;
+  } else {
+    addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+  }
+  int32_t offset = (int32_t)(addr - instruction_offset);
+  int32_t immlo = (offset & 0x3);
+  int32_t immhi = (offset >> 2) & 0x7ffff;
+  if (!known) {
+    if (sym != NULL) {
+      AssemblerRelocation* reloc = NewAssemblerRelocation(
+          sym, op == 0 ? R_AARCH64_ADR_PREL_LO21 : R_AARCH64_ADR_PREL_PG_HI21,
+          ASM.current_section, instruction_offset, 0);
+      AssemblerAddRelocation(&ASM, reloc);
+    }
+    immlo = 0;
+    immhi = 0;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      (op << 31) | (immlo << 29) | (0x10 << 24) | (immhi << 5) | rd.num);
+}
+
+static void Assemble_adr(AARCH64Assembler* assembler) {
+  AssembleADR(assembler, 0);
+}
+
+static void Assemble_adrp(AARCH64Assembler* assembler) {
+  AssembleADR(assembler, 1);
+}
+
+static void AssembleDataProcessing3Source(AARCH64Assembler* assembler,
+                                          int op54, int op31, int o0) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  NeedComma(assembler);
+  Register ra = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm) ||
+      !CheckRegWidths(assembler, &rd, &ra)) {
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0x1b << 24) | (op54 << 21) |
+      (rm.num << 16) | (o0 << 15) | (ra.num << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void AssembleDataProcessing3SourceLong(AARCH64Assembler* assembler,
+                                              int op54, int op31, int o0) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  NeedComma(assembler);
+  Register ra = GetRegister(assembler);
+  if (rd.width != kX || ra.width != kX || rn.width != kW || rm.width != kW) {
+    AssemblerError(&ASM, "Invalid widening multiply register widths");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      (1 << 31) | (0x1b << 24) | (op54 << 21) | (op31 << 15) |
+      (rm.num << 16) | (o0 << 15) | (ra.num << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_madd(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3Source(assembler, 0, 0, 0);
+}
+
+static void Assemble_msub(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3Source(assembler, 0, 0, 1);
+}
+
+static void AssembleMulAlias(AARCH64Assembler* assembler, int negate) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  Register zero = ZeroReg(rd.width);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0x1b << 24) |
+      (rm.num << 16) | (negate << 15) | (zero.num << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_mul(AARCH64Assembler* assembler) {
+  AssembleMulAlias(assembler, 0);
+}
+
+static void Assemble_mneg(AARCH64Assembler* assembler) {
+  AssembleMulAlias(assembler, 1);
+}
+
+static void AssembleNegAlias(AARCH64Assembler* assembler, int op, int set_flags) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Operand src = GetOperand(assembler);
+  if (src.type != kRegister) {
+    AssemblerError(&ASM, "Expected register");
+    return;
+  }
+  Register zero = ZeroReg(rd.width);
+  if (!CheckRegWidths(assembler, &rd, &src.reg)) {
+    return;
+  }
+  AssembleAddSubShiftedRegister(
+      assembler, &rd, &zero, &src, rd.width == kX, op, set_flags);
+}
+
+static void Assemble_neg(AARCH64Assembler* assembler) {
+  AssembleNegAlias(assembler, 1, 0);
+}
+
+static void Assemble_negs(AARCH64Assembler* assembler) {
+  AssembleNegAlias(assembler, 1, 1);
+}
+
+static void AssembleNgcAlias(AARCH64Assembler* assembler, int set_flags) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  Register zero = ZeroReg(rd.width);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (1 << 30) | (set_flags << 29) |
+      (0xd0 << 21) | (rm.num << 16) | (zero.num << 5) | rd.num);
+}
+
+static void Assemble_ngc(AARCH64Assembler* assembler) {
+  AssembleNgcAlias(assembler, 0);
+}
+
+static void Assemble_ngcs(AARCH64Assembler* assembler) {
+  AssembleNgcAlias(assembler, 1);
+}
+
+static void AssembleDivide(AARCH64Assembler* assembler, int unsigned_divide) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0xd6 << 21) |
+      (rm.num << 16) | ((unsigned_divide ? 2 : 3) << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_sdiv(AARCH64Assembler* assembler) {
+  AssembleDivide(assembler, 0);
+}
+
+static void Assemble_udiv(AARCH64Assembler* assembler) {
+  AssembleDivide(assembler, 1);
+}
+
+static void Assemble_smaddl(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3SourceLong(assembler, 1, 0, 0);
+}
+
+static void Assemble_smsubl(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3SourceLong(assembler, 1, 0, 1);
+}
+
+static void Assemble_umaddl(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3SourceLong(assembler, 5, 0, 0);
+}
+
+static void Assemble_umsubl(AARCH64Assembler* assembler) {
+  AssembleDataProcessing3SourceLong(assembler, 5, 0, 1);
+}
+
+static void AssembleLongMulAlias(AARCH64Assembler* assembler, int op54, int negate) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (rd.width != kX || rn.width != kW || rm.width != kW) {
+    AssemblerError(&ASM, "Invalid widening multiply register widths");
+    return;
+  }
+  Register zero = ZeroReg(kX);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      (1 << 31) | (0x1b << 24) | (op54 << 21) |
+      (rm.num << 16) | (negate << 15) | (zero.num << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_smull(AARCH64Assembler* assembler) {
+  AssembleLongMulAlias(assembler, 1, 0);
+}
+
+static void Assemble_smnegl(AARCH64Assembler* assembler) {
+  AssembleLongMulAlias(assembler, 1, 1);
+}
+
+static void Assemble_umull(AARCH64Assembler* assembler) {
+  AssembleLongMulAlias(assembler, 5, 0);
+}
+
+static void Assemble_umnegl(AARCH64Assembler* assembler) {
+  AssembleLongMulAlias(assembler, 5, 1);
+}
+
+static void AssembleHighMul(AARCH64Assembler* assembler, int unsigned_mul) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (rd.width != kX || rn.width != kX || rm.width != kX) {
+    AssemblerError(&ASM, "High multiply requires 64-bit registers");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      (1 << 31) | (0x1b << 24) | ((unsigned_mul ? 6 : 2) << 21) |
+      (rm.num << 16) | (0x1f << 10) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_smulh(AARCH64Assembler* assembler) {
+  AssembleHighMul(assembler, 0);
+}
+
+static void Assemble_umulh(AARCH64Assembler* assembler) {
+  AssembleHighMul(assembler, 1);
+}
 
 static void AssembleBitFieldMove(AARCH64Assembler* assembler, int opc,
                                  Register* rd, Register* rn,
@@ -1034,28 +1274,181 @@ static void Assemble_lsr(AARCH64Assembler* assembler) {
 }
 
 
-UNDEFINED_INST(bfi);
-UNDEFINED_INST(bfxil);
-UNDEFINED_INST(cls);
-UNDEFINED_INST(clz);
-UNDEFINED_INST(extr);
-UNDEFINED_INST(rbit);
-UNDEFINED_INST(rev);
-UNDEFINED_INST(rev16);
-UNDEFINED_INST(rev32);
-UNDEFINED_INST(sbfiz);
-UNDEFINED_INST(ubfiz);
-UNDEFINED_INST(sbfx);
-UNDEFINED_INST(ubfx);
-UNDEFINED_INST(sbxt);
-UNDEFINED_INST(sbxtb);
-UNDEFINED_INST(sbxth);
-UNDEFINED_INST(ubxt);
-UNDEFINED_INST(ubxtb);
-UNDEFINED_INST(ubxth);
-UNDEFINED_INST(sxtb);
-UNDEFINED_INST(sxth);
-UNDEFINED_INST(sxtw);
+static void AssembleMove(AARCH64Assembler* assembler);
+
+static bool GetImmediate(AARCH64Assembler* assembler, int64_t* value) {
+  LexMatch(&ASM.lex, TOK(hash));
+  *value = AssemblerEvaluateExpression(&ASM);
+  return true;
+}
+
+static bool GetLsbWidth(AARCH64Assembler* assembler, int64_t* lsb,
+                        int64_t* width) {
+  if (!GetImmediate(assembler, lsb) || !NeedComma(assembler)) {
+    return false;
+  }
+  return GetImmediate(assembler, width);
+}
+
+static void AssembleBitfieldAlias(AARCH64Assembler* assembler, int opc,
+                                  bool insert_at_lsb) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) || !NeedComma(assembler)) {
+    return;
+  }
+  int64_t lsb = 0;
+  int64_t width = 0;
+  if (!GetLsbWidth(assembler, &lsb, &width)) {
+    return;
+  }
+  int64_t max = rd.width == kX ? 64 : 32;
+  if (lsb < 0 || width <= 0 || lsb + width > max) {
+    AssemblerError(&ASM, "Invalid bitfield range");
+    return;
+  }
+  int immr = insert_at_lsb ? (int)((max - lsb) & (max - 1)) : (int)lsb;
+  int imms = insert_at_lsb ? (int)(width - 1) : (int)(lsb + width - 1);
+  AssembleBitFieldMove(assembler, opc, &rd, &rn, rd.width == kX,
+                       rd.width == kX, immr, imms);
+}
+
+static void Assemble_bfi(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 1, true);
+}
+
+static void Assemble_bfxil(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 1, false);
+}
+
+static void Assemble_sbfiz(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 0, true);
+}
+
+static void Assemble_ubfiz(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 2, true);
+}
+
+static void Assemble_sbfx(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 0, false);
+}
+
+static void Assemble_ubfx(AARCH64Assembler* assembler) {
+  AssembleBitfieldAlias(assembler, 2, false);
+}
+
+static void AssembleExtendAlias(AARCH64Assembler* assembler, int opc,
+                                int imms, bool wide_dest) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (wide_dest && rd.width != kX) {
+    AssemblerError(&ASM, "Expected 64-bit destination");
+    return;
+  }
+  int sf = rd.width == kX;
+  int n = sf;
+  AssembleBitFieldMove(assembler, opc, &rd, &rn, sf, n, 0, imms);
+}
+
+static void Assemble_sbxt(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 31, true);
+}
+
+static void Assemble_sbxtb(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 7, true);
+}
+
+static void Assemble_sbxth(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 15, true);
+}
+
+static void Assemble_sxtb(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 7, true);
+}
+
+static void Assemble_sxth(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 15, true);
+}
+
+static void Assemble_sxtw(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 0, 31, true);
+}
+
+static void Assemble_ubxt(AARCH64Assembler* assembler) {
+  AssembleMove(assembler);
+}
+
+static void Assemble_ubxtb(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 2, 7, false);
+}
+
+static void Assemble_ubxth(AARCH64Assembler* assembler) {
+  AssembleExtendAlias(assembler, 2, 15, false);
+}
+
+static void AssembleDataProcessing1Source(AARCH64Assembler* assembler, int opcode) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn)) {
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0x2d6 << 21) |
+      (opcode << 10) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_rbit(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 0);
+}
+
+static void Assemble_rev16(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 1);
+}
+
+static void Assemble_rev32(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 2);
+}
+
+static void Assemble_rev(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 3);
+}
+
+static void Assemble_clz(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 4);
+}
+
+static void Assemble_cls(AARCH64Assembler* assembler) {
+  AssembleDataProcessing1Source(assembler, 5);
+}
+
+static void Assemble_extr(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  NeedComma(assembler);
+  int64_t lsb = 0;
+  GetImmediate(assembler, &lsb);
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  int max = rd.width == kX ? 63 : 31;
+  if (lsb < 0 || lsb > max) {
+    AssemblerError(&ASM, "Invalid extract shift");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0x13 << 24) |
+      ((rd.width == kX) << 22) | (rm.num << 16) |
+      ((int)lsb << 10) | (rn.num << 5) | rd.num);
+}
 
 static void AssembleMovInstruction(AARCH64Assembler* assembler, Register* rd,
                                    int sf, int opc, int imm16, int hw) {
@@ -1223,10 +1616,92 @@ static void Assemble_movn(AARCH64Assembler* assembler) {
 static void Assemble_movz(AARCH64Assembler* assembler) {
   AssembleMoveX(assembler, 2);
 }
-UNDEFINED_INST(asri);
-UNDEFINED_INST(eons);
-UNDEFINED_INST(mvn);
-UNDEFINED_INST(ror);
+
+static void Assemble_asri(AARCH64Assembler* assembler) {
+  Assemble_asr(assembler);
+}
+
+static void Assemble_eons(AARCH64Assembler* assembler) {
+  AssembleLogical(assembler, 3, 1, /*immed_ok=*/false, /*one_operand=*/false);
+}
+
+static void Assemble_mvn(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Operand rm = GetOperand(assembler);
+  if (rm.type != kRegister) {
+    AssemblerError(&ASM, "Expected register");
+    return;
+  }
+  Register zero = ZeroReg(rd.width);
+  if (!CheckRegWidths(assembler, &rd, &rm.reg)) {
+    return;
+  }
+  AssembleLogicalShiftedRegister(
+      assembler, &rd, &zero, &rm, rd.width == kX, 1, 1);
+}
+
+static void Assemble_ror(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  int64_t shift = 0;
+  GetImmediate(assembler, &shift);
+  if (!CheckRegWidths(assembler, &rd, &rn)) {
+    return;
+  }
+  int max = rd.width == kX ? 63 : 31;
+  if (shift < 0 || shift > max) {
+    AssemblerError(&ASM, "Invalid rotate amount");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0x13 << 24) |
+      ((rd.width == kX) << 22) | (rn.num << 16) |
+      ((int)shift << 10) | (rn.num << 5) | rd.num);
+}
+
+static bool GetCondition(AARCH64Assembler* assembler, Condition* cond) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected condition code");
+    return false;
+  }
+#define COND(name) \
+  if (StringEqualCaseBlind(&ASM.lex.spelling, #name)) { \
+    *cond = kCond_##name; \
+    LexNextToken(&ASM.lex); \
+    return true; \
+  }
+  COND(eq);
+  COND(ne);
+  COND(cs);
+  COND(hs);
+  COND(cc);
+  COND(lo);
+  COND(mi);
+  COND(pl);
+  COND(vs);
+  COND(vc);
+  COND(hi);
+  COND(ls);
+  COND(ge);
+  COND(lt);
+  COND(gt);
+  COND(le);
+  COND(al);
+#undef COND
+  AssemblerError(&ASM, "Unknown condition code %s", ASM.lex.spelling.value);
+  return false;
+}
+
+static Condition InvertCondition(Condition cond) {
+  if (cond == kCond_al) {
+    return cond;
+  }
+  return cond ^ 1;
+}
 
 static void AssembleConditionalBranch(AARCH64Assembler* assembler,
                                       int cond, int consistent) {
@@ -1282,9 +1757,19 @@ COND_BRANCH(al);
 #undef COND_BRANCH
 
 static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, int l) {
-  // TODO: branch to a symbol with a relocation.
-  int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+  int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
+  bool known = false;
+  int64_t addr = 0;
+  AssemblerSymbol* sym = NULL;
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+    known = sym->defined && sym->section == ASM.current_section;
+    addr = sym->value;
+  } else {
+    addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+  }
+  int32_t offset = (int32_t)(addr - instruction_offset);
 
   // We have a 26 bit immediate which is a multiple of 4, so this give us
   // 28 bits of range.
@@ -1297,12 +1782,20 @@ static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, in
     AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
     return;
   }
-  // imm19 is encoded as the top 19 bits of the offset.
+  if (!known) {
+    if (sym != NULL) {
+      AssemblerRelocation* reloc = NewAssemblerRelocation(
+          sym, l ? R_AARCH64_CALL26 : R_AARCH64_JUMP26,
+          ASM.current_section, instruction_offset, 0);
+      AssemblerAddRelocation(&ASM, reloc);
+    }
+    offset = 0;
+  }
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (l << 31) |
                     (0x5 << 26) |
-                    ((offset >> 2) << 5));    // imm26.
+                    ((offset >> 2) & 0x3ffffff));    // imm26.
 }
 
 static void Assemble_b(AARCH64Assembler* assembler) {
@@ -1440,19 +1933,138 @@ static void Assemble_tbz(AARCH64Assembler* assembler) {
   AssembleTestAndBranch(assembler, 0);
 }
 
-UNDEFINED_INST(ccmn);
-UNDEFINED_INST(ccmni);
-UNDEFINED_INST(ccmp);
-UNDEFINED_INST(ccmpi);
-UNDEFINED_INST(cinc);
-UNDEFINED_INST(cinv);
-UNDEFINED_INST(cneg);
-UNDEFINED_INST(csel);
-UNDEFINED_INST(cset);
-UNDEFINED_INST(csetm);
-UNDEFINED_INST(csinc);
-UNDEFINED_INST(csinv);
-UNDEFINED_INST(csneg);
+static void AssembleConditionalCompare(AARCH64Assembler* assembler, int op,
+                                       bool force_immediate) {
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Operand op2 = GetOperand(assembler);
+  NeedComma(assembler);
+  LexMatch(&ASM.lex, TOK(hash));
+  int64_t nzcv = AssemblerEvaluateExpression(&ASM);
+  NeedComma(assembler);
+  Condition cond;
+  if (!GetCondition(assembler, &cond)) {
+    return;
+  }
+  if (nzcv < 0 || nzcv > 15) {
+    AssemblerError(&ASM, "Invalid NZCV value");
+    return;
+  }
+  if (op2.type == kRegister && !force_immediate) {
+    if (!CheckRegWidths(assembler, &rn, &op2.reg)) {
+      return;
+    }
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        ((rn.width == kX) << 31) | (op << 30) | (0x1d2 << 21) |
+        (op2.reg.num << 16) | (cond << 12) |
+        (rn.num << 5) | (int)nzcv);
+  } else if (op2.type == kIntImmediate) {
+    if (op2.i < 0 || op2.i > 31) {
+      AssemblerError(&ASM, "Invalid conditional compare immediate");
+      return;
+    }
+    AssemblerEmitWord(
+        &ASM, ASM.current_section,
+        ((rn.width == kX) << 31) | (op << 30) | (0x1d2 << 21) |
+        (1 << 11) | (op2.i << 16) | (cond << 12) |
+        (rn.num << 5) | (int)nzcv);
+  } else {
+    AssemblerError(&ASM, "Invalid conditional compare operand");
+  }
+}
+
+static void Assemble_ccmn(AARCH64Assembler* assembler) {
+  AssembleConditionalCompare(assembler, 0, false);
+}
+
+static void Assemble_ccmni(AARCH64Assembler* assembler) {
+  AssembleConditionalCompare(assembler, 0, true);
+}
+
+static void Assemble_ccmp(AARCH64Assembler* assembler) {
+  AssembleConditionalCompare(assembler, 1, false);
+}
+
+static void Assemble_ccmpi(AARCH64Assembler* assembler) {
+  AssembleConditionalCompare(assembler, 1, true);
+}
+
+static void AssembleConditionalSelect(AARCH64Assembler* assembler, int op,
+                                      int op2, bool alias_one_reg,
+                                      bool alias_zero, bool invert_cond) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn;
+  Register rm;
+  if (alias_zero) {
+    rn = ZeroReg(rd.width);
+    rm = ZeroReg(rd.width);
+  } else {
+    rn = GetRegister(assembler);
+    if (!alias_one_reg) {
+      NeedComma(assembler);
+      rm = GetRegister(assembler);
+    } else {
+      rm = rn;
+    }
+  }
+  if (!alias_zero) {
+    NeedComma(assembler);
+  }
+  Condition cond;
+  if (!GetCondition(assembler, &cond)) {
+    return;
+  }
+  if (invert_cond) {
+    cond = InvertCondition(cond);
+  }
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (op << 30) | (0xd4 << 21) |
+      (rm.num << 16) | (cond << 12) | (op2 << 10) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_csel(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 0, 0, false, false, false);
+}
+
+static void Assemble_csinc(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 0, 1, false, false, false);
+}
+
+static void Assemble_csinv(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 1, 0, false, false, false);
+}
+
+static void Assemble_csneg(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 1, 1, false, false, false);
+}
+
+static void Assemble_cset(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 0, 1, false, true, true);
+}
+
+static void Assemble_csetm(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 1, 0, false, true, true);
+}
+
+static void Assemble_cinc(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 0, 1, true, false, true);
+}
+
+static void Assemble_cinv(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 1, 0, true, false, true);
+}
+
+static void Assemble_cneg(AARCH64Assembler* assembler) {
+  AssembleConditionalSelect(assembler, 1, 1, true, false, true);
+}
 
 static void AssembleLoadLiteral(AARCH64Assembler* assembler, Register* rt,
                                 int opc, int v,
@@ -1630,7 +2242,7 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
               return;
           }
           int opc = is_load;
-          if (rt.width == kX || rt.width == kW) {
+          if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
             size = rt.size;
           }
           // TODO: extended register variant.
@@ -1640,11 +2252,11 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         // Immediate offset.
         // TODO: check imm9 size.
         int opc = is_signed << 1 | is_load;
-        if (rt.width == kX || rt.width == kW) {
+        if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
           size = rt.size;
         }
 
-        int imm9 = offset.i / size;
+        int imm9 = offset.i;
         AssembleLoadStoreImmediate(assembler, &rt, &rn, size, rt.fp_or_simd, opc, 0, pre_indexed, imm9);
       } else {
         AssemblerError(&ASM, "Invalid offset for LDR/STR");
@@ -1707,11 +2319,11 @@ void Assemble_strh(AARCH64Assembler* assembler) {
 }
 
 void Assemble_ldr(AARCH64Assembler* assembler) {
-  AssembleLoadStore(assembler, 1, 2, 0, false);
+  AssembleLoadStore(assembler, 1, -1, 0, false);
 }
 
 void Assemble_str(AARCH64Assembler* assembler) {
-  AssembleLoadStore(assembler, 0, 2, 0, false);
+  AssembleLoadStore(assembler, 0, -1, 0, false);
 }
 
 void Assemble_ldp(AARCH64Assembler* assembler) {
@@ -1722,37 +2334,355 @@ void Assemble_stp(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 0, 0, 0, true);
 }
 
-UNDEFINED_INST(ldpsw);
-UNDEFINED_INST(ldur);
-UNDEFINED_INST(ldurb);
-UNDEFINED_INST(ldurh);
-UNDEFINED_INST(ldursb);
-UNDEFINED_INST(ldursh);
-UNDEFINED_INST(ldursw);
-UNDEFINED_INST(prfm);
-UNDEFINED_INST(stur);
-UNDEFINED_INST(sturb);
-UNDEFINED_INST(sturh);
+static void Assemble_ldpsw(AARCH64Assembler* assembler) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rt2 = GetRegister(assembler);
+  NeedComma(assembler);
+  if (!LexMatch(&ASM.lex, TOK(lsquare))) {
+    AssemblerError(&ASM, "Expected [");
+    return;
+  }
+  Register rn = GetRegister(assembler);
+  int32_t offset = 0;
+  if (LexMatch(&ASM.lex, TOK(comma))) {
+    Operand op = GetOperand(assembler);
+    if (op.type != kIntImmediate) {
+      AssemblerError(&ASM, "Expected immediate offset");
+      return;
+    }
+    offset = op.i;
+  }
+  if (!LexMatch(&ASM.lex, TOK(rsquare))) {
+    AssemblerError(&ASM, "Expected ]");
+    return;
+  }
+  int imm7 = offset / 4;
+  CheckImmediateWidth(assembler, imm7, 7);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x69400000 | ((imm7 & 0x7f) << 15) |
+      (rt2.num << 10) | (rn.num << 5) | rt.num);
+}
 
-UNDEFINED_INST(fldr);
-UNDEFINED_INST(fstr);
-UNDEFINED_INST(fadd);
-UNDEFINED_INST(fsub);
-UNDEFINED_INST(fmul);
-UNDEFINED_INST(fdiv);
-UNDEFINED_INST(fsqrt);
-UNDEFINED_INST(fmin);
-UNDEFINED_INST(fmax);
-UNDEFINED_INST(fcvtsd);     // Single to double
-UNDEFINED_INST(fcvtds);     // Double to single.
-UNDEFINED_INST(fcvtns);
-UNDEFINED_INST(fcvtnu);
-UNDEFINED_INST(fcvt);     // Copy from int reg (no conversion)
-UNDEFINED_INST(fmov);
-UNDEFINED_INST(fcmp);
-UNDEFINED_INST(scvtf);
-UNDEFINED_INST(ucvtf);
-UNDEFINED_INST(fneg);
+static void AssembleUnscaledLoadStore(AARCH64Assembler* assembler, int is_load,
+                                      int size, int is_signed) {
+  Register rt = GetRegister(assembler);
+  NeedComma(assembler);
+  if (!LexMatch(&ASM.lex, TOK(lsquare))) {
+    AssemblerError(&ASM, "Expected [");
+    return;
+  }
+  Register rn = GetRegister(assembler);
+  if (rn.fp_or_simd) {
+    AssemblerError(&ASM, "Base must be an integer register");
+    return;
+  }
+  int32_t imm9 = 0;
+  if (LexMatch(&ASM.lex, TOK(comma))) {
+    Operand offset = GetOperand(assembler);
+    if (offset.type != kIntImmediate) {
+      AssemblerError(&ASM, "Expected immediate offset");
+      return;
+    }
+    imm9 = offset.i;
+  }
+  if (!LexMatch(&ASM.lex, TOK(rsquare))) {
+    AssemblerError(&ASM, "Expected ]");
+    return;
+  }
+  if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
+    size = rt.size;
+  }
+  int opc = is_signed && is_load ? (rt.width == kX ? 2 : 3) : is_load;
+  CheckImmediateWidth(assembler, imm9, 9);
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      (size << 30) | (0x7 << 27) | (rt.fp_or_simd << 26) |
+      (opc << 22) | ((imm9 & 0x1ff) << 12) |
+      (rn.num << 5) | rt.num);
+}
+
+static void Assemble_ldur(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, -1, 0);
+}
+
+static void Assemble_ldurb(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, 0, 0);
+}
+
+static void Assemble_ldurh(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, 1, 0);
+}
+
+static void Assemble_ldursb(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, 0, 1);
+}
+
+static void Assemble_ldursh(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, 1, 1);
+}
+
+static void Assemble_ldursw(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 1, 2, 1);
+}
+
+static void Assemble_prfm(AARCH64Assembler* assembler) {
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    LexNextToken(&ASM.lex);
+  } else {
+    GetOperand(assembler);
+  }
+  NeedComma(assembler);
+  if (!LexMatch(&ASM.lex, TOK(lsquare))) {
+    AssemblerError(&ASM, "Expected [");
+    return;
+  }
+  Register rn = GetRegister(assembler);
+  int32_t offset = 0;
+  if (LexMatch(&ASM.lex, TOK(comma))) {
+    Operand op = GetOperand(assembler);
+    if (op.type != kIntImmediate) {
+      AssemblerError(&ASM, "Expected immediate offset");
+      return;
+    }
+    offset = op.i;
+  }
+  if (!LexMatch(&ASM.lex, TOK(rsquare))) {
+    AssemblerError(&ASM, "Expected ]");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0xf9800000 | (((offset / 8) & 0xfff) << 10) | (rn.num << 5));
+}
+
+static void Assemble_stur(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 0, -1, 0);
+}
+
+static void Assemble_sturb(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 0, 0, 0);
+}
+
+static void Assemble_sturh(AARCH64Assembler* assembler) {
+  AssembleUnscaledLoadStore(assembler, 0, 1, 0);
+}
+
+static void Assemble_fldr(AARCH64Assembler* assembler) {
+  AssembleLoadStore(assembler, 1, -1, 0, false);
+}
+
+static void Assemble_fstr(AARCH64Assembler* assembler) {
+  AssembleLoadStore(assembler, 0, -1, 0, false);
+}
+
+static void AssembleFPDataProcessing2(AARCH64Assembler* assembler, int opcode) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!rd.fp_or_simd || !rn.fp_or_simd || !rm.fp_or_simd) {
+    AssemblerError(&ASM, "Expected floating point registers");
+    return;
+  }
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  int ftype = rd.width == kD;
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e200000 | (ftype << 22) | (opcode << 12) |
+      (rm.num << 16) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_fadd(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x28);
+}
+
+static void Assemble_fsub(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x38);
+}
+
+static void Assemble_fmul(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x08);
+}
+
+static void Assemble_fdiv(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x18);
+}
+
+static void Assemble_fsqrt(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (!rd.fp_or_simd || !rn.fp_or_simd ||
+      !CheckRegWidths(assembler, &rd, &rn)) {
+    AssemblerError(&ASM, "Expected matching floating point registers");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e21c000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_fmin(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x58);
+}
+
+static void Assemble_fmax(AARCH64Assembler* assembler) {
+  AssembleFPDataProcessing2(assembler, 0x48);
+}
+
+static void AssembleFPIntBitcast(AARCH64Assembler* assembler, Register* rd,
+                                 Register* rn) {
+  bool is_64bit = rd->width == kD || rd->width == kX;
+  uint32_t base;
+  if (rd->fp_or_simd) {
+    base = is_64bit ? 0x9e670000 : 0x1e270000;
+  } else {
+    base = is_64bit ? 0x9e660000 : 0x1e260000;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      base | (rn->num << 5) | rd->num);
+}
+
+static void AssembleFPConvertPrecision(AARCH64Assembler* assembler,
+                                       RegisterWidth src_width,
+                                       RegisterWidth dest_width) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (rd.fp_or_simd != rn.fp_or_simd) {
+    AssembleFPIntBitcast(assembler, &rd, &rn);
+    return;
+  }
+  if (!rd.fp_or_simd || !rn.fp_or_simd ||
+      rd.width != dest_width || rn.width != src_width) {
+    AssemblerError(&ASM, "Invalid floating point conversion registers");
+    return;
+  }
+  int ftype = src_width == kD;
+  int opc = dest_width == kD ? 1 : 0;
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e224000 | (ftype << 22) | (opc << 15) |
+      (rn.num << 5) | rd.num);
+}
+
+static void Assemble_fcvtsd(AARCH64Assembler* assembler) {
+  AssembleFPConvertPrecision(assembler, kS, kD);
+}
+
+static void Assemble_fcvtds(AARCH64Assembler* assembler) {
+  AssembleFPConvertPrecision(assembler, kD, kS);
+}
+
+static void AssembleFPToInt(AARCH64Assembler* assembler, int unsigned_convert) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (rd.fp_or_simd || !rn.fp_or_simd) {
+    AssemblerError(&ASM, "Expected integer destination and FP source");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e200000 | ((rd.width == kX) << 31) | ((rn.width == kD) << 22) |
+      (unsigned_convert << 16) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_fcvtns(AARCH64Assembler* assembler) {
+  AssembleFPToInt(assembler, 0);
+}
+
+static void Assemble_fcvtnu(AARCH64Assembler* assembler) {
+  AssembleFPToInt(assembler, 1);
+}
+
+static void Assemble_fcvt(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (rd.fp_or_simd == rn.fp_or_simd) {
+    AssemblerError(&ASM, "Expected one floating point and one integer register");
+    return;
+  }
+  AssembleFPIntBitcast(assembler, &rd, &rn);
+}
+
+static void Assemble_fmov(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (rd.fp_or_simd != rn.fp_or_simd) {
+    AssembleFPIntBitcast(assembler, &rd, &rn);
+    return;
+  }
+  if (!rd.fp_or_simd || !CheckRegWidths(assembler, &rd, &rn)) {
+    AssemblerError(&ASM, "Expected matching floating point registers");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e204000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_fcmp(AARCH64Assembler* assembler) {
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!rn.fp_or_simd || !rm.fp_or_simd) {
+    AssemblerError(&ASM, "Expected floating point registers");
+    return;
+  }
+  if (!CheckRegWidths(assembler, &rn, &rm)) {
+    return;
+  }
+  int ftype = rn.width == kD;
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e202000 | (ftype << 22) | (rm.num << 16) | (rn.num << 5));
+}
+
+static void AssembleIntToFP(AARCH64Assembler* assembler, int unsigned_convert) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (!rd.fp_or_simd || rn.fp_or_simd) {
+    AssemblerError(&ASM, "Expected FP destination and integer source");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e220000 | ((rn.width == kX) << 31) | ((rd.width == kD) << 22) |
+      (unsigned_convert << 16) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_scvtf(AARCH64Assembler* assembler) {
+  AssembleIntToFP(assembler, 0);
+}
+
+static void Assemble_ucvtf(AARCH64Assembler* assembler) {
+  AssembleIntToFP(assembler, 1);
+}
+
+static void Assemble_fneg(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  if (!rd.fp_or_simd || !rn.fp_or_simd ||
+      !CheckRegWidths(assembler, &rd, &rn)) {
+    AssemblerError(&ASM, "Expected matching floating point registers");
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      0x1e214000 | ((rd.width == kD) << 22) | (rn.num << 5) | rd.num);
+}
 
 #undef INST
 #undef UNDEFINED_INST
