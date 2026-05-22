@@ -33,18 +33,13 @@ static int ConsoleRead(Device* dev, uint16_t addr) {
   ACIADevice* acia = (ACIADevice*)dev;
   if (addr == acia->data_addr) {
     char buf[1];
-    read(1, buf, 1);
+    read(0, buf, 1);
     return buf[0];
   }
   if (addr == acia->csr_addr) {
     int result = 2;   // TDRE
-    // This is always going to be an LDA in a loop to check for data
-    // being present in the serial port.  If we do a nonblock poll
-    // the interpreter will spin in a tight loop.  We don't really
-    // want this so let's just block until stdin has data.
     struct pollfd fd = {0, POLLIN, 0};    // Poll for stdin.
-    // Blocking poll.
-    if (poll(&fd, 1, -1) == 1) {
+    if (poll(&fd, 1, 0) == 1) {
       result |= 1;  // Can read.
     }
     return result;

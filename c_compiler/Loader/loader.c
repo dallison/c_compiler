@@ -330,16 +330,13 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       length = AlignUp(length, page_size);
       DPRINTF("aligned length: %" PRIx64 "\n", length);
 
-      // Protection for mmap and open.  We have to open the file in order the mmap it.
-      // If the mapping is going to allow writes to the pages we need to open the file
-      // in read-write mode, but we won't be writing to it.
+      // Protection for mmap. MAP_PRIVATE writable mappings do not require the
+      // underlying file descriptor to be writable.
       int prot = PROT_READ;
-      int file_prot = O_RDONLY;
       if ((segment->flags & PF(w)) != 0 ||
           (loader->flags & LOADER_WRITEABLE_TEXT) != 0) {
         // Segment is writeable.
         prot |= PROT_WRITE;
-        file_prot = O_RDWR;
       }
       if ((segment->flags & PF(x)) != 0) {
         // Segment is executable.
@@ -348,7 +345,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       
              // Open the ELF file again to get a file descriptor that we can use
       // for mmap.
-      int fd = open(filename->value, file_prot);
+      int fd = open(filename->value, O_RDONLY);
       if (fd < 0) {
         printf("Failed to open ELF file segment\n");
         return false;

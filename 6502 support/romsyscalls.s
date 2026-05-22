@@ -519,7 +519,8 @@ syscall_ok:
 
 .global __exit
 __exit:
-// TODO
+  LDA #1
+  .byte 0xef      // Interpreter exit
 
 
 // write syscall

@@ -1,3 +1,6 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
 COMMON_COPTS = [
@@ -539,4 +542,62 @@ done
         ":archivist",
         ":davecc",
     ],
+)
+
+genrule(
+    name = "support_rom_65c02",
+    srcs = [
+        "6502 support/Interpreter ROM/introm.map",
+        "6502 support/Interpreter ROM/introm.s",
+    ],
+    outs = ["6502_support/6502rom.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target 65c02 \
+  -Wl,-T"6502 support/Interpreter ROM/introm.map" \
+  -Wl,-tintrom \
+  -static \
+  "6502 support/Interpreter ROM/introm.s" \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_65c02_exe",
+    srcs = glob(["libc/include/**/*.h"]) + [
+        ":libc_65c02",
+        "hello_6502/main.c",
+    ],
+    outs = ["hello_6502/hello.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target 65c02 \
+  -static \
+  hello_6502/main.c \
+  "$(location :libc_65c02)" \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_65c02_output",
+    srcs = [
+        ":hello_65c02_exe",
+        ":support_rom_65c02",
+    ],
+    outs = ["hello_6502/hello.out"],
+    cmd = """
+set -euo pipefail
+
+"$(location :6502)" \
+  -rom "$(location :support_rom_65c02)" \
+  "$(location :hello_65c02_exe)" > "$@"
+""",
+    tools = [":6502"],
 )
