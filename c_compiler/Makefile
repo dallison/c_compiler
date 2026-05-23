@@ -6,6 +6,9 @@ CFLAGS = \
 	-I. \
 	-IELF \
 	-I6502 \
+	-Iaarch64 \
+	-Ip_code \
+	-Irisc_v \
 	$(OPT_DEBUG) $(ADD_FLAGS) \
  	-DDAVECC_SYSROOT_HDRS=$(DAVECC_SYSROOT_HDRS)
 
@@ -22,27 +25,27 @@ UTILS_OBJS = \
 	config.o
 
 RISC_V_OBJS = \
-    risc_v_reg_alloc.o \
-    risc_v_codegen.o \
-    risc_v_emitter.o \
-    risc_v_assembler.o \
-    risc_v_optimize.o \
-    risc_v_target.o \
+    risc_v/risc_v_reg_alloc.o \
+    risc_v/risc_v_codegen.o \
+    risc_v/risc_v_emitter.o \
+    risc_v/risc_v_assembler.o \
+    risc_v/risc_v_optimize.o \
+    risc_v/risc_v_target.o \
 
 AARCH64_OBJS = \
-    aarch64_reg_alloc.o \
-    aarch64_codegen.o \
-    aarch64_emitter.o \
-    aarch64_assembler.o \
-    aarch64_target.o \
+    aarch64/aarch64_reg_alloc.o \
+    aarch64/aarch64_codegen.o \
+    aarch64/aarch64_emitter.o \
+    aarch64/aarch64_assembler.o \
+    aarch64/aarch64_target.o \
 
 P_CODE_OBJS = \
-    p_code_reg_alloc.o \
-    p_code_codegen.o \
-    p_code_emitter.o \
-    p_code_assembler.o \
-    p_code_optimize.o \
-    p_code_target.o \
+    p_code/p_code_reg_alloc.o \
+    p_code/p_code_codegen.o \
+    p_code/p_code_emitter.o \
+    p_code/p_code_assembler.o \
+    p_code/p_code_optimize.o \
+    p_code/p_code_target.o \
 
 6502_OBJS = \
     6502/6502_reg_alloc.o \

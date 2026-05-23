@@ -3,6 +3,7 @@ CFLAGS = -I../c_compiler \
 	-I../c_compiler/ELF \
 	-I../c_compiler/AR \
 	-I../c_compiler/6502 \
+	-I../c_compiler/risc_v \
 	-I../Linker \
 	-I../c_compiler/Loader \
 	-I../c_compiler/Loader/Architecture \
