@@ -15,6 +15,14 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#ifndef COMPILER_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define COMPILER_UNUSED __attribute__((unused))
+#else
+#define COMPILER_UNUSED
+#endif
+#endif
+
 struct Vector;
 
 // This is a struct the implements a general purpose variable

@@ -135,12 +135,12 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
 // Main instruction printer.
 static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
-  if (inst->opcode == P_OP(label)) {
+  if (((int)inst->opcode == (int)P_OP(label))) {
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     return;
   }
   
-  if (inst->opcode == P_OP(named_label)) {
+  if (((int)inst->opcode == (int)P_OP(named_label))) {
     TargetNamedLabel* label = (TargetNamedLabel*)inst;
     fprintf(fp, "%s:\n", label->name);
     return;
@@ -176,7 +176,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
     case P_OP(call):
     case P_OP(callf):
     case P_OP(calld): {
-      assert(inst->operand[0]->opcode == P_OP(symbol));
+      assert(((int)inst->operand[0]->opcode == (int)P_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
       fprintf(fp, "\t%-8s %s\n", "call", sym->symbol->name.value);
       return;
@@ -295,14 +295,14 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s#%d", sep, (int)TargetIntValue(inst->operand[i]));
-          } else if (inst->operand[i]->opcode == P_OP(symbol)) {
+          } else if (((int)inst->operand[i]->opcode == (int)P_OP(symbol))) {
             TargetSymbol* sym = (TargetSymbol*)inst->operand[i];
             fprintf(fp, "%s%s", sep,
                     sym->symbol->name.value);
             if (StorageIs(sym->symbol->storage, STO(thread))) {
               fprintf(fp, "@tls");
             }
-          } else if (inst->operand[i]->opcode == P_OP(literal)) {
+          } else if (((int)inst->operand[i]->opcode == (int)P_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
             fprintf(fp, "%s.str.%d", sep, literal->literal_id);
           } else {

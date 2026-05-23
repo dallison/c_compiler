@@ -66,7 +66,7 @@ static void PrintSymbolNode(SymbolNode* node, int indent) {
          parent == NULL ? "" : parent->symbol->name.value);
 }
 
-static void Printer(BinaryTreeNode* node, int depth, void* data) {
+static COMPILER_UNUSED void Printer(BinaryTreeNode* node, int depth, void* data) {
   PrintSymbolNode((SymbolNode*)node, depth);
 }
 

@@ -179,36 +179,6 @@ static void DeleteINode(INode* inode) {
   free(inode);
 }
 
-static void DoIndent(int indent) {
-  for (int i = 0; i < indent; i++) {
-    putchar(' ');
-  }
-}
-
-
-static void PrintINode(INode* inode, int indent) {
-  DoIndent(indent);
-  printf("%p: parent: %p current: %p expr: %p ", inode,
-         inode->parent, inode->current, inode->expr);
-  switch (inode->kind) {
-    case kIScalar:
-      printf("scalar\n");
-      break;
-    case kIStruct:
-    case kIArray:
-      printf("%s {\n", inode->kind == kIArray ? "array" : "struct");
-      for (size_t i = 0; i < inode->children.length; i++) {
-         PrintINode(inode->children.value.p[i], indent + 2);
-      }
-  
-      DoIndent(indent);
-      printf("}\n");
-      break;
-  }
-  DoIndent(indent);
-  printf("}\n");
-}
-
 static bool AdvanceCurrent(INode* inode) {
   if (inode == NULL) {
     return true;
@@ -394,7 +364,7 @@ static INode* FindDesignator(INode* inode,
 // inside the braces.  If there are designated initializers in there
 // we need to use the maximum value of the array index to set the
 // current size and keep going.
-static int GetArraySizeFromInitializer(BracedInitializerASTNode* braced_init) {
+static COMPILER_UNUSED int GetArraySizeFromInitializer(BracedInitializerASTNode* braced_init) {
   int size = 0;
   for (size_t i = 0; i < braced_init->initializers->length; i++) {
     ASTNode* init = braced_init->initializers->value.p[i];

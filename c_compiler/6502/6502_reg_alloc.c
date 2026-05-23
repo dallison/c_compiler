@@ -262,7 +262,7 @@ static bool IsSpillOnly(TargetInstruction* inst) {
       return false;
   }
 }
-static int RegisterSize(W65C02Register* reg) {
+static COMPILER_UNUSED int RegisterSize(W65C02Register* reg) {
   switch (reg->type) {
       case k6502RegTypeB:
       return 1;
@@ -797,7 +797,7 @@ static bool UsesFixedRegister(TargetInstruction* inst) {
 
 // rmov instructions use the register allocated to their first
 // operand as their own register.
-static void AllocateForRmov(W65C02RegisterAllocator* allocator,
+static COMPILER_UNUSED void AllocateForRmov(W65C02RegisterAllocator* allocator,
                             TargetInstruction* inst) {
   W65C02Register* reg = (W65C02Register*)inst->operand[0]->reg;
   TargetInstruction* src = inst->operand[1];
@@ -838,7 +838,7 @@ static void EnsureRegFileOffset(W65C02RegisterAllocator* allocator,
   RegFileMarkUsed(allocator, reg);
 }
 
-static void SaveZprOffsetForEmit(W65C02RegisterAllocator* allocator,
+static COMPILER_UNUSED void SaveZprOffsetForEmit(W65C02RegisterAllocator* allocator,
                                   TargetInstruction* inst,
                                   TargetInstruction* reg_inst) {
   if (reg_inst == NULL || reg_inst->reg == NULL) {
@@ -848,7 +848,7 @@ static void SaveZprOffsetForEmit(W65C02RegisterAllocator* allocator,
   EnsureRegFileOffset(allocator, reg);
 }
 
-static bool SavesZprOffsetForEmit(W65C02Opcode opcode) {
+static COMPILER_UNUSED bool SavesZprOffsetForEmit(W65C02Opcode opcode) {
   switch (opcode) {
     case W65C02_OP(var_addr):
     case W65C02_OP(var_addrb):

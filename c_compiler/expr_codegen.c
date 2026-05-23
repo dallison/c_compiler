@@ -199,7 +199,7 @@ static int BitSizeToByteSize(int bit_size) {
   return 1;
 }
 
-static IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_size) {
+static COMPILER_UNUSED IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_size) {
   // Round bit size to byte size.
   int size = BitSizeToByteSize(bit_size);
 

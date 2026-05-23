@@ -17,7 +17,7 @@
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag);
 static DIE* NewMemberDIE(DebugBuilder* builder, StructMember* member);
 static DIE* NewEnumConstDIE(DebugBuilder* builder, Symbol* c);
-static void DebugAbbreviationPrint(DebugAbbreviation* abbrev, int level);
+static COMPILER_UNUSED void DebugAbbreviationPrint(DebugAbbreviation* abbrev, int level);
 static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type);
 static void DIEInit(DIE* die, DW_TAG tag, DIEVirtuals* virtuals,
                     bool has_children);
@@ -805,7 +805,7 @@ static void WriteUnsignedLEB128(Buffer* buffer, uint64_t value) {
   } while (value != 0);
 }
 
-static void WriteSignedLEB128(Buffer* buffer, int64_t value) {
+static COMPILER_UNUSED void WriteSignedLEB128(Buffer* buffer, int64_t value) {
   bool more = true;
   while (more) {
     int8_t byte = value & 0x7f;
@@ -1368,7 +1368,7 @@ static int8_t* DecodeUnsignedLEB128(int8_t* data, int64_t* result) {
   return data;
 }
 
-static void DebugAbbreviationPrint(DebugAbbreviation* abbrev, int level) {
+static COMPILER_UNUSED void DebugAbbreviationPrint(DebugAbbreviation* abbrev, int level) {
   DoIndent(level);
 
   // Decode the signature.  It starts with the tag, then the has_children

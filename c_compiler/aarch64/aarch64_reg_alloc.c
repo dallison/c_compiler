@@ -182,17 +182,9 @@ static void FreeRegister(AARCH64RegisterAllocator* allocator, AARCH64Register* r
 // frees up all now-unused operands and destination.
 static void FreeRegisters(AARCH64RegisterAllocator* allocator,
                           TargetInstruction* inst) {
-  int dest_id = -1;
-  if (inst->dest != NULL) {
-    dest_id = inst->dest->id;
-  }
-  bool dest_in_operands = false;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
-      if (op->id == dest_id) {
-        dest_in_operands = true;
-      }
       if (AARCH64IsFixedRegister(op)) {
         continue;
       }
@@ -418,10 +410,10 @@ static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
   AssignRegister(reg, inst);
 }
 
-static void AllocateForRmov(AARCH64RegisterAllocator* allocator,
+static COMPILER_UNUSED void AllocateForRmov(AARCH64RegisterAllocator* allocator,
                             TargetInstruction* inst) {
-  assert(inst->opcode == AARCH64_OP(mv) || inst->opcode == AARCH64_OP(fmv_s) ||
-         inst->opcode == AARCH64_OP(fmv_d));
+  assert(((int)inst->opcode == (int)AARCH64_OP(mv)) || ((int)inst->opcode == (int)AARCH64_OP(fmv_s)) ||
+         ((int)inst->opcode == (int)AARCH64_OP(fmv_d)));
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
@@ -432,7 +424,7 @@ static void AllocateForRmov(AARCH64RegisterAllocator* allocator,
   AARCH64Register* reg = (AARCH64Register*)dest->reg;
   assert(reg != NULL);
   
-  if (src->opcode == AARCH64_OP(spill)) {
+  if (((int)src->opcode == (int)AARCH64_OP(spill))) {
     // If we are rmoving a spill we can just load it directly into the
     // destination register.  To do this, we convert the rmov
     // into a reload instruction
@@ -458,7 +450,7 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
-    if (op != NULL && op->opcode == AARCH64_OP(spill)) {
+    if (op != NULL && ((int)op->opcode == (int)AARCH64_OP(spill))) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)AARCH64_OP(reload),
                                                         op);
       TrapReload(reload);
@@ -686,7 +678,7 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
     if (inst->reg == NULL) {
       continue;
     }
-    if (inst->opcode == AARCH64_OP(spill) ||
+    if (((int)inst->opcode == (int)AARCH64_OP(spill)) ||
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }

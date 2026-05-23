@@ -83,7 +83,7 @@ static uint32_t EncodeLdr64Imm(int rt, int rn, int32_t imm12) {
          ((uint32_t)rn << 5) | (uint32_t)rt;
 }
 
-static uint32_t EncodeBlr(int rn) {
+static COMPILER_UNUSED uint32_t EncodeBlr(int rn) {
   return 0xD63F0000u | ((uint32_t)rn << 5);
 }
 

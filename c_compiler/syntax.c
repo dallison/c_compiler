@@ -500,7 +500,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     Symbol* old_sym = NULL;
     if (sym != NULL) {
       old_sym = FindGlobalSymbol(&sym->name);
-      bool ok = true;
       if (old_sym != NULL) {
         // We have this symbol already.  If it's a declaration then it's
         // OK to declare (and define) it now.  If it's a definition then
@@ -512,14 +511,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
               // This is 'extern int foo = xxx', a definition
               SyntaxError(syntax, "Duplicate definition of symbol %s",
                           sym->name.value);
-              ok = false;
             }
           } else {
             if (IsDefinition(parser, old_sym, storage)) {
               // This is a declaration of a previously known definition.
               SyntaxError(syntax, "Duplicate definition of symbol %s",
                           sym->name.value);
-              ok = false;
             }
           }
         } else {
@@ -539,7 +536,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           int lineno, start, end;
           DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
           ReportNote(filename, lineno, "Previously declared here");
-          ok = false;
         } else {
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
@@ -549,7 +545,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           if (old_storage != new_storage) {
             SyntaxError(syntax, "Symbol %s redeclared with different linkage",
                         sym->name.value);
-            ok = false;
           }
           sym->flags.is_defined = true;
         }
@@ -773,7 +768,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
            const char* filename;
            int lineno, start, end;
            DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
-           ReportNote(filename, lineno, "Previously declared here");          ok = false;
+           ReportNote(filename, lineno, "Previously declared here");
         } else {
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.

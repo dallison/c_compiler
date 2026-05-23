@@ -94,7 +94,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       bool is_candidate = true;
       
       // Check if destination is not in the output filter.
-      if (dest != NULL && (dest->opcode == RV_OP(tmp) ||
+      if (dest != NULL && (((int)dest->opcode == (int)RV_OP(tmp)) ||
           RVIsFixedRegister(dest) ||
           BitSetContains(&filter, dest->id) ||
           RVIsResult(dest))) {
@@ -103,7 +103,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
 
       // If destination is not in the output filter then if the
       // expression is not used in this block it can be removed.
-      if (is_candidate && inst->opcode != RV_OP(tmp) &&
+      if (is_candidate && ((int)inst->opcode != (int)RV_OP(tmp)) &&
           !RVIsFixedRegister(inst) &&
           !BitSetContains(&filter, inst->id)) {
         TrapRemoveInstruction(inst);
@@ -111,7 +111,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
         continue;
       }
 #if 0
-    } else if (inst->opcode == RV_OP(rmov)) {
+    } else if (((int)inst->opcode == (int)RV_OP(rmov))) {
        TargetInstruction* result = inst->operand[0];
        if (inst->users.length > 0) {
          // Result of rmov is being used.  This overrides the destination
@@ -123,7 +123,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
        if (RVIsResult(result)) {
          goto dont_optimize;
        }
-       if ((RVOpcode)result->opcode == RV_OP(sp)) {
+       if ((RVOpcode)((int)result->opcode == (int)RV_OP(sp))) {
          goto dont_optimize;
        }
       TargetInstruction* src = inst->operand[1];
@@ -161,7 +161,6 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       }
 #endif
     }
-dont_optimize:;
     // Add all of the instruction's operands to the filter.
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
       if (inst->operand[i] != NULL) {
@@ -305,7 +304,7 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
       TargetInstruction* operand = inst->operand[i];
       if (operand != NULL) {
-        if (operand->opcode == RV_OP(mv) && operand->users.length == 1) {
+        if (((int)operand->opcode == (int)RV_OP(mv)) && operand->users.length == 1) {
           TargetInstruction* mv = operand;
           if (mv->operand[0]->opcode == (TargetOpcode)RV_OP(x0)) {
             // Found mv xx, x0.  Replace instruction operand with x0.

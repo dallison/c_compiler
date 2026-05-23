@@ -13,7 +13,7 @@
 #include "elf.h"
 #include "p_code_machine.h"
 
-static int CompareString(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareString(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
   return strcmp(s1->key.p, s2->key.p);

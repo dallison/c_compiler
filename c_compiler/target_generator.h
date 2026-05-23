@@ -15,6 +15,9 @@
 
 #define TARGET_OP(op) kTarget_##op
 
+#define TargetOpcodeEq(op, arch_op) ((int)(op) == (int)(arch_op))
+#define TargetOpcodeNe(op, arch_op) ((int)(op) != (int)(arch_op))
+
 typedef enum {
   // Pseudo ops.
   TARGET_OP(save),      // Save registers.

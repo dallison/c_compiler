@@ -163,7 +163,7 @@ static void DecrementStackPointer(RVEmitter* emitter, int stack_frame_size,
   }
 }
 
-static void IncrementStackPointer(RVEmitter* emitter, int stack_frame_size,
+static COMPILER_UNUSED void IncrementStackPointer(RVEmitter* emitter, int stack_frame_size,
                                   FILE* fp) {
   if (stack_frame_size > 0x7ff) {
     // Too big for an immediate.  Load into t0 and use an add instruction.
@@ -176,7 +176,7 @@ static void IncrementStackPointer(RVEmitter* emitter, int stack_frame_size,
 }
 
 // Load a floating point or integer register from the stack frame.
-static void LoadRegisterFromFrame(RVEmitter* emitter, int reg,
+static COMPILER_UNUSED void LoadRegisterFromFrame(RVEmitter* emitter, int reg,
                                   int offset, bool is_fp,
                                   const char* symbol_name,
                                   FILE* fp) {
@@ -199,7 +199,7 @@ static void LoadRegisterFromFrame(RVEmitter* emitter, int reg,
   fprintf(fp, "\t\t// %s\n", symbol_name);
 }
 
-static void GenerateOffsetFromFrame(RVEmitter* emitter, int reg,
+static COMPILER_UNUSED void GenerateOffsetFromFrame(RVEmitter* emitter, int reg,
                                     int offset,
                                     const char* symbol_name,
                                     FILE* fp) {
@@ -456,7 +456,6 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   // ld s0, S-8(sp)   - restore frame pointer.
   // addi sp, sp, S   - increment sp
 
-  int stack_frame_size = StackFrameSize(emitter);
   char buf1[8];
 
   bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
@@ -468,16 +467,12 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
   }
-  int frame_pointer_offset = stack_frame_size - 16 - space_above_frame_pointer;
   // int return_address_offset = stack_frame_size - 8 - space_above_frame_pointer;
 
   // A leaf procedure doesn't save the return address.
-  if (is_leaf) {
-    frame_pointer_offset += 8;
-  } else {
+  if (!is_leaf) {
     fprintf(fp, "\t// Restored registers.\n");
   }
-  Vector regs = {0};
 
   int offset = emitter->saved_reg_offset;
 
@@ -573,7 +568,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     fprintf(fp, "\n\t// *** Basic block %zd\n\n", b->block_id);
     emitter->current_block = inst->block;
   }
-  if (inst->opcode == RV_OP(label)) {
+  if (((int)inst->opcode == (int)RV_OP(label))) {
     if ((inst->flags & RV_EXPORTED_LABEL) != 0) {
       // Label may be exported.
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
@@ -582,13 +577,13 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     return;
   }
 
-  if (inst->opcode == RV_OP(named_label)) {
+  if (((int)inst->opcode == (int)RV_OP(named_label))) {
     TargetNamedLabel* label = (TargetNamedLabel*)inst;
     fprintf(fp, "%s:\n", label->name);
     return;
   }
   
-  if (inst->opcode == RV_OP(ivarreg) || inst->opcode == RV_OP(fvarreg)) {
+  if (((int)inst->opcode == (int)RV_OP(ivarreg)) || ((int)inst->opcode == (int)RV_OP(fvarreg))) {
     return;
   }
   if (!IsPrintable(inst)) {
@@ -634,7 +629,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     }
     case RV_OP(call):
     case RV_OP(callf): {
-      assert(inst->operand[0]->opcode == RV_OP(symbol));
+      assert(((int)inst->operand[0]->opcode == (int)RV_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
       fprintf(fp, "\t%-12s%s\n", "call", sym->symbol->name.value);
       return;
@@ -765,21 +760,21 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
 
-      } else if (inst->operand[1]->opcode == RV_OP(symbol)) {
+      } else if (((int)inst->operand[1]->opcode == (int)RV_OP(symbol))) {
         assert((inst->flags & RV_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst, buf1, sizeof(buf1)),
                 ((TargetSymbol*)inst->operand[1])->symbol->name.value,
                 GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[1]->opcode == RV_OP(label)) {
+      } else if (((int)inst->operand[1]->opcode == (int)RV_OP(label))) {
         assert((inst->flags & RV_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
                 GetRegisterName(inst, buf1, sizeof(buf1)),
                 func_name, inst->operand[1]->id,
                 GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[1]->opcode == RV_OP(x0)) {
+      } else if (((int)inst->operand[1]->opcode == (int)RV_OP(x0))) {
         fprintf(fp, "%s, 0(%s)\n",
                 GetRegisterName(inst, buf1, sizeof(buf1)),
                 GetRegisterName(inst->operand[0], buf2,
@@ -809,7 +804,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                 offset,
                 GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[2]->opcode == RV_OP(symbol)) {
+      } else if (((int)inst->operand[2]->opcode == (int)RV_OP(symbol))) {
         assert((inst->flags & RV_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst->operand[0], buf1,
@@ -817,7 +812,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                 ((TargetSymbol*)inst->operand[2])->symbol->name.value,
                 GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[2]->opcode == RV_OP(label)) {
+      } else if (((int)inst->operand[2]->opcode == (int)RV_OP(label))) {
         assert((inst->flags & RV_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
                 GetRegisterName(inst->operand[0], buf1,
@@ -825,7 +820,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                 func_name, inst->operand[2]->id,
                 GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[2]->opcode == RV_OP(x0)) {
+      } else if (((int)inst->operand[2]->opcode == (int)RV_OP(x0))) {
         fprintf(fp, "%s, 0(%s)\n",
                 GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
@@ -875,9 +870,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(j): {
       assert(inst->operand[0] != NULL);
       TargetInstruction* dest = inst->operand[0];
-      if (dest->opcode == RV_OP(label)) {
+      if (((int)dest->opcode == (int)RV_OP(label))) {
         fprintf(fp, ".%s_label_%d\n", func_name, inst->operand[0]->id);
-      } else if (dest->opcode == RV_OP(symbol)) {
+      } else if (((int)dest->opcode == (int)RV_OP(symbol))) {
         fprintf(fp, "%s\n", ((TargetSymbol*)dest)->symbol->name.value);
       } else {
         assert(false);
@@ -933,7 +928,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
-          } else if (inst->operand[i]->opcode == RV_OP(symbol)) {
+          } else if (((int)inst->operand[i]->opcode == (int)RV_OP(symbol))) {
             if ((inst->flags & RV_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
                       ((TargetSymbol*)inst->operand[i])->symbol->name.value);
@@ -941,7 +936,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
               fprintf(fp, "%s%s", sep,
                       ((TargetSymbol*)inst->operand[i])->symbol->name.value);
             }
-          } else if (inst->operand[i]->opcode == RV_OP(literal)) {
+          } else if (((int)inst->operand[i]->opcode == (int)RV_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
             fprintf(fp, "%s.str.%d", sep, literal->literal_id);
           } else {

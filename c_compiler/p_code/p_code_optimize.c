@@ -27,16 +27,16 @@ static void RemoveUnusedExpressions(PCodeGenerator* pcode) {
         // No references to an expression, remove it.
         TargetDeleteInstruction(&pcode->base, inst);
       }
-    } else if (inst->opcode == P_OP(mov) && inst->dest != NULL) {
+    } else if (((int)inst->opcode == (int)P_OP(mov)) && inst->dest != NULL) {
       // A mov can be eliminated if it has zero references and
       // its dest is a tmp with one reference.
       TargetInstruction* dest = inst->dest;
-      if (inst->users.length == 0 && dest->opcode == P_OP(tmp) &&
+      if (inst->users.length == 0 && ((int)dest->opcode == (int)P_OP(tmp)) &&
           dest->users.length == 1) {
         TargetDeleteInstruction(&pcode->base, inst);
       }
-    } else if ((PCodeOpcode)inst->opcode == P_OP(decsp) ||
-              (PCodeOpcode)inst->opcode == P_OP(incsp)) {
+    } else if ((PCodeOpcode)((int)inst->opcode == (int)P_OP(decsp)) ||
+              (PCodeOpcode)((int)inst->opcode == (int)P_OP(incsp))) {
       // Incsp or Descp with zero bytes can go away.
       TargetConstant* size = (TargetConstant*)inst->operand[0];
       if (size->value.ivalue == 0) {

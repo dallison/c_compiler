@@ -101,7 +101,7 @@ void ValueSetDelete(ValueSet* set) {
   HashTableDestruct(&set->values);
 }
 
-static bool CanPoolFromDominator(Generator* gen, BasicBlock* block) {
+static COMPILER_UNUSED bool CanPoolFromDominator(Generator* gen, BasicBlock* block) {
   for (size_t i = 0; i < block->in_edges.length; i++) {
     BlockId id = block->in_edges.value.w[i];
     BasicBlock* in_block = gen->basic_blocks.value.p[id];
@@ -299,7 +299,7 @@ static void PrintValueList(void* list, void* data) {
   }
 }
 
-static void PrintValueSet(ValueSet* set) {
+static COMPILER_UNUSED void PrintValueSet(ValueSet* set) {
   HashTableTraverse(&set->values, PrintValueList, NULL);
 }
 

@@ -1087,7 +1087,7 @@ static size_t PrintLengthDelimitedToken(String* line, size_t pos) {
   return pos;
 }
 
-static void PrintTokenizedLine(String* line) {
+static COMPILER_UNUSED void PrintTokenizedLine(String* line) {
   size_t i = 0;
   while (i < line->length) {
     switch ((PreprocessingToken)line->value[i++]) {
@@ -1344,7 +1344,7 @@ static size_t ReadIdentifier(String* line, size_t pos, String* result) {
 
 // Reads a string, returning the new position in the line.  The result
 // is appended to the result argument.
-static size_t ReadString(String* line, size_t pos, String* result) {
+static COMPILER_UNUSED size_t ReadString(String* line, size_t pos, String* result) {
   if (pos < line->length && line->value[pos] == '"') {
     pos++;
     while (pos < line->length) {

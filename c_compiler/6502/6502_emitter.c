@@ -100,7 +100,7 @@ static bool IsPrintable(TargetInstruction* inst) {
   return true;
 }
 
-static int RegisterSize(W65C02Register* reg) {
+static COMPILER_UNUSED int RegisterSize(W65C02Register* reg) {
   switch (reg->type) {
     case k6502RegTypeI:
       return 2;
@@ -114,7 +114,7 @@ static int RegisterSize(W65C02Register* reg) {
   }
 }
 
-static void PrintRegister(W65C02Register* reg, FILE* fp) {}
+static COMPILER_UNUSED void PrintRegister(W65C02Register* reg, FILE* fp) {}
 
 static struct {
   int offset;
@@ -208,7 +208,7 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
       break;
     case kAddrModeIndirect:
       if (!Is65c02()) {
-        if (inst->opcode != W65C02_OP(jmp)) {
+        if (((int)inst->opcode != (int)W65C02_OP(jmp))) {
           fprintf(stderr, "Invalid 6502 indirect instruction\n");
           abort();
         }
@@ -276,7 +276,7 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
     case kAddrModeAbsoluteIndexedX:
       break;
     case kAddrModeLiteralIndexedX: {
-      assert(operand->opcode == W65C02_OP(literalrefX));
+      assert(((int)operand->opcode == (int)W65C02_OP(literalrefX)));
       TargetConstant* literal = (TargetConstant*)operand->operand[0];
       Literal* lit = CompilerFindLiteral(literal->literal_id);
       assert(lit != NULL);
@@ -318,12 +318,12 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     fprintf(fp, ".chkaddr 0x%x\n", inst->addr);
   }
   TrapInstruction(inst);
-  if (inst->opcode == W65C02_OP(label)) {
+  if (((int)inst->opcode == (int)W65C02_OP(label))) {
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
     return;
   }
 
-  if (inst->opcode == W65C02_OP(named_label)) {
+  if (((int)inst->opcode == (int)W65C02_OP(named_label))) {
     TargetNamedLabel* label = (TargetNamedLabel*)inst;
     fprintf(fp, "%s:\n", label->name);
     return;

@@ -13,7 +13,7 @@
 #include <inttypes.h>
 #include "target_generator.h"
 
-static void FilePrinter(int index, File* file, void* data) {
+static COMPILER_UNUSED void FilePrinter(int index, File* file, void* data) {
   FILE* fp = data;
   if (index == 0) {
     // Don't emit index 0 as this is the current file.

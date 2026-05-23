@@ -13,6 +13,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef COMPILER_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define COMPILER_UNUSED __attribute__((unused))
+#else
+#define COMPILER_UNUSED
+#endif
+#endif
+
 // Simple binary map between two values.  The map is held as a contiguous array
 // of MapKeyValue struct, each of which has a key and a value.  The map also
 // has a comparison function that can compare two MapKeyValue pairs for ordering

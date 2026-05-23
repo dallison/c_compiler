@@ -211,7 +211,7 @@ static int64_t ReadInt(ConfigParser* parser,char first) {
 }
 
 // Initial quote has been read.
-static void ReadString(ConfigParser* parser, String* s) {
+static COMPILER_UNUSED void ReadString(ConfigParser* parser, String* s) {
   StringInit(s, NULL);
   while (!feof(parser->fp)) {
     int ch = ReadChar(parser);

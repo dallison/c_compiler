@@ -255,7 +255,7 @@ const char* PCodeOpcodeName(int op) {
   }
 }
 
-static TargetInstruction* ArgumentPointer(PCodeGenerator* pcode) {
+static COMPILER_UNUSED TargetInstruction* ArgumentPointer(PCodeGenerator* pcode) {
   if (pcode->argument_pointer == NULL) {
     pcode->argument_pointer =
         TargetEmit(&pcode->base, TargetNewInstruction((TargetOpcode)P_OP(ap)));
@@ -457,7 +457,7 @@ static TargetInstruction* NewInstruction2(PCodeOpcode opcode,
   return TargetNewInstruction2((TargetOpcode)opcode, op1, op2);
 }
 
-static TargetInstruction* NewInstruction3(PCodeOpcode opcode,
+static COMPILER_UNUSED TargetInstruction* NewInstruction3(PCodeOpcode opcode,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2,
                                           TargetInstruction* op3) {
@@ -468,37 +468,37 @@ static TargetInstruction* Emit(PCodeGenerator* pcode, TargetInstruction* inst) {
   return TargetEmit(&pcode->base, inst);
 }
 
-static TargetInstruction* EmitBefore(PCodeGenerator* pcode,
+static COMPILER_UNUSED TargetInstruction* EmitBefore(PCodeGenerator* pcode,
                                      TargetInstruction* inst,
                                      TargetInstruction* pos) {
   return TargetEmitBefore(&pcode->base, inst, pos);
 }
 
-static TargetInstruction* EmitAfter(PCodeGenerator* pcode,
+static COMPILER_UNUSED TargetInstruction* EmitAfter(PCodeGenerator* pcode,
                                     TargetInstruction* inst,
                                     TargetInstruction* pos) {
   return TargetEmitAfter(&pcode->base, inst, pos);
 }
 
-static TargetInstruction* EmitConstant(PCodeGenerator* pcode,
+static COMPILER_UNUSED TargetInstruction* EmitConstant(PCodeGenerator* pcode,
                                        TargetInstruction* c) {
   return TargetEmitConstant(&pcode->base, c);
 }
 
-static TargetInstruction* EmitSymbol(PCodeGenerator* pcode,
+static COMPILER_UNUSED TargetInstruction* EmitSymbol(PCodeGenerator* pcode,
                                      TargetInstruction* c) {
   return TargetEmitSymbol(&pcode->base, c);
 }
 
-static TargetInstruction* FramePointer(PCodeGenerator* pcode) {
+static COMPILER_UNUSED TargetInstruction* FramePointer(PCodeGenerator* pcode) {
   return TargetFramePointer(&pcode->base);
 }
 
-static TargetInstruction* StackPointer(PCodeGenerator* pcode) {
+static COMPILER_UNUSED TargetInstruction* StackPointer(PCodeGenerator* pcode) {
   return TargetStackPointer(&pcode->base);
 }
 
-static TargetInstruction* ThreadPointer(PCodeGenerator* pcode) {
+static COMPILER_UNUSED TargetInstruction* ThreadPointer(PCodeGenerator* pcode) {
   return TargetThreadPointer(&pcode->base);
 }
 
@@ -516,7 +516,7 @@ static TargetInstruction* GetIntConstant(PCodeGenerator* pcode, IRNode* node,
   return TargetGetIntConstant(&pcode->base, node, type, value);
 }
 
-static TargetInstruction* GetFloatingPointConstant(PCodeGenerator* pcode,
+static COMPILER_UNUSED TargetInstruction* GetFloatingPointConstant(PCodeGenerator* pcode,
                                                    IRNode* node,
                                                    TargetType type,
                                                    double value) {
@@ -577,7 +577,7 @@ static struct {
     {NULL, 0},
 };
 
-static TargetInstruction* LoadVariableValue(PCodeGenerator* pcode, IRNode* node,
+static COMPILER_UNUSED TargetInstruction* LoadVariableValue(PCodeGenerator* pcode, IRNode* node,
                                             TargetInstruction* addr,
                                             TargetInstruction* offset) {
   PCodeOpcode opcode = P_OP(ldw);
@@ -592,7 +592,7 @@ static TargetInstruction* LoadVariableValue(PCodeGenerator* pcode, IRNode* node,
 }
 
 // TODO: allow override of tls model per variable.
-static TargetInstruction* GetTlsVariableAddress(PCodeGenerator* pcode, IRNode* node) {
+static COMPILER_UNUSED TargetInstruction* GetTlsVariableAddress(PCodeGenerator* pcode, IRNode* node) {
   switch (compiler->tls_model) {
     default:
       abort();
@@ -640,7 +640,7 @@ static TargetInstruction* GetTlsVariableAddress(PCodeGenerator* pcode, IRNode* n
 }
 
 
-static void GetTlsAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
+static COMPILER_UNUSED void GetTlsAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
                                                  TargetInstruction** addr,
                                                  TargetInstruction** offset) {
   switch (compiler->tls_model) {
@@ -1333,7 +1333,7 @@ static void PushArg(PCodeGenerator* pcode, IRNode* node,
 
 // Passing a struct or union to a function needs to copy
 // the memory from the address to the stack.
-static void PushStructArg(PCodeGenerator* pcode, IRNode* node, size_t *args_size) {
+static COMPILER_UNUSED void PushStructArg(PCodeGenerator* pcode, IRNode* node, size_t *args_size) {
   size_t struct_size = node->type->size;
   *args_size += struct_size;
   
@@ -1385,7 +1385,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   }
   TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
   PCodeOpcode opcode;
-  if (addr->opcode == P_OP(symbol)) {
+  if (((int)addr->opcode == (int)P_OP(symbol))) {
     if (TypeIsFloat(node->type)) {
       opcode = P_OP(callf);
     } else if (TypeIsDouble(node->type)) {

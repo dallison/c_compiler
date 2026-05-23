@@ -245,7 +245,6 @@ int SourceGetChar(Source* src) {
 void SourceReadLine(Source* src, String* line) {
   while (!SourceEof(src)) {
     String newline = {0};
-    int last_ch = '\0';
     for (;;) {
       int ch = SourceGetChar(src);
       if (ch == EOF) {
@@ -255,7 +254,6 @@ void SourceReadLine(Source* src, String* line) {
         break;
       }
       StringAppendChar(&newline, ch);
-      last_ch = ch;
     }
     src->lineno++;
 

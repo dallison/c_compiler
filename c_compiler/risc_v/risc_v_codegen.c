@@ -576,7 +576,7 @@ bool RVIsFloatingPoint(TargetInstruction* inst) {
 }
 
 bool RVIsSymbol(TargetInstruction* inst) {
-  return (RVOpcode)inst->opcode == RV_OP(symbol);
+  return (RVOpcode)((int)inst->opcode == (int)RV_OP(symbol));
 }
 
 bool RVIsCall(TargetInstruction* inst) {
@@ -706,15 +706,15 @@ bool RVIsConditionalBranch(TargetInstruction* inst) {
 }
 
 bool RVIsSpill(TargetInstruction* inst) {
-  return (RVOpcode)inst->opcode == RV_OP(spill);
+  return (RVOpcode)((int)inst->opcode == (int)RV_OP(spill));
 }
 
 bool RVIsLabel(TargetInstruction* inst) {
-  return (RVOpcode)inst->opcode == RV_OP(label);
+  return (RVOpcode)((int)inst->opcode == (int)RV_OP(label));
 }
 
 bool RVIsReturn(TargetInstruction* inst) {
-  return (RVOpcode)inst->opcode == RV_OP(ret);
+  return (RVOpcode)((int)inst->opcode == (int)RV_OP(ret));
 }
 
 int RVIntValue(TargetInstruction* inst) {
@@ -813,7 +813,7 @@ static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
   return reg;
 }
 
-static void SavedArgumentRegisterDelete(SavedArgumentRegister* reg) {
+static COMPILER_UNUSED void SavedArgumentRegisterDelete(SavedArgumentRegister* reg) {
   free(reg);
 }
 
@@ -829,7 +829,7 @@ static TargetInstruction* NewInstruction2(RVOpcode opcode,
   return TargetNewInstruction2((TargetOpcode)opcode, op1, op2);
 }
 
-static TargetInstruction* NewInstruction3(RVOpcode opcode,
+static COMPILER_UNUSED TargetInstruction* NewInstruction3(RVOpcode opcode,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2,
                                           TargetInstruction* op3) {
@@ -840,29 +840,29 @@ static TargetInstruction* Emit(RVGenerator* rv, TargetInstruction* inst) {
   return TargetEmit(&rv->base, inst);
 }
 
-static TargetInstruction* EmitBefore(RVGenerator* rv, TargetInstruction* inst,
+static COMPILER_UNUSED TargetInstruction* EmitBefore(RVGenerator* rv, TargetInstruction* inst,
                                      TargetInstruction* pos) {
   return TargetEmitBefore(&rv->base, inst, pos);
 }
 
-static TargetInstruction* EmitAfter(RVGenerator* rv, TargetInstruction* inst,
+static COMPILER_UNUSED TargetInstruction* EmitAfter(RVGenerator* rv, TargetInstruction* inst,
                                     TargetInstruction* pos) {
   return TargetEmitAfter(&rv->base, inst, pos);
 }
 
-static TargetInstruction* EmitConstant(RVGenerator* rv, TargetInstruction* c) {
+static COMPILER_UNUSED TargetInstruction* EmitConstant(RVGenerator* rv, TargetInstruction* c) {
   return TargetEmitConstant(&rv->base, c);
 }
 
-static TargetInstruction* EmitSymbol(RVGenerator* rv, TargetInstruction* c) {
+static COMPILER_UNUSED TargetInstruction* EmitSymbol(RVGenerator* rv, TargetInstruction* c) {
   return TargetEmitSymbol(&rv->base, c);
 }
 
-static TargetInstruction* FramePointer(RVGenerator* rv) {
+static COMPILER_UNUSED TargetInstruction* FramePointer(RVGenerator* rv) {
   return TargetFramePointer(&rv->base);
 }
 
-static TargetInstruction* StackPointer(RVGenerator* rv) {
+static COMPILER_UNUSED TargetInstruction* StackPointer(RVGenerator* rv) {
   return TargetStackPointer(&rv->base);
 }
 
@@ -880,7 +880,7 @@ static TargetInstruction* GetIntConstant(RVGenerator* rv, IRNode* node,
   return TargetGetIntConstant(&rv->base, node, type, value);
 }
 
-static TargetInstruction* GetFloatingPointConstant(RVGenerator* rv,
+static COMPILER_UNUSED TargetInstruction* GetFloatingPointConstant(RVGenerator* rv,
                                                    IRNode* node,
                                                    TargetType type,
                                                    double value) {
@@ -1029,7 +1029,7 @@ static TargetInstruction* AddValue(RVGenerator* rv, TargetInstruction* src,
     return AddImmediate(rv, src, TargetIntValue(value));
   }
 
-  if (value->opcode == RV_OP(x0)) {
+  if (((int)value->opcode == (int)RV_OP(x0))) {
     return src;
   }
   return Emit(rv, NewInstruction2(RV_OP(add), src, value));
@@ -1378,7 +1378,7 @@ static struct {
     {NULL, 0},
 };
 
-static TargetInstruction* LoadVariableValue(RVGenerator* rv, IRNode* node,
+static COMPILER_UNUSED TargetInstruction* LoadVariableValue(RVGenerator* rv, IRNode* node,
                                             TargetInstruction* addr,
                                             TargetInstruction* offset) {
   RVOpcode opcode = RV_OP(ld);
@@ -1842,7 +1842,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   return Emit(rv, inst);
 }
 
-static TargetInstruction* LowerRmov(RVGenerator* rv, IRNode* node) {
+static COMPILER_UNUSED TargetInstruction* LowerRmov(RVGenerator* rv, IRNode* node) {
   TargetInstruction* dest = GetLoweredNode(node->inputs.value.p[0]);
   TargetInstruction* src = Materialize(rv, node->inputs.value.p[1]);
   RVOpcode opcode = IR2RV(node->opcode);
@@ -2153,7 +2153,7 @@ static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opco
   }
 
   TargetInstruction* result = NULL;
-  if ((RVOpcode)addr->opcode == RV_OP(addi) && TargetIsZero(offset)) {
+  if ((RVOpcode)((int)addr->opcode == (int)RV_OP(addi)) && TargetIsZero(offset)) {
     // If the address is calculated using an addi instruction we can
     // combine the immediate from the addi with the load.
     // The addi instruction will no longer be used and will be eliminated
@@ -3201,7 +3201,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     }
     rv->base.num_calls--;
   } else {
-    if (addr->opcode == RV_OP(symbol)) {
+    if (((int)addr->opcode == (int)RV_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? RV_OP(callf) : RV_OP(call);
     } else {
@@ -3671,7 +3671,7 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
   return arg->type->size < 4 ? 4 : arg->type->size;
 }
 
-static int CompareRegisterVar(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
   const PoolEntry* var1 = *(const PoolEntry**)a;
   const PoolEntry* var2 = *(const PoolEntry**)b;
 

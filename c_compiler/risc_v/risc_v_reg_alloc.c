@@ -182,22 +182,14 @@ static void FreeRegister(RVRegisterAllocator* allocator, RVRegister* reg) {
 // frees up all now-unused operands and destination.
 static void FreeRegisters(RVRegisterAllocator* allocator,
                           TargetInstruction* inst) {
-  int dest_id = -1;
-  if (inst->dest != NULL) {
-    dest_id = inst->dest->id;
-  }
-  bool dest_in_operands = false;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
-      if (op->id == dest_id) {
-        dest_in_operands = true;
-      }
       if (RVIsFixedRegister(op)) {
         continue;
       }
 #if 0
-      if (op->opcode == RV_OP(reload) || op->opcode == RV_OP(spill)) {
+      if (((int)op->opcode == (int)RV_OP(reload)) || ((int)op->opcode == (int)RV_OP(spill))) {
         continue;
       }
 #endif
@@ -278,7 +270,7 @@ static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
 #if 0
-          if (owner->opcode == RV_OP(spill) || owner->opcode == RV_OP(reload)) {
+          if (((int)owner->opcode == (int)RV_OP(spill)) || ((int)owner->opcode == (int)RV_OP(reload))) {
             // Not spill or reload instruction.
             continue;
           }
@@ -436,10 +428,10 @@ static void AllocateVariableRegister(RVRegisterAllocator* allocator,
   AssignRegister(reg, inst);
 }
 
-static void AllocateForRmov(RVRegisterAllocator* allocator,
+static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
                             TargetInstruction* inst) {
-  assert(inst->opcode == RV_OP(mv) || inst->opcode == RV_OP(fmv_s) ||
-         inst->opcode == RV_OP(fmv_d));
+  assert(((int)inst->opcode == (int)RV_OP(mv)) || ((int)inst->opcode == (int)RV_OP(fmv_s)) ||
+         ((int)inst->opcode == (int)RV_OP(fmv_d)));
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
@@ -450,7 +442,7 @@ static void AllocateForRmov(RVRegisterAllocator* allocator,
   RVRegister* reg = (RVRegister*)dest->reg;
   assert(reg != NULL);
   
-  if (src->opcode == RV_OP(spill)) {
+  if (((int)src->opcode == (int)RV_OP(spill))) {
     // If we are rmoving a spill we can just load it directly into the
     // destination register.  To do this, we convert the rmov
     // into a reload instruction
@@ -476,7 +468,7 @@ static void ReloadSpills(RVRegisterAllocator* allocator,
                          TargetInstruction* inst) {
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
-    if (op != NULL && op->opcode == RV_OP(spill)) {
+    if (op != NULL && ((int)op->opcode == (int)RV_OP(spill))) {
       TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)RV_OP(reload),
                                                         op);
       TrapReload(reload);
@@ -696,7 +688,7 @@ static void InitializeBasicBlockRegisters(RVRegisterAllocator* allocator,
     if (inst->reg == NULL) {
       continue;
     }
-    if (inst->opcode == RV_OP(spill) ||
+    if (((int)inst->opcode == (int)RV_OP(spill)) ||
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }

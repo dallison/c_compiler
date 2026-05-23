@@ -244,7 +244,7 @@ static int64_t SegmentFileOffsetDelta(const ELFProgramHeader* segment) {
   return segment->offset - AlignDown(segment->offset, page_size);
 }
 
-bool LoaderLinkedAddressToRuntime(Loader* loader, LoadedDynamicLibrary* lib,
+bool LoaderLinkedAddressToRuntime(Loader* loader, const LoadedDynamicLibrary* lib,
                                   uint64_t linked,
                                   uint64_t* runtime) {
   if (!loader->arch->ignore_vaddr) {

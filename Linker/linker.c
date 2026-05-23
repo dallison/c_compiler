@@ -51,10 +51,6 @@ void VLinkerError(ObjectFile* file, const char* error, va_list ap) {
 void LinkerWarning(ObjectFile* file, const char* warn, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  const char* filename = "";
-  if (file != NULL) {
-    filename = file->elf_file->filename.value;
-  }
   VLinkerWarning(file, warn, error, ap);
   va_end(ap);
 
@@ -1101,7 +1097,6 @@ void LinkerLinkAllFiles(Linker* linker) {
   
   uint64_t text_file_offset = sizeof(ELFHeader) + sizeof(ELFProgramHeader) * num_program_headers +
   sizeof(ELFSectionHeader) * num_sections;
-  uint64_t code_size = 0;
   
   // Assign code segment addresses.
   AssignSegmentSectionAddresses(linker, &linker->code_segment, 0, text_file_offset);

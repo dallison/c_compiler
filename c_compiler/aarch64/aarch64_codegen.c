@@ -424,7 +424,7 @@ bool AARCH64IsFloatingPoint(TargetInstruction* inst) {
 }
 
 bool AARCH64IsSymbol(TargetInstruction* inst) {
-  return (AARCH64Opcode)inst->opcode == AARCH64_OP(symbol);
+  return (AARCH64Opcode)((int)inst->opcode == (int)AARCH64_OP(symbol));
 }
 
 bool AARCH64IsCall(TargetInstruction* inst) {
@@ -513,7 +513,7 @@ bool AARCH64IsConditionalBranch(TargetInstruction* inst) {
   switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(b):
       // AL condition means unconditional.
-      return inst->operand[0]->opcode != AARCH64_OP(al);
+      return ((int)inst->operand[0]->opcode != (int)AARCH64_OP(al));
  
     case AARCH64_OP(br):
       return false;
@@ -524,15 +524,15 @@ bool AARCH64IsConditionalBranch(TargetInstruction* inst) {
 }
 
 bool AARCH64IsSpill(TargetInstruction* inst) {
-  return (AARCH64Opcode)inst->opcode == AARCH64_OP(spill);
+  return (AARCH64Opcode)((int)inst->opcode == (int)AARCH64_OP(spill));
 }
 
 bool AARCH64IsLabel(TargetInstruction* inst) {
-  return (AARCH64Opcode)inst->opcode == AARCH64_OP(label);
+  return (AARCH64Opcode)((int)inst->opcode == (int)AARCH64_OP(label));
 }
 
 bool AARCH64IsReturn(TargetInstruction* inst) {
-  return (AARCH64Opcode)inst->opcode == AARCH64_OP(ret);
+  return (AARCH64Opcode)((int)inst->opcode == (int)AARCH64_OP(ret));
 }
 
 int AARCH64IntValue(TargetInstruction* inst) {
@@ -589,14 +589,14 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
 }
 
 TargetInstruction* AARCH64GetBranchTarget(TargetInstruction* inst) {
-  if (inst->opcode == AARCH64_OP(br)) {
+  if (((int)inst->opcode == (int)AARCH64_OP(br))) {
     return inst->operand[0];
   }
   return inst->operand[1];
 }
 
 bool AARCH64IsJumpableEntry(TargetInstruction* inst) {
-  return inst->opcode == (TargetOpcode)AARCH64_OP(b) && inst->operand[0]->opcode == AARCH64_OP(al);
+  return inst->opcode == (TargetOpcode)AARCH64_OP(b) && ((int)inst->operand[0]->opcode == (int)AARCH64_OP(al));
 }
 
 static bool HasLoweredNode(IRNode* node) {
@@ -675,7 +675,7 @@ static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
   return reg;
 }
 
-static void SavedArgumentRegisterDelete(SavedArgumentRegister* reg) {
+static COMPILER_UNUSED void SavedArgumentRegisterDelete(SavedArgumentRegister* reg) {
   free(reg);
 }
 
@@ -691,7 +691,7 @@ static TargetInstruction* NewInstruction2(AARCH64Opcode opcode,
   return TargetNewInstruction2((TargetOpcode)opcode, op1, op2);
 }
 
-static TargetInstruction* NewInstruction3(AARCH64Opcode opcode,
+static COMPILER_UNUSED TargetInstruction* NewInstruction3(AARCH64Opcode opcode,
                                           TargetInstruction* op1,
                                           TargetInstruction* op2,
                                           TargetInstruction* op3) {
@@ -710,29 +710,29 @@ static TargetInstruction* Emit(AARCH64Generator* g, TargetInstruction* inst) {
   return TargetEmit(&g->base, inst);
 }
 
-static TargetInstruction* EmitBefore(AARCH64Generator* g, TargetInstruction* inst,
+static COMPILER_UNUSED TargetInstruction* EmitBefore(AARCH64Generator* g, TargetInstruction* inst,
                                      TargetInstruction* pos) {
   return TargetEmitBefore(&g->base, inst, pos);
 }
 
-static TargetInstruction* EmitAfter(AARCH64Generator* g, TargetInstruction* inst,
+static COMPILER_UNUSED TargetInstruction* EmitAfter(AARCH64Generator* g, TargetInstruction* inst,
                                     TargetInstruction* pos) {
   return TargetEmitAfter(&g->base, inst, pos);
 }
 
-static TargetInstruction* EmitConstant(AARCH64Generator* g, TargetInstruction* c) {
+static COMPILER_UNUSED TargetInstruction* EmitConstant(AARCH64Generator* g, TargetInstruction* c) {
   return TargetEmitConstant(&g->base, c);
 }
 
-static TargetInstruction* EmitSymbol(AARCH64Generator* g, TargetInstruction* c) {
+static COMPILER_UNUSED TargetInstruction* EmitSymbol(AARCH64Generator* g, TargetInstruction* c) {
   return TargetEmitSymbol(&g->base, c);
 }
 
-static TargetInstruction* FramePointer(AARCH64Generator* g) {
+static COMPILER_UNUSED TargetInstruction* FramePointer(AARCH64Generator* g) {
   return SetInstructionSize(TargetFramePointer(&g->base), kSize64Bit);
 }
 
-static TargetInstruction* StackPointer(AARCH64Generator* g) {
+static COMPILER_UNUSED TargetInstruction* StackPointer(AARCH64Generator* g) {
   return SetInstructionSize(TargetStackPointer(&g->base), kSize64Bit);
 }
 
@@ -751,7 +751,7 @@ static TargetInstruction* GetIntConstant(AARCH64Generator* g, IRNode* node,
                             type == kTargetType64Bit ? kSize64Bit : kSize32Bit);
 }
 
-static TargetInstruction* GetFloatingPointConstant(AARCH64Generator* g,
+static COMPILER_UNUSED TargetInstruction* GetFloatingPointConstant(AARCH64Generator* g,
                                                    IRNode* node,
                                                    TargetType type,
                                                    double value) {
@@ -780,7 +780,7 @@ static TargetInstruction* EmitBranch(AARCH64Generator* g, AARCH64Opcode cond,
   return bra;
 }
 
-static TargetInstruction* EmitLabelReference(AARCH64Generator* g,
+static COMPILER_UNUSED TargetInstruction* EmitLabelReference(AARCH64Generator* g,
                                              TargetInstruction* label,
                                              IRNode* target_node) {
   Emit(g, label);
@@ -956,7 +956,7 @@ static TargetInstruction* AddValue(AARCH64Generator* g, TargetInstruction* src,
     return AddImmediate(g, src, TargetIntValue(value));
   }
 
-  if (value->opcode == AARCH64_OP(zr)) {
+  if (((int)value->opcode == (int)AARCH64_OP(zr))) {
     return src;
   }
   return Emit(g, NewInstruction2(AARCH64_OP(add), src, value));
@@ -1286,7 +1286,7 @@ static struct {
     {NULL, 0},
 };
 
-static TargetInstruction* LoadVariableValue(AARCH64Generator* g, IRNode* node,
+static COMPILER_UNUSED TargetInstruction* LoadVariableValue(AARCH64Generator* g, IRNode* node,
                                             TargetInstruction* addr,
                                             TargetInstruction* offset) {
   AARCH64Opcode opcode = AARCH64_OP(ldr);
@@ -1969,7 +1969,7 @@ static TargetInstruction* Load(AARCH64Generator* g, IRNode* addr_node, AARCH64Op
 
 #if 0
   TargetInstruction* result = NULL;
-  if ((AARCH64Opcode)addr->opcode == AARCH64_OP(add) && TargetIsZero(offset)) {
+  if ((AARCH64Opcode)((int)addr->opcode == (int)AARCH64_OP(add)) && TargetIsZero(offset)) {
     // If the address is calculated using an addi instruction we can
     // combine the immediate from the addi with the load.
     // The addi instruction will no longer be used and will be eliminated
@@ -2317,14 +2317,13 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
       // If constant is zero, BRA is comparing false
       // otherwise, BRA is comparing true.
       int64_t cval = IRIntConstValue(input);
-      TargetInstruction* bra = NULL;
       if (cval == 0) {
         if (node->opcode == IR_OP(bfalse)) {
-          bra = EmitBranch(g, AARCH64_OP(al), target_node);
+          EmitBranch(g, AARCH64_OP(al), target_node);
         }
       } else {
         if (node->opcode == IR_OP(btrue)) {
-          bra = EmitBranch(g, AARCH64_OP(al), target_node);
+          EmitBranch(g, AARCH64_OP(al), target_node);
         }
       }
    } else {
@@ -3123,7 +3122,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     g->base.num_calls--;
   } else {
-    if (addr->opcode == AARCH64_OP(symbol)) {
+    if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);
     } else {
@@ -3588,7 +3587,7 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
   return arg->type->size < 4 ? 4 : arg->type->size;
 }
 
-static int CompareRegisterVar(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
   const PoolEntry* var1 = *(const PoolEntry**)a;
   const PoolEntry* var2 = *(const PoolEntry**)b;
 

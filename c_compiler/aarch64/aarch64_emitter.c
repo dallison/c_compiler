@@ -271,7 +271,7 @@ static void DecrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
   AddSubImmediate(emitter, "sp",  NULL, /*add=*/false, stack_frame_size, NULL, fp);
 }
 
-static void IncrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
+static COMPILER_UNUSED void IncrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
                                   FILE* fp) {
   if (stack_frame_size <= 0) {
     return;
@@ -280,7 +280,7 @@ static void IncrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
 }
 
 // Load a floating point or integer register from the stack frame.
-static void LoadRegisterFromFrame(AARCH64Emitter* emitter, int reg,
+static COMPILER_UNUSED void LoadRegisterFromFrame(AARCH64Emitter* emitter, int reg,
                                   int offset, bool is_fp,
                                   const char* symbol_name,
                                   FILE* fp) {
@@ -302,7 +302,7 @@ static void LoadRegisterFromFrame(AARCH64Emitter* emitter, int reg,
   fprintf(fp, "\t\t// %s\n", symbol_name);
 }
 
-static void GenerateOffsetFromFrame(AARCH64Emitter* emitter, int reg,
+static COMPILER_UNUSED void GenerateOffsetFromFrame(AARCH64Emitter* emitter, int reg,
                                     int offset,
                                     const char* symbol_name,
                                     FILE* fp) {
@@ -400,8 +400,6 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   // Frame pointer and return address are positive offsets from the
   // decremented stack pointer.
-  int return_address_offset = stack_frame_size - 8 - space_above_frame_pointer;
-  int frame_pointer_offset = stack_frame_size - 16 - space_above_frame_pointer;
 
   // Local vars are referenced as a negative offset from s0 and are immediately
   // below the saved argument registers.  This is the low address of the
@@ -417,7 +415,6 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   // A leaf procedure doesn't save the return address.
   if (is_leaf) {
-    frame_pointer_offset += 8;
     saved_reg_offset += 8;
   }
 
@@ -431,13 +428,11 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
     if (varargs) {
       int num_pushed_arg_regs = AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs;
-      int offset_from_frame_pointer = 0;
       fprintf(fp, "\t// varargs function with %d declared args\n",
               emitter->g->num_int_arg_regs);
       for (int i = AARCH64_NUM_INT_ARGS - num_pushed_arg_regs; i < AARCH64_NUM_INT_ARGS;
            i++) {
         fprintf(fp, "\tstr x%d, [sp, #-8]!\n", i);
-        offset_from_frame_pointer += 8;
       }
     }
   }
@@ -538,16 +533,11 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
   }
-  int frame_pointer_offset = stack_frame_size - 16 - space_above_frame_pointer;
-  // int return_address_offset = stack_frame_size - 8 - space_above_frame_pointer;
 
   // A leaf procedure doesn't save the return address.
-  if (is_leaf) {
-    frame_pointer_offset += 8;
-  } else {
+  if (!is_leaf) {
     fprintf(fp, "\t// Restored registers.\n");
   }
-  Vector regs = {0};
 
   int offset = emitter->saved_reg_offset;
 
@@ -639,7 +629,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     fprintf(fp, "\n\t// *** Basic block %zd\n\n", b->block_id);
     emitter->current_block = inst->block;
   }
-  if (inst->opcode == AARCH64_OP(label)) {
+  if (((int)inst->opcode == (int)AARCH64_OP(label))) {
     if ((inst->flags & AARCH64_EXPORTED_LABEL) != 0) {
       // Label may be exported.
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
@@ -648,13 +638,13 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     return;
   }
 
-  if (inst->opcode == AARCH64_OP(named_label)) {
+  if (((int)inst->opcode == (int)AARCH64_OP(named_label))) {
     TargetNamedLabel* label = (TargetNamedLabel*)inst;
     fprintf(fp, "%s:\n", label->name);
     return;
   }
   
-  if (inst->opcode == AARCH64_OP(ivarreg) || inst->opcode == AARCH64_OP(fvarreg)) {
+  if (((int)inst->opcode == (int)AARCH64_OP(ivarreg)) || ((int)inst->opcode == (int)AARCH64_OP(fvarreg))) {
     return;
   }
   if (inst->id == 7) {
@@ -699,7 +689,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     }
     // case AARCH64_OP(bl):
     case AARCH64_OP(bl): {
-      assert(inst->operand[0]->opcode == AARCH64_OP(symbol));
+      assert(((int)inst->operand[0]->opcode == (int)AARCH64_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
       fprintf(fp, "\t%-12s%s\n", "bl", sym->symbol->name.value);
       return;
@@ -850,14 +840,14 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[0], kSize64Bit, buf2,
                                sizeof(buf2)), offset);
 #if 0
-      } else if (inst->operand[1]->opcode == AARCH64_OP(symbol)) {
+      } else if (((int)inst->operand[1]->opcode == (int)AARCH64_OP(symbol))) {
         assert((inst->flags & AARCH64_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst, reg_size,buf1, sizeof(buf1)),
                 ((TargetSymbol*)inst->operand[1])->symbol->name.value,
                 GetRegisterName(inst->operand[0], reg_size,buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[1]->opcode == AARCH64_OP(label)) {
+      } else if (((int)inst->operand[1]->opcode == (int)AARCH64_OP(label))) {
         assert((inst->flags & AARCH64_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
                 GetRegisterName(inst, reg_size,buf1, sizeof(buf1)),
@@ -865,7 +855,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[0], reg_size,buf2,
                                sizeof(buf2)));
 #endif
-      } else if (inst->operand[1]->opcode == AARCH64_OP(zr)) {
+      } else if (((int)inst->operand[1]->opcode == (int)AARCH64_OP(zr))) {
         fprintf(fp, "%s, [%s, #0]\n",
                 GetRegisterName(inst, reg_size,buf1, sizeof(buf1)),
                 GetRegisterName(inst->operand[0], reg_size,buf2,
@@ -896,7 +886,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[1], kSize64Bit, buf2,
                                sizeof(buf2)), offset);
 #if 0
-      } else if (inst->operand[2]->opcode == AARCH64_OP(symbol)) {
+      } else if (((int)inst->operand[2]->opcode == (int)AARCH64_OP(symbol))) {
         assert((inst->flags & AARCH64_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst->operand[0], reg_size,buf1,
@@ -904,7 +894,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 ((TargetSymbol*)inst->operand[2])->symbol->name.value,
                 GetRegisterName(inst->operand[1],reg_size, buf2,
                                sizeof(buf2)));
-      } else if (inst->operand[2]->opcode == AARCH64_OP(label)) {
+      } else if (((int)inst->operand[2]->opcode == (int)AARCH64_OP(label))) {
         assert((inst->flags & AARCH64_PCREL_LO_RELOC) != 0);
         fprintf(fp, "%s, %%pcrel_lo(.%s_label_%d)(%s)\n",
                 GetRegisterName(inst->operand[0], reg_size,buf1,
@@ -913,7 +903,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[1],reg_size, buf2,
                                sizeof(buf2)));
 #endif
-      } else if (inst->operand[2]->opcode == AARCH64_OP(zr)) {
+      } else if (((int)inst->operand[2]->opcode == (int)AARCH64_OP(zr))) {
         fprintf(fp, "%s, [%s, #0]\n",
                 GetRegisterName(inst->operand[0], reg_size,buf1,
                                sizeof(buf1)),
@@ -934,7 +924,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       assert(inst->operand[1] != NULL);
       TargetInstruction* cond = inst->operand[0];
       char condbuf[8] = {0};
-      if (cond->opcode != AARCH64_OP(al)) {
+      if (((int)cond->opcode != (int)AARCH64_OP(al))) {
         snprintf(condbuf, sizeof(condbuf), ".%s", AARCH64OpcodeName(cond->opcode));
       }
        fprintf(fp, "%s .%s_label_%d\n",
@@ -984,7 +974,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
-          } else if (inst->operand[i]->opcode == AARCH64_OP(symbol)) {
+          } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(symbol))) {
             if ((inst->flags & AARCH64_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
                       ((TargetSymbol*)inst->operand[i])->symbol->name.value);
@@ -992,10 +982,10 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
               fprintf(fp, "%s%s", sep,
                       ((TargetSymbol*)inst->operand[i])->symbol->name.value);
             }
-          } else if (inst->operand[i]->opcode == AARCH64_OP(literal)) {
+          } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
             fprintf(fp, "%s.str.%d", sep, literal->literal_id);
-          } else if (inst->operand[i]->opcode == AARCH64_OP(oplsl)) {
+          } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(oplsl))) {
             fprintf(fp, ", lsl ");
             sep = "";
             continue;

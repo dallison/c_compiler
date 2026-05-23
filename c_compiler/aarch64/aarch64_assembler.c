@@ -688,7 +688,7 @@ static bool CheckRegWidths(AARCH64Assembler* assembler, Register* r1, Register* 
   return true;
 }
 
-static bool AssemblerFunction(AARCH64Assembler* assembler, String* func,
+static COMPILER_UNUSED bool AssemblerFunction(AARCH64Assembler* assembler, String* func,
                               String* symbol) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     StringSet(func, ASM.lex.spelling.value);  // Already initialized.
@@ -1623,7 +1623,7 @@ static void Assemble_asri(AARCH64Assembler* assembler) {
   Assemble_asr(assembler);
 }
 
-static void Assemble_eons(AARCH64Assembler* assembler) {
+static COMPILER_UNUSED void Assemble_eons(AARCH64Assembler* assembler) {
   AssembleLogical(assembler, 3, 1, /*immed_ok=*/false, /*one_operand=*/false);
 }
 

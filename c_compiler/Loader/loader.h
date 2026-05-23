@@ -103,7 +103,7 @@ void VLoaderError(const char* error, va_list ap);
 int LoaderNumErrors(void);
 
 bool LoaderLinkedAddressToRuntime(Loader* loader,
-                                  LoadedDynamicLibrary* lib,
+                                  const LoadedDynamicLibrary* lib,
                                   uint64_t linked,
                                   uint64_t* runtime);
 

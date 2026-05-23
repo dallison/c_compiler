@@ -229,7 +229,6 @@ void BitSetIteratorStart(BitSetIterator* it, BitSet* set) {
   it->set = set;
   it->word_offset = 0;
   it->bit_offset = 0;
-  size_t index = 0;
   // Find first bit with value 1.
   for (size_t word = 0; word < set->capacity; word++) {
     for (size_t bit = 0; bit < 64; bit++) {
@@ -238,7 +237,6 @@ void BitSetIteratorStart(BitSetIterator* it, BitSet* set) {
         it->bit_offset = bit;
         return;
       }
-      index++;
     }
   }
 }

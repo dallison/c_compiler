@@ -381,8 +381,6 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
   // PLT relocations in GOT.
   ELFRelocation* plt_relocations = NULL;
   
-  // Address of PLT entries in GOT.
-  void* pltgot = NULL;
   int64_t reloc_type = DT(rela);
   int64_t rela_size = 0;
   int64_t rela_entsize = 0;
@@ -397,10 +395,6 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
       case DT(jmprel):
         plt_relocations = (ELFRelocation*)
             DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(jmprel));
-        break;
-      case DT(pltgot):
-        pltgot = (void*)DynamicLoaderFindDynamicSectionAddressEntry(lib,
-                                                                   DT(pltgot));
         break;
       case DT(pltrel):
         reloc_type = section->entries[i].un.val;

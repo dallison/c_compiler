@@ -12,7 +12,7 @@
 #include "assembler.h"
 #include "map.h"
 
-static int CompareString(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareString(const void* a, const void* b) {
   MapKeyValue* k1 = (MapKeyValue*)a;
   MapKeyValue* k2 = (MapKeyValue*)b;
   String* s1 = k1->key.p;

@@ -14,7 +14,7 @@
 #include "elf.h"
 #include "risc_v_machine.h"
 
-static int CompareString(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareString(const void* a, const void* b) {
   MapKeyValue* s1 = (MapKeyValue*)a;
   MapKeyValue* s2 = (MapKeyValue*)b;
   return strcmp(s1->key.p, s2->key.p);
@@ -761,7 +761,7 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
   }
 }
 
-static bool AssemblerFunction(RVAssembler* assembler, String* func,
+static COMPILER_UNUSED bool AssemblerFunction(RVAssembler* assembler, String* func,
                               String* symbol) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     StringSet(func, ASM.lex.spelling.value);  // Already initialized.

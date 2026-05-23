@@ -400,8 +400,6 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     phdr.paddr = phdr.vaddr;
     fwrite(&phdr, sizeof(phdr), 1, fp);
     
-    int64_t first_section_offset = 0;
-    
     for (size_t i = 0; i < elf->segments.length; i++) {
       ELFWriterSegment* segment = elf->segments.value.p[i];
       bool start_address_assigned = false;
@@ -423,7 +421,6 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
           segment->header.vaddr = section->address;
           segment->header.paddr = segment->header.vaddr;
           start_address_assigned = true;
-          first_section_offset = section->header.offset;
         }
       }
       

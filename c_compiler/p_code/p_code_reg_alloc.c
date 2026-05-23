@@ -257,7 +257,7 @@ static bool UsesFixedRegister(TargetInstruction* inst) {
 
 // rmov instructions use the register allocated to their first
 // operand as their own register.
-static void AllocateForRmov(PCodeRegisterAllocator* allocator,
+static COMPILER_UNUSED void AllocateForRmov(PCodeRegisterAllocator* allocator,
                             TargetInstruction* inst) {
   PCodeRegister* reg = (PCodeRegister*)inst->operand[0]->reg;
   TargetInstruction* src = inst->operand[1];
@@ -337,8 +337,8 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
   
 #if 0
   // Treat rmov instructions specially.
-  if (inst->opcode == P_OP(rmov) || inst->opcode == P_OP(rmovf) ||
-      inst->opcode == P_OP(rmovd)) {
+  if (((int)inst->opcode == (int)P_OP(rmov)) || ((int)inst->opcode == (int)P_OP(rmovf)) ||
+      ((int)inst->opcode == (int)P_OP(rmovd))) {
     AllocateForRmov(allocator, inst);
     return;
   }
