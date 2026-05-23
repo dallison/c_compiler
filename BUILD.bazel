@@ -3,6 +3,16 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+config_setting(
+    name = "host_aarch64",
+    values = {"cpu": "darwin_arm64"},
+)
+
+AARCH64_COPTS = select({
+    ":host_aarch64": ["-mbranch-protection=none"],
+    "//conditions:default": [],
+})
+
 COMMON_COPTS = [
     "-std=c99",
     "-fPIC",
@@ -22,6 +32,7 @@ COMMON_INCLUDES = [
     "c_compiler/Loader",
     "c_compiler/Loader/Architecture",
     "risc_v_interpreter",
+    "aarch64_interpreter",
 ]
 
 LIBC_SRCS = [
@@ -324,6 +335,31 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "aarch64_lib",
+    srcs = [
+        "aarch64_interpreter/aarch64_interpreter.c",
+        "aarch64_interpreter/aarch64_native.c",
+        "aarch64_interpreter/aarch64_runtime.c",
+        "aarch64_interpreter/aarch64_syscalls.c",
+    ],
+    hdrs = glob([
+        "aarch64_interpreter/*.h",
+        "c_compiler/*.h",
+        "c_compiler/aarch64/*.h",
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+    ]),
+    copts = COMMON_COPTS + AARCH64_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
 cc_binary(
     name = "6502",
     srcs = ["6502_interpreter/main.c"],
@@ -417,6 +453,36 @@ cc_binary(
         ":risc_v_lib",
         ":utils",
     ],
+)
+
+cc_binary(
+    name = "aarch64",
+    srcs = ["aarch64_interpreter/main.c"],
+    copts = COMMON_COPTS + AARCH64_COPTS,
+    deps = [
+        ":aarch64_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+genrule(
+    name = "aarch64_signed",
+    srcs = [
+        ":aarch64",
+        "aarch64_interpreter/aarch64.entitlements",
+    ],
+    outs = ["aarch64_signed_bin"],
+    cmd = """
+cp $(location :aarch64) $@
+codesign -s - --options runtime \
+  --entitlements $(location aarch64_interpreter/aarch64.entitlements) \
+  -f $@
+chmod +x $@
+""",
+    executable = True,
 )
 
 genrule(
@@ -610,4 +676,86 @@ set -euo pipefail
   "$(location :hello_65c02_exe)" > "$@"
 """,
     tools = [":6502"],
+)
+
+genrule(
+    name = "hello_aarch64_exe",
+    srcs = ["hello_aarch64/main.c"],
+    outs = ["hello_aarch64/hello.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target aarch64 \
+  -static \
+  -Wl,-e \
+  -Wl,main \
+  hello_aarch64/main.c \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_aarch64_libfunc_so",
+    srcs = ["hello_aarch64/libfunc.c"],
+    outs = ["hello_aarch64/libfunc.so"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target aarch64 \
+  -fpic \
+  -shared \
+  hello_aarch64/libfunc.c \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_aarch64_dynamic_exe",
+    srcs = [
+        "hello_aarch64/main_dynamic.c",
+        ":hello_aarch64_libfunc_so",
+    ],
+    outs = ["hello_aarch64/hello_dynamic.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target aarch64 \
+  -fpic \
+  -Wl,-e \
+  -Wl,main \
+  -rpath '$$ORIGIN' \
+  hello_aarch64/main_dynamic.c \
+  "$(location :hello_aarch64_libfunc_so)" \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_aarch64_milestone_test",
+    srcs = [
+        "hello_aarch64/milestone_test.sh",
+        ":hello_aarch64_dynamic_exe",
+        ":hello_aarch64_libfunc_so",
+        ":hello_aarch64_exe",
+    ],
+    outs = ["hello_aarch64/milestone.ok"],
+    cmd = """
+set -euo pipefail
+bash "$(location hello_aarch64/milestone_test.sh)" \
+  "$$(pwd)/$(execpath :aarch64)" \
+  "$$(pwd)/$(execpath :aarch64_signed)" \
+  "$$(pwd)/$(execpath :hello_aarch64_dynamic_exe)" \
+  "$$(pwd)/$(execpath :hello_aarch64_exe)"
+touch "$@"
+""",
+    tools = [
+        ":aarch64",
+        ":aarch64_signed",
+    ],
 )

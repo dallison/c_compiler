@@ -89,6 +89,7 @@ void RISCVLoaderArchitectureInit(LoaderArchitecture* arch) {
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;
   arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;
+  arch->fixup_plt_after_load = NULL;
 }
 
 LoaderArchitecture* NewRISCVLoaderArchitecture(void) {

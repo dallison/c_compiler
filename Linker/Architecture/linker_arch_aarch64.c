@@ -70,11 +70,74 @@ static Relocation* FindRelocation(Linker* linker, int64_t pc) {
   return NULL;
 }
 
+static uint32_t EncodeAdrp(int rd, uint64_t pc, uint64_t target) {
+  int64_t page_delta = ((int64_t)(target & ~0xfffULL) - (int64_t)(pc & ~0xfffULL)) >> 12;
+  int32_t immlo = (int32_t)(page_delta & 3);
+  int32_t immhi = (int32_t)((page_delta >> 2) & 0x7ffff);
+  return (1u << 31) | ((uint32_t)immlo << 29) | (0x10u << 24) |
+         ((uint32_t)immhi << 5) | (uint32_t)rd;
+}
+
+static uint32_t EncodeLdr64Imm(int rt, int rn, int32_t imm12) {
+  return 0xF9400000u | ((uint32_t)(imm12 & 0xfff) << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+static uint32_t EncodeBlr(int rn) {
+  return 0xD63F0000u | ((uint32_t)rn << 5);
+}
+
+static uint32_t EncodeSubReg(int rd, int rn, int rm) {
+  return 0xCB000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) |
+         (uint32_t)rd;
+}
+
+static uint32_t EncodeAddImm(int rd, int rn, int32_t imm12) {
+  return 0x91000000u | ((uint32_t)(imm12 & 0xfff) << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t EncodeSubImm(int rd, int rn, int32_t imm12) {
+  return 0xD1000000u | ((uint32_t)(imm12 & 0xfff) << 10) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t EncodeLsrImm(int rd, int rn, int shift) {
+  return 0xD345FC00u | ((uint32_t)(shift & 0x3f) << 16) |
+         ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t EncodeBr(int rn) {
+  return 0xD61F0000u | ((uint32_t)rn << 5);
+}
+
 static void HandlePICRelocation(
     DynamicLinker* dynamic, LinkerSymbol* symbol, Relocation* reloc,
     int (*append_data_to_got)(DynamicLinker*, LinkerSymbol*),
     int (*append_func_to_got)(DynamicLinker*, LinkerSymbol*),
-    int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {}
+    int (*append_to_plt)(DynamicLinker*, LinkerSymbol*)) {
+  switch (reloc->type) {
+    case R_AARCH64_ADR_GOT_PAGE:
+      if (symbol != NULL) {
+        symbol->got_index = append_data_to_got(dynamic, symbol);
+      }
+      break;
+
+    case R_AARCH64_CALL_PLT:
+      if (symbol != NULL) {
+        symbol->got_index = append_func_to_got(dynamic, symbol);
+        symbol->plt_index = append_to_plt(dynamic, symbol);
+      }
+      break;
+
+    case R_AARCH64_ABS64: {
+      Relocation* rel_reloc = NewRelativeRelocation(
+          reloc->offset, reloc->section, R_AARCH64_RELATIVE, reloc->addend);
+      VectorAppend(&dynamic->data_relocations, rel_reloc);
+      break;
+    }
+  }
+}
 
 static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
                             LinkerSymbol* symbol, char* target_address,
@@ -189,8 +252,20 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
     }
 
-    case R_AARCH64_ADR_PREL_PG_HI21:
-      break;
+    case R_AARCH64_ADR_PREL_PG_HI21: {
+      uint64_t got_address = 0;
+      uint64_t addr = S + A;
+      if (symbol != NULL && symbol->got_index >= 0 &&
+          linker->dynamic_linker != NULL &&
+          linker->dynamic_linker->got_plt_group != NULL) {
+        got_address = linker->dynamic_linker->got_plt_group->address;
+        addr = got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
+      }
+      uint32_t instruction = EncodeAdrp(0, P, addr);
+      instruction = (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_ADR_PREL_PG_HI21_NC:
       break;
@@ -218,6 +293,17 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_AARCH64_CALL26: {
       int64_t offset = (int64_t)(S + A - P);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~0x03ffffffu;
+      instruction |= (uint32_t)((offset >> 2) & 0x03ffffff);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
+
+    case R_AARCH64_CALL_PLT: {
+      uint64_t plt_address = linker->dynamic_linker->plt_group->address;
+      uint64_t addr = plt_address + (uint64_t)symbol->plt_index * 16 + (uint64_t)A;
+      int64_t offset = (int64_t)(addr - P);
       uint32_t instruction = *(uint32_t*)target_address;
       instruction &= ~0x03ffffffu;
       instruction |= (uint32_t)((offset >> 2) & 0x03ffffff);
@@ -291,11 +377,33 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_LD64_GOTOFF_LO15:
       break;
 
-    case R_AARCH64_ADR_GOT_PAGE:
-      break;
+    case R_AARCH64_ADR_GOT_PAGE: {
+      uint64_t got_address = linker->dynamic_linker->got_plt_group->address;
+      uint64_t addr = got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
+      uint32_t instruction = EncodeAdrp(0, P, addr);
+      instruction = (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
-    case R_AARCH64_LD64_GOT_LO12_NC:
-      break;
+    case R_AARCH64_LD64_GOT_LO12_NC: {
+      Relocation* page_reloc = FindRelocation(linker, (int64_t)(P - 4));
+      if (page_reloc == NULL ||
+          page_reloc->type != R_AARCH64_ADR_GOT_PAGE) {
+        LinkerError(file, "Missing ADR_GOT_PAGE for LD64_GOT_LO12_NC");
+        return;
+      }
+      LinkerSymbol* got_symbol =
+          ObjectFileFindSymbol(file, page_reloc->symbol_name.value);
+      uint64_t got_address = linker->dynamic_linker->got_plt_group->address;
+      uint64_t addr = got_address + (uint64_t)got_symbol->got_index * 8 +
+                      (uint64_t)page_reloc->addend;
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~0x003ffc00u;
+      instruction |= (uint32_t)((addr & 0xfff) << 10);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_LD64_GOTPAGE_LO15:
       break;
@@ -490,13 +598,14 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_GLOB_DAT:
-      break;
+      *((int64_t*)target_address) = (int64_t)(S + A);
+      return;
 
     case R_AARCH64_JUMP_SLOT:
-      break;
+      return;
 
     case R_AARCH64_RELATIVE:
-      break;
+      return;
 
     case R_AARCH64_TLS_DTPMOD:
       break;
@@ -534,16 +643,16 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
   int32_t reloc_type;
   switch (relocation_type) {
     case kGOTRelocationFunction:
-      reloc_type = R_RISCV_JUMP_SLOT;
+      reloc_type = R_AARCH64_JUMP_SLOT;
       break;
     case kGOTRelocationVariable:
-      reloc_type = R_RISCV_64;
+      reloc_type = R_AARCH64_ABS64;
       break;
     case kGOTRelocationTLSOffset:
-      reloc_type = R_RISCV_TLS_DTPREL64;
+      reloc_type = R_AARCH64_TLS_DTPREL;
       break;
     case kGOTRelocationTLSModuleId:
-      reloc_type = R_RISCV_TLS_DTPMOD64;
+      reloc_type = R_AARCH64_TLS_DTPMOD;
       break;
   }
   BufferAppendLongLE(&contents->data.buffered, 0);
@@ -553,25 +662,58 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
   VectorAppend(relocs, reloc);
 }
 
-// The GOT entry in the .got.plt is set to the address of the plt.
+// The GOT entry points to the PLT resolver for lazy resolution.
 static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
-  // The GOT entry points to the first entry in the PLT, which contains
-  // the symbol resolver code.
+  (void)symbol;
+  (void)plt_entry_size;
   uint64_t* p = (uint64_t*)got_plt_buffer->value + symbol->got_index;
   *p = plt_address;
 }
 
 static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
-                        ELFWriterSectionContents* contents) {}
+                        ELFWriterSectionContents* contents) {
+  (void)linker;
+  (void)symbol;
+  BufferAppendWordLE(&contents->data.buffered,
+                     EncodeAdrp(AARCH64_IP1_REG, 0, 0));
+  BufferAppendWordLE(&contents->data.buffered,
+                     EncodeLdr64Imm(AARCH64_IP2_REG, AARCH64_IP1_REG, 0));
+  BufferAppendWordLE(&contents->data.buffered, EncodeBr(AARCH64_IP2_REG));
+  BufferAppendWordLE(&contents->data.buffered, 0xD503201Fu);  // nop
+}
 
 static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
                                   Buffer* plt_buffer, uint64_t got_address,
-                                  uint64_t plt_address) {}
+                                  uint64_t plt_address) {
+  (void)plt;
+  const int resolver_target = 18;
+
+  uint32_t* p = (uint32_t*)plt_buffer->value;
+  p[0] = EncodeAdrp(AARCH64_IP1_REG, plt_address, got_address);
+  p[1] = EncodeSubReg(AARCH64_IP2_REG, AARCH64_LR_REG, AARCH64_IP2_REG);
+  p[2] = EncodeLdr64Imm(resolver_target, AARCH64_IP1_REG,
+                         (int32_t)((got_address & 0xfff) / 8));
+  p[3] = EncodeSubImm(AARCH64_IP2_REG, AARCH64_IP2_REG, 32 + 12);
+  p[4] = EncodeAddImm(0, AARCH64_IP1_REG, (int32_t)(got_address & 0xfff));
+  p[5] = EncodeLsrImm(AARCH64_IP2_REG, AARCH64_IP2_REG, 1);
+  p[6] = EncodeLdr64Imm(0, 0, 1);
+  p[7] = EncodeBr(resolver_target);
+}
 
 static void FixupPLTEntry(ProcedureLinkageTable* plt, GlobalOffsetTable* got,
                           LinkerSymbol* symbol, Buffer* plt_buffer,
-                          uint64_t got_address, uint64_t plt_address) {}
+                          uint64_t got_address, uint64_t plt_address) {
+  uint64_t offset = (uint64_t)symbol->plt_index * (uint64_t)plt->entry_size;
+  uint64_t entry_address =
+      got_address + (uint64_t)symbol->got_index * (uint64_t)got->entry_size;
+  uint64_t trampoline_address = plt_address + offset;
+  uint32_t* p = (uint32_t*)(plt_buffer->value + offset);
+
+  p[0] = EncodeAdrp(AARCH64_IP1_REG, trampoline_address, entry_address);
+  p[1] = EncodeLdr64Imm(AARCH64_IP2_REG, AARCH64_IP1_REG,
+                         (int32_t)((entry_address & 0xfff) / 8));
+}
 
 static void CheckOptions(Linker* linker) {}
 

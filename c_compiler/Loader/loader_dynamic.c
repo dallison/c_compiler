@@ -119,6 +119,38 @@ void DynamicLibraryRegistryInsert(DynamicLibraryRegistry* reg,
 
 }
 
+static const void* ResolveDynamicTagPointer(const LoadedDynamicLibrary* lib,
+                                            uint64_t tag_value) {
+  if (lib->dynamic_section_relocated) {
+    return (const void*)tag_value;
+  }
+  if (lib->header != NULL && lib->addr != NULL) {
+    if (lib->header->type == ET(dyn)) {
+      for (int i = 0; i < lib->header->phnum; i++) {
+        const ELFProgramHeader* ph = &lib->program_headers[i];
+        if (ph->type != PT(load)) {
+          continue;
+        }
+        if (tag_value >= ph->vaddr && tag_value < ph->vaddr + ph->memsz) {
+          return (const char*)lib->addr + ph->offset + (tag_value - ph->vaddr);
+        }
+      }
+    }
+    if (lib->section_headers != NULL) {
+      for (int i = 0; i < lib->header->shnum; i++) {
+        const ELFSectionHeader* sh = &lib->section_headers[i];
+        if (sh->type == SHT(nobits) || sh->size == 0) {
+          continue;
+        }
+        if (tag_value >= sh->addr && tag_value < sh->addr + sh->size) {
+          return (const char*)lib->addr + sh->offset + (tag_value - sh->addr);
+        }
+      }
+    }
+  }
+  return (const void*)((uintptr_t)lib->load_address + tag_value);
+}
+
 const void* DynamicLoaderFindDynamicSectionAddressEntry(
                                                   const LoadedDynamicLibrary* lib,
                                                   ELFDynamicTag tag) {
@@ -126,11 +158,18 @@ const void* DynamicLoaderFindDynamicSectionAddressEntry(
   for (size_t i = 0; dynamic->entries[i].tag != DT(null); i++) {
     if (dynamic->entries[i].tag == tag) {
       if (lib->dynamic_section_relocated) {
-        // This has already been relocated and contains the full address.
-        return (const void*)dynamic->entries[i].un.ptr;
-      } else {
-        return (const void*)lib->load_address + dynamic->entries[i].un.ptr;
+        return (const void*)dynamic->entries[i].un.val;
       }
+      if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+        uint64_t runtime = 0;
+        if (!LoaderLinkedAddressToRuntime(lib->loader, lib,
+                                          dynamic->entries[i].un.val,
+                                          &runtime)) {
+          return NULL;
+        }
+        return (const void*)runtime;
+      }
+      return ResolveDynamicTagPointer(lib, dynamic->entries[i].un.val);
     }
   }
   return NULL;
@@ -177,7 +216,11 @@ static bool FindDynamicLibraryFile(Vector* static_search_path,
                                    const char* filename,
                                    String* pathname) {
   struct stat st;
-  // Check as full path.
+  if (stat(filename, &st) == 0) {
+    StringSet(pathname, filename);
+    return true;
+  }
+  // Check as full path (legacy check for paths that failed stat above).
   if (filename[0] == '/' && stat(filename, &st) == 0) {
     StringSet(pathname, filename);
     return true;
@@ -304,6 +347,20 @@ static void RelocateDynamicSection(LoadedDynamicLibrary* lib) {
   lib->dynamic_section_relocated = true;
 }
 
+static char* RelocationTargetAddress(LoadedDynamicLibrary* lib,
+                                     uint64_t linked_offset) {
+  if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+    uint64_t runtime = 0;
+    if (!LoaderLinkedAddressToRuntime(lib->loader, lib, linked_offset, &runtime)) {
+      LoaderError("Cannot translate relocation target 0x%" PRIx64,
+                  linked_offset);
+      return NULL;
+    }
+    return (char*)runtime;
+  }
+  return (char*)lib->load_address + linked_offset;
+}
+
 static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
                                       DynamicLibraryRegistry* loaded_libraries,
                                       bool lazy) {
@@ -315,8 +372,8 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
     return;
   }
   // Symbol and string tables;
-  const ELFSymbol* symtab = NULL;
-  const char* strtab = NULL;
+  const ELFSymbol* symtab = lib->dynsym;
+  const char* strtab = lib->dynstr;
   
   // Data relocations in GOT.
   ELFRelocation* data_relocations = NULL;
@@ -333,20 +390,17 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
   int64_t plt_rel_size = 0;
   for (size_t i = 0; section->entries[i].tag != DT(null); i++) {
     switch (section->entries[i].tag) {
-      case DT(symtab):
-        symtab = (const ELFSymbol*)(section->entries[i].un.ptr);
-        break;
-      case DT(strtab):
-        strtab = (const char*)(section->entries[i].un.ptr);
-        break;
       case DT(rela):
-        data_relocations = (ELFRelocation*)(section->entries[i].un.ptr);
+        data_relocations = (ELFRelocation*)
+            DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(rela));
         break;
       case DT(jmprel):
-        plt_relocations = (ELFRelocation*)(section->entries[i].un.ptr);
+        plt_relocations = (ELFRelocation*)
+            DynamicLoaderFindDynamicSectionAddressEntry(lib, DT(jmprel));
         break;
       case DT(pltgot):
-        pltgot = (void*)section->entries[i].un.ptr;
+        pltgot = (void*)DynamicLoaderFindDynamicSectionAddressEntry(lib,
+                                                                   DT(pltgot));
         break;
       case DT(pltrel):
         reloc_type = section->entries[i].un.val;
@@ -402,7 +456,10 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
         // Might not have a symbol (as in the case of RELATIVE relocations).
         found_lib = lib;
       }
-      char* target_address = (char*)lib->load_address + reloc->offset;
+      char* target_address = RelocationTargetAddress(found_lib, reloc->offset);
+      if (target_address == NULL) {
+        continue;
+      }
       loader->arch->apply_got_data_relocation(found_lib, reloc,
                                               symbol, sym_name,
                                               target_address, lazy);
@@ -424,7 +481,10 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
     
     for (int64_t i = 0; i < num_relocations; i++) {
       ELFRelocation* reloc = &plt_relocations[i];
-      char* target_address = (char*)lib->load_address + reloc->offset;
+      char* target_address = RelocationTargetAddress(lib, reloc->offset);
+      if (target_address == NULL) {
+        continue;
+      }
       int32_t sym_index = ELF_R_SYM(reloc->info);
       const char* sym_name = strtab + symtab[sym_index].name;
       const ELFSymbol* symbol = NULL;
@@ -438,6 +498,11 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
                                              symbol, sym_name,
                                              target_address, lazy);
     }
+    if (loader->arch->ignore_vaddr &&
+        loader->arch->fixup_plt_after_load != NULL) {
+      loader->arch->fixup_plt_after_load(loader, lib, plt_relocations,
+                                         num_relocations, lazy);
+    }
   }
 }
 
@@ -449,7 +514,7 @@ static void PerformDynamicRelocations(Loader* loader, LoadedDynamicLibrary* lib,
 static int MapDynamicLibraryHeader(String* filename,
                              const void** addr, size_t* length) {
   // Open the file.
-  int fd = open(filename->value, O_RDWR);
+  int fd = open(filename->value, O_RDONLY);
   if (fd < 0) {
     return fd;
   }
@@ -581,13 +646,17 @@ static bool LoadSegments(LoadedDynamicLibrary* lib,
     // includes the symbol tables. The PT_DYNAMIC segment also needs
     // to be loaded.
     if (lib->header->type == ET(exec)) {
-      // Executable file.  The load address is as specified in
-      // the file.
-      LoadedDynamicLibraryLoadSegments(lib, 0, end_of_library);
+      uint64_t first = LoadedDynamicLibraryLoadSegments(lib, 0, end_of_library);
+      if (lib->loader == NULL || !lib->loader->arch->ignore_vaddr) {
+        lib->load_address = first;
+      }
     } else if (lib->header->type == ET(dyn)){
-      lib->load_address = LoadedDynamicLibraryLoadSegments(lib,
-                                                           load_address,
-                                                           end_of_library);
+      uint64_t first = LoadedDynamicLibraryLoadSegments(lib,
+                                                        load_address,
+                                                        end_of_library);
+      if (lib->loader == NULL || !lib->loader->arch->ignore_vaddr) {
+        lib->load_address = first;
+      }
     } else {
       // Unknown ELF file type.
       LoadedDynamicLibraryDelete(lib);
@@ -614,7 +683,8 @@ static bool FindDynamicSection(LoadedDynamicLibrary* lib,
           if (lib->header->type == ET(exec)) {
             lib->dynamic = (DynamicSection*)(lib->program_headers[i].vaddr);
           } else {
-            lib->dynamic = (DynamicSection*)((char*)lib->dynamic + lib->program_headers[i].offset);
+            lib->dynamic = (DynamicSection*)((char*)lib->load_address +
+                                             lib->program_headers[i].offset);
           }
         }
         break;
@@ -628,7 +698,8 @@ static bool FindDynamicSection(LoadedDynamicLibrary* lib,
   
   // Relocate the pointer entries in the dynamic section.  Only if we
   // can write to it.  If load_address was 0 we map read-only.
-  if (load_address != 0) {
+  if (load_address != 0 &&
+      (lib->loader == NULL || !lib->loader->arch->ignore_vaddr)) {
     RelocateDynamicSection(lib);
   }
   
@@ -928,6 +999,9 @@ const ELFSymbol* LoadedDynamicLibraryFindSymbol(LoadedDynamicLibrary* lib,
     // comparison with the symbol name.
     uint32_t chain_hash = chains[symbol_index - lib->gnu_hash->symoffset];
     if ((chain_hash | 1) == (hash | 1) && strcmp(name, symbol_name) == 0) {
+      if (symbol->shndx == 0) {
+        return NULL;
+      }
       return symbol;
     }
     
@@ -982,6 +1056,30 @@ bool LoadedDynamicLibraryLookupSymbolByAddress(LoadedDynamicLibrary* lib,
     }
   }
   return false;
+}
+
+static bool MapDynamicIgnoreVaddrSegment(LoadedDynamicLibrary* lib,
+                                         const ELFProgramHeader* segment,
+                                         int64_t offset_diff,
+                                         uint64_t map_length,
+                                         void** out_ptr) {
+  void* segment_ptr = mmap(NULL, map_length, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (segment_ptr == MAP_FAILED) {
+    LoaderError("Failed to map dynamic segment: %s", strerror(errno));
+    return false;
+  }
+  if (segment->filesz > 0) {
+    ssize_t bytes = pread(lib->fd, (char*)segment_ptr + offset_diff,
+                          segment->filesz, (off_t)segment->offset);
+    if (bytes != (ssize_t)segment->filesz) {
+      LoaderError("Failed to read dynamic segment: %s", strerror(errno));
+      munmap(segment_ptr, map_length);
+      return false;
+    }
+  }
+  *out_ptr = segment_ptr;
+  return true;
 }
 
 // Load a loadable segment.  The load_address is where we want to load
@@ -1045,6 +1143,33 @@ static void* LoadLoadableSegment(LoadedDynamicLibrary* lib,
   
   if (*length == 0) {
     return NULL;
+  }
+
+  if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+    int64_t offset_diff = (int64_t)segment->offset - (int64_t)offset;
+    uint64_t map_length = AlignUp((uint64_t)offset_diff + segment->memsz,
+                                  page_size);
+    *length = map_length;
+    void* segment_ptr = NULL;
+    if (!MapDynamicIgnoreVaddrSegment(lib, segment, offset_diff, map_length,
+                                      &segment_ptr)) {
+      return NULL;
+    }
+    if (segment->memsz > segment->filesz) {
+      memset((char*)segment_ptr + offset_diff + segment->filesz, 0,
+             (size_t)(segment->memsz - segment->filesz));
+    }
+    if (lib->load_address == 0) {
+      lib->load_address = (uint64_t)segment_ptr + (uint64_t)offset_diff -
+                          segment->vaddr;
+    }
+    if (start_address != NULL) {
+      *start_address = (char*)segment_ptr + offset_diff;
+    }
+    VectorAppend(&lib->loader->regions,
+                 NewRegion(segment_ptr, offset, (int64_t)map_length,
+                           (ELFProgramHeader*)segment, lib));
+    return segment_ptr;
   }
 
   // Calculate end of mapped memory.  The 'length' contains the total length

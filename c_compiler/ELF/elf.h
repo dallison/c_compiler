@@ -271,6 +271,7 @@ typedef struct  {
 #define R_AARCH64_CONDBR19  280  // PC-rel. cond. br. imm. from 20:2. 
 #define R_AARCH64_JUMP26  282  // PC-rel. B imm. from bits 27:2.  
 #define R_AARCH64_CALL26  283  // Likewise for CALL.  
+#define R_AARCH64_CALL_PLT  1100  // davecc: PC-relative call via PLT.
 #define R_AARCH64_LDST16_ABS_LO12_NC 284 // Dir. ADD imm. from bits 11:1.  
 #define R_AARCH64_LDST32_ABS_LO12_NC 285 // Likewise for bits 11:2.  
 #define R_AARCH64_LDST64_ABS_LO12_NC 286 // Likewise for bits 11:3.  

@@ -28,12 +28,15 @@ int LoaderNumErrors() {
   return num_errors;
 }
 
-Region* NewRegion(void* addr, int64_t offset, int64_t length, ELFProgramHeader* segment) {
+Region* NewRegion(void* addr, int64_t offset, int64_t length,
+                  ELFProgramHeader* segment,
+                  LoadedDynamicLibrary* owner) {
   Region* region = malloc(sizeof(Region));
   region->address = addr;
   region->offset = offset;
   region->length = length;
   region->segment = segment;
+  region->owner = owner;
   VectorInit(&region->sections);
   return region;
 }
@@ -70,12 +73,20 @@ void LoaderWarning(const char* warn, const char* error, ...) {
   
 }
 
+static bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
+                                          uint64_t* linked);
+
 static bool FindStaticSymbolByAddress(Loader* loader,
                              uint64_t address,
                              const char** name,
                              uint64_t* start,
                              uint64_t* length) {
   StaticSymbolTable* symbols = &loader->static_symbol_table;
+  uint64_t linked_address = address;
+  if (loader->arch->ignore_vaddr &&
+      !LoaderRuntimeAddressToLinked(loader, address, &linked_address)) {
+    return false;
+  }
   // Binary search for symbols_by_addr.
   int begin = 0;
   int end = (int)symbols->symbols_by_addr.length - 1;
@@ -87,14 +98,21 @@ static bool FindStaticSymbolByAddress(Loader* loader,
     if (mid < num_symbols - 1) {
       sym2 = symbols->symbols_by_addr.value.p[mid+1];
     }
-    if (address >= sym1->value && (sym2 == NULL || address < sym2->value)) {
+    if (linked_address >= sym1->value && (sym2 == NULL || linked_address < sym2->value)) {
       // Found between sym1 and sym2.
-      *start = sym1->value;
+      if (loader->arch->ignore_vaddr) {
+        if (!LoaderLinkedAddressToRuntime(loader, loader->dynamic_lib,
+                                          sym1->value, start)) {
+          return false;
+        }
+      } else {
+        *start = sym1->value;
+      }
       *length = sym1->size;
       *name = symbols->strtab + sym1->name;
       return true;
     }
-    if (address < sym1->value) {
+    if (linked_address < sym1->value) {
       end = mid - 1;
     } else {
       begin = mid + 1;
@@ -158,7 +176,12 @@ uint64_t LoaderLookupSymbol(Loader* loader, const char* name) {
     if (symbol == NULL) {
       return 0;
     }
-    return symbol->value;
+    uint64_t runtime = 0;
+    if (!LoaderLinkedAddressToRuntime(loader, loader->dynamic_lib,
+                                      symbol->value, &runtime)) {
+      return 0;
+    }
+    return runtime;
   }
   LoadedDynamicLibrary* lib;
   bool found = DynamicLoaderFindSymbol(&loader->loaded_libraries,
@@ -216,6 +239,74 @@ static int CompareSymbolAddress(const void* a, const void* b) {
   return (int)(s1->value - s2->value);
 }
 
+static int64_t SegmentFileOffsetDelta(const ELFProgramHeader* segment) {
+  int64_t page_size = sysconf(_SC_PAGESIZE);
+  return segment->offset - AlignDown(segment->offset, page_size);
+}
+
+bool LoaderLinkedAddressToRuntime(Loader* loader, LoadedDynamicLibrary* lib,
+                                  uint64_t linked,
+                                  uint64_t* runtime) {
+  if (!loader->arch->ignore_vaddr) {
+    *runtime = linked;
+    return true;
+  }
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (lib != NULL && region->owner != lib) {
+      continue;
+    }
+    if (region->segment == NULL) {
+      continue;
+    }
+    ELFProgramHeader* segment = region->segment;
+    if (linked < segment->vaddr || linked >= segment->vaddr + segment->memsz) {
+      continue;
+    }
+    *runtime = (uint64_t)region->address + SegmentFileOffsetDelta(segment) +
+               (linked - segment->vaddr);
+    return true;
+  }
+  return false;
+}
+
+static bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
+                                          uint64_t* linked) {
+  if (!loader->arch->ignore_vaddr) {
+    *linked = runtime;
+    return true;
+  }
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (region->segment == NULL) {
+      continue;
+    }
+    ELFProgramHeader* segment = region->segment;
+    uint64_t base = (uint64_t)region->address + SegmentFileOffsetDelta(segment);
+    if (runtime < base || runtime >= base + segment->memsz) {
+      continue;
+    }
+    *linked = segment->vaddr + (runtime - base);
+    return true;
+  }
+  return false;
+}
+
+static void LoaderFixupStaticAddresses(Loader* loader) {
+  if (!loader->arch->ignore_vaddr) {
+    return;
+  }
+  uint64_t runtime_entry = 0;
+  if (!LoaderLinkedAddressToRuntime(loader, loader->dynamic_lib,
+                                    loader->main_address,
+                                    &runtime_entry)) {
+    LoaderError("Cannot translate entry point 0x%" PRIx64 "\n",
+                loader->main_address);
+    return;
+  }
+  loader->main_address = runtime_entry;
+}
+
 static void MapSymbolTable(Loader* loader, int fd,
                            const ELFSectionHeader* symtab,
                            const ELFSectionHeader* strtab) {
@@ -239,7 +330,7 @@ static void MapSymbolTable(Loader* loader, int fd,
   }
   loader->static_symbol_table.symtab = (const ELFSymbol*)((char*)addr + delta + (symtab->offset - start));
   loader->static_symbol_table.strtab = (const char*)addr + delta + (strtab->offset - start);
-  VectorAppend(&loader->regions, NewRegion(addr, start_offset, length, NULL));
+  VectorAppend(&loader->regions, NewRegion(addr, start_offset, length, NULL, NULL));
   loader->static_symbol_table.load_address = (uint64_t)addr;
 }
 
@@ -276,6 +367,33 @@ static void FindAndLoadSymbolTable(Loader* loader, int fd) {
 
 #define PRINT_DEBUG 0
 #define DPRINTF(...) if (PRINT_DEBUG) printf(__VA_ARGS__)
+
+static bool LoaderMapIgnoreVaddrSegment(int elf_fd, ELFProgramHeader* segment,
+                                        int64_t offset_diff, uint64_t map_length,
+                                        void** out_ptr) {
+  void* segment_ptr = mmap(NULL, map_length, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (segment_ptr == MAP_FAILED) {
+    printf("Failed to map in ELF segment: %s\n", strerror(errno));
+    return false;
+  }
+  if (segment->filesz > 0) {
+    ssize_t bytes =
+        pread(elf_fd, (char*)segment_ptr + offset_diff, segment->filesz,
+              (off_t)segment->offset);
+    if (bytes != (ssize_t)segment->filesz) {
+      printf("Failed to read ELF segment: %s\n", strerror(errno));
+      munmap(segment_ptr, map_length);
+      return false;
+    }
+  }
+  if (segment->memsz > segment->filesz) {
+    memset((char*)segment_ptr + offset_diff + segment->filesz, 0,
+           (size_t)(segment->memsz - segment->filesz));
+  }
+  *out_ptr = segment_ptr;
+  return true;
+}
 
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
@@ -352,28 +470,32 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       }
       
       if (length == 0) {
+        close(fd);
         continue;
       }
-      
-      int flags = MAP_PRIVATE;
-      if (mmap_addr != 0) {
-        flags |= MAP_FIXED;
+
+      void* segment_ptr = NULL;
+      if (loader->arch->ignore_vaddr) {
+        uint64_t map_length = AlignUp(offset_diff + segment->memsz, page_size);
+        if (!LoaderMapIgnoreVaddrSegment(fd, segment, offset_diff, map_length,
+                                         &segment_ptr)) {
+          close(fd);
+          return false;
+        }
+        length = map_length;
+        close(fd);
+      } else {
+        int flags = MAP_PRIVATE;
+        if (mmap_addr != 0) {
+          flags |= MAP_FIXED;
+        }
+        segment_ptr = mmap((void*)mmap_addr, length, prot, flags, fd, offset);
+        close(fd);
+        if (segment_ptr == MAP_FAILED) {
+          printf("Failed to map in ELF segment: %s\n", strerror(errno));
+          return false;
+        }
       }
-      // Map in the segment at the address specified in the ELF file.  This is done using
-      // the MAP_PRIVATE flag so that the pages are all copy-on-write, meaning that they
-      // will be copied to a new physical address if they are written to, otherwise they
-      // are shared with other physical pages that map the same file in.  The MAP_FIXED
-      // flag says that we are providing the address to map the pages at.  Normally mmap
-      // chooses the address, but in this case we need them at the same virtual address
-      // that he Loader chose and specified in the segment header.
-      void* segment_ptr = mmap((void*)mmap_addr, length, prot, flags, fd, offset);
-      if (segment_ptr == MAP_FAILED) {
-        printf("Failed to map in ELF segment: %s\n", strerror(errno));
-        return false;
-      }
-      
-      // Don't need the file descriptor now.
-      close(fd);
       
       DPRINTF("aligned segment loaded at %p\n", segment_ptr);
       DPRINTF("loaded length: %" PRIx64 "\n", length);
@@ -383,7 +505,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
       // it will need to be zeroed out.  We also need to allocate a contiguous
       // anonymous region of zeros above the segment.
       // We need the .bss to be all zeroes before thae program starts.
-      if ((prot & PROT_WRITE) != 0) {
+      if ((prot & PROT_WRITE) != 0 && !loader->arch->ignore_vaddr) {
         void* zeroed_region = (loader->arch->ignore_vaddr ?
                                (segment_ptr + offset_diff): (char*)segment->vaddr) +
             segment->filesz;   // Start of zero memory.
@@ -412,13 +534,13 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
             LoaderError("Failed to map in dynamic segment: %s\n", strerror(errno));
             return false;
           }
-          VectorAppend(&loader->regions, NewRegion(zero, 0, additional_memory, NULL));
+          VectorAppend(&loader->regions, NewRegion(zero, 0, additional_memory, NULL, NULL));
         }
       }
       
       // Add a new region to the regions vector so that we can remove it
       // when destructed.
-      Region* region = NewRegion(segment_ptr, offset, length, segment);
+      Region* region = NewRegion(segment_ptr, offset, length, segment, NULL);
       VectorAppend(&loader->regions, region);
       GetRegionSections(loader, region, segment, i);
     }
@@ -476,6 +598,9 @@ static bool LoadDynamic(Loader* loader, bool lazy) {
     LoadedDynamicLibraryRelocate(loader, lib,
                                  &loader->loaded_libraries,
                                  lazy);
+  }
+  if (loader->arch->ignore_vaddr) {
+    LoaderFixupStaticAddresses(loader);
   }
   return true;
 }
@@ -561,7 +686,8 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
 
   // Add the whole ELF file to the regions vector.
   VectorAppend(&loader->regions, NewRegion(loader->elf_file->header, 0,
-                                           loader->elf_file->file_length, NULL));
+                                           loader->elf_file->file_length, NULL,
+                                           NULL));
 
   // Get the entry point address.
   loader->main_address = loader->elf_file->header->entry;
@@ -574,6 +700,9 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
       return false;
     }
     ok = LoadStaticSegments(loader, filename);
+    if (ok) {
+      LoaderFixupStaticAddresses(loader);
+    }
     loader->is_static = true;
   } else {
     // This is a dynamic executable.

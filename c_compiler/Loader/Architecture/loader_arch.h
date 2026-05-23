@@ -29,6 +29,11 @@ typedef struct LoaderArchitecture {
                                    const char* sym_name,
                                    char* target_address,
                                    bool lazy);
+  void (*fixup_plt_after_load)(struct Loader* loader,
+                               LoadedDynamicLibrary* lib,
+                               const ELFRelocation* plt_relocations,
+                               int64_t num_relocations,
+                               bool lazy);
 } LoaderArchitecture;
 
 #endif /* loader_arch_h */

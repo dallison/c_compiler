@@ -1,0 +1,32 @@
+//
+//  aarch64_syscalls.h
+//  aarch64_interpreter
+//
+
+#ifndef aarch64_syscalls_h
+#define aarch64_syscalls_h
+
+#include <stdint.h>
+
+#define AARCH64_SYSCALL_REG 16
+
+#define AARCH64_SYSCALL_HALT 1
+#define AARCH64_SYSCALL_OPEN 2
+#define AARCH64_SYSCALL_CLOSE 3
+#define AARCH64_SYSCALL_WRITE 4
+#define AARCH64_SYSCALL_READ 5
+#define AARCH64_SYSCALL_RESOLVE 6
+#define AARCH64_SYSCALL_LSEEK 7
+#define AARCH64_SYSCALL_MALLOC 8
+#define AARCH64_SYSCALL_FREE 9
+#define AARCH64_SYSCALL_REALLOC 10
+#define AARCH64_SYSCALL_ABORT 11
+#define AARCH64_SYSCALL_EXIT 12
+
+struct AARCH64Interpreter;
+
+int64_t AARCH64HandleSyscall(struct AARCH64Interpreter* interpreter,
+                             int64_t number, int64_t a0, int64_t a1,
+                             int64_t a2, int64_t a3, int64_t a4, int64_t a5);
+
+#endif /* aarch64_syscalls_h */

@@ -25,9 +25,12 @@ typedef struct {
   int64_t length;       // Length in bytes.
   Vector sections;      // Sections in this region (ELFReaderSection*).
   ELFProgramHeader* segment;
+  LoadedDynamicLibrary* owner;
 } Region;
 
-Region* NewRegion(void* addr, int64_t offset, int64_t length, ELFProgramHeader* segment);
+Region* NewRegion(void* addr, int64_t offset, int64_t length,
+                  ELFProgramHeader* segment,
+                  LoadedDynamicLibrary* owner);
 void RegionDestruct(Region* region);
 
 // A symbol scope is a region of memory that corresponds
@@ -44,6 +47,7 @@ typedef struct {
 #define LOADER_MAP_SYMTAB 1      // Load symbol table.
 #define LOADER_LAZY_RESOLVE 2    // Use lazy PLT resolution.
 #define LOADER_WRITEABLE_TEXT 4  // Map the text writeable.
+#define LOADER_EXECUTABLE_MAPPING 8  // Map text segments OS-executable.
 
 typedef struct {
   uint64_t load_address;
@@ -97,5 +101,10 @@ void LoaderError(const char* error, ...);
 void VLoaderError(const char* error, va_list ap);
 
 int LoaderNumErrors(void);
+
+bool LoaderLinkedAddressToRuntime(Loader* loader,
+                                  LoadedDynamicLibrary* lib,
+                                  uint64_t linked,
+                                  uint64_t* runtime);
 
 #endif /* loader_h */

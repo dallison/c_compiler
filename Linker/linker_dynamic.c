@@ -336,9 +336,6 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
   GroupedSection* gsect = dynamic->dyn_rela_group->components.value.p[0];
   Buffer* contents = &gsect->section.new->contents->data.buffered;
   
-  GroupedSection* got_gsect = dynamic->got_group->components.value.p[0];
-  ELFWriterSection* got = got_gsect->section.new;
-  
   // The buffer already has all the space we need but it is not populated.
   // Since we now know the symbol indexes we can create the relocation
   // entries in the table, overwriting the memory previously allocated.
@@ -365,7 +362,7 @@ void DynamicLinkerBuildDynamicRelocations(struct Linker* linker) {
       symbol_index = reloc->symbol->dynamic_index;
     }
     assert(symbol_index != -1);
-    ELFWriterInitRelocation(elfreloc, reloc->offset + got->address,
+    ELFWriterInitRelocation(elfreloc, reloc->offset + dynamic->got_group->address,
                            symbol_index, 0, reloc->type);
     index++;
   }
@@ -377,9 +374,6 @@ void DynamicLinkerBuildPLTRelocations(struct Linker* linker) {
   DynamicLinker* dynamic = linker->dynamic_linker;
   GroupedSection* gsect = dynamic->plt_rela_group->components.value.p[0];
   Buffer* contents = &gsect->section.new->contents->data.buffered;
-  
-  GroupedSection* got_plt_gsect = dynamic->got_plt_group->components.value.p[0];
-  ELFWriterSection* got_plt = got_plt_gsect->section.new;
   
   // The buffer already has all the space we need but it is not populated.
   // Since we now know the symbol indexes we can create the relocation
@@ -394,7 +388,8 @@ void DynamicLinkerBuildPLTRelocations(struct Linker* linker) {
       symbol_index = reloc->symbol->dynamic_index;
     }
     // assert(symbol_index != -1);
-    ELFWriterInitRelocation(elfreloc, reloc->offset + got_plt->address,
+    ELFWriterInitRelocation(elfreloc,
+                            reloc->offset + dynamic->got_plt_group->address,
                             symbol_index, 0, reloc->type);
   }
 }

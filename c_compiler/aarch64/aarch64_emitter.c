@@ -9,6 +9,7 @@
 #include "aarch64_emitter.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
 #include "aarch64_assembler.h"
@@ -1045,6 +1046,10 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   }
   fprintf(fp, "\t.type %s, @function\n\n", func_name);
   fprintf(fp, "%s:\n", func_name);
+  if (compiler->pic && emitter->g->base.is_global &&
+      strcmp(func_name, "main") != 0) {
+    fprintf(fp, "\t.word 0xD503241F  // bti c\n");
+  }
   TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
   while (inst != NULL) {
     PrintInstruction(emitter, inst, func_name, fp);

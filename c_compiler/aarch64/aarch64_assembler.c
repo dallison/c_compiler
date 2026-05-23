@@ -487,7 +487,8 @@ static Register GetRegister(AARCH64Assembler* assembler) {
   if (StringEqualCaseBlind(&ASM.lex.spelling, "sp")) {
     LexNextToken(&ASM.lex);
     reg.width = kX;
-    reg.num = AARCH64_SP_REG;
+    // AArch64 encodes SP as register 31 in instruction words.
+    reg.num = 31;
     return reg;
   }
   char prefix = toupper(ASM.lex.spelling.value[0]);
@@ -1785,8 +1786,12 @@ static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, in
   }
   if (!known) {
     if (sym != NULL) {
+      int reloc_type = l ? R_AARCH64_CALL26 : R_AARCH64_JUMP26;
+      if (l && sym->binding == SYM_BIND(global) && assembler->base.pic) {
+        reloc_type = R_AARCH64_CALL_PLT;
+      }
       AssemblerRelocation* reloc = NewAssemblerRelocation(
-          sym, l ? R_AARCH64_CALL26 : R_AARCH64_JUMP26,
+          sym, reloc_type,
           ASM.current_section, instruction_offset, 0);
       AssemblerAddRelocation(&ASM, reloc);
     }
