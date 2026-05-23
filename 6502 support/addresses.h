@@ -29,8 +29,8 @@
 .set output_buffer 0x500
 
 // Zero page.  We use some zero page locations for ths ROM.  They
-// start above the C ABI's reserved space, at 0xbb.
-.set zp_start 0xbb
+// start above the C ABI's reserved space, at 0x7e.
+.set zp_start 0x7e
 
 // Temporary address.
 .set temp_addr zp_start + 0x00 //,1

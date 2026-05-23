@@ -8,11 +8,14 @@
 
 #include "6502_target.h"
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include "6502_assembler.h"
 #include "6502_codegen.h"
 #include "6502_emitter.h"
+#include "6502_machine.h"
 #include "common_emitter.h"
+#include "errors.h"
 
 static void* GenerateCode(Generator* gen) {
   W65C02Generator* g = New6502Generator(gen);
@@ -33,36 +36,29 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
     return NULL;
   }
 
-  // Define the registers.
-  static struct {
-    char prefix;
-    int num;
-    int size;
-  } registers[] = {{'b', W65C02_NUM_B_REGS, 1}, {'i', W65C02_NUM_I_REGS, 2},
-                   {'l', W65C02_NUM_L_REGS, 4}, {'x', W65C02_NUM_X_REGS, 8},
-                {'f', W65C02_NUM_F_REGS, 4}
-  };
-
-  // Get start address for registers from target options.
+  // Define zero-page layout relative to -freg-start.
   int start_addr = ((W65C02Target*)compiler->target)->regs_start;
-  int addr = start_addr;
-  for (int i = 0; i < 5; i++) {
-    for (int j = 0; j < registers[i].num; j++) {
-      fprintf(fp, "\t.set __%c%d 0x%x\n", registers[i].prefix, j, addr);
-      addr += registers[i].size;
-    }
+  if (start_addr < 0 || start_addr + W65C02_ZP_LAYOUT_END > 256) {
+    ReportError(NULL, 0,
+                "Invalid -freg-start 0x%x: zero-page layout exceeds 256 bytes",
+                start_addr);
+    return NULL;
   }
-  
-  fprintf(fp, "\t.set __sp 0x%x\n", W65C02_SP_REG + start_addr);
-  fprintf(fp, "\t.set __fp 0x%x\n", W65C02_FP_REG + start_addr);
-  fprintf(fp, "\t.set __result 0x%x\n", W65C02_RESULT_REG + start_addr);
-  fprintf(fp, "\t.set __t0 0x%x\n", W65C02_T0_REG + start_addr);
-  fprintf(fp, "\t.set __t1 0x%x\n", W65C02_T1_REG + start_addr);
-  fprintf(fp, "\t.set __t2 0x%x\n", W65C02_T2_REG + start_addr);
-  fprintf(fp, "\t.set __t3 0x%x\n", W65C02_T3_REG + start_addr);
-  fprintf(fp, "\t.set __mem_src 0x%x\n", W65C02_MSRC_REG + start_addr);
-  fprintf(fp, "\t.set __mem_dest 0x%x\n", W65C02_MDST_REG + start_addr);
-  fprintf(fp, "\t.set __mem_size 0x%x\n", W65C02_MSZ_REG + start_addr);
+
+  for (int i = 0; i < W65C02_REG_FILE_BYTES; i++) {
+    fprintf(fp, "\t.set __zpr%d 0x%x\n", i, start_addr + i);
+  }
+
+  fprintf(fp, "\t.set __sp 0x%x\n", start_addr + W65C02_SP_REG);
+  fprintf(fp, "\t.set __fp 0x%x\n", start_addr + W65C02_FP_REG);
+  fprintf(fp, "\t.set __result 0x%x\n", start_addr + W65C02_RESULT_REG);
+  fprintf(fp, "\t.set __t0 0x%x\n", start_addr + W65C02_T0_REG);
+  fprintf(fp, "\t.set __t1 0x%x\n", start_addr + W65C02_T1_REG);
+  fprintf(fp, "\t.set __t2 0x%x\n", start_addr + W65C02_T2_REG);
+  fprintf(fp, "\t.set __t3 0x%x\n", start_addr + W65C02_T3_REG);
+  fprintf(fp, "\t.set __mem_src 0x%x\n", start_addr + W65C02_MSRC_REG);
+  fprintf(fp, "\t.set __mem_dest 0x%x\n", start_addr + W65C02_MDST_REG);
+  fprintf(fp, "\t.set __mem_size 0x%x\n", start_addr + W65C02_MSZ_REG);
 
   fprintf(fp, "\n\n");
   return fp;
@@ -89,6 +85,12 @@ static CompilerOptionDefinition options[] = {
 static void HandleOptions(Vector* options) {
   W65C02Target* target = (W65C02Target*)compiler->target;
   target->regs_start = OptionIntValue(k6502OptionRegStart, options, 0);
+  if (target->regs_start < 0 ||
+      target->regs_start + W65C02_ZP_LAYOUT_END > 256) {
+    ReportError(NULL, 0,
+                "Invalid -freg-start 0x%x: zero-page layout exceeds 256 bytes",
+                target->regs_start);
+  }
 }
 
 // Create a new W65C02 target.  The functions are called by the

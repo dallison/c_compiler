@@ -20,7 +20,7 @@
 // |      frame         |
 // |                    |
 // +--------------------+    <- previous sp, new fp
-// |   save mask (24)   |
+// |   save mask (64)   |
 // +--------------------+    <- reg save mask @fp-2
 // |                    |
 // |                    |    <- variables (accessed via fp-X)
@@ -135,6 +135,15 @@ static struct {
     {-1, NULL},
 };
 
+static void FormatRegRef(TargetInstruction* reg_inst, W65C02Register* reg,
+                         int byte, char* buf, size_t len) {
+  if (reg_inst != NULL && reg_inst->operand[2] != NULL) {
+    snprintf(buf, len, "__zpr%d", (int)TargetIntValue(reg_inst->operand[2]) + byte);
+    return;
+  }
+  W65C02RegisterAsString(reg, byte, buf, len);
+}
+
 static const char* ZeroPageLocation(int offset) {
   for (size_t i = 0; zero_page_locations[i].offset != -1; i++) {
     if (zero_page_locations[i].offset == offset) {
@@ -204,9 +213,8 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
           abort();
         }
       }
-      fprintf(
-          fp, "(%s)",
-          W65C02RegisterAsString((W65C02Register*)operand->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(operand, (W65C02Register*)operand->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "(%s)", buf);
       break;
     case kAddrModeRelative:
       fprintf(fp, ".%s_label_%d", func_name, operand->id);
@@ -220,7 +228,8 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
     case kAddrModeZeroPage:
       assert(inst->operand[1] != NULL);
       offset = (int)TargetIntValue(inst->operand[1]);
-      fprintf(fp, "%s", W65C02RegisterAsString(reg, offset, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, offset, buf, sizeof(buf));
+      fprintf(fp, "%s", buf);
       break;
     case kAddrModeZeroPageAbsolute:
       offset = (int)TargetIntValue(inst->operand[0]);
@@ -251,15 +260,18 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
     case kAddrModeZeroPageImmediate:
       assert(reg != NULL);
       offset = (int)TargetIntValue(inst->operand[1]);
-      fprintf(fp, "#%s", W65C02RegisterAsString(reg, offset, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, offset, buf, sizeof(buf));
+      fprintf(fp, "#%s", buf);
       break;
     case kAddrModeIndirectIndexed:
       assert(reg != NULL);
-      fprintf(fp, "(%s), Y", W65C02RegisterAsString(reg, 0, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, 0, buf, sizeof(buf));
+      fprintf(fp, "(%s), Y", buf);
       break;
     case kAddrModeIndexedIndirect:
       assert(reg != NULL);
-      fprintf(fp, "(%s, X)", W65C02RegisterAsString(reg, 0, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, 0, buf, sizeof(buf));
+      fprintf(fp, "(%s, X)", buf);
       break;
     case kAddrModeAbsoluteIndexedX:
       break;
@@ -275,16 +287,16 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
     case kAddrModeZeroPageIndexedX:
       assert(reg != NULL);
       offset = (int)TargetIntValue(inst->operand[1]);
-      fprintf(fp, "%s, X",
-              W65C02RegisterAsString(reg, offset, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, offset, buf, sizeof(buf));
+      fprintf(fp, "%s, X", buf);
       break;
     case kAddrModeAbsoluteIndexedY:
       break;
     case kAddrModeZeroPageIndexedY:
       assert(reg != NULL);
       offset = (int)TargetIntValue(inst->operand[1]);
-      fprintf(fp, "%s, Y",
-              W65C02RegisterAsString(reg, offset, buf, sizeof(buf)));
+      FormatRegRef(operand, reg, offset, buf, sizeof(buf));
+      fprintf(fp, "%s, Y", buf);
       break;
    }
 }
@@ -399,7 +411,7 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
         suffix2 = "+2";
         fprintf(fp, "\t%-12s #%d\n", "ldy", (frame_size >> 8) & 0xff);
       }
-      uint32_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
+      uint64_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
       if (mask == 0) {
         suffix1 = "_nomask";
       }
@@ -407,21 +419,22 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
               opcode == W65C02_OP(enter_leaf) ? "enter_leaf" : "enter", suffix1, suffix2);
       
       if (mask != 0) {
-        // Write out 24 bit save mask.
+        // Write out 64-bit save mask (8 bytes, little-endian).
         fprintf(fp, "\t%-12s", ".byte");
         char* sep = " ";
-        for (int i = 0; i < 3; i++) {
-          fprintf(fp, "%s0x%02x", sep, (mask >> i*8) & 0xff);
+        for (int i = 0; i < W65C02_ENTER_SAVE_MASK_BYTES; i++) {
+          fprintf(fp, "%s0x%02x", sep, (unsigned int)((mask >> (i * 8)) & 0xff));
           sep = ",";
         }
-        fprintf(fp, "\t\t// Save mask %s\n", W65C02RegisterAllocatorPrintRegMask(mask, buf));
+        fprintf(fp, "\t\t// Save mask %s\n",
+                W65C02RegisterAllocatorPrintRegMask(mask, buf));
       }
       break;
     }
     case W65C02_OP(leave):
     case W65C02_OP(leave_leaf): {
       int frame_size = FrameSize(emitter, opcode == W65C02_OP(leave_leaf));
-      frame_size += 3;                  // Space for reg save mask.
+      frame_size += W65C02_ENTER_SAVE_MASK_BYTES;
       fprintf(fp, "\t%-12s #%d\n", "ldy", frame_size & 0xff);
       const char* suffix1 = "";
       const char* suffix2 = "";
@@ -444,7 +457,7 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
           leave_func = "leave";
         }
       }
-      uint32_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
+      uint64_t mask = W65C02RegisterAllocatorBuildRegMask(emitter->regs);
       if (mask == 0) {
         suffix1 = "_nomask";
       }
@@ -462,15 +475,15 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       TargetInstruction* result = inst->operand[0];
       TargetInstruction* var = inst->operand[1];
       int offset = (int)TargetIntValue(var->operand[0]);
-//      fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda",
-//              W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf, sizeof(buf)),
-//              ((TargetSymbol*)var)->symbol->name.value);
+      FormatRegRef(result, (W65C02Register*)result->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda", buf,
+              ((TargetSymbol*)var)->symbol->name.value);
       fprintf(fp, "\t%-12s #%d\n", "ldx", offset & 0xff);
       if (offset >= 256) {
         fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
       }
-      fprintf(fp, "\t%-12s __%s_i%d\t\t\t// %s\n", "jsr",
-              opcode == W65C02_OP(var_addr) ? "var_addr" : "var_addrb", result->reg->num,
+      fprintf(fp, "\t%-12s __%s\t\t\t// %s\n", "jsr",
+              opcode == W65C02_OP(var_addr) ? "var_addr" : "var_addrb",
               ((TargetSymbol*)var)->symbol->name.value);
       break;
     }
@@ -480,19 +493,19 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       // lda #dest_addr
       // ldx #offset lo
       // ldy #offset hi (removed for single byte case)
-      // JSR __arg_addr[b] (or arg_addr[b])
+      // JSR __arg_addr[b]
       TargetInstruction* result = inst->operand[0];
       TargetInstruction* var = inst->operand[1];
       int offset = (int)TargetIntValue(var->operand[0]);
-//      fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda",
-//              W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf, sizeof(buf)),
-//              ((TargetSymbol*)var)->symbol->name.value);
+      FormatRegRef(result, (W65C02Register*)result->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda", buf,
+              ((TargetSymbol*)var)->symbol->name.value);
       fprintf(fp, "\t%-12s #%d\n", "ldx", offset & 0xff);
       if (offset >= 256) {
         fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
       }
-      fprintf(fp, "\t%-12s __%s_i%d\t\t\t// %s\n", "jsr",
-              opcode == W65C02_OP(arg_addr) ? "arg_addr" : "arg_addrb", result->reg->num,
+      fprintf(fp, "\t%-12s __%s\t\t\t// %s\n", "jsr",
+              opcode == W65C02_OP(arg_addr) ? "arg_addr" : "arg_addrb",
               ((TargetSymbol*)var)->symbol->name.value);
       break;
     }
@@ -535,7 +548,23 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     case W65C02_OP(pushreg4):
     case W65C02_OP(pushreg8): {
       TargetInstruction* r = inst->operand[0];
-      fprintf(fp, "\tjsr         __push%s\n", W65C02RegisterAsString((W65C02Register*)r->reg, 0, buf, sizeof(buf)) + 2);
+      const char* push_func;
+      switch (opcode) {
+        case W65C02_OP(pushreg2):
+          push_func = "__pushreg2";
+          break;
+        case W65C02_OP(pushreg4):
+          push_func = "__pushreg4";
+          break;
+        case W65C02_OP(pushreg8):
+          push_func = "__pushreg8";
+          break;
+        default:
+          abort();
+      }
+      FormatRegRef(r, (W65C02Register*)r->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\n", "ldx", buf);
+      fprintf(fp, "\t%-12s %s\n", "jsr", push_func);
       break;
     }
       
@@ -543,8 +572,8 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       // lda #dest_addr
       // ldx #0
       // JSR __arg_value2
-      fprintf(fp, "\t%-12s #%s\t\t\t// struct return address\n", "lda",
-              W65C02RegisterAsString((W65C02Register*)inst->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(inst, (W65C02Register*)inst->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\t\t\t// struct return address\n", "lda", buf);
       fprintf(fp, "\t%-12s #0\n", "ldx");
       fprintf(fp, "\t%-12s __%s\n", "jsr",
               "arg_value2");
@@ -573,13 +602,14 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
           abort();
       }
       int spill_offset = SpillRegion(emitter) + (int)TargetIntValue(inst->operand[1]);
+      int reg_offset = (int)TargetIntValue(inst->operand[2]);
   
       // JSR spill
       // .byte reg
       // .byte spill_offset lo, spill_offset_hi
       fprintf(fp, "\t%-12s __%s\n", "jsr",
               spill_func);
-      fprintf(fp, "\t.byte %s\n", W65C02RegisterAsString((W65C02Register*)inst->reg, 0, buf, sizeof(buf)));
+      fprintf(fp, "\t.byte __zpr%d\n", reg_offset);
       fprintf(fp, "\t.byte 0x%02x,0x%02x\n", spill_offset & 0xff, (spill_offset >> 8) & 0xff);
        break;
     }
@@ -609,7 +639,8 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     
       fprintf(fp, "\t%-12s __%s\n", "jsr",
               reload_func);
-      fprintf(fp, "\t.byte %s\n", W65C02RegisterAsString((W65C02Register*)inst->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(inst, (W65C02Register*)inst->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t.byte %s\n", buf);
       fprintf(fp, "\t.byte 0x%02x,0x%02x\n", spill_offset & 0xff, (spill_offset >> 8) & 0xff);
       break;
     }
@@ -646,35 +677,33 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
        }
       int offset = (int)TargetIntValue(var->operand[0]);
       const char* op = W65C02OpcodeName(inst->opcode);
-      //fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda",
-     //         W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf, sizeof(buf)),
-      //        ((TargetSymbol*)var)->symbol->name.value);
+      FormatRegRef(result, (W65C02Register*)result->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\t\t\t// %s\n", "lda", buf,
+              ((TargetSymbol*)var)->symbol->name.value);
       fprintf(fp, "\t%-12s #%d\n", "ldx", offset & 0xff);
       if (offset >= 256) {
         fprintf(fp, "\t%-12s #%d\n", "ldy", (offset >> 8) & 0xff);
       }
-      fprintf(fp, "\t%-12s __%s%s\t\t\t// %s\n", "jsr", op,
-              W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf, sizeof(buf)) + 1,
-              ((TargetSymbol*)var)->symbol->name.value);
+      fprintf(fp, "\t%-12s __%s\n", "jsr", op);
       break;
     }
 
     case W65C02_OP(expr_addr_a): {
       TargetInstruction* expr = inst->operand[0];
-      fprintf(fp, "\t%-12s #%s\n", "lda",
-              W65C02RegisterAsString((W65C02Register*)expr->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(expr, (W65C02Register*)expr->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\n", "lda", buf);
       break;
     }
     case W65C02_OP(expr_addr_x): {
       TargetInstruction* expr = inst->operand[0];
-      fprintf(fp, "\t%-12s #%s\n", "ldx",
-              W65C02RegisterAsString((W65C02Register*)expr->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(expr, (W65C02Register*)expr->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\n", "ldx", buf);
       break;
     }
     case W65C02_OP(expr_addr_y): {
       TargetInstruction* expr = inst->operand[0];
-      fprintf(fp, "\t%-12s #%s\n", "ldy",
-              W65C02RegisterAsString((W65C02Register*)expr->reg, 0, buf, sizeof(buf)));
+      FormatRegRef(expr, (W65C02Register*)expr->reg, 0, buf, sizeof(buf));
+      fprintf(fp, "\t%-12s #%s\n", "ldy", buf);
       break;
     }
 

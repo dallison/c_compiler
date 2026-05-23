@@ -53,7 +53,88 @@ static void InitializeZeroPageRegister(W65C02Register* reg, int num,
                                        W65C02RegisterType type, bool temp) {
   TargetRegisterInit(&reg->base, num);
   reg->type = type;
+  reg->byte_offset = -1;
+  reg->emit_zpr_offset = -1;
   reg->temp = temp;
+  reg->locked = false;
+}
+
+static int RegFileSize(W65C02RegisterType type) {
+  switch (type) {
+    case k6502RegTypeB:
+      return 1;
+    case k6502RegTypeI:
+      return 2;
+    case k6502RegTypeL:
+      return 4;
+    case k6502RegTypeX:
+      return 8;
+    case k6502RegTypeF:
+      return 4;
+  }
+  return 1;
+}
+
+static int RegFileAlign(W65C02RegisterType type) {
+  switch (type) {
+    case k6502RegTypeB:
+      return 1;
+    case k6502RegTypeI:
+      return 2;
+    case k6502RegTypeL:
+      return 4;
+    case k6502RegTypeX:
+      return 8;
+    case k6502RegTypeF:
+      return 4;
+  }
+  return 1;
+}
+
+static uint64_t RegFileByteMask(int offset, int size) {
+  assert(offset >= 0 && offset + size <= W65C02_REG_FILE_BYTES);
+  if (size >= 64) {
+    return ~0ULL;
+  }
+  return ((1ULL << size) - 1ULL) << offset;
+}
+
+static bool RegFileRegionFree(uint64_t used, int offset, int size) {
+  return (used & RegFileByteMask(offset, size)) == 0;
+}
+
+static int RegFileFindFree(uint64_t used, W65C02RegisterType type) {
+  int size = RegFileSize(type);
+  int align = RegFileAlign(type);
+  for (int offset = 0; offset <= W65C02_REG_FILE_BYTES - size; offset++) {
+    if (offset % align != 0) {
+      continue;
+    }
+    if (RegFileRegionFree(used, offset, size)) {
+      return offset;
+    }
+  }
+  return -1;
+}
+
+static void RegFileMarkUsed(W65C02RegisterAllocator* allocator,
+                            W65C02Register* reg) {
+  int size = RegFileSize(reg->type);
+  uint64_t mask = RegFileByteMask(reg->byte_offset, size);
+  allocator->reg_file_used |= mask;
+  if (!reg->temp) {
+    allocator->preserved_bytes |= mask;
+  }
+}
+
+static void RegFileClearUsed(W65C02RegisterAllocator* allocator,
+                             W65C02Register* reg) {
+  if (reg->byte_offset < 0) {
+    return;
+  }
+  int size = RegFileSize(reg->type);
+  uint64_t mask = RegFileByteMask(reg->byte_offset, size);
+  allocator->reg_file_used &= ~mask;
 }
 
 #define INIT_REGS(set, type) \
@@ -78,11 +159,14 @@ void W65C02RegisterAllocatorInit(W65C02RegisterAllocator* allocator,
 
   InitializeZeroPageRegister(&allocator->sp_reg, W65C02_SP_REG, k6502RegTypeI, false);
   InitializeZeroPageRegister(&allocator->fp_reg, W65C02_FP_REG, k6502RegTypeI, false);
+  InitializeZeroPageRegister(&allocator->ap_reg, -1, k6502RegTypeI, false);
   BitSetInit(&allocator->used_b_regs);
   BitSetInit(&allocator->used_i_regs);
   BitSetInit(&allocator->used_l_regs);
   BitSetInit(&allocator->used_x_regs);
   BitSetInit(&allocator->used_f_regs);
+  allocator->reg_file_used = 0;
+  allocator->preserved_bytes = 0;
   allocator->current_spilled_region_size = 0;
   allocator->max_spilled_region_size = 0;
   MapInitForInt64Keys(&allocator->spill_points);
@@ -388,6 +472,8 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
+  spill->operand[2] = TargetGetIntConstant(&allocator->g->base, NULL, kTargetType32Bit,
+                                           reg->byte_offset);
 
   // printf("Spilled @%d (reg %d) as @%d\n", victim->id, reg->base.num, spill->id);
  
@@ -401,6 +487,8 @@ static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
   TargetRetargetInstructionIf(victim, spill, IsAfterSpillPoint, spill_point);
   spill->operand[0] = victim;
   spill->reg = victim->reg;
+  RegFileClearUsed(allocator, reg);
+  reg->byte_offset = -1;
   reg->base.owner = NULL;
   victim->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -442,10 +530,18 @@ static W65C02Register* FindFreeRegister(W65C02RegisterAllocator* allocator,
   }
 
   for (int i = 0; i < num_regs; i++) {
-    if (!regs[i].base.reserved && regs[i].base.owner == NULL) {
+    if (!regs[i].base.reserved && regs[i].base.owner == NULL &&
+        regs[i].byte_offset < 0) {
       if (!can_use_temp && regs[i].temp) {
         continue;
       }
+      int offset = RegFileFindFree(allocator->reg_file_used, type);
+      if (offset < 0) {
+        continue;
+      }
+      regs[i].byte_offset = offset;
+      regs[i].emit_zpr_offset = offset;
+      RegFileMarkUsed(allocator, &regs[i]);
       return &regs[i];
     }
   }
@@ -456,7 +552,9 @@ static void FreeRegister(W65C02RegisterAllocator* allocator,
                          W65C02Register* reg) {
   TrapRegister(allocator, reg);
   TrapFreeRegister(allocator, reg);
+  RegFileClearUsed(allocator, reg);
   reg->base.owner = NULL;
+  reg->byte_offset = -1;
 }
 
 static W65C02RegisterType RegisterTypeFromTypeRecord(TypeRecord* type) {
@@ -566,6 +664,16 @@ static W65C02Register* AllocateRegisterWithType(
     TargetInstruction* victim, *spill_point;
     FindSpillVictim(allocator, type, &victim, &spill_point);
     reg = SpillInstruction(allocator, victim, spill_point);
+    if (reg->byte_offset < 0) {
+      int offset = RegFileFindFree(allocator->reg_file_used, type);
+      if (offset < 0) {
+        fprintf(stderr, "Out of zero-page register space after spill\n");
+        abort();
+      }
+      reg->byte_offset = offset;
+      reg->emit_zpr_offset = offset;
+      RegFileMarkUsed(allocator, reg);
+    }
   }
   TrapRegister(allocator, reg);
   TrapAllocRegister(allocator, reg);
@@ -715,6 +823,66 @@ static void AllocateForRmov(W65C02RegisterAllocator* allocator,
   reg->base.owner = inst;
 }
 
+static void EnsureRegFileOffset(W65C02RegisterAllocator* allocator,
+                                W65C02Register* reg) {
+  if (reg->byte_offset >= 0) {
+    return;
+  }
+  int offset = RegFileFindFree(allocator->reg_file_used, reg->type);
+  if (offset < 0) {
+    fprintf(stderr, "Out of zero-page register space\n");
+    abort();
+  }
+  reg->byte_offset = offset;
+  reg->emit_zpr_offset = offset;
+  RegFileMarkUsed(allocator, reg);
+}
+
+static void SaveZprOffsetForEmit(W65C02RegisterAllocator* allocator,
+                                  TargetInstruction* inst,
+                                  TargetInstruction* reg_inst) {
+  if (reg_inst == NULL || reg_inst->reg == NULL) {
+    return;
+  }
+  W65C02Register* reg = (W65C02Register*)reg_inst->reg;
+  EnsureRegFileOffset(allocator, reg);
+}
+
+static bool SavesZprOffsetForEmit(W65C02Opcode opcode) {
+  switch (opcode) {
+    case W65C02_OP(var_addr):
+    case W65C02_OP(var_addrb):
+    case W65C02_OP(arg_addr):
+    case W65C02_OP(arg_addrb):
+    case W65C02_OP(var_value1):
+    case W65C02_OP(var_value1b):
+    case W65C02_OP(var_value2):
+    case W65C02_OP(var_value2b):
+    case W65C02_OP(var_value4):
+    case W65C02_OP(var_value4b):
+    case W65C02_OP(var_value8):
+    case W65C02_OP(var_value8b):
+    case W65C02_OP(arg_value1):
+    case W65C02_OP(arg_value1b):
+    case W65C02_OP(arg_value2):
+    case W65C02_OP(arg_value2b):
+    case W65C02_OP(arg_value4):
+    case W65C02_OP(arg_value4b):
+    case W65C02_OP(arg_value8):
+    case W65C02_OP(arg_value8b):
+    case W65C02_OP(expr_addr_a):
+    case W65C02_OP(expr_addr_x):
+    case W65C02_OP(expr_addr_y):
+    case W65C02_OP(pushreg2):
+    case W65C02_OP(pushreg4):
+    case W65C02_OP(pushreg8):
+    case W65C02_OP(structreturn):
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Does the instruction need a register allocated for it?
 static bool NeedsRegister(TargetInstruction* inst) {
   if ((inst->flags & k6502DontEmit) != 0) {
@@ -816,10 +984,12 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
 
     case W65C02_OP(ap):
       reg = &allocator->ap_reg;
+      EnsureRegFileOffset(allocator, reg);
       break;
 
     case W65C02_OP(resulti):
-      reg = &allocator->x_regs[0];
+      reg = &allocator->x_regs[W65C02_X_RETURN_REG];
+      EnsureRegFileOffset(allocator, reg);
       break;
       
     case W65C02_OP(structreturn): {
@@ -850,36 +1020,25 @@ static void AllocateRegister(W65C02RegisterAllocator* allocator,
 
 const char* W65C02RegisterAsString(W65C02Register* reg, int byte, char* buf,
                                   size_t len) {
-  char bytebuf[16] = {0};
-  if (byte > 0) {
-    snprintf(bytebuf, sizeof(bytebuf), "+%d", byte);
+  if (reg->type == k6502RegTypeI && reg->base.num == W65C02_SP_REG) {
+    if (byte > 0) {
+      snprintf(buf, len, "__sp+%d", byte);
+    } else {
+      snprintf(buf, len, "__sp");
+    }
+    return buf;
   }
-  switch (reg->type) {
-    case k6502RegTypeB:
-      snprintf(buf, len, "__b%d%s", reg->base.num, bytebuf);
-      break;
-    case k6502RegTypeI:
-      if (reg->base.num == W65C02_SP_REG) {
-        snprintf(buf, len, "__sp%s", bytebuf);
-        break;
-      }
-      if (reg->base.num == W65C02_FP_REG) {
-        snprintf(buf, len, "__fp%s", bytebuf);
-        break;
-      }
-      snprintf(buf, len, "__i%d%s", reg->base.num, bytebuf);
-      break;
-    case k6502RegTypeL:
-      snprintf(buf, len, "__l%d%s", reg->base.num, bytebuf);
-      break;
-    case k6502RegTypeX:
-      snprintf(buf, len, "__x%d%s", reg->base.num, bytebuf);
-      break;
-    case k6502RegTypeF:
-      snprintf(buf, len, "__f%d%s", reg->base.num, bytebuf);
-      break;
+  if (reg->type == k6502RegTypeI && reg->base.num == W65C02_FP_REG) {
+    if (byte > 0) {
+      snprintf(buf, len, "__fp+%d", byte);
+    } else {
+      snprintf(buf, len, "__fp");
+    }
+    return buf;
   }
-
+  assert(reg->byte_offset >= 0 || reg->emit_zpr_offset >= 0);
+  int off = reg->byte_offset >= 0 ? reg->byte_offset : reg->emit_zpr_offset;
+  snprintf(buf, len, "__zpr%d", off + byte);
   return buf;
 }
 
@@ -893,7 +1052,7 @@ static void InitializeBasicBlockRegisters(W65C02RegisterAllocator* allocator,
     reg->base.owner = NULL;
     reg->locked = false;
   }
- for (int i = 0; i < W65C02_NUM_I_REGS; i++) {
+  for (int i = 0; i < W65C02_NUM_I_REGS; i++) {
     W65C02Register* reg = &allocator->i_regs[i];
     if (reg->base.reserved) {
       continue;
@@ -902,30 +1061,32 @@ static void InitializeBasicBlockRegisters(W65C02RegisterAllocator* allocator,
     reg->locked = false;
   }
   for (int i = 0; i < W65C02_NUM_L_REGS; i++) {
-     W65C02Register* reg = &allocator->l_regs[i];
-     if (reg->base.reserved) {
-       continue;
-     }
-     reg->base.owner = NULL;
-     reg->locked = false;
-   }
+    W65C02Register* reg = &allocator->l_regs[i];
+    if (reg->base.reserved) {
+      continue;
+    }
+    reg->base.owner = NULL;
+    reg->locked = false;
+  }
   for (int i = 0; i < W65C02_NUM_X_REGS; i++) {
-     W65C02Register* reg = &allocator->x_regs[i];
-     if (reg->base.reserved) {
-       continue;
-     }
-     reg->base.owner = NULL;
-     reg->locked = false;
-   }
+    W65C02Register* reg = &allocator->x_regs[i];
+    if (reg->base.reserved) {
+      continue;
+    }
+    reg->base.owner = NULL;
+    reg->locked = false;
+  }
   for (int i = 0; i < W65C02_NUM_F_REGS; i++) {
-     W65C02Register* reg = &allocator->f_regs[i];
-     if (reg->base.reserved) {
-       continue;
-     }
-     reg->base.owner = NULL;
-     reg->locked = false;
-   }
-  
+    W65C02Register* reg = &allocator->f_regs[i];
+    if (reg->base.reserved) {
+      continue;
+    }
+    reg->base.owner = NULL;
+    reg->locked = false;
+  }
+
+  allocator->reg_file_used = 0;
+
   // Now allocate the registers to the inputs.
   for (size_t i = 0; i < block->inputs.length; i++) {
     TargetInstruction* inst = block->inputs.value.p[i];
@@ -941,6 +1102,19 @@ static void InitializeBasicBlockRegisters(W65C02RegisterAllocator* allocator,
       continue;
     }
     assert(inst->reg != NULL);
+    if (reg->byte_offset < 0) {
+      int offset = RegFileFindFree(allocator->reg_file_used, reg->type);
+      if (offset < 0) {
+        fprintf(stderr, "Out of zero-page register space at block entry\n");
+        abort();
+      }
+      reg->byte_offset = offset;
+      reg->emit_zpr_offset = offset;
+      RegFileMarkUsed(allocator, reg);
+    } else {
+      int size = RegFileSize(reg->type);
+      allocator->reg_file_used |= RegFileByteMask(reg->byte_offset, size);
+    }
     reg->base.owner = inst;
   }
 }
@@ -991,44 +1165,11 @@ void W65C02AllocateRegisters(W65C02RegisterAllocator* allocator) {
   ProcessBasicBlock(allocator, allocator->g->base.entry_block);
 }
 
-uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {
-  uint32_t result= 0;
-  static int shifts[] = {0, 5, 4, 4, 3};
-  BitSet* reg_sets[5];
-  reg_sets[0] = &alloc->used_i_regs;
-  reg_sets[1] = &alloc->used_b_regs;
-  reg_sets[2] = &alloc->used_l_regs;
-  reg_sets[3] = &alloc->used_x_regs;
-  reg_sets[4] = &alloc->used_f_regs;
-  for (int i = 4; i >= 0; i--) {
-    BitSetIterator it;
-    BitSetIteratorStart(&it, reg_sets[i]);
-    int num_regs = 0;
-     while (!BitSetIteratorDone(&it)) {
-       num_regs++;
-       BitSetIteratorNext(&it);
-     }
-    result |= num_regs;
-    result <<= shifts[i];
-  }
-  return result;
+uint64_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {
+  return alloc->preserved_bytes;
 }
 
-const char* W65C02RegisterAllocatorPrintRegMask(uint32_t mask, char* buf) {
-  static int shifts[] = {5, 4, 4, 3, 3};
-  static int masks[] = {31,15,15,7,7};
-  static const char* reg_types[] = {
-    "i",
-    "b",
-    "l",
-    "x",
-    "f",
-  };
-  const char* r = buf;
-  for (int i = 0; i < 5; i++) {
-    int n = mask & masks[i];
-    buf += snprintf(buf, 6, "%s:%d ", reg_types[i], n);
-    mask >>= shifts[i];
-  }
-  return r;
+const char* W65C02RegisterAllocatorPrintRegMask(uint64_t mask, char* buf) {
+  snprintf(buf, 23, "0x%016llx", (unsigned long long)mask);
+  return buf;
 }
