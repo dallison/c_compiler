@@ -21,7 +21,7 @@ void VectorInit(Vector* vec) {
   vec->capacity = 0;
 }
 
-Vector* NewVector() {
+Vector* NewVector(void) {
   Vector* vec = malloc(sizeof(Vector));
   VectorInit(vec);
   return vec;

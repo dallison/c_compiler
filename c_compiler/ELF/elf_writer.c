@@ -296,6 +296,7 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
             break;
           }
         }
+        (void)section_found;
         assert(section_found);
       }
     }
@@ -363,11 +364,11 @@ static void WriteSectionContents(ELFWriterFile* elf,
             break;
           }
         }
+        (void)section_found;
         assert(section_found);
       }
     }
-    
-    // Pad to next section address.
+        // Pad to next section address.
     if (section->padding != 0) {
       Pad(section->padding, fp);
     }

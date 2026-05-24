@@ -297,8 +297,7 @@ static void LoaderFixupStaticAddresses(Loader* loader) {
     return;
   }
   uint64_t runtime_entry = 0;
-  if (!LoaderLinkedAddressToRuntime(loader, loader->dynamic_lib,
-                                    loader->main_address,
+  if (!LoaderLinkedAddressToRuntime(loader, NULL, loader->main_address,
                                     &runtime_entry)) {
     LoaderError("Cannot translate entry point 0x%" PRIx64 "\n",
                 loader->main_address);
@@ -408,9 +407,9 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
   for (size_t i = 0; i < loader->elf_file->segments.length; i++) {
     ELFProgramHeader* segment = loader->elf_file->segments.value.p[i];
     if (segment->type == PT(load)) {
-      if (segment->memsz == 0) {
+        if (segment->memsz == 0) {
         // No point in trying to map a zero length segment.
-        break;
+        continue;
       }
       
       uint64_t mmap_addr = loader->arch->ignore_vaddr ? 0 : segment->vaddr;       // Address to place segment at.

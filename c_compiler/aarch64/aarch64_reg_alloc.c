@@ -597,7 +597,7 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     case AARCH64_OP(ivarreg):
     case AARCH64_OP(fvarreg):
       assert(false);
-      break;
+      COMPILER_UNREACHABLE();
       
     case AARCH64_OP(d0):
     case AARCH64_OP(d1):

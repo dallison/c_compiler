@@ -31,6 +31,11 @@ struct __jmp_buf {
 struct __jmp_buf {
   long regs[32];
 };
+#elif defined(__x86_64__)
+struct __jmp_buf {
+  long regs[32];
+  long retaddr;
+};
 #else
 #error "Unknown architecture"
 #endif

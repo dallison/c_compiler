@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include "map.h"
 #include "6502_branches.h"
 #include "6502_spiller.h"
 #include "6502_optimize.h"
@@ -756,6 +757,7 @@ void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   PLAIN_INTRINSIC(memcmp, Int);
 
   g->struct_return_inst = NULL;
+  g->reg_var_bytes_assigned = 0;
   VectorInit(&g->branches);
   InitRegVars(&g->reg_vars[0], kNumIVars, k6502RegTypeI, W65C02_OP(ivarreg));
   InitRegVars(&g->reg_vars[1], kNumBVars, k6502RegTypeB, W65C02_OP(bvarreg));
@@ -945,6 +947,28 @@ static int SizeofArray(TypeRecord* type) {
   return type->size;
 }
 
+static int RegVarByteSize(W65C02RegisterType type) {
+  switch (type) {
+    case k6502RegTypeB:
+      return 1;
+    case k6502RegTypeI:
+      return 2;
+    case k6502RegTypeL:
+      return 4;
+    case k6502RegTypeX:
+      return 8;
+    case k6502RegTypeF:
+      return 4;
+  }
+  return 1;
+}
+
+static TargetInstruction* AddSpillPoint(W65C02Generator* g, TargetInstruction* expr) {
+  W65C02RegisterAllocatorAddSpillPoint(&g->register_allocator,
+                                         expr->id, TargetLastInstruction(&g->base));
+  return expr;
+}
+
 static TargetInstruction* CreateVariableRegister(W65C02Generator* g,
                                                       RegisterVariableSet* set,
                                                  TargetInstruction* var,
@@ -956,15 +980,8 @@ static TargetInstruction* CreateVariableRegister(W65C02Generator* g,
   inst->symbol = sym;
   set->vars[i].reg = &inst->base;
   set->vars[i].var = var;
+  g->reg_var_bytes_assigned += RegVarByteSize(set->type);
   return Emit(g, set->vars[i].reg);
-}
-
-// Add a spill point for the given expression as the last emitted
-// instruction.
-static TargetInstruction* AddSpillPoint(W65C02Generator* g, TargetInstruction* expr) {
-  W65C02RegisterAllocatorAddSpillPoint(&g->register_allocator,
-                                         expr->id, TargetLastInstruction(&g->base));
-  return expr;
 }
 
 static bool IsExpression(TargetInstruction* inst) {
@@ -1458,6 +1475,22 @@ static void CopyWithLoopX(W65C02Generator* g, TargetInstruction* to,
 
 static TargetInstruction* GetImmediateLiteral(W65C02Generator* g, TargetInstruction* from) {
   TargetConstant* c = (TargetConstant*)from;
+  if (c->literal_id < 0) {
+    switch (c->type) {
+      case kTargetType64Bit:
+        AddLiteral(g, c, &c->value.ivalue, 8);
+        break;
+      case kTargetTypeFloat:
+      case kTargetTypeDouble: {
+        float v = (float)c->value.dvalue;
+        AddLiteral(g, c, &v, 4);
+        break;
+      }
+      default:
+        AddLiteral(g, c, &c->value.ivalue, 4);
+        break;
+    }
+  }
   Literal* lit = CompilerFindLiteral(c->literal_id);
   assert(lit != NULL);
   lit->disabled = false;
@@ -5319,6 +5352,7 @@ static TargetInstruction* PushArg(W65C02Generator* g, IRNode* node) {
     }
   }
   assert(false);
+  COMPILER_UNREACHABLE();
 }
 
 // Get the number of bytes pushed for an argument.
@@ -5334,6 +5368,7 @@ static size_t GetPushedSize(IRNode* node) {
     }
   }
   assert(false);
+  COMPILER_UNREACHABLE();
 }
 
 // Passing a struct or union to a function needs to copy
@@ -7409,17 +7444,22 @@ static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord*
 static RegisterVariableSet* MaybeUseRegister(W65C02Generator* g, PoolEntry* entry) {
   TypeRecord* type = entry->value.symbol->type;
   if (TypeIsArray(type) || !TypeIsScalar(type)) {
-    return false;
+    return NULL;
   }
   if (entry->value.symbol->flags.address_taken) {
-    return false;
+    return NULL;
   }
   RegisterVariableSet* set = TypeToRegisterVarSet(g, type);
   if (entry->value.symbol->usage_info.reads == 1) {
     // No point in putting a single read into a register.
     return NULL;
   }
-  if (set->num_vars < set->max_vars) {
+  if (g->gen->variable_pool.length > 12) {
+    return NULL;
+  }
+  int size = RegVarByteSize(set->type);
+  if (set->num_vars < set->max_vars &&
+      g->reg_var_bytes_assigned + size <= W65C02_REG_FILE_BYTES - 32) {
     return set;
   }
   return NULL;

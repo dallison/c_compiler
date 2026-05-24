@@ -735,11 +735,26 @@ bool RVIsPossibleImmediate(int64_t value) {
 
 TargetInstruction* RVGetBranchTarget(TargetInstruction* inst) {
   RVOpcode opcode = (RVOpcode)inst->opcode;
-  if (opcode == RV_OP(bnez) || opcode == RV_OP(beqz)) {
-     return inst->operand[1];
-   } else {
-     return inst->operand[2];    // Operand 2.
-   }
+  switch (opcode) {
+    case RV_OP(j):
+    case RV_OP(jal):
+      return inst->operand[0];
+    case RV_OP(bnez):
+    case RV_OP(beqz):
+      return inst->operand[1];
+    case RV_OP(beq):
+    case RV_OP(bne):
+    case RV_OP(blt):
+    case RV_OP(bge):
+    case RV_OP(bltu):
+    case RV_OP(bgeu):
+      return inst->operand[2];
+    default:
+      if (inst->operand[2] != NULL) {
+        return inst->operand[2];
+      }
+      return inst->operand[0];
+  }
 }
 
 bool RVIsJumpableEntry(TargetInstruction* inst) {
@@ -1327,6 +1342,22 @@ static RVOpcode IR2RV(IROpcode op) {
   }
 }
 
+static int MaxIntRegisterVariables(RVGenerator* rv) {
+  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
+  if (is_leaf) {
+    return RV_LAST_LEAF_INT_REG_VAR - RV_FIRST_LEAF_INT_REG_VAR + 1;
+  }
+  return RV_LAST_INT_REG_VAR - RV_FIRST_INT_REG_VAR + 1;
+}
+
+static int MaxFpRegisterVariables(RVGenerator* rv) {
+  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
+  if (is_leaf) {
+    return RV_LAST_LEAF_FP_REG_VAR - RV_FIRST_LEAF_FP_REG_VAR + 1;
+  }
+  return RV_LAST_FP_REG_VAR - RV_FIRST_FP_REG_VAR + 1;
+}
+
 static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
   if (OptLevel0()) {
     // When not optimizing, all variables are on the stack.
@@ -1342,7 +1373,13 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
   if (var->base.outputs.length == 0) {
     return false;
   }
-  return true;
+
+  // Register variables are assigned to a fixed pool of dedicated registers.
+  // If we run out, keep the variable on the stack.
+  if (TypeIsFloatingPoint(var_node->type)) {
+    return rv->num_fp_reg_vars < MaxFpRegisterVariables(rv);
+  }
+  return rv->num_int_reg_vars < MaxIntRegisterVariables(rv);
 }
 
 // Static varaibles have an address calculated by the linker so at this
@@ -2209,6 +2246,7 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 
   return SetLoweredNode(node, Load(rv, addr_node, opcode));
@@ -2267,6 +2305,7 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(rv, src_node);
 
@@ -2500,6 +2539,7 @@ static TargetInstruction* LowerResult(RVGenerator* rv, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 #if 0
   TargetInstruction* result = Materialize(rv, node->inputs.value.p[0]);
@@ -3595,7 +3635,7 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
       return LowerNamedLabel(rv, node);
 
     case IR_OP(pusharg):
-      break;
+      return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
       
     case IR_OP(calla):
       return LowerCall(rv, node);

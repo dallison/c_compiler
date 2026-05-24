@@ -2029,6 +2029,7 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 
   return SetLoweredNode(node, Load(g, addr_node, opcode, size));
@@ -2277,6 +2278,7 @@ static TargetInstruction* LowerStore(AARCH64Generator* g, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(g, src_node);
 
@@ -2399,6 +2401,7 @@ static TargetInstruction* LowerResult(AARCH64Generator* g, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 #if 0
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);

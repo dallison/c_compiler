@@ -21,6 +21,15 @@
 #endif
 #endif
 
+#ifndef COMPILER_UNREACHABLE
+#if defined(__GNUC__) || defined(__clang__)
+#define COMPILER_UNREACHABLE() __builtin_unreachable()
+#else
+#include <stdlib.h>
+#define COMPILER_UNREACHABLE() abort()
+#endif
+#endif
+
 // Simple binary map between two values.  The map is held as a contiguous array
 // of MapKeyValue struct, each of which has a key and a value.  The map also
 // has a comparison function that can compare two MapKeyValue pairs for ordering

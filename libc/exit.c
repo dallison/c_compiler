@@ -6,7 +6,24 @@
 //  Copyright © 2022 David Allison. All rights reserved.
 //
 
+#if defined(__x86_64__)
+void _Exit(int status);
+
+int atexit(void (*p)(void)) {
+  (void)p;
+  return 0;
+}
+
+void exit(int status) {
+  _Exit(status);
+}
+
+#else
+
 #include <stdlib.h>
+#if !defined(__6502__)
+#include <string.h>
+#endif
 
 static void (*atexit_funcs[32])(void);
 static unsigned char numfuncs;
@@ -36,3 +53,4 @@ void exit(int status) {
   _Exit(status);
 }
 
+#endif

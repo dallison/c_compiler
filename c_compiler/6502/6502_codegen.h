@@ -655,6 +655,7 @@ typedef struct W65C02Generator {
   
   // Register variables.  
   RegisterVariableSet reg_vars[kNumVarSets];
+  int reg_var_bytes_assigned;
   
   // Register allocator.
   W65C02RegisterAllocator register_allocator;

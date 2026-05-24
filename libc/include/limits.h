@@ -63,8 +63,7 @@
 #  else
 #   define LONG_MAX  2147483647L
 #  endif
-#  define LONG_MIN  (-LONG_MAX - 1L)#endif
-
+#  define LONG_MIN  (-LONG_MAX - 1L)
 
 /* Maximum value an `unsigned long int' can hold.  (Minimum is 0.)  */
 #  if __WORDSIZE == 64

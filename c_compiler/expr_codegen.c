@@ -1468,7 +1468,7 @@ static IRNode* GenerateBuiltinVaEnd(Generator* gen, VectorASTNode* node) {
 
 static IRNode* GenerateBuiltinVaCopy(Generator* gen, VectorASTNode* node) {
   IRNode* d = GenerateExpression(gen, node->children->value.p[0]);
-  IRNode* s = GenerateExpression(gen, node->children->value.p[0]);
+  IRNode* s = GenerateExpression(gen, node->children->value.p[1]);
   IRNode* result = GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_copy), d, s));
   CheckForVarDef(result, &node->base);
   return IRSetType(result, node->base.type);

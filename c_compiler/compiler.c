@@ -25,6 +25,7 @@
 #include "p_code_target.h"
 #include "risc_v_target.h"
 #include "aarch64_target.h"
+#include "x86_64_target.h"
 
 // This is global to avoid having to pass it around everywhere.
 Compiler* compiler;
@@ -54,7 +55,7 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false, "Keep assembly file"},
     {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false, "Save IR to .ir file"},
     {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false, "Save AST to .ast file"},
-    {NULL, 0, 0, false},
+    {NULL, 0, 0, false, NULL},
 };
 
 bool OptLevel0(void) {
@@ -84,6 +85,7 @@ static struct CompilerTargetDefinition{
   {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false},
   {"riscv", {"riscv", "risc-v"}, NewRVTarget, false},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false},
+  {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false},
   {"6502", {"6502"}, New6502Target, true},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true},
 };
@@ -756,8 +758,20 @@ static void CompileDeclaration(Syntax* syntax) {
 }
 
 static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
-  String* code = NewString(
-      "typedef void* __builtin_va_list;\n"
+  const char* va_list_typedef =
+      "typedef void* __builtin_va_list;\n";
+  if (compiler->target != NULL &&
+      StringEqual(&compiler->target->name, "x86-64")) {
+    va_list_typedef =
+        "typedef struct __va_list_tag {"
+        " unsigned int __gp_offset;"
+        " unsigned int __fp_offset;"
+        " void* __overflow_arg_area;"
+        " void* __reg_save_area;"
+        " } __builtin_va_list;\n";
+  }
+  String* code = NewString(va_list_typedef);
+  StringAppend(code,
       "#define __asm asm\n"
       "#define __asm__ asm\n"
       "#define __attribute __attribute__\n"

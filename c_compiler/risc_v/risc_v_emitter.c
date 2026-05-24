@@ -550,11 +550,90 @@ static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
       RVRegisterName((RVRegister*)inst->operand[1]->reg, buf2, sizeof(buf2)));
 }
 
+static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
+  TargetInstruction* src = inst->operand[0];
+  assert(src != NULL);
+  if (src->block == NULL) {
+    return;
+  }
+  if (src->reg == NULL) {
+    return;
+  }
+  TargetRegister* dest_reg = inst->reg;
+  if (dest_reg == NULL && inst->dest != NULL) {
+    dest_reg = inst->dest->reg;
+  }
+  if (dest_reg == NULL) {
+    return;
+  }
+  if (dest_reg == src->reg) {
+    return;
+  }
+
+  const char* mnemonic = "";
+  switch (inst->opcode) {
+    case RV_OP(mv):
+      mnemonic = "mv";
+      break;
+    case RV_OP(fmv_s):
+      mnemonic = "fmv.s";
+      break;
+    case RV_OP(fmv_d):
+      mnemonic = "fmv.d";
+      break;
+    default:
+      assert(false);
+  }
+  char buf1[8], buf2[8];
+  fprintf(fp, "\t%-12s%s, %s\n", mnemonic,
+          RVRegisterName((RVRegister*)dest_reg, buf1, sizeof(buf1)),
+          RVRegisterName((RVRegister*)src->reg, buf2, sizeof(buf2)));
+}
+
 static const char* GetRegisterName(TargetInstruction* inst, char* buf, size_t size) {
-  if (inst->dest != NULL) {
+  if (inst == NULL) {
+    return "";
+  }
+  if (inst->reg != NULL) {
+    return RVRegisterName((RVRegister*)inst->reg, buf, size);
+  }
+  if (inst->dest != NULL && inst->dest->reg != NULL) {
     return RVRegisterName((RVRegister*)inst->dest->reg, buf, size);
   }
-  return RVRegisterName((RVRegister*)inst->reg, buf, size);
+  switch ((RVOpcode)inst->opcode) {
+    case RV_OP(x0):
+      return RVRegisterNameFromNum(RV_INT_ZERO_REG, kRVRegTypeInt, buf, size);
+    case RV_OP(t0):
+      return RVRegisterNameFromNum(RV_INT_TEMP_START_1, kRVRegTypeInt, buf,
+                                   size);
+    case RV_OP(fp):
+      return RVRegisterNameFromNum(RV_FP_REG, kRVRegTypeInt, buf, size);
+    case RV_OP(sp):
+      return RVRegisterNameFromNum(RV_SP_REG, kRVRegTypeInt, buf, size);
+    case RV_OP(a0):
+    case RV_OP(a1):
+    case RV_OP(a2):
+    case RV_OP(a3):
+    case RV_OP(a4):
+    case RV_OP(a5):
+    case RV_OP(a6):
+    case RV_OP(a7):
+      return RVRegisterNameFromNum(
+          (int)inst->opcode - RV_OP(a0) + RV_INT_ARG_START, kRVRegTypeInt, buf,
+          size);
+    case RV_OP(resulti):
+    case RV_OP(call):
+    case RV_OP(rcall):
+      return RVRegisterNameFromNum(RV_INT_RETURN_REG, kRVRegTypeInt, buf, size);
+    case RV_OP(resultf):
+    case RV_OP(resultd):
+    case RV_OP(callf):
+    case RV_OP(rcallf):
+      return RVRegisterNameFromNum(RV_FLOAT_RETURN_REG, kRVRegTypeFloat, buf,
+                                   size);
+    default:
+      return "";
+  }
 }
 
 // Main instruction printer.
@@ -609,15 +688,14 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 //      return;
 
     case RV_OP(mv):
-      // Don't emit mv x, x.
-      if (inst->operand[0]->reg == inst->reg) {
-        return;
-      }
-      if (inst->dest != NULL) {
+    case RV_OP(fmv_s):
+    case RV_OP(fmv_d):
+      if (inst->operand[1] != NULL) {
         PrintRmov(emitter, inst, fp);
-        return;
+      } else {
+        PrintDestMove(inst, fp);
       }
-      break;
+      return;
     case RV_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
       if (StorageIs(sym->symbol->storage, STO(static))) {
@@ -793,8 +871,6 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
       assert(inst->operand[2] != NULL);
-      assert(inst->operand[0]->reg != NULL);
-      assert(inst->operand[1]->reg != NULL);
       if (TargetIsConst(inst->operand[2])) {
         int offset = (int)TargetIntValue(inst->operand[2]);
         assert(RVIsPossibleImmediate(offset));

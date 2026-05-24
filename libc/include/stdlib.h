@@ -33,7 +33,7 @@ typedef long ssize_t;
 
 
 #ifndef __DIV_T
-typedef struct {
+typedef struct __div_t {
   int quot;
   int rem;
 } div_t;
@@ -41,7 +41,7 @@ typedef struct {
 #endif
 
 #ifndef __LDIV_T
-typedef struct {
+typedef struct __ldiv_t {
   long int quot;
   long int rem;
 } ldiv_t;
@@ -49,7 +49,7 @@ typedef struct {
 #endif
 
 #ifndef __LLDIV_T
-typedef struct {
+typedef struct __lldiv_t {
   long long int quot;
   long long int rem;
 } lldiv_t;

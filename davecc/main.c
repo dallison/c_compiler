@@ -16,6 +16,7 @@
 #include "risc_v_assembler.h"
 #include "6502_assembler.h"
 #include "p_code_assembler.h"
+#include "x86_64_assembler.h"
 #include "compiler.h"
 #include "linker_main.h"
 
@@ -334,6 +335,10 @@ int main(int argc, char * argv[]) {
         assembler = NewAARCH64Assembler(asm_filename, &output_filename);
         asm_run = AssembleAARCH64Instruction;
         destructor = (AssemblerDestructor)AARCH64AssemblerDestruct;
+      } else if (StringEqual(&target, "x86_64") || StringEqual(&target, "x86-64")) {
+        assembler = (Assembler*)NewX86_64Assembler(asm_filename, &output_filename);
+        asm_run = AssembleX86_64Instruction;
+        destructor = (AssemblerDestructor)X86_64AssemblerDestruct;
       } else if (StringEqual(&target, "pcode")) {
         assembler = (Assembler*)NewPCodeAssembler(asm_filename, &output_filename);
         asm_run = AssemblePCodeInstruction;

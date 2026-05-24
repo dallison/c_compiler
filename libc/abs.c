@@ -6,7 +6,7 @@
 //  Copyright © 2022 David Allison. All rights reserved.
 //
 
-#include <stdlib.h>
+// abs/labs/llabs are declared in stdlib.h; no include needed here.
 
 int abs(int j) {
   if (j < 0) {

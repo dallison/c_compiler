@@ -375,8 +375,7 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
 
     case W65C02_OP(stringliteralref): {
       TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-      Literal* lit = CompilerFindLiteral(literal->literal_id);
-      assert(lit != NULL);
+      assert(CompilerFindLiteral(literal->literal_id) != NULL);
       const char* label = "str";
       fprintf(fp, "\tldx         #%%lo(.%s.%d)\n", label,
               literal->literal_id);

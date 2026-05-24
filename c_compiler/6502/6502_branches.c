@@ -33,6 +33,18 @@ static int FrameSize(W65C02Generator* g, bool is_leaf) {
       (is_leaf ? 0 : 2);
 }
 
+static int EnterInstructionBytes(W65C02Generator* g, bool is_leaf) {
+  int frame_size = FrameSize(g, is_leaf);
+  int bytes = 5;  // ldx #size; jsr enter*
+  if (frame_size >= 256) {
+    bytes += 2;  // ldy #size hi
+  }
+  if (W65C02RegisterAllocatorBuildRegMask(&g->register_allocator) != 0) {
+    bytes += W65C02_ENTER_SAVE_MASK_BYTES;
+  }
+  return bytes;
+}
+
 // How many bytes in the instruction?
 // Based on opcode and addressing mode:
 static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
@@ -73,13 +85,8 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(literalrefX):  // Placeholder for literal reference.
       return 0;
       
-    case W65C02_OP(enter): {
-      int frame_size = FrameSize(g, true);
-      if (frame_size >= 256) {
-        return 10;
-      }
-      return 8;
-    }
+    case W65C02_OP(enter):
+      return EnterInstructionBytes(g, false);
     case W65C02_OP(spill1):
     case W65C02_OP(spill2):
     case W65C02_OP(spill4):
@@ -90,13 +97,8 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(reload8):
       return 6;
       
-    case W65C02_OP(enter_leaf): {
-      int frame_size = FrameSize(g, true);
-      if (frame_size >= 256) {
-        return 10;
-      }
-      return 8;
-    }
+    case W65C02_OP(enter_leaf):
+      return EnterInstructionBytes(g, true);
       
     case W65C02_OP(leave): {
       int frame_size = FrameSize(g, false);
@@ -164,9 +166,9 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
       TargetInstruction* var = inst->operand[0];
       int offset = (int)TargetIntValue(var->operand[0]);
       if (offset >= 256) {
-        return 9;
+        return 7;
       }
-      return 7;
+      return 5;
       break;
     }
       
@@ -279,6 +281,9 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(movdc):
     case W65C02_OP(movxc):
 
+    case W65C02_OP(structreturn):  // lda #dest; ldx #0; jsr arg_value2
+      return 7;
+
 //    case W65C02_OP(rmov):
 //    case W65C02_OP(rmovf):
 //    case W65C02_OP(rmovd):
@@ -296,8 +301,6 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(resultf):
     case W65C02_OP(resultd):
 
-    case W65C02_OP(structreturn):  // Struct return address.
-
     case W65C02_OP(asm):
 
     case W65C02_OP(loc):
@@ -313,7 +316,7 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
     case W65C02_OP(pushreg2):
     case W65C02_OP(pushreg4):
     case W65C02_OP(pushreg8):
-      return 3;
+      return 5;
       
     default:
       abort();

@@ -1,0 +1,1668 @@
+//
+//  x86_64_assembler.c
+//  c_compiler
+//
+//  AT&T-syntax x86_64 assembler using the generic ELF assembler driver.
+//
+
+#include "x86_64_assembler.h"
+
+#include <assert.h>
+#include <ctype.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "elf.h"
+#include "x86_64_machine.h"
+
+typedef enum {
+  kX86Size8 = 1,
+  kX86Size16 = 2,
+  kX86Size32 = 4,
+  kX86Size64 = 8,
+} X86Size;
+
+typedef struct {
+  int num;
+  X86Size size;
+  bool is_xmm;
+} X86Reg;
+
+typedef enum {
+  kX86OpReg,
+  kX86OpImm,
+  kX86OpMem,
+} X86OpKind;
+
+typedef struct {
+  X86OpKind kind;
+  X86Reg reg;
+  int64_t imm;
+  int64_t disp;
+  X86Reg base;
+  X86Reg index;
+  int scale;
+  AssemblerSymbol* sym;
+  bool sym_known;
+  int64_t sym_value;
+  bool rip_relative;
+} X86Op;
+
+typedef struct {
+  X86_64Assembler* assembler;
+  uint8_t bytes[16];
+  size_t len;
+  int rex;
+  size_t modrm_pos;
+  bool has_modrm;
+  size_t disp_pos;
+  int disp_size;
+  size_t imm_pos;
+  int imm_size;
+} X86Encode;
+
+static int CompareString(const void* a, const void* b) {
+  MapKeyValue* s1 = (MapKeyValue*)a;
+  MapKeyValue* s2 = (MapKeyValue*)b;
+  return strcmp(s1->key.p, s2->key.p);
+}
+
+static AssemblerSymbol* GetOrCreateSymbol(X86_64Assembler* assembler,
+                                          const char* name) {
+  AssemblerSymbol* sym = AssemblerFindSymbol(&assembler->base, name);
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(name, assembler->base.current_section,
+                             SYM_TYPE(none), SYM_BIND(local), 0);
+    sym->is_forward_declared = true;
+    AssemblerInsertSymbol(&assembler->base, sym);
+  }
+  return sym;
+}
+
+static void EncodeInit(X86Encode* enc, X86_64Assembler* assembler) {
+  enc->assembler = assembler;
+  enc->len = 0;
+  enc->rex = -1;
+  enc->has_modrm = false;
+  enc->disp_pos = 0;
+  enc->disp_size = 0;
+  enc->imm_pos = 0;
+  enc->imm_size = 0;
+}
+
+static void EncodeByte(X86Encode* enc, uint8_t byte) {
+  assert(enc->len < sizeof(enc->bytes));
+  enc->bytes[enc->len++] = byte;
+}
+
+static void SetRexW(X86Encode* enc) {
+  if (enc->rex < 0) {
+    enc->rex = 0x40;
+  }
+  enc->rex |= 0x08;
+}
+
+static void SetRexR(X86Encode* enc, int reg) {
+  if (enc->rex < 0) {
+    enc->rex = 0x40;
+  }
+  if (reg & 8) {
+    enc->rex |= 0x04;
+  }
+}
+
+static void SetRexX(X86Encode* enc, int index) {
+  if (enc->rex < 0) {
+    enc->rex = 0x40;
+  }
+  if (index & 8) {
+    enc->rex |= 0x02;
+  }
+}
+
+static void SetRexB(X86Encode* enc, int rm) {
+  if (enc->rex < 0) {
+    enc->rex = 0x40;
+  }
+  if (rm & 8) {
+    enc->rex |= 0x01;
+  }
+}
+
+static void EncodeModRM(X86Encode* enc, int mod, int reg, int rm) {
+  SetRexR(enc, reg);
+  SetRexB(enc, rm);
+  enc->modrm_pos = enc->len;
+  enc->has_modrm = true;
+  EncodeByte(enc, (uint8_t)((mod << 6) | ((reg & 7) << 3) | (rm & 7)));
+}
+
+static void EncodeSIB(X86Encode* enc, int scale, int index, int base) {
+  SetRexX(enc, index);
+  SetRexB(enc, base);
+  int scale_bits = 0;
+  switch (scale) {
+    case 1:
+      scale_bits = 0;
+      break;
+    case 2:
+      scale_bits = 1;
+      break;
+    case 4:
+      scale_bits = 2;
+      break;
+    case 8:
+      scale_bits = 3;
+      break;
+    default:
+      AssemblerError(&enc->assembler->base, "Invalid SIB scale %d", scale);
+      scale_bits = 0;
+      break;
+  }
+  int index_field = (index < 0) ? 4 : (index & 7);
+  EncodeByte(enc, (uint8_t)((scale_bits << 6) | (index_field << 3) | (base & 7)));
+}
+
+static void EncodeDisp(X86Encode* enc, int size, int32_t disp) {
+  enc->disp_pos = enc->len;
+  enc->disp_size = size;
+  if (size == 1) {
+    EncodeByte(enc, (uint8_t)disp);
+  } else if (size == 4) {
+    for (int i = 0; i < 4; i++) {
+      EncodeByte(enc, (uint8_t)(disp >> (8 * i)));
+    }
+  } else {
+    AssemblerError(&enc->assembler->base, "Unsupported displacement size %d",
+                   size);
+  }
+}
+
+static void EncodeImm(X86Encode* enc, int size, int64_t imm) {
+  enc->imm_pos = enc->len;
+  enc->imm_size = size;
+  for (int i = 0; i < size; i++) {
+    EncodeByte(enc, (uint8_t)(imm >> (8 * i)));
+  }
+}
+
+static void EncodeFinish(X86Encode* enc) {
+  Assembler* base = &enc->assembler->base;
+  if (enc->rex >= 0) {
+    AssemblerEmitByte(base, base->current_section, (uint8_t)enc->rex);
+  }
+  for (size_t i = 0; i < enc->len; i++) {
+    AssemblerEmitByte(base, base->current_section, enc->bytes[i]);
+  }
+}
+
+static bool ParseXmmSuffix(const char* name, size_t len, X86Reg* reg) {
+  if (len < 4 || strncmp(name, "xmm", 3) != 0) {
+    return false;
+  }
+  const char* num_str = name + 3;
+  size_t num_len = len - 3;
+  if (num_len == 0) {
+    return false;
+  }
+  int num = 0;
+  for (size_t i = 0; i < num_len; i++) {
+    if (!isdigit((unsigned char)num_str[i])) {
+      return false;
+    }
+    num = num * 10 + (num_str[i] - '0');
+  }
+  if (num < 0 || num > 15) {
+    return false;
+  }
+  reg->num = num;
+  reg->size = kX86Size32;
+  reg->is_xmm = true;
+  return true;
+}
+
+static bool ParseRegSuffix(const char* name, size_t len, X86Reg* reg) {
+  reg->is_xmm = false;
+  if (ParseXmmSuffix(name, len, reg)) {
+    return true;
+  }
+  static struct {
+    const char* name;
+    int num;
+    X86Size size;
+  } regs[] = {
+      {"rax", X86_REG_RAX, kX86Size64}, {"rbx", X86_REG_RBX, kX86Size64},
+      {"rcx", X86_REG_RCX, kX86Size64}, {"rdx", X86_REG_RDX, kX86Size64},
+      {"rsi", X86_REG_RSI, kX86Size64}, {"rdi", X86_REG_RDI, kX86Size64},
+      {"rbp", X86_REG_RBP, kX86Size64}, {"rsp", X86_REG_RSP, kX86Size64},
+      {"r8", X86_REG_R8, kX86Size64},   {"r9", X86_REG_R9, kX86Size64},
+      {"r10", X86_REG_R10, kX86Size64}, {"r11", X86_REG_R11, kX86Size64},
+      {"r12", X86_REG_R12, kX86Size64}, {"r13", X86_REG_R13, kX86Size64},
+      {"r14", X86_REG_R14, kX86Size64}, {"r15", X86_REG_R15, kX86Size64},
+      {"eax", X86_REG_RAX, kX86Size32}, {"ebx", X86_REG_RBX, kX86Size32},
+      {"ecx", X86_REG_RCX, kX86Size32}, {"edx", X86_REG_RDX, kX86Size32},
+      {"esi", X86_REG_RSI, kX86Size32}, {"edi", X86_REG_RDI, kX86Size32},
+      {"ebp", X86_REG_RBP, kX86Size32}, {"esp", X86_REG_RSP, kX86Size32},
+      {"r8d", X86_REG_R8, kX86Size32},  {"r9d", X86_REG_R9, kX86Size32},
+      {"r10d", X86_REG_R10, kX86Size32},{"r11d", X86_REG_R11, kX86Size32},
+      {"r12d", X86_REG_R12, kX86Size32},{"r13d", X86_REG_R13, kX86Size32},
+      {"r14d", X86_REG_R14, kX86Size32},{"r15d", X86_REG_R15, kX86Size32},
+      {"ax", X86_REG_RAX, kX86Size16},  {"bx", X86_REG_RBX, kX86Size16},
+      {"cx", X86_REG_RCX, kX86Size16},  {"dx", X86_REG_RDX, kX86Size16},
+      {"si", X86_REG_RSI, kX86Size16},  {"di", X86_REG_RDI, kX86Size16},
+      {"bp", X86_REG_RBP, kX86Size16},  {"sp", X86_REG_RSP, kX86Size16},
+      {"r8w", X86_REG_R8, kX86Size16},  {"r9w", X86_REG_R9, kX86Size16},
+      {"al", X86_REG_RAX, kX86Size8},   {"bl", X86_REG_RBX, kX86Size8},
+      {"cl", X86_REG_RCX, kX86Size8},   {"dl", X86_REG_RDX, kX86Size8},
+      {"sil", X86_REG_RSI, kX86Size8},  {"dil", X86_REG_RDI, kX86Size8},
+      {"bpl", X86_REG_RBP, kX86Size8},  {"spl", X86_REG_RSP, kX86Size8},
+      {"r8b", X86_REG_R8, kX86Size8},   {"r9b", X86_REG_R9, kX86Size8},
+      {"rip", X86_REG_RBP, kX86Size64}, /* placeholder num for %rip */
+  };
+  for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+    if (strlen(regs[i].name) == len &&
+        strncmp(name, regs[i].name, len) == 0) {
+      reg->num = regs[i].num;
+      reg->size = regs[i].size;
+      return true;
+    }
+  }
+  return false;
+}
+
+#define ASM assembler->base
+
+static bool ParseRegister(X86_64Assembler* assembler, X86Reg* reg,
+                          bool allow_rip, bool* is_rip) {
+  if (is_rip != NULL) {
+    *is_rip = false;
+  }
+  if (LexMatch(&ASM.lex, TOK(percent))) {
+    // AT&T register syntax.
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Register expected");
+    return false;
+  }
+  const char* name = ASM.lex.spelling.value;
+  size_t len = ASM.lex.spelling.length;
+  if (len == 3 && strncmp(name, "rip", 3) == 0) {
+    if (!allow_rip) {
+      AssemblerError(&ASM, "Unexpected %%rip");
+      return false;
+    }
+    if (is_rip != NULL) {
+      *is_rip = true;
+    }
+    reg->num = 0;
+    reg->size = kX86Size64;
+    reg->is_xmm = false;
+    LexNextToken(&ASM.lex);
+    return true;
+  }
+  if (!ParseRegSuffix(name, len, reg)) {
+    AssemblerError(&ASM, "Unknown register %.*s", (int)len, name);
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  return true;
+}
+
+static bool ParseMemoryTail(X86_64Assembler* assembler, X86Op* op) {
+  if (!LexMatch(&ASM.lex, TOK(lparen))) {
+    AssemblerError(&ASM, "Expected ( in memory operand");
+    return false;
+  }
+
+  if (LexLookingAt(&ASM.lex, TOK(percent)) ||
+      LexLookingAt(&ASM.lex, TOK(identifier))) {
+    bool is_rip = false;
+    X86Reg reg;
+    if (!ParseRegister(assembler, &reg, /*allow_rip=*/true, &is_rip)) {
+      return false;
+    }
+    if (is_rip) {
+      op->rip_relative = true;
+    } else {
+      op->base = reg;
+    }
+  }
+
+  if (LexMatch(&ASM.lex, TOK(comma))) {
+    if (!ParseRegister(assembler, &op->index, /*allow_rip=*/false, NULL)) {
+      return false;
+    }
+    if (LexMatch(&ASM.lex, TOK(comma))) {
+      op->scale = (int)AssemblerEvaluateExpression(&ASM);
+    }
+  }
+
+  if (!LexMatch(&ASM.lex, TOK(rparen))) {
+    AssemblerError(&ASM, "Expected ) after memory operand");
+    return false;
+  }
+  return true;
+}
+
+static bool AsmLookingAtLParen(Assembler* assembler) {
+  size_t pos = assembler->lex.pos;
+  while (pos < assembler->lex.line.length &&
+         isspace((unsigned char)assembler->lex.line.value[pos])) {
+    pos++;
+  }
+  return pos < assembler->lex.line.length &&
+         assembler->lex.line.value[pos] == '(';
+}
+
+static void InitMemOp(X86Op* op) {
+  op->kind = kX86OpMem;
+  op->disp = 0;
+  op->base = (X86Reg){.num = -1, .size = kX86Size64, .is_xmm = false};
+  op->index = (X86Reg){.num = -1, .size = kX86Size64, .is_xmm = false};
+  op->scale = 1;
+  op->sym = NULL;
+  op->sym_known = false;
+  op->rip_relative = false;
+}
+
+static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
+  InitMemOp(op);
+
+  if (LexLookingAt(&ASM.lex, TOK(lparen))) {
+    return ParseMemoryTail(assembler, op);
+  }
+
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    op->sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    op->sym_known =
+        op->sym->defined && op->sym->section == ASM.current_section;
+    op->sym_value = op->sym->value;
+    LexNextToken(&ASM.lex);
+    return ParseMemoryTail(assembler, op);
+  }
+
+  op->disp = AssemblerEvaluateExpression(&ASM);
+  return ParseMemoryTail(assembler, op);
+}
+
+static bool ParseOperand(X86_64Assembler* assembler, X86Op* op) {
+  memset(op, 0, sizeof(*op));
+
+  if (LexLookingAt(&ASM.lex, TOK(number))) {
+    if (AsmLookingAtLParen(&ASM)) {
+      InitMemOp(op);
+      op->disp = AssemblerEvaluateExpression(&ASM);
+      return ParseMemoryTail(assembler, op);
+    }
+    op->kind = kX86OpImm;
+    op->imm = AssemblerEvaluateExpression(&ASM);
+    return true;
+  }
+  if (LexLookingAt(&ASM.lex, TOK(minus))) {
+    LexNextToken(&ASM.lex);
+    if (LexLookingAt(&ASM.lex, TOK(number)) && AsmLookingAtLParen(&ASM)) {
+      InitMemOp(op);
+      op->disp = -AssemblerEvaluateExpression(&ASM);
+      return ParseMemoryTail(assembler, op);
+    }
+    op->kind = kX86OpImm;
+    op->imm = -AssemblerEvaluateExpression(&ASM);
+    return true;
+  }
+  if (LexMatch(&ASM.lex, TOK(percent))) {
+    op->kind = kX86OpReg;
+    return ParseRegister(assembler, &op->reg, /*allow_rip=*/false, NULL);
+  }
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    X86Reg reg;
+    if (ParseRegSuffix(ASM.lex.spelling.value, ASM.lex.spelling.length, &reg)) {
+      op->kind = kX86OpReg;
+      op->reg = reg;
+      LexNextToken(&ASM.lex);
+      return true;
+    }
+    return ParseMemory(assembler, op);
+  }
+  if (LexLookingAt(&ASM.lex, TOK(lparen))) {
+    return ParseMemory(assembler, op);
+  }
+
+  AssemblerError(&ASM, "Expected operand");
+  return false;
+}
+
+static bool ExpectComma(X86_64Assembler* assembler) {
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Expected comma");
+    return false;
+  }
+  return true;
+}
+
+static int PickMemDispSize(int64_t disp) {
+  if (disp >= -128 && disp <= 127) {
+    return 1;
+  }
+  return 4;
+}
+
+static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
+  Assembler* base = &enc->assembler->base;
+  if (mem->rip_relative || (mem->base.num < 0 && mem->sym != NULL)) {
+    SetRexW(enc);
+    EncodeModRM(enc, 0, reg_field, 5);
+    enc->disp_pos = enc->len;
+    enc->disp_size = 4;
+    int64_t next_ip =
+        AssemblerCurrentAddress(base) + (enc->rex >= 0 ? 1 : 0) + enc->len + 4;
+    if (mem->sym != NULL && !mem->sym_known) {
+      for (int i = 0; i < 4; i++) {
+        EncodeByte(enc, 0);
+      }
+      int reloc_type = R_X86_64_PC32;
+      if (base->pic && mem->sym->binding == SYM_BIND(global)) {
+        reloc_type = R_X86_64_GOTPCREL;
+      }
+      AssemblerRelocation* reloc = NewAssemblerRelocation(
+          mem->sym, reloc_type, base->current_section, (int32_t)next_ip,
+          (int32_t)(mem->disp - next_ip));
+      AssemblerAddRelocation(base, reloc);
+    } else {
+      int64_t target = mem->sym_known ? mem->sym_value + mem->disp : mem->disp;
+      EncodeDisp(enc, 4, (int32_t)(target - next_ip));
+    }
+    return;
+  }
+
+  int base_reg = mem->base.num;
+  int index = mem->index.num;
+  int64_t disp = mem->disp;
+  if (mem->sym != NULL) {
+    if (!mem->sym_known) {
+      AssemblerError(&enc->assembler->base,
+                     "Undefined symbol in memory operand");
+      return;
+    }
+    disp += mem->sym_value;
+  }
+
+  bool need_sib = (base_reg == X86_REG_RSP) || (index >= 0);
+  if (base_reg < 0) {
+    base_reg = X86_REG_RBP;
+    if (index < 0) {
+      need_sib = true;
+      index = 4;
+    }
+  }
+
+  int mod = 0;
+  int disp_size = 0;
+  if (disp == 0 && base_reg != X86_REG_RBP && index < 0) {
+    mod = 0;
+  } else if (PickMemDispSize(disp) == 1) {
+    mod = 1;
+    disp_size = 1;
+  } else {
+    mod = 2;
+    disp_size = 4;
+  }
+
+  if (need_sib) {
+    EncodeModRM(enc, mod, reg_field, 4);
+    EncodeSIB(enc, mem->scale, index < 0 ? 4 : index, base_reg);
+  } else {
+    EncodeModRM(enc, mod, reg_field, base_reg);
+  }
+  if (disp_size != 0) {
+    EncodeDisp(enc, disp_size, (int32_t)disp);
+  }
+}
+
+static void EncodeRegOperand(X86Encode* enc, int reg_field, const X86Reg* reg);
+static void EmitMovqXmmParsed(X86_64Assembler* assembler, const X86Op* src,
+                              const X86Op* dst);
+
+static void EncodeRegOperand(X86Encode* enc, int reg_field, const X86Reg* reg) {
+  if (reg->is_xmm) {
+    AssemblerError(&enc->assembler->base, "Expected integer register");
+    return;
+  }
+  if (reg->size == kX86Size64) {
+    SetRexW(enc);
+  } else if (reg->size == kX86Size8 && reg->num >= 4 && reg->num <= 7) {
+    if (enc->rex < 0) {
+      enc->rex = 0x40;
+    }
+  }
+  EncodeModRM(enc, 3, reg_field, reg->num);
+}
+
+static void EncodeXmmRegOperand(X86Encode* enc, int reg_field,
+                                const X86Reg* reg) {
+  if (!reg->is_xmm) {
+    AssemblerError(&enc->assembler->base, "Expected XMM register");
+    return;
+  }
+  EncodeModRM(enc, 3, reg_field, reg->num);
+}
+
+static void EmitRexPrefixBytes(X86Encode* enc) {
+  if (enc->rex >= 0) {
+    EncodeByte(enc, (uint8_t)enc->rex);
+    enc->rex = -1;
+  }
+}
+
+static void EmitOpcodeBytes(X86Encode* enc, uint8_t prefix66, uint8_t prefix_f2,
+                            uint8_t prefix_f3, uint8_t opcode,
+                            bool two_byte) {
+  if (prefix66) {
+    EncodeByte(enc, 0x66);
+  }
+  if (prefix_f2) {
+    EncodeByte(enc, 0xf2);
+  }
+  if (prefix_f3) {
+    EncodeByte(enc, 0xf3);
+  }
+  EmitRexPrefixBytes(enc);
+  if (two_byte) {
+    EncodeByte(enc, 0x0f);
+  }
+  EncodeByte(enc, opcode);
+}
+
+static void EmitALURegImm(X86_64Assembler* assembler, int op_ext, X86Size size,
+                          const X86Reg* dst, int64_t imm) {
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  if (size == kX86Size8 && imm >= -128 && imm <= 127) {
+    EncodeByte(&enc, 0x83);
+    EncodeRegOperand(&enc, op_ext, dst);
+    EncodeImm(&enc, 1, imm);
+  } else if ((size == kX86Size64 || size == kX86Size32) &&
+             imm >= INT32_MIN && imm <= INT32_MAX) {
+    EncodeByte(&enc, 0x81);
+    EncodeRegOperand(&enc, op_ext, dst);
+    EncodeImm(&enc, 4, imm);
+  } else if (size == kX86Size16 && imm >= INT16_MIN && imm <= INT16_MAX) {
+    EncodeByte(&enc, 0x81);
+    EncodeRegOperand(&enc, op_ext, dst);
+    EncodeImm(&enc, 2, imm);
+  } else {
+    AssemblerError(&ASM, "Immediate out of range for ALU instruction");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitMov(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
+    X86Reg reg = dst.reg;
+    if (reg.size == kX86Size64) {
+      if (src.sym != NULL) {
+        SetRexW(&enc);
+        EncodeByte(&enc, (uint8_t)(0xb8 + (reg.num & 7)));
+        SetRexB(&enc, reg.num);
+        enc.imm_pos = enc.len;
+        enc.imm_size = 8;
+        EncodeImm(&enc, 8, 0);
+        EncodeFinish(&enc);
+        int offset = (int32_t)(enc.imm_pos - (enc.rex >= 0 ? 1 : 0));
+        AssemblerRelocation* reloc = NewAssemblerRelocation(
+            src.sym, R_X86_64_64, ASM.current_section, offset, 0);
+        AssemblerAddRelocation(&ASM, reloc);
+        return;
+      }
+      if (src.imm >= INT32_MIN && src.imm <= INT32_MAX) {
+        SetRexW(&enc);
+        EncodeByte(&enc, 0xc7);
+        EncodeRegOperand(&enc, 0, &reg);
+        EncodeImm(&enc, 4, src.imm);
+      } else {
+        SetRexW(&enc);
+        EncodeByte(&enc, (uint8_t)(0xb8 + (reg.num & 7)));
+        SetRexB(&enc, reg.num);
+        EncodeImm(&enc, 8, src.imm);
+      }
+    } else if (reg.size == kX86Size32) {
+      EncodeByte(&enc, 0xc7);
+      EncodeRegOperand(&enc, 0, &reg);
+      EncodeImm(&enc, 4, src.imm);
+    } else if (reg.size == kX86Size16) {
+      EncodeByte(&enc, 0x66);
+      EncodeByte(&enc, 0xc7);
+      EncodeRegOperand(&enc, 0, &reg);
+      EncodeImm(&enc, 2, src.imm);
+    } else {
+      EncodeByte(&enc, 0xb0 + (reg.num & 7));
+      SetRexB(&enc, reg.num);
+      EncodeImm(&enc, 1, src.imm);
+    }
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpReg) {
+    if (dst.reg.is_xmm || src.reg.is_xmm) {
+      EmitMovqXmmParsed(assembler, &src, &dst);
+      return;
+    }
+    if (dst.reg.size != src.reg.size) {
+      AssemblerError(&ASM, "mov operand size mismatch");
+      return;
+    }
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    } else if (dst.reg.size == kX86Size16) {
+      EncodeByte(&enc, 0x66);
+    }
+    EncodeByte(&enc, 0x89);
+    EncodeRegOperand(&enc, src.reg.num, &dst.reg);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpMem) {
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    } else if (dst.reg.size == kX86Size16) {
+      EncodeByte(&enc, 0x66);
+    }
+    EncodeByte(&enc, 0x8b);
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpMem && src.kind == kX86OpReg) {
+    if (src.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    } else if (src.reg.size == kX86Size16) {
+      EncodeByte(&enc, 0x66);
+    }
+    EncodeByte(&enc, 0x89);
+    EncodeMemOperand(&enc, src.reg.num, &dst);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  AssemblerError(&ASM, "Unsupported mov operand combination");
+}
+
+static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
+  X86Op op;
+  if (!ParseOperand(assembler, &op) || op.kind != kX86OpReg) {
+    AssemblerError(&ASM, "%s expects a register operand",
+                   is_push ? "push" : "pop");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (op.reg.size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+  if (op.reg.size == kX86Size64) {
+    SetRexW(&enc);
+    EncodeByte(&enc, (uint8_t)((is_push ? 0x50 : 0x58) + (op.reg.num & 7)));
+    SetRexB(&enc, op.reg.num);
+  } else if (op.reg.size == kX86Size32) {
+    EncodeByte(&enc, (uint8_t)((is_push ? 0x50 : 0x58) + (op.reg.num & 7)));
+    SetRexB(&enc, op.reg.num);
+  } else {
+    AssemblerError(&ASM, "push/pop unsupported operand size");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
+    EmitALURegImm(assembler, op_ext, dst.reg.size, &dst.reg, src.imm);
+    return;
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (dst.kind == kX86OpReg && src.kind == kX86OpReg) {
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    } else if (dst.reg.size == kX86Size16) {
+      EncodeByte(&enc, 0x66);
+    }
+    EncodeByte(&enc, (uint8_t)reg_opcode);
+    EncodeRegOperand(&enc, src.reg.num, &dst.reg);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpMem) {
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    }
+    EncodeByte(&enc, (uint8_t)(reg_opcode + 2));
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpMem && src.kind == kX86OpReg) {
+    if (src.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    }
+    EncodeByte(&enc, (uint8_t)reg_opcode);
+    EncodeMemOperand(&enc, src.reg.num, &dst);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  AssemblerError(&ASM, "Unsupported ALU operand combination");
+}
+
+static void EmitCmp(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
+    EmitALURegImm(assembler, 7, dst.reg.size, &dst.reg, src.imm);
+    return;
+  }
+
+  if (dst.kind == kX86OpImm && src.kind == kX86OpReg) {
+    EmitALURegImm(assembler, 7, src.reg.size, &src.reg, dst.imm);
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpReg) {
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    }
+    EncodeByte(&enc, 0x39);
+    EncodeRegOperand(&enc, src.reg.num, &dst.reg);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  if (dst.kind == kX86OpReg && src.kind == kX86OpMem) {
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    }
+    EncodeByte(&enc, 0x3b);
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+    EncodeFinish(&enc);
+    return;
+  }
+
+  AssemblerError(&ASM, "Unsupported cmp operand combination");
+}
+
+static void EmitLea(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (dst.kind != kX86OpReg || src.kind != kX86OpMem) {
+    AssemblerError(&ASM, "lea expects mem, reg operands");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (dst.reg.size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  EncodeByte(&enc, 0x8d);
+  EncodeMemOperand(&enc, dst.reg.num, &src);
+  EncodeFinish(&enc);
+}
+
+static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
+  int32_t start = (int32_t)AssemblerCurrentAddress(&ASM);
+  bool known = false;
+  int64_t target = 0;
+  AssemblerSymbol* sym = NULL;
+
+  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+    known = sym->defined && sym->section == ASM.current_section;
+    target = sym->value;
+  } else {
+    target = AssemblerEvaluateKnownExpression(&ASM, &known);
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (opcode < 0) {
+    EncodeByte(&enc, (uint8_t)(is_call ? 0xe8 : 0xe9));
+  } else {
+    EncodeByte(&enc, 0x0f);
+    EncodeByte(&enc, (uint8_t)opcode);
+  }
+
+  size_t total_len = (enc.rex >= 0 ? 1 : 0) + enc.len + 4;
+  int32_t rel =
+      known ? (int32_t)(target - (start + (int32_t)total_len)) : 0;
+  enc.disp_pos = enc.len;
+  EncodeDisp(&enc, 4, rel);
+  EncodeFinish(&enc);
+
+  if (!known && sym != NULL) {
+    int reloc_type = is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+    if (is_call && !ASM.pic) {
+      reloc_type = R_X86_64_PC32;
+    }
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+        sym, reloc_type, ASM.current_section,
+        (int32_t)(start + (enc.rex >= 0 ? 1 : 0) + enc.disp_pos), -4);
+    AssemblerAddRelocation(&ASM, reloc);
+  }
+}
+
+static void EmitMovabs(X86_64Assembler* assembler) {
+  X86Op imm, dst;
+  if (!ParseOperand(assembler, &imm) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (imm.kind != kX86OpImm || dst.kind != kX86OpReg || dst.reg.is_xmm) {
+    AssemblerError(&ASM, "movabs expects $imm, reg");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  SetRexW(&enc);
+  EncodeByte(&enc, (uint8_t)(0xb8 + (dst.reg.num & 7)));
+  SetRexB(&enc, dst.reg.num);
+  EncodeImm(&enc, 8, imm.imm);
+  EncodeFinish(&enc);
+}
+
+static void EmitShift(X86_64Assembler* assembler, int op_ext, X86Size size) {
+  X86Op count, dst;
+  if (!ParseOperand(assembler, &count) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  } else if (size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+  bool use_cl = false;
+  if (count.kind == kX86OpReg && !count.reg.is_xmm &&
+      count.reg.num == X86_REG_RCX && count.reg.size == kX86Size8) {
+    use_cl = true;
+  } else if (count.kind == kX86OpReg && !count.reg.is_xmm &&
+             count.reg.num == X86_REG_RCX &&
+             (count.reg.size == kX86Size64 || count.reg.size == kX86Size32)) {
+    use_cl = true;
+  }
+  if (use_cl) {
+    EncodeByte(&enc, 0xd3);
+    if (dst.kind == kX86OpReg) {
+      EncodeRegOperand(&enc, op_ext, &dst.reg);
+    } else if (dst.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, op_ext, &dst);
+    } else {
+      AssemblerError(&ASM, "Invalid shift destination");
+    }
+  } else if (count.kind == kX86OpImm) {
+    EncodeByte(&enc, 0xc1);
+    if (dst.kind == kX86OpReg) {
+      EncodeRegOperand(&enc, op_ext, &dst.reg);
+    } else if (dst.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, op_ext, &dst);
+    } else {
+      AssemblerError(&ASM, "Invalid shift destination");
+    }
+    EncodeImm(&enc, 1, count.imm & 0xff);
+  } else {
+    AssemblerError(&ASM, "Shift count must be immediate or %%cl");
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitUnary(X86_64Assembler* assembler, int op_ext, X86Size size) {
+  X86Op dst;
+  if (!ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  } else if (size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+  EncodeByte(&enc, 0xf7);
+  if (dst.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, op_ext, &dst.reg);
+  } else if (dst.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, op_ext, &dst);
+  } else {
+    AssemblerError(&ASM, "Unary instruction expects register or memory");
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitImul(X86_64Assembler* assembler, X86Size size) {
+  X86Op op1, op2, op3;
+  if (!ParseOperand(assembler, &op1)) {
+    return;
+  }
+  if (!ExpectComma(assembler)) {
+    return;
+  }
+  if (!ParseOperand(assembler, &op2)) {
+    return;
+  }
+  bool three_operand = LexMatch(&ASM.lex, TOK(comma));
+  if (three_operand && !ParseOperand(assembler, &op3)) {
+    return;
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  } else if (size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+
+  if (three_operand) {
+    if (op1.kind != kX86OpImm) {
+      AssemblerError(&ASM, "Three-operand imul expects immediate first operand");
+      return;
+    }
+    if (op3.kind != kX86OpReg || op2.kind != kX86OpReg) {
+      AssemblerError(&ASM, "Three-operand imul expects reg, reg operands");
+      return;
+    }
+    if (op1.imm >= -128 && op1.imm <= 127) {
+      EncodeByte(&enc, 0x6b);
+      EncodeRegOperand(&enc, op3.reg.num, &op2.reg);
+      EncodeImm(&enc, 1, op1.imm);
+    } else {
+      EncodeByte(&enc, 0x69);
+      EncodeRegOperand(&enc, op3.reg.num, &op2.reg);
+      EncodeImm(&enc, 4, op1.imm);
+    }
+  } else {
+    EncodeByte(&enc, 0x0f);
+    EncodeByte(&enc, 0xaf);
+    if (op2.kind == kX86OpReg && op1.kind == kX86OpReg) {
+      EncodeRegOperand(&enc, op2.reg.num, &op1.reg);
+    } else if (op1.kind == kX86OpReg && op2.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, op1.reg.num, &op2);
+    } else if (op1.kind == kX86OpMem && op2.kind == kX86OpReg) {
+      EncodeMemOperand(&enc, op2.reg.num, &op1);
+    } else {
+      AssemblerError(&ASM, "Unsupported imul operand combination");
+    }
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitDivOp(X86_64Assembler* assembler, int op_ext, X86Size size) {
+  X86Op divisor;
+  if (!ParseOperand(assembler, &divisor)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  } else if (size == kX86Size16) {
+    EncodeByte(&enc, 0x66);
+  }
+  EncodeByte(&enc, 0xf7);
+  if (divisor.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, op_ext, &divisor.reg);
+  } else if (divisor.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, op_ext, &divisor);
+  } else {
+    AssemblerError(&ASM, "Divide expects register or memory divisor");
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitTest(X86_64Assembler* assembler, X86Size size) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
+    EncodeByte(&enc, 0xf7);
+    EncodeRegOperand(&enc, 0, &dst.reg);
+    EncodeImm(&enc, 4, src.imm);
+  } else if (dst.kind == kX86OpReg && src.kind == kX86OpReg) {
+    EncodeByte(&enc, 0x85);
+    EncodeRegOperand(&enc, src.reg.num, &dst.reg);
+  } else {
+    AssemblerError(&ASM, "Unsupported test operand combination");
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitSetcc(X86_64Assembler* assembler, int opcode) {
+  X86Op dst;
+  if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg ||
+      dst.reg.is_xmm) {
+    AssemblerError(&ASM, "setcc expects byte integer register destination");
+    return;
+  }
+  X86Reg byte_reg = dst.reg;
+  byte_reg.size = kX86Size8;
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, (uint8_t)opcode);
+  EncodeRegOperand(&enc, 0, &byte_reg);
+  EncodeFinish(&enc);
+}
+
+static void EmitNoOperands(X86_64Assembler* assembler, bool rex_w, uint8_t opcode) {
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (rex_w) {
+    SetRexW(&enc);
+  }
+  EncodeByte(&enc, opcode);
+  EncodeFinish(&enc);
+}
+
+static void EmitIndirectCall(X86_64Assembler* assembler) {
+  (void)LexMatch(&ASM.lex, TOK(star));
+  X86Op target;
+  if (!ParseOperand(assembler, &target)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  SetRexW(&enc);
+  EncodeByte(&enc, 0xff);
+  if (target.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, 2, &target.reg);
+  } else if (target.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, 2, &target);
+  } else {
+    AssemblerError(&ASM, "Indirect call expects register or memory target");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitSSE(X86_64Assembler* assembler, uint8_t prefix66, uint8_t prefix_f2,
+                    uint8_t prefix_f3, uint8_t opcode, bool int_dst) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (int_dst) {
+    if (dst.kind != kX86OpReg || dst.reg.is_xmm || src.kind != kX86OpReg ||
+        !src.reg.is_xmm) {
+      AssemblerError(&ASM, "SSE convert expects xmm source, integer destination");
+      return;
+    }
+    SetRexR(&enc, dst.reg.num);
+    SetRexB(&enc, src.reg.num);
+    EmitOpcodeBytes(&enc, prefix66, prefix_f2, prefix_f3, opcode, true);
+    EncodeModRM(&enc, 3, dst.reg.num, src.reg.num);
+  } else {
+    if (dst.kind != kX86OpReg || !dst.reg.is_xmm) {
+      AssemblerError(&ASM, "SSE instruction expects XMM destination");
+      return;
+    }
+    EmitOpcodeBytes(&enc, prefix66, prefix_f2, prefix_f3, opcode, true);
+    if (src.kind == kX86OpReg && src.reg.is_xmm) {
+      EncodeXmmRegOperand(&enc, dst.reg.num, &src.reg);
+    } else if (src.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, dst.reg.num, &src);
+    } else if (src.kind == kX86OpReg && !src.reg.is_xmm) {
+      AssemblerError(&ASM, "SSE instruction expects XMM or memory source");
+      return;
+    } else {
+      AssemblerError(&ASM, "Unsupported SSE operand combination");
+      return;
+    }
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitSSEMove(X86_64Assembler* assembler, uint8_t prefix_f2,
+                        uint8_t prefix_f3, bool store) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EmitOpcodeBytes(&enc, false, prefix_f2, prefix_f3, store ? 0x11 : 0x10, true);
+  if (store) {
+    if (src.kind != kX86OpReg || !src.reg.is_xmm) {
+      AssemblerError(&ASM, "SSE store expects XMM source");
+      return;
+    }
+    if (dst.kind == kX86OpReg && dst.reg.is_xmm) {
+      EncodeXmmRegOperand(&enc, dst.reg.num, &src.reg);
+    } else if (dst.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, src.reg.num, &dst);
+    } else {
+      AssemblerError(&ASM, "Unsupported SSE store operands");
+    }
+  } else {
+    if (dst.kind != kX86OpReg || !dst.reg.is_xmm) {
+      AssemblerError(&ASM, "SSE load expects XMM destination");
+      return;
+    }
+    if (src.kind == kX86OpReg && src.reg.is_xmm) {
+      EncodeXmmRegOperand(&enc, dst.reg.num, &src.reg);
+    } else if (src.kind == kX86OpMem) {
+      EncodeMemOperand(&enc, dst.reg.num, &src);
+    } else {
+      AssemblerError(&ASM, "Unsupported SSE load operands");
+    }
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitMovdParsed(X86_64Assembler* assembler, const X86Op* src,
+                           const X86Op* dst, bool gpr_to_xmm) {
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EmitOpcodeBytes(&enc, true, false, false, gpr_to_xmm ? 0x6e : 0x7e, true);
+  if (gpr_to_xmm) {
+    if (dst->kind != kX86OpReg || !dst->reg.is_xmm) {
+      AssemblerError(&ASM, "movd to xmm expects XMM destination");
+      return;
+    }
+    if (src->kind == kX86OpReg && !src->reg.is_xmm) {
+      EncodeRegOperand(&enc, dst->reg.num, &src->reg);
+    } else if (src->kind == kX86OpMem) {
+      EncodeMemOperand(&enc, dst->reg.num, src);
+    } else {
+      AssemblerError(&ASM, "movd expects GPR or memory source");
+    }
+  } else {
+    if (src->kind != kX86OpReg || !src->reg.is_xmm) {
+      AssemblerError(&ASM, "movd from xmm expects XMM source");
+      return;
+    }
+    if (dst->kind == kX86OpReg && !dst->reg.is_xmm) {
+      EncodeRegOperand(&enc, src->reg.num, &dst->reg);
+    } else if (dst->kind == kX86OpMem) {
+      EncodeMemOperand(&enc, src->reg.num, dst);
+    } else {
+      AssemblerError(&ASM, "movd expects GPR or memory destination");
+    }
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitMovqXmmParsed(X86_64Assembler* assembler, const X86Op* src,
+                              const X86Op* dst) {
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (src->kind == kX86OpReg && src->reg.is_xmm &&
+      dst->kind == kX86OpReg && !dst->reg.is_xmm) {
+    SetRexW(&enc);
+    EmitOpcodeBytes(&enc, true, false, false, 0x7e, true);
+    EncodeRegOperand(&enc, src->reg.num, &dst->reg);
+  } else if (src->kind == kX86OpReg && !src->reg.is_xmm &&
+             dst->kind == kX86OpReg && dst->reg.is_xmm) {
+    SetRexW(&enc);
+    EmitOpcodeBytes(&enc, true, false, false, 0x6e, true);
+    EncodeRegOperand(&enc, dst->reg.num, &src->reg);
+  } else if (src->kind == kX86OpMem && dst->kind == kX86OpReg &&
+             dst->reg.is_xmm) {
+    EmitOpcodeBytes(&enc, false, false, true, 0x7e, true);
+    EncodeMemOperand(&enc, dst->reg.num, src);
+  } else if (src->kind == kX86OpReg && src->reg.is_xmm &&
+             dst->kind == kX86OpMem) {
+    EmitOpcodeBytes(&enc, false, false, true, 0x7e, true);
+    EncodeMemOperand(&enc, src->reg.num, dst);
+  } else if (src->kind == kX86OpReg && src->reg.is_xmm &&
+             dst->kind == kX86OpReg && dst->reg.is_xmm) {
+    EmitOpcodeBytes(&enc, false, false, true, 0x7e, true);
+    EncodeXmmRegOperand(&enc, dst->reg.num, &src->reg);
+  } else {
+    AssemblerError(&ASM, "Unsupported movq xmm/gpr operand combination");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void EmitMovqXmm(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  EmitMovqXmmParsed(assembler, &src, &dst);
+}
+
+static void EmitFnegSs(X86_64Assembler* assembler) {
+  X86Op dst;
+  if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg || !dst.reg.is_xmm) {
+    AssemblerError(&ASM, "fneg_ss expects XMM destination/source");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EmitOpcodeBytes(&enc, false, false, false, 0x57, true);
+  EncodeXmmRegOperand(&enc, dst.reg.num, &dst.reg);
+  EncodeFinish(&enc);
+}
+
+static void EmitFnegSd(X86_64Assembler* assembler) {
+  X86Op dst;
+  if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg || !dst.reg.is_xmm) {
+    AssemblerError(&ASM, "fneg_sd expects XMM destination/source");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EmitOpcodeBytes(&enc, false, true, false, 0x57, true);
+  EncodeXmmRegOperand(&enc, dst.reg.num, &dst.reg);
+  EncodeFinish(&enc);
+}
+
+static void Assemble_movw(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_movabs(X86_64Assembler* assembler) { EmitMovabs(assembler); }
+static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
+static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
+static void Assemble_xorq(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
+static void Assemble_addl(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
+static void Assemble_subl(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
+static void Assemble_cmpb(X86_64Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpl(X86_64Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpw(X86_64Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_test(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size64); }
+static void Assemble_testq(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size64); }
+static void Assemble_testl(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size32); }
+static void Assemble_not(X86_64Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
+static void Assemble_notq(X86_64Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
+static void Assemble_neg(X86_64Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
+static void Assemble_negq(X86_64Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
+static void Assemble_imul(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size64); }
+static void Assemble_imulq(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size64); }
+static void Assemble_imull(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size32); }
+static void Assemble_idiv(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
+static void Assemble_idivq(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
+static void Assemble_idivl(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size32); }
+static void Assemble_div(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
+static void Assemble_divq(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
+static void Assemble_divl(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size32); }
+static void Assemble_shlq(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
+static void Assemble_shrq(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
+static void Assemble_sarq(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
+static void Assemble_shll(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size32); }
+static void Assemble_shrl(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size32); }
+static void Assemble_sarl(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size32); }
+static void Assemble_shl(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
+static void Assemble_shr(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
+static void Assemble_sar(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
+static void Assemble_sete(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x94); }
+static void Assemble_setne(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x95); }
+static void Assemble_setl(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9c); }
+static void Assemble_setb(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x92); }
+static void Assemble_setg(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9f); }
+static void Assemble_cqo(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
+static void Assemble_cdq(X86_64Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
+static void Assemble_cltq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
+static void Assemble_movslq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
+static void Assemble_rcall(X86_64Assembler* assembler) { EmitIndirectCall(assembler); }
+static void Assemble_movss(X86_64Assembler* assembler) { EmitSSEMove(assembler, false, true, false); }
+static void Assemble_movsd(X86_64Assembler* assembler) { EmitSSEMove(assembler, true, false, false); }
+static void Assemble_storesd(X86_64Assembler* assembler) { EmitSSEMove(assembler, true, false, true); }
+static void Assemble_storess(X86_64Assembler* assembler) { EmitSSEMove(assembler, false, true, true); }
+static void Assemble_addss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x58, false); }
+static void Assemble_addsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x58, false); }
+static void Assemble_subss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5c, false); }
+static void Assemble_subsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5c, false); }
+static void Assemble_mulss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x59, false); }
+static void Assemble_mulsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x59, false); }
+static void Assemble_divss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5e, false); }
+static void Assemble_divsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5e, false); }
+static void Assemble_sqrtss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x51, false); }
+static void Assemble_sqrtsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x51, false); }
+static void Assemble_ucomiss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x2e, false); }
+static void Assemble_ucomisd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x2e, false); }
+
+static void EmitSSEConvertFromInt(X86_64Assembler* assembler, uint8_t prefix_f2,
+                                  uint8_t prefix_f3, uint8_t opcode) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (dst.kind != kX86OpReg || !dst.reg.is_xmm ||
+      (src.kind == kX86OpReg && src.reg.is_xmm)) {
+    AssemblerError(&ASM, "Integer-to-SSE convert expects GPR/memory source, XMM dest");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (src.kind == kX86OpReg && src.reg.size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  EmitOpcodeBytes(&enc, false, prefix_f2, prefix_f3, opcode, true);
+  if (src.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, dst.reg.num, &src.reg);
+  } else if (src.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+  } else {
+    AssemblerError(&ASM, "Integer-to-SSE convert expects GPR or memory source");
+  }
+  EncodeFinish(&enc);
+}
+
+static void Assemble_cvtsi2ss(X86_64Assembler* assembler) {
+  EmitSSEConvertFromInt(assembler, false, true, 0x2a);
+}
+static void Assemble_cvtsi2sd(X86_64Assembler* assembler) {
+  EmitSSEConvertFromInt(assembler, true, false, 0x2a);
+}
+static void Assemble_cvttss2si(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x2c, true); }
+static void Assemble_cvttsd2si(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x2c, true); }
+static void Assemble_cvtss2sd(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5a, false); }
+static void Assemble_cvtsd2ss(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5a, false); }
+static void Assemble_movd(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  EmitMovdParsed(assembler, &src, &dst,
+                 dst.kind == kX86OpReg && dst.reg.is_xmm);
+}
+static void Assemble_movq_xmm(X86_64Assembler* assembler) { EmitMovqXmm(assembler); }
+static void Assemble_fneg_ss(X86_64Assembler* assembler) { EmitFnegSs(assembler); }
+static void Assemble_fneg_sd(X86_64Assembler* assembler) { EmitFnegSd(assembler); }
+
+static void Assemble_mov(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_movq(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_movl(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_movb(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_push(X86_64Assembler* assembler) {
+  EmitPushPop(assembler, true);
+}
+static void Assemble_pushq(X86_64Assembler* assembler) {
+  EmitPushPop(assembler, true);
+}
+static void Assemble_pop(X86_64Assembler* assembler) {
+  EmitPushPop(assembler, false);
+}
+static void Assemble_popq(X86_64Assembler* assembler) {
+  EmitPushPop(assembler, false);
+}
+static void Assemble_add(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
+static void Assemble_addq(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0); }
+static void Assemble_sub(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
+static void Assemble_subq(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5); }
+static void Assemble_and(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
+static void Assemble_or(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
+static void Assemble_xor(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6); }
+static void Assemble_cmp(X86_64Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpq(X86_64Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_lea(X86_64Assembler* assembler) { EmitLea(assembler); }
+static void Assemble_leaq(X86_64Assembler* assembler) { EmitLea(assembler); }
+static void Assemble_call(X86_64Assembler* assembler) {
+  if (LexLookingAt(&ASM.lex, TOK(star))) {
+    EmitIndirectCall(assembler);
+  } else {
+    EmitBranch(assembler, -1, true);
+  }
+}
+static void Assemble_jmp(X86_64Assembler* assembler) {
+  EmitBranch(assembler, -1, false);
+}
+static void Assemble_ret(X86_64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASM.current_section, 0xc3);
+}
+static void Assemble_leave(X86_64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASM.current_section, 0xc9);
+}
+static void Assemble_nop(X86_64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASM.current_section, 0x90);
+}
+
+#define JCC(name, opcode)                                                    \
+  static void Assemble_##name(X86_64Assembler* assembler) {                  \
+    EmitBranch(assembler, opcode, false);                                    \
+  }
+
+JCC(je, 0x84);
+JCC(jz, 0x84);
+JCC(jne, 0x85);
+JCC(jnz, 0x85);
+JCC(jl, 0x8c);
+JCC(jg, 0x8f);
+JCC(jle, 0x8e);
+JCC(jge, 0x8d);
+JCC(jb, 0x82);
+JCC(jae, 0x83);
+
+#undef JCC
+
+#define INST(mnemonic)                                                       \
+  do {                                                                       \
+    MapKeyValue kv = {0};                                                    \
+    kv.key.p = #mnemonic;                                                    \
+    kv.value.p = Assemble_##mnemonic;                                          \
+    MapInsert(instructions, kv);                                             \
+  } while (0)
+
+#define INST2(mnemonic, alias)                                               \
+  do {                                                                       \
+    MapKeyValue kv = {0};                                                    \
+    kv.key.p = #alias;                                                       \
+    kv.value.p = Assemble_##mnemonic;                                          \
+    MapInsert(instructions, kv);                                             \
+  } while (0)
+
+static void InitializeInstructions(Map* instructions) {
+  INST(mov);
+  INST(movq);
+  INST(movl);
+  INST(movb);
+  INST(movw);
+  INST(movabs);
+  INST(movss);
+  INST(movsd);
+  INST(storess);
+  INST(storesd);
+  INST(movd);
+  INST(movq_xmm);
+  INST(push);
+  INST(pushq);
+  INST(pop);
+  INST(popq);
+  INST(add);
+  INST(addq);
+  INST(addl);
+  INST(sub);
+  INST(subq);
+  INST(subl);
+  INST(and);
+  INST(andq);
+  INST(or);
+  INST(orq);
+  INST(xor);
+  INST(xorq);
+  INST(imul);
+  INST(imulq);
+  INST(imull);
+  INST(idiv);
+  INST(idivq);
+  INST(idivl);
+  INST(div);
+  INST(divq);
+  INST(divl);
+  INST(not);
+  INST(notq);
+  INST(neg);
+  INST(negq);
+  INST(shl);
+  INST(shlq);
+  INST(shr);
+  INST(shrq);
+  INST(sar);
+  INST(sarq);
+  INST(shll);
+  INST(shrl);
+  INST(sarl);
+  INST(cmp);
+  INST(cmpq);
+  INST(cmpb);
+  INST(cmpl);
+  INST(cmpw);
+  INST(test);
+  INST(testq);
+  INST(testl);
+  INST(lea);
+  INST(leaq);
+  INST(call);
+  INST(rcall);
+  INST(jmp);
+  INST(ret);
+  INST(nop);
+  INST(je);
+  INST(jz);
+  INST(jne);
+  INST(jnz);
+  INST(jl);
+  INST(jg);
+  INST(jle);
+  INST(jge);
+  INST(jb);
+  INST(jae);
+  INST(sete);
+  INST(setne);
+  INST(setl);
+  INST(setb);
+  INST(setg);
+  INST(cqo);
+  INST(cdq);
+  INST(cltq);
+  INST(movslq);
+  INST(addss);
+  INST(addsd);
+  INST(subss);
+  INST(subsd);
+  INST(mulss);
+  INST(mulsd);
+  INST(divss);
+  INST(divsd);
+  INST(sqrtss);
+  INST(sqrtsd);
+  INST(ucomiss);
+  INST(ucomisd);
+  INST(cvtsi2ss);
+  INST(cvtsi2sd);
+  INST(cvttss2si);
+  INST(cvttsd2si);
+  INST(cvtss2sd);
+  INST(cvtsd2ss);
+  INST(fneg_ss);
+  INST(fneg_sd);
+  INST(leave);
+}
+
+#undef INST
+#undef INST2
+
+bool X86_64AssemblerInit(X86_64Assembler* assembler, String* infile,
+                           String* outfile) {
+  static int reloc_types[] = {
+      R_X86_64_16,    R_X86_64_32,    R_X86_64_64,    R_X86_64_16,
+      R_X86_64_32,    R_X86_64_64,    R_X86_64_16,    R_X86_64_32,
+      R_X86_64_64,    R_X86_64_PLT32, R_X86_64_GOTPCREL,
+  };
+
+  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_X86_64, 0, reloc_types,
+                     infile, outfile)) {
+    return false;
+  }
+
+  MapInit(&assembler->instructions, CompareString);
+  InitializeInstructions(&assembler->instructions);
+  AssemblerAddSection(&assembler->base, NULL, SHT(null), 0, 0);
+  assembler->bss =
+      AssemblerAddSection(&assembler->base, NewString(".bss"),
+                          SHT(nobits), SHF(alloc) | SHF(write), 16);
+  return true;
+}
+
+X86_64Assembler* NewX86_64Assembler(String* infile, String* outfile) {
+  X86_64Assembler* assembler = malloc(sizeof(X86_64Assembler));
+  X86_64AssemblerInit(assembler, infile, outfile);
+  return assembler;
+}
+
+void X86_64AssemblerDestruct(X86_64Assembler* assembler) {
+  AssemblerDestruct(&assembler->base);
+  MapDestruct(&assembler->instructions);
+}
+
+void X86_64AssemblerDelete(X86_64Assembler* assembler) {
+  X86_64AssemblerDestruct(assembler);
+  free(assembler);
+}
+
+void AssembleX86_64Instruction(Assembler* base, String* word) {
+  X86_64Assembler* assembler = (X86_64Assembler*)base;
+  void* asm_func = MapFindPointerKey(&assembler->instructions, word->value);
+  if (asm_func != NULL) {
+    void (*func)(X86_64Assembler*) = asm_func;
+    func(assembler);
+  } else {
+    AssemblerError(&assembler->base, "Syntax error; unknown instruction: %s",
+                   word->value);
+  }
+}

@@ -700,8 +700,7 @@ static void StraightenGraph(Generator* gen) {
       // Found a possible movable block.
       BasicBlock* input = VectorGet(&gen->basic_blocks, block->in_edges.value.w[0]);
       if (input->out_edges.length == 1) {
-        BasicBlock* out = VectorGet(&gen->basic_blocks, input->out_edges.value.w[0]);
-        assert(out == block);
+        assert(block == VectorGet(&gen->basic_blocks, input->out_edges.value.w[0]));
         IRNode* terminator = input->end_code;
         // Unconditional branch, not in a jump table.
         // Also check that the block is not just a label.

@@ -314,7 +314,6 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
-  printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
  
   if (RVIsVarRegister(inst)) {
     // Spilling a varreg.  This instruction is in the entry block but
@@ -421,11 +420,35 @@ static bool CanUseTemp(RVRegisterAllocator* allocator, TargetInstruction* inst) 
 
 static void AllocateVariableRegister(RVRegisterAllocator* allocator,
                                      TargetInstruction* inst) {
-  RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
-  
-  RVRegister* reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                 reg_type, CanUseTemp(allocator, inst));
-  AssignRegister(reg, inst);
+  bool is_leaf = allocator->rv->base.num_calls == 0 && OptLevel1() &&
+                 !allocator->rv->not_leaf;
+
+  for (size_t i = 0; i < allocator->rv->var_regs.length; i++) {
+    RegisterVariable* var = allocator->rv->var_regs.value.p[i];
+    if (var->inst != inst) {
+      continue;
+    }
+    RVRegister* reg;
+    if (var->is_fp) {
+      int first = is_leaf ? RV_FIRST_LEAF_FP_REG_VAR : RV_FIRST_FP_REG_VAR;
+      reg = &allocator->float_regs[first + var->varnum];
+    } else {
+      int first = is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
+      reg = &allocator->int_regs[first + var->varnum];
+    }
+    AssignRegister(reg, inst);
+    if (IsSavedReg(reg)) {
+      if (var->is_fp) {
+        BitSetInsert(&allocator->used_float_regs, reg->base.num);
+      } else {
+        BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      }
+    }
+    return;
+  }
+
+  assert(false);
+  COMPILER_UNREACHABLE();
 }
 
 static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
@@ -463,6 +486,32 @@ static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,
   inst->flags |= TARGET_INST_PROCESSED;
 }
 
+static bool AllocateUsingDest(RVRegisterAllocator* allocator,
+                              TargetInstruction* inst) {
+  if (inst->dest == NULL) {
+    return false;
+  }
+  if (inst->dest->reg == NULL) {
+    if (RVIsVarRegister(inst->dest)) {
+      AllocateVariableRegister(allocator, inst->dest);
+    } else {
+      AllocateRegister(allocator, inst->dest);
+    }
+  }
+  assert(inst->dest->reg != NULL);
+  if (inst->operand[0] != NULL && inst->operand[0]->reg == NULL &&
+      inst->operand[0]->block != NULL) {
+    AllocateRegister(allocator, inst->operand[0]);
+  }
+  inst->reg = inst->dest->reg;
+  if (inst->operand[0] != NULL) {
+    inst->operand[0]->uses++;
+  }
+  FreeRegisters(allocator, inst);
+  inst->flags |= TARGET_INST_PROCESSED;
+  return true;
+}
+
 
 static void ReloadSpills(RVRegisterAllocator* allocator,
                          TargetInstruction* inst) {
@@ -484,10 +533,34 @@ static void ReloadSpills(RVRegisterAllocator* allocator,
   }
 }
 
+static void EnsureOperandsAllocated(RVRegisterAllocator* allocator,
+                                    TargetInstruction* inst) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op == NULL || op->reg != NULL || op->block == NULL ||
+        TargetIsConst(op)) {
+      continue;
+    }
+    if (RVIsFixedRegister(op)) {
+      AllocateRegister(allocator, op);
+      continue;
+    }
+    if (RVIsVarRegister(op)) {
+      if (op->reg == NULL) {
+        AllocateVariableRegister(allocator, op);
+      }
+      continue;
+    }
+    if ((op->flags & TARGET_INST_PROCESSED) == 0) {
+      AllocateRegister(allocator, op);
+    }
+  }
+}
+
 static void AllocateRegister(RVRegisterAllocator* allocator,
                              TargetInstruction* inst) {
-   bool is_leaf = allocator->rv->base.num_calls == 0 &&
-      compiler->optimize;
+   bool is_leaf = allocator->rv->base.num_calls == 0 && OptLevel1() &&
+      !allocator->rv->not_leaf;
 
   RVOpcode opcode = (RVOpcode)inst->opcode;
   
@@ -504,7 +577,8 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
   // rmov instructions use the register allocated to their first
   // operand as their own register.
   if ((opcode == RV_OP(mv) || opcode == RV_OP(fmv_s) ||
-      opcode == RV_OP(fmv_d)) && inst->dest != NULL) {
+      opcode == RV_OP(fmv_d)) && inst->dest == NULL &&
+      inst->operand[1] != NULL) {
     AllocateForRmov(allocator, inst);
     return;
   }
@@ -516,27 +590,16 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     return;
   }
 
+  if (AllocateUsingDest(allocator, inst)) {
+    return;
+  }
+
   // Reload any spilled expressions.
   ReloadSpills(allocator, inst);
 
-  RVRegister* reg;
+  EnsureOperandsAllocated(allocator, inst);
 
-  if (inst->dest != NULL) {
-    if (inst->dest->reg == NULL) {
-      if (RVIsVarRegister(inst->dest)) {
-        // Assignment to a variable register,
-        AllocateVariableRegister(allocator, inst->dest);
-      } else {
-        AllocateRegister(allocator, inst->dest);
-      }
-    }
-    assert(inst->dest->reg != NULL);
-    reg = (RVRegister*)inst->dest->reg;
-    inst->reg = inst->dest->reg;
-    FreeRegisters(allocator, inst);
-    inst->flags |= TARGET_INST_PROCESSED;
-    return;
-  }
+  RVRegister* reg;
 
   // Free up any registers we can.
   FreeRegisters(allocator, inst);
@@ -600,7 +663,7 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
     case RV_OP(ivarreg):
     case RV_OP(fvarreg):
       assert(false);
-      break;
+      COMPILER_UNREACHABLE();
       
     case RV_OP(fa0):
     case RV_OP(fa1):

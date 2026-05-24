@@ -1587,7 +1587,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
   Struct* str = NULL;
   bool empty_tag_name = tag_name->length == 0;
   if (empty_tag_name) {
-    StringSet(tag_name, SyntaxFakeName(parser->syntax));
+    SyntaxFakeTagName(parser->syntax, tag_name);
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
   if (tag != NULL) {
@@ -1787,7 +1787,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
   Enum* e = NULL;
   bool empty_tag_name = tag_name->length == 0;
   if (empty_tag_name) {
-    StringSet(tag_name, SyntaxFakeName(parser->syntax));
+    SyntaxFakeTagName(parser->syntax, tag_name);
   }
   Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
   if (tag != NULL) {

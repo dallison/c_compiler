@@ -53,7 +53,8 @@ typedef long ssize_t;
 #define SEEK_SET 2
 #endif
 
-enum
+#ifndef __SC_NAMES
+enum __SC_NAMES
   {
     _SC_ARG_MAX,
 #define  _SC_ARG_MAX      _SC_ARG_MAX
@@ -513,6 +514,8 @@ enum
     _SC_THREAD_ROBUST_PRIO_PROTECT
 #define _SC_THREAD_ROBUST_PRIO_PROTECT  _SC_THREAD_ROBUST_PRIO_PROTECT
   };
+#define __SC_NAMES
+#endif
 
 extern void    _exit(int status);
 extern int    access(const char *path, int mode);

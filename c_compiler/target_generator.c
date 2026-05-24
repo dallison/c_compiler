@@ -321,6 +321,9 @@ void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new) {
         user->operand[j] = new;
         TargetAddUser(new, user);
       }
+      if (user->dest == old) {
+        user->dest = new;
+      }
     }
   }
   VectorClear(&old->users);
@@ -342,9 +345,6 @@ void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,
   }
   old->uses = (int)(old->users.length - num_retargeted);
   if (old->uses == 0) {
-    if (old->id == 30) {
-      printf("");
-    }
     VectorClear(&old->users);
   }
  
@@ -354,6 +354,13 @@ void TargetReplaceInstruction(TargetGenerator* target,
                               TargetInstruction* old,
                               TargetInstruction* new) {
   TargetRetargetInstruction(old, new);
+  for (TargetInstruction* inst = TargetFirstInstruction(target);
+       inst != NULL;
+       inst = TargetNext(inst)) {
+    if (inst->dest == old) {
+      inst->dest = new;
+    }
+  }
   TargetDeleteInstruction(target, old);
 }
 
@@ -388,7 +395,9 @@ TargetInstruction* TargetGetLoweredNode(IRNode* node) {
 }
 
 TargetInstruction* TargetSetLoweredNode(IRNode* node, TargetInstruction* inst) {
-  assert(node->data.ptr == NULL);
+  if (node->data.ptr != NULL) {
+    return (TargetInstruction*)node->data.ptr;
+  }
   node->data.ptr = inst;
   return inst;
 }
@@ -581,10 +590,16 @@ static TargetOpcode constant_ops[] = {
 };
 
 bool TargetIsConst(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
   return inst->opcode >= TARGET_OP(const8) && inst->opcode <= TARGET_OP(constd);
 }
 
 bool TargetIsZero(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
   if (inst->opcode >= TARGET_OP(const8) && inst->opcode <= TARGET_OP(constd)) {
     return TargetIntValue(inst) == 0;
   }

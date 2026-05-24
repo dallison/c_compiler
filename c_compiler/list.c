@@ -21,7 +21,7 @@ void ListInit(List* list) {
   list->length = 0;
 }
 
-List* NewList() {
+List* NewList(void) {
   List* list = malloc(sizeof(List));
   ListInit(list);
   return list;

@@ -16,7 +16,7 @@ void BufferInit(Buffer* buf) {
   buf->capacity = 0;
 }
 
-Buffer* NewBuffer() {
+Buffer* NewBuffer(void) {
   Buffer* buf = malloc(sizeof(Buffer));
   BufferInit(buf);
   return buf;

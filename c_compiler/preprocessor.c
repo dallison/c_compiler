@@ -251,8 +251,10 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   // Architecture macros.
   if (StringEqual(compiler->target_name, "x86_64")) {
     PreprocessorDefineMacro(p, "__x86_64__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "64");
   } else if (StringEqual(compiler->target_name, "aarch64")) {
     PreprocessorDefineMacro(p, "__aarch64__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "64");
   } else if (StringEqual(compiler->target_name, "p-code") ||
              StringEqual(compiler->target_name, "pcode")) {
     PreprocessorDefineMacro(p, "__p_code__", "1");
@@ -1539,8 +1541,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                      &replacement_text,
                      NewSourceLocation(p->lex->source, p->lex->source->lineno,
                                        name_start, name_end));
-    bool ok = HashTableInsert(&p->macros, macro);
-    assert(ok);
+    assert(HashTableInsert(&p->macros, macro));
   } else {
     if (!MacroEqual(macro, function_like_macro, &args, varargs,
                     &replacement_text)) {

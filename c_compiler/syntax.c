@@ -158,6 +158,14 @@ const char* SyntaxFakeName(Syntax* syntax) {
   return syntax->fake_name_buffer;
 }
 
+void SyntaxFakeTagName(Syntax* syntax, String* tag_name) {
+  Symbol* tag;
+  do {
+    StringSet(tag_name, SyntaxFakeName(syntax));
+    tag = SyntaxFindTopScopeTag(syntax, tag_name);
+  } while (tag != NULL);
+}
+
 Storage SyntaxParseStorage(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(extern):
@@ -551,8 +559,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        bool ok = InsertGlobalSymbol(sym);
-        assert(ok);
+        assert(InsertGlobalSymbol(sym));
         if (IsDefinition(parser, sym, storage)) {
           sym->flags.is_defined = true;
         } else if (!StorageIs(storage, STO(extern))) {
@@ -791,8 +798,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        bool ok = SyntaxAddSymbol(syntax, sym);
-        assert(ok);
+        assert(SyntaxAddSymbol(syntax, sym));
       }
     }
 

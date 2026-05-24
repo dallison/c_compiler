@@ -77,6 +77,7 @@ void SyntaxOpenScope(Syntax* syntax);
 void SyntaxCloseScope(Syntax* syntax);
 
 const char* SyntaxFakeName(Syntax* syntax);
+void SyntaxFakeTagName(Syntax* syntax, String* tag_name);
 
 void SyntaxError(Syntax* syntax, const char* format, ...);
 void SyntaxWarning(Syntax* syntax, const char* warn, const char* format, ...);

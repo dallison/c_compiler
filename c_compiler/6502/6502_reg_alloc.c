@@ -341,36 +341,9 @@ static bool CanUseTemp(W65C02RegisterAllocator* allocator, TargetInstruction* in
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 
-static void FindSpillVictim(W65C02RegisterAllocator* allocator,
-                                   W65C02RegisterType type, TargetInstruction** victim, TargetInstruction** spill_point) {
-  W65C02Register* regs;
-  int num_regs;
-  switch (type) {
-      case k6502RegTypeB:
-        regs = allocator->b_regs;
-        num_regs = W65C02_NUM_B_REGS;
-        break;
-      case k6502RegTypeI:
-        regs = allocator->i_regs;
-        num_regs = W65C02_NUM_I_REGS;
-        break;
-      case k6502RegTypeL:
-        regs = allocator->l_regs;
-        num_regs = W65C02_NUM_L_REGS;
-        break;
-      case k6502RegTypeX:
-        regs = allocator->x_regs;
-        num_regs = W65C02_NUM_X_REGS;
-        break;
-      case k6502RegTypeF:
-        regs = allocator->f_regs;
-        num_regs = W65C02_NUM_F_REGS;
-        break;
-
-  }
-  int min_cost = INT_MAX;
-  *victim = NULL;
-  // Find the instruction with the lowest spill cost.
+static bool FindSpillVictimInRegs(W65C02Register* regs, int num_regs,
+                                  TargetInstruction** victim, int* min_cost) {
+  bool found = false;
   for (int i = 0; i < num_regs; i++) {
     if (regs[i].base.owner != NULL) {
       TargetInstruction* owner = regs[i].base.owner;
@@ -379,12 +352,68 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
         continue;
       }
       assert((owner->flags & TARGET_INST_SPILLED) == 0);
-      
+
       int cost = SpillCost(owner);
-      if (cost < min_cost) {
-        min_cost = cost;
+      if (cost < *min_cost) {
+        *min_cost = cost;
         *victim = owner;
+        found = true;
       }
+    }
+  }
+  return found;
+}
+
+static void FindSpillVictim(W65C02RegisterAllocator* allocator,
+                                   W65C02RegisterType type, TargetInstruction** victim, TargetInstruction** spill_point) {
+  int min_cost = INT_MAX;
+  *victim = NULL;
+  switch (type) {
+      case k6502RegTypeB:
+        FindSpillVictimInRegs(allocator->b_regs, W65C02_NUM_B_REGS, victim, &min_cost);
+        break;
+      case k6502RegTypeI:
+        FindSpillVictimInRegs(allocator->i_regs, W65C02_NUM_I_REGS, victim, &min_cost);
+        break;
+      case k6502RegTypeL:
+        FindSpillVictimInRegs(allocator->l_regs, W65C02_NUM_L_REGS, victim, &min_cost);
+        break;
+      case k6502RegTypeX:
+        FindSpillVictimInRegs(allocator->x_regs, W65C02_NUM_X_REGS, victim, &min_cost);
+        break;
+      case k6502RegTypeF:
+        FindSpillVictimInRegs(allocator->f_regs, W65C02_NUM_F_REGS, victim, &min_cost);
+        break;
+  }
+  if (*victim == NULL) {
+    FindSpillVictimInRegs(allocator->b_regs, W65C02_NUM_B_REGS, victim, &min_cost);
+    FindSpillVictimInRegs(allocator->i_regs, W65C02_NUM_I_REGS, victim, &min_cost);
+    FindSpillVictimInRegs(allocator->l_regs, W65C02_NUM_L_REGS, victim, &min_cost);
+    FindSpillVictimInRegs(allocator->x_regs, W65C02_NUM_X_REGS, victim, &min_cost);
+    FindSpillVictimInRegs(allocator->f_regs, W65C02_NUM_F_REGS, victim, &min_cost);
+  }
+  if (*victim == NULL) {
+    int spill_cost = INT_MAX;
+    W65C02Register* spill_regs[] = {
+        allocator->b_regs, allocator->i_regs, allocator->l_regs,
+        allocator->x_regs, allocator->f_regs};
+    int spill_counts[] = {W65C02_NUM_B_REGS, W65C02_NUM_I_REGS, W65C02_NUM_L_REGS,
+                          W65C02_NUM_X_REGS, W65C02_NUM_F_REGS};
+    for (size_t t = 0; t < sizeof(spill_counts) / sizeof(spill_counts[0]); t++) {
+      for (int i = 0; i < spill_counts[t]; i++) {
+        W65C02Register* reg = &spill_regs[t][i];
+        if (reg->base.owner != NULL && IsSpillInstruction(reg->base.owner)) {
+          int cost = SpillCost(reg->base.owner);
+          if (cost < spill_cost) {
+            spill_cost = cost;
+            *victim = reg->base.owner;
+          }
+        }
+      }
+    }
+    if (*victim != NULL) {
+      *spill_point = NULL;
+      return;
     }
   }
  
@@ -530,8 +559,7 @@ static W65C02Register* FindFreeRegister(W65C02RegisterAllocator* allocator,
   }
 
   for (int i = 0; i < num_regs; i++) {
-    if (!regs[i].base.reserved && regs[i].base.owner == NULL &&
-        regs[i].byte_offset < 0) {
+    if (!regs[i].base.reserved && regs[i].base.owner == NULL) {
       if (!can_use_temp && regs[i].temp) {
         continue;
       }

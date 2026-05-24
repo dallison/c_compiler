@@ -1098,6 +1098,7 @@ static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
   assert(node->inputs.length == 2);
   IRNode* expr = node->inputs.value.p[0];
@@ -1238,6 +1239,7 @@ static TargetInstruction* LowerLoad(PCodeGenerator* pcode, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 
   return SetLoweredNode(node, Load(pcode, addr_node, opcode));
@@ -1290,6 +1292,7 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
 
   return SetLoweredNode(node, Store(pcode, addr_node, src, opcode));
@@ -1431,6 +1434,7 @@ static TargetInstruction* LowerResult(PCodeGenerator* pcode, IRNode* node) {
       break;
     default:
       assert(false);
+      COMPILER_UNREACHABLE();
   }
   TargetInstruction* result = Materialize(pcode, node->inputs.value.p[0]);
   TargetInstruction* result_reg =

@@ -12,6 +12,7 @@ CFLAGS = \
 	-I../c_compiler/aarch64 \
 	-I../c_compiler/p_code \
 	-I../c_compiler/risc_v \
+	-I../c_compiler/x86_64 \
 	-I../c_compiler/AR \
 	$(OPT_DEBUG) $(ADD_FLAGS)
 
@@ -20,6 +21,7 @@ ARCH_OBJS = \
 	Architecture/linker_arch_pcode.o \
 	Architecture/linker_arch_6502.o \
 	Architecture/linker_arch_aarch64.o \
+	Architecture/linker_arch_x86_64.o \
 
 LINKER_OBJS = \
 	linker.o \

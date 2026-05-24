@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,12 +28,14 @@ COMMON_INCLUDES = [
     "c_compiler/aarch64",
     "c_compiler/p_code",
     "c_compiler/risc_v",
+    "c_compiler/x86_64",
     "c_compiler/AR",
     "c_compiler/ELF",
     "c_compiler/Loader",
     "c_compiler/Loader/Architecture",
     "risc_v_interpreter",
     "aarch64_interpreter",
+    "x86_64_interpreter",
 ]
 
 LIBC_SRCS = [
@@ -96,6 +99,7 @@ LIBC_SRCS = [
     "libc/strtoll.c",
     "libc/strtoul.c",
     "libc/strtoull.c",
+    "libc/syscall.c",
     "libc/ungetc.c",
 ]
 
@@ -155,6 +159,7 @@ cc_library(
     srcs = [
         "c_compiler/Loader/Architecture/loader_arch_6502.c",
         "c_compiler/Loader/Architecture/loader_arch_aarch64.c",
+        "c_compiler/Loader/Architecture/loader_arch_x86_64.c",
         "c_compiler/Loader/Architecture/loader_arch_pcode.c",
         "c_compiler/Loader/Architecture/loader_arch_riscv.c",
         "c_compiler/Loader/loader.c",
@@ -177,6 +182,7 @@ cc_library(
     srcs = [
         "Linker/Architecture/linker_arch_6502.c",
         "Linker/Architecture/linker_arch_aarch64.c",
+        "Linker/Architecture/linker_arch_x86_64.c",
         "Linker/Architecture/linker_arch_pcode.c",
         "Linker/Architecture/linker_arch_riscv.c",
         "Linker/linker.c",
@@ -194,6 +200,7 @@ cc_library(
         "c_compiler/aarch64/*.h",
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
+        "c_compiler/x86_64/*.h",
     ]),
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
@@ -257,6 +264,12 @@ cc_library(
         "c_compiler/risc_v/risc_v_optimize.c",
         "c_compiler/risc_v/risc_v_reg_alloc.c",
         "c_compiler/risc_v/risc_v_target.c",
+        "c_compiler/x86_64/x86_64_assembler.c",
+        "c_compiler/x86_64/x86_64_codegen.c",
+        "c_compiler/x86_64/x86_64_emitter.c",
+        "c_compiler/x86_64/x86_64_optimize.c",
+        "c_compiler/x86_64/x86_64_reg_alloc.c",
+        "c_compiler/x86_64/x86_64_target.c",
         "c_compiler/semantics.c",
         "c_compiler/source.c",
         "c_compiler/ssa.c",
@@ -277,6 +290,7 @@ cc_library(
         "c_compiler/aarch64/*.h",
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
+        "c_compiler/x86_64/*.h",
     ]),
     copts = COMMON_COPTS + [
         "-DDAVECC_SYSROOT_HDRS=libc/include",
@@ -360,6 +374,31 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "x86_64_lib",
+    srcs = [
+        "x86_64_interpreter/x86_64_interpreter.c",
+        "x86_64_interpreter/x86_64_native.c",
+        "x86_64_interpreter/x86_64_runtime.c",
+        "x86_64_interpreter/x86_64_syscalls.c",
+    ],
+    hdrs = glob([
+        "x86_64_interpreter/*.h",
+        "c_compiler/*.h",
+        "c_compiler/x86_64/*.h",
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
 cc_binary(
     name = "6502",
     srcs = ["6502_interpreter/main.c"],
@@ -382,6 +421,17 @@ cc_binary(
         ":elf",
         ":linker",
         ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "x86asm",
+    srcs = ["x86asm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
         ":utils",
     ],
 )
@@ -461,6 +511,19 @@ cc_binary(
     copts = COMMON_COPTS + AARCH64_COPTS,
     deps = [
         ":aarch64_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "x86_64",
+    srcs = ["x86_64_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":x86_64_lib",
         ":elf",
         ":linker",
         ":loader",
@@ -621,6 +684,280 @@ done
 )
 
 genrule(
+    name = "libc_x86_64",
+    srcs = LIBC_SRCS + glob([
+        "libc/include/**/*.h",
+        "x86_64 support/*.s",
+    ]),
+    outs = ["libc/libcx86_64.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcx86_64.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$(location :davecc)"
+archivist="$(location :archivist)"
+cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
+
+runtime_srcs=(
+  "x86_64 support/setjmp.s"
+  "x86_64 support/longjmp.s"
+  "x86_64 support/syscall.s"
+  "x86_64 support/abs.s"
+)
+
+runtime_objs=()
+for src in "$${runtime_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
+
+libc_srcs=(
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ctype.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/libc_test.c"
+  "libc/malloc.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/posix.c"
+  "libc/printf.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/syscall.c"
+  "libc/ungetc.c"
+)
+
+libc_objs=()
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}"
+""",
+    tools = [
+        ":archivist",
+        ":davecc",
+    ],
+)
+
+genrule(
+    name = "libc_riscv",
+    srcs = LIBC_SRCS + glob([
+        "libc/include/**/*.h",
+    ]) + [
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcriscv.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcriscv.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
+
+libc_srcs=(
+  "libc/abs.c"
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ctype.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/malloc.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/posix.c"
+  "libc/printf.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/syscall.c"
+  "libc/ungetc.c"
+)
+
+libc_objs=()
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${libc_objs[@]}"
+""",
+)
+
+LIBC_TEST_DATA = LIBC_SRCS + glob([
+    "libc/include/**/*.h",
+    "libc/tests/**",
+    "x86_64 support/*.s",
+])
+
+sh_test(
+    name = "libc_x86_64_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "x86_64",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "libc_x86_64_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "all",
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :x86_64)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "libc_riscv_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "riscv",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "libc_riscv_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "all",
+        "$(rootpath :davecc)",
+        "riscv",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+        ":libc_riscv",
+        ":riscv",
+    ],
+)
+
+genrule(
     name = "support_rom_65c02",
     srcs = [
         "6502 support/Interpreter ROM/introm.map",
@@ -691,6 +1028,24 @@ set -euo pipefail
   -Wl,-e \
   -Wl,main \
   hello_aarch64/main.c \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_x86_64_exe",
+    srcs = ["hello_x86_64/main.c"],
+    outs = ["hello_x86_64/hello.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target x86_64 \
+  -static \
+  -Wl,-e \
+  -Wl,main \
+  hello_x86_64/main.c \
   -o "$@"
 """,
     tools = [":davecc"],

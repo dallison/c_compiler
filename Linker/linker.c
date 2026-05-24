@@ -26,6 +26,7 @@
 #include "linker_arch_riscv.h"
 #include "linker_arch_6502.h"
 #include "linker_arch_aarch64.h"
+#include "linker_arch_x86_64.h"
 
 void LinkerError(ObjectFile* file, const char* error, ...) {
   va_list ap;
@@ -150,6 +151,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->architectures, NewRISCVLinkerArchitecture());
   VectorAppend(&linker->architectures, New6502LinkerArchitecture());
   VectorAppend(&linker->architectures, NewAARCH64LinkerArchitecture());
+  VectorAppend(&linker->architectures, NewX86_64LinkerArchitecture());
 
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");
