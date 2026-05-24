@@ -1739,7 +1739,7 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       } else if (((int)dest->opcode == (int)X86_64_OP(symbol))) {
         fprintf(fp, "\tjmp %s\n", ((TargetSymbol*)dest)->symbol->name.value);
       } else {
-        fprintf(fp, "\tjmp ");
+        fprintf(fp, "\tjmp *");
         PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
         fprintf(fp, "\n");
       }

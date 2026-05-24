@@ -1130,6 +1130,27 @@ static void EmitIndirectCall(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
+static void EmitIndirectJmp(X86_64Assembler* assembler) {
+  (void)LexMatch(&ASM.lex, TOK(star));
+  X86Op target;
+  if (!ParseOperand(assembler, &target)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  SetRexW(&enc);
+  EncodeByte(&enc, 0xff);
+  if (target.kind == kX86OpReg) {
+    EncodeRegOperand(&enc, 4, &target.reg);
+  } else if (target.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, 4, &target);
+  } else {
+    AssemblerError(&ASM, "Indirect jump expects register or memory target");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
 static void EmitSSE(X86_64Assembler* assembler, uint8_t prefix66, uint8_t prefix_f2,
                     uint8_t prefix_f3, uint8_t opcode, bool int_dst) {
   X86Op src, dst;
@@ -1457,6 +1478,10 @@ static void Assemble_call(X86_64Assembler* assembler) {
   }
 }
 static void Assemble_jmp(X86_64Assembler* assembler) {
+  if (LexLookingAt(&ASM.lex, TOK(star))) {
+    EmitIndirectJmp(assembler);
+    return;
+  }
   EmitBranch(assembler, -1, false);
 }
 static void Assemble_ret(X86_64Assembler* assembler) {

@@ -231,7 +231,10 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     IRNode* input = inst->inputs.value.p[i];
     int64_t input_key = CalculateInstructionKey(table, input);
     Value* v = HashTableSearch(table, (void*)input_key);
-    assert(v != NULL);
+    if (v == NULL) {
+      // Operand is not available in this block's value set yet.
+      return (uint64_t)inst->id + last_ir_opcode;
+    }
     op_values[i] = v->value_number;
   }
 

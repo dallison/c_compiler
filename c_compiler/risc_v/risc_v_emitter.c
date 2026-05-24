@@ -514,6 +514,17 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
 
 // The rmov instructions are an explicit mov from operand[1] to
 // operand[0].  Both are registers.
+static const char* MoveMnemonic(RVOpcode opcode, RVRegister* dest,
+                                RVRegister* src) {
+  if (dest->type == kRVRegTypeFloat || src->type == kRVRegTypeFloat) {
+    if (opcode == RV_OP(fmv_d)) {
+      return "fmv.d";
+    }
+    return "fmv.s";
+  }
+  return "mv";
+}
+
 static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   assert(inst->operand[0] != NULL);
   assert(inst->operand[1] != NULL);
@@ -529,20 +540,9 @@ static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
     return;
   }
 
-  const char* mnemonic = "";
-  switch (inst->opcode) {
-    case RV_OP(mv):
-      mnemonic = "mv";
-      break;
-    case RV_OP(fmv_s):
-      mnemonic = "fmv.s";
-      break;
-    case RV_OP(fmv_d):
-      mnemonic = "fmv.d";
-      break;
-    default:
-      assert(false);
-  }
+  const char* mnemonic =
+      MoveMnemonic((RVOpcode)inst->opcode, (RVRegister*)inst->operand[0]->reg,
+                   (RVRegister*)inst->operand[1]->reg);
   char buf1[8], buf2[8];
   fprintf(
       fp, "\t%-12s%s, %s\n", mnemonic,
@@ -570,20 +570,9 @@ static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
     return;
   }
 
-  const char* mnemonic = "";
-  switch (inst->opcode) {
-    case RV_OP(mv):
-      mnemonic = "mv";
-      break;
-    case RV_OP(fmv_s):
-      mnemonic = "fmv.s";
-      break;
-    case RV_OP(fmv_d):
-      mnemonic = "fmv.d";
-      break;
-    default:
-      assert(false);
-  }
+  const char* mnemonic = MoveMnemonic((RVOpcode)inst->opcode,
+                                      (RVRegister*)dest_reg,
+                                      (RVRegister*)src->reg);
   char buf1[8], buf2[8];
   fprintf(fp, "\t%-12s%s, %s\n", mnemonic,
           RVRegisterName((RVRegister*)dest_reg, buf1, sizeof(buf1)),
@@ -921,8 +910,6 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
       assert(inst->operand[2] != NULL);
-      assert(inst->operand[0]->reg != NULL);
-      assert(inst->operand[1]->reg != NULL);
       fprintf(fp, "%s, %s, .%s_label_%d\n",
               GetRegisterName(inst->operand[0], buf1,
                              sizeof(buf1)),

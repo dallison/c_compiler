@@ -57,6 +57,17 @@ struct OptimizerData {
   X86_64Generator* rv;
 };
 
+// Some moves (mv/fmv_*) store into operand[0] when dest is NULL.
+static TargetInstruction* InstructionResult(TargetInstruction* inst) {
+  if (inst->dest != NULL) {
+    return inst->dest;
+  }
+  if (inst->operand[0] != NULL && X86_64IsVarRegister(inst->operand[0])) {
+    return inst->operand[0];
+  }
+  return inst;
+}
+
 
 // Remove unused instructions from the basic block.
 // The algorithm uses a filter to determine if the result
@@ -87,7 +98,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
         opcode != X86_64_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)
       // is not in the filter, remove it.
-      TargetInstruction* dest = inst->dest;
+      TargetInstruction* dest = InstructionResult(inst);
       bool is_candidate = true;
       
       // Check if destination is not in the output filter.
@@ -149,7 +160,6 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         TargetBasicBlockEmitBefore(&rv->base, block, label, base);
         base->opcode = (TargetOpcode)X86_64_OP(lea_rip);
         base->flags |= X86_64_PCREL_HI_RELOC;
-        TargetRetargetInstruction(inst->operand[1], label);
         TargetReplaceOperand(inst, 1, label);
         inst->flags |= X86_64_PCREL_LO_RELOC;
       } else if (base->opcode == (TargetOpcode)X86_64_OP(add)) {

@@ -221,7 +221,6 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         TargetBasicBlockEmitBefore(&rv->base, block, label, base);
         base->opcode = (TargetOpcode)RV_OP(auipc);
         base->flags |= RV_PCREL_HI_RELOC;
-        TargetRetargetInstruction(inst->operand[1], label);
         TargetReplaceOperand(inst, 1, label);
         inst->flags |= RV_PCREL_LO_RELOC;
       } else if (base->opcode == (TargetOpcode)RV_OP(addi)) {
@@ -443,7 +442,7 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
           // src or dest haveu been assigned to, not candidate.
           continue;
         }
-        if (!RVIsVarRegister(inst_dest) &&
+        if (RVIsVarRegister(inst_dest) &&
             RVIsExpression(prev) && prev->users.length == 1) {
            // rmov an expression to a register, just retarget the
           // expression to the register.  We use rmov to assign to a

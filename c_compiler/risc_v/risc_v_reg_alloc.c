@@ -431,9 +431,17 @@ static void AllocateVariableRegister(RVRegisterAllocator* allocator,
     RVRegister* reg;
     if (var->is_fp) {
       int first = is_leaf ? RV_FIRST_LEAF_FP_REG_VAR : RV_FIRST_FP_REG_VAR;
+      int last = is_leaf ? RV_LAST_LEAF_FP_REG_VAR : RV_LAST_FP_REG_VAR;
+      if (var->varnum > last - first) {
+        goto dynamic_alloc;
+      }
       reg = &allocator->float_regs[first + var->varnum];
     } else {
       int first = is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
+      int last = is_leaf ? RV_LAST_LEAF_INT_REG_VAR : RV_LAST_INT_REG_VAR;
+      if (var->varnum > last - first) {
+        goto dynamic_alloc;
+      }
       reg = &allocator->int_regs[first + var->varnum];
     }
     AssignRegister(reg, inst);
@@ -449,6 +457,21 @@ static void AllocateVariableRegister(RVRegisterAllocator* allocator,
 
   assert(false);
   COMPILER_UNREACHABLE();
+
+dynamic_alloc:
+  {
+    RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
+    RVRegister* reg = AllocateRegisterWithType(allocator, inst->block, inst,
+                                             reg_type, CanUseTemp(allocator, inst));
+    AssignRegister(reg, inst);
+    if (IsSavedReg(reg)) {
+      if (reg_type == kRVRegTypeFloat) {
+        BitSetInsert(&allocator->used_float_regs, reg->base.num);
+      } else {
+        BitSetInsert(&allocator->used_int_regs, reg->base.num);
+      }
+    }
+  }
 }
 
 static COMPILER_UNUSED void AllocateForRmov(RVRegisterAllocator* allocator,

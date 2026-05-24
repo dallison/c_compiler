@@ -30,9 +30,10 @@ typedef struct {
 
 static bool IsVariableReference(IRNode* inst) {
   switch (inst->opcode) {
-    case IR_OP(ssavar):
-    case IR_OP(phi):
+    // Only propagate through non-SSA stack variables and arguments.
+    // SSA names and phis can be updated across loop iterations.
     case IR_OP(localvar):
+    case IR_OP(argument):
       return true;
     default:
       return false;
@@ -51,7 +52,7 @@ static IRNode* SignExtendedConstant(Generator* gen, IRConstant* con, int bits) {
 static IRNode* TruncatedConstant(Generator* gen, IRConstant* con, int bits) {
   int64_t value = con->value.ivalue;
   if (bits < 64) {
-    int64_t mask = bits - 1;
+    int64_t mask = (1LL << bits) - 1;
     value &= mask;
   }
   return GeneratorGetIntConstant(gen, con->base.type, value);
@@ -59,7 +60,8 @@ static IRNode* TruncatedConstant(Generator* gen, IRConstant* con, int bits) {
 
 static bool AllConstantInputs(IRNode* node) {
   for (size_t i = 0; i < node->inputs.length; i++) {
-    if (!IRIsIntConst(node->inputs.value.p[i])) {
+    IRNode* input = node->inputs.value.p[i];
+    if (input == NULL || !IRIsIntConst(input)) {
       return false;
     }
   }
@@ -68,9 +70,14 @@ static bool AllConstantInputs(IRNode* node) {
 
 
 static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst) {
-  if (IRIsIntConst(inst->inputs.value.p[1])) {
-    // We are adding a constant.
-    IRNode* src = inst->inputs.value.p[0];
+  if (inst->inputs.length < 2 ||
+      inst->inputs.value.p[0] == NULL ||
+      inst->inputs.value.p[1] == NULL ||
+      !IRIsIntConst(inst->inputs.value.p[1])) {
+    return;
+  }
+  // We are adding a constant.
+  IRNode* src = inst->inputs.value.p[0];
     if (src->opcode == IR_OP(addi) && IRIsIntConst(src->inputs.value.p[1])) {
       // The source of this node is also an addi and it's adding a constant.
       if (src->outputs.length == 1) {
@@ -116,13 +123,17 @@ static void PropagateAddConstant(Generator* gen, BasicBlock* block, IRNode* inst
         }
       }
     }
-  }
 }
 
 static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst) {
-  if (IRIsIntConst(inst->inputs.value.p[1])) {
-    // We are subtracting a constant.
-    IRNode* src = inst->inputs.value.p[0];
+  if (inst->inputs.length < 2 ||
+      inst->inputs.value.p[0] == NULL ||
+      inst->inputs.value.p[1] == NULL ||
+      !IRIsIntConst(inst->inputs.value.p[1])) {
+    return;
+  }
+  // We are subtracting a constant.
+  IRNode* src = inst->inputs.value.p[0];
     if (src->opcode == IR_OP(addi) && IRIsIntConst(src->inputs.value.p[1])) {
       if (src->outputs.length == 1) {
         // We are the only user of this instruction.
@@ -166,12 +177,14 @@ static void PropagateSubConstant(Generator* gen, BasicBlock* block, IRNode* inst
         }
       }
     }
-  }
 }
  
 // General case for a single constant operation.
 #define PROP_CONST_OP(ir_opcode, op) \
-  if (IRIsIntConst(inst->inputs.value.p[1])) {\
+  if (inst->inputs.length >= 2 && \
+      inst->inputs.value.p[0] != NULL && \
+      inst->inputs.value.p[1] != NULL && \
+      IRIsIntConst(inst->inputs.value.p[1])) {\
     IRNode* src = inst->inputs.value.p[0];\
     if (src->opcode == IR_OP(ir_opcode) && IRIsIntConst(src->inputs.value.p[1])) {\
       if (src->outputs.length == 1) {\
@@ -202,18 +215,24 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
       case IR_OP(store8):
       case IR_OP(store16):
       case IR_OP(store64):
-        if (IsVariableReference(inst->inputs.value.p[0])) {
+        if (inst->inputs.length >= 1 &&
+            inst->inputs.value.p[0] != NULL &&
+            IsVariableReference(inst->inputs.value.p[0])) {
+          IRNode* var = inst->inputs.value.p[0];
+          if (TypeIsVolatile(var->type)) {
+            // Volatile prevents this optimization.
+            break;
+          }
           if (IRIsIntConst(inst->inputs.value.p[1])) {
             // Store of a constant to a variable.
-            IRNode* var = inst->inputs.value.p[0];
-            if (TypeIsVolatile(var->type)) {
-              // Volatile prevents this optimization.
-              break;
-            }
             IRNode* val = inst->inputs.value.p[1];
             assert(!TypeIsVoid(val->type));
             MapKeyValue kv = {.key.p = var, .value.p = val};
             MapInsert(&p->constants, kv);
+          } else {
+            // Non-constant store invalidates any prior constant value.
+            MapKeyType key = {.p = var};
+            MapRemove(&p->constants, key);
           }
         }
         break;
@@ -225,7 +244,9 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
       case IR_OP(loadu32):  // Load unsigned 32-bit from [op0]
       case IR_OP(loadu8):  // Load unsigned 8-bit from [op0]
       case IR_OP(loadu16):  // Load unsigned 16-bit from [op0]
-        if (IsVariableReference(inst->inputs.value.p[0])) {
+        if (inst->inputs.length >= 1 &&
+            inst->inputs.value.p[0] != NULL &&
+            IsVariableReference(inst->inputs.value.p[0])) {
           IRNode* var = inst->inputs.value.p[0];
           IRConstant* con = MapFindPointerKey(&p->constants, var);
           if (con == NULL) {
@@ -383,7 +404,9 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         }
         break;
       case IR_OP(btrue):
-        if (IRIsIntConst(inst->inputs.value.p[0])) {
+        if (inst->inputs.length >= 1 &&
+            inst->inputs.value.p[0] != NULL &&
+            IRIsIntConst(inst->inputs.value.p[0])) {
           int64_t v = IRIntConstValue(inst->inputs.value.p[0]);
           if (v == 0) {
             BasicBlockRemoveInstruction(gen, block, inst);
@@ -391,7 +414,9 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         }
         break;
       case IR_OP(bfalse):
-        if (IRIsIntConst(inst->inputs.value.p[0])) {
+        if (inst->inputs.length >= 1 &&
+            inst->inputs.value.p[0] != NULL &&
+            IRIsIntConst(inst->inputs.value.p[0])) {
           int64_t v = IRIntConstValue(inst->inputs.value.p[0]);
           if (v != 0) {
             BasicBlockRemoveInstruction(gen, block, inst);
