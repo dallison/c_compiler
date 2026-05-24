@@ -7,6 +7,7 @@ CFLAGS = -I. \
 	-I.. \
 	-I../ELF \
 	-I../6502 \
+	-I../arm \
 	$(OPT_DEBUG) $(ADD_FLAGS)
 
 ARCH_OBJS = \
@@ -14,6 +15,7 @@ ARCH_OBJS = \
 	Architecture/loader_arch_pcode.o \
 	Architecture/loader_arch_6502.o \
 	Architecture/loader_arch_aarch64.o \
+	Architecture/loader_arch_arm.o \
 	Architecture/loader_arch_x86_64.o \
 
 LINKER_OBJS = \

@@ -374,7 +374,45 @@ typedef struct  {
 #define ELF_MACHINE_TYPE_RISC_V 243
 #define ELF_MACHINE_TYPEW65C02 6502
 #define ELF_MACHINE_TYPE_AARCH64  183
+#define ELF_MACHINE_TYPE_ARM 40
 #define ELF_MACHINE_TYPE_X86_64 62
+
+// ARM ELF flags.
+#define EF_ARM_EABI_VER5 0x05000000
+#define EF_ARM_ABI_FLOAT_HARD 0x00000400
+#define EF_ARM_EABI_FLAGS 0x0502
+
+// ARM relocation types (EABI).
+#define R_ARM_NONE 0
+#define R_ARM_PC24 1
+#define R_ARM_ABS32 2
+#define R_ARM_REL32 3
+#define R_ARM_LDR_PC_G0 4
+#define R_ARM_ADD8 8
+#define R_ARM_ADD16 9
+#define R_ARM_ADD32 10
+#define R_ARM_SUB8 11
+#define R_ARM_SUB16 12
+#define R_ARM_SUB32 13
+#define R_ARM_TLS_DTPMOD32 17
+#define R_ARM_TLS_DTPREL32 18
+#define R_ARM_TLS_TPOFF32 19
+#define R_ARM_GLOB_DAT 21
+#define R_ARM_JUMP_SLOT 22
+#define R_ARM_RELATIVE 23
+#define R_ARM_GOT_BREL 26
+#define R_ARM_PLT32 27
+#define R_ARM_CALL 28
+#define R_ARM_JUMP24 29
+#define R_ARM_CALL_PLT R_ARM_PLT32
+#define R_ARM_32 R_ARM_ABS32
+#define R_ARM_TARGET1 38
+#define R_ARM_V4BX 40
+#define R_ARM_MOVW_ABS_NC 43
+#define R_ARM_MOVT_ABS 44
+#define R_ARM_MOVW_PREL_NC 45
+#define R_ARM_MOVT_PREL 46
+#define R_ARM_COPY 20
 
 // x86-64 relocation types.
 #define R_X86_64_NONE 0

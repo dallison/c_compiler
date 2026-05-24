@@ -106,5 +106,8 @@ bool LoaderLinkedAddressToRuntime(Loader* loader,
                                   const LoadedDynamicLibrary* lib,
                                   uint64_t linked,
                                   uint64_t* runtime);
+bool LoaderRuntimeAddressToLinked(Loader* loader,
+                                  uint64_t runtime,
+                                  uint64_t* linked);
 
 #endif /* loader_h */

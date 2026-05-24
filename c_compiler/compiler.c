@@ -25,6 +25,7 @@
 #include "p_code_target.h"
 #include "risc_v_target.h"
 #include "aarch64_target.h"
+#include "arm_target.h"
 #include "x86_64_target.h"
 
 // This is global to avoid having to pass it around everywhere.
@@ -85,6 +86,7 @@ static struct CompilerTargetDefinition{
   {"pcode", {"pcode", "p-code"}, NewPCodeTarget, false},
   {"riscv", {"riscv", "risc-v"}, NewRVTarget, false},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false},
+  {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false},
   {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false},
   {"6502", {"6502"}, New6502Target, true},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true},

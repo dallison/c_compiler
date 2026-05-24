@@ -10,6 +10,7 @@ CFLAGS =  \
 	-I../c_compiler/ELF \
 	-I../c_compiler/6502 \
 	-I../c_compiler/aarch64 \
+	-I../c_compiler/arm \
 	-I../c_compiler/p_code \
 	-I../c_compiler/risc_v \
 	-I../c_compiler/AR \
@@ -19,6 +20,7 @@ ARCH_OBJS = \
 	Architecture/linker_arch_riscv.o \
 	Architecture/linker_arch_pcode.o \
 	Architecture/linker_arch_6502.o \
+	Architecture/linker_arch_arm.o \
 
 LINKER_OBJS = \
 	linker.o \

@@ -17,6 +17,7 @@
 #include "6502_assembler.h"
 #include "p_code_assembler.h"
 #include "x86_64_assembler.h"
+#include "arm_assembler.h"
 #include "compiler.h"
 #include "linker_main.h"
 
@@ -335,6 +336,11 @@ int main(int argc, char * argv[]) {
         assembler = NewAARCH64Assembler(asm_filename, &output_filename);
         asm_run = AssembleAARCH64Instruction;
         destructor = (AssemblerDestructor)AARCH64AssemblerDestruct;
+      } else if (StringEqual(&target, "arm") || StringEqual(&target, "armv7") ||
+                 StringEqual(&target, "armv7-a") || StringEqual(&target, "arm32")) {
+        assembler = (Assembler*)NewARMAssembler(asm_filename, &output_filename);
+        asm_run = AssembleARMInstruction;
+        destructor = (AssemblerDestructor)ARMAssemblerDestruct;
       } else if (StringEqual(&target, "x86_64") || StringEqual(&target, "x86-64")) {
         assembler = (Assembler*)NewX86_64Assembler(asm_filename, &output_filename);
         asm_run = AssembleX86_64Instruction;

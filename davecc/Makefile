@@ -3,6 +3,7 @@ CFLAGS = -I../c_compiler \
 	-I../c_compiler/AR \
 	-I../c_compiler/6502 \
 	-I../c_compiler/aarch64 \
+	-I../c_compiler/arm \
 	-I../c_compiler/p_code \
 	-I../c_compiler/risc_v \
 	-I../Linker \

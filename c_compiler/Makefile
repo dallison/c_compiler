@@ -7,6 +7,7 @@ CFLAGS = \
 	-IELF \
 	-I6502 \
 	-Iaarch64 \
+	-Iarm \
 	-Ip_code \
 	-Irisc_v \
 	$(OPT_DEBUG) $(ADD_FLAGS) \
@@ -38,6 +39,14 @@ AARCH64_OBJS = \
     aarch64/aarch64_emitter.o \
     aarch64/aarch64_assembler.o \
     aarch64/aarch64_target.o \
+
+ARM_OBJS = \
+    arm/arm_reg_alloc.o \
+    arm/arm_codegen.o \
+    arm/arm_emitter.o \
+    arm/arm_assembler.o \
+    arm/arm_optimize.o \
+    arm/arm_target.o \
 
 P_CODE_OBJS = \
     p_code/p_code_reg_alloc.o \
@@ -98,6 +107,7 @@ COMPILER_OBJS = \
 	dwarf.o \
 	$(RISC_V_OBJS) \
 	$(AARCH64_OBJS) \
+	$(ARM_OBJS) \
 	$(P_CODE_OBJS) \
 	$(6502_OBJS) \
 

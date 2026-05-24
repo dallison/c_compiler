@@ -73,9 +73,6 @@ void LoaderWarning(const char* warn, const char* error, ...) {
   
 }
 
-static bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
-                                          uint64_t* linked);
-
 static bool FindStaticSymbolByAddress(Loader* loader,
                              uint64_t address,
                              const char** name,
@@ -263,15 +260,16 @@ bool LoaderLinkedAddressToRuntime(Loader* loader, const LoadedDynamicLibrary* li
     if (linked < segment->vaddr || linked >= segment->vaddr + segment->memsz) {
       continue;
     }
-    *runtime = (uint64_t)region->address + SegmentFileOffsetDelta(segment) +
+    *runtime = (uint64_t)(uintptr_t)region->address +
+               (uint64_t)SegmentFileOffsetDelta(segment) +
                (linked - segment->vaddr);
     return true;
   }
   return false;
 }
 
-static bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
-                                          uint64_t* linked) {
+bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
+                                  uint64_t* linked) {
   if (!loader->arch->ignore_vaddr) {
     *linked = runtime;
     return true;
@@ -282,8 +280,9 @@ static bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
       continue;
     }
     ELFProgramHeader* segment = region->segment;
-    uint64_t base = (uint64_t)region->address + SegmentFileOffsetDelta(segment);
-    if (runtime < base || runtime >= base + segment->memsz) {
+    uint64_t base = (uint64_t)(uintptr_t)region->address +
+                    (uint64_t)SegmentFileOffsetDelta(segment);
+    if (runtime < base || runtime + 4 > base + segment->memsz) {
       continue;
     }
     *linked = segment->vaddr + (runtime - base);

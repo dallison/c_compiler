@@ -255,6 +255,13 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   } else if (StringEqual(compiler->target_name, "aarch64")) {
     PreprocessorDefineMacro(p, "__aarch64__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
+  } else if (StringEqual(compiler->target_name, "arm") ||
+             StringEqual(compiler->target_name, "armv7") ||
+             StringEqual(compiler->target_name, "armv7-a") ||
+             StringEqual(compiler->target_name, "arm32")) {
+    PreprocessorDefineMacro(p, "__arm__", "1");
+    PreprocessorDefineMacro(p, "__ARM_ARCH_7A__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "32");
   } else if (StringEqual(compiler->target_name, "p-code") ||
              StringEqual(compiler->target_name, "pcode")) {
     PreprocessorDefineMacro(p, "__p_code__", "1");

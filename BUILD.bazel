@@ -26,6 +26,7 @@ COMMON_INCLUDES = [
     "c_compiler",
     "c_compiler/6502",
     "c_compiler/aarch64",
+    "c_compiler/arm",
     "c_compiler/p_code",
     "c_compiler/risc_v",
     "c_compiler/x86_64",
@@ -34,6 +35,7 @@ COMMON_INCLUDES = [
     "c_compiler/Loader",
     "c_compiler/Loader/Architecture",
     "risc_v_interpreter",
+    "arm_interpreter",
     "aarch64_interpreter",
     "x86_64_interpreter",
 ]
@@ -159,6 +161,7 @@ cc_library(
     srcs = [
         "c_compiler/Loader/Architecture/loader_arch_6502.c",
         "c_compiler/Loader/Architecture/loader_arch_aarch64.c",
+        "c_compiler/Loader/Architecture/loader_arch_arm.c",
         "c_compiler/Loader/Architecture/loader_arch_x86_64.c",
         "c_compiler/Loader/Architecture/loader_arch_pcode.c",
         "c_compiler/Loader/Architecture/loader_arch_riscv.c",
@@ -182,6 +185,7 @@ cc_library(
     srcs = [
         "Linker/Architecture/linker_arch_6502.c",
         "Linker/Architecture/linker_arch_aarch64.c",
+        "Linker/Architecture/linker_arch_arm.c",
         "Linker/Architecture/linker_arch_x86_64.c",
         "Linker/Architecture/linker_arch_pcode.c",
         "Linker/Architecture/linker_arch_riscv.c",
@@ -198,6 +202,7 @@ cc_library(
         "Linker/Architecture/*.h",
         "c_compiler/6502/*.h",
         "c_compiler/aarch64/*.h",
+        "c_compiler/arm/*.h",
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
         "c_compiler/x86_64/*.h",
@@ -228,6 +233,12 @@ cc_library(
         "c_compiler/aarch64/aarch64_emitter.c",
         "c_compiler/aarch64/aarch64_reg_alloc.c",
         "c_compiler/aarch64/aarch64_target.c",
+        "c_compiler/arm/arm_assembler.c",
+        "c_compiler/arm/arm_codegen.c",
+        "c_compiler/arm/arm_emitter.c",
+        "c_compiler/arm/arm_optimize.c",
+        "c_compiler/arm/arm_reg_alloc.c",
+        "c_compiler/arm/arm_target.c",
         "c_compiler/asm_expr.c",
         "c_compiler/assembler.c",
         "c_compiler/ast.c",
@@ -288,6 +299,7 @@ cc_library(
         "c_compiler/*.h",
         "c_compiler/6502/*.h",
         "c_compiler/aarch64/*.h",
+        "c_compiler/arm/*.h",
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
         "c_compiler/x86_64/*.h",
@@ -361,11 +373,36 @@ cc_library(
         "aarch64_interpreter/*.h",
         "c_compiler/*.h",
         "c_compiler/aarch64/*.h",
+        "c_compiler/arm/*.h",
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
     ]),
     copts = COMMON_COPTS + AARCH64_COPTS,
     includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "arm_lib",
+    srcs = [
+        "arm_interpreter/arm_interpreter.c",
+        "arm_interpreter/arm_debugger.c",
+    ],
+    hdrs = glob([
+        "arm_interpreter/*.h",
+        "c_compiler/*.h",
+        "c_compiler/arm/*.h",
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    linkopts = ["-lm"],
     deps = [
         ":elf",
         ":linker",
@@ -511,6 +548,20 @@ cc_binary(
     copts = COMMON_COPTS + AARCH64_COPTS,
     deps = [
         ":aarch64_lib",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "arm",
+    srcs = ["arm_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    linkopts = ["-lm"],
+    deps = [
+        ":arm_lib",
         ":elf",
         ":linker",
         ":loader",
@@ -1112,5 +1163,85 @@ touch "$@"
     tools = [
         ":aarch64",
         ":aarch64_signed",
+    ],
+)
+
+genrule(
+    name = "hello_arm_exe",
+    srcs = ["hello_arm/main.c"],
+    outs = ["hello_arm/hello.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target arm \
+  -static \
+  -Wl,-e \
+  -Wl,main \
+  hello_arm/main.c \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_arm_libfunc_so",
+    srcs = ["hello_arm/libfunc.c"],
+    outs = ["hello_arm/libfunc.so"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target arm \
+  -fpic \
+  -shared \
+  hello_arm/libfunc.c \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_arm_dynamic_exe",
+    srcs = [
+        "hello_arm/main_dynamic.c",
+        ":hello_arm_libfunc_so",
+    ],
+    outs = ["hello_arm/hello_dynamic.exe"],
+    cmd = """
+set -euo pipefail
+
+"$(location :davecc)" \
+  -target arm \
+  -fpic \
+  -Wl,-e \
+  -Wl,main \
+  -rpath '$$ORIGIN' \
+  hello_arm/main_dynamic.c \
+  "$(location :hello_arm_libfunc_so)" \
+  -o "$@"
+""",
+    tools = [":davecc"],
+)
+
+genrule(
+    name = "hello_arm_milestone_test",
+    srcs = [
+        "hello_arm/milestone_test.sh",
+        ":hello_arm_dynamic_exe",
+        ":hello_arm_libfunc_so",
+        ":hello_arm_exe",
+    ],
+    outs = ["hello_arm/milestone.ok"],
+    cmd = """
+set -euo pipefail
+bash "$(location hello_arm/milestone_test.sh)" \
+  "$$(pwd)/$(execpath :arm)" \
+  "$$(pwd)/$(execpath :hello_arm_dynamic_exe)" \
+  "$$(pwd)/$(execpath :hello_arm_exe)"
+touch "$@"
+""",
+    tools = [
+        ":arm",
     ],
 )
