@@ -30,8 +30,25 @@
 .global __restore_reg_set
 
 // Register save mask
-// This is a 64-bit byte mask (8 bytes) immediately after the __enter and __enter_leaf
-// calls.  Each bit selects one byte of the unified register file to save.
+// This is a 24-bit bitmask immediately after the __enter and __enter_leaf
+// calls.  Consists of a number of registers to save for each of the
+// register types in this order:
+// i regs (12)   - 5 bits  0..4
+// b regs (8)    - 4 bits  5..8
+// l regs (8)    - 4 bits  9..12
+// x regs (4)    - 3 bits  13..15
+// f regs (4)    - 3 bits  16..18
+//    total      =========
+//                 19 bits
+//
+//     3       3     4      5      4
+// 19 18 17 16 15 14 13 12 11 10  9 8 7 6 5 4 3  2  1  0
+//  +----------+---------+---------+-----+----------+
+//  |    f     |   x     |    l    |  b  |    i     |
+//  +----------+---------+---------+-----+----------+
+//
+// If the save mask is 0 it is absent from the instructions and the *_nomask
+// variants of the enter and leave subroutines are used.
 
 // Entry:
 // Y: start offset for first reg to save
@@ -120,108 +137,152 @@ restore_reg_done:
   STA __sp+1
   RTS
 
-// Register save mask: 64-bit byte mask (8 bytes) immediately after __enter.
-// Each bit selects a byte in the unified register file (__zpr0..__zpr63).
-// If the save mask is zero the *_nomask variants are used.
+// Sizes of each register set in bits, from LSB to MSB
+reg_mask_sizes:
+  .byte 5,4,4,3,3
 
-.set SAVE_MASK_BYTES 8
-.set REG_FILE_BYTES 64
+// Mask to AND with to get number of regs to save.
+reg_mask_masks:
+  .byte 31,15,15,7,7
 
-// Save register-file byte X onto the expression stack.
-__save_reg_byte:
-  SEC
-  LDA __sp
-  SBC #1
-  STA __sp
-  LDA __sp+1
-  SBC #0
-  STA __sp+1
-  LDA __zpr0,X
-  LDY #0
-  STA (__sp),Y
+// Start offset of registers in zero page.
+// First n for each reg is not saved:
+// i: 4
+// b: 2
+// l: 2
+// x: 1
+// f: 1
+reg_mask_offsets:
+  .byte __i0+8, __b0+2, __l0+8, __x0+8, __f0+4
+
+// Log2 of size of each register (left shift count)
+reg_mask_reg_sizes:
+  .byte 1, 0, 2, 3, 2
+
+
+// __t0,t1: current save mask.
+// X: reg type (0 = b,...)
+// Exit:
+// __t0, __t1, __t2 shifted right to remove save count.
+__save_from_mask:
+  LDA reg_mask_masks,X
+  AND __t0            // A = number of regs to save
+  BEQ skip_save_reg
+  STA __t3
+  LDY reg_mask_reg_sizes,X
+  BEQ skip_reg_mult
+// Shift left by log2 of register size to get number of bytes to save.
+reg_mult_loop:
+  ASL __t3
+  DEY
+  BNE reg_mult_loop
+skip_reg_mult:        # __t2 contains number of bytes
+  LDA __t3
+  LDY reg_mask_offsets, X
+  JSR __save_reg_set
+skip_save_reg:
+// Shift reg mask to the right by the number of bits in the mask
+  LDY reg_mask_sizes,X
+reg_mask_shift_loop:
+  LSR __t2
+  ROR __t1
+  ROR __t0
+  DEY
+  BNE reg_mask_shift_loop
+end_save_regs:
   RTS
 
-// Restore register-file byte X from the expression stack.
-__restore_reg_byte:
-  LDY #0
-  LDA (__sp),Y
-  STA __zpr0,X
-  CLC
-  LDA __sp
-  ADC #1
-  STA __sp
-  LDA __sp+1
-  ADC #0
-  STA __sp+1
-  RTS
 
-// Entry: __t2,__t3 = address of 8-byte save mask.
+// Entry:
+// __t2, __t3: address of save mask, corrupted on exit.
 __save_regs:
-  LDX #0
-  LDY #0
-  LDA #1
+  LDA (__t2)
   STA __t0
-save_regs_loop:
-  CPX #REG_FILE_BYTES
-  BCS save_regs_done
+  LDY #1
   LDA (__t2),Y
-  AND __t0
-  BEQ save_regs_skip
-  TXA
-  PHX
-  TAX
-  JSR __save_reg_byte
-  PLX
-save_regs_skip:
-  ASL __t0
-  BNE save_regs_next
+  STA __t1
   INY
-  CPY #SAVE_MASK_BYTES
-  BEQ save_regs_done
-  LDA #1
-  STA __t0
-save_regs_next:
+  LDA (__t2),Y
+  STA __t2
+  LDX #0
+save_regs_loop:
+  LDA __t0
+  ORA __t1
+  ORA __t2
+  BEQ end_save_regs
+  JSR __save_from_mask
   INX
   BNE save_regs_loop
-save_regs_done:
-  RTS
 
-// Entry: save mask at __fp - SAVE_MASK_BYTES.
+// Entry:
+// __fp-3: address of save mask
+// This is like save_regs except it needs to operate in reverse.
+// It needs to pop the registers off the stack in reverse order.
+// Saves X
 __restore_regs:
   PHX
   SEC
   LDA __fp
-  SBC #SAVE_MASK_BYTES
+  SBC #3          // 24 bits for save mask
   STA __t2
   LDA __fp+1
   SBC #0
   STA __t3
-  LDX #REG_FILE_BYTES - 1
-  LDY #SAVE_MASK_BYTES - 1
-  LDA #0x80
+  LDA (__t2)
   STA __t0
-restore_regs_loop:
-  CPX #0xFF
-  BEQ restore_regs_done
+  LDY #1
   LDA (__t2),Y
-  AND __t0
-  BEQ restore_regs_skip
-  TXA
-  PHX
-  TAX
-  JSR __restore_reg_byte
-  PLX
-restore_regs_skip:
-  LSR __t0
-  BNE restore_regs_next
+  STA __t1
+  INY
+  LDA (__t2),Y
+  STA __t2
+  LDX #0
+restore_regs_loop:
+  LDA __t0
+  ORA __t1
+  ORA __t2
+  BEQ end_restore_regs
+  // Calculate number of bytes to restore and push onto 6502 stack
+  LDA reg_mask_masks,X
+  AND __t0            // A = number of regs to save
+  LDY reg_mask_reg_sizes,X
+  BEQ skip_reg_mult1
+// Shift left by log2 of register size to get number of bytes to save.
+reg_mult_loop1:
+  ASL A
   DEY
-  BMI restore_regs_done
-  LDA #0x80
-  STA __t0
-restore_regs_next:
-  DEX
+  BNE reg_mult_loop1
+skip_reg_mult1:        // __t3 contains number of bytes
+  PHA                 // Push onto 6502 stack.
+
+  // Shift reg mask to the right by the number of bits in the mask
+  LDY reg_mask_sizes,X
+reg_mask_shift_loop1:
+  LSR __t2
+  ROR __t1
+  ROR __t0
+  DEY
+  BNE reg_mask_shift_loop1
+  INX
   BNE restore_regs_loop
-restore_regs_done:
+
+end_restore_regs:
+  CPX #0              // Nothing to restore?
+  BEQ end_restore
+  DEX                 // X is now index into reg_mask_offsets.
+
+  // 6502 stack contains N bytes which are the number of bytes to restore
+  // for each reg type.  X contains the number of bytes pushed.
+restore_reg_loop2:
+  LDY reg_mask_offsets, X
+  PLA
+  BEQ skip_restore
+  STA __t3
+  JSR __restore_reg_set
+skip_restore:
+  DEX
+  BPL restore_reg_loop2
+end_restore:
   PLX
   RTS
 
@@ -229,7 +290,7 @@ restore_regs_done:
 save_mask_space:
   SEC
   LDA __sp
-  SBC #SAVE_MASK_BYTES
+  SBC #3
   STA __sp
   LDA __sp+1
   SBC #0
@@ -243,8 +304,8 @@ save_mask_space:
 // |      frame         |
 // |                    |
 // +--------------------+    <- previous sp, new fp
-// |   save mask (64)   |
-// +--------------------+    <- reg save mask @fp-8
+// |   save mask (24)   |
+// +--------------------+    <- reg save mask @fp-3
 // |                    |
 // |                    |    <- variables (accessed via fp-X)
 // |                    |
@@ -266,7 +327,7 @@ save_mask_space:
 // X = frame_size_lo
 // Y = frame_size hi
 
-// Possibly followed by 64-bit register save mask (8 bytes)
+// Possibly followed by 24-bits of register save mask
 
 __enter:
   LDY #0
@@ -295,14 +356,15 @@ __enter:
   BNE enter_skip
   INC __t3
 enter_skip:
-  // Store save mask (8 bytes)
-  LDY #0
-enter_mask_loop:
+  // Store save mask (24 bits)
+  LDA (__t2)
+  STA (__sp)
+  LDY #1
   LDA (__t2),Y
   STA (__sp),Y
   INY
-  CPY #SAVE_MASK_BYTES
-  BNE enter_mask_loop
+  LDA (__t2),Y
+  STA (__sp),Y
 
   // Decrement sp by frame size
   SEC
@@ -334,15 +396,15 @@ enter_mask_loop:
   PLA
   STA __fp
 
-  // Return to address after save mask (__t2 + 7)
-  // The save mask is 8 bytes but we set the return address to
+  // Return to address after save mask (__t2 + 2)
+  // The save mask is 3 bytes but we set the return address to
   // one byte less than the next instruction as the RTS will add one
   // to it before jumping to it.
 enter_save_regs:
   TSX
   CLC
   LDA __t2
-  ADC #7
+  ADC #2
   STA 0x101,X
   LDA __t3
   ADC #0
@@ -381,14 +443,15 @@ __enter_leaf:
   BNE enter_leaf_skip
   INC __t3
 enter_leaf_skip:
-  // Store save mask (8 bytes)
-  LDY #0
-enter_leaf_mask_loop:
+  // Store save mask
+  LDA (__t2)
+  STA (__sp)
+  LDY #1
   LDA (__t2),Y
   STA (__sp),Y
   INY
-  CPY #SAVE_MASK_BYTES
-  BNE enter_leaf_mask_loop
+  LDA (__t2),Y
+  STA (__sp),Y
 
   // Decrement sp by frame size.
   SEC
@@ -588,7 +651,7 @@ leave_reload:
   ADC __sp+1
   STA __sp+1
   RTS
-
+'
 __leave_leaf_void:
   LDX #0
 
@@ -638,8 +701,8 @@ leave_leaf_nomask_small:
 // X,Y: offset from fp to location of result addr
 // which is frame_size + 3 - 2 = frame_size + 1
 // +--------------------+    <- previous sp, new fp
-// |   save mask (64)   |
-// +--------------------+    <- reg save mask @fp-8
+// |   save mask (24)   |
+// +--------------------+    <- reg save mask @fp-3
 // |                    |
 // |                    |    <- variables (accessed via fp-X)
 // |                    |

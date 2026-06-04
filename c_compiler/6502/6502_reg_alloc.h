@@ -41,8 +41,6 @@ typedef enum {
 typedef struct W65C02Register {
   TargetRegister base;
   W65C02RegisterType type;
-  int byte_offset;                  // Offset in register file (0..63).
-  int emit_zpr_offset;              // Saved offset for assembly emission.
   bool locked;                      // Locked (do not free).
   bool temp;                        // Is temp (not preserved).
 } W65C02Register;
@@ -68,8 +66,6 @@ typedef struct {
   BitSet used_l_regs;
   BitSet used_x_regs;
   BitSet used_f_regs;
-  uint64_t reg_file_used;           // One bit per byte in register file.
-  uint64_t preserved_bytes;         // Bytes used by preserved regs (call save).
   int current_spilled_region_size;
   int max_spilled_region_size;
   Map spill_points;              // Map of inst id vs inst ptr for spill points.
@@ -82,8 +78,8 @@ W65C02RegisterAllocator* New6502RegisterAllocator(struct W65C02Generator* g);
 
 void W65C02RegisterAllocatorDestruct(W65C02RegisterAllocator* alloc);
 void W65C02RegisterAllocatorDelete(W65C02RegisterAllocator* alloc);
-uint64_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc);
-const char* W65C02RegisterAllocatorPrintRegMask(uint64_t mask, char* buf);
+uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc);
+const char* W65C02RegisterAllocatorPrintRegMask(uint32_t mask, char* buf);
 
 void W65C02AllocateRegisters(W65C02RegisterAllocator* emitter);
 const char* W65C02RegisterAsString(W65C02Register* reg, int byte, char* buf, size_t len);

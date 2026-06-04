@@ -12,29 +12,56 @@
 // 6502 Runtime
 // -------------
 //
-// Zero page layout (offsets relative to regs_start / REG_BASE):
+// THIS IS OUT OF DATE
 //
-// 0x00..0x3f: Unified register file (8 x 64-bit slots, 64 bytes).
-//   All integer and floating-point virtual registers share this space;
-//   the register allocator tracks byte-level occupancy.
+// Zero page is used to hold sets of registers:
+// Single byte registers: 8 bits
+// 0x00: b0
+// 0x01: b1
+// 0x02: b2
+// 0x03: b3
+
+// Integer/address registers: 16 bits
+// 0x04/0x04: i0
+// 0x06/0x07: i1
+// 0x08/0x09: i2
+// 0x0a/0x0b: i3
 //
-// 0x40/0x41: __sp   (16-bit stack pointer)
-// 0x42/0x43: __fp   (16-bit frame pointer)
-// 0x44/0x45: __result
-// 0x46: __t0
-// 0x47: __t1
-// 0x48: __t2
-// 0x49: __t3
-// 0x4a/0x4b: __mem_src
-// 0x4c/0x4d: __mem_dest
-// 0x4e/0x4f: __mem_size
+// Long registers: 32 bits
+// 0x0c..0x0f: l0
+// 0x19..0x13: l1
+// 0x14..0x17: l2
+// 0x18..0x1f: l3
 //
-// Math/fp scratch follows immediately (see vars.s):
-// 0x50..0x59: mt1 (10 bytes)
-// 0x5a..0x5f: mt2 (6 bytes)
-// 0x60..0x65: mt3 (6 bytes)
-// 0x66..0x7d: fscratch (24 bytes)
-// 0x7e: os_scratch_start
+// Long long registers: 64 bits
+// 0x20..0x27: x0
+// 0x28..0x2f: x1
+// 0x30..0x37: x2
+// 0x38..0x3f: x3
+//
+// Single precision float - 32 bits
+// 0x40..0x43: f0
+// 0x44..0x47: f1
+// 0x48..0x4c: f2
+// 0x4c..0x4f: f3
+//
+// Stack pointer: 16 bits - address of top of stack.
+// 0x70/0x71: sp
+//
+// Frame pointer: 16 bits - address of bottom of stack frame.
+// 0x72/0x73: fp
+//
+// Result address register:
+// 0x74/0x75: result
+
+// Temp registers.
+// 0x76: t0
+// 0x77: t1
+//
+// For memory pushes to stack
+// 0x78, 0x79: mem_src
+// 0x7a, 0x7b: mem_dest
+// 0x7c, 0x7d: mem_size;
 
 // Page 1 contains the 6502 processor stack.
 //
@@ -67,11 +94,13 @@
 #define W65C02_NUM_PRESERVED_F_REGS 3
 #define W65C02_NUM_F_REGS (W65C02_NUM_TEMP_F_REGS + W65C02_NUM_PRESERVED_F_REGS)
 
-#define W65C02_NUM_SLOTS 8
-#define W65C02_SLOT_SIZE 8
-#define W65C02_REG_FILE_BYTES (W65C02_NUM_SLOTS * W65C02_SLOT_SIZE)
+#define W65C02_B_REG_START 0
+#define W65C02_I_REG_START (W65C02_B_REG_START + W65C02_NUM_B_REGS)
+#define W65C02_L_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*2)
+#define W65C02_X_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*4)
+#define W65C02_F_REG_START (W65C02_X_REG_START + W65C02_NUM_X_REGS*8)
 
-#define W65C02_SP_REG W65C02_REG_FILE_BYTES
+#define W65C02_SP_REG (W65C02_F_REG_START + W65C02_NUM_F_REGS*4)
 #define W65C02_FP_REG (W65C02_SP_REG + 2)
 #define W65C02_RESULT_REG (W65C02_FP_REG + 2)
 #define W65C02_T0_REG (W65C02_RESULT_REG + 2)
@@ -81,21 +110,6 @@
 #define W65C02_MSRC_REG (W65C02_T3_REG + 1)
 #define W65C02_MDST_REG (W65C02_MSRC_REG + 2)
 #define W65C02_MSZ_REG (W65C02_MDST_REG + 2)
-#define W65C02_ZP_RUNTIME_END (W65C02_MSZ_REG + 2)
-
-#define W65C02_MT1_REG W65C02_ZP_RUNTIME_END
-#define W65C02_MT1_BYTES 10
-#define W65C02_MT2_REG (W65C02_MT1_REG + W65C02_MT1_BYTES)
-#define W65C02_MT2_BYTES 6
-#define W65C02_MT3_REG (W65C02_MT2_REG + W65C02_MT2_BYTES)
-#define W65C02_MT3_BYTES 6
-#define W65C02_FSCRATCH_REG (W65C02_MT3_REG + W65C02_MT3_BYTES)
-#define W65C02_FSCRATCH_BYTES 24
-#define W65C02_FSCRATCH_END (W65C02_FSCRATCH_REG + W65C02_FSCRATCH_BYTES)
-#define W65C02_OS_SCRATCH_REG W65C02_FSCRATCH_END
-#define W65C02_ZP_LAYOUT_END W65C02_OS_SCRATCH_REG
-
-#define W65C02_ENTER_SAVE_MASK_BYTES 8
 
 
 // The opcodes are in the first byte.  Most of them fall into the form

@@ -1,19 +1,3 @@
-Zero page layout (6502 / 65c02):
-
-  __zpr0 .. __zpr63   unified register file (64 bytes, 8 slots x 8 bytes)
-  __sp, __fp, __result, __t0-__t3, __mem_*   fixed runtime specials (64-79)
-  mt1/mt2/mt3, fscratch, os_scratch_start      runtime math/fp scratch (80-125)
-
-The compiler assigns variables to __zprN symbols via byte-level allocation in the
-64-byte register file. Call-save uses an 8-byte preserved-byte mask after
-__enter / __enter_leaf.
-
--freg-start N shifts the whole layout by N bytes in zero page (default 0).
-If N != 0, rebuild the 6502 support library with matching REG_BASE in vars.s.
-
-Legacy __b0/__i0/... aliases in vars.s exist for hand-written runtime .s modules;
-compiler-generated code uses __zprN from allocation.
-
 Zero page regs:
 sp   stack pointer
 fp   frame pointer

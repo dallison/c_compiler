@@ -113,8 +113,14 @@ int main(int argc, char *argv[]) {
   if (disassemble_only) {
     W65C02InterpreterDisassemble(&interpreter, &loader);
   } else {
-    // Run the code at its entry address.
-    W65C02InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv, program_arg_offset);
+    // The 6502 interpreter runs the guest inside a 64K memory array at the
+    // ELF linked addresses, so the entry point must be the guest-linked entry
+    // (e_entry).  The shared loader rewrites loader.main_address to a host
+    // runtime pointer for ignore_vaddr architectures, which is meaningless for
+    // the in-array 6502, so use the original ELF entry directly.
+    uint64_t entry = loader.elf_file != NULL ? loader.elf_file->header->entry
+                                             : loader.main_address;
+    W65C02InterpreterRun(&interpreter, &loader, entry, argc, argv, program_arg_offset);
   }
   
   if (extract) {

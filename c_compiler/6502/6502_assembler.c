@@ -422,7 +422,7 @@ static AssemblerSymbol* DefineLabel(Assembler* base_asm, String* spelling) {
   return sym;
 }
 
-static COMPILER_UNUSED bool AssemblerFunction(W65C02Assembler* assembler, String* func,
+static bool AssemblerFunction(W65C02Assembler* assembler, String* func,
                               String* symbol) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     StringSet(func, ASM.lex.spelling.value);  // Already initialized.

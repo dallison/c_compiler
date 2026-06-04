@@ -221,126 +221,61 @@
 .global __reload4b
 .global __reload8b
 
-// Zero page locations (must match vars.s / 6502_machine.h).
-.set REG_BASE 0
-.set __zpr0 (REG_BASE + 0)
-.set __zpr1 (REG_BASE + 1)
-.set __zpr2 (REG_BASE + 2)
-.set __zpr3 (REG_BASE + 3)
-.set __zpr4 (REG_BASE + 4)
-.set __zpr5 (REG_BASE + 5)
-.set __zpr6 (REG_BASE + 6)
-.set __zpr7 (REG_BASE + 7)
-.set __zpr8 (REG_BASE + 8)
-.set __zpr9 (REG_BASE + 9)
-.set __zpr10 (REG_BASE + 10)
-.set __zpr11 (REG_BASE + 11)
-.set __zpr12 (REG_BASE + 12)
-.set __zpr13 (REG_BASE + 13)
-.set __zpr14 (REG_BASE + 14)
-.set __zpr15 (REG_BASE + 15)
-.set __zpr16 (REG_BASE + 16)
-.set __zpr17 (REG_BASE + 17)
-.set __zpr18 (REG_BASE + 18)
-.set __zpr19 (REG_BASE + 19)
-.set __zpr20 (REG_BASE + 20)
-.set __zpr21 (REG_BASE + 21)
-.set __zpr22 (REG_BASE + 22)
-.set __zpr23 (REG_BASE + 23)
-.set __zpr24 (REG_BASE + 24)
-.set __zpr25 (REG_BASE + 25)
-.set __zpr26 (REG_BASE + 26)
-.set __zpr27 (REG_BASE + 27)
-.set __zpr28 (REG_BASE + 28)
-.set __zpr29 (REG_BASE + 29)
-.set __zpr30 (REG_BASE + 30)
-.set __zpr31 (REG_BASE + 31)
-.set __zpr32 (REG_BASE + 32)
-.set __zpr33 (REG_BASE + 33)
-.set __zpr34 (REG_BASE + 34)
-.set __zpr35 (REG_BASE + 35)
-.set __zpr36 (REG_BASE + 36)
-.set __zpr37 (REG_BASE + 37)
-.set __zpr38 (REG_BASE + 38)
-.set __zpr39 (REG_BASE + 39)
-.set __zpr40 (REG_BASE + 40)
-.set __zpr41 (REG_BASE + 41)
-.set __zpr42 (REG_BASE + 42)
-.set __zpr43 (REG_BASE + 43)
-.set __zpr44 (REG_BASE + 44)
-.set __zpr45 (REG_BASE + 45)
-.set __zpr46 (REG_BASE + 46)
-.set __zpr47 (REG_BASE + 47)
-.set __zpr48 (REG_BASE + 48)
-.set __zpr49 (REG_BASE + 49)
-.set __zpr50 (REG_BASE + 50)
-.set __zpr51 (REG_BASE + 51)
-.set __zpr52 (REG_BASE + 52)
-.set __zpr53 (REG_BASE + 53)
-.set __zpr54 (REG_BASE + 54)
-.set __zpr55 (REG_BASE + 55)
-.set __zpr56 (REG_BASE + 56)
-.set __zpr57 (REG_BASE + 57)
-.set __zpr58 (REG_BASE + 58)
-.set __zpr59 (REG_BASE + 59)
-.set __zpr60 (REG_BASE + 60)
-.set __zpr61 (REG_BASE + 61)
-.set __zpr62 (REG_BASE + 62)
-.set __zpr63 (REG_BASE + 63)
-
-// Legacy logical register aliases for hand-written runtime modules.
-.set __b0 __zpr0
-.set __b1 __zpr1
-.set __b2 __zpr2
-.set __b3 __zpr3
-.set __b4 __zpr4
-.set __b5 __zpr5
-.set __b6 __zpr6
-.set __b7 __zpr7
-.set __i0 __zpr8
-.set __i1 __zpr10
-.set __i2 __zpr12
-.set __i3 __zpr14
-.set __i4 __zpr16
-.set __i5 __zpr18
-.set __i6 __zpr20
-.set __i7 __zpr22
-.set __i8 __zpr24
-.set __i9 __zpr26
-.set __i10 __zpr28
-.set __i11 __zpr30
-.set __i12 __zpr32
-.set __i13 __zpr34
-.set __i14 __zpr36
-.set __i15 __zpr38
-.set __l0 __zpr40
-.set __l1 __zpr44
-.set __l2 __zpr48
-.set __l3 __zpr52
-.set __l4 __zpr56
-.set __l5 __zpr60
-.set __l6 __zpr56
-.set __l7 __zpr60
-.set __x0 __zpr32
-.set __x1 __zpr40
-.set __x2 __zpr48
-.set __x3 __zpr56
-.set __f0 __zpr36
-.set __f1 __zpr40
-.set __f2 __zpr44
-.set __f3 __zpr48
-
-.set __sp (REG_BASE + 64)
-.set __fp (REG_BASE + 66)
-.set __result (REG_BASE + 68)
-.set __t0 (REG_BASE + 70)
-.set __t1 (REG_BASE + 71)
-.set __t2 (REG_BASE + 72)
-.set __t3 (REG_BASE + 73)
-.set __mem_src (REG_BASE + 74)
-.set __mem_dest (REG_BASE + 76)
-.set __mem_size (REG_BASE + 78)
-// Runtime syscall scratch (not part of compiler register file).
+// Zero page locations.
+.set __b0 0x0
+.set __b1 0x1
+.set __b2 0x2
+.set __b3 0x3
+.set __b4 0x4
+.set __b5 0x5
+.set __b6 0x6
+.set __b7 0x7
+.set __i0 0x8
+.set __i1 0xa
+.set __i2 0xc
+.set __i3 0xe
+.set __i4 0x10
+.set __i5 0x12
+.set __i6 0x14
+.set __i7 0x16
+.set __i8 0x18
+.set __i9 0x1a
+.set __i10 0x1c
+.set __i11 0x1e
+.set __i12 0x20
+.set __i13 0x22
+.set __i14 0x24
+.set __i15 0x26
+.set __l0 0x28
+.set __l1 0x2c
+.set __l2 0x30
+.set __l3 0x34
+.set __l4 0x38
+.set __l5 0x3c
+.set __l6 0x40
+.set __l7 0x44
+.set __x0 0x48
+.set __x1 0x50
+.set __x2 0x58
+.set __x3 0x60
+.set __f0 0x68
+.set __f1 0x6c
+.set __f2 0x70
+.set __f3 0x74
+.set __d0 0x78
+.set __d1 0x80
+.set __d2 0x88
+.set __d3 0x90
+.set __fp 0x9a
+.set __sp 0x98
+.set __result 0x9c
+.set __t0 0x9e
+.set __t1 0x9f
+.set __t2 0xa0
+.set __t3 0xa1
+.set __mem_dest 0xa4
+.set __mem_src 0xa2
+.set __mem_size 0xa6
 .set __t4 __mem_dest
 .set __t5 __mem_dest+1
 
@@ -348,14 +283,11 @@
 .set sys_exit 1
 .set sys_abort 2
 
-.set SAVE_MASK_BYTES 8
-.set REG_FILE_BYTES 64
-
-.set mt1 (REG_BASE + 80)
-.set mt2 (REG_BASE + 90)
-.set mt3 (REG_BASE + 96)
-.set fscratch_start (REG_BASE + 102)
-.set fscratch_end (REG_BASE + 126)
+// Math scratch space starts at 0xc0 (40 bytes)
+.set mt1 0xc0     // 16 bytes
+.set mt2 0xd0     // 8 bytes
+.set mt3 0xd8     // 8 bytes
+.set mt4 0xe0     // 8 bytes
 
 
 
@@ -384,16 +316,19 @@ start:
   LDY #0x2
   JSR __pushxy
 
-  // argc is 0
-  LDX #0
+  // argc is in i0
+  LDX #__i0
+  JSR __pushreg2
+
+  // main returns a value.  Put it in i0.
+  LDX #__i0
   LDY #0
-  JSR __pushxy
 
   // Invoke main
   JSR main
 
-  // Push exit code (return value in __result) onto the runtime stack.
-  LDX #__result
+  // Push exit code (in __i0) onto the runtime stack.
+  LDX #__i0
   JSR __pushreg2
 
   // Invoke exit syscall with exit code on the runtime stack.
@@ -454,36 +389,36 @@ __exit:
 .global __write
 __write:
   // NOTE: only fd = 1 for now.
-  // Buffer in t0/t1
+  // Buffer in i0
   LDY #4
   LDA (__sp), Y
-  STA __t0
+  STA __i0
   INY
   LDA (__sp),Y
-  STA __t1
+  STA __i0+1
   INY
 
-  // length in t2/t3
+  // length in i1
   LDA (__sp), Y
-  STA __t2
+  STA __i1
   INY
   LDA (__sp),Y
-  STA __t3
+  STA __i1+1
 
 write_loop:
-  LDA __t2
-  ORA __t3
+  LDA __i1
+  ORA __i1+1
   BEQ write_end
-  LDA (__t0)
+  LDA (__i0)
   STA acia1_data
   
-  INC __t0
+  INC __i0
   BNE wr1
-  INC __t1
+  INC __i0+1
 wr1:
-  DEC __t2
+  DEC __i1
   BPL wr2
-  DEC __t3
+  DEC __i1+1
 wr2:
   BRA write_loop
 write_end:
@@ -512,40 +447,40 @@ write_end:
 .global __read
 __read:
   // NOTE: only fd = 0 for now.
-  // Buffer in t0/t1
+  // Buffer in i0
   LDY #4
   LDA (__sp), Y
-  STA __t0
+  STA __i0
   INY
   LDA (__sp),Y
-  STA __t1
+  STA __i0+1
   INY
 
-  // length in t2/t3
+  // length in i1
   LDA (__sp), Y
-  STA __t2
+  STA __i1
   INY
   LDA (__sp),Y
-  STA __t3
+  STA __i1+1
 
 read_loop:
-  LDA __t2
-  ORA __t3
+  LDA __i1
+  ORA __i1+1
   BEQ read_end
 rwait:
   LDA acia1_csr
   AND #1
   BEQ rwait
   LDA acia1_data
-  STA (__t0)
+  STA (__i0)
 
-  INC __t0
+  INC __i0
   BNE r1
-  INC __t1
+  INC __i0+1
 r1:
-  DEC __t2
+  DEC __i1
   BPL r2
-  DEC __t3
+  DEC __i1+1
 r2:
   BRA read_loop
 
@@ -573,158 +508,226 @@ __abort:
   .byte 0xef      // Interpreter exit
   RTS
 
-// Register save mask: 64-bit byte mask (8 bytes) after __enter/__enter_leaf.
+// Register save mask
+// This is a 24-bit bitmask immediately after the __enter and __enter_leaf
+// calls.  Consists of a number of registers to save for each of the
+// register types in this order:
+// b regs (8)    - 4 bits
+// i regs (16)   - 5 bits
+// l regs (8)    - 4 bits
+// x regs (4)    - 3 bits
+// f regs (4)    - 3 bits
+// d regs (4)    - 3 bits
+//    total      =========
+//                 22 bits
+//
+//    3       3       3     4      5      4
+// 21 20 19 18 17 16 15 14 13 12 11 10  9 8 7 6 5 4 3  2  1  0
+//  +--------+----------+---------+---------+-------+--------+
+//  | d      |    f     |   x     |    l    |   i   |    b   |
+//  +--------+----------+---------+---------+-------+--------+
 
-// Save register-file byte X onto the expression stack.
-save_reg_byte:
-  SEC
+// Entry:
+// Y: start offset for first reg to save
+// __t3: number of bytes to save
+// Saves X
+.global save_reg_set
+save_reg_set:
+  // Make space on the stack.
+  PHX
+  CLC
   LDA __sp
-  SBC #1
+  SBC __t3
   STA __sp
   LDA __sp+1
   SBC #0
   STA __sp+1
-  LDA __zpr0,X
-  LDY #0
+
+  // Copy from top down.
+  DEC __t3
+  TYA
+  LDY __t3
+  CLC
+  ADC __t3
+  TAX
+save_reg_loop:
+  LDA 0,X
   STA (__sp),Y
+  DEX
+  DEY
+  BPL save_reg_loop
+  PLX
   RTS
 
-// Restore register-file byte X from the expression stack.
-restore_reg_byte:
-  LDY #0
+// Entry:
+// Y: start offset for first reg to restore
+// __t3: number of bytes to restore
+// Saves X
+.global restore_reg_set
+restore_reg_set:
+  PHX
+
+  // Copy from top down.
+  DEC __t3
+  TYA
+  LDY __t3
+  CLC
+  ADC __t3
+  TAX
+restore_reg_loop:
   LDA (__sp),Y
-  STA __zpr0,X
+  STA 0,X
+  DEX
+  DEY
+  BPL restore_reg_loop
+  PLX
+
+  // Remove space from stack.
   CLC
   LDA __sp
-  ADC #1
+  SBC __t3
   STA __sp
   LDA __sp+1
-  ADC #0
+  SBC #0
   STA __sp+1
   RTS
 
-// Entry: __t2,__t3 = address of 8-byte save mask.
-.global save_regs
-save_regs:
-  LDX #0
-  LDY #0
-  LDA #1
-  STA __t0
-save_regs_loop:
-  CPX #REG_FILE_BYTES
-  BCS save_regs_done
-  LDA (__t2),Y
-  AND __t0
-  BEQ save_regs_skip
-  TXA
-  PHX
-  TAX
-  JSR save_reg_byte
-  PLX
-save_regs_skip:
-  ASL __t0
-  BNE save_regs_next
-  INY
-  CPY #SAVE_MASK_BYTES
-  BEQ save_regs_done
-  LDA #1
-  STA __t0
-save_regs_next:
-  INX
-  BNE save_regs_loop
-save_regs_done:
+// Sizes of each register set in bits, from LSB to MSB
+reg_mask_sizes:
+  .byte 4,5,4,3,3,3
+
+// Mask to AND with to get number of regs to save.
+reg_mask_masks:
+  .byte 15,31,15,7,7,7
+
+// Start offset of registers in zero page
+reg_mask_offsets:
+  .byte __b0, __i0, __l0, __x0, __f0, __d0
+
+// Log2 of size of each register (left shift count)
+reg_mask_reg_sizes:
+  .byte 0, 1, 2, 3, 2, 3
+
+
+// __t0,t1: current save mask.
+// X: reg type (0 = b,...)
+// Exit:
+// __t0, __t1, __t2 shifted right to remove save count.
+.global save_from_mask
+save_from_mask:
+  LDA reg_mask_masks,X
+  AND __t0            // A = number of regs to save
+  STA __t3
+  LDY reg_mask_reg_sizes,X
+  BEQ skip_reg_mult
+// Shift left by log2 of register size to get number of bytes to save.
+reg_mult_loop:
+  ASL __t3
+  DEY
+  BNE reg_mult_loop
+skip_reg_mult:        # __t2 contains number of bytes
+  LDA __t3
+  BEQ skip_save_reg
+  LDY reg_mask_offsets, X
+  JSR save_reg_set
+skip_save_reg:
+// Shift reg mask to the right by the number of bits in the mask
+  LDY reg_mask_sizes,X
+reg_mask_shift_loop:
+  LSR __t2
+  ROR __t1
+  ROR __t0
+  DEY
+  BNE reg_mask_shift_loop
+end_save_regs:
   RTS
 
-// Entry: save mask at __fp - SAVE_MASK_BYTES.
+
+// Entry:
+// __t2, __t3: address of save mask, corrupted on exit.
+.global save_regs
+save_regs:
+  LDA (__t2)
+  STA __t0
+  LDY #1
+  LDA (__t2),Y
+  STA __t1
+  INY
+  LDA (__t2),Y
+  STA __t2
+  LDX #0
+save_regs_loop:
+  LDA __t0
+  ORA __t1
+  ORA __t2
+  BEQ end_save_regs
+  JSR save_from_mask
+  INX
+  BNE save_regs_loop
+
+// Entry:
+// __fp-2: address of save mask
+// This is like save_regs except it needs to operate in reverse.
+// It needs to pop the registers off the stack in reverse order.
+// Saves X
 .global restore_regs
 restore_regs:
   PHX
   SEC
   LDA __fp
-  SBC #SAVE_MASK_BYTES
+  SBC #3          // 24 bits for save mask
   STA __t2
   LDA __fp+1
   SBC #0
   STA __t3
-  LDX #REG_FILE_BYTES - 1
-  LDY #SAVE_MASK_BYTES - 1
-  LDA #0x80
+  LDA (__t2)
   STA __t0
-restore_regs_loop:
-  CPX #0xFF
-  BEQ restore_regs_done
-  LDA (__t2),Y
-  AND __t0
-  BEQ restore_regs_skip
-  TXA
-  PHX
-  TAX
-  JSR restore_reg_byte
-  PLX
-restore_regs_skip:
-  LSR __t0
-  BNE restore_regs_next
-  DEY
-  BMI restore_regs_done
-  LDA #0x80
-  STA __t0
-restore_regs_next:
-  DEX
-  BNE restore_regs_loop
-restore_regs_done:
-  PLX
-  RTS
-
-// Entry: Y = start offset, __t3 = number of bytes to save.
-.global save_reg_set
-save_reg_set:
-  PHX
-  CLC
-  LDA __sp
-  SBC __t3
-  STA __sp
-  LDA __sp+1
-  SBC #0
-  STA __sp+1
-  DEC __t3
-  TYA
-  LDY __t3
-  CLC
-  ADC __t3
-  TAX
-save_reg_set_loop:
-  LDA __zpr0,X
-  STA (__sp),Y
-  DEX
-  DEY
-  BPL save_reg_set_loop
-  PLX
-  RTS
-
-// Entry: Y = start offset, __t3 = number of bytes to restore.
-.global restore_reg_set
-restore_reg_set:
-  PHX
-  DEC __t3
-  TYA
-  LDY __t3
-  CLC
-  ADC __t3
-  TAX
-restore_reg_set_loop:
+  LDY #1
   LDA (__sp),Y
-  STA __zpr0,X
-  DEX
+  STA __t1
+  INY
+  LDA (__t2),Y
+  STA __t2
+  LDX #0
+restore_regs_loop:
+  // Calculate number of bytes to restore and push onto 6502 stack
+  LDA reg_mask_masks,X
+  AND __t0            // A = number of regs to save
+  LDY reg_mask_reg_sizes,X
+  BEQ skip_reg_mult1
+// Shift left by log2 of register size to get number of bytes to save.
+reg_mult_loop1:
+  ASL A
   DEY
-  BPL restore_reg_set_loop
+  BNE reg_mult_loop1
+skip_reg_mult1:        // __t3 contains number of bytes
+  PHA                 // Push onto 6502 stack.
+
+  // Shift reg mask to the right by the number of bits in the mask
+  LDY reg_mask_sizes,X
+reg_mask_shift_loop1:
+  LSR __t2
+  ROR __t1
+  ROR __t0
+  DEY
+  BNE reg_mask_shift_loop1
+  INX
+  CPX #6
+  BNE restore_regs_loop
+end_restore_regs:
+  // 6502 stack contains 6 bytes which are the number of bytes to restore
+  // for each reg type.
+  LDX #5
+restore_reg_loop2:
+  LDY reg_mask_offsets, X
+  PLA
+  BEQ skip_restore
+  STA __t3
+  JSR restore_reg_set
+skip_restore:
+  DEX
+  BPL restore_reg_loop2
   PLX
-  CLC
-  LDA __sp
-  SBC __t3
-  STA __sp
-  LDA __sp+1
-  SBC #0
-  STA __sp+1
   RTS
 
 
@@ -735,8 +738,8 @@ restore_reg_set_loop:
 // |      frame         |
 // |                    |
 // +--------------------+    <- previous sp, new fp
-// |   save mask (64)   |
-// +--------------------+    <- reg save mask @fp-8
+// |   save mask (24)   |
+// +--------------------+    <- reg save mask @fp-3
 // |                    |
 // |                    |    <- variables (accessed via fp-X)
 // |                    |
@@ -771,9 +774,10 @@ __enter:
   PHA
 
   // Store save mask in frame.
+  // First make room on stack by decrementing __sp by 3
   SEC
   LDA __sp
-  SBC #SAVE_MASK_BYTES
+  SBC #3
   STA __sp
   LDA __sp+1
   SBC #0
@@ -789,14 +793,15 @@ __enter:
   BNE enter_skip
   INC __t3
 enter_skip:
-  // Store save mask (8 bytes)
-  LDY #0
-enter_mask_loop:
+  // Store save mask (24 bits)
+  LDA (__t2)
+  STA (__sp)
+  LDY #1
   LDA (__t2),Y
   STA (__sp),Y
   INY
-  CPY #SAVE_MASK_BYTES
-  BNE enter_mask_loop
+  LDA (__t2),Y
+  STA (__sp),Y
 
   // Decrement sp by frame size
   SEC
@@ -828,12 +833,12 @@ enter_mask_loop:
   PLA
   STA __fp
 
-  // Return to address after save mask (__t2 + 7)
+  // Return to address after save mask (__t2 + 1)
 enter_save_regs:
   TSX
   CLC
   LDA __t2
-  ADC #7
+  ADC #1
   STA 0x101,X
   LDA __t3
   ADC #0
@@ -857,10 +862,11 @@ __enter_leaf:
   LDA __sp+1
   PHA
 
-  // Store reg save mask (8 bytes).
+  // Store reg save mask.
+  // First make room on stack by decrementing __sp by 3
   SEC
   LDA __sp
-  SBC #SAVE_MASK_BYTES
+  SBC #3
   STA __sp
   LDA __sp+1
   SBC #0
@@ -875,13 +881,15 @@ __enter_leaf:
   BNE enter_leaf_skip
   INC __t3
 enter_leaf_skip:
-  LDY #0
-enter_leaf_mask_loop:
+  // Store save mask
+  LDA (__t2)
+  STA (__sp)
+  LDY #1
   LDA (__t2),Y
   STA (__sp),Y
   INY
-  CPY #SAVE_MASK_BYTES
-  BNE enter_leaf_mask_loop
+  LDA (__t2),Y
+  STA (__sp),Y
 
   // Decrement sp by frame size.
   SEC
