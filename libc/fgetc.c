@@ -18,25 +18,11 @@ static void SetErrorOrEof(FILE* stream, ssize_t n) {
   }
 }
 
- static void ReadFullBuffer(FILE* stream) {
-  char* p = stream->buf;
-  int remaining = stream->bufsize;
-  while (remaining > 0) {
-    ssize_t n = read(stream->fd, p, remaining);
-    if (n <= 0) {
-      SetErrorOrEof(stream, n);
-      break;
-    }
-    stream->rlimit += n;
-    p += n;
-    remaining -= n;
-  }
-}
-
-extern void Break();
-
 int getc(FILE* stream) {
   if (stream->buf == NULL) {
+    if (stream->error_flag != 0 || stream->eof_flag != 0) {
+      return EOF;
+    }
     // NON-buffered, call read directly
     char rbuf[1];
     ssize_t n = read(stream->fd, rbuf, 1);
@@ -61,14 +47,32 @@ int getc(FILE* stream) {
   stream->rindex = 0;
   stream->rlimit = 0;
   if (stream->buffering_mode == _IOFBF) {
-    // Fully buffered, use read for full buffer.
-    ReadFullBuffer(stream);
+    // Inlined: a nested call would load the stream from the wrong frame slot.
+    char* p = stream->buf;
+    int remaining = stream->bufsize;
+    ssize_t nread_buf[1];
+    while (remaining > 0) {
+      nread_buf[0] = read(stream->fd, p, remaining);
+      if (nread_buf[0] < 1) {
+        // EOF/error only if nothing was buffered this fill.
+        if (stream->rlimit == stream->rindex) {
+          SetErrorOrEof(stream, nread_buf[0]);
+        }
+        break;
+      }
+      stream->rlimit += nread_buf[0];
+      p += nread_buf[0];
+      remaining -= nread_buf[0];
+    }
   } else {
     char* p = stream->buf + stream->rlimit;
+    ssize_t nread_buf[1];
     for (;;) {
-      ssize_t n = read(stream->fd, p, 1);
-      if (n <= 0) {
-        SetErrorOrEof(stream, n);
+      nread_buf[0] = read(stream->fd, p, 1);
+      if (nread_buf[0] <= 0) {
+        if (stream->rlimit == stream->rindex) {
+          SetErrorOrEof(stream, nread_buf[0]);
+        }
         break;
       }
       char ch = *p++;

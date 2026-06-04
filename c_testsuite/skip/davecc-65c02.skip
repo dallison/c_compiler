@@ -44,4 +44,3 @@ echo "tests/single-exec/00219.c"
 echo "tests/single-exec/00220.c"
 
 # File I/O (fopen/fread/fgetc/fgets) not fully working in interpreter
-echo "tests/single-exec/00187.c"

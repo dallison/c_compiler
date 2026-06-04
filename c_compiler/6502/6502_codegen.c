@@ -3811,6 +3811,28 @@ static void CompareFloatingPoint(W65C02Generator* g,
   }
 }
 
+// Subtract lhs - rhs into flags (signed).  N=1 means lhs < rhs.
+static void CompareSignedSubtract(W65C02Generator* g, TargetInstruction* value1,
+                                  TargetInstruction* value2, int size) {
+  TargetInstruction* skip_label =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  if (size == 1) {
+    sec(g);
+  }
+  for (int i = 0; i < size; i++) {
+    SetIndexReg(g, value1, value2, i);
+    lda(g, value1, i);
+    if (i == 0 && size > 1) {
+      cmp(g, value2, i);
+    } else {
+      sbc(g, value2, i);
+    }
+  }
+  EmitResolvedBranch(g, W65C02_OP(bvc), skip_label);
+  eori(g, 0x80);
+  Emit(g, skip_label);
+}
+
 // Compares 2 signed integers for < or >=.  Branches to target
 static void CompareSignedInteger(W65C02Generator* g,
                                            IRNode* lhs_node,
@@ -3818,49 +3840,26 @@ static void CompareSignedInteger(W65C02Generator* g,
                                            IRNode* target_node,
                                            bool less_than) {
   TargetInstruction* value1 = GetAddress(g, lhs_node, true);
-  AddReloadPoint(g, value1);
-  int size = Sizeof(lhs_node->type);
-
-  
-  //  lda byte1
-  //  CMP value1
-  //  lda byte2
-  //  sbc value2
-  //  bvc skip_label
-  //  eor #0x80
-  // skip_label:              N = 1 means less
-  //  bmi target_node [or bpl for >=)
-
-
   TargetInstruction* value2 = GetAddress(g, rhs_node, true);
+  AddReloadPoint(g, value1);
   AddReloadPoint(g, value2);
-  TargetInstruction* skip_label =
-      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  CompareSignedSubtract(g, value1, value2, Sizeof(lhs_node->type));
+  TargetInstruction* bra =
+      EmitBranch(g, less_than ? W65C02_OP(bmi) : W65C02_OP(bpl), target_node);
+  bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
+}
 
-  if (IRIsZero(rhs_node)) {
-    // Compare less or greater zero.  Just load the top byte of value1.
-    lda(g, value1, size-1);
-  //} else if (IRIsZero(lhs_node)) {
-  //  lda(g, value2, size-1);
-  } else {
-    if (size == 1) {
-      sec(g);
-    }
-    for (int i = 0; i < size; i++) {
-      SetIndexReg(g, value1, value2, i);
-      lda(g, value1, i);
-      if (i == 0 && size > 1) {
-        cmp(g, value2, i);
-      } else {
-        sbc(g, value2, i);
-      }
-    }
-    
-    EmitResolvedBranch(g, W65C02_OP(bvc), skip_label);
-    eori(g, 0x80);
-    Emit(g, skip_label);
-  }
-  TargetInstruction* bra = EmitBranch(g, less_than ? W65C02_OP(bmi) : W65C02_OP(bpl), target_node);
+// Branches to target if lhs <= rhs (signed).
+static void CompareSignedLessOrEqual(W65C02Generator* g, IRNode* lhs_node,
+                                     IRNode* rhs_node, IRNode* target_node) {
+  TargetInstruction* value1 = GetAddress(g, lhs_node, true);
+  TargetInstruction* value2 = GetAddress(g, rhs_node, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
+  CompareSignedSubtract(g, value1, value2, Sizeof(lhs_node->type));
+  TargetInstruction* bra = EmitBranch(g, W65C02_OP(bmi), target_node);
+  bra->flags |= k6502InstIsCondBranch;
+  bra = EmitBranch(g, W65C02_OP(beq), target_node);
   bra->flags |= k6502BlockEnd | k6502InstIsCondBranch;
 }
 
@@ -3973,7 +3972,7 @@ static void LowerConditionalBranch(W65C02Generator* g,
           CompareGreaterOrEqualUnsignedInteger(
             g, rhs, lhs, target_node);
           } else {
-            CompareSignedInteger(g, rhs, lhs, target_node, false);
+            CompareSignedLessOrEqual(g, lhs, rhs, target_node);
         }
       }
       break;
@@ -6741,37 +6740,50 @@ static void CompareSignedIntegerExpression(W65C02Generator* g, IRNode* lhs,
   //  stx dest
 
   TargetInstruction* value1 = GetAddress(g, lhs, true);
+  TargetInstruction* value2 = GetAddress(g, rhs, true);
   AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
   TargetInstruction* false_label =
       NewInstruction(W65C02_OP(label), kAddrModeImplied);
   ldxi(g, 0);
-  if (IRIsZero(rhs)) {
-    lda(g, value1, size-1);
-  } else {
-    TargetInstruction* value2 = GetAddress(g, rhs, true);
-    AddReloadPoint(g, value2);
-    TargetInstruction* skip_label =
-        NewInstruction(W65C02_OP(label), kAddrModeImplied);
-    if (size == 1) {
-      sec(g);
-    }
-    
-    for (int i = 0; i < size; i++) {
-      SetIndexReg(g, value1, value2, i);
-      lda(g, value1, i);
-      if (i == 0 && size > 1) {
-        cmp(g, value2, i);
-      } else {
-        sbc(g, value2, i);
-      }
-    }
-    EmitResolvedBranch(g, W65C02_OP(bvc), skip_label);
-    eori(g, 0x80);
-    Emit(g, skip_label);
-  }
+  CompareSignedSubtract(g, value1, value2, size);
   EmitResolvedBranch(g, less_than ? W65C02_OP(bpl) : W65C02_OP(bmi), false_label);
   inx(g);
   Emit(g, false_label);
+  if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
+    txa(g);
+    sta(g, dest, 0);
+  } else {
+    stx(g, dest, 0);
+  }
+}
+
+// Sets dest to 1 if lhs <= rhs (signed), else 0.
+static void CompareSignedLessOrEqualExpression(W65C02Generator* g, IRNode* lhs,
+                                               IRNode* rhs,
+                                               TargetInstruction* dest,
+                                               int size) {
+  TargetInstruction* value1 = GetAddress(g, lhs, true);
+  TargetInstruction* value2 = GetAddress(g, rhs, true);
+  AddReloadPoint(g, value1);
+  AddReloadPoint(g, value2);
+  TargetInstruction* false_label =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  TargetInstruction* true_label =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  ldxi(g, 0);
+  CompareSignedSubtract(g, value1, value2, size);
+  EmitResolvedBranch(g, W65C02_OP(bmi), true_label);
+  EmitResolvedBranch(g, W65C02_OP(beq), true_label);
+  Emit(g, false_label);
+  if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
+    txa(g);
+    sta(g, dest, 0);
+  } else {
+    stx(g, dest, 0);
+  }
+  Emit(g, true_label);
+  inx(g);
   if (GetAddrMode(dest) == kAddrModeIndirectIndexed) {
     txa(g);
     sta(g, dest, 0);
@@ -6909,11 +6921,10 @@ static void LowerComparison(W65C02Generator* g, IRNode* node) {
     case IR_OP(cmplea):
     case IR_OP(cmplef):
     case IR_OP(cmpled):
-      // Same as >= with args reversed.
       if (is_unsigned) {
         CompareGreaterOrEqualUnsignedIntegerExpression(g, lhs, rhs, dest, size);
       } else {
-        CompareSignedIntegerExpression(g, rhs, lhs, dest, size, false);
+        CompareSignedLessOrEqualExpression(g, lhs, rhs, dest, size);
       }
       break;
     case IR_OP(cmpgti):

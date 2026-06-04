@@ -514,6 +514,23 @@ cc_binary(
     ],
 )
 
+# Cross-build genrules use exec configuration (optimized by default).  The
+# compiler mis-parses some libc headers at -O2 on 65c02; use -O0 for tools.
+cc_binary(
+    name = "davecc_tool",
+    srcs = ["davecc/main.c"],
+    copts = COMMON_COPTS + ["-O0"],
+    features = ["-opt"],
+    deps = [
+        ":ar_lib",
+        ":compiler",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
 cc_binary(
     name = "elfdump",
     srcs = ["elfdump/main.c"],
@@ -605,7 +622,10 @@ genrule(
         "6502 support/*.h",
         "6502 support/*.s",
         "libc/include/**/*.h",
-    ]),
+    ]) + [
+        ":davecc",
+        ":archivist",
+    ],
     outs = ["libc/libc65c02.a"],
     cmd = """
 set -euo pipefail
@@ -615,9 +635,9 @@ work="$(@D)/libc65c02.build"
 rm -rf "$$work"
 mkdir -p "$$work"
 
-davecc="$(location :davecc)"
-archivist="$(location :archivist)"
-cflags=(-target 65c02 -c -Xkeep-asm)
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target 65c02 -c -Xkeep-asm -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "6502 support/start.s"
@@ -719,19 +739,19 @@ libc_srcs=(
   "libc/ungetc.c"
 )
 
-libc_objs=()
 for src in "$${libc_srcs[@]}"; do
   obj="$$work/$$(basename "$${src%.c}").o"
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
-  libc_objs+=("$$obj")
 done
 
-"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}"
+out_file="$$out"
+case "$$out_file" in
+  /*) ;;
+  *) out_file="$$(pwd)/$$out_file" ;;
+esac
+cd "$$work"
+"$$archivist" r "$$out_file" *.o
 """,
-    tools = [
-        ":archivist",
-        ":davecc",
-    ],
 )
 
 genrule(
@@ -1013,40 +1033,46 @@ genrule(
     srcs = [
         "6502 support/Interpreter ROM/introm.map",
         "6502 support/Interpreter ROM/introm.s",
+        "6502 support/vars.s",
+        ":davecc",
     ],
     outs = ["6502_support/6502rom.exe"],
     cmd = """
 set -euo pipefail
 
-"$(location :davecc)" \
+davecc="$$(pwd)/$(execpath :davecc)"
+"$$davecc" \
   -target 65c02 \
+  -I"6502 support" \
   -Wl,-T"6502 support/Interpreter ROM/introm.map" \
   -Wl,-tintrom \
   -static \
   "6502 support/Interpreter ROM/introm.s" \
   -o "$@"
 """,
-    tools = [":davecc"],
 )
 
 genrule(
     name = "hello_65c02_exe",
     srcs = glob(["libc/include/**/*.h"]) + [
         ":libc_65c02",
+        ":davecc",
         "hello_6502/main.c",
     ],
     outs = ["hello_6502/hello.exe"],
     cmd = """
 set -euo pipefail
 
-"$(location :davecc)" \
+davecc="$$(pwd)/$(execpath :davecc)"
+libc="$$(pwd)/$(execpath :libc_65c02)"
+"$$davecc" \
   -target 65c02 \
   -static \
+  -isystem libc/include \
   hello_6502/main.c \
-  "$(location :libc_65c02)" \
+  "$$libc" \
   -o "$@"
 """,
-    tools = [":davecc"],
 )
 
 genrule(

@@ -47,7 +47,7 @@ FILE* fopen(const char* filename, const char* mode) {
   fp->fd = fd;
   fp->bufsize = BUFSIZE;
   fp->windex = 0;
-  fp->rindex = fp->bufsize;
+  fp->rindex = 0;
   fp->rlimit = 0;
   fp->buffer_owned = 0;       // Buffer doesn't need to be freed.
   fp->buffering_mode = _IOFBF;    // Fully buffered.

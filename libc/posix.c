@@ -20,7 +20,10 @@ int errno;
 int open(const char* filename, int flags, ...) {
   va_list ap;
   va_start(ap, flags);
-  return syscall(SYS_OPEN, filename, flags, va_arg(ap, int));
+  if (flags & O_CREAT) {
+    return syscall(SYS_OPEN, filename, flags, va_arg(ap, int));
+  }
+  return syscall(SYS_OPEN, filename, flags, 0);
 }
 
 int close(int fd) {

@@ -455,6 +455,54 @@ static const char* RISCVRelocType(int32_t reloc_type) {
   return type;
 }
 
+static const char* W65C02RelocType(int32_t reloc_type) {
+  switch (reloc_type) {
+    case R_W65C02_JSR:
+      return "R_W65C02_JSR";
+    case R_W65C02_JMP:
+      return "R_W65C02_JMP";
+    case R_W65C02_DATA16:
+      return "R_W65C02_DATA16";
+    case R_W65C02_DATA32:
+      return "R_W65C02_DATA32";
+    case R_W65C02_DATA64:
+      return "R_W65C02_DATA64";
+    case R_W65C02_BYTE0:
+      return "R_W65C02_BYTE0";
+    case R_W65C02_BYTE1:
+      return "R_W65C02_BYTE1";
+    case R_W65C02_BYTE2:
+      return "R_W65C02_BYTE2";
+    case R_W65C02_BYTE3:
+      return "R_W65C02_BYTE3";
+    case R_W65C02_BYTE4:
+      return "R_W65C02_BYTE4";
+    case R_W65C02_BYTE5:
+      return "R_W65C02_BYTE5";
+    case R_W65C02_BYTE6:
+      return "R_W65C02_BYTE6";
+    case R_W65C02_BYTE7:
+      return "R_W65C02_BYTE7";
+    case R_W65C02_ADD8:
+      return "R_W65C02_ADD8";
+    case R_W65C02_ADD16:
+      return "R_W65C02_ADD16";
+    case R_W65C02_ADD32:
+      return "R_W65C02_ADD32";
+    case R_W65C02_ADD64:
+      return "R_W65C02_ADD64";
+    case R_W65C02_SUB8:
+      return "R_W65C02_SUB8";
+    case R_W65C02_SUB16:
+      return "R_W65C02_SUB16";
+    case R_W65C02_SUB32:
+      return "R_W65C02_SUB32";
+    case R_W65C02_SUB64:
+      return "R_W65C02_SUB64";
+  }
+  return "unknown";
+}
+
 static int DisassembleRISCV(void* interpreter, void* addr) {
   DisassembleRiscVInstruction((RISCVInterpreter*)interpreter, addr, stdout);
   return 0;
@@ -506,7 +554,7 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
       disassembler = DisassembleRISCV;
       break;
     case ELF_MACHINE_TYPEW65C02:
-      StringPrintf(&type, "%08x", reloc_type);
+      StringSet(&type, W65C02RelocType(reloc_type));
       disassembler = Disassemble6502;
       break;
   }

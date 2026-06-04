@@ -13,7 +13,7 @@ char *fgets(char * restrict s, int n,
   n--;        // Space for newline.
   char* p = s;
   while (n > 0) {
-    char ch = fgetc(stream);
+    int ch = fgetc(stream);
     if (ch == EOF) {
       stream->eof_flag = 1;
       if (p == s) {
