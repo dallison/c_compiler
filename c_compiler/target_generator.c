@@ -738,10 +738,9 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     snprintf(buf, len, ".local.%s.%d", symbol->name.value, symbol->id);
   } else {
     if (compiler->prepend_underscore) {
-      buf[0] = '_';
-      strncpy(buf+1, symbol->name.value, len);
+      snprintf(buf, len, "_%s", symbol->name.value);
     } else {
-      strncpy(buf, symbol->name.value, len);
+      snprintf(buf, len, "%s", symbol->name.value);
     }
   }
   return buf;

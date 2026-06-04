@@ -139,12 +139,15 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(and): return "and";
   case AARCH64_OP(ands): return "ands";
   case AARCH64_OP(asr): return "asr";
+  case AARCH64_OP(asrv): return "asrv";
   case AARCH64_OP(bic): return "bic";
   case AARCH64_OP(bics): return "bics";
   case AARCH64_OP(eon): return "eon";
   case AARCH64_OP(eons): return "eons";
   case AARCH64_OP(lsl): return "lsl";
+  case AARCH64_OP(lslv): return "lslv";
   case AARCH64_OP(lsr): return "lsr";
+  case AARCH64_OP(lsrv): return "lsrv";
   case AARCH64_OP(mov): return "mov";
   case AARCH64_OP(movk): return "movk";
   case AARCH64_OP(movn): return "movn";
@@ -1614,6 +1617,22 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
           inst->operand[0] = Materialize(g, op1);
           inst->operand[1] = GetLoweredNode(op2);
         }
+      } else {
+        AARCH64Opcode var_opcode = opcode;
+        switch (opcode) {
+          case AARCH64_OP(lsl):
+            var_opcode = AARCH64_OP(lslv);
+            break;
+          case AARCH64_OP(lsr):
+            var_opcode = AARCH64_OP(lsrv);
+            break;
+          case AARCH64_OP(asr):
+            var_opcode = AARCH64_OP(asrv);
+            break;
+          default:
+            break;
+        }
+        inst = NewInstruction2(var_opcode, Materialize(g, op1), Materialize(g, op2));
       }
       break;
     }
@@ -2297,16 +2316,7 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
   IRNode* target_node = node->inputs.value.p[1];
   IRNode* input = node->inputs.value.p[0];
 
-  IRNode* lhs = input->inputs.value.p[0];
-  IRNode* rhs = input->inputs.value.p[1];
-  bool is_unsigned = TypeIsUnsigned(lhs->type);
-  
-  int size = kSize32Bit;
-  if (lhs->type->size > 4) {
-    size = kSize64Bit;
-  }
-  
-  // Check if the branch comes from a comparison.  It not, we compare with
+  // Check if the branch comes from a comparison.  If not, we compare with
   // zero.
   bool compare_with_zero = !IRIsComparison(input);
   if (!compare_with_zero && HasLoweredNode(input)) {
@@ -2314,6 +2324,10 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
     compare_with_zero = (comp->flags & kAARCH64ComparisonGenerated) != 0;
   }
   if (compare_with_zero) {
+    int size = kSize32Bit;
+    if (expr->type->size > 4) {
+      size = kSize64Bit;
+    }
     if (IRIsConst(input)) {
       // Compare constant.
       // If constant is zero, BRA is comparing false
@@ -2338,6 +2352,9 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
     }
     return NULL;
   }
+  IRNode* lhs = input->inputs.value.p[0];
+  IRNode* rhs = input->inputs.value.p[1];
+  bool is_unsigned = TypeIsUnsigned(lhs->type);
   return CompareAndBranch(g, lhs, rhs, target_node, is_unsigned, reverse, expr->opcode);
 }
 

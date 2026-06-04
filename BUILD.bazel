@@ -962,6 +962,116 @@ done
 """,
 )
 
+genrule(
+    name = "libc_aarch64",
+    srcs = LIBC_SRCS + glob([
+        "libc/include/**/*.h",
+        "aarch64 support/*.s",
+    ]) + [
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcaarch64.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcaarch64.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target aarch64 -O1 -c -isystem libc/include -Ilibc)
+
+runtime_srcs=(
+  "aarch64 support/syscall.s"
+)
+
+for src in "$${runtime_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+done
+
+libc_srcs=(
+  "libc/abs.c"
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ctype.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/malloc.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/posix.c"
+  "libc/printf.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/syscall.c"
+  "libc/ungetc.c"
+)
+
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+done
+
+out_file="$$out"
+case "$$out_file" in
+  /*) ;;
+  *) out_file="$$(pwd)/$$out_file" ;;
+esac
+cd "$$work"
+"$$archivist" r "$$out_file" *.o
+""",
+)
+
 LIBC_TEST_DATA = LIBC_SRCS + glob([
     "libc/include/**/*.h",
     "libc/tests/**",

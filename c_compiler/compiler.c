@@ -1115,7 +1115,7 @@ void CompilerDestruct(Compiler* compiler) {
   }
   VectorDestruct(&compiler->initialized_static_variables);
 
-  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
     UninitializedStaticVariableDelete(
         compiler->uninitialized_static_variables.value.p[i]);
   }
@@ -1195,7 +1195,6 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     compiler->target->emit_function_assembly(compiler->functions.value.p[i],
                                              asm_file);
   }
-
   // Now emit the data to the assembly file.
   compiler->target->emit_data_start(asm_file);
 

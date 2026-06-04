@@ -80,12 +80,15 @@ DECLARE_INST_FUNC(and);
 DECLARE_INST_FUNC(ands);
 DECLARE_INST_FUNC(asr);
 DECLARE_INST_FUNC(asri);
+DECLARE_INST_FUNC(asrv);
 DECLARE_INST_FUNC(bic);
 DECLARE_INST_FUNC(bics);
 DECLARE_INST_FUNC(eon);
 DECLARE_INST_FUNC(eons);
 DECLARE_INST_FUNC(lsl);
+DECLARE_INST_FUNC(lslv);
 DECLARE_INST_FUNC(lsr);
+DECLARE_INST_FUNC(lsrv);
 DECLARE_INST_FUNC(mov);
 DECLARE_INST_FUNC(movk);
 DECLARE_INST_FUNC(movn);
@@ -283,11 +286,14 @@ static void InitializeInstructions(Map* instructions) {
   INST(ands);
   INST(asr);
   INST(asri);
+  INST(asrv);
   INST(bic);
   INST(bics);
   INST(eon);
   INST(lsl);
+  INST(lslv);
   INST(lsr);
+  INST(lsrv);
   INST(mov);
   INST(movk);
   INST(movn);
@@ -310,7 +316,7 @@ static void InitializeInstructions(Map* instructions) {
   INST2(bvs, b.vs);
   INST2(bvc, b.vc);
   INST2(bhi, b.hi);
-  INST2(bls, b.hs);
+  INST2(bls, b.ls);
   INST2(bge, b.ge);
   INST2(blt, b.lt);
   INST2(bgt, b.gt);
@@ -647,6 +653,7 @@ static bool GetShift(AARCH64Assembler* assembler, Operand* op, int max_shift) {
     AssemblerError(&ASM, "Invalid shift %s", ASM.lex.spelling.value);
     return false;
   }
+  LexNextToken(&ASM.lex);
   LexMatch(&ASM.lex, TOK(hash));      // Optional.
   op->shift.amount = (int)AssemblerEvaluateExpression(&ASM);
   if (op->shift.amount < 0 || op->shift.amount > max_shift) {
@@ -1130,6 +1137,34 @@ static void AssembleDivide(AARCH64Assembler* assembler, int unsigned_divide) {
       ((rd.width == kX) << 31) | (0xd6 << 21) |
       (rm.num << 16) | ((unsigned_divide ? 2 : 3) << 10) |
       (rn.num << 5) | rd.num);
+}
+
+static void AssembleShiftVariable(AARCH64Assembler* assembler, int shift_op) {
+  Register rd = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rn = GetRegister(assembler);
+  NeedComma(assembler);
+  Register rm = GetRegister(assembler);
+  if (!CheckRegWidths(assembler, &rd, &rn) ||
+      !CheckRegWidths(assembler, &rd, &rm)) {
+    return;
+  }
+  AssemblerEmitWord(
+      &ASM, ASM.current_section,
+      ((rd.width == kX) << 31) | (0xd6 << 21) | (rm.num << 16) |
+      (shift_op << 10) | (rn.num << 5) | rd.num);
+}
+
+static void Assemble_lslv(AARCH64Assembler* assembler) {
+  AssembleShiftVariable(assembler, 8);
+}
+
+static void Assemble_lsrv(AARCH64Assembler* assembler) {
+  AssembleShiftVariable(assembler, 9);
+}
+
+static void Assemble_asrv(AARCH64Assembler* assembler) {
+  AssembleShiftVariable(assembler, 10);
 }
 
 static void Assemble_sdiv(AARCH64Assembler* assembler) {

@@ -25,12 +25,11 @@ static void TrapInstruction(TargetInstruction* inst) {
   }
 }
 
-#if 0
+#if 1
 // Build a MOV instruction out of MOVZ, MOVN and MOVK, based on the immediate
 // value.
 // A MOVZ, MOVN and MOVK instruction can take 16 bit immediate value shifted
 // left by 0, 16, 32 or 48 (0 or 16 for 32 bit only.
-// TODO: this goes in the assembler.
 static void MoveImmediate(AARCH64Emitter* emitter,
                           const char* reg,
                           uint64_t value, FILE* fp) {
@@ -95,7 +94,7 @@ static void AddSubImmediate(AARCH64Emitter* emitter,
   const char* tmpreg = destreg[0] == 'x' ? "x8" : "w8";
   if (value > 0xffffff) {
     // Too big for an immediate, put it into a register and use that.
-    MoveImmediate(emitter, tmpreg, value, fp);
+    MoveImmediate(emitter, tmpreg, (uint64_t)value, fp);
     fprintf(fp, "\t%s %s, %s, %s%s\n", op, destreg, srcreg, tmpreg, commentbuf);
     return;
   }
@@ -612,10 +611,46 @@ static void PrintRmov(AARCH64Emitter* emitter, TargetInstruction* inst, FILE* fp
 }
 
 static const char* GetRegisterName(TargetInstruction* inst, int size, char* buf, size_t bufsize) {
-  if (inst->dest != NULL) {
+  if (inst->reg != NULL) {
+    return AARCH64RegisterName((AARCH64Register*)inst->reg, size, buf, bufsize);
+  }
+  if (inst->dest != NULL && inst->dest->reg != NULL) {
     return AARCH64RegisterName((AARCH64Register*)inst->dest->reg, size, buf, bufsize);
   }
-  return AARCH64RegisterName((AARCH64Register*)inst->reg, size, buf, bufsize);
+  return "";
+}
+
+// Emit mov/movz (etc.) when the result is assigned via inst->dest.
+static void PrintDestMove(AARCH64Emitter* emitter, TargetInstruction* inst,
+                          FILE* fp) {
+  TargetInstruction* src = inst->operand[0];
+  if (src == NULL || src->block == NULL) {
+    return;
+  }
+  int reg_size = GetRegisterSize(inst);
+  char buf1[8], buf2[8];
+  const char* dest_name =
+      GetRegisterName(inst, reg_size, buf1, sizeof(buf1));
+  if (dest_name[0] == '\0') {
+    return;
+  }
+  if (TargetIsConst(src)) {
+    MoveImmediate(emitter, dest_name, (uint64_t)TargetIntValue(src), fp);
+    return;
+  }
+  if (src->reg == NULL) {
+    return;
+  }
+  if (inst->reg != NULL && src->reg == inst->reg) {
+    return;
+  }
+  if (inst->dest != NULL && inst->dest->reg != NULL &&
+      src->reg == inst->dest->reg) {
+    return;
+  }
+  fprintf(fp, "\t%-12s%s, %s\n", "mov", dest_name,
+          AARCH64RegisterName((AARCH64Register*)src->reg, reg_size, buf2,
+                              sizeof(buf2)));
 }
 
 // Main instruction printer.
@@ -647,13 +682,10 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
   if (((int)inst->opcode == (int)AARCH64_OP(ivarreg)) || ((int)inst->opcode == (int)AARCH64_OP(fvarreg))) {
     return;
   }
-  if (inst->id == 7) {
-    printf("");
-  }
   if (!IsPrintable(inst)) {
     return;
   }
-  
+
   const bool show_id = 1;
 
   if (show_id) {
@@ -927,9 +959,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       if (((int)cond->opcode != (int)AARCH64_OP(al))) {
         snprintf(condbuf, sizeof(condbuf), ".%s", AARCH64OpcodeName(cond->opcode));
       }
-       fprintf(fp, "%s .%s_label_%d\n",
-               condbuf,
-               func_name, inst->operand[1]->id);
+      fprintf(fp, "%s .%s_label_%d\n", condbuf, func_name, inst->operand[1]->id);
       break;
     }
       
@@ -955,9 +985,26 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       break;
 
     case AARCH64_OP(mov):
+    case AARCH64_OP(movz):
+    case AARCH64_OP(movk):
+    case AARCH64_OP(movn):
+      if (inst->dest != NULL) {
+        PrintDestMove(emitter, inst, fp);
+        return;
+      }
       if (TargetIsConst(inst->operand[0])) {
-        MoveImmediate(emitter, GetRegisterName(inst, reg_size, buf1,sizeof(buf1)), TargetIntValue(inst->operand[0]), fp);
-        break;
+        MoveImmediate(emitter, GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+                        (uint64_t)TargetIntValue(inst->operand[0]), fp);
+        return;
+      }
+      if (inst->operand[1] == NULL && inst->operand[0] != NULL) {
+        PrintDestMove(emitter, inst, fp);
+        return;
+      }
+      if (inst->operand[0] != NULL && inst->operand[0]->reg != NULL &&
+          inst->operand[1] != NULL && inst->operand[1]->reg != NULL) {
+        PrintRmov(emitter, inst, fp);
+        return;
       }
       fprintf(fp, "\t%-12s", "mov");
 
@@ -973,7 +1020,12 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
-            fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
+            AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+            if (op == AARCH64_OP(adr) || op == AARCH64_OP(adrp)) {
+              fprintf(fp, "%s%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
+            } else {
+              fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
+            }
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(symbol))) {
             if ((inst->flags & AARCH64_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
@@ -1000,7 +1052,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\n");
     }
   }
-  
+
 }
 
 void AARCH64EmitterInit(AARCH64Emitter* emitter, AARCH64Generator* g) {

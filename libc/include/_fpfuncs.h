@@ -21,6 +21,14 @@
 typedef uint8_t Exponent;
 typedef uint32_t Mantissa;
 #define DOUBLE_IS_SINGLE 1
+#elif defined(__aarch64__)
+// Match 6502-sized buffer until aarch64 codegen handles large stack frames.
+#define FIXED_SIZE_WORDS 4
+#define FIXED_SIZE_HALF 2
+#define EXP_BIAS 1023
+typedef uint16_t Exponent;
+typedef uint64_t Mantissa;
+#define DOUBLE_IS_SINGLE 0
 #else
 // Double is double precision.  The max power-of-2 exponent is 2^11, which
 // is 2048 bits.  Twice that is 4096 bits so we need 4096/64 = 64 words.

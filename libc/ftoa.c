@@ -85,7 +85,7 @@ STATIC void FixFloat(struct FloatPrinter* printer, double f) {
 #if defined(__6502__)
   printer->fx[1] = (uint64_t)printer->mantissa << 32;
 #else
-  printer->fx[31] = printer->mantissa;
+  printer->fx[FIXED_SIZE_HALF - 1] = printer->mantissa;
 #endif
   // Shift the mantissa left or right by the exponent.
   // In IEE754 single precision, the exponent has a bias

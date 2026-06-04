@@ -112,8 +112,7 @@ static struct {
 } register_ranges[] = {
   {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true},
   {kAARCH64RegTypeInt, AARCH64_INT_TEMP_START, AARCH64_INT_TEMP_END, true},
-    {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true},
-    {kAARCH64RegTypeInt, AARCH64_INT_SAVED_START, AARCH64_INT_SAVED_END, false},
+  {kAARCH64RegTypeInt, AARCH64_INT_SAVED_START, AARCH64_INT_SAVED_END, false},
     {kAARCH64RegTypeFloat, AARCH64_FP_TEMP_START, AARCH64_FP_TEMP_END, true},
     {kAARCH64RegTypeFloat, AARCH64_FP_ARG_START, AARCH64_FP_ARG_END, true},
     {kAARCH64RegTypeFloat, AARCH64_FP_SAVED_START, AARCH64_FP_SAVED_END,false},
@@ -230,6 +229,9 @@ static int SpillCost(TargetInstruction* inst) {
       TargetBasicBlock* block = user->block;
       while (block != NULL) {
         cost *= block->loop_nesting + 1;
+        if (cost > INT_MAX / 4) {
+          return INT_MAX / 4;
+        }
         block = block->idom;
       }
     }
@@ -250,7 +252,11 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
-          assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
+              ((int)owner->opcode == (int)AARCH64_OP(spill)) ||
+              ((int)owner->opcode == (int)AARCH64_OP(reload))) {
+            continue;
+          }
           int cost = SpillCost(owner);
           if (cost < min_cost) {
             min_cost = cost;
@@ -261,6 +267,16 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
     }
   }
   if (victim == NULL) {
+    // All spill candidates may already be spilled; pick any occupied register.
+    for (size_t i = 0; i < NUM_REG_RANGES; i++) {
+      if (register_ranges[i].type == type) {
+        for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+          if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
+            return regs[j].base.owner;
+          }
+        }
+      }
+    }
     DumpRegisters(allocator);
     abort();
   }
@@ -289,7 +305,6 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
-  printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
  
   if (AARCH64IsVarRegister(inst)) {
     // Spilling a varreg->base.  This instruction is in the entry block but
@@ -466,6 +481,32 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
   }
 }
 
+// Allocate registers for operand instructions (e.g. address calcs for ldr/str)
+// that are not reached by the linear block scan.
+static void EnsureOperandsAllocated(AARCH64RegisterAllocator* allocator,
+                                    TargetInstruction* inst) {
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op == NULL || op->reg != NULL || op->block == NULL ||
+        TargetIsConst(op)) {
+      continue;
+    }
+    if (AARCH64IsFixedRegister(op)) {
+      AllocateRegister(allocator, op);
+      continue;
+    }
+    if (AARCH64IsVarRegister(op)) {
+      if (op->reg == NULL) {
+        AllocateVariableRegister(allocator, op);
+      }
+      continue;
+    }
+    if ((op->flags & TARGET_INST_PROCESSED) == 0) {
+      AllocateRegister(allocator, op);
+    }
+  }
+}
+
 static void AllocateRegister(AARCH64RegisterAllocator* allocator,
                              TargetInstruction* inst) {
    bool is_leaf = allocator->g->base.num_calls == 0 &&
@@ -501,6 +542,8 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
   // Reload any spilled expressions.
   ReloadSpills(allocator, inst);
 
+  EnsureOperandsAllocated(allocator, inst);
+
   AARCH64Register* reg;
 
   if (inst->dest != NULL) {
@@ -512,7 +555,9 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
         AllocateRegister(allocator, inst->dest);
       }
     }
-    assert(inst->dest->reg != NULL);
+    if (inst->dest->reg == NULL) {
+      return;
+    }
     reg = (AARCH64Register*)inst->dest->reg;
     inst->reg = inst->dest->reg;
     FreeRegisters(allocator, inst);
@@ -560,6 +605,8 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     case   AARCH64_OP(cmp):
     case   AARCH64_OP(fcmp):
     case   AARCH64_OP(oplsl):
+    case AARCH64_OP(spill):
+    case AARCH64_OP(reload):
       // These instructions do not have registers allocated to them.
       return;
 

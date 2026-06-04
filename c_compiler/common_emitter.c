@@ -57,10 +57,9 @@ static const char* VarName(InitializedStaticVariable* var, char* buf, size_t len
     snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
   } else {
     if (compiler->prepend_underscore) {
-      buf[0] = '_';
-      strncpy(buf+1, var->symbol->name.value, len);
+      snprintf(buf, len, "_%s", var->symbol->name.value);
     } else {
-      strncpy(buf, var->symbol->name.value, len);
+      snprintf(buf, len, "%s", var->symbol->name.value);
     }
   }
   return buf;
@@ -71,10 +70,9 @@ static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t 
     snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
   } else {
     if (compiler->prepend_underscore) {
-      buf[0] = '_';
-      strncpy(buf+1, var->symbol->name.value, len);
+      snprintf(buf, len, "_%s", var->symbol->name.value);
     } else {
-      strncpy(buf, var->symbol->name.value, len);
+      snprintf(buf, len, "%s", var->symbol->name.value);
     }
   }
   return buf;
@@ -82,6 +80,10 @@ static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t 
 
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   char buf[256];
+  const char* ptr_asm =
+      compiler->pointer_size == 8 ? ".8byte" : ".word";
+  const char* long_asm =
+      compiler->pointer_size == 8 ? ".8byte" : ".long";
   EmitP2Align(var->alignment, fp);
   fprintf(fp, "%s:\n", VarName(var, buf, sizeof(buf)));
   fprintf(fp, "\t.type   %s,@object\n", VarName(var, buf, sizeof(buf)));
@@ -114,7 +116,8 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         next_offset += 4;
         break;
       case kInitTypeLong:
-        fprintf(fp, "\t.long   %" PRId64 "\t\t// offset %d\n", (int64_t)init->value.byte, next_offset);
+        fprintf(fp, "\t%s   %" PRId64 "\t\t// offset %d\n", long_asm,
+                (int64_t)init->value._long, next_offset);
         next_offset += 8;
         break;
       case kInitTypeSymbol:
@@ -123,11 +126,14 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         } else {
           fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
         }
-        fprintf(fp, "\t.hword    %s\t\t// offset %d\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)), next_offset);
+        fprintf(fp, "\t%s    %s\t\t// offset %d\n", ptr_asm,
+                TargetSymbolName(init->value.symbol, buf, sizeof(buf)),
+                next_offset);
         next_offset += compiler->pointer_size;
         break;
       case kInitTypeString:
-        fprintf(fp, "\t.hword    .str.%d\t\t// offset %d\n", init->value.literal_id, next_offset);
+        fprintf(fp, "\t%s    .str.%d\t\t// offset %d\n", ptr_asm,
+                init->value.literal_id, next_offset);
         next_offset += compiler->pointer_size;
         break;
       case kInitTypeMemory: {

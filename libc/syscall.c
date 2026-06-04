@@ -20,6 +20,8 @@ int syscall(int n, ...) {
 #elif defined(__p_code__)
 #elif defined(__x86_64__)
 // Implemented in x86_64 support/syscall.s
+#elif defined(__aarch64__)
+// Implemented in aarch64 support/syscall.s
 #elif defined(__W65C02__)
 // Implemented in 6502runtime.s
 #else
