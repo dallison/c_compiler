@@ -1,0 +1,17 @@
+#! /bin/sh
+# Tests skipped for davecc -target aarch64.
+
+if ! test -f README.md; then
+    echo "run from the c_testsuite directory." >&2
+    exit 1
+fi
+
+# Same portability constraints as other DaveCC targets; extend as needed.
+echo "tests/single-exec/00202.c"
+echo "tests/single-exec/00206.c"
+echo "tests/single-exec/00210.c"
+echo "tests/single-exec/00213.c"
+echo "tests/single-exec/00214.c"
+echo "tests/single-exec/00216.c"
+echo "tests/single-exec/00219.c"
+echo "tests/single-exec/00220.c"

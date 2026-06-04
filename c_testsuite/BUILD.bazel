@@ -1,0 +1,105 @@
+# C testsuite (single-exec) driven by DaveCC + target-specific libc and interpreter.
+#
+# Run one target:
+#   bazel test //c_testsuite:single_exec_65c02 --test_output=errors
+#   bazel test //c_testsuite:single_exec_riscv --test_output=errors
+#   bazel test //c_testsuite:single_exec_x86_64 --test_output=errors
+#   bazel test //c_testsuite:single_exec_aarch64 --test_output=errors
+#
+# All wired targets:
+#   bazel test //c_testsuite:all_single_exec --test_output=errors
+#
+# To add a target: define libc_* and interpreter in //BUILD.bazel, add a skip file
+# under skip/, then call ctestsuite_sh_test() below (see 65c02 / riscv / x86_64).
+
+load("//c_testsuite:ctestsuite.bzl", "ctestsuite_sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTESTSUITE_TEST_DATA = glob([
+    "tests/single-exec/*.c",
+    "tests/single-exec/*.expected",
+]) + [
+    "README.md",
+    "run_single_exec.sh",
+]
+
+ctestsuite_sh_test(
+    name = "65c02",
+    test_data = CTESTSUITE_TEST_DATA,
+    davecc_target = "//:davecc",
+    compiler_target = "65c02",
+    libc_label = "//:libc_65c02",
+    interpreter_label = "//:6502",
+    rom_label = "//:support_rom_65c02",
+    skip_file = "skip/davecc-65c02.skip",
+    compile_args = [
+        "-target",
+        "65c02",
+        "-static",
+        "-isystem",
+        "libc/include",
+    ],
+)
+
+ctestsuite_sh_test(
+    name = "riscv",
+    test_data = CTESTSUITE_TEST_DATA,
+    davecc_target = "//:davecc",
+    compiler_target = "riscv",
+    libc_label = "//:libc_riscv",
+    interpreter_label = "//:riscv",
+    skip_file = "skip/davecc-riscv.skip",
+    compile_args = [
+        "-target",
+        "riscv",
+        "-static",
+    ],
+)
+
+ctestsuite_sh_test(
+    name = "aarch64",
+    test_data = CTESTSUITE_TEST_DATA,
+    davecc_target = "//:davecc",
+    compiler_target = "aarch64",
+    libc_label = "//:libc_aarch64",
+    interpreter_label = "//:aarch64",
+    skip_file = "skip/davecc-aarch64.skip",
+    compile_args = [
+        "-target",
+        "aarch64",
+        "-static",
+        "-isystem",
+        "libc/include",
+        "-Wl,-e",
+        "-Wl,main",
+    ],
+    interp_args = ["-i"],
+)
+
+ctestsuite_sh_test(
+    name = "x86_64",
+    test_data = CTESTSUITE_TEST_DATA,
+    davecc_target = "//:davecc",
+    compiler_target = "x86_64",
+    libc_label = "//:libc_x86_64",
+    interpreter_label = "//:x86_64",
+    skip_file = "skip/davecc-x86_64.skip",
+    compile_args = [
+        "-target",
+        "x86_64",
+        "-static",
+    ],
+    interp_args = ["-i"],
+)
+
+test_suite(
+    name = "all_single_exec",
+    tests = [
+        ":single_exec_65c02",
+        ":single_exec_riscv",
+        ":single_exec_x86_64",
+        ":single_exec_aarch64",
+    ],
+    tags = ["manual"],
+)

@@ -1,0 +1,123 @@
+#! /bin/sh
+
+if ! test -f README.md
+then
+    echo "run from the base directory." >&2
+    exit 1
+fi
+
+terminate=false
+start=
+end=
+
+while getopts ":s:e:t" opt; do
+  case $opt in
+    s)
+        start=$OPTARG
+        ;;
+    e)
+        end=$OPTARG
+        ;;
+    t)
+        terminate=true
+        echo "Will terminate on first test failure"
+        ;;
+    \?)
+        echo Invalid option
+        exit 1
+  esac
+done
+
+shift $((OPTIND - 1))
+if (( $# == 0 )); then
+  echo Specify a compiler to run
+  exit 1
+fi
+
+compiler="$1"
+
+# Work out what the timeout program is
+if [[ -f /usr/bin/timeout ]]; then
+  timeout=/usr/bin/timeout
+elif [[ -f /usr/local/bin/gtimeout ]]; then
+  timeout=/usr/local/bin/gtimeout
+fi
+scratchdir=$(mktemp -d)
+cleanup () {
+  rm -rf $scratchdir
+}
+#trap cleanup EXIT
+
+testdir="./tests/single-exec"
+runner="./runners/single-exec/$compiler"
+
+skipcmd="./runners/single-exec/$compiler.skip"
+skipset="$scratchdir/skip_lut"
+
+echo "TAP version 13"
+echo "1..$(find ./tests/single-exec/ -name "*.c" | wc -l)"
+
+if ! test -f "$runner"
+then
+    echo "$runner does not exist!" 1>&2
+    exit 1
+fi
+
+if test -f "$skipcmd"
+then
+    if ! $skipcmd > "$scratchdir/skip.txt"
+    then
+        echo "skip list command failed" 1>&2
+        exit 1
+    fi
+
+    ./scripts/lib-exec/mkset "$skipset" "$scratchdir/skip.txt"
+else
+    echo -n "" | ./scripts/lib-exec/mkset "$skipset"
+fi
+
+alltests=()
+if [[ -z "$start" ]]; then
+  alltests=( $testdir/*.c )
+else
+  if [[ -z "$end" ]]; then
+    end=$start
+  fi
+
+  declare -i s=$start
+  declare -i e=$end
+
+  declare -i i=$s
+  while (( $i <= $e )); do
+    file=$testdir/$(printf "%05d" $i).c
+    alltests+=( $file )
+    i=$((i+1))
+  done
+fi
+
+for t in ${alltests[@]}
+do
+    echo Running $t
+    exit_status=0
+    result="ok"
+
+    
+    if ./scripts/lib-exec/setlookup "$skipset" "$t"
+    then
+        echo "ok $t # SKIP"
+        continue
+    fi
+
+    $runner $t > $scratchdir/t.out 2>&1
+    exit_status=$?
+    if (( "$exit_status" != 0 )); then
+        result="not ok"
+    fi
+
+    echo "$result" "$t"
+    sed -e 's/^/\#/' $scratchdir/t.out
+    if [ "$result" != "ok" ]; then
+      echo "Terminated due to failure in $t, exit status $exit_status"
+      exit 1
+    fi
+done
