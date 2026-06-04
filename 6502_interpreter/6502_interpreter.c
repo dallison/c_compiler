@@ -616,6 +616,9 @@ void W65C02InterpreterInit(W65C02Interpreter* interpreter, bool debug,
   for (int i = 0; i < W65C02_MAX_OPEN_FILES; i++) {
     interpreter->open_files[i] = -1;
   }
+  interpreter->open_files[0] = STDIN_FILENO;
+  interpreter->open_files[1] = STDOUT_FILENO;
+  interpreter->open_files[2] = STDERR_FILENO;
 }
 
 Device* PollForDevice(W65C02Interpreter* interpreter, uint8_t* addr) {

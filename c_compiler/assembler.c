@@ -805,7 +805,7 @@ static void HandleDirective_comm(Assembler* assembler) {
     AssemblerSymbol* sym =
         AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
     if (sym != NULL) {
-      if (assembler->pass == 1 && sym->defined) {
+      if (assembler->pass == 1 && sym->defined && sym->section != SHN_COM) {
         AssemblerError(assembler, "Duplicate common symbol %s", sym->name.value);
         return;
       }
@@ -828,12 +828,18 @@ static void HandleDirective_comm(Assembler* assembler) {
       return;
     }
     if (LexLookingAt(&assembler->lex, TOK(number))) {
-      sym->size = (int32_t)assembler->lex.number;
+      int32_t new_size = (int32_t)assembler->lex.number;
+      if (new_size > sym->size) {
+        sym->size = new_size;
+      }
       LexNextToken(&assembler->lex);
     }
     if (LexMatch(&assembler->lex, TOK(comma))) {
       if (LexLookingAt(&assembler->lex, TOK(number))) {
-        sym->alignment = (int32_t)assembler->lex.number;
+        int32_t new_align = (int32_t)assembler->lex.number;
+        if (new_align > sym->alignment) {
+          sym->alignment = new_align;
+        }
         LexNextToken(&assembler->lex);
       }
     }

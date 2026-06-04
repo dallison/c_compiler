@@ -1215,7 +1215,8 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
     UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
-    if (!var->is_tls && var->symbol->flags.is_tentative_decl) {
+    if (!var->is_tls &&
+        (var->symbol->flags.is_tentative_decl || var->is_local)) {
       compiler->target->emit_bss_space(var, asm_file);
     }
     contains_tls_vars |= var->is_tls;

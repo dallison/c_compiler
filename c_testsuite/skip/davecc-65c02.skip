@@ -1,0 +1,47 @@
+#! /bin/sh
+# Tests skipped for davecc -target 65c02 (run from c_testsuite/ via Bazel).
+
+if ! test -f README.md; then
+    echo "run from the c_testsuite directory." >&2
+    exit 1
+fi
+
+# Assumes double is double precision
+echo "tests/single-exec/00174.c"
+
+# This assumes sizeof int is 4
+echo "tests/single-exec/00178.c"
+
+# Assumes double is IEE754 double precision.
+echo "tests/single-exec/00195.c"
+
+# This one is undefined preprocessor behavior as far as I can see
+echo "tests/single-exec/00202.c"
+
+# This one is too big to fit in 6502 memory.
+echo "tests/single-exec/00204.c"
+
+# Uses #pragma push_macro
+echo "tests/single-exec/00206.c"
+
+# This one uses complex attribute specifications.
+echo "tests/single-exec/00210.c"
+
+# Needs LP64 or LP32
+echo "tests/single-exec/00212.c"
+
+# Uses GCC statement expression extension.
+echo "tests/single-exec/00213.c"
+echo "tests/single-exec/00214.c"
+
+# GNU extension allowing compound literals as constant initializers.
+echo "tests/single-exec/00216.c"
+
+# _Generic isn't supported.
+echo "tests/single-exec/00219.c"
+
+# non-ascii characters aren't supported
+echo "tests/single-exec/00220.c"
+
+# File I/O (fopen/fread/fgetc/fgets) not fully working in interpreter
+echo "tests/single-exec/00187.c"
