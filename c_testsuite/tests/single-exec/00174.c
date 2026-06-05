@@ -1,5 +1,5 @@
 #include <stdio.h>
-// #include <math.h>
+#include <math.h>
 
 int main()
 {
@@ -42,9 +42,7 @@ int main()
    // type coercion
    a = 2;
    printf("%f\n", a);
-#if 0
    printf("%f\n", sin(2));
-#endif
 
    return 0;
 }

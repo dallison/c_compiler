@@ -643,7 +643,8 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
     // &local to copy a struct argument by value).
     if (TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
-        TypeIsDouble(node->type) || TypeIsStructOrUnion(node->type)) {
+        TypeIsDouble(node->type) || TypeIsLongDouble(node->type) ||
+        TypeIsStructOrUnion(node->type)) {
       size = kSize64Bit;
     }
     SetInstructionSize(inst, size);
@@ -1468,24 +1469,21 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
        }
         
       case IR_OP(constf): {
-        // The constant's fvalue field is always in double precision.
+        // The constant's fvalue field is always in double precision; round it
+        // to single precision and materialize the 32-bit single bit pattern in
+        // a general register, then bit-cast it into a single (s) FP register.
         double dvalue = ((IRConstant*)node)->value.fvalue;
-
-        // Round to single precision, then re-widen to double: the backend keeps
-        // float values in registers in double-precision form (64-bit FP ops),
-        // so the materialized register must hold the single-rounded value as a
-        // double bit pattern.  Materialising the raw 32-bit single pattern into
-        // a 64-bit register would be interpreted as a (near-zero) double.
         float fvalue = (float)dvalue;
-        double promoted = (double)fvalue;
-        int64_t bits = *(int64_t*)(&promoted);
+        uint32_t bits;
+        memcpy(&bits, &fvalue, sizeof(bits));
         TargetInstruction* c;
         if (bits == 0) {
           c = ZeroReg(g);
         } else {
-          c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType64Bit, bits), kSize64Bit);
+          c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)bits), kSize32Bit);
         }
-        return Emit(g, NewInstruction1(AARCH64_OP(fcvt), c));
+        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fcvt), c),
+                                          kSize32Bit));
       }
       case IR_OP(constd): {
         double value = ((IRConstant*)node)->value.fvalue;
@@ -1497,7 +1495,8 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
           c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType64Bit, bits), kSize64Bit);
 
         }
-        return Emit(g, NewInstruction1(AARCH64_OP(fcvt), c));
+        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fcvt), c),
+                                          kSize64Bit));
       }
       default:
         assert(false);
@@ -1526,8 +1525,12 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
       return OffsetFrom(g, addr, LocalVariableOffset(g, var_offset));
     }
   } else if (IRIsArgument(node)) {
-    // TODO: structs passed by reference.
     int32_t var_offset = node->data.ivalue;
+    // A struct/union larger than 8 bytes was passed by reference: the register
+    // or frame slot holds a pointer to the caller's copy, which *is* the
+    // address of the parameter.
+    bool by_ref_struct =
+        TypeIsStructOrUnion(node->type) && node->type->size > 8;
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       IRVariable* var = (IRVariable*)node;
@@ -1535,12 +1538,18 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
       if (TypeIsFloatingPoint(node->type)) {
         return FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
+        // For a by-reference struct the register already holds the pointer.
         return IntVariableRegister(g, var_num, var->symbol);
       }
+    } else if (by_ref_struct) {
+      // Load the pointer from the frame slot; that pointer is the address.
+      TargetInstruction* slot = OffsetFrom(g, FramePointer(g), var_offset);
+      return Emit(g, SetInstructionSize(
+                         NewInstruction2(AARCH64_OP(ldr), slot, ZeroImm(g)),
+                         kSize64Bit));
     } else {
       // Argument is on the stack.
       TargetInstruction* addr = FramePointer(g);
-      int32_t var_offset = node->data.ivalue;
       return OffsetFrom(g, addr, var_offset);
     }
   } else if (IRIsStaticVariable(node)) {
@@ -2175,6 +2184,11 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
   } else if (IRIsArgument(addr_node)) {
     int32_t var_offset = addr_node->data.ivalue;
     IRVariable* var = (IRVariable*)addr_node;
+    // A struct/union larger than 8 bytes was passed by reference: the slot (or
+    // register) holds a *pointer* to the caller's copy, which is the address of
+    // the parameter.  Dereference it so callers see the struct's address.
+    bool by_ref_struct =
+        TypeIsStructOrUnion(addr_node->type) && addr_node->type->size > 8;
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~AARCH64_REG_VAR;
@@ -2183,8 +2197,24 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
       } else {
         *addr = IntVariableRegister(g, var_num, var->symbol);
       }
+      if (by_ref_struct) {
+        // The register holds the pointer; use it directly as the base address.
+        *offset = ZeroImm(g);
+        return true;
+      }
       *offset = NULL;
       return false;
+    } else if (by_ref_struct) {
+      // Load the pointer from its frame slot and use it as the base address.
+      TargetInstruction* slot_addr;
+      TargetInstruction* slot_off;
+      GetAddressAndOffsetFrom(g, FramePointer(g), var_offset, &slot_addr,
+                              &slot_off);
+      *addr = Emit(g, SetInstructionSize(
+                          NewInstruction2(AARCH64_OP(ldr), slot_addr, slot_off),
+                          kSize64Bit));
+      *offset = ZeroImm(g);
+      return true;
     } else {
       GetAddressAndOffsetFrom(g, FramePointer(g), var_offset,
                               addr, offset);
@@ -2529,6 +2559,7 @@ static TargetInstruction* LowerStore(AARCH64Generator* g, IRNode* node) {
       break;
     case IR_OP(stored):
       opcode = AARCH64_OP(fstr);
+      size = kSize64Bit;
       break;
     case IR_OP(storea):
       opcode = AARCH64_OP(str);
@@ -3193,30 +3224,11 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
 //    stop working (TODO: check the C standard for this).
 // 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
 //    register pair.
-// Determine whether the callee is variadic and, if so, how many fixed (named)
-// parameters it declares.  The DaveCC aarch64 varargs ABI saves the integer
-// argument registers into a single contiguous area that va_arg walks 8 bytes at
-// a time.  For this to work every *variadic* argument (including floating
-// point) must travel through the integer-register / stack sequence, so a
-// floating-point variadic argument is bit-cast into an integer register rather
-// than passed in d0-d7.  Returns false (num_fixed untouched) for non-variadic
-// or unknown callees, in which case the normal ABI applies.
-static bool CalleeVariadicInfo(IRNode* call, size_t* num_fixed) {
-  IRNode* func = call->inputs.value.p[0];
-  TypeRecord* t = (func != NULL) ? func->type : NULL;
-  if (t != NULL && t->declarator == kDeclPointer) {
-    t = t->next;
-  }
-  if (t == NULL || t->declarator != kDeclFunction) {
-    return false;
-  }
-  if (!t->info.function.varargs) {
-    return false;
-  }
-  *num_fixed = t->info.function.prototype.length;
-  return true;
-}
-
+//
+// Variadic arguments follow the normal AAPCS64 rules: integer/pointer
+// arguments in x0-x7, floating-point arguments in d0-d7, and the remainder on
+// the stack.  The callee's prologue saves the unnamed argument registers into
+// the GP and VR save areas that va_arg walks (see LowerBuiltinVaStart).
 static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -3226,21 +3238,11 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   Vector arg_locations;
   VectorInit(&arg_locations);
 
-  // Work out which arguments fall in the variadic region so floating-point
-  // ones can be routed through the integer path (see CalleeVariadicInfo).
-  size_t num_fixed_args = 0;
-  bool callee_variadic = CalleeVariadicInfo(node, &num_fixed_args);
-  // Index (into node->inputs) of the first real source argument.  A hidden
-  // struct-return pointer, when present, occupies the first slot.
-  size_t first_arg_input = TypeIsStructOrUnion(node->type) ? 2 : 1;
-
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    bool is_variadic_arg =
-        callee_variadic && i >= first_arg_input + num_fixed_args;
     if (TypeIsStructOrUnion(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg->base.
@@ -3284,7 +3286,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type) && !is_variadic_arg) {
+    } else if (TypeIsFloatingPoint(arg_node->type)) {
       if (next_fp_arg_reg < AARCH64_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -3395,8 +3397,6 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
-    bool is_variadic_arg =
-        callee_variadic && i >= first_arg_input + num_fixed_args;
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
@@ -3445,19 +3445,6 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                                AARCH64_OP(ldr), arg,
                                GetIntConstant(g, NULL, kTargetType32Bit, 0)), 0));
           }
-        }
-        if (is_variadic_arg && TypeIsFloatingPoint(arg_node->type)) {
-          // A floating-point variadic argument is passed in an *integer*
-          // argument register holding the value's raw bit pattern, so it lands
-          // in the contiguous varargs save area that va_arg walks.  Emit an
-          // fmov (FP -> GP bitcast) as a destination-move into the integer
-          // argument register.  Variadic floats are promoted to double, so this
-          // is always a 64-bit move.
-          TargetInstruction* mv = Emit(
-              g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), arg),
-                                    kSize64Bit));
-          mv->dest = arg_location->location.reg;
-          break;
         }
         AARCH64Opcode mov_opcode = AARCH64_OP(mov);
         if (TypeIsFloatingPoint(arg_node->type)) {
@@ -3523,6 +3510,11 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     call =
         Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
+    if (TypeIsFloatingPoint(node->type)) {
+      // The value comes back in the floating-point return register (d0), not
+      // x0; tell the register allocator so the result isn't read from x0.
+      call->flags |= AARCH64_INST_FP_RETURN;
+    }
 
     // Increment the stack pointer again to remove pushed args.
     if (total_stack_size > 0) {
@@ -3584,64 +3576,145 @@ static TargetInstruction* LowerComputedBranch(AARCH64Generator* g, IRNode* node)
 // address of the last function argument (ignored in RISC-V).  This
 // simply stores the value of the frame pointer in the address passed
 // in the first input.
-static TargetInstruction* LowerBuiltinVaStart(AARCH64Generator* g, IRNode* node) {
-  TargetInstruction* s0 = Emit(g, NewInstruction(AARCH64_OP(fp)));
-  TargetInstruction* addr;
+// AAPCS64 va_list field byte offsets (see __builtin_va_list in compiler.c).
+#define AARCH64_VA_STACK 0     // void*  next stack argument
+#define AARCH64_VA_GR_TOP 8    // void*  one past the GP register save area
+#define AARCH64_VA_VR_TOP 16   // void*  one past the VR register save area
+#define AARCH64_VA_GR_OFFS 24  // int    negative offset from __gr_top
+#define AARCH64_VA_VR_OFFS 28  // int    negative offset from __vr_top
+
+// Return a single register holding the address of the va_list structure
+// referenced by addr_node (which is &ap or *ap).  Field accesses then use small
+// in-range immediate offsets 0..28 relative to it.
+static TargetInstruction* VaListAddress(AARCH64Generator* g, IRNode* addr_node) {
+  TargetInstruction* base;
   TargetInstruction* offset;
   TargetInstruction* scale;
-  bool on_stack = GetRegAndOffset(g, node->inputs.value.p[0], &addr, &offset, &scale);
-  if (!on_stack) {
-    TargetInstruction* mv = Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), s0), 0));
-    mv->dest = addr;
-    return SetLoweredNode(node, addr);
-  }
-  return SetLoweredNode(node,
-                        Emit(g, CopyInstructionSize(NewInstruction3(AARCH64_OP(str), s0, addr, offset), 0)));
+  GetRegAndOffset(g, addr_node, &base, &offset, &scale);
+  int off = (offset != NULL && TargetIsConst(offset)) ? AARCH64IntValue(offset) : 0;
+  return (off == 0) ? base : AddImmediate(g, base, off);
 }
 
-// The first input is &ap.  The 'ap' variable contains the address of the
-// current argument (starts at s0).  The code is:
-// ld t0, 0(ap)  // Address of current arg->base.
-// ld a0, 0(t1)      // Load current arg->base.
-// addi t0, t0, 8    // Next arg
-// sd t0, 0(a0)      // Update
+static TargetInstruction* VaLoad(AARCH64Generator* g, TargetInstruction* ap,
+                                 int field, int size) {
+  return Emit(g, SetInstructionSize(
+                     NewInstruction2(AARCH64_OP(ldr), ap,
+                                     GetIntConstant(g, NULL, kTargetType32Bit, field)),
+                     size));
+}
 
+static void VaStore(AARCH64Generator* g, TargetInstruction* value,
+                    TargetInstruction* ap, int field, int size) {
+  Emit(g, SetInstructionSize(
+              NewInstruction3(AARCH64_OP(str), value, ap,
+                              GetIntConstant(g, NULL, kTargetType32Bit, field)),
+              size));
+}
+
+// va_start initialises the AAPCS64 va_list.  The prologue (see
+// aarch64_emitter.c) lowered x29 so the GP and VR register save areas sit
+// immediately above it; the caller's on-stack overflow arguments sit above
+// those plus the saved x29/x30 pair (16 bytes).
+static TargetInstruction* LowerBuiltinVaStart(AARCH64Generator* g, IRNode* node) {
+  TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
+
+  int gp_size = (AARCH64_NUM_INT_ARGS - g->num_int_arg_regs) * 8;
+  if (gp_size < 0) gp_size = 0;
+  int vr_size = (AARCH64_NUM_FP_ARGS - g->num_fp_arg_regs) * 16;
+  if (vr_size < 0) vr_size = 0;
+
+  TargetInstruction* x29 =
+      Emit(g, SetInstructionSize(NewInstruction(AARCH64_OP(fp)), kSize64Bit));
+
+  // __stack = x29 + 16 + gp_size + vr_size  (start of the overflow area).
+  VaStore(g, AddImmediate(g, x29, 16 + gp_size + vr_size), ap, AARCH64_VA_STACK,
+          kSize64Bit);
+  // __gr_top = x29 + gp_size  (one past the GP save area).
+  VaStore(g, AddImmediate(g, x29, gp_size), ap, AARCH64_VA_GR_TOP, kSize64Bit);
+  // __vr_top = x29 + gp_size + vr_size  (one past the VR save area).
+  VaStore(g, AddImmediate(g, x29, gp_size + vr_size), ap, AARCH64_VA_VR_TOP,
+          kSize64Bit);
+  // __gr_offs = -gp_size, __vr_offs = -vr_size (negative until exhausted).
+  VaStore(g,
+          MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, -gp_size),
+                        kSize32Bit),
+          ap, AARCH64_VA_GR_OFFS, kSize32Bit);
+  VaStore(g,
+          MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, -vr_size),
+                        kSize32Bit),
+          ap, AARCH64_VA_VR_OFFS, kSize32Bit);
+  return SetLoweredNode(node, x29);
+}
+
+// va_arg implements the AAPCS64 algorithm branchlessly with csel:
+//   reg_offs = ap->__{gr,vr}_offs
+//   addr     = (reg_offs >= 0) ? ap->__stack : ap->__{gr,vr}_top + reg_offs
+//   ap->__{gr,vr}_offs += step  (8 for GP, 16 for VR)
+//   ap->__stack        += (reg_offs >= 0) ? 8 : 0
+//   result   = *addr
 static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
-  TargetInstruction* ap_addr;
-  TargetInstruction* ap_offset;
-  TargetInstruction* ap_scale;
-  bool on_stack =
-      GetRegAndOffset(g, node->inputs.value.p[0], &ap_addr, &ap_offset, &ap_scale);
-  AARCH64Opcode load_op =
-      TypeIsFloatingPoint(node->type) ? AARCH64_OP(fldr) : AARCH64_OP(ldr);
-  TargetInstruction* result;
-  if (!on_stack) {
-    // The va_list lives in a register (ap_addr).  Read the current argument
-    // first, then advance the register; reading must precede the update.
-    TargetInstruction* ap_load = ap_addr;
-    result = Emit(g, NewInstruction2(load_op, ap_load,
-                                     GetIntConstant(g, NULL, kTargetType32Bit, 0)));
-    TargetInstruction* addi =
-        Emit(g, NewInstruction2(AARCH64_OP(add), ap_load,
-                                GetIntConstant(g, NULL, kTargetType32Bit, 8)));
-    TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov), addi));
-    mv->dest = ap_load;
-  } else {
-    // The va_list lives in memory at [ap_addr + ap_offset].  Load it into a
-    // register, write back the advanced pointer *before* loading the result.
-    // Doing the writeback first keeps ap_addr live across the minimum span and
-    // lets the result register safely reuse ap_addr's register afterwards;
-    // otherwise the result load can clobber ap_addr and the writeback stores
-    // through the wrong pointer.
-    TargetInstruction* ap_load =
-        Emit(g, NewInstruction2(AARCH64_OP(ldr), ap_addr, ap_offset));
-    TargetInstruction* addi =
-        Emit(g, NewInstruction2(AARCH64_OP(add), ap_load,
-                                GetIntConstant(g, NULL, kTargetType32Bit, 8)));
-    Emit(g, NewInstruction3(AARCH64_OP(str), addi, ap_addr, ap_offset));
-    result = Emit(g, NewInstruction2(load_op, ap_load,
-                                     GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+  TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
+  bool is_fp = TypeIsFloatingPoint(node->type);
+  int top_field = is_fp ? AARCH64_VA_VR_TOP : AARCH64_VA_GR_TOP;
+  int offs_field = is_fp ? AARCH64_VA_VR_OFFS : AARCH64_VA_GR_OFFS;
+  int step = is_fp ? 16 : 8;  // VR slots are 16 bytes, GP slots 8.
+
+  TargetInstruction* reg_offs = VaLoad(g, ap, offs_field, kSize32Bit);
+  TargetInstruction* reg_top = VaLoad(g, ap, top_field, kSize64Bit);
+  TargetInstruction* reg_offs64 = Emit(
+      g, SetInstructionSize(NewInstruction1(AARCH64_OP(sxtw), reg_offs), kSize64Bit));
+  TargetInstruction* reg_addr = Emit(
+      g, SetInstructionSize(NewInstruction2(AARCH64_OP(add), reg_top, reg_offs64),
+                            kSize64Bit));
+  TargetInstruction* stack = VaLoad(g, ap, AARCH64_VA_STACK, kSize64Bit);
+
+  // Use the on-stack overflow area once the register save area is exhausted
+  // (reg_offs has counted up to >= 0).
+  Emit(g, SetInstructionSize(
+              NewInstruction2(AARCH64_OP(cmp), reg_offs,
+                              GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+              kSize32Bit));
+  TargetInstruction* addr = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(AARCH64_OP(csel), stack, reg_addr,
+                             Condition(g, AARCH64_OP(ge), kSize64Bit)),
+             kSize64Bit));
+
+  // Advance the register offset (harmless if we used the stack: it only grows
+  // further past zero) and the stack pointer (only when the stack was used).
+  VaStore(g, AddImmediate(g, reg_offs, step), ap, offs_field, kSize32Bit);
+  TargetInstruction* new_stack = AddImmediate(g, stack, 8);
+  TargetInstruction* final_stack = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(AARCH64_OP(csel), new_stack, stack,
+                             Condition(g, AARCH64_OP(ge), kSize64Bit)),
+             kSize64Bit));
+  VaStore(g, final_stack, ap, AARCH64_VA_STACK, kSize64Bit);
+
+  if (TypeIsStructOrUnion(node->type)) {
+    // Aggregates are referenced by address.  A struct/union that fits in a
+    // single 8-byte general slot is passed by value, so the save-area slot
+    // *is* the struct: its address is the slot address.  A larger aggregate is
+    // passed by reference, so the slot holds a pointer to the caller's copy;
+    // load that pointer and use it as the address.
+    if (node->type->size <= 8) {
+      return SetLoweredNode(node, addr);
+    }
+    TargetInstruction* ptr = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(AARCH64_OP(ldr), addr,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+               kSize64Bit));
+    return SetLoweredNode(node, ptr);
   }
+
+  AARCH64Opcode load_op = is_fp ? AARCH64_OP(fldr) : AARCH64_OP(ldr);
+  int load_size = (node->type->size > 4) ? kSize64Bit : kSize32Bit;
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(load_op, addr,
+                             GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             load_size));
   return SetLoweredNode(node, result);
 }
 
@@ -3651,7 +3724,13 @@ static TargetInstruction* LowerBuiltinVaEnd(AARCH64Generator* g, IRNode* node) {
 }
 
 static TargetInstruction* LowerBuiltinVaCopy(AARCH64Generator* g, IRNode* node) {
-  return NULL;  // TODO
+  // Copy the 32-byte va_list structure from src (input 1) to dst (input 0).
+  TargetInstruction* dst = VaListAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* src = VaListAddress(g, node->inputs.value.p[1]);
+  for (int o = 0; o < 32; o += 8) {
+    VaStore(g, VaLoad(g, src, o, kSize64Bit), dst, o, kSize64Bit);
+  }
+  return NULL;
 }
 
 static TargetInstruction* LowerLocation(AARCH64Generator* g, IRNode* node) {
@@ -4213,6 +4292,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
               (int)location.location.offset, AARCH64_FP_REG, offset, true);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
+          g->num_fp_arg_regs++;  // Named fp argument passed in a register.
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else {
           // Passed on the stack: lives at [x29, #16 + pushed_offset].
@@ -4230,25 +4310,48 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
-        // Less than a pointer, passed in reg
-        if (UseRegisterForVariable(g, entry->pooled)) {
-          // TODO: if this is a leaf procedure we can keep them in the arg regs.
-          int reg = g->num_int_reg_vars++;
-          entry->pooled->data.ivalue = AARCH64_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
-          ArgLocation location = ArgumentLocation(entry, args);
-          LoadIntArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
+        // A struct/union that fits in a single register is passed by value in
+        // an integer argument register (or on the stack).  Because field
+        // accesses need the struct's address, it must live in a stack slot
+        // rather than a register variable: home the incoming argument register
+        // into a frame slot exactly like a pointer-sized integer argument so
+        // the prologue spills it and &param / a.field address that slot.
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          int offset = -24 - (int)g->saved_regs.length * 8;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, AARCH64_FP_REG, offset, false);
+          entry->pooled->data.ivalue = offset;
+          VectorAppend(&g->saved_regs, saved);
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else {
-          AlignOffset(entry, var_offset);
-          entry->pooled->data.ivalue = *var_offset;
-          SetDebugStackLocation(entry, *var_offset);
-          *var_offset += size;
+          // The struct was passed on the stack by the caller; it lives just
+          // above the saved frame-pointer/link-register pair.
+          g->not_leaf = true;
+          entry->pooled->data.ivalue = 16 + (int)location.location.offset;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {
-        // Passed by reference.  This means it is pushed onto the stack
-        // and the address of the copy is passed in an argument register
-        // or on the stack.
-        // TODO:
+        // Passed by reference: the caller copied the struct to its stack and
+        // passed a pointer in an argument register or on the stack.  Locate
+        // that pointer exactly like a pointer-sized integer argument; the
+        // pointer *is* the address of the parameter (so &param and field
+        // accesses dereference it - see GetRegAndOffset).
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          // Save the pointer-holding argument register into a frame slot.
+          int offset = -24 - (int)g->saved_regs.length * 8;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, AARCH64_FP_REG, offset, false);
+          entry->pooled->data.ivalue = offset;
+          VectorAppend(&g->saved_regs, saved);
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // The pointer was passed on the stack at [x29, #16 + pushed_offset].
+          g->not_leaf = true;
+          entry->pooled->data.ivalue = 16 + (int)location.location.offset;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        }
       }
     } else {
       // Not an argument.

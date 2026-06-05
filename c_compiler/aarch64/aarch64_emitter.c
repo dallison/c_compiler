@@ -228,6 +228,29 @@ static bool IsPrintable(TargetInstruction* inst) {
 // The only potentially large area is the space for
 // local variables.  The rest are small and bounded.
 
+// Size of the variadic register save area reserved immediately above the
+// frame pointer for a variadic function.  This follows AAPCS64: the unnamed
+// general-purpose argument registers (x_named..x7) form the GP save area and
+// the unnamed SIMD/FP registers (d_named..d7) form the VR save area, with each
+// VR slot occupying 16 bytes.  va_start records pointers/offsets into these two
+// regions (plus the on-stack overflow area) in the va_list structure.
+static int VarargsGpSaveSize(AARCH64Emitter* emitter) {
+  int n = AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs;
+  return n > 0 ? n * 8 : 0;
+}
+
+static int VarargsVrSaveSize(AARCH64Emitter* emitter) {
+  int n = AARCH64_NUM_FP_ARGS - emitter->g->num_fp_arg_regs;
+  return n > 0 ? n * 16 : 0;
+}
+
+static int VarargsSaveAreaSize(AARCH64Emitter* emitter) {
+  if (!emitter->g->base.varargs) {
+    return 0;
+  }
+  return VarargsGpSaveSize(emitter) + VarargsVrSaveSize(emitter);
+}
+
 // This is the size of the stack frame including the space
 // for the local variables.
 static int StackFrameSize(AARCH64Emitter* emitter) {
@@ -235,16 +258,9 @@ static int StackFrameSize(AARCH64Emitter* emitter) {
   // 16 bytes for the saved x29 and x30.
   int stack_frame_size = emitter->g->base.stack_frame_size + 16;
 
-  bool varargs = emitter->g->base.varargs;
-
-  if (varargs) {
-    if (emitter->g->num_int_arg_regs < AARCH64_NUM_INT_ARGS) {
-      // All args other than those declared and in registers must
-      // be saved to the stack above the frame pointer and directly
-      // under the first pushed arg->base.  This adds to the stack frame size.
-      stack_frame_size += (AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8;
-    }
-  }
+  // Reserve the AAPCS64 variadic register save area (GP + VR) above the frame
+  // pointer for a variadic function.
+  stack_frame_size += VarargsSaveAreaSize(emitter);
   // A non-leaf procedure saves register variables on the stack as these
   // will be in saved registers.
   // if (!is_leaf) {
@@ -335,12 +351,7 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
-  int space_above_frame_pointer =
-      varargs ? (AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8 : 0;
-
-  if (space_above_frame_pointer < 0) {
-    space_above_frame_pointer = 0;
-  }
+  int space_above_frame_pointer = VarargsSaveAreaSize(emitter);
   if (is_leaf) {
     fprintf(fp, "\t// Leaf procedure, no stack frame generated\n");
   }
@@ -435,19 +446,29 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
     DecrementStackPointer(emitter, stack_frame_size, fp);
 
     if (varargs && space_above_frame_pointer > 0) {
-      // va_start sets the va_list to the frame pointer (x29) and va_arg walks
-      // *upward* from there, so the variadic argument registers must live
-      // immediately above x29 in ascending order.  StackFrameSize() already
-      // reserved space_above_frame_pointer bytes for them, so lower x29 to
-      // expose that region (the saved x29/x30 record stays at the top of the
-      // frame and is restored from sp in the epilogue, independent of x29).
-      fprintf(fp, "\t// varargs function with %d declared args\n",
-              emitter->g->num_int_arg_regs);
+      // AAPCS64 variadic register save area.  StackFrameSize() reserved
+      // space_above_frame_pointer bytes immediately above the frame pointer for
+      // it, so lower x29 to expose that region (the saved x29/x30 record stays
+      // at the top of the frame and is restored from sp in the epilogue,
+      // independent of x29).  Layout, low to high address from the lowered x29:
+      //   [x29 .. x29+gp_size)            GP save area: x_named..x7
+      //   [x29+gp_size .. x29+gp+vr_size) VR save area: d_named..d7 (16B slots)
+      // va_start records __gr_top, __vr_top, their negative offsets and the
+      // on-stack overflow pointer (__stack = x29 + 16 + space_above) so that
+      // va_arg can walk the three regions independently.
+      int gp_size = VarargsGpSaveSize(emitter);
+      fprintf(fp, "\t// varargs function: %d named int / %d named fp args\n",
+              emitter->g->num_int_arg_regs, emitter->g->num_fp_arg_regs);
       fprintf(fp, "\tsub x29, x29, #%d\n", space_above_frame_pointer);
       int offset = 0;
       for (int i = emitter->g->num_int_arg_regs; i < AARCH64_NUM_INT_ARGS; i++) {
         fprintf(fp, "\tstr x%d, [x29, #%d]\n", i, offset);
         offset += 8;
+      }
+      offset = gp_size;
+      for (int i = emitter->g->num_fp_arg_regs; i < AARCH64_NUM_FP_ARGS; i++) {
+        fprintf(fp, "\tfstr d%d, [x29, #%d]\n", i, offset);
+        offset += 16;
       }
     }
   }
@@ -541,13 +562,6 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
-  bool varargs = emitter->g->base.varargs;
-  int space_above_frame_pointer =
-      varargs ? (AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8 : 0;
-
-  if (space_above_frame_pointer < 0) {
-    space_above_frame_pointer = 0;
-  }
 
   // A leaf procedure doesn't save the return address.
   if (!is_leaf) {
@@ -997,6 +1011,20 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
               GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
               AARCH64OpcodeName(inst->operand[0]->opcode));
       break;
+
+    case AARCH64_OP(csel): {
+      // csel Rd, Rn, Rm, cond  ->  Rd = cond ? Rn : Rm
+      assert(inst->operand[0] != NULL);
+      assert(inst->operand[1] != NULL);
+      assert(inst->operand[2] != NULL);
+      char buf3[8];
+      fprintf(fp, "%s, %s, %s, %s\n",
+              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], reg_size, buf2, sizeof(buf2)),
+              GetRegisterName(inst->operand[1], reg_size, buf3, sizeof(buf3)),
+              AARCH64OpcodeName(inst->operand[2]->opcode));
+      break;
+    }
       
     case AARCH64_OP(blr):
       assert(inst->operand[0] != NULL);
@@ -1004,6 +1032,31 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
               GetRegisterName(inst->operand[0], kSize64Bit, buf1,
                              sizeof(buf1)));
       break;
+
+    // Floating-point conversions move between registers whose widths may
+    // differ from each other: e.g. scvtf converts a 32-bit integer (w) into a
+    // single (s) or double (d), and fcvtsd widens a single (s) to a double
+    // (d).  A single instruction-wide "size" cannot describe both, so print the
+    // destination at the instruction's own size and the source at its
+    // producer's size.
+    case AARCH64_OP(scvtf):
+    case AARCH64_OP(ucvtf):
+    case AARCH64_OP(fcvtns):
+    case AARCH64_OP(fcvtnu):
+    case AARCH64_OP(fcvtsd):
+    case AARCH64_OP(fcvtds):
+    case AARCH64_OP(fcvt): {
+      assert(inst->reg != NULL);
+      assert(inst->operand[0] != NULL);
+      int src_size = GetRegisterSize(inst->operand[0]);
+      if (src_size == 0) {
+        src_size = kSize64Bit;
+      }
+      fprintf(fp, "%s, %s\n",
+              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], src_size, buf2, sizeof(buf2)));
+      break;
+    }
 
     case AARCH64_OP(mov):
     case AARCH64_OP(movz):

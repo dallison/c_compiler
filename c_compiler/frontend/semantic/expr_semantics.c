@@ -554,6 +554,25 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   return simplified_init;
 }
 
+// Convert the right operand of an arithmetic compound assignment (+=, -=, *=,
+// /=).  In general `a OP= b` is `a = (typeof a)((T)a OP (T)b)` where T is the
+// usual-arithmetic-conversion type of a and b.  When the left operand is a
+// (single-precision) float and the right is a wider floating type, the
+// arithmetic must be done in double precision and only narrowed to float on
+// the store; otherwise (e.g. `a += 56.78`) the double literal would be rounded
+// to float first, losing precision.  In that case the right operand is left in
+// double and code generation performs the widening/narrowing.  All other cases
+// keep the historical behaviour of converting the right operand to the left
+// type.
+static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
+  if (TypeIsFloat(node->left->type) &&
+      (TypeIsDouble(node->right->type) || TypeIsLongDouble(node->right->type))) {
+    NormalConversion(node->right, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
+    return;
+  }
+  NormalConversion(node->right, node->left->type);
+}
+
 static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
@@ -586,13 +605,13 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
         scale->parent = (ASTNode*)node;
         ASTNodeSetType(scale, node->left->type);
       } else {
-        NormalConversion(node->right, node->left->type);
+        ConvertCompoundAssignmentOperand(node);
       }
       ASTNodeSetType((ASTNode*)node, node->left->type);
       break;
     case AST_OP(multeq):
     case AST_OP(diveq):
-      NormalConversion(node->right, node->left->type);
+      ConvertCompoundAssignmentOperand(node);
       ASTNodeSetType((ASTNode*)node, node->left->type);
       break;
     case AST_OP(percenteq):
@@ -941,6 +960,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (TypeIsStructOrUnion(actual->type) || TypeIsArray(actual->type) ||
           TypeIsFunction(actual->type)) {
         actual->flags |= kASTNeedAddress;
+      }
+    }
+  }
+
+  // Default argument promotions apply to the variadic part of a call (the
+  // arguments matched by "...") and to every argument of an unprototyped
+  // function.  In particular a 'float' actual is promoted to 'double'; without
+  // this a single-precision value would be passed where the callee (e.g.
+  // printf's %f) expects a double.
+  {
+    bool unknown = subtype->info.function.unknown_args;
+    bool varargs = subtype->info.function.varargs;
+    if (unknown || varargs) {
+      size_t start = unknown ? 0 : num_formal_args;
+      for (size_t i = start; i < num_actual_args; i++) {
+        ASTNode* actual = (ASTNode*)node->children->value.p[i];
+        if (TypeIsFloat(actual->type)) {
+          NormalConversion(actual, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
+        }
       }
     }
   }

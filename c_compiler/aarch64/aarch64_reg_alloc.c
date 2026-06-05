@@ -736,7 +736,11 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
 
     case AARCH64_OP(bl):
     case AARCH64_OP(blr):
-      reg = &allocator->int_regs[AARCH64_INT_RETURN_REG];
+      if ((inst->flags & AARCH64_INST_FP_RETURN) != 0) {
+        reg = &allocator->float_regs[AARCH64_FLOAT_RETURN_REG];
+      } else {
+        reg = &allocator->int_regs[AARCH64_INT_RETURN_REG];
+      }
       break;
 #if 0
     case AARCH64_OP(callf):
@@ -938,7 +942,16 @@ static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type
       return buf;
 
     case kAARCH64RegTypeFloat:
-      snprintf(buf, len, "d%d", num);
+      // Honor the requested operand width: a 32-bit (single precision) value
+      // must use the "s" register so that, in particular, stores write 4 bytes
+      // (fstr s<n>) rather than 8 (fstr d<n>), which would clobber the adjacent
+      // stack slot, and arithmetic rounds at single precision.  An unspecified
+      // size (0) keeps the 64-bit "d" name.
+      if (size == kSize32Bit) {
+        snprintf(buf, len, "s%d", num);
+      } else {
+        snprintf(buf, len, "d%d", num);
+      }
       return buf;
   }
   

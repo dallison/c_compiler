@@ -321,6 +321,12 @@ typedef enum {
 #define AARCH64_PCREL_LO_RELOC 0x8000
 #define AARCH64_EXPORTED_LABEL 0x10000
 
+// Marks a call (bl/blr) whose value is returned in the floating-point return
+// register (d0) rather than the integer return register (x0).  Set when the
+// callee's return type is floating point so the register allocator binds the
+// call result to d0.  Uses a bit above the instruction-size field (bits 16-17).
+#define AARCH64_INST_FP_RETURN 0x40000
+
 typedef struct {
   int reg_num;
   int base_reg_num;

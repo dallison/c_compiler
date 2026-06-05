@@ -98,21 +98,57 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
   
   Lex* lex = syntax->lex;
   int64_t value = lex->number;
+
+  // The type of an integer constant is the first type from a candidate list
+  // (C11 6.4.4.1) that can represent its value.  Decimal constants only
+  // consider signed types when there is no 'u' suffix; hexadecimal and octal
+  // constants may also pick an unsigned type.  Capture the radix and suffix
+  // flags before advancing the lexer, which overwrites them.
+  const char* spelling = lex->spelling.value;
+  bool octal_or_hex = spelling != NULL && spelling[0] == '0' &&
+                      (spelling[1] == 'x' || spelling[1] == 'X' ||
+                       (spelling[1] >= '0' && spelling[1] <= '7'));
+  bool has_u = StringContainsChar(&lex->suffix, 'U');
+  bool has_ll = StringContainsString(&lex->suffix, "LL");
+  bool has_l = !has_ll && StringContainsChar(&lex->suffix, 'L');
   LexNextToken(lex);
-  Type type_specifier = kTypeInt;
-  
-  // Look at the suffix to determine type.  The suffix is a string set by the
-  // lexical analyzer.  It contains the letters U and L.  LL means long long.
-  if (StringContainsChar(&lex->suffix, 'U')) {
-    type_specifier |= kTypeUnsigned;
+
+  uint64_t uval = (uint64_t)value;
+  // Whether an unsigned candidate may be selected when there is no 'u' suffix.
+  bool allow_unsigned = octal_or_hex;
+
+  // Candidate integer ranks, in increasing width.  The bit widths are taken
+  // from the active target (e.g. int is 16 bits on the 6502 but 32 bits
+  // elsewhere) so that a literal is given the narrowest standard type that can
+  // actually represent it on that target.
+  Type rank_spec[3] = { kTypeInt, kTypeLong, kTypeLongLong };
+  int rank_bits[3] = { SizeofType(kTypeInt) * 8,
+                       SizeofType(kTypeLong) * 8,
+                       SizeofType(kTypeLongLong) * 8 };
+
+  // An explicit L/LL suffix sets a minimum rank.  A 'u' suffix forbids signed
+  // candidates; hex/octal constants (or a 'u' suffix) permit unsigned ones.
+  int min_rank = has_ll ? 2 : (has_l ? 1 : 0);
+  bool try_signed = !has_u;
+  bool try_unsigned = has_u || allow_unsigned;
+
+  Type type_specifier = kTypeLongLong | kTypeUnsigned;
+  for (int r = min_rank; r < 3; r++) {
+    int bits = rank_bits[r];
+    uint64_t smax = (bits >= 64) ? 0x7fffffffffffffffULL
+                                 : ((1ULL << (bits - 1)) - 1);
+    uint64_t umax = (bits >= 64) ? 0xffffffffffffffffULL
+                                 : ((1ULL << bits) - 1);
+    if (try_signed && uval <= smax) {
+      type_specifier = rank_spec[r];
+      break;
+    }
+    if (try_unsigned && uval <= umax) {
+      type_specifier = rank_spec[r] | kTypeUnsigned;
+      break;
+    }
   }
-  if (StringContainsString(&lex->suffix, "LL")) {
-    type_specifier &= ~kTypeInt;
-    type_specifier |= kTypeLongLong;
-  } else if (StringContainsChar(&lex->suffix, 'L')) {
-    type_specifier &= ~kTypeInt;
-    type_specifier |= kTypeLong;
-  }
+
   TypeRecord* type = NewTypeRecordWithSize(type_specifier, kQualPlain);
   return NewIntConstantASTNode(value, type,
                                syntax->lex->current_token_location);

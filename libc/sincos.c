@@ -23,11 +23,6 @@ q2 = 0.9463096101538208180571257e4,
 q3 = 0.1326534908786136358911494e3;
 
 
-#ifndef __6502__
-#define sin Sin
-#define cos Cos
-#endif
-
 static double __sin(double x, int quad) {
   if (x < 0) {
     x = -x;

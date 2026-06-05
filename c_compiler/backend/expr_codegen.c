@@ -86,16 +86,20 @@ static struct {
 
 // Given an AST node and an operation (might not be the same as node->op),
 // return an IR opcode based on the AST operation and node type.
-static IROpcode FindIROpcode(ASTNode* node, ASTOpcode op) {
+static IROpcode FindIROpcodeForType(TypeRecord* type, ASTOpcode op) {
   for (size_t i = 0; expr_operators[i].node_op != AST_OP(bad); i++) {
     if (expr_operators[i].node_op == op) {
-      if (expr_operators[i].type_func(node->type)) {
+      if (expr_operators[i].type_func(type)) {
         return expr_operators[i].ir_op;
       }
     }
   }
   assert(false);
   return IR_OP(nop);
+}
+
+static IROpcode FindIROpcode(ASTNode* node, ASTOpcode op) {
+  return FindIROpcodeForType(node->type, op);
 }
 
 static bool IsCommutative(ASTOpcode op) {
@@ -1040,9 +1044,17 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     }
   }
 
-  // Load the value.
+  // The result is stored back to the left operand using its own type, but the
+  // arithmetic may need to be performed in a wider type (e.g. `float += double`
+  // computes in double then narrows to float - see ConvertCompoundAssignmentOperand).
+  TypeRecord* store_type = node->base.type;       // == node->left->type
+  TypeRecord* op_type = node->right->type;          // common arithmetic type
+  bool widen = !TypeEqual(store_type, op_type) &&
+               TypeIsFloatingPoint(store_type) && TypeIsFloatingPoint(op_type);
+
+  // Load the value (always at the left operand's storage type).
   IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-  IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), node->base.type);
+  IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), store_type);
 
   // If we are operating on a variable we have a reference to it.
   CheckForVarUse(load, node->left);
@@ -1052,11 +1064,21 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
   }
 
-  // Get the ALU operation to perform.
-  IROpcode ir_op = FindIROpcode((ASTNode*)node, alu_op);
+  if (widen) {
+    // Promote the loaded float to the wider operation type before operating.
+    load = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(f2d), load)), op_type);
+  }
+
+  // Get the ALU operation to perform (in the operation type).
+  IROpcode ir_op = FindIROpcodeForType(op_type, alu_op);
 
   // Operate on the value.
-  value = IRSetType(GeneratorEmit(gen, NewIR2(ir_op, load, value)), node->base.type);
+  value = IRSetType(GeneratorEmit(gen, NewIR2(ir_op, load, value)), op_type);
+
+  if (widen) {
+    // Narrow the result back to the stored (float) type.
+    value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(d2f), value)), store_type);
+  }
 
   // Bitfield? Mask in the value.
   if (IsBitfieldReference(node->left)) {

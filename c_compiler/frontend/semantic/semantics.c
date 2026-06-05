@@ -258,9 +258,36 @@ void SemanticTypeConversionWarning(ASTNode* from, TypeRecord* to,
   StringDestruct(&to_string);
 }
 
-static ASTNode* SignExtendIntConstant(ConstantASTNode* c, int bits) {
-  c->value.ivalue <<= 64 - bits;
-  c->value.ivalue >>= 64 - bits;
+// Fold an integer-to-integer constant conversion to type `to`.  The stored
+// 64-bit value is reduced to the destination width (a no-op when widening) and
+// then re-extended: sign-extended for a signed destination, zero-extended for
+// an unsigned one.  Consulting the destination signedness (rather than always
+// sign-extending) is required so that, e.g., converting an unsigned int such as
+// 0xabcd0000 to (unsigned) long long zero-extends to 0xabcd0000 instead of
+// becoming 0xffffffffabcd0000.
+static ASTNode* ConvertIntConstantToType(ConstantASTNode* c, TypeRecord* to) {
+  // Normalize the source value to a full 64-bit representation according to the
+  // source type's width and signedness (char/short constants are stored in
+  // their raw low bits, not pre-extended).
+  int src_bits = (int)c->base.type->size * 8;
+  uint64_t v = (uint64_t)c->value.ivalue;
+  if (src_bits > 0 && src_bits < 64) {
+    uint64_t smask = (1ULL << src_bits) - 1ULL;
+    v &= smask;
+    if (!TypeIsUnsigned(c->base.type) && (v & (1ULL << (src_bits - 1))) != 0) {
+      v |= ~smask;
+    }
+  }
+  // Reduce to the destination width and re-extend per destination signedness.
+  int dst_bits = (int)to->size * 8;
+  if (dst_bits > 0 && dst_bits < 64) {
+    uint64_t dmask = (1ULL << dst_bits) - 1ULL;
+    v &= dmask;
+    if (!TypeIsUnsigned(to) && (v & (1ULL << (dst_bits - 1))) != 0) {
+      v |= ~dmask;
+    }
+  }
+  c->value.ivalue = (int64_t)v;
   return (ASTNode*)c;
 }
 
@@ -295,12 +322,10 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
         default:
           break;
         case AST_OP(i2s):
-          return SignExtendIntConstant(c, 16);
         case AST_OP(i2c):
-          return SignExtendIntConstant(c, 8);
         case AST_OP(i2l):
         case AST_OP(i2ll):
-          return SignExtendIntConstant(c, 32);
+          return ConvertIntConstantToType(c, to);
         case AST_OP(i2f):
         case AST_OP(i2d):
         case AST_OP(i2ld):
@@ -313,36 +338,30 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
           c->value.ivalue = c->value.ivalue != 0;
           return from;
         case AST_OP(c2i):
-          return SignExtendIntConstant(c, 8);
         case AST_OP(c2s):
-          return SignExtendIntConstant(c, 8);
         case AST_OP(c2l):
         case AST_OP(c2ll):
-          return SignExtendIntConstant(c, 8);
+          return ConvertIntConstantToType(c, to);
         case AST_OP(c2f):
         case AST_OP(c2d):
         case AST_OP(c2ld):
           return ConvertIntToDouble(c, 8);
         case AST_OP(s2i):
-          return SignExtendIntConstant(c, 16);
         case AST_OP(s2c):
-          return SignExtendIntConstant(c, 16);
         case AST_OP(s2l):
         case AST_OP(s2ll):
-          return SignExtendIntConstant(c, 16);
+          return ConvertIntConstantToType(c, to);
         case AST_OP(s2f):
         case AST_OP(s2d):
         case AST_OP(s2ld):
           return ConvertIntToDouble(c, 16);
         case AST_OP(l2i):
         case AST_OP(ll2i):
-          return SignExtendIntConstant(c, 32);
         case AST_OP(l2c):
         case AST_OP(ll2c):
-          return SignExtendIntConstant(c, 8);
         case AST_OP(l2s):
         case AST_OP(ll2s):
-          return SignExtendIntConstant(c, 16);
+          return ConvertIntConstantToType(c, to);
         case AST_OP(ll2l):
         case AST_OP(l2ll):
           return from;

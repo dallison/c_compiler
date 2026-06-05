@@ -772,6 +772,21 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
         " void* __reg_save_area;"
         " } __builtin_va_list;\n";
   }
+  if (compiler->target != NULL &&
+      StringEqual(&compiler->target->name, "aarch64")) {
+    // The AArch64 PCS (AAPCS64) va_list.  __stack points at the next
+    // stack-passed argument, __gr_top/__vr_top point one past the general /
+    // SIMD register save areas, and __gr_offs/__vr_offs are negative byte
+    // offsets from those tops to the next unconsumed register argument.
+    va_list_typedef =
+        "typedef struct __va_list_tag {"
+        " void* __stack;"
+        " void* __gr_top;"
+        " void* __vr_top;"
+        " int __gr_offs;"
+        " int __vr_offs;"
+        " } __builtin_va_list;\n";
+  }
   String* code = NewString(va_list_typedef);
   StringAppend(code,
       "#define __asm asm\n"
