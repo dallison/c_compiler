@@ -651,7 +651,7 @@ leave_reload:
   ADC __sp+1
   STA __sp+1
   RTS
-'
+
 __leave_leaf_void:
   LDX #0
 

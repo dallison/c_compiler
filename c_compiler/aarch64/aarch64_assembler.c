@@ -457,7 +457,7 @@ typedef struct {
   OpType type;
   union {
     Register reg;
-    int32_t i;
+    int64_t i;
     double f;
   };
   Shift shift;
@@ -626,7 +626,7 @@ static Operand GetOperand(AARCH64Assembler* assembler) {
       LexNextToken(&ASM.lex);
       break;
     case kIntImmediate:
-      op.i = (int)AssemblerEvaluateExpression(&ASM);
+      op.i = AssemblerEvaluateExpression(&ASM);
       if (negative_immed) {
         op.i = -op.i;
       }
@@ -728,6 +728,19 @@ static COMPILER_UNUSED bool AssemblerFunction(AARCH64Assembler* assembler, Strin
 static void AssembleAddSubImmediate(AARCH64Assembler* assembler,
                                     Register* rd, Register* rn,
                                     int immed, int sf, int op, int s) {
+  // The add/sub immediate field is an unsigned 12-bit value.  A negative
+  // immediate (common when computing the address of a stack local at a
+  // negative frame-pointer offset, e.g. "add x0, x29, #-384") must be encoded
+  // as the opposite operation with the negated immediate (here "sub x0, x29,
+  // #384").  This also applies to the flag-setting forms: "cmp Rn, #-k"
+  // (subs) becomes "cmn Rn, #k" (adds).  The flags are *identical* between the
+  // two forms - subs uses AddWithCarry(Rn, NOT(-k), 1) = AddWithCarry(Rn,
+  // k-1, 1) and adds uses AddWithCarry(Rn, k, 0); both yield the same
+  // unsigned and signed sums, so N/Z/C/V all match - so flipping is safe.
+  if (immed < 0) {
+    immed = -immed;
+    op ^= 1;  // ADD <-> SUB (bit 30 of the encoding).
+  }
   CheckImmediateWidth(assembler, immed, 12);
   AssemblerEmitWord(
       &ASM, ASM.current_section,
@@ -761,6 +774,23 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
   if (one_operand) {
     rd = ZeroReg(rn.width);
   } else if (!CheckRegWidths(assembler, &rd, &rn)) {
+    return;
+  }
+  // Handle ":lo12:symbol" operand used to materialize the low 12 bits of a
+  // symbol address (paired with a preceding adrp).  Emits an ADD #0 with an
+  // R_AARCH64_ADD_ABS_LO12_NC relocation that the linker patches.
+  if (LexLookingAt(&ASM.lex, TOK(colon))) {
+    LexNextToken(&ASM.lex);          // consume first ':'
+    LexNextToken(&ASM.lex);          // consume 'lo12' identifier
+    LexMatch(&ASM.lex, TOK(colon));  // consume second ':'
+    AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+    int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
+    AssemblerRelocation* reloc =
+        NewAssemblerRelocation(sym, R_AARCH64_ADD_ABS_LO12_NC,
+                               ASM.current_section, instruction_offset, 0);
+    AssemblerAddRelocation(&ASM, reloc);
+    AssembleAddSubImmediate(assembler, &rd, &rn, 0, rd.width == kX, opcode, s);
     return;
   }
   Operand src2 = GetOperand(assembler);
@@ -840,14 +870,86 @@ static void AssembleAddSubWithCarry(AARCH64Assembler* assembler, int op, int s) 
                     (rm.num << 16) | (rn.num << 5) | (rd.num));
 }
 
+// A value of the form 0...01...1 (a run of ones at the low end).
+static bool AARCH64IsMask64(uint64_t v) {
+  return v != 0 && ((v + 1) & v) == 0;
+}
+
+// A value of the form 0...01...10...0 (a single contiguous run of ones).
+static bool AARCH64IsShiftedMask64(uint64_t v) {
+  return v != 0 && AARCH64IsMask64((v - 1) | v);
+}
+
+// Encode a logical (bitmask) immediate VALUE into the 13-bit N:immr:imms field
+// used by AND/ORR/EOR/ANDS immediate forms.  Returns false when the value is
+// not a representable bitmask immediate (e.g. zero or all-ones).  Follows the
+// standard AArch64 reference algorithm (cf. LLVM
+// AArch64_AM::processLogicalImmediate).
+static bool AARCH64EncodeLogicalImmediate(uint64_t imm, int sf,
+                                          unsigned* encoding) {
+  unsigned reg_size = sf ? 64 : 32;
+  if (reg_size != 64) {
+    if ((imm >> reg_size) != 0 && imm != (uint64_t)(int64_t)(int32_t)imm) {
+      // High bits set on a 32-bit operand that aren't a sign extension: not a
+      // valid 32-bit pattern.
+      return false;
+    }
+    imm &= 0xffffffffULL;
+  }
+  uint64_t all_ones = reg_size == 64 ? ~0ULL : 0xffffffffULL;
+  if (imm == 0 || imm == all_ones) {
+    return false;
+  }
+
+  // Determine the element size of the repeating pattern.
+  unsigned size = reg_size;
+  do {
+    size /= 2;
+    uint64_t mask = (1ULL << size) - 1;
+    if ((imm & mask) != ((imm >> size) & mask)) {
+      size *= 2;
+      break;
+    }
+  } while (size > 2);
+
+  uint64_t mask = (~0ULL) >> (64 - size);
+  imm &= mask;
+
+  unsigned i;
+  unsigned cto;
+  if (AARCH64IsShiftedMask64(imm)) {
+    i = (unsigned)__builtin_ctzll(imm);
+    cto = (unsigned)__builtin_ctzll(~(imm >> i));
+  } else {
+    imm |= ~mask;
+    if (!AARCH64IsShiftedMask64(~imm)) {
+      return false;
+    }
+    unsigned clo = (unsigned)__builtin_clzll(~imm);
+    i = 64 - clo;
+    cto = clo + (unsigned)__builtin_ctzll(imm) - (64 - size);
+  }
+
+  unsigned immr = (size - i) & (size - 1);
+  unsigned nimms = (~(size - 1)) << 1;
+  nimms |= (cto - 1);
+  unsigned n = ((nimms >> 6) & 1) ^ 1;
+  *encoding = ((n & 1) << 12) | (immr << 6) | (nimms & 0x3f);
+  return true;
+}
+
 static void AssembleLogicalImmediate(AARCH64Assembler* assembler,
                                     Register* rd, Register* rn,
-                                    int immed, int sf, int opc) {
-  CheckImmediateWidth(assembler, immed, 13);
+                                    int64_t immed, int sf, int opc) {
+  unsigned encoding;
+  if (!AARCH64EncodeLogicalImmediate((uint64_t)immed, sf, &encoding)) {
+    AssemblerError(&ASM, "Invalid logical immediate");
+    return;
+  }
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (sf << 31) | (opc << 29) | (0x24 << 23) |
-                    (immed << 10 | (rn->num << 5) | (rd->num)));
+                    (encoding << 10 | (rn->num << 5) | (rd->num)));
 }
 
 
@@ -975,7 +1077,23 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   } else {
     addr = AssemblerEvaluateKnownExpression(&ASM, &known);
   }
-  int32_t offset = (int32_t)(addr - instruction_offset);
+  // For adrp (op == 1) the immediate is a *page* delta computed from final
+  // load addresses, not a section-relative byte offset.  Resolving it at
+  // assembly time using section-relative offsets (the ADR-style math below)
+  // produces a wrong page number.  Always defer adrp to the linker, which has
+  // the final addresses, when it targets a symbol.
+  if (op == 1 && sym != NULL) {
+    known = false;
+  }
+  // For a symbol target the encoded value is the PC-relative displacement
+  // (symbol_address - this_instruction_address).  A bare numeric operand, by
+  // contrast, is already a PC-relative byte displacement: the computed-branch
+  // table jump emits `adr t1, 12` to mean "pc + 12" (the start of the jump
+  // table 12 bytes ahead).  Applying the symbol-style `addr - pc` math to such
+  // a constant would treat it as an absolute section offset and produce a
+  // wildly wrong displacement, so use the constant directly.
+  int32_t offset =
+      (sym != NULL) ? (int32_t)(addr - instruction_offset) : (int32_t)addr;
   int32_t immlo = (offset & 0x3);
   int32_t immhi = (offset >> 2) & 0x7ffff;
   if (!known) {
@@ -1255,7 +1373,7 @@ static void AssembleBitFieldMove(AARCH64Assembler* assembler, int opc,
   AssemblerEmitWord(
       &ASM, ASM.current_section,
                     (sf << 31) | (opc << 29) | (0x26 << 23) | (n << 22) |
-                    (immr << 16) | (imms << 10) |
+                    ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) |
                     (rn->num << 5) | (rd->num));
 }
 
@@ -1297,7 +1415,10 @@ static void Assemble_lsl(AARCH64Assembler* assembler) {
   // Page C6-1678
   // immr is -shift % (32 or 64)
   // imms is (31 or 63) - shift
-  int immr = (int)(-shift % (max_shift + 1));
+  // Use a positive modulo: C's truncated % yields a negative value for a
+  // positive shift, which only happens to encode correctly for the 64-bit
+  // width once masked to 6 bits.
+  int immr = (int)((max_shift + 1 - shift) % (max_shift + 1));
   int imms = (int)(max_shift - shift);
   AssembleBitFieldMove(assembler, 2, &rd, &rn, is_64bit, is_64bit, immr, imms);
 }
@@ -2133,7 +2254,7 @@ static void AssembleLoadStoreImmediate(AARCH64Assembler* assembler, Register* rt
                     (fp << 26) |
                     (opc << 22) |
                     (v << 26) |
-                    (imm9 << 12) |
+                    ((imm9 & 0x1ff) << 12) |
                     (addr_mode << 10) |
                     (rn->num << 5) |
                     (rt->num));

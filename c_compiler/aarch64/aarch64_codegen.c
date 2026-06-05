@@ -354,15 +354,17 @@ bool AARCH64IsLoad(TargetInstruction* inst) {
 }
 
 bool AARCH64IsSignedLoad(TargetInstruction* inst) {
+  // Only the sign-extending loads leave a sign-extended value in the
+  // destination register.  Plain ldr/ldur/ldrb/ldrh zero-extend (writing a
+  // w-register clears the upper 32 bits), so a value loaded by them still needs
+  // an explicit sign-extension when widened.
   switch ((AARCH64Opcode)inst->opcode) {
-    case AARCH64_OP(ldp):
     case AARCH64_OP(ldpsw):
-    case AARCH64_OP(ldr):
-    case AARCH64_OP(ldur):
-    case AARCH64_OP(ldrb):
-    case AARCH64_OP(ldrh):
     case AARCH64_OP(ldrsb):
     case AARCH64_OP(ldrsh):
+    case AARCH64_OP(ldursb):
+    case AARCH64_OP(ldursh):
+    case AARCH64_OP(ldursw):
       return true;
     default:
       return false;
@@ -481,6 +483,7 @@ bool AARCH64IsFixedRegister(TargetInstruction* inst) {
     case AARCH64_OP(lr):
     case AARCH64_OP(xr):
     case AARCH64_OP(zr):
+    case AARCH64_OP(r9):
 
       // Calls always return in z0 (or fa0?).
     case AARCH64_OP(bl):
@@ -555,6 +558,57 @@ bool AARCH64IsPossibleImmediate(int64_t value) {
   return value < 2048;
 }
 
+// True when `offset` can be used directly as the immediate of a load/store.
+// The unscaled forms the codegen emits for frame access (ldur/stur and the
+// byte/half variants) take a *signed 9-bit* byte offset, i.e. -256..255.  This
+// is much narrower than AARCH64IsPossibleImmediate (which models the 12-bit
+// add/sub immediate), so it must NOT be used to decide whether a memory access
+// offset is encodable: an offset such as -320 fits the 12-bit add range but is
+// silently truncated to 9 bits by the assembler (-320 & 0x1ff == +192),
+// redirecting the access into the caller's frame.  Anything outside this window
+// must have its effective address materialized into a register first.
+static bool AARCH64LoadStoreImmInRange(int32_t offset) {
+  return offset >= -256 && offset <= 255;
+}
+
+// True when `value` can be represented as an AArch64 logical (bitmask)
+// immediate for an operation of the given width.  Only such values may be used
+// with the AND/ORR/EOR immediate forms; anything else must be materialized in a
+// register.  This mirrors AARCH64EncodeLogicalImmediate in the assembler.
+static bool AARCH64IsMaskRun(uint64_t v) {
+  return v != 0 && ((v + 1) & v) == 0;
+}
+static bool AARCH64IsShiftedMaskRun(uint64_t v) {
+  return v != 0 && AARCH64IsMaskRun((v - 1) | v);
+}
+bool AARCH64IsLogicalImmediate(int64_t value, bool is64) {
+  uint64_t imm = (uint64_t)value;
+  unsigned reg_size = is64 ? 64 : 32;
+  if (reg_size != 64) {
+    imm &= 0xffffffffULL;
+  }
+  uint64_t all_ones = reg_size == 64 ? ~0ULL : 0xffffffffULL;
+  if (imm == 0 || imm == all_ones) {
+    return false;
+  }
+  unsigned size = reg_size;
+  do {
+    size /= 2;
+    uint64_t mask = (1ULL << size) - 1;
+    if ((imm & mask) != ((imm >> size) & mask)) {
+      size *= 2;
+      break;
+    }
+  } while (size > 2);
+  uint64_t mask = (~0ULL) >> (64 - size);
+  imm &= mask;
+  if (AARCH64IsShiftedMaskRun(imm)) {
+    return true;
+  }
+  imm |= ~mask;
+  return AARCH64IsShiftedMaskRun(~imm);
+}
+
 // The size of the data an instruction operates on is 32 or 64 bits.
 int GetRegisterSize(TargetInstruction* inst) {
   return (inst->flags >> 16) & 3;
@@ -576,17 +630,28 @@ TargetInstruction* CopyInstructionSize(TargetInstruction* inst, int op) {
 }
 
 TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* inst) {
-  if (node->inputs.length == 0) {
-    // Leaf node, set size based on node type.
+  // Size the instruction by the IR node's own result type.  Copying the size
+  // from operand 0 (the previous behaviour for non-leaf nodes) is wrong
+  // whenever the result is wider than that operand: e.g. assembling a 64-bit
+  // value by shifting a byte left by 56, or computing a pointer offset from a
+  // 32-bit index.  In those cases the operation would be emitted at the narrow
+  // operand width, dropping high bits or using an out-of-range shift amount.
+  if (node->type != NULL) {
     int size = kSize32Bit;
-    if (TypeIsLong(node->type) || TypeIsLongLong(node->type) || TypeIsPointerOrArray(node->type) ||
-        TypeIsFunction(node->type) || TypeIsDouble(node->type)) {
+    // Struct/union-typed nodes denote an aggregate, which in this ABI is
+    // referenced by address; size them as 64-bit pointers (e.g. forming
+    // &local to copy a struct argument by value).
+    if (TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
+        TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
+        TypeIsDouble(node->type) || TypeIsStructOrUnion(node->type)) {
       size = kSize64Bit;
     }
     SetInstructionSize(inst, size);
-  } else {
-    // Propagate the instruction size from the first operand.
+  } else if (node->inputs.length > 0) {
+    // No result type to consult; fall back to the first operand's width.
     CopyInstructionSize(inst, 0);
+  } else {
+    SetInstructionSize(inst, kSize32Bit);
   }
   return inst;
 }
@@ -862,6 +927,26 @@ static TargetInstruction* FloatingPointArgumentRegister(AARCH64Generator* g,
   return g->fp_argument_registers[argnum];
 }
 
+// Outgoing call arguments must use a *fresh* argument-register pseudo for each
+// call rather than the cached one returned by Int/FloatingPointArgumentRegister.
+// The cached pseudos persist across basic blocks, but the register allocator
+// resets each physical register's owner at every block boundary.  When a cached
+// pseudo already has a physical register assigned, the destination-allocation
+// path skips re-allocation and never re-establishes ownership, so inside a loop
+// body the argument register looks free and a temporary (e.g. a pointer
+// post-increment's reload) steals it, clobbering an argument that was already
+// set up.  A fresh pseudo per call has its ownership and use-count tracked
+// correctly within the block where the call lives.
+static TargetInstruction* FreshIntArgumentRegister(AARCH64Generator* g,
+                                                   int argnum) {
+  return EmitSymbol(g, NewInstruction(AARCH64_OP(r0) + argnum));
+}
+
+static TargetInstruction* FreshFpArgumentRegister(AARCH64Generator* g,
+                                                  int argnum) {
+  return EmitSymbol(g, NewInstruction(AARCH64_OP(d0) + argnum));
+}
+
 static TargetInstruction* IntVariableRegister(AARCH64Generator* g, int varnum, Symbol* sym) {
   for (size_t i = 0; i < g->var_regs.length; i++) {
     RegisterVariable* var = g->var_regs.value.p[i];
@@ -931,6 +1016,22 @@ static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
   return to;
 }
 
+static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node);
+
+// If the IR node writes its result into a destination tmp (the "-> $n"
+// annotation, used to merge the results of && / || / ?: into one location),
+// return the lowered instruction for that destination so the caller can route
+// the result there.  Returns NULL when there is no destination.
+static TargetInstruction* GetDestInstruction(AARCH64Generator* g, IRNode* node) {
+  if (node->dest == NULL) {
+    return NULL;
+  }
+  if (node->dest->data.ptr == NULL) {
+    LowerExpression(g, node->dest);
+  }
+  return GetLoweredNode(node->dest);
+}
+
 static TargetInstruction* SetDestOrMoveToArgReg(AARCH64Generator* g,
                                                 IRNode* from_node,
                                                 TargetInstruction* from,
@@ -946,8 +1047,26 @@ static TargetInstruction* SetDestOrMoveToArgReg(AARCH64Generator* g,
       break;
     }
   }
-  if (candidate) {
+  // Only redirect the producer's destination straight into the argument
+  // register when the producer is the most recently emitted instruction.
+  // Arguments are moved into their registers in reverse order, so a preceding
+  // argument's value (e.g. a call result still living in x0) may already have
+  // been moved out by an instruction emitted *after* this producer.  Giving an
+  // older producer an argument register as its destination would place that
+  // (clobbering) write before the move that consumes the register's previous
+  // value; emit an explicit move at the current position instead.
+  if (candidate && TargetNext(from) == NULL) {
     return SetDestOrMove(g, from, to, rmov_opcode);
+  }
+  if (rmov_opcode == AARCH64_OP(fmov)) {
+    // fmov has no register-move (rmov) form in the emitter, so the two-operand
+    // encoding would be mis-assembled (it picks up only the first two
+    // registers, reversing the move).  Emit it as a destination-move into the
+    // argument register, copying its size from the source value.
+    TargetInstruction* move =
+        Emit(g, CopyInstructionSize(NewInstruction1(rmov_opcode, from), 0));
+    move->dest = to;
+    return to;
   }
   Emit(g, NewInstruction2(rmov_opcode, to, from));
   return to;
@@ -1023,28 +1142,28 @@ static TargetInstruction* OffsetFrom(AARCH64Generator* g, TargetInstruction* src
 
 static TargetInstruction* LoadImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
                                           TargetInstruction* base, int32_t offset) {
-  if (AARCH64IsPossibleImmediate(offset)) {
+  if (AARCH64LoadStoreImmInRange(offset)) {
     return Emit(g, NewInstruction2(opcode, base,
                                     GetIntConstant(g, NULL, kTargetType32Bit, offset)));
   }
-  int32_t page_offset;
-  TargetInstruction* page_inst = PagedOffsetFrom(g, base, offset, &page_offset);
-  return Emit(g, NewInstruction2(opcode, page_inst,
-                                  GetIntConstant(g, NULL, kTargetType32Bit, page_offset)));
-
+  // The offset does not fit the load's 9-bit immediate; fold it into the base
+  // address and load at offset 0.
+  TargetInstruction* addr = OffsetFrom(g, base, offset);
+  return Emit(g, NewInstruction2(opcode, addr,
+                                  GetIntConstant(g, NULL, kTargetType32Bit, 0)));
 }
 
 static TargetInstruction* StoreImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
                                          TargetInstruction* value, TargetInstruction* base, int32_t offset) {
-  if (AARCH64IsPossibleImmediate(offset)) {
+  if (AARCH64LoadStoreImmInRange(offset)) {
     return Emit(g, NewInstruction3(opcode, value, base,
                                     GetIntConstant(g, NULL, kTargetType32Bit, offset)));
   }
-  int32_t page_offset;
-  TargetInstruction* page_inst = PagedOffsetFrom(g, base, offset, &page_offset);
-  return Emit(g, NewInstruction3(opcode, value, page_inst,
-                                  GetIntConstant(g, NULL, kTargetType32Bit, page_offset)));
-
+  // The offset does not fit the store's 9-bit immediate; fold it into the base
+  // address and store at offset 0.
+  TargetInstruction* addr = OffsetFrom(g, base, offset);
+  return Emit(g, NewInstruction3(opcode, value, addr,
+                                  GetIntConstant(g, NULL, kTargetType32Bit, 0)));
 }
 
 static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_addr,
@@ -1130,7 +1249,14 @@ static TargetInstruction* Memzero(AARCH64Generator* g, TargetInstruction* dest_a
       g, NewInstruction1(AARCH64_OP(mov), ZeroReg(g)));
   arg1->dest = IntArgumentRegister(g, 1);
 
-  // First arg is the address.
+  // First arg is the address.  The short (inline-store) path above threads the
+  // variable's frame offset into each store; the memset path must likewise add
+  // the offset to the base address, otherwise memset clears memory at the bare
+  // frame pointer instead of at the variable (corrupting the saved frame
+  // record / caller's frame).
+  if (offset != 0) {
+    dest_addr = OffsetFrom(g, dest_addr, offset);
+  }
   TargetInstruction* arg0 = SetDestOrMove(g, dest_addr, IntArgumentRegister(g, 0), AARCH64_OP(mov));
 
   // We need to keep the arguments alive until the point of the call.  This
@@ -1261,12 +1387,21 @@ static bool UseRegisterForVariable(AARCH64Generator* g, IRNode* var_node) {
 // is done using a la or lla pseudo-instruction.
 static TargetInstruction* LoadStaticVariableAddress(AARCH64Generator* g,
                                                     IRNode* node) {
-  IRVariable* var = (IRVariable*)node;
-  // A local variable is loaded usng the lla instruction and globals
-  // are loaded using la.  The difference is in PIC code lla will
-  // not use the GOT for the relocation.
-  AARCH64Opcode opcode = var->symbol->flags.is_local ? AARCH64_OP(adr) : AARCH64_OP(adr);
-  return Emit(g, NewInstruction1(opcode, GetLoweredNode(node)));
+  (void)node;
+  // The address of a static/global symbol is materialized with an adrp/add
+  // pair.  The linker places the code and data segments far apart (well beyond
+  // adr's +/-1MB range), so a single PC-relative adr cannot reach data symbols.
+  // adrp computes the 4KB page (R_AARCH64_ADR_PREL_PG_HI21, +/-4GB range) and
+  // the add fills in the low 12 bits (R_AARCH64_ADD_ABS_LO12_NC).
+  TargetInstruction* sym = GetLoweredNode(node);
+  TargetInstruction* page =
+      Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), sym),
+                                 kSize64Bit));
+  TargetInstruction* addr =
+      Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(add), page, sym),
+                                 kSize64Bit));
+  addr->flags |= AARCH64_LO_RELOC;
+  return addr;
 }
 
 static struct {
@@ -1336,14 +1471,19 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
         // The constant's fvalue field is always in double precision.
         double dvalue = ((IRConstant*)node)->value.fvalue;
 
-        // Convert to single precision.
+        // Round to single precision, then re-widen to double: the backend keeps
+        // float values in registers in double-precision form (64-bit FP ops),
+        // so the materialized register must hold the single-rounded value as a
+        // double bit pattern.  Materialising the raw 32-bit single pattern into
+        // a 64-bit register would be interpreted as a (near-zero) double.
         float fvalue = (float)dvalue;
-        int32_t bits = *(int32_t*)(&fvalue);
+        double promoted = (double)fvalue;
+        int64_t bits = *(int64_t*)(&promoted);
         TargetInstruction* c;
         if (bits == 0) {
           c = ZeroReg(g);
         } else {
-          c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, bits), kSize32Bit);
+          c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType64Bit, bits), kSize64Bit);
         }
         return Emit(g, NewInstruction1(AARCH64_OP(fcvt), c));
       }
@@ -1413,8 +1553,54 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
   return GetLoweredNode(node);
 }
 
+// True when Materialize1 returns the *address* of a memory-resident object
+// rather than a value held in a register.  Such an address is always a 64-bit
+// pointer, so its width must not be reduced to the (possibly narrower) object
+// type by CopyOrSetInstructionSize.
+static bool MaterializesToAddress(IRNode* node) {
+  if (IRIsStaticVariable(node)) {
+    return true;
+  }
+  if (IRIsAutoVariable(node) || IRIsArgument(node)) {
+    if (TypeIsVLA(node->type)) {
+      return true;
+    }
+    int32_t var_offset = node->data.ivalue;
+    return !AARCH64_IS_REG_VAR(var_offset);
+  }
+  return false;
+}
+
 static TargetInstruction* Materialize(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* inst = Materialize1(g, node);
+  if (MaterializesToAddress(node)) {
+    // The instruction already carries the correct 64-bit pointer width.
+    return inst;
+  }
+  if (node->opcode == IR_OP(signextendi)) {
+    // LowerSignExtend has already sized its result (sxtw / shift pair) to the
+    // width required by the operation, which for a narrowing sign-extend is the
+    // *source* width rather than the node's narrower result type.  Resizing it
+    // here would emit an out-of-range shift (e.g. asr w, w, #32).
+    return inst;
+  }
+  if (node->opcode == IR_OP(cast)) {
+    // A cast lowers to the (already correctly sized) instruction of its input;
+    // it shares that instruction, so resizing it here to the cast's own type
+    // would corrupt the producer (e.g. shrinking a 64-bit shift used by an
+    // enclosing widening sign-extend down to a 32-bit, out-of-range shift).
+    return inst;
+  }
+  if (IRIsLoadOnly(node)) {
+    // A load instruction is already sized correctly by LowerLoad according to
+    // the loaded type (e.g. load32 -> 32-bit, load64/loada -> 64-bit).  Running
+    // CopyOrSetInstructionSize here would instead copy the size of the load's
+    // address operand (always a 64-bit pointer), widening a narrow load to 64
+    // bits.  That makes the load read 8 bytes from a 4-byte object, so when the
+    // value is then used as an address offset (e.g. mul-by-1 index scaling for
+    // a char array) the garbage high bits corrupt the computed address.
+    return inst;
+  }
   return CopyOrSetInstructionSize(node, inst);
 }
 
@@ -1529,6 +1715,31 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   if (node->data.ptr != NULL) {
     return node->data.ptr;
   }
+
+  // Logical NOT (!x).  This is distinct from one's-complement (~x): the result
+  // is 1 when the operand is zero and 0 otherwise.  Materialize it as
+  // "cmp x, #0 ; cset rd, eq" rather than the bitwise mvn used by onescomp.
+  if (node->opcode == IR_OP(noti) || node->opcode == IR_OP(nota)) {
+    IRNode* op = node->inputs.value.p[0];
+    int compare_size = (op->type->size > 4) ? kSize64Bit : kSize32Bit;
+    int result_size = (node->type->size > 4) ? kSize64Bit : kSize32Bit;
+    Emit(g, SetInstructionSize(
+                NewInstruction2(AARCH64_OP(cmp), Materialize(g, op),
+                                GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                compare_size));
+    TargetInstruction* result = SetInstructionSize(
+        NewInstruction1(AARCH64_OP(cset),
+                        Condition(g, AARCH64_OP(eq), result_size)),
+        result_size);
+    result->flags |= kAARCH64ComparisonGenerated;
+    Emit(g, result);
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+    }
+    return SetLoweredNode(node, result);
+  }
+
   AARCH64Opcode opcode = IR2RV(node->opcode, TypeIsUnsigned(node->type));
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
@@ -1723,7 +1934,8 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
-        if (opcode == AARCH64_OP(umod) && IsPowerOf2(c)) {
+        if (opcode == AARCH64_OP(umod) && IsPowerOf2(c) &&
+            AARCH64IsLogicalImmediate(c - 1, node->type->size > 4)) {
           int64_t mask = c - 1;
           inst =
                  NewInstruction2(AARCH64_OP(and), Materialize(g, op1),
@@ -1747,7 +1959,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
         if (c == 0) {
           // Anding with zero is zero.
           inst = ZeroReg(g);
-        } else if (AARCH64IsPossibleImmediate(c)) {
+        } else if (AARCH64IsLogicalImmediate(c, node->type->size > 4)) {
           inst = (TargetInstruction*)NewInstruction(AARCH64_OP(and));
           inst->operand[0] = Materialize(g, op1);
           inst->operand[1] = GetLoweredNode(op2);
@@ -1765,7 +1977,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
         if (c == 0) {
           // ORing with zero is nop.
           inst = GetLoweredNode(op1);
-        } else if (AARCH64IsPossibleImmediate(c)) {
+        } else if (AARCH64IsLogicalImmediate(c, node->type->size > 4)) {
           inst = (TargetInstruction*)NewInstruction(AARCH64_OP(orr));
           inst->operand[0] = Materialize(g, op1);
           inst->operand[1] = GetLoweredNode(op2);
@@ -1786,6 +1998,14 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   CopyOrSetInstructionSize(node, inst);
   if (!ref_counts_ok) {
     TargetUpdateOperandUsers(inst);
+  }
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL && inst != NULL) {
+    AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+                                   ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
+                                                           : AARCH64_OP(fmv_s))
+                                   : AARCH64_OP(mov);
+    inst = SetDestOrMove(g, inst, dest, mov_opcode);
   }
   SetLoweredNode(node, inst);
   return Emit(g, inst);
@@ -1887,7 +2107,15 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
   if (result != NULL) {
     result->flags |= kAARCH64ComparisonGenerated;
   }
-  return Emit(g, SetLoweredNode(node, result));
+  Emit(g, result);
+  // If the comparison result is consumed via a destination tmp (e.g. it is an
+  // operand of a && / || / ?: that is materialized into a value), route the
+  // cset there so the merged result lands in the destination's register.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL && result != NULL) {
+    result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+  }
+  return SetLoweredNode(node, result);
 }
 
 static void GetAddressAndOffsetFrom(AARCH64Generator* g,
@@ -1895,15 +2123,16 @@ static void GetAddressAndOffsetFrom(AARCH64Generator* g,
                                  int offset,
                                  TargetInstruction** addr_inst,
                                  TargetInstruction** offset_inst) {
-  if (AARCH64IsPossibleImmediate(offset)) {
+  if (AARCH64LoadStoreImmInRange(offset)) {
     *addr_inst = addr;
     *offset_inst = GetIntConstant(g, NULL, kTargetType32Bit, offset);
     return;
   }
-  int page_offset;
-  TargetInstruction* page_inst = PagedOffsetFrom(g, addr, offset, &page_offset);
-  *addr_inst = page_inst;
-  *offset_inst = GetIntConstant(g, NULL, kTargetType32Bit, page_offset);
+  // The offset is too large for a load/store immediate (9-bit signed for the
+  // unscaled forms used for frame access); materialize the full effective
+  // address and use a zero offset.
+  *addr_inst = OffsetFrom(g, addr, offset);
+  *offset_inst = GetIntConstant(g, NULL, kTargetType32Bit, 0);
 }
 
 static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
@@ -2045,13 +2274,23 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
       break;
     case IR_OP(loada):
       opcode = AARCH64_OP(ldr);
+      size = kSize64Bit;
       break;
     default:
       assert(false);
       COMPILER_UNREACHABLE();
   }
 
-  return SetLoweredNode(node, Load(g, addr_node, opcode, size));
+  TargetInstruction* result = Load(g, addr_node, opcode, size);
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+                                   ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
+                                                           : AARCH64_OP(fmv_s))
+                                   : AARCH64_OP(mov);
+    result = SetDestOrMove(g, result, dest, mov_opcode);
+  }
+  return SetLoweredNode(node, result);
 }
 
 static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetInstruction* src, AARCH64Opcode opcode, int size) {
@@ -2463,16 +2702,31 @@ static TargetInstruction* LowerAddressOf(AARCH64Generator* g, IRNode* node) {
 }
 
 static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
-  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
-  IRConstant* mask_node = (IRConstant*)node->inputs.value.p[1];
-  int64_t mask = mask_node->value.ivalue;
-  if (AARCH64IsPossibleImmediate(mask)) {
-    value = Emit(g, NewInstruction2(
-                         AARCH64_OP(and), value,
-                         GetIntConstant(g, NULL, kTargetType64Bit, mask)));
-  } else {
-    value = Emit(g, NewInstruction2(AARCH64_OP(and), value,
-                                     Materialize(g, node->inputs.value.p[1])));
+  IRNode* src = node->inputs.value.p[0];
+  TargetInstruction* value = Materialize(g, src);
+  // The second IR operand is the bit-difference (diff*8), not a usable mask, so
+  // derive the mask from the operand types: a zero extension keeps the low
+  // min(src,dest) bytes of value and clears the rest.  Using the constant
+  // operand directly (e.g. 24 for a char->int extension) produces a wrong mask.
+  int src_size = src->type != NULL ? src->type->size : node->type->size;
+  int keep_bytes = src_size < node->type->size ? src_size : node->type->size;
+  if (keep_bytes >= 8) {
+    // No masking required; the value already occupies the full register.
+    SetLoweredNode(node, value);
+    return value;
+  }
+  int64_t mask = (1LL << (keep_bytes * 8)) - 1;
+  int size = node->type->size > 4 ? kSize64Bit : kSize32Bit;
+  TargetType type = size == kSize64Bit ? kTargetType64Bit : kTargetType32Bit;
+  // Materialize the mask into a register and use the register form of AND.  The
+  // immediate form requires a pre-encoded bitmask field, which the constant
+  // does not carry, so we avoid it here.
+  TargetInstruction* mask_reg = movi(g, size, GetIntConstant(g, NULL, type, mask));
+  value = Emit(g, SetInstructionSize(
+                      NewInstruction2(AARCH64_OP(and), value, mask_reg), size));
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    value = SetDestOrMove(g, value, dest, AARCH64_OP(mov));
   }
   SetLoweredNode(node, value);
   return value;
@@ -2654,26 +2908,45 @@ static TargetInstruction* LowerSetBitField(AARCH64Generator* g, IRNode* node) {
 
 static TargetInstruction* LowerSignExtend(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
-  if (AARCH64IsSignedLoad(value)) {
-    return SetLoweredNode(node, value);
-  }
+  TargetInstruction* result;
+  // diff is (to_size - from_size) * 8: positive when widening, negative when
+  // narrowing, and (in either case) the magnitude is the shift amount needed to
+  // sign-extend the value held in a register.  Note that unlike RISC-V (whose
+  // word loads sign-extend), an AArch64 `ldr w` zero-extends, so a widening
+  // sign-extend must actually emit code here.
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
-  if (diff > 0) {
-    return SetLoweredNode(node, value);
+  if (AARCH64IsSignedLoad(value) || diff == 0) {
+    // Already sign-extended by the load, or no width change at all.
+    result = value;
+  } else if (diff == 32) {
+    // 32-bit value widened to 64 bits: a plain mov would zero-extend (writing a
+    // w-register clears the upper 32 bits), turning negative ints into large
+    // positives; sxtw performs the arithmetic widening.
+    result = Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(sxtw), value),
+                                        kSize64Bit));
+  } else {
+    int64_t shift = diff < 0 ? -diff : diff;
+    // The shift/extend runs in a register as wide as the *larger* of the source
+    // and destination types: widening fills the (wider) destination, narrowing
+    // shifts within the (wider) source.  shift == abs(diff) is always strictly
+    // less than that width, so it is a legal shift amount.
+    int to_bits = (node->type != NULL ? (int)node->type->size : 4) * 8;
+    int from_bits = to_bits - (int)diff;
+    int wide_bits = to_bits > from_bits ? to_bits : from_bits;
+    int size = wide_bits > 32 ? kSize64Bit : kSize32Bit;
+    TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, shift);
+    TargetInstruction* lsl = Emit(
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(lsl), value, immed), size));
+    result = Emit(
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(asr), lsl, immed), size));
   }
-  diff = -diff;
-  if (diff == 32) {
-    // There is a word signextension instruction sext.w
-    return SetLoweredNode(node,
-                          Emit(g, NewInstruction1(AARCH64_OP(mov), value)));
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
   }
-  TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
-  TargetInstruction* lsl = Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(lsl), value, immed), 0));
-  TargetInstruction* asr = Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(asr), lsl, immed), 0));
-
-  SetLoweredNode(node, asr);
-  return asr;
+  SetLoweredNode(node, result);
+  return result;
 }
 
 static TargetInstruction* LowerAlign(AARCH64Generator* g, IRNode* node) {
@@ -2707,19 +2980,27 @@ static TargetInstruction* PushArg(AARCH64Generator* g, IRNode* node,
 }
 
 static TargetInstruction* PopArg(AARCH64Generator* g, IRNode* node, size_t offset) {
+  // Incoming arguments passed on the stack live just above the saved
+  // frame-pointer/link-register pair, i.e. at [x29, #16 + offset].  We must
+  // address them relative to the frame pointer (not sp) because by the time
+  // these loads execute the prologue has already lowered sp by the frame size.
+  // Addressing through x29 requires a real stack frame, so this function can
+  // no longer be treated as a frameless leaf.
+  g->not_leaf = true;
+  int64_t fp_offset = 16 + (int64_t)offset;
   if (node->type == NULL) {
     // No type, use ldr instruction.
     return Emit(g, CopyInstructionSize(NewInstruction2(
-                        AARCH64_OP(ldr), StackPointer(g),
-                        GetIntConstant(g, NULL, kTargetType64Bit, offset)), 0));
+                        AARCH64_OP(ldr), FramePointer(g),
+                        GetIntConstant(g, NULL, kTargetType64Bit, fp_offset)), 0));
   }
   AARCH64Opcode opcode = AARCH64_OP(ldr);
   if (TypeIsFloatingPoint(node->type)) {
     opcode = AARCH64_OP(fldr);
   }
   return Emit(g, CopyInstructionSize(NewInstruction2(
-                      opcode, StackPointer(g),
-                      GetIntConstant(g, NULL, kTargetType64Bit, offset)), 0));
+                      opcode, FramePointer(g),
+                      GetIntConstant(g, NULL, kTargetType64Bit, fp_offset)), 0));
 }
 
 
@@ -2912,6 +3193,30 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
 //    stop working (TODO: check the C standard for this).
 // 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
 //    register pair.
+// Determine whether the callee is variadic and, if so, how many fixed (named)
+// parameters it declares.  The DaveCC aarch64 varargs ABI saves the integer
+// argument registers into a single contiguous area that va_arg walks 8 bytes at
+// a time.  For this to work every *variadic* argument (including floating
+// point) must travel through the integer-register / stack sequence, so a
+// floating-point variadic argument is bit-cast into an integer register rather
+// than passed in d0-d7.  Returns false (num_fixed untouched) for non-variadic
+// or unknown callees, in which case the normal ABI applies.
+static bool CalleeVariadicInfo(IRNode* call, size_t* num_fixed) {
+  IRNode* func = call->inputs.value.p[0];
+  TypeRecord* t = (func != NULL) ? func->type : NULL;
+  if (t != NULL && t->declarator == kDeclPointer) {
+    t = t->next;
+  }
+  if (t == NULL || t->declarator != kDeclFunction) {
+    return false;
+  }
+  if (!t->info.function.varargs) {
+    return false;
+  }
+  *num_fixed = t->info.function.prototype.length;
+  return true;
+}
+
 static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -2921,16 +3226,26 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   Vector arg_locations;
   VectorInit(&arg_locations);
 
+  // Work out which arguments fall in the variadic region so floating-point
+  // ones can be routed through the integer path (see CalleeVariadicInfo).
+  size_t num_fixed_args = 0;
+  bool callee_variadic = CalleeVariadicInfo(node, &num_fixed_args);
+  // Index (into node->inputs) of the first real source argument.  A hidden
+  // struct-return pointer, when present, occupies the first slot.
+  size_t first_arg_input = TypeIsStructOrUnion(node->type) ? 2 : 1;
+
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
+    bool is_variadic_arg =
+        callee_variadic && i >= first_arg_input + num_fixed_args;
     if (TypeIsStructOrUnion(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg->base.
         TargetInstruction* arg_reg =
-             IntArgumentRegister(g, next_int_arg_reg++);
+             FreshIntArgumentRegister(g, next_int_arg_reg++);
          VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
         continue;
       }
@@ -2942,7 +3257,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         if (next_int_arg_reg < AARCH64_NUM_INT_ARGS) {
           // Argument goes in an argument register.
           TargetInstruction* arg_reg =
-              IntArgumentRegister(g, next_int_arg_reg++);
+              FreshIntArgumentRegister(g, next_int_arg_reg++);
           VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
         } else {
           // Need to push argument on to the stack.  But we do that in reverse
@@ -2958,7 +3273,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         if (next_int_arg_reg < AARCH64_NUM_INT_ARGS) {
           // Argument goes in an argument register.
           TargetInstruction* arg_reg =
-              IntArgumentRegister(g, next_int_arg_reg++);
+              FreshIntArgumentRegister(g, next_int_arg_reg++);
           VectorAppend(&arg_locations, NewArgLocationReferenceInRegister(
                                            arg_reg, struct_area_size));
         } else {
@@ -2969,11 +3284,11 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeIsFloatingPoint(arg_node->type) && !is_variadic_arg) {
       if (next_fp_arg_reg < AARCH64_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
-            FloatingPointArgumentRegister(g, next_fp_arg_reg++);
+            FreshFpArgumentRegister(g, next_fp_arg_reg++);
         VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
@@ -2987,7 +3302,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       if (next_int_arg_reg < AARCH64_NUM_INT_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
-            IntArgumentRegister(g, next_int_arg_reg++);
+            FreshIntArgumentRegister(g, next_int_arg_reg++);
         VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
@@ -3030,6 +3345,47 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
   }
 
+  // Phase 3.5:
+  // For an indirect call (the target is computed into a register rather than
+  // being a link-time symbol) stage the target into its own register *before*
+  // the argument registers are set up below.  The blr below references this
+  // staged value, so the register allocator keeps it live across the argument
+  // moves and won't reuse its register for an argument (e.g. x0).  Without
+  // this, the call target and the first argument can land in the same
+  // register and the argument move clobbers the target.
+  bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
+      total_stack_size == 0 && g->base.stack_frame_size == 0;
+  TargetInstruction* staged_target = NULL;
+  if (!will_tail_call) {
+    IRNode* target_node = node->inputs.value.p[0];
+    TargetInstruction* a = GetLoweredNode(target_node);
+    if (((int)a->opcode != (int)AARCH64_OP(symbol))) {
+      // Force the target into the dedicated temp register (x9), which is not
+      // an argument register, so the argument moves below cannot clobber it.
+      // Prefer giving the target instruction itself the temp as its
+      // destination (no extra move, and no dependence on the target's old
+      // register surviving argument setup).  Only do this when every use of
+      // the target value is in this block, so we don't redirect a value that
+      // is read after the (register-clobbering) call.
+      bool single_block = true;
+      for (size_t u = 0; u < target_node->outputs.length; u++) {
+        if (((IRNode*)target_node->outputs.value.p[u])->block !=
+            target_node->block) {
+          single_block = false;
+          break;
+        }
+      }
+      if (single_block) {
+        staged_target = SetDestOrMove(g, a, Tmp(g), AARCH64_OP(mov));
+      } else {
+        TargetInstruction* mv =
+            Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), a), 0));
+        mv->dest = Tmp(g);
+        staged_target = Tmp(g);
+      }
+    }
+  }
+
   // Phase 4:
   // Pass through all args, in reverse order, pushing those not passed in
   // registers and moving the register arguments into their argument
@@ -3039,6 +3395,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
+    bool is_variadic_arg =
+        callee_variadic && i >= first_arg_input + num_fixed_args;
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
@@ -3088,13 +3446,22 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                                GetIntConstant(g, NULL, kTargetType32Bit, 0)), 0));
           }
         }
+        if (is_variadic_arg && TypeIsFloatingPoint(arg_node->type)) {
+          // A floating-point variadic argument is passed in an *integer*
+          // argument register holding the value's raw bit pattern, so it lands
+          // in the contiguous varargs save area that va_arg walks.  Emit an
+          // fmov (FP -> GP bitcast) as a destination-move into the integer
+          // argument register.  Variadic floats are promoted to double, so this
+          // is always a 64-bit move.
+          TargetInstruction* mv = Emit(
+              g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), arg),
+                                    kSize64Bit));
+          mv->dest = arg_location->location.reg;
+          break;
+        }
         AARCH64Opcode mov_opcode = AARCH64_OP(mov);
         if (TypeIsFloatingPoint(arg_node->type)) {
-          if (TypeIsDouble(arg_node->type)) {
-            mov_opcode = AARCH64_OP(fmov);
-          } else {
-            mov_opcode = AARCH64_OP(fmov);
-          }
+          mov_opcode = AARCH64_OP(fmov);
         }
         // Emit(g, NewInstruction2(mov_opcode, arg_location->location.reg, arg));
         SetDestOrMoveToArgReg(g, arg_node, arg, arg_location->location.reg, mov_opcode);
@@ -3142,7 +3509,12 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     }
     g->base.num_calls--;
   } else {
-    if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
+    TargetInstruction* call_target = addr;
+    if (staged_target != NULL) {
+      // Indirect call: target was staged into its own register above.
+      opcode = AARCH64_OP(blr);
+      call_target = staged_target;
+    } else if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);
     } else {
@@ -3150,13 +3522,25 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(blr) : AARCH64_OP(blr);
     }
     call =
-        Emit(g, NewInstruction2(opcode, addr, BuildArgList(g, &arg_locations)));
+        Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
 
     // Increment the stack pointer again to remove pushed args.
     if (total_stack_size > 0) {
       TargetInstruction* newsp =
           AddImmediate(g, StackPointer(g), total_stack_size);
       TargetSetDest(newsp, StackPointer(g));
+    }
+  }
+  // If the call result feeds a merge destination (the "-> $n" annotation used
+  // to funnel the two arms of &&/||/?: into one location), route the result
+  // there.  Without this the call's return value (in x0) is dropped and the
+  // merge slot keeps the other arm's stale value, e.g. `x || f()` yields x
+  // instead of f()'s result.  bl/blr are not expressions, so SetDestOrMove
+  // emits an explicit move rather than redirecting the call's x0 output.
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      call = SetDestOrMove(g, call, dest, AARCH64_OP(mov));
     }
   }
   SetLoweredNode(node, call);
@@ -3228,28 +3612,35 @@ static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* ap_scale;
   bool on_stack =
       GetRegAndOffset(g, node->inputs.value.p[0], &ap_addr, &ap_offset, &ap_scale);
-  TargetInstruction* ap_load;
-  if (!on_stack) {
-    ap_load = ap_addr;
-  } else {
-    ap_load = Emit(g, NewInstruction2(AARCH64_OP(ldr), ap_addr, ap_offset));
-  }
+  AARCH64Opcode load_op =
+      TypeIsFloatingPoint(node->type) ? AARCH64_OP(fldr) : AARCH64_OP(ldr);
   TargetInstruction* result;
-  if (TypeIsFloatingPoint(node->type)) {
-    result = Emit(g, NewInstruction2(AARCH64_OP(fldr), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)));
-  } else {
-    result = Emit(g, NewInstruction2(AARCH64_OP(ldr), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)));
-  }
-  TargetInstruction* addi =
-      Emit(g, NewInstruction2(AARCH64_OP(add), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 8)));
-  if (on_stack) {
-    Emit(g, NewInstruction3(AARCH64_OP(str), addi, ap_addr, ap_offset));
-  } else {
+  if (!on_stack) {
+    // The va_list lives in a register (ap_addr).  Read the current argument
+    // first, then advance the register; reading must precede the update.
+    TargetInstruction* ap_load = ap_addr;
+    result = Emit(g, NewInstruction2(load_op, ap_load,
+                                     GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+    TargetInstruction* addi =
+        Emit(g, NewInstruction2(AARCH64_OP(add), ap_load,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 8)));
     TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov), addi));
     mv->dest = ap_load;
+  } else {
+    // The va_list lives in memory at [ap_addr + ap_offset].  Load it into a
+    // register, write back the advanced pointer *before* loading the result.
+    // Doing the writeback first keeps ap_addr live across the minimum span and
+    // lets the result register safely reuse ap_addr's register afterwards;
+    // otherwise the result load can clobber ap_addr and the writeback stores
+    // through the wrong pointer.
+    TargetInstruction* ap_load =
+        Emit(g, NewInstruction2(AARCH64_OP(ldr), ap_addr, ap_offset));
+    TargetInstruction* addi =
+        Emit(g, NewInstruction2(AARCH64_OP(add), ap_load,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 8)));
+    Emit(g, NewInstruction3(AARCH64_OP(str), addi, ap_addr, ap_offset));
+    result = Emit(g, NewInstruction2(load_op, ap_load,
+                                     GetIntConstant(g, NULL, kTargetType32Bit, 0)));
   }
   return SetLoweredNode(node, result);
 }
@@ -3551,8 +3942,21 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(memcpy):
       return LowerMemcpy(g, node);
 
-    case IR_OP(cast):
-        return SetLoweredNode(node, Materialize(g, node->inputs.value.p[0]));
+    case IR_OP(cast): {
+      TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
+      // A cast just shares its input's value, but it may still carry a merge
+      // destination (the "-> $n" annotation used to funnel the arms of
+      // &&/||/?: into one location).  Without routing the value there, the
+      // merge slot keeps a stale value, e.g. `*s ? (char*)s : 0` would drop
+      // the (char*)s arm and return the wrong pointer.
+      if (node->dest != NULL) {
+        TargetInstruction* dest = GetDestInstruction(g, node);
+        if (dest != NULL) {
+          result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+        }
+      }
+      return SetLoweredNode(node, result);
+    }
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(g, node);
@@ -3639,8 +4043,12 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         1;  // For struct returns, the first arg is the address of the struct.
   }
   int fp_reg = AARCH64_FP_ARG_START;
+  // Offset (from the start of the caller-pushed argument area) of the next
+  // argument that does not fit in a register.  The caller (see the call-site
+  // lowering) allocates a uniform 8-byte slot per pushed argument, so the
+  // callee must use the same stride here or incoming stack arguments will be
+  // read from the wrong place.
   int stack_offset = 0;
-  int current_stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
@@ -3651,7 +4059,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = fp_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       } else {
         if (int_reg <= AARCH64_INT_ARG_END) {
@@ -3660,36 +4068,31 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = int_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       }
       return location;
     }
 
+    // Advance the per-type register counter (or the stack offset once the
+    // argument registers are exhausted) for each preceding argument.  This
+    // must use the *argument*-register limits (x0..x7 / d0..d7), the same
+    // bounds the per-argument decision above uses; using the wider
+    // callee-saved range here would keep incrementing the register counter
+    // past x7 and never advance stack_offset, so every stacked argument would
+    // be read from the same (first) stack slot.
     Symbol* arg_symbol = args->value.p[i];
     if (TypeIsFloatingPoint(arg_symbol->type)) {
-      if (fp_reg <= AARCH64_LAST_FP_REG_VAR) {
+      if (fp_reg <= AARCH64_FP_ARG_END) {
         fp_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        stack_offset += arg_symbol->type->size;
+        stack_offset += 8;
       }
     } else {
-      if (int_reg <= AARCH64_LAST_INT_REG_VAR) {
+      if (int_reg <= AARCH64_INT_ARG_END) {
         int_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        if (TypeIsStructOrUnion(arg_symbol->type)) {
-          // Struct and unions are passed by reference - 8 bytes.
-          stack_offset += 8;
-        } else {
-          int size = arg_symbol->type->size;
-          if (size < 8) {
-            stack_offset += 4;
-          } else {
-            stack_offset += 8;
-          }
-        }
+        stack_offset += 8;
       }
     }
   }
@@ -3727,14 +4130,21 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(AARCH64Generator* g
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(g, reg_var, sym->symbol);
       AARCH64Opcode move_op = TypeIsDouble(symbol->type) ? AARCH64_OP(fmov) : AARCH64_OP(fmov);
-      Emit(g, NewInstruction2(move_op, var,
-                FloatingPointArgumentRegister(g,
-                    (int)arg_loc.location.offset - AARCH64_FP_ARG_START)));
+      TargetInstruction* arg_reg = FloatingPointArgumentRegister(
+          g, (int)arg_loc.location.offset - AARCH64_FP_ARG_START);
+      // Reserve this incoming argument register from function entry.
+      arg_reg->flags |= TARGET_INST_INCOMING_ARG;
+      Emit(g, NewInstruction2(move_op, var, arg_reg));
       return var;
     }
     case kArgLocationPushed:
-    case kArgLocationPassedByReferenceOnStack:
-      return PopArg(g, symbol, arg_loc.location.offset);
+    case kArgLocationPassedByReferenceOnStack: {
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var = FloatingPointVariableRegister(g, reg_var, sym->symbol);
+      TargetInstruction* load = PopArg(g, symbol, arg_loc.location.offset);
+      load->dest = var;
+      return var;
+    }
   }
 }
 
@@ -3747,15 +4157,26 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* 
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = IntVariableRegister(g, reg_var, sym->symbol);
-      TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov),
-                 IntArgumentRegister(g,
-                          (int)arg_loc.location.offset - AARCH64_INT_ARG_START)));
+      TargetInstruction* arg_reg = IntArgumentRegister(
+          g, (int)arg_loc.location.offset - AARCH64_INT_ARG_START);
+      // Mark this as an incoming argument register so the allocator reserves
+      // its physical register from function entry (it is live until this copy).
+      arg_reg->flags |= TARGET_INST_INCOMING_ARG;
+      TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov), arg_reg));
       mv->dest = var;
       return var;
     }
     case kArgLocationPassedByReferenceOnStack:
-    case kArgLocationPushed:
-      return PopArg(g, symbol, arg_loc.location.offset);
+    case kArgLocationPushed: {
+      // Argument arrived on the stack but lives in a register variable.  Load
+      // it from the incoming-argument area and bind the load's result to the
+      // variable's register so it is not clobbered by later argument moves.
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var = IntVariableRegister(g, reg_var, sym->symbol);
+      TargetInstruction* load = PopArg(g, symbol, arg_loc.location.offset);
+      load->dest = var;
+      return var;
+    }
   }
 }
 
@@ -3792,6 +4213,11 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
               (int)location.location.offset, AARCH64_FP_REG, offset, true);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Passed on the stack: lives at [x29, #16 + pushed_offset].
+          g->not_leaf = true;
+          entry->pooled->data.ivalue = 16 + (int)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {
@@ -3886,6 +4312,15 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
           g->num_int_arg_regs++;  // Argument was passed in a register.
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Argument was passed on the stack by the caller.  It lives just
+          // above the saved frame-pointer/link-register pair, i.e. at
+          // [x29, #16 + pushed_offset].  Record that positive offset so it is
+          // addressed directly from the frame pointer.  This requires a real
+          // stack frame.
+          g->not_leaf = true;
+          entry->pooled->data.ivalue = 16 + (int)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {

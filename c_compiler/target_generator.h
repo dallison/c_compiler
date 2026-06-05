@@ -123,6 +123,11 @@ typedef struct TargetInstruction {
 // A table jump instruction.
 #define TARGET_INST_TABLE_JUMP 8
 
+// An incoming argument register (live from function entry until copied to its
+// home register).  The register allocator must reserve its physical register
+// at entry so temporaries do not steal it before the argument is consumed.
+#define TARGET_INST_INCOMING_ARG 16
+
 // A constant.
 typedef struct {
   TargetInstruction base;

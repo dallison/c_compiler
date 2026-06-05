@@ -80,8 +80,13 @@ static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t 
 
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   char buf[256];
+  // Pick a data directive that emits exactly pointer_size bytes.  The
+  // assembler treats .short as 2 bytes, .word as 4 bytes and .8byte as 8
+  // bytes, so a 2-byte pointer target (e.g. 6502) must use .short or the
+  // pointer would occupy 4 bytes and shift every following field.
   const char* ptr_asm =
-      compiler->pointer_size == 8 ? ".8byte" : ".word";
+      compiler->pointer_size == 8 ? ".8byte" :
+      compiler->pointer_size == 2 ? ".short" : ".word";
   const char* long_asm =
       compiler->pointer_size == 8 ? ".8byte" : ".long";
   EmitP2Align(var->alignment, fp);

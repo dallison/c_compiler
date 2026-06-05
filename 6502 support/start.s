@@ -2,6 +2,7 @@
 .text
 
 .global _start
+.global exit
 
 // Main entry point
 _start:
@@ -31,12 +32,11 @@ _start:
   // Invoke main
   JSR main
 
-  // Push exit code (in __i0) onto the runtime stack.
+  // Call exit(main_return_value).  exit() runs atexit handlers and flushes
+  // buffered stdio before performing the exit syscall, so it does not return.
   LDX #__i0
-  JSR __pushreg2
-  JSR __pushreg2      // Push fake return address.
-
-  // Invoke exit syscall with exit code on the runtime stack.
-  BRK
-  .byte sys_exit
+  JSR __pushreg2      // Push status argument onto the runtime stack.
+  LDX #__i0
+  LDY #0
+  JSR exit
 

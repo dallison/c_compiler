@@ -1099,6 +1099,13 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   if ((node->base.flags & kASTNeedAddress) != 0) {
     return addr;
   }
+  // If the indexed element is itself an aggregate (e.g. the inner subscript of
+  // a multi-dimensional array, where arr[i] has array type), it decays to its
+  // address rather than being loaded.
+  if (TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
+      TypeIsFunction(node->base.type)) {
+    return IRSetType(addr, node->base.type);
+  }
   IROpcode load_op = GetLoadOpcode((ASTNode*)node);
   IRNode* result = GeneratorEmit(gen, NewIR1(load_op, addr));
   CheckForVarUse(result, node->left);
@@ -1843,8 +1850,12 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     }
 
     case AST_OP(cast):
-      // Propagate flags down to child.
-      cast_node->expr->flags = cast_node->base.flags;
+      // Propagate flags down to child.  Use OR rather than assignment so that
+      // flags the operand already carries are preserved.  In particular an
+      // array/function/struct operand has kASTNeedAddress set during semantic
+      // analysis (it decays to its address); clobbering the operand's flags
+      // would drop that and cause a spurious load of the array contents.
+      cast_node->expr->flags |= cast_node->base.flags;
       result = GenerateExpression(gen, cast_node->expr);
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
       IRSetType(result, node->type);

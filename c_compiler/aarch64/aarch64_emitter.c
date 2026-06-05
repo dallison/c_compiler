@@ -143,6 +143,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case AARCH64_OP(r5):
     case AARCH64_OP(r6):
     case AARCH64_OP(r7):
+    case AARCH64_OP(r9):
     case AARCH64_OP(d0):
     case AARCH64_OP(d1):
     case AARCH64_OP(d2):
@@ -261,8 +262,16 @@ static int StackFrameSize(AARCH64Emitter* emitter) {
 }
 
 static bool EmptyStackFrame(AARCH64Emitter* emitter) {
+  // A frame is only truly empty when there is nothing to store on the stack:
+  // no locals, no calls (so no saved x29/x30), and no callee-saved or spilled
+  // registers.  If any registers must be saved we still need to allocate a
+  // frame; otherwise the save/restore stores would write above sp (the stack
+  // top) into unmapped memory.
   return emitter->g->base.stack_frame_size == 0 &&
-         emitter->g->base.num_calls == 0 && !emitter->g->not_leaf;
+         emitter->g->base.num_calls == 0 && !emitter->g->not_leaf &&
+         BitSetCount(&emitter->regs->used_int_regs) == 0 &&
+         BitSetCount(&emitter->regs->used_float_regs) == 0 &&
+         emitter->spill_region_size == 0;
 }
 
 static void DecrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
@@ -425,13 +434,20 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
     fprintf(fp, "add x29, sp, #16\n");
     DecrementStackPointer(emitter, stack_frame_size, fp);
 
-    if (varargs) {
-      int num_pushed_arg_regs = AARCH64_NUM_INT_ARGS - emitter->g->num_int_arg_regs;
+    if (varargs && space_above_frame_pointer > 0) {
+      // va_start sets the va_list to the frame pointer (x29) and va_arg walks
+      // *upward* from there, so the variadic argument registers must live
+      // immediately above x29 in ascending order.  StackFrameSize() already
+      // reserved space_above_frame_pointer bytes for them, so lower x29 to
+      // expose that region (the saved x29/x30 record stays at the top of the
+      // frame and is restored from sp in the epilogue, independent of x29).
       fprintf(fp, "\t// varargs function with %d declared args\n",
               emitter->g->num_int_arg_regs);
-      for (int i = AARCH64_NUM_INT_ARGS - num_pushed_arg_regs; i < AARCH64_NUM_INT_ARGS;
-           i++) {
-        fprintf(fp, "\tstr x%d, [sp, #-8]!\n", i);
+      fprintf(fp, "\tsub x29, x29, #%d\n", space_above_frame_pointer);
+      int offset = 0;
+      for (int i = emitter->g->num_int_arg_regs; i < AARCH64_NUM_INT_ARGS; i++) {
+        fprintf(fp, "\tstr x%d, [x29, #%d]\n", i, offset);
+        offset += 8;
       }
     }
   }
@@ -565,7 +581,7 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
   } else {
-    IncrementStackPointer(emitter, stack_frame_size-32, fp);
+    IncrementStackPointer(emitter, stack_frame_size, fp);
     fprintf(fp, "\tldp x29, x30, [sp, #16]\n");
     fprintf(fp, "\tadd sp, sp, #32\n");
   }
@@ -695,6 +711,8 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
   // Buffers for register name printing->base.
   char buf1[8];
   char buf2[8];
+  // Buffer for symbol name printing (large enough for mangled local names).
+  char symbuf[256];
 
   int reg_size = GetRegisterSize(inst);
   
@@ -713,9 +731,11 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     case AARCH64_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
       if (StorageIs(sym->symbol->storage, STO(static))) {
-        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.local %s\n",
+                TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       } else {
-        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.global %s\n",
+                TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       }
       return;
     }
@@ -723,7 +743,8 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     case AARCH64_OP(bl): {
       assert(((int)inst->operand[0]->opcode == (int)AARCH64_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
-      fprintf(fp, "\t%-12s%s\n", "bl", sym->symbol->name.value);
+      fprintf(fp, "\t%-12s%s\n", "bl",
+              TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       return;
     }
 
@@ -1029,10 +1050,16 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(symbol))) {
             if ((inst->flags & AARCH64_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+                      TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
+                                       symbuf, sizeof(symbuf)));
+            } else if ((inst->flags & AARCH64_LO_RELOC) != 0) {
+              fprintf(fp, "%s:lo12:%s", sep,
+                      TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
+                                       symbuf, sizeof(symbuf)));
             } else {
               fprintf(fp, "%s%s", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+                      TargetSymbolName(((TargetSymbol*)inst->operand[i])->symbol,
+                                       symbuf, sizeof(symbuf)));
             }
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];

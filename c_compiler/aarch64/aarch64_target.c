@@ -90,7 +90,11 @@ CompilerTarget* NewAARCH64Target() {
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
-  target->prepend_underscore = true;
+  // The aarch64 backend emits ELF objects whose references and function
+  // labels use unprefixed names; prefixing only the data-symbol definitions
+  // (via the common emitter) made every global/common symbol unresolvable at
+  // link time.  Match the other ELF targets (riscv/x86_64) and use no prefix.
+  target->prepend_underscore = false;
   target->plain_char_is_signed = false;
   target->flags = 0;
   target->alignment = 8;

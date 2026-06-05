@@ -18,8 +18,15 @@
 typedef struct AARCH64Interpreter {
   Loader* loader;
   uint64_t x[31];
+  // Scalar floating-point / SIMD register file.  Only the low 64 bits are
+  // modelled (enough for float/double scalars).
+  uint64_t v[32];
   uint64_t sp;
   uint64_t pc;
+  bool flag_n;
+  bool flag_z;
+  bool flag_c;
+  bool flag_v;
   char* stack;
   bool trace_instructions;
   bool trace_registers;

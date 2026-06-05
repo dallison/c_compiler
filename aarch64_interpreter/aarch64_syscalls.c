@@ -142,21 +142,21 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
       exit((int)a0);
       break;
     case AARCH64_SYSCALL_OPEN:
-      return open((const char*)(uintptr_t)a1, (int)a2, (mode_t)a3);
+      return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
     case AARCH64_SYSCALL_CLOSE:
-      return close((int)a1);
+      return close((int)a0);
     case AARCH64_SYSCALL_READ:
-      return read((int)a1, (void*)(uintptr_t)a2, (size_t)a3);
+      return read((int)a0, (void*)(uintptr_t)a1, (size_t)a2);
     case AARCH64_SYSCALL_WRITE:
-      return write((int)a1, (const void*)(uintptr_t)a2, (size_t)a3);
+      return write((int)a0, (const void*)(uintptr_t)a1, (size_t)a2);
     case AARCH64_SYSCALL_LSEEK:
-      return lseek((int)a1, (off_t)a2, (int)a3);
+      return lseek((int)a0, (off_t)a1, (int)a2);
     case AARCH64_SYSCALL_MALLOC:
-      return (int64_t)(uintptr_t)malloc((size_t)a1);
+      return (int64_t)(uintptr_t)malloc((size_t)a0);
     case AARCH64_SYSCALL_REALLOC:
-      return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)a1, (size_t)a2);
+      return (int64_t)(uintptr_t)realloc((void*)(uintptr_t)a0, (size_t)a1);
     case AARCH64_SYSCALL_FREE:
-      free((void*)(uintptr_t)a1);
+      free((void*)(uintptr_t)a0);
       return 0;
     case AARCH64_SYSCALL_ABORT:
       abort();

@@ -30,7 +30,6 @@ static ASTNode* FindEnclosingLoop(ASTNode* stmt) {
       case AST_OP(do): {
         CombinedStatementASTNode* c = (CombinedStatementASTNode*)stmt;
         return c->stmt;
-        return stmt;
       }
       default:
         break;
@@ -51,7 +50,6 @@ static ASTNode* FindEnclosingLoopOrSwitch(ASTNode* stmt) {
       case AST_OP(do): {
         CombinedStatementASTNode* c = (CombinedStatementASTNode*)stmt;
         return c->stmt;
-        return stmt;
       }
       case AST_OP(switch): {
         SwitchStatementASTNode *s = (SwitchStatementASTNode*)stmt;
@@ -752,7 +750,7 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
       if (node->c2 != NULL && !constant_condition) {
         IRNode* cond = GenerateExpression(gen, node->c2);
         // btrue cond, loop_label
-        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, loop_label));
+        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
       } else {
         // bra loop_label
         GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));

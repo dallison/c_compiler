@@ -4,6 +4,12 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "libc_headers",
+    srcs = glob(["libc/include/**/*.h"]),
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "host_aarch64",
     values = {"cpu": "darwin_arm64"},
@@ -982,14 +988,16 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target aarch64 -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "aarch64 support/syscall.s"
 )
 
 for src in "$${runtime_srcs[@]}"; do
-  obj="$$work/$$(basename "$${src%.s}").o"
+  # Prefix the object name so it can't collide with a same-named libc object
+  # (e.g. syscall.s vs the empty syscall.c).
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
 done
 

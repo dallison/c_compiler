@@ -490,7 +490,17 @@ uint64_t SegmentEndAddress(Segment* segment) {
       if (region->config_end != 0) {
         return region->config_end;
       }
-      return region->next;
+      if (region->next != 0) {
+        return region->next;
+      }
+      // The region has a base address but nothing has been allocated into it
+      // yet (e.g. an empty .data section followed by a dedicated bss region).
+      // Fall back to its computed end, or its start, so callers such as the
+      // .bss/common-symbol placement get a valid address rather than 0.
+      if (region->actual_end != 0) {
+        return region->actual_end;
+      }
+      return region->start;
     } else if (region->next != 0) {
       return region->next;
     }

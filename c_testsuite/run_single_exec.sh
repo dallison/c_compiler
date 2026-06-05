@@ -78,6 +78,13 @@ if [ -z "$SUITE_ROOT" ] && [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-
   SUITE_ROOT="${TEST_SRCDIR}/${TEST_WORKSPACE}/c_testsuite"
 fi
 
+# The libc headers (shipped via //:libc_headers) live at the workspace root,
+# not under c_testsuite/, so a relative "-isystem libc/include" cannot find
+# them once we cd into the suite directory.  Add an absolute include path.
+if [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-}" ]; then
+  COMPILE_ARGS+=("-isystem" "${TEST_SRCDIR}/${TEST_WORKSPACE}/libc/include")
+fi
+
 if [ -n "$SUITE_ROOT" ]; then
   cd "$SUITE_ROOT"
 fi

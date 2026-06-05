@@ -270,8 +270,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_ADR_PREL_PG_HI21_NC:
       break;
 
-    case R_AARCH64_ADD_ABS_LO12_NC:
-      break;
+    case R_AARCH64_ADD_ABS_LO12_NC: {
+      uint64_t value = (uint64_t)(S + A);
+      uint32_t imm12 = (uint32_t)(value & 0xfff);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~(0xfffu << 10);
+      instruction |= imm12 << 10;
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_LDST8_ABS_LO12_NC:
       break;

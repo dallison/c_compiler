@@ -298,7 +298,7 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
 void AARCH64LoaderArchitectureInit(LoaderArchitecture* arch) {
   arch->machine_type = ELF_MACHINE_TYPE_AARCH64;
   arch->platform = "aarch64";
-  arch->ignore_vaddr = true;
+  arch->ignore_vaddr = false;
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;
   arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;

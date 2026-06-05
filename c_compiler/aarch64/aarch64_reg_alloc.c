@@ -71,6 +71,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   allocator->int_regs[AARCH64_FP_REG].base.reserved = true;
   allocator->int_regs[AARCH64_LR_REG].base.reserved = true;
   allocator->int_regs[AARCH64_SPILL_ADDR].base.reserved = true;
+  allocator->int_regs[AARCH64_INT_ZERO_REG].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
@@ -110,12 +111,19 @@ static struct {
   int end;              // End of range.
   bool temp;
 } register_ranges[] = {
-  {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true},
-  {kAARCH64RegTypeInt, AARCH64_INT_TEMP_START, AARCH64_INT_TEMP_END, true},
+  // General temporaries prefer non-argument registers.  Argument registers
+  // (x0..x7 / d0..d7) are searched last so a long-lived temporary does not
+  // grab one that is about to be needed for an outgoing call's register
+  // argument (which would clobber the temporary when the argument is set up,
+  // or vice versa).  x9 is intentionally excluded from the general pool: it is
+  // the dedicated scratch used to stage indirect-call targets across argument
+  // setup.
+  {kAARCH64RegTypeInt, AARCH64_INT_TEMP_START + 1, AARCH64_INT_TEMP_END, true},
   {kAARCH64RegTypeInt, AARCH64_INT_SAVED_START, AARCH64_INT_SAVED_END, false},
+  {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true},
     {kAARCH64RegTypeFloat, AARCH64_FP_TEMP_START, AARCH64_FP_TEMP_END, true},
-    {kAARCH64RegTypeFloat, AARCH64_FP_ARG_START, AARCH64_FP_ARG_END, true},
     {kAARCH64RegTypeFloat, AARCH64_FP_SAVED_START, AARCH64_FP_SAVED_END,false},
+    {kAARCH64RegTypeFloat, AARCH64_FP_ARG_START, AARCH64_FP_ARG_END, true},
 };
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
@@ -240,6 +248,36 @@ static int SpillCost(TargetInstruction* inst) {
   return cost;
 }
 
+// Outgoing-argument and other fixed-register pseudos must never be chosen as
+// spill victims: their physical register is dictated by the ABI and is needed
+// at the imminent call.  Spilling one (e.g. because its use-count happens to be
+// the cheapest) would free the argument register for an unrelated temporary,
+// clobbering an argument that was already set up.
+static bool IsUnspillableFixedReg(TargetInstruction* inst) {
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(r0):
+    case AARCH64_OP(r1):
+    case AARCH64_OP(r2):
+    case AARCH64_OP(r3):
+    case AARCH64_OP(r4):
+    case AARCH64_OP(r5):
+    case AARCH64_OP(r6):
+    case AARCH64_OP(r7):
+    case AARCH64_OP(d0):
+    case AARCH64_OP(d1):
+    case AARCH64_OP(d2):
+    case AARCH64_OP(d3):
+    case AARCH64_OP(d4):
+    case AARCH64_OP(d5):
+    case AARCH64_OP(d6):
+    case AARCH64_OP(d7):
+    case AARCH64_OP(structreturn):
+      return true;
+    default:
+      return false;
+  }
+}
+
 static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
                                    AARCH64RegisterType type) {
   AARCH64Register* regs =
@@ -254,7 +292,8 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
           TargetInstruction* owner = regs[j].base.owner;
           if ((owner->flags & TARGET_INST_SPILLED) != 0 ||
               ((int)owner->opcode == (int)AARCH64_OP(spill)) ||
-              ((int)owner->opcode == (int)AARCH64_OP(reload))) {
+              ((int)owner->opcode == (int)AARCH64_OP(reload)) ||
+              IsUnspillableFixedReg(owner)) {
             continue;
           }
           int cost = SpillCost(owner);
@@ -271,7 +310,8 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
     for (size_t i = 0; i < NUM_REG_RANGES; i++) {
       if (register_ranges[i].type == type) {
         for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
-          if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
+          if (!regs[j].base.reserved && regs[j].base.owner != NULL &&
+              !IsUnspillableFixedReg(regs[j].base.owner)) {
             return regs[j].base.owner;
           }
         }
@@ -513,7 +553,7 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
       compiler->optimize;
 
   AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
-  
+
   TrapInstruction(inst);
 
   // If we already have a register allocated (as can be the case
@@ -560,6 +600,16 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
     }
     reg = (AARCH64Register*)inst->dest->reg;
     inst->reg = inst->dest->reg;
+    // A fixed argument-register pseudo (r0..r7 / d0..d7) is allocated once in
+    // the symbol pre-pass, but InitializeBasicBlockRegisters clears every
+    // physical register's owner at each block boundary.  Because the pseudo
+    // already has a register, the allocation above is skipped and ownership is
+    // never re-established, so inside a loop body the argument register looks
+    // free and an intervening temporary can steal it, clobbering an argument.
+    // Re-claim ownership here for the value we are routing into it.
+    if (IsUnspillableFixedReg(inst->dest) && reg->base.owner == NULL) {
+      reg->base.owner = inst->dest;
+    }
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
     return;
@@ -628,6 +678,16 @@ static void AllocateRegister(AARCH64RegisterAllocator* allocator,
 
     case AARCH64_OP(xr):
       reg = &allocator->int_regs[AARCH64_XR_REG];
+      break;
+
+    case AARCH64_OP(zr):
+      reg = &allocator->int_regs[AARCH64_INT_ZERO_REG];
+      break;
+
+    case AARCH64_OP(r9):
+      // Dedicated scratch register (x9) used for staging e.g. indirect call
+      // targets so they survive argument-register setup.
+      reg = &allocator->int_regs[9];
       break;
 
     case AARCH64_OP(r0):
@@ -729,7 +789,16 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }
-    if (inst->uses == 0) {
+    // An input with no remaining uses inside this block is normally dead and
+    // its physical register is free for reuse.  However, if the value is also
+    // live-out of the block (it appears in the block's output set, e.g. a
+    // read-only loop-invariant that is consumed again on a later loop
+    // iteration), its register must stay reserved for the whole block.  The
+    // static use count cannot model dynamic loop iterations, so without this
+    // the register would be handed to an unrelated value and clobber the
+    // loop-carried one.
+    if (inst->uses == 0 &&
+        !BitSetContains(&block->output_ids, inst->id)) {
       continue;
     }
     assert(inst->reg != NULL);
@@ -747,7 +816,45 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   // on entry.  An alive instruction has a register allocated to it.  All
   // other registers should be free at this point.
   InitializeBasicBlockRegisters(allocator, block);
-  
+
+  // In the entry block the incoming argument registers (x0..x7 / d0..d7) are
+  // live from function entry until they are copied into their home registers.
+  // Reserve their physical registers for the duration of the entry block so
+  // that a temporary materialized before the copy (e.g. an early use of a
+  // *later* parameter) cannot steal a physical register that still holds a
+  // not-yet-consumed incoming argument.  Without this, lowering could emit
+  // "mov x0, x2" before "mov x19, x0", clobbering the first argument.  We use
+  // the reserved flag (not just ownership) because pseudo-instructions that map
+  // to fixed registers - e.g. resulti -> x0 - otherwise stomp the reservation.
+  AARCH64Register* reserved_args[AARCH64_NUM_INT_ARGS + AARCH64_NUM_FP_ARGS];
+  int num_reserved_args = 0;
+  if (block == allocator->g->base.entry_block) {
+    for (int i = 0; i < AARCH64_NUM_INT_ARGS; i++) {
+      TargetInstruction* arg = allocator->g->int_argument_registers[i];
+      if (arg != NULL && (arg->flags & TARGET_INST_INCOMING_ARG) != 0) {
+        if (arg->reg == NULL) {
+          AllocateRegister(allocator, arg);
+        }
+        if (arg->reg != NULL && !arg->reg->reserved) {
+          arg->reg->reserved = true;
+          reserved_args[num_reserved_args++] = (AARCH64Register*)arg->reg;
+        }
+      }
+    }
+    for (int i = 0; i < AARCH64_NUM_FP_ARGS; i++) {
+      TargetInstruction* arg = allocator->g->fp_argument_registers[i];
+      if (arg != NULL && (arg->flags & TARGET_INST_INCOMING_ARG) != 0) {
+        if (arg->reg == NULL) {
+          AllocateRegister(allocator, arg);
+        }
+        if (arg->reg != NULL && !arg->reg->reserved) {
+          arg->reg->reserved = true;
+          reserved_args[num_reserved_args++] = (AARCH64Register*)arg->reg;
+        }
+      }
+    }
+  }
+
   for (TargetInstruction* inst = block->code;
        inst != NULL && inst != block->end_code;
        inst = TargetNext(inst)) {
@@ -755,6 +862,12 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   }
   if (block->end_code != NULL) {
     AllocateRegister(allocator, block->end_code);
+  }
+
+  // Release the incoming-argument reservations; by the end of the entry block
+  // every argument has been copied to its home register.
+  for (int i = 0; i < num_reserved_args; i++) {
+    reserved_args[i]->base.reserved = false;
   }
 }
 
@@ -813,7 +926,15 @@ static const char* AARCH64RegisterNameFromNum1(int num, AARCH64RegisterType type
         break;
       }
 
-      snprintf(buf, len, "x%d", num);
+      // Honor the requested operand width: a 32-bit operation must use the
+      // "w" register so that, in particular, stores write 4 bytes (str w<n>)
+      // rather than 8 (str x<n>), which would clobber the adjacent stack slot.
+      // An unspecified size (0) keeps the historical 64-bit "x" name.
+      if (size == kSize32Bit) {
+        snprintf(buf, len, "w%d", num);
+      } else {
+        snprintf(buf, len, "x%d", num);
+      }
       return buf;
 
     case kAARCH64RegTypeFloat:

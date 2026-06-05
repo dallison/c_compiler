@@ -467,7 +467,7 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         return false;
       }
       
-      if (length == 0) {
+      if (length == 0 && segment->memsz == 0) {
         close(fd);
         continue;
       }
@@ -483,11 +483,30 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
         length = map_length;
         close(fd);
       } else {
-        int flags = MAP_PRIVATE;
+        // Place the segment at its linked virtual address (host == virtual) so
+        // that absolute relocations and PC-relative references across segments
+        // resolve correctly.  We always use an anonymous MAP_FIXED mapping
+        // populated via pread rather than a file-backed mmap because (a) the
+        // DaveCC linker emits segments whose p_vaddr % page != p_offset % page,
+        // which a file mapping cannot satisfy (it would place the contents at
+        // the wrong virtual address), and (b) macOS forbids MAP_FIXED file
+        // mappings of executable pages (code-signing / W^X).  The interpreter
+        // decodes instructions in software, so no PROT_EXEC is required and the
+        // whole segment (including any .bss tail) is mapped here.
+        int anon_flags = MAP_PRIVATE | MAP_ANON;
         if (mmap_addr != 0) {
-          flags |= MAP_FIXED;
+          anon_flags |= MAP_FIXED;
         }
-        segment_ptr = mmap((void*)mmap_addr, length, prot, flags, fd, offset);
+        length = AlignUp(mem_delta + segment->memsz, page_size);
+        segment_ptr =
+            mmap((void*)mmap_addr, length, PROT_READ | PROT_WRITE, anon_flags,
+                 -1, 0);
+        if (segment_ptr != MAP_FAILED && segment->filesz > 0) {
+          if (pread(fd, (char*)segment_ptr + mem_delta, segment->filesz,
+                    (off_t)segment->offset) != (ssize_t)segment->filesz) {
+            segment_ptr = MAP_FAILED;
+          }
+        }
         close(fd);
         if (segment_ptr == MAP_FAILED) {
           printf("Failed to map in ELF segment: %s\n", strerror(errno));

@@ -21,6 +21,7 @@ void exit(int status) {
 #else
 
 #include <stdlib.h>
+#include <stdio.h>
 #if !defined(__6502__)
 #include <string.h>
 #endif
@@ -50,6 +51,9 @@ void exit(int status) {
       n--;
     }
   }
+  // Flush all open streams so buffered output reaches the OS before we
+  // terminate.  Required for normal program termination per the C standard.
+  fflush(NULL);
   _Exit(status);
 }
 

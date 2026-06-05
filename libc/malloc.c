@@ -55,7 +55,7 @@ STATIC void InitFreeList() {
   __free_list->length = MEMTOP - (int)_end;
 #elif defined(__risc_v__)
 // TODO
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) || defined(__aarch64__)
   extern char _end[];
   __free_list = (FreeBlockHeader*)_end;
   if (__initial_heap_size == 0) {

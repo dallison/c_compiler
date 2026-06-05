@@ -22,6 +22,7 @@ CTESTSUITE_TEST_DATA = glob([
 ]) + [
     "README.md",
     "run_single_exec.sh",
+    "//:libc_headers",
 ]
 
 ctestsuite_sh_test(
