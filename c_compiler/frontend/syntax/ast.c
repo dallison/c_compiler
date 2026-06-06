@@ -201,6 +201,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "ptr-scale";
       case AST_OP(compound_literal):
         return "compound_literal";
+    case AST_OP(stmt_expr):
+      return "stmt-expr";
 
     // Integer to...
     case AST_OP(i2s):
@@ -2415,6 +2417,7 @@ Designator* NewArrayDesignator(TypeRecord* type, int index) {
   Designator* d = malloc(sizeof(Designator));
   d->designator_type = kDesignatorArray;
   d->value.array_index = index;
+  d->array_index_end = index;
   d->type = type;
   TypeRecordIncRef(type);
   return d;

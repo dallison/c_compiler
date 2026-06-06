@@ -244,10 +244,13 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       ASTNodeSetType((ASTNode*)node, ptr->type);
     }
   } else {
-    int left_rank = IsIntConstant(node->left) ? 0 : GetRank(node->left->type);
-    int right_rank = IsIntConstant(node->right) ? 0 : GetRank(node->right->type);
+    int left_rank = GetRank(node->left->type);
+    int right_rank = GetRank(node->right->type);
     if (promote_to_int) {
-      // Promote values smaller than int to int.
+      // Integer promotions: operands of rank lower than int are promoted to
+      // int.  This must happen on the actual operand types (including integer
+      // constants such as `(short)1`) before any of the constant-adaption
+      // below, otherwise small constants would skip promotion.
       if (left_rank > 0 && left_rank < kIntRank) {
         Type t = kTypeInt;
         if (TypeIsUnsigned(node->left->type)) {
@@ -255,6 +258,7 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
         }
         NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->left->type);
+        left_rank = GetRank(node->left->type);
       }
       if (right_rank > 0 && right_rank < kIntRank) {
         Type t = kTypeInt;
@@ -263,7 +267,19 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
         }
         NormalConversion(node->right, NewTypeRecordWithSize(t, kQualPlain));
         ASTNodeSetType((ASTNode*)node, node->right->type);
+        right_rank = GetRank(node->right->type);
       }
+    }
+    // After integer promotion, an integer constant no wider than int adapts to
+    // the other operand's type (so e.g. `someUnsignedLong + 1` keeps its type)
+    // by being treated as the lowest rank.  A constant with an explicit
+    // long/long long type keeps its rank so the usual arithmetic conversions
+    // widen the result correctly (e.g. `i + 2L` becomes long).
+    if (IsIntConstant(node->left) && left_rank <= kIntRank) {
+      left_rank = 0;
+    }
+    if (IsIntConstant(node->right) && right_rank <= kIntRank) {
+      right_rank = 0;
     }
     // Convert smaller rank to larger.
     assert(left_rank != -1 && right_rank != -1);
@@ -405,7 +421,27 @@ static void AnalyzeShift(BinaryASTNode* node) {
     SemanticError((ASTNode*)node, "Shift operator needs integral types");
   }
 
-  InsertNumericConversions(node, true);
+  // Each operand of a shift is integer-promoted independently and the type of
+  // the result is the promoted type of the LEFT operand (C11 6.5.7p3).  The
+  // usual arithmetic conversions are NOT applied, so the right operand's type
+  // (e.g. a `long long` shift count) must not widen the result.
+  int left_rank = GetRank(node->left->type);
+  if (left_rank > 0 && left_rank < kIntRank) {
+    Type t = kTypeInt;
+    if (TypeIsUnsigned(node->left->type)) {
+      t |= kTypeUnsigned;
+    }
+    NormalConversion(node->left, NewTypeRecordWithSize(t, kQualPlain));
+  }
+  int right_rank = GetRank(node->right->type);
+  if (right_rank > 0 && right_rank < kIntRank) {
+    Type t = kTypeInt;
+    if (TypeIsUnsigned(node->right->type)) {
+      t |= kTypeUnsigned;
+    }
+    NormalConversion(node->right, NewTypeRecordWithSize(t, kQualPlain));
+  }
+  ASTNodeSetType((ASTNode*)node, node->left->type);
 
   // Convert node opcode to correct shift type.   An unsigned type uses a
   // logical shift an a signed type uses an arithmetic (sign extension) shift.
@@ -448,6 +484,13 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
   colon->left = AnalyzeExpression(colon->left);
   colon->right = AnalyzeExpression(colon->right);
+  // If either arm has void type (e.g. a statement expression whose last
+  // statement is not an expression) the result of the conditional is void.
+  if (TypeIsVoid(colon->left->type) || TypeIsVoid(colon->right->type)) {
+    ASTNodeSetType((ASTNode*)colon, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    return;
+  }
   InsertNumericConversions(colon, false);
   ASTNodeSetType((ASTNode*)node, colon->left->type);
 
@@ -1345,6 +1388,28 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_va_arg):
       AnalyzeVarargsBuiltin2(vector_node);
       break;
+
+    case AST_OP(stmt_expr): {
+      // GCC statement expression: analyze the compound statement; the value
+      // (and type) is that of the final statement if it is an expression
+      // statement, otherwise void.
+      AnalyzeStatement(unary_node->sub);
+      CompoundStatementASTNode* comp =
+          (CompoundStatementASTNode*)unary_node->sub;
+      TypeRecord* type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+      if (comp->statements->length > 0) {
+        ASTNode* last =
+            comp->statements->value.p[comp->statements->length - 1];
+        if (last->op == AST_OP(expr)) {
+          ExpressionStatementASTNode* es = (ExpressionStatementASTNode*)last;
+          if (es->expr != NULL && es->expr->type != NULL) {
+            type = es->expr->type;
+          }
+        }
+      }
+      ASTNodeSetType(node, type);
+      break;
+    }
 
     default:
       break;

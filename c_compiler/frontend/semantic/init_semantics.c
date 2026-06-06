@@ -74,11 +74,6 @@ static void AppendStructMembers(INode* inode) {
   size_t num_children = type->info.struct_info->members.length;
   for (size_t i = 0; i < num_children; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
-    // Flexible array members are effectively invisible in initializers.
-    if (TypeIsArray(member->symbol->type) &&
-        member->symbol->type->info.array.is_flexible) {
-      continue;
-    }
     INode* child = BuildINode(member->symbol->type, inode);
     child->index = i;
     VectorAppend(&inode->children, child);
@@ -196,6 +191,7 @@ static bool AdvanceCurrent(INode* inode) {
 }
 
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only);
+static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only);
 
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
   if (expr->op == AST_OP(string)) {
@@ -270,6 +266,16 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
   if (inode->expr != NULL) {
     return false;
   }
+  // A compound literal initializing an aggregate is treated as if its
+  // brace-enclosed initializer appeared directly here.  Its anonymous object is
+  // not separately materialized, which also lets a compound literal serve as a
+  // constant initializer for a static aggregate.
+  if (expr->op == AST_OP(compound_literal) &&
+      (inode->kind == kIStruct || inode->kind == kIArray) &&
+      (TypeIsStructOrUnion(expr->type) || TypeIsArray(expr->type))) {
+    CompoundLiteralASTNode* cl = (CompoundLiteralASTNode*)expr;
+    return InitializeINode(inode, cl->initializer, constants_only);
+  }
   expr = AnalyzeExpression(expr);
   switch (inode->kind) {
     case kIScalar:
@@ -289,12 +295,14 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
       return InitArrayAndAdvance(inode, expr, constants_only);
  
     case kIStruct:
-      if (TypeEqual(inode->type, expr->type)) {
+      if (TypeIsStructOrUnion(expr->type) &&
+          expr->type->info.struct_info == inode->type->info.struct_info) {
+        // A struct/union can be initialized by an expression of the same
+        // struct/union type (ignoring top-level qualifiers on the source).
         if (constants_only) {
           SemanticError(expr, "Expression is not a compile-time constant");
           return true;
         }
-        // A struct can be initialized by an expression with the same type.
         inode->expr = ASTNodeMove(expr);
         return AdvanceCurrent(inode->parent);
       }
@@ -439,6 +447,11 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       }
       // Set designated node as parent's current.
       designated_node->parent->current = designated_node;
+      // A designated initializer may overwrite a value set by an earlier
+      // initializer (the last assignment wins), e.g. with overlapping
+      // [start ... end] range designators.  Clear any existing value so the
+      // re-initialization is not rejected as "too many initializers".
+      designated_node->expr = NULL;
       return InitializeINode(designated_node, designated_init->init, constants_only);
     }
     default:

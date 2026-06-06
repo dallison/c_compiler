@@ -900,8 +900,11 @@ static void CheckReturn(Generator* gen) {
   ReturnVisitor v = {{0}, false, false};
   VisitBlockForResult(gen, gen->basic_blocks.value.p[0], &v);
   if (v.result_known && !v.found_result) {
-    SyntaxError(gen->syntax, "Control reaches the end of non-void function '%s'",
-                gen->func->info.function.symbol->name.value);
+    // Falling off the end of a non-void function is undefined behaviour, but
+    // like GCC/Clang we only warn rather than reject the program.
+    SyntaxWarning(gen->syntax, "return-type",
+                  "Control reaches the end of non-void function '%s'",
+                  gen->func->info.function.symbol->name.value);
   }
 }
 

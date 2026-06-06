@@ -2437,10 +2437,14 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         if (size < 0 && (rt.width == kX || rt.width == kW || rt.fp_or_simd)) {
           size = rt.size;
         }
-        if (!post_indexed && !writeback && offset.i >= 0) {
+        int scale = 1 << (size < 0 ? 0 : size);
+        bool aligned = (offset.i & (scale - 1)) == 0;
+        if (!post_indexed && !writeback && offset.i >= 0 && aligned) {
           AssembleLoadStoreUnsignedImmediate(assembler, &rt, &rn, size,
                                              rt.fp_or_simd, opc, 0, offset.i);
         } else {
+          // Misaligned (or negative/indexed) offsets use the unscaled
+          // LDUR/STUR form, which permits any byte offset in [-256, 255].
           int imm9 = offset.i;
           int mode = post_indexed ? 1 : (writeback ? 3 : 0);
           AssembleLoadStoreImmediate(assembler, &rt, &rn, size,

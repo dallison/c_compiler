@@ -2001,6 +2001,29 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       result = GenerateExpression(gen, binary_node->right);
       break;
 
+    case AST_OP(stmt_expr): {
+      // GCC statement expression: emit each statement; the value is the result
+      // of the final statement when it is an expression statement.
+      extern void GenerateStatement(Generator * gen, ASTNode * node);
+      CompoundStatementASTNode* comp =
+          (CompoundStatementASTNode*)unary_node->sub;
+      size_t n = comp->statements->length;
+      for (size_t i = 0; i < n; i++) {
+        ASTNode* stmt = comp->statements->value.p[i];
+        if (i + 1 == n && stmt->op == AST_OP(expr)) {
+          result =
+              GenerateExpression(gen, ((ExpressionStatementASTNode*)stmt)->expr);
+        } else {
+          GenerateStatement(gen, stmt);
+        }
+      }
+      if (result == NULL) {
+        result =
+            GeneratorGetIntConstant(gen, NewTypeRecord(kTypeInt, kQualPlain), 0);
+      }
+      break;
+    }
+
     case AST_OP(designated_init):
     case AST_OP(expr_init):
       assert(false);

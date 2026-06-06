@@ -113,6 +113,7 @@ typedef enum {
   AST_OP(designated_init),
   AST_OP(ptr_scale),
   AST_OP(compound_literal),
+  AST_OP(stmt_expr),  // GCC statement expression ({ ... }).
 
   // Type conversions.
   // Integer to...
@@ -597,6 +598,8 @@ typedef enum {
 typedef struct {
   DesignatorType designator_type;
   TypeRecord* type;
+  int array_index_end;  // For GCC range designators [start ... end]; == index
+                        // when not a range.
   union {
     int array_index;
     String* struct_member_name;   // Before semantic analysis.

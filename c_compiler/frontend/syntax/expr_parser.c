@@ -12,6 +12,8 @@
 #include <string.h>
 #include "expr_evaluator.h"
 #include "expr_parser.h"
+#include "expr_semantics.h"
+#include "statement_parser.h"
 #include "type.h"
 
 static struct Intrinsic {
@@ -251,6 +253,151 @@ static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
 //
 // The syntax for this is:
 
+// Build the type used to match a _Generic controlling expression against the
+// association type names.  This is the type of the controlling expression
+// after lvalue conversion: array and function types decay to pointers and any
+// top-level qualifiers are removed (C11 6.5.1.1).
+static TypeRecord* GenericControllingType(TypeRecord* ctype) {
+  if (TypeIsArray(ctype)) {
+    TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
+    TypeRecordChain(ptr, ctype->next);
+    TypeRecordCalculateSize(ptr);
+    return ptr;
+  }
+  if (TypeIsFunction(ctype)) {
+    TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
+    TypeRecordChain(ptr, ctype);
+    TypeRecordCalculateSize(ptr);
+    return ptr;
+  }
+  TypeRecord* copy = TypeRecordCopy(ctype);
+  copy->qualifiers = kQualPlain;
+  return copy;
+}
+
+// Canonicalize a primitive type's specifier bits for _Generic matching so that
+// equivalent spellings compare equal (e.g. "long" == "signed long int").  The
+// char family (char/signed char/unsigned char) stays distinct, as does
+// signedness for the other integer types.
+static int CanonicalPrimitive(int t) {
+  if (t & kTypeChar) {
+    return t & (kTypeChar | kTypeSigned | kTypeUnsigned);
+  }
+  if (t & (kTypeFloat | kTypeDouble | kTypeLongDouble | kTypeVoid | kTypeBool)) {
+    return t & (kTypeFloat | kTypeDouble | kTypeLongDouble | kTypeVoid |
+                kTypeBool);
+  }
+  int size = t & (kTypeShort | kTypeLong | kTypeLongLong);
+  int sign = (t & kTypeUnsigned) ? kTypeUnsigned : kTypeSigned;
+  return size | kTypeInt | sign;
+}
+
+// Type matching for _Generic associations.  Unlike TypeEqual this distinguishes
+// distinct struct/union/enum tags (which must select different associations)
+// and treats equivalent integer spellings as identical.
+static bool GenericTypeMatch(TypeRecord* a, TypeRecord* b) {
+  if ((a->type & kTypeUnknown) != 0 || (b->type & kTypeUnknown) != 0) {
+    return true;
+  }
+  if (a->declarator != b->declarator) {
+    return false;
+  }
+  switch (a->declarator) {
+    case kDeclArray:
+      return GenericTypeMatch(a->next, b->next) &&
+             a->info.array.size.fixed == b->info.array.size.fixed;
+    case kDeclPointer:
+      return GenericTypeMatch(a->next, b->next);
+    case kDeclFunction:
+      return TypeEqual(a, b);
+    case kDeclPrimitive:
+    default:
+      if (a->qualifiers != b->qualifiers) {
+        return false;
+      }
+      if (TypeIsStructOrUnion(a) || TypeIsStructOrUnion(b)) {
+        return TypeIsStructOrUnion(a) && TypeIsStructOrUnion(b) &&
+               a->info.struct_info == b->info.struct_info;
+      }
+      if (TypeIsEnum(a) || TypeIsEnum(b)) {
+        return TypeIsEnum(a) && TypeIsEnum(b) &&
+               a->info.enum_info == b->info.enum_info;
+      }
+      return CanonicalPrimitive(a->type) == CanonicalPrimitive(b->type);
+  }
+}
+
+// Parse a C11 _Generic selection:
+//   _Generic ( assignment-expression , generic-assoc-list )
+//   generic-association:
+//     type-name : assignment-expression
+//     default : assignment-expression
+// The controlling expression is an unevaluated operand: only its type is used
+// to pick the matching association.  We return the selected expression (or the
+// default), which is then analyzed normally as part of the surrounding AST.
+static ASTNode* ParseGenericSelection(Syntax* syntax, TokenClass followers) {
+  Lex* lex = syntax->lex;
+  LexNextToken(lex);  // Consume "_Generic".
+  SyntaxNeedBracket(syntax, TOK(lparen), followers);
+
+  // Determine the controlling expression's type without keeping the node: it
+  // is unevaluated, so we analyze it only to obtain its type.
+  ASTNode* controlling =
+      SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+  controlling = AnalyzeExpression(controlling);
+  TypeRecord* match_type =
+      controlling->type != NULL ? GenericControllingType(controlling->type)
+                                : NewTypeRecordWithSize(kTypeInt, kQualPlain);
+
+  SyntaxNeedBracket(syntax, TOK(comma), followers);
+
+  ASTNode* selected = NULL;
+  ASTNode* default_expr = NULL;
+  while (!LexEof(lex)) {
+    bool is_default = false;
+    TypeRecord* assoc_type = NULL;
+    Symbol* assoc_sym = NULL;
+    if (LexMatch(lex, TOK(default))) {
+      is_default = true;
+    } else {
+      TypeParser parser;
+      TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
+      TypeRecord* type = TypeParserParseType(&parser, true);
+      assoc_sym = TypeParserParseDeclarator(&parser, type);
+      assoc_type = assoc_sym != NULL ? assoc_sym->type : type;
+    }
+    SyntaxNeedBracket(syntax, TOK(colon), followers);
+    ASTNode* expr = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+
+    if (is_default) {
+      default_expr = expr;
+    } else if (selected == NULL && assoc_type != NULL &&
+               GenericTypeMatch(match_type, assoc_type)) {
+      selected = expr;
+    } else {
+      ASTNodeDelete(expr);
+    }
+    if (assoc_sym != NULL) {
+      SymbolDelete(assoc_sym);
+    }
+    if (!LexMatch(lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  ASTNode* result = selected != NULL ? selected : default_expr;
+  if (result == NULL) {
+    SyntaxError(syntax, "No matching association in _Generic selection");
+    result = (ASTNode*)NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+        syntax->lex->current_token_location);
+  } else if (selected != NULL && default_expr != NULL) {
+    ASTNodeDelete(default_expr);
+  }
+  return result;
+}
+
 // primary-expression:
 //   identifier
 //   constant
@@ -266,9 +413,23 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   // expression.
   if (syntax->found_open_paren || LexMatch(lex, TOK(lparen))) {
     syntax->found_open_paren = false;
+    // GCC statement expression: ( { statements } ).  The value is that of the
+    // last statement if it is an expression statement.
+    if (LexLookingAt(lex, TOK(lbrace))) {
+      ASTNode* compound = SyntaxParseStatement(syntax, followers | TC(closebra));
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return NewUnaryASTNode(AST_OP(stmt_expr), NULL,
+                             syntax->lex->current_token_location, compound);
+    }
     ASTNode* node = SyntaxParseExpression(syntax, followers | TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
     return node;
+  }
+
+  // C11 _Generic selection (lexes as an identifier).
+  if (LexLookingAt(lex, TOK(identifier)) &&
+      StringEqual(&lex->spelling, "_Generic")) {
+    return ParseGenericSelection(syntax, followers);
   }
 
   // Check for identifier.
@@ -373,6 +534,32 @@ static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
 // Parse a function call or varargs builtin.
 static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
                                   TokenClass followers) {
+  // __builtin_expect(expr, hint) is a branch-prediction hint that evaluates to
+  // its first argument; the hint is ignored.
+  if (left->op == AST_OP(identifier) &&
+      StringEqual(&((IdentifierASTNode*)left)->symbol->name,
+                  "__builtin_expect")) {
+    ASTNode* value = NULL;
+    while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+      ASTNode* arg = SyntaxParseSingleExpression(syntax, followers);
+      if (value == NULL) {
+        value = arg;
+      } else {
+        ASTNodeDelete(arg);
+      }
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+    }
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    if (value == NULL) {
+      value = (ASTNode*)NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeLong, kQualPlain),
+          syntax->lex->current_token_location);
+    }
+    return value;
+  }
+
   // Check for varargs intrinsic functions.
   ASTNode* varargs = VarargsIntrinsic(syntax, left, followers);
   if (varargs != NULL) {
@@ -718,7 +905,10 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
   if (!syntax->lex->preprocessor_mode && !syntax->lex->assembler_mode &&
       LexMatch(syntax->lex, TOK(lparen))) {
-    if (SyntaxLookingAtType(syntax)) {
+    // A leading __attribute__ (GCC extension) only appears in type names, so
+    // treat "( __attribute__((...)) type-name )" as a cast / compound literal.
+    if (SyntaxLookingAtType(syntax) ||
+        LexLookingAt(syntax->lex, TOK(attribute))) {
       TypeParser parser;
       TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
       TypeRecord* type = TypeParserParseType(&parser, false);

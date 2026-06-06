@@ -181,7 +181,8 @@ int TypeRecordAlignment(TypeRecord* record) {
       break;
     case kDeclPrimitive:
       if (TypeIsStructOrUnion(record)) {
-        return SizeofPointer();
+        int a = record->info.struct_info->alignment;
+        return a > 0 ? a : 1;
       }
       return SizeofType(record->type);
   }
@@ -367,6 +368,7 @@ Struct* NewStruct(bool is_union) {
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;
+  s->alignment = 1;
   s->next_bit_pos = 65;
   return s;
 }
@@ -920,7 +922,10 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     .quals = kQualPlain,
     .type_record = NULL,
     .error = false };
-  
+
+  // Leading __attribute__((...)) specifiers (GCC extension) before the type.
+  TypeParserSkipAttributes(parser);
+
   while (parser->found_void || SyntaxLookingAtType(syntax)) {
     PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit);
     if (new_type_specifier.type == kTypeImplicit && new_type_specifier.quals == kQualPlain) {
@@ -978,6 +983,25 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   return parser->symbol;
 }
 
+// Skip any __attribute__((...)) specifiers (a GCC extension) that can appear
+// in declarator positions (pointers, parenthesized declarators, type names).
+// The attributes are parsed and discarded.  Returns true if at least one was
+// seen.
+bool TypeParserSkipAttributes(TypeParser* parser) {
+  bool any = false;
+  while (LexMatch(parser->lex, TOK(attribute))) {
+    Vector attrs = {0};
+    VectorInit(&attrs);
+    SyntaxParseAttribute(parser->syntax, &attrs);
+    for (size_t i = 0; i < attrs.length; i++) {
+      StringDelete((String*)attrs.value.p[i]);
+    }
+    VectorDestruct(&attrs);
+    any = true;
+  }
+  return any;
+}
+
 static Qualifiers ParseQualifiers(TypeParser* parser) {
   Qualifiers quals = kQualPlain;
   int num_consts = 0;
@@ -993,6 +1017,8 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
     } else if (LexMatch(parser->lex, TOK(restrict))) {
       num_restricts++;
       quals |= kQualRestrict;
+    } else if (LexLookingAt(parser->lex, TOK(attribute))) {
+      TypeParserSkipAttributes(parser);
     } else {
       break;
     }
@@ -1004,6 +1030,7 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
 }
 
 void TypeParserParsePointer(TypeParser* parser) {
+  TypeParserSkipAttributes(parser);
   if (LexMatch(parser->lex, TOK(star))) {
     Qualifiers quals = ParseQualifiers(parser);
     TypeParserParsePointer(parser);
@@ -1268,10 +1295,12 @@ static void ParseArrayDecl(TypeParser* parser) {
         is_vla = true;
       }
     } else {
-      if (size <= 0) {
-        SyntaxError(parser->syntax, "Array with negative or zero size");
+      if (size < 0) {
+        SyntaxError(parser->syntax, "Array with negative size");
         size = 1;
       }
+      // A zero-length array (int r[0]) is a GCC extension, commonly used at
+      // the end of a struct like a flexible array member.
       p->info.array.size.fixed = (int)size;
     }
     if (delete_expr) {
@@ -1344,6 +1373,9 @@ static bool CheckStructMember(Struct* str, String* name) {
 
 static void AlignNextOffset(Struct* str, TypeRecord* type) {
   int alignment = TypeRecordAlignment(type);
+  if (alignment > str->alignment) {
+    str->alignment = alignment;
+  }
   str->next_offset = (str->next_offset + (alignment - 1)) & ~(alignment - 1);
   str->next_bit_pos = 65;
   str->current_offset = str->next_offset;
@@ -1459,7 +1491,9 @@ static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src )
       }
       member->byte_offset = dest->next_offset;
       if (!src->is_union) {
-        UpdateStructSize(dest, symbol->type, dest->is_union);
+        // Members of an anonymous struct are laid out sequentially regardless
+        // of whether the enclosing aggregate is a union, so always advance.
+        UpdateStructSize(dest, symbol->type, false);
       }
     }
   }
@@ -1475,6 +1509,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
       if (possible_anon && LexLookingAt(parser->lex, TOK(semicolon))) {
         TypeRecordCalculateSize(member_type);
         AlignNextOffset(str, member_type);
+        int anon_base = str->next_offset;
         CopyAnonymousMembers(parser, str, member_type->info.struct_info);
         
         // Make a fake member symbol to represent the anonymous member.  This
@@ -1482,12 +1517,21 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
         Symbol* member_symbol = NewSymbol(SyntaxFakeName(parser->syntax),
                                           member_type, STO(implicit));
         StructMember* member = NewStructMember(member_symbol);
+        member->byte_offset = anon_base;
         VectorAppend(&str->members, member);
 
-        // If we are inserting a union we haven't changed the size of the
-        // current struct yet.
-        if (member_type->info.struct_info->is_union) {
-          UpdateStructSize(str, member_type, is_union);
+        // Account for the space occupied by the anonymous aggregate.  In a
+        // struct we advance past it; in a union it overlays the other members
+        // at the same base offset, so we only grow the union's size and leave
+        // next_offset where it was.
+        if (is_union) {
+          if (anon_base + member_type->size > str->size) {
+            str->size = anon_base + member_type->size;
+          }
+          str->next_offset = anon_base;
+        } else {
+          str->next_offset = anon_base + member_type->size;
+          str->size = str->next_offset;
         }
         member->is_anon = true;
         // Syntax doesn't allow anonymous members to be in a comma-separated
@@ -1621,8 +1665,12 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
   // and 'str' will be a pointer to the Struct information.
   ParseStructMembers(parser, str, is_union);
   
-  // Round the size of the struct to the target's alignment.
-  str->size = (str->size + (compiler->alignment - 1)) & ~(compiler->alignment - 1);
+  // Round the size of the struct up to its own alignment (the maximum
+  // alignment of its members), as required by the ABI.
+  {
+    int align = str->alignment > 0 ? str->alignment : 1;
+    str->size = (str->size + (align - 1)) & ~(align - 1);
+  }
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
    
   CheckFlexibleArrays(parser, str, is_union);

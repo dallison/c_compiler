@@ -18,20 +18,21 @@ echo "tests/single-exec/00195.c"
 # This one is too big to fit in 6502 memory.
 echo "tests/single-exec/00204.c"
 
-# This one uses complex attribute specifications.
-echo "tests/single-exec/00210.c"
-
 # Needs LP64 or LP32
 echo "tests/single-exec/00212.c"
 
-# Uses GCC statement expression extension.
-echo "tests/single-exec/00213.c"
+# GCC statement expressions and __builtin_expect are supported, but this test
+# relies on size_t (32-bit unsigned long) values surviving a cast to a 16-bit
+# 6502 pointer, which truncates.
 echo "tests/single-exec/00214.c"
 
-# GNU extension allowing compound literals as constant initializers.
+# Compound literals / designated ranges / flexible array members are supported,
+# but this test assumes a 32-bit int layout that the 16-bit-int 6502 doesn't
+# match.
 echo "tests/single-exec/00216.c"
 
-# _Generic isn't supported.
+# _Generic is supported, but this test hits a pre-existing 6502 codegen bug in
+# signed division of a variable by a power of two (e.g. (int)x / 2).
 echo "tests/single-exec/00219.c"
 
 # Wide string literals decode to Unicode code points (supported), but the 6502

@@ -204,6 +204,39 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
 
 static ASTNode* ParseBracedInitializer(Syntax* syntax);
 
+// Identity transform used when deep-cloning an AST node.
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
+  return node;
+}
+
+// Deep-clone an initializer so that the same value can be used for each index
+// of a GCC range designator.
+static ASTNode* CloneInitializer(ASTNode* init) {
+  if (init->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)init;
+    return NewExpressionInitializerASTNode(
+        ASTNodeClone(e->expr, IdentityCloneNode, NULL, NULL), init->location);
+  }
+  return ASTNodeClone(init, IdentityCloneNode, NULL, NULL);
+}
+
+// Clone a designator list, substituting a single array index at position
+// range_pos (used to expand a [start ... end] range designator).
+static Vector* CloneDesignators(Vector* src, int range_pos, int index_value) {
+  Vector* dst = NewVector();
+  for (size_t i = 0; i < src->length; i++) {
+    Designator* d = src->value.p[i];
+    if (d->designator_type == kDesignatorArray) {
+      int v = ((int)i == range_pos) ? index_value : d->value.array_index;
+      VectorAppend(dst, NewArrayDesignator(d->type, v));
+    } else {
+      VectorAppend(dst, NewStructDesignator(
+                            NewString(d->value.struct_member_name->value)));
+    }
+  }
+  return dst;
+}
+
 static void ParseDesignatedInitializer(Syntax* syntax,
                                            Vector* initializers) {
   Vector* designators = NewVector();
@@ -226,8 +259,21 @@ static void ParseDesignatedInitializer(Syntax* syntax,
               "Need constant expression inside [] in designated initializer");
         value = 0;
       }
+      // GCC range designator: [ start ... end ].
+      int64_t end_value = value;
+      if (LexMatch(syntax->lex, TOK(ellipsis))) {
+        ASTNode* end_expr = SyntaxParseExpression(syntax, TC(semicolon));
+        end_expr = AnalyzeExpression(end_expr);
+        if (!EvaluateIntegerExpression(end_expr, &end_value)) {
+          SyntaxError(syntax,
+                "Need constant expression inside [] in designated initializer");
+          end_value = value;
+        }
+      }
       SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
-      VectorAppend(designators, NewArrayDesignator(NULL, (int)value));
+      Designator* d = NewArrayDesignator(NULL, (int)value);
+      d->array_index_end = (int)end_value;
+      VectorAppend(designators, d);
     } else if (LexMatch(syntax->lex, TOK(dot))) {
       // Struct designator.  The dot is followed by a struct member name.
       String* member_name;
@@ -256,8 +302,32 @@ static void ParseDesignatedInitializer(Syntax* syntax,
       init = NewExpressionInitializerASTNode(
                                              SyntaxParseSingleExpression(syntax, TC(exprsep)), location);
     }
-    VectorAppend(initializers, NewDesignatedInitializerASTNode(
+    // If one of the designators is a [start ... end] range, expand it into one
+    // designated initializer per index, cloning the value for each.
+    int range_pos = -1;
+    for (size_t i = 0; i < designators->length; i++) {
+      Designator* d = designators->value.p[i];
+      if (d->designator_type == kDesignatorArray &&
+          d->array_index_end > d->value.array_index) {
+        range_pos = (int)i;
+        break;
+      }
+    }
+    if (range_pos >= 0) {
+      Designator* range = designators->value.p[range_pos];
+      int start = range->value.array_index;
+      int end = range->array_index_end;
+      for (int v = start; v <= end; v++) {
+        Vector* desigs = CloneDesignators(designators, range_pos, v);
+        ASTNode* init_for_index = (v == end) ? init : CloneInitializer(init);
+        VectorAppend(initializers, NewDesignatedInitializerASTNode(
+                                       desigs, init_for_index, location));
+      }
+      VectorDelete(designators);
+    } else {
+      VectorAppend(initializers, NewDesignatedInitializerASTNode(
                                                                designators, init, location));
+    }
   }
 
 }

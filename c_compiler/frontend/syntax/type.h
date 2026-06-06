@@ -91,6 +91,7 @@ typedef struct Struct {
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
   int size;          // Size of struct in bytes.
+  int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
   int next_bit_pos;  // Next bit position for bit fields.
   int current_offset;
@@ -217,6 +218,7 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
 
 TypeRecord* TypeParserParseType(TypeParser* parser, bool needed);
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type);
+bool TypeParserSkipAttributes(TypeParser* parser);
 void TypeParserParseBase(TypeParser* parser);
 void TypeParserParsePointer(TypeParser* parser);
 void TypeParserParseFuncOrArray(TypeParser* parser);

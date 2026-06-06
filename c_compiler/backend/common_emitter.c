@@ -160,6 +160,7 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
           }
         }
         fprintf(fp, "\n");
+        next_offset += (int)init->value.memory.length;
         break;
       }
     }

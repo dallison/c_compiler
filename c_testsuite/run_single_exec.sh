@@ -129,6 +129,9 @@ fi
 is_skipped() {
   local base=$1
   local s
+  if [ "${#SKIP_LIST[@]}" -eq 0 ]; then
+    return 1
+  fi
   for s in "${SKIP_LIST[@]}"; do
     if [ "$s" = "$base" ]; then
       return 0
