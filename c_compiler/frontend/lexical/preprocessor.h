@@ -41,6 +41,7 @@ typedef struct {
   Vector if_stack;
   Vector user_include_paths;
   Vector system_include_paths;
+  Vector macro_stack;   // Saved macros for #pragma push_macro/pop_macro.
   struct Lex* lex;
   bool is_compiled_in;  // Is the current state compiled in?
 } Preprocessor;

@@ -572,7 +572,6 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           bool upper = *p == 'X';
           p++;
           v = ConvertHexLongLong(value_ll, buf, sizeof(buf), upper);
-          fmt.fill_zero = false;
           count += WriteFormatted(writer, data, &fmt, v, end - v, false, true);
           break;
         }

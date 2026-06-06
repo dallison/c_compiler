@@ -323,9 +323,33 @@ static void CollectWideStringLiteral(Lex* lex) {
     } else if (ch == '"') {
       break;
     } else {
-      StringAppendChar(&lex->spelling, ch);
-      for (int i = 0; i < compiler->wchar_size - 1; i++) {
-        StringAppendChar(&lex->spelling, '\0');
+      // Decode a UTF-8 source sequence into a single Unicode code point and
+      // store it as one wchar_t.  Each wide character holds a code point, not
+      // an individual UTF-8 byte.
+      unsigned int cp = (unsigned char)ch;
+      int extra = 0;
+      if ((cp & 0x80) != 0) {
+        if ((cp & 0xe0) == 0xc0) {
+          cp &= 0x1f;
+          extra = 1;
+        } else if ((cp & 0xf0) == 0xe0) {
+          cp &= 0x0f;
+          extra = 2;
+        } else if ((cp & 0xf8) == 0xf0) {
+          cp &= 0x07;
+          extra = 3;
+        }
+        for (int k = 0; k < extra && lex->pos < lex->line.length; k++) {
+          unsigned char cont = (unsigned char)lex->line.value[lex->pos];
+          if ((cont & 0xc0) != 0x80) {
+            break;   // Not a continuation byte; stop decoding.
+          }
+          cp = (cp << 6) | (cont & 0x3f);
+          lex->pos++;
+        }
+      }
+      for (int i = 0; i < compiler->wchar_size; i++) {
+        StringAppendChar(&lex->spelling, (cp >> i*8) & 0xff);
       }
     }
   }

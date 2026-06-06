@@ -15,14 +15,8 @@ echo "tests/single-exec/00178.c"
 # Assumes double is IEE754 double precision.
 echo "tests/single-exec/00195.c"
 
-# This one is undefined preprocessor behavior as far as I can see
-echo "tests/single-exec/00202.c"
-
 # This one is too big to fit in 6502 memory.
 echo "tests/single-exec/00204.c"
-
-# Uses #pragma push_macro
-echo "tests/single-exec/00206.c"
 
 # This one uses complex attribute specifications.
 echo "tests/single-exec/00210.c"
@@ -40,7 +34,8 @@ echo "tests/single-exec/00216.c"
 # _Generic isn't supported.
 echo "tests/single-exec/00219.c"
 
-# non-ascii characters aren't supported
+# Wide string literals decode to Unicode code points (supported), but the 6502
+# has a 16-bit int/wchar_t so the wchar_t[] array overflows and truncates.
 echo "tests/single-exec/00220.c"
 # Exercises double-precision math.h; on the 6502 double is a 32-bit float so
 # the results don't meet the test's double-precision tolerance.

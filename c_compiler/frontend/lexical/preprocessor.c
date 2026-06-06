@@ -288,6 +288,7 @@ void PreprocessorInit(Preprocessor* p) {
   p->lex = NULL;
   VectorInit(&p->user_include_paths);
   VectorInit(&p->system_include_paths);
+  VectorInit(&p->macro_stack);
   p->is_compiled_in = true;
 
 #ifndef DAVECC_SYSROOT_HDRS
@@ -330,11 +331,18 @@ void PreprocessorDestruct(Preprocessor* p) {
   VectorDestruct(&p->system_include_paths);
 
   PreprocessorReset(p);
+  VectorDestruct(&p->macro_stack);
 }
 
 void PreprocessorReset(Preprocessor* p) {
   HashTableTraverse(&p->macros, DeleteMacroTree, NULL);
   HashTableClear(&p->macros);
+  for (size_t i = 0; i < p->macro_stack.length; i++) {
+    Macro* saved = p->macro_stack.value.p[i];
+    MacroDestruct(saved);
+    free(saved);
+  }
+  VectorClear(&p->macro_stack);
   PredefineMacros(p);
 }
 
@@ -1271,13 +1279,63 @@ static void DetokenizeToken(String* tokens,
   StringDestruct(&spelling);
 }
 
-static void Detokenize(Preprocessor* p, String* tokens, String* text) {
+// Operator characters that can combine into a longer punctuator token (e.g.
+// '+' '+' -> "++", '<' '<' -> "<<").
+static bool CombiningOperatorChar(char c) {
+  return strchr("<>=!&|+-*/%^~.#", c) != NULL;
+}
+
+// Would joining a token ending in 'a' to one starting with 'b' accidentally
+// form a different single token when the text is re-lexed?
+//
+// We only guard against operator characters merging.  Two adjacent operator
+// tokens only ever arise from ## pasting (the tokenizer groups runs of
+// operator characters such as "<<" into a single token), so separating them is
+// always safe.  We deliberately do NOT separate adjacent word characters: the
+// preprocessor's number tokenizer over-splits forms like "0x09" and
+// "4294967295UL" into a digit token plus an identifier token, and those must be
+// allowed to re-merge when re-lexed.
+static bool NeedsSeparator(char a, char b) {
+  return CombiningOperatorChar(a) && CombiningOperatorChar(b);
+}
+
+// Detokenize a tokenized line back to text.  When avoid_paste is set a single
+// space is inserted between adjacent tokens whose spellings would otherwise
+// merge into a different token on re-lexing (e.g. two '+' tokens produced via
+// ## pasting of an empty argument must not become "++").  Legitimate
+// multi-character operators are stored as a single token, so this never splits
+// them.
+static void DetokenizeEx(Preprocessor* p, String* tokens, String* text,
+                         bool avoid_paste) {
   TokenIterator ti;
   TokenIteratorInit(&ti, p, tokens);
+  bool prev_was_separable = false;  // Previous emitted token can paste.
   while (CurrentToken(&ti) != PPTOK(end)) {
-    DetokenizeToken(ti.input, ti.curr, text);
+    PreprocessingToken tok = CurrentToken(&ti);
+    // Comments carry their own "/* */" delimiters and spaces and must never
+    // have a separator spliced against them, or the delimiters break.
+    bool separable = tok != PPTOK(space) && tok != PPTOK(comment);
+    if (avoid_paste && text->length > 0 && prev_was_separable && separable) {
+      String piece = {0};
+      DetokenizeToken(ti.input, ti.curr, &piece);
+      if (piece.length > 0 &&
+          NeedsSeparator(text->value[text->length - 1], piece.value[0])) {
+        StringAppendChar(text, ' ');
+      }
+      StringAppendString(text, &piece);
+      StringDestruct(&piece);
+    } else {
+      DetokenizeToken(ti.input, ti.curr, text);
+    }
+    if (tok != PPTOK(space)) {
+      prev_was_separable = separable;
+    }
     MoveToNextToken(&ti);
   }
+}
+
+static void Detokenize(Preprocessor* p, String* tokens, String* text) {
+  DetokenizeEx(p, tokens, text, false);
 }
 
 // Returns index after comment close (or eol).
@@ -2057,6 +2115,101 @@ static bool GetIdentifierToken(TokenIterator* ti, String* spelling) {
   return false;
 }
 
+// Deep-clone macro `m` (which may be NULL or undefined) for the push_macro
+// stack.  The clone always carries `name`; if `m` is NULL the clone records
+// that the macro was not defined.
+static Macro* SnapshotMacro(Macro* m, const char* name) {
+  Vector* args = NewVector();
+  String empty;
+  StringInit(&empty, "");
+  String* rep = &empty;
+  bool fn = false;
+  bool va = false;
+  SourceLocation loc = SOURCE_LOCATION_COMMAND_LINE;
+  if (m != NULL) {
+    for (size_t i = 0; i < m->args.length; i++) {
+      VectorAppend(args, NewString(((String*)m->args.value.p[i])->value));
+    }
+    rep = &m->replacement_text;
+    fn = m->is_function_like;
+    va = m->varargs;
+    loc = m->location;
+  }
+  Macro* c = NewMacro(name, fn, va, args, rep, loc);
+  c->undefined = (m == NULL) ? true : m->undefined;
+  StringDestruct(&empty);
+  // NewMacro copied the element pointers into c->args; free our temp vector.
+  VectorDestruct(args);
+  free(args);
+  return c;
+}
+
+static void PushMacro(Preprocessor* p, const char* name) {
+  Macro* cur = HashTableSearch(&p->macros, (char*)name);
+  VectorAppend(&p->macro_stack, SnapshotMacro(cur, name));
+}
+
+static void PopMacro(Preprocessor* p, const char* name) {
+  // Find the most recently pushed snapshot for this name.
+  int idx = -1;
+  for (int i = (int)p->macro_stack.length - 1; i >= 0; i--) {
+    Macro* s = p->macro_stack.value.p[i];
+    if (StringEqual(&s->name, name)) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    return;   // No matching push; ignore.
+  }
+  Macro* snap = p->macro_stack.value.p[idx];
+  for (size_t i = (size_t)idx; i + 1 < p->macro_stack.length; i++) {
+    p->macro_stack.value.p[i] = p->macro_stack.value.p[i + 1];
+  }
+  p->macro_stack.length--;
+
+  Macro* cur = HashTableSearch(&p->macros, (char*)name);
+  if (cur != NULL) {
+    StringSet(&cur->replacement_text, snap->replacement_text.value);
+    cur->is_function_like = snap->is_function_like;
+    cur->varargs = snap->varargs;
+    cur->undefined = snap->undefined;
+    cur->location = snap->location;
+    for (size_t i = 0; i < cur->args.length; i++) {
+      StringDelete((String*)cur->args.value.p[i]);
+    }
+    VectorClear(&cur->args);
+    for (size_t i = 0; i < snap->args.length; i++) {
+      VectorAppend(&cur->args,
+                   NewString(((String*)snap->args.value.p[i])->value));
+    }
+  } else if (!snap->undefined) {
+    HashTableInsert(&p->macros, SnapshotMacro(snap, name));
+  }
+  MacroDestruct(snap);
+  free(snap);
+}
+
+// Parse a pragma argument of the form ("name") and return the quoted name.
+static bool GetPragmaMacroArg(TokenIterator* ti, String* name) {
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(openparen)) {
+    return false;
+  }
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(literal)) {
+    return false;
+  }
+  GetCurrentTokenSpelling(ti, name);
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) == PPTOK(closeparen)) {
+    MoveToNextToken(ti);
+  }
+  return true;
+}
+
 static void Pragma(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
@@ -2078,6 +2231,18 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
         }
       }
       StringDestruct(&warning);
+    } else if (MatchIdentifierToken(&ti, "push_macro")) {
+      String name = {0};
+      if (GetPragmaMacroArg(&ti, &name)) {
+        PushMacro(p, name.value);
+      }
+      StringDestruct(&name);
+    } else if (MatchIdentifierToken(&ti, "pop_macro")) {
+      String name = {0};
+      if (GetPragmaMacroArg(&ti, &name)) {
+        PopMacro(p, name.value);
+      }
+      StringDestruct(&name);
     } else {
       // Unknown pragma, ignore rest of line.
       break;
@@ -2327,19 +2492,11 @@ static void CollectActualArguments(Preprocessor* p,
 static void Paste(TokenIterator* ti) {
   PreprocessingToken prev = PrevToken(ti);
   PreprocessingToken next = NextToken(ti);
-  // Placemarker tokens require special handling.
-  if (prev == PPTOK(placemarker)) {
-    if (next == PPTOK(placemarker)) {
-      MoveToNextToken(ti);
-      EraseCurrentToken(ti);
-    } else {
-      // Erase placemarker token.
-      EraseCurrentToken(ti);
-    }
-    return;
-  }
-  if (next == PPTOK(placemarker)) {
-    MoveToNextToken(ti);
+  // Placemarker tokens (introduced for empty macro arguments) paste away: the
+  // result of pasting with a placemarker is just the other operand (which may
+  // itself be a placemarker).  In every case we simply erase the ## token and
+  // leave any placemarker(s) for RemovePlacemarkers to clean up afterwards.
+  if (prev == PPTOK(placemarker) || next == PPTOK(placemarker)) {
     EraseCurrentToken(ti);
     return;
   }
@@ -2671,7 +2828,11 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   } else {
     StringClear(line);
   }
-  Detokenize(p, &tokenized_line, line);
+  // Avoid accidental token pasting when re-lexing the detokenized C line, but
+  // not in assembler mode where lines are machine-generated and have their own
+  // lexical rules (e.g. "*/" comment terminators and "#-32" immediates that
+  // must not have spaces inserted).
+  DetokenizeEx(p, &tokenized_line, line, !p->lex->assembler_mode);
 }
 
 
