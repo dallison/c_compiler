@@ -46,6 +46,11 @@ __fadd:
   JSR __funpackA
   JSR __funpackB
 add_common:
+  // Default the result sign to positive.  fsign is only set explicitly on the
+  // negative-result path below, but __fassemble always ORs it into the result.
+  // fsign aliases __t0, which __argaddr clobbers whenever a function reads a
+  // parameter, so it must be initialized here rather than relied upon to be 0.
+  STZ fsign
   SEC
   LDA fexpB
   STA fexp

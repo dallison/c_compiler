@@ -5707,6 +5707,11 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
   
   // Load return address into X,Y,
   TargetInstruction* result = NULL;
+  // When the result destination is a zero-page register we don't let the
+  // callee write into it directly: it returns the value through a temp buffer
+  // that we copy into `result` after the call (see below).
+  TargetInstruction* result_buf = NULL;
+  int result_size = 0;
   // If the function returns a struct/union its result is in address specified
   // by first arg.
   if (TypeIsStructOrUnion(node->type)) {
@@ -5717,7 +5722,18 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
       LowerIRNode(g, node->dest);
       result = GetLoweredNode(node->dest);
       if (W65C02IsExpression(result)) {
-        ldxzi(g, result, 0);
+        // The callee returns its value by writing through the pointer we pass
+        // in X,Y.  If that pointer were the address of `result`'s own zero-page
+        // register and the callee happened to use (hence save and restore) that
+        // register, its epilogue would restore the register *after* storing the
+        // result, destroying it.  A call ends its basic block, so temp
+        // registers are always free at this point; route the value through a
+        // temp buffer -- which is necessarily caller-saved and so never touched
+        // by the callee's restore -- and copy it into `result` after the call.
+        result_size = Sizeof(node->type);
+        result_buf = TempRegister(g, node->type, result_size);
+        result_buf->flags |= k6502ExprIsCallResult;
+        ldxzi(g, result_buf, 0);
         ldyi(g, 0);
       } else {
         // Not an expression, get address in X,Y
@@ -5728,7 +5744,7 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
       ldxzi(g, result, 0);
       ldyi(g, 0);
     }
-    if (result != NULL) {
+    if (result != NULL && result_buf == NULL) {
       result->flags |= k6502ExprIsCallResult;
     }
   }
@@ -5816,6 +5832,17 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
 
       call = jsr(g, incsp);
     }
+  }
+  // The callee has returned (and restored its saved registers).  Copy the
+  // value it left in the temp buffer into its real zero-page register home.
+  // The copy stays in this same basic block (we move the block-end marker onto
+  // its last instruction) so the buffer is never live across the call boundary
+  // and therefore never forced into a preserved register.
+  if (result_buf != NULL) {
+    AddSpillPoint(g, result_buf);
+    Copy(g, result, result_buf, 0, 0, result_size,
+         GetAddrMode(result), GetAddrMode(result_buf));
+    call = TargetLastInstruction(&g->base);
   }
   call->flags |= k6502InstIsCall | k6502BlockEnd;
   if (result == NULL) {
