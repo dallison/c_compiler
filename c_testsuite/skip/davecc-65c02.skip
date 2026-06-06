@@ -42,5 +42,8 @@ echo "tests/single-exec/00219.c"
 
 # non-ascii characters aren't supported
 echo "tests/single-exec/00220.c"
+# Exercises double-precision math.h; on the 6502 double is a 32-bit float so
+# the results don't meet the test's double-precision tolerance.
+echo "tests/single-exec/00221.c"
 
 # File I/O (fopen/fread/fgetc/fgets) not fully working in interpreter

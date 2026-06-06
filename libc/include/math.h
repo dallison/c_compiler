@@ -36,6 +36,9 @@ double acos(double x);
 double atan(double x);
 double atan2(double y, double x);
 
+double sqrt(double x);
+double fabs(double x);
+
 double modf(double x, double* p);
 double ldexp(double mantissa, int exp);
 

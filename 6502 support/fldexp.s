@@ -21,7 +21,7 @@ ldexp:
   STX __result+0
   STY __result+1
   LDX #__sp+4
-  JSR __checkA0
+  JSR __fcheckA0
   BEQ ldexp0
   JSR __fisnanA
   BCS ldexp_res_nan
@@ -40,7 +40,7 @@ ldexp:
   STA fexp
   LDA fsignA
   STA fsign
-  JSR __fzeromantissa
+  JSR __fzero_mantissa
   LDA fmanA+1
   STA fmantissa+1
   LDA fmanA+2

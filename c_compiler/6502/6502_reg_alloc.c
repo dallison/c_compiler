@@ -257,6 +257,23 @@ static bool CanUseTemp(W65C02RegisterAllocator* allocator, TargetInstruction* in
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 
+// Is `inst` used as an operand of the instruction we are currently allocating?
+// Such an occupant must never be chosen as a spill victim: the in-flight
+// instruction still needs its value in a register.
+static bool IsOperandOfFrontier(W65C02RegisterAllocator* allocator,
+                                TargetInstruction* inst) {
+  TargetInstruction* frontier = allocator->frontier_inst;
+  if (frontier == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (frontier->operand[i] == inst) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void FindSpillVictim(W65C02RegisterAllocator* allocator,
                                    W65C02RegisterType type, TargetInstruction** victim, TargetInstruction** spill_point) {
   W65C02Register* regs;
@@ -291,10 +308,15 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
     if (regs[i].base.owner != NULL) {
       TargetInstruction* owner = regs[i].base.owner;
       assert(owner != NULL);
-      if (IsSpillInstruction(owner) || IsRegVar(owner)) {
+      // A locked register variable holds a value for its whole live range and
+      // is never spilled.  Any other occupant is a candidate -- including a
+      // reload, which can be evicted essentially for free because its value
+      // still lives in the original spill slot (see SpillInstruction).
+      if (IsRegVar(owner) || IsOperandOfFrontier(allocator, owner)) {
         continue;
       }
-      assert((owner->flags & TARGET_INST_SPILLED) == 0);
+      assert(IsSpillInstruction(owner) ||
+             (owner->flags & TARGET_INST_SPILLED) == 0);
       
       int cost = SpillCost(owner);
       if (cost < min_cost) {
@@ -315,7 +337,10 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
 #endif
   
   if (IsSpillInstruction(*victim)) {
-    // Spilling a spill is a NOP.
+    // The victim is a reload: its value already lives in the original spill
+    // slot, so it can be evicted without storing anything.  SpillInstruction
+    // detects this case (a spill instruction as victim) and frees the register
+    // after retargeting the reload's remaining uses back to the slot.
     *spill_point = NULL;
     return;
   }
@@ -367,10 +392,35 @@ static bool IsAfterSpillPoint(TargetInstruction* inst, void* data) {
       inst->addr > spill_point->addr;
 }
 
+// Predicate for evicting a reload: retarget exactly those users that have not
+// yet been processed and that come after the current allocation frontier.
+// Already-processed users (e.g. earlier reloads, which carry no real address)
+// have consumed the register and must keep referencing this reload.
+static bool IsAfterFrontier(TargetInstruction* inst, void* data) {
+  int frontier_addr = *(int*)data;
+  return (inst->flags & TARGET_INST_PROCESSED) == 0 &&
+      inst->addr > frontier_addr;
+}
+
+
 static W65C02Register* SpillInstruction(W65C02RegisterAllocator* allocator,
                                           TargetInstruction* victim, TargetInstruction* spill_point) {
   W65C02Register* reg = (W65C02Register*)victim->reg;    // Current register.
-  
+
+  // Evicting a reload is free: the value it loaded is still present in the
+  // original spill slot (the reload's operand[0]).  We retarget the reload's
+  // remaining, not-yet-processed uses back to that slot so they reload again,
+  // then release the register.  No store instruction is needed because the
+  // register's contents are identical to the slot.
+  if (IsSpillInstruction(victim)) {
+    TargetInstruction* slot = victim->operand[0];
+    assert(slot != NULL && IsSpillOnly(slot));
+    int frontier_addr = allocator->frontier_addr;
+    TargetRetargetInstructionIf(victim, slot, IsAfterFrontier, &frontier_addr);
+    reg->base.owner = NULL;
+    return reg;
+  }
+
   if (spill_point == NULL) {
     return reg;
   }
@@ -970,9 +1020,13 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   for (TargetInstruction* inst = block->code;
        inst != NULL && inst != block->end_code;
        inst = TargetNext(inst)) {
+    allocator->frontier_addr = inst->addr;
+    allocator->frontier_inst = inst;
     AllocateRegister(allocator, inst);
   }
   if (block->end_code != NULL) {
+    allocator->frontier_addr = block->end_code->addr;
+    allocator->frontier_inst = block->end_code;
     AllocateRegister(allocator, block->end_code);
   }
 }

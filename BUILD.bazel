@@ -56,11 +56,16 @@ COMMON_INCLUDES = [
 
 LIBC_SRCS = [
     "libc/abs.c",
+    "libc/acos.c",
+    "libc/asin.c",
+    "libc/atan.c",
+    "libc/atan2.c",
     "libc/bsearch.c",
     "libc/calloc.c",
     "libc/cdiv.c",
     "libc/ctype.c",
     "libc/exit.c",
+    "libc/fabs.c",
     "libc/fclose.c",
     "libc/fflush.c",
     "libc/fgetc.c",
@@ -93,6 +98,7 @@ LIBC_SRCS = [
     "libc/realloc.c",
     "libc/scanf.c",
     "libc/sincos.c",
+    "libc/sqrt.c",
     "libc/stdio.c",
     "libc/strcat.c",
     "libc/strchr.c",
@@ -116,6 +122,7 @@ LIBC_SRCS = [
     "libc/strtoul.c",
     "libc/strtoull.c",
     "libc/syscall.c",
+    "libc/tan.c",
     "libc/ungetc.c",
 ]
 
@@ -745,6 +752,13 @@ libc_srcs=(
   "libc/strtoul.c"
   "libc/strtoull.c"
   "libc/ungetc.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/fabs.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
 )
 
 for src in "$${libc_srcs[@]}"; do
@@ -857,6 +871,13 @@ libc_srcs=(
   "libc/strtoull.c"
   "libc/syscall.c"
   "libc/ungetc.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/fabs.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
 )
 
 libc_objs=()
@@ -957,6 +978,13 @@ libc_srcs=(
   "libc/strtoull.c"
   "libc/syscall.c"
   "libc/ungetc.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/fabs.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
 )
 
 libc_objs=()
@@ -1065,6 +1093,13 @@ libc_srcs=(
   "libc/strtoull.c"
   "libc/syscall.c"
   "libc/ungetc.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/fabs.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
 )
 
 for src in "$${libc_srcs[@]}"; do

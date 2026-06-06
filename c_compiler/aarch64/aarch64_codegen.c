@@ -2003,7 +2003,14 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       inst->operand[i] = Materialize(g, input);
     }
   }
-  
+
+  // A `tmp` merge slot (used for ?: / && / ||) carries no register class in its
+  // opcode, so mark it floating-point when its value is, ensuring the allocator
+  // routes the producing instruction's result through an FP register.
+  if (opcode == AARCH64_OP(tmp) && TypeIsFloatingPoint(node->type)) {
+    inst->flags |= AARCH64_INST_FP;
+  }
+
   CopyOrSetInstructionSize(node, inst);
   if (!ref_counts_ok) {
     TargetUpdateOperandUsers(inst);

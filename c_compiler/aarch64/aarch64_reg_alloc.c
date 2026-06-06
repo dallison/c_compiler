@@ -403,6 +403,12 @@ static AARCH64Register* AllocateRegisterWithType(AARCH64RegisterAllocator* alloc
 }
 
 static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
+  // A value whose opcode does not imply a register class (e.g. a `tmp` merge
+  // slot for ?: / && / ||) records its floating-pointness via this flag so the
+  // allocator places it in an FP register rather than defaulting to integer.
+  if ((inst->flags & AARCH64_INST_FP) != 0) {
+    return kAARCH64RegTypeFloat;
+  }
   switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(constf):
     case AARCH64_OP(constd):

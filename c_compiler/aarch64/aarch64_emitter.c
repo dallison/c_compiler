@@ -572,21 +572,26 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   BitSetIterator it;
 
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tfldr %s, [sp, #%d]\n",
-            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeFloat, kSize64Bit, buf1, sizeof(buf1)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
-
+  // Restore registers in exactly the same order (and therefore from exactly the
+  // same offsets) that SaveRegisters stored them: integer registers first, then
+  // floating-point.  The two sequences must iterate identically, otherwise a
+  // register is reloaded from another register's slot (e.g. a callee-saved d8
+  // restored from where x10 was spilled), silently corrupting its value.
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
     int reg = (int)BitSetIteratorValue(&it);
     fprintf(fp, "\tldr %s, [sp, #%d]\n",
             AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeInt, kSize64Bit, buf1, sizeof(buf1)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tfldr %s, [sp, #%d]\n",
+            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeFloat, kSize64Bit, buf1, sizeof(buf1)),
             offset);
     offset -= 8;
     BitSetIteratorNext(&it);

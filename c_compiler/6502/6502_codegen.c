@@ -1849,6 +1849,11 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
     }
     result = TempRegister(g, node->type, Sizeof(node->type));
     Copy(g, result, inst, 0, 0, size, GetAddrMode(result), GetAddrMode(inst));
+    // The materialized constant lives in a zero-page register and may be live
+    // across a call, so it must be spillable: register its spill point (the
+    // store completes the value).  Omitting this makes the register allocator
+    // pick it as a spill victim and then fail with "Can't find spill point".
+    AddSpillPoint(g, result);
 #if 0
     // Load a constant.
     result = TempRegister(g, node->type, Sizeof(node->type));

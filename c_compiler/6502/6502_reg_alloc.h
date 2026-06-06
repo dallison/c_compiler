@@ -70,6 +70,8 @@ typedef struct {
   int max_spilled_region_size;
   Map spill_points;              // Map of inst id vs inst ptr for spill points.
   BitSet preserved_instructions;    // Instructions needing preserved regs.
+  int frontier_addr;             // addr of instruction currently being allocated.
+  TargetInstruction* frontier_inst;  // instruction currently being allocated.
 } W65C02RegisterAllocator;
 
 void W65C02RegisterAllocatorInit(W65C02RegisterAllocator* alloc,

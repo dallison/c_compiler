@@ -327,6 +327,12 @@ typedef enum {
 // call result to d0.  Uses a bit above the instruction-size field (bits 16-17).
 #define AARCH64_INST_FP_RETURN 0x40000
 
+// Marks a value-carrying instruction whose result is a floating-point value but
+// whose opcode does not otherwise imply a register class (e.g. a `tmp` merge
+// slot used for ?: / && / ||).  The register allocator uses this to place the
+// value in an FP register instead of defaulting to a general register.
+#define AARCH64_INST_FP (1 << 23)
+
 typedef struct {
   int reg_num;
   int base_reg_num;
