@@ -30,10 +30,13 @@ void ELFReaderSectionDelete(ELFReaderSection* section) {
 
 void ELFReaderFileInit(ELFReaderFile* elf, String* filename) {
   StringInit(&elf->filename, filename->value);
-  memset(&elf->header, 0, sizeof(elf->header));
+  elf->header = NULL;
   VectorInit(&elf->sections);
   VectorInit(&elf->segments);
   elf->section_names = NULL;
+  elf->ops = NULL;
+  elf->base = NULL;
+  elf->owns_decoded = false;
 }
 
 ELFReaderFile* NewELFReaderFile(String* filename) {
@@ -45,9 +48,9 @@ ELFReaderFile* NewELFReaderFile(String* filename) {
 // Read the contents of the ELF file mapped into memory at
 // the address 'addr'.
 bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
-  elf->header = addr;
   elf->file_length = length;
-  
+  elf->base = addr;
+
   // Address of the header as char* so we can perform math on it.
   const char* header_addr = addr;
   
@@ -57,16 +60,42 @@ bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
       header_addr[EI_MAG3] != 'F') {
     return false;
   }
-  
+
+  // Select the format operations from the file's class byte.
+  bool is_64_bit =
+      (uint8_t)header_addr[EI_CLASS] != ELFCLASS32;  // default to 64-bit.
+  elf->ops = ELFFormatOpsFor(is_64_bit);
+
+  // For ELF64 the on-disk layout matches the canonical (wide) in-memory
+  // layout, so the header and section/segment headers can be referenced
+  // directly from the mapping.  For ELF32 they have to be decoded into owned
+  // wide structures.
+  elf->owns_decoded = !is_64_bit;
+
+  // Read the file header.
+  if (elf->owns_decoded) {
+    ELFHeader* header = malloc(sizeof(ELFHeader));
+    elf->ops->ReadHeader(header, header_addr);
+    elf->header = header;
+  } else {
+    elf->header = (ELFHeader*)addr;
+  }
+
   // Read the section headers.
   // The first section header is at header->shoff bytes from the
   // file header.
   const char* section_header = header_addr + elf->header->shoff;
   for (int i = 0; i < elf->header->shnum; i++) {
     ELFReaderSection* section = NewELFReaderSection();
-    section->header = (ELFSectionHeader*)section_header;
+    if (elf->owns_decoded) {
+      ELFSectionHeader* hdr = malloc(sizeof(ELFSectionHeader));
+      elf->ops->ReadSectionHeader(hdr, section_header);
+      section->header = hdr;
+    } else {
+      section->header = (ELFSectionHeader*)section_header;
+    }
     VectorAppend(&elf->sections, section);
-    section_header += sizeof(ELFSectionHeader);   // Next section header.
+    section_header += elf->ops->section_header_size;   // Next section header.
   }
   
   // Read the section name string table.
@@ -84,9 +113,15 @@ bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
   // Read the program segments and insert them into the segments vector.
   const char* segment_header = header_addr + elf->header->phoff;
   for (int i = 0; i < elf->header->phnum; i++) {
-    ELFProgramHeader* segment = (ELFProgramHeader*)segment_header;
-    VectorAppend(&elf->segments, segment);
-    segment_header += sizeof(ELFProgramHeader);   // Next segment header.
+    if (elf->owns_decoded) {
+      ELFProgramHeader* segment = malloc(sizeof(ELFProgramHeader));
+      elf->ops->ReadProgramHeader(segment, segment_header);
+      VectorAppend(&elf->segments, segment);
+    } else {
+      ELFProgramHeader* segment = (ELFProgramHeader*)segment_header;
+      VectorAppend(&elf->segments, segment);
+    }
+    segment_header += elf->ops->program_header_size;   // Next segment header.
   }
   return true;
 }
@@ -139,6 +174,20 @@ bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
 }
 
 void ELFReaderFileDestruct(ELFReaderFile* elf) {
+  // For ELF32 the header and the per-section/segment headers were decoded into
+  // heap-allocated wide structures, so free them here.  For ELF64 they point
+  // directly into the file mapping and are not owned.
+  if (elf->owns_decoded) {
+    for (size_t i = 0; i < elf->sections.length; i++) {
+      ELFReaderSection* section = elf->sections.value.p[i];
+      free(section->header);
+    }
+    for (size_t i = 0; i < elf->segments.length; i++) {
+      free(elf->segments.value.p[i]);
+    }
+    free(elf->header);
+    elf->header = NULL;
+  }
   VectorDestruct(&elf->sections);
   VectorDestruct(&elf->segments);
 }

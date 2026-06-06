@@ -13,6 +13,7 @@
 // writer.  It can be used to construct ELF files from an assembler
 // or linker.
 #include "elf.h"
+#include "elf_format.h"
 
 // The section contents can come from different places.  If an
 // assembler is creating the section the data will be in a Buffer.
@@ -106,6 +107,10 @@ typedef struct ELFWriterFile {
   
   // Function to call to handle dynamic libraries or exes (or NULL).
   DynamicCallback dynamic_callback;
+
+  // Format operations (ELF32 or ELF64) used for all width-sensitive on-disk
+  // sizes and serialization.  Set from the is64bit flag at init time.
+  const ELFFormatOps* ops;
 } ELFWriterFile;
 
 void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,

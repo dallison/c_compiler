@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include "elf.h"
+#include "elf_format.h"
 #include "vector.h"
 #include "dstring.h"
 #include "hashtable.h"
@@ -32,13 +33,26 @@ ELFReaderSection* NewELFReaderSection(void);
 void ELFReaderSectionDelete(ELFReaderSection* section);
 
 typedef struct {
-  ELFHeader* header;          // Header mapped from ELF file.
+  ELFHeader* header;          // Header (wide, canonical) for the ELF file.
   String filename;
   int64_t file_length;
   Vector sections;            // Vector of ELFReaderSection*.
   Vector segments;            // Vector of ELFProgramHeader*.
   const char* section_names;  // Section names string table mapped from file.
   struct stat file_stat;      // Result of stat call.
+
+  // Format operations (ELF32 or ELF64) selected from the file's EI_CLASS byte.
+  const ELFFormatOps* ops;
+  // Base address of the file mapped into memory.  Section contents and string
+  // tables are referenced directly from here; section/segment file offsets are
+  // relative to this address.  For ELF64 the header and section headers point
+  // directly into this mapping; for ELF32 they are decoded into owned wide
+  // structures (see owns_decoded).
+  const char* base;
+  // True if 'header', the per-section headers and the segment headers were
+  // decoded into heap-allocated wide structures (the ELF32 case) and therefore
+  // need to be freed.
+  bool owns_decoded;
 } ELFReaderFile;
 
 void ELFReaderFileInit(ELFReaderFile* elf, String* filename);

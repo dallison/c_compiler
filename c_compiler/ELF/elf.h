@@ -600,4 +600,133 @@ typedef struct {
 #define	EI_OSABI 7
 #define	EI_PAD 8
 
+// Values for the EI_CLASS byte of the ident field.
+#define ELFCLASS32 1
+#define ELFCLASS64 2
+
+// ===========================================================================
+// ELF32 vs ELF64 support.
+//
+// All of the types and structures above are the ELF64 (LP64) on-disk layout.
+// They are also used as the canonical in-memory representation throughout the
+// compiler, linker and loaders.  ELF32 files use narrower fields and, for
+// some structures, a different field order, so they need their own set of
+// on-disk structures.
+//
+// The ELF reader/writer convert between these on-disk structures and the
+// canonical (wide) in-memory structures above using the function pointers in
+// the generic ELFFormatOps "class" (see elf_format.h).
+// ===========================================================================
+
+// ELF64 types.  These alias the canonical (wide) types above so that the
+// ELF64-specific reader/writer functions can be written in terms of ELF64
+// names while sharing the in-memory representation.
+typedef ELF_Addr   ELF64_Addr;
+typedef ELF_Half   ELF64_Half;
+typedef ELF_Off    ELF64_Off;
+typedef ELF_Sword  ELF64_Sword;
+typedef ELF_Word   ELF64_Word;
+typedef ELF_Xword  ELF64_Xword;
+typedef ELF_Sxword ELF64_Sxword;
+
+typedef ELFHeader              ELF64Header;
+typedef ELFProgramHeader       ELF64ProgramHeader;
+typedef ELFSectionHeader       ELF64SectionHeader;
+typedef ELFSymbol              ELF64Symbol;
+typedef ELFRelocation          ELF64Relocation;
+typedef ELFDynamicSectionEntry ELF64DynamicSectionEntry;
+
+// ELF32 types.
+typedef uint32_t ELF32_Addr;
+typedef uint16_t ELF32_Half;
+typedef uint32_t ELF32_Off;
+typedef int32_t  ELF32_Sword;
+typedef uint32_t ELF32_Word;
+
+// ELF32 file header.  The Addr/Off fields are 32 bits wide (so the header is
+// 52 bytes rather than 64).
+typedef struct {
+  uint8_t ident[16];
+  ELF32_Half type;
+  ELF32_Half machine;
+  ELF32_Word version;
+  ELF32_Addr entry;
+  ELF32_Off phoff;
+  ELF32_Off shoff;
+  ELF32_Word flags;
+  ELF32_Half ehsize;
+  ELF32_Half phentsize;
+  ELF32_Half phnum;
+  ELF32_Half shentsize;
+  ELF32_Half shnum;
+  ELF32_Half shstrndx;
+} ELF32Header;
+
+// ELF32 program header.  Note the 'flags' field comes last (unlike ELF64,
+// where it is the second field).
+typedef struct {
+  ELF32_Word type;
+  ELF32_Off offset;
+  ELF32_Addr vaddr;
+  ELF32_Addr paddr;
+  ELF32_Word filesz;
+  ELF32_Word memsz;
+  ELF32_Word flags;
+  ELF32_Word align;
+} ELF32ProgramHeader;
+
+// ELF32 section header.  All fields are 32 bits wide (40 bytes total).
+typedef struct {
+  ELF32_Word name;
+  ELF32_Word type;
+  ELF32_Word flags;
+  ELF32_Addr addr;
+  ELF32_Off offset;
+  ELF32_Word size;
+  ELF32_Word link;
+  ELF32_Word info;
+  ELF32_Word addralign;
+  ELF32_Word entsize;
+} ELF32SectionHeader;
+
+// ELF32 symbol.  Note the field order differs from the ELF64 symbol: value and
+// size come before info/other/shndx (16 bytes total).
+typedef struct {
+  ELF32_Word name;
+  ELF32_Addr value;
+  ELF32_Word size;
+  uint8_t info;
+  uint8_t other;
+  ELF32_Half shndx;
+} ELF32Symbol;
+
+// ELF32 relocation with addend (12 bytes total).
+typedef struct {
+  ELF32_Addr offset;
+  ELF32_Word info;
+  ELF32_Sword addend;
+} ELF32Relocation;
+
+// ELF32 dynamic section entry (8 bytes total).
+typedef struct {
+  ELF32_Sword tag;
+  union {
+    ELF32_Word val;
+    ELF32_Addr ptr;
+  } un;
+} ELF32DynamicSectionEntry;
+
+// Relocation 'info' field encoding.  In ELF64 the symbol index is the top
+// 32 bits and the type is the bottom 32 bits.  In ELF32 the symbol index is
+// the top 24 bits and the type is the bottom 8 bits.  The canonical in-memory
+// representation always uses the ELF64 encoding; the ELF32 serialization
+// re-encodes when writing/reading.
+#define ELF64_R_SYM(info)           ((uint32_t)((info)>>32))
+#define ELF64_R_TYPE(info)          ((uint32_t)(info))
+#define ELF64_R_INFO(sym, type)     (((ELF_Xword)(sym)<<32)+(ELF_Xword)(type))
+
+#define ELF32_R_SYM(info)           ((uint32_t)((info)>>8))
+#define ELF32_R_TYPE(info)          ((uint8_t)(info))
+#define ELF32_R_INFO(sym, type)     (((ELF32_Word)(sym)<<8)+((type)&0xff))
+
 #endif // elf_h 

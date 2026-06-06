@@ -16,12 +16,13 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
                        int flags, DynamicCallback dynamic_callback,
                        bool is_64_bit,
                        bool is_little_endian) {
+  elf->ops = ELFFormatOpsFor(is_64_bit);
   memset(&elf->header, 0, sizeof(elf->header));
   elf->header.ident[EI_MAG0] = '\x7f';
   elf->header.ident[EI_MAG1] = 'E';
   elf->header.ident[EI_MAG2] = 'L';
   elf->header.ident[EI_MAG3] = 'F';
-  elf->header.ident[EI_CLASS] = is_64_bit ? 2 : 1;
+  elf->header.ident[EI_CLASS] = is_64_bit ? ELFCLASS64 : ELFCLASS32;
   elf->header.ident[EI_DATA] = is_little_endian ? 1 : 2;
   elf->header.ident[EI_VERSION] = 1;
   elf->header.ident[EI_OSABI] = 0;
@@ -29,11 +30,11 @@ void ELFWriterFileInit(ELFWriterFile* elf, ELFType type, int machine,
   elf->header.machine = machine;
   elf->header.flags = flags;
   elf->header.version = 1;
-  elf->header.ehsize = sizeof(ELFHeader);
-  elf->header.shentsize = sizeof(ELFSectionHeader);
-  elf->header.phentsize = sizeof(ELFProgramHeader);
+  elf->header.ehsize = (ELF_Half)elf->ops->header_size;
+  elf->header.shentsize = (ELF_Half)elf->ops->section_header_size;
+  elf->header.phentsize = (ELF_Half)elf->ops->program_header_size;
   // Program segment headers are immediately after file header.
-  elf->header.phoff = sizeof(ELFHeader);
+  elf->header.phoff = elf->ops->header_size;
   VectorInit(&elf->sections);
   VectorInit(&elf->segments);
   BufferInit(&elf->string_table);
@@ -226,7 +227,7 @@ static void CreateRelocationSections(ELFWriterFile* elf,
       ELFWriterAddSectionFixup(elf, kFixupFieldInfo, reloc_sect, section);
       
       // RELA sections have a fixed entry size.
-      reloc_sect->header.entsize = sizeof(ELFRelocation);
+      reloc_sect->header.entsize = elf->ops->relocation_size;
       // Take ownership of the relocations.
       reloc_sect->relocations = section->relocations;
       section->relocations = NULL;
@@ -268,9 +269,9 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
   // Calculate the file offset for the first section data.   This is
   // incremented during the offset assignment loop below to be the
   // address of the next section's file offset.
-  int64_t next_section_data_offset = sizeof(ELFHeader) +
-    num_segments * sizeof(ELFProgramHeader) +
-    elf->sections.length * sizeof(ELFSectionHeader);
+  int64_t next_section_data_offset = elf->ops->header_size +
+    num_segments * elf->ops->program_header_size +
+    elf->sections.length * elf->ops->section_header_size;
   ELFWriterSection* prev = NULL;
   
   // Write all the section headers to the file.
@@ -282,7 +283,7 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
       data_length = ELFWriterSectionContentsGetLength(section->contents);
     } else {
       if (section == symtab) {
-        data_length = elf->symbol_table.length * sizeof(ELFSymbol);
+        data_length = elf->symbol_table.length * elf->ops->symbol_size;
       } else if (section == strtab) {
         data_length = elf->string_table.length;
       } else if (section == shstrtab) {
@@ -291,7 +292,7 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
         bool section_found = false;
         for (size_t j = 0; j < relocation_sections->length; j++) {
           if (relocation_sections->value.p[j] == section) {
-            data_length = section->relocations->length * sizeof(ELFRelocation);
+            data_length = section->relocations->length * elf->ops->relocation_size;
             section_found = true;
             break;
           }
@@ -315,7 +316,7 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
    }
     section->header.size = data_length;
     
-    fwrite(&section->header, sizeof(ELFSectionHeader), 1, fp);
+    elf->ops->WriteSectionHeader(&section->header, fp);
     if (section->header.type != SHT(nobits)) {
       next_section_data_offset += data_length + padding;
     }
@@ -342,7 +343,7 @@ static void WriteSectionContents(ELFWriterFile* elf,
       if (section == symtab) {
         for (size_t sym_index = 0; sym_index < elf->symbol_table.length; sym_index++) {
           ELFSymbol* sym = elf->symbol_table.value.p[sym_index];
-          fwrite(sym, sizeof(ELFSymbol), 1, fp);
+          elf->ops->WriteSymbol(sym, fp);
         }
       } else if (section == strtab) {
         data_length = elf->string_table.length;
@@ -358,7 +359,7 @@ static void WriteSectionContents(ELFWriterFile* elf,
             for (size_t reloc_index = 0;
                  reloc_index < section->relocations->length; reloc_index++) {
               ELFRelocation* reloc = section->relocations->value.p[reloc_index];
-              fwrite(reloc, sizeof(*reloc), 1, fp);
+              elf->ops->WriteRelocation(reloc, fp);
             }
             section_found = true;
             break;
@@ -388,7 +389,7 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     ELFProgramHeader phdr;
     memset(&phdr, 0, sizeof(phdr));
     phdr.offset = elf->header.phoff;
-    phdr.filesz = num_segments * sizeof(ELFProgramHeader);
+    phdr.filesz = num_segments * elf->ops->program_header_size;
     phdr.memsz = phdr.filesz;
     phdr.align = 8;
     phdr.flags = PF(r) | PF(x);
@@ -399,7 +400,7 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
     phdr.vaddr = (section0->address & ~(code_segment->header.align - 1)) +
               elf->header.phoff;
     phdr.paddr = phdr.vaddr;
-    fwrite(&phdr, sizeof(phdr), 1, fp);
+    elf->ops->WriteProgramHeader(&phdr, fp);
     
     for (size_t i = 0; i < elf->segments.length; i++) {
       ELFWriterSegment* segment = elf->segments.value.p[i];
@@ -425,7 +426,7 @@ static void WriteProgramHeaders(ELFWriterFile* elf, size_t num_segments,
         }
       }
       
-      fwrite(&segment->header, sizeof(ELFProgramHeader), 1, fp);
+      elf->ops->WriteProgramHeader(&segment->header, fp);
     }
   } else {
     // No segments, need to zero out the phoff
@@ -442,7 +443,7 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   ELFWriterSection* shstrtab = ELFWriterAddStandardSection(elf, ".shstrtab", SHT(strtab), SHF(strings));
   
   // Setup the special symbol table fields.
-  symtab->header.entsize = sizeof(ELFSymbol);
+  symtab->header.entsize = elf->ops->symbol_size;
   ELFWriterAddSectionFixup(elf, kFixupFieldLink, symtab, strtab);
 
   // The 'info' field is one greater than the index of the last local
@@ -468,7 +469,8 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   // segments in the file.
   size_t num_segments = elf->segments.length == 0 ? 0 : elf->segments.length + 1;
 
-  elf->header.shoff = sizeof(ELFHeader) + num_segments * sizeof(ELFProgramHeader);
+  elf->header.shoff = elf->ops->header_size +
+      num_segments * elf->ops->program_header_size;
 
   // Allocate space for the file header.  This will be written after
   // we have all the information we need for it.
@@ -499,7 +501,7 @@ void ELFWriterFileWrite(ELFWriterFile* elf, FILE* fp) {
   
   // Now we need to go back and write the file header.
   rewind(fp);
-  fwrite(&elf->header, sizeof(ELFHeader), 1, fp);
+  elf->ops->WriteHeader(&elf->header, fp);
   
   // Don't need the relocation sections vector now.
   VectorDestruct(&relocation_sections);

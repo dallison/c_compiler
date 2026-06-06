@@ -150,6 +150,7 @@ cc_library(
 cc_library(
     name = "elf",
     srcs = [
+        "c_compiler/ELF/elf_format.c",
         "c_compiler/ELF/elf_reader.c",
         "c_compiler/ELF/elf_writer.c",
     ],
