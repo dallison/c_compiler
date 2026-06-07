@@ -13,7 +13,7 @@
 #include <string.h>
 #include <assert.h>
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
 #include "6502/_malloc.h"
 
 // Rename functions to libc names.

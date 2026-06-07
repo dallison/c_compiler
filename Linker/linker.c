@@ -137,6 +137,8 @@ void LinkerInit(Linker* linker) {
   
   linker->elf_machine_type = 0;
   linker->elf_flags = 0;
+  // Default to ELF64; overridden from the first object file read.
+  linker->ops = ELFFormatOpsFor(true);
   linker->building_dso = false;
   linker->so_name = -1;
   linker->fully_static = false;
@@ -568,11 +570,21 @@ static void ReadSymbolTables(Linker* linker, ELFReaderFile* elf_file,
     }
     ELFReaderSection* strtab = elf_file->sections.value.p[symtab->header->link];
     size_t num_symbols = symtab->header->size / symtab->header->entsize;
-    const char* symbol_addr = (const char*)elf_file->header + symtab->header->offset;
+    const char* symbol_addr = elf_file->base + symtab->header->offset;
+    const ELFFormatOps* ops = elf_file->ops;
     
     // Now read the symbols and add them to the symbol tables in the file.
     for (size_t i = 0; i < num_symbols; i++) {
-      ELFSymbol* elf_sym = (ELFSymbol*)symbol_addr;
+      // LinkerReadSymbol may retain the ELFSymbol pointer (via NewLinkerSymbol),
+      // so for ELF32 we decode into a heap-allocated wide symbol.  For ELF64 the
+      // on-disk layout matches the canonical struct and we alias it directly.
+      ELFSymbol* elf_sym;
+      if (ops->is_64_bit) {
+        elf_sym = (ELFSymbol*)symbol_addr;
+      } else {
+        elf_sym = malloc(sizeof(ELFSymbol));
+        ops->ReadSymbol(elf_sym, symbol_addr);
+      }
       LinkerReadSymbol(linker, file, elf_file, strtab, elf_sym);
       symbol_addr += symtab->header->entsize;
     }
@@ -605,17 +617,26 @@ static void ReadRelocations(Linker* linker, ELFReaderFile* elf_file,
       continue;
     }
     ELFReaderSection* strtab = elf_file->sections.value.p[symtab->header->link];
-    const char* symbol_table_address = (const char*)elf_file->header +
+    const char* symbol_table_address = elf_file->base +
     symtab->header->offset;
+    const ELFFormatOps* ops = elf_file->ops;
     
     int64_t num_relocations = reloc_section->header->size /
     reloc_section->header->entsize;
     
-    const char* reloc_addr = (const char*)elf_file->header +
+    const char* reloc_addr = elf_file->base +
     reloc_section->header->offset;
+    ELFRelocation reloc_storage;
     for (int64_t ri = 0; ri < num_relocations; ri++) {
-      ELFRelocation* reloc = (ELFRelocation*)reloc_addr;
-      
+      // Decode the on-disk relocation into a canonical (wide) relocation.  The
+      // relocation is consumed immediately, so a stack temporary suffices.
+      ELFRelocation* reloc;
+      if (ops->is_64_bit) {
+        reloc = (ELFRelocation*)reloc_addr;
+      } else {
+        ops->ReadRelocation(&reloc_storage, reloc_addr);
+        reloc = &reloc_storage;
+      }
       LinkerReadRelocation(linker, file, elf_file, reloc, symbol_table_address,
                            reloc_section, symtab, strtab);
       reloc_addr += reloc_section->header->entsize;
@@ -656,9 +677,11 @@ static void ReadELFContents(Linker* linker, ELFReaderFile* elf_file,
 
 static bool CheckMachineType(Linker* linker, ObjectFile* file) {
   if (linker->files.length == 1) {
-    // First file, record machine type.
+    // First file, record machine type and the ELF format (32 vs 64 bit) to
+    // use for both decoding inputs and writing the output.
     linker->elf_machine_type = file->elf_file->header->machine;
     linker->elf_flags = file->elf_file->header->flags;
+    linker->ops = file->elf_file->ops;
   } else {
     if (linker->elf_machine_type != file->elf_file->header->machine) {
       LinkerError(file, "Inconsistent ELF machine type");
@@ -1109,8 +1132,9 @@ void LinkerLinkAllFiles(Linker* linker) {
   int num_program_headers = 5;
   int num_sections = 18;
   
-  uint64_t text_file_offset = sizeof(ELFHeader) + sizeof(ELFProgramHeader) * num_program_headers +
-  sizeof(ELFSectionHeader) * num_sections;
+  uint64_t text_file_offset = linker->ops->header_size +
+  linker->ops->program_header_size * num_program_headers +
+  linker->ops->section_header_size * num_sections;
   
   // Assign code segment addresses.
   AssignSegmentSectionAddresses(linker, &linker->code_segment, 0, text_file_offset);
@@ -1475,7 +1499,7 @@ bool LinkerWriteOutput(Linker* linker, FILE* output) {
                     linker->elf_flags,
                     linker->fully_static ? NULL :
                       DynamicLinkerFixupDynamicSectionContents,
-                    true, true);
+                    linker->ops->is_64_bit, true);
   
   // Build all output sections.
   BuildSections(linker, &elf);

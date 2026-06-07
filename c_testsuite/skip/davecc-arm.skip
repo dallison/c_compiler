@@ -1,0 +1,9 @@
+#! /bin/sh
+# Tests skipped for davecc -target arm.
+
+if ! test -f README.md; then
+    echo "run from the c_testsuite directory." >&2
+    exit 1
+fi
+
+# Same portability constraints as other DaveCC targets; extend as needed.

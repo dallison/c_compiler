@@ -1580,7 +1580,10 @@ static IRNode* LengthenInt(Generator* gen, ASTNode* node, IRNode* sub) {
     // Booleans are unsigned.
     return GenerateZeroExtend(gen, node, sub);
   }
-  if (TypeIsUnsigned(node->type)) {
+  // Widening preserves the value, so the kind of extension is determined by the
+  // signedness of the *source* type, not the destination: a signed value is
+  // sign-extended (e.g. (unsigned long long)(int)-1 == 0xffffffffffffffff).
+  if (TypeIsUnsigned(sub->type)) {
     return GenerateZeroExtend(gen, node, sub);
   } else {
     return GenerateSignExtend(gen, sub, node);

@@ -1480,16 +1480,28 @@ static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src )
       SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                 symbol->name.value);
     } else {
-      // Add the member to the symbol table of the struct/union.
-      MapKeyValue kv;
-      kv.key.p = &symbol->name;
-      kv.value.p = member;
-      MapInsert(&dest->symbol_table, kv);
-
+      // Insert a *copy* of the member into the destination's symbol table with
+      // the byte offset adjusted to be relative to the destination struct.  We
+      // must not mutate the original member's byte_offset: it is shared with the
+      // anonymous aggregate's own members vector, where the offset must stay
+      // relative to that aggregate (otherwise designated/positional static
+      // initializers and member access through the aggregate compute the wrong
+      // offset).
       if (!src->is_union) {
         AlignNextOffset(dest, symbol->type);
       }
-      member->byte_offset = dest->next_offset;
+      StructMember* dest_member = NewStructMember(symbol);
+      dest_member->bit_offset = member->bit_offset;
+      dest_member->bit_size = member->bit_size;
+      dest_member->index = member->index;
+      dest_member->is_anon = member->is_anon;
+      dest_member->byte_offset = dest->next_offset;
+
+      MapKeyValue kv;
+      kv.key.p = &symbol->name;
+      kv.value.p = dest_member;
+      MapInsert(&dest->symbol_table, kv);
+
       if (!src->is_union) {
         // Members of an anonymous struct are laid out sequentially regardless
         // of whether the enclosing aggregate is a union, so always advance.

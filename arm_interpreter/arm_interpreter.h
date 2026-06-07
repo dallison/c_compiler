@@ -14,6 +14,9 @@
 #include "loader.h"
 
 #define ARM_STACK_SIZE (8 * 1024 * 1024)
+// Guest virtual address at which the interpreter maps the stack.  Chosen to sit
+// above the code/data/heap (which start at 0x40000000) and below 0x80000000.
+#define ARM_STACK_BASE 0x70000000u
 #define ARM_BREAKPOINT_INSN 0xE7F001F0u
 
 #define ARM_SYSCALL_REG 7

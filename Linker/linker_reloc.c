@@ -86,7 +86,19 @@ void LinkerReadRelocation(Linker* linker,
   int32_t reloc_type = ELF_R_TYPE(reloc->info);
   int64_t addend = reloc_section->header->type == SHT(rela) ? reloc->addend : 0;
   
-  ELFSymbol* elf_sym = (ELFSymbol*)(symbol_table_address + symbol_index * symtab->header->entsize);
+  // Decode the referenced symbol from the on-disk symbol table.  For ELF32 the
+  // on-disk symbol is narrower than the canonical struct, so decode it via the
+  // format ops; the symbol is only used immediately (for its name).
+  const char* sym_addr =
+      symbol_table_address + symbol_index * symtab->header->entsize;
+  ELFSymbol sym_storage;
+  ELFSymbol* elf_sym;
+  if (elf_file->ops->is_64_bit) {
+    elf_sym = (ELFSymbol*)sym_addr;
+  } else {
+    elf_file->ops->ReadSymbol(&sym_storage, sym_addr);
+    elf_sym = &sym_storage;
+  }
 
   // Get the target section index from the info field in the section header.
   int target_section_index = reloc_section->header->info;

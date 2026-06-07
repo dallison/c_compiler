@@ -21,6 +21,8 @@
 #define ARM_PC_REG 15
 #define ARM_FP_REG 11
 #define ARM_IP_REG 12
+// Dedicated scratch/temp register (see Tmp() in arm_codegen.c).
+#define ARM_TMP_REG 9
 
 // Integer return values.
 #define ARM_INT_RETURN_VALUE_0 0

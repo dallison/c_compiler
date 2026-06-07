@@ -102,31 +102,35 @@ static void AddELFSymbols(ARArchiveBuilder* builder, ELFReaderFile* elf, ARFile*
       continue;
     }
     ELFReaderSection* strtab = elf->sections.value.p[symtab->header->link];
-    size_t num_symbols = symtab->header->size / symtab->header->entsize;
-    const char* symbol_addr = (const char*)elf->header + symtab->header->offset;
-    
+    // Symbol entries are decoded through the format ops so that both ELF32 and
+    // ELF64 object files are handled.  The on-disk stride is the format's
+    // symbol size; section contents point into the mapped file.
+    size_t sym_size = elf->ops->symbol_size;
+    size_t num_symbols = sym_size ? (symtab->header->size / sym_size) : 0;
+    const char* symbol_addr = (const char*)symtab->contents;
+
     // Now read the symbols and add them to the symbol tables in the file.
     for (size_t i = 0; i < num_symbols; i++) {
-      ELFSymbol* elf_sym = (ELFSymbol*)symbol_addr;
-      int64_t info = elf_sym->info;
-      int64_t binding = ELF_ST_BIND(info);
-      if (elf_sym->name > strtab->header->size) {
+      ELFSymbol elf_sym;
+      elf->ops->ReadSymbol(&elf_sym, symbol_addr);
+      int64_t binding = ELF_ST_BIND(elf_sym.info);
+      if (elf_sym.name > strtab->header->size) {
         fprintf(stderr, "archivist: corrupt symbol name in %s\n", elf->filename.value);
-        symbol_addr += symtab->header->entsize;
+        symbol_addr += sym_size;
         continue;
       }
-      const char* sym_name = (const char*)strtab->contents + elf_sym->name;
+      const char* sym_name = (const char*)strtab->contents + elf_sym.name;
       if (sym_name[0] == '\0') {
         // Don't insert empty symbol.
-        symbol_addr += symtab->header->entsize;
+        symbol_addr += sym_size;
         continue;
       }
       bool is_local_symbol = binding == STB(local);
-      bool is_defined = elf_sym->shndx != 0;
+      bool is_defined = elf_sym.shndx != 0;
       if (!is_local_symbol && is_defined) {
         ARArchiveBuilderAddSymbol(builder, file, sym_name);
       }
-      symbol_addr += symtab->header->entsize;
+      symbol_addr += sym_size;
     }
   }
   VectorDestruct(&symbol_tables);
@@ -168,7 +172,7 @@ static void ReplaceFile(ARArchiveBuilder* builder, ELFReaderFile* elf, Command c
                           elf->file_stat.st_size,
                           elf->file_stat.st_uid, elf->file_stat.st_gid,
                           elf->file_stat.st_mode,
-                          elf_timestamp, elf->header);
+                          elf_timestamp, (void*)elf->base);
   AddELFSymbols(builder, elf, file);
 }
 

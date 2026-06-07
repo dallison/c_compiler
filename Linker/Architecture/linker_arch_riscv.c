@@ -15,22 +15,22 @@ static int64_t CodeStartAddress(Linker* linker) {
     // We have an extra segment when build a dynamic object (the DYNAMIC
     // segment).
     address =  LINKER_DSO_CODE_SEGMENT_START_ADDRESS +
-    LINKER_SECTION_HEADER_OFFSET + 1 * sizeof(ELFProgramHeader);
+    LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
     address =  LINKER_CODE_SEGMENT_START_ADDRESS +
-    LINKER_SECTION_HEADER_OFFSET;
+    LinkerSectionHeaderOffset(linker);
   } else {
     // Dynamic executable, 2 extra segments: INTERP and DYNAMIC.
     address =  LINKER_CODE_SEGMENT_START_ADDRESS +
-    LINKER_SECTION_HEADER_OFFSET + 2 * sizeof(ELFProgramHeader);
+    LinkerSectionHeaderOffset(linker) + 2 * linker->ops->program_header_size;
   }
   // We know how many sections there are now.  This is the number of groups + the number
   // of extra sections we add.  Add space for the section headers, each of which is
-  // sizeof(ELFSectionHeader) bytes long.
+  // linker->ops->section_header_size bytes long.
   // We also are going to create a BSS section.
   address += (linker->section_groups.length +
               LINKER_NUM_EXTRA_SECTIONS + 1) *
-  sizeof(ELFSectionHeader);
+  linker->ops->section_header_size;
   return address;
 }
 
@@ -43,19 +43,19 @@ static int64_t DataStartAddress(Linker* linker, int64_t code_start, int64_t code
     address = (address +
                LINKER_DYNAMIC_SEGMENT_ALIGNMENT - 1) &
     ~(LINKER_DYNAMIC_SEGMENT_ALIGNMENT-1);
-    address += LINKER_SECTION_HEADER_OFFSET + 1 * sizeof(ELFProgramHeader);
+    address += LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
     // For a static executable the data segment has a fixed address.
-    address = LINKER_DATA_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET;
+    address = LINKER_DATA_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker);
   } else {
     // For a static executable the data segment has a fixed address.
     address = LINKER_DATA_SEGMENT_START_ADDRESS +
-    LINKER_SECTION_HEADER_OFFSET +
-    2 * sizeof(ELFProgramHeader);
+    LinkerSectionHeaderOffset(linker) +
+    2 * linker->ops->program_header_size;
   }
   address += (linker->section_groups.length +
               LINKER_NUM_EXTRA_SECTIONS + 1) *
-      sizeof(ELFSectionHeader) + code_size;
+      linker->ops->section_header_size + code_size;
   return address;
 }
 

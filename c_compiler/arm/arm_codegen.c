@@ -88,7 +88,7 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(cmp): return "cmp";
   case ARM_OP(madd): return "madd";
   case ARM_OP(mneg): return "mneg";
-  case ARM_OP(msub): return "msub";
+  case ARM_OP(msub): return "mls";
   case ARM_OP(mul): return "mul";
   case ARM_OP(neg): return "neg";
   case ARM_OP(ngc): return "ngc";
@@ -155,6 +155,7 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(mvn): return "mvn";
   case ARM_OP(orn): return "orn";
   case ARM_OP(orr): return "orr";
+  case ARM_OP(orrs): return "orrs";
   case ARM_OP(ror): return "ror";
   case ARM_OP(tst): return "tst";
 
@@ -476,6 +477,7 @@ bool ARMIsFixedRegister(TargetInstruction* inst) {
     case ARM_OP(r5):
     case ARM_OP(r6):
     case ARM_OP(r7):
+    case ARM_OP(r9):  // Dedicated scratch/temp register (see Tmp()).
     case ARM_OP(fp):
     case ARM_OP(sp):
     case ARM_OP(lr):
@@ -574,11 +576,31 @@ static TargetInstruction* CopyInstructionSize(TargetInstruction* inst, int op) {
   return inst;
 }
 
+// On the ARM target `long double` has the same 8-byte size and representation
+// as `double`, so the backend must treat the two identically for register and
+// instruction selection (size, fp load/store, register class).  TypeIsDouble
+// only matches the `double` type bit, so use this wherever a "64-bit FP value"
+// decision is made.
+static bool ARMTypeIsDouble(TypeRecord* type) {
+  return TypeIsDouble(type) || TypeIsLongDouble(type);
+}
+
 static TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* inst) {
+  // Floating-point values are sized by their own type, never by their operands:
+  // a load's operand is a 32-bit address, so copying from operand[0] would
+  // wrongly size a `double` load (and every value derived from it) as 32 bits.
+  if (node->type != NULL && ARMTypeIsDouble(node->type)) {
+    SetInstructionSize(inst, kSize64Bit);
+    return inst;
+  }
+  if (node->type != NULL && TypeIsFloat(node->type)) {
+    SetInstructionSize(inst, kSize32Bit);
+    return inst;
+  }
   if (node->inputs.length == 0) {
     // Leaf node, set size based on node type.
     int size = kSize32Bit;
-    if (TypeIsLongLong(node->type) || TypeIsDouble(node->type)) {
+    if (TypeIsLongLong(node->type) || ARMTypeIsDouble(node->type)) {
       size = kSize64Bit;
     }
     SetInstructionSize(inst, size);
@@ -630,6 +652,7 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
   g->not_leaf = false;
+  g->uses_dynamic_stack = false;
   g->zero = NULL;
   g->tmp = NULL;
   g->lsl = NULL;
@@ -673,6 +696,7 @@ static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
   reg->reg_num = reg_num;
   reg->offset = offset;
   reg->is_fp = is_fp;
+  reg->is_double = false;
   return reg;
 }
 
@@ -746,6 +770,31 @@ static TargetInstruction* SetLoweredNode(IRNode* node,
   return TargetSetLoweredNode(node, inst);
 }
 
+// ===== 64-bit integer (register-pair) support =====
+// On 32-bit ARM a 64-bit integer (long long / unsigned long long) is held in a
+// pair of 32-bit registers.  Each "wide" IR node is lowered into two
+// instructions: the low half (stored normally via SetLoweredNode, i.e. in
+// node->data.ptr) and the high half (stashed in the otherwise-unused
+// node->data.lvalue).  Consumers that only need the low 32 bits (truncation to
+// int, etc.) transparently get the low half through the normal lowering path.
+static bool TypeIsWideInt(TypeRecord* t) {
+  return t != NULL && TypeIsIntegral(t) && !TypeIsFloatingPoint(t) &&
+         !TypeIsStructOrUnion(t) && !TypeIsArray(t) && !TypeIsPointer(t) &&
+         t->size == 8;
+}
+
+static bool NodeIsWideInt(IRNode* node) {
+  return node != NULL && TypeIsWideInt(node->type);
+}
+
+static void SetLoweredHi(IRNode* node, TargetInstruction* hi) {
+  node->data.lvalue = (int64_t)(intptr_t)hi;
+}
+
+static TargetInstruction* GetLoweredHi(IRNode* node) {
+  return (TargetInstruction*)(intptr_t)node->data.lvalue;
+}
+
 static TargetInstruction* GetIntConstant(ARMGenerator* g, IRNode* node,
                                          TargetType type, int64_t value) {
   return SetInstructionSize(TargetGetIntConstant(&g->base, node, type, value),
@@ -794,11 +843,19 @@ static COMPILER_UNUSED TargetInstruction* EmitLabelReference(ARMGenerator* g,
   return label;
 }
 
+static TargetInstruction* movi(ARMGenerator* g, int size,
+                               TargetInstruction* src);
+
 static TargetInstruction* ZeroReg(ARMGenerator* g) {
-  if (g->zero == NULL) {
-    g->zero = Emit(g, NewInstruction(ARM_OP(zr)));
-  }
-  return g->zero;
+  // ARM (unlike AArch64) has no hardware zero register, so a register holding
+  // zero must be materialized with `mov rd, #0`.  We must emit a *fresh*
+  // materialization at every use rather than caching a single instruction:
+  // a cached zero value would have one long live range spanning whole basic
+  // blocks and `bl` calls.  Since the arg registers (r0-r3) it often lands in
+  // are caller-saved, that range gets clobbered, and later uses would read a
+  // stale (non-zero) register.  A short-lived per-use `mov #0` lets the
+  // allocator place each one correctly.
+  return movi(g, kSize32Bit, GetIntConstant(g, NULL, kTargetType32Bit, 0));
 }
 
 static TargetInstruction* ZeroImm(ARMGenerator* g) {
@@ -924,7 +981,7 @@ static TargetInstruction* SetDestOrMove(ARMGenerator* g,
     TargetSetDest(from, to);
     return from;
   }
-  TargetInstruction* move = Emit(g, NewInstruction1(mov_opcode, from));
+  TargetInstruction* move = Emit(g, CopyInstructionSize(NewInstruction1(mov_opcode, from), 0));
   move->dest = to;
   return to;
 }
@@ -944,10 +1001,31 @@ static TargetInstruction* SetDestOrMoveToArgReg(ARMGenerator* g,
       break;
     }
   }
-  if (candidate) {
+  // Only redirect the producer's destination straight into the argument
+  // register when the producer is the most recently emitted instruction.
+  // Arguments are moved into their registers in reverse order, so a preceding
+  // argument's value (e.g. a call result still living in r0) may already have
+  // been moved out by an instruction emitted *after* this producer.  Giving an
+  // older producer an argument register as its destination would place that
+  // (clobbering) write before the move that consumes the register's previous
+  // value; emit an explicit move at the current position instead.
+  if (candidate && TargetNext(from) == NULL) {
     return SetDestOrMove(g, from, to, rmov_opcode);
   }
-  Emit(g, NewInstruction2(rmov_opcode, to, from));
+  // Emit an explicit register move at the current position.  Use the
+  // destination-move form (NewInstruction1 + dest) rather than the two-operand
+  // form: ARM's emitter prints a two-operand mov as a three-address
+  // data-processing instruction ("mov rd, rn, rm"), which is wrong for a plain
+  // register-to-register move.  The destination-move form prints correctly as
+  // "mov <to>, <from>" (matching SetDestOrMove's own fallback).
+  TargetInstruction* move = Emit(g, CopyInstructionSize(NewInstruction1(rmov_opcode, from), 0));
+  move->dest = to;
+  if (rmov_opcode == ARM_OP(mov)) {
+    // Tag integer argument moves so the register allocator's parallel-move
+    // resolver can re-sequence a contiguous run of them and break any cycles
+    // (e.g. an r2<->r3 swap) through the scratch register.
+    move->flags |= kARMArgMove;
+  }
   return to;
 }
 
@@ -1050,10 +1128,10 @@ static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
                                  int src_offset, int dest_offset, bool count_as_call) {
   if (length <= 40) {
     // Length is short, copy using sequence of ld/sd and lb/sb instructions.
-    int num_bytes = length & 7;
-    int num_words = length >> 3;
+    int num_bytes = length & 3;
+    int num_words = length >> 2;
     TargetInstruction* result = NULL;
-    for (int i = 0; i < num_words; i++, src_offset += 8, dest_offset += 8) {
+    for (int i = 0; i < num_words; i++, src_offset += 4, dest_offset += 4) {
       TargetInstruction* load = LoadImmediate(g, ARM_OP(ldr), src_addr, src_offset);
       result = StoreImmediate(g, ARM_OP(str), load, dest_addr, dest_offset);
     }
@@ -1103,11 +1181,14 @@ static TargetInstruction* Memcpy(ARMGenerator* g, TargetInstruction* dest_addr,
 static TargetInstruction* Memzero(ARMGenerator* g, TargetInstruction* dest_addr,
                                   int length, int offset) {
   if (length <= 40) {
-    // Length is short, copy using sequence of ld/sd and lb/sb instructions.
-    int num_bytes = length & 7;
-    int num_words = length >> 3;
+    // Length is short, zero it inline with a sequence of word (str) and byte
+    // (strb) stores.  ARM is a 32-bit machine, so a word is 4 bytes: stride by
+    // 4 and handle the trailing 0-3 bytes individually.  (A previous 8-byte
+    // stride left every other word uninitialized.)
+    int num_bytes = length & 3;
+    int num_words = length >> 2;
     TargetInstruction* result = NULL;
-    for (int i = 0; i < num_words; i++, offset += 8) {
+    for (int i = 0; i < num_words; i++, offset += 4) {
       result = StoreImmediate(g, ARM_OP(str), ZeroReg(g), dest_addr, offset);
     }
     for (int i = 0; i < num_bytes; i++, offset += 1) {
@@ -1128,8 +1209,15 @@ static TargetInstruction* Memzero(ARMGenerator* g, TargetInstruction* dest_addr,
       g, NewInstruction1(ARM_OP(mov), ZeroReg(g)));
   arg1->dest = IntArgumentRegister(g, 1);
 
-  // First arg is the address.
-  TargetInstruction* arg0 = SetDestOrMove(g, dest_addr, IntArgumentRegister(g, 0), ARM_OP(mov));
+  // First arg is the address.  Apply the variable's frame-relative offset here:
+  // the short (inline store) path above folds `offset` into each store, but on
+  // this memset-call path it must be added to the base register, otherwise the
+  // zero-fill targets the bare frame pointer instead of the variable's slot.
+  TargetInstruction* base = dest_addr;
+  if (offset != 0) {
+    base = AddImmediate(g, dest_addr, offset);
+  }
+  TargetInstruction* arg0 = SetDestOrMove(g, base, IntArgumentRegister(g, 0), ARM_OP(mov));
 
   // We need to keep the arguments alive until the point of the call.  This
   // is done using a ARM_OP(regarg) instruction sequence.  See BuildArgList for
@@ -1241,6 +1329,12 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
     // When not optimizing, all variables are on the stack.
     return false;
   }
+  // A 64-bit integer needs a register pair; the simple single-register variable
+  // machinery can't represent that, so keep wide integers on the stack and
+  // access them with load64/store64.
+  if (TypeIsWideInt(var_node->type)) {
+    return false;
+  }
   // Can't use a register if its address has been taken.
   IRVariable* var = (IRVariable*)var_node;
   if (var->symbol->flags.address_taken) {
@@ -1265,6 +1359,13 @@ static TargetInstruction* EmitAddressOfSymbol(ARMGenerator* g,
   TargetInstruction* movt =
       Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(movt), movw, sym), size));
   movt->flags |= ARM_HI_RELOC;
+  // movt modifies the high half of the register written by movw in place, so
+  // both instructions must use the *same* physical register.  Route movw's
+  // result into movt's register (the register allocator processes movw first
+  // and will allocate movt, which inherits its register from whatever consumes
+  // the address, e.g. an argument register).  Without this the pair can be
+  // split across two registers and the materialized address is corrupted.
+  movw->dest = movt;
   return movt;
 }
 
@@ -1287,6 +1388,7 @@ static struct {
     {TypeIsUnsignedChar, ARM_OP(ldurb)},
     {TypeIsFloat, ARM_OP(fldr)},
     {TypeIsDouble, ARM_OP(fldr)},
+    {TypeIsLongDouble, ARM_OP(fldr)},
     {TypeIsBool, ARM_OP(ldrb)},
     {TypeIsPointerOrArray, ARM_OP(ldr)},
     {TypeIsFunction, ARM_OP(ldr)},
@@ -1352,16 +1454,22 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
         return Emit(g, NewInstruction1(ARM_OP(fcvt), c));
       }
       case IR_OP(constd): {
+        // A double has no single-register representation on AArch32.  Build the
+        // two 32-bit halves in core registers and move them into a
+        // double-precision VFP register with `vmov Dn, Rlo, Rhi` (the 2-operand
+        // form of fcvt).
         double value = ((IRConstant*)node)->value.fvalue;
-        int64_t bits = *(int64_t*)(&value);
-        TargetInstruction* c;
-        if (bits == 0) {
-          c = ZeroReg(g);
-        } else {
-          c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType64Bit, bits), kSize64Bit);
-
-        }
-        return Emit(g, NewInstruction1(ARM_OP(fcvt), c));
+        uint64_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+        int32_t lo_bits = (int32_t)(uint32_t)bits;
+        int32_t hi_bits = (int32_t)(uint32_t)(bits >> 32);
+        TargetInstruction* lo = MoveImmediate(
+            g, GetIntConstant(g, NULL, kTargetType32Bit, lo_bits), kSize32Bit);
+        TargetInstruction* hi = MoveImmediate(
+            g, GetIntConstant(g, NULL, kTargetType32Bit, hi_bits), kSize32Bit);
+        TargetInstruction* d = NewInstruction2(ARM_OP(fcvt), lo, hi);
+        SetInstructionSize(d, kSize64Bit);
+        return Emit(g, d);
       }
       default:
         assert(false);
@@ -1420,6 +1528,309 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
 static TargetInstruction* Materialize(ARMGenerator* g, IRNode* node) {
   TargetInstruction* inst = Materialize1(g, node);
   return CopyOrSetInstructionSize(node, inst);
+}
+
+// Emit a 32-bit data-processing instruction (its result is its own freshly
+// allocated register).  Used to build the individual halves of 64-bit ops.
+static TargetInstruction* EmitWide32(ARMGenerator* g, TargetInstruction* inst) {
+  return Emit(g, SetInstructionSize(inst, kSize32Bit));
+}
+
+static TargetInstruction* Const32(ARMGenerator* g, int32_t value) {
+  if (value == 0) {
+    return ZeroReg(g);
+  }
+  return MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, value),
+                       kSize32Bit);
+}
+
+// Produce the low and high 32-bit halves of a wide (64-bit) operand.  Constants
+// are materialized on demand; other wide nodes have already been lowered to a
+// (low, high) pair by LowerWideExpression and friends.
+static void MaterializeWide(ARMGenerator* g, IRNode* node,
+                            TargetInstruction** lo, TargetInstruction** hi) {
+  if (IRIsConst(node)) {
+    uint64_t v = (uint64_t)((IRConstant*)node)->value.ivalue;
+    *lo = Const32(g, (int32_t)(uint32_t)v);
+    *hi = Const32(g, (int32_t)(uint32_t)(v >> 32));
+    return;
+  }
+  *lo = GetLoweredNode(node);
+  *hi = GetLoweredHi(node);
+  // A non-wide value used in a wide context (e.g. an int promoted implicitly)
+  // has no high half; treat it as zero-extended.  This should be rare because
+  // the front end inserts explicit extensions, but guard against a NULL.
+  if (*hi == NULL) {
+    *hi = ZeroReg(g);
+  }
+}
+
+static TargetInstruction* WideMov(ARMGenerator* g, TargetInstruction* src) {
+  return EmitWide32(g, NewInstruction1(ARM_OP(mov), src));
+}
+
+// Variable (runtime) 64-bit shift of the pair {ahi:alo} by the amount in
+// register r (assumed 0..63).  Implemented with ARM register-controlled shifts,
+// which produce 0 when the count is >= 32 (LSL/LSR) or the sign (ASR), so the
+// cross-word terms can be OR-combined without conditional execution.
+static void WideVariableShift(ARMGenerator* g, IROpcode op,
+                              TargetInstruction* alo, TargetInstruction* ahi,
+                              TargetInstruction* r, TargetInstruction** lo,
+                              TargetInstruction** hi) {
+  TargetInstruction* c32 = Const32(g, 32);
+  TargetInstruction* n32 =
+      EmitWide32(g, NewInstruction2(ARM_OP(sub), c32, r));  // 32 - r
+  TargetInstruction* nm32 =
+      EmitWide32(g, NewInstruction2(ARM_OP(sub), r, Const32(g, 32)));  // r - 32
+  if (op == IR_OP(lsli)) {
+    *lo = EmitWide32(g, NewInstruction2(ARM_OP(lsl), alo, r));
+    TargetInstruction* t1 = EmitWide32(g, NewInstruction2(ARM_OP(lsl), ahi, r));
+    TargetInstruction* t2 = EmitWide32(g, NewInstruction2(ARM_OP(lsr), alo, n32));
+    TargetInstruction* t3 = EmitWide32(g, NewInstruction2(ARM_OP(lsl), alo, nm32));
+    TargetInstruction* h = EmitWide32(g, NewInstruction2(ARM_OP(orr), t1, t2));
+    *hi = EmitWide32(g, NewInstruction2(ARM_OP(orr), h, t3));
+  } else if (op == IR_OP(lsri)) {
+    *hi = EmitWide32(g, NewInstruction2(ARM_OP(lsr), ahi, r));
+    TargetInstruction* t1 = EmitWide32(g, NewInstruction2(ARM_OP(lsr), alo, r));
+    TargetInstruction* t2 = EmitWide32(g, NewInstruction2(ARM_OP(lsl), ahi, n32));
+    TargetInstruction* t3 = EmitWide32(g, NewInstruction2(ARM_OP(lsr), ahi, nm32));
+    TargetInstruction* l = EmitWide32(g, NewInstruction2(ARM_OP(orr), t1, t2));
+    *lo = EmitWide32(g, NewInstruction2(ARM_OP(orr), l, t3));
+  } else {  // asri (arithmetic right): the high->low cross term needs a select.
+    *hi = EmitWide32(g, NewInstruction2(ARM_OP(asr), ahi, r));
+    TargetInstruction* t1 = EmitWide32(g, NewInstruction2(ARM_OP(lsr), alo, r));
+    TargetInstruction* t2 = EmitWide32(g, NewInstruction2(ARM_OP(lsl), ahi, n32));
+    TargetInstruction* lo_lt =
+        EmitWide32(g, NewInstruction2(ARM_OP(orr), t1, t2));  // valid r<32
+    TargetInstruction* lo_ge =
+        EmitWide32(g, NewInstruction2(ARM_OP(asr), ahi, nm32));  // valid r>=32
+    // mask = 0xFFFFFFFF iff r >= 32, else 0.  (r-32) is negative for r<32, so
+    // ~((r-32) >> 31) gives the desired mask.
+    TargetInstruction* sign =
+        EmitWide32(g, NewInstruction2(ARM_OP(asr), nm32, Const32(g, 31)));
+    TargetInstruction* mask = EmitWide32(g, NewInstruction1(ARM_OP(mvn), sign));
+    TargetInstruction* a = EmitWide32(g, NewInstruction2(ARM_OP(and), lo_ge, mask));
+    TargetInstruction* b =
+        EmitWide32(g, NewInstruction2(ARM_OP(bic), lo_lt, mask));  // lo_lt & ~mask
+    *lo = EmitWide32(g, NewInstruction2(ARM_OP(orr), a, b));
+  }
+}
+
+// 32-bit ARM has no hardware 64-bit multiply/divide/modulo, so these are
+// implemented by calling the usual libgcc-style runtime helpers.  Look up (and
+// cache) an external Symbol for the helper by name.
+static Symbol* GetLibcallSymbol(const char* name) {
+  static struct {
+    const char* name;
+    Symbol* sym;
+  } cache[8];
+  static int count = 0;
+  for (int i = 0; i < count; i++) {
+    if (strcmp(cache[i].name, name) == 0) {
+      return cache[i].sym;
+    }
+  }
+  TypeRecord* base = NewTypeRecord(kTypeInt, kQualPlain);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.unknown_args = true;
+  TypeRecordChain(func, base);
+  Symbol* sym = NewSymbol(name, func, STO(extern));
+  assert(count < (int)(sizeof(cache) / sizeof(cache[0])));
+  cache[count].name = name;
+  cache[count].sym = sym;
+  count++;
+  return sym;
+}
+
+// Emit a call to a runtime helper taking two 64-bit integer arguments and
+// returning a 64-bit integer.  Per AAPCS the first 64-bit argument is passed in
+// r0:r1 and the second in r2:r3, and the result comes back in r0:r1.
+static TargetInstruction* WideLibCall(ARMGenerator* g, IRNode* node,
+                                      const char* name) {
+  IRNode* a = node->inputs.value.p[0];
+  IRNode* b = node->inputs.value.p[1];
+  TargetInstruction *alo, *ahi, *blo, *bhi;
+  MaterializeWide(g, a, &alo, &ahi);
+  MaterializeWide(g, b, &blo, &bhi);
+
+  TargetInstruction* arg0 =
+      SetDestOrMove(g, alo, IntArgumentRegister(g, 0), ARM_OP(mov));
+  TargetInstruction* arg1 =
+      SetDestOrMove(g, ahi, IntArgumentRegister(g, 1), ARM_OP(mov));
+  TargetInstruction* arg2 =
+      SetDestOrMove(g, blo, IntArgumentRegister(g, 2), ARM_OP(mov));
+  TargetInstruction* arg3 =
+      SetDestOrMove(g, bhi, IntArgumentRegister(g, 3), ARM_OP(mov));
+
+  // Keep all four argument registers live up to the call.
+  TargetInstruction* regarg =
+      Emit(g, NewInstruction2(ARM_OP(regarg), NULL, arg3));
+  regarg = Emit(g, NewInstruction2(ARM_OP(regarg), regarg, arg2));
+  regarg = Emit(g, NewInstruction2(ARM_OP(regarg), regarg, arg1));
+  regarg = Emit(g, NewInstruction2(ARM_OP(regarg), regarg, arg0));
+
+  TargetInstruction* sym = GetSymbol(g, NULL, GetLibcallSymbol(name));
+  TargetInstruction* call = Emit(g, NewInstruction2(ARM_OP(bl), sym, regarg));
+  g->not_leaf = true;
+  g->base.num_calls++;
+
+  // Result low half is r0 (the call instruction itself); capture the high half
+  // from r1 immediately while it is still live.
+  TargetInstruction* r1 = Emit(g, NewInstruction(ARM_OP(r1)));
+  TargetInstruction* hi = Emit(g, NewInstruction1(ARM_OP(mov), r1));
+  SetLoweredHi(node, hi);
+  return SetLoweredNode(node, call);
+}
+
+// Lower a 64-bit integer producing IR node into a (low, high) register pair.
+static TargetInstruction* LowerWideExpression(ARMGenerator* g, IRNode* node) {
+  TargetInstruction* lo = NULL;
+  TargetInstruction* hi = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(const64):
+    case IR_OP(consta):
+      MaterializeWide(g, node, &lo, &hi);
+      break;
+
+    case IR_OP(movi): {
+      TargetInstruction *alo, *ahi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      lo = WideMov(g, alo);
+      hi = WideMov(g, ahi);
+      break;
+    }
+
+    case IR_OP(addi): {
+      TargetInstruction *alo, *ahi, *blo, *bhi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      MaterializeWide(g, node->inputs.value.p[1], &blo, &bhi);
+      lo = EmitWide32(g, NewInstruction2(ARM_OP(adds), alo, blo));
+      hi = EmitWide32(g, NewInstruction2(ARM_OP(adc), ahi, bhi));
+      break;
+    }
+
+    case IR_OP(subi): {
+      TargetInstruction *alo, *ahi, *blo, *bhi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      MaterializeWide(g, node->inputs.value.p[1], &blo, &bhi);
+      lo = EmitWide32(g, NewInstruction2(ARM_OP(subs), alo, blo));
+      hi = EmitWide32(g, NewInstruction2(ARM_OP(sbc), ahi, bhi));
+      break;
+    }
+
+    case IR_OP(andi):
+    case IR_OP(ori):
+    case IR_OP(xori): {
+      ARMOpcode op = node->opcode == IR_OP(andi)   ? ARM_OP(and)
+                     : node->opcode == IR_OP(ori)  ? ARM_OP(orr)
+                                                   : ARM_OP(eor);
+      TargetInstruction *alo, *ahi, *blo, *bhi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      MaterializeWide(g, node->inputs.value.p[1], &blo, &bhi);
+      lo = EmitWide32(g, NewInstruction2(op, alo, blo));
+      hi = EmitWide32(g, NewInstruction2(op, ahi, bhi));
+      break;
+    }
+
+    case IR_OP(muli):
+      return WideLibCall(g, node, "__muldi3");
+
+    case IR_OP(divi):
+      return WideLibCall(
+          g, node, TypeIsUnsigned(node->type) ? "__udivdi3" : "__divdi3");
+
+    case IR_OP(modi):
+      return WideLibCall(
+          g, node, TypeIsUnsigned(node->type) ? "__umoddi3" : "__moddi3");
+
+    case IR_OP(onescomp): {
+      TargetInstruction *alo, *ahi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      lo = EmitWide32(g, NewInstruction1(ARM_OP(mvn), alo));
+      hi = EmitWide32(g, NewInstruction1(ARM_OP(mvn), ahi));
+      break;
+    }
+
+    case IR_OP(negi): {
+      // Two's complement: -x = ~x + 1 over the 64-bit pair.
+      TargetInstruction *alo, *ahi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      TargetInstruction* nlo = EmitWide32(g, NewInstruction1(ARM_OP(mvn), alo));
+      TargetInstruction* nhi = EmitWide32(g, NewInstruction1(ARM_OP(mvn), ahi));
+      lo = EmitWide32(g, NewInstruction2(ARM_OP(adds), nlo,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 1)));
+      hi = EmitWide32(g, NewInstruction2(ARM_OP(adc), nhi,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+      break;
+    }
+
+    case IR_OP(lsli):
+    case IR_OP(lsri):
+    case IR_OP(asri): {
+      TargetInstruction *alo, *ahi;
+      MaterializeWide(g, node->inputs.value.p[0], &alo, &ahi);
+      IRNode* amount = node->inputs.value.p[1];
+      if (!IRIsConst(amount)) {
+        TargetInstruction* r = Materialize(g, amount);
+        WideVariableShift(g, node->opcode, alo, ahi, r, &lo, &hi);
+        break;
+      }
+      int n = (int)(((IRConstant*)amount)->value.ivalue) & 63;
+      ARMOpcode op = node->opcode;
+      if (n == 0) {
+        lo = WideMov(g, alo);
+        hi = WideMov(g, ahi);
+      } else if (op == IR_OP(lsli)) {
+        if (n < 32) {
+          TargetInstruction* hi_hi = EmitWide32(g, NewInstruction2(ARM_OP(lsl), ahi,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, n)));
+          TargetInstruction* hi_lo = EmitWide32(g, NewInstruction2(ARM_OP(lsr), alo,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, 32 - n)));
+          hi = EmitWide32(g, NewInstruction2(ARM_OP(orr), hi_hi, hi_lo));
+          lo = EmitWide32(g, NewInstruction2(ARM_OP(lsl), alo,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, n)));
+        } else {
+          hi = (n == 32) ? WideMov(g, alo)
+                         : EmitWide32(g, NewInstruction2(ARM_OP(lsl), alo,
+                               GetIntConstant(g, NULL, kTargetType32Bit, n - 32)));
+          lo = ZeroReg(g);
+        }
+      } else {  // lsri / asri (right shifts)
+        ARMOpcode high_op = (op == IR_OP(asri)) ? ARM_OP(asr) : ARM_OP(lsr);
+        if (n < 32) {
+          TargetInstruction* lo_lo = EmitWide32(g, NewInstruction2(ARM_OP(lsr), alo,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, n)));
+          TargetInstruction* lo_hi = EmitWide32(g, NewInstruction2(ARM_OP(lsl), ahi,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, 32 - n)));
+          lo = EmitWide32(g, NewInstruction2(ARM_OP(orr), lo_lo, lo_hi));
+          hi = EmitWide32(g, NewInstruction2(high_op, ahi,
+                                       GetIntConstant(g, NULL, kTargetType32Bit, n)));
+        } else {
+          if (op == IR_OP(asri)) {
+            lo = (n == 32) ? WideMov(g, ahi)
+                           : EmitWide32(g, NewInstruction2(ARM_OP(asr), ahi,
+                                 GetIntConstant(g, NULL, kTargetType32Bit, n - 32)));
+            hi = EmitWide32(g, NewInstruction2(ARM_OP(asr), ahi,
+                                 GetIntConstant(g, NULL, kTargetType32Bit, 31)));
+          } else {
+            lo = (n == 32) ? WideMov(g, ahi)
+                           : EmitWide32(g, NewInstruction2(ARM_OP(lsr), ahi,
+                                 GetIntConstant(g, NULL, kTargetType32Bit, n - 32)));
+            hi = ZeroReg(g);
+          }
+        }
+      }
+      break;
+    }
+
+    default:
+      assert(false && "unhandled wide (64-bit) integer operation");
+      break;
+  }
+
+  SetLoweredHi(node, hi);
+  return SetLoweredNode(node, lo);
 }
 
 static void ApplyFixups(ARMGenerator* g, IRNode* label_node) {
@@ -1528,11 +1939,61 @@ static TargetInstruction* LowerModulo(ARMGenerator* g, IRNode* node,
 }
 
 
+static TargetInstruction* GetDestInstruction(ARMGenerator* g, IRNode* node);
+
 static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
     return node->data.ptr;
   }
+
+  // 64-bit integer operations are lowered into register pairs.
+  if (NodeIsWideInt(node)) {
+    switch (node->opcode) {
+      case IR_OP(addi):
+      case IR_OP(subi):
+      case IR_OP(andi):
+      case IR_OP(ori):
+      case IR_OP(xori):
+      case IR_OP(onescomp):
+      case IR_OP(negi):
+      case IR_OP(lsli):
+      case IR_OP(lsri):
+      case IR_OP(asri):
+      case IR_OP(movi):
+      case IR_OP(muli):
+      case IR_OP(divi):
+      case IR_OP(modi):
+        return LowerWideExpression(g, node);
+      default:
+        break;
+    }
+  }
+
+  // Logical NOT (!x).  This is distinct from one's-complement (~x, onescomp):
+  // the result is 1 when the operand is zero and 0 otherwise.  Materialize it
+  // as "cmp x, #0 ; cset rd, eq" rather than the bitwise mvn that the IR2RV
+  // table maps noti/nota onto (mvn would wrongly yield ~x).
+  if (node->opcode == IR_OP(noti) || node->opcode == IR_OP(nota)) {
+    IRNode* op = node->inputs.value.p[0];
+    int compare_size = (op->type->size > 4) ? kSize64Bit : kSize32Bit;
+    int result_size = (node->type->size > 4) ? kSize64Bit : kSize32Bit;
+    Emit(g, SetInstructionSize(
+                NewInstruction2(ARM_OP(cmp), Materialize(g, op),
+                                GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                compare_size));
+    TargetInstruction* result = SetInstructionSize(
+        NewInstruction1(ARM_OP(cset), Condition(g, ARM_OP(eq), result_size)),
+        result_size);
+    result->flags |= kARMComparisonGenerated;
+    Emit(g, result);
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+    }
+    return SetLoweredNode(node, result);
+  }
+
   ARMOpcode opcode = IR2RV(node->opcode, TypeIsUnsigned(node->type));
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
@@ -1770,13 +2231,110 @@ static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
       inst->operand[i] = Materialize(g, input);
     }
   }
-  
+
+  // A bare temporary (e.g. the merge slot of a ?: / && / || expression) is
+  // type-agnostic and defaults to an integer register.  When it holds a
+  // floating-point value mark it so the register allocator picks a float
+  // register instead.
+  if ((ARMOpcode)inst->opcode == ARM_OP(tmp) && node->type != NULL &&
+      TypeIsFloatingPoint(node->type)) {
+    inst->flags |= kARMFloatValue;
+  }
+
   CopyOrSetInstructionSize(node, inst);
   if (!ref_counts_ok) {
     TargetUpdateOperandUsers(inst);
   }
-  SetLoweredNode(node, inst);
-  return Emit(g, inst);
+  Emit(g, inst);
+  // If this expression writes its result into a destination tmp (the "-> $n"
+  // annotation used to merge the arms of && / || / ?: into one location), route
+  // the result there so the merged value lands in the destination's register.
+  // Without this the merge temp is never written and the consumer (a later use
+  // or branch) reads an unrelated register.  The comparison and logical-NOT
+  // paths handle their own routing; this covers everything else (e.g. a mova
+  // that materializes an address into a ?: result).
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(g, inst, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, inst);
+}
+
+// If the IR node writes its result into a destination tmp (the "-> $n"
+// annotation, used to merge the results of && / || / ?: into one location),
+// return the lowered instruction for that destination so the caller can route
+// the result there.  Returns NULL when there is no destination.
+static TargetInstruction* GetDestInstruction(ARMGenerator* g, IRNode* node) {
+  if (node->dest == NULL) {
+    return NULL;
+  }
+  if (node->dest->data.ptr == NULL) {
+    LowerExpression(g, node->dest);
+  }
+  return GetLoweredNode(node->dest);
+}
+
+static ARMOpcode InvertCondCode(ARMOpcode c) {
+  if (c == ARM_OP(eq)) return ARM_OP(ne);
+  if (c == ARM_OP(ne)) return ARM_OP(eq);
+  if (c == ARM_OP(lt)) return ARM_OP(ge);
+  if (c == ARM_OP(ge)) return ARM_OP(lt);
+  if (c == ARM_OP(lo)) return ARM_OP(hs);
+  if (c == ARM_OP(hs)) return ARM_OP(lo);
+  assert(false && "unexpected wide condition code");
+  return c;
+}
+
+// Emit a 64-bit integer comparison of two wide operands, setting the condition
+// flags.  Returns the ARM condition code to test afterwards (with cset or a
+// conditional branch).  If `invert` is true the returned condition is negated
+// (used for the bfalse / "branch when false" case).
+static ARMOpcode WideCompareSetFlags(ARMGenerator* g, IRNode* lhs_node,
+                                     IRNode* rhs_node, IROpcode opcode,
+                                     bool is_unsigned, bool invert) {
+  TargetInstruction *alo, *ahi, *blo, *bhi;
+  MaterializeWide(g, lhs_node, &alo, &ahi);
+  MaterializeWide(g, rhs_node, &blo, &bhi);
+
+  // Categorize the comparison.
+  enum { CEQ, CNE, CLT, CGE, CGT, CLE } cat;
+  switch (opcode) {
+    case IR_OP(cmpeqi): case IR_OP(cmpeqa): cat = CEQ; break;
+    case IR_OP(cmpnei): case IR_OP(cmpnea): cat = CNE; break;
+    case IR_OP(cmplti): case IR_OP(cmplta): cat = CLT; break;
+    case IR_OP(cmpgei): case IR_OP(cmpgea): cat = CGE; break;
+    case IR_OP(cmpgti): case IR_OP(cmpgta): cat = CGT; break;
+    case IR_OP(cmplei): case IR_OP(cmplea): cat = CLE; break;
+    default: assert(false && "non-integer wide comparison"); cat = CEQ; break;
+  }
+
+  ARMOpcode cond;
+  if (cat == CEQ || cat == CNE) {
+    TargetInstruction* t1 = EmitWide32(g, NewInstruction2(ARM_OP(eor), alo, blo));
+    TargetInstruction* t2 = EmitWide32(g, NewInstruction2(ARM_OP(eor), ahi, bhi));
+    EmitWide32(g, NewInstruction2(ARM_OP(orrs), t1, t2));
+    cond = (cat == CEQ) ? ARM_OP(eq) : ARM_OP(ne);
+  } else {
+    // Ordering comparisons via subs/sbcs (64-bit subtract).  gt/le are turned
+    // into swapped lt/ge so that only N/V (signed) or C (unsigned) -- which are
+    // valid for the full 64-bit value after sbcs -- are needed.
+    bool swap = (cat == CGT || cat == CLE);
+    bool want_ge = (cat == CGE || cat == CLE);
+    TargetInstruction *xlo, *xhi, *ylo, *yhi;
+    if (!swap) {
+      xlo = alo; xhi = ahi; ylo = blo; yhi = bhi;
+    } else {
+      xlo = blo; xhi = bhi; ylo = alo; yhi = ahi;
+    }
+    EmitWide32(g, NewInstruction2(ARM_OP(subs), xlo, ylo));
+    EmitWide32(g, NewInstruction2(ARM_OP(sbcs), xhi, yhi));
+    if (want_ge) {
+      cond = is_unsigned ? ARM_OP(hs) : ARM_OP(ge);
+    } else {
+      cond = is_unsigned ? ARM_OP(lo) : ARM_OP(lt);
+    }
+  }
+  return invert ? InvertCondCode(cond) : cond;
 }
 
 static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
@@ -1810,6 +2368,22 @@ static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
     result_size = kSize64Bit;
   }
   TargetInstruction* result = NULL;
+
+  // 64-bit integer comparison: build the flags from the register pair.
+  if (TypeIsWideInt(op1->type)) {
+    ARMOpcode cond =
+        WideCompareSetFlags(g, lhs, rhs, node->opcode, is_unsigned, false);
+    result = SetInstructionSize(
+        NewInstruction1(ARM_OP(cset), Condition(g, cond, result_size)),
+        result_size);
+    result->flags |= kARMComparisonGenerated;
+    Emit(g, result);
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+    }
+    return SetLoweredNode(node, result);
+  }
 #define CMP_SET(cond)                                                       \
   do {                                                                      \
     Emit(g, SetInstructionSize(                                             \
@@ -1875,7 +2449,17 @@ static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
   if (result != NULL) {
     result->flags |= kARMComparisonGenerated;
   }
-  return Emit(g, SetLoweredNode(node, result));
+  Emit(g, result);
+  // If the comparison result is consumed via a destination tmp (e.g. it is an
+  // operand of a && / || / ?: that is materialized into a value), route the
+  // cset there so the merged result lands in the destination's register.  
+  // Without this the merged value (read by a later branch or use) is never
+  // written, and the consumer reads an unrelated register.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL && result != NULL) {
+    result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, result);
 }
 
 static void GetAddressAndOffsetFrom(ARMGenerator* g,
@@ -1995,11 +2579,51 @@ static TargetInstruction* Load(ARMGenerator* g, IRNode* addr_node, ARMOpcode opc
   return result;
 }
 
+// Load a 64-bit integer from memory into a (low, high) register pair using two
+// 32-bit loads (avoids the alignment/consecutive-register constraints of ldrd).
+static TargetInstruction* LowerWideLoad(ARMGenerator* g, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  TargetInstruction* scale;
+  bool on_stack = GetRegAndOffset(g, addr_node, &addr, &offset, &scale);
+  TargetInstruction* lo;
+  TargetInstruction* hi;
+  if (!on_stack) {
+    // Value already sits in a register (shouldn't happen: wide variables are
+    // forced to the stack).  Treat the register as the low half.
+    lo = addr;
+    hi = ZeroReg(g);
+  } else {
+    assert(TargetIsConst(offset) &&
+           "wide load with non-constant offset not supported");
+    int off = (int)TargetIntValue(offset);
+    lo = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), addr, offset),
+                                    kSize32Bit));
+    TargetInstruction* offset_hi =
+        GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
+    hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), addr, offset_hi),
+                                    kSize32Bit));
+  }
+  SetLoweredHi(node, hi);
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    lo = SetDestOrMove(g, lo, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, lo);
+}
+
 static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
   ARMOpcode opcode;
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
-  
+
+  // load64 is always an 8-byte integer load (doubles use loadd); the value must
+  // be materialized as a (lo, hi) register pair.
+  if (node->opcode == IR_OP(load64)) {
+    return LowerWideLoad(g, node);
+  }
+
   int size = kSize32Bit;
   switch (node->opcode) {
     case IR_OP(load32):
@@ -2039,7 +2663,17 @@ static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
 
-  return SetLoweredNode(node, Load(g, addr_node, opcode, size));
+  TargetInstruction* inst = Load(g, addr_node, opcode, size);
+  // If this load writes its result into a destination tmp (the "-> $n"
+  // annotation used to merge the arms of && / || / ?: into one location),
+  // route the loaded value there.  e.g. `a && b` where the right operand `b`
+  // is a plain load: its result must land in the same register as the merge
+  // temp, otherwise the consumer reads an unrelated register.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    inst = SetDestOrMove(g, inst, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, inst);
 }
 
 static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstruction* src, ARMOpcode opcode, int size) {
@@ -2206,6 +2840,14 @@ static TargetInstruction* CompareAndBranch(ARMGenerator* g,
       break;
   }
   
+  // 64-bit integer comparison: build the flags from the register pair and
+  // branch on the resulting condition.
+  if (!is_floating_point && TypeIsWideInt(lhs_node->type)) {
+    ARMOpcode cond =
+        WideCompareSetFlags(g, lhs_node, rhs_node, op, is_unsigned, reverse);
+    return EmitBranch(g, cond, target_node);
+  }
+
   int size = kSize32Bit;
   if (lhs_node->type->size > 4) {
     size = kSize64Bit;
@@ -2250,6 +2892,34 @@ static TargetInstruction* CompareAndBranch(ARMGenerator* g,
   return EmitBranch(g, cond, target_node);
 }
 
+// Store a 64-bit integer (low, high) register pair to memory using two 32-bit
+// stores.
+static TargetInstruction* LowerWideStore(ARMGenerator* g, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  IRNode* src_node = node->inputs.value.p[1];
+  TargetInstruction *src_lo, *src_hi;
+  MaterializeWide(g, src_node, &src_lo, &src_hi);
+
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  TargetInstruction* scale;
+  bool on_stack = GetRegAndOffset(g, addr_node, &addr, &offset, &scale);
+  assert(on_stack && "wide store target must be addressable");
+  assert(TargetIsConst(offset) &&
+         "wide store with non-constant offset not supported");
+  int off = (int)TargetIntValue(offset);
+  Emit(g, SetInstructionSize(
+              NewInstruction4(ARM_OP(str), src_lo, addr, offset, NULL),
+              kSize32Bit));
+  TargetInstruction* offset_hi =
+      GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
+  TargetInstruction* last = Emit(
+      g, SetInstructionSize(
+             NewInstruction4(ARM_OP(str), src_hi, addr, offset_hi, NULL),
+             kSize32Bit));
+  return SetLoweredNode(node, last);
+}
+
 static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
   ARMOpcode opcode;
   assert(node->inputs.length == 2);
@@ -2259,6 +2929,12 @@ static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
 
   // Value to store is in second input.
   IRNode* src_node = node->inputs.value.p[1];
+
+  // store64 is always an 8-byte integer store (doubles use stored); store both
+  // 32-bit halves.
+  if (node->opcode == IR_OP(store64)) {
+    return LowerWideStore(g, node);
+  }
 
   int size = kSize32Bit;
   
@@ -2282,6 +2958,7 @@ static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
       break;
     case IR_OP(stored):
       opcode = ARM_OP(fstr);
+      size = kSize64Bit;
       break;
     case IR_OP(storea):
       opcode = ARM_OP(str);
@@ -2307,15 +2984,6 @@ static TargetInstruction* LowerConditionalBranch(ARMGenerator* g,
   IRNode* target_node = node->inputs.value.p[1];
   IRNode* input = node->inputs.value.p[0];
 
-  IRNode* lhs = input->inputs.value.p[0];
-  IRNode* rhs = input->inputs.value.p[1];
-  bool is_unsigned = TypeIsUnsigned(lhs->type);
-  
-  int size = kSize32Bit;
-  if (lhs->type->size > 4) {
-    size = kSize64Bit;
-  }
-  
   // Check if the branch comes from a comparison.  It not, we compare with
   // zero.
   bool compare_with_zero = !IRIsComparison(input);
@@ -2324,10 +2992,29 @@ static TargetInstruction* LowerConditionalBranch(ARMGenerator* g,
     compare_with_zero = (comp->flags & kARMComparisonGenerated) != 0;
   }
   if (compare_with_zero) {
+    // The condition is an arbitrary value (e.g. the result of `||`/`&&` or a
+    // plain load), not a comparison node, so it does not have two comparison
+    // operands.  Compare it against zero instead.
+    int size = kSize32Bit;
+    if (expr->type->size > 4) {
+      size = kSize64Bit;
+    }
     if (IRIsConst(input)) {
       // Compare constant.
       // If constant is zero, BRA is comparing false
       // otherwise, BRA is comparing true.
+      // The condition may also feed a merge destination (the "-> $n" used for
+      // &&/||/?:).  For example `0 && f()` lowers the constant 0 as the branch
+      // condition *and* the merge result; if we only fold the branch and drop
+      // the dest, the merge slot keeps a stale value.  Materialize the constant
+      // into its destination before taking the (folded) branch.
+      if (input->dest != NULL) {
+        TargetInstruction* dest = GetDestInstruction(g, input);
+        if (dest != NULL) {
+          TargetInstruction* cval_inst = Materialize(g, input);
+          SetDestOrMove(g, cval_inst, dest, ARM_OP(mov));
+        }
+      }
       int64_t cval = IRIntConstValue(input);
       if (cval == 0) {
         if (node->opcode == IR_OP(bfalse)) {
@@ -2348,6 +3035,9 @@ static TargetInstruction* LowerConditionalBranch(ARMGenerator* g,
     }
     return NULL;
   }
+  IRNode* lhs = input->inputs.value.p[0];
+  IRNode* rhs = input->inputs.value.p[1];
+  bool is_unsigned = TypeIsUnsigned(lhs->type);
   return CompareAndBranch(g, lhs, rhs, target_node, is_unsigned, reverse, expr->opcode);
 }
 
@@ -2418,6 +3108,17 @@ static TargetInstruction* LowerResult(ARMGenerator* g, IRNode* node) {
   TargetInstruction* result_reg = Emit(g, NewInstruction(result_reg_opcode));
   return Emit(g, NewInstruction2(opcode, result_reg, result));
 #else
+  if (node->opcode == IR_OP(resulti) && NodeIsWideInt(node)) {
+    // 64-bit integer result: low half in r0 (resulti), high half in r1.
+    TargetInstruction* lo;
+    TargetInstruction* hi;
+    MaterializeWide(g, node->inputs.value.p[0], &lo, &hi);
+    TargetInstruction* r0 = EmitSymbol(g, NewInstruction(ARM_OP(resulti)));
+    SetDestOrMove(g, lo, r0, ARM_OP(mov));
+    TargetInstruction* r1 = EmitSymbol(g, NewInstruction(ARM_OP(r1)));
+    TargetInstruction* res_hi = SetDestOrMove(g, hi, r1, ARM_OP(mov));
+    return SetLoweredNode(node, res_hi);
+  }
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
   TargetInstruction* result_reg = EmitSymbol(g, NewInstruction(result_reg_opcode));
   return SetLoweredNode(node, SetDestOrMove(g, result, result_reg, opcode));
@@ -2457,18 +3158,31 @@ static TargetInstruction* LowerAddressOf(ARMGenerator* g, IRNode* node) {
 
 static TargetInstruction* LowerZeroExtend(ARMGenerator* g, IRNode* node) {
   TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
-  IRConstant* mask_node = (IRConstant*)node->inputs.value.p[1];
-  int64_t mask = mask_node->value.ivalue;
-  if (ARMIsPossibleImmediate(mask)) {
-    value = Emit(g, NewInstruction2(
-                         ARM_OP(and), value,
-                         GetIntConstant(g, NULL, kTargetType32Bit, mask)));
-  } else {
-    value = Emit(g, NewInstruction2(ARM_OP(and), value,
-                                     Materialize(g, node->inputs.value.p[1])));
+  // The second IR operand is the bit-difference between the destination and
+  // source widths (e.g. 24 for a char->int extension, 16 for a short->int
+  // extension), NOT a usable AND mask.  Zero-extend by shifting the value left
+  // to push the unwanted high bits out and then logically right, which clears
+  // them.  (The previous code used the bit-difference directly as an AND mask,
+  // emitting e.g. "and rX, rX, #24" instead of the correct "and rX, rX, #255".)
+  IRConstant* diff_node = (IRConstant*)node->inputs.value.p[1];
+  int64_t diff = diff_node->value.ivalue;
+  if (diff <= 0 || diff >= 32) {
+    return SetLoweredNode(node, value);
   }
-  SetLoweredNode(node, value);
-  return value;
+  TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
+  TargetInstruction* lsl =
+      Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsl), value, immed), 0));
+  TargetInstruction* lsr =
+      Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsr), lsl, immed), 0));
+  // Honor a "-> $n" merge destination (the temp used to merge the arms of
+  // && / || / ?:).  A char/short operand of && is zero-extended here; without
+  // routing the result to the merge temp the short-circuit path reads a stale
+  // register (the extension lands in a fresh reg instead of the merge temp).
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    lsr = SetDestOrMove(g, lsr, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, lsr);
 }
 
 static TargetInstruction* LowerInc(ARMGenerator* g, IRNode* node) {
@@ -2651,28 +3365,50 @@ static TargetInstruction* LowerSetBitField(ARMGenerator* g, IRNode* node) {
   return result;
 }
 
+// Finish a sign extension: `lo` holds the 32-bit sign-extended value.  If the
+// result type is 64-bit, fill the high word with copies of the sign bit
+// (asr lo, #31) so the value is correctly sign-extended across the register
+// pair.
+static TargetInstruction* FinishSignExtend(ARMGenerator* g, IRNode* node,
+                                           TargetInstruction* lo) {
+  if (NodeIsWideInt(node)) {
+    TargetInstruction* hi = EmitWide32(
+        g, NewInstruction2(ARM_OP(asr), lo,
+                           GetIntConstant(g, NULL, kTargetType32Bit, 31)));
+    SetLoweredHi(node, hi);
+    return SetLoweredNode(node, lo);
+  }
+  // Honor a "-> $n" merge destination (see LowerZeroExtend): a sign-extended
+  // char/short operand of && / || / ?: must write the merge temp.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    lo = SetDestOrMove(g, lo, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, lo);
+}
+
 static TargetInstruction* LowerSignExtend(ARMGenerator* g, IRNode* node) {
   TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
   if (ARMIsSignedLoad(value)) {
-    return SetLoweredNode(node, value);
+    return FinishSignExtend(g, node, value);
   }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff > 0) {
-    return SetLoweredNode(node, value);
+    return FinishSignExtend(g, node, value);
   }
   diff = -diff;
-  if (diff == 32) {
-    // There is a word signextension instruction sext.w
-    return SetLoweredNode(node,
-                          Emit(g, NewInstruction1(ARM_OP(mov), value)));
+  if (diff == 32 || diff == 0) {
+    // The low word already holds the full source value (e.g. int -> long long);
+    // only the high word (handled by FinishSignExtend) needs filling.
+    return FinishSignExtend(g, node,
+                            Emit(g, NewInstruction1(ARM_OP(mov), value)));
   }
   TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
   TargetInstruction* lsl = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsl), value, immed), 0));
   TargetInstruction* asr = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(asr), lsl, immed), 0));
 
-  SetLoweredNode(node, asr);
-  return asr;
+  return FinishSignExtend(g, node, asr);
 }
 
 static TargetInstruction* LowerAlign(ARMGenerator* g, IRNode* node) {
@@ -2823,6 +3559,12 @@ typedef enum {
   kArgLocationPushed,
   kArgLocationPassedByReferenceInRegister,
   kArgLocationPassedByReferenceOnStack,
+  // A variadic double passed (per AAPCS) in a pair of core integer registers.
+  kArgLocationFpIntPair,
+  // A 64-bit integer (long long) passed in an even-aligned core register pair.
+  kArgLocationIntPair,
+  // A 64-bit integer passed on the stack (both halves, 8-byte aligned).
+  kArgLocationPushedWide,
 } ArgLocationType;
 
 typedef struct {
@@ -2831,6 +3573,7 @@ typedef struct {
     TargetInstruction* reg;
     size_t offset;
   } location;
+  TargetInstruction* reg2;  // High half register for kArgLocationFpIntPair.
   size_t reference_offset;
 } ArgLocation;
 
@@ -2838,6 +3581,29 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = kArgLocationRegister;
   loc->location.reg = reg;
+  loc->reg2 = NULL;
+  loc->reference_offset = 0;
+  return loc;
+}
+
+// A variadic double passed in two consecutive core registers (lo, hi).
+static ArgLocation* NewArgLocationFpIntPair(TargetInstruction* lo,
+                                            TargetInstruction* hi) {
+  ArgLocation* loc = malloc(sizeof(ArgLocation));
+  loc->type = kArgLocationFpIntPair;
+  loc->location.reg = lo;
+  loc->reg2 = hi;
+  loc->reference_offset = 0;
+  return loc;
+}
+
+// A 64-bit integer passed in an even-aligned core register pair (lo, hi).
+static ArgLocation* NewArgLocationIntPair(TargetInstruction* lo,
+                                          TargetInstruction* hi) {
+  ArgLocation* loc = malloc(sizeof(ArgLocation));
+  loc->type = kArgLocationIntPair;
+  loc->location.reg = lo;
+  loc->reg2 = hi;
   loc->reference_offset = 0;
   return loc;
 }
@@ -2846,6 +3612,7 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = type;
   loc->location.offset = offset;
+  loc->reg2 = NULL;
   loc->reference_offset = 0;
   return loc;
 }
@@ -2855,6 +3622,7 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = kArgLocationPassedByReferenceInRegister;
   loc->location.reg = reg;
+  loc->reg2 = NULL;
   loc->reference_offset = reference_offset;
   return loc;
 }
@@ -2864,6 +3632,7 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = kArgLocationPassedByReferenceOnStack;
   loc->location.offset = offset;
+  loc->reg2 = NULL;
   loc->reference_offset = reference_offset;
   return loc;
 }
@@ -2888,6 +3657,12 @@ static TargetInstruction* BuildArgList(ARMGenerator* g, Vector* arg_locations) {
     if (loc->type == kArgLocationRegister) {
       result =
           Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->location.reg));
+    } else if (loc->type == kArgLocationFpIntPair ||
+               loc->type == kArgLocationIntPair) {
+      // Both core registers of a 64-bit argument must stay live to the call.
+      result =
+          Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->location.reg));
+      result = Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->reg2));
     }
   }
   return result;
@@ -2911,6 +3686,84 @@ static TargetInstruction* BuildArgList(ARMGenerator* g, Vector* arg_locations) {
 //    stop working (TODO: check the C standard for this).
 // 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
 //    register pair.
+// Determine how many leading arguments of the callee are *named* (declared in
+// the prototype).  Returns true and sets *named_count if the callee is a
+// variadic function; arguments at or beyond *named_count are variadic and, on
+// AAPCS, must be passed in core registers / on the stack rather than VFP.
+static bool CalleeVariadicNamedCount(IRNode* node, int* named_count) {
+  IRNode* target = node->inputs.value.p[0];
+  TypeRecord* t = target->type;
+  while (t != NULL && t->declarator == kDeclPointer) {
+    t = t->next;
+  }
+  if (t == NULL || t->declarator != kDeclFunction) {
+    return false;
+  }
+  if (!t->info.function.varargs) {
+    return false;
+  }
+  *named_count = (int)t->info.function.prototype.length;
+  return true;
+}
+
+// AAPCS stack-slot layout for arguments passed on the stack.  Scalars of 4
+// bytes or less occupy a 4-byte slot; 8-byte scalars (long long / double) are
+// 8-byte aligned and occupy 8 bytes.  Structs/unions keep an 8-byte slot
+// (matching the by-value / by-reference handling in LowerCall).  This sizing
+// must be identical on the caller (LowerCall), the named-argument reader
+// (ArgumentLocation) and va_arg so that overflow arguments line up.
+static size_t ArgStackAlignment(TypeRecord* type) {
+  if (type == NULL) {
+    return 4;
+  }
+  if (TypeIsStructOrUnion(type)) {
+    // A by-value struct keeps its natural alignment, clamped to the 4/8-byte
+    // argument-slot granularity (AAPCS aligns aggregate arguments to at most a
+    // double-word).
+    size_t a = (size_t)TypeRecordAlignment(type);
+    return a <= 4 ? 4 : 8;
+  }
+  if (TypeIsPointerOrArray(type)) {
+    // Pointer and (decayed) array arguments are passed as a 4-byte pointer, not
+    // as the pointee/array size.  Using type->size here would over-reserve the
+    // slot (e.g. a string literal of type char[5]) and desync va_arg, which
+    // advances pointers by 4 bytes.
+    return 4;
+  }
+  if (type->size > 4) {
+    return 8;
+  }
+  return 4;
+}
+
+static size_t ArgStackSize(TypeRecord* type) {
+  if (type == NULL) {
+    return 4;
+  }
+  if (TypeIsStructOrUnion(type)) {
+    // A by-value struct occupies its whole size on the stack, rounded up to a
+    // whole number of 4-byte words.
+    return ((size_t)type->size + 3) & ~(size_t)3;
+  }
+  if (TypeIsPointerOrArray(type)) {
+    return 4;  // Passed as a 4-byte pointer (see ArgStackAlignment).
+  }
+  if (type->size > 4) {
+    return 8;
+  }
+  return 4;
+}
+
+// Align *offset for an argument of the given type, return its slot offset and
+// advance *offset past it.
+static size_t ArgStackSlot(TypeRecord* type, size_t* offset) {
+  size_t align = ArgStackAlignment(type);
+  *offset = (*offset + align - 1) & ~(align - 1);
+  size_t slot = *offset;
+  *offset += ArgStackSize(type);
+  return slot;
+}
+
 static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -2919,6 +3772,13 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   size_t next_pushed_arg_offset = 0;
   Vector arg_locations;
   VectorInit(&arg_locations);
+
+  // Variadic floating-point arguments follow the integer ABI on ARM.
+  int named_count = 0;
+  bool callee_varargs = CalleeVariadicNamedCount(node, &named_count);
+  // Argument ordinal among the real (source) arguments, ignoring a leading
+  // hidden struct-return pointer.
+  int arg_ordinal = 0;
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
@@ -2933,43 +3793,64 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
          VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
         continue;
       }
-      // Struct or union that fit in a register are passed in a register.  If
-      // they are bigger than 8 bytes they are passed by reference (first making
-      // a copy on the stack).
+      bool variadic = callee_varargs && arg_ordinal >= named_count;
+      // Named struct/union arguments are passed *by value* in the stacked
+      // argument area, laid out consecutively (see ArgStackSlot).  The callee
+      // reads them directly at fp + slot (ArgumentLocation / the argument case
+      // in AssignRegisterOrOffset).  This keeps multi-struct calls and structs
+      // of any size correct without the broken "fits in one register" path.
+      // Variadic struct arguments are passed *by reference*: a single 4-byte
+      // pointer to a caller-made copy, occupying one word in the argument area
+      // (a core register, then the stack).  Keeping every variadic struct one
+      // word wide lets va_arg(struct) walk the save area uniformly -- it loads
+      // the pointer and treats it as the struct's address (see
+      // LowerBuiltinVaArg).
       size_t struct_size = arg_node->type->size;
-      if (struct_size <= 8) {
-        if (next_int_arg_reg < ARM_NUM_INT_ARGS) {
-          // Argument goes in an argument register.
-          TargetInstruction* arg_reg =
-              IntArgumentRegister(g, next_int_arg_reg++);
-          VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
-        } else {
-          // Need to push argument on to the stack.  But we do that in reverse
-          // order so for now, we record that the arg location is on the stack.
-          VectorAppend(
-              &arg_locations,
-              NewArgLocationPushed(kArgLocationPushed, next_pushed_arg_offset));
-          next_pushed_arg_offset += 8;
-        }
+      if (!variadic) {
+        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushed, slot));
       } else {
-        // The struct needs to be copied onto the stack and then its address
-        // passed either in a register or on the stack.
         if (next_int_arg_reg < ARM_NUM_INT_ARGS) {
-          // Argument goes in an argument register.
+          // Pointer to the copy passed in an argument register.
           TargetInstruction* arg_reg =
               IntArgumentRegister(g, next_int_arg_reg++);
           VectorAppend(&arg_locations, NewArgLocationReferenceInRegister(
                                            arg_reg, struct_area_size));
         } else {
+          // Pointer to the copy passed in a single 4-byte stack slot.
+          size_t slot = next_pushed_arg_offset;
+          next_pushed_arg_offset += 4;
           VectorAppend(&arg_locations,
-                       NewArgLocationReferenceOnStack(next_pushed_arg_offset,
-                                                      struct_area_size));
-          next_pushed_arg_offset += 8;
+                       NewArgLocationReferenceOnStack(slot, struct_area_size));
         }
-        struct_area_size += struct_size;
+        // Reserve an 8-byte-aligned region for the caller's copy so that
+        // 8-byte members (HFA doubles / long double) stay aligned.
+        struct_area_size += (struct_size + 7) & ~(size_t)7;
       }
     } else if (TypeIsFloatingPoint(arg_node->type)) {
-      if (next_fp_arg_reg < ARM_NUM_FP_ARGS) {
+      bool variadic = callee_varargs && arg_ordinal >= named_count;
+      if (variadic) {
+        // AAPCS: a variadic double is passed like a 64-bit integer -- in a pair
+        // of core registers (8-byte aligned, so starting at an even register)
+        // or on the stack.  (Variadic floats are promoted to double by the
+        // front end, so every variadic FP argument is 8 bytes.)
+        if (next_int_arg_reg % 2 != 0) {
+          next_int_arg_reg++;  // 8-byte alignment: skip to an even register.
+        }
+        if (next_int_arg_reg + 1 < ARM_NUM_INT_ARGS) {
+          TargetInstruction* lo = IntArgumentRegister(g, next_int_arg_reg);
+          TargetInstruction* hi = IntArgumentRegister(g, next_int_arg_reg + 1);
+          next_int_arg_reg += 2;
+          VectorAppend(&arg_locations, NewArgLocationFpIntPair(lo, hi));
+        } else {
+          // No room for a register pair: pass the whole double on the stack.
+          next_int_arg_reg = ARM_NUM_INT_ARGS;
+          size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+          VectorAppend(&arg_locations,
+                       NewArgLocationPushed(kArgLocationPushed, slot));
+        }
+      } else if (next_fp_arg_reg < ARM_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
             FloatingPointArgumentRegister(g, next_fp_arg_reg++);
@@ -2977,10 +3858,27 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
         // order so for now, we record that the arg location is on the stack.
-        VectorAppend(
-            &arg_locations,
-            NewArgLocationPushed(kArgLocationPushed, next_pushed_arg_offset));
-        next_pushed_arg_offset += 8;
+        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushed, slot));
+      }
+    } else if (TypeIsWideInt(arg_node->type)) {
+      // AAPCS: a 64-bit integer is passed in an even-aligned pair of core
+      // registers (r0:r1 or r2:r3) or, once those run out, 8-byte aligned on
+      // the stack.
+      if (next_int_arg_reg % 2 != 0) {
+        next_int_arg_reg++;  // 8-byte alignment: skip to an even register.
+      }
+      if (next_int_arg_reg + 1 < ARM_NUM_INT_ARGS) {
+        TargetInstruction* lo = IntArgumentRegister(g, next_int_arg_reg);
+        TargetInstruction* hi = IntArgumentRegister(g, next_int_arg_reg + 1);
+        next_int_arg_reg += 2;
+        VectorAppend(&arg_locations, NewArgLocationIntPair(lo, hi));
+      } else {
+        next_int_arg_reg = ARM_NUM_INT_ARGS;
+        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushedWide, slot));
       }
     } else {
       if (next_int_arg_reg < ARM_NUM_INT_ARGS) {
@@ -2991,17 +3889,20 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       } else {
         // Need to push argument on to the stack.  But we do that in reverse
         // order so for now, we record that the arg location is on the stack.
-        VectorAppend(
-            &arg_locations,
-            NewArgLocationPushed(kArgLocationPushed, next_pushed_arg_offset));
-        next_pushed_arg_offset += 8;
+        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushed, slot));
       }
     }
+    arg_ordinal++;
   }
 
   // Phase 2:
-  // Decrement the stack pointer to make space for the stack args
+  // Decrement the stack pointer to make space for the stack args.  Keep the
+  // stack pointer 8-byte aligned at the call site (AAPCS), even though
+  // individual word arguments only occupy 4-byte slots.
   size_t total_stack_size = struct_area_size + next_pushed_arg_offset;
+  total_stack_size = (total_stack_size + 7) & ~(size_t)7;
   if (total_stack_size > 0) {
     TargetInstruction* newsp =
         AddImmediate(g, StackPointer(g), -total_stack_size);
@@ -3017,6 +3918,17 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     IRNode* arg_node = node->inputs.value.p[i];
     size_t size = arg_node->type->size;
     switch (arg_location->type) {
+      case kArgLocationPushed:
+        if (TypeIsStructOrUnion(arg_node->type)) {
+          // Named struct passed by value on the stack: copy the whole struct
+          // into its stacked slot now, before the argument registers are set
+          // up (the copy may materialize the source address into scratch
+          // registers).  Phase 4 then leaves this argument alone.
+          TargetInstruction* arg = Materialize(g, arg_node);
+          Memcpy(g, StackPointer(g), arg, (int)size, 0,
+                 (int)arg_location->location.offset, false);
+        }
+        break;
       case kArgLocationPassedByReferenceInRegister:
       case kArgLocationPassedByReferenceOnStack: {
         TargetInstruction* arg = Materialize(g, arg_node);
@@ -3026,6 +3938,40 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       }
       default:
         break;
+    }
+  }
+
+  // Phase 3.5:
+  // For an indirect call (the target is computed into a register rather than
+  // being a link-time symbol) stage the target into its own register *before*
+  // the argument registers are set up below.  The blr below references this
+  // staged value, so the register allocator keeps it live across the argument
+  // moves and won't reuse its register for an argument (e.g. r0).  Without
+  // this, the call target and the first argument can land in the same
+  // register and the argument move clobbers the target.
+  bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
+      total_stack_size == 0 && g->base.stack_frame_size == 0;
+  TargetInstruction* staged_target = NULL;
+  if (!will_tail_call) {
+    IRNode* target_node = node->inputs.value.p[0];
+    TargetInstruction* a = GetLoweredNode(target_node);
+    if ((int)a->opcode == (int)ARM_OP(bl) ||
+        (int)a->opcode == (int)ARM_OP(blr) ||
+        (((int)a->opcode != (int)ARM_OP(symbol)) && ARMGeneratesOutput(a))) {
+      // Indirect (or chained) call: the target value is computed into a
+      // register.  ARM has only r0-r3 for arguments, so the register allocator
+      // readily places the target in an argument register that the arg setup
+      // below then clobbers.  Copy the target into a fresh allocatable
+      // temporary and call through it.  Using a fresh temp (rather than the
+      // single dedicated scratch r9) lets the allocator preserve it across a
+      // nested call inside the argument list -- e.g. an indirect call whose
+      // argument is itself an indirect call would otherwise have both targets
+      // collide in r9.
+      TargetInstruction* tmp = Emit(g, NewInstruction(ARM_OP(tmp)));
+      TargetInstruction* mv =
+          Emit(g, CopyInstructionSize(NewInstruction1(ARM_OP(mov), a), 0));
+      mv->dest = tmp;
+      staged_target = mv;
     }
   }
 
@@ -3058,18 +4004,12 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         break;
       }
       case kArgLocationPushed: {
-        TargetInstruction* arg = Materialize(g, arg_node);
         if (TypeIsStructOrUnion(arg_node->type)) {
-          size_t size = arg_node->type->size;
-          if (size <= 8) {
-            // A struct less than 8 bytes is passed directly on stack.  The
-            // Materialize call will result in the address of the struct.  We
-            // need to load it.
-            arg = Emit(g, CopyInstructionSize(NewInstruction2(
-                               ARM_OP(ldr), arg,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)), 0));
-          }
+          // Named struct passed by value on the stack was already copied into
+          // its slot in phase 3.
+          break;
         }
+        TargetInstruction* arg = Materialize(g, arg_node);
         PushArg(g, arg_node, arg, arg_location->location.offset);
         break;
       }
@@ -3097,6 +4037,57 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         }
         // Emit(g, NewInstruction2(mov_opcode, arg_location->location.reg, arg));
         SetDestOrMoveToArgReg(g, arg_node, arg, arg_location->location.reg, mov_opcode);
+        break;
+      }
+      case kArgLocationFpIntPair: {
+        // Variadic double: move its 64-bit value into a pair of core registers
+        // with `vmov rLo, rHi, dX` (the from-double doubleword transfer, which
+        // shares the fcvt opcode with the to-double form used by constd).  The
+        // instruction's destination is the low register; the high register is
+        // written by the same instruction and kept live via the regarg list.
+        TargetInstruction* arg = Materialize(g, arg_node);
+        TargetInstruction* mov = Emit(
+            g, SetInstructionSize(
+                   NewInstruction2(ARM_OP(fcvt), arg_location->reg2, arg),
+                   kSize64Bit));
+        mov->dest = arg_location->location.reg;
+        break;
+      }
+      case kArgLocationIntPair: {
+        // 64-bit integer: move the low half into the even register and the high
+        // half into the odd register.  Both are kept live to the call via the
+        // regarg list (BuildArgList).  Tag these as argument moves so the
+        // parallel-move resolver schedules them together with the other integer
+        // argument moves; otherwise a following argument materialized into one
+        // of this pair's destination registers (r2/r3) would be clobbered
+        // before its own move reads it.
+        TargetInstruction* lo;
+        TargetInstruction* hi;
+        MaterializeWide(g, arg_node, &lo, &hi);
+        TargetInstruction* mlo = Emit(g, NewInstruction1(ARM_OP(mov), lo));
+        mlo->dest = arg_location->location.reg;
+        mlo->flags |= kARMArgMove;
+        TargetInstruction* mhi = Emit(g, NewInstruction1(ARM_OP(mov), hi));
+        mhi->dest = arg_location->reg2;
+        mhi->flags |= kARMArgMove;
+        break;
+      }
+      case kArgLocationPushedWide: {
+        // 64-bit integer passed on the stack: store both halves.
+        TargetInstruction* lo;
+        TargetInstruction* hi;
+        MaterializeWide(g, arg_node, &lo, &hi);
+        size_t off = arg_location->location.offset;
+        Emit(g, SetInstructionSize(
+                    NewInstruction3(ARM_OP(str), lo, StackPointer(g),
+                                    GetIntConstant(g, NULL, kTargetType32Bit,
+                                                   (int)off)),
+                    kSize32Bit));
+        Emit(g, SetInstructionSize(
+                    NewInstruction3(ARM_OP(str), hi, StackPointer(g),
+                                    GetIntConstant(g, NULL, kTargetType32Bit,
+                                                   (int)off + 4)),
+                    kSize32Bit));
         break;
       }
     }
@@ -3141,7 +4132,12 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     }
     g->base.num_calls--;
   } else {
-    if (((int)addr->opcode == (int)ARM_OP(symbol))) {
+    TargetInstruction* call_target = addr;
+    if (staged_target != NULL) {
+      // Indirect call: target was staged into its own register above.
+      opcode = ARM_OP(blr);
+      call_target = staged_target;
+    } else if (((int)addr->opcode == (int)ARM_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? ARM_OP(bl) : ARM_OP(bl);
     } else {
@@ -3149,13 +4145,55 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       opcode = TypeIsFloatingPoint(node->type) ? ARM_OP(blr) : ARM_OP(blr);
     }
     call =
-        Emit(g, NewInstruction2(opcode, addr, BuildArgList(g, &arg_locations)));
+        Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
+    // A call's result is returned in a caller-saved register (r0, r0:r1, or
+    // d0).  If that value is consumed later it may have to survive another
+    // call (e.g. f(g(), h()) evaluates both calls before either result is
+    // used).  The result is hard-pinned to the return register and cannot be
+    // moved to a callee-saved register by the allocator, so copy it into a
+    // fresh register immediately while it is still live.  The allocator's
+    // preserved-instruction logic can then keep that copy across later calls.
+    bool result_used = node->outputs.length > 0;
+    if (TypeIsFloatingPoint(node->type)) {
+      // The result comes back in the floating-point return register.
+      call->flags |= kARMFpReturn;
+      SetInstructionSize(call, ARMTypeIsDouble(node->type) ? kSize64Bit : kSize32Bit);
+      if (result_used) {
+        call = Emit(g, CopyInstructionSize(NewInstruction1(ARM_OP(fmov), call), 0));
+      }
+    } else if (NodeIsWideInt(node)) {
+      // A 64-bit integer is returned in r0:r1.  The call instruction itself
+      // owns r0 (the low half); capture r1 (the high half) into a fresh
+      // register immediately, while it is still live.
+      TargetInstruction* r1 = Emit(g, NewInstruction(ARM_OP(r1)));
+      TargetInstruction* hi = Emit(g, NewInstruction1(ARM_OP(mov), r1));
+      SetLoweredHi(node, hi);
+      if (result_used) {
+        call = Emit(g, NewInstruction1(ARM_OP(mov), call));
+      }
+    } else if (result_used && node->type != NULL &&
+               !TypeIsStructOrUnion(node->type)) {
+      // Scalar (integer/pointer) result in r0.
+      call = Emit(g, NewInstruction1(ARM_OP(mov), call));
+    }
 
     // Increment the stack pointer again to remove pushed args.
     if (total_stack_size > 0) {
       TargetInstruction* newsp =
           AddImmediate(g, StackPointer(g), total_stack_size);
       TargetSetDest(newsp, StackPointer(g));
+    }
+  }
+  // If the call result feeds a merge destination (the "-> $n" annotation used
+  // to funnel the two arms of &&/||/?: into one location), route the result
+  // there.  Without this the call's return value (in r0) is dropped and the
+  // merge slot keeps the other arm's stale value, e.g. `x || f()` yields x
+  // instead of f()'s result.  bl/blr are not expressions, so SetDestOrMove
+  // emits an explicit move rather than redirecting the call's r0 output.
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      call = SetDestOrMove(g, call, dest, ARM_OP(mov));
     }
   }
   SetLoweredNode(node, call);
@@ -3201,17 +4239,26 @@ static TargetInstruction* LowerComputedBranch(ARMGenerator* g, IRNode* node) {
 // in the first input.
 static TargetInstruction* LowerBuiltinVaStart(ARMGenerator* g, IRNode* node) {
   TargetInstruction* s0 = Emit(g, NewInstruction(ARM_OP(fp)));
+  // fp points at the r0 slot of the variadic register save area (see the
+  // prologue in arm_emitter.c).  Skip the named integer-register arguments so
+  // ap points at the first variadic slot.  Subsequent 8-byte arguments are then
+  // 8-byte aligned relative to the (8-byte aligned) fp, which va_arg relies on.
+  TargetInstruction* ap_value = s0;
+  int named_offset = g->num_int_arg_regs * 4;
+  if (named_offset != 0) {
+    ap_value = AddImmediate(g, s0, named_offset);
+  }
   TargetInstruction* addr;
   TargetInstruction* offset;
   TargetInstruction* scale;
   bool on_stack = GetRegAndOffset(g, node->inputs.value.p[0], &addr, &offset, &scale);
   if (!on_stack) {
-    TargetInstruction* mv = Emit(g, CopyInstructionSize(NewInstruction1(ARM_OP(mov), s0), 0));
+    TargetInstruction* mv = Emit(g, CopyInstructionSize(NewInstruction1(ARM_OP(mov), ap_value), 0));
     mv->dest = addr;
     return SetLoweredNode(node, addr);
   }
   return SetLoweredNode(node,
-                        Emit(g, CopyInstructionSize(NewInstruction3(ARM_OP(str), s0, addr, offset), 0)));
+                        Emit(g, CopyInstructionSize(NewInstruction3(ARM_OP(str), ap_value, addr, offset), 0)));
 }
 
 // The first input is &ap.  The 'ap' variable contains the address of the
@@ -3233,22 +4280,74 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
   } else {
     ap_load = Emit(g, NewInstruction2(ARM_OP(ldr), ap_addr, ap_offset));
   }
+
+  // Variadic structs are passed by reference (see LowerCall): the save-area
+  // slot holds a 4-byte pointer to the caller's copy.  Load that pointer -- it
+  // is the struct address va_arg yields -- and advance ap past the one-word
+  // pointer slot.
+  if (node->type != NULL && TypeIsStructOrUnion(node->type)) {
+    TargetInstruction* ptr = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(ARM_OP(ldr), ap_load,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+               kSize32Bit));
+    TargetInstruction* next =
+        Emit(g, NewInstruction2(ARM_OP(add), ap_load,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 4)));
+    if (on_stack) {
+      Emit(g, NewInstruction3(ARM_OP(str), next, ap_addr, ap_offset));
+    } else {
+      TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(mov), next));
+      mv->dest = ap_addr;
+    }
+    return SetLoweredNode(node, ptr);
+  }
+
+  // 8-byte scalars (double, long long) are 8-byte aligned in the variadic area.
+  bool is_eight = node->type != NULL && node->type->size > 4;
+  if (is_eight) {
+    TargetInstruction* aligned =
+        Emit(g, NewInstruction2(ARM_OP(add), ap_load,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 7)));
+    aligned = Emit(g, NewInstruction2(ARM_OP(bic), aligned,
+                                GetIntConstant(g, NULL, kTargetType32Bit, 7)));
+    ap_load = aligned;
+  }
+
+  int data_size = is_eight ? kSize64Bit : kSize32Bit;
   TargetInstruction* result;
   if (TypeIsFloatingPoint(node->type)) {
-    result = Emit(g, NewInstruction2(ARM_OP(fldr), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction2(ARM_OP(fldr), ap_load,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                         data_size));
+  } else if (NodeIsWideInt(node)) {
+    // 64-bit integer variadic argument: load the two 32-bit halves into a
+    // register pair (the single 64-bit ldr only loads 32 bits).
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction2(ARM_OP(ldr), ap_load,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                         kSize32Bit));
+    TargetInstruction* hi = Emit(g, SetInstructionSize(
+                         NewInstruction2(ARM_OP(ldr), ap_load,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 4)),
+                         kSize32Bit));
+    SetLoweredHi(node, hi);
   } else {
-    result = Emit(g, NewInstruction2(ARM_OP(ldr), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction2(ARM_OP(ldr), ap_load,
+                                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                         data_size));
   }
   TargetInstruction* addi =
       Emit(g, NewInstruction2(ARM_OP(add), ap_load,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 8)));
+                               GetIntConstant(g, NULL, kTargetType32Bit,
+                                              is_eight ? 8 : 4)));
   if (on_stack) {
     Emit(g, NewInstruction3(ARM_OP(str), addi, ap_addr, ap_offset));
   } else {
     TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(mov), addi));
-    mv->dest = ap_load;
+    mv->dest = ap_addr;
   }
   return SetLoweredNode(node, result);
 }
@@ -3270,6 +4369,10 @@ static TargetInstruction* LowerLocation(ARMGenerator* g, IRNode* node) {
 static TargetInstruction* LowerStackPointerOps(ARMGenerator* g, IRNode* node) {
   switch (node->opcode) {
     case IR_OP(decsp): {
+      // Dynamically lowering sp (VLA/alloca): the epilogue can no longer assume
+      // a fixed distance between sp and the saved-register area, so it must
+      // restore sp from the frame pointer.
+      g->uses_dynamic_stack = true;
       TargetInstruction* size = Materialize(g, node->inputs.value.p[0]);
       TargetInstruction* new_sp;
       if (TargetIsConst(size)) {
@@ -3529,6 +4632,15 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       return LowerNamedLabel(g, node);
 
     case IR_OP(pusharg):
+      if (NodeIsWideInt(node)) {
+        // Propagate both halves of a 64-bit integer argument so the call's
+        // register-pair lowering (MaterializeWide) can find the high half.
+        TargetInstruction* lo;
+        TargetInstruction* hi;
+        MaterializeWide(g, node->inputs.value.p[0], &lo, &hi);
+        SetLoweredHi(node, hi);
+        return SetLoweredNode(node, lo);
+      }
       return SetLoweredNode(node, Materialize(g, node->inputs.value.p[0]));
       
     case IR_OP(calla):
@@ -3550,8 +4662,18 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(memcpy):
       return LowerMemcpy(g, node);
 
-    case IR_OP(cast):
-        return SetLoweredNode(node, Materialize(g, node->inputs.value.p[0]));
+    case IR_OP(cast): {
+      TargetInstruction* inst = Materialize(g, node->inputs.value.p[0]);
+      // Honor a "-> $n" merge destination (the temp used to merge the arms of
+      // && / || / ?:).  Without this, a cast appearing in one arm (e.g.
+      // `cond ? NULL : (char*)s`) never writes the merge temp, so the consumer
+      // reads a stale register.
+      TargetInstruction* dest = GetDestInstruction(g, node);
+      if (dest != NULL) {
+        inst = SetDestOrMove(g, inst, dest, ARM_OP(mov));
+      }
+      return SetLoweredNode(node, inst);
+    }
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(g, node);
@@ -3638,20 +4760,48 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         1;  // For struct returns, the first arg is the address of the struct.
   }
   int fp_reg = ARM_FP_ARG_START;
-  int stack_offset = 0;
-  int current_stack_offset = 0;
+  // Stack-passed arguments follow AAPCS packing (4-byte words; 8-byte-aligned
+  // 8-byte scalars), matching the caller (LowerCall via ArgStackSlot) and
+  // va_arg.  stack_offset tracks the next free byte; the requested argument's
+  // slot is computed by aligning for its own type.
+  size_t stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
       if (TypeIsFloatingPoint(arg->pooled->type)) {
-        if (fp_reg <= ARM_FP_ARG_END) {
-          // Arg is in a floating point register.
+        // Each floating-point argument (float or double) consumes one full
+        // double-precision argument register.  fp_reg counts d-register indices
+        // (d0..d3), matching the caller side in LowerCall.
+        if (fp_reg < ARM_NUM_FP_ARGS) {
           location.type = kArgLocationRegister;
           location.location.offset = fp_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset =
+              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
+              ~(ArgStackAlignment(arg->pooled->type) - 1);
         }
+      } else if (TypeIsWideInt(arg->pooled->type)) {
+        // 64-bit integer: even-aligned register pair (r0:r1 / r2:r3) or stack.
+        if ((int_reg - ARM_INT_ARG_START) % 2 != 0) {
+          int_reg++;
+        }
+        if (int_reg + 1 <= ARM_INT_ARG_END) {
+          location.type = kArgLocationIntPair;
+          location.location.offset = int_reg;  // low reg; high = int_reg + 1.
+        } else {
+          location.type = kArgLocationPushed;
+          location.location.offset =
+              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
+              ~(ArgStackAlignment(arg->pooled->type) - 1);
+        }
+      } else if (TypeIsStructOrUnion(arg->pooled->type)) {
+        // Named struct/union: always passed by value in the stacked-argument
+        // area (matching the caller in LowerCall).  fp + offset addresses it.
+        location.type = kArgLocationPushed;
+        location.location.offset =
+            (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
+            ~(ArgStackAlignment(arg->pooled->type) - 1);
       } else {
         if (int_reg <= ARM_INT_ARG_END) {
           // Arg is in an integer register.
@@ -3659,36 +4809,47 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = int_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset =
+              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
+              ~(ArgStackAlignment(arg->pooled->type) - 1);
         }
       }
       return location;
     }
 
+    // Advance the per-type register counter (or the stack offset once the
+    // argument registers are exhausted) for each preceding argument.  This must
+    // use the *argument*-register limits (r0..r3 / s0..s3) -- the same bounds
+    // the per-argument decision above uses.  Using the wider callee-saved range
+    // (ARM_LAST_INT_REG_VAR) would keep incrementing the register counter past
+    // r3 and never advance stack_offset, so every stacked argument would be read
+    // from the same (first) stack slot.
     Symbol* arg_symbol = args->value.p[i];
     if (TypeIsFloatingPoint(arg_symbol->type)) {
-      if (fp_reg <= ARM_LAST_FP_REG_VAR) {
+      if (fp_reg < ARM_NUM_FP_ARGS) {
         fp_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        stack_offset += arg_symbol->type->size;
+        ArgStackSlot(arg_symbol->type, &stack_offset);
       }
+    } else if (TypeIsWideInt(arg_symbol->type)) {
+      if ((int_reg - ARM_INT_ARG_START) % 2 != 0) {
+        int_reg++;
+      }
+      if (int_reg + 1 <= ARM_INT_ARG_END) {
+        int_reg += 2;
+      } else {
+        int_reg = ARM_INT_ARG_END + 1;
+        ArgStackSlot(arg_symbol->type, &stack_offset);
+      }
+    } else if (TypeIsStructOrUnion(arg_symbol->type)) {
+      // Named struct/union: always consumes a stacked-argument slot (it is
+      // never placed in a core register), matching the caller.
+      ArgStackSlot(arg_symbol->type, &stack_offset);
     } else {
-      if (int_reg <= ARM_LAST_INT_REG_VAR) {
+      if (int_reg <= ARM_INT_ARG_END) {
         int_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        if (TypeIsStructOrUnion(arg_symbol->type)) {
-          // Struct and unions are passed by reference - 8 bytes.
-          stack_offset += 8;
-        } else {
-          int size = arg_symbol->type->size;
-          if (size < 8) {
-            stack_offset += 4;
-          } else {
-            stack_offset += 8;
-          }
-        }
+        ArgStackSlot(arg_symbol->type, &stack_offset);
       }
     }
   }
@@ -3786,11 +4947,25 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         if (location.type == kArgLocationRegister) {
-          int offset = -24 - (int)g->saved_regs.length * 8;
+          // Saved argument registers live immediately below the frame pointer.
+          // The base must equal -(ARM_STACK_FRAME_HEADER_SIZE + 8) so that this
+          // region tiles exactly with the local-variable region (which is placed
+          // at var_offset - stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE). With
+          // an 8-byte header that base is -16; using -24 (the aarch64 value, for
+          // a 16-byte header) makes locals overlap the saved-arg slots.
+          int offset = -16 - (int)g->saved_regs.length * 8;
+          // location.offset is a d-register index; the physical register file is
+          // numbered in s-register units, so the even low half is index*2.
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
-              (int)location.location.offset, ARM_FP_REG, offset, true);
+              (int)location.location.offset * 2, ARM_FP_REG, offset, true);
+          saved->is_double = ARMTypeIsDouble(entry->pooled->type);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Floating-point argument passed on the stack (above the frame
+          // pointer); fp points directly at the first incoming stack argument.
+          entry->pooled->data.ivalue = (int)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {
@@ -3802,27 +4977,13 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
-      if (size <= 8) {
-        // Less than a pointer, passed in reg
-        if (UseRegisterForVariable(g, entry->pooled)) {
-          // TODO: if this is a leaf procedure we can keep them in the arg regs.
-          int reg = g->num_int_reg_vars++;
-          entry->pooled->data.ivalue = ARM_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
-          ArgLocation location = ArgumentLocation(entry, args);
-          LoadIntArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
-        } else {
-          AlignOffset(entry, var_offset);
-          entry->pooled->data.ivalue = *var_offset;
-          SetDebugStackLocation(entry, *var_offset);
-          *var_offset += size;
-        }
-      } else {
-        // Passed by reference.  This means it is pushed onto the stack
-        // and the address of the copy is passed in an argument register
-        // or on the stack.
-        // TODO:
-      }
+      // Named struct/union arguments are passed by value in the stacked
+      // argument area (see LowerCall / ArgumentLocation).  The argument lives
+      // at fp + offset; record that positive offset directly (the argument
+      // addressing path in LowerExpression treats it as fp-relative).
+      ArgLocation location = ArgumentLocation(entry, args);
+      entry->pooled->data.ivalue = (int)location.location.offset;
+      SetDebugStackLocation(entry, entry->pooled->data.ivalue);
     } else {
       // Not an argument.
       // TODO: it is possible to put small structs in registers.
@@ -3875,16 +5036,39 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         // if it is not passed in x0..x7.  But if is in an arg reg
         // we need to save it to the stack frame.
         ArgLocation location = ArgumentLocation(entry, args);
-        if (location.type == kArgLocationRegister) {
+        if (location.type == kArgLocationIntPair) {
+          // 64-bit integer passed in an even-aligned register pair.  Save both
+          // halves into a single 8-byte slot below the frame pointer (low at
+          // offset, high at offset+4) so load64 can read [fp+off]/[fp+off+4].
+          int offset = -16 - (int)g->saved_regs.length * 8;
+          int lo_reg = (int)location.location.offset;
+          VectorAppend(&g->saved_regs,
+                       NewSavedArgumentRegister(lo_reg, ARM_FP_REG, offset, false));
+          VectorAppend(&g->saved_regs,
+                       NewSavedArgumentRegister(lo_reg + 1, ARM_FP_REG, offset + 4,
+                                                false));
+          entry->pooled->data.ivalue = offset;
+          g->num_int_arg_regs += 2;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else if (location.type == kArgLocationRegister) {
           // Argument is in a register so we need to save it to the stack. These
-          // are stored immediately below the saved frame pointer (24 bytes
-          // below the previous stack pointer).
-          int offset = -24 - (int)g->saved_regs.length * 8;
+          // are stored immediately below the saved frame pointer. The base must
+          // be -(ARM_STACK_FRAME_HEADER_SIZE + 8) = -16 so the saved-arg region
+          // tiles with the local-variable region without overlapping (locals are
+          // placed at var_offset - stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE).
+          int offset = -16 - (int)g->saved_regs.length * 8;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, ARM_FP_REG, offset, false);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&g->saved_regs, saved);
           g->num_int_arg_regs++;  // Argument was passed in a register.
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Argument was passed on the stack (above the frame pointer).  The
+          // prologue does "add fp, sp, #ARM_STACK_FRAME_HEADER_SIZE", so fp
+          // points directly at the first incoming stack argument; its location
+          // offset (0, 8, 16, ...) is the fp-relative offset to use.
+          entry->pooled->data.ivalue = (int)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {

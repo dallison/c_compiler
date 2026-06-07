@@ -25,7 +25,7 @@
 #define STATIC
 #endif
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start
@@ -55,7 +55,7 @@ STATIC void InitFreeList() {
   __free_list->length = MEMTOP - (int)_end;
 #elif defined(__risc_v__)
 // TODO
-#elif defined(__x86_64__) || defined(__aarch64__)
+#elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
   extern char _end[];
   __free_list = (FreeBlockHeader*)_end;
   if (__initial_heap_size == 0) {

@@ -71,6 +71,10 @@ void ARMRegisterAllocatorInit(ARMRegisterAllocator* allocator,
   allocator->int_regs[ARM_FP_REG].base.reserved = true;
   allocator->int_regs[ARM_LR_REG].base.reserved = true;
   allocator->int_regs[ARM_SPILL_ADDR].base.reserved = true;
+  // r9 is a dedicated scratch register (see Tmp() in arm_codegen.c) used to
+  // stage indirect-call targets and other temporaries.  Keep it out of the
+  // general allocatable pool so it is never clobbered by argument setup.
+  allocator->int_regs[ARM_TMP_REG].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
@@ -110,13 +114,20 @@ static struct {
   int end;              // End of range.
   bool temp;
 } register_ranges[] = {
-  {kARMRegTypeInt, ARM_INT_ARG_START, ARM_INT_ARG_END, true},
-  {kARMRegTypeInt, ARM_INT_TEMP_START, ARM_INT_TEMP_END, true},
-    {kARMRegTypeInt, ARM_INT_ARG_START, ARM_INT_ARG_END, true},
+  // General temporaries prefer non-argument registers.  On ARM the only
+  // caller-saved scratch registers are the argument registers (r0..r3), so a
+  // general temporary searched out of that pool can grab a register that is
+  // about to be needed for an outgoing call's register argument.  When the
+  // argument is then set up it either clobbers the still-live temporary, or
+  // forces an impossible two-instruction register swap (e.g. r0<->r1).  Search
+  // the callee-saved range (r4..r11) first and fall back to the argument
+  // registers last, mirroring aarch64's allocation order.  r9 (ARM_TMP_REG)
+  // and r11 (frame pointer) are reserved and skipped by FindFreeRegister.
     {kARMRegTypeInt, ARM_INT_SAVED_START, ARM_INT_SAVED_END, false},
+  {kARMRegTypeInt, ARM_INT_ARG_START, ARM_INT_ARG_END, true},
+    {kARMRegTypeFloat, ARM_FP_SAVED_START, ARM_FP_SAVED_END,false},
     {kARMRegTypeFloat, ARM_FP_TEMP_START, ARM_FP_TEMP_END, true},
     {kARMRegTypeFloat, ARM_FP_ARG_START, ARM_FP_ARG_END, true},
-    {kARMRegTypeFloat, ARM_FP_SAVED_START, ARM_FP_SAVED_END,false},
 };
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
@@ -161,7 +172,12 @@ static ARMRegister* FindFreeRegister(ARMRegisterAllocator* allocator,
       if (!can_use_temp && register_ranges[i].temp) {
         continue;
       }
-      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+      // Float registers are allocated in double-precision (d-register) units:
+      // each allocation consumes an even/odd s-register pair, named by its even
+      // low half.  This keeps a `float` and a `double` from aliasing the same
+      // physical storage.  Integer registers step by one.
+      int step = (type == kARMRegTypeFloat) ? 2 : 1;
+      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j += step) {
         if (!regs[j].base.reserved && regs[j].base.owner == NULL) {
           return &regs[j];
         }
@@ -247,7 +263,8 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
-      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+      int step = (type == kARMRegTypeFloat) ? 2 : 1;
+      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j += step) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
@@ -289,8 +306,6 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
-  printf("Spilled @%d (reg %d) as @%d\n", inst->id, reg->base.num, spill->id);
- 
   if (ARMIsVarRegister(inst)) {
     // Spilling a varreg->base.  This instruction is in the entry block but
     // it can't be spilled there.  It needs to be spilled at its first
@@ -384,6 +399,11 @@ static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case  ARM_OP(fcvtns):
     case  ARM_OP(fcvtnu):
       return kARMRegTypeInt;
+
+    case ARM_OP(tmp):
+      // A bare temporary defaults to an integer register unless it was tagged
+      // as holding a floating-point value (e.g. a `double` ?: merge slot).
+      return (inst->flags & kARMFloatValue) ? kARMRegTypeFloat : kARMRegTypeInt;
 
     default:
       if ((ARMOpcode)inst->opcode >= ARM_OP(fldr) &&
@@ -591,6 +611,7 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     case ARM_OP(r5):
     case ARM_OP(r6):
     case ARM_OP(r7):
+    case ARM_OP(r9):  // Dedicated scratch/temp register (see Tmp()).
       reg = &allocator->int_regs[(int)inst->opcode - ARM_OP(r0) + ARM_INT_ARG_START];
       break;
 
@@ -607,8 +628,10 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     case ARM_OP(d5):
     case ARM_OP(d6):
     case ARM_OP(d7):
+      // Floating-point argument registers are double-precision: d{n} maps to
+      // the even/odd s-register pair starting at s{2n}.
       reg = &allocator
-                 ->float_regs[(int)inst->opcode - ARM_OP(d0) + ARM_FP_ARG_START];
+                 ->float_regs[((int)inst->opcode - ARM_OP(d0) + ARM_FP_ARG_START) * 2];
       break;
 
     case ARM_OP(structreturn):
@@ -629,7 +652,11 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
 
     case ARM_OP(bl):
     case ARM_OP(blr):
-      reg = &allocator->int_regs[ARM_INT_RETURN_REG];
+      if ((inst->flags & kARMFpReturn) != 0) {
+        reg = &allocator->float_regs[ARM_FLOAT_RETURN_REG];
+      } else {
+        reg = &allocator->int_regs[ARM_INT_RETURN_REG];
+      }
       break;
 #if 0
     case ARM_OP(callf):
@@ -730,6 +757,150 @@ static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
 }
 
+// Maximum number of register-argument moves we resolve in a single run.  ARM
+// has only r0..r3 for integer arguments, so a run never needs more than a
+// handful of slots; the extra headroom covers any self-moves.
+#define ARM_MAX_ARG_MOVES 16
+
+// Build a throwaway instruction that merely carries a physical register
+// reference for the emitter (which only reads ->reg / ->dest->reg).
+static TargetInstruction* RegRef(ARMRegisterAllocator* allocator, int num) {
+  TargetInstruction* ref = TargetNewInstruction((TargetOpcode)ARM_OP(r9));
+  ref->reg = &allocator->int_regs[num].base;
+  ref->flags |= TARGET_INST_PROCESSED;
+  return ref;
+}
+
+// Emit a re-sequenced integer register move ("mov dst, src") into the block
+// just before `pos`, mirroring the form produced by SetDestOrMoveToArgReg.
+static void EmitResolvedMove(ARMRegisterAllocator* allocator,
+                             TargetBasicBlock* block, TargetInstruction* pos,
+                             TargetInstruction* dst_ref, TargetInstruction* src_ref,
+                             int size_flags) {
+  TargetInstruction* mov = TargetNewInstruction1((TargetOpcode)ARM_OP(mov), src_ref);
+  mov->dest = dst_ref;
+  mov->reg = dst_ref->reg;
+  // Carry the source value's size but never re-tag as an argument move (so the
+  // resolver does not revisit it).
+  mov->flags |= (size_flags & (kARMInstructionSize | (kARMInstructionSize << 1)));
+  TargetBasicBlockEmitBefore(&allocator->g->base, block, mov, pos);
+}
+
+// Re-sequence a contiguous run of tagged argument moves (moves[0..count-1])
+// into a valid parallel-move order, breaking register cycles through r9.  The
+// original move instructions are disabled and replaced with the resolved
+// sequence inserted before the run.
+static void ResolveArgMoveRun(ARMRegisterAllocator* allocator,
+                              TargetInstruction** moves, int count) {
+  if (count < 2) {
+    return;  // A single move cannot form a cycle.
+  }
+  TargetBasicBlock* block = moves[0]->block;
+  TargetInstruction* pos = moves[0];
+  int size_flags = moves[0]->flags;
+
+  int dst[ARM_MAX_ARG_MOVES];
+  int src[ARM_MAX_ARG_MOVES];
+  TargetInstruction* src_ref[ARM_MAX_ARG_MOVES];
+  TargetInstruction* dst_ref[ARM_MAX_ARG_MOVES];
+  bool done[ARM_MAX_ARG_MOVES];
+
+  for (int i = 0; i < count; i++) {
+    TargetInstruction* m = moves[i];
+    // Bail out if anything is unexpected; leave the run untouched.
+    if (m->dest == NULL || m->dest->reg == NULL || m->operand[0] == NULL ||
+        m->operand[0]->reg == NULL) {
+      return;
+    }
+    dst[i] = m->dest->reg->num;
+    src[i] = m->operand[0]->reg->num;
+    src_ref[i] = m->operand[0];
+    dst_ref[i] = m->dest;
+    done[i] = (dst[i] == src[i]);  // Self-moves emit nothing.
+  }
+
+  TargetInstruction* r9ref = RegRef(allocator, ARM_TMP_REG);
+
+  int remaining = 0;
+  for (int i = 0; i < count; i++) {
+    if (!done[i]) remaining++;
+  }
+
+  int guard = 0;
+  while (remaining > 0 && guard++ < ARM_MAX_ARG_MOVES * 4) {
+    bool progressed = false;
+    for (int i = 0; i < count; i++) {
+      if (done[i]) continue;
+      // The move is safe to emit now if no other pending move still reads the
+      // register we are about to overwrite.
+      bool safe = true;
+      for (int j = 0; j < count; j++) {
+        if (j == i || done[j]) continue;
+        if (src[j] == dst[i]) {
+          safe = false;
+          break;
+        }
+      }
+      if (safe) {
+        EmitResolvedMove(allocator, block, pos, dst_ref[i], src_ref[i],
+                         size_flags);
+        done[i] = true;
+        remaining--;
+        progressed = true;
+      }
+    }
+    if (!progressed) {
+      // Every remaining move is part of a cycle.  Pick one, save the register
+      // it targets into r9, and redirect that register's readers to r9.  This
+      // turns the cycle into a chain that the next iterations can drain.
+      int c = -1;
+      for (int i = 0; i < count; i++) {
+        if (!done[i]) {
+          c = i;
+          break;
+        }
+      }
+      EmitResolvedMove(allocator, block, pos, r9ref, dst_ref[c], size_flags);
+      for (int j = 0; j < count; j++) {
+        if (!done[j] && src[j] == dst[c]) {
+          src[j] = ARM_TMP_REG;
+          src_ref[j] = r9ref;
+        }
+      }
+    }
+  }
+
+  // Disable the original moves; the resolved sequence replaces them.
+  for (int i = 0; i < count; i++) {
+    moves[i]->block = NULL;
+  }
+}
+
+// Scan the instruction stream for contiguous runs of tagged integer argument
+// moves and resolve each as a parallel move (see ResolveArgMoveRun).
+static void ResolveArgumentMoves(ARMRegisterAllocator* allocator) {
+  TargetInstruction* inst = TargetFirstInstruction(&allocator->g->base);
+  while (inst != NULL) {
+    if ((inst->flags & kARMArgMove) != 0 &&
+        ((int)inst->opcode == (int)ARM_OP(mov))) {
+      TargetInstruction* moves[ARM_MAX_ARG_MOVES];
+      int count = 0;
+      TargetInstruction* run = inst;
+      while (run != NULL && (run->flags & kARMArgMove) != 0 &&
+             ((int)run->opcode == (int)ARM_OP(mov)) &&
+             count < ARM_MAX_ARG_MOVES) {
+        moves[count++] = run;
+        run = TargetNext(run);
+      }
+      ResolveArgMoveRun(allocator, moves, count);
+      inst = run;  // Continue after the run (resolved moves were inserted
+                   // before it and are not re-tagged).
+    } else {
+      inst = TargetNext(inst);
+    }
+  }
+}
+
 void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
   TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
@@ -737,6 +908,10 @@ void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
   // Process all basic blocks in the ARM generator by traversing the
   // dominator tree.
   ProcessBasicBlock(allocator, allocator->g->base.entry_block);
+
+  // Fix up any argument-register move cycles the linear-scan allocator left
+  // behind (e.g. an r2<->r3 swap).
+  ResolveArgumentMoves(allocator);
 }
 
 static const char* ARMRegisterNameNoSize(ARMRegister* reg, int size, char* buf, size_t len) {

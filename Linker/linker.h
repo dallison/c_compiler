@@ -101,8 +101,6 @@
 #define LINKER_DYNAMIC_SEGMENT_ALIGNMENT 0x1000LL
 
 #define LINKER_NUM_SEGMENTS 3
-#define LINKER_SECTION_HEADER_OFFSET (sizeof(ELFHeader) + \
-          LINKER_NUM_SEGMENTS * sizeof(ELFProgramHeader))
 
 
 struct Segment;
@@ -203,6 +201,9 @@ typedef struct Linker {
   Vector dynamic_libraries;   // Vector of LoadedDynamicLibrary*.
   int elf_machine_type;       // From first object file.
   int elf_flags;              // From first object fie.
+  // ELF format ops (ELF32 or ELF64) for the output and for decoding input
+  // object files.  Taken from the first object file read.
+  const ELFFormatOps* ops;
   bool building_dso;          // True if building a shared object.
   bool fully_static;          // Generating fully static executable.
   struct DynamicLinker* dynamic_linker;
@@ -221,6 +222,14 @@ typedef struct Linker {
   
   int num_errors;
 } Linker;
+
+// File offset of the section header table: the ELF file header followed by the
+// program segment headers.  Uses the output format's on-disk sizes (ELF32 or
+// ELF64).
+static inline uint64_t LinkerSectionHeaderOffset(const Linker* linker) {
+  return linker->ops->header_size +
+         LINKER_NUM_SEGMENTS * linker->ops->program_header_size;
+}
 
 void LinkerInit(Linker* linker);
 void LinkerDestruct(Linker* linker);

@@ -86,7 +86,7 @@ CompilerTarget* NewARMTarget() {
   target->ir_optimizations.const_prop = true;
   target->ir_optimizations.code_motion = true;
   target->ir_optimizations.tail_call = true;
-  target->prepend_underscore = true;
+  target->prepend_underscore = false;
   target->plain_char_is_signed = false;
 
   target->options = NULL;

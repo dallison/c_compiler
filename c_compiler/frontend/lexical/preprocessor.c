@@ -266,6 +266,8 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__arm__", "1");
     PreprocessorDefineMacro(p, "__ARM_ARCH_7A__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "32");
+    PreprocessorDefineMacro(p, "__ILP32__", "1");
+    PreprocessorDefineMacro(p, "_ILP32", "1");
   } else if (StringEqual(compiler->target_name, "p-code") ||
              StringEqual(compiler->target_name, "pcode")) {
     PreprocessorDefineMacro(p, "__p_code__", "1");

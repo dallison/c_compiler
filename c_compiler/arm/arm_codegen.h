@@ -47,6 +47,23 @@ typedef enum {
 // This comparison was generated.  Used to in conditional branch.
 #define kARMComparisonGenerated (1 << 22)
 
+// A register-to-register move that copies a value into an outgoing call's
+// argument register.  A contiguous run of these forms a parallel move; the
+// register allocator post-pass re-sequences them and breaks cycles (see
+// arm_reg_alloc.c) so a swap like r2<->r3 is not miscompiled.
+#define kARMArgMove (1 << 23)
+
+// Marks a bl/blr whose callee returns a floating-point value, so the register
+// allocator assigns its result to the floating-point return register (d0/s0)
+// rather than the integer return register (r0).
+#define kARMFpReturn (1 << 24)
+
+// Marks a generic temporary (ARM_OP(tmp)) that holds a floating-point value, so
+// the register allocator gives it a floating-point register.  The tmp opcode is
+// otherwise type-agnostic and defaults to an integer register, which would be
+// wrong for e.g. the merge slot of a `double` conditional expression.
+#define kARMFloatValue (1 << 25)
+
 #define ARM_OP(op) kARM_##op
 
 // ARM code generator opcodes.
@@ -183,6 +200,7 @@ typedef enum {
   ARM_OP(mvn),
   ARM_OP(orn),
   ARM_OP(orr),
+  ARM_OP(orrs),
   ARM_OP(ror),
   ARM_OP(tst),
   ARM_OP(eor),
@@ -325,6 +343,7 @@ typedef struct {
   int base_reg_num;
   int offset;  // Negative offset from frame pointer (or zero).
   bool is_fp;
+  bool is_double;  // 64-bit floating point argument (saved as a d-register).
 } SavedArgumentRegister;
 
 // For large offsets that don't fit into an immediate field
@@ -355,6 +374,8 @@ typedef struct ARMGenerator {
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
+  bool uses_dynamic_stack;  // Uses VLA/alloca (sp adjusted dynamically); the
+                            // epilogue must restore sp from fp.
   
   Vector saved_regs;
   Vector offsets;         // Pointers to Offset.

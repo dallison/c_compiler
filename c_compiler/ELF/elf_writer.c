@@ -304,15 +304,26 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
     
     uint64_t padding = 0;
     if (section->header.name != 0) {
-      uint64_t aligned_address = AlignTo(next_section_data_offset,
-                                         section->header.addralign);
-      // Padding to get to next section.
-      padding = aligned_address - next_section_data_offset;
-      section->header.offset = aligned_address;
-      if (prev != NULL) {
-         prev->padding = padding;
+      if (section->header.type == SHT(nobits)) {
+        // A nobits section (e.g. .bss) occupies no space in the file, so it
+        // must not introduce any alignment padding into the file: its file
+        // offset is just the current position and the following section
+        // handles its own alignment.  (Previously the alignment padding for
+        // a nobits section was written but not accounted for in the data
+        // offset, which shifted all following sections.  This only mattered
+        // when the section data did not start on an aligned boundary, as
+        // happens for ELF32 with its 52-byte header.)
+        section->header.offset = next_section_data_offset;
+      } else {
+        uint64_t aligned_address = AlignTo(next_section_data_offset,
+                                           section->header.addralign);
+        // Padding to get to next section.
+        padding = aligned_address - next_section_data_offset;
+        section->header.offset = aligned_address;
+        if (prev != NULL) {
+           prev->padding = padding;
+        }
       }
-
    }
     section->header.size = data_length;
     

@@ -64,7 +64,10 @@ static void MoveImmediate(ARMEmitter* emitter,
                           int64_t value, FILE* fp) {
   (void)emitter;
   value = (int32_t)value;
-  if (value >= 0 && value <= 0xffff) {
+  // A plain "mov" immediate must be an 8-bit value rotated by an even amount;
+  // 0..255 is always encodable.  Larger 16-bit values use movw, which accepts
+  // any value in 0..0xffff.
+  if (value >= 0 && value <= 0xff) {
     fprintf(fp, "\tmov %s, #%" PRId64 "\n", reg, value);
     return;
   }
@@ -149,6 +152,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case ARM_OP(r5):
     case ARM_OP(r6):
     case ARM_OP(r7):
+    case ARM_OP(r9):
     case ARM_OP(d0):
     case ARM_OP(d1):
     case ARM_OP(d2):
@@ -267,8 +271,17 @@ static int StackFrameSize(ARMEmitter* emitter) {
 }
 
 static bool EmptyStackFrame(ARMEmitter* emitter) {
+  // A frame is only truly empty when there is nothing to place below the saved
+  // fp/lr: no locals/saved-arg slots, no callee-saved register spills and no
+  // register-spill region.  Callee-saved registers (used_int_regs /
+  // used_float_regs) are stored at sp-relative offsets that assume the body of
+  // the frame has been allocated, so a function that uses them needs a real
+  // frame even if it has no locals and makes no calls.
   return emitter->g->base.stack_frame_size == 0 &&
-         emitter->g->base.num_calls == 0 && !emitter->g->not_leaf;
+         emitter->g->base.num_calls == 0 && !emitter->g->not_leaf &&
+         BitSetCount(&emitter->regs->used_int_regs) == 0 &&
+         BitSetCount(&emitter->regs->used_float_regs) == 0 &&
+         emitter->spill_region_size == 0;
 }
 
 static void DecrementStackPointer(ARMEmitter* emitter, int stack_frame_size,
@@ -332,8 +345,10 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
-  int space_above_frame_pointer =
-      varargs ? (ARM_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8 : 0;
+  // The variadic register save area holds all four core argument registers in
+  // contiguous 4-byte slots so va_arg can walk them like a packed argument
+  // list (honouring 8-byte alignment for double / long long).
+  int space_above_frame_pointer = varargs ? ARM_NUM_INT_ARGS * 4 : 0;
 
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
@@ -428,19 +443,37 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
       fprintf(fp, "\tpush {lr}\n");
     }
   } else {
-    fprintf(fp, "\tpush {fp, lr}\n");
-    fprintf(fp, "\tadd fp, sp, #0\n");
-    DecrementStackPointer(emitter, stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE, fp);
-
-    if (varargs) {
-      int num_pushed_arg_regs = ARM_NUM_INT_ARGS - emitter->g->num_int_arg_regs;
+    if (varargs && space_above_frame_pointer > 0) {
+      // Reserve the variadic register save area immediately below the caller's
+      // stack arguments (i.e. above the saved fp/lr) and spill ALL four core
+      // argument registers into contiguous 4-byte slots (r0@0, r1@4, r2@8,
+      // r3@12).  Saving the full register file - including the named registers -
+      // means the save area mirrors the abstract argument layout starting at r0,
+      // so va_arg can apply the AAPCS 8-byte alignment rule (for double / long
+      // long) relative to fp.  fp is set to the base of this region (see "add
+      // fp, sp" below), i.e. it points at the r0 slot; va_start skips the named
+      // registers by adding num_int_arg_regs*4.
       fprintf(fp, "\t// varargs function with %d declared args\n",
               emitter->g->num_int_arg_regs);
-      for (int i = ARM_NUM_INT_ARGS - num_pushed_arg_regs; i < ARM_NUM_INT_ARGS;
-           i++) {
-        fprintf(fp, "\tstr r%d, [sp, #-4]!\n", i);
+      DecrementStackPointer(emitter, space_above_frame_pointer, fp);
+      for (int i = 0; i < ARM_NUM_INT_ARGS; i++) {
+        fprintf(fp, "\tstr r%d, [sp, #%d]\n", i, i * 4);
       }
     }
+    fprintf(fp, "\tpush {fp, lr}\n");
+    // Point fp at the slot just above the saved fp/lr, so the 8-byte header
+    // occupies offsets [-8,-1] from fp.  Every offset convention in this file
+    // (saved-arg base of -16, local vars at var_offset - stack_frame_size -
+    // HEADER, the callee-saved offset, etc.) assumes the header sits below fp.
+    // Using "add fp, sp, #0" would place fp at the saved fp, pushing every
+    // fp-relative region down by 8 bytes and making the lowest saved-arg slot
+    // overlap the top callee-saved spill slot.  For a varargs function this also
+    // lands fp at the base of the register save area reserved above.
+    fprintf(fp, "\tadd fp, sp, #%d\n", ARM_STACK_FRAME_HEADER_SIZE);
+    DecrementStackPointer(emitter,
+                          stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
+                              space_above_frame_pointer,
+                          fp);
   }
 
   char buf1[8], buf2[8];
@@ -454,10 +487,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
     int offset = saved_reg->offset;
     ARMRegisterType reg_type =
         saved_reg->is_fp ? kARMRegTypeFloat : kARMRegTypeInt;
+    int saved_reg_size =
+        (saved_reg->is_fp && saved_reg->is_double) ? kSize64Bit : kSize32Bit;
     fprintf(fp, "\t%s %s, [%s, #%d]\n",
             saved_reg->is_fp ? "vstr" : "str",
             ARMRegisterNameFromNum(saved_reg->reg_num, reg_type,
-                                  saved_reg->is_fp ? kSize32Bit : kSize32Bit,
+                                  saved_reg_size,
                                   buf1, sizeof(buf1)),
             ARMRegisterNameFromNum(saved_reg->base_reg_num, kARMRegTypeInt, kSize32Bit,
                                   buf2, sizeof(buf2)),
@@ -513,7 +548,7 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
     int offset = saved_reg_offset;
     saved_reg_offset -= 8;
     fprintf(fp, "\tvstr %s, [sp, #%d]\n",
-            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize32Bit, buf1, sizeof(buf1)),
+            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize64Bit, buf1, sizeof(buf1)),
             offset);
     BitSetIteratorNext(&it);
   }
@@ -534,8 +569,10 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
-  int space_above_frame_pointer =
-      varargs ? (ARM_NUM_INT_ARGS - emitter->g->num_int_arg_regs) * 8 : 0;
+  // The variadic register save area holds all four core argument registers in
+  // contiguous 4-byte slots so va_arg can walk them like a packed argument
+  // list (honouring 8-byte alignment for double / long long).
+  int space_above_frame_pointer = varargs ? ARM_NUM_INT_ARGS * 4 : 0;
 
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
@@ -546,20 +583,23 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     fprintf(fp, "\t// Restored registers.\n");
   }
 
+  // If the function adjusted sp dynamically (VLA / alloca), sp is no longer a
+  // fixed distance from the saved-register area, so the sp-relative reloads and
+  // the fixed sp increment below would use the wrong addresses.  Restore sp from
+  // the frame pointer to the position it had right after the fixed prologue
+  // allocation.  Post-prologue: sp = fp - stack_frame_size + space_above.
+  if (emitter->g->uses_dynamic_stack && !EmptyStackFrame(emitter)) {
+    AddSubImmediate(emitter, "sp", "fp", /*add=*/false,
+                    stack_frame_size - space_above_frame_pointer,
+                    "restore sp (dynamic stack)", fp);
+  }
+
   int offset = emitter->saved_reg_offset;
 
   BitSetIterator it;
 
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tvldr %s, [sp, #%d]\n",
-            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize32Bit, buf1, sizeof(buf1)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
-
+  // Restore in the same order SaveRegisters used (integer registers first,
+  // then floating point) so the offsets match the stores in the prologue.
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
     int reg = (int)BitSetIteratorValue(&it);
@@ -570,13 +610,30 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tvldr %s, [sp, #%d]\n",
+            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize64Bit, buf1, sizeof(buf1)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+
   if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       fprintf(fp, "\tpop {lr}\n");
     }
   } else {
-    IncrementStackPointer(emitter, stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE, fp);
+    IncrementStackPointer(emitter,
+                          stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
+                              space_above_frame_pointer,
+                          fp);
     fprintf(fp, "\tpop {fp, lr}\n");
+    // Release the variadic register save area reserved above the saved fp/lr.
+    if (varargs && space_above_frame_pointer > 0) {
+      IncrementStackPointer(emitter, space_above_frame_pointer, fp);
+    }
   }
 }
 
@@ -587,7 +644,9 @@ static const char* AsmOpcodeName(ARMOpcode op) {
   switch (op) {
     case ARM_OP(fldr): return "vldr";
     case ARM_OP(fstr): return "vstr";
-    case ARM_OP(fmov): return "vmov.f32";
+    case ARM_OP(fmov): return "vmov";
+    case ARM_OP(fneg): return "vneg";
+    case ARM_OP(fsqrt): return "vsqrt";
     case ARM_OP(fadd): return "vadd";
     case ARM_OP(fsub): return "vsub";
     case ARM_OP(fmul): return "vmul";
@@ -644,7 +703,9 @@ static void PrintSymbolOperand(ARMEmitter* emitter, TargetInstruction* inst,
                                TargetInstruction* operand, const char* reg,
                                bool is_mov, FILE* fp) {
   (void)emitter;
-  const char* sym = ((TargetSymbol*)operand)->symbol->name.value;
+  char symbuf[256];
+  const char* sym =
+      TargetSymbolName(((TargetSymbol*)operand)->symbol, symbuf, sizeof(symbuf));
   if ((inst->flags & ARM_HI_RELOC) != 0 ||
       (inst->flags & ARM_PCREL_HI_RELOC) != 0) {
     fprintf(fp, "\tmovw %s, %s\n", reg, sym);
@@ -678,6 +739,7 @@ static void PrintRmov(ARMEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   }
 
   const char* mnemonic = "";
+  int rmov_size = ARMGetRegisterSize(inst);
   switch ((ARMOpcode)inst->opcode) {
     case ARM_OP(mv):
       mnemonic = "mov";
@@ -686,10 +748,10 @@ static void PrintRmov(ARMEmitter* emitter, TargetInstruction* inst, FILE* fp) {
       mnemonic = "vmov.f32";
       break;
     case ARM_OP(fmv_d):
-      mnemonic = "vmov.f32";
+      mnemonic = "vmov.f64";
       break;
     case ARM_OP(fmov):
-      mnemonic = "vmov.f32";
+      mnemonic = (rmov_size == kSize64Bit) ? "vmov.f64" : "vmov.f32";
       break;
     case ARM_OP(mov):
       mnemonic = "mov";
@@ -774,10 +836,13 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       break;
     case ARM_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
+      char symbuf[256];
       if (StorageIs(sym->symbol->storage, STO(static))) {
-        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.local %s\n",
+                TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       } else {
-        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.global %s\n",
+                TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       }
       return;
     }
@@ -785,7 +850,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
     case ARM_OP(bl): {
       assert(((int)inst->operand[0]->opcode == (int)ARM_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
-      fprintf(fp, "\t%-12s%s\n", "bl", sym->symbol->name.value);
+      char symbuf[256];
+      fprintf(fp, "\t%-12s%s\n", "bl",
+              TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       return;
     }
 
@@ -826,33 +893,17 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
     }
 
     case ARM_OP(spill): {
-#if 0
+      // Store the spilled register's value into its slot in the spill region
+      // (a negative offset from the frame pointer).  The matching reload below
+      // reads it back from the same [fp, #-offset] location.  Without this store
+      // the reload would read an uninitialized stack slot.
       ARMRegister* reg = (ARMRegister*)inst->reg;
-      int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
-      const int spill_addr = ARM_SPILL_ADDR;
-      if (!ARMIsPossibleImmediate(offset)) {
-        fprintf(fp, "\t%-12s%s, %d\n",
-                "lui",
-                ARMRegisterNameFromNum(spill_addr, kARMRegTypeInt, reg_size, buf1, sizeof(buf1)),
-                offset >> 12);
-        fprintf(fp, "\t%-12s%s, s0, %s\n",
-                "sub",
-                ARMRegisterNameFromNum(spill_addr, kARMRegTypeInt, reg_size, buf1, sizeof(buf1)),
-                ARMRegisterNameFromNum(spill_addr, kARMRegTypeInt, reg_size, buf2, sizeof(buf2)));
-        fprintf(fp, "\t%-12s%s, -%d(%s)\t// Spilled @%d\n",
-                 reg->type == kARMRegTypeInt ? "sd" : "fsd",
-                 ARMRegisterName(reg, buf1, sizeof(buf1)),
-                 offset & 0xfff,
-                 ARMRegisterNameFromNum(spill_addr, kARMRegTypeInt, reg_size, buf2, sizeof(buf2)),
-                 inst->operand[0]->id);
-      } else {
-        fprintf(fp, "\t%-12s%s, -%d(s0)\t// Spilled @%d\n",
-                 reg->type == kARMRegTypeInt ? "sd" : "fsd",
-                 ARMRegisterName(reg, buf1, sizeof(buf1)),
-                 offset,
-                 inst->operand[0]->id);
-      }
-#endif
+      int offset =
+          (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
+      const char* store = reg->type == kARMRegTypeInt ? "str" : "vstr";
+      fprintf(fp, "\t%s %s, [fp, #-%d]\t// Spilled @%d\n", store,
+              ARMRegisterName(reg, kSize32Bit, buf1, sizeof(buf1)), offset,
+              inst->operand[0]->id);
       return;
     }
       
@@ -946,7 +997,32 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
     case ARM_OP(movz):
     case ARM_OP(movk):
     case ARM_OP(movn):
+    case ARM_OP(blr):
+    case ARM_OP(br):
+    case ARM_OP(movw):
+    case ARM_OP(movt):
+    case ARM_OP(cset):
+    case ARM_OP(csetm):
+    case ARM_OP(adr):
       break;
+    case ARM_OP(fadd):
+    case ARM_OP(fsub):
+    case ARM_OP(fmul):
+    case ARM_OP(fdiv):
+    case ARM_OP(fcmp):
+    case ARM_OP(fmov):
+    case ARM_OP(fneg):
+    case ARM_OP(fsqrt): {
+      // Floating-point data-processing ops need an explicit precision suffix so
+      // the assembler selects the f32 vs f64 encoding.  The operand register
+      // names (sN vs dN) are driven by the same instruction size.
+      const char* base = AsmOpcodeName((ARMOpcode)inst->opcode);
+      const char* suffix = (reg_size == kSize64Bit) ? ".f64" : ".f32";
+      char mnem[24];
+      snprintf(mnem, sizeof(mnem), "%s%s", base, suffix);
+      fprintf(fp, "\t%-12s", mnem);
+      break;
+    }
     default:
       fprintf(fp, "\t%-12s", LoadStoreMnemonic((ARMOpcode)inst->opcode));
       break;
@@ -954,6 +1030,20 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
 
   // Print operands.
   switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(fcvtsd):
+      // fcvtsd Dd, Sm : destination is double, source is single.
+      fprintf(fp, "%s, %s\n",
+              GetRegisterName(inst, kSize64Bit, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], kSize32Bit, buf2,
+                             sizeof(buf2)));
+      return;
+    case ARM_OP(fcvtds):
+      // fcvtds Sd, Dm : destination is single, source is double.
+      fprintf(fp, "%s, %s\n",
+              GetRegisterName(inst, kSize32Bit, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], kSize64Bit, buf2,
+                             sizeof(buf2)));
+      return;
     case  ARM_OP(ldr):
     case   ARM_OP(ldur):
     case   ARM_OP(ldrb):
@@ -1050,13 +1140,16 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       TargetInstruction* cond = inst->operand[0];
       TargetInstruction* dest = inst->operand[1];
       if (((int)cond->opcode != (int)ARM_OP(al))) {
-        fprintf(fp, ".%s", ARMOpcodeName(cond->opcode));
+        // ARM conditional branches are written "bge", not "b.ge".
+        fprintf(fp, "%s", ARMOpcodeName(cond->opcode));
       }
       fprintf(fp, " ");
       if (((int)dest->opcode == (int)ARM_OP(label))) {
         fprintf(fp, ".%s_label_%d\n", func_name, dest->id);
       } else if (((int)dest->opcode == (int)ARM_OP(symbol))) {
-        fprintf(fp, "%s\n", ((TargetSymbol*)dest)->symbol->name.value);
+        char symbuf[256];
+        fprintf(fp, "%s\n", TargetSymbolName(((TargetSymbol*)dest)->symbol,
+                                             symbuf, sizeof(symbuf)));
       } else if (((int)dest->opcode == (int)ARM_OP(named_label))) {
         fprintf(fp, "%s\n", ((TargetNamedLabel*)dest)->name);
       } else {
@@ -1097,8 +1190,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%-12s%s, ", ARMOpcodeName(inst->opcode),
               GetRegisterName(inst, reg_size, buf1, sizeof(buf1)));
       if (((int)sym->opcode == (int)ARM_OP(symbol))) {
-        fprintf(fp, "%s\n",
-                ((TargetSymbol*)sym)->symbol->name.value);
+        char symbuf[256];
+        fprintf(fp, "%s\n", TargetSymbolName(((TargetSymbol*)sym)->symbol,
+                                             symbuf, sizeof(symbuf)));
       } else if (((int)sym->opcode == (int)ARM_OP(literal))) {
         fprintf(fp, ".str.%d\n", ((TargetLiteral*)sym)->literal_id);
       } else {
@@ -1134,17 +1228,18 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
           if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
           } else if (((int)inst->operand[i]->opcode == (int)ARM_OP(symbol))) {
+            char symbuf[256];
+            const char* opsym = TargetSymbolName(
+                ((TargetSymbol*)inst->operand[i])->symbol, symbuf,
+                sizeof(symbuf));
             if ((inst->flags & ARM_HI_RELOC) != 0 ||
                 (inst->flags & ARM_PCREL_HI_RELOC) != 0) {
-              fprintf(fp, "%s%s", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+              fprintf(fp, "%s%s", sep, opsym);
             } else if ((inst->flags & ARM_LO_RELOC) != 0 ||
                        (inst->flags & ARM_PCREL_LO_RELOC) != 0) {
-              fprintf(fp, "%s%s", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+              fprintf(fp, "%s%s", sep, opsym);
             } else {
-              fprintf(fp, "%s=%s", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+              fprintf(fp, "%s=%s", sep, opsym);
             }
           } else if (((int)inst->operand[i]->opcode == (int)ARM_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];

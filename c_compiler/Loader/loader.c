@@ -350,6 +350,19 @@ static void FindAndLoadSymbolTable(Loader* loader, int fd) {
       
       // Add all symbols to internal caches.
       StaticSymbolTable* symbols = &loader->static_symbol_table;
+      // For ELF32 the on-disk symbols are narrower than the canonical ELFSymbol
+      // and have a different field order, so decode them into a wide array.
+      const ELFFormatOps* ops = loader->elf_file->ops;
+      if (!ops->is_64_bit && symbols->num_symtab_symbols > 0) {
+        const char* disk = (const char*)symbols->symtab;
+        size_t entsize = section->header->entsize;
+        ELFSymbol* wide =
+            malloc(symbols->num_symtab_symbols * sizeof(ELFSymbol));
+        for (int j = 0; j < symbols->num_symtab_symbols; j++) {
+          ops->ReadSymbol(&wide[j], disk + (size_t)j * entsize);
+        }
+        symbols->symtab = wide;
+      }
       for (int i = 0; i < symbols->num_symtab_symbols; i++) {
         const ELFSymbol* symbol =  &symbols->symtab[i];
         const char* symname = symbols->strtab + symbol->name;
@@ -393,10 +406,42 @@ static bool LoaderMapIgnoreVaddrSegment(int elf_fd, ELFProgramHeader* segment,
   return true;
 }
 
+// The runtime heap (used by malloc) lives immediately above the program's
+// last writable segment, starting at the linker-defined '_end' symbol.  The
+// libc malloc for these targets assumes a contiguous block of memory there
+// without ever calling brk/mmap to obtain it, so the loader must reserve and
+// map that space.  Without it the very first malloc writes just past the
+// segment and faults ("outside mapped memory").
+#define LOADER_HEAP_RESERVE (4 * 1024 * 1024)
+
 static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
   int page_size = (int)sysconf(_SC_PAGESIZE);
-  
+
+  // Reserve heap space above the last writable segment.  For ignore_vaddr
+  // targets (ARM ELF32) the address-translation logic rejects any access
+  // outside [vaddr, vaddr+memsz), so the heap that sits at '_end' is otherwise
+  // unreachable.  Extend the highest writable PT_LOAD segment's memsz so the
+  // mapping below (and the translation that uses memsz) covers the heap.
+  if (loader->arch->ignore_vaddr) {
+    ELFProgramHeader* heap_segment = NULL;
+    uint64_t heap_segment_end = 0;
+    for (size_t i = 0; i < loader->elf_file->segments.length; i++) {
+      ELFProgramHeader* segment = loader->elf_file->segments.value.p[i];
+      if (segment->type != PT(load) || (segment->flags & PF(w)) == 0) {
+        continue;
+      }
+      uint64_t end = segment->vaddr + segment->memsz;
+      if (heap_segment == NULL || end > heap_segment_end) {
+        heap_segment = segment;
+        heap_segment_end = end;
+      }
+    }
+    if (heap_segment != NULL) {
+      heap_segment->memsz += LOADER_HEAP_RESERVE;
+    }
+  }
+
   // Process all program segments and look for PT_LOAD types.  These are
   // loadable segments that have an address assigned to them.  We map them in
   // from the file directly using the 'mmap' function provided by the operating
@@ -701,8 +746,10 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   // Initialize regions vector.
   VectorInit(&loader->regions);
 
-  // Add the whole ELF file to the regions vector.
-  VectorAppend(&loader->regions, NewRegion(loader->elf_file->header, 0,
+  // Add the whole ELF file to the regions vector.  Use the mmap base (not the
+  // decoded header, which for ELF32 is a heap-allocated wide struct) so that
+  // file-offset based addresses resolve into the mapped file.
+  VectorAppend(&loader->regions, NewRegion((void*)loader->elf_file->base, 0,
                                            loader->elf_file->file_length, NULL,
                                            NULL));
 

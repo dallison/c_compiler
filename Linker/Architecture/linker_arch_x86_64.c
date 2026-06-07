@@ -12,15 +12,15 @@ static int64_t CodeStartAddress(Linker* linker) {
   int64_t address;
   if (linker->building_dso) {
     address = LINKER_DSO_CODE_SEGMENT_START_ADDRESS +
-              LINKER_SECTION_HEADER_OFFSET + 1 * sizeof(ELFProgramHeader);
+              LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
-    address = LINKER_CODE_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET;
+    address = LINKER_CODE_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker);
   } else {
-    address = LINKER_CODE_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET +
-              2 * sizeof(ELFProgramHeader);
+    address = LINKER_CODE_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker) +
+              2 * linker->ops->program_header_size;
   }
   address += (linker->section_groups.length + LINKER_NUM_EXTRA_SECTIONS + 1) *
-             sizeof(ELFSectionHeader);
+             linker->ops->section_header_size;
   return address;
 }
 
@@ -30,15 +30,15 @@ static int64_t DataStartAddress(Linker* linker, int64_t code_start,
   if (linker->building_dso) {
     address = (address + LINKER_DYNAMIC_SEGMENT_ALIGNMENT - 1) &
               ~(LINKER_DYNAMIC_SEGMENT_ALIGNMENT - 1);
-    address += LINKER_SECTION_HEADER_OFFSET + 1 * sizeof(ELFProgramHeader);
+    address += LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
-    address = LINKER_DATA_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET;
+    address = LINKER_DATA_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker);
   } else {
-    address = LINKER_DATA_SEGMENT_START_ADDRESS + LINKER_SECTION_HEADER_OFFSET +
-              2 * sizeof(ELFProgramHeader);
+    address = LINKER_DATA_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker) +
+              2 * linker->ops->program_header_size;
   }
   address += (linker->section_groups.length + LINKER_NUM_EXTRA_SECTIONS + 1) *
-                 sizeof(ELFSectionHeader) +
+                 linker->ops->section_header_size +
              code_size;
   return address;
 }

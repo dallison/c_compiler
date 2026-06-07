@@ -21,7 +21,7 @@
 typedef uint8_t Exponent;
 typedef uint32_t Mantissa;
 #define DOUBLE_IS_SINGLE 1
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(__arm__)
 // Match 6502-sized buffer until aarch64 codegen handles large stack frames.
 #define FIXED_SIZE_WORDS 4
 #define FIXED_SIZE_HALF 2

@@ -382,6 +382,17 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
                 InsertSymbolIntoHashTable, FindSymbolInHashTable);
   assembler->elf_machine_type = elf_machine_type;
   assembler->elf_flags = elf_flags;
+  // 32-bit machines emit ELF32; everything else emits ELF64.  ARM (EABI) is
+  // a little-endian 32-bit target.
+  switch (elf_machine_type) {
+    case ELF_MACHINE_TYPE_ARM:
+      assembler->is_64_bit = false;
+      break;
+    default:
+      assembler->is_64_bit = true;
+      break;
+  }
+  assembler->is_little_endian = true;
   assembler->reloc_types = reloc_types;
   assembler->pic = false;
   assembler->absolute = false;
@@ -695,7 +706,8 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   // Produce the ELF file.
   ELFWriterFile elf;
   ELFWriterFileInit(&elf, ET(rel), assembler->elf_machine_type,
-                    assembler->elf_flags, NULL, true, true);
+                    assembler->elf_flags, NULL, assembler->is_64_bit,
+                    assembler->is_little_endian);
 
   // Add the file symbol.
   if (assembler->filename.length != 0) {

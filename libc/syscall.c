@@ -22,6 +22,8 @@ int syscall(int n, ...) {
 // Implemented in x86_64 support/syscall.s
 #elif defined(__aarch64__)
 // Implemented in aarch64 support/syscall.s
+#elif defined(__arm__)
+// Implemented in arm support/syscall.s
 #elif defined(__W65C02__)
 // Implemented in 6502runtime.s
 #else

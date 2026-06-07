@@ -134,6 +134,8 @@ typedef struct Assembler {
   int32_t current_section;    // Current section index.
   uint16_t elf_machine_type;  // ELF machine.
   uint16_t elf_flags;         // ELF flags.
+  bool is_64_bit;             // 64-bit (ELF64) vs 32-bit (ELF32) output.
+  bool is_little_endian;      // Little vs big endian output.
   int* reloc_types;           // Relocation types.
   bool pic;                   // Position Independent Code.
   Dwarf dwarf;                // Debugging information.

@@ -78,73 +78,115 @@ static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
   return false;
 }
 
-static bool InterpreterAddressOk(ARMInterpreter* interpreter, uint64_t addr,
+// Resolve a guest address to a host pointer.  The ARM backend materializes
+// absolute *linked* virtual addresses with movw/movt, but the loader maps
+// segments at arbitrary host addresses (ignore_vaddr).  An address reaching the
+// memory subsystem may therefore be: a stack address (host), an address that is
+// already a host/runtime address, or a linked virtual address that must be
+// translated to its runtime location.  Returns NULL if unmapped.
+static void* ResolveHostPtrExact(ARMInterpreter* interpreter, uint64_t addr,
                                  size_t size) {
+  Loader* loader = interpreter->loader;
   if (interpreter->stack != NULL) {
     uint64_t start = (uint64_t)(uintptr_t)interpreter->stack;
     uint64_t end = start + ARM_STACK_SIZE;
     if (addr >= start && addr + size <= end) {
-      return true;
+      return (void*)(uintptr_t)addr;
     }
   }
-  return GuestAddressOk(interpreter->loader, addr, size);
+  if (GuestAddressOk(loader, addr, size)) {
+    return (void*)(uintptr_t)addr;
+  }
+  uint64_t host = 0;
+  if (LoaderLinkedAddressToRuntime(loader, NULL, addr, &host) &&
+      GuestAddressOk(loader, host, size)) {
+    return (void*)(uintptr_t)host;
+  }
+  return NULL;
+}
+
+static void* ResolveHostPtr(ARMInterpreter* interpreter, uint64_t addr,
+                            size_t size) {
+  void* p = ResolveHostPtrExact(interpreter, addr, size);
+  if (p != NULL) {
+    return p;
+  }
+  // ARM general-purpose registers are 32 bits wide, but the interpreter holds
+  // them in uint64_t slots and computes ALU results in 64 bits.  A 32-bit add
+  // that carries past bit 31 therefore leaves stray high bits in the value.
+  // When such a value is used as an address, the 32-bit guest address still
+  // lives in the low word, so retry the resolution with the high bits cleared.
+  // (PC-relative computations legitimately produce >32-bit host addresses and
+  // are handled by the exact lookup above, so this only fires as a fallback.)
+  if ((addr >> 32) != 0) {
+    return ResolveHostPtrExact(interpreter, addr & 0xffffffffu, size);
+  }
+  return NULL;
 }
 
 static uint32_t Fetch32(ARMInterpreter* interpreter) {
-  if (!InterpreterAddressOk(interpreter, interpreter->pc, 4)) {
+  void* p = ResolveHostPtr(interpreter, interpreter->pc, 4);
+  if (p == NULL) {
     fprintf(stderr, "Fetch32 outside mapped memory at pc 0x%016" PRIx64 "\n",
             interpreter->pc);
     exit(1);
   }
-  return *(uint32_t*)(uintptr_t)interpreter->pc;
+  return *(uint32_t*)p;
 }
 
 static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 1)) {
-    fprintf(stderr, "Store8 outside mapped memory at 0x%08x\n", addr);
+  void* p = ResolveHostPtr(interpreter, addr, 1);
+  if (p == NULL) {
+    fprintf(stderr, "Store8 outside mapped memory at 0x%08x pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n", addr, interpreter->pc, (uint32_t)interpreter->regs[13], (uint32_t)interpreter->regs[11]);
+    ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
-  *(uint8_t*)(uintptr_t)addr = value;
+  *(uint8_t*)p = value;
 }
 
 static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 2)) {
+  void* p = ResolveHostPtr(interpreter, addr, 2);
+  if (p == NULL) {
     fprintf(stderr, "Store16 outside mapped memory at 0x%08x\n", addr);
     exit(1);
   }
-  *(uint16_t*)(uintptr_t)addr = value;
+  *(uint16_t*)p = value;
 }
 
 static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 4)) {
+  void* p = ResolveHostPtr(interpreter, addr, 4);
+  if (p == NULL) {
     fprintf(stderr, "Store32 outside mapped memory at 0x%08x\n", addr);
     exit(1);
   }
-  *(uint32_t*)(uintptr_t)addr = value;
+  *(uint32_t*)p = value;
 }
 
 static uint8_t Load8(ARMInterpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 1)) {
+  void* p = ResolveHostPtr(interpreter, addr, 1);
+  if (p == NULL) {
     fprintf(stderr, "Load8 outside mapped memory at 0x%08x\n", addr);
     exit(1);
   }
-  return *(uint8_t*)(uintptr_t)addr;
+  return *(uint8_t*)p;
 }
 
 static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 2)) {
+  void* p = ResolveHostPtr(interpreter, addr, 2);
+  if (p == NULL) {
     fprintf(stderr, "Load16 outside mapped memory at 0x%08x\n", addr);
     exit(1);
   }
-  return *(uint16_t*)(uintptr_t)addr;
+  return *(uint16_t*)p;
 }
 
 static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 4)) {
+  void* p = ResolveHostPtr(interpreter, addr, 4);
+  if (p == NULL) {
     fprintf(stderr, "Load32 outside mapped memory at 0x%08x\n", addr);
     exit(1);
   }
-  return *(uint32_t*)(uintptr_t)addr;
+  return *(uint32_t*)p;
 }
 
 static int32_t SignExtend32(uint32_t value, int bits) {
@@ -198,6 +240,43 @@ static void SetNZCVSub(ARMInterpreter* interpreter, uint32_t lhs, uint32_t rhs,
   if (((lhs ^ rhs) & (lhs ^ result) & 0x80000000u) != 0) {
     interpreter->cpsr |= CPSR_V;
   }
+}
+
+// Add-with-carry flag setter.  `carry_in` is 0 or 1.  Computes the result in 64
+// bits so the carry-out (and the Z flag, which must reflect the carry-in) are
+// correct even when carry_in participates.  Returns the 32-bit result.
+static uint32_t SetFlagsAddC(ARMInterpreter* interpreter, uint32_t lhs,
+                             uint32_t rhs, uint32_t carry_in) {
+  uint64_t wide = (uint64_t)lhs + (uint64_t)rhs + (uint64_t)carry_in;
+  uint32_t result = (uint32_t)wide;
+  SetNZ(interpreter, result);
+  interpreter->cpsr &= ~(CPSR_C | CPSR_V);
+  if ((wide >> 32) != 0) {
+    interpreter->cpsr |= CPSR_C;
+  }
+  if (((lhs ^ result) & (rhs ^ result) & 0x80000000u) != 0) {
+    interpreter->cpsr |= CPSR_V;
+  }
+  return result;
+}
+
+// Subtract-with-borrow flag setter.  `borrow_in` is 0 or 1 (the inverted carry
+// for SBC).  Carry-out is set when no borrow is produced.  Returns the 32-bit
+// result.
+static uint32_t SetFlagsSubC(ARMInterpreter* interpreter, uint32_t lhs,
+                             uint32_t rhs, uint32_t borrow_in) {
+  uint64_t wide = (uint64_t)lhs - (uint64_t)rhs - (uint64_t)borrow_in;
+  uint32_t result = (uint32_t)wide;
+  SetNZ(interpreter, result);
+  interpreter->cpsr &= ~(CPSR_C | CPSR_V);
+  // No borrow (carry set) iff the 64-bit difference did not go negative.
+  if (((wide >> 32) & 1u) == 0) {
+    interpreter->cpsr |= CPSR_C;
+  }
+  if (((lhs ^ rhs) & (lhs ^ result) & 0x80000000u) != 0) {
+    interpreter->cpsr |= CPSR_V;
+  }
+  return result;
 }
 
 static bool ConditionPass(ARMInterpreter* interpreter, uint32_t cond) {
@@ -520,16 +599,29 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
   switch (number) {
     case ARM_SYSCALL_HALT:
     case ARM_SYSCALL_EXIT:
-      exit(a0);
+      // The syscall number is in r7 and the first argument (the exit status)
+      // is in r1 (== a1), matching the other syscalls' argument layout.
+      exit(a1);
       break;
-    case ARM_SYSCALL_OPEN:
-      return open((const char*)(uintptr_t)a1, a2, (mode_t)a3);
+    case ARM_SYSCALL_OPEN: {
+      void* path = ResolveHostPtr(interpreter, (uint32_t)a1, 1);
+      return open((const char*)path, a2, (mode_t)a3);
+    }
     case ARM_SYSCALL_CLOSE:
       return close(a1);
-    case ARM_SYSCALL_READ:
-      return (int32_t)read(a1, (void*)(uintptr_t)a2, (size_t)a3);
-    case ARM_SYSCALL_WRITE:
-      return (int32_t)write(a1, (const void*)(uintptr_t)a2, (size_t)a3);
+    case ARM_SYSCALL_READ: {
+      void* buf = ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3);
+      return (int32_t)read(a1, buf, (size_t)a3);
+    }
+    case ARM_SYSCALL_WRITE: {
+      void* buf = ResolveHostPtr(interpreter, (uint32_t)a2, (size_t)a3);
+      if (getenv("ARM_DBG_SYS")) {
+        fprintf(stderr,
+                "DBG write fd=%d guest_buf=0x%08x len=%d host_buf=%p\n", a1,
+                (uint32_t)a2, a3, buf);
+      }
+      return (int32_t)write(a1, (const void*)buf, (size_t)a3);
+    }
     case ARM_SYSCALL_LSEEK:
       return (int32_t)lseek(a1, (off_t)a2, a3);
     case ARM_SYSCALL_MALLOC:
@@ -592,18 +684,24 @@ static bool ExecuteDataProcessingImm(ARMInterpreter* interpreter, uint32_t insn)
         SetNZCVAdd(interpreter, lhs, rhs, result);
       }
       break;
-    case 0x5:
-      result = lhs + rhs + ((interpreter->cpsr & CPSR_C) ? 1u : 0u);
+    case 0x5: {
+      uint32_t cin = (interpreter->cpsr & CPSR_C) ? 1u : 0u;
       if (set_flags) {
-        SetNZCVAdd(interpreter, lhs, rhs, result);
+        result = SetFlagsAddC(interpreter, (uint32_t)lhs, (uint32_t)rhs, cin);
+      } else {
+        result = (uint32_t)lhs + (uint32_t)rhs + cin;
       }
       break;
-    case 0x6:
-      result = lhs - rhs - (((interpreter->cpsr & CPSR_C) ? 0u : 1u));
+    }
+    case 0x6: {
+      uint32_t bin = (interpreter->cpsr & CPSR_C) ? 0u : 1u;
       if (set_flags) {
-        SetNZCVSub(interpreter, lhs, rhs, result);
+        result = SetFlagsSubC(interpreter, (uint32_t)lhs, (uint32_t)rhs, bin);
+      } else {
+        result = (uint32_t)lhs - (uint32_t)rhs - bin;
       }
       break;
+    }
     case 0x8:
       if (set_flags) {
         SetNZ(interpreter, lhs & rhs);
@@ -697,18 +795,24 @@ static bool ExecuteDataProcessingReg(ARMInterpreter* interpreter, uint32_t insn)
         SetNZCVAdd(interpreter, lhs, rhs, result);
       }
       break;
-    case 0x5:
-      result = lhs + rhs + ((interpreter->cpsr & CPSR_C) ? 1u : 0u);
+    case 0x5: {
+      uint32_t cin = (interpreter->cpsr & CPSR_C) ? 1u : 0u;
       if (set_flags) {
-        SetNZCVAdd(interpreter, lhs, rhs, result);
+        result = SetFlagsAddC(interpreter, (uint32_t)lhs, (uint32_t)rhs, cin);
+      } else {
+        result = (uint32_t)lhs + (uint32_t)rhs + cin;
       }
       break;
-    case 0x6:
-      result = lhs - rhs - (((interpreter->cpsr & CPSR_C) ? 0u : 1u));
+    }
+    case 0x6: {
+      uint32_t bin = (interpreter->cpsr & CPSR_C) ? 0u : 1u;
       if (set_flags) {
-        SetNZCVSub(interpreter, lhs, rhs, result);
+        result = SetFlagsSubC(interpreter, (uint32_t)lhs, (uint32_t)rhs, bin);
+      } else {
+        result = (uint32_t)lhs - (uint32_t)rhs - bin;
       }
       break;
+    }
     case 0x8:
       if (set_flags) {
         SetNZ(interpreter, lhs & rhs);
@@ -765,6 +869,47 @@ static bool ExecuteMultiply(ARMInterpreter* interpreter, uint32_t insn) {
   int rs = (int)((insn >> 8) & 0xfu);
   int rm = (int)(insn & 0xfu);
   uint32_t result = ReadReg(interpreter, rm) * ReadReg(interpreter, rs);
+  // Multiply-accumulate (mla): cond 0000 001S Rd Ra Rm 1001 Rn adds Ra.
+  if (((insn >> 21) & 0x7u) == 0x1u) {
+    int ra = (int)((insn >> 12) & 0xfu);
+    result += (uint32_t)ReadReg(interpreter, ra);
+  }
+  WriteReg(interpreter, rd, result);
+  return true;
+}
+
+// Integer divide: sdiv (cond 0111 0001 Rd 1111 Rm 0001 Rn) and udiv (0111
+// 0011 ...) compute Rd = Rn / Rm.  These share bits 27-26 = 01 with the
+// load/store encodings, so they must be dispatched before ExecuteLoadStore.
+static bool ExecuteDivide(ARMInterpreter* interpreter, uint32_t insn) {
+  bool is_unsigned = ((insn >> 21) & 1u) != 0;
+  int rd = (int)((insn >> 16) & 0xfu);
+  int rm = (int)((insn >> 8) & 0xfu);
+  int rn = (int)(insn & 0xfu);
+  uint32_t dividend = (uint32_t)ReadReg(interpreter, rn);
+  uint32_t divisor = (uint32_t)ReadReg(interpreter, rm);
+  uint32_t result;
+  if (divisor == 0) {
+    result = 0;  // ARM division by zero yields 0.
+  } else if (is_unsigned) {
+    result = dividend / divisor;
+  } else {
+    result = (uint32_t)((int32_t)dividend / (int32_t)divisor);
+  }
+  WriteReg(interpreter, rd, result);
+  return true;
+}
+
+// Multiply and subtract (mls): cond 0000 0110 Rd Ra Rm 1001 Rn computes
+// Rd = Ra - Rn * Rm.
+static bool ExecuteMls(ARMInterpreter* interpreter, uint32_t insn) {
+  int rd = (int)((insn >> 16) & 0xfu);
+  int ra = (int)((insn >> 12) & 0xfu);
+  int rm = (int)((insn >> 8) & 0xfu);
+  int rn = (int)(insn & 0xfu);
+  uint32_t result = (uint32_t)ReadReg(interpreter, ra) -
+                    (uint32_t)ReadReg(interpreter, rn) *
+                        (uint32_t)ReadReg(interpreter, rm);
   WriteReg(interpreter, rd, result);
   return true;
 }
@@ -775,11 +920,44 @@ static bool ExecuteMovwMovt(ARMInterpreter* interpreter, uint32_t insn) {
   uint32_t imm16 = (insn & 0xfffu) | ((insn >> 4) & 0xf000u);
   uint32_t value = ReadReg(interpreter, rd);
   if (is_movt) {
+    // movt sets the top 16 bits, leaving the bottom 16 untouched.
     value = (value & 0xffffu) | (imm16 << 16);
   } else {
-    value = (value & 0xffff0000u) | imm16;
+    // movw writes the 16-bit immediate zero-extended: the top 16 bits are
+    // cleared (the prior register contents must not survive).
+    value = imm16;
   }
   WriteReg(interpreter, rd, value);
+  return true;
+}
+
+// Halfword transfer: cond 000 P U 1 W L Rn Rt immH 1011 immL.  The 8-bit
+// immediate is split across two nibbles.
+static bool ExecuteHalfword(ARMInterpreter* interpreter, uint32_t insn) {
+  bool preindex = ((insn >> 24) & 1u) != 0;
+  bool add_offset = ((insn >> 23) & 1u) != 0;
+  bool writeback = ((insn >> 21) & 1u) != 0;
+  bool load = ((insn >> 20) & 1u) != 0;
+  int rn = (int)((insn >> 16) & 0xfu);
+  int rd = (int)((insn >> 12) & 0xfu);
+  uint32_t offset = ((insn >> 4) & 0xf0u) | (insn & 0xfu);
+  uint64_t base = ReadReg(interpreter, rn);
+  uint64_t addr = base;
+  if (preindex) {
+    addr = add_offset ? base + offset : base - offset;
+    if (writeback) {
+      WriteReg(interpreter, rn, addr);
+    }
+  }
+  if (load) {
+    WriteReg(interpreter, rd, Load16(interpreter, addr));
+  } else {
+    Store16(interpreter, addr, (uint16_t)ReadReg(interpreter, rd));
+  }
+  if (!preindex) {
+    addr = add_offset ? base + offset : base - offset;
+    WriteReg(interpreter, rn, addr);
+  }
   return true;
 }
 
@@ -792,7 +970,6 @@ static bool ExecuteLoadStore(ARMInterpreter* interpreter, uint32_t insn,
   bool load = ((insn >> 20) & 1u) != 0;
   int rn = (int)((insn >> 16) & 0xfu);
   int rd = (int)((insn >> 12) & 0xfu);
-  bool halfword = !byte && ((insn >> 5) & 1u) != 0;
   uint32_t offset = insn & 0xfffu;
   if ((insn & 0x02000000u) != 0) {
     uint32_t shifted = 0;
@@ -812,9 +989,7 @@ static bool ExecuteLoadStore(ARMInterpreter* interpreter, uint32_t insn,
   if (load) {
     if (rd == ARM_PC_REG) {
       uint32_t target;
-      if (halfword) {
-        target = Load16(interpreter, addr);
-      } else if (byte) {
+      if (byte) {
         target = Load8(interpreter, addr);
       } else {
         target = Load32(interpreter, addr);
@@ -829,18 +1004,14 @@ static bool ExecuteLoadStore(ARMInterpreter* interpreter, uint32_t insn,
       *pc_updated = true;
       return true;
     }
-    if (halfword) {
-      WriteReg(interpreter, rd, Load16(interpreter, addr));
-    } else if (byte) {
+    if (byte) {
       WriteReg(interpreter, rd, Load8(interpreter, addr));
     } else {
       WriteReg(interpreter, rd, Load32(interpreter, addr));
     }
   } else {
     uint32_t value = ReadReg(interpreter, rd);
-    if (halfword) {
-      Store16(interpreter, addr, (uint16_t)value);
-    } else if (byte) {
+    if (byte) {
       Store8(interpreter, addr, (uint8_t)value);
     } else {
       Store32(interpreter, addr, value);
@@ -912,7 +1083,8 @@ static bool ExecuteBranch(ARMInterpreter* interpreter, uint32_t insn,
 
 static bool ExecuteBranchExchange(ARMInterpreter* interpreter, uint32_t insn,
                                   bool* pc_updated) {
-  bool link = ((insn >> 21) & 1u) != 0;
+  // BX has bits [7:4] == 0001, BLX (register) has bits [7:4] == 0011.
+  bool link = ((insn >> 4) & 0xfu) == 0x3u;
   int rm = (int)(insn & 0xfu);
   uint64_t target = ReadReg(interpreter, rm);
   if (link) {
@@ -948,100 +1120,301 @@ static bool ExecuteSwi(ARMInterpreter* interpreter, uint32_t insn,
   return true;
 }
 
+// Decode single-precision VFP register fields (Vx 4-bit field + 1 extra bit).
+// For single precision the extra bit is the low bit (Sx = Vx<<1 | extra).
+static int VfpSd(uint32_t insn) { return (int)(((insn >> 12) & 0xfu) << 1) | (int)((insn >> 22) & 1u); }
+static int VfpSn(uint32_t insn) { return (int)(((insn >> 16) & 0xfu) << 1) | (int)((insn >> 7) & 1u); }
+static int VfpSm(uint32_t insn) { return (int)(((insn >> 0) & 0xfu) << 1) | (int)((insn >> 5) & 1u); }
+
+// Decode double-precision VFP register fields.  For double precision the extra
+// bit is the high bit (Dx = extra<<4 | Vx), naming d0..d31.
+static int VfpDd(uint32_t insn) { return (int)((insn >> 12) & 0xfu) | (int)(((insn >> 22) & 1u) << 4); }
+static int VfpDn(uint32_t insn) { return (int)((insn >> 16) & 0xfu) | (int)(((insn >> 7) & 1u) << 4); }
+static int VfpDm(uint32_t insn) { return (int)((insn >> 0) & 0xfu) | (int)(((insn >> 5) & 1u) << 4); }
+
+// Double-precision register dN aliases the single-precision pair s(2N):s(2N+1).
+// The interpreter stores single registers in sregs[]; read/write doubles by
+// combining the two halves so the aliasing is correct.
+static double ReadDreg(ARMInterpreter* interpreter, int d) {
+  uint32_t lo, hi;
+  memcpy(&lo, &interpreter->sregs[2 * d], 4);
+  memcpy(&hi, &interpreter->sregs[2 * d + 1], 4);
+  uint64_t bits = (uint64_t)lo | ((uint64_t)hi << 32);
+  double v;
+  memcpy(&v, &bits, 8);
+  return v;
+}
+
+static void WriteDreg(ARMInterpreter* interpreter, int d, double v) {
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  uint32_t lo = (uint32_t)bits;
+  uint32_t hi = (uint32_t)(bits >> 32);
+  memcpy(&interpreter->sregs[2 * d], &lo, 4);
+  memcpy(&interpreter->sregs[2 * d + 1], &hi, 4);
+}
+
+// Read/write the raw 64-bit pattern of dN (used by vmov Dm,Rt,Rt2 and vldr/vstr).
+static uint64_t ReadDregBits(ARMInterpreter* interpreter, int d) {
+  uint32_t lo, hi;
+  memcpy(&lo, &interpreter->sregs[2 * d], 4);
+  memcpy(&hi, &interpreter->sregs[2 * d + 1], 4);
+  return (uint64_t)lo | ((uint64_t)hi << 32);
+}
+
+static void WriteDregBits(ARMInterpreter* interpreter, int d, uint64_t bits) {
+  uint32_t lo = (uint32_t)bits;
+  uint32_t hi = (uint32_t)(bits >> 32);
+  memcpy(&interpreter->sregs[2 * d], &lo, 4);
+  memcpy(&interpreter->sregs[2 * d + 1], &hi, 4);
+}
+
+// Set the CPSR N/Z/C/V flags from a floating-point comparison, matching the
+// ARM FPSCR->APSR_nzcv mapping used after vcmp.
+static void SetFloatCompareFlags(ARMInterpreter* interpreter, double lhs,
+                                 double rhs) {
+  interpreter->cpsr &= ~(CPSR_N | CPSR_Z | CPSR_C | CPSR_V);
+  if (lhs < rhs) {
+    interpreter->cpsr |= CPSR_N;                       // less than
+  } else if (lhs == rhs) {
+    interpreter->cpsr |= CPSR_Z | CPSR_C;              // equal
+  } else if (lhs > rhs) {
+    interpreter->cpsr |= CPSR_C;                       // greater than
+  } else {
+    interpreter->cpsr |= CPSR_C | CPSR_V;              // unordered (NaN)
+  }
+}
+
 static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
-  if ((insn & 0x0f000000u) != 0x0e000000u) {
+  if ((insn & 0x0f000000u) != 0x0e000000u &&
+      (insn & 0x0f200000u) != 0x0d000000u &&
+      (insn & 0x0fe00000u) != 0x0c400000u) {
     return false;
   }
 
-  if ((insn & 0x0fb00fffu) == 0x0eb00a40u) {
-    int vd = (int)((insn >> 12) & 0xfu);
-    int vm = (int)(insn & 0xfu);
-    interpreter->sregs[vd] = interpreter->sregs[vm];
+  // vmov Dm, Rt, Rt2 (to FP) / vmov Rt, Rt2, Dm (from FP): doubleword transfer
+  // between two core registers and a double-precision register.  Encoding
+  // cccc 1100 010L Rt2 Rt 1011 00M1 Vm.
+  if ((insn & 0x0fe00fd0u) == 0x0c400b10u) {
+    bool to_arm = ((insn >> 20) & 1u) != 0;
+    int rt = (int)((insn >> 12) & 0xfu);
+    int rt2 = (int)((insn >> 16) & 0xfu);
+    int dm = (int)(insn & 0xfu) | (int)(((insn >> 5) & 1u) << 4);
+    if (to_arm) {
+      uint64_t bits = ReadDregBits(interpreter, dm);
+      WriteReg(interpreter, rt, (uint32_t)bits);
+      WriteReg(interpreter, rt2, (uint32_t)(bits >> 32));
+    } else {
+      uint64_t lo = (uint32_t)ReadReg(interpreter, rt);
+      uint64_t hi = (uint32_t)ReadReg(interpreter, rt2);
+      WriteDregBits(interpreter, dm, lo | (hi << 32));
+    }
     return true;
   }
 
+  // Custom int<->float conversions, encoded in coprocessor 11 (0xb).
+  // Bit 7 (free in this custom encoding) marks double-precision operands.
+  if ((insn & 0x0f000f10u) == 0x0e000b10u) {
+    bool is_double = ((insn >> 7) & 1u) != 0;
+    if ((insn & (1u << 20)) == 0) {
+      // scvtf sd, rt : signed int (or ucvtf if bit22 set) -> float.
+      int rt = (int)((insn >> 16) & 0xfu);
+      uint32_t bits = (uint32_t)ReadReg(interpreter, rt);
+      bool is_unsigned = (insn & (1u << 22)) != 0;
+      if (is_double) {
+        int dd = VfpDd(insn);
+        WriteDreg(interpreter, dd,
+                  is_unsigned ? (double)bits : (double)(int32_t)bits);
+      } else {
+        int sd = VfpSd(insn);
+        interpreter->sregs[sd] =
+            is_unsigned ? (float)bits : (float)(int32_t)bits;
+      }
+    } else {
+      // fcvtnu/fcvtns rt, sm : float -> int (round toward zero).
+      int rt = (int)((insn >> 12) & 0xfu);
+      double v = is_double ? ReadDreg(interpreter, VfpDm(insn))
+                           : (double)interpreter->sregs[VfpSm(insn)];
+      WriteReg(interpreter, rt, (uint32_t)(int32_t)v);
+    }
+    return true;
+  }
+
+  // vldr/vstr sd, [rn, #+/-imm]  (bit 8 selects double precision)
   if ((insn & 0x0f200000u) == 0x0d000000u) {
     bool load = ((insn >> 20) & 1u) != 0;
+    bool add = ((insn >> 23) & 1u) != 0;
+    bool is_double = ((insn >> 8) & 1u) != 0;
     int rn = (int)((insn >> 16) & 0xfu);
-    int vd = (int)((insn >> 12) & 0xfu);
     int32_t offset = (int32_t)(insn & 0xffu) * 4;
-    uint64_t addr = ReadReg(interpreter, rn) + (uint64_t)offset;
-    if (load) {
-      uint32_t bits = Load32(interpreter, addr);
-      memcpy(&interpreter->sregs[vd], &bits, sizeof(float));
+    if (!add) {
+      offset = -offset;
+    }
+    uint64_t addr = ReadReg(interpreter, rn) + (uint64_t)(int64_t)offset;
+    if (is_double) {
+      int dd = VfpDd(insn);
+      if (load) {
+        uint64_t bits = (uint64_t)Load32(interpreter, addr) |
+                        ((uint64_t)Load32(interpreter, addr + 4) << 32);
+        WriteDregBits(interpreter, dd, bits);
+      } else {
+        uint64_t bits = ReadDregBits(interpreter, dd);
+        Store32(interpreter, addr, (uint32_t)bits);
+        Store32(interpreter, addr + 4, (uint32_t)(bits >> 32));
+      }
     } else {
-      uint32_t bits = 0;
-      memcpy(&bits, &interpreter->sregs[vd], sizeof(float));
-      Store32(interpreter, addr, bits);
+      int sd = VfpSd(insn);
+      if (load) {
+        uint32_t bits = Load32(interpreter, addr);
+        memcpy(&interpreter->sregs[sd], &bits, sizeof(float));
+      } else {
+        uint32_t bits = 0;
+        memcpy(&bits, &interpreter->sregs[sd], sizeof(float));
+        Store32(interpreter, addr, bits);
+      }
     }
     return true;
   }
 
-  if ((insn & 0x0f000010u) == 0x0e000000u) {
-    int op = (int)((insn >> 20) & 0xfu);
-    int vn = (int)((insn >> 16) & 0xfu);
-    int vd = (int)((insn >> 12) & 0xfu);
-    int vm = (int)(insn & 0xfu);
-    float lhs = interpreter->sregs[vn];
-    float rhs = interpreter->sregs[vm];
-    switch (op) {
-      case 0x3:
-        interpreter->sregs[vd] = lhs + rhs;
-        return true;
-      case 0x5:
-        interpreter->sregs[vd] = lhs - rhs;
-        return true;
-      case 0x2:
-        interpreter->sregs[vd] = lhs * rhs;
-        return true;
-      case 0x8:
-        interpreter->sregs[vd] = lhs / rhs;
-        return true;
-      default:
-        break;
-    }
-  }
-
-  if ((insn & 0x0fb80f00u) == 0x0eb80a00u) {
-    int vn = (int)((insn >> 16) & 0xfu);
-    int vd = (int)((insn >> 12) & 0xfu);
-    int opc = (int)((insn >> 7) & 0xfu);
-    float value = interpreter->sregs[vn];
-    switch (opc) {
-      case 0x8:
-        WriteReg(interpreter, vd, (uint32_t)(int32_t)value);
-        return true;
-      case 0x0:
-        WriteReg(interpreter, vd, (uint32_t)value);
-        return true;
-      default:
-        break;
-    }
-  }
-
-  if ((insn & 0x0fb00f00u) == 0x0eb40a00u) {
-    float lhs = interpreter->sregs[(insn >> 16) & 0xfu];
-    float rhs = interpreter->sregs[insn & 0xfu];
-    SetNZ(interpreter, (uint32_t)(lhs == rhs ? 0 : 1));
-    return true;
-  }
-
-  if ((insn & 0x0fff0fffu) == 0x0ef1fa10u) {
-    (void)interpreter;
-    return true;
-  }
-
-  if ((insn & 0x0e100000u) == 0x0e000000u) {
+  // vmov sn, rt / vmov rt, sn (GP register <-> single register, raw bits).
+  if ((insn & 0x0fe00f10u) == 0x0e000a10u) {
+    bool to_arm = ((insn >> 20) & 1u) != 0;
     int rt = (int)((insn >> 12) & 0xfu);
-    int vn = (int)((insn >> 16) & 0xfu);
-    bool to_arm = ((insn >> 16) & 0x40u) != 0;
+    int sn = VfpSn(insn);
     if (to_arm) {
       uint32_t bits = 0;
-      memcpy(&bits, &interpreter->sregs[vn], sizeof(float));
+      memcpy(&bits, &interpreter->sregs[sn], sizeof(float));
       WriteReg(interpreter, rt, bits);
     } else {
-      uint32_t bits = ReadReg(interpreter, rt);
-      memcpy(&interpreter->sregs[vn], &bits, sizeof(float));
+      uint32_t bits = (uint32_t)ReadReg(interpreter, rt);
+      memcpy(&interpreter->sregs[sn], &bits, sizeof(float));
+    }
+    return true;
+  }
+
+  // vmrs APSR_nzcv, FPSCR : flags already set by vcmp, so this is a no-op.
+  if ((insn & 0x0fff0fffu) == 0x0ef1fa10u) {
+    return true;
+  }
+
+  // vcmp sd, sm (bit 8 selects double precision)
+  if ((insn & 0x0fbf0ed0u) == 0x0eb40a40u) {
+    if (((insn >> 8) & 1u) != 0) {
+      SetFloatCompareFlags(interpreter, ReadDreg(interpreter, VfpDd(insn)),
+                           ReadDreg(interpreter, VfpDm(insn)));
+    } else {
+      SetFloatCompareFlags(interpreter, interpreter->sregs[VfpSd(insn)],
+                           interpreter->sregs[VfpSm(insn)]);
+    }
+    return true;
+  }
+
+  // vcvt, vneg, vabs, vsqrt, vmov(copy) : 1110 1110 1D11 op Vd 101 sz x1.0 Vm.
+  if ((insn & 0x0fb00e50u) == 0x0eb00a40u) {
+    bool is_double = ((insn >> 8) & 1u) != 0;
+    int op = (int)((insn >> 16) & 0xfu);  // distinguishing field
+    bool bit7 = ((insn >> 7) & 1u) != 0;
+    if (is_double) {
+      int dd = VfpDd(insn);
+      int dm = VfpDm(insn);
+      switch (op) {
+        case 0x0:  // vmov copy (bit7=0) or vabs (bit7=1)
+          WriteDreg(interpreter, dd,
+                    bit7 ? fabs(ReadDreg(interpreter, dm))
+                         : ReadDreg(interpreter, dm));
+          return true;
+        case 0x1:  // vneg (bit7=0) or vsqrt (bit7=1)
+          WriteDreg(interpreter, dd,
+                    bit7 ? sqrt(ReadDreg(interpreter, dm))
+                         : -ReadDreg(interpreter, dm));
+          return true;
+        case 0x7:  // vcvt.f32.f64 : double in dm -> float in sd (sz=1 source)
+          interpreter->sregs[VfpSd(insn)] = (float)ReadDreg(interpreter, dm);
+          return true;
+        case 0x8:  // vcvt.f64.s32/.u32 : int bits in sm -> double in dd
+          if (bit7) {
+            WriteDreg(interpreter, dd,
+                      (double)(int32_t)interpreter->sregs[VfpSm(insn)]);
+          } else {
+            uint32_t b;
+            memcpy(&b, &interpreter->sregs[VfpSm(insn)], 4);
+            WriteDreg(interpreter, dd, (double)b);
+          }
+          return true;
+        case 0xc:  // vcvt.u32.f64 : double in dm -> unsigned int bits in sd
+        case 0xd: {  // vcvt.s32.f64 : double in dm -> int bits in sd
+          double v = ReadDreg(interpreter, dm);
+          uint32_t bits = (op == 0xd) ? (uint32_t)(int32_t)v : (uint32_t)v;
+          memcpy(&interpreter->sregs[VfpSd(insn)], &bits, 4);
+          return true;
+        }
+        default:
+          break;
+      }
+    } else {
+      int sd = VfpSd(insn);
+      int sm = VfpSm(insn);
+      switch (op) {
+        case 0x0:  // vmov copy (bit7=0) or vabs (bit7=1)
+          interpreter->sregs[sd] =
+              bit7 ? fabsf(interpreter->sregs[sm]) : interpreter->sregs[sm];
+          return true;
+        case 0x1:  // vneg (bit7=0) or vsqrt (bit7=1)
+          interpreter->sregs[sd] =
+              bit7 ? sqrtf(interpreter->sregs[sm]) : -interpreter->sregs[sm];
+          return true;
+        case 0x7:  // vcvt.f64.f32 : float in sm -> double in dd (sz=0 source)
+          WriteDreg(interpreter, VfpDd(insn), (double)interpreter->sregs[sm]);
+          return true;
+        case 0x8:  // vcvt.f32.s32 : int bits in sm -> float in sd
+          interpreter->sregs[sd] = (float)(int32_t)interpreter->sregs[sm];
+          return true;
+        case 0xd: {  // vcvt.s32.f32 : float in sm -> int bits in sd
+          int32_t v = (int32_t)interpreter->sregs[sm];
+          memcpy(&interpreter->sregs[sd], &v, sizeof(int32_t));
+          return true;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  // vadd/vsub/vmul/vdiv sd, sn, sm (bit 8 selects double precision)
+  if ((insn & 0x0f000e10u) == 0x0e000a00u) {
+    uint32_t opc = (insn >> 20) & 0xfu;
+    bool op6 = ((insn >> 6) & 1u) != 0;
+    bool is_double = ((insn >> 8) & 1u) != 0;
+    if (is_double) {
+      double lhs = ReadDreg(interpreter, VfpDn(insn));
+      double rhs = ReadDreg(interpreter, VfpDm(insn));
+      int dd = VfpDd(insn);
+      if (opc == 0x3 && !op6) {
+        WriteDreg(interpreter, dd, lhs + rhs);
+      } else if (opc == 0x3 && op6) {
+        WriteDreg(interpreter, dd, lhs - rhs);
+      } else if (opc == 0x2) {
+        WriteDreg(interpreter, dd, lhs * rhs);
+      } else if (opc == 0x8) {
+        WriteDreg(interpreter, dd, lhs / rhs);
+      } else {
+        return false;
+      }
+      return true;
+    }
+    int sd = VfpSd(insn);
+    float lhs = interpreter->sregs[VfpSn(insn)];
+    float rhs = interpreter->sregs[VfpSm(insn)];
+    if (opc == 0x3 && !op6) {
+      interpreter->sregs[sd] = lhs + rhs;  // vadd
+    } else if (opc == 0x3 && op6) {
+      interpreter->sregs[sd] = lhs - rhs;  // vsub
+    } else if (opc == 0x2) {
+      interpreter->sregs[sd] = lhs * rhs;  // vmul
+    } else if (opc == 0x8) {
+      interpreter->sregs[sd] = lhs / rhs;  // vdiv
+    } else {
+      return false;
     }
     return true;
   }
@@ -1069,16 +1442,36 @@ static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
     return ExecuteBranch(interpreter, insn, pc_updated);
   }
 
-  if ((insn & 0x0ffffff0u) == 0x012ff10u) {
+  // BX:  cond 0001 0010 1111 1111 1111 0001 Rm
+  // BLX: cond 0001 0010 1111 1111 1111 0011 Rm
+  if ((insn & 0x0ffffff0u) == 0x012fff10u ||
+      (insn & 0x0ffffff0u) == 0x012fff30u) {
     return ExecuteBranchExchange(interpreter, insn, pc_updated);
   }
 
-  if ((insn & 0x0ff00000u) == 0x03000000u) {
+  // movw (0x03000000) and movt (0x03400000); bit 22 selects movt.
+  if ((insn & 0x0fb00000u) == 0x03000000u) {
     return ExecuteMovwMovt(interpreter, insn);
   }
 
   if ((insn & 0x0fc000f0u) == 0x00000090u) {
     return ExecuteMultiply(interpreter, insn);
+  }
+
+  // Integer divide (sdiv/udiv): cond 0111 00x1 Rd 1111 Rm 0001 Rn.  Bits 27-26
+  // are 01, shared with the load/store encodings, so dispatch this first.
+  if ((insn & 0x0f9000f0u) == 0x07100010u) {
+    return ExecuteDivide(interpreter, insn);
+  }
+
+  // Multiply and subtract (mls): cond 0000 0110 Rd Ra Rm 1001 Rn.
+  if ((insn & 0x0ff000f0u) == 0x00600090u) {
+    return ExecuteMls(interpreter, insn);
+  }
+
+  // Halfword transfer (unsigned): bits 27-25 = 000 and bits 7-4 = 1011.
+  if ((insn & 0x0e0000f0u) == 0x000000b0u) {
+    return ExecuteHalfword(interpreter, insn);
   }
 
   if ((insn & 0x0e000000u) == 0x08000000u) {
@@ -1089,16 +1482,25 @@ static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
     return ExecuteLoadStore(interpreter, insn, pc_updated);
   }
 
+  // Coprocessor / VFP space: bits 27-26 = 11 (0xc/0xd/0xe).  This must be
+  // tested before the data-processing checks below: VFP load/store (vldr/vstr,
+  // 0x0d......) and VFP data ops set bit 25, so they would otherwise be
+  // mis-dispatched as data-processing-immediate instructions.
+  if ((insn & 0x0c000000u) == 0x0c000000u) {
+    return ExecuteVfp(interpreter, insn);
+  }
+
   if ((insn & 0x02000000u) != 0) {
     return ExecuteDataProcessingImm(interpreter, insn);
   }
 
-  if ((insn & 0x0e000010u) == 0x00000000u && (insn & 0x02000000u) == 0) {
+  // Data-processing register form: bits 27-25 == 000.  This covers both the
+  // immediate-shift form (bit 4 == 0) and the register-specified-shift form
+  // (bit 4 == 1, bit 7 == 0).  Multiply, divide, mls, halfword and branch-
+  // exchange encodings share these bits but are all dispatched above, so by the
+  // time we get here a 000 class instruction is a data-processing-register op.
+  if ((insn & 0x0e000000u) == 0x00000000u) {
     return ExecuteDataProcessingReg(interpreter, insn);
-  }
-
-  if ((insn & 0x0f000000u) == 0x0e000000u) {
-    return ExecuteVfp(interpreter, insn);
   }
 
   if (insn == 0xE1A00000u) {
@@ -1178,16 +1580,55 @@ void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
                                          ARM_SYSCALL_RESOLVE;
   interpreter->symbol_resolver_code[1] = ARM_AL | 0x0f000000u;
 
+  // The stack lives at a fixed 32-bit guest virtual address mapped onto a host
+  // buffer.  ARM is a 32-bit machine, so the stack pointer must fit in 32 bits;
+  // the host malloc address does not.  Register the stack as a loader region so
+  // that ResolveHostPtr translates guest stack addresses to the host buffer.
   interpreter->stack = malloc(ARM_STACK_SIZE);
+  static ELFProgramHeader stack_segment;
+  memset(&stack_segment, 0, sizeof(stack_segment));
+  stack_segment.vaddr = ARM_STACK_BASE;
+  stack_segment.memsz = ARM_STACK_SIZE;
+  stack_segment.offset = 0;
+  VectorAppend(&loader->regions,
+               NewRegion(interpreter->stack, 0, ARM_STACK_SIZE, &stack_segment,
+                         NULL));
   interpreter->regs[ARM_SP_REG] =
-      ((uintptr_t)(interpreter->stack + ARM_STACK_SIZE) & ~0x7ull) - 4096;
+      (((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull) - 4096;
   interpreter->pc = entry_address;
   interpreter->regs[ARM_LR_REG] = 0;
+
+  // Build argc/argv in *guest* stack memory.  ARM is a 32-bit machine with
+  // address translation, so we cannot hand the guest a host pointer (as the
+  // 64-bit backends do); the argv array and the argument strings must live at
+  // guest addresses the program can dereference.  We place them in the unused
+  // headroom between the initial SP and the top of the stack (the stack grows
+  // downward from SP, so it never clobbers this region).
   WriteReg(interpreter, 0, (uint64_t)(uint32_t)argc);
   if (!loader->is_static) {
     WriteReg(interpreter, 1, entry_address);
+  } else if (argc > 0 && argv != NULL) {
+    uint64_t guest_top = ((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull;
+    uint64_t p = guest_top;
+    uint32_t* guest_ptrs = malloc((size_t)(argc + 1) * sizeof(uint32_t));
+    for (int i = 0; i < argc; i++) {
+      size_t len = strlen(argv[i]) + 1;
+      p -= len;
+      memcpy(interpreter->stack + (p - ARM_STACK_BASE), argv[i], len);
+      guest_ptrs[i] = (uint32_t)p;
+    }
+    guest_ptrs[argc] = 0;
+    // Place the pointer array (word aligned) below the strings.
+    p &= ~0x7ull;
+    p -= (uint64_t)(argc + 1) * sizeof(uint32_t);
+    p &= ~0x7ull;
+    uint64_t guest_argv = p;
+    memcpy(interpreter->stack + (guest_argv - ARM_STACK_BASE), guest_ptrs,
+           (size_t)(argc + 1) * sizeof(uint32_t));
+    free(guest_ptrs);
+    WriteReg(interpreter, 1, guest_argv);
   } else {
-    WriteReg(interpreter, 1, (uint64_t)(uintptr_t)argv);
+    WriteReg(interpreter, 1, 0);
   }
   MapGuestResolver(interpreter);
 }

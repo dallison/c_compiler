@@ -20,8 +20,12 @@ int main(int argc, char * argv[]) {
   bool trace_regs = false;
   bool trace_instructions = false;
   bool enter_debugger = false;
+  // Index in argv of the guest program's name.  Everything from this index
+  // onward (the program plus any of its own arguments) becomes the guest's
+  // argc/argv.
+  int program_index = -1;
   for (int i = 1; i < argc; i++) {
-    if (argv[i][0] == '-') {
+    if (program_index < 0 && argv[i][0] == '-') {
       switch (argv[i][1]) {
         case 'd':
           trace_instructions = true;
@@ -32,18 +36,27 @@ int main(int argc, char * argv[]) {
         case 'r':
           trace_regs = true;
           break;
+        case 'i':
+          // The ARM backend only has a software interpreter; accept -i
+          // (and --interpret) for parity with the other interpreters.
+          break;
         default:
           fprintf(stderr, "unsupported flag -%d\n", argv[i][1]);
           exit(2);
       }
     } else {
-      if (filename.length != 0) {
-        fprintf(stderr, "Only one file to interpret please\n");
-        exit(1);
+      // First non-flag argument is the program; remaining arguments belong to
+      // the guest program, not the interpreter.
+      if (program_index < 0) {
+        program_index = i;
+        StringSet(&filename, argv[i]);
       }
-      StringSet(&filename, argv[i]);
     }
   }
+
+  // The guest program sees argv starting at its own name.
+  int program_argc = program_index < 0 ? 0 : argc - program_index;
+  char** program_argv = program_index < 0 ? NULL : &argv[program_index];
   
   ARMInterpreter interpreter;
   Loader loader;
@@ -87,7 +100,7 @@ int main(int argc, char * argv[]) {
     exit(0);
   }
   ARMInterpreterInit(&interpreter, &loader,
-                       loader.main_address, argc, argv,
+                       loader.main_address, program_argc, program_argv,
                        trace_regs, trace_instructions);
   if (enter_debugger) {
     ARMDebugger debugger;

@@ -31,6 +31,10 @@ struct __jmp_buf {
 struct __jmp_buf {
   long regs[32];
 };
+#elif defined(__arm__)
+struct __jmp_buf {
+  long regs[32];
+};
 #elif defined(__x86_64__)
 struct __jmp_buf {
   long regs[32];
