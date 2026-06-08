@@ -263,6 +263,11 @@ typedef struct {
   Vector literals;     // Literals
   int next_literal_id;
 
+  // Roots of every external declaration's AST (ASTNode*).  Retained so the
+  // whole AST forest can be destructed once at CompilerDestruct.  The node
+  // structs themselves are arena allocated and freed by ASTArenaRelease.
+  Vector declaration_asts;
+
   int next_symbol_id; // Next symbol id.
   
   // Flags.

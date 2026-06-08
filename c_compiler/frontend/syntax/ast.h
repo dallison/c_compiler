@@ -278,10 +278,18 @@ typedef struct ASTNode {
 #define kASTIsDeclaration (1 << 4)   // This is a declaration.
 #define kASTRvoCall (1 << 5)         // Return Value Optimization call.
 #define kASTNrvoMarker (1 << 6)      // Named Return Value Optimization symbol.
+#define kASTDestructed (1 << 7)      // Node has been destructed (see ASTNodeDelete).
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
                  SourceLocation location, ASTNodeVirtuals* virtuals);
+
+// AST nodes are allocated from a bump allocator (see ast.c).  ASTArenaAlloc
+// returns zeroed, 16-byte aligned memory.  ASTArenaRelease frees every block at
+// once and must only be called after all nodes have been destructed (via
+// ASTNodeDelete) so their owned (non-arena) resources are released first.
+void* ASTArenaAlloc(size_t size);
+void ASTArenaRelease(void);
 
 // Creates a new AST node.  The deleter for this will be ASTNodeBaseDelete
 // which simply frees the memory passed.

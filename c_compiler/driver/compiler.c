@@ -649,6 +649,8 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
 static void CompileDeclaration(Syntax* syntax) {
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
   if (node != NULL) {
+    // Retain the root so the whole AST can be torn down at CompilerDestruct.
+    VectorAppend(&compiler->declaration_asts, node);
     // 'node' will be a declaration list containing declarations.
     if (node->op == AST_OP(decl_list)) {
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
@@ -840,6 +842,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->literals);
+  VectorInit(&compiler->declaration_asts);
   SetInit(&compiler->disabled_warnings, CompareWarning);
   compiler->num_errors = 0;
   compiler->next_literal_id = 1;
@@ -1106,6 +1109,17 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
 }
 
 void CompilerDestruct(Compiler* compiler) {
+  // Tear down the AST forest first, while the symbol table and type records it
+  // references are still alive.  Destructing releases each node's non-arena
+  // resources (type references, owned strings/vectors); it is idempotent and
+  // graph-safe (see ASTNodeDelete).  The node structs themselves live in the
+  // AST arena and are reclaimed wholesale afterwards.
+  for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
+    ASTNodeDelete((ASTNode*)compiler->declaration_asts.value.p[i]);
+  }
+  VectorDestruct(&compiler->declaration_asts);
+  ASTArenaRelease();
+
   if (compiler->ir_output_file != stdout) {
     fclose(compiler->ir_output_file);
   }
