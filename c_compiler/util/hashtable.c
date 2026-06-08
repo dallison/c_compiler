@@ -31,7 +31,9 @@ HashTable* NewHashTable(size_t size, const char* name, HashTableHasher hash,
 }
 
 void HashTableDestruct(HashTable* table) {
+  StringDestruct(&table->name);
   free(table->entries);
+  table->entries = NULL;
   table->size = 0;
 }
 

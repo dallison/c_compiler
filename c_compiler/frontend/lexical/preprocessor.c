@@ -334,7 +334,17 @@ void PreprocessorDestruct(Preprocessor* p) {
   }
   VectorDestruct(&p->system_include_paths);
 
-  PreprocessorReset(p);
+  // Delete every macro and then the macro table itself.  Unlike
+  // PreprocessorReset this must not re-predefine the standard macros (that would
+  // repopulate the table we are tearing down).
+  HashTableTraverse(&p->macros, DeleteMacroTree, NULL);
+  HashTableDestruct(&p->macros);
+
+  for (size_t i = 0; i < p->macro_stack.length; i++) {
+    Macro* saved = p->macro_stack.value.p[i];
+    MacroDestruct(saved);
+    free(saved);
+  }
   VectorDestruct(&p->macro_stack);
 }
 

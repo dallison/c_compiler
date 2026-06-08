@@ -1130,6 +1130,9 @@ void CompilerDestruct(Compiler* compiler) {
   
   ClearSymbolTable(&compiler->global_symbol_table, true);
   ClearSymbolTable(&compiler->global_tag_table, true);
+  // ClearSymbolTable only empties the tables; release their bucket arrays too.
+  HashTableDestruct(&compiler->global_symbol_table);
+  HashTableDestruct(&compiler->global_tag_table);
 
   StringDestruct(&compiler->infile);
 
