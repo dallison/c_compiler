@@ -234,6 +234,12 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
 }
 
 void TargetGeneratorDestruct(TargetGenerator* gen) {
+  // ListDestruct frees the instruction structs (header is the first member)
+  // but not the per-instruction "users" vector, so destruct those first.
+  for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
+       inst = TargetNext(inst)) {
+    VectorDestruct(&inst->users);
+  }
   ListDestruct(&gen->code);
   SymbolDelete(gen->memcpy);
   SymbolDelete(gen->memset);
