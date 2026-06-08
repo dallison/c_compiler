@@ -129,6 +129,11 @@ typedef struct Assembler {
   Vector sections;            // Vector of AssemblerSection*.
   Vector relocations;         // Vector of AssemberRelocation*
   HashTable symbol_table;     // Symbol table.
+  // Symbols that are created but not owned by the symbol table (pass-2 inserts,
+  // which the table rejects, and forward-declared symbols referenced in
+  // expressions).  Tracked here so they are freed at destruct rather than
+  // leaked.
+  Vector orphan_symbols;
   int pass;                   // Pass number (1 or 2).
   int num_errors;             // Number of errors.
   int32_t current_section;    // Current section index.
@@ -151,6 +156,10 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 void AssemblerDestruct(Assembler* assembler);
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name);
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym);
+
+// Track a symbol that is not owned by the symbol table so it is freed at
+// destruct (e.g. forward-declared symbols referenced only in expressions).
+void AssemblerTrackOrphanSymbol(Assembler* assembler, AssemblerSymbol* sym);
 void AssemblerReset(Assembler* assembler, bool clear_symbols);
 void AssemblerClearSymbols(Assembler* assembler);
 

@@ -264,9 +264,16 @@ void AssemblerExtractSymbolSuffix(String* symbol, String* name, String* suffix) 
   StringSet(suffix, symbol->value + index + 1);
 }
 
+void AssemblerTrackOrphanSymbol(Assembler* assembler, AssemblerSymbol* sym) {
+  VectorAppend(&assembler->orphan_symbols, sym);
+}
+
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym) {
-  // In pass 2 we don't insert any more symbols.
+  // In pass 2 we don't insert any more symbols, but the caller has already
+  // allocated this one (e.g. a symbol referenced only in pass 2).  Track it so
+  // it can be freed at destruct rather than leaked.
   if (assembler->pass == 2) {
+    AssemblerTrackOrphanSymbol(assembler, sym);
     return;
   }
   HashTableInsert(&assembler->symbol_table, sym);
@@ -376,6 +383,7 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 
   VectorInit(&assembler->sections);
   VectorInit(&assembler->relocations);
+  VectorInit(&assembler->orphan_symbols);
   assembler->pass = 0;
   assembler->num_errors = 0;
   HashTableInit(&assembler->symbol_table, "assembler_symbols", 1009, HashSymbol,
@@ -424,6 +432,15 @@ void AssemblerDestruct(Assembler* assembler) {
 
   ClearAssemblerSymbolTable(&assembler->symbol_table);
   HashTableDestruct(&assembler->symbol_table);
+
+  // Free the symbols that were never inserted into the table.
+  for (size_t i = 0; i < assembler->orphan_symbols.length; i++) {
+    AssemblerSymbol* sym = assembler->orphan_symbols.value.p[i];
+    AssemblerSymbolDelete(sym);
+    free(sym);
+  }
+  VectorDestruct(&assembler->orphan_symbols);
+
   DwarfDestruct(&assembler->dwarf);
 }
 

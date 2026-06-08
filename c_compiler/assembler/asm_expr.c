@@ -31,6 +31,8 @@ static ASTNode* ParseIdentifier(Assembler* assembler) {
                                 SYM_TYPE(none), SYM_BIND(local),
                                 AssemblerCurrentAddress(assembler));
     symbol->is_forward_declared = true;
+    // Not inserted into the symbol table; track it so it is freed at destruct.
+    AssemblerTrackOrphanSymbol(assembler, symbol);
   }
   StringDestruct(&name);
   return NewRawIdentifierASTNode(symbol, lex->current_token_location);
