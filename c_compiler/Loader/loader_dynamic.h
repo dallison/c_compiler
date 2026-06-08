@@ -82,6 +82,15 @@ typedef struct LoadedDynamicLibrary {
   const char* strtab;
   int64_t num_symtab_symbols;
   bool dynamic_section_relocated;
+  // True when the header, program headers and section headers were decoded
+  // from an ELF32 file into heap-allocated (wide) structures and therefore
+  // need to be freed.  For ELF64 these point directly into the mapped file and
+  // must not be freed.
+  bool owns_decoded;
+  // True when the dynamic section and dynamic symbol table were also decoded
+  // into heap memory (the ELF32 linker path, load_address == 0).  In the
+  // ELF32 runtime path they point into mapped segments and must not be freed.
+  bool owns_dynamic_tables;
   Vector mapped_segments;
 } LoadedDynamicLibrary;
 

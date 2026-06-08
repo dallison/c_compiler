@@ -522,6 +522,27 @@ static int MapDynamicLibraryHeader(String* filename,
     close(fd);
     return -1;
   }
+
+  // ELF32 files use a different (narrower) header layout, so the fields read
+  // above are not where we expect.  They are also small (e.g. davecc's ARM
+  // output), so just map the whole file: the segments are mapped separately
+  // from the fd, and mapping everything makes the ELF32 headers and section
+  // data (shstrtab etc.) fully available for decoding.
+  if (((const unsigned char*)&header)[EI_CLASS] == ELFCLASS32) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+      close(fd);
+      return -1;
+    }
+    *length = st.st_size;
+    *addr = mmap(NULL, *length, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (*addr == MAP_FAILED) {
+      close(fd);
+      return -1;
+    }
+    return fd;
+  }
+
   int page_size = (int)sysconf(_SC_PAGESIZE);
   off_t end_program_headers = header.phoff + header.phnum * header.phentsize;
   off_t end_section_headers = header.shoff + header.shnum * header.shentsize;
@@ -810,6 +831,208 @@ static void BuildRuntimePaths(LoadedDynamicLibrary* lib) {
   }
 }
 
+// Decode the ELF32 file header, program headers and section headers into the
+// canonical (wide) in-memory structures the rest of the loader expects.  These
+// are heap allocated and owned by the library (freed on destruct).  The whole
+// file must already be mapped at lib->addr.
+static void DecodeELF32Headers(LoadedDynamicLibrary* lib) {
+  const char* base = (const char*)lib->addr;
+  const ELF32Header* hdr32 = (const ELF32Header*)base;
+
+  ELFHeader* header = calloc(1, sizeof(ELFHeader));
+  memcpy(header->ident, hdr32->ident, sizeof(header->ident));
+  header->type = hdr32->type;
+  header->machine = hdr32->machine;
+  header->version = hdr32->version;
+  header->entry = hdr32->entry;
+  header->phoff = hdr32->phoff;
+  header->shoff = hdr32->shoff;
+  header->flags = hdr32->flags;
+  header->ehsize = hdr32->ehsize;
+  header->phentsize = hdr32->phentsize;
+  header->phnum = hdr32->phnum;
+  header->shentsize = hdr32->shentsize;
+  header->shnum = hdr32->shnum;
+  header->shstrndx = hdr32->shstrndx;
+  lib->header = header;
+  lib->owns_decoded = true;
+
+  ELFProgramHeader* phdrs = calloc(header->phnum > 0 ? header->phnum : 1,
+                                   sizeof(ELFProgramHeader));
+  for (int i = 0; i < header->phnum; i++) {
+    const ELF32ProgramHeader* in =
+        (const ELF32ProgramHeader*)(base + header->phoff +
+                                    (size_t)i * sizeof(ELF32ProgramHeader));
+    phdrs[i].type = in->type;
+    phdrs[i].flags = in->flags;
+    phdrs[i].offset = in->offset;
+    phdrs[i].vaddr = in->vaddr;
+    phdrs[i].paddr = in->paddr;
+    phdrs[i].filesz = in->filesz;
+    phdrs[i].memsz = in->memsz;
+    phdrs[i].align = in->align;
+  }
+  lib->program_headers = phdrs;
+
+  ELFSectionHeader* shdrs = calloc(header->shnum > 0 ? header->shnum : 1,
+                                   sizeof(ELFSectionHeader));
+  for (int i = 0; i < header->shnum; i++) {
+    const ELF32SectionHeader* in =
+        (const ELF32SectionHeader*)(base + header->shoff +
+                                    (size_t)i * sizeof(ELF32SectionHeader));
+    shdrs[i].name = in->name;
+    shdrs[i].type = in->type;
+    shdrs[i].flags = in->flags;
+    shdrs[i].addr = in->addr;
+    shdrs[i].offset = in->offset;
+    shdrs[i].size = in->size;
+    shdrs[i].link = in->link;
+    shdrs[i].info = in->info;
+    shdrs[i].addralign = in->addralign;
+    shdrs[i].entsize = in->entsize;
+  }
+  lib->section_headers = shdrs;
+}
+
+// Count the dynamic symbols of an ELF32 library from its .dynsym section
+// header (size / entsize).  Used to drive the linear symbol search.
+static int64_t ELF32DynamicSymbolCount(LoadedDynamicLibrary* lib) {
+  for (int i = 0; i < lib->header->shnum; i++) {
+    const ELFSectionHeader* sec = &lib->section_headers[i];
+    if (sec->type == SHT(dynsym)) {
+      size_t entsize = sec->entsize != 0 ? sec->entsize : sizeof(ELF32Symbol);
+      return (int64_t)(sec->size / entsize);
+    }
+  }
+  return 0;
+}
+
+// Load an ELF32 dynamic object into a running address space (load_address != 0,
+// used by the runtime loader/interpreter).  This relies on the ARM loader's
+// ignore_vaddr mode: segments are mapped at OS-chosen addresses and the linked
+// addresses are translated to runtime addresses via the loader's regions.
+//
+// davecc emits the dynamic section, dynamic symbol table and relocations in the
+// wide (64-bit) layout even for ELF32 output, so once the headers are decoded
+// the existing segment-loading and relocation machinery handles the rest.
+static bool SetupELF32RuntimeLibrary(LoadedDynamicLibrary* lib,
+                                     uint64_t load_address,
+                                     uint64_t* end_of_library) {
+  DecodeELF32Headers(lib);
+
+  if (!LoadSegments(lib, load_address, end_of_library)) {
+    return false;
+  }
+  if (!FindDynamicSection(lib, load_address)) {
+    return false;
+  }
+  FindHashTable(lib);
+
+  // Force the slow (linear) symbol search.  The GNU hash table's bloom filter
+  // width is ambiguous for ELF32 output, so avoid relying on it.  We need the
+  // dynamic symbol count for the linear search.
+  lib->gnu_hash = NULL;
+  lib->num_dynamic_symbols = ELF32DynamicSymbolCount(lib);
+  return true;
+}
+
+// Decode an ELF32 dynamic library into the canonical (wide) in-memory
+// structures the rest of the loader expects.  Only the read-only "map the
+// whole file" path (load_address == 0), which the linker uses to discover the
+// symbols a shared object exports, is supported here.  The runtime path is
+// handled by SetupELF32RuntimeLibrary.
+static bool SetupELF32DynamicLibrary(LoadedDynamicLibrary* lib,
+                                     uint64_t load_address) {
+  (void)load_address;
+  DecodeELF32Headers(lib);
+  const char* base = (const char*)lib->addr;
+  const ELFHeader* header = lib->header;
+  const ELFSectionHeader* shdrs = lib->section_headers;
+
+  // The whole file is mapped, so the load address is its base.
+  lib->load_address = (uint64_t)lib->addr;
+
+  // Decode the dynamic section.  Respect the section's sh_entsize so that we
+  // read it correctly regardless of whether the entries use the 8-byte ELF32
+  // layout or the 16-byte (wide) layout that davecc currently emits even for
+  // ELF32 output.
+  for (int i = 0; i < header->shnum; i++) {
+    if (shdrs[i].type == SHT(dynamic)) {
+      size_t entsize = shdrs[i].entsize;
+      if (entsize == 0) {
+        entsize = sizeof(ELF32DynamicSectionEntry);
+      }
+      size_t count = shdrs[i].size / entsize;
+      ELFDynamicSectionEntry* entries =
+          calloc(count + 1, sizeof(ELFDynamicSectionEntry));
+      const char* p = base + shdrs[i].offset;
+      for (size_t e = 0; e < count; e++) {
+        if (entsize == sizeof(ELFDynamicSectionEntry)) {
+          entries[e] = *(const ELFDynamicSectionEntry*)(p + e * entsize);
+        } else {
+          const ELF32DynamicSectionEntry* in =
+              (const ELF32DynamicSectionEntry*)(p + e * entsize);
+          entries[e].tag = in->tag;
+          entries[e].un.val = in->un.val;
+        }
+      }
+      entries[count].tag = DT(null);
+      lib->dynamic = (const DynamicSection*)entries;
+      lib->owns_dynamic_tables = true;
+      break;
+    }
+  }
+  if (lib->dynamic == NULL) {
+    LoaderError("Failed to load dynamic library %s: no dynamic section",
+                lib->filename.value);
+    return false;
+  }
+
+  // Find the dynamic symbol table and its string table via the section
+  // headers and decode the symbols into wide structures, again respecting the
+  // section's sh_entsize (16-byte ELF32 symbols or 24-byte wide symbols).
+  for (int i = 0; i < header->shnum; i++) {
+    if (shdrs[i].type == SHT(dynsym)) {
+      const ELFSectionHeader* dynsym_sec = &shdrs[i];
+      const ELFSectionHeader* dynstr_sec = &shdrs[dynsym_sec->link];
+      size_t entsize = dynsym_sec->entsize;
+      if (entsize == 0) {
+        entsize = sizeof(ELF32Symbol);
+      }
+      size_t count = dynsym_sec->size / entsize;
+      ELFSymbol* syms = calloc(count > 0 ? count : 1, sizeof(ELFSymbol));
+      const char* p = base + dynsym_sec->offset;
+      for (size_t s = 0; s < count; s++) {
+        if (entsize == sizeof(ELFSymbol)) {
+          syms[s] = *(const ELFSymbol*)(p + s * entsize);
+        } else {
+          const ELF32Symbol* in = (const ELF32Symbol*)(p + s * entsize);
+          syms[s].name = in->name;
+          syms[s].info = in->info;
+          syms[s].other = in->other;
+          syms[s].shndx = in->shndx;
+          syms[s].value = in->value;
+          syms[s].size = in->size;
+        }
+      }
+      lib->dynsym = syms;
+      lib->num_dynamic_symbols = (int64_t)count;
+      lib->dynstr = base + dynstr_sec->offset;
+      break;
+    }
+  }
+  if (lib->dynsym == NULL || lib->dynstr == NULL) {
+    LoaderError("Failed to load dynamic library %s: no dynamic symbol table",
+                lib->filename.value);
+    return false;
+  }
+
+  // Force the slow (linear) symbol search.  The GNU hash table's bloom filter
+  // uses 32-bit words in ELF32, which the wide hash lookup does not handle.
+  lib->gnu_hash = NULL;
+  return true;
+}
+
 bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
                               DynamicLibraryRegistry* registry,
                               Vector* search_path,
@@ -837,31 +1060,43 @@ bool LoadedDynamicLibraryLoad(LoadedDynamicLibrary* lib,
   
   lib->addr = addr;
   lib->length = length;
-  
-  lib->header = (const ELFHeader*)lib->addr;
-  lib->program_headers = (const ELFProgramHeader*)(lib->addr + lib->header->phoff);
-  lib->section_headers = (const ELFSectionHeader*)(lib->addr + lib->header->shoff);
 
-  if (!LoadSegments(lib, load_address, end_of_library)) {
-    return false;
-  }
-  
-  if (print_libraries_only) {
-    uint64_t base_address = lib->load_address;
-    if (base_address != 0) {
-      printf("\t%s => %s (0x%" PRIx64 ")\n", lib->libname.value,
-             lib->filename.value, base_address);
+  const unsigned char* ident = (const unsigned char*)lib->addr;
+  if (ident[EI_CLASS] == ELFCLASS32) {
+    // ELF32 files (e.g. 32-bit ARM) use narrower on-disk structures with a
+    // different field order, so decode them into the canonical wide structures.
+    bool ok = load_address == 0
+                  ? SetupELF32DynamicLibrary(lib, load_address)
+                  : SetupELF32RuntimeLibrary(lib, load_address, end_of_library);
+    if (!ok) {
+      return false;
     }
+  } else {
+    lib->header = (const ELFHeader*)lib->addr;
+    lib->program_headers = (const ELFProgramHeader*)(lib->addr + lib->header->phoff);
+    lib->section_headers = (const ELFSectionHeader*)(lib->addr + lib->header->shoff);
+
+    if (!LoadSegments(lib, load_address, end_of_library)) {
+      return false;
+    }
+
+    if (print_libraries_only) {
+      uint64_t base_address = lib->load_address;
+      if (base_address != 0) {
+        printf("\t%s => %s (0x%" PRIx64 ")\n", lib->libname.value,
+               lib->filename.value, base_address);
+      }
+    }
+
+    // Find the PT(dynamic) segment.
+    if (!FindDynamicSection(lib, load_address)) {
+      return false;
+    }
+
+    // Find the symbol hash table.  It is most likely that it is
+    // present.
+    FindHashTable(lib);
   }
-  
-  // Find the PT(dynamic) segment.
-  if (!FindDynamicSection(lib, load_address)) {
-    return false;
-  }
-  
-  // Find the symbol hash table.  It is most likely that it is
-  // present.
-  FindHashTable(lib);
   
   // Build runtime paths from DT_RPATH or DT_RUNPATH.
   if (lib->loader != NULL) {
@@ -908,10 +1143,26 @@ LoadedDynamicLibrary* NewLoadedDynamicLibrary(const char* libname,
   lib->strtab = NULL;
   lib->num_symtab_symbols = 0;
   lib->dynamic_section_relocated = false;
+  lib->owns_decoded = false;
+  lib->owns_dynamic_tables = false;
   return lib;
 }
 
 void LoadedDynamicLibraryDestruct(LoadedDynamicLibrary* lib) {
+  if (lib->owns_decoded) {
+    // For ELF32 the header, program headers and section headers were decoded
+    // into heap memory (see DecodeELF32Headers).
+    free((void*)lib->header);
+    free((void*)lib->program_headers);
+    free((void*)lib->section_headers);
+  }
+  if (lib->owns_dynamic_tables) {
+    // The ELF32 linker path also decodes the dynamic section and dynamic
+    // symbol table into heap memory.  dynstr still points into the mapped
+    // file, so it is not freed here.
+    free((void*)lib->dynamic);
+    free((void*)lib->dynsym);
+  }
   if (lib->length > 0) {
     munmap((void*)lib->addr, lib->length);
   }

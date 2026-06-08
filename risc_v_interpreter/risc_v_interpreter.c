@@ -115,8 +115,9 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       break;
     case RISC_V_ECALL_OPEN: {
       const char* filename = (const char*)interpreter->iregs[REG(a1)];
-      int mode = (int)interpreter->iregs[REG(a2)];
-      interpreter->iregs[REG(a0)] = open(filename, mode);
+      int flags = (int)interpreter->iregs[REG(a2)];
+      mode_t create_mode = (mode_t)interpreter->iregs[REG(a3)];
+      interpreter->iregs[REG(a0)] = open(filename, flags, create_mode);
       break;
     }
     case RISC_V_ECALL_CLOSE: {
