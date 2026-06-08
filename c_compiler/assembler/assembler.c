@@ -115,6 +115,10 @@ AssemblerSection* NewAssemblerSection(String* name, int32_t type, int32_t flags,
 
 void AssemblerSectionDestruct(AssemblerSection* section) {
   ELFWriterSectionContentsDestruct(&section->contents);
+  // The section owns its name string (handed over at creation in pass 1).
+  if (section->name != NULL) {
+    StringDelete(section->name);
+  }
 }
 
 void AssemblerSectionDelete(AssemblerSection* section) {
@@ -440,6 +444,10 @@ void AssemblerDestruct(Assembler* assembler) {
     free(sym);
   }
   VectorDestruct(&assembler->orphan_symbols);
+
+  // Keys are string literals and values are function pointers, so only the
+  // map's backing storage needs to be freed.
+  MapDestruct(&assembler->directives);
 
   DwarfDestruct(&assembler->dwarf);
 }
@@ -1283,6 +1291,8 @@ static void HandleDirective_section(Assembler* assembler) {
       section = AssemblerFindSection(assembler, name);
       if (section == -1) {
         section = AssemblerAddSection(assembler, name, type, flags, alignment);
+      } else {
+        StringDelete(name);
       }
     } else {
       section = AssemblerFindSection(assembler, name);
@@ -1306,6 +1316,8 @@ static void HandleDirective_text(Assembler* assembler) {
     if (section == -1) {
       section = AssemblerAddSection(assembler, name, SHT(progbits),
                                     SHF(alloc) | SHF(execinstr), 8);
+    } else {
+      StringDelete(name);
     }
   } else {
     section = AssemblerFindSection(assembler, name);
@@ -1323,6 +1335,8 @@ static void HandleDirective_data(Assembler* assembler) {
     if (section == -1) {
       section =
       AssemblerAddSection(assembler, name, SHT(progbits), SHF(write)|SHF(alloc), 8);
+    } else {
+      StringDelete(name);
     }
   } else {
     section = AssemblerFindSection(assembler, name);
