@@ -2538,6 +2538,7 @@ Designator* NewStructDesignator(String* member) {
   Designator* d = malloc(sizeof(Designator));
   d->designator_type = kDesignatorStruct;
   d->value.struct_member_name = member;
+  d->type = NULL;
   return d;
 }
 
@@ -2545,12 +2546,22 @@ Designator* NewStructMemberDesignator(StructMember* member) {
   Designator* d = malloc(sizeof(Designator));
   d->designator_type = kDesignatorStruct;
   d->value.struct_member = member;
+  d->type = NULL;
   return d;
+}
+
+// Frees a Designator's owned resources.  Only array designators take a
+// reference on their type (NewArrayDesignator/clone); struct designators leave
+// it NULL so the decref is a no-op.
+static void DesignatorDestruct(void* p) {
+  Designator* d = (Designator*)p;
+  TypeRecordDelete(d->type);
 }
 
 static void DesignatedInitializerASTNodeDelete(ASTNode* node) {
   DesignatedInitializerASTNode* dnode = (DesignatedInitializerASTNode*)node;
-  VectorDelete(dnode->designators);
+  VectorDeleteWithContents(dnode->designators, DesignatorDestruct,
+                           /*free_element=*/true);
   ASTNodeDelete(dnode->init);
   ASTNodeBaseDelete(node);
 }
