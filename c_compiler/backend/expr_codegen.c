@@ -1374,6 +1374,10 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
      GeneratorRemoveInstruction(gen, tmp);
      tmp = left;
    } else {
+     if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left)) {
+       left = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(node->left->type), left)),
+                        node->left->type);
+     }
      left->dest = tmp;
    }
  }
@@ -1387,6 +1391,10 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // Evaluate right node and place result in tmp.
  IRNode* right = GenerateExpression(gen, node->right);
  if (value_is_used) {
+   if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right)) {
+     right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(node->right->type), right)),
+                       node->right->type);
+   }
    if (right->opcode != IR_OP(tmp)) {
      right->dest = tmp;
    } else {

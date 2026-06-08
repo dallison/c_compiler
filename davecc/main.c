@@ -328,7 +328,7 @@ int main(int argc, char * argv[]) {
         asm_run = Assemble6502Instruction;
         destructor = (AssemblerDestructor)W65C02AssemblerDestruct;
         finalizer = (AssemblerFinalizer)W65C02AssemblerFinalize;
-      } else if (StringEqual(&target, "risc-v")) {
+      } else if (StringEqual(&target, "riscv") || StringEqual(&target, "risc-v")) {
         assembler = (Assembler*)NewRVAssembler(asm_filename, &output_filename);
         asm_run = AssembleRVInstruction;
         destructor = (AssemblerDestructor)RVAssemblerDestruct;

@@ -216,10 +216,8 @@ for base in "${TEST_LIST[@]}"; do
   fi
   run_cmd+=("$bin")
 
-  run_status=0
-  if ! "${run_cmd[@]}" >"$out" 2>"$work/run.err"; then
-    run_status=$?
-  fi
+  "${run_cmd[@]}" >"$out" 2>"$work/run.err"
+  run_status=$?
 
   if [ "$run_status" -eq 124 ]; then
     echo "FAIL $base (timeout)"

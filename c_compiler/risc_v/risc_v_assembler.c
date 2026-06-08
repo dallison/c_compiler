@@ -718,10 +718,11 @@ static AssemblerSymbol* GetOrCreateSymbol(RVAssembler* assembler,
 static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
                                           int64_t immed) {
   int bit_width = 0;
+  uint64_t value = (uint64_t)immed;
   if (immed < 0) {
     // Look for first 0 bit
     for (int i = 63; i >= 0; i--) {
-      if ((immed & (1LL << i)) == 0) {
+      if ((value & (1ULL << i)) == 0) {
         bit_width = i + 1;
         break;
       }
@@ -729,7 +730,7 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
   } else {
     // Look for first 1 bit
     for (int i = 63; i >= 0; i--) {
-      if ((immed & (1LL << i)) != 0) {
+      if ((value & (1ULL << i)) != 0) {
         bit_width = i + 1;
         break;
       }
@@ -741,23 +742,36 @@ static void AssembleLoadImmediateConstant(RVAssembler* assembler, int reg,
         &ASM, ASM.current_section,
         ITypeInstruction(RV_OPCODE(op_imm), reg, 0, RV_F3(addi), (int)immed));
 
-  } else if (bit_width <= 32) {
+  } else if ((immed >= 0 && bit_width < 31) ||
+             (immed < 0 && bit_width <= 32)) {
+    int64_t hi20 = (immed + 0x800) >> 12;
     AssemblerEmitWord(&ASM, ASM.current_section,
-                      UTypeInstruction(RV_OPCODE(lui), reg, (int)immed >> 12));
+                      UTypeInstruction(RV_OPCODE(lui), reg, (int)hi20));
     if ((immed & 0xfff) != 0) {
       AssemblerEmitWord(&ASM, ASM.current_section,
                         ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(addi),
                                        (int)immed & 0xfff));
     }
   } else {
-    AssembleLoadImmediateConstant(assembler, 6, immed >> 32);
+    int top_group = 63 / 11;
+    while (top_group > 0 && ((value >> (top_group * 11)) & 0x7ff) == 0) {
+      top_group--;
+    }
     AssemblerEmitWord(
         &ASM, ASM.current_section,
-        RTypeInstruction(RV_OPCODE(op), 6, 6, 32, RV_F3(slli), 0));
-    AssembleLoadImmediateConstant(assembler, reg, immed & 0xffffffffU);
-    AssemblerEmitWord(
-        &ASM, ASM.current_section,
-        RTypeInstruction(RV_OPCODE(op), reg, reg, 6, RV_F3(or), RV_F7(or)));
+        ITypeInstruction(RV_OPCODE(op_imm), reg, 0, RV_F3(addi),
+                         (int)((value >> (top_group * 11)) & 0x7ff)));
+    for (int group = top_group - 1; group >= 0; group--) {
+      AssemblerEmitWord(
+          &ASM, ASM.current_section,
+          ITypeInstruction(RV_OPCODE(op_imm), reg, reg, RV_F3(slli), 11));
+      int chunk = (int)((value >> (group * 11)) & 0x7ff);
+      if (chunk != 0) {
+        AssemblerEmitWord(&ASM, ASM.current_section,
+                          ITypeInstruction(RV_OPCODE(op_imm), reg, reg,
+                                           RV_F3(ori), chunk));
+      }
+    }
   }
 }
 
@@ -1142,7 +1156,7 @@ static void Assemble_j(RVAssembler* assembler) {
   LexNextToken(&ASM.lex);
 
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
-  if (sym->is_label && sym->binding == SYM_BIND(local)) {
+  if (sym->is_label && sym->binding == SYM_BIND(local) && sym->defined) {
     // j offset   -> jal x0, offset
     int64_t addr = sym->value;
     int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
@@ -1153,7 +1167,7 @@ static void Assemble_j(RVAssembler* assembler) {
     // For PIC we use a R_RISCV_CALL_PLT and generate the auipc and jalr
     // For non-PIC we generate a R_RISCV_JAL relocation and a jal instruction.
     // R_RISCV_JAL relocation.
-    int reloc_type = R_RISCV_CALL;
+    int reloc_type = R_RISCV_JAL;
     if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
       reloc_type = R_RISCV_CALL_PLT;
     }

@@ -252,7 +252,9 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
   iregs[RV_INT_ARG_START] = argc;
   iregs[RV_INT_ARG_START + 1] = (int64_t)argv;
 
-  interpreter->trace_regs = kShowRegChanges;
+  if (kShowRegChanges) {
+    interpreter->trace_regs = true;
+  }
 }
 
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
@@ -787,13 +789,21 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
             break;
 
           // Moves.
-          case RV_F7(fmv_w_x):
-            *(int32_t*)(&fregs[rd]) = (int32_t)iregs[rs1];
+          case RV_F7(fmv_w_x): {
+            uint32_t bits = (uint32_t)iregs[rs1];
+            float value;
+            memcpy(&value, &bits, sizeof(value));
+            fregs[rd] = value;
             break;
+          }
 
-          case RV_F7(fmv_x_w):
-            iregs[rd] = *(int32_t*)(&fregs[rs1]);
+          case RV_F7(fmv_x_w): {
+            float value = (float)fregs[rs1];
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            iregs[rd] = (int32_t)bits;
             break;
+          }
 
           case RV_F7(fmv_d_x):
             *(int64_t*)(&fregs[rd]) = iregs[rs1];
@@ -820,6 +830,23 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
             }
             break;
 
+          case RV_F7(fcvt_d_w):  // and RV_F7(fcvt_d_wu)/fcvt_d_l/fcvt_d_lu:
+            switch (rs2) {
+              case 0:
+                fregs[rd] = (double)((int32_t)iregs[rs1]);
+                break;
+              case 1:
+                fregs[rd] = (double)((uint32_t)iregs[rs1]);
+                break;
+              case 2:
+                fregs[rd] = (double)((int64_t)iregs[rs1]);
+                break;
+              case 3:
+                fregs[rd] = (double)((uint64_t)iregs[rs1]);
+                break;
+            }
+            break;
+
           case RV_F7(fcvt_w_s):  // and RV_F7(fcvt_wu_s):
             switch (rs2) {
               case 0:
@@ -837,8 +864,25 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
             }
             break;
 
+          case RV_F7(fcvt_w_d):  // and RV_F7(fcvt_wu_d)/fcvt_l_d/fcvt_lu_d:
+            switch (rs2) {
+              case 0:
+                iregs[rd] = (int32_t)fregs[rs1];
+                break;
+              case 1:
+                iregs[rd] = (uint32_t)fregs[rs1];
+                break;
+              case 2:
+                iregs[rd] = (int64_t)fregs[rs1];
+                break;
+              case 3:
+                iregs[rd] = (uint64_t)fregs[rs1];
+                break;
+            }
+            break;
+
           case RV_F7(fcvt_s_d):
-            *(float*)(&fregs[rd]) = fregs[rs1];
+            fregs[rd] = (float)fregs[rs1];
             break;
 
           case RV_F7(fcvt_d_s):

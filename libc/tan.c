@@ -19,19 +19,19 @@ static const double
   kPio2_lo = 6.12323399573676603587e-17,
   k2_pi    = 0.63661977236758134308;   // 2/pi
 
-// tan(u) for |u| <= pi/8 via its Maclaurin series, evaluated with Horner's
-// method using a single accumulator to keep floating-point register pressure
-// low (important on targets such as the 6502).
+// tan(u) for |u| <= pi/8 via its Maclaurin series, evaluated with a running
+// term to keep original-argument live ranges short.
 static double __tan_small(double u) {
   double u2 = u * u;
-  double a = 21844.0 / 6081075.0;
-  a = a * u2 + 1382.0 / 155925.0;
-  a = a * u2 + 62.0 / 2835.0;
-  a = a * u2 + 17.0 / 315.0;
-  a = a * u2 + 2.0 / 15.0;
-  a = a * u2 + 1.0 / 3.0;
-  a = a * u2 + 1.0;
-  return u * a;
+  double term = u;
+  double result = u;
+  term *= u2; result += term / 3.0;
+  term *= u2; result += (2.0 * term) / 15.0;
+  term *= u2; result += (17.0 * term) / 315.0;
+  term *= u2; result += (62.0 * term) / 2835.0;
+  term *= u2; result += (1382.0 * term) / 155925.0;
+  term *= u2; result += (21844.0 * term) / 6081075.0;
+  return result;
 }
 
 double tan(double x) {

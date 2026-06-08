@@ -33,19 +33,17 @@ double atan(double x) {
     offset = kPi6;
   }
 
-  // Horner evaluation of x - x^3/3 + x^5/5 - ... using a single accumulator
-  // (kept as sequential statements so targets with very few floating-point
-  // registers, e.g. the 6502, don't run out).
+  // Evaluate x - x^3/3 + x^5/5 - ... with a running term. Keeping each step
+  // local avoids a long live range for x on register-poor backends.
   double x2 = x * x;
-  double a = 1.0 / 13.0;
-  a = a * x2 - 1.0 / 11.0;
-  a = a * x2 + 1.0 / 9.0;
-  a = a * x2 - 1.0 / 7.0;
-  a = a * x2 + 1.0 / 5.0;
-  a = a * x2 - 1.0 / 3.0;
-  a = a * x2 + 1.0;
-  double r = x * a;
-  r += offset;
+  double term = x;
+  double r = x + offset;
+  term *= x2; r -= term / 3.0;
+  term *= x2; r += term / 5.0;
+  term *= x2; r -= term / 7.0;
+  term *= x2; r += term / 9.0;
+  term *= x2; r -= term / 11.0;
+  term *= x2; r += term / 13.0;
   if (inv) r = kPio2 - r;
   if (neg) r = -r;
   return r;

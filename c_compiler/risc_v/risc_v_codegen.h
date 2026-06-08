@@ -290,6 +290,8 @@ typedef enum {
   
   RV_OP(x0),  // Zero reg.
   RV_OP(t0),  // Temp reg.
+  RV_OP(t1),  // Secondary temp reg.
+  RV_OP(t2),  // Tertiary temp reg.
 
   RV_OP(regarg),  // Holder for reg args.
   
@@ -309,6 +311,8 @@ typedef struct {
   int reg_num;
   int base_reg_num;
   int offset;  // Negative offset from frame pointer (or zero).
+  int size;
+  bool is_fp;
 } SavedArgumentRegister;
 
 
@@ -352,6 +356,7 @@ typedef struct RVGenerator {
 
   TargetInstruction* zero;  // Explicit zero (register x0).
   TargetInstruction* tmp;   // Temp reg for tail calls vi jr instruction.
+  TargetInstruction* tmp2;  // Secondary temp reg.
   
   // Register allocator.
   RVRegisterAllocator register_allocator;

@@ -413,6 +413,10 @@ const char* RVOpcodeName(int op) {
       return "x0";
     case RV_OP(t0):
       return "t0";
+    case RV_OP(t1):
+      return "t1";
+    case RV_OP(t2):
+      return "t2";
     case RV_OP(spill):
       return "spill";
     case RV_OP(reload):
@@ -645,6 +649,8 @@ bool RVIsFixedRegister(TargetInstruction* inst) {
     case RV_OP(fa7):
     case RV_OP(x0):
     case RV_OP(t0):
+    case RV_OP(t1):
+    case RV_OP(t2):
     case RV_OP(fp):
 
       // Calls always return in a0 or fa0.
@@ -820,11 +826,15 @@ void RVGeneratorDelete(RVGenerator* rv) {
 
 static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
                                                        int base_reg_num,
-                                                       int offset) {
+                                                       int offset,
+                                                       int size,
+                                                       bool is_fp) {
   SavedArgumentRegister* reg = malloc(sizeof(SavedArgumentRegister));
   reg->base_reg_num = base_reg_num;
   reg->reg_num = reg_num;
   reg->offset = offset;
+  reg->size = size;
+  reg->is_fp = is_fp;
   return reg;
 }
 
@@ -923,6 +933,13 @@ static TargetInstruction* Tmp(RVGenerator* rv) {
     rv->tmp = Emit(rv, NewInstruction(RV_OP(t0)));
   }
   return rv->tmp;
+}
+
+static COMPILER_UNUSED TargetInstruction* Tmp2(RVGenerator* rv) {
+  if (rv->tmp2 == NULL) {
+    rv->tmp2 = Emit(rv, NewInstruction(RV_OP(t2)));
+  }
+  return rv->tmp2;
 }
 
 static TargetInstruction* IntArgumentRegister(RVGenerator* rv, int argnum) {
@@ -1225,6 +1242,9 @@ static TargetInstruction* Memzero(RVGenerator* rv, TargetInstruction* dest_addr,
   arg1->dest = IntArgumentRegister(rv, 1);
 
   // First arg is the address.
+  if (offset != 0) {
+    dest_addr = OffsetFrom(rv, dest_addr, offset);
+  }
   TargetInstruction* arg0 = SetDestOrMove(rv, dest_addr, IntArgumentRegister(rv, 0), RV_OP(mv));
   //TargetInstruction* arg0 = Emit(
   //    rv, NewInstruction2(RV_OP(rmov), IntArgumentRegister(rv, 0), dest_addr));
@@ -1293,9 +1313,8 @@ static RVOpcode IR2RV(IROpcode op) {
       return RV_OP(xor);
 
     case IR_OP(noti):
-      return RV_OP(not);
     case IR_OP(nota):
-      return RV_OP(not);
+      return RV_OP(seqz);
     case IR_OP(onescomp):
       return RV_OP(not);
     case IR_OP(negi):
@@ -1415,6 +1434,10 @@ static struct {
     {NULL, 0},
 };
 
+static TargetInstruction* FinishWithDest(RVGenerator* rv, IRNode* node,
+                                         TargetInstruction* result,
+                                         RVOpcode mov_opcode);
+
 static COMPILER_UNUSED TargetInstruction* LoadVariableValue(RVGenerator* rv, IRNode* node,
                                             TargetInstruction* addr,
                                             TargetInstruction* offset) {
@@ -1531,6 +1554,14 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
 
   // Node is not a variable, is must be an already-lowered expression.
   return GetLoweredNode(node);
+}
+
+static TargetInstruction* MaterializeIntConstantToTmp(RVGenerator* rv,
+                                                      IRConstant* constant) {
+  return Emit(
+      rv, NewInstruction1(
+              RV_OP(li),
+              GetIntConstant(rv, NULL, kTargetType64Bit, constant->value.ivalue)));
 }
 
 static void ApplyFixups(RVGenerator* rv, IRNode* label_node) {
@@ -1800,29 +1831,20 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     }
 
     case RV_OP(rem): {
-      // If we are moding by a constant power of 2 we can use an AND.
+      // If we are moding an unsigned value by a constant power of 2 we can use
+      // an AND. Signed modulo needs truncation toward zero, so keep rem.
       assert(node->inputs.length == 2);
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
-        int64_t mask = c - 1;
-        if (RVIsPossibleImmediate(mask)) {
+        if (TypeIsUnsigned(node->type) && IsPowerOf2(c) && c < 64) {
+          int64_t mask = c - 1;
           inst =
                  NewInstruction2(RV_OP(andi), Materialize(rv, op1),
                                  GetIntConstant(rv, NULL, kTargetType32Bit, mask));
           ref_counts_ok = true;
-        } else {
-          // It'a always better to use a move and AND than use 'rem'.
-          TargetInstruction* tmp = Emit(rv, NewInstruction(RV_OP(tmp)));
-          TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv),
-                                   GetIntConstant(rv,
-                                                  NULL,
-                                                  kTargetType32Bit, mask)));
-          mv->dest = tmp;
-        
-          inst = NewInstruction2(RV_OP(and), Materialize(rv, op1), tmp);
         }
       }
       break;
@@ -1841,6 +1863,19 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
           inst = (TargetInstruction*)NewInstruction(RV_OP(andi));
           inst->operand[0] = Materialize(rv, op1);
           inst->operand[1] = GetLoweredNode(op2);
+        } else {
+          inst = NewInstruction2(RV_OP(and), Materialize(rv, op1),
+                                 MaterializeIntConstantToTmp(rv,
+                                                            (IRConstant*)op2));
+        }
+      } else if (IRIsConst(op1)) {
+        int64_t c = ((IRConstant*)op1)->value.ivalue;
+        if (c == 0) {
+          inst = Zero(rv);
+        } else if (!RVIsPossibleImmediate(c)) {
+          inst = NewInstruction2(RV_OP(and), Materialize(rv, op2),
+                                 MaterializeIntConstantToTmp(rv,
+                                                            (IRConstant*)op1));
         }
       }
       break;
@@ -1859,6 +1894,19 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
           inst = (TargetInstruction*)NewInstruction(RV_OP(ori));
           inst->operand[0] = Materialize(rv, op1);
           inst->operand[1] = GetLoweredNode(op2);
+        } else {
+          inst = NewInstruction2(RV_OP(or), Materialize(rv, op1),
+                                 MaterializeIntConstantToTmp(rv,
+                                                            (IRConstant*)op2));
+        }
+      } else if (IRIsConst(op1)) {
+        int64_t c = ((IRConstant*)op1)->value.ivalue;
+        if (c == 0) {
+          inst = GetLoweredNode(op2);
+        } else if (!RVIsPossibleImmediate(c)) {
+          inst = NewInstruction2(RV_OP(or), Materialize(rv, op2),
+                                 MaterializeIntConstantToTmp(rv,
+                                                            (IRConstant*)op1));
         }
       }
       break;
@@ -1875,8 +1923,12 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   if (!ref_counts_ok) {
     TargetUpdateOperandUsers(inst);
   }
-  SetLoweredNode(node, inst);
-  return Emit(rv, inst);
+  inst = Emit(rv, inst);
+  RVOpcode mov_opcode = RV_OP(mv);
+  if (TypeIsFloatingPoint(node->type)) {
+    mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+  }
+  return FinishWithDest(rv, node, inst, mov_opcode);
 }
 
 static COMPILER_UNUSED TargetInstruction* LowerRmov(RVGenerator* rv, IRNode* node) {
@@ -1884,6 +1936,26 @@ static COMPILER_UNUSED TargetInstruction* LowerRmov(RVGenerator* rv, IRNode* nod
   TargetInstruction* src = Materialize(rv, node->inputs.value.p[1]);
   RVOpcode opcode = IR2RV(node->opcode);
   return SetLoweredNode(node, SetDestOrMove(rv, src, dest, opcode));
+}
+
+static TargetInstruction* GetDestInstruction(RVGenerator* rv, IRNode* node) {
+  if (node->dest == NULL) {
+    return NULL;
+  }
+  if (node->dest->data.ptr == NULL) {
+    LowerExpression(rv, node->dest);
+  }
+  return GetLoweredNode(node->dest);
+}
+
+static TargetInstruction* FinishWithDest(RVGenerator* rv, IRNode* node,
+                                         TargetInstruction* result,
+                                         RVOpcode mov_opcode) {
+  TargetInstruction* dest = GetDestInstruction(rv, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(rv, result, dest, mov_opcode);
+  }
+  return SetLoweredNode(node, result);
 }
 
 // There is no compare for equality instruction, it must be synthesized
@@ -1921,30 +1993,34 @@ static TargetInstruction* SubtractForComparison(RVGenerator* rv, IRNode* node,
 // instructions.
 static TargetInstruction* CompareLessThanInt(RVGenerator* rv, IRNode* node,
                                              IRNode* op1, IRNode* op2) {
+  bool is_unsigned = TypeIsUnsigned(op1->type);
   if (!IRIsConst(op2)) {
-    // Second operand isn't constant, compiled as slt.
+    // Second operand isn't constant, compile as slt/sltu.
     TargetInstruction* i1 = Materialize(rv, op1);
     TargetInstruction* i2 = Materialize(rv, op2);
-    return Emit(rv, NewInstruction2(RV_OP(slt), i1, i2));
+    return Emit(rv, NewInstruction2(is_unsigned ? RV_OP(sltu) : RV_OP(slt), i1,
+                                    i2));
   }
 
   // Second operand is constant.
   int64_t value = ((IRConstant*)op2)->value.ivalue;
-  if (value == 0) {
+  if (!is_unsigned && value == 0) {
     // Common case, compare with zero, use sltz.
     return Emit(rv, NewInstruction1(RV_OP(sltz), Materialize(rv, op1)));
   }
 
   if (RVIsPossibleImmediate(value)) {
-    // Immediate, use slti.
+    // Immediate, use slti/sltiu.
     return Emit(
-        rv, NewInstruction2(RV_OP(slti), Materialize(rv, op1),
+        rv, NewInstruction2(is_unsigned ? RV_OP(sltiu) : RV_OP(slti),
+                            Materialize(rv, op1),
                             GetIntConstant(rv, NULL, kTargetType32Bit, value)));
   }
 
   // Constant is too big for an immediate, materialize it into
-  // a register and use an slt instruction.
-  return Emit(rv, NewInstruction2(RV_OP(slt), Materialize(rv, op1),
+  // a register and use an slt/sltu instruction.
+  return Emit(rv, NewInstruction2(is_unsigned ? RV_OP(sltu) : RV_OP(slt),
+                                  Materialize(rv, op1),
                                   Materialize(rv, op2)));
 }
 
@@ -1997,7 +2073,7 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
     case IR_OP(cmplea): {
       // Use op2 < op1 and invert
       TargetInstruction* slt = CompareLessThanInt(rv, node, op2, op1);
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(not), slt)));
+      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(seqz), slt)));
     }
 
     case IR_OP(cmpgti):
@@ -2009,7 +2085,7 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
     case IR_OP(cmpgea): {
       // Compare less than and invert.
       TargetInstruction* slt = CompareLessThanInt(rv, node, op1, op2);
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(not), slt)));
+      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(seqz), slt)));
     }
 
     case IR_OP(cmpeqf):
@@ -2025,7 +2101,7 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
       TargetInstruction* cmp =
           Emit(rv, NewInstruction2(RV_OP(feq_s), Materialize(rv, op1),
                                    Materialize(rv, op2)));
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(not), cmp)));
+      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(seqz), cmp)));
     }
 
     case IR_OP(cmpltf):
@@ -2065,7 +2141,7 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
       TargetInstruction* cmp =
           Emit(rv, NewInstruction2(RV_OP(feq_d), Materialize(rv, op1),
                                    Materialize(rv, op2)));
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(not), cmp)));
+      return Emit(rv, SetLoweredNode(node, NewInstruction1(RV_OP(seqz), cmp)));
     }
 
     case IR_OP(cmpltd):
@@ -2186,7 +2262,11 @@ static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opco
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
 
   if (!on_stack) {
-    return addr;
+    if (TypeIsFloatingPoint(addr_node->type)) {
+      return Emit(rv, NewInstruction1(TypeIsDouble(addr_node->type) ?
+                                      RV_OP(fmv_d) : RV_OP(fmv_s), addr));
+    }
+    return Emit(rv, NewInstruction1(RV_OP(mv), addr));
   }
 
   TargetInstruction* result = NULL;
@@ -2249,7 +2329,12 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
 
-  return SetLoweredNode(node, Load(rv, addr_node, opcode));
+  TargetInstruction* result = Load(rv, addr_node, opcode);
+  RVOpcode mov_opcode = RV_OP(mv);
+  if (TypeIsFloatingPoint(node->type)) {
+    mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+  }
+  return FinishWithDest(rv, node, result, mov_opcode);
 }
 
 static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstruction* src, RVOpcode opcode) {
@@ -2321,28 +2406,28 @@ static struct BranchInfo {
     {IR_OP(cmpeqi), true, RV_OP(beq), false},
     {IR_OP(cmpnei), true, RV_OP(bne), false},
     {IR_OP(cmplti), true, RV_OP(blt), false},
-    {IR_OP(cmplei), false, RV_OP(bge), false},
+    {IR_OP(cmplei), false, RV_OP(blt), true},
     {IR_OP(cmpgti), true, RV_OP(blt), true},
     {IR_OP(cmpgei), true, RV_OP(bge), false},
 
     {IR_OP(cmpeqa), true, RV_OP(beq), false},
     {IR_OP(cmpnea), true, RV_OP(bne), false},
     {IR_OP(cmplta), true, RV_OP(bltu), false},
-    {IR_OP(cmplea), false, RV_OP(bgeu), false},
+    {IR_OP(cmplea), false, RV_OP(bltu), true},
     {IR_OP(cmpgta), true, RV_OP(bltu), true},
     {IR_OP(cmpgea), true, RV_OP(bgeu), false},
 
     {IR_OP(cmpeqi), false, RV_OP(bne), false},
     {IR_OP(cmpnei), false, RV_OP(beq), false},
     {IR_OP(cmplti), false, RV_OP(bge), false},
-    {IR_OP(cmplei), true, RV_OP(blt), false},
+    {IR_OP(cmplei), true, RV_OP(bge), true},
     {IR_OP(cmpgti), false, RV_OP(bge), true},
     {IR_OP(cmpgei), false, RV_OP(blt), false},
 
     {IR_OP(cmpeqa), false, RV_OP(bne), false},
     {IR_OP(cmpnea), false, RV_OP(beq), false},
     {IR_OP(cmplta), false, RV_OP(bgeu), false},
-    {IR_OP(cmplea), true, RV_OP(bltu), false},
+    {IR_OP(cmplea), true, RV_OP(bgeu), true},
     {IR_OP(cmpgta), false, RV_OP(bgeu), true},
     {IR_OP(cmpgea), false, RV_OP(bltu), false},
 };
@@ -2580,23 +2665,27 @@ static TargetInstruction* LowerLiteralReference(RVGenerator* rv, IRNode* node) {
 
 static TargetInstruction* LowerAddressOf(RVGenerator* rv, IRNode* node) {
   TargetInstruction* src = Materialize(rv, node->inputs.value.p[0]);
+  if (RVIsVarRegister(src)) {
+    src = Emit(rv, NewInstruction1(RV_OP(mv), src));
+  }
   return SetLoweredNode(node, src);
 }
 
 static TargetInstruction* LowerZeroExtend(RVGenerator* rv, IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
-  IRConstant* mask_node = (IRConstant*)node->inputs.value.p[1];
-  int64_t mask = mask_node->value.ivalue;
-  if (RVIsPossibleImmediate(mask)) {
-    value = Emit(rv, NewInstruction2(
-                         RV_OP(andi), value,
-                         GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
-  } else {
-    value = Emit(rv, NewInstruction2(RV_OP(and), value,
-                                     Materialize(rv, node->inputs.value.p[1])));
+  // The second IR operand is the bit-difference between destination and source
+  // widths (e.g. 24 for char->int), not an AND mask.
+  IRConstant* diff_node = (IRConstant*)node->inputs.value.p[1];
+  int64_t diff = diff_node->value.ivalue;
+  if (diff <= 0 || diff >= 64) {
+    return FinishWithDest(rv, node, value, RV_OP(mv));
   }
-  SetLoweredNode(node, value);
-  return value;
+  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
+  TargetInstruction* lsl =
+      Emit(rv, NewInstruction2(RV_OP(slli), value, immed));
+  TargetInstruction* lsr =
+      Emit(rv, NewInstruction2(RV_OP(srli), lsl, immed));
+  return FinishWithDest(rv, node, lsr, RV_OP(mv));
 }
 
 static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
@@ -2757,7 +2846,7 @@ static TargetInstruction* LowerSetBitField(RVGenerator* rv, IRNode* node) {
   TargetInstruction* m1 = Emit(rv, NewInstruction2(RV_OP(andi), lsl, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
 
   TargetInstruction* m2 = Emit(rv, NewInstruction2(RV_OP(andi), output, GetIntConstant(rv, NULL, kTargetType32Bit, ~mask)));
-  TargetInstruction* result = Emit(rv, NewInstruction2(RV_OP(ori), m1, m2));
+  TargetInstruction* result = Emit(rv, NewInstruction2(RV_OP(or), m1, m2));
   SetLoweredNode(node, result);
   return result;
 }
@@ -2765,25 +2854,25 @@ static TargetInstruction* LowerSetBitField(RVGenerator* rv, IRNode* node) {
 static TargetInstruction* LowerSignExtend(RVGenerator* rv, IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
   if (RVIsSignedLoad(value)) {
-    return SetLoweredNode(node, value);
+    return FinishWithDest(rv, node, value, RV_OP(mv));
   }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff > 0) {
-    return SetLoweredNode(node, value);
+    return FinishWithDest(rv, node, value, RV_OP(mv));
   }
   diff = -diff;
   if (diff == 32) {
     // There is a word signextension instruction sext.w
-    return SetLoweredNode(node,
-                          Emit(rv, NewInstruction1(RV_OP(sext_w), value)));
+    return FinishWithDest(rv, node,
+                          Emit(rv, NewInstruction1(RV_OP(sext_w), value)),
+                          RV_OP(mv));
   }
   TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(RV_OP(slli), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(RV_OP(srai), lsl, immed));
 
-  SetLoweredNode(node, asr);
-  return asr;
+  return FinishWithDest(rv, node, asr, RV_OP(mv));
 }
 
 static TargetInstruction* LowerAlign(RVGenerator* rv, IRNode* node) {
@@ -2820,7 +2909,7 @@ static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
   if (node->type == NULL) {
     // No type, use ld instruction.
     return Emit(rv, NewInstruction2(
-                        RV_OP(ld), StackPointer(rv),
+                        RV_OP(ld), FramePointer(rv),
                         GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   RVOpcode opcode = RV_OP(ld);
@@ -2828,7 +2917,7 @@ static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
     opcode = RV_OP(fld);
   }
   return Emit(rv, NewInstruction2(
-                      opcode, StackPointer(rv),
+                      opcode, FramePointer(rv),
                       GetIntConstant(rv, node, kTargetType64Bit, offset)));
 }
 
@@ -2904,7 +2993,6 @@ static TargetInstruction* LowerMemzero(RVGenerator* rv, IRNode* node) {
       offset_value = (int)((TargetConstant*)dest_offset)->value.ivalue;
     }
   }
-  dest_node->data.ptr = dest_addr;
   TargetInstruction* result =
       Memzero(rv, dest_addr, var->symbol->type->size, offset_value);
 
@@ -3013,12 +3101,22 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   size_t next_pushed_arg_offset = 0;
   Vector arg_locations;
   VectorInit(&arg_locations);
+  IRNode* callee_node = node->inputs.value.p[0];
+  TypeRecord* callee_type = callee_node->type;
+  if (callee_type != NULL && TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
+  bool is_varargs_call = callee_type != NULL && TypeIsFunction(callee_type) &&
+                         callee_type->info.function.varargs;
+  size_t num_fixed_args =
+      is_varargs_call ? callee_type->info.function.prototype.length : 0;
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
+    bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
     if (TypeIsStructOrUnion(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg.
@@ -3062,7 +3160,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeIsFloatingPoint(arg_node->type) && !is_variadic_arg) {
       if (next_fp_arg_reg < RV_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -3137,6 +3235,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
+    bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
+    bool pass_float_as_int =
+        is_variadic_arg && TypeIsFloatingPoint(arg_node->type);
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
@@ -3159,7 +3260,16 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
       }
       case kArgLocationPushed: {
         TargetInstruction* arg = Materialize(rv, arg_node);
-        if (TypeIsStructOrUnion(arg_node->type)) {
+        if (pass_float_as_int) {
+          arg = Emit(rv, NewInstruction1(!TypeIsFloat(arg_node->type)
+                                             ? RV_OP(fmv_x_d)
+                                             : RV_OP(fmv_x_w),
+                                       arg));
+          Emit(rv, NewInstruction3(
+                       RV_OP(sd), arg, StackPointer(rv),
+                       GetIntConstant(rv, arg_node, kTargetType64Bit,
+                                      arg_location->location.offset)));
+        } else if (TypeIsStructOrUnion(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed directly on stack.  The
@@ -3170,7 +3280,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
           }
         }
-        PushArg(rv, arg_node, arg, arg_location->location.offset);
+        if (!pass_float_as_int) {
+          PushArg(rv, arg_node, arg, arg_location->location.offset);
+        }
         break;
       }
       case kArgLocationRegister: {
@@ -3188,7 +3300,14 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
           }
         }
         RVOpcode mov_opcode = RV_OP(mv);
-        if (TypeIsFloatingPoint(arg_node->type)) {
+        if (pass_float_as_int) {
+          arg = Emit(rv, NewInstruction1(!TypeIsFloat(arg_node->type)
+                                             ? RV_OP(fmv_x_d)
+                                             : RV_OP(fmv_x_w),
+                                       arg));
+          Emit(rv, NewInstruction2(RV_OP(mv), arg_location->location.reg, arg));
+          break;
+        } else if (TypeIsFloatingPoint(arg_node->type)) {
           if (TypeIsDouble(arg_node->type)) {
             mov_opcode = RV_OP(fmv_d);
           } else {
@@ -3259,10 +3378,25 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
       // Emit(rv, NewInstruction2(RV_OP(rmov), StackPointer(rv), newsp));
     }
   }
-  SetLoweredNode(node, call);
+  TargetInstruction* result = call;
+  if (!can_be_tail_call) {
+    RVOpcode mov_opcode = RV_OP(mv);
+    if (node->type != NULL && TypeIsFloatingPoint(node->type)) {
+      mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+    }
+    TargetInstruction* dest = GetDestInstruction(rv, node);
+    if (dest != NULL) {
+      result = SetDestOrMove(rv, call, dest, mov_opcode);
+    } else {
+      result = Emit(rv, NewInstruction1(mov_opcode, call));
+    }
+    SetLoweredNode(node, result);
+  } else {
+    SetLoweredNode(node, call);
+  }
 
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
-  return call;
+  return result;
 }
 
 // A computed branch is used to branch to a dense switch table consisting
@@ -3298,21 +3432,29 @@ static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
 }
 
 // The first input is the address of the 'ap' variable.  The second is the
-// address of the last function argument (ignored in RISC-V).  This
-// simply stores the value of the frame pointer in the address passed
-// in the first input.
+// address of the last named function argument.  The varargs save area starts at
+// s0 with a1 in slot 0, so the first unnamed argument is last_arg_number slots
+// past s0.
 static TargetInstruction* LowerBuiltinVaStart(RVGenerator* rv, IRNode* node) {
   TargetInstruction* s0 = Emit(rv, NewInstruction(RV_OP(fp)));
+  TargetInstruction* va_start = s0;
+  if (node->inputs.length > 1 && IRIsArgument(node->inputs.value.p[1])) {
+    IRVariable* last_arg = (IRVariable*)node->inputs.value.p[1];
+    int offset = (int)last_arg->symbol->value.arg_number * 8;
+    if (offset != 0) {
+      va_start = AddImmediate(rv, s0, offset);
+    }
+  }
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, node->inputs.value.p[0], &addr, &offset);
   if (!on_stack) {
-    TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv), s0));
+    TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv), va_start));
     mv->dest = addr;
     return SetLoweredNode(node, addr);
   }
   return SetLoweredNode(node,
-                        Emit(rv, NewInstruction3(RV_OP(sd), s0, addr, offset)));
+                        Emit(rv, NewInstruction3(RV_OP(sd), va_start, addr, offset)));
 }
 
 // The first input is &ap.  The 'ap' variable contains the address of the
@@ -3334,7 +3476,10 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
     ap_load = Emit(rv, NewInstruction2(RV_OP(ld), ap_addr, ap_offset));
   }
   TargetInstruction* result;
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeIsStructOrUnion(node->type) &&
+      node->type->info.struct_info->size <= 8) {
+    result = ap_load;
+  } else if (TypeIsFloatingPoint(node->type)) {
     result = Emit(rv, NewInstruction2(RV_OP(fld), ap_load,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
   } else {
@@ -3616,7 +3761,7 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(cmplea):
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
-      return LowerComparison(rv, node);
+      return FinishWithDest(rv, node, LowerComparison(rv, node), RV_OP(mv));
 
     case IR_OP(btrue):
     case IR_OP(bfalse):
@@ -3657,7 +3802,8 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
       return LowerMemcpy(rv, node);
 
     case IR_OP(cast):
-        return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
+        return FinishWithDest(rv, node, Materialize(rv, node->inputs.value.p[0]),
+                              RV_OP(mv));
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(rv, node);
@@ -3744,7 +3890,6 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   }
   int fp_reg = RV_FP_ARG_START;
   int stack_offset = 0;
-  int current_stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
@@ -3755,7 +3900,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = fp_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       } else {
         if (int_reg <= RV_INT_ARG_END) {
@@ -3764,7 +3909,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = int_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       }
       return location;
@@ -3772,28 +3917,17 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
 
     Symbol* arg_symbol = args->value.p[i];
     if (TypeIsFloatingPoint(arg_symbol->type)) {
-      if (fp_reg <= RV_LAST_FP_REG_VAR) {
+      if (fp_reg <= RV_FP_ARG_END) {
         fp_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        stack_offset += arg_symbol->type->size;
+        stack_offset += 8;
       }
     } else {
-      if (int_reg <= RV_LAST_INT_REG_VAR) {
+      if (int_reg <= RV_INT_ARG_END) {
         int_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        if (TypeIsStructOrUnion(arg_symbol->type)) {
-          // Struct and unions are passed by reference - 8 bytes.
-          stack_offset += 8;
-        } else {
-          int size = arg_symbol->type->size;
-          if (size < 8) {
-            stack_offset += 4;
-          } else {
-            stack_offset += 8;
-          }
-        }
+        // The caller allocates one XLEN slot for each stack-passed argument.
+        stack_offset += 8;
       }
     }
   }
@@ -3837,8 +3971,14 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(RVGenerator* rv,
       return var;
     }
     case kArgLocationPushed:
-    case kArgLocationPassedByReferenceOnStack:
-      return PopArg(rv, symbol, arg_loc.location.offset);
+    case kArgLocationPassedByReferenceOnStack: {
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
+      TargetInstruction* load = PopArg(rv, symbol, arg_loc.location.offset);
+      RVOpcode move_op = TypeIsDouble(symbol->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
+      Emit(rv, NewInstruction2(move_op, var, load));
+      return var;
+    }
   }
 }
 
@@ -3858,8 +3998,14 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
       return var;
     }
     case kArgLocationPassedByReferenceOnStack:
-    case kArgLocationPushed:
-      return PopArg(rv, symbol, arg_loc.location.offset);
+    case kArgLocationPushed: {
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var = IntVariableRegister(rv, reg_var, sym->symbol);
+      TargetInstruction* mv = Emit(rv, NewInstruction1(RV_OP(mv),
+                                                       PopArg(rv, symbol, arg_loc.location.offset)));
+      mv->dest = var;
+      return var;
+    }
   }
 }
 
@@ -3888,10 +4034,29 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         LoadFpArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
       }
     } else {
-      AlignOffset(entry, var_offset);
-      entry->pooled->data.ivalue = *var_offset;
-      SetDebugStackLocation(entry, *var_offset);
-      *var_offset += size;
+      if (is_arg) {
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          int offset = -24 - (int)rv->saved_regs.length * 8;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, RV_FP_REG, offset,
+              entry->pooled->type->size,
+              true);
+          entry->pooled->data.ivalue = offset;
+          VectorAppend(&rv->saved_regs, saved);
+          rv->num_fp_arg_regs++;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else if (location.type == kArgLocationPushed ||
+                   location.type == kArgLocationPassedByReferenceOnStack) {
+          entry->pooled->data.ivalue = (int32_t)location.location.offset;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        }
+      } else {
+        AlignOffset(entry, var_offset);
+        entry->pooled->data.ivalue = *var_offset;
+        SetDebugStackLocation(entry, *var_offset);
+        *var_offset += size;
+      }
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
@@ -3905,16 +4070,42 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           ArgLocation location = ArgumentLocation(entry, args);
           LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
         } else {
-          AlignOffset(entry, var_offset);
-          entry->pooled->data.ivalue = *var_offset;
-          SetDebugStackLocation(entry, *var_offset);
-          *var_offset += size;
+          ArgLocation location = ArgumentLocation(entry, args);
+          if (location.type == kArgLocationRegister) {
+            int offset = -24 - (int)rv->saved_regs.length * 8;
+            SavedArgumentRegister* saved = NewSavedArgumentRegister(
+                (int)location.location.offset, RV_FP_REG, offset, 8, false);
+            entry->pooled->data.ivalue = offset;
+            VectorAppend(&rv->saved_regs, saved);
+            rv->num_int_arg_regs++;
+            SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+          } else if (location.type == kArgLocationPushed ||
+                     location.type == kArgLocationPassedByReferenceOnStack) {
+            entry->pooled->data.ivalue = (int32_t)location.location.offset;
+            SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+          } else {
+            AlignOffset(entry, var_offset);
+            entry->pooled->data.ivalue = *var_offset;
+            SetDebugStackLocation(entry, *var_offset);
+            *var_offset += size;
+          }
         }
       } else {
         // Passed by reference.  This means it is pushed onto the stack
         // and the address of the copy is passed in an argument register
         // or on the stack.
-        // TODO:
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationPassedByReferenceInRegister ||
+            location.type == kArgLocationRegister) {
+          int reg = rv->num_int_reg_vars++;
+          entry->pooled->data.ivalue = RV_REG_VAR | reg;
+          SetDebugRegisterLocation(entry, reg);
+          LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
+        } else if (location.type == kArgLocationPushed ||
+                   location.type == kArgLocationPassedByReferenceOnStack) {
+          entry->pooled->data.ivalue = (int32_t)location.location.offset;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        }
       }
     } else {
       // Not an argument.
@@ -3974,10 +4165,14 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
           // below the previous stack pointer).
           int offset = -24 - (int)rv->saved_regs.length * 8;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
-              (int)location.location.offset, RV_FP_REG, offset);
+              (int)location.location.offset, RV_FP_REG, offset, 8, false);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&rv->saved_regs, saved);
           rv->num_int_arg_regs++;  // Argument was passed in a register.
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else if (location.type == kArgLocationPushed ||
+                   location.type == kArgLocationPassedByReferenceOnStack) {
+          entry->pooled->data.ivalue = (int32_t)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {

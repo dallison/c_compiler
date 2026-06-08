@@ -40,8 +40,10 @@ void __Increment(uint64_t a[FIXED_SIZE_WORDS]) {
 
 #if !defined(__6502__)
 uint64_t __Add64(uint64_t* a, uint64_t* b, uint64_t carry_in) {
-  uint64_t na = *a + *b + carry_in;
-  uint64_t carry_out = na < *a;
+  uint64_t sum = *a + carry_in;
+  uint64_t carry_out = sum < *a;
+  uint64_t na = sum + *b;
+  carry_out |= na < sum;
   *a = na;
   return carry_out;
 }
@@ -71,14 +73,14 @@ void __AddHalf(uint64_t a[FIXED_SIZE_HALF], uint64_t b[FIXED_SIZE_HALF]) {
 
 #if !defined(__6502__)
 int64_t __ROL(uint64_t* a, uint64_t carry_in) {
-  int64_t carry_out = (*a & (1LL << 63)) != 0;
+  int64_t carry_out = (*a & 0x8000000000000000ULL) != 0;
   *a <<= 1;
   *a |= carry_in;
   return carry_out;
 }
 
 int64_t __ASL(uint64_t* a) {
-  int64_t carry = (*a & (1LL << 63)) != 0;
+  int64_t carry = (*a & 0x8000000000000000ULL) != 0;
   *a <<= 1;
   return carry;
 }
@@ -198,12 +200,18 @@ bool __IsOneHalf(uint64_t a[FIXED_SIZE_WORDS]) {
 // Divide a by 10, where a is a big number.  Return
 // the modulus.  A is modified to be a/10.
 uint8_t __DivModBy10Half(uint64_t a[FIXED_SIZE_HALF]){
-#if defined(__6502__)
-  // On 6502 we can use 64-bit division if the upper half is zero.
-  if (__IsZeroUpper(a)) {
+  // If the upper words are clear, use native 64-bit division instead of the
+  // multiword long division path.
+  bool upper_zero = true;
+  for (uint8_t i = 1; i < FIXED_SIZE_HALF; i++) {
+    if (a[i] != 0) {
+      upper_zero = false;
+      break;
+    }
+  }
+  if (upper_zero) {
     return __DivMod64By10(a);
   }
-#endif
   uint64_t quotient[FIXED_SIZE_HALF] = {0};
   uint8_t rem = 0;
   const int kHiWord = FIXED_SIZE_HALF - 1;

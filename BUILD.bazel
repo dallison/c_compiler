@@ -900,6 +900,7 @@ genrule(
     name = "libc_riscv",
     srcs = LIBC_SRCS + glob([
         "libc/include/**/*.h",
+        "RISCV_support/*.s",
     ]) + [
         ":davecc",
         ":archivist",
@@ -916,6 +917,17 @@ mkdir -p "$$work"
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
+
+runtime_srcs=(
+  "RISCV_support/start.s"
+)
+
+runtime_objs=()
+for src in "$${runtime_srcs[@]}"; do
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
 
 libc_srcs=(
   "libc/abs.c"
@@ -995,7 +1007,7 @@ for src in "$${libc_srcs[@]}"; do
   libc_objs+=("$$obj")
 done
 
-"$$archivist" r "$$out" "$${libc_objs[@]}"
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}"
 """,
 )
 

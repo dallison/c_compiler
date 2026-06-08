@@ -59,12 +59,18 @@ static bool IsPrintable(TargetInstruction* inst) {
     case RV_OP(fvarreg):
     case RV_OP(x0):
     case RV_OP(t0):
+    case RV_OP(t1):
+    case RV_OP(t2):
     case RV_OP(nrvoval):
       return false;
     default:
       break;
   }
   return true;
+}
+
+static const char* SymbolName(TargetSymbol* sym, char* buf, size_t len) {
+  return TargetSymbolName(sym->symbol, buf, len);
 }
 
 // The stack frame looks like this:
@@ -384,10 +390,16 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
   for (size_t i = 0; i < emitter->rv->saved_regs.length; i++) {
     SavedArgumentRegister* saved_reg = emitter->rv->saved_regs.value.p[i];
     int offset = saved_reg->offset;
-    fprintf(fp, "\tsd %s, %d(%s)\n",
-            RVRegisterNameFromNum(saved_reg->reg_num, kRVRegTypeInt, buf1,
-                                  sizeof(buf1)),
-                                  offset,
+    const char* store = saved_reg->is_fp
+                            ? (saved_reg->size == 4 ? "fsw" : "fsd")
+                            : "sd";
+    fprintf(fp, "\t%s %s, %d(%s)\n",
+            store,
+            RVRegisterNameFromNum(saved_reg->reg_num,
+                                  saved_reg->is_fp ? kRVRegTypeFloat
+                                                   : kRVRegTypeInt,
+                                  buf1, sizeof(buf1)),
+            offset,
             RVRegisterNameFromNum(saved_reg->base_reg_num, kRVRegTypeInt,
                                   buf2, sizeof(buf2)));
   }
@@ -478,21 +490,21 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
 
   BitSetIterator it;
 
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tfld %s, %d(sp)\n",
-            RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf1, sizeof(buf1)),
-            offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
-
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
     int reg = (int)BitSetIteratorValue(&it);
     fprintf(fp, "\tld %s, %d(sp)\n",
             RVRegisterNameFromNum(reg, kRVRegTypeInt, buf1, sizeof(buf1)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tfld %s, %d(sp)\n",
+            RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf1, sizeof(buf1)),
             offset);
     offset -= 8;
     BitSetIteratorNext(&it);
@@ -595,6 +607,12 @@ static const char* GetRegisterName(TargetInstruction* inst, char* buf, size_t si
     case RV_OP(t0):
       return RVRegisterNameFromNum(RV_INT_TEMP_START_1, kRVRegTypeInt, buf,
                                    size);
+    case RV_OP(t1):
+      return RVRegisterNameFromNum(RV_INT_TEMP_START_1 + 1, kRVRegTypeInt, buf,
+                                   size);
+    case RV_OP(t2):
+      return RVRegisterNameFromNum(RV_INT_TEMP_START_1 + 2, kRVRegTypeInt, buf,
+                                   size);
     case RV_OP(fp):
       return RVRegisterNameFromNum(RV_FP_REG, kRVRegTypeInt, buf, size);
     case RV_OP(sp):
@@ -667,6 +685,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
   // Buffers for register name printing.
   char buf1[8];
   char buf2[8];
+  char buf3[256];
 
   // Special case instructions.
   switch ((RVOpcode)inst->opcode) {
@@ -688,9 +707,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
       if (StorageIs(sym->symbol->storage, STO(static))) {
-        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.local %s\n", SymbolName(sym, buf3, sizeof(buf3)));
       } else {
-        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.global %s\n", SymbolName(sym, buf3, sizeof(buf3)));
       }
       return;
     }
@@ -698,7 +717,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(callf): {
       assert(((int)inst->operand[0]->opcode == (int)RV_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
-      fprintf(fp, "\t%-12s%s\n", "call", sym->symbol->name.value);
+      fprintf(fp, "\t%-12s%s\n", "call", SymbolName(sym, buf3, sizeof(buf3)));
       return;
     }
 
@@ -831,7 +850,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
         assert((inst->flags & RV_LO_RELOC) != 0);
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst, buf1, sizeof(buf1)),
-                ((TargetSymbol*)inst->operand[1])->symbol->name.value,
+                SymbolName((TargetSymbol*)inst->operand[1], buf3, sizeof(buf3)),
                 GetRegisterName(inst->operand[0], buf2,
                                sizeof(buf2)));
       } else if (((int)inst->operand[1]->opcode == (int)RV_OP(label))) {
@@ -874,7 +893,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
         fprintf(fp, "%s, %%lo(%s)(%s)\n",
                 GetRegisterName(inst->operand[0], buf1,
                                sizeof(buf1)),
-                ((TargetSymbol*)inst->operand[2])->symbol->name.value,
+                SymbolName((TargetSymbol*)inst->operand[2], buf3, sizeof(buf3)),
                 GetRegisterName(inst->operand[1], buf2,
                                sizeof(buf2)));
       } else if (((int)inst->operand[2]->opcode == (int)RV_OP(label))) {
@@ -936,7 +955,7 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       if (((int)dest->opcode == (int)RV_OP(label))) {
         fprintf(fp, ".%s_label_%d\n", func_name, inst->operand[0]->id);
       } else if (((int)dest->opcode == (int)RV_OP(symbol))) {
-        fprintf(fp, "%s\n", ((TargetSymbol*)dest)->symbol->name.value);
+        fprintf(fp, "%s\n", SymbolName((TargetSymbol*)dest, buf3, sizeof(buf3)));
       } else {
         assert(false);
       }
@@ -994,10 +1013,10 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
           } else if (((int)inst->operand[i]->opcode == (int)RV_OP(symbol))) {
             if ((inst->flags & RV_HI_RELOC) != 0) {
               fprintf(fp, "%s%%hi(%s)", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+                      SymbolName((TargetSymbol*)inst->operand[i], buf3, sizeof(buf3)));
             } else {
               fprintf(fp, "%s%s", sep,
-                      ((TargetSymbol*)inst->operand[i])->symbol->name.value);
+                      SymbolName((TargetSymbol*)inst->operand[i], buf3, sizeof(buf3)));
             }
           } else if (((int)inst->operand[i]->opcode == (int)RV_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];

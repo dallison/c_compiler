@@ -376,6 +376,7 @@ typedef struct ARMGenerator {
   bool not_leaf;          // Not a leaf procedure.
   bool uses_dynamic_stack;  // Uses VLA/alloca (sp adjusted dynamically); the
                             // epilogue must restore sp from fp.
+  int saved_arg_size;     // Bytes used by register-passed argument homes.
   
   Vector saved_regs;
   Vector offsets;         // Pointers to Offset.

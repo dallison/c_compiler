@@ -653,6 +653,7 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   g->struct_return_reg = -1;
   g->not_leaf = false;
   g->uses_dynamic_stack = false;
+  g->saved_arg_size = 0;
   g->zero = NULL;
   g->tmp = NULL;
   g->lsl = NULL;
@@ -702,6 +703,15 @@ static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
 
 static COMPILER_UNUSED void SavedArgumentRegisterDelete(SavedArgumentRegister* reg) {
   free(reg);
+}
+
+static int AllocateSavedArgumentHome(ARMGenerator* g, int size, int align) {
+  if (align > 1) {
+    g->saved_arg_size = (g->saved_arg_size + align - 1) & ~(align - 1);
+  }
+  int offset = -ARM_STACK_FRAME_HEADER_SIZE - g->saved_arg_size - size;
+  g->saved_arg_size += size;
+  return offset;
 }
 
 // Some static utility functions that map to generic target functions.
@@ -4953,7 +4963,8 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
           // at var_offset - stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE). With
           // an 8-byte header that base is -16; using -24 (the aarch64 value, for
           // a 16-byte header) makes locals overlap the saved-arg slots.
-          int offset = -16 - (int)g->saved_regs.length * 8;
+          int saved_size = ARMTypeIsDouble(entry->pooled->type) ? 8 : 4;
+          int offset = AllocateSavedArgumentHome(g, saved_size, saved_size);
           // location.offset is a d-register index; the physical register file is
           // numbered in s-register units, so the even low half is index*2.
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
@@ -5040,7 +5051,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
           // 64-bit integer passed in an even-aligned register pair.  Save both
           // halves into a single 8-byte slot below the frame pointer (low at
           // offset, high at offset+4) so load64 can read [fp+off]/[fp+off+4].
-          int offset = -16 - (int)g->saved_regs.length * 8;
+          int offset = AllocateSavedArgumentHome(g, 8, 8);
           int lo_reg = (int)location.location.offset;
           VectorAppend(&g->saved_regs,
                        NewSavedArgumentRegister(lo_reg, ARM_FP_REG, offset, false));
@@ -5056,7 +5067,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
           // be -(ARM_STACK_FRAME_HEADER_SIZE + 8) = -16 so the saved-arg region
           // tiles with the local-variable region without overlapping (locals are
           // placed at var_offset - stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE).
-          int offset = -16 - (int)g->saved_regs.length * 8;
+          int offset = AllocateSavedArgumentHome(g, 4, 4);
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
               (int)location.location.offset, ARM_FP_REG, offset, false);
           entry->pooled->data.ivalue = offset;
@@ -5101,8 +5112,7 @@ static void AssignRegisterVars(ARMGenerator* g, Vector* vars, Vector* args) {
   
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
-  g->base.stack_frame_size =
-      (int32_t)var_offset + (int)g->saved_regs.length * 8;
+  g->base.stack_frame_size = (int32_t)var_offset + g->saved_arg_size;
   // Align to 8 byte boundary (AAPCS).
   g->base.stack_frame_size = (g->base.stack_frame_size + 7) & ~7;
 }

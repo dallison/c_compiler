@@ -164,8 +164,10 @@ static void SetJTypeImm(char* target_address, int32_t immed) {
   ((immed >> 1) & 0x3ff) << 21 |   // imm[10:1]
   ((immed >> 11) & 1) << 20 |    // imm[11]
   ((immed >> 12) & 0xff) << 12;      // imm[19:12]
-  SetBitField32(target_address, 12, 20, encoded_value);
-  
+  int32_t word = *(int32_t*)target_address;
+  word &= 0xfff;  // Preserve rd and opcode; replace imm[20|10:1|11|19:12].
+  word |= encoded_value;
+  *(int32_t*)target_address = word;
 }
 
 // Find the relocation associated with pc.  This is used to handle

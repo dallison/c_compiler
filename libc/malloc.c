@@ -49,12 +49,17 @@ extern char _end[];
 FreeBlockHeader* __free_list;
 int __initial_heap_size;
 
+#if defined(__risc_v__)
+static FreeBlockHeader __riscv_heap[1024 * 1024 / sizeof(FreeBlockHeader)];
+#endif
+
 STATIC void InitFreeList() {
 #if defined(__6502__)
   __free_list = (FreeBlockHeader*)_end;
   __free_list->length = MEMTOP - (int)_end;
 #elif defined(__risc_v__)
-// TODO
+  __free_list = __riscv_heap;
+  __free_list->length = sizeof(__riscv_heap);
 #elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
   extern char _end[];
   __free_list = (FreeBlockHeader*)_end;

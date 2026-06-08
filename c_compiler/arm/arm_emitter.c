@@ -261,7 +261,7 @@ static int StackFrameSize(ARMEmitter* emitter) {
   //  emitter->armnum_fp_reg_vars * 8;
   //}
 
-  stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 8;
+  stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 4;
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
   
@@ -332,6 +332,70 @@ static COMPILER_UNUSED void GenerateOffsetFromFrame(ARMEmitter* emitter, int reg
 }
 
 
+// Emit a block data transfer of the given integer registers
+// using base as the address register.  Registers are listed in ascending
+// number, which is the order the hardware (and the interpreter) transfers them
+// to ascending addresses.
+static void EmitIntRegBlock(FILE* fp, const char* op, const char* base,
+                            const int* regs, int n) {
+  char buf[8];
+  fprintf(fp, "\t%s %s, {", op, base);
+  for (int i = 0; i < n; i++) {
+    fprintf(fp, "%s%s", i ? ", " : "",
+            ARMRegisterNameFromNum(regs[i], kARMRegTypeInt, kSize32Bit, buf,
+                                   sizeof(buf)));
+  }
+  fprintf(fp, "}\n");
+}
+
+static int CombinedSavedIntArgCount(ARMEmitter* emitter) {
+  if (emitter->g->base.varargs) {
+    return 0;
+  }
+  bool seen[ARM_NUM_INT_ARGS] = {false};
+  int max_reg = -1;
+  for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
+    SavedArgumentRegister* saved = emitter->g->saved_regs.value.p[i];
+    if (saved->is_fp || saved->base_reg_num != ARM_FP_REG ||
+        saved->reg_num < 0 || saved->reg_num >= ARM_NUM_INT_ARGS) {
+      continue;
+    }
+    seen[saved->reg_num] = true;
+    if (saved->reg_num > max_reg) {
+      max_reg = saved->reg_num;
+    }
+  }
+  if (max_reg < 0) {
+    return 0;
+  }
+  int count = max_reg + 1;
+  int base = -(count + 2) * 4;
+  for (int reg = 0; reg < count; reg++) {
+    if (!seen[reg]) {
+      return 0;
+    }
+    bool found = false;
+    for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
+      SavedArgumentRegister* saved = emitter->g->saved_regs.value.p[i];
+      if (!saved->is_fp && saved->base_reg_num == ARM_FP_REG &&
+          saved->reg_num == reg && saved->offset == base + reg * 4) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return 0;
+    }
+  }
+  return count;
+}
+
+static bool IsCombinedSavedIntArg(SavedArgumentRegister* saved, int count) {
+  return count > 0 && !saved->is_fp && saved->base_reg_num == ARM_FP_REG &&
+         saved->reg_num >= 0 && saved->reg_num < count &&
+         saved->offset == -(count + 2) * 4 + saved->reg_num * 4;
+}
+
 // Save all used registers on the stack.
 static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   // Entry sequence:
@@ -345,6 +409,8 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
+  int combined_int_args = CombinedSavedIntArgCount(emitter);
+  int combined_int_arg_bytes = combined_int_args * 4;
   // The variadic register save area holds all four core argument registers in
   // contiguous 4-byte slots so va_arg can walk them like a packed argument
   // list (honouring 8-byte alignment for double / long long).
@@ -427,11 +493,15 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   int local_vars = emitter->g->base.stack_frame_size +
                      ARM_STACK_FRAME_HEADER_SIZE;
 
+  int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
+  int first_saved_slot_size = used_int_count > 0 ? 4 : 8;
+
   // Offset from sp of first saved register.
   int saved_reg_offset = stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE - 8 -
                           emitter->g->base.stack_frame_size -
                           space_above_frame_pointer -
-                          emitter->spill_region_size;  // First saved register.
+                          emitter->spill_region_size +
+                          (8 - first_saved_slot_size);  // First saved register.
 
   // A leaf procedure doesn't save the return address.
   if (is_leaf) {
@@ -440,7 +510,8 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
 
   if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
-      fprintf(fp, "\tpush {lr}\n");
+      int regs[] = {ARM_LR_REG};
+      EmitIntRegBlock(fp, "stmdb", "sp!", regs, 1);
     }
   } else {
     if (varargs && space_above_frame_pointer > 0) {
@@ -456,11 +527,26 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
       fprintf(fp, "\t// varargs function with %d declared args\n",
               emitter->g->num_int_arg_regs);
       DecrementStackPointer(emitter, space_above_frame_pointer, fp);
+      // r0..r3 occupy contiguous 4-byte slots at [sp,#0..12]; store them with a
+      // single increment-after block transfer instead of four str.
+      int arg_regs[ARM_NUM_INT_ARGS];
       for (int i = 0; i < ARM_NUM_INT_ARGS; i++) {
-        fprintf(fp, "\tstr r%d, [sp, #%d]\n", i, i * 4);
+        arg_regs[i] = i;
       }
+      EmitIntRegBlock(fp, "stmia", "sp", arg_regs, ARM_NUM_INT_ARGS);
     }
-    fprintf(fp, "\tpush {fp, lr}\n");
+    if (combined_int_args > 0) {
+      int regs[ARM_NUM_INT_ARGS + 2];
+      for (int i = 0; i < combined_int_args; i++) {
+        regs[i] = i;
+      }
+      regs[combined_int_args] = ARM_FP_REG;
+      regs[combined_int_args + 1] = ARM_LR_REG;
+      EmitIntRegBlock(fp, "stmdb", "sp!", regs, combined_int_args + 2);
+    } else {
+      int regs[] = {ARM_FP_REG, ARM_LR_REG};
+      EmitIntRegBlock(fp, "stmdb", "sp!", regs, 2);
+    }
     // Point fp at the slot just above the saved fp/lr, so the 8-byte header
     // occupies offsets [-8,-1] from fp.  Every offset convention in this file
     // (saved-arg base of -16, local vars at var_offset - stack_frame_size -
@@ -469,10 +555,12 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
     // fp-relative region down by 8 bytes and making the lowest saved-arg slot
     // overlap the top callee-saved spill slot.  For a varargs function this also
     // lands fp at the base of the register save area reserved above.
-    fprintf(fp, "\tadd fp, sp, #%d\n", ARM_STACK_FRAME_HEADER_SIZE);
+    fprintf(fp, "\tadd fp, sp, #%d\n",
+            ARM_STACK_FRAME_HEADER_SIZE + combined_int_arg_bytes);
     DecrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
-                              space_above_frame_pointer,
+                              space_above_frame_pointer -
+                              combined_int_arg_bytes,
                           fp);
   }
 
@@ -484,6 +572,9 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   }
   for (size_t i = 0; i < emitter->g->saved_regs.length; i++) {
     SavedArgumentRegister* saved_reg = emitter->g->saved_regs.value.p[i];
+    if (IsCombinedSavedIntArg(saved_reg, combined_int_args)) {
+      continue;
+    }
     int offset = saved_reg->offset;
     ARMRegisterType reg_type =
         saved_reg->is_fp ? kARMRegTypeFloat : kARMRegTypeInt;
@@ -525,18 +616,39 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   
   BitSetIterator it;
 
+  // Collect the used integer callee-saved registers (ascending register
+  // number).  When there are at least three, store them with a single block
+  // transfer.  Integer registers are 32-bit on ARM, so the save area uses
+  // a 4-byte stride (lowest register at the lowest address, matching
+  // stmia/ldmia and the interpreter).
+  int int_regs[16];
+  int num_int = 0;
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  if (!BitSetIteratorDone(&it)) {
-    fprintf(fp, "\t// Saved integer registers.\n");
-  }
   while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    int offset = saved_reg_offset;
-    saved_reg_offset -= 8;
-    fprintf(fp, "\tstr %s, [sp, #%d]\n",
-            ARMRegisterNameFromNum(reg, kARMRegTypeInt, kSize32Bit, buf1, sizeof(buf1)),
-            offset);
+    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
     BitSetIteratorNext(&it);
+  }
+  if (num_int > 0) {
+    fprintf(fp, "\t// Saved integer registers.\n");
+    if (num_int >= 3) {
+      int base_low = saved_reg_offset - 4 * (num_int - 1);
+      const char* base = "sp";
+      if (base_low != 0) {
+        AddSubImmediate(emitter, "ip", "sp", /*add=*/true, base_low, NULL, fp);
+        base = "ip";
+      }
+      EmitIntRegBlock(fp, "stmia", base, int_regs, num_int);
+    } else {
+      int off = saved_reg_offset;
+      for (int i = 0; i < num_int; i++) {
+        fprintf(fp, "\tstr %s, [sp, #%d]\n",
+                ARMRegisterNameFromNum(int_regs[i], kARMRegTypeInt, kSize32Bit,
+                                       buf1, sizeof(buf1)),
+                off);
+        off -= 4;
+      }
+    }
+    saved_reg_offset -= 4 * num_int;
   }
   
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
@@ -569,6 +681,8 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
   bool varargs = emitter->g->base.varargs;
+  int combined_int_args = CombinedSavedIntArgCount(emitter);
+  int combined_int_arg_bytes = combined_int_args * 4;
   // The variadic register save area holds all four core argument registers in
   // contiguous 4-byte slots so va_arg can walk them like a packed argument
   // list (honouring 8-byte alignment for double / long long).
@@ -598,17 +712,33 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
 
   BitSetIterator it;
 
-  // Restore in the same order SaveRegisters used (integer registers first,
-  // then floating point) so the offsets match the stores in the prologue.
+  // Restore in the same order and with the same layout SaveRegisters used:
+  // integer registers (a single ldmia when there are >= 3) first, then floating
+  // point.
+  int int_regs[16];
+  int num_int = 0;
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tldr %s, [sp, #%d]\n",
-            ARMRegisterNameFromNum(reg, kARMRegTypeInt, kSize32Bit, buf1, sizeof(buf1)),
-            offset);
-    offset -= 8;
+    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
     BitSetIteratorNext(&it);
   }
+  if (num_int >= 3) {
+    int base_low = offset - 4 * (num_int - 1);
+    const char* base = "sp";
+    if (base_low != 0) {
+      AddSubImmediate(emitter, "ip", "sp", /*add=*/true, base_low, NULL, fp);
+      base = "ip";
+    }
+    EmitIntRegBlock(fp, "ldmia", base, int_regs, num_int);
+  } else {
+    for (int i = 0; i < num_int; i++) {
+      fprintf(fp, "\tldr %s, [sp, #%d]\n",
+              ARMRegisterNameFromNum(int_regs[i], kARMRegTypeInt, kSize32Bit,
+                                     buf1, sizeof(buf1)),
+              offset - 4 * i);
+    }
+  }
+  offset -= 4 * num_int;
 
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
   while (!BitSetIteratorDone(&it)) {
@@ -622,14 +752,20 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
 
   if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
-      fprintf(fp, "\tpop {lr}\n");
+      int regs[] = {ARM_LR_REG};
+      EmitIntRegBlock(fp, "ldmia", "sp!", regs, 1);
     }
   } else {
     IncrementStackPointer(emitter,
                           stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE -
-                              space_above_frame_pointer,
+                              space_above_frame_pointer -
+                              combined_int_arg_bytes,
                           fp);
-    fprintf(fp, "\tpop {fp, lr}\n");
+    if (combined_int_arg_bytes > 0) {
+      IncrementStackPointer(emitter, combined_int_arg_bytes, fp);
+    }
+      int regs[] = {ARM_FP_REG, ARM_LR_REG};
+      EmitIntRegBlock(fp, "ldmia", "sp!", regs, 2);
     // Release the variadic register save area reserved above the saved fp/lr.
     if (varargs && space_above_frame_pointer > 0) {
       IncrementStackPointer(emitter, space_above_frame_pointer, fp);

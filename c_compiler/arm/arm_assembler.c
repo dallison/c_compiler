@@ -821,6 +821,75 @@ static void Assemble_pop(ARMAssembler* assembler) {
   EmitInst(assembler, 0xE8BD0000u | reglist);
 }
 
+// Parse and encode a block data transfer:
+//   <ldm/stm><addr-mode> Rn[!], {reglist}
+// W (writeback) is set when the base is followed by '!'.
+static void Assemble_block_transfer(ARMAssembler* assembler, bool load,
+                                    bool preindex, bool add_offset) {
+  ARMReg rn;
+  if (!ParseRegister(assembler, &rn)) {
+    return;
+  }
+  bool writeback = LexMatch(&ASM.lex, TOK(bang));
+  if (!ExpectComma(assembler)) {
+    return;
+  }
+  if (!LexMatch(&ASM.lex, TOK(lbrace))) {
+    AssemblerError(&ASM, "Expected {");
+    return;
+  }
+  uint16_t reglist = 0;
+  bool first = true;
+  while (!LexMatch(&ASM.lex, TOK(rbrace))) {
+    if (!first) {
+      if (!ExpectComma(assembler)) {
+        return;
+      }
+    }
+    ARMReg reg;
+    if (!ParseRegister(assembler, &reg)) {
+      return;
+    }
+    reglist |= (uint16_t)(1 << reg.num);
+    first = false;
+  }
+  // cond=AL, block transfer (100), P/U select IA/IB/DA/DB.
+  uint32_t insn = 0xE8000000u | ((uint32_t)rn.num << 16) | reglist;
+  if (preindex) {
+    insn |= 0x01000000u;  // P bit.
+  }
+  if (add_offset) {
+    insn |= 0x00800000u;  // U bit.
+  }
+  if (load) {
+    insn |= 0x00100000u;  // L bit.
+  }
+  if (writeback) {
+    insn |= 0x00200000u;  // W bit.
+  }
+  EmitInst(assembler, insn);
+}
+
+static void Assemble_stmia(ARMAssembler* assembler) {
+  Assemble_block_transfer(assembler, /*load=*/false, /*preindex=*/false,
+                          /*add_offset=*/true);
+}
+
+static void Assemble_ldmia(ARMAssembler* assembler) {
+  Assemble_block_transfer(assembler, /*load=*/true, /*preindex=*/false,
+                          /*add_offset=*/true);
+}
+
+static void Assemble_stmdb(ARMAssembler* assembler) {
+  Assemble_block_transfer(assembler, /*load=*/false, /*preindex=*/true,
+                          /*add_offset=*/false);
+}
+
+static void Assemble_ldmdb(ARMAssembler* assembler) {
+  Assemble_block_transfer(assembler, /*load=*/true, /*preindex=*/true,
+                          /*add_offset=*/false);
+}
+
 static void Assemble_nop(ARMAssembler* assembler) {
   (void)assembler;
   EmitInst(assembler, ARM_AL | 0x0320f000);  // mov r0, r0
@@ -1171,6 +1240,10 @@ DECLARE_INST_FUNC(bx);
 DECLARE_INST_FUNC(blx);
 DECLARE_INST_FUNC(push);
 DECLARE_INST_FUNC(pop);
+DECLARE_INST_FUNC(stmia);
+DECLARE_INST_FUNC(ldmia);
+DECLARE_INST_FUNC(stmdb);
+DECLARE_INST_FUNC(ldmdb);
 DECLARE_INST_FUNC(nop);
 DECLARE_INST_FUNC(ret);
 DECLARE_INST_FUNC(movw);
@@ -1283,6 +1356,12 @@ static void InitializeInstructions(Map* instructions) {
   INST(blx);
   INST(push);
   INST(pop);
+  INST(stmia);
+  INST(ldmia);
+  INST(stmdb);
+  INST(ldmdb);
+  INST2("stmfd", stmdb);
+  INST2("ldmfd", ldmia);
   INST(nop);
   INST(ret);
   INST(movw);

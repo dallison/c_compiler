@@ -188,6 +188,9 @@ static void FreeRegisters(RVRegisterAllocator* allocator,
       if (RVIsFixedRegister(op)) {
         continue;
       }
+      if (RVIsVarRegister(op)) {
+        continue;
+      }
 #if 0
       if (((int)op->opcode == (int)RV_OP(reload)) || ((int)op->opcode == (int)RV_OP(spill))) {
         continue;
@@ -670,6 +673,14 @@ static void AllocateRegister(RVRegisterAllocator* allocator,
 
     case RV_OP(t0):
       reg = &allocator->int_regs[RV_INT_TEMP_START_1];
+      break;
+
+    case RV_OP(t1):
+      reg = &allocator->int_regs[RV_INT_TEMP_START_1 + 1];
+      break;
+
+    case RV_OP(t2):
+      reg = &allocator->int_regs[RV_INT_TEMP_START_1 + 2];
       break;
 
     case RV_OP(a0):

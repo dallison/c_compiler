@@ -29,35 +29,24 @@ static const double
 // Evaluated with Horner's method using single accumulators to keep
 // floating-point register pressure low (important on targets such as the 6502).
 static double __asin_r(double t) {
+  volatile double vt = t;
   double p = pS5;
-  p = p * t + pS4;
-  p = p * t + pS3;
-  p = p * t + pS2;
-  p = p * t + pS1;
-  p = p * t + pS0;
-  p = p * t;
+  p = p * vt + pS4;
+  p = p * vt + pS3;
+  p = p * vt + pS2;
+  p = p * vt + pS1;
+  p = p * vt + pS0;
+  p = p * vt;
   double q = qS4;
-  q = q * t + qS3;
-  q = q * t + qS2;
-  q = q * t + qS1;
-  q = q * t + 1.0;
+  q = q * vt + qS3;
+  q = q * vt + qS2;
+  q = q * vt + qS1;
+  q = q * vt + 1.0;
   return p / q;
 }
 
 double acos(double x) {
   if (x != x) return x;                              // NaN
   if (x > 1.0 || x < -1.0) { double z = x - x; return z / z; }  // domain -> NaN
-
-  if (x < -0.5) {
-    double t = 0.5 * (1.0 + x);
-    double s = sqrt(t);
-    return kPi - 2.0 * (s + s * __asin_r(t));
-  } else if (x < 0.5) {
-    double t = x * x;
-    return kPio2 - (x + x * __asin_r(t));
-  } else {
-    double t = 0.5 * (1.0 - x);
-    double s = sqrt(t);
-    return 2.0 * (s + s * __asin_r(t));
-  }
+  return atan2(sqrt(1.0 - x * x), x);
 }
