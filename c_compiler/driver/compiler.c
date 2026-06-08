@@ -1409,6 +1409,9 @@ String* CompileTranslationUnit(const char* filename, Vector* options, Vector* ta
   String* object_file = Compile(compiler, options);
   CompilerDelete(compiler);
   compiler = NULL;
+  // Release the global source-file table (file names, line tables and the file
+  // map).  Source locations are no longer needed once the object file is built.
+  ClearAllFiles();
   return object_file;
 }
 
@@ -1420,6 +1423,7 @@ String* CompileTranslationUnitFromString(const char* filename, const char* code,
   String* object_file = Compile(compiler, options);
   CompilerDelete(compiler);
   compiler = NULL;
+  ClearAllFiles();
   return object_file;
 }
 

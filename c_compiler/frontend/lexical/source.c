@@ -62,6 +62,12 @@ void ClearAllFiles() {
     free(all_files.value.p[i]);
   }
   VectorDestruct(&all_files);
+  // The file_map keys are borrowed pointers into the File names just freed, so
+  // only the map's own storage is released here.
+  if (file_map_initialized) {
+    MapDestruct(&file_map);
+    file_map_initialized = false;
+  }
 }
 
 static void ResetFiles() {
@@ -70,8 +76,10 @@ static void ResetFiles() {
     free(all_files.value.p[i]);
   }
   VectorClear(&all_files);
+  // Empty (but keep) the file map so its backing storage is reused.  Leaving
+  // file_map_initialized set avoids a re-init that would null the values
+  // pointer and orphan the existing allocation.
   MapClear(&file_map);
-  file_map_initialized = false;
 }
 
 SourceLocation NewSourceLocation(Source* source, int lineno, size_t start,
