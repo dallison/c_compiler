@@ -1139,10 +1139,9 @@ static void PushArg(Generator* gen, IRNode* call,
   // Generate an IR_OP(pusharg) containing the expression to push and the
   // argument number.  Some backends will use this to either push the
   // expression onto the stack or put it in a register.
-  IRNode* arg_num = GeneratorGetIntConstant(gen,
-                                            NewTypeRecordWithSize(kTypeInt,
-                                                          kQualPlain),
-                                            argnum);
+  // Pass NULL so the (plain int) type is only created on a constant-pool miss;
+  // creating it here would leak it whenever the constant is already pooled.
+  IRNode* arg_num = GeneratorGetIntConstant(gen, NULL, argnum);
   IRNode* push = NewIR2(IR_OP(pusharg), expr, arg_num);
   IRSetType(push, expr->type);
   VectorAppend(callargs, GeneratorEmit(gen, push));
@@ -1278,7 +1277,7 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
     return GenerateExpression(gen, node->ret_value);
   }
   // No return value, return a zero constant.
-  return GeneratorGetIntConstant(gen, NewTypeRecord(kTypeInt, kQualPlain), 0);
+  return GeneratorGetIntConstant(gen, NULL, 0);
 }
 
 static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
@@ -1476,7 +1475,7 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   // If the value is used we return the temporary holding it.  Otherwise
   // the value will be ignored so we just return zero.
   return value_is_used ? tmp :
-      GeneratorGetIntConstant(gen, NewTypeRecordWithSize(kTypeInt, kQualPlain), 0);
+      GeneratorGetIntConstant(gen, NULL, 0);
 }
 
 static IRNode* GenerateBuiltinVaStart(Generator* gen, VectorASTNode* node) {
@@ -1902,7 +1901,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       } else {
         // Just emit an integer zero.
         result =
-          GeneratorGetIntConstant(gen, NewTypeRecord(kTypeInt, kQualPlain), 0);
+          GeneratorGetIntConstant(gen, NULL, 0);
       }
       break;
       
@@ -1934,7 +1933,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       } else {
         // Just emit an integer zero.
         result =
-          GeneratorGetIntConstant(gen, NewTypeRecord(kTypeInt, kQualPlain), 0);
+          GeneratorGetIntConstant(gen, NULL, 0);
       }
       break;
 
@@ -2030,7 +2029,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       }
       if (result == NULL) {
         result =
-            GeneratorGetIntConstant(gen, NewTypeRecord(kTypeInt, kQualPlain), 0);
+            GeneratorGetIntConstant(gen, NULL, 0);
       }
       break;
     }
