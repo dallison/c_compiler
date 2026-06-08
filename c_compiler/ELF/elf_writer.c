@@ -529,7 +529,9 @@ ELFWriterFile* NewELFWriterFileFromFile(FILE* fp) {
 void ELFWriterSectionDestruct(ELFWriterSection* sect) {
   StringDestruct(&sect->name);
   if (sect->relocations != NULL) {
-    VectorDelete(sect->relocations);
+    // The vector owns the heap-allocated ELFRelocation structs (flat, no
+    // nested allocations), so free them along with the vector.
+    VectorDeleteWithContents(sect->relocations, NULL, /*free_element=*/true);
   }
 }
 
