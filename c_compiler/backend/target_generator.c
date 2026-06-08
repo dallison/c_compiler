@@ -243,6 +243,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
   ListDestruct(&gen->code);
   SymbolDelete(gen->memcpy);
   SymbolDelete(gen->memset);
+  SymbolDelete(gen->__tls_get_addr);
   
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
