@@ -1034,7 +1034,8 @@ static void VectorASTNodeDelete(ASTNode* node) {
       ASTNodeDelete(child);
     }
   }
-  VectorDestruct(vnode->children);
+  // children is heap-allocated (NewVector), so free the struct too.
+  VectorDelete(vnode->children);
   ASTNodeBaseDelete(node);
 }
 
@@ -1669,7 +1670,8 @@ static void CompoundStatementASTNodeDelete(ASTNode* node) {
       ASTNodeDelete(stmt);
     }
   }
-  VectorDestruct(vnode->statements);
+  // statements is heap-allocated (NewVector), so free the struct too.
+  VectorDelete(vnode->statements);
   ASTNodeBaseDelete(node);
 }
 
@@ -1896,7 +1898,7 @@ static void VariableDeclarationASTNodeDelete(ASTNode* node) {
   if (vnode->initializer != NULL) {
     ASTNodeDelete(vnode->initializer);
   }
-  ASTNodeDelete(node);
+  ASTNodeBaseDelete(node);
 }
 
 static void VariableDeclarationASTNodePrint(ASTNode* node, int indents, FILE* fp) {
