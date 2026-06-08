@@ -843,6 +843,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
+  VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
   compiler->num_errors = 0;
   compiler->next_literal_id = 1;
@@ -1119,6 +1120,14 @@ void CompilerDestruct(Compiler* compiler) {
   }
   VectorDestruct(&compiler->declaration_asts);
   ASTArenaRelease();
+
+  // Free function-definition symbols that were superseded by an earlier
+  // declaration and so never entered the global symbol table.  Deleting each
+  // releases its owned function type (breaking the symbol<->type cycle).
+  for (size_t i = 0; i < compiler->orphan_function_symbols.length; i++) {
+    SymbolDelete((Symbol*)compiler->orphan_function_symbols.value.p[i]);
+  }
+  VectorDestruct(&compiler->orphan_function_symbols);
 
   if (compiler->ir_output_file != stdout) {
     fclose(compiler->ir_output_file);

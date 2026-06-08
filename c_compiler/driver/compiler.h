@@ -268,6 +268,12 @@ typedef struct {
   // structs themselves are arena allocated and freed by ASTArenaRelease.
   Vector declaration_asts;
 
+  // Function-definition symbols (Symbol*) that are not stored in the global
+  // symbol table because the function was previously declared.  Each owns a
+  // freshly-parsed function type (forming a symbol<->type cycle), so they are
+  // tracked here and freed at CompilerDestruct rather than leaked.
+  Vector orphan_function_symbols;
+
   int next_symbol_id; // Next symbol id.
   
   // Flags.

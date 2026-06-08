@@ -666,6 +666,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (TypeIsFunction(sym->type)) {
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
       if (result != NULL) {
+        // A function definition whose name was already declared: `old_sym`
+        // stays in the symbol table and `sym` (this definition, holding the
+        // body and its own function type) is referenced only by the AST and
+        // by old_sym->value.func_defn.  It never enters the table, so track it
+        // for teardown instead of leaking the symbol<->type cycle.
+        if (old_sym != NULL) {
+          VectorAppend(&compiler->orphan_function_symbols, sym);
+        }
         return result;
       }
     } else if (parser->is_inline) {
