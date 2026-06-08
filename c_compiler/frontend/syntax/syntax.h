@@ -37,7 +37,10 @@ typedef struct Syntax {
   Vector all_local_symbols;  // All symbols defined in a function (owned by this
                              // vector).
   Vector local_statics;      // All local statics defined in function.
-  Vector all_symbols;        // All symbols (needed by assembler).
+  Vector all_symbols;        // Local symbols of all prior declarations, moved
+                             // here by SyntaxResetForNewDeclaration so they
+                             // outlive the reset; owned by this vector and freed
+                             // at SyntaxDestruct.
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.

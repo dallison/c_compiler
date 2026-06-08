@@ -43,15 +43,30 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
 
 
 void SyntaxDestruct(Syntax* syntax) {
+  // all_local_symbols holds the most recent declaration's local symbols;
+  // all_symbols accumulates the local symbols of every prior declaration
+  // (SyntaxResetForNewDeclaration moves them there so they outlive the per-
+  // declaration reset but stay reachable for code emission).  Both own their
+  // symbols, so free their contents here at end of compilation.  The two
+  // vectors are disjoint and contain no symbols owned elsewhere (function
+  // parameters live in their function type's prototype, globals in the global
+  // table), so there is no double free.
   VectorDestructWithContents(&syntax->all_local_symbols,
+                             (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&syntax->all_symbols,
                              (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
   VectorDestruct(&syntax->local_statics);
   ASTNodeDelete(syntax->ast);
 }
 
 void SyntaxResetForNewDeclaration(Syntax* syntax) {
-  VectorCopy(&syntax->all_symbols, &syntax->all_local_symbols);
-  
+  // Retain the just-finished declaration's local symbols until end of
+  // compilation: code generation has run, but they may still be referenced by
+  // the per-function target code that is emitted after the whole parse loop.
+  // Accumulate (not overwrite - VectorCopy clears first) so symbols from every
+  // declaration survive; SyntaxDestruct frees them all.
+  VectorAppendVector(&syntax->all_symbols, &syntax->all_local_symbols);
+
   VectorDestruct(&syntax->all_local_symbols);
   VectorDestruct(&syntax->local_statics);
   ASTNodeDelete(syntax->ast);
