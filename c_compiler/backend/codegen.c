@@ -287,6 +287,9 @@ IRNode* GeneratorEmitVariable(Generator* gen, IRNode* inst) {
 void GeneratorRemoveInstruction(Generator* gen, IRNode* inst) {
   ListDeleteElement(&gen->code, &inst->header);
   IRRemoveNode(inst);
+  // IRRemoveNode only unlinks the def-use edges; release the node's own
+  // inputs/outputs vectors and type reference before freeing the struct.
+  IRDestruct(inst);
   free(inst);
 }
 
