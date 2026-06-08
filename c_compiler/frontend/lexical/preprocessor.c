@@ -385,16 +385,22 @@ void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
 static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
   HashTable* to_table = data;
   Macro* macro = (Macro*)node;
-  Vector* args = NewVector();
+  Vector args;
+  VectorInit(&args);
   for (size_t i = 0; i < macro->args.length; i++) {
     String* a = macro->args.value.p[i];
-    VectorAppend(args, NewString(a->value));
+    VectorAppend(&args, NewString(a->value));
   }
+  // NewMacro copies the args (the element pointers) and the replacement text
+  // into the new macro, so the temporary vector and string are freed here.
+  // The arg element strings are now owned by the new macro's args vector.
+  String* replacement = NewString(macro->replacement_text.value);
   HashTableInsert(to_table, NewMacro(macro->name.value,
-                  macro->is_function_like, macro->varargs, args,
-                  NewString(macro->replacement_text.value),
+                  macro->is_function_like, macro->varargs, &args,
+                  replacement,
                   macro->location));
-
+  VectorDestruct(&args);
+  StringDelete(replacement);
 }
 
 static void CopyMacroTree(void* m, void* data) {
@@ -429,8 +435,13 @@ void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
     macro->undefined = false;
     return;
   }
-  macro = NewMacro(macro_name, false, false, NewVector(), &tokens,
+  // NewMacro copies the args into its own vector, so a temporary empty one is
+  // enough here (this macro is not function-like).
+  Vector args;
+  VectorInit(&args);
+  macro = NewMacro(macro_name, false, false, &args, &tokens,
                    SOURCE_LOCATION_COMMAND_LINE);
+  VectorDestruct(&args);
   HashTableInsert(&p->macros, macro);
   StringDestruct(&tokens);
 }
@@ -2814,6 +2825,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
     StringInit(&copy, tokenized_line.value);
     ReplaceMacrosInTokenizedLine(p, &copy, false);
     if (StringEqualString(&tokenized_line, &copy)) {
+      StringDestruct(&copy);
       break;
     }
     StringDestruct(&tokenized_line);
@@ -2837,6 +2849,7 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   // lexical rules (e.g. "*/" comment terminators and "#-32" immediates that
   // must not have spaces inserted).
   DetokenizeEx(p, &tokenized_line, line, !p->lex->assembler_mode);
+  StringDestruct(&tokenized_line);
 }
 
 
