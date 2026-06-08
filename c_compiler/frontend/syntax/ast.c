@@ -1969,7 +1969,8 @@ static void DeclarationListASTNodeDelete(ASTNode* node) {
       ASTNodeDelete(stmt);
     }
   }
-  VectorDestruct(vnode->declarations);
+  // declarations is heap-allocated (NewVector), so free the struct too.
+  VectorDelete(vnode->declarations);
   ASTNodeBaseDelete(node);
 }
 

@@ -759,11 +759,9 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   if (result != NULL) {
     if (declarations->length != 1) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
-      for (size_t i = 0; i < declarations->length; i++) {
-        ASTNodeDelete(declarations->value.p[i]);
-      }
-      VectorDelete(declarations);
     }
+    // result is a DeclarationListASTNode that owns `declarations`; its teardown
+    // frees the vector and its contents, so don't free them here.
     VectorDestruct(&attributes);
     return result;
   }
