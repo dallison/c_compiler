@@ -729,6 +729,20 @@ static void ConstantASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   }
 }
 
+// String constants own a heap-allocated String value; other constants store
+// it inline in the union.
+static bool ConstantOwnsString(const ASTNode* node) {
+  return node->op == AST_OP(string) || node->op == AST_OP(string_wide);
+}
+
+static void ConstantASTNodeDelete(ASTNode* node) {
+  ConstantASTNode* cnode = (ConstantASTNode*)node;
+  if (ConstantOwnsString(node) && cnode->value.string != NULL) {
+    StringDelete(cnode->value.string);
+  }
+  ASTNodeBaseDelete(node);
+}
+
 static ASTNode* ConstantASTNodeClone(const ASTNode* node,
                                      ASTNode* (*func)(ASTNode* node, void*),
                                      void* data) {
@@ -736,10 +750,15 @@ static ASTNode* ConstantASTNodeClone(const ASTNode* node,
   ConstantASTNode* to = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeBaseCopy(&to->base, node);
   memcpy(&to->value, &from->value, sizeof(to->value));
+  // The clone needs its own copy of the owned string so each node can free it.
+  if (ConstantOwnsString(node) && from->value.string != NULL) {
+    to->value.string = NewString(from->value.string->value);
+  }
   return func(&to->base, data);
 }
 
-static ASTNodeVirtuals constant_vtbl = {ASTNodeBaseDelete, ConstantASTNodePrint,
+static ASTNodeVirtuals constant_vtbl = {ConstantASTNodeDelete,
+                                        ConstantASTNodePrint,
                                         NULL, ConstantASTNodeClone, NULL, NULL};
 
 void IntConstantASTNodeInit(ConstantASTNode* node, int64_t value,
