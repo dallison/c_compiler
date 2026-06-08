@@ -477,6 +477,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     sym->type->info.function.body =
         NewCompoundStatementASTNode(body, syntax->lex->current_token_location);
+    // The body is hung off the function type, not reachable from the
+    // declaration AST, so register it as a teardown root of its own.
+    VectorAppend(&compiler->declaration_asts, sym->type->info.function.body);
     SyntaxNeedBracket(syntax, TOK(rbrace), TC(decl));
     ASTNode* decl = NewVariableDeclarationASTNode(sym, NULL,
                                                   syntax->lex->current_token_location);
