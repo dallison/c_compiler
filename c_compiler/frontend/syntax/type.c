@@ -584,6 +584,13 @@ void TypeParserReset(TypeParser* parser) {
   VectorInit(&parser->stack);
 }
 
+void TypeParserDestruct(TypeParser* parser) {
+  // Only frees the stack's backing array.  Any TypeRecords still referenced by
+  // the stack are owned elsewhere (the combined result type) and must not be
+  // freed here.
+  VectorDestruct(&parser->stack);
+}
+
 // Mapping for token vs type for parsing a type specifier.
 static struct {
   Token token;
@@ -692,6 +699,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       }
       type_record->qualifiers |= quals;
     }
+    TypeParserDestruct(&composite_parser);
   }
 
   result.type = type;
@@ -1211,6 +1219,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
 
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   VectorAppend(&parser->stack, func);
+  TypeParserDestruct(&proto_parser);
 }
  
 static void ParseArrayDecl(TypeParser* parser) {

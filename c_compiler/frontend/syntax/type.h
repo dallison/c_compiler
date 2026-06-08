@@ -211,6 +211,10 @@ void TypeRecordToString(TypeRecord* type, String* result);
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
                     Storage storage, enum ParserContext context);
 void TypeParserReset(TypeParser* parser);
+// Release the parser's working storage (the declarator stack).  Does not free
+// the TypeRecords the stack referenced; those are owned by the parsed type or
+// already consumed.
+void TypeParserDestruct(TypeParser* parser);
 
 PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
                                                    PartialTypeSpecifier* prev);

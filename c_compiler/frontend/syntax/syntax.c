@@ -433,6 +433,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         }
       }
       SyntaxNeedSemicolon(syntax, TC(openbra));
+      TypeParserDestruct(&arg_parser);
     }
     // We need a function body after the argument declarations.
     if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
@@ -559,9 +560,11 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
       SyntaxParseAttribute(syntax, attributes);
     } else {
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+      TypeParserDestruct(&parser);
       return;
     }
   }
+  TypeParserDestruct(&parser);
 }
 
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
@@ -759,6 +762,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
                                                  &attributes,
                                                  declarations);
   SyntaxCloseScope(syntax);
+  TypeParserDestruct(&parser);
   if (result != NULL) {
     if (declarations->length != 1) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
@@ -973,6 +977,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
 
   // Now we get a sequence of declarations, separated by commas.
   ParseLocalDeclarationList(&parser, type, storage, &attributes, declarations);
+  TypeParserDestruct(&parser);
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));

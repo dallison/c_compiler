@@ -365,6 +365,7 @@ static ASTNode* ParseGenericSelection(Syntax* syntax, TokenClass followers) {
       TypeRecord* type = TypeParserParseType(&parser, true);
       assoc_sym = TypeParserParseDeclarator(&parser, type);
       assoc_type = assoc_sym != NULL ? assoc_sym->type : type;
+      TypeParserDestruct(&parser);
     }
     SyntaxNeedBracket(syntax, TOK(colon), followers);
     ASTNode* expr = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
@@ -501,6 +502,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
         actual =
             NewIntConstantASTNode(0, type, syntax->lex->current_token_location);
         SymbolDelete(sym);  // Don't need this.
+        TypeParserDestruct(&parser);
       } else {
         actual = SyntaxParseSingleExpression(syntax, followers);
       }
@@ -784,11 +786,13 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
         result = GetSizeofVLA(sym->type,
                               syntax->lex->current_token_location);
         SymbolDelete(sym);
+        TypeParserDestruct(&parser);
         goto done;
       }
       size = sym->type->size;
       SymbolDelete(sym);
     }
+    TypeParserDestruct(&parser);
     assert(size != -1);
     result = NewSizeofASTNodeWithKnownSize(size,
                                            syntax->lex->current_token_location);
@@ -934,6 +938,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
           // The compound literal will create its own symbol.
           SymbolDelete(sym);
         }
+        TypeParserDestruct(&parser);
         return result;
       }
       ASTNode* expr = ParseCastExpression(syntax, followers);
@@ -943,6 +948,7 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       if (sym != NULL) {
         SymbolDelete(sym);
       }
+      TypeParserDestruct(&parser);
       return result;
     } else {
       // Not a type name.  We have consumed the open paren so we
