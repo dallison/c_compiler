@@ -1887,12 +1887,23 @@ static void* EvaluateExpression(Preprocessor* p, String* expr_string) {
       if (EvaluateIntegerExpression(expr, &value)) {
         controlling_value = value == 0 ? NULL : &true_value;
       }
+      // This expression AST is a throwaway used only to compute the #if
+      // condition; release it so its type records aren't leaked.
+      ASTNodeDelete(expr);
     }
   }
   abort_on_error = prev_abort_on_error;
   SyntaxDestruct(&syntax);
-  lex.source = NULL;  // Prevent Lex from freeing source.
+  // The source borrows the caller-owned expression string, so we can't let
+  // SourceDestruct free it (it would free a non-owned string).  Detach the
+  // source, destruct the rest of the lexer, then free the source struct and
+  // its own strings by hand.
+  Source* src = lex.source;
+  lex.source = NULL;
   LexDestruct(&lex);
+  StringDestruct(&src->filename);
+  StringDestruct(&src->original);
+  free(src);
   p->lex = prev_lex;
 
   return controlling_value;
