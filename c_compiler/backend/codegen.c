@@ -88,9 +88,11 @@ void GeneratorDestruct(Generator* gen) {
   ListTraverse(&gen->code, DestructIRNode, NULL);
   ListDestruct(&gen->code);
 
-  VectorDestruct(&gen->int_constant_pool);
-  VectorDestruct(&gen->fp_constant_pool);
-  VectorDestruct(&gen->variable_pool);
+  // The pools own the PoolEntry wrappers (the pooled IR nodes themselves live
+  // in gen->code and were destructed above), so free the entries here.
+  VectorDestructWithContents(&gen->int_constant_pool, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&gen->fp_constant_pool, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&gen->variable_pool, NULL, /*free_element=*/true);
 
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
