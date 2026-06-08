@@ -245,6 +245,10 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
   SymbolDelete(gen->memset);
   SymbolDelete(gen->__tls_get_addr);
   
+  // The fixups vector owns the heap-allocated TargetBranchFixup structs (flat,
+  // no nested allocations); free them together with the vector backing.
+  VectorDestructWithContents(&gen->fixups, NULL, /*free_element=*/true);
+
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];

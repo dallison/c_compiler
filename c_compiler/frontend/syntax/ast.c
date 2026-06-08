@@ -2168,6 +2168,9 @@ static void SwitchStatementASTNodeDelete(ASTNode* node) {
   if (snode->stmt != NULL) {
     ASTNodeDelete(snode->stmt);
   }
+  // The cases vector holds non-owning pointers to case nodes (owned by the
+  // statement subtree); free only the vector's backing array.
+  VectorDestruct(&snode->cases);
   ASTNodeBaseDelete(node);
 }
 
