@@ -1170,6 +1170,10 @@ void CompilerDestruct(Compiler* compiler) {
   PreprocessorDestruct(&compiler->preprocessor);
   SyntaxDestruct(&compiler->syntax);
   LexDestruct(&compiler->lex);
+
+  // Everything that references TypeRecords has now been torn down, so the type
+  // arena's struct memory can be reclaimed in one shot.
+  TypeRecordArenaRelease();
 }
 
 void CompilerDelete(Compiler* compiler) {

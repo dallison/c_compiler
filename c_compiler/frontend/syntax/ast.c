@@ -40,6 +40,13 @@ typedef struct ASTArenaBlock {
 
 static ASTArenaBlock* ast_arena = NULL;
 
+// Every node handed out by ASTArenaAlloc, in allocation order.  Used at
+// teardown to destruct every node (releasing its type references and owned
+// resources), including nodes that semantic analysis replaced or discarded and
+// which are therefore no longer reachable from any declaration root.
+static Vector ast_all_nodes;
+static bool ast_all_nodes_initialized = false;
+
 static ASTArenaBlock* NewASTArenaBlock(size_t capacity) {
   ASTArenaBlock* block = malloc(capacity + sizeof(ASTArenaBlock));
   block->next = NULL;
@@ -61,12 +68,26 @@ void* ASTArenaAlloc(size_t size) {
   void* p = ast_arena->data + ast_arena->used;
   ast_arena->used += aligned;
   memset(p, 0, size);
+  if (!ast_all_nodes_initialized) {
+    VectorInit(&ast_all_nodes);
+    ast_all_nodes_initialized = true;
+  }
+  VectorAppend(&ast_all_nodes, p);
   return p;
 }
 
-// Free all arena blocks.  Call only after every node has been destructed (their
-// owned resources released) since the node structs themselves become invalid.
+// Free all arena blocks.  First destruct every node so the non-arena resources
+// they own (type references, owned strings/vectors) are released; this is
+// idempotent (see ASTNodeDelete) so nodes already destructed via a declaration
+// root are skipped.  Then free the node structs wholesale.
 void ASTArenaRelease(void) {
+  for (size_t i = 0; i < ast_all_nodes.length; i++) {
+    ASTNodeDelete((ASTNode*)ast_all_nodes.value.p[i]);
+  }
+  if (ast_all_nodes_initialized) {
+    VectorDestruct(&ast_all_nodes);
+    ast_all_nodes_initialized = false;
+  }
   ASTArenaBlock* block = ast_arena;
   while (block != NULL) {
     ASTArenaBlock* next = block->next;

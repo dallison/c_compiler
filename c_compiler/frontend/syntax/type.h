@@ -171,6 +171,9 @@ TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
 void TypeRecordPrint(TypeRecord* record, FILE* fp);
 void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* fp);
 void TypeRecordDelete(TypeRecord* record);
+// Free every TypeRecord struct allocated from the type arena.  Call once, at
+// CompilerDestruct, after all type-referencing structures are torn down.
+void TypeRecordArenaRelease(void);
 TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);

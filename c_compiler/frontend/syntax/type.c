@@ -26,6 +26,61 @@
 
 static int next_type_id = 0;
 
+//
+// TypeRecord arena allocator.
+//
+// TypeRecords are reference counted and shared widely (AST nodes, symbols, IR,
+// target instructions) with ownership that is hard to balance precisely, so a
+// stray ref leaves the 96-byte struct leaked at exit.  Like the AST, every
+// TypeRecord struct is allocated from a bump arena and the whole arena is freed
+// in one shot at CompilerDestruct (TypeRecordArenaRelease).  Reference counting
+// still drives release of each record's *owned* auxiliary resources (function
+// prototype symbols, struct/enum info, VLA size AST); only the struct itself is
+// no longer individually free()d.
+typedef struct TypeArenaBlock {
+  struct TypeArenaBlock* next;
+  size_t used;
+  size_t capacity;
+  char data[];
+} TypeArenaBlock;
+
+#define TYPE_ARENA_BLOCK_SIZE (256 * 1024)
+
+static TypeArenaBlock* type_arena = NULL;
+
+static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
+  TypeArenaBlock* block = malloc(capacity + sizeof(TypeArenaBlock));
+  block->next = NULL;
+  block->used = 0;
+  block->capacity = capacity;
+  return block;
+}
+
+static TypeRecord* TypeArenaAlloc(void) {
+  size_t aligned = (sizeof(TypeRecord) + 15) & ~(size_t)15;
+  if (type_arena == NULL || type_arena->used + aligned > type_arena->capacity) {
+    TypeArenaBlock* block = NewTypeArenaBlock(TYPE_ARENA_BLOCK_SIZE);
+    block->next = type_arena;
+    type_arena = block;
+  }
+  void* p = type_arena->data + type_arena->used;
+  type_arena->used += aligned;
+  return (TypeRecord*)p;
+}
+
+// Free every TypeRecord struct.  Call only after all type-referencing data
+// structures have been torn down (their TypeRecordDelete calls have released
+// the auxiliary resources); the struct memory becomes invalid afterwards.
+void TypeRecordArenaRelease(void) {
+  TypeArenaBlock* block = type_arena;
+  while (block != NULL) {
+    TypeArenaBlock* next = block->next;
+    free(block);
+    block = next;
+  }
+  type_arena = NULL;
+}
+
 static void Trap(TypeRecord* r) {
   if (r->id == 1234) {
     printf("");
@@ -118,7 +173,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   if (type == kTypeUnsigned || type == kTypeSigned) {
     type |= kTypeInt;
   }
-  TypeRecord* record = malloc(sizeof(TypeRecord));
+  TypeRecord* record = TypeArenaAlloc();
   record->id = next_type_id++;
   record->type = type;
   record->qualifiers = quals;
@@ -162,7 +217,8 @@ void TypeRecordDelete(TypeRecord* record) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
     }
-    free(record);
+    // The struct itself lives in the type arena and is reclaimed wholesale by
+    // TypeRecordArenaRelease; only its owned auxiliary resources are freed here.
   }
 }
 
@@ -252,7 +308,7 @@ static ASTNode* CloneVLAExpr(ASTNode* node, void* data) {
 // Copy a type record and chain it to its existing next,
 // incrementing the ref count.
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
-  TypeRecord* r = malloc(sizeof(TypeRecord));
+  TypeRecord* r = TypeArenaAlloc();
   memcpy(r, record, sizeof(TypeRecord));
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
