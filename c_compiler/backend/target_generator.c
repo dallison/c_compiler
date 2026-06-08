@@ -250,6 +250,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
     TargetBasicBlockDelete(block);
   }
+  VectorDestruct(&gen->basic_blocks);
 }
 
 TargetInstruction* TargetFirstInstruction(TargetGenerator* target) {

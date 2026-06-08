@@ -99,6 +99,7 @@ void GeneratorDestruct(Generator* gen) {
     BasicBlock* block = gen->basic_blocks.value.p[i];
     BasicBlockDelete(block);
   }
+  VectorDestruct(&gen->basic_blocks);
 }
 
 // Check if the node is using (reading) a variable.  If so,
