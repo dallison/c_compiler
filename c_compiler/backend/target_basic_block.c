@@ -599,6 +599,23 @@ static void DecrementOperandUses(TargetInstruction* inst) {
   }
   for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
+      // The liveness use counter (ResetInstructionUses) is the number of
+      // distinct user instructions (the users list is deduplicated), so an
+      // instruction that references the same value in several operand slots
+      // (e.g. `cmp a, a` from `a == a`) must only decrement it once.  Skip an
+      // operand that already appeared in an earlier slot, otherwise the count
+      // underflows to zero early and the value is wrongly dropped from the
+      // block's live sets.
+      bool duplicate = false;
+      for (int j = 0; j < i; j++) {
+        if (inst->operand[j] == inst->operand[i]) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       if (inst->operand[i]->uses > 0) {
         inst->operand[i]->uses--;
         assert(inst->operand[i]->uses >= 0);

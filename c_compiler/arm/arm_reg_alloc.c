@@ -278,6 +278,13 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
+          // A variable register with no users cannot be spilled (there is no
+          // use site to reload it at, see SpillInstruction).  Such a register
+          // holds a dead value, but skip it as a victim so we pick a register
+          // we can actually spill.
+          if (ARMIsVarRegister(owner) && owner->users.length == 0) {
+            continue;
+          }
           int cost = SpillCost(owner);
           if (cost < min_cost) {
             min_cost = cost;
