@@ -1013,6 +1013,25 @@ static TargetInstruction* SetDestOrMoveToArgReg(ARMGenerator* g,
       break;
     }
   }
+  // Only pin the producer's result directly into the (caller-saved) argument
+  // register when that result is consumed solely by this argument.  IR basic
+  // blocks are not split by calls, so a value with another use later in the
+  // same IR block -- after an intervening call that clobbers the argument
+  // registers -- would read the wrong value.  This happens when GVN merges a
+  // value feeding a call argument with one feeding a later assignment (e.g. the
+  // `(float)'a'` conversion shared by `floatfunc('a')` and `float f = 'a'`).
+  // The argument node is usually a `pusharg` wrapper, so look through it to the
+  // value actually producing the register.  With more than one user, keep the
+  // value in its own register (which the allocator can preserve) and emit an
+  // explicit move into the argument register instead.
+  IRNode* value_node = from_node;
+  if (value_node != NULL && (int)value_node->opcode == (int)IR_OP(pusharg) &&
+      value_node->inputs.length > 0) {
+    value_node = value_node->inputs.value.p[0];
+  }
+  if (value_node != NULL && value_node->outputs.length > 1) {
+    candidate = false;
+  }
   // Only redirect the producer's destination straight into the argument
   // register when the producer is the most recently emitted instruction.
   // Arguments are moved into their registers in reverse order, so a preceding
