@@ -4945,7 +4945,14 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
   if (TypeIsFloatingPoint(entry->pooled->type)) {
-    if (UseRegisterForVariable(g, entry->pooled)) {
+    // See the integer case below: a stack-passed argument has no entry load that
+    // assigns its register, so it must not be promoted to a register variable.
+    bool arg_on_stack = false;
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      arg_on_stack = location.type == kArgLocationPushed;
+    }
+    if (UseRegisterForVariable(g, entry->pooled) && !arg_on_stack) {
       int reg = g->num_fp_reg_vars++;
       entry->pooled->data.ivalue = ARM_REG_VAR | reg;
       SetDebugRegisterLocation(entry, reg);
@@ -5030,7 +5037,16 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer.
-    if (UseRegisterForVariable(g, entry->pooled)) {
+    // A stack-passed argument cannot be promoted to a register variable here:
+    // there is no entry load that assigns the variable's register (only the
+    // register-passed path emits a move whose dest is the variable), so it would
+    // reach emission with no register.  Leave such arguments on the stack.
+    bool arg_on_stack = false;
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      arg_on_stack = location.type == kArgLocationPushed;
+    }
+    if (UseRegisterForVariable(g, entry->pooled) && !arg_on_stack) {
       int reg = g->num_int_reg_vars++;
       entry->pooled->data.ivalue = ARM_REG_VAR | reg;
       SetDebugRegisterLocation(entry, reg);
