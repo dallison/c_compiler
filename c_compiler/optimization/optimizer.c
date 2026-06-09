@@ -89,6 +89,16 @@ static int64_t BitMask(IRNode* node) {
 // processors so if we can convert it to a shift the program might run faster.
 static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
                                IRNode* node) {
+  // A non-NULL dest means this node's result must be written into a specific
+  // merge temporary (e.g. the shared tmp for the arms of `a || b`, `a && b` or
+  // a `?:`).  The simplifications below replace `node` with one of its inputs,
+  // which silently drops that dest linkage -- the merge tmp would then never
+  // receive the value (e.g. `x || (0 + f())` folds `0 + f()` to `f()` and loses
+  // the assignment of f()'s result into the `||` result tmp).  Skip strength
+  // reduction in that case; it only costs a minor, rare optimization.
+  if (node->dest != NULL) {
+    return;
+  }
   switch (node->opcode) {
     case IR_OP(addi):
       // Adding constant 0 is a nop.
