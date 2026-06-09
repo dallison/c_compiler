@@ -214,6 +214,16 @@ static void FreeRegisters(ARMRegisterAllocator* allocator,
       if (ARMIsVarRegister(op)) {
         continue;
       }
+      // Inside a loop, a value that is live-out of the block is read again on a
+      // later iteration through the back edge, so its linear "last use" in this
+      // block is not really its last use.  Freeing its register here would let a
+      // subsequent temp reuse it and clobber the still-live value.  Restrict
+      // this to loop blocks so straight-line code keeps freeing registers
+      // promptly (avoiding needless register pressure).
+      if (inst->block != NULL && inst->block->loop_nesting > 0 &&
+          BitSetContains(&inst->block->output_ids, op->id)) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
       if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
@@ -737,11 +747,18 @@ static void InitializeBasicBlockRegisters(ARMRegisterAllocator* allocator,
         (inst->flags & TARGET_INST_SPILLED) != 0) {
       continue;
     }
-    if (inst->uses == 0) {
-      continue;
-    }
+    // A value listed in block->inputs is live on entry to this block.  Reserve
+    // its register even when the linear use counter has already reached zero:
+    // that happens for a value read again across a loop back edge after its
+    // single static use was processed in an earlier (dominator-order) block,
+    // e.g. a hoisted loop-invariant constant used by one switch arm.  Without
+    // reserving it, a temp in this block could reuse and clobber the still-live
+    // value.  Only claim the register if it is not already owned by another
+    // live-in value processed above.
     assert(inst->reg != NULL);
-    inst->reg->owner = inst;
+    if (inst->reg->owner == NULL || inst->reg->owner == inst) {
+      inst->reg->owner = inst;
+    }
   }
 }
 
