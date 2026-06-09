@@ -52,13 +52,41 @@ static void HoistInstruction(Generator* gen, IRNode* inst) {
   assert(false);
 }
 
+typedef struct CodeMotionContext {
+  Generator* gen;
+  // True if any block inside a loop contains a call or a memory write.  When
+  // set we must not hoist memory LOADS out of loops: a load is only loop
+  // invariant if nothing in the loop can change the loaded location, and we
+  // have no alias analysis to prove that.  (A call may modify any global, and a
+  // store may alias the loaded address.)  Pure register expressions remain
+  // hoistable.
+  bool loop_writes_memory;
+} CodeMotionContext;
+
+// Pre-pass: detect whether any loop block performs a call or a memory write.
+static void ScanLoopWrites(BasicBlock* block, void* data) {
+  CodeMotionContext* ctx = data;
+  if (block->loop_nesting == 0 || ctx->loop_writes_memory) {
+    return;
+  }
+  for (IRNode* inst = BasicBlockBegin(block);
+       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+       inst = IRNext(inst)) {
+    if (IRIsCall(inst) || IRIsStore(inst)) {
+      ctx->loop_writes_memory = true;
+      return;
+    }
+  }
+}
+
 // Given a basic block, check that it's in a loop and if so,
 // look for instructions that have no side effects but have all their inputs
 // coming from a dominator block (not this block).  For each of these,
 // move them to the closest dominator block that satisfies all their
 // inputs.
 void PerformCodeMotion(BasicBlock* block, void* data) {
-  Generator* gen = data;
+  CodeMotionContext* ctx = data;
+  Generator* gen = ctx->gen;
   if (block->loop_nesting == 0) {
     return;
   }
@@ -72,6 +100,12 @@ void PerformCodeMotion(BasicBlock* block, void* data) {
             !IRIsCall(inst) &&
             !IRIsVariable(inst) && inst->opcode != IR_OP(literalref) &&
             inst->inputs.length > 0;
+    // A memory load may only be hoisted out of a loop if nothing in the loop
+    // writes memory; otherwise the hoisted value goes stale (e.g. a global read
+    // in a loop that also calls a function which updates that global).
+    if (is_candidate && IRIsLoad(inst) && ctx->loop_writes_memory) {
+      is_candidate = false;
+    }
     if (is_candidate) {
       for (size_t i = 0; i < inst->inputs.length; i++) {
         IRNode* input = inst->inputs.value.p[i];
@@ -107,5 +141,9 @@ void PerformCodeMotion(BasicBlock* block, void* data) {
 }
 
 void CodeMotionOptimization(Generator* gen) {
-  BasicBlockTraverseDominatorTree(gen, gen->entry_block, PerformCodeMotion, kTraversePreOrder, gen);
+  CodeMotionContext ctx = {gen, false};
+  BasicBlockTraverseDominatorTree(gen, gen->entry_block, ScanLoopWrites,
+                                  kTraversePreOrder, &ctx);
+  BasicBlockTraverseDominatorTree(gen, gen->entry_block, PerformCodeMotion,
+                                  kTraversePreOrder, &ctx);
 }
