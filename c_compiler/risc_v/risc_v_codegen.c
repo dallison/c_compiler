@@ -1048,7 +1048,33 @@ static TargetInstruction* SetDestOrMoveToArgReg(RVGenerator* rv,
       break;
     }
   }
-  if (candidate) {
+  // Only pin the producer's result directly into the (caller-saved) argument
+  // register when that result is consumed solely by this argument.  IR basic
+  // blocks are not split by calls, so a value with another use later -- after
+  // an intervening call that clobbers the argument registers -- would read the
+  // wrong value.  This happens when GVN merges a value feeding a call argument
+  // with the same value feeding other arguments/blocks (e.g. the address of a
+  // local `&a` shared by every printf/strcmp call in a function).  The argument
+  // node is usually a `pusharg` wrapper, so look through it to the value
+  // actually producing the register.  With more than one user, keep the value
+  // in its own register (which the allocator can preserve in a callee-saved
+  // register) and emit an explicit move into the argument register instead.
+  IRNode* value_node = from_node;
+  if (value_node != NULL && (int)value_node->opcode == (int)IR_OP(pusharg) &&
+      value_node->inputs.length > 0) {
+    value_node = value_node->inputs.value.p[0];
+  }
+  if (value_node != NULL && value_node->outputs.length > 1) {
+    candidate = false;
+  }
+  // Only redirect the producer's destination straight into the argument
+  // register when the producer is the most recently emitted instruction.
+  // Arguments are moved into their registers in reverse order, so a preceding
+  // argument's value may already have been moved out by an instruction emitted
+  // after this producer; giving an older producer an argument register as its
+  // destination would order that (clobbering) write incorrectly.  Emit an
+  // explicit move at the current position instead.
+  if (candidate && TargetNext(from) == NULL) {
     return SetDestOrMove(rv, from, to, rmov_opcode);
   }
   Emit(rv, NewInstruction2(rmov_opcode, to, from));
@@ -4066,34 +4092,32 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
-        // Less than a pointer, passed in reg
-        if (UseRegisterForVariable(rv, entry->pooled)) {
-          // TODO: if this is a leaf procedure we can keep them in the arg regs.
-          int reg = rv->num_int_reg_vars++;
-          entry->pooled->data.ivalue = RV_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
-          ArgLocation location = ArgumentLocation(entry, args);
-          LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
+        // A struct/union that fits in a single register is passed by value in
+        // an integer argument register (or on the stack).  It must NOT be kept
+        // in a register variable: a field access such as `a.x` (and `&a`) needs
+        // the struct's address, and the frontend does not mark a by-value struct
+        // parameter as address-taken, so UseRegisterForVariable would wrongly
+        // promote it.  Home the incoming value into a stack slot exactly like a
+        // pointer-sized integer argument so the prologue spills it and the
+        // address computation refers to that slot.
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          int offset = -24 - (int)rv->saved_regs.length * 8;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, RV_FP_REG, offset, 8, false);
+          entry->pooled->data.ivalue = offset;
+          VectorAppend(&rv->saved_regs, saved);
+          rv->num_int_arg_regs++;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else if (location.type == kArgLocationPushed ||
+                   location.type == kArgLocationPassedByReferenceOnStack) {
+          entry->pooled->data.ivalue = (int32_t)location.location.offset;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         } else {
-          ArgLocation location = ArgumentLocation(entry, args);
-          if (location.type == kArgLocationRegister) {
-            int offset = -24 - (int)rv->saved_regs.length * 8;
-            SavedArgumentRegister* saved = NewSavedArgumentRegister(
-                (int)location.location.offset, RV_FP_REG, offset, 8, false);
-            entry->pooled->data.ivalue = offset;
-            VectorAppend(&rv->saved_regs, saved);
-            rv->num_int_arg_regs++;
-            SetDebugStackLocation(entry, entry->pooled->data.ivalue);
-          } else if (location.type == kArgLocationPushed ||
-                     location.type == kArgLocationPassedByReferenceOnStack) {
-            entry->pooled->data.ivalue = (int32_t)location.location.offset;
-            SetDebugStackLocation(entry, entry->pooled->data.ivalue);
-          } else {
-            AlignOffset(entry, var_offset);
-            entry->pooled->data.ivalue = *var_offset;
-            SetDebugStackLocation(entry, *var_offset);
-            *var_offset += size;
-          }
+          AlignOffset(entry, var_offset);
+          entry->pooled->data.ivalue = *var_offset;
+          SetDebugStackLocation(entry, *var_offset);
+          *var_offset += size;
         }
       } else {
         // Passed by reference.  This means it is pushed onto the stack

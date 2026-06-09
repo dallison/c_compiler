@@ -227,7 +227,15 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
     if (RVIsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
       if (base->opcode == (TargetOpcode)RV_OP(la) &&
-          !compiler->pic) {
+          !compiler->pic && RVIntValue(inst->operand[1]) == 0 &&
+          base->users.length == 1) {
+        // Fold the la's %pcrel_lo into the load.  Only safe when the load
+        // reads exactly the symbol (offset 0 -- %pcrel_lo cannot carry an
+        // extra constant) and the la feeds nothing else.  A la shared by
+        // several loads/stores (e.g. copying a multi-word struct) must keep
+        // materializing the full address: folding would replace this access's
+        // offset with the relocation and leave the other accesses reading from
+        // the bare auipc (high bits only).
         // Insert label for auipc instruction.
         TargetInstruction* label =
             TargetNewInstruction((TargetOpcode)RV_OP(label));
@@ -260,7 +268,11 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       }
     } else if (RVIsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
-      if (base->opcode == (TargetOpcode)RV_OP(la) && !compiler->pic) {
+      if (base->opcode == (TargetOpcode)RV_OP(la) && !compiler->pic &&
+          RVIntValue(inst->operand[2]) == 0 && base->users.length == 1) {
+        // Fold only for a zero-offset store whose la feeds nothing else; see
+        // the load case above for why a nonzero offset or a shared la base
+        // (e.g. a multi-word struct copy) must not be folded.
         // Insert label for auipc instruction.  Use the basic-block-aware
         // helper (as in the load case): inserting via the raw list helper
         // fails to update block->code when the auipc is the first instruction
