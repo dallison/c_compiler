@@ -260,6 +260,7 @@ static void BranchMapDestruct(MapKeyValue* kv) {
 static void LabelMapDestruct(MapKeyValue* kv) {
   StringDelete((String*)kv->key.p);
   LabelDestruct((Label*)kv->value.p);
+  free(kv->value.p);
 }
 
 W65C02Assembler* New6502Assembler(String* infile, String* outfile) {

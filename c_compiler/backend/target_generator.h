@@ -200,6 +200,7 @@ typedef struct TargetGenerator {
   bool is_void;           // Function returns void.
   
   List code;                         // The code.
+  Vector deleted_instructions;       // Removed instructions, freed at teardown.
   TargetInstruction* last_constant;  // Last constant.
   TargetInstruction* first_symbol;   // First symbol.
   TargetInstruction* last_symbol;    // Last symbol.

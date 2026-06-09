@@ -200,6 +200,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->entry_block = NULL;
   target->exit_block = NULL;
 
+  VectorInit(&target->deleted_instructions);
   ListInit(&target->code);
   target->stack_frame_size = 0;
   target->last_constant = NULL;
@@ -241,6 +242,25 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     VectorDestruct(&inst->users);
   }
   ListDestruct(&gen->code);
+  // Instructions removed during code generation were parked here (see
+  // TargetDeleteInstruction); their users vectors were already destructed at
+  // removal time, so just free the structs.  An instruction can be removed more
+  // than once, so deduplicate by pointer to avoid a double free.
+  Map freed_instructions;
+  MapInitForPointerKeys(&freed_instructions);
+  for (size_t i = 0; i < gen->deleted_instructions.length; i++) {
+    TargetInstruction* inst = gen->deleted_instructions.value.p[i];
+    if (MapFindPointerKey(&freed_instructions, inst) != NULL) {
+      continue;
+    }
+    MapKeyValue kv;
+    kv.key.p = inst;
+    kv.value.p = inst;
+    MapInsert(&freed_instructions, kv);
+    free(inst);
+  }
+  MapDestruct(&freed_instructions);
+  VectorDestruct(&gen->deleted_instructions);
   StringDestruct(&gen->function_name);
   SymbolDelete(gen->memcpy);
   SymbolDelete(gen->memset);
@@ -297,6 +317,11 @@ void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst) {
   }
   VectorDestruct(&inst->users);
   ListDeleteElement(&target->code, &inst->header);
+  // Removed from the code list, so TargetGeneratorDestruct's ListDestruct will
+  // not free it.  We cannot free it now either: branches/fixups and the
+  // assembler can still hold pointers to deleted instructions during the rest of
+  // code generation.  Park it in a graveyard and free it in bulk at teardown.
+  VectorAppend(&target->deleted_instructions, inst);
 }
 
 void TargetAddUser(TargetInstruction* inst, TargetInstruction* user) {

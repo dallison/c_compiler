@@ -648,7 +648,11 @@ typedef struct W65C02Generator {
 
   Map intrinsics;
   int next_intrinsic_index;
-  
+
+  // Owns every Symbol created by CreateRuntimeSymbol (the __enter/__leave/...
+  // runtime helpers), which are also referenced by named fields above.
+  Vector runtime_symbols;
+
   Vector branches;
   
   TargetInstruction* struct_return_inst;

@@ -420,7 +420,9 @@ static Symbol* CreateRuntimeSymbol(W65C02Generator* g, const char* name) {
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.unknown_args = true;
   TypeRecordChain(func, base);
-  return NewSymbol(name, func, STO(extern));
+  Symbol* sym = NewSymbol(name, func, STO(extern));
+  VectorAppend(&g->runtime_symbols, sym);
+  return sym;
 }
 
 static Intrinsic* CreatePlainIntrinsic(W65C02Generator* g, const char* name, Type type) {
@@ -471,7 +473,9 @@ static void InitRegVars(RegisterVariableSet* vars, int max, W65C02RegisterType t
 void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   TargetGeneratorInit(&g->base, gen, &virtuals);
   g->gen = gen;
-  
+
+  VectorInit(&g->runtime_symbols);
+
 #define RUNTIME_SYM(name) g->name = CreateRuntimeSymbol(g, "__" #name)
 
   RUNTIME_SYM(enter);
@@ -769,10 +773,22 @@ W65C02Generator* New6502Generator(Generator* gen) {
   return g;
 }
 
+static void DeleteIntrinsic(MapKeyValue* kv) {
+  Intrinsic* intrinsic = kv->value.p;
+  SymbolDelete(intrinsic->symbol);
+  free(intrinsic);
+}
+
 void W65C02GeneratorDestruct(W65C02Generator* g) {
   TargetGeneratorDestruct(&g->base);
   VectorDestruct(&g->branches);
   W65C02RegisterAllocatorDestruct(&g->register_allocator);
+  // The intrinsics map owns its Intrinsic values, each of which owns a Symbol.
+  // The keys are static string literals so they need no freeing.
+  MapDestructWithContents(&g->intrinsics, DeleteIntrinsic);
+  VectorDestructWithContents(&g->runtime_symbols,
+                             (VectorElementDestructor)SymbolDelete,
+                             /*free_element=*/false);
 }
 
 void W65C02GeneratorDelete(W65C02Generator* g) {
