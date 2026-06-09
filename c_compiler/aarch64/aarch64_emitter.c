@@ -991,17 +991,27 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\n");
       break;
       
-    case AARCH64_OP(b): {
-      assert(inst->operand[0] != NULL);
-      assert(inst->operand[1] != NULL);
-      TargetInstruction* cond = inst->operand[0];
-      char condbuf[8] = {0};
-      if (((int)cond->opcode != (int)AARCH64_OP(al))) {
-        snprintf(condbuf, sizeof(condbuf), ".%s", AARCH64OpcodeName(cond->opcode));
-      }
-      fprintf(fp, "%s .%s_label_%d\n", condbuf, func_name, inst->operand[1]->id);
-      break;
+  case AARCH64_OP(b): {
+    assert(inst->operand[0] != NULL);
+    assert(inst->operand[1] != NULL);
+    TargetInstruction* cond = inst->operand[0];
+    TargetInstruction* dest = inst->operand[1];
+    char condbuf[8] = {0};
+    if (((int)cond->opcode != (int)AARCH64_OP(al))) {
+      snprintf(condbuf, sizeof(condbuf), ".%s", AARCH64OpcodeName(cond->opcode));
     }
+    if (((int)dest->opcode == (int)AARCH64_OP(symbol))) {
+      // Tail-call branch to a function symbol (not a local label).
+      fprintf(fp, "%s %s\n", condbuf,
+              TargetSymbolName(((TargetSymbol*)dest)->symbol, symbuf,
+                               sizeof(symbuf)));
+    } else if (((int)dest->opcode == (int)AARCH64_OP(named_label))) {
+      fprintf(fp, "%s %s\n", condbuf, ((TargetNamedLabel*)dest)->name);
+    } else {
+      fprintf(fp, "%s .%s_label_%d\n", condbuf, func_name, dest->id);
+    }
+    break;
+  }
       
     case AARCH64_OP(br):
       fprintf(fp, "%s\n",
@@ -1044,12 +1054,27 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
     // (d).  A single instruction-wide "size" cannot describe both, so print the
     // destination at the instruction's own size and the source at its
     // producer's size.
+    case AARCH64_OP(fcvtsd):
+    case AARCH64_OP(fcvtds): {
+      // fcvtsd widens a single (s) to a double (d); fcvtds narrows a double
+      // (d) to a single (s).  The source width is fixed by the conversion, not
+      // by the producer's tracked size (a float register variable lives in the
+      // same physical register as a double and may report a 64-bit size).
+      assert(inst->reg != NULL);
+      assert(inst->operand[0] != NULL);
+      int src_size = ((AARCH64Opcode)inst->opcode == AARCH64_OP(fcvtsd))
+                         ? kSize32Bit
+                         : kSize64Bit;
+      fprintf(fp, "%s, %s\n",
+              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+              GetRegisterName(inst->operand[0], src_size, buf2, sizeof(buf2)));
+      break;
+    }
+
     case AARCH64_OP(scvtf):
     case AARCH64_OP(ucvtf):
     case AARCH64_OP(fcvtns):
     case AARCH64_OP(fcvtnu):
-    case AARCH64_OP(fcvtsd):
-    case AARCH64_OP(fcvtds):
     case AARCH64_OP(fcvt): {
       assert(inst->reg != NULL);
       assert(inst->operand[0] != NULL);

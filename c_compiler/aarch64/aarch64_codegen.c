@@ -1048,6 +1048,25 @@ static TargetInstruction* SetDestOrMoveToArgReg(AARCH64Generator* g,
       break;
     }
   }
+  // Only pin the producer's result directly into the (caller-saved) argument
+  // register when that result is consumed solely by this argument.  IR basic
+  // blocks are not split by calls, so a value with another use later in the
+  // same IR block -- after an intervening call that clobbers the argument
+  // registers -- would read the wrong value.  This happens when GVN merges a
+  // value feeding a call argument with one feeding a later assignment (e.g. the
+  // `(float)'a'` conversion shared by `floatfunc('a')` and `float f = 'a'`).
+  // The argument node is usually a `pusharg` wrapper, so look through it to the
+  // value actually producing the register.  With more than one user, keep the
+  // value in its own register (which the allocator can preserve) and emit an
+  // explicit move into the argument register instead.
+  IRNode* value_node = from_node;
+  if (value_node != NULL && (int)value_node->opcode == (int)IR_OP(pusharg) &&
+      value_node->inputs.length > 0) {
+    value_node = value_node->inputs.value.p[0];
+  }
+  if (value_node != NULL && value_node->outputs.length > 1) {
+    candidate = false;
+  }
   // Only redirect the producer's destination straight into the argument
   // register when the producer is the most recently emitted instruction.
   // Arguments are moved into their registers in reverse order, so a preceding
@@ -1482,7 +1501,10 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
         } else {
           c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)bits), kSize32Bit);
         }
-        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fcvt), c),
+        // fmov Sd, Wn reinterprets the integer bit pattern as a single; fcvt
+        // is an FP-to-FP precision conversion and cannot take a general
+        // register source.
+        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), c),
                                           kSize32Bit));
       }
       case IR_OP(constd): {
@@ -1495,7 +1517,10 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
           c = MoveImmediate(g, GetIntConstant(g, NULL, kTargetType64Bit, bits), kSize64Bit);
 
         }
-        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fcvt), c),
+        // fmov Dd, Xn reinterprets the integer bit pattern as a double; fcvt
+        // is an FP-to-FP precision conversion and cannot take a general
+        // register source.
+        return Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), c),
                                           kSize64Bit));
       }
       default:
@@ -2639,16 +2664,14 @@ static TargetInstruction* LowerBranch(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
-  // If we are leaf and the branch is a return branch we can just emit
-  // the ret itself rather than branching to it.  For a leaf there
-  // is no stack frame restore.
-  bool is_leaf = g->base.num_calls == 0 && OptLevel1() &&
-                 !g->not_leaf && g->base.stack_frame_size == 0;
-  if (is_leaf && (node->flags & kIRReturnJump) != 0) {
-    return Emit(g, NewInstruction(AARCH64_OP(ret)));
-  }
-  
-  // Normal branch or non-leaf return branch.
+  // A return jump must branch to the shared epilogue: even a function that
+  // looks like a leaf here (no calls, zero stack-frame size) may still need to
+  // restore callee-saved registers and deallocate its frame in the epilogue.
+  // Register usage is not known until after register allocation, so emitting a
+  // bare `ret` here would skip a restore that turns out to be required and
+  // leave the caller's frame pointer / callee-saved registers clobbered.
+
+  // Normal branch or return branch.
   TargetInstruction* inst =
       (TargetInstruction*)Emit(g, NewInstruction1(AARCH64_OP(b), Condition(g, AARCH64_OP(al), 0)));
 
@@ -2770,6 +2793,35 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
   return value;
 }
 
+// A post-increment/decrement node may carry a third input: a separate load of
+// the old value whose result the surrounding expression still consumes.  When
+// the lvalue lives in a register (a register variable), that load aliases the
+// variable's register, which the in-place update is about to overwrite.  Copy
+// the old value into a fresh temporary and redirect the load's remaining uses
+// to it so they observe the pre-update value.
+static void PreserveInPlaceOldValue(AARCH64Generator* g, IRNode* node, int size) {
+  if (node->inputs.length <= 2) {
+    return;
+  }
+  IRNode* old_load = node->inputs.value.p[2];
+  if (old_load == NULL || !HasLoweredNode(old_load)) {
+    return;
+  }
+  TargetInstruction* old = GetLoweredNode(old_load);
+  if (old == NULL || !AARCH64IsVarRegister(old)) {
+    return;
+  }
+  AARCH64Opcode copy_op =
+      TypeIsFloatingPoint(node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
+  TargetInstruction* saved =
+      Emit(g, SetInstructionSize(NewInstruction1(copy_op, old), size));
+  // SetLoweredNode is intentionally write-once; the load already has its
+  // lowered value (the variable register).  Overwrite it directly so the load's
+  // remaining consumers observe the preserved copy instead of the register that
+  // the in-place update is about to clobber.
+  old_load->data.ptr = saved;
+}
+
 static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   AARCH64Opcode ld_opcode;
@@ -2820,6 +2872,7 @@ static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -2885,6 +2938,7 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -3362,10 +3416,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   // moves and won't reuse its register for an argument (e.g. x0).  Without
   // this, the call target and the first argument can land in the same
   // register and the argument move clobbers the target.
-  bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
-      total_stack_size == 0 && g->base.stack_frame_size == 0;
   TargetInstruction* staged_target = NULL;
-  if (!will_tail_call) {
+  {
     IRNode* target_node = node->inputs.value.p[0];
     TargetInstruction* a = GetLoweredNode(target_node);
     if (((int)a->opcode != (int)AARCH64_OP(symbol))) {
@@ -3485,17 +3537,22 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
 
   if (can_be_tail_call) {
     // Tail call.
-    // Add a restore instruction and replace the call with a jump.
-    if (AARCH64IsExpression(addr)) {
-      // The address is calculated inside the function body.  It needs
-      // to survive a restore operation so we need to put it in
-      // a temp register.  All 't' regs should not be allocated now
-      // since we are leaving the function.
+    // Add a restore instruction and replace the call with a jump.  Only a
+    // direct call to a known function symbol can use the symbol-relative
+    // branch; an indirect target (a function pointer in a register, a computed
+    // address, or even a constant) must be materialized into a temp register
+    // and reached with a register branch.
+    if (((int)addr->opcode != (int)AARCH64_OP(symbol))) {
+      // Indirect tail call.  The target was staged into the temp register (x9)
+      // in phase 3.5, before the argument registers were set up, so it survives
+      // both the argument moves and the restore.  (The address may itself be a
+      // caller-saved register such as the x0 result of a preceding call, as in
+      // `(*(*p)(...))(...)`; capturing it after the argument moves would read a
+      // clobbered register.)
+      assert(staged_target != NULL);
       BuildArgList(g, &arg_locations);
-      TargetInstruction* mv = Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), addr), 0));
-      mv->dest = Tmp(g);
       Emit(g, NewInstruction(AARCH64_OP(restore)));
-      call = Emit(g, NewInstruction1(AARCH64_OP(br), Tmp(g)));
+      call = Emit(g, NewInstruction1(AARCH64_OP(br), staged_target));
     } else {
       Emit(g, NewInstruction(AARCH64_OP(restore)));
       BuildArgList(g, &arg_locations);
@@ -4215,12 +4272,17 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(AARCH64Generator* g
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(g, reg_var, sym->symbol);
-      AARCH64Opcode move_op = TypeIsDouble(symbol->type) ? AARCH64_OP(fmov) : AARCH64_OP(fmov);
       TargetInstruction* arg_reg = FloatingPointArgumentRegister(
           g, (int)arg_loc.location.offset - AARCH64_FP_ARG_START);
       // Reserve this incoming argument register from function entry.
       arg_reg->flags |= TARGET_INST_INCOMING_ARG;
-      Emit(g, NewInstruction2(move_op, var, arg_reg));
+      // fmov has no two-operand register-move form in the emitter (it would be
+      // mis-assembled as a three-register instruction); emit a destination
+      // move into the variable register instead, mirroring the integer path.
+      int size = TypeIsDouble(symbol->type) ? kSize64Bit : kSize32Bit;
+      TargetInstruction* mv =
+          Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(fmov), arg_reg), size));
+      mv->dest = var;
       return var;
     }
     case kArgLocationPushed:

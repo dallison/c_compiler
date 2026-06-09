@@ -195,6 +195,13 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
       if (AARCH64IsFixedRegister(op)) {
         continue;
       }
+      // A variable register is a dedicated callee-saved register pinned to a C
+      // variable for its entire live range (which may span loop back edges that
+      // the static use count cannot model).  It must not be freed by the use
+      // counter, or it could be reassigned and clobber the variable.
+      if (AARCH64IsVarRegister(op)) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
       if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
