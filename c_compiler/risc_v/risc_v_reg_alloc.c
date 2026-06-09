@@ -185,10 +185,36 @@ static void FreeRegisters(RVRegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      // The use counter is the number of distinct user instructions (the users
+      // list is deduplicated), so an instruction that references the same value
+      // in several operand slots must only decrement it once.  Skip an operand
+      // already seen in an earlier slot; otherwise the count underflows early
+      // and the value's register is freed while still live.
+      bool duplicate = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       if (RVIsFixedRegister(op)) {
         continue;
       }
       if (RVIsVarRegister(op)) {
+        continue;
+      }
+      // Inside a loop, a value that is live-out of the block is read again on a
+      // later iteration through the back edge, so its linear "last use" in this
+      // block is not really its last use.  Freeing its register here would let a
+      // subsequent temp reuse it and clobber the still-live value (e.g. a pooled
+      // loop-bound constant sharing a register with the loop variable).  Restrict
+      // this to loop blocks so straight-line code keeps freeing registers
+      // promptly.
+      if (inst->block != NULL && inst->block->loop_nesting > 0 &&
+          BitSetContains(&inst->block->output_ids, op->id)) {
         continue;
       }
 #if 0
@@ -847,9 +873,41 @@ static void BuildPreservedInstructionsSet(TargetBasicBlock* block, void* data) {
   BitSetUnionInPlace(&allocator->preserved_instructions, &block->output_ids);
 }
 
+// Variable registers are assigned a fixed physical register by index
+// (FIRST_*_REG_VAR + varnum) and are allocated lazily at their first
+// definition.  Those physical registers are drawn from the same range the
+// dynamic allocator searches, so without reserving them the dynamic allocator
+// can hand a variable's register to an unrelated value (e.g. a pooled
+// loop-bound constant) before the variable is allocated, and the variable's
+// later assignment then clobbers that still-live value.  Reserve them up front.
+static void ReserveVariableRegisters(RVRegisterAllocator* allocator) {
+  bool is_leaf = allocator->rv->base.num_calls == 0 && OptLevel1() &&
+                 !allocator->rv->not_leaf;
+  for (size_t i = 0; i < allocator->rv->var_regs.length; i++) {
+    RegisterVariable* var = allocator->rv->var_regs.value.p[i];
+    if (var->is_fp) {
+      int first = is_leaf ? RV_FIRST_LEAF_FP_REG_VAR : RV_FIRST_FP_REG_VAR;
+      int last = is_leaf ? RV_LAST_LEAF_FP_REG_VAR : RV_LAST_FP_REG_VAR;
+      if (var->varnum > last - first) {
+        continue;
+      }
+      allocator->float_regs[first + var->varnum].base.reserved = true;
+    } else {
+      int first = is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR;
+      int last = is_leaf ? RV_LAST_LEAF_INT_REG_VAR : RV_LAST_INT_REG_VAR;
+      if (var->varnum > last - first) {
+        continue;
+      }
+      allocator->int_regs[first + var->varnum].base.reserved = true;
+    }
+  }
+}
+
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
   TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
+
+  ReserveVariableRegisters(allocator);
 
   // Process all basic blocks in the RV generator by traversing the
   // dominator tree.
