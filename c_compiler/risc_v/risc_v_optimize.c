@@ -91,6 +91,20 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
       // Instruction is an expression.  If its result (maybe in dest)
       // is not in the filter, remove it.
       TargetInstruction* dest = inst->dest;
+
+      // An rmov (`mv reg, src`, with no SSA dest) writes its target register
+      // through operand[0] rather than producing an SSA value.  Consumers such
+      // as a following regarg/call read that physical register, not the move
+      // itself, so the move has no SSA users.  Treat the written register as
+      // the result here; otherwise the move is dropped even when the register
+      // is live (e.g. a float argument converted into an integer argument
+      // register for a variadic call), leaving the argument undefined.
+      if (dest == NULL && inst->operand[1] != NULL &&
+          (opcode == RV_OP(mv) || opcode == RV_OP(fmv_s) ||
+           opcode == RV_OP(fmv_d))) {
+        dest = inst->operand[0];
+      }
+
       bool is_candidate = true;
       
       // Check if destination is not in the output filter.
