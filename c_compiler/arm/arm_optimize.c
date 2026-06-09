@@ -70,6 +70,21 @@ static bool ARMSetsConditionFlags(TargetInstruction* inst) {
     case ARM_OP(cmn):
     case ARM_OP(tst):
     case ARM_OP(fcmp):
+    case ARM_OP(ccmp):
+    case ARM_OP(ccmn):
+    // The flag-setting ('s' suffix) arithmetic/logical variants exist solely so
+    // their condition codes can drive a later conditional branch -- e.g. a
+    // 64-bit `x != 1` lowers to `eor/eor/orrs` and a 64-bit `<` to `subs/sbcs`,
+    // where the register result is unused and only the flags matter.  They have
+    // no operand users, so they must be treated as having a side effect or
+    // RemoveUnusedExpressions deletes the whole comparison.
+    case ARM_OP(adds):
+    case ARM_OP(adcs):
+    case ARM_OP(subs):
+    case ARM_OP(sbcs):
+    case ARM_OP(ands):
+    case ARM_OP(bics):
+    case ARM_OP(orrs):
       return true;
     default:
       return false;
