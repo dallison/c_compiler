@@ -1171,6 +1171,12 @@ void CompilerDestruct(Compiler* compiler) {
   SyntaxDestruct(&compiler->syntax);
   LexDestruct(&compiler->lex);
 
+  // The AST, symbol tables and tags are gone, so struct infos (which can form
+  // reference cycles and thus are not freed by refcount) can be freed in one
+  // pass.  This deletes member symbols, which decref TypeRecords, so it must
+  // run before the type arena is released.
+  StructRegistryRelease();
+
   // Everything that references TypeRecords has now been torn down, so the type
   // arena's struct memory can be reclaimed in one shot.
   TypeRecordArenaRelease();

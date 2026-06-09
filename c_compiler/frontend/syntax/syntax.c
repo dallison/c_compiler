@@ -779,6 +779,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   // type declaration list.
   SyntaxOpenScope(syntax);
 
+  // Claim a reference on the freshly built base type for the duration of
+  // declarator parsing.  Each declarator that adopts it takes its own
+  // reference, so releasing ours afterwards frees the base type when no
+  // declarator used it (e.g. a bare `struct S { ... };` or `enum E { ... };`).
+  TypeRecordIncRef(type);
+
   // Now we get a sequence of declarations, separated by commas.
   ASTNode* result = ParseExternalDeclarationList(&parser,
                                                  type, storage,
@@ -786,6 +792,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
                                                  declarations);
   SyntaxCloseScope(syntax);
   TypeParserDestruct(&parser);
+  TypeRecordDelete(type);
   if (result != NULL) {
     if (declarations->length != 1) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
@@ -998,9 +1005,16 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingBlockScope);
 
+  // Claim a reference on the freshly built base type for the duration of
+  // declarator parsing.  Each declarator that adopts it takes its own
+  // reference, so releasing ours afterwards frees the base type when no
+  // declarator used it (e.g. a bare `struct S { ... };`).
+  TypeRecordIncRef(type);
+
   // Now we get a sequence of declarations, separated by commas.
   ParseLocalDeclarationList(&parser, type, storage, &attributes, declarations);
   TypeParserDestruct(&parser);
+  TypeRecordDelete(type);
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));

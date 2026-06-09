@@ -81,6 +81,48 @@ void TypeRecordArenaRelease(void) {
   type_arena = NULL;
 }
 
+// Registries of every Struct and Enum created.  Struct infos can form
+// reference cycles (a member of type 'struct S *' inside 'struct S' takes a
+// reference on S's own struct_info), so refcount-driven freeing in
+// TypeRecordDelete never reaches zero for them.  Instead, every struct and enum
+// info is freed in one bulk pass at end of compilation, after all
+// type-referencing structures have been torn down.
+static Vector struct_registry;
+static bool struct_registry_initialized = false;
+static Vector enum_registry;
+static bool enum_registry_initialized = false;
+
+static void StructTeardownMembers(Struct* s);
+
+// Free every Struct and Enum info in one pass.  Must be called after the AST,
+// symbol tables and tags are gone but before TypeRecordArenaRelease, because
+// tearing down a struct's members deletes member symbols which decref
+// TypeRecords (and may decref other struct/enum infos).
+void StructRegistryRelease(void) {
+  // Phase 1: tear down every struct's members.  This deletes member symbols,
+  // whose types may decref OTHER struct/enum infos.  Every info is still
+  // allocated at this point (none are freed below), so those decrements are
+  // safe.  TypeRecordDelete never frees struct/enum infos itself.
+  for (size_t i = 0; i < struct_registry.length; i++) {
+    StructTeardownMembers((Struct*)struct_registry.value.p[i]);
+  }
+  // Phase 2: now that no more decrements will occur, free the info structs.
+  for (size_t i = 0; i < struct_registry.length; i++) {
+    free(struct_registry.value.p[i]);
+  }
+  for (size_t i = 0; i < enum_registry.length; i++) {
+    EnumDelete((Enum*)enum_registry.value.p[i]);
+  }
+  if (struct_registry_initialized) {
+    VectorDestruct(&struct_registry);
+    struct_registry_initialized = false;
+  }
+  if (enum_registry_initialized) {
+    VectorDestruct(&enum_registry);
+    enum_registry_initialized = false;
+  }
+}
+
 static void Trap(TypeRecord* r) {
   if (r->id == 1234) {
     printf("");
@@ -203,13 +245,15 @@ void TypeRecordDelete(TypeRecord* record) {
     }
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
-      if (--record->info.struct_info->refs == 0) {
-        StructDelete(record->info.struct_info);
-      }
+      // Struct infos are not freed here: they can form reference cycles, so
+      // they are all freed in one pass by StructRegistryRelease at end of
+      // compilation.  Keep the count balanced for any code that reads it.
+      record->info.struct_info->refs--;
     } else if (TypeIsEnum(record)) {
-      if (--record->info.enum_info->refs == 0) {
-        EnumDelete(record->info.enum_info);
-      }
+      // Enum infos are freed in bulk by StructRegistryRelease (alongside
+      // structs) so that decrements during the bulk teardown never touch an
+      // already-freed info.  Keep the count balanced for any reader.
+      record->info.enum_info->refs--;
     } else if (TypeIsFunction(record)) {
       VectorDestructWithContents(&record->info.function.prototype,
                                 (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
@@ -426,13 +470,26 @@ Struct* NewStruct(bool is_union) {
   s->size = 0;
   s->alignment = 1;
   s->next_bit_pos = 65;
+  // Track every struct so it can be freed in bulk at end of compilation; see
+  // StructRegistryRelease (struct infos can form reference cycles).
+  if (!struct_registry_initialized) {
+    VectorInit(&struct_registry);
+    struct_registry_initialized = true;
+  }
+  VectorAppend(&struct_registry, s);
   return s;
 }
 
-void StructDelete(Struct* s) {
+// Tear down a struct's members and member tables, but do NOT free the Struct
+// itself (see StructRegistryRelease's two-phase teardown).
+static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->members,
                              (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
   MapDestruct(&s->symbol_table);
+}
+
+void StructDelete(Struct* s) {
+  StructTeardownMembers(s);
   free(s);
 }
 
@@ -449,6 +506,13 @@ Enum* NewEnum() {
   e->refs = 1;
   VectorInit(&e->constants);
   e->next_value = 0;
+  // Track every enum so it can be freed in bulk by StructRegistryRelease; this
+  // keeps composite-info teardown uniform and cycle/UAF-safe.
+  if (!enum_registry_initialized) {
+    VectorInit(&enum_registry);
+    enum_registry_initialized = true;
+  }
+  VectorAppend(&enum_registry, e);
   return e;
 }
 

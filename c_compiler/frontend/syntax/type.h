@@ -174,6 +174,11 @@ void TypeRecordDelete(TypeRecord* record);
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);
+// Free every Struct info (and its members) in one pass.  Call once, at
+// CompilerDestruct, after the AST/symbols/tags are gone but before
+// TypeRecordArenaRelease.  Structs are freed here rather than by refcount
+// because they can form reference cycles.
+void StructRegistryRelease(void);
 TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordIncRef(TypeRecord* record);
