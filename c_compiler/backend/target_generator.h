@@ -265,6 +265,7 @@ TargetInstruction* TargetNext(TargetInstruction* inst);
 TargetInstruction* TargetPrev(TargetInstruction* inst);
 
 void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst);
+void TargetTrackOrphanInstruction(TargetGenerator* target, TargetInstruction* inst);
 void TargetReplaceInstruction(TargetGenerator* target, TargetInstruction* old, TargetInstruction* new);
 void TargetRetargetInstruction(TargetInstruction* old, TargetInstruction* new);
 void TargetRetargetInstructionIf(TargetInstruction* old, TargetInstruction* new,

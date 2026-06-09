@@ -768,6 +768,9 @@ static TargetInstruction* RegRef(ARMRegisterAllocator* allocator, int num) {
   TargetInstruction* ref = TargetNewInstruction((TargetOpcode)ARM_OP(r9));
   ref->reg = &allocator->int_regs[num].base;
   ref->flags |= TARGET_INST_PROCESSED;
+  // This register-reference is used only as an operand of resolved moves; it is
+  // never emitted into the code list, so track it for cleanup at teardown.
+  TargetTrackOrphanInstruction(&allocator->g->base, ref);
   return ref;
 }
 

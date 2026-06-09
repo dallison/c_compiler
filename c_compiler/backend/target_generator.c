@@ -242,10 +242,12 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     VectorDestruct(&inst->users);
   }
   ListDestruct(&gen->code);
-  // Instructions removed during code generation were parked here (see
-  // TargetDeleteInstruction); their users vectors were already destructed at
-  // removal time, so just free the structs.  An instruction can be removed more
-  // than once, so deduplicate by pointer to avoid a double free.
+  // Instructions parked off the code list are freed here: ones removed during
+  // code generation (TargetDeleteInstruction) and orphan operand instructions
+  // that were never emitted (TargetTrackOrphanInstruction).  An instruction can
+  // be parked more than once, so deduplicate by pointer to avoid a double free.
+  // VectorDestruct on an already-destructed users vector is a no-op, so it is
+  // safe for both the removed (users already gone) and orphan cases.
   Map freed_instructions;
   MapInitForPointerKeys(&freed_instructions);
   for (size_t i = 0; i < gen->deleted_instructions.length; i++) {
@@ -257,6 +259,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     kv.key.p = inst;
     kv.value.p = inst;
     MapInsert(&freed_instructions, kv);
+    VectorDestruct(&inst->users);
     free(inst);
   }
   MapDestruct(&freed_instructions);
@@ -321,6 +324,14 @@ void TargetDeleteInstruction(TargetGenerator* target, TargetInstruction* inst) {
   // not free it.  We cannot free it now either: branches/fixups and the
   // assembler can still hold pointers to deleted instructions during the rest of
   // code generation.  Park it in a graveyard and free it in bulk at teardown.
+  VectorAppend(&target->deleted_instructions, inst);
+}
+
+void TargetTrackOrphanInstruction(TargetGenerator* target,
+                                  TargetInstruction* inst) {
+  // An instruction that is referenced as an operand but never emitted into the
+  // code list (so ListDestruct will not free it).  Park it with the removed
+  // instructions to be freed at teardown.
   VectorAppend(&target->deleted_instructions, inst);
 }
 
