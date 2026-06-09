@@ -3844,7 +3844,11 @@ static void CompareSignedSubtract(W65C02Generator* g, TargetInstruction* value1,
     SetIndexReg(g, value1, value2, i);
     lda(g, value1, i);
     if (i == 0 && size > 1) {
-      cmp(g, value2, i);
+      // The low-byte CMP sets the carry that the following SBC (next byte up)
+      // consumes.  Mark it so the CMP #0 peephole does not delete it: that
+      // peephole only reasons about the Z/N flags (which a preceding LDA also
+      // sets) but CMP also forces carry, which LDA does not.
+      cmp(g, value2, i)->flags |= k6502GeneratesFlags;
     } else {
       sbc(g, value2, i);
     }
