@@ -235,7 +235,10 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0) {
+          // Only drop the addi if nothing else needs it.  A non-NULL dest
+          // means the addi also writes a variable register that may be read
+          // elsewhere, so removing it would leave that register undefined.
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
@@ -269,7 +272,9 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
                                                              NULL,
                                                              kTargetType32Bit,
                                                              offset + immed));
-          if (base->users.length == 0) {
+          // See the load case above: keep the addi if it also defines a
+          // variable register (non-NULL dest) that may be read elsewhere.
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
            TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
