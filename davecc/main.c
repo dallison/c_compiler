@@ -128,6 +128,7 @@ static int ParseArg(int i, int argc, char** argv,
     } else {
       VectorAppend(compiler_args, argv[i]);
     }
+    StringDelete(option);
   } else if (argv[i][0] == '@') {
     char* arg = &argv[i][1];
     // Args from file.

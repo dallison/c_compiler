@@ -241,6 +241,7 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
     VectorDestruct(&inst->users);
   }
   ListDestruct(&gen->code);
+  StringDestruct(&gen->function_name);
   SymbolDelete(gen->memcpy);
   SymbolDelete(gen->memset);
   SymbolDelete(gen->__tls_get_addr);
