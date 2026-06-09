@@ -111,6 +111,7 @@ Vector* ParseOptionSet(CompilerOptionDefinition* compiler_options,
                        Vector* strings, Vector* options) {
   Vector* unused_strings = NULL;
   for (int i = 0; i < strings->length; i++) {
+    int start = i;
     CompilerOptionString* s = strings->value.p[i];
     bool option_ok = false;
     if (s->name.value[0] == '-') {
@@ -123,7 +124,11 @@ Vector* ParseOptionSet(CompilerOptionDefinition* compiler_options,
       option_ok = true;
     }
     if (option_ok) {
-      CompilerOptionStringDelete(s);
+      // ParseOption may have consumed a following value arg (advancing i); free
+      // every option string it consumed, not just the first.
+      for (int k = start; k <= i; k++) {
+        CompilerOptionStringDelete((CompilerOptionString*)strings->value.p[k]);
+      }
     } else {
       if (unused_strings == NULL) {
         unused_strings = NewVector();

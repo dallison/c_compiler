@@ -1150,6 +1150,11 @@ void CompilerDestruct(Compiler* compiler) {
   }
   VectorDestruct(&compiler->functions);
 
+  if (compiler->target != NULL) {
+    DeleteCompilerTarget(compiler->target);
+    compiler->target = NULL;
+  }
+
   for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
     InitializedStaticVariableDelete(
         compiler->initialized_static_variables.value.p[i]);

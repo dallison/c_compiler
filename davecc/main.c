@@ -200,6 +200,7 @@ static int ParseArg(int i, int argc, char** argv,
       // Unknown extension, add to linker args.
       VectorAppend(linker_args, argv[i]);
     }
+    StringDestruct(&arg);
   }
   return i + 1;
 }

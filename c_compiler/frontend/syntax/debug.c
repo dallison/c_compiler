@@ -67,6 +67,8 @@ static void DebugAbbreviationMapDestruct(MapKeyValue* kv) {
 }
 
 void DebugBuilderDestruct(DebugBuilder* builder) {
+  StringDestruct(&builder->filename);
+  StringDestruct(&builder->dir);
   MapDestruct(&builder->tags);
   MapDestructWithContents(&builder->abbreviation_map,
                           DebugAbbreviationMapDestruct);

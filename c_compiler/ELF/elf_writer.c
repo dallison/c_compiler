@@ -228,7 +228,9 @@ static void CreateRelocationSections(ELFWriterFile* elf,
       
       // RELA sections have a fixed entry size.
       reloc_sect->header.entsize = elf->ops->relocation_size;
-      // Take ownership of the relocations.
+      // Take ownership of the relocations, freeing the empty vector the new
+      // section was created with.
+      VectorDelete(reloc_sect->relocations);
       reloc_sect->relocations = section->relocations;
       section->relocations = NULL;
       

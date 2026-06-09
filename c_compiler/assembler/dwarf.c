@@ -50,7 +50,10 @@ static void DeleteDirectoryEntry(MapKeyValue* kv) {
 
 void DwarfDestruct(Dwarf* dwarf) {
   MapDestructWithContents(&dwarf->directory_table, DeleteDirectoryEntry);
-  VectorDestructWithContents(&dwarf->file_table, NULL, /*free_element=*/true);
+  // Each FileEntry owns its filename string, so free those too.
+  VectorDestructWithContents(&dwarf->file_table,
+                             (VectorElementDestructor)FileEntryDestruct,
+                             /*free_element=*/true);
   VectorDestructWithContents(&dwarf->locations, NULL, /*free_element=*/true);
 }
 
@@ -89,6 +92,7 @@ void DwarfAddFile(Dwarf* dwarf, String* filename) {
     }
     StringInitFromSegment(basename, filename->value + basename_index + 1,
                           filename->length - basename_index - 1);
+    StringDestruct(&dir_name);
   } else {
     StringSetString(basename, filename);
   }
