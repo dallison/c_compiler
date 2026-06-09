@@ -503,7 +503,15 @@ void RVOptimize(RVGenerator* rv) {
   // RVPrintBasicBlocks(rv, stdout);
 
   // Pool multi-use constants as instructions.
-  PoolConstants(rv);
+  //
+  // Disabled: pooling a constant forces it to live in a register across all
+  // its uses.  When those uses straddle a loop and/or a call (e.g. the same
+  // constants used to initialize two arrays around a loop), it keeps many
+  // values live simultaneously and drives the allocator into spilling it
+  // cannot always satisfy correctly, clobbering live values such as a loop
+  // bound.  On RISC-V re-materializing a constant is cheap, so the pooling
+  // pays for itself rarely and is not worth the correctness risk.
+  // PoolConstants(rv);
   // RVPrintBasicBlocks(rv, stdout);
 
   // RVPrintBasicBlocks(rv, stdout);
