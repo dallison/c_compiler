@@ -31,10 +31,6 @@ echo "tests/single-exec/00214.c"
 # match.
 echo "tests/single-exec/00216.c"
 
-# _Generic is supported, but this test hits a pre-existing 6502 codegen bug in
-# signed division of a variable by a power of two (e.g. (int)x / 2).
-echo "tests/single-exec/00219.c"
-
 # Wide string literals decode to Unicode code points (supported), but the 6502
 # has a 16-bit int/wchar_t so the wchar_t[] array overflows and truncates.
 echo "tests/single-exec/00220.c"

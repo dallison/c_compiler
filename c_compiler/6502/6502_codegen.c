@@ -2808,7 +2808,13 @@ static TargetInstruction* ConstantArithmeticRightShiftOp(W65C02Generator* g,
     }
     return dest;
   }
-  // First shift puts src into dest.
+  // First shift puts src into dest.  ShiftOnceArithmeticRight starts with a
+  // `cmp #$80` to seed the carry from the sign bit, which reads A -- so the
+  // high byte must be in A first.  (The src==dest path above loads it; this
+  // path previously relied on whatever happened to be in A, which set the
+  // carry wrong for non-negative values and rotated a 1 into the sign bit.)
+  SetIndexReg(g, src, dest, size-1);
+  lda(g, src, size-1);
   ShiftOnceArithmeticRight(g, node, size, dest, src);
   if (count == 1) {
     // Only one shift, we're done.
