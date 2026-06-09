@@ -58,7 +58,11 @@ Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
 void MacroDestruct(Macro* macro) {
   StringDestruct(&macro->name);
   StringDestruct(&macro->replacement_text);
-  VectorDestruct(&macro->args);
+  // The args vector owns the heap-allocated formal-argument name strings (see
+  // NewMacro/CopyMacro), so free them along with the vector backing.
+  VectorDestructWithContents(&macro->args,
+                             (VectorElementDestructor)StringDestruct,
+                             /*free_element=*/true);
 }
 
 void MacroDisable(Macro* macro) {
@@ -1547,12 +1551,15 @@ static size_t ReadMacroFormalArguments(Preprocessor* p,
     for (size_t i = 0; i < args->length; i++) {
       if (StringEqualString((String*)args->value.p[i], &arg)) {
         PreprocessorError(p, "Duplicate macro argument %s", arg.value);
+        StringDestruct(&arg);
         return pos;
       }
     }
     
-    // Add argument to the set of known arguments.
+    // Add argument to the set of known arguments.  NewString copies the name,
+    // so the temporary read above is no longer needed.
     VectorAppend(args, NewString(arg.value));
+    StringDestruct(&arg);
     
     // Check for more arguments.
     pos = SkipSpacesAndComments(p, pos, line, NULL);
@@ -1636,6 +1643,9 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                      NewSourceLocation(p->lex->source, p->lex->source->lineno,
                                        name_start, name_end));
     assert(HashTableInsert(&p->macros, macro));
+    // NewMacro copied the arg element pointers into the macro; free our temp
+    // vector backing (the strings are now owned by the macro).
+    VectorDestruct(&args);
   } else {
     if (!MacroEqual(macro, function_like_macro, &args, varargs,
                     &replacement_text)) {
@@ -1652,10 +1662,15 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
     // If macro was undefined it will have its original value.  Give it the
     // new one.
     StringSet(&macro->replacement_text, replacement_text.value);
+    // This is a redefinition: the freshly parsed args were not handed to any
+    // macro, so free the strings and the vector backing here.
+    VectorDestructWithContents(&args, (VectorElementDestructor)StringDestruct,
+                               /*free_element=*/true);
   }
 
   // We're done with these strings, clean up.
   StringDestruct(&macro_name);
+  StringDestruct(&raw_replacement_text);
   StringDestruct(&replacement_text);
 }
 

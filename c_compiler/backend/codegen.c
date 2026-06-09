@@ -912,6 +912,7 @@ static void CheckReturn(Generator* gen) {
                   "Control reaches the end of non-void function '%s'",
                   gen->func->info.function.symbol->name.value);
   }
+  BitSetDestruct(&v.visited);
 }
 
 
