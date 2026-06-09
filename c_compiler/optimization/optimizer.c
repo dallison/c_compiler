@@ -205,6 +205,23 @@ void StrengthReductionOptimization(Generator* gen) {
 }
 
 
+// Instructions that may legitimately appear after a call without preventing a
+// tail call: they are just the return bookkeeping (labels, the procedure
+// leave/return, branches to the exit) and do not run any user code.
+static bool IsTrivialReturnInstruction(IRNode* inst) {
+  switch (inst->opcode) {
+    case IR_OP(label):
+    case IR_OP(leave):
+    case IR_OP(ret):
+    case IR_OP(bra):
+    case IR_OP(nop):
+    case IR_OP(enter):
+      return true;
+    default:
+      return false;
+  }
+}
+
 // The last IR_OP(calla) in a block whose only out edge goes
 // to a block marked with return_block is a tail call.
 // Also, if the block is a return block the last call is a
@@ -219,6 +236,17 @@ void FindTailCalls(BasicBlock* block, void* data) {
     BasicBlock* next = VectorGet(&gen->basic_blocks, next_id);
     if (!next->return_block) {
       return;
+    }
+    // The successor return block runs *after* this block's call.  If it does
+    // any real work (e.g. `printf(); fred++;` where the post-increment of the
+    // static `fred` lands in the return block) the call is not in tail position
+    // and turning it into a jump would drop that work.
+    for (IRNode* inst = BasicBlockBegin(next);
+         !BasicBlockIsEmpty(next) && inst != BasicBlockEnd(next);
+         inst = IRNext(inst)) {
+      if (!IsTrivialReturnInstruction(inst)) {
+        return;
+      }
     }
   }
   // Look for the last call in the block.  If we see a result instruction
@@ -243,6 +271,11 @@ void FindTailCalls(BasicBlock* block, void* data) {
     }
     if (inst->opcode == IR_OP(calla)) {
       inst->flags |= kIRTailCall;
+      return;
+    }
+    // Any other instruction sitting between the call and the return means there
+    // is real work after the call, so it is not in tail position.
+    if (!IsTrivialReturnInstruction(inst)) {
       return;
     }
   }
