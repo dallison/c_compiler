@@ -956,6 +956,8 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
         fprintf(fp, ".%s_label_%d\n", func_name, inst->operand[0]->id);
       } else if (((int)dest->opcode == (int)RV_OP(symbol))) {
         fprintf(fp, "%s\n", SymbolName((TargetSymbol*)dest, buf3, sizeof(buf3)));
+      } else if (((int)dest->opcode == (int)RV_OP(named_label))) {
+        fprintf(fp, "%s\n", ((TargetNamedLabel*)dest)->name);
       } else {
         assert(false);
       }

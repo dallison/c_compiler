@@ -2568,16 +2568,14 @@ static TargetInstruction* LowerBranch(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
-  // If we are leaf and the branch is a return branch we can just emit
-  // the ret itself rather than branching to it.  For a leaf there
-  // is no stack frame restore.
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() &&
-                 !rv->not_leaf && rv->base.stack_frame_size == 0;
-  if (is_leaf && (node->flags & kIRReturnJump) != 0) {
-    return Emit(rv, NewInstruction(RV_OP(ret)));
-  }
-  
-  // Normal branch or non-leaf return branch.
+  // A return jump must branch to the shared epilogue: even a function that
+  // looks like a leaf here (no calls, zero stack-frame size) may still need to
+  // restore callee-saved registers and deallocate its frame in the epilogue.
+  // Register usage is not known until after register allocation, so emitting a
+  // bare `ret` here would skip a restore that turns out to be required and
+  // leave the caller's frame pointer / callee-saved registers clobbered.
+
+  // Normal branch or return branch.
   TargetInstruction* inst =
       (TargetInstruction*)Emit(rv, NewInstruction(RV_OP(j)));
 
@@ -3356,7 +3354,14 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     } else {
       Emit(rv, NewInstruction(RV_OP(restore)));
       BuildArgList(rv, &arg_locations);
-      call = Emit(rv, NewInstruction1(RV_OP(j), addr));
+      if (((int)addr->opcode == (int)RV_OP(symbol))) {
+        // Direct tail call to a known function: a plain jump to the symbol.
+        call = Emit(rv, NewInstruction1(RV_OP(j), addr));
+      } else {
+        // Tail call through a register-held address (e.g. a function pointer,
+        // including a constant null that lowers to x0): an indirect jump.
+        call = Emit(rv, NewInstruction1(RV_OP(jr), addr));
+      }
     }
     rv->base.num_calls--;
   } else {

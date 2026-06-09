@@ -244,11 +244,15 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
     } else if (RVIsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
       if (base->opcode == (TargetOpcode)RV_OP(la) && !compiler->pic) {
-        // Insert label for auipc instruction.
+        // Insert label for auipc instruction.  Use the basic-block-aware
+        // helper (as in the load case): inserting via the raw list helper
+        // fails to update block->code when the auipc is the first instruction
+        // in its block, which orphans the label so it is never emitted and
+        // leaves the paired %pcrel_lo relocation dangling.
         TargetInstruction* label =
             TargetNewInstruction((TargetOpcode)RV_OP(label));
         label->flags = RV_EXPORTED_LABEL;
-        TargetEmitBefore(&rv->base, label, base);
+        TargetBasicBlockEmitBefore(&rv->base, block, label, base);
         base->opcode = (TargetOpcode)RV_OP(auipc);
         base->flags |= RV_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 2, label);

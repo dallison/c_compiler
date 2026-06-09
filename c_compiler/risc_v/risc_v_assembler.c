@@ -847,10 +847,13 @@ static void AssembleLoadStore(RVAssembler* assembler, bool isload, int funct3,
   }
 }
 
-// Load or store with a symbol.  A LO12 relocation will be inserted.
-static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
-                                    int funct3, String* symbol, String* asmfunc,
-                                    int* regs) {
+// Load or store with a symbol.  A LO12 relocation will be inserted.  The
+// load/store opcodes are passed in so this serves both the integer
+// (load/store) and floating-point (load_fp/store_fp) forms.
+static void AssembleLoadStoreSymbolOp(RVAssembler* assembler, bool isload,
+                                      int load_opcode, int store_opcode,
+                                      int funct3, String* symbol,
+                                      String* asmfunc, int* regs) {
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol->value);
 
   int reloc_type;
@@ -868,12 +871,19 @@ static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
   if (isload) {
     AssemblerEmitWord(
         &ASM, ASM.current_section,
-        ITypeInstruction(RV_OPCODE(load), regs[0], regs[1], funct3, 0));
+        ITypeInstruction(load_opcode, regs[0], regs[1], funct3, 0));
   } else {
     AssemblerEmitWord(
         &ASM, ASM.current_section,
-        STypeInstruction(RV_OPCODE(store), regs[1], regs[0], funct3, 0));
+        STypeInstruction(store_opcode, regs[1], regs[0], funct3, 0));
   }
+}
+
+static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
+                                    int funct3, String* symbol, String* asmfunc,
+                                    int* regs) {
+  AssembleLoadStoreSymbolOp(assembler, isload, RV_OPCODE(load),
+                            RV_OPCODE(store), funct3, symbol, asmfunc, regs);
 }
 
 #define ASSEMBLE_INT_ALU_REG(inst)                                        \
@@ -1389,25 +1399,65 @@ static void AssembleFpLoadStore(RVAssembler* assembler, bool isload, int funct3,
   }
 }
 
-#define ASSEMBLE_FP_LOAD_STORE(inst, isload)                           \
-  static void Assemble_##inst(RVAssembler* assembler) {                \
-    int regs[2];                                                       \
-    regs[0] = Register(assembler, kRVRegTypeFloat, "float");           \
-    if (!LexMatch(&ASM.lex, TOK(comma))) {                             \
-      AssemblerError(&ASM, "Missing comma");                           \
-      return;                                                          \
-    }                                                                  \
-    int offset = (int)AssemblerEvaluateExpression(&ASM);               \
-    if (!LexMatch(&ASM.lex, TOK(lparen))) {                            \
-      AssemblerError(&ASM, "Expected offset(reg) for load/store");     \
-      return;                                                          \
-    }                                                                  \
-    regs[1] = Register(assembler, kRVRegTypeInt, "integer");           \
-    if (!LexMatch(&ASM.lex, TOK(rparen))) {                            \
-      AssemblerError(&ASM, "Missing close paren");                     \
-      return;                                                          \
-    }                                                                  \
-    AssembleFpLoadStore(assembler, isload, RV_F3(inst), offset, regs); \
+// Floating-point load/store.  Like the integer form, the offset may be a
+// %lo()/%pcrel_lo() relocation referencing the paired auipc, e.g.
+//   fld ft0, %pcrel_lo(.label)(t0)
+static void AssembleFpLoadStoreInstruction(RVAssembler* assembler, bool isload,
+                                           int funct3) {
+  int regs[2];
+  regs[0] = Register(assembler, kRVRegTypeFloat, "float");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (LexMatch(&ASM.lex, TOK(percent))) {
+    String func;
+    StringInit(&func, "");
+    String symbol_name;
+    StringInit(&symbol_name, "");
+    bool ok = AssemblerFunction(assembler, &func, &symbol_name);
+    if (!ok) {
+      goto error;
+    }
+    if (!StringEqual(&func, "lo") && !StringEqual(&func, "pcrel_lo")) {
+      AssemblerError(&ASM,
+                     "Bad assembler function %%%s() for load/store instruction",
+                     func.value);
+      goto error;
+    }
+    if (!LexMatch(&ASM.lex, TOK(lparen))) {
+      AssemblerError(&ASM, "Expected offset(reg) for load/store");
+      goto error;
+    }
+    regs[1] = Register(assembler, kRVRegTypeInt, "integer");
+    if (!LexMatch(&ASM.lex, TOK(rparen))) {
+      AssemblerError(&ASM, "Missing close paren");
+      goto error;
+    }
+    AssembleLoadStoreSymbolOp(assembler, isload, RV_OPCODE(load_fp),
+                              RV_OPCODE(store_fp), funct3, &symbol_name, &func,
+                              regs);
+  error:
+    StringDestruct(&func);
+    StringDestruct(&symbol_name);
+  } else {
+    int offset = (int)AssemblerEvaluateExpression(&ASM);
+    if (!LexMatch(&ASM.lex, TOK(lparen))) {
+      AssemblerError(&ASM, "Expected offset(reg) for load/store");
+      return;
+    }
+    regs[1] = Register(assembler, kRVRegTypeInt, "integer");
+    if (!LexMatch(&ASM.lex, TOK(rparen))) {
+      AssemblerError(&ASM, "Missing close paren");
+      return;
+    }
+    AssembleFpLoadStore(assembler, isload, funct3, offset, regs);
+  }
+}
+
+#define ASSEMBLE_FP_LOAD_STORE(inst, isload)                       \
+  static void Assemble_##inst(RVAssembler* assembler) {            \
+    AssembleFpLoadStoreInstruction(assembler, isload, RV_F3(inst)); \
   }
 
 // Floating point rounding modes.
