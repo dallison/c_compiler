@@ -31,8 +31,14 @@ def ctestsuite_sh_test(
         "$(rootpath " + interpreter_label + ")",
         "--skip",
         "$(rootpath " + skip_file + ")",
+        # Per-test wall-clock limit.  A few tests (e.g. the 00040 8-queens
+        # solver) are genuinely heavy: they take ~25s even when fully optimized
+        # because the work is interpreted, so a 30s ceiling is too tight and
+        # leaves no margin for an unoptimized (-O0) build or a slower CI host.
+        # The output is correct at every optimization level; only the run time
+        # exceeded the old limit.
         "--timeout",
-        "30",
+        "90",
     ]
     for flag in compile_args:
         args += ["--compile-arg", flag]
