@@ -528,6 +528,17 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     return;
   }
 
+  // Ensure any variable-register operand has a physical register.  A variable
+  // that is read but never written (e.g. used while uninitialized) never goes
+  // through the "allocate on assignment" path, so its register would otherwise
+  // stay NULL and the emitter would dereference it.  Give it one on first use.
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && ARMIsVarRegister(op) && op->reg == NULL) {
+      AllocateVariableRegister(allocator, op);
+    }
+  }
+
   // Reload any spilled expressions.
   ReloadSpills(allocator, inst);
 

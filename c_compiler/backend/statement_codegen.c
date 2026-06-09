@@ -209,10 +209,52 @@ static ASTNode* CheckSingleBranch(ASTNode* stmt, ASTOpcode opcode) {
 }
 
 
+// Does the statement subtree contain a label, case or default?  Such labels
+// are valid goto/switch targets, so a branch that looks dead (e.g. the body of
+// `if (0)`) is actually reachable and its code must still be generated.
+static bool StatementContainsLabel(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(label):
+    case AST_OP(case):
+      return true;
+    case AST_OP(compound): {
+      CompoundStatementASTNode* c = (CompoundStatementASTNode*)node;
+      for (size_t i = 0; i < c->statements->length; i++) {
+        if (StatementContainsLabel(c->statements->value.p[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case AST_OP(if): {
+      IfStatementASTNode* n = (IfStatementASTNode*)node;
+      return StatementContainsLabel(n->if_part) ||
+             StatementContainsLabel(n->else_part);
+    }
+    case AST_OP(while):
+    case AST_OP(do):
+      return StatementContainsLabel(((CombinedStatementASTNode*)node)->stmt);
+    case AST_OP(for):
+      return StatementContainsLabel(((ForStatementASTNode*)node)->stmt);
+    case AST_OP(switch):
+      return StatementContainsLabel(((SwitchStatementASTNode*)node)->stmt);
+    default:
+      return false;
+  }
+}
+
 static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   // If the condition is a constant we can omit the expression,
-  // comparison and the statement as appropriate.
-  if (OptLevel1() && ASTNodeIsIntConstant(node->cond)) {
+  // comparison and the statement as appropriate -- but only when the dead arm
+  // contains no labels.  A label inside the dead arm is a valid goto/switch
+  // target, so that code is reachable and must still be generated (otherwise
+  // the label is dropped while branches to it survive, dangling the target).
+  if (OptLevel1() && ASTNodeIsIntConstant(node->cond) &&
+      !StatementContainsLabel(node->if_part) &&
+      !StatementContainsLabel(node->else_part)) {
     ConstantASTNode* c = (ConstantASTNode*)node->cond;
     if (c->value.ivalue != 0) {
       GenerateStatement(gen, node->if_part);
