@@ -219,7 +219,12 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
 
     if (ARMIsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
-      if (IsAddWithImmediate(base)) {
+      // Only fold a pure address-calculation add (no dest).  An add that also
+      // writes a register variable (dest != NULL) updates that register in
+      // place, so its source operand has already been overwritten by the time
+      // the load runs -- folding the add's immediate into the load would then
+      // address the post-update value (e.g. the load in `*(++p)`).
+      if (IsAddWithImmediate(base) && base->dest == NULL) {
         int offset = ARMIntValue(inst->operand[1]);
         int immed = ARMIntValue(base->operand[1]);
         if (ARMIsPossibleImmediate(offset + immed)) {
@@ -237,7 +242,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       }
     } else if (ARMIsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
-      if (IsAddWithImmediate(base)) {
+      // See the load case: only fold a pure address-calculation add.
+      if (IsAddWithImmediate(base) && base->dest == NULL) {
         int offset = ARMIntValue(inst->operand[2]);
         int immed = ARMIntValue(base->operand[1]);
         if (ARMIsPossibleImmediate(offset + immed)) {

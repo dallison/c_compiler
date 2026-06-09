@@ -204,6 +204,16 @@ static void FreeRegisters(ARMRegisterAllocator* allocator,
       if (ARMIsFixedRegister(op)) {
         continue;
       }
+      // A variable register is a dedicated callee-saved register that holds a C
+      // variable for its whole live range.  Its (linear) last use inside a loop
+      // body is not really the last use -- the value is read again on the next
+      // iteration via the back edge -- so it must not be freed by the use
+      // counter, or a later temp in the same block would reuse the register and
+      // clobber the still-live variable.  These registers are re-owned at each
+      // block entry from the live-in set, so they never need explicit freeing.
+      if (ARMIsVarRegister(op)) {
+        continue;
+      }
       TargetRegister* reg = op->reg;
       if (reg != NULL && !reg->reserved && reg->owner != NULL && op->uses > 0) {
         op->uses--;
