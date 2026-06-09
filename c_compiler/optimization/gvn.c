@@ -216,9 +216,13 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     return key;
   }
   
-  // If we have a destination set, keep unique.
+  // If we have a destination set, keep unique.  The key computed so far is
+  // only the opcode for most instructions, which would make every dest-having
+  // instruction of the same opcode compare equal (e.g. two `load -> tmp` that
+  // feed the two arms of a `||`), so GVN would wrongly merge them and drop one
+  // arm.  Use the instruction id to make the key genuinely unique.
   if (inst->dest != NULL) {
-    return key;
+    return (uint64_t)inst->id + last_ir_opcode;
   }
   
   // We can only deal with 1 or 2 operands but inc and dec instructions
