@@ -153,6 +153,23 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     case IR_OP(phi):
     case IR_OP(calla):
     case IR_OP(tmp):
+    // Loads must not be value-numbered together: this GVN has no memory
+    // dependence/alias analysis, so two loads of the same address that look
+    // identical may actually read different values when a call or store
+    // between them changes memory (e.g. `if (g) ...; effect(); if (g != 1)`
+    // where effect() writes the global g).  Keying loads by id keeps each one
+    // distinct so a stale value is never reused.
+    case IR_OP(load8):
+    case IR_OP(load16):
+    case IR_OP(load32):
+    case IR_OP(load64):
+    case IR_OP(loadu8):
+    case IR_OP(loadu16):
+    case IR_OP(loadu32):
+    case IR_OP(loadf):
+    case IR_OP(loadd):
+    case IR_OP(loada):
+    case IR_OP(structarg):
     case IR_OP(store32):
     case IR_OP(store8):
     case IR_OP(store16):
