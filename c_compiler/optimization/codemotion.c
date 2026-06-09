@@ -33,12 +33,14 @@ static void HoistInstruction(Generator* gen, IRNode* inst) {
     }
     if (first_input != NULL) {
       IRNode* last_in_block = first_input->block->end_code;
-      // The block probably ends in an unconditional branch.  If it
-      // doesn't we insert the instruction after the last in the block.
-      // Also, if the last instrution is a cbra (a computed branch) then
-      // we need to insert before it.
-      if (IRIsUnconditionalBranch(last_in_block) ||
-          last_in_block->opcode == IR_OP(cbra)) {
+      // If the block ends in a control-transfer instruction (any branch --
+      // conditional bfalse/btrue, unconditional bra, computed cbra -- or a
+      // return) the hoisted instruction must go BEFORE it: code placed after a
+      // conditional branch lands on the fall-through path only, so a value used
+      // on the taken path (e.g. the hoisted argument of a call further down the
+      // dominator tree) is never computed there.  Otherwise append it at the
+      // end of the block.
+      if (IRIsBranch(last_in_block) || IRIsReturn(last_in_block)) {
         BasicBlockMoveInstructionBefore(gen, inst, last_in_block);
       } else {
         BasicBlockMoveInstructionAfter(gen, inst, last_in_block);

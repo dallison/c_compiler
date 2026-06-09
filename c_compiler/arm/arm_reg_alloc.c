@@ -297,6 +297,16 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
       type == kARMRegTypeInt ? allocator->int_regs : allocator->float_regs;
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
+  // Variable registers hold a C local across its whole (often loop-spanning)
+  // live range and may be redefined in place (e.g. a loop counter `i++`).  The
+  // spill machinery only emits a single store/reload for the value's first
+  // definition, which cannot model a value that is reassigned or whose register
+  // is reused between definition and use -- spilling such a register silently
+  // corrupts the variable (the store can capture a later, unrelated value, and
+  // in-loop reassignments are never written back).  Only fall back to spilling
+  // a variable register when nothing else is available.
+  int min_var_cost = INT_MAX;
+  TargetInstruction* var_victim = NULL;
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
@@ -305,11 +315,27 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
-          // A variable register with no users cannot be spilled (there is no
-          // use site to reload it at, see SpillInstruction).  Such a register
-          // holds a dead value, but skip it as a victim so we pick a register
-          // we can actually spill.
-          if (ARMIsVarRegister(owner) && owner->users.length == 0) {
+          // A fixed-register holder (an incoming argument register r0..r3, the
+          // call-result register, etc.) is pinned to a physical register and is
+          // typically defined at function entry, before the prologue establishes
+          // fp.  Spilling it would emit the store there (referencing fp before
+          // it is valid, at a bogus offset), so never choose one as a victim.
+          if (ARMIsFixedRegister(owner)) {
+            continue;
+          }
+          if (ARMIsVarRegister(owner)) {
+            // A variable register with no users cannot be spilled (there is no
+            // use site to reload it at, see SpillInstruction).  Such a register
+            // holds a dead value, but skip it as a victim so we pick a register
+            // we can actually spill.
+            if (owner->users.length == 0) {
+              continue;
+            }
+            int cost = SpillCost(owner);
+            if (cost < min_var_cost) {
+              min_var_cost = cost;
+              var_victim = owner;
+            }
             continue;
           }
           int cost = SpillCost(owner);
@@ -320,6 +346,10 @@ static TargetInstruction* FindSpillVictim(ARMRegisterAllocator* allocator,
         }
       }
     }
+  }
+  if (victim == NULL) {
+    // No ordinary spill candidate; reluctantly spill a variable register.
+    victim = var_victim;
   }
   if (victim == NULL) {
     DumpRegisters(allocator);
@@ -512,6 +542,28 @@ static COMPILER_UNUSED void AllocateForRmov(ARMRegisterAllocator* allocator,
 
 static void ReloadSpills(ARMRegisterAllocator* allocator,
                          TargetInstruction* inst) {
+  // All operands of `inst` are simultaneously live when `inst` executes, so a
+  // register allocated for reloading one operand must not be reused for another
+  // operand's reload (nor stolen as a spill victim).  Temporarily reserve each
+  // operand's register -- both those already holding a value and those we
+  // allocate here for reloads -- so FindFreeRegister/FindSpillVictim skip them,
+  // then release the reservations once every operand has its register.  Without
+  // this, reloading a second spilled operand could spill the reload just made
+  // for the first operand and reuse its register, leaving the first operand
+  // reading the wrong value (e.g. `add r8, r8, r8` where the base pointer and
+  // index collapsed onto the same register).
+  ARMRegister* protect[TARGET_MAX_OPERANDS];
+  int num_protect = 0;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && op->reg != NULL) {
+      ARMRegister* r = (ARMRegister*)op->reg;
+      if (!r->base.reserved) {
+        r->base.reserved = true;
+        protect[num_protect++] = r;
+      }
+    }
+  }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     if (op != NULL && ((int)op->opcode == (int)ARM_OP(spill))) {
@@ -535,7 +587,16 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
       AssignRegister(reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
+      // Protect this reload's register from being chosen to satisfy a later
+      // operand's reload of the same instruction.
+      if (!reg->base.reserved) {
+        reg->base.reserved = true;
+        protect[num_protect++] = reg;
+      }
     }
+  }
+  for (int i = 0; i < num_protect; i++) {
+    protect[i]->base.reserved = false;
   }
 }
 
