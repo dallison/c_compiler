@@ -239,10 +239,27 @@ static bool IsPrintable(TargetInstruction* inst) {
 
 // This is the size of the stack frame including the space
 // for the local variables.
+// A leaf function makes no calls, so lr is never clobbered and need not be
+// saved.  If in addition it needs no frame-pointer-relative storage - no stack
+// locals, no register spills, no stacked saved arguments, no varargs and no
+// dynamic stack adjustment - then nothing in the body references fp, so the
+// frame pointer can be omitted entirely.  Such a function touches neither fp nor
+// lr; its only frame content is the callee-saved register area, addressed via
+// sp.
+static bool OmitFramePointer(ARMEmitter* emitter) {
+  return emitter->g->base.num_calls == 0 && OptLevel1() &&
+         !emitter->g->not_leaf && !emitter->g->base.varargs &&
+         !emitter->g->uses_dynamic_stack && !emitter->g->has_stack_args &&
+         emitter->g->base.stack_frame_size == 0 &&
+         emitter->spill_region_size == 0 &&
+         emitter->g->saved_regs.length == 0;
+}
+
 static int StackFrameSize(ARMEmitter* emitter) {
-  // Start off with local variable space.  This also includes
-  // 8 bytes for the saved fp and lr.
-  int stack_frame_size = emitter->g->base.stack_frame_size + ARM_STACK_FRAME_HEADER_SIZE;
+  // Start off with local variable space.  This normally also includes 8 bytes
+  // for the saved fp and lr, but a frame-pointer-less leaf saves neither.
+  int header = OmitFramePointer(emitter) ? 0 : ARM_STACK_FRAME_HEADER_SIZE;
+  int stack_frame_size = emitter->g->base.stack_frame_size + header;
 
   bool varargs = emitter->g->base.varargs;
 
@@ -279,6 +296,7 @@ static bool EmptyStackFrame(ARMEmitter* emitter) {
   // frame even if it has no locals and makes no calls.
   return emitter->g->base.stack_frame_size == 0 &&
          emitter->g->base.num_calls == 0 && !emitter->g->not_leaf &&
+         !emitter->g->has_stack_args &&
          BitSetCount(&emitter->regs->used_int_regs) == 0 &&
          BitSetCount(&emitter->regs->used_float_regs) == 0 &&
          emitter->spill_region_size == 0;
@@ -496,19 +514,20 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
   int used_int_count = BitSetCount(&emitter->regs->used_int_regs);
   int first_saved_slot_size = used_int_count > 0 ? 4 : 8;
 
-  // Offset from sp of first saved register.
-  int saved_reg_offset = stack_frame_size - ARM_STACK_FRAME_HEADER_SIZE - 8 -
+  // Offset from sp of first saved register.  When the frame pointer is omitted
+  // there is no saved fp/lr header above the callee-saved area.
+  int header = OmitFramePointer(emitter) ? 0 : ARM_STACK_FRAME_HEADER_SIZE;
+  int saved_reg_offset = stack_frame_size - header - 8 -
                           emitter->g->base.stack_frame_size -
                           space_above_frame_pointer -
                           emitter->spill_region_size +
                           (8 - first_saved_slot_size);  // First saved register.
 
-  // A leaf procedure doesn't save the return address.
-  if (is_leaf) {
-    saved_reg_offset += 8;
-  }
-
-  if (EmptyStackFrame(emitter)) {
+  if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
+    // Frame-pointer-less leaf: reserve the callee-saved register area only.
+    // fp and lr are left untouched; everything is addressed via sp.
+    DecrementStackPointer(emitter, stack_frame_size, fp);
+  } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
       EmitIntRegBlock(fp, "stmdb", "sp!", regs, 1);
@@ -750,7 +769,10 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
-  if (EmptyStackFrame(emitter)) {
+  if (OmitFramePointer(emitter) && !EmptyStackFrame(emitter)) {
+    // Frame-pointer-less leaf: just release the callee-saved register area.
+    IncrementStackPointer(emitter, stack_frame_size, fp);
+  } else if (EmptyStackFrame(emitter)) {
     if (!is_leaf) {
       int regs[] = {ARM_LR_REG};
       EmitIntRegBlock(fp, "ldmia", "sp!", regs, 1);

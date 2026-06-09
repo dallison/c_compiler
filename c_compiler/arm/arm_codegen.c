@@ -305,6 +305,7 @@ bool ARMIsExpression(TargetInstruction* inst) {
     case ARM_OP(strh):
     case ARM_OP(sturb):
     case ARM_OP(sturh):
+    case ARM_OP(fstr):
     case ARM_OP(loc):
     case ARM_OP(named_label):
     case ARM_OP(regarg):
@@ -652,6 +653,7 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
   g->not_leaf = false;
+  g->has_stack_args = false;
   g->uses_dynamic_stack = false;
   g->saved_arg_size = 0;
   g->zero = NULL;
@@ -3055,16 +3057,12 @@ static TargetInstruction* LowerBranch(ARMGenerator* g, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
-  // If we are leaf and the branch is a return branch we can just emit
-  // the ret itself rather than branching to it.  For a leaf there
-  // is no stack frame restore.
-  bool is_leaf = g->base.num_calls == 0 && OptLevel1() &&
-                 !g->not_leaf && g->base.stack_frame_size == 0;
-  if (is_leaf && (node->flags & kIRReturnJump) != 0) {
-    return Emit(g, NewInstruction(ARM_OP(ret)));
-  }
-  
-  // Normal branch or non-leaf return branch.
+  // A return jump must branch to the shared epilogue: even a leaf function may
+  // need to restore callee-saved registers and deallocate its frame there.
+  // (Register usage is not known until after register allocation, so emitting a
+  // bare `ret` here would skip a restore that turns out to be required.)
+
+  // Normal branch or return branch.
   TargetInstruction* inst =
       (TargetInstruction*)Emit(g, NewInstruction1(ARM_OP(b), Condition(g, ARM_OP(al), 0)));
 
@@ -3195,6 +3193,35 @@ static TargetInstruction* LowerZeroExtend(ARMGenerator* g, IRNode* node) {
   return SetLoweredNode(node, lsr);
 }
 
+// A post-increment/decrement whose result value is used records the original
+// (pre-update) value via a separate load node, attached as the inc/dec node's
+// last input.  When the lvalue lives in a register (a register variable), that
+// load aliases the variable's register, which the in-place update is about to
+// overwrite.  Copy the old value into a fresh temporary and redirect the load's
+// remaining uses to it so they observe the pre-update value.
+static void PreserveInPlaceOldValue(ARMGenerator* g, IRNode* node, int size) {
+  if (node->inputs.length <= 2) {
+    return;
+  }
+  IRNode* old_load = node->inputs.value.p[2];
+  if (old_load == NULL || !HasLoweredNode(old_load)) {
+    return;
+  }
+  TargetInstruction* old = GetLoweredNode(old_load);
+  if (old == NULL || !ARMIsVarRegister(old)) {
+    return;
+  }
+  ARMOpcode copy_op =
+      TypeIsFloatingPoint(node->type) ? ARM_OP(fmov) : ARM_OP(mov);
+  TargetInstruction* saved =
+      Emit(g, SetInstructionSize(NewInstruction1(copy_op, old), size));
+  // SetLoweredNode is intentionally write-once; the load already has its
+  // lowered value (the variable register).  Overwrite it directly so the load's
+  // remaining consumers observe the preserved copy instead of the register that
+  // the in-place update is about to clobber.
+  old_load->data.ptr = saved;
+}
+
 static TargetInstruction* LowerInc(ARMGenerator* g, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   ARMOpcode ld_opcode;
@@ -3248,6 +3275,7 @@ static TargetInstruction* LowerInc(ARMGenerator* g, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -3316,6 +3344,7 @@ static TargetInstruction* LowerDec(ARMGenerator* g, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -4896,10 +4925,16 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(ARMGenerator* g,
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(g, reg_var, sym->symbol);
-      ARMOpcode move_op = TypeIsDouble(symbol->type) ? ARM_OP(fmov) : ARM_OP(fmov);
-      Emit(g, NewInstruction2(move_op, var,
+      // The move's destination must be the variable register (not an operand):
+      // the register allocator only binds a variable register when it is the
+      // `dest` of a defining move (see AllocateRegister / AllocateForRmov),
+      // mirroring the integer argument path below.
+      TargetInstruction* mv = Emit(g, NewInstruction1(ARM_OP(fmov),
                 FloatingPointArgumentRegister(g,
                     (int)arg_loc.location.offset - ARM_FP_ARG_START)));
+      SetInstructionSize(mv,
+                         TypeIsDouble(symbol->type) ? kSize64Bit : kSize32Bit);
+      mv->dest = var;
       return var;
     }
     case kArgLocationPushed:
@@ -4942,6 +4977,16 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
+
+  // An argument passed on the stack is addressed relative to the frame pointer,
+  // so the function must set one up (see EmptyStackFrame / OmitFramePointer).
+  if (is_arg) {
+    ArgLocation loc = ArgumentLocation(entry, args);
+    if (loc.type == kArgLocationPushed ||
+        loc.type == kArgLocationPassedByReferenceOnStack) {
+      g->has_stack_args = true;
+    }
+  }
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
   if (TypeIsFloatingPoint(entry->pooled->type)) {

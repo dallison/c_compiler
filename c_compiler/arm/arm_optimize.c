@@ -60,6 +60,22 @@ struct OptimizerData {
   ARMGenerator* rv;
 };
 
+// Comparison instructions produce condition flags rather than a register
+// result.  The flags are consumed by a following conditional branch / csel,
+// but that dependency is not modelled as an operand, so dead-code elimination
+// (which tracks register results) must never treat these as unused.
+static bool ARMSetsConditionFlags(TargetInstruction* inst) {
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(cmp):
+    case ARM_OP(cmn):
+    case ARM_OP(tst):
+    case ARM_OP(fcmp):
+      return true;
+    default:
+      return false;
+  }
+}
+
 
 // Remove unused instructions from the basic block.
 // The algorithm uses a filter to determine if the result
@@ -85,7 +101,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
     prev = TargetPrev(inst);
 
     ARMOpcode opcode = (ARMOpcode)inst->opcode;
-    if (ARMIsExpression(inst) &&
+    if (ARMIsExpression(inst) && !ARMSetsConditionFlags(inst) &&
         !ARMIsSymbol(inst) && !ARMIsConst(inst) && opcode != ARM_OP(tmp) &&
         opcode != ARM_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)
@@ -210,7 +226,10 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));
-          if (base->users.length == 0) {
+          // Only drop the address calculation if nothing else needs it.  A
+          // dest means the add also assigns a (variable) register used
+          // elsewhere, so it must be kept even with no remaining operand users.
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
             TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }
@@ -225,7 +244,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
               &rv->base, NULL, kTargetType32Bit, offset + immed));
-          if (base->users.length == 0) {
+          // See the load case: keep the add if it also defines a dest register.
+          if (base->users.length == 0 && base->dest == NULL) {
             TrapRemoveInstruction(base);
             TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
           }

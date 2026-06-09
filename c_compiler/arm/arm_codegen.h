@@ -374,6 +374,9 @@ typedef struct ARMGenerator {
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
+  bool has_stack_args;    // Has at least one incoming argument passed on the
+                          // stack; such args are addressed via fp, so the
+                          // function needs a frame pointer.
   bool uses_dynamic_stack;  // Uses VLA/alloca (sp adjusted dynamically); the
                             // epilogue must restore sp from fp.
   int saved_arg_size;     // Bytes used by register-passed argument homes.
