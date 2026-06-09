@@ -68,6 +68,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecord* type = NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
       symbol = NewSymbol(name.value, type, STO(implicit));
       symbol->flags.is_forward_declared = true;
+      // Register it so it is found on later references (and owned/freed by a
+      // symbol table) rather than leaked.
+      SyntaxAddSymbol(syntax, symbol);
     } else if (LexLookingAt(lex, TOK(lparen))) {
       if (GetIntrinsicIndex(name.value) == -1) {
         // Calling an unknown function is a warning.
@@ -83,6 +86,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecordChain(func_type, type);
       symbol = NewSymbol(name.value, func_type, STO(implicit));
       symbol->flags.is_forward_declared = true;
+      // Declare it so repeated calls find this symbol (no duplicate warnings)
+      // and so it is owned/freed by a symbol table rather than leaked.
+      SyntaxAddSymbol(syntax, symbol);
     } else {
       SyntaxError(syntax, "No such symbol \"%s\"", name.value);
       TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
