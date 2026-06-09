@@ -894,7 +894,27 @@ bool TargetBasicBlockOutputs(TargetBasicBlock* block, TargetInstruction* inst) {
 void TargetBasicBlockPropagateExpression(TargetGenerator* gen, TargetInstruction* inst, TargetBasicBlock* to) {
   TargetBasicBlock* from = inst->block;
   AddOutput(gen, from, inst, false);
-  VectorAppend(&to->inputs, inst);
+  // Mark the value as input to the using block.
+  if (!BitSetContains(&to->input_ids, inst->id)) {
+    VectorAppend(&to->inputs, inst);
+    BitSetInsert(&to->input_ids, inst->id);
+  }
+  // `from` dominates `to`, so the value is live along the dominator path
+  // between them.  Mark every intermediate block as having the value both
+  // live-in and live-out; otherwise the register allocator (which reserves
+  // registers only for each block's recorded inputs) treats the value's
+  // register as free in those blocks and reuses it -- clobbering a pooled
+  // constant that is defined in `from` and consumed later in `to`.
+  for (TargetBasicBlock* b = to->idom; b != NULL && b != from; b = b->idom) {
+    if (!BitSetContains(&b->output_ids, inst->id)) {
+      VectorAppend(&b->outputs, inst);
+      BitSetInsert(&b->output_ids, inst->id);
+    }
+    if (!BitSetContains(&b->input_ids, inst->id)) {
+      VectorAppend(&b->inputs, inst);
+      BitSetInsert(&b->input_ids, inst->id);
+    }
+  }
 }
 
 TargetInstruction* TargetBasicBlockBegin(TargetBasicBlock* b) {

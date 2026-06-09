@@ -201,6 +201,23 @@ static void FreeRegisters(ARMRegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      // The use counter is the number of distinct user instructions (the users
+      // list is deduplicated), so an instruction that references the same value
+      // in several operand slots -- e.g. `vmov Dn, Rt, Rt` materializing the
+      // double 0.0, or `cmp a, a` -- must only decrement it once.  Skip an
+      // operand already seen in an earlier slot; otherwise the count underflows
+      // early and the value's register is freed while it is still live, letting
+      // a later instruction reuse and clobber it.
+      bool duplicate = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       if (ARMIsFixedRegister(op)) {
         continue;
       }
@@ -503,7 +520,16 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->g->base, inst->block, reload, inst);
       inst->operand[i] = reload;
-      ARMRegisterType reg_type = RegisterTypeFromInstruction(inst);
+      // The reload must land in a register of the spilled VALUE's class, not
+      // the using instruction's class.  These differ for `fcvt`, which lowers a
+      // double constant / variadic-double argument to `vmov Dn, Rlo, Rhi`: the
+      // instruction is float-typed but its two operands are the int halves.
+      // Using the user's (float) type here would reload an int half into a VFP
+      // register and emit an invalid `vmov d, d, r`.  op->operand[0] is the
+      // original spilled instruction (see SpillInstruction).
+      TargetInstruction* spilled_value =
+          (op->operand[0] != NULL) ? op->operand[0] : inst;
+      ARMRegisterType reg_type = RegisterTypeFromInstruction(spilled_value);
       ARMRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);

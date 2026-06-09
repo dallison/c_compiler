@@ -668,6 +668,16 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
       }
     }
     saved_reg_offset -= 4 * num_int;
+    // Each saved register is written UP from its offset (str/vstr [sp,#off]
+    // covers [off, off+size)).  Integer slots are 4 bytes, so after the int
+    // region the cursor sits 4 bytes below the lowest int's offset -- but the
+    // lowest int still occupies the 4 bytes ABOVE that cursor.  A 64-bit float
+    // placed at the cursor would write 8 bytes up and re-enter the lowest int's
+    // slot, so its high word clobbers a saved integer register (e.g. d8's high
+    // word overwriting saved r4).  Drop the cursor one int slot further so the
+    // first float's top byte clears the lowest int.  The prologue's start bump
+    // (8 - first_saved_slot_size) already reserved this space at the top.
+    saved_reg_offset -= 4;
   }
   
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
@@ -758,6 +768,11 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
     }
   }
   offset -= 4 * num_int;
+  // Mirror SaveRegisters: skip the extra int slot so floats reload from the
+  // same offsets they were spilled to (see the comment there).
+  if (num_int > 0) {
+    offset -= 4;
+  }
 
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
   while (!BitSetIteratorDone(&it)) {
@@ -1059,8 +1074,17 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       int offset =
           (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
       const char* store = reg->type == kARMRegTypeInt ? "str" : "vstr";
+      // A VFP register may hold a 64-bit double; spilling it as single
+      // precision (vstr sN) would drop the high 32 bits and corrupt the value.
+      // Use the spilled value's real size so a double is saved with vstr dN.
+      int spill_size = reg->type == kARMRegTypeInt
+                           ? kSize32Bit
+                           : ARMGetRegisterSize(inst->operand[0]);
+      if (spill_size == 0) {
+        spill_size = kSize32Bit;
+      }
       fprintf(fp, "\t%s %s, [fp, #-%d]\t// Spilled @%d\n", store,
-              ARMRegisterName(reg, kSize32Bit, buf1, sizeof(buf1)), offset,
+              ARMRegisterName(reg, spill_size, buf1, sizeof(buf1)), offset,
               inst->operand[0]->id);
       return;
     }
@@ -1070,10 +1094,17 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
       const char* load = reg->type == kARMRegTypeInt ? "ldr" : "vldr";
+      // Match the spill width: a 64-bit double must be reloaded with vldr dN,
+      // not vldr sN, or the high 32 bits read back as garbage.
+      int reload_size = reg->type == kARMRegTypeInt
+                            ? kSize32Bit
+                            : ARMGetRegisterSize(spill->operand[0]);
+      if (reload_size == 0) {
+        reload_size = kSize32Bit;
+      }
       fprintf(fp, "\t%s %s, [fp, #-%d]\t// Reloaded spilled @%d\n",
               load,
-              ARMRegisterName(reg, reg->type == kARMRegTypeInt ? kSize32Bit : kSize32Bit,
-                              buf1, sizeof(buf1)),
+              ARMRegisterName(reg, reload_size, buf1, sizeof(buf1)),
               offset,
               spill->operand[0]->id);
       return;
