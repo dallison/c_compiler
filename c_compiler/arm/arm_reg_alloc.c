@@ -573,6 +573,19 @@ static void AllocateRegister(ARMRegisterAllocator* allocator,
     assert(inst->dest->reg != NULL);
     reg = (ARMRegister*)inst->dest->reg;
     inst->reg = inst->dest->reg;
+    // Re-establish ownership of the destination register.  Argument registers
+    // (and other fixed-register holders) are shared singletons whose `reg`
+    // field persists across calls, so when the holder already has a register
+    // the allocation path above is skipped and AssignRegister never runs.
+    // InitializeBasicBlockRegisters clears all owners at block entry, so
+    // without this the register appears free for the rest of the block.  A
+    // reload inserted for a later operand in the same argument setup (e.g. the
+    // high half of a 64-bit argument whose source was spilled) would then grab
+    // this very register and clobber the value we just moved in.  Claim it for
+    // the destination so it stays live until legitimately freed.
+    if (!reg->base.reserved) {
+      reg->base.owner = inst->dest;
+    }
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
     return;

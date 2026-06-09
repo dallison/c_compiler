@@ -487,7 +487,18 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
       if (return_value->op == AST_OP(call)) {
         return_value->flags |= kASTRvoCall;
       } else if (return_value->op == AST_OP(identifier)) {
-        return_value->flags |= kASTNrvoMarker;
+        // Named RVO places the returned variable directly in the caller's
+        // return slot and elides the struct copy.  This is only valid for a
+        // local automatic variable -- the backend can allocate such a variable
+        // in the return slot.  A static/global/extern variable has its own
+        // fixed storage, and a function argument is passed elsewhere, so those
+        // must be copied into the return slot explicitly.  Mirror the
+        // localvar test in NewIRVariable.
+        Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
+        if (sym != NULL && sym->flags.is_local && !sym->flags.is_argument &&
+            !sym->flags.is_temp && !StorageIs(sym->storage, STO(static))) {
+          return_value->flags |= kASTNrvoMarker;
+        }
       }
     }
   }
