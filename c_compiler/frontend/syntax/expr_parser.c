@@ -74,7 +74,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     } else if (LexLookingAt(lex, TOK(lparen))) {
       if (GetIntrinsicIndex(name.value) == -1) {
         // Calling an unknown function is a warning.
-        SyntaxWarning(syntax, "unknown-func",
+        SyntaxWarning(syntax, "implicit-function-declaration",
                       "Calling undeclared function %s", name.value);
       }
       

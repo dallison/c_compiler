@@ -93,9 +93,21 @@ typedef struct Struct {
   int size;          // Size of struct in bytes.
   int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
+  bool packed;       // __attribute__((packed)): no inter-member padding.
+  int explicit_alignment;  // __attribute__((aligned(N))) minimum; 0 = none.
+  int pack;          // #pragma pack(n) member alignment cap; 0 = no cap.
   int next_bit_pos;  // Next bit position for bit fields.
   int current_offset;
 } Struct;
+
+// Applies layout-affecting attributes (packed, aligned) from an Attribute
+// vector to a struct.  Must be called before the struct is laid out (or
+// followed by a re-layout for the trailing/typedef form).
+void StructApplyLayoutAttributes(struct Struct* str, Vector* attrs);
+// Propagates packed/aligned attributes from a (typedef) symbol onto its
+// struct/union type and re-lays out the struct.  No-op if the symbol carries
+// no layout attribute or its type is not a struct/union.
+void TypeApplyStructAttributesFromSymbol(Symbol* sym);
 
 // An enum type.
 typedef struct {

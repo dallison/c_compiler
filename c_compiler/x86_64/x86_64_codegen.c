@@ -2346,13 +2346,21 @@ static TargetInstruction* LowerAsm(X86_64Generator* rv, IRNode* node) {
 // A literal reference is an add of the literal offset (the first input
 // to the literalref node) to the 'literal' with the given id.  This will
 // be assembled as a reference to a symbol with the name .str.%d.
-static TargetInstruction* LowerLiteralReference(X86_64Generator* rv, IRNode* node) {
+static TargetInstruction* LowerLiteralReference(X86_64Generator* rv, Generator* gen, IRNode* node) {
   IRConstant* id_node = node->inputs.value.p[0];
   TargetInstruction* literal =
       Emit(rv, TargetNewLiteral((int)id_node->value.ivalue));
 
   TargetInstruction* result =
       Emit(rv, NewInstruction1(X86_64_OP(lea_rip), literal));
+
+  // Route the result into a destination tmp when this literalref is a ?: / && /
+  // || branch (the "-> $n" annotation); otherwise the merge tmp is never
+  // written and the value is read uninitialized.
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(rv, result, dest, X86_64_OP(mv));
+  }
 
   SetLoweredNode(node, result);
   return result;
@@ -3298,7 +3306,7 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     }
 
     case IR_OP(literalref):
-      return LowerLiteralReference(rv, node);
+      return LowerLiteralReference(rv, gen, node);
 
     case IR_OP(addressof):
       return LowerAddressOf(rv, node);

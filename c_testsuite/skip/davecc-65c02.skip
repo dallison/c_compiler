@@ -38,4 +38,9 @@ echo "tests/single-exec/00220.c"
 # the results don't meet the test's double-precision tolerance.
 echo "tests/single-exec/00221.c"
 
+# Verifies #pragma pack alignment caps against a 32-bit-int layout; the 6502
+# has 16-bit ints and no struct alignment, so pack is a no-op and the offsets
+# and sizes differ.
+echo "tests/single-exec/00227.c"
+
 # File I/O (fopen/fread/fgetc/fgets) not fully working in interpreter

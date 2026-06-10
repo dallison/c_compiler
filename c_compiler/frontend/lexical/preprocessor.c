@@ -289,6 +289,12 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__6502__", "1"); }
 }
 
+// Compare two owned path strings stored in the pragma-once set.  The set passes
+// the address of each element, so both arguments are char**.
+static int ComparePragmaOncePath(const void* a, const void* b) {
+  return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
 void PreprocessorInit(Preprocessor* p) {
   HashTableInit(&p->macros, "macros", MACROS_TABLE_SIZE, HashMacro,
                 InsertMacroInHashTable, FindMacroInHashTable);
@@ -297,6 +303,7 @@ void PreprocessorInit(Preprocessor* p) {
   VectorInit(&p->user_include_paths);
   VectorInit(&p->system_include_paths);
   VectorInit(&p->macro_stack);
+  SetInit(&p->pragma_once_files, ComparePragmaOncePath);
   p->is_compiled_in = true;
 
 #ifndef DAVECC_SYSROOT_HDRS
@@ -350,6 +357,8 @@ void PreprocessorDestruct(Preprocessor* p) {
     free(saved);
   }
   VectorDestruct(&p->macro_stack);
+
+  SetDestructWithContents(&p->pragma_once_files, free, false);
 }
 
 void PreprocessorReset(Preprocessor* p) {
@@ -361,6 +370,7 @@ void PreprocessorReset(Preprocessor* p) {
     free(saved);
   }
   VectorClear(&p->macro_stack);
+  SetClearWithContents(&p->pragma_once_files, free, false);
   PredefineMacros(p);
 }
 
@@ -1653,7 +1663,7 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
       int lineno;
       int start, end;
       DecodeSourceLocation(macro->location, &filename, &lineno, &start, &end);
-      PreprocessorWarning(p, "macro-redef",
+      PreprocessorWarning(p, "macro-redefined",
                           "Macro %s redefined; previously"
                           " defined at %s:%d",
                           macro_name.value, filename, lineno);
@@ -1770,6 +1780,34 @@ static void PrintSearchDetails(Preprocessor* p, const char* file, bool system_in
 
 }
 
+// Canonicalizes `path` to an absolute, symlink-resolved path.  Returns a
+// freshly malloc'd string the caller must free; falls back to a copy of `path`
+// when realpath fails (e.g. the file no longer exists).
+static char* CanonicalizePath(const char* path) {
+  char* resolved = realpath(path, NULL);
+  return resolved != NULL ? resolved : strdup(path);
+}
+
+// Returns true if `path` resolves to a file already marked with #pragma once.
+static bool PragmaOnceSeen(Preprocessor* p, const char* path) {
+  char* canonical = CanonicalizePath(path);
+  bool seen = SetContains(&p->pragma_once_files, canonical);
+  free(canonical);
+  return seen;
+}
+
+// Records that the file at `path` carried a #pragma once so later #includes of
+// it are skipped.  Ownership of the canonical path transfers to the set, or it
+// is freed if the file was already recorded.
+static void PragmaOnceAdd(Preprocessor* p, const char* path) {
+  char* canonical = CanonicalizePath(path);
+  if (SetContains(&p->pragma_once_files, canonical)) {
+    free(canonical);
+    return;
+  }
+  SetInsert(&p->pragma_once_files, canonical);
+}
+
 static void DoInclude(Preprocessor* p, String* line, size_t pos,
                       size_t start_index) {
   if (!p->is_compiled_in) {
@@ -1821,6 +1859,15 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
                       filename.value);
     PrintSearchDetails(p, filename.value, system_include);
     exit(1);
+  }
+
+  // If this file was previously included and contained a #pragma once, skip it
+  // entirely (do not push it as a new source).
+  if (PragmaOnceSeen(p, filename.value)) {
+    fclose(fp);
+    StringDestruct(&filename);
+    StringDestruct(&tokenized_line);
+    return;
   }
 
   // We have found the include file, process it as if it was inline
@@ -2261,6 +2308,158 @@ static bool GetPragmaMacroArg(TokenIterator* ti, String* name) {
   return true;
 }
 
+// Reads the message argument of a #pragma message / #pragma GCC warning /
+// #pragma GCC error directive.  Accepts both the bare form ("text") and the
+// parenthesized form (("text")), and concatenates adjacent string literals
+// (e.g. "a" "b").  Returns true and stores the (unquoted) text in *out on
+// success; leaves the iterator just past the consumed tokens.
+static bool GetPragmaMessageString(TokenIterator* ti, String* out) {
+  SkipSpaceTokens(ti);
+  bool paren = CurrentToken(ti) == PPTOK(openparen);
+  if (paren) {
+    MoveToNextToken(ti);
+    SkipSpaceTokens(ti);
+  }
+  if (CurrentToken(ti) != PPTOK(literal)) {
+    return false;
+  }
+  bool got = false;
+  while (CurrentToken(ti) == PPTOK(literal)) {
+    String piece = {0};
+    GetCurrentTokenSpelling(ti, &piece);
+    StringAppend(out, piece.value);
+    StringDestruct(&piece);
+    MoveToNextToken(ti);
+    SkipSpaceTokens(ti);
+    got = true;
+  }
+  if (paren && CurrentToken(ti) == PPTOK(closeparen)) {
+    MoveToNextToken(ti);
+  }
+  return got;
+}
+
+// Handles the tail of a "#pragma <vendor> diagnostic ..." directive, with the
+// iterator positioned just after the vendor token.  Supports push, pop, and
+// ignored/warning/error "-W<name>", honoring a named warning only when the
+// vendor recognizes it.
+static void HandleDiagnosticPragma(TokenIterator* ti, DiagnosticVendor vendor) {
+  if (!MatchIdentifierToken(ti, "diagnostic")) {
+    // Some other vendor pragma we don't implement; ignore it.
+    return;
+  }
+  if (MatchIdentifierToken(ti, "push")) {
+    DiagnosticPush();
+    return;
+  }
+  if (MatchIdentifierToken(ti, "pop")) {
+    DiagnosticPop();
+    return;
+  }
+
+  enum { kIgnore, kWarn, kError } action;
+  if (MatchIdentifierToken(ti, "ignored")) {
+    action = kIgnore;
+  } else if (MatchIdentifierToken(ti, "warning")) {
+    action = kWarn;
+  } else if (MatchIdentifierToken(ti, "error")) {
+    action = kError;
+  } else {
+    // Unknown/unsupported action (e.g. clang's "fatal"); ignore.
+    return;
+  }
+
+  // The diagnostic is named by a string literal such as "-Wunused-variable".
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(literal)) {
+    return;
+  }
+  String spelling = {0};
+  GetCurrentTokenSpelling(ti, &spelling);
+  MoveToNextToken(ti);
+
+  const char* name = spelling.value;
+  if (name[0] == '-' && name[1] == 'W' && DiagnosticVendorKnowsWarning(vendor, name + 2)) {
+    name += 2;
+    switch (action) {
+      case kIgnore:
+        DiagnosticIgnore(name);
+        break;
+      case kWarn:
+        DiagnosticWarn(name);
+        break;
+      case kError:
+        DiagnosticError(name);
+        break;
+    }
+  }
+  StringDestruct(&spelling);
+}
+
+// Reads a non-negative integer token, returning true and storing the value in
+// *out on success.  Leaves the iterator unmoved on failure.
+static bool GetNumberToken(TokenIterator* ti, int* out) {
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(number)) {
+    return false;
+  }
+  String spelling = {0};
+  GetCurrentTokenSpelling(ti, &spelling);
+  *out = atoi(spelling.value);
+  StringDestruct(&spelling);
+  MoveToNextToken(ti);
+  return true;
+}
+
+// Handles "#pragma pack(...)" in the GCC/MSVC style, with the iterator
+// positioned just after the "pack" token.  Supported forms:
+//   pack(n)            set the member-alignment cap to n
+//   pack()             reset to the default (no cap)
+//   pack(push)         save the current value
+//   pack(push, n)      save the current value, then set the cap to n
+//   pack(pop)          restore the most recently saved value
+static void HandlePackPragma(TokenIterator* ti) {
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(openparen)) {
+    return;
+  }
+  MoveToNextToken(ti);
+
+  if (MatchIdentifierToken(ti, "push")) {
+    VectorAppend(&compiler->pack_stack,
+                 (void*)(intptr_t)compiler->pack_alignment);
+    SkipSpaceTokens(ti);
+    if (CurrentToken(ti) == PPTOK(comma)) {
+      MoveToNextToken(ti);
+      int n = 0;
+      if (GetNumberToken(ti, &n)) {
+        compiler->pack_alignment = n;
+      }
+    }
+  } else if (MatchIdentifierToken(ti, "pop")) {
+    if (compiler->pack_stack.length > 0) {
+      compiler->pack_alignment = (int)(intptr_t)VectorLast(&compiler->pack_stack);
+      VectorPop(&compiler->pack_stack);
+    } else {
+      compiler->pack_alignment = 0;
+    }
+  } else {
+    int n = 0;
+    if (GetNumberToken(ti, &n)) {
+      // pack(n): a value of 0 is treated as "reset to default".
+      compiler->pack_alignment = n;
+    } else {
+      // pack(): reset to the default alignment.
+      compiler->pack_alignment = 0;
+    }
+  }
+
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) == PPTOK(closeparen)) {
+    MoveToNextToken(ti);
+  }
+}
+
 static void Pragma(Preprocessor* p, String* line, size_t pos) {
   if (!p->is_compiled_in) {
     return;
@@ -2271,7 +2470,46 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
   TokenIterator ti;
   TokenIteratorInit(&ti,p,  &tokenized_tail);
   while (CurrentToken(&ti) != PPTOK(end)) {
-    if (MatchIdentifierToken(&ti, "warning")) {
+    if (MatchIdentifierToken(&ti, "once")) {
+      // Mark the current file so subsequent #includes of it are skipped.
+      if (p->lex->source->device == kSourceFromFile) {
+        PragmaOnceAdd(p, p->lex->source->filename.value);
+      }
+    } else if (MatchIdentifierToken(&ti, "message")) {
+      // #pragma message "text" / #pragma message("text"): emit a note.
+      String msg = {0};
+      if (GetPragmaMessageString(&ti, &msg)) {
+        ReportNote(p->lex->source->filename.value, p->lex->source->lineno,
+                   "%s", msg.value);
+      }
+      StringDestruct(&msg);
+    } else if (MatchIdentifierToken(&ti, "davecc")) {
+      HandleDiagnosticPragma(&ti, kDiagnosticVendorDavecc);
+    } else if (MatchIdentifierToken(&ti, "clang")) {
+      HandleDiagnosticPragma(&ti, kDiagnosticVendorClang);
+    } else if (MatchIdentifierToken(&ti, "gcc") ||
+               MatchIdentifierToken(&ti, "GCC")) {
+      // #pragma GCC warning "text" and #pragma GCC error "text" emit a
+      // diagnostic with user-supplied text; everything else is a diagnostic
+      // push/pop/ignored directive.
+      if (MatchIdentifierToken(&ti, "warning")) {
+        String msg = {0};
+        if (GetPragmaMessageString(&ti, &msg)) {
+          PreprocessorWarning(p, "pragma-messages", "%s", msg.value);
+        }
+        StringDestruct(&msg);
+      } else if (MatchIdentifierToken(&ti, "error")) {
+        String msg = {0};
+        if (GetPragmaMessageString(&ti, &msg)) {
+          PreprocessorError(p, "%s", msg.value);
+        }
+        StringDestruct(&msg);
+      } else {
+        HandleDiagnosticPragma(&ti, kDiagnosticVendorGcc);
+      }
+    } else if (MatchIdentifierToken(&ti, "pack")) {
+      HandlePackPragma(&ti);
+    } else if (MatchIdentifierToken(&ti, "warning")) {
       String warning;
       if (GetIdentifierToken(&ti, &warning)) {
         bool on = MatchIdentifierToken(&ti, "on");
@@ -2694,14 +2932,24 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
           // Detokenize the actual value.
           String detokenized = {0};
           Detokenize(p, actual, &detokenized);
-          
+
+          // The literal token stores its content already escaped (e.g. an
+          // embedded " becomes \").  Escape into a temporary first so the
+          // encoded token length matches the bytes actually appended; encoding
+          // the unescaped length here desynchronizes the token stream and sends
+          // the tokenizer into an infinite loop on any argument containing a
+          // character that must be escaped.
+          String escaped = {0};
+          StringEscape(&detokenized, &escaped);
+
           String literal = {0};
           // Append a PPTOK(literal) to the temp value.
           StringAppendChar(&literal, PPTOK(literal));
-          EncodeLength(&literal, detokenized.length);
-          StringEscape(&detokenized, &literal);
+          EncodeLength(&literal, escaped.length);
+          StringAppendString(&literal, &escaped);
           ReplaceCurrentToken(&rep_ti, &literal);
           StringDestruct(&detokenized);
+          StringDestruct(&escaped);
           StringDestruct(&literal);
         }
         break;
@@ -2769,6 +3017,71 @@ static void ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
   StringDestruct(&va_args);
 }
 
+// Destringizes the content of a string literal as required by the _Pragma
+// operator: the surrounding quotes are already absent from the token spelling,
+// so we only need to turn \" into " and \\ into \.
+static void DestringizePragma(const char* s, String* out) {
+  StringInit(out, NULL);
+  for (size_t i = 0; s[i] != '\0'; i++) {
+    if (s[i] == '\\' && (s[i + 1] == '"' || s[i + 1] == '\\')) {
+      i++;
+    }
+    StringAppendChar(out, s[i]);
+  }
+}
+
+// Handles the _Pragma("...") operator with the iterator positioned at the
+// _Pragma token.  On success the whole `_Pragma ( "..." )` span is removed from
+// the token stream and the destringized content is processed as if it had
+// appeared in a #pragma directive.  On a malformed use the iterator is left
+// untouched (and _Pragma stays in the stream as an ordinary identifier).
+static void ProcessPragmaOperator(Preprocessor* p, TokenIterator* ti) {
+  size_t start = ti->curr;
+  size_t orig_prev = ti->prev;
+  size_t orig_next = ti->next;
+
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(openparen)) {
+    goto bail;
+  }
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(literal) &&
+      CurrentToken(ti) != PPTOK(wide_literal)) {
+    goto bail;
+  }
+  String content = {0};
+  GetCurrentTokenSpelling(ti, &content);
+  MoveToNextToken(ti);
+  SkipSpaceTokens(ti);
+  if (CurrentToken(ti) != PPTOK(closeparen)) {
+    StringDestruct(&content);
+    goto bail;
+  }
+  size_t end = ti->next;  // Index just past the closing paren.
+
+  String pragma_text = {0};
+  DestringizePragma(content.value, &pragma_text);
+  Pragma(p, &pragma_text, 0);
+  StringDestruct(&pragma_text);
+  StringDestruct(&content);
+
+  // Remove the entire _Pragma(...) span, leaving an empty replacement so the
+  // caller's MoveToNextToken lands on the following token (cf.
+  // ReplaceCurrentToken with empty text).
+  StringErase(ti->input, start, end - start);
+  ti->prev = orig_prev;
+  ti->curr = start;
+  ti->next = start;
+  return;
+
+bail:
+  ti->prev = orig_prev;
+  ti->curr = start;
+  ti->next = orig_next;
+}
+
 // We have a possible macro name.  See if it's a macro or other special
 // name and if so, replace it by the replacement text.
 static void ProcessPossibleMacro(Preprocessor* p,
@@ -2778,7 +3091,7 @@ static void ProcessPossibleMacro(Preprocessor* p,
                                    bool whole_input) {
   String replacement = {0};
   if (StringEqual(possible_macro_name, "_Pragma")) {
-    // No pragmas in this compiler.
+    ProcessPragmaOperator(p, ti);
   } else if (StringEqual(possible_macro_name, "__FILE__")) {
     StringPrintf(&replacement, "\"%s\"", &p->lex->source->filename);
     TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);

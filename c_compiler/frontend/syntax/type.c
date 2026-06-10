@@ -469,6 +469,9 @@ Struct* NewStruct(bool is_union) {
   s->current_offset = 0;
   s->size = 0;
   s->alignment = 1;
+  s->packed = false;
+  s->explicit_alignment = 0;
+  s->pack = 0;
   s->next_bit_pos = 65;
   // Track every struct so it can be freed in bulk at end of compilation; see
   // StructRegistryRelease (struct infos can form reference cycles).
@@ -1121,10 +1124,7 @@ bool TypeParserSkipAttributes(TypeParser* parser) {
     Vector attrs = {0};
     VectorInit(&attrs);
     SyntaxParseAttribute(parser->syntax, &attrs);
-    for (size_t i = 0; i < attrs.length; i++) {
-      StringDelete((String*)attrs.value.p[i]);
-    }
-    VectorDestruct(&attrs);
+    AttributeListDestruct(&attrs);
     any = true;
   }
   return any;
@@ -1501,13 +1501,50 @@ static bool CheckStructMember(Struct* str, String* name) {
 }
 
 static void AlignNextOffset(Struct* str, TypeRecord* type) {
-  int alignment = TypeRecordAlignment(type);
+  // A packed struct places members on byte boundaries with no padding, so the
+  // effective member alignment is 1.
+  int alignment = str->packed ? 1 : TypeRecordAlignment(type);
+  // #pragma pack(n) caps the effective alignment of each member at n bytes.
+  if (str->pack > 0 && alignment > str->pack) {
+    alignment = str->pack;
+  }
   if (alignment > str->alignment) {
     str->alignment = alignment;
   }
   str->next_offset = (str->next_offset + (alignment - 1)) & ~(alignment - 1);
   str->next_bit_pos = 65;
   str->current_offset = str->next_offset;
+}
+
+// Applies the final struct alignment/size rounding, honoring an explicit
+// aligned(N) override.
+static void FinalizeStructAlignment(Struct* str) {
+  int align = str->alignment > 0 ? str->alignment : 1;
+  if (str->explicit_alignment > align) {
+    align = str->explicit_alignment;
+    str->alignment = align;
+  }
+  str->size = (str->size + (align - 1)) & ~(align - 1);
+}
+
+void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {
+  if (AttributeListHas(attrs, "packed")) {
+    str->packed = true;
+  }
+  Attribute* aligned = AttributeListFind(attrs, "aligned");
+  if (aligned != NULL) {
+    long n = 0;
+    int a;
+    if (AttributeArgInt(aligned, 0, &n) && n > 0) {
+      a = (int)n;
+    } else {
+      // aligned with no argument requests the target's maximum alignment.
+      a = compiler->alignment;
+    }
+    if (a > str->explicit_alignment) {
+      str->explicit_alignment = a;
+    }
+  }
 }
 
 // Parse a bitfield.  We are just after the : in the member definition.
@@ -1766,7 +1803,8 @@ static void CheckTagType(TypeParser* parser, Symbol* old,
   }
 }
 
-static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_union) {
+static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
+                               bool is_union, Vector* attributes) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -1804,14 +1842,19 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
 
   // Now 'tag' will be the struct tag pointer
   // and 'str' will be a pointer to the Struct information.
+  // Capture the #pragma pack(n) value in effect at the point of definition so
+  // member offsets reflect it (and any later push/pop does not retroactively
+  // change this struct).
+  str->pack = compiler->pack_alignment;
+  // Apply layout attributes (packed, aligned) before laying out members so the
+  // member offsets reflect them in a single pass.
+  StructApplyLayoutAttributes(str, attributes);
   ParseStructMembers(parser, str, is_union);
   
   // Round the size of the struct up to its own alignment (the maximum
-  // alignment of its members), as required by the ABI.
-  {
-    int align = str->alignment > 0 ? str->alignment : 1;
-    str->size = (str->size + (align - 1)) & ~(align - 1);
-  }
+  // alignment of its members, or an explicit aligned(N)), as required by the
+  // ABI.
+  FinalizeStructAlignment(str);
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
    
   CheckFlexibleArrays(parser, str, is_union);
@@ -1819,38 +1862,119 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name, bool is_uni
   return tag;
 }
 
+// Recomputes member offsets and the struct size after packed/aligned has been
+// applied post-hoc (the trailing / typedef attribute form, e.g.
+// `typedef struct {...} __attribute__((packed)) T;`).  Returns false, leaving
+// the layout untouched, for shapes we don't safely re-lay-out (anonymous
+// members, whose copied symbol-table offsets would also need adjusting).
+static bool RelayoutStruct(Struct* str) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* m = str->members.value.p[i];
+    if (m->is_anon) {
+      return false;
+    }
+  }
+  bool is_union = str->is_union;
+  str->next_offset = 0;
+  str->current_offset = 0;
+  str->size = 0;
+  str->alignment = 1;
+  str->next_bit_pos = 65;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* m = str->members.value.p[i];
+    TypeRecord* type = m->symbol->type;
+    if (m->bit_size > 0) {
+      // Bitfield: replicate ParseBitField's placement using the stored width.
+      int word_width = type->size * 8;
+      if (str->next_bit_pos + m->bit_size > word_width) {
+        AlignNextOffset(str, type);
+        m->byte_offset = str->next_offset;
+        m->index = i;
+        str->next_bit_pos = 0;
+        if (!is_union) {
+          str->next_offset += type->size;
+          str->size = str->next_offset;
+        } else if (type->size > str->size) {
+          str->size = type->size;
+        }
+      } else {
+        m->byte_offset = str->current_offset;
+      }
+      m->bit_offset = str->next_bit_pos;
+      if (!is_union) {
+        str->next_bit_pos += m->bit_size;
+      }
+    } else {
+      AlignNextOffset(str, type);
+      m->byte_offset = str->next_offset;
+      m->index = i;
+      UpdateStructSize(str, type, is_union);
+    }
+  }
+  FinalizeStructAlignment(str);
+  return true;
+}
+
+void TypeApplyStructAttributesFromSymbol(Symbol* sym) {
+  if (sym == NULL || sym->attributes.length == 0) {
+    return;
+  }
+  if (!AttributeListHas(&sym->attributes, "packed") &&
+      AttributeListFind(&sym->attributes, "aligned") == NULL) {
+    return;
+  }
+  TypeRecord* type = sym->type;
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return;
+  }
+  Struct* str = type->info.struct_info;
+  bool was_packed = str->packed;
+  int was_align = str->explicit_alignment;
+  StructApplyLayoutAttributes(str, &sym->attributes);
+  if (str->packed != was_packed || str->explicit_alignment != was_align) {
+    if (RelayoutStruct(str)) {
+      // The type's size may already have been cached at the old (unpacked)
+      // value; force it to be recomputed from the struct's new size.
+      type->size = 0;
+      TypeRecordCalculateSize(type);
+    }
+  }
+}
+
 // Parse a struct.  The 'struct' or 'union' keyword has been
 // consumed and the current token will be the follower.  This may
 // be a tag name or an open brace, or semicolon.  Don't consume
 // a semicolon at the end of the struct.
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
-  // Parse common __attribute__ syntax.
+  // Parse common __attribute__ syntax (e.g. struct __attribute__((packed)) ...).
   Vector attributes = {0};
   while (LexMatch(parser->lex, TOK(attribute))) {
     SyntaxParseAttribute(parser->syntax, &attributes);
   }
 
+  String tag_name = {0};
+  Symbol* tag = NULL;
+
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
-    return NULL;
+    goto done;
   }
 
   // Read the tag name if there is one.
-  String tag_name = {0};
   if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
-  Symbol* tag = NULL;
   if (LexMatch(parser->lex, TOK(lbrace))) {
-    tag = ParseStructBody(parser, &tag_name, is_union);
+    tag = ParseStructBody(parser, &tag_name, is_union, &attributes);
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.
     if (tag_name.length == 0) {
       // No tag name, nothing to do.
-      return NULL;
+      goto done;
     }
     tag = SyntaxFindTag(parser->syntax, &tag_name);
     if (tag == NULL) {
@@ -1867,6 +1991,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
       CheckTagType(parser, tag, is_union, false);
     }
   }
+
+done:
+  StringDestruct(&tag_name);
+  AttributeListDestruct(&attributes);
   return tag;
 }
 
@@ -2023,19 +2151,20 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     SyntaxParseAttribute(parser->syntax, &attributes);
   }
 
+  String tag_name = {0};
+  Symbol* tag = NULL;
+
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
-    return NULL;
+    goto done;
   }
 
   // Read the tag name if there is one.
-  String tag_name = {0};
   if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
-  Symbol* tag = NULL;
   if (LexMatch(parser->lex, TOK(lbrace))) {
     tag = ParseEnumBody(parser, &tag_name);
   } else {
@@ -2043,7 +2172,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     // creation of a new one.
     if (tag_name.length == 0) {
       // No tag name, nothing to do.
-      return NULL;
+      goto done;
     }
     tag = SyntaxFindTag(parser->syntax, &tag_name);
     if (tag == NULL) {
@@ -2060,6 +2189,10 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       CheckTagType(parser, tag, false, true);
     }
   }
+
+done:
+  StringDestruct(&tag_name);
+  AttributeListDestruct(&attributes);
   return tag;
 }
 

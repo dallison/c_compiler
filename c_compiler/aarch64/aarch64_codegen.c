@@ -2753,6 +2753,14 @@ static TargetInstruction* LowerLiteralReference(AARCH64Generator* g, IRNode* nod
 
   TargetInstruction* result = Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr), literal), kSize64Bit));
 
+  // Route the result into a destination tmp when this literalref is a ?: / && /
+  // || branch (the "-> $n" annotation); otherwise the merge tmp is never
+  // written and the value is read uninitialized.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+  }
+
   SetLoweredNode(node, result);
   return result;
 }
@@ -3596,7 +3604,12 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   if (node->dest != NULL) {
     TargetInstruction* dest = GetDestInstruction(g, node);
     if (dest != NULL) {
-      call = SetDestOrMove(g, call, dest, AARCH64_OP(mov));
+      // A floating-point result returns in d0 and must be copied with fmov;
+      // using the integer mov here corrupts the value.
+      AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+                                     ? AARCH64_OP(fmov)
+                                     : AARCH64_OP(mov);
+      call = SetDestOrMove(g, call, dest, mov_opcode);
     }
   }
   SetLoweredNode(node, call);

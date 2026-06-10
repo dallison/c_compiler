@@ -212,6 +212,16 @@ typedef struct {
   bool convert_warnings_to_errors;
   bool enable_all_warnings;
   Set disabled_warnings;
+  // Warnings promoted to errors by -Werror=<name>.
+  Set error_warnings;
+  // Warnings exempted from -Werror by -Wno-error=<name>.
+  Set no_error_warnings;
+  // Stack of saved warning states for #pragma diagnostic push/pop.
+  Vector diagnostic_stack;
+  // Current #pragma pack(n) member alignment cap (0 = no packing in effect).
+  int pack_alignment;
+  // Stack of saved pack values for #pragma pack(push[,n]) / pack(pop).
+  Vector pack_stack;
   Preprocessor preprocessor;
   Lex lex;
   Syntax syntax;

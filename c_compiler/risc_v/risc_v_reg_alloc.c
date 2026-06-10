@@ -431,6 +431,10 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(fmv_x_d):
       return kRVRegTypeInt;
 
+    case RV_OP(tmp):
+      // A tmp placeholder is integer unless tagged as holding a float value.
+      return (inst->flags & RV_INST_FLOAT_TMP) ? kRVRegTypeFloat : kRVRegTypeInt;
+
     default:
       if ((RVOpcode)inst->opcode >= RV_OP(flw) &&
           (RVOpcode)inst->opcode <= RV_OP(fmv_d_x)) {
@@ -903,6 +907,259 @@ static void ReserveVariableRegisters(RVRegisterAllocator* allocator) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Parallel-copy resolution for call argument register moves.
+//
+// LowerCall emits the moves that place argument values into the physical
+// argument registers (a0..a7 / fa0..fa7) as a sequence of independent register
+// moves (tagged RV_INST_ARG_MOVE).  Conceptually they are a *parallel* copy:
+// every source is the value live just before the call and every destination is
+// a distinct argument register.  Emitting them as naive sequential moves is
+// wrong whenever a value already sits in an argument register another argument
+// needs: an earlier move overwrites a register a later move still has to read
+// (e.g. `mv a3,t6; mv a0,a3` loses the original a3), and true cycles (`a1<->a2`)
+// cannot be done with plain copies at all.
+//
+// After register allocation every operand is a physical register, so we can
+// resolve each run of consecutive argument moves as a proper parallel copy:
+// emit a move only once its destination is no longer needed as a source, and
+// break cycles by saving one register into a scratch temporary.
+// ---------------------------------------------------------------------------
+
+#define RV_MAX_ARG_MOVES 32
+
+typedef struct {
+  int dst;                // Destination physical register number.
+  int src;                // Source physical register number.
+  RVRegisterType type;    // Register file (int or float).
+  TargetOpcode opcode;    // Move opcode (mv / fmv.s / fmv.d).
+  bool done;
+} RVArgMove;
+
+// Create a free-standing instruction that just carries a physical register so
+// it can be used as a move operand.  It is never linked into the code list, so
+// it is parked for teardown.
+static TargetInstruction* RVRegHolder(RVRegisterAllocator* alloc,
+                                      TargetBasicBlock* block, int num,
+                                      RVRegisterType type) {
+  TargetInstruction* h = TargetNewInstruction(TARGET_OP(tmp));
+  RVRegister* reg = (type == kRVRegTypeInt) ? &alloc->int_regs[num]
+                                            : &alloc->float_regs[num];
+  h->reg = &reg->base;
+  h->block = block;
+  TargetTrackOrphanInstruction(&alloc->rv->base, h);
+  return h;
+}
+
+static bool RVRegInMoves(RVArgMove* moves, int count, RVRegisterType type,
+                         int num) {
+  for (int i = 0; i < count; i++) {
+    if (moves[i].type != type) {
+      continue;
+    }
+    if (moves[i].dst == num || moves[i].src == num) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Find a caller-saved temporary register of the given type that is not used by
+// any move in the copy (so clobbering it is safe -- the moves immediately
+// precede a call, which clobbers temporaries anyway).  Returns -1 if none.
+static int RVFindScratchTemp(RVArgMove* moves, int count, RVRegisterType type) {
+  if (type == kRVRegTypeInt) {
+    for (int n = RV_INT_TEMP_START_1; n <= RV_INT_TEMP_END_1; n++) {
+      if (!RVRegInMoves(moves, count, type, n)) return n;
+    }
+    for (int n = RV_INT_TEMP_START_2; n <= RV_INT_TEMP_END_2; n++) {
+      if (!RVRegInMoves(moves, count, type, n)) return n;
+    }
+  } else {
+    for (int n = RV_FP_TEMP_START_1; n <= RV_FP_TEMP_END_1; n++) {
+      if (!RVRegInMoves(moves, count, type, n)) return n;
+    }
+    for (int n = RV_FP_TEMP_START_2; n <= RV_FP_TEMP_END_2; n++) {
+      if (!RVRegInMoves(moves, count, type, n)) return n;
+    }
+  }
+  return -1;
+}
+
+static void RVEmitMove(RVRegisterAllocator* alloc, TargetBasicBlock* block,
+                       TargetInstruction* pos, int dst, int src,
+                       RVRegisterType type, TargetOpcode opcode) {
+  TargetInstruction* d = RVRegHolder(alloc, block, dst, type);
+  TargetInstruction* s = RVRegHolder(alloc, block, src, type);
+  TargetInstruction* move = TargetNewInstruction2(opcode, d, s);
+  TargetBasicBlockEmitBefore(&alloc->rv->base, block, move, pos);
+}
+
+// Emit the parallel copy described by `moves` as correctly ordered move
+// instructions inserted before `pos`.  All destinations are distinct.
+static void RVResolveParallelCopy(RVRegisterAllocator* alloc,
+                                  TargetBasicBlock* block,
+                                  TargetInstruction* pos, RVArgMove* moves,
+                                  int count) {
+  int remaining = 0;
+  for (int i = 0; i < count; i++) {
+    moves[i].done = (moves[i].dst == moves[i].src);  // Self-moves are no-ops.
+    if (!moves[i].done) {
+      remaining++;
+    }
+  }
+
+  while (remaining > 0) {
+    bool progressed = false;
+    for (int i = 0; i < count; i++) {
+      if (moves[i].done) {
+        continue;
+      }
+      // Ready when no other unfinished move still needs to read this
+      // destination's current contents.
+      bool blocked = false;
+      for (int j = 0; j < count; j++) {
+        if (moves[j].done || j == i) {
+          continue;
+        }
+        if (moves[j].type == moves[i].type && moves[j].src == moves[i].dst) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) {
+        continue;
+      }
+      RVEmitMove(alloc, block, pos, moves[i].dst, moves[i].src, moves[i].type,
+                 moves[i].opcode);
+      moves[i].done = true;
+      remaining--;
+      progressed = true;
+    }
+    if (progressed) {
+      continue;
+    }
+
+    // Every remaining move is part of a cycle.  Break one by saving its
+    // destination into a scratch temporary and redirecting its readers.
+    int pick = -1;
+    for (int i = 0; i < count; i++) {
+      if (!moves[i].done) {
+        pick = i;
+        break;
+      }
+    }
+    RVRegisterType type = moves[pick].type;
+    int scratch = RVFindScratchTemp(moves, count, type);
+    if (scratch < 0) {
+      // No scratch available (extremely unlikely for argument setup).  Emit the
+      // remaining moves in order as a best effort rather than risk an overflow.
+      for (int i = 0; i < count; i++) {
+        if (moves[i].done) {
+          continue;
+        }
+        RVEmitMove(alloc, block, pos, moves[i].dst, moves[i].src, moves[i].type,
+                   moves[i].opcode);
+        moves[i].done = true;
+      }
+      break;
+    }
+    RVEmitMove(alloc, block, pos, scratch, moves[pick].dst, type,
+               moves[pick].opcode);
+    for (int j = 0; j < count; j++) {
+      if (!moves[j].done && moves[j].type == type &&
+          moves[j].src == moves[pick].dst) {
+        moves[j].src = scratch;
+      }
+    }
+  }
+}
+
+// Rewrite each run of consecutive RV_INST_ARG_MOVE moves in `block` as a
+// correctly ordered parallel copy.
+static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
+                                          TargetBasicBlock* block) {
+  TargetInstruction* inst = TargetBasicBlockBegin(block);
+  TargetInstruction* end = TargetBasicBlockEnd(block);
+  while (inst != end && inst != NULL) {
+    if ((inst->flags & RV_INST_ARG_MOVE) == 0) {
+      inst = TargetNext(inst);
+      continue;
+    }
+
+    // Gather the maximal run of consecutive argument moves.
+    TargetInstruction* run[RV_MAX_ARG_MOVES];
+    int run_count = 0;
+    bool well_formed = true;
+    TargetInstruction* scan = inst;
+    while (scan != end && scan != NULL &&
+           (scan->flags & RV_INST_ARG_MOVE) != 0) {
+      if (run_count >= RV_MAX_ARG_MOVES) {
+        well_formed = false;
+        break;
+      }
+      if (scan->operand[0] == NULL || scan->operand[1] == NULL ||
+          scan->operand[0]->reg == NULL || scan->operand[1]->reg == NULL ||
+          scan->operand[1]->block == NULL) {
+        well_formed = false;
+      }
+      run[run_count++] = scan;
+      scan = TargetNext(scan);
+    }
+    TargetInstruction* after_run = scan;
+
+    // Build the parallel-copy move set.
+    RVArgMove moves[RV_MAX_ARG_MOVES];
+    int count = 0;
+    bool duplicate_dst = false;
+    if (well_formed) {
+      for (int i = 0; i < run_count; i++) {
+        RVRegister* dreg = (RVRegister*)run[i]->operand[0]->reg;
+        RVRegister* sreg = (RVRegister*)run[i]->operand[1]->reg;
+        RVRegisterType type = (dreg->type == kRVRegTypeFloat ||
+                               sreg->type == kRVRegTypeFloat)
+                                  ? kRVRegTypeFloat
+                                  : kRVRegTypeInt;
+        for (int j = 0; j < count; j++) {
+          if (moves[j].type == type && moves[j].dst == dreg->base.num) {
+            duplicate_dst = true;
+          }
+        }
+        moves[count].dst = dreg->base.num;
+        moves[count].src = sreg->base.num;
+        moves[count].type = type;
+        moves[count].opcode = run[i]->opcode;
+        moves[count].done = false;
+        count++;
+      }
+    }
+
+    // Only rewrite when it is safe to do so; otherwise leave the run untouched.
+    if (well_formed && !duplicate_dst) {
+      RVResolveParallelCopy(alloc, block, run[0], moves, count);
+      // Neutralise the original moves rather than deleting them: the register
+      // allocator has already consumed the use counts on their operands, so
+      // deleting would underflow them.  Pointing both operands at the same
+      // register makes the emitter skip them (it never emits `mv rx, rx`).
+      for (int i = 0; i < run_count; i++) {
+        run[i]->operand[1] = run[i]->operand[0];
+      }
+    }
+    inst = after_run;
+  }
+}
+
+static void RVResolveArgumentMoves(RVRegisterAllocator* alloc) {
+  Vector* blocks = &alloc->rv->base.basic_blocks;
+  for (size_t i = 0; i < blocks->length; i++) {
+    TargetBasicBlock* block = blocks->value.p[i];
+    if (block == NULL || TargetBasicBlockIsEmpty(block)) {
+      continue;
+    }
+    RVResolveArgumentMovesInBlock(alloc, block);
+  }
+}
+
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
   TargetTraverseDominatorTree(&allocator->rv->base, BuildPreservedInstructionsSet,
                           kTraversePreOrder, allocator);
@@ -912,6 +1169,10 @@ void RVAllocateRegisters(RVRegisterAllocator* allocator) {
   // Process all basic blocks in the RV generator by traversing the
   // dominator tree.
   ProcessBasicBlock(allocator, allocator->rv->base.entry_block);
+
+  // Fix up argument-register moves that the per-instruction allocation may have
+  // left as a clobbering sequence (see RVResolveArgumentMoves).
+  RVResolveArgumentMoves(allocator);
 }
 
 const char* RVRegisterName(RVRegister* reg, char* buf, size_t len) {

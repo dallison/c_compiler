@@ -9,6 +9,8 @@
 #include <stdlib.h>
 
 #include <assert.h>
+#include <ctype.h>
+#include <string.h>
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
@@ -376,7 +378,7 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
 // Parses a symbol initializer.
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
   if (StorageIs(storage, STO(extern))) {
-    SyntaxWarning(syntax, "extern-with-init", "extern with initializer");
+    SyntaxWarning(syntax, "extern-initializer", "extern with initializer");
   }
   if (StorageIs(storage, STO(typedef))) {
     SyntaxError(syntax, "typdefs can't have initializers");
@@ -394,13 +396,157 @@ ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
       SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(stmt)), location);
 }
 
-// Parse attributes and return a bitmask containing them.
+// Appends the [start,end) text (trimmed of surrounding whitespace) to the
+// attribute's argument list.  Empty arguments are ignored, so "foo()" yields
+// no arguments.
+static void AttributeAppendArg(Attribute* attr, const char* start,
+                               const char* end) {
+  while (start < end && isspace((unsigned char)*start)) {
+    start++;
+  }
+  while (end > start && isspace((unsigned char)end[-1])) {
+    end--;
+  }
+  if (end > start) {
+    AttributeAddArg(attr, start, (size_t)(end - start));
+  }
+}
+
+// Parses the raw text captured between the __attribute__ parentheses into a
+// list of Attribute clauses.  Each clause is an identifier optionally followed
+// by a balanced (...) argument list; clauses are separated by top-level commas.
+// Inside the parentheses, arguments are split on top-level commas.  This
+// correctly handles multi-argument attributes such as format(printf, 1, 2)
+// and aligned(16) (a naive comma split would mangle them).
+static void ParseAttributeText(String* text, Vector* attrs) {
+  const char* p = (text->value != NULL) ? text->value : "";
+  while (*p != '\0') {
+    while (*p != '\0' && (isspace((unsigned char)*p) || *p == ',')) {
+      p++;
+    }
+    if (*p == '\0') {
+      break;
+    }
+    const char* name_start = p;
+    while (*p != '\0' && (isalnum((unsigned char)*p) || *p == '_')) {
+      p++;
+    }
+    if (p == name_start) {
+      // Not an identifier (stray punctuation); skip a char to make progress.
+      p++;
+      continue;
+    }
+    String* name = NewStringWithLength(name_start, (size_t)(p - name_start));
+    Attribute* attr = NewAttribute(name->value);
+    StringDelete(name);
+
+    while (*p != '\0' && isspace((unsigned char)*p)) {
+      p++;
+    }
+    if (*p == '(') {
+      p++;  // Consume '('.
+      int depth = 1;
+      const char* arg_start = p;
+      while (*p != '\0' && depth > 0) {
+        char c = *p;
+        if (c == '(') {
+          depth++;
+        } else if (c == ')') {
+          depth--;
+          if (depth == 0) {
+            AttributeAppendArg(attr, arg_start, p);
+            p++;  // Consume ')'.
+            break;
+          }
+        } else if (c == ',' && depth == 1) {
+          AttributeAppendArg(attr, arg_start, p);
+          arg_start = p + 1;
+        }
+        p++;
+      }
+    }
+    VectorAppend(attrs, attr);
+  }
+}
+
+// Attributes the compiler either acts on or knowingly accepts and ignores.
+// Anything not in this list triggers a (default-off) -Wattributes warning,
+// matching GCC's "attribute directive ignored" diagnostic.
+static bool IsKnownAttribute(const char* name) {
+  static const char* known[] = {
+    // Acted upon by davecc.
+    "packed", "aligned", "format", "deprecated", "unused",
+    "warn_unused_result", "noreturn", "noinline", "always_inline",
+    // Accepted but not modelled (parsed cleanly, no effect).
+    "stdcall", "cdecl", "fastcall", "thiscall", "regparm", "ms_abi",
+    "sysv_abi", "may_alias", "gnu_inline", "nothrow", "leaf", "cold", "hot",
+    "malloc", "pure", "const", "nonnull", "returns_nonnull", "sentinel",
+    "weak", "alias", "section", "visibility", "used", "constructor",
+    "destructor", "transparent_union", "vector_size", "mode",
+    "no_instrument_function", "cleanup", "returns_twice", "artificial",
+    "designated_init", "fallthrough", "warning", "error", "alloc_size",
+    "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
+    "weakref", "dllimport", "dllexport", "common", "nocommon", "tls_model",
+    "aligned_alloc", "assume_aligned",
+  };
+  for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+    if (strcmp(known[i], name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Parse an __attribute__((...)) clause list, appending parsed Attribute* to
+// attrs.  Assumes TOK(attribute) was just consumed.
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
   String attribute_list = {0};
   LexReadAttributes(syntax->lex, &attribute_list);
-  StringSplit(&attribute_list, ',', attrs);
+  size_t start = attrs->length;
+  ParseAttributeText(&attribute_list, attrs);
+  for (size_t i = start; i < attrs->length; i++) {
+    Attribute* attr = attrs->value.p[i];
+    if (!IsKnownAttribute(attr->name.value)) {
+      SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
+                    attr->name.value);
+    }
+  }
   SyntaxNeedBracket(syntax, TOK(rparen), 0);
   StringDestruct(&attribute_list);
+}
+
+// Interprets attributes that have just been attached to a declared symbol and
+// affect the symbol/type directly (layout and function-behavior flags).
+static void SyntaxApplyDeclarationAttributes(Symbol* sym) {
+  if (sym == NULL) {
+    return;
+  }
+
+  // Function-behavior flags (also meaningful on forward declarations).
+  if (AttributeListHas(&sym->attributes, "noreturn")) {
+    sym->flags.noreturn = true;
+  }
+  if (AttributeListHas(&sym->attributes, "always_inline")) {
+    sym->flags.always_inline = true;
+  }
+  if (AttributeListHas(&sym->attributes, "noinline")) {
+    sym->flags.noinline = true;
+  }
+
+  if (StorageIs(sym->storage, STO(typedef))) {
+    // packed/aligned on a typedef applies to the (usually anonymous) struct or
+    // union type it names.
+    TypeApplyStructAttributesFromSymbol(sym);
+    return;
+  }
+  // aligned(N) on a variable raises its alignment.
+  Attribute* aligned = AttributeListFind(&sym->attributes, "aligned");
+  if (aligned != NULL) {
+    long n = 0;
+    if (AttributeArgInt(aligned, 0, &n) && n > 0) {
+      sym->alignment = (int)n;
+    }
+  }
 }
 
 // For an old-style C function we have the types for the arguments specified
@@ -554,7 +700,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
     
       // Check for duplicate storage.
       if ((new & old) != 0) {
-        SyntaxWarning(syntax, "dup-storage", "Duplicate storage specifier");
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate storage specifier");
       }
     
       // Remove __thread from mask and check for multiple bits set.
@@ -565,7 +712,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
       *storage |= s;
     } else if (LexMatch(syntax->lex, TOK(inline))) {
       if (*is_inline) {
-        SyntaxWarning(syntax, "dup-inline", "Duplicate 'inline' specifier");
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate 'inline' specifier");
       }
       *is_inline = true;
     } else if (SyntaxLookingAtType(syntax) &&
@@ -676,6 +824,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
+    SyntaxApplyDeclarationAttributes(sym);
   
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
@@ -799,14 +948,14 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     }
     // result is a DeclarationListASTNode that owns `declarations`; its teardown
     // frees the vector and its contents, so don't free them here.
-    VectorDestruct(&attributes);
+    AttributeListDestruct(&attributes);
     return result;
   }
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));
 
-  VectorDestruct(&attributes);
+  AttributeListDestruct(&attributes);
   
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);
@@ -922,9 +1071,15 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       sym->flags.is_local = true;
     }
 
+    // Parse trailing __attribute__ syntax (e.g. `int x __attribute__((...))`).
+    while (LexMatch(syntax->lex, TOK(attribute))) {
+      SyntaxParseAttribute(syntax, attributes);
+    }
+
     // Symbol takes ownerhip of attribute strings.
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
+    SyntaxApplyDeclarationAttributes(sym);
     
     // Check for __thread violations.
     CheckThreadLocal(syntax, sym);
@@ -1019,7 +1174,7 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));
 
-  VectorDestruct(&attributes);
+  AttributeListDestruct(&attributes);
   
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);

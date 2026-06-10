@@ -1156,6 +1156,22 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   
   bool returns_struct = TypeIsStructOrUnion(node->base.type);
 
+  // Arguments are evaluated right-to-left.  When more than one argument
+  // contains a call, an earlier-evaluated call's result (held in the fixed
+  // return register) would be clobbered by a later argument's call before it
+  // reaches its own argument register.  Stash each call-bearing scalar
+  // argument's result into a temporary so it survives, mirroring
+  // GenerateBinaryExpression.
+  int call_arg_count = 0;
+  if (compiler->call_return_fixed_reg) {
+    for (size_t i = 0; i < node->children->length; i++) {
+      if (ContainsCall((ASTNode*)node->children->value.p[i])) {
+        call_arg_count++;
+      }
+    }
+  }
+  bool stash_call_results = call_arg_count >= 2;
+
   Vector args_right_to_left = {0};
   
   // All arguments, in reverse order.
@@ -1163,6 +1179,17 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
     IRNode* arg_value = GenerateExpression(gen, arg);
+
+    // Scalar arguments (integer, pointer and floating-point) need stashing
+    // here: a call returns its result in a fixed return register, so an
+    // earlier-evaluated call's result would be clobbered by a later argument's
+    // call before it reaches its own argument register.  Struct/array
+    // arguments are passed by address (and struct returns land in memory), so
+    // leave those untouched.
+    if (stash_call_results && ContainsCall(arg) &&
+        !TypeIsStructOrUnion(arg->type) && !TypeIsArray(arg->type)) {
+      arg_value = StashCallResult(gen, arg_value);
+    }
 
     if (TypeIsStructOrUnion(arg->type)) {
       // If the argument is the result of another call it may

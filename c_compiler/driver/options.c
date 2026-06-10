@@ -48,6 +48,13 @@ static bool ParseOption(CompilerOptionDefinition* compiler_options,
       o->opt = compiler_options[opt].opt;
       // Prefixed options are always a string.
       StringInit(&o->value.svalue, &s->name.value[2]);
+      // ParseOptions splits "-Xfoo=bar" into name "-Xfoo" and value "bar"; for a
+      // prefix option re-join the "=bar" so the value is whole (e.g. "-Dfoo=bar"
+      // or "-Werror=format" rather than just "foo"/"error").
+      if (s->value.length > 0) {
+        StringAppend(&o->value.svalue, "=");
+        StringAppend(&o->value.svalue, s->value.value);
+      }
       VectorAppend(options, o);
       found = true;
       break;

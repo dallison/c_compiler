@@ -44,9 +44,11 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-U", kCompilerOptionString, kOptionUndefineMacro, true, "Undefine a macro"},
     {"-fPIC", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
     {"-fpic", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
-    {"-Werror", kCompilerOptionBool, kOptionWerror, false, "Warnings are errors"},
-    {"-Wall", kCompilerOptionBool, kOptionWall, false, "All warnings producesd"},
-    {"-W", kCompilerOptionString, kOptionWarning, true, "Turn warning on or off"},
+    // All -W* flags are matched by this single prefix entry and interpreted in
+    // InitComplexOptions: -W<name>/-Wno-<name> enable/disable, -Wall, -Werror,
+    // -Wno-error, and the per-warning -Werror=<name>/-Wno-error=<name>.
+    {"-W", kCompilerOptionString, kOptionWarning, true,
+     "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]"},
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
     {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
     {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
@@ -375,6 +377,13 @@ static void InitArray(ASTNode* expr, ASTNode* subinit, int offset,
 static void ExpandBracedInitializer(BracedInitializerASTNode* init,
                                     int dest_offset, Vector* initializers);
 
+// Returns the alignment to use for a variable, honoring an explicit
+// __attribute__((aligned(N))) override that raises the natural alignment.
+static int SymbolEffectiveAlignment(Symbol* sym) {
+  int natural = TypeRecordAlignment(sym->type);
+  return sym->alignment > natural ? sym->alignment : natural;
+}
+
 static ASTNode* InitCompoundLiteral(ASTNode* node) {
   CompoundLiteralASTNode* lit = (CompoundLiteralASTNode*)node;
   IdentifierASTNode* sym_node = (IdentifierASTNode*)lit->sym;
@@ -386,7 +395,7 @@ static ASTNode* InitCompoundLiteral(ASTNode* node) {
   var->size = sym_node->symbol->type->size;
   var->is_tls = StorageIs(sym_node->symbol->storage, STO(thread));
   var->is_local = sym_node->symbol->flags.is_local;
-  var->alignment = TypeRecordAlignment(sym_node->symbol->type);
+  var->alignment = SymbolEffectiveAlignment(sym_node->symbol);
   ExpandBracedInitializer((BracedInitializerASTNode*)lit->initializer, 0,
                           &var->initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
@@ -468,7 +477,7 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
   var->size = decl->symbol->type->size;
   var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
   var->is_local = decl->symbol->flags.is_local;
-  var->alignment = TypeRecordAlignment(decl->symbol->type);
+  var->alignment = SymbolEffectiveAlignment(decl->symbol);
   ExpandBracedInitializer((BracedInitializerASTNode*)init, 0,
                           &var->initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
@@ -566,7 +575,7 @@ static void AddLocalStatics(Syntax* syntax) {
       var->symbol = decl->symbol;
       var->is_global = false;
       var->size = decl->symbol->type->size;
-      var->alignment = TypeRecordAlignment(decl->symbol->type);
+      var->alignment = SymbolEffectiveAlignment(decl->symbol);
       var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
       var->is_local = decl->symbol->flags.is_local;
       VectorAppend(&compiler->uninitialized_static_variables, var);
@@ -589,7 +598,7 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
   }
   TypeRecord* main = sym->type;
   if (!TypeIsInt(main->next)) {
-    SyntaxWarning(syntax, "main-ret-type", "main must return an int");
+    SyntaxWarning(syntax, "main", "main must return an int");
   }
   Vector* prototype = &main->info.function.prototype;
   // Check main args.
@@ -609,7 +618,7 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
     }
   }
   if (prototype->length == 1) {
-    SyntaxWarning(syntax, "main-arg-count", "main should have 2 or 3 args");
+    SyntaxWarning(syntax, "main", "main should have 2 or 3 args");
   }
   if (prototype->length >= 2) {
     TypeRecord* t = ((Symbol*)prototype->value.p[1])->type;
@@ -647,7 +656,14 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
 
 
 static void CompileDeclaration(Syntax* syntax) {
+  // Capture the diagnostic state active at the start of this declaration.
+  // Parsing reads a lookahead token that can process a following
+  // "#pragma diagnostic pop", so we reinstall this snapshot around semantic
+  // analysis and codegen (which emit deferred warnings) and then restore the
+  // post-parse state for the next declaration.
+  void* diag_state = DiagnosticSnapshotState();
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+  DiagnosticSwapState(diag_state);
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
     VectorAppend(&compiler->declaration_asts, node);
@@ -727,7 +743,7 @@ static void CompileDeclaration(Syntax* syntax) {
                 var->symbol = decl->symbol;
                 var->is_global = !StorageIs(decl->symbol->storage, STO(static));
                 var->size = decl->symbol->type->size;
-                var->alignment = TypeRecordAlignment(decl->symbol->type);
+                var->alignment = SymbolEffectiveAlignment(decl->symbol);
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                 var->is_local = decl->symbol->flags.is_local;
                 VectorAppend(&compiler->uninitialized_static_variables, var);
@@ -759,6 +775,10 @@ static void CompileDeclaration(Syntax* syntax) {
       }
     }
   }
+  // Restore the post-parse diagnostic state so the next declaration starts from
+  // where the lexer left off.
+  DiagnosticSwapState(diag_state);
+  DiagnosticFreeState(diag_state);
 }
 
 static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
@@ -845,6 +865,11 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
+  SetInit(&compiler->error_warnings, CompareWarning);
+  SetInit(&compiler->no_error_warnings, CompareWarning);
+  VectorInit(&compiler->diagnostic_stack);
+  compiler->pack_alignment = 0;
+  VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
@@ -932,9 +957,34 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
 static void InitBasicOptionsOrDie(Compiler* compiler,
                                   Vector* options, Vector* target_opts) {
   compiler->max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
-  compiler->convert_warnings_to_errors =
-      OptionBoolValue(kOptionWerror, options, false);
-  compiler->enable_all_warnings = OptionBoolValue(kOptionWall, options, false);
+  // -Wall and the global -Werror/-Wno-error toggles arrive as warning options
+  // (see the table comment).  Resolve them up front, in command-line order so a
+  // later flag wins, because enable_all_warnings must be known before the
+  // default-off DisableWarning calls below (DisableWarning is a no-op once all
+  // warnings are enabled).  Per-warning enable/disable/-Werror= is applied
+  // afterwards in InitComplexOptions.
+  compiler->enable_all_warnings = false;
+  compiler->convert_warnings_to_errors = false;
+  if (options != NULL) {
+    for (size_t i = 0; i < options->length; i++) {
+      CompilerOptionValue* o = options->value.p[i];
+      if (o->opt != kOptionWarning) {
+        continue;
+      }
+      const char* v = o->value.svalue.value;
+      if (strcmp(v, "all") == 0) {
+        compiler->enable_all_warnings = true;
+      } else if (strcmp(v, "error") == 0) {
+        compiler->convert_warnings_to_errors = true;
+      } else if (strcmp(v, "no-error") == 0) {
+        compiler->convert_warnings_to_errors = false;
+      }
+    }
+  }
+  // The "ignored attribute" diagnostic is noisy (most attributes are silently
+  // accepted), so it is off unless -Wall is given.  DisableWarning is a no-op
+  // when -Wall enabled all warnings.
+  DisableWarning("attributes");
   compiler->target_name = OptionStringValue(kOptionTarget, options);
   if (compiler->target_name == NULL) {
     fprintf(stderr, "No target specified; please specify -target option\n");
@@ -1057,8 +1107,8 @@ static void InitComplexOptions(Compiler* compiler, Vector* options) {
         } else {
           StringSubstring(&option_value->value.svalue, 0, equals, &macro_name);
           StringSubstring(&option_value->value.svalue, equals + 1,
-                          option_value->value.svalue.length - equals,
-                          &macro_name);
+                          option_value->value.svalue.length - equals - 1,
+                          &macro_value);
         }
         PreprocessorDefineMacro(&compiler->preprocessor, macro_name.value,
                                 macro_value.value);
@@ -1070,13 +1120,24 @@ static void InitComplexOptions(Compiler* compiler, Vector* options) {
         PreprocessorUndefineMacro(&compiler->preprocessor,
                                   &option_value->value.svalue);
         break;
-      case kOptionWarning:
-        if (StringStartsWith(&option_value->value.svalue, "no-")) {
-          DisableWarning(option_value->value.svalue.value + 3);
+      case kOptionWarning: {
+        const char* v = option_value->value.svalue.value;
+        // -Wall and global -Werror/-Wno-error are resolved in
+        // InitBasicOptionsOrDie; skip them here.
+        if (strcmp(v, "all") == 0 || strcmp(v, "error") == 0 ||
+            strcmp(v, "no-error") == 0) {
+          // Already handled.
+        } else if (strncmp(v, "error=", 6) == 0) {
+          MakeWarningError(v + 6);
+        } else if (strncmp(v, "no-error=", 9) == 0) {
+          ExemptWarningFromError(v + 9);
+        } else if (strncmp(v, "no-", 3) == 0) {
+          DisableWarning(v + 3);
         } else {
-          EnableWarning(option_value->value.svalue.value);
+          EnableWarning(v);
         }
         break;
+      }
       default:
         break;
     }
@@ -1171,6 +1232,13 @@ void CompilerDestruct(Compiler* compiler) {
     LiteralDelete(compiler->literals.value.p[i]);
   }
   VectorDestruct(&compiler->literals);
+
+  // Free any unbalanced #pragma diagnostic push snapshots.
+  for (size_t i = 0; i < compiler->diagnostic_stack.length; i++) {
+    free(compiler->diagnostic_stack.value.p[i]);
+  }
+  VectorDestruct(&compiler->diagnostic_stack);
+  VectorDestruct(&compiler->pack_stack);
 
   PreprocessorDestruct(&compiler->preprocessor);
   SyntaxDestruct(&compiler->syntax);

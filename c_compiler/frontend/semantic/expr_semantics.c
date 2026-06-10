@@ -8,6 +8,8 @@
 
 #include "expr_semantics.h"
 #include <assert.h>
+#include <ctype.h>
+#include <string.h>
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "statement_semantics.h"
@@ -28,6 +30,35 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
     // Symbol has now been used.
     node->symbol->flags.used = true;
+
+    // Warn about uses of a symbol marked __attribute__((deprecated)).
+    if ((node->base.flags & kASTIsDeclaration) == 0) {
+      Attribute* dep = SymbolFindAttribute(node->symbol, "deprecated");
+      if (dep != NULL) {
+        const char* msg = AttributeArgString(dep, 0);
+        if (msg != NULL) {
+          // The argument token retains its surrounding double quotes; trim them
+          // for a cleaner message.
+          char trimmed[256];
+          size_t len = strlen(msg);
+          if (len >= 2 && msg[0] == '"' && msg[len - 1] == '"') {
+            size_t inner = len - 2;
+            if (inner >= sizeof(trimmed)) {
+              inner = sizeof(trimmed) - 1;
+            }
+            memcpy(trimmed, msg + 1, inner);
+            trimmed[inner] = '\0';
+            msg = trimmed;
+          }
+          SemanticWarning(&node->base, "deprecated-declarations",
+                          "'%s' is deprecated: %s", node->symbol->name.value,
+                          msg);
+        } else {
+          SemanticWarning(&node->base, "deprecated-declarations",
+                          "'%s' is deprecated", node->symbol->name.value);
+        }
+      }
+    }
   }
   
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
@@ -933,7 +964,14 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
     // Only at -O2 and above.
     return false;
   }
-  if (!func->is_inline || !func->symbol->flags.is_defined ||
+  // __attribute__((noinline)) blocks inlining outright.
+  if (func->symbol != NULL && func->symbol->flags.noinline) {
+    return false;
+  }
+  // __attribute__((always_inline)) forces inlining even without the 'inline'
+  // keyword (and bypasses the size heuristic below).
+  bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
+  if ((!func->is_inline && !force_inline) || !func->symbol->flags.is_defined ||
       func->body == NULL ||
       func->symbol == compiler->current_function->info.function.symbol ||
       func->unknown_args || func->varargs) {
@@ -943,9 +981,208 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   GotoFinder finder = {0, false};
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
+    // Can't inline a function containing a goto regardless of always_inline.
     return false;
   }
+  if (force_inline) {
+    return true;
+  }
   return finder.node_count < kMaxInlineNodeCount;
+}
+
+// The class of argument a printf/scanf conversion expects.  Used by the
+// format-string checker for lenient type matching.
+typedef enum {
+  kFmtNone,      // No argument (%%) or unknown conversion: skip.
+  kFmtInteger,   // %d %i %u %o %x %c and friends.
+  kFmtDouble,    // %f %e %g %a (after default promotion the arg is a double).
+  kFmtString,    // %s (a pointer).
+  kFmtPointer,   // %p and %n (a pointer).
+} FmtClass;
+
+static FmtClass FormatConversionClass(char conv, bool is_scanf) {
+  // For scanf every conversion takes a pointer to the destination.
+  if (is_scanf) {
+    return (conv == '%') ? kFmtNone : kFmtPointer;
+  }
+  switch (conv) {
+    case 'd': case 'i': case 'u': case 'o':
+    case 'x': case 'X': case 'c':
+      return kFmtInteger;
+    case 'f': case 'F': case 'e': case 'E':
+    case 'g': case 'G': case 'a': case 'A':
+      return kFmtDouble;
+    case 's':
+      return kFmtString;
+    case 'p': case 'n':
+      return kFmtPointer;
+    default:
+      return kFmtNone;
+  }
+}
+
+// Checks one variadic argument against the class a conversion expects, emitting
+// a (lenient) -Wformat warning only on clear mismatches.
+static void CheckFormatArg(ASTNode* call, ASTNode* arg, FmtClass cls,
+                           int arg_number) {
+  if (arg == NULL || arg->type == NULL || cls == kFmtNone) {
+    return;
+  }
+  TypeRecord* t = arg->type;
+  bool ok = true;
+  const char* expected = NULL;
+  switch (cls) {
+    case kFmtInteger:
+      // Accept any integer/enum; flag floating point and pointers.
+      ok = TypeIsIntegral(t) || TypeIsEnum(t) || TypeIsBool(t);
+      expected = "integer";
+      break;
+    case kFmtDouble:
+      ok = TypeIsFloatingPoint(t);
+      expected = "floating-point";
+      break;
+    case kFmtString:
+      ok = TypeIsPointerOrArray(t);
+      expected = "string (char *)";
+      break;
+    case kFmtPointer:
+      ok = TypeIsPointerOrArray(t);
+      expected = "pointer";
+      break;
+    case kFmtNone:
+      return;
+  }
+  if (!ok) {
+    SemanticWarning(call, "format",
+                    "format argument %d has the wrong type (expected %s)",
+                    arg_number, expected);
+  }
+}
+
+// If the callee carries a format(printf/scanf, fmt, first) attribute and the
+// format argument is a string literal, validate the variadic arguments against
+// the conversions in the format string (count and rough types).
+static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
+  Attribute* fmt = SymbolFindAttribute(callee, "format");
+  if (fmt == NULL) {
+    return;
+  }
+  const char* archetype = AttributeArgString(fmt, 0);
+  long fmt_pos = 0;
+  long first_pos = 0;
+  if (archetype == NULL || !AttributeArgInt(fmt, 1, &fmt_pos) ||
+      !AttributeArgInt(fmt, 2, &first_pos)) {
+    return;
+  }
+  bool is_scanf = strstr(archetype, "scanf") != NULL;
+  bool is_printf = strstr(archetype, "printf") != NULL;
+  if (!is_scanf && !is_printf) {
+    return;  // Unsupported archetype (e.g. strftime).
+  }
+  // first_pos == 0 means the arguments are not available to check here (e.g.
+  // a vprintf-style function taking a va_list).
+  if (first_pos == 0) {
+    return;
+  }
+
+  size_t nargs = node->children->length;
+  if (fmt_pos < 1 || (size_t)fmt_pos > nargs) {
+    return;
+  }
+  ASTNode* fmt_arg = (ASTNode*)node->children->value.p[fmt_pos - 1];
+  if (fmt_arg == NULL || fmt_arg->op != AST_OP(string)) {
+    // Non-literal format string: be lenient and skip (avoids false positives).
+    return;
+  }
+  String* format = ((ConstantASTNode*)fmt_arg)->value.string;
+  const char* p = (format->value != NULL) ? format->value : "";
+
+  size_t arg_index = (size_t)first_pos - 1;  // 0-based index into children.
+  int conversions = 0;
+  while (*p != '\0') {
+    if (*p != '%') {
+      p++;
+      continue;
+    }
+    p++;  // Consume '%'.
+    if (*p == '%') {
+      p++;
+      continue;
+    }
+    bool suppress = false;
+    // Flags.
+    while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
+      p++;
+    }
+    if (is_scanf && *p == '*') {
+      suppress = true;  // Assignment-suppressing: consumes no argument.
+      p++;
+    }
+    // Width: digits, or '*' (printf consumes an int argument for it).
+    if (*p == '*') {
+      if (!is_scanf) {
+        CheckFormatArg((ASTNode*)node, arg_index < nargs
+                           ? (ASTNode*)node->children->value.p[arg_index]
+                           : NULL,
+                       kFmtInteger, (int)arg_index + 1);
+        arg_index++;
+        conversions++;
+      }
+      p++;
+    } else {
+      while (isdigit((unsigned char)*p)) {
+        p++;
+      }
+    }
+    // Precision.
+    if (*p == '.') {
+      p++;
+      if (*p == '*') {
+        if (!is_scanf) {
+          CheckFormatArg((ASTNode*)node, arg_index < nargs
+                             ? (ASTNode*)node->children->value.p[arg_index]
+                             : NULL,
+                         kFmtInteger, (int)arg_index + 1);
+          arg_index++;
+          conversions++;
+        }
+        p++;
+      } else {
+        while (isdigit((unsigned char)*p)) {
+          p++;
+        }
+      }
+    }
+    // Length modifiers.
+    while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'j' || *p == 'z' ||
+           *p == 't') {
+      p++;
+    }
+    if (*p == '\0') {
+      break;
+    }
+    char conv = *p;
+    p++;
+    FmtClass cls = FormatConversionClass(conv, is_scanf);
+    if (cls == kFmtNone || suppress) {
+      continue;
+    }
+    conversions++;
+    if (arg_index >= nargs) {
+      SemanticWarning((ASTNode*)node, "format",
+                      "too few arguments for format string");
+      return;
+    }
+    CheckFormatArg((ASTNode*)node,
+                   (ASTNode*)node->children->value.p[arg_index], cls,
+                   (int)arg_index + 1);
+    arg_index++;
+  }
+  if (arg_index < nargs) {
+    SemanticWarning((ASTNode*)node, "format",
+                    "too many arguments for format string");
+  }
+  (void)conversions;
 }
 
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
@@ -1026,6 +1263,15 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   
+  // Validate printf/scanf-style format strings on functions annotated with
+  // __attribute__((format(...))).
+  if (call_ok && node->left->op == AST_OP(identifier)) {
+    Symbol* callee = ((IdentifierASTNode*)node->left)->symbol;
+    if (callee != NULL) {
+      CheckFormatCall(node, callee);
+    }
+  }
+
   // Inline function call if possible.  Only possible if we are calling
   // a function (not a function pointer) and it was tagged as inline.
   if (call_ok && TypeIsFunction(node->left->type)) {

@@ -3174,6 +3174,14 @@ static TargetInstruction* LowerLiteralReference(ARMGenerator* g, IRNode* node) {
 
   TargetInstruction* result = EmitAddressOfSymbol(g, literal, kSize32Bit);
 
+  // Route the result into a destination tmp when this literalref is a ?: / && /
+  // || branch (the "-> $n" annotation); otherwise the merge tmp is never
+  // written and the value is read uninitialized.
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+  }
+
   SetLoweredNode(node, result);
   return result;
 }
@@ -4251,7 +4259,12 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
   if (node->dest != NULL) {
     TargetInstruction* dest = GetDestInstruction(g, node);
     if (dest != NULL) {
-      call = SetDestOrMove(g, call, dest, ARM_OP(mov));
+      // A floating-point result returns in the FP return register and must be
+      // copied with fmov; using the integer mov here corrupts the value.
+      ARMOpcode mov_opcode = TypeIsFloatingPoint(node->type)
+                                 ? ARM_OP(fmov)
+                                 : ARM_OP(mov);
+      call = SetDestOrMove(g, call, dest, mov_opcode);
     }
   }
   SetLoweredNode(node, call);

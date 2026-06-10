@@ -11,6 +11,7 @@
 
 #include "dstring.h"
 #include "hashtable.h"
+#include "set.h"
 #include "source.h"
 #include "vector.h"
 #include "binary_tree.h"
@@ -42,6 +43,9 @@ typedef struct {
   Vector user_include_paths;
   Vector system_include_paths;
   Vector macro_stack;   // Saved macros for #pragma push_macro/pop_macro.
+  // Canonical (realpath) paths of files that contained a #pragma once and so
+  // must not be included again.  Elements are owned char* and freed on destruct.
+  Set pragma_once_files;
   struct Lex* lex;
   bool is_compiled_in;  // Is the current state compiled in?
 } Preprocessor;

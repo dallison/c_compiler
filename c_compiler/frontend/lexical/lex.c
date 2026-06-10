@@ -1129,20 +1129,31 @@ void VLexWarning(Lex* lex, const char* warn, const char* error, va_list ap) {
 }
 
 // Read the arguments for an __attribute__ element.
-// These consist of ((text)).
+// These consist of ((text)).  The two outer wrapping parentheses are stripped
+// but any parentheses inside the attribute text are preserved (so that
+// argument-bearing attributes like aligned(16) or format(printf, 1, 2) survive
+// intact).
 void LexReadAttributes(Lex* lex, String* attrs) {
   LexSkipSpacesAndComments(lex);
+  // The function-like '(' of __attribute__ has already been consumed by the
+  // tokenizer, so here bracket_count==1 corresponds to the attribute-list
+  // paren and argument parens are at depth >= 2.  We strip the list paren but
+  // keep argument parens so that aligned(16) / format(printf, 1, 2) survive.
   int bracket_count = 0;
   while (!LexEof(lex)) {
     if (lex->line.value[lex->pos] == '(') {
       bracket_count++;
       lex->pos++;
+      if (bracket_count >= 2) {
+        StringAppendChar(attrs, '(');
+      }
     } else if (lex->line.value[lex->pos] == ')') {
       lex->pos++;
       bracket_count--;
       if (bracket_count == 0) {
         break;
       }
+      StringAppendChar(attrs, ')');
     } else {
       StringAppendChar(attrs, GetCharInComment(lex));
     }

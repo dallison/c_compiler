@@ -18,6 +18,21 @@
 
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+
+  // warn_unused_result: a discarded call to a function so annotated.
+  ASTNode* expr = node->expr;
+  if (expr != NULL && expr->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)expr;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+      if (callee != NULL && SymbolHasAttribute(callee, "warn_unused_result")) {
+        SemanticWarning(expr, "unused-result",
+                        "ignoring return value of '%s' declared with "
+                        "warn_unused_result",
+                        callee->name.value);
+      }
+    }
+  }
 }
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
@@ -193,7 +208,7 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
      if (BitSetContains(&enum_constants, case_value)) {
        BitSetInsert(&found_constants, case_value);
      } else {
-       SemanticWarning(&node->base, "switch-bad-case",
+       SemanticWarning(&node->base, "switch",
                        "Case value %" PRId64 " is not valid for enumeration %s",
                        case_value, info->tag_name->value);
      }
@@ -210,14 +225,14 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   if (node->default_node == NULL && missing_constants.length > 0) {
     if (missing_constants.length > 4) {
       Symbol* ec = missing_constants.value.p[0];
-      SemanticWarning(&node->base, "missing-switch-enum",
+      SemanticWarning(&node->base, "switch",
                       "Enum constant %s and %" PRId64 " others are not present in switch statement",
                       ec->name.value, missing_constants.length - 1);
 
     } else {
       for (size_t i = 0; i < missing_constants.length; i++) {
         Symbol* ec = missing_constants.value.p[i];
-        SemanticWarning(&node->base, "missing-switch-enum",
+        SemanticWarning(&node->base, "switch",
                         "Enum constant %s is not present in switch statement",
                         ec->name.value);
       }

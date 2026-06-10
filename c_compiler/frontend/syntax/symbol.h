@@ -34,6 +34,37 @@ typedef enum {
 
 bool StorageIs(Storage storage, Storage value);
 
+// A parsed __attribute__((...)) clause: a name with optional argument tokens.
+// e.g. "aligned(16)"          -> name "aligned", args ["16"]
+//      "format(printf, 1, 2)" -> name "format",  args ["printf", "1", "2"]
+//      "packed"               -> name "packed",  args []
+// The name is normalized by stripping a surrounding "__" pair so that
+// "__packed__" and "packed" compare equal (as GCC does).
+typedef struct Attribute {
+  String name;   // Normalized attribute name.
+  Vector args;   // Vector of String* argument tokens (owns String*).
+} Attribute;
+
+Attribute* NewAttribute(const char* name);
+void AttributeDestruct(Attribute* attr);
+void AttributeDelete(Attribute* attr);
+Attribute* AttributeClone(Attribute* attr);
+
+// Append an argument token (a copy is made).
+void AttributeAddArg(Attribute* attr, const char* arg, size_t length);
+size_t AttributeArgCount(Attribute* attr);
+// Returns the raw argument token at index, or NULL if out of bounds.
+const char* AttributeArgString(Attribute* attr, size_t index);
+// Parses the argument at index as a base-10 integer.  Returns false (and
+// leaves *value unchanged) if missing or not a valid integer.
+bool AttributeArgInt(Attribute* attr, size_t index, long* value);
+
+// Operations on a Vector of Attribute*.
+Attribute* AttributeListFind(Vector* attrs, const char* name);
+bool AttributeListHas(Vector* attrs, const char* name);
+void AttributeListDestruct(Vector* attrs);          // Frees contained Attribute*.
+void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
+
 // A symbol.  This is a variable, function or type used in a program.
 typedef struct Symbol {
   String name;                // Symbol name.
@@ -52,6 +83,9 @@ typedef struct Symbol {
     bool invented: 1;
     bool is_inline_defn: 1;        // Is an inline function definition.
     bool value_set : 1;            // Value has been set (for const).
+    bool noreturn: 1;              // __attribute__((noreturn)) / _Noreturn.
+    bool always_inline: 1;         // __attribute__((always_inline)).
+    bool noinline: 1;              // __attribute__((noinline)).
   } flags;
   
   struct {
@@ -60,7 +94,8 @@ typedef struct Symbol {
     int reads;                    // Number of reads.
   } usage_info;
   
-  Vector attributes;          // Attributes (owns String*).
+  Vector attributes;          // Attributes (owns Attribute*).
+  int alignment;              // __attribute__((aligned(N))) override; 0 = natural.
   SourceLocation location;
   
   // Symbol value, one of these.
@@ -86,9 +121,11 @@ Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 
-// Adds attribute and takes ownership of the String.
-void SymbolAddAttribute(Symbol* symbol, String* attribute);
+// Adds attribute and takes ownership of the Attribute.
+void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
+// Returns the attribute with the given (normalized) name, or NULL.
+Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute);
 
 void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp);
 void SymbolPrint(Symbol* sym, FILE* fp);

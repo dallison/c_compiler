@@ -1077,7 +1077,8 @@ static TargetInstruction* SetDestOrMoveToArgReg(RVGenerator* rv,
   if (candidate && TargetNext(from) == NULL) {
     return SetDestOrMove(rv, from, to, rmov_opcode);
   }
-  Emit(rv, NewInstruction2(rmov_opcode, to, from));
+  TargetInstruction* move = Emit(rv, NewInstruction2(rmov_opcode, to, from));
+  move->flags |= RV_INST_ARG_MOVE;
   return to;
 }
 
@@ -1950,6 +1951,11 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     TargetUpdateOperandUsers(inst);
   }
   inst = Emit(rv, inst);
+  // A bare tmp placeholder carries no type; tag it so the register allocator
+  // gives it a float register when it will hold a floating-point value.
+  if ((RVOpcode)inst->opcode == RV_OP(tmp) && TypeIsFloatingPoint(node->type)) {
+    inst->flags |= RV_INST_FLOAT_TMP;
+  }
   RVOpcode mov_opcode = RV_OP(mv);
   if (TypeIsFloatingPoint(node->type)) {
     mov_opcode = TypeIsDouble(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
@@ -2683,8 +2689,10 @@ static TargetInstruction* LowerLiteralReference(RVGenerator* rv, IRNode* node) {
 
   TargetInstruction* result = Emit(rv, NewInstruction1(RV_OP(lla), literal));
 
-  SetLoweredNode(node, result);
-  return result;
+  // Route the result into a destination tmp when this literalref is a ?: / && /
+  // || branch (the "-> $n" annotation); otherwise the merge tmp is never
+  // written and the value is read uninitialized.
+  return FinishWithDest(rv, node, result, RV_OP(mv));
 }
 
 static TargetInstruction* LowerAddressOf(RVGenerator* rv, IRNode* node) {
@@ -3329,7 +3337,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                                              ? RV_OP(fmv_x_d)
                                              : RV_OP(fmv_x_w),
                                        arg));
-          Emit(rv, NewInstruction2(RV_OP(mv), arg_location->location.reg, arg));
+          TargetInstruction* fmove =
+              Emit(rv, NewInstruction2(RV_OP(mv), arg_location->location.reg, arg));
+          fmove->flags |= RV_INST_ARG_MOVE;
           break;
         } else if (TypeIsFloatingPoint(arg_node->type)) {
           if (TypeIsDouble(arg_node->type)) {

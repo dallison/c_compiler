@@ -307,6 +307,19 @@ typedef enum {
 #define RV_PCREL_LO_RELOC 0x8000
 #define RV_EXPORTED_LABEL 0x10000
 
+// A register-to-register move that copies a value into a physical argument
+// register as part of a call's argument setup.  After register allocation
+// these moves form a parallel copy; ResolveArgumentMoves reorders them (and
+// breaks cycles with a scratch temporary) so they don't clobber each other.
+#define RV_INST_ARG_MOVE 0x20000
+
+// Marks an RV_OP(tmp) placeholder as holding a floating-point value, so the
+// register allocator assigns it a float register.  The bare tmp opcode carries
+// no type, so without this the allocator would default it to an integer
+// register and a float move into it (fmv.d/fmv.s) would target the wrong
+// register file.
+#define RV_INST_FLOAT_TMP 0x40000
+
 typedef struct {
   int reg_num;
   int base_reg_num;

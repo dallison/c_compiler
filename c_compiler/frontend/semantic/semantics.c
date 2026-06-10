@@ -81,8 +81,9 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
     if (!symbol->flags.used && !symbol->flags.is_argument &&
-        !symbol->flags.is_temp && !symbol->flags.invented) {
-      SemanticSymbolWarning(symbol, "unused-var",
+        !symbol->flags.is_temp && !symbol->flags.invented &&
+        !SymbolHasAttribute(symbol, "unused")) {
+      SemanticSymbolWarning(symbol, "unused-variable",
                     "Local variable '%s' is not used in function '%s'",
                     symbol->name.value,
                       node->type->info.function.symbol->name.value);
@@ -452,7 +453,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         return;
       }
       if (type_conversions[i].warning) {
-        SemanticTypeConversionWarning(from, to, "type-conversion",
+        SemanticTypeConversionWarning(from, to, "conversion",
                                       "Dangerous type conversion "
                                       "from '%s' to '%s'");
       }
@@ -510,7 +511,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       }
       if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
         if (!TypeAssignmentCompatible(from->type, to)) {
-          SemanticTypeConversionWarning(from, to, "ptr-conversion",
+          SemanticTypeConversionWarning(from, to, "incompatible-pointer-types",
                                         "Illegal pointer conversion; "
                                         "from '%s' to '%s'");
         }

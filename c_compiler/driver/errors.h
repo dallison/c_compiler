@@ -10,6 +10,7 @@
 #define errors_h
 
 #include <stdarg.h>
+#include <stdbool.h>
 
 
 // Reports an error with varargs (printf style) arguments.
@@ -39,6 +40,43 @@ void DisableWarning(const char* warning);
 
 // Enables the given warning.
 void EnableWarning(const char* warning);
+
+// Promotes the given warning to an error (-Werror=<name>).
+void MakeWarningError(const char* warning);
+
+// Exempts the given warning from -Werror (-Wno-error=<name>).
+void ExemptWarningFromError(const char* warning);
+
+// Vendor namespace for #pragma <vendor> diagnostic ... directives.
+typedef enum {
+  kDiagnosticVendorDavecc,  // #pragma davecc diagnostic: all davecc diagnostics.
+  kDiagnosticVendorClang,   // #pragma clang diagnostic: clang-supported only.
+  kDiagnosticVendorGcc,     // #pragma GCC diagnostic: gcc-supported only.
+} DiagnosticVendor;
+
+// Saves/restores the whole diagnostic state for #pragma diagnostic push/pop.
+void DiagnosticPush(void);
+void DiagnosticPop(void);
+
+// Captures the current diagnostic state, swaps the live state with a saved
+// snapshot, and frees a snapshot.  Used to scope diagnostics to a single
+// declaration: parsing consumes a lookahead token that may process a trailing
+// "#pragma diagnostic pop" before the declaration is analyzed and code-genned,
+// so the snapshot taken before parsing is reinstalled around those phases.
+void* DiagnosticSnapshotState(void);
+void DiagnosticSwapState(void* snapshot);
+void DiagnosticFreeState(void* snapshot);
+
+// #pragma diagnostic {ignored,warning,error} "-W<name>" actions.
+void DiagnosticIgnore(const char* warning);
+void DiagnosticWarn(const char* warning);
+void DiagnosticError(const char* warning);
+
+// Returns whether `vendor` recognizes the warning `name`.  davecc recognizes
+// every davecc diagnostic; clang and gcc only recognize the warnings those
+// compilers actually provide, so vendor-specific pragmas naming a diagnostic
+// the vendor lacks are ignored.
+bool DiagnosticVendorKnowsWarning(DiagnosticVendor vendor, const char* name);
 
 void FatalError(const char* format, ...);
 

@@ -903,6 +903,15 @@ static void CheckReturn(Generator* gen) {
   if (StringEqual(&gen->func->info.function.symbol->name, "main")) {
     return;
   }
+
+  // A function marked __attribute__((noreturn)) / _Noreturn is not expected to
+  // return, so don't warn about reaching its end.
+  Symbol* func_symbol = gen->func->info.function.symbol;
+  if (func_symbol->flags.noreturn ||
+      SymbolHasAttribute(func_symbol, "noreturn")) {
+    return;
+  }
+
   ReturnVisitor v = {{0}, false, false};
   VisitBlockForResult(gen, gen->basic_blocks.value.p[0], &v);
   if (v.result_known && !v.found_result) {
@@ -948,7 +957,7 @@ static void DetectUninitializedVars(Generator* gen) {
           int lineno;
           int start, end;
           DecodeSourceLocation(ref->location, &filename, &lineno, &start, &end);
-          ReportWarning(filename, lineno, "uninit-var",
+          ReportWarning(filename, lineno, "uninitialized",
                     "Variable '%s' is used uninitialized here in function '%s'",
                     var->symbol->name.value,
                     gen->func->info.function.symbol->name.value);

@@ -1,0 +1,5 @@
+plain
+"quoted"
+call("arg")
+'c'
+"\"nested\""
