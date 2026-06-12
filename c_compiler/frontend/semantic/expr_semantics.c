@@ -306,10 +306,16 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
     // by being treated as the lowest rank.  A constant with an explicit
     // long/long long type keeps its rank so the usual arithmetic conversions
     // widen the result correctly (e.g. `i + 2L` becomes long).
-    if (IsIntConstant(node->left) && left_rank <= kIntRank) {
+    if (IsIntConstant(node->left) && left_rank <= kIntRank &&
+        !(TypeIsUnsigned(node->left->type) &&
+          !TypeIsUnsigned(node->right->type) &&
+          left_rank == right_rank)) {
       left_rank = 0;
     }
-    if (IsIntConstant(node->right) && right_rank <= kIntRank) {
+    if (IsIntConstant(node->right) && right_rank <= kIntRank &&
+        !(TypeIsUnsigned(node->right->type) &&
+          !TypeIsUnsigned(node->left->type) &&
+          left_rank == right_rank)) {
       right_rank = 0;
     }
     // Convert smaller rank to larger.
@@ -322,6 +328,15 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       // Convert left to right.
       NormalConversion(node->left, node->right->type);
       ASTNodeSetType((ASTNode*)node, node->right->type);
+    } else if (TypeIsUnsigned(node->left->type) !=
+               TypeIsUnsigned(node->right->type)) {
+      if (TypeIsUnsigned(node->left->type)) {
+        NormalConversion(node->right, node->left->type);
+        ASTNodeSetType((ASTNode*)node, node->left->type);
+      } else {
+        NormalConversion(node->left, node->right->type);
+        ASTNodeSetType((ASTNode*)node, node->right->type);
+      }
     }
   }
 }

@@ -110,6 +110,10 @@ ctestsuite_sh_test(
         "-target",
         "x86_64",
         "-static",
+        "-isystem",
+        "libc/include",
+        "-Wl,-e",
+        "-Wl,main",
     ],
     interp_args = ["-i"],
 )

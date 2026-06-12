@@ -55,6 +55,17 @@ typedef struct {
   uint8_t bytes[16];
   size_t len;
   int rex;
+  // Legacy / mandatory prefixes (0x66, 0xf2, 0xf3) must be emitted before the
+  // REX prefix.  They are buffered separately so that EncodeFinish can place
+  // them ahead of REX regardless of when the REX bits become known (e.g. the
+  // REX.B for a memory operand of an SSE move is only computed while encoding
+  // the operand, after the opcode bytes).
+  uint8_t prefixes[4];
+  size_t num_prefixes;
+  // Number of bytes that follow the displacement field (e.g. a trailing
+  // immediate).  Needed so RIP-relative displacements account for the full
+  // instruction length.
+  int tail_bytes;
   size_t modrm_pos;
   bool has_modrm;
   size_t disp_pos;
@@ -85,6 +96,8 @@ static void EncodeInit(X86Encode* enc, X86_64Assembler* assembler) {
   enc->assembler = assembler;
   enc->len = 0;
   enc->rex = -1;
+  enc->num_prefixes = 0;
+  enc->tail_bytes = 0;
   enc->has_modrm = false;
   enc->disp_pos = 0;
   enc->disp_size = 0;
@@ -95,6 +108,12 @@ static void EncodeInit(X86Encode* enc, X86_64Assembler* assembler) {
 static void EncodeByte(X86Encode* enc, uint8_t byte) {
   assert(enc->len < sizeof(enc->bytes));
   enc->bytes[enc->len++] = byte;
+}
+
+// Buffer a legacy / mandatory prefix that must precede the REX prefix.
+static void EncodeLegacyPrefix(X86Encode* enc, uint8_t byte) {
+  assert(enc->num_prefixes < sizeof(enc->prefixes));
+  enc->prefixes[enc->num_prefixes++] = byte;
 }
 
 static void SetRexW(X86Encode* enc) {
@@ -190,6 +209,9 @@ static void EncodeImm(X86Encode* enc, int size, int64_t imm) {
 
 static void EncodeFinish(X86Encode* enc) {
   Assembler* base = &enc->assembler->base;
+  for (size_t i = 0; i < enc->num_prefixes; i++) {
+    AssemblerEmitByte(base, base->current_section, enc->prefixes[i]);
+  }
   if (enc->rex >= 0) {
     AssemblerEmitByte(base, base->current_section, (uint8_t)enc->rex);
   }
@@ -455,8 +477,8 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
     EncodeModRM(enc, 0, reg_field, 5);
     enc->disp_pos = enc->len;
     enc->disp_size = 4;
-    int64_t next_ip =
-        AssemblerCurrentAddress(base) + (enc->rex >= 0 ? 1 : 0) + enc->len + 4;
+    int64_t next_ip = AssemblerCurrentAddress(base) + enc->num_prefixes +
+                      (enc->rex >= 0 ? 1 : 0) + enc->len + 4 + enc->tail_bytes;
     if (mem->sym != NULL && !mem->sym_known) {
       for (int i = 0; i < 4; i++) {
         EncodeByte(enc, 0);
@@ -465,9 +487,14 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
       if (base->pic && mem->sym->binding == SYM_BIND(global)) {
         reloc_type = R_X86_64_GOTPCREL;
       }
+      // The relocation patches the 4-byte displacement field, which sits 4
+      // bytes before the end of the instruction (next_ip).  The standard
+      // RIP-relative addend is -4 (plus any explicit displacement), because
+      // the CPU computes the effective address relative to next_ip = P + 4.
+      int32_t disp_offset = (int32_t)(next_ip - 4);
       AssemblerRelocation* reloc = NewAssemblerRelocation(
-          mem->sym, reloc_type, base->current_section, (int32_t)next_ip,
-          (int32_t)(mem->disp - next_ip));
+          mem->sym, reloc_type, base->current_section, disp_offset,
+          (int32_t)(mem->disp - 4));
       AssemblerAddRelocation(base, reloc);
     } else {
       int64_t target = mem->sym_known ? mem->sym_value + mem->disp : mem->disp;
@@ -488,7 +515,11 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
     disp += mem->sym_value;
   }
 
-  bool need_sib = (base_reg == X86_REG_RSP) || (index >= 0);
+  // rm == 100b (rsp, r12) always means "SIB byte follows", so any base whose
+  // low three bits are 100 must be encoded with a SIB byte even when there is
+  // no index register.
+  bool need_sib = (base_reg >= 0 && (base_reg & 7) == (X86_REG_RSP & 7)) ||
+                  (index >= 0);
   if (base_reg < 0) {
     base_reg = X86_REG_RBP;
     if (index < 0) {
@@ -499,7 +530,9 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
 
   int mod = 0;
   int disp_size = 0;
-  if (disp == 0 && base_reg != X86_REG_RBP && index < 0) {
+  // rm == 101b (rbp, r13) with mod == 0 means RIP/disp32, not [reg], so those
+  // bases always need an explicit (possibly zero) displacement byte.
+  if (disp == 0 && (base_reg & 7) != (X86_REG_RBP & 7) && index < 0) {
     mod = 0;
   } else if (PickMemDispSize(disp) == 1) {
     mod = 1;
@@ -548,26 +581,22 @@ static void EncodeXmmRegOperand(X86Encode* enc, int reg_field,
   EncodeModRM(enc, 3, reg_field, reg->num);
 }
 
-static void EmitRexPrefixBytes(X86Encode* enc) {
-  if (enc->rex >= 0) {
-    EncodeByte(enc, (uint8_t)enc->rex);
-    enc->rex = -1;
-  }
-}
-
 static void EmitOpcodeBytes(X86Encode* enc, uint8_t prefix66, uint8_t prefix_f2,
                             uint8_t prefix_f3, uint8_t opcode,
                             bool two_byte) {
+  // Mandatory prefixes are buffered separately (EncodeFinish emits them before
+  // the REX prefix).  This is required because the REX bits for some operands
+  // (e.g. an extended base register of a memory operand) are only determined
+  // after this function runs, while encoding the operand.
   if (prefix66) {
-    EncodeByte(enc, 0x66);
+    EncodeLegacyPrefix(enc, 0x66);
   }
   if (prefix_f2) {
-    EncodeByte(enc, 0xf2);
+    EncodeLegacyPrefix(enc, 0xf2);
   }
   if (prefix_f3) {
-    EncodeByte(enc, 0xf3);
+    EncodeLegacyPrefix(enc, 0xf3);
   }
-  EmitRexPrefixBytes(enc);
   if (two_byte) {
     EncodeByte(enc, 0x0f);
   }
@@ -579,7 +608,7 @@ static void EmitALURegImm(X86_64Assembler* assembler, int op_ext, X86Size size,
   X86Encode enc;
   EncodeInit(&enc, assembler);
   if (size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
   if (size == kX86Size64) {
     SetRexW(&enc);
@@ -604,12 +633,36 @@ static void EmitALURegImm(X86_64Assembler* assembler, int op_ext, X86Size size,
   EncodeFinish(&enc);
 }
 
-static void EmitMov(X86_64Assembler* assembler) {
+// The code emitter always prints 64-bit register names regardless of the
+// access width, so the operand size of a mov comes from the mnemonic
+// (movb/movw/movl/movq), not from the register operand.  force_bits selects
+// that size (0 means use the register's own size, i.e. 64-bit names -> 64).
+static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
     return;
   }
+
+  X86Size size = kX86Size64;
+  switch (force_bits) {
+    case 8: size = kX86Size8; break;
+    case 16: size = kX86Size16; break;
+    case 32: size = kX86Size32; break;
+    case 64: size = kX86Size64; break;
+    default: break;
+  }
+  // Override the (always-64-bit) register operand sizes so the encoder picks
+  // the right REX.W / operand-size prefix.
+  if (force_bits != 0) {
+    if (src.kind == kX86OpReg && !src.reg.is_xmm) {
+      src.reg.size = size;
+    }
+    if (dst.kind == kX86OpReg && !dst.reg.is_xmm) {
+      dst.reg.size = size;
+    }
+  }
+  bool byte = (size == kX86Size8);
 
   X86Encode enc;
   EncodeInit(&enc, assembler);
@@ -647,7 +700,7 @@ static void EmitMov(X86_64Assembler* assembler) {
       EncodeRegOperand(&enc, 0, &reg);
       EncodeImm(&enc, 4, src.imm);
     } else if (reg.size == kX86Size16) {
-      EncodeByte(&enc, 0x66);
+      EncodeLegacyPrefix(&enc, 0x66);
       EncodeByte(&enc, 0xc7);
       EncodeRegOperand(&enc, 0, &reg);
       EncodeImm(&enc, 2, src.imm);
@@ -672,39 +725,94 @@ static void EmitMov(X86_64Assembler* assembler) {
     if (dst.reg.size == kX86Size64) {
       SetRexW(&enc);
     } else if (dst.reg.size == kX86Size16) {
-      EncodeByte(&enc, 0x66);
+      EncodeLegacyPrefix(&enc, 0x66);
     }
-    EncodeByte(&enc, 0x89);
+    EncodeByte(&enc, byte ? 0x88 : 0x89);
     EncodeRegOperand(&enc, src.reg.num, &dst.reg);
     EncodeFinish(&enc);
     return;
   }
 
   if (dst.kind == kX86OpReg && src.kind == kX86OpMem) {
-    if (dst.reg.size == kX86Size64) {
+    if (size == kX86Size64) {
       SetRexW(&enc);
-    } else if (dst.reg.size == kX86Size16) {
-      EncodeByte(&enc, 0x66);
+    } else if (size == kX86Size16) {
+      EncodeLegacyPrefix(&enc, 0x66);
     }
-    EncodeByte(&enc, 0x8b);
+    EncodeByte(&enc, byte ? 0x8a : 0x8b);
     EncodeMemOperand(&enc, dst.reg.num, &src);
     EncodeFinish(&enc);
     return;
   }
 
   if (dst.kind == kX86OpMem && src.kind == kX86OpReg) {
-    if (src.reg.size == kX86Size64) {
+    if (size == kX86Size64) {
       SetRexW(&enc);
-    } else if (src.reg.size == kX86Size16) {
-      EncodeByte(&enc, 0x66);
+    } else if (size == kX86Size16) {
+      EncodeLegacyPrefix(&enc, 0x66);
     }
-    EncodeByte(&enc, 0x89);
+    EncodeByte(&enc, byte ? 0x88 : 0x89);
     EncodeMemOperand(&enc, src.reg.num, &dst);
     EncodeFinish(&enc);
     return;
   }
 
+  if (dst.kind == kX86OpMem && src.kind == kX86OpImm && src.sym == NULL) {
+    int imm_size = byte ? 1 : (size == kX86Size16 ? 2 : 4);
+    if (size == kX86Size64) {
+      SetRexW(&enc);
+    } else if (size == kX86Size16) {
+      EncodeLegacyPrefix(&enc, 0x66);
+    }
+    EncodeByte(&enc, byte ? 0xc6 : 0xc7);
+    // The trailing immediate must be accounted for in any RIP-relative
+    // displacement emitted while encoding the memory operand.
+    enc.tail_bytes = imm_size;
+    EncodeMemOperand(&enc, 0, &dst);
+    enc.tail_bytes = 0;
+    EncodeImm(&enc, imm_size, src.imm);
+    EncodeFinish(&enc);
+    return;
+  }
+
   AssemblerError(&ASM, "Unsupported mov operand combination");
+}
+
+static void EmitMov(X86_64Assembler* assembler) {
+  EmitMovSized(assembler, 0);
+}
+
+// movzx / movsx: opcode is the second byte of a 0F-prefixed instruction.
+//   0F B6 movzbl/q, 0F BE movsbl/q, 0F B7 movzwl/q, 0F BF movswl/q.
+// The destination is always a (64-bit named) register; the source is a byte or
+// word in memory or a register.
+static void EmitMovExtend(X86_64Assembler* assembler, uint8_t opcode) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (dst.kind != kX86OpReg || dst.reg.is_xmm) {
+    AssemblerError(&ASM, "movzx/movsx requires a register destination");
+    return;
+  }
+
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  if (dst.reg.size == kX86Size64) {
+    SetRexW(&enc);
+  }
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, opcode);
+  if (src.kind == kX86OpReg) {
+    EncodeModRM(&enc, 3, dst.reg.num, src.reg.num);
+  } else if (src.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+  } else {
+    AssemblerError(&ASM, "movzx/movsx invalid source operand");
+    return;
+  }
+  EncodeFinish(&enc);
 }
 
 static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
@@ -717,7 +825,7 @@ static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
   X86Encode enc;
   EncodeInit(&enc, assembler);
   if (op.reg.size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
   if (op.reg.size == kX86Size64) {
     SetRexW(&enc);
@@ -751,7 +859,7 @@ static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext) {
     if (dst.reg.size == kX86Size64) {
       SetRexW(&enc);
     } else if (dst.reg.size == kX86Size16) {
-      EncodeByte(&enc, 0x66);
+      EncodeLegacyPrefix(&enc, 0x66);
     }
     EncodeByte(&enc, (uint8_t)reg_opcode);
     EncodeRegOperand(&enc, src.reg.num, &dst.reg);
@@ -918,7 +1026,7 @@ static void EmitShift(X86_64Assembler* assembler, int op_ext, X86Size size) {
   if (size == kX86Size64) {
     SetRexW(&enc);
   } else if (size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
   bool use_cl = false;
   if (count.kind == kX86OpReg && !count.reg.is_xmm &&
@@ -964,7 +1072,7 @@ static void EmitUnary(X86_64Assembler* assembler, int op_ext, X86Size size) {
   if (size == kX86Size64) {
     SetRexW(&enc);
   } else if (size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
   EncodeByte(&enc, 0xf7);
   if (dst.kind == kX86OpReg) {
@@ -998,7 +1106,7 @@ static void EmitImul(X86_64Assembler* assembler, X86Size size) {
   if (size == kX86Size64) {
     SetRexW(&enc);
   } else if (size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
 
   if (three_operand) {
@@ -1045,7 +1153,7 @@ static void EmitDivOp(X86_64Assembler* assembler, int op_ext, X86Size size) {
   if (size == kX86Size64) {
     SetRexW(&enc);
   } else if (size == kX86Size16) {
-    EncodeByte(&enc, 0x66);
+    EncodeLegacyPrefix(&enc, 0x66);
   }
   EncodeByte(&enc, 0xf7);
   if (divisor.kind == kX86OpReg) {
@@ -1330,7 +1438,7 @@ static void EmitFnegSd(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void Assemble_movw(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_movw(X86_64Assembler* assembler) { EmitMovSized(assembler, 16); }
 static void Assemble_movabs(X86_64Assembler* assembler) { EmitMovabs(assembler); }
 static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4); }
 static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1); }
@@ -1373,7 +1481,36 @@ static void Assemble_setg(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9
 static void Assemble_cqo(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
 static void Assemble_cdq(X86_64Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
 static void Assemble_cltq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
-static void Assemble_movslq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
+// movslq (a.k.a. movsxd): sign-extend an r/m32 source into a 64-bit register.
+// Encoded as REX.W + 0x63 /r.  (The no-operand cltq form is no longer emitted
+// by the code generator; sign-extension of a value already in a register is
+// lowered to a shift pair instead.)
+static void EmitMovsxd(X86_64Assembler* assembler) {
+  X86Op src, dst;
+  if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &dst)) {
+    return;
+  }
+  if (dst.kind != kX86OpReg || dst.reg.is_xmm) {
+    AssemblerError(&ASM, "movslq requires a register destination");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  SetRexW(&enc);
+  EncodeByte(&enc, 0x63);
+  if (src.kind == kX86OpReg) {
+    EncodeModRM(&enc, 3, dst.reg.num, src.reg.num);
+  } else if (src.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, dst.reg.num, &src);
+  } else {
+    AssemblerError(&ASM, "movslq invalid source operand");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void Assemble_movslq(X86_64Assembler* assembler) { EmitMovsxd(assembler); }
 static void Assemble_rcall(X86_64Assembler* assembler) { EmitIndirectCall(assembler); }
 static void Assemble_movss(X86_64Assembler* assembler) { EmitSSEMove(assembler, false, true, false); }
 static void Assemble_movsd(X86_64Assembler* assembler) { EmitSSEMove(assembler, true, false, false); }
@@ -1443,10 +1580,14 @@ static void Assemble_movq_xmm(X86_64Assembler* assembler) { EmitMovqXmm(assemble
 static void Assemble_fneg_ss(X86_64Assembler* assembler) { EmitFnegSs(assembler); }
 static void Assemble_fneg_sd(X86_64Assembler* assembler) { EmitFnegSd(assembler); }
 
-static void Assemble_mov(X86_64Assembler* assembler) { EmitMov(assembler); }
-static void Assemble_movq(X86_64Assembler* assembler) { EmitMov(assembler); }
-static void Assemble_movl(X86_64Assembler* assembler) { EmitMov(assembler); }
-static void Assemble_movb(X86_64Assembler* assembler) { EmitMov(assembler); }
+static void Assemble_mov(X86_64Assembler* assembler) { EmitMovSized(assembler, 64); }
+static void Assemble_movq(X86_64Assembler* assembler) { EmitMovSized(assembler, 64); }
+static void Assemble_movl(X86_64Assembler* assembler) { EmitMovSized(assembler, 32); }
+static void Assemble_movb(X86_64Assembler* assembler) { EmitMovSized(assembler, 8); }
+static void Assemble_movsbq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xbe); }
+static void Assemble_movzbq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xb6); }
+static void Assemble_movswq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xbf); }
+static void Assemble_movzwq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xb7); }
 static void Assemble_push(X86_64Assembler* assembler) {
   EmitPushPop(assembler, true);
 }
@@ -1512,6 +1653,8 @@ JCC(jle, 0x8e);
 JCC(jge, 0x8d);
 JCC(jb, 0x82);
 JCC(jae, 0x83);
+JCC(ja, 0x87);
+JCC(jbe, 0x86);
 
 #undef JCC
 
@@ -1537,6 +1680,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(movl);
   INST(movb);
   INST(movw);
+  INST(movsbq);
+  INST(movzbq);
+  INST(movswq);
+  INST(movzwq);
   INST(movabs);
   INST(movss);
   INST(movsd);
@@ -1607,6 +1754,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(jge);
   INST(jb);
   INST(jae);
+  INST(ja);
+  INST(jbe);
   INST(sete);
   INST(setne);
   INST(setl);

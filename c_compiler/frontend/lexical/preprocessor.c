@@ -1652,7 +1652,9 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                      &replacement_text,
                      NewSourceLocation(p->lex->source, p->lex->source->lineno,
                                        name_start, name_end));
-    assert(HashTableInsert(&p->macros, macro));
+    bool macro_inserted = HashTableInsert(&p->macros, macro);
+    assert(macro_inserted);
+    (void)macro_inserted;
     // NewMacro copied the arg element pointers into the macro; free our temp
     // vector backing (the strings are now owned by the macro).
     VectorDestruct(&args);

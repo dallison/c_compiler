@@ -12,5 +12,8 @@ char* strchr(const char* s, char c) {
   while (*s != '\0' && *s != c) {
     s++;
   }
-  return *s == '\0' ? NULL : (char*)s;
+  if (*s == '\0') {
+    return NULL;
+  }
+  return (char*)s;
 }

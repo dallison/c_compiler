@@ -16,5 +16,8 @@ char* strrchr(const char* s, char c) {
   while (s >= start && *s != c) {
     s--;
   }
-  return s < start ? NULL : (char*)s;
+  if (s < start) {
+    return NULL;
+  }
+  return (char*)s;
 }

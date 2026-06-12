@@ -798,7 +798,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        assert(InsertGlobalSymbol(sym));
+        bool inserted = InsertGlobalSymbol(sym);
+        assert(inserted);
+        (void)inserted;
         if (IsDefinition(parser, sym, storage)) {
           sym->flags.is_defined = true;
         } else if (!StorageIs(storage, STO(extern))) {
@@ -1052,7 +1054,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        assert(SyntaxAddSymbol(syntax, sym));
+        bool added = SyntaxAddSymbol(syntax, sym);
+        assert(added);
+        (void)added;
       }
     }
 

@@ -178,7 +178,10 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
 void X86_64LoaderArchitectureInit(LoaderArchitecture* arch) {
   arch->machine_type = ELF_MACHINE_TYPE_X86_64;
   arch->platform = "x86_64";
-  arch->ignore_vaddr = true;
+  // The software interpreter executes using host addresses, so segments must
+  // be mapped at their linked virtual addresses (host == vaddr).  This keeps
+  // RIP-relative references across the text and data segments valid.
+  arch->ignore_vaddr = false;
   arch->init_got_plt = InitGOTPLT;
   arch->apply_got_data_relocation = ApplyGOTDataRelocation;
   arch->apply_got_plt_relocation = ApplyGOTPLTRelocation;

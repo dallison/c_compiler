@@ -14,7 +14,7 @@ int memcmp(const void* s1, const void* s2, size_t n) {
   while (*p1 == *p2) {
     n--;
     if (n == 0) {
-       break;
+       return 0;
     }
     p1++;
     p2++;

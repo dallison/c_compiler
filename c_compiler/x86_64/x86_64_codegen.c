@@ -41,6 +41,7 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(loadw)
     OPCODE(loadw_z)
     OPCODE(loadl)
+    OPCODE(loadl_z)
     OPCODE(loadq)
     OPCODE(storeb)
     OPCODE(storew)
@@ -209,6 +210,7 @@ bool X86_64IsLoad(TargetInstruction* inst) {
   switch ((X86_64Opcode)inst->opcode) {
     case X86_64_OP(loadb):
     case X86_64_OP(loadl):
+    case X86_64_OP(loadl_z):
     case X86_64_OP(loadq):
     case X86_64_OP(loadb_z):
     case X86_64_OP(loadw):
@@ -223,11 +225,13 @@ bool X86_64IsLoad(TargetInstruction* inst) {
 
 bool X86_64IsSignedLoad(TargetInstruction* inst) {
   switch ((X86_64Opcode)inst->opcode) {
-    case X86_64_OP(loadb):
-    case X86_64_OP(loadl):
-    case X86_64_OP(loadw):
-    case X86_64_OP(loadq):
+    case X86_64_OP(loadb):  // emitted as movsbq (sign-extends)
+    case X86_64_OP(loadw):  // emitted as movswq (sign-extends)
+    case X86_64_OP(loadl):  // emitted as movslq (sign-extends)
+    case X86_64_OP(loadq):  // full 64-bit load, no extension needed
       return true;
+    // NOTE: loadl_z is deliberately excluded.  It is emitted as a plain movl,
+    // which zero-extends the upper 32 bits (correct for unsigned int).
     default:
       return false;
   }
@@ -527,10 +531,12 @@ void X86_64GeneratorInit(X86_64Generator* rv, Generator* gen) {
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->not_leaf = false;
+  rv->has_incoming_stack_args = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
   VectorInit(&rv->saved_regs);
+  rv->saved_arg_area_size = 0;
   VectorInit(&rv->offsets);
 
   X86_64RegisterAllocatorInit(&rv->register_allocator, rv);
@@ -558,11 +564,16 @@ void X86_64GeneratorDelete(X86_64Generator* rv) {
 
 static SavedArgumentRegister* NewSavedArgumentRegister(int reg_num,
                                                        int base_reg_num,
-                                                       int offset) {
+                                                       int offset,
+                                                       bool is_fp,
+                                                       int value_bytes) {
   SavedArgumentRegister* reg = malloc(sizeof(SavedArgumentRegister));
   reg->base_reg_num = base_reg_num;
   reg->reg_num = reg_num;
   reg->offset = offset;
+  reg->is_fp = is_fp;
+  reg->value_bytes = value_bytes;
+  reg->copy_bytes = 0;
   return reg;
 }
 
@@ -696,6 +707,11 @@ static TargetInstruction* IntArgumentRegister(X86_64Generator* rv, int argnum) {
   return rv->int_argument_registers[argnum];
 }
 
+static TargetInstruction* IncomingIntArgumentRegister(X86_64Generator* rv,
+                                                      int argnum) {
+  return EmitSymbol(rv, NewInstruction(X86_64_OP(a0) + argnum));
+}
+
 
 static TargetInstruction* FloatingPointArgumentRegister(X86_64Generator* rv,
                                                         int argnum) {
@@ -706,6 +722,11 @@ static TargetInstruction* FloatingPointArgumentRegister(X86_64Generator* rv,
         EmitSymbol(rv, NewInstruction(X86_64_OP(fa0) + argnum));
   }
   return rv->fp_argument_registers[argnum];
+}
+
+static TargetInstruction* IncomingFloatingPointArgumentRegister(
+    X86_64Generator* rv, int argnum) {
+  return EmitSymbol(rv, NewInstruction(X86_64_OP(fa0) + argnum));
 }
 
 static TargetInstruction* IntVariableRegister(X86_64Generator* rv, int varnum, Symbol* sym) {
@@ -795,10 +816,14 @@ static TargetInstruction* SetDestOrMoveToArgReg(X86_64Generator* rv,
       break;
     }
   }
+  if (TargetIsConst(from) || (X86_64Opcode)from->opcode == X86_64_OP(x0)) {
+    return SetDestOrMove(rv, from, to, rmov_opcode);
+  }
   if (candidate) {
     return SetDestOrMove(rv, from, to, rmov_opcode);
   }
-  Emit(rv, NewInstruction2(rmov_opcode, to, from));
+  TargetInstruction* move = Emit(rv, NewInstruction1(rmov_opcode, from));
+  move->dest = to;
   return to;
 }
 
@@ -904,12 +929,23 @@ static TargetInstruction* Memcpy(X86_64Generator* rv, TargetInstruction* dest_ad
     int num_bytes = length & 7;
     int num_words = length >> 3;
     TargetInstruction* result = NULL;
+    TargetInstruction* stable_src = Emit(rv, NewInstruction1(X86_64_OP(mv), src_addr));
     for (int i = 0; i < num_words; i++, src_offset += 8, dest_offset += 8) {
-      TargetInstruction* load = LoadImmediate(rv, X86_64_OP(loadq), src_addr, src_offset);
+      TargetInstruction* chunk_src =
+          Emit(rv, NewInstruction1(X86_64_OP(mv), stable_src));
+      if (src_offset != 0) {
+        chunk_src = AddImmediate(rv, chunk_src, src_offset);
+      }
+      TargetInstruction* load = LoadImmediate(rv, X86_64_OP(loadq), chunk_src, 0);
       result = StoreImmediate(rv, X86_64_OP(storeq), load, dest_addr, dest_offset);
     }
     for (int i = 0; i < num_bytes; i++, src_offset += 1, dest_offset += 1) {
-      TargetInstruction* load = LoadImmediate(rv, X86_64_OP(loadb), src_addr, src_offset);
+      TargetInstruction* chunk_src =
+          Emit(rv, NewInstruction1(X86_64_OP(mv), stable_src));
+      if (src_offset != 0) {
+        chunk_src = AddImmediate(rv, chunk_src, src_offset);
+      }
+      TargetInstruction* load = LoadImmediate(rv, X86_64_OP(loadb), chunk_src, 0);
       result = StoreImmediate(rv, X86_64_OP(storeb), load, dest_addr, dest_offset);
     }
     if (count_as_call) {
@@ -988,7 +1024,13 @@ static TargetInstruction* Memzero(X86_64Generator* rv, TargetInstruction* dest_a
       rv, NewInstruction1(X86_64_OP(mv), Zero(rv)));
   arg1->dest = IntArgumentRegister(rv, 1);
 
-  // First arg is the address.
+  // First arg is the address.  Apply the offset to the base address; the
+  // short (in-line) path above folds the offset into each store, but for the
+  // memset call we must materialize base + offset explicitly or we would zero
+  // the wrong location (e.g. clobbering the return address at rbp+0).
+  if (offset != 0) {
+    dest_addr = OffsetFrom(rv, dest_addr, offset);
+  }
   TargetInstruction* arg0 = SetDestOrMove(rv, dest_addr, IntArgumentRegister(rv, 0), X86_64_OP(mv));
   //TargetInstruction* arg0 = Emit(
   //    rv, NewInstruction2(X86_64_OP(rmov), IntArgumentRegister(rv, 0), dest_addr));
@@ -1106,6 +1148,23 @@ static X86_64Opcode IR2X86_64(IROpcode op) {
   }
 }
 
+// Number of integer variables that can be pinned to a distinct physical
+// register.  Mirrors the usable fixed slots in X86_64VarRegSlot(): a non-leaf
+// function uses the callee-saved r12-r15 (4 of them); a leaf function makes no
+// calls and may also use the caller-saved temporaries r8-r10 (3 of them).
+// Beyond this, additional variables must live on the stack -- otherwise they
+// would be allocated to caller-saved temporaries and silently clobbered across
+// the calls they span, or alias another register variable.
+#define X86_64_MAX_LEAF_INT_REG_VARS 3
+#define X86_64_MAX_NONLEAF_INT_REG_VARS 4
+
+static bool X86_64HasFreeIntRegVar(X86_64Generator* rv) {
+  bool is_leaf = rv->base.num_calls == 0 && compiler->optimize;
+  int limit = is_leaf ? X86_64_MAX_LEAF_INT_REG_VARS
+                      : X86_64_MAX_NONLEAF_INT_REG_VARS;
+  return rv->num_int_reg_vars < limit;
+}
+
 static bool UseRegisterForVariable(X86_64Generator* rv, IRNode* var_node) {
   if (OptLevel0()) {
     // When not optimizing, all variables are on the stack.
@@ -1147,7 +1206,7 @@ static struct {
     {TypeIsChar, X86_64_OP(loadb)},
     {TypeIsLong, X86_64_OP(loadq)},
     {TypeIsLongLong, X86_64_OP(loadq)},
-    {TypeIsUnsignedInt, X86_64_OP(loadl)},
+    {TypeIsUnsignedInt, X86_64_OP(loadl_z)},
     {TypeIsUnsignedShort, X86_64_OP(loadw_z)},
     {TypeIsUnsignedChar, X86_64_OP(loadb_z)},
     {TypeIsFloat, X86_64_OP(loadss)},
@@ -1697,34 +1756,111 @@ static TargetInstruction* SubtractForComparison(X86_64Generator* rv, IRNode* nod
                                   Materialize(rv, op2)));
 }
 
-// Compare integers for less than.  This uses the slt/slti
-// instructions.
+// True for the unsigned integer comparison IR opcodes (the "a" suffixed forms
+// behave as unsigned / "above-below").  Signed comparisons use setl, unsigned
+// ones must use setb so the value-producing form matches the semantics.
+static bool ComparisonIsUnsigned(IRNode* node) {
+  switch (node->opcode) {
+    case IR_OP(cmplta):
+    case IR_OP(cmplea):
+    case IR_OP(cmpgta):
+    case IR_OP(cmpgea):
+      return true;
+    case IR_OP(cmplti):
+    case IR_OP(cmplei):
+    case IR_OP(cmpgti):
+    case IR_OP(cmpgei):
+      if (node->inputs.length > 0) {
+        IRNode* op = node->inputs.value.p[0];
+        return TypeIsUnsigned(op->type);
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+static X86_64Opcode UnsignedBranchForComparison(X86_64Opcode branch) {
+  switch (branch) {
+    case X86_64_OP(jl):
+      return X86_64_OP(jb);
+    case X86_64_OP(jge):
+      return X86_64_OP(jae);
+    default:
+      return branch;
+  }
+}
+
+// Compare integers for less than (op1 < op2), producing a 0/1 value.  Uses
+// setl for signed comparisons and setb for unsigned.  The set* lowering takes
+// operand[0] as the left operand and operand[1] as the right (see
+// PrintCompareAndSet); a single operand means "compare against zero".
 static TargetInstruction* CompareLessThanInt(X86_64Generator* rv, IRNode* node,
                                              IRNode* op1, IRNode* op2) {
+  X86_64Opcode setcc =
+      ComparisonIsUnsigned(node) ? X86_64_OP(setb) : X86_64_OP(setl);
   if (!IRIsConst(op2)) {
     // Second operand isn't constant, compiled as slt.
     TargetInstruction* i1 = Materialize(rv, op1);
     TargetInstruction* i2 = Materialize(rv, op2);
-    return Emit(rv, NewInstruction2(X86_64_OP(setl), i1, i2));
+    return Emit(rv, NewInstruction2(setcc, i1, i2));
   }
 
   // Second operand is constant.
   int64_t value = ((IRConstant*)op2)->value.ivalue;
   if (value == 0) {
     // Common case, compare with zero, use sltz.
-    return Emit(rv, NewInstruction1(X86_64_OP(setl), Materialize(rv, op1)));
+    return Emit(rv, NewInstruction1(setcc, Materialize(rv, op1)));
   }
 
   if (X86_64IsPossibleImmediate(value)) {
     return Emit(
-        rv, NewInstruction2(X86_64_OP(setl), Materialize(rv, op1),
+        rv, NewInstruction2(setcc, Materialize(rv, op1),
                             GetIntConstant(rv, NULL, kTargetType32Bit, value)));
   }
 
   // Constant is too big for an immediate, materialize it into
   // a register and use an slt instruction.
-  return Emit(rv, NewInstruction2(X86_64_OP(setl), Materialize(rv, op1),
+  return Emit(rv, NewInstruction2(setcc, Materialize(rv, op1),
                                   Materialize(rv, op2)));
+}
+
+// Logical NOT (!x).  This is distinct from one's-complement (~x): the result
+// is 1 when the operand is zero and 0 otherwise.  Materialize it as
+// "test x, x ; sete rd" rather than the bitwise notq used by onescomp.  The
+// single-operand sete form emits "test op,op" before the set (see
+// PrintCompareAndSet), and setcc results are zero-extended to the full
+// register so the boolean is a clean 0/1.
+// Route a freshly produced boolean (comparison or logical-not) result into the
+// node's destination register if it has one.  Comparison/logical-not results
+// are frequently merged into a value via && / || / ?: (the IR marks this with
+// "-> $dest"); without this the result is left in a scratch register and the
+// destination is never written.
+static TargetInstruction* RouteResultToDest(X86_64Generator* rv, Generator* gen,
+                                            IRNode* node,
+                                            TargetInstruction* result) {
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL && result != NULL) {
+    result = SetDestOrMove(rv, result, dest, X86_64_OP(mv));
+    SetLoweredNode(node, result);
+  }
+  return result;
+}
+
+static TargetInstruction* LowerLogicalNot(X86_64Generator* rv, Generator* gen,
+                                          IRNode* node) {
+  IRNode* op = node->inputs.value.p[0];
+  // Floating-point logical-not is uncommon and the operand lives in an XMM
+  // register, so fall back to the generic lowering for it.  Integer/pointer
+  // logical-not is "test op,op ; sete rd" (the single-operand sete form emits
+  // the test, and setcc results are zero-extended to a clean 0/1).
+  if (TypeIsFloatingPoint(op->type)) {
+    return LowerExpression(rv, gen, node);
+  }
+  TargetInstruction* result = Emit(
+      rv, SetLoweredNode(node,
+                         NewInstruction1(X86_64_OP(sete), Materialize(rv, op))));
+  return RouteResultToDest(rv, gen, node, result);
 }
 
 // Comparisons set the result register to 1 or 0.  The result of integer
@@ -1734,6 +1870,36 @@ static TargetInstruction* CompareLessThanInt(X86_64Generator* rv, IRNode* node,
 // the conditional branch.  However we still need to generate the correct
 // result because the result might not be used in a branch.
 //
+// Lower a scalar floating-point comparison into "ucomiSS/SD ; setcc ; movzbq".
+// ucomiSS/SD (emitted by PrintCompareAndSet when the X86_64_FCMP_* flag is set)
+// compares operand[0] against operand[1] and sets CF (operand[0] < operand[1]),
+// ZF (operand[0] == operand[1]).  The chosen setcc reads those flags to produce
+// a clean 0/1 boolean.  NaN operands (PF set) are not handled specially.
+static TargetInstruction* FloatCompareSet(X86_64Generator* rv, IRNode* node,
+                                          X86_64Opcode setcc, IRNode* a,
+                                          IRNode* b, bool is_double) {
+  TargetInstruction* inst =
+      NewInstruction2(setcc, Materialize(rv, a), Materialize(rv, b));
+  inst->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
+  return Emit(rv, SetLoweredNode(node, inst));
+}
+
+// a <= b is computed as !(b < a) and a >= b as !(a < b): produce (a < b) with
+// setb then logically invert the boolean with "xor $1" (matching the integer
+// <=/>= lowering, see cmplei/cmpgei above).
+static TargetInstruction* FloatCompareInvert(X86_64Generator* rv, IRNode* node,
+                                             IRNode* a, IRNode* b,
+                                             bool is_double) {
+  TargetInstruction* lt =
+      NewInstruction2(X86_64_OP(setb), Materialize(rv, a), Materialize(rv, b));
+  lt->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
+  lt = Emit(rv, lt);
+  return Emit(rv, SetLoweredNode(
+                      node, NewInstruction2(
+                                X86_64_OP(xor), lt,
+                                GetIntConstant(rv, NULL, kTargetType32Bit, 1))));
+}
+
 // Floating point comparisons do exist but the only conditions are EQ/LT/LE.
 // We need to reverse the operands to perform the other conditions.
 static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
@@ -1774,9 +1940,13 @@ static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
 
     case IR_OP(cmplei):
     case IR_OP(cmplea): {
-      // Use op2 < op1 and invert
+      // a <= b  ==  !(b < a).  Compute (b < a) then logically invert the 0/1
+      // result with "xor $1" (bitwise notq would yield -1/-2, not a boolean).
       TargetInstruction* slt = CompareLessThanInt(rv, node, op2, op1);
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(X86_64_OP(not), slt)));
+      return Emit(rv, SetLoweredNode(
+                          node, NewInstruction2(
+                                    X86_64_OP(xor), slt,
+                                    GetIntConstant(rv, NULL, kTargetType32Bit, 1))));
     }
 
     case IR_OP(cmpgti):
@@ -1786,91 +1956,44 @@ static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
 
     case IR_OP(cmpgei):
     case IR_OP(cmpgea): {
-      // Compare less than and invert.
+      // a >= b  ==  !(a < b).  Compute (a < b) then logically invert the 0/1
+      // result with "xor $1" (bitwise notq would yield -1/-2, not a boolean).
       TargetInstruction* slt = CompareLessThanInt(rv, node, op1, op2);
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(X86_64_OP(not), slt)));
+      return Emit(rv, SetLoweredNode(
+                          node, NewInstruction2(
+                                    X86_64_OP(xor), slt,
+                                    GetIntConstant(rv, NULL, kTargetType32Bit, 1))));
     }
 
     case IR_OP(cmpeqf):
-      // feq.s op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
-
-    case IR_OP(cmpnef): {
-      // feq.s op1, op1
-      // invert
-      TargetInstruction* cmp =
-          Emit(rv, NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op1),
-                                   Materialize(rv, op2)));
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(X86_64_OP(not), cmp)));
-    }
-
+      return FloatCompareSet(rv, node, X86_64_OP(sete), op1, op2, false);
+    case IR_OP(cmpnef):
+      return FloatCompareSet(rv, node, X86_64_OP(setne), op1, op2, false);
     case IR_OP(cmpltf):
-      // flt.s op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
-    case IR_OP(cmplef):
-      // fle.s op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
+      // a < b: ucomi(a,b) sets CF when a < b.
+      return FloatCompareSet(rv, node, X86_64_OP(setb), op1, op2, false);
     case IR_OP(cmpgtf):
-      // flt.s op2, op1
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op2),
-                                             Materialize(rv, op1))));
+      // a > b  ==  b < a: ucomi(b,a) sets CF.
+      return FloatCompareSet(rv, node, X86_64_OP(setb), op2, op1, false);
+    case IR_OP(cmplef):
+      // a <= b  ==  !(b < a): compute (b < a) then invert the 0/1 result.
+      return FloatCompareInvert(rv, node, op2, op1, false);
     case IR_OP(cmpgef):
-      // fle.s op2, op1
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomiss), Materialize(rv, op2),
-                                             Materialize(rv, op1))));
+      // a >= b  ==  !(a < b): compute (a < b) then invert the 0/1 result.
+      return FloatCompareInvert(rv, node, op1, op2, false);
 
     case IR_OP(cmpeqd):
-      // feq.d op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
-    case IR_OP(cmpned): {
-      // feq.d op1, op2
-      // invert
-      TargetInstruction* cmp =
-          Emit(rv, NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op1),
-                                   Materialize(rv, op2)));
-      return Emit(rv, SetLoweredNode(node, NewInstruction1(X86_64_OP(not), cmp)));
-    }
-
+      return FloatCompareSet(rv, node, X86_64_OP(sete), op1, op2, true);
+    case IR_OP(cmpned):
+      return FloatCompareSet(rv, node, X86_64_OP(setne), op1, op2, true);
     case IR_OP(cmpltd):
-      // flt.d op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
-    case IR_OP(cmpled):
-      // fle.d op1, op2
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op1),
-                                             Materialize(rv, op2))));
+      return FloatCompareSet(rv, node, X86_64_OP(setb), op1, op2, true);
     case IR_OP(cmpgtd):
-      // flt.d op2, op1
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op2),
-                                             Materialize(rv, op1))));
+      return FloatCompareSet(rv, node, X86_64_OP(setb), op2, op1, true);
+    case IR_OP(cmpled):
+      return FloatCompareInvert(rv, node, op2, op1, true);
     case IR_OP(cmpged):
-      // fle.d op2, op1
-      return Emit(
-          rv, SetLoweredNode(node,
-                             NewInstruction2(X86_64_OP(ucomisd), Materialize(rv, op2),
-                                             Materialize(rv, op1))));
+      return FloatCompareInvert(rv, node, op1, op2, true);
     default:
       assert(false);
   }
@@ -2103,31 +2226,35 @@ static struct BranchInfo {
   X86_64Opcode branch;  // Branch opcode.
   bool reverse;     // Reverse operands.
 } branch_compare_ops[] = {
+    // The backend only has jl/jge (signed) and jb/jae (unsigned) conditional
+    // branches; <= and > are expressed by reversing the operands.  For
+    // (a <= b): a <= b  <=>  b >= a, and !(a <= b) == (a > b)  <=>  (b < a),
+    // both obtained by swapping the operands (reverse=true).
     {IR_OP(cmpeqi), true, X86_64_OP(je), false},
     {IR_OP(cmpnei), true, X86_64_OP(jne), false},
     {IR_OP(cmplti), true, X86_64_OP(jl), false},
-    {IR_OP(cmplei), false, X86_64_OP(jge), false},
+    {IR_OP(cmplei), true, X86_64_OP(jge), true},
     {IR_OP(cmpgti), true, X86_64_OP(jl), true},
     {IR_OP(cmpgei), true, X86_64_OP(jge), false},
 
     {IR_OP(cmpeqa), true, X86_64_OP(je), false},
     {IR_OP(cmpnea), true, X86_64_OP(jne), false},
     {IR_OP(cmplta), true, X86_64_OP(jb), false},
-    {IR_OP(cmplea), false, X86_64_OP(jae), false},
+    {IR_OP(cmplea), true, X86_64_OP(jae), true},
     {IR_OP(cmpgta), true, X86_64_OP(jb), true},
     {IR_OP(cmpgea), true, X86_64_OP(jae), false},
 
     {IR_OP(cmpeqi), false, X86_64_OP(jne), false},
     {IR_OP(cmpnei), false, X86_64_OP(je), false},
     {IR_OP(cmplti), false, X86_64_OP(jge), false},
-    {IR_OP(cmplei), true, X86_64_OP(jl), false},
+    {IR_OP(cmplei), false, X86_64_OP(jl), true},
     {IR_OP(cmpgti), false, X86_64_OP(jge), true},
     {IR_OP(cmpgei), false, X86_64_OP(jl), false},
 
     {IR_OP(cmpeqa), false, X86_64_OP(jne), false},
     {IR_OP(cmpnea), false, X86_64_OP(je), false},
     {IR_OP(cmplta), false, X86_64_OP(jae), false},
-    {IR_OP(cmplea), true, X86_64_OP(jb), false},
+    {IR_OP(cmplea), false, X86_64_OP(jb), true},
     {IR_OP(cmpgta), false, X86_64_OP(jae), true},
     {IR_OP(cmpgea), false, X86_64_OP(jb), false},
 };
@@ -2161,14 +2288,18 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
     // only used in this branch.
     IRNode* op1 = expr->inputs.value.p[0];
     IRNode* op2 = expr->inputs.value.p[1];
+    X86_64Opcode branch_opcode = branch_info->branch;
+    if (ComparisonIsUnsigned(expr)) {
+      branch_opcode = UnsignedBranchForComparison(branch_opcode);
+    }
 
     // There are beqz and bnez pseudo-instructions for comparing against zero.
     // Use them if possible.
     if ((IRIsZero(op1) || IRIsZero(op2)) &&
-        (branch_info->branch == X86_64_OP(je) ||
-         branch_info->branch == X86_64_OP(jne))) {
+        (branch_opcode == X86_64_OP(je) ||
+         branch_opcode == X86_64_OP(jne))) {
       X86_64Opcode branch =
-          branch_info->branch == X86_64_OP(je) ? X86_64_OP(jz) : X86_64_OP(jnz);
+          branch_opcode == X86_64_OP(je) ? X86_64_OP(jz) : X86_64_OP(jnz);
 
       // Put the zero in operand 2.
       if (IRIsZero(op1)) {
@@ -2198,9 +2329,25 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
       op2 = tmp;
     }
 
+    TargetInstruction* lhs = Materialize(rv, op1);
+    TargetInstruction* rhs = Materialize(rv, op2);
+    if ((expr->opcode == IR_OP(cmpeqi) || expr->opcode == IR_OP(cmpnei)) &&
+        op1->type != NULL && op1->type->size == 4 && IRIsConst(op2)) {
+      int64_t c = IRIntConstValue(op2);
+      if (c >= 0x80000000LL && c <= 0xffffffffLL) {
+        TargetInstruction* mask = Emit(rv, NewInstruction(X86_64_OP(tmp)));
+        TargetInstruction* mv =
+            Emit(rv, NewInstruction1(
+                         X86_64_OP(mv),
+                         GetIntConstant(rv, NULL, kTargetType64Bit,
+                                        0xffffffffLL)));
+        mv->dest = mask;
+        lhs = Emit(rv, NewInstruction2(X86_64_OP(and), lhs, mask));
+      }
+    }
+
     TargetInstruction* inst =
-        Emit(rv, NewInstruction2(branch_info->branch, Materialize(rv, op1),
-                                 Materialize(rv, op2)));
+        Emit(rv, NewInstruction2(branch_opcode, lhs, rhs));
 
     TargetInstruction* target = target_node->data.ptr;
     if (target == NULL) {
@@ -2228,7 +2375,7 @@ static TargetInstruction* LowerConditionalBranch(X86_64Generator* rv,
   int target_operand_num = 1;
   TargetInstruction* inst;
 
-  if (OptLevel1() && IRIsConst(expr)) {
+  if (IRIsConst(expr)) {
     int64_t value = ((IRConstant*)expr)->value.ivalue;
     if (value == 0) {
       // Expression is zero.  This becomes unconditional.
@@ -2268,14 +2415,10 @@ static TargetInstruction* LowerBranch(X86_64Generator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
   IRNode* target_node = node->inputs.value.p[0];
 
-  // If we are leaf and the branch is a return branch we can just emit
-  // the ret itself rather than branching to it.  For a leaf there
-  // is no stack frame restore.
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() &&
-                 !rv->not_leaf && rv->base.stack_frame_size == 0;
-  if (is_leaf && (node->flags & kIRReturnJump) != 0) {
-    return Emit(rv, NewInstruction(X86_64_OP(ret)));
-  }
+  // Return branches must go through the shared epilogue.  This lowering happens
+  // before register allocation, and register allocation can later introduce a
+  // real frame (saved registers, spills, forced frame pointer for stack args).
+  // Emitting a bare ret here would then skip the restore path.
   
   // Normal branch or non-leaf return branch.
   TargetInstruction* inst =
@@ -2367,24 +2510,85 @@ static TargetInstruction* LowerLiteralReference(X86_64Generator* rv, Generator* 
 }
 
 static TargetInstruction* LowerAddressOf(X86_64Generator* rv, IRNode* node) {
-  TargetInstruction* src = Materialize(rv, node->inputs.value.p[0]);
-  return SetLoweredNode(node, src);
+  IRNode* input = node->inputs.value.p[0];
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  bool on_stack = GetRegAndOffset(rv, input, &addr, &offset);
+  if (!on_stack || offset == NULL || TargetIsZero(offset)) {
+    return SetLoweredNode(node, addr);
+  }
+  return SetLoweredNode(node, AddValue(rv, addr, offset));
 }
 
-static TargetInstruction* LowerZeroExtend(X86_64Generator* rv, IRNode* node) {
-  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
-  IRConstant* mask_node = (IRConstant*)node->inputs.value.p[1];
-  int64_t mask = mask_node->value.ivalue;
+static TargetInstruction* LowerZeroExtend(X86_64Generator* rv, Generator* gen,
+                                          IRNode* node) {
+  IRNode* src = node->inputs.value.p[0];
+  TargetInstruction* value = Materialize(rv, src);
+  // The second IR operand is the bit-difference (diff*8), not a usable mask, so
+  // derive the mask from the operand types: a zero extension keeps the low
+  // min(src,dest) bytes of value and clears the rest.  Using the constant
+  // operand directly (e.g. 24 for a char->int extension) produces a wrong mask.
+  int src_size = src->type != NULL ? src->type->size : node->type->size;
+  int keep_bytes = src_size < node->type->size ? src_size : node->type->size;
+  if (keep_bytes >= 8) {
+    // No masking required; the value already occupies the full register.
+    TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+    if (dest != NULL) {
+      value = SetDestOrMove(rv, value, dest, X86_64_OP(mv));
+    }
+    return SetLoweredNode(node, value);
+  }
+  int64_t mask = (1LL << (keep_bytes * 8)) - 1;
   if (X86_64IsPossibleImmediate(mask)) {
     value = Emit(rv, NewInstruction2(
                          X86_64_OP(and), value,
                          GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
   } else {
-    value = Emit(rv, NewInstruction2(X86_64_OP(and), value,
-                                     Materialize(rv, node->inputs.value.p[1])));
+    TargetInstruction* mask_reg = Emit(
+        rv, NewInstruction1(X86_64_OP(mov),
+                            GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
+    value = Emit(rv, NewInstruction2(X86_64_OP(and), value, mask_reg));
   }
-  SetLoweredNode(node, value);
-  return value;
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL) {
+    value = SetDestOrMove(rv, value, dest, X86_64_OP(mv));
+  }
+  return SetLoweredNode(node, value);
+}
+
+// For a post-increment/decrement whose result value is consumed (such as
+// `f(p++)`), the IR provides the previously-loaded old value as a third input.
+// When the modified object is a register-allocated variable, that load aliases
+// the live variable register; the in-place update below would clobber it before
+// the consumer reads it.  Snapshot the old value into a fresh register and
+// retarget the consumer's value node to the snapshot.  (Memory-resident
+// variables already load into an independent temporary, so no snapshot is
+// needed there.)
+static void SnapshotPostIncOldValue(X86_64Generator* rv, IRNode* node,
+                                    IRNode* addr_node) {
+  if (node->inputs.length < 3) {
+    return;
+  }
+  IRNode* value_node = node->inputs.value.p[2];
+  if (value_node == NULL) {
+    return;
+  }
+  TargetInstruction* old = GetLoweredNode(value_node);
+  if (old == NULL || !X86_64IsVarRegister(old)) {
+    return;
+  }
+  X86_64Opcode mv_opcode =
+      TypeIsFloatingPoint(addr_node->type)
+          ? (TypeIsDouble(addr_node->type) ? X86_64_OP(fmv_d)
+                                           : X86_64_OP(fmv_s))
+          : X86_64_OP(mv);
+  TargetInstruction* snapshot = Emit(rv, NewInstruction1(mv_opcode, old));
+  // Redirect the value node's lowered result to the snapshot.  The node was
+  // already lowered to the live variable register (so SetLoweredNode would be
+  // a no-op); overwrite the cached lowering directly so the consumer reads the
+  // snapshot instead.  Any user of `old` that is the inc/dec itself has already
+  // been handled above.
+  value_node->data.ptr = snapshot;
 }
 
 static TargetInstruction* LowerInc(X86_64Generator* rv, IRNode* node) {
@@ -2434,6 +2638,7 @@ static TargetInstruction* LowerInc(X86_64Generator* rv, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  SnapshotPostIncOldValue(rv, node, addr_node);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -2494,6 +2699,7 @@ static TargetInstruction* LowerDec(X86_64Generator* rv, IRNode* node) {
       abort();
   }
   TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  SnapshotPostIncOldValue(rv, node, addr_node);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
@@ -2561,11 +2767,11 @@ static TargetInstruction* LowerSignExtend(X86_64Generator* rv, IRNode* node) {
     return SetLoweredNode(node, value);
   }
   diff = -diff;
-  if (diff == 32) {
-    // There is a word signextension instruction sext.w
-    return SetLoweredNode(node,
-                          Emit(rv, NewInstruction1(X86_64_OP(movslq), value)));
-  }
+  // Sign-extend by shifting left then arithmetic-shifting right.  This works
+  // for any register, unlike the dedicated cltq (movslq) instruction which is
+  // hard-wired to sign-extend %eax into %rax and therefore produces wrong
+  // results when the value lives in any other register (e.g. a register
+  // variable in r8-r15).
   TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(X86_64_OP(shl), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(X86_64_OP(sar), lsl, immed));
@@ -2605,19 +2811,33 @@ static TargetInstruction* PushArg(X86_64Generator* rv, IRNode* node,
 }
 
 static TargetInstruction* PopArg(X86_64Generator* rv, IRNode* node, size_t offset) {
+  // Reading an incoming stack argument requires a frame pointer (these are
+  // addressed rbp-relative), so make sure the prologue is not elided.
+  rv->has_incoming_stack_args = true;
+  // Incoming stack arguments live in the caller's frame just above our return
+  // address.  rbp points at the return-address slot, so the first stack
+  // argument is at rbp+8.  Address them frame-pointer relative (not via the
+  // stack pointer, which has already been decremented by the frame size by the
+  // time these loads execute in the prologue).  For varargs procedures the
+  // prologue lowers rbp by space_above_frame_pointer, so add that back.
+  int space_above_frame_pointer =
+      compiler->current_function->info.function.varargs
+          ? X86_64_VARARG_SAVE_AREA_SIZE
+          : 0;
+  int64_t fp_offset = (int64_t)offset + 8 + space_above_frame_pointer;
   if (node->type == NULL) {
     // No type, use ld instruction.
     return Emit(rv, NewInstruction2(
-                        X86_64_OP(loadq), StackPointer(rv),
-                        GetIntConstant(rv, node, kTargetType64Bit, offset)));
+                        X86_64_OP(loadq), FramePointer(rv),
+                        GetIntConstant(rv, node, kTargetType64Bit, fp_offset)));
   }
   X86_64Opcode opcode = X86_64_OP(loadq);
   if (TypeIsFloatingPoint(node->type)) {
     opcode = X86_64_OP(loadsd);
   }
   return Emit(rv, NewInstruction2(
-                      opcode, StackPointer(rv),
-                      GetIntConstant(rv, node, kTargetType64Bit, offset)));
+                      opcode, FramePointer(rv),
+                      GetIntConstant(rv, node, kTargetType64Bit, fp_offset)));
 }
 
 
@@ -2793,7 +3013,8 @@ static TargetInstruction* BuildArgList(X86_64Generator* rv, Vector* arg_location
 //    stop working (TODO: check the C standard for this).
 // 2. Doesn't do the 2XXLEN stuff where 16 byte structs are passed in a
 //    register pair.
-static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
+static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
+                                    IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
   int next_int_arg_reg = 0;
@@ -2824,7 +3045,10 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
           // Argument goes in an argument register.
           TargetInstruction* arg_reg =
               IntArgumentRegister(rv, next_int_arg_reg++);
-          VectorAppend(&arg_locations, NewArgLocationRegister(arg_reg));
+          ArgLocation* loc = NewArgLocationRegister(arg_reg);
+          loc->reference_offset = struct_area_size;
+          VectorAppend(&arg_locations, loc);
+          struct_area_size += 8;
         } else {
           // Need to push argument on to the stack.  But we do that in reverse
           // order so for now, we record that the arg location is on the stack.
@@ -2911,6 +3135,15 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
                (int)(arg_location->reference_offset + next_pushed_arg_offset), false);
         break;
       }
+      case kArgLocationRegister: {
+        if (TypeIsStructOrUnion(arg_node->type) && size <= 8) {
+          TargetInstruction* arg = Materialize(rv, arg_node);
+          Memcpy(rv, StackPointer(rv), arg, (int)size, 0,
+                 (int)(arg_location->reference_offset + next_pushed_arg_offset),
+                 false);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -2953,8 +3186,10 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
             // A struct less than 8 bytes is passed directly on stack.  The
             // Materialize call will result in the address of the struct.  We
             // need to load it.
+            TargetInstruction* addr =
+                IRIsStaticVariable(arg_node) ? GetLoweredNode(arg_node) : arg;
             arg = Emit(rv, NewInstruction2(
-                               X86_64_OP(loadq), arg,
+                               X86_64_OP(loadq), addr,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
           }
         }
@@ -2968,10 +3203,15 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed in a register.  The
-            // Materialize call will result in the address of the struct.  We
-            // need to load it.
+            // original value has already been copied into the outgoing stack
+            // scratch area so address temporaries used for other arguments
+            // cannot clobber it before this load.
+            TargetInstruction* addr =
+                AddImmediate(rv, StackPointer(rv),
+                             arg_location->reference_offset +
+                                 next_pushed_arg_offset);
             arg = Emit(rv, NewInstruction2(
-                               X86_64_OP(loadq), arg,
+                               X86_64_OP(loadq), addr,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
           }
         }
@@ -3050,6 +3290,27 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, IRNode* node) {
   SetLoweredNode(node, call);
 
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
+
+  // Honor an explicit result destination (node->dest, written "-> $N" in the
+  // IR).  The call leaves its result in the return register (rax / xmm0); the
+  // emitter does not move it anywhere on its own.  When the IR requests the
+  // result be placed in a particular value (e.g. the shared temporary produced
+  // by a short-circuit && / || or a ?: expression, where two different calls
+  // must converge on the same destination), emit an explicit move.  Without
+  // this the destination register keeps its previous (garbage) contents.
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+    if (dest != NULL && dest != call) {
+      X86_64Opcode mov_opcode = X86_64_OP(mv);
+      if (TypeIsFloatingPoint(node->type)) {
+        mov_opcode =
+            TypeIsDouble(node->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+      }
+      TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, call));
+      move->dest = dest;
+      return SetLoweredNode(node, move);
+    }
+  }
   return call;
 }
 
@@ -3120,16 +3381,48 @@ static TargetInstruction* LowerBuiltinVaStart(X86_64Generator* rv, IRNode* node)
       rv, NULL, kTargetType32Bit, (int64_t)rv->num_int_arg_regs * 8);
   StoreApField(rv, node->inputs.value.p[0], 0, gp_offset, X86_64_OP(storel));
 
-  TargetInstruction* fp_offset =
-      GetIntConstant(rv, NULL, kTargetType32Bit, 48);
+  TargetInstruction* fp_offset = GetIntConstant(
+      rv, NULL, kTargetType32Bit,
+      X86_64_VARARG_FP_SAVE_OFFSET + (int64_t)rv->num_fp_arg_regs * 16);
   StoreApField(rv, node->inputs.value.p[0], 4, fp_offset, X86_64_OP(storel));
 
-  TargetInstruction* last_addr;
-  TargetInstruction* last_offset;
-  GetRegAndOffset(rv, node->inputs.value.p[1], &last_addr, &last_offset);
-  TargetInstruction* last =
-      Emit(rv, NewInstruction2(X86_64_OP(add), last_addr, last_offset));
-  TargetInstruction* overflow_addr = AddImmediate(rv, last, 8);
+  // overflow_arg_area must point at the first variadic argument that was passed
+  // on the stack.  The "&last_named_arg + 8" trick only works when the last
+  // named argument itself lives on the stack; for the common case (e.g. printf,
+  // whose single named argument "format" arrives in a register) it would point
+  // into the register-save area instead.  Compute the address directly from the
+  // frame pointer using the same incoming-stack-argument layout as PopArg:
+  // rbp points at the return-address slot, the first stack slot is at rbp+8, a
+  // varargs prologue lowers rbp by space_above_frame_pointer, and any named
+  // arguments that spilled to the stack come before the variadic ones.
+  int space_above_frame_pointer = X86_64_VARARG_SAVE_AREA_SIZE;
+  int named_stack_bytes = 0;
+  {
+    bool is_struct_return = TypeIsStructOrUnion(
+        compiler->current_function->info.function.symbol->type->next);
+    int int_reg = X86_64_INT_ARG_START + (is_struct_return ? 1 : 0);
+    int fp_reg = X86_64_FP_ARG_START;
+    Vector* proto = &compiler->current_function->info.function.prototype;
+    for (size_t i = 0; i < proto->length; i++) {
+      Symbol* arg_symbol = proto->value.p[i];
+      if (TypeIsFloatingPoint(arg_symbol->type)) {
+        if (fp_reg <= X86_64_FP_ARG_END) {
+          fp_reg++;
+        } else {
+          named_stack_bytes += 8;
+        }
+      } else {
+        if (int_reg <= X86_64_INT_ARG_END) {
+          int_reg++;
+        } else {
+          named_stack_bytes += 8;
+        }
+      }
+    }
+  }
+  TargetInstruction* frame_ptr = Emit(rv, NewInstruction(X86_64_OP(fp)));
+  TargetInstruction* overflow_addr = AddImmediate(
+      rv, frame_ptr, 8 + space_above_frame_pointer + named_stack_bytes);
   StoreApField(rv, node->inputs.value.p[0], 8, overflow_addr, X86_64_OP(storeq));
 
   TargetInstruction* reg_save = Emit(rv, NewInstruction(X86_64_OP(fp)));
@@ -3143,8 +3436,22 @@ static TargetInstruction* LowerBuiltinVaArg(X86_64Generator* rv, IRNode* node) {
   int64_t arg_size = ((IRConstant*)node->inputs.value.p[1])->value.ivalue;
   int64_t aligned_size = (arg_size + 7) & ~7;
 
+  // Integer arguments are fetched from the integer portion of the register
+  // save area indexed by gp_offset (va_list field 0, capped at 48 == 6*8).
+  // Floating-point arguments live in the vector portion indexed by fp_offset
+  // (field 4, starting at 48 and stepping 16 bytes per register, capped at the
+  // end of the save area).  Select the right field/cap/stride up front.
+  bool va_is_fp = TypeIsFloatingPoint(node->type);
+  bool va_is_small_aggregate =
+      TypeIsStructOrUnion(node->type) && arg_size <= 8;
+  int offset_field = va_is_fp ? 4 : 0;
+  int offset_cap = va_is_fp
+                       ? (X86_64_VARARG_FP_SAVE_OFFSET + X86_64_NUM_FP_ARGS * 16)
+                       : (X86_64_NUM_INT_ARGS * 8);
+  int offset_step = va_is_fp ? 16 : 8;
+
   TargetInstruction* gp_offset =
-      LoadApField(rv, ap_node, 0, X86_64_OP(loadl));
+      LoadApField(rv, ap_node, offset_field, X86_64_OP(loadl));
   TargetInstruction* reg_save =
       LoadApField(rv, ap_node, 16, X86_64_OP(loadq));
 
@@ -3162,47 +3469,60 @@ static TargetInstruction* LowerBuiltinVaArg(X86_64Generator* rv, IRNode* node) {
         TypeIsDouble(node->type) ? X86_64_OP(loadsd) : X86_64_OP(loadss);
   }
 
-  TargetInstruction* result_tmp = Emit(rv, NewInstruction(X86_64_OP(t0)));
   TargetInstruction* overflow_label =
       TargetNewInstruction((TargetOpcode)X86_64_OP(label));
   TargetInstruction* done_label =
       TargetNewInstruction((TargetOpcode)X86_64_OP(label));
 
   Emit(rv, NewInstruction2(X86_64_OP(cmp), gp_offset,
-                           GetIntConstant(rv, NULL, kTargetType32Bit, 48)));
+                           GetIntConstant(rv, NULL, kTargetType32Bit, offset_cap)));
   Emit(rv, NewInstruction1(X86_64_OP(jge), overflow_label));
 
   TargetInstruction* reg_addr =
       Emit(rv, NewInstruction2(X86_64_OP(add), reg_save, gp_offset));
-  TargetInstruction* reg_value = Emit(
-      rv, NewInstruction2(load_opcode, reg_addr,
-                          GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  TargetInstruction* reg_value =
+      va_is_small_aggregate
+          ? reg_addr
+          : Emit(rv, NewInstruction2(
+                         load_opcode, reg_addr,
+                         GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
   X86_64Opcode mv_opcode = X86_64_OP(mv);
   if (load_opcode == X86_64_OP(loadss)) {
     mv_opcode = X86_64_OP(fmv_s);
   } else if (load_opcode == X86_64_OP(loadsd)) {
     mv_opcode = X86_64_OP(fmv_d);
   }
-  TargetInstruction* mv_reg = NewInstruction1(mv_opcode, reg_value);
-  mv_reg->dest = result_tmp;
-  Emit(rv, mv_reg);
-  StoreApField(rv, ap_node, 0,
-               AddImmediate(rv, gp_offset, 8),
+  // Advance gp_offset before materializing the result.  The result value
+  // must be the last thing written into the merged result register so that the
+  // (two-address) gp_offset update cannot clobber it via register aliasing.
+  StoreApField(rv, ap_node, offset_field,
+               AddImmediate(rv, gp_offset, offset_step),
                X86_64_OP(storel));
+  // The result is a normal allocator-managed virtual register (the value
+  // produced by this mv), not a fixed scratch register.  Using a fixed
+  // register such as t0 here is unsafe: forced physical registers bypass the
+  // allocator's aliasing-aware availability check, so a value that lives into
+  // the surrounding (allocator-managed) code can be handed the same physical
+  // register and clobbered.  The overflow arm below writes the same virtual.
+  TargetInstruction* result_tmp = Emit(rv, NewInstruction1(mv_opcode, reg_value));
   Emit(rv, NewInstruction1(X86_64_OP(jmp), done_label));
 
   Emit(rv, overflow_label);
   TargetInstruction* overflow_area =
       LoadApField(rv, ap_node, 8, X86_64_OP(loadq));
-  TargetInstruction* stack_value = Emit(
-      rv, NewInstruction2(load_opcode, overflow_area,
-                          GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
-  TargetInstruction* mv_stack = NewInstruction1(mv_opcode, stack_value);
-  mv_stack->dest = result_tmp;
-  Emit(rv, mv_stack);
+  TargetInstruction* stack_value =
+      va_is_small_aggregate
+          ? overflow_area
+          : Emit(rv, NewInstruction2(
+                         load_opcode, overflow_area,
+                         GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  // Advance overflow_arg_area before materializing the result (see above).
   StoreApField(rv, ap_node, 8,
                AddImmediate(rv, overflow_area, aligned_size),
                X86_64_OP(storeq));
+  TargetInstruction* mv_stack = NewInstruction1(mv_opcode, stack_value);
+  mv_stack->dest = result_tmp;
+  Emit(rv, mv_stack);
 
   Emit(rv, done_label);
   return SetLoweredNode(node, result_tmp);
@@ -3300,7 +3620,7 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       TargetInstruction* result =
           SetLoweredNode(node, EmitSymbol(rv, NewInstruction(X86_64_OP(structreturn))));
       TargetInstruction* mv = Emit(rv, NewInstruction1(X86_64_OP(mv),
-                  IntArgumentRegister(rv, 0)));
+                  IncomingIntArgumentRegister(rv, 0)));
       mv->dest = result;
       return result;
     }
@@ -3336,7 +3656,8 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
                                       ((IRConstant*)node)->value.fvalue);
 
     case IR_OP(enter):
-      Emit(rv, NewInstruction(X86_64_OP(save)));
+      // The prologue (save) is emitted at the start of X86_64Lower, before
+      // variable lowering, so that argument spills land after the frame setup.
       return NULL;
 
     case IR_OP(leave):
@@ -3427,8 +3748,6 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(andi):
     case IR_OP(xori):
 
-    case IR_OP(noti):
-    case IR_OP(nota):
     case IR_OP(onescomp):
     case IR_OP(negi):
     case IR_OP(negf):
@@ -3448,6 +3767,10 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(tmp):
       return LowerExpression(rv, gen, node);
 
+    case IR_OP(noti):
+    case IR_OP(nota):
+      return LowerLogicalNot(rv, gen, node);
+
 //    case IR_OP(rmovi):
 //    case IR_OP(rmovf):
 //    case IR_OP(rmovd):
@@ -3460,6 +3783,17 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(cmplei):
     case IR_OP(cmpgti):
     case IR_OP(cmpgei):
+
+    case IR_OP(cmpeqa):
+    case IR_OP(cmpnea):
+    case IR_OP(cmplta):
+    case IR_OP(cmplea):
+    case IR_OP(cmpgta):
+    case IR_OP(cmpgea):
+      // Integer/pointer comparisons produce a 0/1 value (sete/setne/...).  If
+      // the comparison feeds a merged value (&&/||/?:), route the result into
+      // its destination register so the merge variable is actually written.
+      return RouteResultToDest(rv, gen, node, LowerComparison(rv, node));
 
     case IR_OP(cmpeqf):
     case IR_OP(cmpnef):
@@ -3474,13 +3808,6 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(cmpled):
     case IR_OP(cmpgtd):
     case IR_OP(cmpged):
-
-    case IR_OP(cmpeqa):
-    case IR_OP(cmpnea):
-    case IR_OP(cmplta):
-    case IR_OP(cmplea):
-    case IR_OP(cmpgta):
-    case IR_OP(cmpgea):
       return LowerComparison(rv, node);
 
     case IR_OP(btrue):
@@ -3503,7 +3830,7 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
       
     case IR_OP(calla):
-      return LowerCall(rv, node);
+      return LowerCall(rv, gen, node);
 
     case IR_OP(structarg):
       // Same as its input.
@@ -3525,7 +3852,7 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
         return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
 
     case IR_OP(zeroextendi):
-      return LowerZeroExtend(rv, node);
+      return LowerZeroExtend(rv, gen, node);
 
     case IR_OP(signextendi):
       return LowerSignExtend(rv, node);
@@ -3609,7 +3936,6 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   }
   int fp_reg = X86_64_FP_ARG_START;
   int stack_offset = 0;
-  int current_stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
@@ -3620,7 +3946,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = fp_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       } else {
         if (int_reg <= X86_64_INT_ARG_END) {
@@ -3629,36 +3955,29 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = int_reg;
         } else {
           location.type = kArgLocationPushed;
-          location.location.offset = current_stack_offset;
+          location.location.offset = stack_offset;
         }
       }
       return location;
     }
 
+    // Account for the space consumed by this preceding argument.  The
+    // register/stack split here must match both the target check above and the
+    // caller-side pushing logic in LowerCall (which uses X86_64_NUM_INT_ARGS /
+    // X86_64_NUM_FP_ARGS argument registers and always reserves 8-byte stack
+    // slots).
     Symbol* arg_symbol = args->value.p[i];
     if (TypeIsFloatingPoint(arg_symbol->type)) {
-      if (fp_reg <= X86_64_LAST_FP_REG_VAR) {
+      if (fp_reg <= X86_64_FP_ARG_END) {
         fp_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        stack_offset += arg_symbol->type->size;
+        stack_offset += 8;
       }
     } else {
-      if (int_reg <= X86_64_LAST_INT_REG_VAR) {
+      if (int_reg <= X86_64_INT_ARG_END) {
         int_reg++;
       } else {
-        current_stack_offset = stack_offset;
-        if (TypeIsStructOrUnion(arg_symbol->type)) {
-          // Struct and unions are passed by reference - 8 bytes.
-          stack_offset += 8;
-        } else {
-          int size = arg_symbol->type->size;
-          if (size < 8) {
-            stack_offset += 4;
-          } else {
-            stack_offset += 8;
-          }
-        }
+        stack_offset += 8;
       }
     }
   }
@@ -3696,14 +4015,30 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(X86_64Generator* rv
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
       X86_64Opcode move_op = TypeIsDouble(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
-      Emit(rv, NewInstruction2(move_op, var,
-                FloatingPointArgumentRegister(rv,
-                    (int)arg_loc.location.offset - X86_64_FP_ARG_START)));
+      TargetInstruction* mv = Emit(
+          rv, NewInstruction1(
+                  move_op,
+                  IncomingFloatingPointArgumentRegister(
+                      rv,
+                      (int)arg_loc.location.offset - X86_64_FP_ARG_START)));
+      mv->dest = var;
       return var;
     }
     case kArgLocationPushed:
-    case kArgLocationPassedByReferenceOnStack:
-      return PopArg(rv, symbol, arg_loc.location.offset);
+    case kArgLocationPassedByReferenceOnStack: {
+      // Stack-passed argument bound to a register variable: load it from the
+      // incoming stack slot and move it into the variable register so the
+      // register actually holds the value (and the allocator keeps it live).
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var =
+          FloatingPointVariableRegister(rv, reg_var, sym->symbol);
+      TargetInstruction* loaded = PopArg(rv, symbol, arg_loc.location.offset);
+      X86_64Opcode move_op =
+          TypeIsDouble(symbol->type) ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+      TargetInstruction* mv = Emit(rv, NewInstruction1(move_op, loaded));
+      mv->dest = var;
+      return var;
+    }
   }
 }
 
@@ -3717,14 +4052,23 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(X86_64Generator* r
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = IntVariableRegister(rv, reg_var, sym->symbol);
       TargetInstruction* mv = Emit(rv, NewInstruction1(X86_64_OP(mv),
-                 IntArgumentRegister(rv,
+                 IncomingIntArgumentRegister(rv,
                           (int)arg_loc.location.offset - X86_64_INT_ARG_START)));
       mv->dest = var;
       return var;
     }
     case kArgLocationPassedByReferenceOnStack:
-    case kArgLocationPushed:
-      return PopArg(rv, symbol, arg_loc.location.offset);
+    case kArgLocationPushed: {
+      // Stack-passed argument bound to a register variable: load it from the
+      // incoming stack slot and move it into the variable register so the
+      // register actually holds the value (and the allocator keeps it live).
+      IRVariable* sym = (IRVariable*)symbol;
+      TargetInstruction* var = IntVariableRegister(rv, reg_var, sym->symbol);
+      TargetInstruction* loaded = PopArg(rv, symbol, arg_loc.location.offset);
+      TargetInstruction* mv = Emit(rv, NewInstruction1(X86_64_OP(mv), loaded));
+      mv->dest = var;
+      return var;
+    }
   }
 }
 
@@ -3750,13 +4094,45 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
       SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          rv->num_fp_arg_regs++;
+        }
         LoadFpArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
       }
     } else {
-      AlignOffset(entry, var_offset);
-      entry->pooled->data.ivalue = *var_offset;
-      SetDebugStackLocation(entry, *var_offset);
-      *var_offset += size;
+      if (is_arg) {
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          // Address-taken FP parameters need a stack home just like integer
+          // parameters.  Defer the xmmN -> stack store to the prologue so rbp is
+          // established before we address the local slot.
+          int offset = -16 - rv->saved_arg_area_size - 8;
+          rv->saved_arg_area_size += 8;
+          entry->pooled->data.ivalue = offset;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, X86_64_FP_REG, offset,
+              /*is_fp=*/true, TypeIsDouble(entry->pooled->type) ? 8 : 4);
+          VectorAppend(&rv->saved_regs, saved);
+          rv->num_fp_arg_regs++;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Stack-passed FP argument that remains in the caller-provided stack
+          // slot.  Since it is addressed rbp-relative, force a frame.
+          int space_above_frame_pointer =
+              compiler->current_function->info.function.varargs
+                  ? X86_64_VARARG_SAVE_AREA_SIZE
+                  : 0;
+          entry->pooled->data.ivalue =
+              (int)location.location.offset + 8 + space_above_frame_pointer;
+          rv->has_incoming_stack_args = true;
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        }
+      } else {
+        AlignOffset(entry, var_offset);
+        entry->pooled->data.ivalue = *var_offset;
+        SetDebugStackLocation(entry, *var_offset);
+        *var_offset += size;
+      }
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
@@ -3768,18 +4144,66 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
           entry->pooled->data.ivalue = X86_64_REG_VAR | reg;
           SetDebugRegisterLocation(entry, reg);
           ArgLocation location = ArgumentLocation(entry, args);
+          if (location.type == kArgLocationRegister) {
+            // Named small-struct argument that consumed an integer argument
+            // register; count it for va_start's gp_offset.
+            rv->num_int_arg_regs++;
+          }
           LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
         } else {
-          AlignOffset(entry, var_offset);
-          entry->pooled->data.ivalue = *var_offset;
-          SetDebugStackLocation(entry, *var_offset);
-          *var_offset += size;
+          ArgLocation location = ArgumentLocation(entry, args);
+          if (location.type == kArgLocationRegister) {
+            int offset = -16 - rv->saved_arg_area_size - 8;
+            rv->saved_arg_area_size += 8;
+            entry->pooled->data.ivalue = offset;
+            SetDebugStackLocation(entry, offset);
+            rv->num_int_arg_regs++;
+            VectorAppend(&rv->saved_regs,
+                         NewSavedArgumentRegister(
+                             (int)location.location.offset, X86_64_FP_REG,
+                             offset, /*is_fp=*/false, 8));
+          } else {
+            AlignOffset(entry, var_offset);
+            entry->pooled->data.ivalue = *var_offset;
+            SetDebugStackLocation(entry, *var_offset);
+            *var_offset += size;
+          }
         }
       } else {
-        // Passed by reference.  This means it is pushed onto the stack
-        // and the address of the copy is passed in an argument register
-        // or on the stack.
-        // TODO:
+        // Passed by reference: the caller copied the struct onto its stack and
+        // passed the address of that copy in an argument register (or on the
+        // stack).  Because the address of this parameter can be taken (and the
+        // ABI nominally forbids mutating the caller's copy), make our own copy
+        // in a fixed slot of the saved-argument area and address the parameter
+        // there.  Fixed (frame-pointer relative, stack_frame_size-independent)
+        // offsets let us emit the copy here, before the frame size is known.
+        int copy_size = (int)((size + 7) & ~7);
+        int offset = -16 - rv->saved_arg_area_size - copy_size;
+        rv->saved_arg_area_size += copy_size;
+        entry->pooled->data.ivalue = offset;
+        SetDebugStackLocation(entry, offset);
+
+        ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          // The pointer to the caller's copy arrived in an argument register.
+          // Defer the copy to the prologue (after the frame pointer is set up)
+          // by recording it in saved_regs; emitting it inline here would run
+          // before `enter`/push rbp and use a stale frame pointer.
+          rv->num_int_arg_regs++;
+          SavedArgumentRegister* saved = NewSavedArgumentRegister(
+              (int)location.location.offset, X86_64_FP_REG, offset,
+              /*is_fp=*/false, 8);
+          saved->copy_bytes = (int)size;
+          VectorAppend(&rv->saved_regs, saved);
+        } else {
+          // The pointer was passed on the stack just above the frame; copy now
+          // (these reads/writes go through the stack/frame pointer which the
+          // emitted prologue will have established for stack-relative access).
+          TargetInstruction* src_ptr =
+              PopArg(rv, entry->pooled, location.location.offset);
+          Memcpy(rv, FramePointer(rv), src_ptr, (int)size, 0, offset,
+                 /*count_as_call=*/false);
+        }
       }
     } else {
       // Not an argument.
@@ -3790,7 +4214,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
         entry->pooled->data.ivalue = X86_64_REG_VAR | rv->struct_return_reg;
         TargetInstruction* var = IntVariableRegister(rv, rv->struct_return_reg, entry->value.symbol);
         Emit(rv, NewInstruction2(X86_64_OP(mv), var,
-                    IntArgumentRegister(rv, 0)));
+                    IncomingIntArgumentRegister(rv, 0)));
         SetDebugRegisterLocation(entry, rv->struct_return_reg);
       } else {
         AlignOffset(entry, var_offset);
@@ -3816,13 +4240,19 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
     SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer.
-    if (UseRegisterForVariable(rv, entry->pooled)) {
+    if (UseRegisterForVariable(rv, entry->pooled) &&
+        X86_64HasFreeIntRegVar(rv)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = X86_64_REG_VAR | reg;
       SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(entry, args);
+        if (location.type == kArgLocationRegister) {
+          // This named argument consumed an integer argument register; count it
+          // so va_start's gp_offset skips past all named register arguments.
+          rv->num_int_arg_regs++;
+        }
         LoadIntArgumentIntoRegisterVariable(rv,
                                             reg, location, entry->pooled);
       }
@@ -3837,12 +4267,27 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
           // Argument is in a register so we need to save it to the stack. These
           // are stored immediately below the saved frame pointer (24 bytes
           // below the previous stack pointer).
-          int offset = -24 - (int)rv->saved_regs.length * 8;
+          int offset = -16 - rv->saved_arg_area_size - 8;
+          rv->saved_arg_area_size += 8;
           SavedArgumentRegister* saved = NewSavedArgumentRegister(
-              (int)location.location.offset, X86_64_FP_REG, offset);
+              (int)location.location.offset, X86_64_FP_REG, offset,
+              /*is_fp=*/false, 8);
           entry->pooled->data.ivalue = offset;
           VectorAppend(&rv->saved_regs, saved);
           rv->num_int_arg_regs++;  // Argument was passed in a register.
+          SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+        } else {
+          // Stack-passed argument that stays on the stack (no register
+          // assigned).  It lives in the caller's frame just above our return
+          // address.  rbp points at the return-address slot, so the first
+          // stack argument is at rbp+8.  For varargs procedures the prologue
+          // lowers rbp by space_above_frame_pointer, so add that back here.
+          int space_above_frame_pointer =
+              compiler->current_function->info.function.varargs
+                  ? X86_64_VARARG_SAVE_AREA_SIZE
+                  : 0;
+          entry->pooled->data.ivalue =
+              (int)location.location.offset + 8 + space_above_frame_pointer;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
       } else {
@@ -3876,7 +4321,7 @@ static void AssignRegisterVars(X86_64Generator* rv, Vector* vars, Vector* args) 
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
   rv->base.stack_frame_size =
-      (int32_t)var_offset + (int)rv->saved_regs.length * 8;
+      (int32_t)var_offset + rv->saved_arg_area_size;
   // Align to 16 byte boundary.
   rv->base.stack_frame_size = (rv->base.stack_frame_size + 15) & ~15;
 }
@@ -3919,7 +4364,26 @@ void X86_64Lower(X86_64Generator* rv, Generator* gen) {
   if (TypeIsStructOrUnion(gen->func->next)) {
     rv->struct_return_reg = rv->num_int_reg_vars++;
   }
-  
+
+  // Emit the prologue (save) BEFORE lowering variables.  LowerVariables emits
+  // the argument-register moves and may also queue spills of those values; if
+  // the prologue (push rbp / frame setup) comes after them, those spill stores
+  // use the caller's stale rbp and a stale first_spill_offset (computed when the
+  // prologue prints), which is wrong.  Emitting the prologue first guarantees
+  // the frame pointer and spill region are established before any rbp-relative
+  // store.  The IR enter node (handled below) becomes a no-op in that case.
+  bool has_enter = false;
+  for (IRNode* scan = GeneratorFirstInstruction(gen); scan != NULL;
+       scan = IRNext(scan)) {
+    if (scan->opcode == IR_OP(enter)) {
+      has_enter = true;
+      break;
+    }
+  }
+  if (has_enter) {
+    Emit(rv, NewInstruction(X86_64_OP(save)));
+  }
+
   LowerVariables(rv, gen);
 
   IRNode* node = GeneratorFirstInstruction(gen);

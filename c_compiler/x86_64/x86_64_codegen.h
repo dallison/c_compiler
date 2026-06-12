@@ -77,6 +77,7 @@ typedef enum {
   X86_64_OP(loadw),
   X86_64_OP(loadw_z),
   X86_64_OP(loadl),
+  X86_64_OP(loadl_z),
   X86_64_OP(loadq),
 
   X86_64_OP(storeb),
@@ -208,11 +209,23 @@ typedef enum {
 #define X86_64_EXPORTED_LABEL 0x10000
 #define X86_64_UNSIGNED_MOD 0x20000
 #define X86_64_GOTPCREL_RELOC 0x40000
+// Marks a setcc instruction whose flags come from a scalar floating-point
+// comparison (ucomiss/ucomisd) rather than an integer cmp.  See
+// PrintCompareAndSet in the emitter.
+#define X86_64_FCMP_SS 0x80000
+#define X86_64_FCMP_SD 0x100000
 
 typedef struct {
   int reg_num;
   int base_reg_num;
   int offset;
+  bool is_fp;
+  int value_bytes;
+  // When non-zero this entry is not a single register store but a copy of
+  // copy_bytes bytes from the memory pointed to by reg_num into
+  // offset(base_reg_num).  Used to make a local copy of a large struct
+  // argument passed by reference (the incoming pointer is in reg_num).
+  int copy_bytes;
 } SavedArgumentRegister;
 
 typedef struct {
@@ -235,8 +248,17 @@ typedef struct X86_64Generator {
   int num_fp_reg_vars;
   int struct_return_reg;
   bool not_leaf;
+  // Set when the function reads an incoming argument passed on the stack.  Such
+  // arguments are addressed relative to the frame pointer, so the prologue must
+  // establish a frame even for an otherwise leaf/empty function.
+  bool has_incoming_stack_args;
 
   Vector saved_regs;
+  // Total number of bytes allocated in the saved-argument area below the frame
+  // pointer (used for saved argument registers and for local copies of large
+  // struct arguments passed by reference).  These offsets are fixed relative to
+  // the frame pointer and do not depend on stack_frame_size.
+  int saved_arg_area_size;
   Vector offsets;
 
   TargetInstruction* int_argument_registers[X86_64_NUM_INT_ARGS];

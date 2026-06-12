@@ -55,13 +55,36 @@
 #define X86_64_INT_RETURN_VALUE_0 X86_REG_RAX
 #define X86_64_INT_RETURN_VALUE_1 X86_REG_RDX
 
+// The SysV AMD64 ABI passes the first six integer/pointer arguments in
+// registers (rdi, rsi, rdx, rcx, r8, r9); everything else is passed on the
+// stack.  The logical register file reserves slots 10..15 for them.  Slots 16
+// and 17 alias r10/r11, which are caller-saved scratch registers, so they must
+// NOT be treated as argument registers: doing so makes the caller place args 7
+// and 8 in r10/r11 while the va_arg lowering (gp_offset capped at 48 == 6*8)
+// expects them on the stack, and the argument-shuffle code clobbers r10/r11
+// while computing other argument addresses.
 #define X86_64_INT_ARG_START 10
-#define X86_64_INT_ARG_END 17
+#define X86_64_INT_ARG_END 15
 #define X86_64_NUM_INT_ARGS (X86_64_INT_ARG_END - X86_64_INT_ARG_START + 1)
 
 #define X86_64_FP_ARG_START 0
 #define X86_64_FP_ARG_END 7
 #define X86_64_NUM_FP_ARGS (X86_64_FP_ARG_END - X86_64_FP_ARG_START + 1)
+
+// Size of the in-frame register save area that a varargs function reserves so
+// va_start/va_arg can address the incoming argument registers.  The SysV
+// AMD64 va_list reg_save_area holds the six integer argument registers
+// (rdi..r9, 8 bytes each, offsets 0..47) followed by the eight vector argument
+// registers (xmm0..xmm7, 16 bytes each, offsets 48..175).  The trailing +8
+// keeps the area clear of the saved frame pointer / return address slots once
+// rbp is lowered to expose it (see GenerateProlog / RestoreRegisters).  This
+// value is exactly how much the varargs prologue lowers rbp, and the same
+// value is added back when addressing incoming stack arguments, so it must be
+// used consistently in every such computation.
+#define X86_64_VARARG_SAVE_AREA_SIZE \
+  (X86_64_NUM_INT_ARGS * 8 + X86_64_NUM_FP_ARGS * 16 + 8)
+// Byte offset of the first vector register slot within the save area.
+#define X86_64_VARARG_FP_SAVE_OFFSET (X86_64_NUM_INT_ARGS * 8)
 
 #define X86_64_INT_SAVED_START_1 8
 #define X86_64_INT_SAVED_END_1 9

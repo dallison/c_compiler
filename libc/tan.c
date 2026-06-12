@@ -50,8 +50,9 @@ double tan(double x) {
   r = r - kd * kPio2_lo;
 
   double t = __tan_small(r * 0.5);
+  double twice = t + t;
   double denom = 1.0 - t * t;
-  double tr = (t + t) / denom;                   // tan(r)
+  double tr = twice / denom;                     // tan(r)
 
   double result = odd ? -1.0 / tr : tr;          // odd quadrant: -cot(r)
   return neg ? -result : result;

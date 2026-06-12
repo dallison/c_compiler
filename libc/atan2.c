@@ -14,7 +14,8 @@ static const double
   kPio2 = 1.57079632679489661923;
 
 double atan2(double y, double x) {
-  if (x != x || y != y) return x + y;   // propagate NaN
+  if (x != x) return x + y;             // propagate NaN
+  if (y != y) return x + y;
 
   if (x == 0.0) {
     if (y > 0.0) return kPio2;

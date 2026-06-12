@@ -18,6 +18,9 @@
 typedef struct X86_64Interpreter {
   Loader* loader;
   uint64_t iregs[X86_NUM_INT_REGS];
+  // SSE/XMM register file.  Each register holds 128 bits (two 64-bit lanes);
+  // only the low lane(s) are used by scalar floating-point code.
+  uint64_t xmm[16][2];
   uint64_t rsp;
   uint64_t rbp;
   uint64_t rip;
@@ -31,6 +34,7 @@ typedef struct X86_64Interpreter {
   bool zf;
   bool sf;
   bool of;
+  bool pf;
   jmp_buf debugger;
   bool running;
   bool rip_updated;

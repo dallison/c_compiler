@@ -670,7 +670,8 @@ STATIC int StringWriter(const char* s, size_t len, void* data) {
   return (int)len;
 }
 
-#if !defined(__6502__) && !defined(__risc_v__) && !defined(__aarch64__) && !defined(__arm__)
+#if !defined(__6502__) && !defined(__risc_v__) && !defined(__aarch64__) && \
+    !defined(__arm__) && !defined(__x86_64__)
 #define fprintf __fprintf
 #define printf __printf
 #define sprintf __sprintf

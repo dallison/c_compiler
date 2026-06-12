@@ -714,7 +714,6 @@ libc_srcs=(
   "libc/getenv.c"
   "libc/gets.c"
   "libc/ldexp.c"
-  "libc/libc_test.c"
   "libc/malloc.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -805,7 +804,9 @@ runtime_srcs=(
 
 runtime_objs=()
 for src in "$${runtime_srcs[@]}"; do
-  obj="$$work/$$(basename "$${src%.s}").o"
+  # Prefix the object name so it can't collide with a same-named libc object
+  # (e.g. syscall.s vs the empty syscall.c).
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
   runtime_objs+=("$$obj")
 done
@@ -832,7 +833,6 @@ libc_srcs=(
   "libc/getenv.c"
   "libc/gets.c"
   "libc/ldexp.c"
-  "libc/libc_test.c"
   "libc/malloc.c"
   "libc/memchr.c"
   "libc/memcmp.c"

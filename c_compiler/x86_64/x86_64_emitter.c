@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
 #include "x86_64_assembler.h"
@@ -130,17 +131,19 @@ static bool IsPrintable(TargetInstruction* inst) {
 static int StackFrameSize(X86_64Emitter* emitter) {
   // Start off with local variable space.  This also includes
   // 16 bytes for the saved ra and s0.
-  int stack_frame_size = emitter->rv->base.stack_frame_size + 16;
+  int stack_frame_size = emitter->rv->base.stack_frame_size +
+                         emitter->rv->saved_arg_area_size + 16;
 
   bool varargs = emitter->rv->base.varargs;
 
   if (varargs) {
-    if (emitter->rv->num_int_arg_regs < X86_64_NUM_INT_ARGS) {
-      // All args other than those declared and in registers must
-      // be saved to the stack above the frame pointer and directly
-      // under the first pushed arg.  This adds to the stack frame size.
-      stack_frame_size += (X86_64_NUM_INT_ARGS - emitter->rv->num_int_arg_regs) * 8;
-    }
+    // Reserve an in-frame register save area for all integer argument
+    // registers.  Unlike aarch64/riscv (where the return address lives in a
+    // link register), x86_64 has the return address on the stack at [rbp+0]
+    // and the saved frame pointer at [rbp-8].  The extra 8 bytes keep the save
+    // area clear of those slots once rbp is lowered to expose it (see
+    // GenerateProlog / RestoreRegisters).
+    stack_frame_size += X86_64_VARARG_SAVE_AREA_SIZE;
   }
   // A non-leaf procedure saves register variables on the stack as these
   // will be in saved registers.
@@ -159,8 +162,20 @@ static int StackFrameSize(X86_64Emitter* emitter) {
 }
 
 static bool EmptyStackFrame(X86_64Emitter* emitter) {
+  // A frame can be elided only when there is genuinely nothing to store on the
+  // stack.  In particular, if any registers (callee-saved/used registers or
+  // saved argument registers) have to be spilled to the stack, they are stored
+  // at positive offsets from rsp which only address valid memory once a frame
+  // has been allocated.  Skipping the frame in that case would write those
+  // saves above rsp, clobbering the caller's frame (e.g. the caller's own
+  // saved-register slots).  StackFrameSize() already reserves space for these,
+  // so they must be accounted for here too.
   return emitter->rv->base.stack_frame_size == 0 &&
-         emitter->rv->base.num_calls == 0 && !emitter->rv->not_leaf;
+         emitter->rv->base.num_calls == 0 && !emitter->rv->not_leaf &&
+         !emitter->rv->has_incoming_stack_args &&
+         emitter->rv->saved_regs.length == 0 &&
+         BitSetCount(&emitter->regs->used_int_regs) == 0 &&
+         BitSetCount(&emitter->regs->used_float_regs) == 0;
 }
 
 static void PrintPercentReg(FILE* fp, const char* reg);
@@ -302,7 +317,7 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
           !emitter->rv->not_leaf;
   bool varargs = emitter->rv->base.varargs;
   int space_above_frame_pointer =
-      varargs ? (X86_64_NUM_INT_ARGS - emitter->rv->num_int_arg_regs) * 8 : 0;
+      varargs ? X86_64_VARARG_SAVE_AREA_SIZE : 0;
 
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
@@ -379,11 +394,13 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
   // below the saved argument registers.  This is the low address of the
   // start of the local variable region on the stack.
   int local_vars = emitter->rv->base.stack_frame_size +
-                     X86_64_STACK_FRAME_HEADER_SIZE;
+                   emitter->rv->saved_arg_area_size +
+                   X86_64_STACK_FRAME_HEADER_SIZE;
 
   // Offset from sp of first saved register.
   int saved_reg_offset = stack_frame_size - X86_64_STACK_FRAME_HEADER_SIZE - 8 -
                           emitter->rv->base.stack_frame_size -
+                          emitter->rv->saved_arg_area_size -
                           space_above_frame_pointer -
                           emitter->spill_region_size;  // First saved register.
 
@@ -404,12 +421,34 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
 
     if (varargs) {
       fprintf(fp, "\t// varargs function: save integer argument registers\n");
+      // Lower rbp by the reserved save-area size so the area sits inside the
+      // allocated frame (below the saved frame pointer), not above rbp where
+      // the return address and caller frame live.  StackFrameSize() reserved
+      // the same number of bytes, so local-variable offsets (negative from
+      // rbp) remain correct.  va_start reads rbp as the reg_save_area base.
+      // Immediates are emitted in hex (see PrintAsmImmediate); printing this
+      // with %d would be re-parsed as hex by the assembler (e.g. 72 -> 0x72).
+      fprintf(fp, "\tsubq ");
+      PrintAsmImmediate(fp, space_above_frame_pointer);
+      fprintf(fp, ", %%rbp\n");
       for (int i = 0; i < X86_64_NUM_INT_ARGS; i++) {
         fprintf(fp, "\tmovq ");
         PrintPercentReg(fp, X86_64RegisterNameFromNum(
                                 X86_64_INT_ARG_START + i, kX86_64RegTypeInt,
                                 buf1, sizeof(buf1)));
         fprintf(fp, ", %d(%%rbp)\n", i * 8);
+      }
+      // Save the vector argument registers (xmm0..xmm7) after the integer save
+      // area so va_arg can fetch floating-point variadic arguments.  These are
+      // saved unconditionally (the caller's %al vector count is not relied
+      // upon); reading slots for arguments that were never passed is harmless.
+      fprintf(fp, "\t// varargs function: save vector argument registers\n");
+      for (int i = 0; i < X86_64_NUM_FP_ARGS; i++) {
+        fprintf(fp, "\tstoresd ");
+        PrintPercentReg(fp, X86_64RegisterNameFromNum(
+                                X86_64_FP_ARG_START + i, kX86_64RegTypeFloat,
+                                buf1, sizeof(buf1)));
+        fprintf(fp, ", %d(%%rbp)\n", X86_64_VARARG_FP_SAVE_OFFSET + i * 16);
       }
     }
   }
@@ -421,9 +460,44 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
   for (size_t i = 0; i < emitter->rv->saved_regs.length; i++) {
     SavedArgumentRegister* saved_reg = emitter->rv->saved_regs.value.p[i];
     int offset = saved_reg->offset;
-    fprintf(fp, "\tmovq ");
+    if (saved_reg->copy_bytes > 0) {
+      // Make a local copy of a large struct argument that was passed by
+      // reference: reg_num holds the pointer to the caller's copy and we copy
+      // copy_bytes (rounded up to whole words; the ABI pads struct args to a
+      // multiple of 8 at both ends, so reading/writing full words is safe) into
+      // offset(base_reg_num).  Use r11 as the scratch register since it is
+      // never an argument register and is free at this point in the prologue.
+      char scbuf[8];
+      const char* src = X86_64RegisterNameFromNum(
+          saved_reg->reg_num, kX86_64RegTypeInt, buf1, sizeof(buf1));
+      const char* base = X86_64RegisterNameFromNum(
+          saved_reg->base_reg_num, kX86_64RegTypeInt, buf2, sizeof(buf2));
+      const char* scratch = X86_64RegisterNameFromNum(
+          X86_64_SPILL_ADDR, kX86_64RegTypeInt, scbuf, sizeof(scbuf));
+      int words = (saved_reg->copy_bytes + 7) / 8;
+      for (int w = 0; w < words; w++) {
+        int o = w * 8;
+        fprintf(fp, "\tmovq %d(", o);
+        PrintPercentReg(fp, src);
+        fprintf(fp, "), ");
+        PrintPercentReg(fp, scratch);
+        fprintf(fp, "\n\tmovq ");
+        PrintPercentReg(fp, scratch);
+        fprintf(fp, ", %d(", offset + o);
+        PrintPercentReg(fp, base);
+        fprintf(fp, ")\n");
+      }
+      continue;
+    }
+    const char* store = "movq";
+    X86_64RegisterType reg_type = kX86_64RegTypeInt;
+    if (saved_reg->is_fp) {
+      store = saved_reg->value_bytes == 4 ? "storess" : "storesd";
+      reg_type = kX86_64RegTypeFloat;
+    }
+    fprintf(fp, "\t%s ", store);
     PrintPercentReg(fp, X86_64RegisterNameFromNum(saved_reg->reg_num,
-                                                  kX86_64RegTypeInt, buf1,
+                                                  reg_type, buf1,
                                                   sizeof(buf1)));
     fprintf(fp, ", %d(", offset);
     PrintPercentReg(fp, X86_64RegisterNameFromNum(saved_reg->base_reg_num,
@@ -502,12 +576,11 @@ static void RestoreRegisters(X86_64Emitter* emitter, FILE* fp) {
           !emitter->rv->not_leaf;
   bool varargs = emitter->rv->base.varargs;
   int space_above_frame_pointer =
-      varargs ? (X86_64_NUM_INT_ARGS - emitter->rv->num_int_arg_regs) * 8 : 0;
+      varargs ? X86_64_VARARG_SAVE_AREA_SIZE : 0;
 
   if (space_above_frame_pointer < 0) {
     space_above_frame_pointer = 0;
   }
-  (void)space_above_frame_pointer;
 
   if (!is_leaf) {
     fprintf(fp, "\t// Restored registers.\n");
@@ -516,17 +589,6 @@ static void RestoreRegisters(X86_64Emitter* emitter, FILE* fp) {
   int offset = emitter->saved_reg_offset;
 
   BitSetIterator it;
-
-  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    fprintf(fp, "\tmovsd %d(%%rsp), ", offset);
-    PrintPercentReg(fp, X86_64RegisterNameFromNum(reg, kX86_64RegTypeFloat, buf1,
-                                                  sizeof(buf1)));
-    fprintf(fp, "\n");
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
 
   BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
   while (!BitSetIteratorDone(&it)) {
@@ -539,10 +601,24 @@ static void RestoreRegisters(X86_64Emitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tmovsd %d(%%rsp), ", offset);
+    PrintPercentReg(fp, X86_64RegisterNameFromNum(reg, kX86_64RegTypeFloat, buf1,
+                                                  sizeof(buf1)));
+    fprintf(fp, "\n");
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
   } else {
-    fprintf(fp, "\tleaq -8(%%rbp), %%rsp\n");
+    // rbp may have been lowered by space_above_frame_pointer in the varargs
+    // prologue, so the saved frame pointer sits at space_above_frame_pointer-8
+    // above the (possibly lowered) rbp.  For non-varargs this is just -8.
+    fprintf(fp, "\tleaq %d(%%rbp), %%rsp\n", space_above_frame_pointer - 8);
     fprintf(fp, "\tpopq %%rbp\n");
   }
 }
@@ -587,7 +663,11 @@ static bool MemoryBaseFromOffsetOperand(TargetInstruction* offset_inst,
       offset_inst->operand[0] != NULL &&
       offset_inst->operand[1] != NULL &&
       TargetIsConst(offset_inst->operand[1]) &&
-      !TargetIsConst(offset_inst->operand[0])) {
+      !TargetIsConst(offset_inst->operand[0]) &&
+      // The zero pseudo-register is never a real memory base: an
+      // add(x0, const) encodes a pure constant offset, so the base must come
+      // from the instruction's own base operand, not from this add.
+      (int)offset_inst->operand[0]->opcode != (int)X86_64_OP(x0)) {
     *base_out = offset_inst->operand[0];
     return true;
   }
@@ -764,6 +844,37 @@ static const char* BranchMnemonic(X86_64Opcode opcode) {
   return X86_64OpcodeName((int)opcode);
 }
 
+// True when this operand must be emitted as an immediate (it has no register).
+// The zero pseudo-register x0 is the constant 0; x86-64 has no hardware zero
+// register so it cannot be used as a real register operand.
+static bool BranchOperandIsImmediate(TargetInstruction* op) {
+  return op != NULL &&
+         (TargetIsConst(op) || (int)op->opcode == (int)X86_64_OP(x0));
+}
+
+// The compare-and-branch form emits "cmp src, dst" (AT&T), computing dst - src,
+// and the assembler requires any immediate to be the source.  When the
+// destination operand is an immediate we must compare in the other direction
+// (src - dst) and invert the condition.  Returns the inverted mnemonic.
+static const char* SwappedBranchMnemonic(X86_64Opcode opcode) {
+  switch (opcode) {
+    case X86_64_OP(je):
+      return "je";
+    case X86_64_OP(jne):
+      return "jne";
+    case X86_64_OP(jl):
+      return "jg";
+    case X86_64_OP(jge):
+      return "jle";
+    case X86_64_OP(jb):
+      return "ja";
+    case X86_64_OP(jae):
+      return "jbe";
+    default:
+      return NULL;
+  }
+}
+
 static const char* AttMnemonic(X86_64Opcode opcode) {
   switch (opcode) {
     case X86_64_OP(imul):
@@ -805,10 +916,13 @@ static void PrintAttOperand(FILE* fp, TargetInstruction* op, char* buf,
   if (TargetIsConst(op)) {
     PrintAsmImmediate(fp, TargetIntValue(op));
   } else if (((int)op->opcode == (int)X86_64_OP(symbol))) {
+    char namebuf[256];
+    const char* symname =
+        TargetSymbolName(((TargetSymbol*)op)->symbol, namebuf, sizeof(namebuf));
     if ((op->flags & X86_64_HI_RELOC) != 0) {
-      fprintf(fp, "%%hi(%s)", ((TargetSymbol*)op)->symbol->name.value);
+      fprintf(fp, "%%hi(%s)", symname);
     } else {
-      fprintf(fp, "%s", ((TargetSymbol*)op)->symbol->name.value);
+      fprintf(fp, "%s", symname);
     }
   } else if (((int)op->opcode == (int)X86_64_OP(literal))) {
     TargetLiteral* literal = (TargetLiteral*)op;
@@ -820,12 +934,55 @@ static void PrintAttOperand(FILE* fp, TargetInstruction* op, char* buf,
   }
 }
 
+// The logical register file has more slots than there are physical x86-64
+// registers, so several distinct logical slots alias the same physical
+// register (e.g. logical slot 14 and slot 28 both denote r8 -- see the
+// kIntRegNames table in x86_64_reg_alloc.c).  Two-address handling must reason
+// about the *physical* register a value occupies, not the logical slot: if a
+// source and the destination land on the same physical register through
+// different logical slots, a naive "mov src0 -> dest" still clobbers the other
+// source.  Compare by the rendered physical register name, which is unique per
+// physical register and distinct across int/xmm banks.
+static bool SamePhysicalReg(TargetRegister* a, TargetRegister* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  char buf_a[32];
+  char buf_b[32];
+  X86_64RegisterName((X86_64Register*)a, buf_a, sizeof(buf_a));
+  X86_64RegisterName((X86_64Register*)b, buf_b, sizeof(buf_b));
+  return strcmp(buf_a, buf_b) == 0;
+}
+
 static void PrintMovToDestIfNeeded(FILE* fp, TargetInstruction* inst,
                                    char* buf1, char* buf2) {
+  TargetRegister* dest_reg = inst->reg;
+  if (dest_reg == NULL && inst->dest != NULL) {
+    dest_reg = inst->dest->reg;
+  }
+  if (inst->operand[0] != NULL &&
+      (TargetIsConst(inst->operand[0]) ||
+       (X86_64Opcode)inst->operand[0]->opcode == X86_64_OP(x0)) &&
+      dest_reg != NULL) {
+    fprintf(fp, "\tmovq ");
+    if (TargetIsConst(inst->operand[0])) {
+      PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+    } else {
+      fprintf(fp, "$0");
+    }
+    fprintf(fp, ", ");
+    PrintPercentReg(
+        fp, X86_64RegisterName((X86_64Register*)dest_reg, buf1, sizeof(buf1)));
+    fprintf(fp, "\n");
+    return;
+  }
   if (inst->operand[0] != NULL &&
       inst->operand[0]->reg != NULL &&
-      inst->reg != NULL &&
-      inst->operand[0]->reg != inst->reg) {
+      dest_reg != NULL &&
+      !SamePhysicalReg(inst->operand[0]->reg, dest_reg)) {
     const char* mov = "movq";
     if (X86_64IsFloatingPoint(inst)) {
       bool is_double =
@@ -851,7 +1008,8 @@ static void PrintMovToDestIfNeeded(FILE* fp, TargetInstruction* inst,
     fprintf(fp, "\t%s ", mov);
     PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
     fprintf(fp, ", ");
-    PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+    PrintPercentReg(
+        fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2, sizeof(buf2)));
     fprintf(fp, "\n");
   }
 }
@@ -881,12 +1039,80 @@ static void PrintSseSourceOperand(FILE* fp, TargetInstruction* op, char* buf,
 
 static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
                              TargetInstruction* inst, char* buf1, char* buf2) {
+  X86_64Opcode opcode = (X86_64Opcode)inst->opcode;
+  if (X86_64IsFloatingPoint(inst) &&
+      InstResultRegType(inst) == kX86_64RegTypeInt) {
+    const char* mov =
+        opcode == X86_64_OP(addsd) || opcode == X86_64_OP(subsd) ||
+                opcode == X86_64_OP(mulsd) || opcode == X86_64_OP(divsd)
+            ? "movsd"
+            : "movss";
+    if (inst->operand[0] != NULL && inst->operand[0]->reg != NULL &&
+        ((X86_64Register*)inst->operand[0]->reg)->type == kX86_64RegTypeInt) {
+      fprintf(fp, "\tmovq_xmm ");
+      PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+      fprintf(fp, ", %%xmm14\n");
+    } else {
+      fprintf(fp, "\t%s ", mov);
+      PrintSseSourceOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+      fprintf(fp, ", %%xmm14\n");
+    }
+    if (inst->operand[1] != NULL) {
+      PrepareSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    }
+    fprintf(fp, "\t%s ", mnemonic);
+    PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    fprintf(fp, ", %%xmm14\n\tmovq %%xmm14, ");
+    PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+    fprintf(fp, "\n");
+    return;
+  }
+  // These are two-address operations: PrintMovToDestIfNeeded copies operand[0]
+  // into the destination register and operand[1] is then used as the source.
+  // If operand[1] already lives in the destination register (e.g. a call result
+  // coalesced into %rax that is the dest of "i * factorial(...)"), that initial
+  // "mov operand[0] -> dest" would clobber operand[1].  For commutative
+  // operations swap the two sources so the operand already sitting in dest is
+  // preserved.  (sub/div are not commutative and are not handled here.)
+  bool commutative = opcode == X86_64_OP(imul) || opcode == X86_64_OP(imull) ||
+                     opcode == X86_64_OP(addss) || opcode == X86_64_OP(addsd) ||
+                     opcode == X86_64_OP(mulss) || opcode == X86_64_OP(mulsd);
+  bool non_commutative_sse = opcode == X86_64_OP(subss) ||
+                             opcode == X86_64_OP(subsd) ||
+                             opcode == X86_64_OP(divss) ||
+                             opcode == X86_64_OP(divsd);
+  bool swapped = false;
+  if (commutative && inst->operand[0] != NULL && inst->operand[1] != NULL &&
+      !TargetIsConst(inst->operand[1]) &&
+      SamePhysicalReg(inst->operand[1]->reg, inst->reg) &&
+      !SamePhysicalReg(inst->operand[0]->reg, inst->reg)) {
+    TargetInstruction* tmp = inst->operand[0];
+    inst->operand[0] = inst->operand[1];
+    inst->operand[1] = tmp;
+    swapped = true;
+  }
+  bool saved_sse_rhs = false;
+  if (non_commutative_sse && inst->operand[0] != NULL &&
+      inst->operand[1] != NULL &&
+      SamePhysicalReg(inst->operand[1]->reg, inst->reg) &&
+      !SamePhysicalReg(inst->operand[0]->reg, inst->reg)) {
+    const char* mov =
+        opcode == X86_64_OP(subsd) || opcode == X86_64_OP(divsd) ? "movsd"
+                                                                  : "movss";
+    fprintf(fp, "\t%s ", mov);
+    PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    fprintf(fp, ", %%xmm15\n");
+    saved_sse_rhs = true;
+  }
   PrintMovToDestIfNeeded(fp, inst, buf1, buf2);
-  if (X86_64IsFloatingPoint(inst) && inst->operand[1] != NULL) {
+  if (X86_64IsFloatingPoint(inst) && inst->operand[1] != NULL &&
+      !saved_sse_rhs) {
     PrepareSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
   }
   fprintf(fp, "\t%s ", mnemonic);
-  if (X86_64IsFloatingPoint(inst)) {
+  if (saved_sse_rhs) {
+    PrintPercentReg(fp, "xmm15");
+  } else if (X86_64IsFloatingPoint(inst)) {
     PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
   } else {
     PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
@@ -894,17 +1120,66 @@ static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
   fprintf(fp, ", ");
   PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
   fprintf(fp, "\n");
+  if (swapped) {
+    TargetInstruction* tmp = inst->operand[0];
+    inst->operand[0] = inst->operand[1];
+    inst->operand[1] = tmp;
+  }
 }
 
 static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
                                TargetInstruction* inst, char* buf1,
                                char* buf2) {
-  if (inst->operand[1] != NULL) {
-    fprintf(fp, "\tcmp ");
-    // AT&T syntax: cmp $imm, %reg (assembler expects reg destination, imm source).
-    PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+  if ((inst->flags & (X86_64_FCMP_SS | X86_64_FCMP_SD)) != 0) {
+    // Floating-point comparison: the flags come from ucomiSS/SD rather than an
+    // integer cmp.  AT&T order is "ucomi src, dst" and the condition codes are
+    // evaluated as dst <cc> src, so emit "ucomi operand[1], operand[0]".
+    const char* cmp_mnemonic =
+        (inst->flags & X86_64_FCMP_SD) != 0 ? "ucomisd" : "ucomiss";
+    PrepareSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    PrepareSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+    fprintf(fp, "\t%s ", cmp_mnemonic);
+    PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
     fprintf(fp, ", ");
-    PrintAttOperand(fp, inst->operand[1], buf2, sizeof(buf2));
+    PrintSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+    fprintf(fp, "\n");
+    fprintf(fp, "\t%s ", set_mnemonic);
+    PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+    fprintf(fp, "\n");
+    fprintf(fp, "\tmovzbq ");
+    PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+    fprintf(fp, ", ");
+    PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+    fprintf(fp, "\n");
+    return;
+  }
+  if (inst->operand[1] != NULL) {
+    // The set* lowering treats operand[0] as the left operand and operand[1] as
+    // the right operand of the relation (e.g. setl means operand[0] < operand[1],
+    // matching a RISC-style slt rd, op0, op1).  In AT&T syntax "cmp src, dst"
+    // computes dst - src and the condition codes are evaluated as dst <cc> src,
+    // so emit "cmp operand[1], operand[0]" (dst = operand[0], src = operand[1]).
+    // If operand[0] is an immediate, materialize it into scratch first because
+    // x86 cannot encode an immediate compare destination.
+    TargetInstruction* lhs = inst->operand[0];
+    if (TargetIsConst(lhs) || (X86_64Opcode)lhs->opcode == X86_64_OP(x0)) {
+      fprintf(fp, "\tmovq ");
+      if (TargetIsConst(lhs)) {
+        PrintAsmImmediate(fp, TargetIntValue(lhs));
+      } else {
+        fprintf(fp, "$0");
+      }
+      fprintf(fp, ", %%r11\n");
+      lhs = NULL;
+    }
+    fprintf(fp, "\tcmp ");
+    PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    fprintf(fp, ", ");
+    if (lhs == NULL) {
+      fprintf(fp, "%%r11");
+    } else {
+      PrintAttOperand(fp, lhs, buf2, sizeof(buf2));
+    }
     fprintf(fp, "\n");
   } else if (inst->operand[0] != NULL) {
     fprintf(fp, "\ttest ");
@@ -916,6 +1191,16 @@ static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
   fprintf(fp, "\t%s ", set_mnemonic);
   PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
   fprintf(fp, "\n");
+  // setcc only writes the low byte, leaving the upper bits of the destination
+  // register stale.  The backend treats comparison/logical-not results as
+  // full-width booleans (e.g. tested with "test reg,reg" or inverted with
+  // notq), so zero-extend the byte into the whole register to keep it a clean
+  // 0/1 value.
+  fprintf(fp, "\tmovzbq ");
+  PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+  fprintf(fp, ", ");
+  PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+  fprintf(fp, "\n");
 }
 
 static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
@@ -924,6 +1209,16 @@ static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
     fprintf(fp, "\tmovq ");
     PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
     fprintf(fp, ", %%rax\n");
+  }
+  bool divisor_is_rdx = false;
+  if (inst->operand[1] != NULL && inst->operand[1]->reg != NULL) {
+    char div_reg[32];
+    X86_64RegisterName((X86_64Register*)inst->operand[1]->reg, div_reg,
+                       sizeof(div_reg));
+    divisor_is_rdx = strcmp(div_reg, "rdx") == 0;
+  }
+  if (divisor_is_rdx) {
+    fprintf(fp, "\tmovq %%rdx, %%r11\n");
   }
   if ((X86_64Opcode)opcode == X86_64_OP(div) ||
       ((X86_64Opcode)opcode == X86_64_OP(mod) &&
@@ -938,7 +1233,11 @@ static void PrintIdivFamily(FILE* fp, X86_64Opcode opcode,
     div_mnemonic = "divq";
   }
   fprintf(fp, "\t%s ", div_mnemonic);
-  PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+  if (divisor_is_rdx) {
+    fprintf(fp, "%%r11");
+  } else {
+    PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+  }
   fprintf(fp, "\n");
   if (inst->reg != NULL) {
     const char* result =
@@ -996,19 +1295,43 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
     case X86_64_OP(neg):
     case X86_64_OP(sqrtss):
     case X86_64_OP(sqrtsd):
-    case X86_64_OP(fneg_ss):
-    case X86_64_OP(fneg_sd):
       PrintMovToDestIfNeeded(fp, inst, buf1, buf2);
       fprintf(fp, "\t%s ", AttMnemonic(opcode));
       PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
       fprintf(fp, "\n");
       return;
 
+    case X86_64_OP(fneg_ss):
+    case X86_64_OP(fneg_sd):
+      PrintMovToDestIfNeeded(fp, inst, buf1, buf2);
+      fprintf(fp, "\tpushq %%r10\n\tpushq %%r11\n\tmovq_xmm ");
+      PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+      fprintf(fp, ", %%r11\n\tmovq $%s, %%r10\n\txorq %%r10, %%r11\n\tmovq_xmm %%r11, ",
+              opcode == X86_64_OP(fneg_sd) ? "8000000000000000" : "80000000");
+      PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+      fprintf(fp, "\n\tpopq %%r11\n\tpopq %%r10\n");
+      return;
+
     case X86_64_OP(cmp):
+      if (TargetIsConst(inst->operand[0]) ||
+          (X86_64Opcode)inst->operand[0]->opcode == X86_64_OP(x0)) {
+        fprintf(fp, "\tmovq ");
+        if (TargetIsConst(inst->operand[0])) {
+          PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+        } else {
+          fprintf(fp, "$0");
+        }
+        fprintf(fp, ", %%r11\n");
+      }
       fprintf(fp, "\t%s ", AttMnemonic(opcode));
       PrintAttOperand(fp, inst->operand[1], buf1, sizeof(buf1));
       fprintf(fp, ", ");
-      PrintAttOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+      if (TargetIsConst(inst->operand[0]) ||
+          (X86_64Opcode)inst->operand[0]->opcode == X86_64_OP(x0)) {
+        fprintf(fp, "%%r11");
+      } else {
+        PrintAttOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+      }
       fprintf(fp, "\n");
       return;
 
@@ -1058,7 +1381,20 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
 
     case X86_64_OP(cvtss2sd):
     case X86_64_OP(cvtsd2ss):
-      PrintBinaryRegOp(fp, AttMnemonic(opcode), inst, buf1, buf2);
+      // These are unary scalar conversions: the (single) source is operand[0]
+      // and the converted value is written to the destination register
+      // (`cvtXX2YY %src, %dst`).  PrintBinaryRegOp would treat operand[1] as the
+      // source, which is NULL for a unary op and produces an empty operand.
+      if (InstResultRegType(inst) == kX86_64RegTypeInt) {
+        PrepareSseSourceOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, "\t%s ", AttMnemonic(opcode));
+        PrintSseSourceOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", %%xmm15\n\tmovq %%xmm15, ");
+        PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        fprintf(fp, "\n");
+        return;
+      }
+      PrintSseIntConvert(fp, AttMnemonic(opcode), inst, false, buf1, buf2);
       return;
 
     case X86_64_OP(movq_xmm):
@@ -1268,15 +1604,32 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
 static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
   TargetInstruction* src = inst->operand[0];
   assert(src != NULL);
-  if (src->block == NULL) {
-    return;
-  }
-  assert(src->reg != NULL);
   TargetRegister* dest_reg = inst->reg;
   if (dest_reg == NULL && inst->dest != NULL) {
     dest_reg = inst->dest->reg;
   }
   if (dest_reg == NULL) {
+    return;
+  }
+  if (TargetIsConst(src) || (X86_64Opcode)src->opcode == X86_64_OP(x0)) {
+    char buf[8];
+    fprintf(fp, "\tmovq ");
+    if (TargetIsConst(src)) {
+      PrintAsmImmediate(fp, TargetIntValue(src));
+    } else {
+      fprintf(fp, "$0");
+    }
+    fprintf(fp, ", ");
+    PrintPercentReg(fp,
+                    X86_64RegisterName((X86_64Register*)dest_reg, buf,
+                                       sizeof(buf)));
+    fprintf(fp, "\n");
+    return;
+  }
+  if (src->block == NULL) {
+    return;
+  }
+  if (src->reg == NULL) {
     return;
   }
   if (dest_reg == src->reg) {
@@ -1386,13 +1739,26 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         PrintRmov(emitter, inst, fp);
         return;
       }
-      break;
+      // Single-operand value copy: inst->reg <- operand[0].
+      // (The generic default emits operands reversed for AT&T syntax, so
+      // handle this form explicitly here.)
+      if (inst->reg != NULL) {
+        fprintf(fp, "\t%s ", MoveMnemonicForInst(inst->operand[0], inst));
+        PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", ");
+        PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        fprintf(fp, "\n");
+      }
+      return;
     case X86_64_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
+      char namebuf[256];
+      const char* symname =
+          TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
       if (StorageIs(sym->symbol->storage, STO(static))) {
-        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.local %s\n", symname);
       } else {
-        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.global %s\n", symname);
       }
       return;
     }
@@ -1525,6 +1891,7 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
   // Print operands for the remaining instruction forms.
   switch ((X86_64Opcode)inst->opcode) {
     case X86_64_OP(loadl):
+    case X86_64_OP(loadl_z):
     case X86_64_OP(loadw):
     case X86_64_OP(loadb):
     case X86_64_OP(loadb_z):
@@ -1535,6 +1902,12 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       const char* mov = "movq";
       switch ((X86_64Opcode)inst->opcode) {
         case X86_64_OP(loadl):
+          // Signed 32-bit load must sign-extend into the full 64-bit register
+          // (the backend operates on 64-bit registers); a plain movl would
+          // zero-extend.
+          mov = "movslq";
+          break;
+        case X86_64_OP(loadl_z):
           mov = "movl";
           break;
         case X86_64_OP(loadss):
@@ -1544,12 +1917,18 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           mov = "movsd";
           break;
         case X86_64_OP(loadb):
+          // Signed byte load must sign-extend into the full register; a plain
+          // movb leaves the upper bits of the (64-bit) destination unchanged.
+          mov = "movsbq";
+          break;
         case X86_64_OP(loadb_z):
-          mov = "movb";
+          mov = "movzbq";
           break;
         case X86_64_OP(loadw):
+          mov = "movswq";
+          break;
         case X86_64_OP(loadw_z):
-          mov = "movw";
+          mov = "movzwq";
           break;
         default:
           break;
@@ -1565,7 +1944,15 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%s ", mov);
       int64_t offset = 0;
       TargetInstruction* base = inst->operand[0];
-      if (MemoryBaseFromOffsetOperand(inst->operand[1], &base)) {
+      if (((int)inst->operand[0]->opcode == (int)X86_64_OP(symbol)) &&
+          MemoryOffsetFromOperand(inst->operand[1], &offset) && offset == 0) {
+        char namebuf[256];
+        fprintf(fp, "%s(%%rip), ",
+                TargetSymbolName(((TargetSymbol*)inst->operand[0])->symbol,
+                                 namebuf, sizeof(namebuf)));
+        PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+        fprintf(fp, "\n");
+      } else if (MemoryBaseFromOffsetOperand(inst->operand[1], &base)) {
         MemoryOffsetFromOperand(inst->operand[1], &offset);
         fprintf(fp, "%" PRId64 "(", offset);
         PrintMemoryBaseRegFromInst(fp, base, buf2, sizeof(buf2));
@@ -1586,7 +1973,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
         fprintf(fp, "\n");
       } else if (((int)inst->operand[1]->opcode == (int)X86_64_OP(symbol))) {
-        fprintf(fp, "%s(", ((TargetSymbol*)inst->operand[1])->symbol->name.value);
+        char namebuf[256];
+        fprintf(fp, "%s(", TargetSymbolName(
+                               ((TargetSymbol*)inst->operand[1])->symbol,
+                               namebuf, sizeof(namebuf)));
         PrintMemoryBaseRegFromInst(fp, inst->operand[0], buf2, sizeof(buf2));
         fprintf(fp, "), ");
         PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
@@ -1647,6 +2037,12 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%s ", mov);
       if (TargetIsConst(inst->operand[0])) {
         PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+      } else if ((int)inst->operand[0]->opcode == (int)X86_64_OP(x0)) {
+        // The x0 pseudo-register is the constant 0; x86-64 has no hardware zero
+        // register, so store an immediate 0 rather than emitting whatever
+        // physical register x0 was mapped to (which is not guaranteed to hold
+        // 0).
+        fprintf(fp, "$0");
       } else {
         PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
       }
@@ -1668,7 +2064,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         PrintMemoryBaseRegFromInst(fp, inst->operand[1], buf2, sizeof(buf2));
         fprintf(fp, ")\n");
       } else if (((int)inst->operand[2]->opcode == (int)X86_64_OP(symbol))) {
-        fprintf(fp, "%s(", ((TargetSymbol*)inst->operand[2])->symbol->name.value);
+        char namebuf[256];
+        fprintf(fp, "%s(", TargetSymbolName(
+                               ((TargetSymbol*)inst->operand[2])->symbol,
+                               namebuf, sizeof(namebuf)));
         PrintMemoryBaseRegFromInst(fp, inst->operand[1], buf2, sizeof(buf2));
         fprintf(fp, ")\n");
       } else if (((int)inst->operand[2]->opcode == (int)X86_64_OP(label))) {
@@ -1708,10 +2107,25 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       }
       assert(inst->operand[0] != NULL);
       assert(inst->operand[2] != NULL);
+      if (BranchOperandIsImmediate(inst->operand[0]) &&
+          !BranchOperandIsImmediate(inst->operand[1])) {
+        // The destination of the cmp would be an immediate, which the
+        // assembler cannot encode.  Compare in the opposite direction and
+        // invert the branch condition.
+        const char* mnemonic = SwappedBranchMnemonic((X86_64Opcode)inst->opcode);
+        assert(mnemonic != NULL);
+        fprintf(fp, "\tcmp ");
+        PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", ");
+        PrintAttOperand(fp, inst->operand[1], buf2, sizeof(buf2));
+        fprintf(fp, "\n\t%s .%s_label_%d\n", mnemonic, func_name,
+                inst->operand[2]->id);
+        break;
+      }
       fprintf(fp, "\tcmp ");
-      PrintPercentRegFromInst(fp, inst->operand[1], buf2, sizeof(buf2));
+      PrintAttOperand(fp, inst->operand[1], buf2, sizeof(buf2));
       fprintf(fp, ", ");
-      PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+      PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
       fprintf(fp, "\n\t%s .%s_label_%d\n",
               BranchMnemonic((X86_64Opcode)inst->opcode),
               func_name, inst->operand[2]->id);
@@ -1770,6 +2184,8 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       if (inst->operand[0] == NULL || inst->operand[1] == NULL) {
         break;
       }
+      bool is_sub = (X86_64Opcode)inst->opcode == X86_64_OP(sub) ||
+                    (X86_64Opcode)inst->opcode == X86_64_OP(subl);
       const char* op = "addq";
       if ((X86_64Opcode)inst->opcode == X86_64_OP(addl)) {
         op = "addl";
@@ -1784,38 +2200,82 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       } else if ((X86_64Opcode)inst->opcode == X86_64_OP(xor)) {
         op = "xorq";
       }
-      if (inst->operand[0]->reg != NULL &&
-          inst->reg != NULL &&
-          inst->operand[0]->reg != inst->reg) {
-        fprintf(fp, "\tmovq ");
-        PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+      // These are two-address operations: the result is computed in place into
+      // the destination register, which first receives a copy of operand[0].
+      // The destination register is operand[0] unless an explicit dest is set.
+      TargetRegister* dest_reg =
+          (inst->dest != NULL && inst->dest->reg != NULL) ? inst->dest->reg
+                                                          : inst->reg;
+      TargetInstruction* src0 = inst->operand[0];
+      TargetInstruction* src1 = inst->operand[1];
+      bool src1_is_zero = (X86_64Opcode)src1->opcode == X86_64_OP(x0);
+      bool src1_in_dest = !TargetIsConst(src1) && !src1_is_zero &&
+                          SamePhysicalReg(src1->reg, dest_reg) &&
+                          !SamePhysicalReg(src0->reg, dest_reg);
+      if (src1_in_dest && !is_sub) {
+        // Commutative op with the second source already in the destination
+        // register: swap the sources so the "mov src0 -> dest" below does not
+        // clobber src1 (which lives in dest).  e.g. add base, idx where idx is
+        // already in dest becomes add idx, base-in-dest.
+        TargetInstruction* tmp = src0;
+        src0 = src1;
+        src1 = tmp;
+      } else if (src1_in_dest && is_sub) {
+        // Non-commutative subtract with the subtrahend in the destination
+        // register.  Compute dest = src0 - src1 as "neg dest ; add src0, dest"
+        // to avoid clobbering src1.
+        fprintf(fp, "\tnegq ");
+        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                               sizeof(buf2)));
+        fprintf(fp, "\n\taddq ");
+        PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
         fprintf(fp, ", ");
-        if (inst->dest != NULL && inst->dest->reg != NULL) {
-        PrintPercentReg(fp,
-                        X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,
-                                           sizeof(buf2)));
-      } else {
-        PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                               sizeof(buf2)));
+        fprintf(fp, "\n");
+        break;
       }
+      bool src0_is_zero = (X86_64Opcode)src0->opcode == X86_64_OP(x0);
+      if ((TargetIsConst(src0) || src0_is_zero) && dest_reg != NULL) {
+        fprintf(fp, "\tmovq ");
+        if (TargetIsConst(src0)) {
+          PrintAsmImmediate(fp, TargetIntValue(src0));
+        } else {
+          fprintf(fp, "$0");
+        }
+        fprintf(fp, ", ");
+        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                               sizeof(buf2)));
+        fprintf(fp, "\n");
+      } else if (src0->reg != NULL && dest_reg != NULL &&
+                 !SamePhysicalReg(src0->reg, dest_reg)) {
+        fprintf(fp, "\tmovq ");
+        PrintPercentRegFromInst(fp, src0, buf1, sizeof(buf1));
+        fprintf(fp, ", ");
+        PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg, buf2,
+                                               sizeof(buf2)));
         fprintf(fp, "\n");
       }
-      if (TargetIsConst(inst->operand[1])) {
+      if (TargetIsConst(src1) || src1_is_zero) {
         fprintf(fp, "\t%s ", op);
-        PrintAsmImmediate(fp, TargetIntValue(inst->operand[1]));
+        if (TargetIsConst(src1)) {
+          PrintAsmImmediate(fp, TargetIntValue(src1));
+        } else {
+          fprintf(fp, "$0");
+        }
         fprintf(fp, ", ");
         PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
         fprintf(fp, "\n");
       } else {
         fprintf(fp, "\t%s ", op);
-        PrintPercentRegFromInst(fp, inst->operand[1], buf1, sizeof(buf1));
+        PrintPercentRegFromInst(fp, src1, buf1, sizeof(buf1));
         fprintf(fp, ", ");
-        if (inst->dest != NULL && inst->dest->reg != NULL) {
-        PrintPercentReg(fp,
-                        X86_64RegisterName((X86_64Register*)inst->dest->reg, buf2,
-                                           sizeof(buf2)));
-      } else {
-        PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
-      }
+        if (dest_reg != NULL) {
+          PrintPercentReg(fp, X86_64RegisterName((X86_64Register*)dest_reg,
+                                                 buf2, sizeof(buf2)));
+        } else {
+          PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+        }
         fprintf(fp, "\n");
       }
       break;
@@ -1885,25 +2345,42 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
 
     case X86_64_OP(lea):
     case X86_64_OP(lea_rip): {
-      if (inst->operand[0] == NULL || inst->operand[1] == NULL) {
+      // lea_rip of a symbol or string literal needs only operand[0]; the RIP
+      // base is implicit.  The register-form lea still requires operand[1].
+      if (inst->operand[0] == NULL) {
+        break;
+      }
+      if ((X86_64Opcode)inst->opcode == X86_64_OP(lea) &&
+          inst->operand[1] == NULL) {
         break;
       }
       fprintf(fp, "\tlea ");
       if (((int)inst->operand[0]->opcode == (int)X86_64_OP(symbol))) {
         TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
+        // Use TargetSymbolName so function-local statics get the same mangled
+        // name (.local.<name>.<id>) used by their data definition; the raw
+        // symbol name would collide with a same-named file-scope global.
+        char namebuf[256];
+        const char* symname =
+            TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         if ((inst->flags & X86_64_GOTPCREL_RELOC) != 0) {
-          fprintf(fp, "%s@GOTPCREL(%%rip), ", sym->symbol->name.value);
+          fprintf(fp, "%s@GOTPCREL(%%rip), ", symname);
         } else if (((int)inst->opcode == (int)X86_64_OP(lea_rip))) {
-          fprintf(fp, "%s(%%rip), ", sym->symbol->name.value);
+          fprintf(fp, "%s(%%rip), ", symname);
         } else {
-          fprintf(fp, "%s(", sym->symbol->name.value);
+          fprintf(fp, "%s(", symname);
           PrintPercentRegFromInst(fp, inst->operand[1], buf2, sizeof(buf2));
           fprintf(fp, "), ");
         }
       } else if (((int)inst->operand[0]->opcode == (int)X86_64_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
         fprintf(fp, ".str.%d(%%rip), ", literal->literal_id);
-      } else if (TargetIsConst(inst->operand[1])) {
+      } else if (((int)inst->opcode == (int)X86_64_OP(lea_rip)) &&
+                 TargetIsConst(inst->operand[0])) {
+        // PC-relative lea with an immediate displacement (used to materialize
+        // the current instruction pointer for computed branches).
+        fprintf(fp, "%" PRId64 "(%%rip), ", TargetIntValue(inst->operand[0]));
+      } else if (inst->operand[1] != NULL && TargetIsConst(inst->operand[1])) {
         fprintf(fp, "%" PRId64 "(", TargetIntValue(inst->operand[1]));
         PrintPercentRegFromInst(fp, inst->operand[0], buf2, sizeof(buf2));
         fprintf(fp, "), ");

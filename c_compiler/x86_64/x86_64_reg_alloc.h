@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
+#include "map.h"
 #include "x86_64_machine.h"
 #include "target_generator.h"
 
@@ -53,6 +54,12 @@ typedef struct {
   int current_spilled_region_size;
   int max_spilled_region_size;
   BitSet preserved_instructions;    // Instructions needing preserved regs.
+
+  // Maps a spilled variable register (ivarreg/fvarreg) to the spill
+  // instruction that owns its stack slot.  A variable register can be
+  // reassigned (e.g. a loop induction variable), so each redefinition must
+  // store the new value back into this slot to keep later reloads correct.
+  Map varreg_spills;
 } X86_64RegisterAllocator;
 
 void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* alloc,

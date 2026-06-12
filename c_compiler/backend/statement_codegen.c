@@ -702,7 +702,15 @@ static void GenerateSwitchStatement(Generator* gen,
   }
   // Use density calculated from semantic analysis to determine what
   // type of switch to generate.
-  if (node->cases.length > min_dense_cases && node->density > 0.5) {
+  //
+  // The x86_64 back-end does not yet implement the computed-branch jump table
+  // (its instructions are variable length, so the fixed-stride inline jump
+  // table used by the RISC-V/AArch64 back-ends does not apply).  Always use a
+  // sparse comparison search there instead.
+  bool target_has_jump_table =
+      !StringEqual(&compiler->target->name, "x86-64");
+  if (target_has_jump_table && node->cases.length > min_dense_cases &&
+      node->density > 0.5) {
     GenerateDenseSwitch(gen, node);
   } else {
     GenerateSparseSwitch(gen, node);

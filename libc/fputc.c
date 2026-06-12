@@ -34,8 +34,7 @@ int fputc(char_t c, FILE* stream) {
   }
   // Add to next position in buffer.
   stream->buf[stream->windex++] = c;
-  
-  Break();
+
   if (c == '\n' && stream->buffering_mode == _IOLBF) {
     // Flush on newline.
     return fflush(stream);
