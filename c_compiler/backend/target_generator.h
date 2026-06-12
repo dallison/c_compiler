@@ -355,5 +355,6 @@ void TargetRegisterInit(TargetRegister* reg, int num);
 
 // Generate the name of a symbol in the name given.
 const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len);
+const char* TargetSanitizedSymbolName(const char* name, char* buf, size_t len);
 
 #endif /* target_generator_h */

@@ -53,29 +53,11 @@ FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
 void EmitDataStart(FILE* fp) { fprintf(fp, "\t.data\n"); }
 
 static const char* VarName(InitializedStaticVariable* var, char* buf, size_t len) {
-  if (var->is_local) {
-    snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
-  } else {
-    if (compiler->prepend_underscore) {
-      snprintf(buf, len, "_%s", var->symbol->name.value);
-    } else {
-      snprintf(buf, len, "%s", var->symbol->name.value);
-    }
-  }
-  return buf;
+  return TargetSymbolName(var->symbol, buf, len);
 }
 
 static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t len) {
-  if (var->is_local) {
-    snprintf(buf, len, ".local.%s.%d", var->symbol->name.value, var->symbol->id);
-  } else {
-    if (compiler->prepend_underscore) {
-      snprintf(buf, len, "_%s", var->symbol->name.value);
-    } else {
-      snprintf(buf, len, "%s", var->symbol->name.value);
-    }
-  }
-  return buf;
+  return TargetSymbolName(var->symbol, buf, len);
 }
 
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
@@ -284,14 +266,15 @@ void EmitTlsDataStart(FILE* fp) { fprintf(fp, "\t.section \".tdata\", \"awT\", @
 void EmitTlsBSSStart(FILE* fp) { fprintf(fp, "\t.section \".tbss\", \"awT\", @nobits\n"); }
 
 void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
-  fprintf(fp, "\t.type   %s,@object\n", var->symbol->name.value);
+  char buf[256];
+  fprintf(fp, "\t.type   %s,@object\n", VarName2(var, buf, sizeof(buf)));
   if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", var->symbol->name.value);
+    fprintf(fp, "\t.global %s\n", VarName2(var, buf, sizeof(buf)));
   } else {
-    fprintf(fp, "\t.local  %s\n", var->symbol->name.value);
+    fprintf(fp, "\t.local  %s\n", VarName2(var, buf, sizeof(buf)));
   }
   EmitP2Align((int)var->alignment, fp);
-  fprintf(fp, "%s:\n", var->symbol->name.value);
+  fprintf(fp, "%s:\n", VarName2(var, buf, sizeof(buf)));
   fprintf(fp, "\t.space   %zd\n", var->size);
   fprintf(fp, "\n");
 }

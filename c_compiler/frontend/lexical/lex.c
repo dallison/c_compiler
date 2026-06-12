@@ -143,6 +143,123 @@ static char CurrentChar(Lex* lex) { return StringCharAt(&lex->line, lex->pos); }
 // What is the next char?
 static char LookaheadChar(Lex* lex) { return lex->line.value[lex->pos + 1]; }
 
+static bool CodepointInRange(uint32_t cp, uint32_t first, uint32_t last) {
+  return cp >= first && cp <= last;
+}
+
+static bool CodepointAllowedInIdentifier(uint32_t cp) {
+  // C99 Annex D.1 ranges for universal character names in identifiers.  Direct
+  // UTF-8 source bytes are mapped to the same implementation-defined set.
+  if (cp == 0x00a8 || cp == 0x00aa || cp == 0x00ad || cp == 0x00af ||
+      CodepointInRange(cp, 0x00b2, 0x00b5) ||
+      CodepointInRange(cp, 0x00b7, 0x00ba) ||
+      CodepointInRange(cp, 0x00bc, 0x00be) ||
+      CodepointInRange(cp, 0x00c0, 0x00d6) ||
+      CodepointInRange(cp, 0x00d8, 0x00f6) ||
+      CodepointInRange(cp, 0x00f8, 0x00ff) ||
+      CodepointInRange(cp, 0x0100, 0x167f) ||
+      CodepointInRange(cp, 0x1681, 0x180d) ||
+      CodepointInRange(cp, 0x180f, 0x1fff) ||
+      CodepointInRange(cp, 0x200b, 0x200d) ||
+      CodepointInRange(cp, 0x202a, 0x202e) ||
+      CodepointInRange(cp, 0x203f, 0x2040) || cp == 0x2054 ||
+      CodepointInRange(cp, 0x2060, 0x206f) ||
+      CodepointInRange(cp, 0x2070, 0x218f) ||
+      CodepointInRange(cp, 0x2460, 0x24ff) ||
+      CodepointInRange(cp, 0x2776, 0x2793) ||
+      CodepointInRange(cp, 0x2c00, 0x2dff) ||
+      CodepointInRange(cp, 0x2e80, 0x2fff) ||
+      CodepointInRange(cp, 0x3004, 0x3007) ||
+      CodepointInRange(cp, 0x3021, 0x302f) ||
+      CodepointInRange(cp, 0x3031, 0x303f) ||
+      CodepointInRange(cp, 0x3040, 0xd7ff) ||
+      CodepointInRange(cp, 0xf900, 0xfd3d) ||
+      CodepointInRange(cp, 0xfd40, 0xfdcf) ||
+      CodepointInRange(cp, 0xfdf0, 0xfe44) ||
+      CodepointInRange(cp, 0xfe47, 0xfffd)) {
+    return true;
+  }
+  return cp >= 0x10000 && cp <= 0xefffd && (cp & 0xffff) <= 0xfffd;
+}
+
+static bool CodepointAllowedAtIdentifierStart(uint32_t cp) {
+  return CodepointAllowedInIdentifier(cp) &&
+         !CodepointInRange(cp, 0x0300, 0x036f) &&
+         !CodepointInRange(cp, 0x1dc0, 0x1dff) &&
+         !CodepointInRange(cp, 0x20d0, 0x20ff) &&
+         !CodepointInRange(cp, 0xfe20, 0xfe2f);
+}
+
+static bool Utf8Continuation(unsigned char ch) { return (ch & 0xc0) == 0x80; }
+
+static size_t DecodeUtf8(const char* text, size_t pos, size_t length,
+                         uint32_t* codepoint) {
+  if (pos >= length) {
+    return 0;
+  }
+  unsigned char ch = (unsigned char)text[pos];
+  if (ch < 0x80) {
+    *codepoint = ch;
+    return 1;
+  }
+
+  size_t needed;
+  uint32_t cp;
+  if (ch >= 0xc2 && ch <= 0xdf) {
+    needed = 2;
+    cp = ch & 0x1f;
+  } else if (ch >= 0xe0 && ch <= 0xef) {
+    needed = 3;
+    cp = ch & 0x0f;
+  } else if (ch >= 0xf0 && ch <= 0xf4) {
+    needed = 4;
+    cp = ch & 0x07;
+  } else {
+    return 0;
+  }
+  if (pos + needed > length) {
+    return 0;
+  }
+  for (size_t i = 1; i < needed; i++) {
+    unsigned char cont = (unsigned char)text[pos + i];
+    if (!Utf8Continuation(cont)) {
+      return 0;
+    }
+    cp = (cp << 6) | (cont & 0x3f);
+  }
+
+  if ((needed == 3 && cp < 0x800) || (needed == 4 && cp < 0x10000) ||
+      (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) {
+    return 0;
+  }
+  *codepoint = cp;
+  return needed;
+}
+
+size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
+                                  bool start) {
+  if (pos >= length) {
+    return 0;
+  }
+  unsigned char ch = (unsigned char)text[pos];
+  if (ch < 0x80) {
+    if (start) {
+      return isalpha(ch) || ch == '_' ? 1 : 0;
+    }
+    return isalnum(ch) || ch == '_' ? 1 : 0;
+  }
+
+  uint32_t cp;
+  size_t bytes = DecodeUtf8(text, pos, length, &cp);
+  if (bytes == 0) {
+    return 0;
+  }
+  return (start ? CodepointAllowedAtIdentifierStart(cp)
+                : CodepointAllowedInIdentifier(cp))
+             ? bytes
+             : 0;
+}
+
 // Perform escape processing on a char.  This handles
 // backslashes inside a string literal or character constant.
 static int EscapeChar(Lex* lex, int* size) {
@@ -151,10 +268,11 @@ static int EscapeChar(Lex* lex, int* size) {
   if (ch == 'x' || ch == 'X') {
     lex->pos++;
     int n = 0;
-    while (lex->pos < lex->line.length && isxdigit(lex->line.value[lex->pos])) {
+    while (lex->pos < lex->line.length &&
+           isxdigit((unsigned char)lex->line.value[lex->pos])) {
       ch = lex->line.value[lex->pos++];
       n <<= 4;
-      if (isalpha(ch)) {
+      if (isalpha((unsigned char)ch)) {
         n |= tolower(ch) - 'a' + 10;
       } else {
         n |= ch - '0';
@@ -167,10 +285,10 @@ static int EscapeChar(Lex* lex, int* size) {
     int count = 4;
     lex->pos++;
     while (count > 0 && lex->pos < lex->line.length &&
-           isxdigit(lex->line.value[lex->pos])) {
+           isxdigit((unsigned char)lex->line.value[lex->pos])) {
       ch = lex->line.value[lex->pos++];
       n <<= 4;
-      if (isalpha(ch)) {
+      if (isalpha((unsigned char)ch)) {
         n |= tolower(ch) - 'a' + 10;
       } else {
         n |= ch - '0';
@@ -434,12 +552,7 @@ static int CollectWideCharConst(Lex* lex) {
 // For the assembler it also includes '.' and '@'.
 // If 'start' then it cannot be numeric.
 bool IsIdentifierChar(Lex* lex, char ch, bool start) {
-  if (start) {
-    // Identifiers only start with alpha or _.
-    if (isalpha(ch) || ch == '_') {
-      return true;
-    }
-  } else if (isalnum(ch) || ch == '_') {
+  if (LexIdentifierCharByteCount(&ch, 0, 1, start) != 0) {
     return true;
   }
   // In assembler mode we allow . and @.
@@ -472,11 +585,16 @@ static void CollectIdentifierOrWide(Lex* lex) {
   StringClear(&lex->spelling);
   while (lex->pos < lex->line.length) {
     char ch = lex->line.value[lex->pos];
-    if (!IsIdentifierChar(lex, ch, false)) {
+    size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
+                                              lex->line.length, false);
+    if (bytes == 0 && lex->assembler_mode && (ch == '.' || ch == '@')) {
+      bytes = 1;
+    }
+    if (bytes == 0) {
       break;
     }
-    StringAppendChar(&lex->spelling, ch);
-    lex->pos++;
+    StringAppendSegment(&lex->spelling, &lex->line.value[lex->pos], bytes);
+    lex->pos += bytes;
   }
 
   // In preprocessor and assembler modes we have no reserved words.
@@ -765,10 +883,10 @@ static void CollectHex(Lex* lex) {
   int64_t number = 0;
   // Collect hex number and convert to binary.
   while (lex->pos < lex->line.length &&
-         isxdigit(lex->line.value[lex->pos])) {
+         isxdigit((unsigned char)lex->line.value[lex->pos])) {
     char ch = lex->line.value[lex->pos++];
     number <<= 4;
-    if (isalpha(ch)) {
+    if (isalpha((unsigned char)ch)) {
       number |= tolower(ch) - 'a' + 10;
     } else {
       number |= ch - '0';
@@ -840,10 +958,10 @@ static void CollectNumber(Lex* lex, char ch) {
         }
       } else if (ishex) {
         // Hex number.
-        if (!isxdigit(ch)) {
+        if (!isxdigit((unsigned char)ch)) {
           break;
         }
-      } else if (!isdigit(ch)) {
+      } else if (!isdigit((unsigned char)ch)) {
         // Decimal number: not a digit, terminate.
         break;
       }
@@ -908,7 +1026,9 @@ void LexNextToken(Lex* lex) {
   // Check for identifier, reserved word or wide string.
   // Wide strings (and character constants) begin with upper
   // case L followed by a quote.
-  if (IsIdentifierChar(lex, ch, true)) {
+  if (LexIdentifierCharByteCount(lex->line.value, lex->pos,
+                                 lex->line.length, true) != 0 ||
+      (lex->assembler_mode && (ch == '.' || ch == '@'))) {
     CollectIdentifierOrWide(lex);
     goto record_token_location;
   }
@@ -918,8 +1038,8 @@ void LexNextToken(Lex* lex) {
   // sure we don't confuse a singular dot or ellipsis (...) here.
   // For compatibility with other assemblers, we also allow a $ to represent
   // a hex number.
-  if (isdigit(ch) || (lex->assembler_mode && ch == '$') ||
-      (ch == '.' && isdigit(LookaheadChar(lex)))) {
+  if (isdigit((unsigned char)ch) || (lex->assembler_mode && ch == '$') ||
+      (ch == '.' && isdigit((unsigned char)LookaheadChar(lex)))) {
     CollectNumber(lex, ch);
     goto record_token_location;
   }
@@ -1073,7 +1193,7 @@ void LexSkipSpacesAndComments(Lex* lex) {
         }
       }
 
-      if (!isspace(ch)) {
+      if (!isspace((unsigned char)ch)) {
         break;
       }
       lex->pos++;

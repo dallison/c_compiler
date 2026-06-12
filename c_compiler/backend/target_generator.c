@@ -189,8 +189,9 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->virtuals = virtuals;
   TypeRecord* func_type = gen->func;
   Symbol* func = func_type->info.function.symbol;
-  const char* func_name = func->name.value;
-  StringInit(&target->function_name, func_name);
+  char func_name[256];
+  StringInit(&target->function_name,
+             TargetSymbolName(func, func_name, sizeof(func_name)));
   target->is_global = !StorageIs(func->storage, STO(static));
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
@@ -782,15 +783,60 @@ void TargetRegisterInit(TargetRegister* reg, int num) {
   reg->reserved = false;
 }
 
+static void AppendToBuffer(char** out, size_t* remaining, const char* text) {
+  while (*text != '\0' && *remaining > 1) {
+    **out = *text;
+    (*out)++;
+    (*remaining)--;
+    text++;
+  }
+  if (*remaining > 0) {
+    **out = '\0';
+  }
+}
+
+static void AppendSanitizedName(char** out, size_t* remaining,
+                                const char* name) {
+  for (const unsigned char* p = (const unsigned char*)name; *p != '\0'; p++) {
+    if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+        (*p >= '0' && *p <= '9') || *p == '_') {
+      char c[2] = {(char)*p, '\0'};
+      AppendToBuffer(out, remaining, c);
+      continue;
+    }
+    char escaped[8];
+    snprintf(escaped, sizeof(escaped), "_u%02x", *p);
+    AppendToBuffer(out, remaining, escaped);
+  }
+}
+
+const char* TargetSanitizedSymbolName(const char* name, char* buf, size_t len) {
+  char* out = buf;
+  size_t remaining = len;
+  if (remaining == 0) {
+    return buf;
+  }
+  AppendSanitizedName(&out, &remaining, name);
+  return buf;
+}
+
 const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
+  char* out = buf;
+  size_t remaining = len;
+  if (remaining == 0) {
+    return buf;
+  }
   if (symbol->flags.is_local && !TypeIsFunction(symbol->type)) {
-    snprintf(buf, len, ".local.%s.%d", symbol->name.value, symbol->id);
+    char suffix[32];
+    snprintf(suffix, sizeof(suffix), ".%d", symbol->id);
+    AppendToBuffer(&out, &remaining, ".local.");
+    AppendSanitizedName(&out, &remaining, symbol->name.value);
+    AppendToBuffer(&out, &remaining, suffix);
   } else {
     if (compiler->prepend_underscore) {
-      snprintf(buf, len, "_%s", symbol->name.value);
-    } else {
-      snprintf(buf, len, "%s", symbol->name.value);
+      AppendToBuffer(&out, &remaining, "_");
     }
+    AppendSanitizedName(&out, &remaining, symbol->name.value);
   }
   return buf;
 }

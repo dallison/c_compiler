@@ -796,7 +796,7 @@ static size_t SkipNumber(String* line, size_t pos) {
         break;
       }
       seensign = true;
-    } else if (!isdigit(ch)) {
+    } else if (!isdigit((unsigned char)ch)) {
       // Not a digit, terminate.
       break;
     }
@@ -866,12 +866,13 @@ static size_t AppendCharLiteral(String* input, String* output, size_t pos) {
 
 static bool CanStartToken(String* input, size_t pos) {
   char ch = input->value[pos];
-  if (isspace(ch) || isalnum(ch) || ch == '_' ||
+  if (isspace((unsigned char)ch) ||
+      LexIdentifierCharByteCount(input->value, pos, input->length, true) != 0 ||
       ch == '"' || ch == '\'' || ch == '#' || ch == '(' || ch == ')') {
     return true;
   }
   if (ch == '.') {
-    if (isdigit(input->value[pos+1])) {
+    if (isdigit((unsigned char)input->value[pos+1])) {
       return true;
     }
   }
@@ -927,7 +928,7 @@ static size_t SkipSpacesAndCommentsInLine(String* line, size_t pos) {
       }
     }
     
-    if (!isspace(ch)) {
+    if (!isspace((unsigned char)ch)) {
       break;
     }
     pos++;
@@ -999,11 +1000,11 @@ static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* out
     
     // Sequence of spaces.  Appended as single space as long as it isn't
     // at the start or end of the line.
-    if (isspace(ch)) {
+    if (isspace((unsigned char)ch)) {
       bool start_or_end = pos == 0;
       while (pos < line->length) {
         ch = line->value[pos];
-        if (!isspace(ch)) {
+        if (!isspace((unsigned char)ch)) {
           break;
         }
         pos++;
@@ -1032,14 +1033,24 @@ static size_t AppendDefined(String* input, String* output, size_t pos) {
     pos++;
     pos = SkipSpacesAndCommentsInLine(input, pos);
     start = pos;
-    while (isalnum(input->value[pos]) || input->value[pos] == '_') {
-      pos++;
+    while (pos < input->length) {
+      size_t bytes =
+          LexIdentifierCharByteCount(input->value, pos, input->length, false);
+      if (bytes == 0) {
+        break;
+      }
+      pos += bytes;
     }
     length = pos - start;
     pos++;
   } else {
-    while (isalnum(input->value[pos]) || input->value[pos] == '_') {
-      pos++;
+    while (pos < input->length) {
+      size_t bytes =
+          LexIdentifierCharByteCount(input->value, pos, input->length, false);
+      if (bytes == 0) {
+        break;
+      }
+      pos += bytes;
     }
     length = pos - start;
   }
@@ -1060,7 +1071,8 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       break;
     }
     char ch = input->value[i];
-    if (isalpha(ch) || ch == '_' || (assembler_mode && (ch == '.' || ch == '@'))) {
+    if (LexIdentifierCharByteCount(input->value, i, input->length, true) != 0 ||
+        (assembler_mode && (ch == '.' || ch == '@'))) {
       if ((ch == 'L' || ch == 'l') && input->value[i+1] == '"') {
         StringAppendChar(output, PPTOK(wide_literal));
         i = AppendStringLiteral(input, output, i + 2);
@@ -1070,10 +1082,19 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       } else {
         size_t start = i;
         String spelling = {0};
-        while (isalnum(input->value[i]) || input->value[i] == '_' ||
-               (assembler_mode && (input->value[i] == '.' || input->value[i] == '@'))) {
-          StringAppendChar(&spelling, input->value[i]);
-          i++;
+        StringInit(&spelling, NULL);
+        while (i < input->length) {
+          size_t bytes =
+              LexIdentifierCharByteCount(input->value, i, input->length, false);
+          if (bytes == 0 && assembler_mode &&
+              (input->value[i] == '.' || input->value[i] == '@')) {
+            bytes = 1;
+          }
+          if (bytes == 0) {
+            break;
+          }
+          StringAppendSegment(&spelling, &input->value[i], bytes);
+          i += bytes;
         }
         if (StringEqual(&spelling, "defined")) {
           StringAppendChar(output, PPTOK(defined));
@@ -1112,7 +1133,8 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       i = AppendCharLiteral(input, output, i+1);
       continue;
     }
-    if (isdigit(ch) || (ch == '.' && isdigit(input->value[i+1]))) {
+    if (isdigit((unsigned char)ch) ||
+        (ch == '.' && isdigit((unsigned char)input->value[i+1]))) {
       StringAppendChar(output, PPTOK(number));
       i = AppendNumber(input, output, i);
       continue;
@@ -1435,7 +1457,7 @@ static size_t SkipSpacesAndComments(Preprocessor* p, size_t pos, String* line,
         return pos;
       }
     }
-    if (!isblank(line->value[pos])) {
+    if (!isblank((unsigned char)line->value[pos])) {
       break;
     }
     pos++;
@@ -1453,13 +1475,15 @@ static size_t SkipSpacesAndComments(Preprocessor* p, size_t pos, String* line,
 // result.
 static size_t ReadIdentifier(String* line, size_t pos, String* result) {
   StringInit(result, NULL);
-  if (pos < line->length &&
-      (isalpha(line->value[pos]) || line->value[pos] == '_')) {
+  if (LexIdentifierCharByteCount(line->value, pos, line->length, true) != 0) {
     while (pos < line->length) {
-      if (!isalnum(line->value[pos]) && line->value[pos] != '_') {
+      size_t bytes =
+          LexIdentifierCharByteCount(line->value, pos, line->length, false);
+      if (bytes == 0) {
         break;
       }
-      StringAppendChar(result, line->value[pos++]);
+      StringAppendSegment(result, &line->value[pos], bytes);
+      pos += bytes;
     }
   }
   return pos;
@@ -2148,7 +2172,7 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
     GetCurrentTokenSpelling(&ti, &spelling);
     lineno = 0;
     for (size_t i = 0; i < spelling.length; i++) {
-      if (!isdigit(spelling.value[i])) {
+      if (!isdigit((unsigned char)spelling.value[i])) {
         PreprocessorError(p, "#line neeed a simple digit sequence");
         error = true;
         break;
@@ -2590,8 +2614,8 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   String command_name = {0};
 
   // Read directive (command) name.  This must start with a letter.
-  if (pos < line->length && isalpha(line->value[pos])) {
-    while (pos < line->length && !isspace(line->value[pos])) {
+  if (pos < line->length && isalpha((unsigned char)line->value[pos])) {
+    while (pos < line->length && !isspace((unsigned char)line->value[pos])) {
       StringAppendChar(&command_name, line->value[pos]);
       pos++;
     }

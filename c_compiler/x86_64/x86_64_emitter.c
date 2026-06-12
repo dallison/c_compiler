@@ -1766,10 +1766,13 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
     case X86_64_OP(callf): {
       assert(((int)inst->operand[0]->opcode == (int)X86_64_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
+      char namebuf[256];
+      const char* symname =
+          TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
       if (compiler->pic) {
-        fprintf(fp, "\t%-12s%s@plt\n", "call", sym->symbol->name.value);
+        fprintf(fp, "\t%-12s%s@plt\n", "call", symname);
       } else {
-        fprintf(fp, "\t%-12s%s\n", "call", sym->symbol->name.value);
+        fprintf(fp, "\t%-12s%s\n", "call", symname);
       }
       return;
     }
@@ -2151,7 +2154,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       if (((int)dest->opcode == (int)X86_64_OP(label))) {
         fprintf(fp, "\tjmp .%s_label_%d\n", func_name, dest->id);
       } else if (((int)dest->opcode == (int)X86_64_OP(symbol))) {
-        fprintf(fp, "\tjmp %s\n", ((TargetSymbol*)dest)->symbol->name.value);
+        char namebuf[256];
+        fprintf(fp, "\tjmp %s\n",
+                TargetSymbolName(((TargetSymbol*)dest)->symbol, namebuf,
+                                 sizeof(namebuf)));
       } else {
         fprintf(fp, "\tjmp *");
         PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));

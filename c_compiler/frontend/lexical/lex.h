@@ -89,6 +89,11 @@ bool LexMatchIdentifier(Lex* lex, String* spelling);
 
 bool LexLookingAt(Lex* lex, Token tok);
 
+// Returns the byte length of a valid UTF-8/ASCII identifier character at `pos`,
+// or zero if the byte sequence is not valid at that identifier position.
+size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,
+                                  bool start);
+
 void LexError(Lex* lex, const char* error, ...);
 void VLexError(Lex* lex, const char* error, va_list ap);
 

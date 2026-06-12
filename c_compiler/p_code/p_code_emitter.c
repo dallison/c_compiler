@@ -166,10 +166,13 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
       return;
     case P_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
+      char namebuf[256];
+      const char* symname =
+          TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
       if (StorageIs(sym->symbol->storage, STO(static))) {
-        fprintf(fp, "\t.local %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.local %s\n", symname);
       } else {
-        fprintf(fp, "\t.global %s\n", sym->symbol->name.value);
+        fprintf(fp, "\t.global %s\n", symname);
       }
       return;
     }
@@ -178,7 +181,9 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
     case P_OP(calld): {
       assert(((int)inst->operand[0]->opcode == (int)P_OP(symbol)));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
-      fprintf(fp, "\t%-8s %s\n", "call", sym->symbol->name.value);
+      char namebuf[256];
+      fprintf(fp, "\t%-8s %s\n", "call",
+              TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf)));
       return;
     }
 
