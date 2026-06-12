@@ -12,7 +12,10 @@ filegroup(
 
 config_setting(
     name = "host_aarch64",
-    values = {"cpu": "darwin_arm64"},
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
 )
 
 AARCH64_COPTS = select({
@@ -1475,6 +1478,7 @@ touch "$@"
         ":aarch64",
         ":aarch64_signed",
     ],
+    tags = ["manual"],
 )
 
 genrule(
@@ -1555,4 +1559,5 @@ touch "$@"
     tools = [
         ":arm",
     ],
+    tags = ["manual"],
 )

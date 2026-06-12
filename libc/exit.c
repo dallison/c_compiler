@@ -22,9 +22,7 @@ void exit(int status) {
 
 #include <stdlib.h>
 #include <stdio.h>
-#if !defined(__6502__)
 #include <string.h>
-#endif
 
 static void (*atexit_funcs[32])(void);
 static unsigned char numfuncs;

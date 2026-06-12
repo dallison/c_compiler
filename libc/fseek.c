@@ -7,6 +7,7 @@
 //
 
 #include <stdio.h>
+#include <unistd.h>
 
 int fseek(FILE *stream, long int offset, int whence) {
   fflush(stream);
