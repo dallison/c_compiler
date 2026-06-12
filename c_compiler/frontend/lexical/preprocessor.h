@@ -66,6 +66,8 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line);
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line);
 Macro* PreprocessorFindMacro(Preprocessor* p, String* macro_name);
+void PreprocessorWarning(Preprocessor* preprocessor, const char* warn,
+                         const char* error, ...);
 
 bool PreprocessorLineIsCompiledIn(Preprocessor* p);
 

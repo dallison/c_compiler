@@ -1323,6 +1323,8 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   // language says that this is a variable arguments function.
   if (info->prototype.length == 0 && !void_args) {
     info->unknown_args = true;
+    SyntaxWarning(proto_parser->syntax, "strict-prototypes",
+                  "function declaration without a prototype");
   }
 }
 

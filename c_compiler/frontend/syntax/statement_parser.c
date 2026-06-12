@@ -27,13 +27,19 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
     VectorAppend(statements, SyntaxNewPCLabel(location));
   }
   // Parse the sequence of statements or declarations, adding them to the vector.
+  bool seen_statement = false;
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(rbrace))) {
     if (!LexMatch(lex, TOK(semicolon))) {
       ASTNode* stmt;
       if (SyntaxLookingAtDeclaration(syntax)) {
+        if (seen_statement) {
+          SyntaxWarning(syntax, "declaration-after-statement",
+                        "declaration after statement");
+        }
         // Declaration.
         stmt = SyntaxParseLocalDeclaration(syntax);
       } else {
+        seen_statement = true;
         stmt = SyntaxParseStatement(syntax, followers | TC(closebrace));
       }
       if (stmt != NULL) {

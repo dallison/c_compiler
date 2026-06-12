@@ -604,6 +604,10 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   
   
   if (LexMatch(syntax->lex, TOK(lbrace))) {
+    if (sym->type->info.function.old_style) {
+      SyntaxWarning(syntax, "old-style-definition",
+                    "old-style function definition");
+    }
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
       old_sym->value.func_defn = sym;
     }
@@ -619,13 +623,19 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
     }
     
+    bool seen_statement = false;
     while (syntax->lex->current_token != TOK(rbrace) &&
            syntax->lex->current_token != TOK(eof)) {
       ASTNode* stmt;
       if (SyntaxLookingAtDeclaration(syntax)) {
+        if (seen_statement) {
+          SyntaxWarning(syntax, "declaration-after-statement",
+                        "declaration after statement");
+        }
         // Declaration.
         stmt = SyntaxParseLocalDeclaration(syntax);
       } else {
+        seen_statement = true;
         stmt = SyntaxParseStatement(syntax,TC(semicolon));
       }
       if (stmt != NULL) {
@@ -722,6 +732,11 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
     } else if (LexMatch(syntax->lex, TOK(attribute))) {
       SyntaxParseAttribute(syntax, attributes);
     } else {
+      if (type_specifier.type == kTypeImplicit &&
+          type_specifier.type_record == NULL) {
+        SyntaxWarning(syntax, "implicit-int",
+                      "type specifier missing, defaults to int");
+      }
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
       TypeParserDestruct(&parser);
       return;

@@ -13,6 +13,7 @@
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "preprocessor.h"
 #include "statement_parser.h"
 #include "type.h"
 
@@ -53,6 +54,11 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   
   // In preprocesor mode we have no symbols, everything is a macro name.
   if (lex->preprocessor_mode) {
+    if (PreprocessorFindMacro(lex->preprocessor, &name) == NULL) {
+      PreprocessorWarning(lex->preprocessor, "undef",
+                          "'%s' is not defined, evaluates to 0",
+                          name.value);
+    }
     ASTNode* result = NewMacroNameASTNode(&name, lex->current_token_location);
     StringDestruct(&name);
     return result;

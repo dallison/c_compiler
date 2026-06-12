@@ -41,6 +41,19 @@ void DisableWarning(const char* warning);
 // Enables the given warning.
 void EnableWarning(const char* warning);
 
+// Returns whether a warning or warning group is known to this compiler.
+bool WarningExists(const char* warning);
+bool WarningGroupExists(const char* group);
+
+// Enables/disables all warnings in a named group such as "all" or "extra".
+void EnableWarningGroup(const char* group);
+void DisableWarningGroup(const char* group);
+
+// Disables warnings that are known but not enabled by default.  Called after
+// the warning sets have been initialized and before command-line -W options are
+// applied.
+void DisableDefaultWarnings(void);
+
 // Promotes the given warning to an error (-Werror=<name>).
 void MakeWarningError(const char* warning);
 

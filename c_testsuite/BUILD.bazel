@@ -13,6 +13,7 @@
 # under skip/, then call ctestsuite_sh_test() below (see 65c02 / riscv / x86_64).
 
 load("//c_testsuite:ctestsuite.bzl", "ctestsuite_sh_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -24,6 +25,18 @@ CTESTSUITE_TEST_DATA = glob([
     "run_single_exec.sh",
     "//:libc_headers",
 ]
+
+sh_test(
+    name = "warning_diagnostics",
+    srcs = ["run_warning_tests.sh"],
+    data = [
+        "//:davecc",
+    ],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+    ],
+)
 
 ctestsuite_sh_test(
     name = "65c02",

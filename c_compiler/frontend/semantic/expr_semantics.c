@@ -511,8 +511,20 @@ static void AnalyzeBitwiseOperator(BinaryASTNode* node) {
   }
 }
 
+static bool IsZeroIntegerConstant(ASTNode* node) {
+  return node != NULL &&
+         (node->op == AST_OP(number) || node->op == AST_OP(charconst)) &&
+         ((ConstantASTNode*)node)->value.ivalue == 0;
+}
+
 static void AnalyzeComparisonOperator(BinaryASTNode* node) {
   AnalyzeBinaryExpression(node);
+  if (TypeIsIntegral(node->left->type) && TypeIsIntegral(node->right->type) &&
+      TypeIsUnsigned(node->left->type) != TypeIsUnsigned(node->right->type) &&
+      !IsZeroIntegerConstant(node->left) && !IsZeroIntegerConstant(node->right)) {
+    SemanticWarning((ASTNode*)node, "sign-compare",
+                    "comparison of integers of different signs");
+  }
   InsertNumericConversions(node, true);
 
   // Comparison operators produce boolean values.
@@ -1009,13 +1021,27 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
 // format-string checker for lenient type matching.
 typedef enum {
   kFmtNone,      // No argument (%%) or unknown conversion: skip.
+  kFmtInvalid,   // Invalid conversion: diagnose and skip.
   kFmtInteger,   // %d %i %u %o %x %c and friends.
   kFmtDouble,    // %f %e %g %a (after default promotion the arg is a double).
   kFmtString,    // %s (a pointer).
   kFmtPointer,   // %p and %n (a pointer).
 } FmtClass;
 
+static bool IsValidFormatConversion(char conv, bool is_scanf) {
+  if (conv == '\0') {
+    return false;
+  }
+  if (is_scanf) {
+    return strchr("diouxXaAeEfFgGsScCpn[%", conv) != NULL;
+  }
+  return strchr("diouxXcCaAeEfFgGsSpn%", conv) != NULL;
+}
+
 static FmtClass FormatConversionClass(char conv, bool is_scanf) {
+  if (!IsValidFormatConversion(conv, is_scanf)) {
+    return kFmtInvalid;
+  }
   // For scanf every conversion takes a pointer to the destination.
   if (is_scanf) {
     return (conv == '%') ? kFmtNone : kFmtPointer;
@@ -1064,6 +1090,7 @@ static void CheckFormatArg(ASTNode* call, ASTNode* arg, FmtClass cls,
       ok = TypeIsPointerOrArray(t);
       expected = "pointer";
       break;
+    case kFmtInvalid:
     case kFmtNone:
       return;
   }
@@ -1104,15 +1131,24 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
   if (fmt_pos < 1 || (size_t)fmt_pos > nargs) {
     return;
   }
+  size_t arg_index = (size_t)first_pos - 1;  // 0-based index into children.
   ASTNode* fmt_arg = (ASTNode*)node->children->value.p[fmt_pos - 1];
   if (fmt_arg == NULL || fmt_arg->op != AST_OP(string)) {
-    // Non-literal format string: be lenient and skip (avoids false positives).
+    SemanticWarning((ASTNode*)node, "format-nonliteral",
+                    "format string is not a string literal");
+    if (arg_index >= nargs) {
+      SemanticWarning((ASTNode*)node, "format-security",
+                      "format string is not a string literal and has no format arguments");
+    }
     return;
   }
   String* format = ((ConstantASTNode*)fmt_arg)->value.string;
   const char* p = (format->value != NULL) ? format->value : "";
+  if (*p == '\0') {
+    SemanticWarning((ASTNode*)node, "format-zero-length",
+                    "zero-length format string");
+  }
 
-  size_t arg_index = (size_t)first_pos - 1;  // 0-based index into children.
   int conversions = 0;
   while (*p != '\0') {
     if (*p != '%') {
@@ -1174,11 +1210,19 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
       p++;
     }
     if (*p == '\0') {
+      SemanticWarning((ASTNode*)node, "format-invalid-specifier",
+                      "incomplete format specifier");
       break;
     }
     char conv = *p;
     p++;
     FmtClass cls = FormatConversionClass(conv, is_scanf);
+    if (cls == kFmtInvalid) {
+      SemanticWarning((ASTNode*)node, "format-invalid-specifier",
+                      "invalid conversion specifier '%c' in format string",
+                      conv);
+      continue;
+    }
     if (cls == kFmtNone || suppress) {
       continue;
     }

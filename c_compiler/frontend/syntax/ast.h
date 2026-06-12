@@ -279,6 +279,7 @@ typedef struct ASTNode {
 #define kASTRvoCall (1 << 5)         // Return Value Optimization call.
 #define kASTNrvoMarker (1 << 6)      // Named Return Value Optimization symbol.
 #define kASTDestructed (1 << 7)      // Node has been destructed (see ASTNodeDelete).
+#define kASTLabelUsed (1 << 8)       // Named label has a resolved goto.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

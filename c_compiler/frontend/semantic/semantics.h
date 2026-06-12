@@ -22,6 +22,7 @@ void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
 
 void SemanticCheckScalarType(ASTNode* node);
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node);
+bool SemanticNodeIsCompilerGenerated(ASTNode* node);
 
 void SemanticAnalyzeVariableDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* node);

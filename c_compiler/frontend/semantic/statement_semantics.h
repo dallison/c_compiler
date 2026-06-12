@@ -13,5 +13,6 @@
 #include "syntax.h"
 
 void AnalyzeStatement(ASTNode* node);
+void CheckUnusedLabels(ASTNode* body);
 
 #endif /* statement_semantics_h */

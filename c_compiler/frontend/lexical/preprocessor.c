@@ -966,11 +966,24 @@ static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* out
         // Multi-line comment.  Read until we find the */ at the end or
         // end of line.
         pos += 2;  // Skip /*.
+        bool nested_comment_warned = false;
+        char prev = '\0';
         do {
           do {
             ch = GetNextCommentChar(p, line, &pos);
+            if (!nested_comment_warned && prev == '/' && ch == '*') {
+              PreprocessorWarning(p, "comment",
+                                  "'/*' within block comment");
+              nested_comment_warned = true;
+            }
+            prev = ch;
           } while (!LexEof(p->lex) && ch != '*');
            ch = GetNextCommentChar(p, line, &pos);
+          if (!nested_comment_warned && prev == '/' && ch == '*') {
+            PreprocessorWarning(p, "comment", "'/*' within block comment");
+            nested_comment_warned = true;
+          }
+          prev = ch;
         } while (!LexEof(p->lex) && ch != '/');
         
         // Append comment token with comment as spelling.
@@ -2355,6 +2368,10 @@ static void HandleDiagnosticPragma(TokenIterator* ti, DiagnosticVendor vendor) {
     return;
   }
   if (MatchIdentifierToken(ti, "pop")) {
+    if (compiler->diagnostic_stack.length == 0) {
+      PreprocessorWarning(ti->p, "unknown-pragmas",
+                          "pragma diagnostic pop without matching push");
+    }
     DiagnosticPop();
     return;
   }
@@ -2535,6 +2552,7 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
       }
       StringDestruct(&name);
     } else {
+      PreprocessorWarning(p, "unknown-pragmas", "unknown pragma ignored");
       // Unknown pragma, ignore rest of line.
       break;
     }

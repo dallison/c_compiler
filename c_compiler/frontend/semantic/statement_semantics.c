@@ -16,6 +16,53 @@
 #include "bitset.h"
 #include "errors.h"
 
+static bool ExpressionHasSideEffects(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(call):
+    case AST_OP(inline_call):
+    case AST_OP(asm):
+    case AST_OP(builtin_va_start):
+    case AST_OP(builtin_va_arg):
+    case AST_OP(builtin_va_end):
+    case AST_OP(builtin_va_copy):
+      return true;
+    case AST_OP(comma): {
+      BinaryASTNode* n = (BinaryASTNode*)node;
+      return ExpressionHasSideEffects(n->left) || ExpressionHasSideEffects(n->right);
+    }
+    case AST_OP(question): {
+      BinaryASTNode* n = (BinaryASTNode*)node;
+      BinaryASTNode* arms = (BinaryASTNode*)n->right;
+      return ExpressionHasSideEffects(n->left) ||
+             (arms != NULL &&
+              (ExpressionHasSideEffects(arms->left) ||
+               ExpressionHasSideEffects(arms->right)));
+    }
+    default:
+      return false;
+  }
+}
+
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
 
@@ -32,6 +79,10 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
                         callee->name.value);
       }
     }
+  }
+  if (expr != NULL && expr->type != NULL && !TypeIsVoid(expr->type) &&
+      !ExpressionHasSideEffects(expr)) {
+    SemanticWarning(expr, "unused-value", "expression result unused");
   }
 }
 
@@ -222,17 +273,18 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
       VectorAppend(&missing_constants, ec);
     }
   }
-  if (node->default_node == NULL && missing_constants.length > 0) {
+  if (missing_constants.length > 0) {
+    const char* warning = node->default_node == NULL ? "switch" : "switch-enum";
     if (missing_constants.length > 4) {
       Symbol* ec = missing_constants.value.p[0];
-      SemanticWarning(&node->base, "switch",
+      SemanticWarning(&node->base, warning,
                       "Enum constant %s and %" PRId64 " others are not present in switch statement",
                       ec->name.value, missing_constants.length - 1);
 
     } else {
       for (size_t i = 0; i < missing_constants.length; i++) {
         Symbol* ec = missing_constants.value.p[i];
-        SemanticWarning(&node->base, "switch",
+        SemanticWarning(&node->base, warning,
                         "Enum constant %s is not present in switch statement",
                         ec->name.value);
       }
@@ -276,6 +328,10 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   // Visit the switch statement and all its children, collecting
   // case and defaults.
   ASTNodeVisit(&node->base, ResolveSwitchStatement, 0, &resolver);
+  if (node->default_node == NULL) {
+    SemanticWarning(&node->base, "switch-default",
+                    "switch statement has no default label");
+  }
 
   size_t num_cases = node->cases.length;
   
@@ -742,6 +798,7 @@ void AnalyzeGotoStatement(GotoStatementASTNode* node) {
   if (node->label == NULL) {
     SemanticError((ASTNode*)node, "Undefined label '%s'", node->label_name->value);
   } else {
+    node->label->flags |= kASTLabelUsed;
     CheckGoto(node->label, &node->base, node);
   }
 }
@@ -781,6 +838,24 @@ void AnalyzeLabel(LabelASTNode* node) {
   if (node->stmt != NULL) {
     AnalyzeStatement(node->stmt);
   }
+}
+
+static void FindUnusedLabel(ASTNode* node, void* data, int child_id,
+                            VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node->op != AST_OP(label)) {
+    return;
+  }
+  LabelASTNode* label = (LabelASTNode*)node;
+  if (!label->named && (node->flags & kASTLabelUsed) == 0) {
+    SemanticWarning(node, "unused-label", "label '%s' defined but not used",
+                    label->name.value);
+  }
+}
+
+void CheckUnusedLabels(ASTNode* body) {
+  ASTNodeVisit(body, FindUnusedLabel, 0, NULL);
 }
 
 void AnalyzeStatement(ASTNode* node) {

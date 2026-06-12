@@ -7,6 +7,7 @@
 //
 
 #include "semantics.h"
+#include <string.h>
 #include "errors.h"
 #include "expr_semantics.h"
 #include "lex.h"
@@ -38,9 +39,31 @@ void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
   va_end(ap);
 }
 
+static bool SymbolIsCompilerGenerated(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  if (symbol->flags.is_temp || symbol->flags.invented) {
+    return true;
+  }
+  if (strncmp(symbol->name.value, "__builtin_", 10) == 0 ||
+      strncmp(symbol->name.value, "__invented__", 12) == 0) {
+    return true;
+  }
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(symbol->location, &filename, &lineno, &start, &end);
+  return filename != NULL && strcmp(filename, "builtin") == 0;
+}
+
 void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
+  if (SymbolIsCompilerGenerated(symbol)) {
+    va_end(ap);
+    return;
+  }
   const char* filename;
   int lineno;
   int start, end;
@@ -49,8 +72,53 @@ void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format,
   va_end(ap);
 }
 
+static bool NodeIsCompilerGenerated(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(identifier): {
+      Symbol* sym = ((IdentifierASTNode*)node)->symbol;
+      return SymbolIsCompilerGenerated(sym);
+    }
+    case AST_OP(builtin_va_start):
+    case AST_OP(builtin_va_arg):
+    case AST_OP(builtin_va_end):
+    case AST_OP(builtin_va_copy):
+      return true;
+    case AST_OP(label): {
+      LabelASTNode* label = (LabelASTNode*)node;
+      return label->named;
+    }
+    default:
+      return false;
+  }
+}
+
+static void FindCompilerGeneratedNode(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  bool* found = data;
+  if (*found) {
+    return;
+  }
+  *found = NodeIsCompilerGenerated(node);
+}
+
+bool SemanticNodeIsCompilerGenerated(ASTNode* node) {
+  bool found = false;
+  ASTNodeVisit(node, FindCompilerGeneratedNode, 0, &found);
+  return found;
+}
+
 void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
                       va_list ap) {
+  if (SemanticNodeIsCompilerGenerated(node)) {
+    return;
+  }
   const char* filename;
   int lineno;
   int start, end;
@@ -80,9 +148,16 @@ void SemanticCheckScalarType(ASTNode* node) {
 static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
-    if (!symbol->flags.used && !symbol->flags.is_argument &&
-        !symbol->flags.is_temp && !symbol->flags.invented &&
-        !SymbolHasAttribute(symbol, "unused")) {
+    if (symbol->flags.used || symbol->flags.is_temp || symbol->flags.invented ||
+        SymbolHasAttribute(symbol, "unused")) {
+      continue;
+    }
+    if (symbol->flags.is_argument) {
+      SemanticSymbolWarning(symbol, "unused-parameter",
+                    "Parameter '%s' is not used in function '%s'",
+                    symbol->name.value,
+                      node->type->info.function.symbol->name.value);
+    } else {
       SemanticSymbolWarning(symbol, "unused-variable",
                     "Local variable '%s' is not used in function '%s'",
                     symbol->name.value,
@@ -134,6 +209,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
+  CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);
 }
@@ -433,6 +509,24 @@ void NormalConversion(ASTNode* from, TypeRecord* to) {
   SemanticConvertType(from, to, kConvertNormal);
 }
 
+static bool TypeDiscardsQualifiers(TypeRecord* from, TypeRecord* to) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  return (from->qualifiers & ~to->qualifiers) != 0;
+}
+
+static bool PointerSignednessDiffers(TypeRecord* from, TypeRecord* to) {
+  if (from == NULL || to == NULL || from->next == NULL || to->next == NULL) {
+    return false;
+  }
+  TypeRecord* from_pointee = from->next;
+  TypeRecord* to_pointee = to->next;
+  return TypeIsIntegral(from_pointee) && TypeIsIntegral(to_pointee) &&
+         TypeEqualIgnoringSign(from_pointee, to_pointee) &&
+         TypeIsUnsigned(from_pointee) != TypeIsUnsigned(to_pointee);
+}
+
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
@@ -510,6 +604,16 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         }
       }
       if (TypeIsPointerOrArray(from->type) && TypeIsPointerOrArray(to)) {
+        if (TypeDiscardsQualifiers(from->type->next, to->next)) {
+          SemanticTypeConversionWarning(from, to, "discarded-qualifiers",
+                                        "Pointer conversion discards qualifiers; "
+                                        "from '%s' to '%s'");
+        }
+        if (PointerSignednessDiffers(from->type, to)) {
+          SemanticTypeConversionWarning(from, to, "pointer-sign",
+                                        "Pointer targets differ in signedness; "
+                                        "from '%s' to '%s'");
+        }
         if (!TypeAssignmentCompatible(from->type, to)) {
           SemanticTypeConversionWarning(from, to, "incompatible-pointer-types",
                                         "Illegal pointer conversion; "
@@ -520,6 +624,9 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       
       // Pointers to int or bool is fine.
       if (TypeIsPointerOrArray(from->type) && (TypeIsInt(to) || TypeIsBool(to))) {
+        SemanticTypeConversionWarning(from, to, "int-conversion",
+                                      "Pointer to integer conversion "
+                                      "from '%s' to '%s'");
         return;
       }
       

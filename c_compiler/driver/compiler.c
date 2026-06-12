@@ -957,12 +957,6 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
 static void InitBasicOptionsOrDie(Compiler* compiler,
                                   Vector* options, Vector* target_opts) {
   compiler->max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
-  // -Wall and the global -Werror/-Wno-error toggles arrive as warning options
-  // (see the table comment).  Resolve them up front, in command-line order so a
-  // later flag wins, because enable_all_warnings must be known before the
-  // default-off DisableWarning calls below (DisableWarning is a no-op once all
-  // warnings are enabled).  Per-warning enable/disable/-Werror= is applied
-  // afterwards in InitComplexOptions.
   compiler->enable_all_warnings = false;
   compiler->convert_warnings_to_errors = false;
   if (options != NULL) {
@@ -972,19 +966,14 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
         continue;
       }
       const char* v = o->value.svalue.value;
-      if (strcmp(v, "all") == 0) {
-        compiler->enable_all_warnings = true;
-      } else if (strcmp(v, "error") == 0) {
+      if (strcmp(v, "error") == 0) {
         compiler->convert_warnings_to_errors = true;
       } else if (strcmp(v, "no-error") == 0) {
         compiler->convert_warnings_to_errors = false;
       }
     }
   }
-  // The "ignored attribute" diagnostic is noisy (most attributes are silently
-  // accepted), so it is off unless -Wall is given.  DisableWarning is a no-op
-  // when -Wall enabled all warnings.
-  DisableWarning("attributes");
+  DisableDefaultWarnings();
   compiler->target_name = OptionStringValue(kOptionTarget, options);
   if (compiler->target_name == NULL) {
     fprintf(stderr, "No target specified; please specify -target option\n");
@@ -1122,19 +1111,42 @@ static void InitComplexOptions(Compiler* compiler, Vector* options) {
         break;
       case kOptionWarning: {
         const char* v = option_value->value.svalue.value;
-        // -Wall and global -Werror/-Wno-error are resolved in
-        // InitBasicOptionsOrDie; skip them here.
-        if (strcmp(v, "all") == 0 || strcmp(v, "error") == 0 ||
-            strcmp(v, "no-error") == 0) {
+        // Global -Werror/-Wno-error are resolved in InitBasicOptionsOrDie.
+        if (strcmp(v, "error") == 0 || strcmp(v, "no-error") == 0) {
           // Already handled.
+        } else if (WarningGroupExists(v)) {
+          EnableWarningGroup(v);
         } else if (strncmp(v, "error=", 6) == 0) {
-          MakeWarningError(v + 6);
+          const char* warning = v + 6;
+          if (WarningExists(warning)) {
+            MakeWarningError(warning);
+            EnableWarning(warning);
+          } else {
+            ReportWarning(compiler->infile.value, 0, "unknown-warning-option",
+                          "unknown warning option '-W%s'", v);
+          }
         } else if (strncmp(v, "no-error=", 9) == 0) {
-          ExemptWarningFromError(v + 9);
+          const char* warning = v + 9;
+          if (WarningExists(warning)) {
+            ExemptWarningFromError(warning);
+          } else {
+            ReportWarning(compiler->infile.value, 0, "unknown-warning-option",
+                          "unknown warning option '-W%s'", v);
+          }
         } else if (strncmp(v, "no-", 3) == 0) {
-          DisableWarning(v + 3);
+          const char* warning = v + 3;
+          if (WarningGroupExists(warning)) {
+            DisableWarningGroup(warning);
+          } else if (WarningExists(warning)) {
+            DisableWarning(warning);
+          }
         } else {
-          EnableWarning(v);
+          if (WarningExists(v)) {
+            EnableWarning(v);
+          } else {
+            ReportWarning(compiler->infile.value, 0, "unknown-warning-option",
+                          "unknown warning option '-W%s'", v);
+          }
         }
         break;
       }
@@ -1423,6 +1435,37 @@ static String* Assemble(Compiler* compiler, String* asm_filename, Vector* option
   return object_filename;
 }
 
+static bool FunctionSymbolWasUsed(Symbol* sym) {
+  if (sym->flags.used || sym->flags.address_taken) {
+    return true;
+  }
+  Symbol* table_sym = FindGlobalSymbol(&sym->name);
+  return table_sym != NULL &&
+         (table_sym->flags.used || table_sym->flags.address_taken);
+}
+
+static void CheckUnusedStaticFunctions(void) {
+  for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
+    ASTNode* node = compiler->declaration_asts.value.p[i];
+    if (node == NULL || node->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
+    for (size_t j = 0; j < decls->declarations->length; j++) {
+      VariableDeclarationASTNode* decl =
+          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      Symbol* sym = decl->symbol;
+      if (sym != NULL && TypeIsFunction(sym->type) &&
+          sym->flags.is_defined && StorageIs(sym->storage, STO(static)) &&
+          !sym->flags.is_inline_defn && !FunctionSymbolWasUsed(sym)) {
+        SemanticSymbolWarning(sym, "unused-function",
+                              "static function '%s' is not used",
+                              sym->name.value);
+      }
+    }
+  }
+}
+
 // Compile a source file, returning name of object file allocated from
 // the heap.  Compiler has already been initialized.
 static String* Compile(Compiler* compiler, Vector* options) {
@@ -1436,6 +1479,7 @@ static String* Compile(Compiler* compiler, Vector* options) {
     SyntaxResetForNewDeclaration(&compiler->syntax);
     CompileDeclaration(&compiler->syntax);
   }
+  CheckUnusedStaticFunctions();
   
   if (compiler->print_front_end) {
     HashTablePrintStats(&compiler->global_symbol_table, compiler->ast_output_file);

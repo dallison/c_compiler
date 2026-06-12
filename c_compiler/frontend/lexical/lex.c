@@ -387,6 +387,9 @@ static int CollectCharConst(Lex* lex) {
   if (nchars > 4) {
     LexError(lex, "Max of 4 characters allowed in character constant");
   }
+  if (nchars > 1) {
+    LexWarning(lex, "multichar", "multi-character character constant");
+  }
   if (nchars == 0 || newline) {
     LexError(lex, "Newline in character constant");
   }
@@ -1050,12 +1053,19 @@ void LexSkipSpacesAndComments(Lex* lex) {
           // skipping lines as we go.
           lex->pos += 2;  // Skip /*.
           lex->in_comment = true;
+          bool nested_comment_warned = false;
+          char prev = '\0';
           do {
-            do {
-              ch = GetCharInComment(lex);
-            } while (!SourceEof(lex->source) && ch != '*');
             ch = GetCharInComment(lex);
-          } while (!SourceEof(lex->source) && ch != '/');
+            if (!nested_comment_warned && prev == '/' && ch == '*') {
+              LexWarning(lex, "comment", "'/*' within block comment");
+              nested_comment_warned = true;
+            }
+            if (prev == '*' && ch == '/') {
+              break;
+            }
+            prev = ch;
+          } while (!SourceEof(lex->source));
 
           lex->in_comment = false;
           // Continue to get another token.

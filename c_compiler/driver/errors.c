@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "set.h"
 #include "compiler.h"
 
@@ -19,15 +20,165 @@ int NumErrors() { return compiler->num_errors; }
 
 void SetMaxErrors(int n) { compiler->max_errors = n; }
 
-void DisableWarning(const char* warning) {
-  if (compiler->enable_all_warnings) {
-    return;
+#define ANSI_RESET "\033[0m"
+#define ANSI_BOLD "\033[1m"
+#define ANSI_ERROR "\033[1;31m"
+#define ANSI_WARNING "\033[1;35m"
+#define ANSI_NOTE "\033[1;36m"
+#define ANSI_OPTION "\033[36m"
+
+static bool DiagnosticsUseColor(void) {
+  static int use_color = -1;
+  if (use_color == -1) {
+    use_color = isatty(STDERR_FILENO) && getenv("NO_COLOR") == NULL;
   }
+  return use_color != 0;
+}
+
+static const char* Color(const char* code) {
+  return DiagnosticsUseColor() ? code : "";
+}
+
+static void PrintDiagnosticLocation(const char* filename, int lineno) {
+  fprintf(stderr, "%s%s", Color(ANSI_BOLD), filename);
+  if (lineno != 0) {
+    fprintf(stderr, ":%d", lineno);
+  }
+  fprintf(stderr, "%s: ", Color(ANSI_RESET));
+}
+
+static void PrintDiagnosticKind(const char* kind, const char* kind_color) {
+  fprintf(stderr, "%s%s%s", Color(kind_color), kind, Color(ANSI_RESET));
+}
+
+enum {
+  kWarningGroupWall = 1 << 0,
+  kWarningGroupExtra = 1 << 1,
+  kWarningGroupPedantic = 1 << 2,
+  kWarningGroupEverything = 1 << 3,
+};
+
+typedef struct WarningInfo {
+  const char* name;
+  const char* parent;
+  bool clang;
+  bool gcc;
+  bool default_enabled;
+  unsigned groups;
+} WarningInfo;
+
+// Central warning registry.  The compiler still stores warning state by name,
+// but the registry lets command-line handling expand groups and validate names.
+static const WarningInfo kWarnings[] = {
+    {"main", NULL, true, true, true, kWarningGroupWall},
+    {"extern-initializer", NULL, true, false, true, kWarningGroupWall},
+    {"attributes", NULL, true, true, false, kWarningGroupWall},
+    {"duplicate-decl-specifier", NULL, true, true, true, kWarningGroupWall},
+    {"implicit-function-declaration", NULL, true, true, true, kWarningGroupWall},
+    {"unused-variable", NULL, true, true, false, kWarningGroupWall},
+    {"macro-redefined", NULL, true, false, true, 0},
+    {"extra-tokens", NULL, true, false, true, 0},
+    {"return-type", NULL, true, true, true, kWarningGroupWall},
+    {"unused-result", NULL, true, true, true, kWarningGroupWall},
+    {"format", NULL, true, true, false, kWarningGroupWall},
+    {"format-zero-length", "format", true, true, true, kWarningGroupWall},
+    {"format-invalid-specifier", "format", true, false, true, kWarningGroupWall},
+    {"format-nonliteral", "format", true, true, false, kWarningGroupWall},
+    {"format-security", "format", true, true, false, kWarningGroupWall},
+    {"switch", NULL, true, true, false, kWarningGroupWall},
+    {"switch-enum", "switch", true, true, true, kWarningGroupWall},
+    {"switch-default", "switch", true, true, false, kWarningGroupExtra},
+    {"uninitialized", NULL, true, true, false, kWarningGroupWall},
+    {"conversion", NULL, true, true, false, 0},
+    {"sign-compare", NULL, true, true, false, kWarningGroupExtra},
+    {"pointer-sign", NULL, true, true, false, kWarningGroupWall},
+    {"discarded-qualifiers", NULL, true, true, false, kWarningGroupWall},
+    {"int-conversion", NULL, true, true, false, kWarningGroupWall},
+    {"incompatible-pointer-types", NULL, true, true, true, kWarningGroupWall},
+    {"deprecated-declarations", NULL, true, true, true, kWarningGroupWall},
+    {"implicit-int", NULL, true, true, false, kWarningGroupWall | kWarningGroupPedantic},
+    {"strict-prototypes", NULL, true, true, false, kWarningGroupExtra},
+    {"old-style-definition", NULL, true, true, false, kWarningGroupExtra},
+    {"declaration-after-statement", NULL, true, true, false, kWarningGroupPedantic},
+    {"unused-parameter", NULL, true, true, false, kWarningGroupExtra},
+    {"unused-function", NULL, true, true, false, kWarningGroupWall},
+    {"unused-label", NULL, true, true, false, kWarningGroupWall},
+    {"unused-value", NULL, true, true, false, kWarningGroupWall},
+    {"undef", NULL, true, true, false, kWarningGroupWall},
+    {"unknown-pragmas", NULL, true, true, false, kWarningGroupWall},
+    {"comment", NULL, true, true, false, kWarningGroupWall},
+    {"multichar", NULL, true, true, false, kWarningGroupWall},
+    {"pragma-messages", NULL, true, false, true, 0},
+    {"unknown-warning-option", NULL, true, false, true, 0},
+    {"preprocessor", NULL, false, false, true, 0},
+    {"pointer-types", NULL, false, false, false, 0},
+};
+
+static const WarningInfo* FindWarning(const char* name) {
+  for (size_t i = 0; i < sizeof(kWarnings) / sizeof(kWarnings[0]); i++) {
+    if (strcmp(kWarnings[i].name, name) == 0) {
+      return &kWarnings[i];
+    }
+  }
+  return NULL;
+}
+
+static unsigned GroupMask(const char* group) {
+  if (strcmp(group, "all") == 0) {
+    return kWarningGroupWall;
+  }
+  if (strcmp(group, "extra") == 0) {
+    return kWarningGroupExtra;
+  }
+  if (strcmp(group, "pedantic") == 0) {
+    return kWarningGroupPedantic;
+  }
+  if (strcmp(group, "everything") == 0) {
+    return kWarningGroupEverything;
+  }
+  return 0;
+}
+
+bool WarningExists(const char* warning) {
+  return FindWarning(warning) != NULL || WarningGroupExists(warning);
+}
+
+bool WarningGroupExists(const char* group) {
+  return GroupMask(group) != 0;
+}
+
+void DisableWarning(const char* warning) {
   SetInsert(&compiler->disabled_warnings, (void*)warning);
 }
 
 void EnableWarning(const char* warning) {
   SetRemove(&compiler->disabled_warnings, (void*)warning);
+}
+
+void EnableWarningGroup(const char* group) {
+  unsigned mask = GroupMask(group);
+  for (size_t i = 0; i < sizeof(kWarnings) / sizeof(kWarnings[0]); i++) {
+    if (mask == kWarningGroupEverything || (kWarnings[i].groups & mask) != 0) {
+      EnableWarning(kWarnings[i].name);
+    }
+  }
+}
+
+void DisableWarningGroup(const char* group) {
+  unsigned mask = GroupMask(group);
+  for (size_t i = 0; i < sizeof(kWarnings) / sizeof(kWarnings[0]); i++) {
+    if (mask == kWarningGroupEverything || (kWarnings[i].groups & mask) != 0) {
+      DisableWarning(kWarnings[i].name);
+    }
+  }
+}
+
+void DisableDefaultWarnings(void) {
+  for (size_t i = 0; i < sizeof(kWarnings) / sizeof(kWarnings[0]); i++) {
+    if (!kWarnings[i].default_enabled) {
+      DisableWarning(kWarnings[i].name);
+    }
+  }
 }
 
 void MakeWarningError(const char* warning) {
@@ -38,47 +189,15 @@ void ExemptWarningFromError(const char* warning) {
   SetInsert(&compiler->no_error_warnings, (void*)warning);
 }
 
-// Which of davecc's diagnostics are also recognized (by the same -W spelling)
-// by clang and/or gcc.  Used to gate #pragma clang/GCC diagnostic so that, for
-// example, "#pragma GCC diagnostic ignored \"-Wmacro-redefined\"" is ignored
-// (that spelling is clang-only) while "#pragma davecc ..." still honors it.
-static const struct {
-  const char* name;
-  bool clang;
-  bool gcc;
-} kWarningVendors[] = {
-    {"main", true, true},
-    {"extern-initializer", true, false},
-    {"attributes", true, true},
-    {"duplicate-decl-specifier", true, true},
-    {"implicit-function-declaration", true, true},
-    {"unused-variable", true, true},
-    {"macro-redefined", true, false},
-    {"extra-tokens", true, false},
-    {"return-type", true, true},
-    {"unused-result", true, true},
-    {"format", true, true},
-    {"switch", true, true},
-    {"uninitialized", true, true},
-    {"conversion", true, true},
-    {"incompatible-pointer-types", true, true},
-    {"deprecated-declarations", true, true},
-    {"preprocessor", false, false},
-    {"pointer-types", false, false},
-};
-
 bool DiagnosticVendorKnowsWarning(DiagnosticVendor vendor, const char* name) {
   // davecc owns all of its diagnostics (and is lenient about unknown names,
   // matching the -W<name> command-line behavior).
   if (vendor == kDiagnosticVendorDavecc) {
     return true;
   }
-  for (size_t i = 0; i < sizeof(kWarningVendors) / sizeof(kWarningVendors[0]);
-       i++) {
-    if (strcmp(kWarningVendors[i].name, name) == 0) {
-      return vendor == kDiagnosticVendorClang ? kWarningVendors[i].clang
-                                              : kWarningVendors[i].gcc;
-    }
+  const WarningInfo* warning = FindWarning(name);
+  if (warning != NULL) {
+    return vendor == kDiagnosticVendorClang ? warning->clang : warning->gcc;
   }
   return false;
 }
@@ -190,8 +309,14 @@ void DiagnosticError(const char* warning) {
 }
 
 static bool IsWarningDisabled(const char* warning) {
-  return
-      SetContains(&compiler->disabled_warnings, (void*)warning);
+  if (SetContains(&compiler->disabled_warnings, (void*)warning)) {
+    return true;
+  }
+  const WarningInfo* info = FindWarning(warning);
+  if (info != NULL && info->parent != NULL) {
+    return SetContains(&compiler->disabled_warnings, (void*)info->parent);
+  }
+  return false;
 }
 
 // Decides whether `warning` should be reported as an error.  A specific
@@ -201,6 +326,15 @@ static bool IsWarningError(const char* warning) {
   if (SetContains(&compiler->error_warnings, (void*)warning)) {
     return true;
   }
+  const WarningInfo* info = FindWarning(warning);
+  if (info != NULL && info->parent != NULL &&
+      SetContains(&compiler->error_warnings, (void*)info->parent)) {
+    return true;
+  }
+  if (info != NULL && info->parent != NULL &&
+      SetContains(&compiler->no_error_warnings, (void*)info->parent)) {
+    return false;
+  }
   return compiler->convert_warnings_to_errors &&
          !SetContains(&compiler->no_error_warnings, (void*)warning);
 }
@@ -209,14 +343,14 @@ void VReportError(const char* filename, int lineno, const char* error,
                   va_list arg) {
   char buf[4096];
   vsnprintf(buf, sizeof(buf), error, arg);
-  if (lineno == 0) {
-    fprintf(stderr, "error: %s: %s\n", filename, buf);
-  } else {
-    fprintf(stderr, "error: %s:%d: %s\n", filename, lineno, buf);
-  }
+  PrintDiagnosticKind("error", ANSI_ERROR);
+  fprintf(stderr, ": ");
+  PrintDiagnosticLocation(filename, lineno);
+  fprintf(stderr, "%s\n", buf);
   compiler->num_errors++;
   if (compiler->num_errors >= compiler->max_errors) {
-    fprintf(stderr, "Too many errors; terminated\n");
+    fprintf(stderr, "%sToo many errors; terminated%s\n", Color(ANSI_ERROR),
+            Color(ANSI_RESET));
     exit(1);
   }
 }
@@ -251,16 +385,17 @@ void VReportWarning(const char* filename, int lineno, const char* warn,
   }
   char buf[4096];
   vsnprintf(buf, sizeof(buf), warning, arg);
-  if (lineno == 0) {
-    fprintf(stderr, "%s[%s]: %s: %s [%s]\n", begin_text, warn, filename, buf, end_text);
-  } else {
-    fprintf(stderr, "%s[%s]: %s:%d: %s [%s]\n", begin_text, warn, filename, lineno, buf, end_text);
-  }
+  PrintDiagnosticKind(begin_text, is_error ? ANSI_ERROR : ANSI_WARNING);
+  fprintf(stderr, "[%s%s%s]: ", Color(ANSI_OPTION), warn, Color(ANSI_RESET));
+  PrintDiagnosticLocation(filename, lineno);
+  fprintf(stderr, "%s [%s%s%s]\n", buf, Color(ANSI_OPTION), end_text,
+          Color(ANSI_RESET));
   if (is_error) {
     compiler->num_errors++;
   }
   if (compiler->num_errors >= compiler->max_errors) {
-    fprintf(stderr, "Too many errors; terminated\n");
+    fprintf(stderr, "%sToo many errors; terminated%s\n", Color(ANSI_ERROR),
+            Color(ANSI_RESET));
     exit(1);
   }
 }
@@ -278,11 +413,15 @@ void VReportNote(const char* filename, int lineno, const char* note,
   char buf[4096];
   vsnprintf(buf, sizeof(buf), note, arg);
   if (filename == NULL) {
-    fprintf(stderr, "    note: %s\n", buf);
-  } else if (lineno == 0) {
-    fprintf(stderr, "    note: %s: %s\n", filename, buf);
+    fprintf(stderr, "    ");
+    PrintDiagnosticKind("note", ANSI_NOTE);
+    fprintf(stderr, ": %s\n", buf);
   } else {
-    fprintf(stderr, "    note: %s:%d: %s\n", filename, lineno, buf);
+    fprintf(stderr, "    ");
+    PrintDiagnosticKind("note", ANSI_NOTE);
+    fprintf(stderr, ": ");
+    PrintDiagnosticLocation(filename, lineno);
+    fprintf(stderr, "%s\n", buf);
   }
 }
 
