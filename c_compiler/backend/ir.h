@@ -269,6 +269,7 @@ typedef struct IRNode {
     Symbol* use;
   } var;
   SourceLocation location;
+  void* aux;                        // Opaque frontend/codegen payload.
   struct IRNode* dest;             // Result goes into here (optional).
 } IRNode;
 

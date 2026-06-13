@@ -12,6 +12,7 @@
 
 #include "x86_64_emitter.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -747,6 +748,106 @@ static void PrintPercentReg(FILE* fp, const char* reg) {
     fprintf(fp, "%s", reg);
   } else {
     fprintf(fp, "%%%s", reg);
+  }
+}
+
+static AsmOperand* GetAsmOperand(X86_64AsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    return NULL;
+  }
+  if ((size_t)index < inst->asm_node->outputs.length) {
+    return inst->asm_node->outputs.value.p[index];
+  }
+  return inst->asm_node->inputs.value.p[index - inst->asm_node->outputs.length];
+}
+
+static int FindAsmOperandByName(X86_64AsmInstruction* inst, const char* name,
+                                size_t len) {
+  for (int i = 0; i < inst->num_operands; i++) {
+    AsmOperand* operand = GetAsmOperand(inst, i);
+    if (operand != NULL && operand->name.length == len &&
+        strncmp(operand->name.value, name, len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int FindAsmLabelByName(X86_64AsmInstruction* inst, const char* name,
+                              size_t len) {
+  for (size_t i = 0; i < inst->asm_node->labels.length; i++) {
+    String* label = inst->asm_node->labels.value.p[i];
+    if (label->length == len && strncmp(label->value, name, len) == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static void PrintAsmOperand(FILE* fp, X86_64AsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    fprintf(fp, "<bad-asm-operand>");
+    return;
+  }
+  if (inst->reg_nums[index] == INT_MIN) {
+    PrintAsmImmediate(fp, inst->immediate_values[index]);
+    return;
+  }
+  char buf[32];
+  PrintPercentReg(fp, X86_64RegisterNameFromNum(inst->reg_nums[index],
+                                                inst->is_fp[index]
+                                                    ? kX86_64RegTypeFloat
+                                                    : kX86_64RegTypeInt,
+                                                buf, sizeof(buf)));
+}
+
+static void PrintAsmLabel(FILE* fp, X86_64AsmInstruction* inst, int index) {
+  if (index < 0 || (size_t)index >= inst->asm_node->labels.length) {
+    fprintf(fp, "<bad-asm-label>");
+    return;
+  }
+  String* label = inst->asm_node->labels.value.p[index];
+  fprintf(fp, "%s", label->value);
+}
+
+static void PrintExtendedAsm(FILE* fp, X86_64AsmInstruction* inst,
+                             const char* text) {
+  for (const char* p = text; *p != '\0'; p++) {
+    if (*p != '%') {
+      fputc(*p, fp);
+      continue;
+    }
+    p++;
+    if (*p == '%') {
+      fputc('%', fp);
+      continue;
+    }
+    char modifier = 0;
+    if (*p == 'q' || *p == 'k' || *p == 'b' || *p == 'w' || *p == 'l') {
+      modifier = *p++;
+    }
+    int index = -1;
+    if (*p == '[') {
+      const char* name = ++p;
+      while (*p != '\0' && *p != ']') {
+        p++;
+      }
+      index = modifier == 'l'
+                  ? FindAsmLabelByName(inst, name, (size_t)(p - name))
+                  : FindAsmOperandByName(inst, name, (size_t)(p - name));
+    } else if (*p >= '0' && *p <= '9') {
+      index = 0;
+      while (*p >= '0' && *p <= '9') {
+        index = index * 10 + (*p - '0');
+        p++;
+      }
+      p--;
+    }
+    if (modifier == 'l') {
+      PrintAsmLabel(fp, inst, index);
+    } else {
+      PrintAsmOperand(fp, inst, index);
+    }
   }
 }
 
@@ -1797,7 +1898,13 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       assert(lit != NULL);
 
       // Output text directly into assembly output.
-      fprintf(fp, "\t%s\n", lit->value.value);
+      fprintf(fp, "\t");
+      if ((inst->flags & X86_64_INST_EXTENDED_ASM) != 0) {
+        PrintExtendedAsm(fp, (X86_64AsmInstruction*)inst, lit->value.value);
+      } else {
+        fprintf(fp, "%s", lit->value.value);
+      }
+      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }

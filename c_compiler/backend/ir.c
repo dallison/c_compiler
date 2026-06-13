@@ -262,6 +262,7 @@ void IRInit(IRNode* inst, IROpcode opcode) {
   inst->var.def = NULL;
   inst->type = NULL;
   inst->location = current_location;
+  inst->aux = NULL;
   inst->dest = NULL;
 }
 
@@ -1052,7 +1053,6 @@ bool IRIsResult(IRNode* node) {
     case IR_OP(resultf):
     case IR_OP(resultd):
     case IR_OP(resulta):
-    case IR_OP(asm):
        return true;
     default:
       return false;

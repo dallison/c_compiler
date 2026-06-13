@@ -545,9 +545,31 @@ typedef struct LabelASTNode {
 ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLocation location);
 
 typedef struct {
+  String constraint;
+  String name;
+  ASTNode* expr;
+  bool is_output;
+  bool is_readwrite;
+  bool is_early_clobber;
+} AsmOperand;
+
+AsmOperand* NewAsmOperand(const char* constraint, const char* name,
+                          ASTNode* expr, bool is_output);
+void AsmOperandDelete(AsmOperand* operand);
+AsmOperand* AsmOperandClone(AsmOperand* operand,
+                            ASTNode* (*func)(ASTNode* node, void*),
+                            void* data, ASTNode* new_parent);
+
+typedef struct {
   ASTNode base;
   String* text;
   bool is_volatile;
+  bool is_goto;
+  Vector outputs;   // AsmOperand*
+  Vector inputs;    // AsmOperand*
+  Vector clobbers;  // String*
+  Vector labels;    // String*
+  Vector label_nodes;  // LabelASTNode*, non-owning.
 } AsmASTNode;
 
 ASTNode* NewAsmASTNode(String* text, bool is_volatile, SourceLocation location);

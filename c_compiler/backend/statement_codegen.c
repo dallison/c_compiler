@@ -938,9 +938,40 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
 // Assembly language IR node.  This refers to a string literal.
 static void GenerateAsm(Generator* gen, AsmASTNode* node) {
   int literal_id = CompilerAddStringLiteral(node->text, false);
-
-  GeneratorEmit(
-      gen, NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id)));
+  IRNode* literal = GeneratorGetIntConstant(gen, NULL, literal_id);
+  Vector inputs;
+  VectorInit(&inputs);
+  for (size_t i = 0; i < node->outputs.length; i++) {
+    AsmOperand* operand = node->outputs.value.p[i];
+    int old_flags = operand->expr->flags;
+    operand->expr->flags |= kASTNeedAddress;
+    VectorAppend(&inputs, GenerateExpression(gen, operand->expr));
+    operand->expr->flags = old_flags;
+  }
+  for (size_t i = 0; i < node->inputs.length; i++) {
+    AsmOperand* operand = node->inputs.value.p[i];
+    VectorAppend(&inputs, GenerateExpression(gen, operand->expr));
+  }
+  IRNode* asm_ir = GeneratorEmit(gen, NewIR(IR_OP(asm)));
+  asm_ir->aux = node;
+  VectorAppend(&asm_ir->inputs, literal);
+  VectorAppend(&literal->outputs, asm_ir);
+  for (size_t i = 0; i < inputs.length; i++) {
+    IRNode* input = inputs.value.p[i];
+    VectorAppend(&asm_ir->inputs, input);
+    VectorAppend(&input->outputs, asm_ir);
+  }
+  VectorDestruct(&inputs);
+  if (node->is_goto && node->label_nodes.length != 0) {
+    LabelASTNode* label = node->label_nodes.value.p[0];
+    if (label->label == NULL) {
+      label->label = label->named ? NewIRNamedLabel(label->name.value)
+                                  : NewIR(IR_OP(label));
+    }
+    IRNode* branch = GeneratorEmit(gen, NewIR(IR_OP(bra)));
+    VectorAppend(&branch->inputs, label->label);
+    VectorAppend(&label->label->outputs, branch);
+  }
 }
 
 void GenerateStatement(Generator* gen, ASTNode* node) {

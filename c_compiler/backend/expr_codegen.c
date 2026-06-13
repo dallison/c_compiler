@@ -1733,8 +1733,9 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
 static IRNode* GenerateAsm(Generator* gen, AsmASTNode* node) {
   int literal_id = CompilerAddStringLiteral(node->text, false);
 
-  return IRSetType(GeneratorEmit(
-      gen, NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id))), node->base.type);
+  IRNode* asm_ir = NewIR1(IR_OP(asm), GeneratorGetIntConstant(gen, NULL, literal_id));
+  asm_ir->aux = node;
+  return IRSetType(GeneratorEmit(gen, asm_ir), node->base.type);
 }
 
 

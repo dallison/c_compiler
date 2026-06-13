@@ -813,6 +813,7 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
   StringAppend(code,
       "#define __asm asm\n"
       "#define __asm__ asm\n"
+      "#define __volatile__ volatile\n"
       "#define __attribute __attribute__\n"
       "#define __inline inline\n"
       "#define __signed signed\n"

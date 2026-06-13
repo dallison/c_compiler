@@ -63,6 +63,19 @@ typedef enum {
 // otherwise type-agnostic and defaults to an integer register, which would be
 // wrong for e.g. the merge slot of a `double` conditional expression.
 #define kARMFloatValue (1 << 25)
+#define kARMExtendedAsm (1 << 26)
+
+#define ARM_MAX_ASM_OPERANDS 16
+
+typedef struct {
+  TargetInstruction base;
+  AsmASTNode* asm_node;
+  int num_operands;
+  int reg_nums[ARM_MAX_ASM_OPERANDS];
+  bool is_fp[ARM_MAX_ASM_OPERANDS];
+  int sizes[ARM_MAX_ASM_OPERANDS];
+  int64_t immediate_values[ARM_MAX_ASM_OPERANDS];
+} ARMAsmInstruction;
 
 #define ARM_OP(op) kARM_##op
 

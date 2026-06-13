@@ -8,6 +8,7 @@
 
 #include "aarch64_emitter.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -655,6 +656,118 @@ static const char* GetRegisterName(TargetInstruction* inst, int size, char* buf,
   return "";
 }
 
+static AsmOperand* GetAsmOperand(AARCH64AsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    return NULL;
+  }
+  if ((size_t)index < inst->asm_node->outputs.length) {
+    return inst->asm_node->outputs.value.p[index];
+  }
+  return inst->asm_node->inputs.value.p[index - inst->asm_node->outputs.length];
+}
+
+static int FindAsmOperandByName(AARCH64AsmInstruction* inst, const char* name,
+                                size_t len) {
+  for (int i = 0; i < inst->num_operands; i++) {
+    AsmOperand* operand = GetAsmOperand(inst, i);
+    if (operand != NULL && operand->name.length == len &&
+        strncmp(operand->name.value, name, len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void PrintAsmOperand(FILE* fp, AARCH64AsmInstruction* inst, int index,
+                            char modifier) {
+  if (index < 0 || index >= inst->num_operands) {
+    fprintf(fp, "<bad-asm-operand>");
+    return;
+  }
+  if (inst->reg_nums[index] == INT_MIN) {
+    fprintf(fp, "#%" PRId64, inst->immediate_values[index]);
+    return;
+  }
+  int size = inst->sizes[index];
+  if (modifier == 'w') {
+    size = kSize32Bit;
+  } else if (modifier == 'x') {
+    size = kSize64Bit;
+  } else if (modifier == 'l') {
+    fprintf(fp, "0");
+    return;
+  }
+  char buf[32];
+  fprintf(fp, "%s",
+          AARCH64RegisterNameFromNum(inst->reg_nums[index],
+                                     inst->is_fp[index] ? kAARCH64RegTypeFloat
+                                                        : kAARCH64RegTypeInt,
+                                     size, buf, sizeof(buf)));
+}
+
+static int FindAsmLabelByName(AARCH64AsmInstruction* inst, const char* name,
+                              size_t len) {
+  for (size_t i = 0; i < inst->asm_node->labels.length; i++) {
+    String* label = inst->asm_node->labels.value.p[i];
+    if (label->length == len && strncmp(label->value, name, len) == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static void PrintAsmLabel(FILE* fp, AARCH64AsmInstruction* inst, int index) {
+  if (index < 0 || (size_t)index >= inst->asm_node->labels.length) {
+    fprintf(fp, "<bad-asm-label>");
+    return;
+  }
+  String* label = inst->asm_node->labels.value.p[index];
+  fprintf(fp, "%s", label->value);
+}
+
+static void PrintExtendedAsm(FILE* fp, AARCH64AsmInstruction* inst,
+                             const char* text) {
+  for (const char* p = text; *p != '\0'; p++) {
+    if (*p != '%') {
+      fputc(*p, fp);
+      continue;
+    }
+    p++;
+    if (*p == '%') {
+      fputc('%', fp);
+      continue;
+    }
+    char modifier = 0;
+    if (*p == 'w' || *p == 'x' || *p == 'l') {
+      modifier = *p++;
+    }
+    int index = -1;
+    if (*p == '[') {
+      const char* name = ++p;
+      while (*p != '\0' && *p != ']') {
+        p++;
+      }
+      if (modifier == 'l') {
+        index = FindAsmLabelByName(inst, name, (size_t)(p - name));
+      } else {
+        index = FindAsmOperandByName(inst, name, (size_t)(p - name));
+      }
+    } else if (*p >= '0' && *p <= '9') {
+      index = 0;
+      while (*p >= '0' && *p <= '9') {
+        index = index * 10 + (*p - '0');
+        p++;
+      }
+      p--;
+    }
+    if (modifier == 'l') {
+      PrintAsmLabel(fp, inst, index);
+    } else {
+      PrintAsmOperand(fp, inst, index, modifier);
+    }
+  }
+}
+
 // Emit mov/movz (etc.) when the result is assigned via inst->dest.
 static void PrintDestMove(AARCH64Emitter* emitter, TargetInstruction* inst,
                           FILE* fp) {
@@ -790,7 +903,13 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       assert(lit != NULL);
 
       // Output text directly into assembly output.
-      fprintf(fp, "\t%s\n", lit->value.value);
+      fprintf(fp, "\t");
+      if ((inst->flags & AARCH64_INST_EXTENDED_ASM) != 0) {
+        PrintExtendedAsm(fp, (AARCH64AsmInstruction*)inst, lit->value.value);
+      } else {
+        fprintf(fp, "%s", lit->value.value);
+      }
+      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }

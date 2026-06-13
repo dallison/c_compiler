@@ -8,6 +8,7 @@
 
 #include "arm_emitter.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -947,6 +948,105 @@ static const char* GetRegisterName(TargetInstruction* inst, int size, char* buf,
   return ARMRegisterName((ARMRegister*)inst->reg, size, buf, bufsize);
 }
 
+static AsmOperand* GetAsmOperand(ARMAsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    return NULL;
+  }
+  if ((size_t)index < inst->asm_node->outputs.length) {
+    return inst->asm_node->outputs.value.p[index];
+  }
+  return inst->asm_node->inputs.value.p[index - inst->asm_node->outputs.length];
+}
+
+static int FindAsmOperandByName(ARMAsmInstruction* inst, const char* name,
+                                size_t len) {
+  for (int i = 0; i < inst->num_operands; i++) {
+    AsmOperand* operand = GetAsmOperand(inst, i);
+    if (operand != NULL && operand->name.length == len &&
+        strncmp(operand->name.value, name, len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int FindAsmLabelByName(ARMAsmInstruction* inst, const char* name,
+                              size_t len) {
+  for (size_t i = 0; i < inst->asm_node->labels.length; i++) {
+    String* label = inst->asm_node->labels.value.p[i];
+    if (label->length == len && strncmp(label->value, name, len) == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static void PrintAsmOperand(FILE* fp, ARMAsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    fprintf(fp, "<bad-asm-operand>");
+    return;
+  }
+  if (inst->reg_nums[index] == INT_MIN) {
+    fprintf(fp, "#%" PRId64, inst->immediate_values[index]);
+    return;
+  }
+  char buf[32];
+  fprintf(fp, "%s", ARMRegisterNameFromNum(inst->reg_nums[index],
+                                           inst->is_fp[index] ? kARMRegTypeFloat
+                                                              : kARMRegTypeInt,
+                                           inst->sizes[index], buf, sizeof(buf)));
+}
+
+static void PrintAsmLabel(FILE* fp, ARMAsmInstruction* inst, int index) {
+  if (index < 0 || (size_t)index >= inst->asm_node->labels.length) {
+    fprintf(fp, "<bad-asm-label>");
+    return;
+  }
+  String* label = inst->asm_node->labels.value.p[index];
+  fprintf(fp, "%s", label->value);
+}
+
+static void PrintExtendedAsm(FILE* fp, ARMAsmInstruction* inst,
+                             const char* text) {
+  for (const char* p = text; *p != '\0'; p++) {
+    if (*p != '%') {
+      fputc(*p, fp);
+      continue;
+    }
+    p++;
+    if (*p == '%') {
+      fputc('%', fp);
+      continue;
+    }
+    char modifier = 0;
+    if (*p == 'l') {
+      modifier = *p++;
+    }
+    int index = -1;
+    if (*p == '[') {
+      const char* name = ++p;
+      while (*p != '\0' && *p != ']') {
+        p++;
+      }
+      index = modifier == 'l'
+                  ? FindAsmLabelByName(inst, name, (size_t)(p - name))
+                  : FindAsmOperandByName(inst, name, (size_t)(p - name));
+    } else if (*p >= '0' && *p <= '9') {
+      index = 0;
+      while (*p >= '0' && *p <= '9') {
+        index = index * 10 + (*p - '0');
+        p++;
+      }
+      p--;
+    }
+    if (modifier == 'l') {
+      PrintAsmLabel(fp, inst, index);
+    } else {
+      PrintAsmOperand(fp, inst, index);
+    }
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1052,7 +1152,13 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       assert(lit != NULL);
 
       // Output text directly into assembly output.
-      fprintf(fp, "\t%s\n", lit->value.value);
+      fprintf(fp, "\t");
+      if ((inst->flags & kARMExtendedAsm) != 0) {
+        PrintExtendedAsm(fp, (ARMAsmInstruction*)inst, lit->value.value);
+      } else {
+        fprintf(fp, "%s", lit->value.value);
+      }
+      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }

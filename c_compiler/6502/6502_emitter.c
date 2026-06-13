@@ -8,7 +8,9 @@
 
 #include "6502_emitter.h"
 #include <assert.h>
+#include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 #include "6502_assembler.h"
 #include "6502_reg_alloc.h"
 #include "compiler.h"
@@ -288,6 +290,112 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
               W65C02RegisterAsString(reg, offset, buf, sizeof(buf)));
       break;
    }
+}
+
+static AsmOperand* GetAsmOperand(W65C02AsmInstruction* inst, int index) {
+  if (inst->asm_node == NULL || index < 0 || index >= inst->num_operands) {
+    return NULL;
+  }
+  if ((size_t)index < inst->asm_node->outputs.length) {
+    return inst->asm_node->outputs.value.p[index];
+  }
+  return inst->asm_node->inputs.value.p[index - inst->asm_node->outputs.length];
+}
+
+static int FindAsmOperandByName(W65C02AsmInstruction* inst, const char* name,
+                                size_t len) {
+  for (int i = 0; i < inst->num_operands; i++) {
+    AsmOperand* operand = GetAsmOperand(inst, i);
+    if (operand != NULL && operand->name.length == len &&
+        strncmp(operand->name.value, name, len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int FindAsmLabelByName(W65C02AsmInstruction* inst, const char* name,
+                              size_t len) {
+  if (inst->asm_node == NULL) {
+    return -1;
+  }
+  for (size_t i = 0; i < inst->asm_node->labels.length; i++) {
+    String* label = inst->asm_node->labels.value.p[i];
+    if (label->length == len && strncmp(label->value, name, len) == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static void PrintAsmOperand(FILE* fp, W65C02AsmInstruction* inst, int index) {
+  if (index < 0 || index >= inst->num_operands) {
+    fprintf(fp, "<bad-asm-operand>");
+    return;
+  }
+  if (inst->is_immediate[index]) {
+    fprintf(fp, "%" PRId64, inst->immediate_values[index]);
+    return;
+  }
+  TargetInstruction* zp = inst->zp_operands[index];
+  if (zp == NULL || zp->reg == NULL) {
+    fprintf(fp, "<bad-asm-operand>");
+    return;
+  }
+  char buf[32];
+  fprintf(fp, "%s", W65C02RegisterAsString((W65C02Register*)zp->reg, 0, buf,
+                                           sizeof(buf)));
+}
+
+static void PrintAsmLabel(FILE* fp, W65C02AsmInstruction* inst, int index) {
+  if (inst->asm_node == NULL || index < 0 ||
+      (size_t)index >= inst->asm_node->labels.length) {
+    fprintf(fp, "<bad-asm-label>");
+    return;
+  }
+  String* label = inst->asm_node->labels.value.p[index];
+  fprintf(fp, "%s", label->value);
+}
+
+static void PrintExtendedAsm(FILE* fp, W65C02AsmInstruction* inst,
+                             const char* text) {
+  for (const char* p = text; *p != '\0'; p++) {
+    if (*p != '%') {
+      fputc(*p, fp);
+      continue;
+    }
+    p++;
+    if (*p == '%') {
+      fputc('%', fp);
+      continue;
+    }
+    char modifier = 0;
+    if (*p == 'l') {
+      modifier = *p++;
+    }
+    int index = -1;
+    if (*p == '[') {
+      const char* name = ++p;
+      while (*p != '\0' && *p != ']') {
+        p++;
+      }
+      index = modifier == 'l'
+                  ? FindAsmLabelByName(inst, name, (size_t)(p - name))
+                  : FindAsmOperandByName(inst, name, (size_t)(p - name));
+    } else if (*p >= '0' && *p <= '9') {
+      index = 0;
+      while (*p >= '0' && *p <= '9') {
+        index = index * 10 + (*p - '0');
+        p++;
+      }
+      p--;
+    }
+    if (modifier == 'l') {
+      PrintAsmLabel(fp, inst, index);
+    } else {
+      PrintAsmOperand(fp, inst, index);
+    }
+  }
 }
 
 // Main instruction printer.
@@ -686,7 +794,13 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
       assert(lit != NULL);
 
       // Output text directly into assembly output.
-      fprintf(fp, "\t%s\n", lit->value.value);
+      fprintf(fp, "\t");
+      if ((inst->flags & k6502ExtendedAsm) != 0) {
+        PrintExtendedAsm(fp, (W65C02AsmInstruction*)inst, lit->value.value);
+      } else {
+        fprintf(fp, "%s", lit->value.value);
+      }
+      fprintf(fp, "\n");
       lit->base.disabled = true;
       return;
     }

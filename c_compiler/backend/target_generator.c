@@ -832,6 +832,8 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     AppendToBuffer(&out, &remaining, ".local.");
     AppendSanitizedName(&out, &remaining, symbol->name.value);
     AppendToBuffer(&out, &remaining, suffix);
+  } else if (symbol->asm_name.length != 0) {
+    AppendToBuffer(&out, &remaining, symbol->asm_name.value);
   } else {
     if (compiler->prepend_underscore) {
       AppendToBuffer(&out, &remaining, "_");

@@ -8,6 +8,7 @@
 
 #include "x86_64_codegen.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "map.h"
@@ -2480,7 +2481,71 @@ static TargetInstruction* LowerAsm(X86_64Generator* rv, IRNode* node) {
   TargetInstruction* literal =
       Emit(rv, TargetNewLiteral((int)id_node->value.ivalue));
 
-  TargetInstruction* result = Emit(rv, NewInstruction1(X86_64_OP(asm), literal));
+  AsmASTNode* asm_node = node->aux;
+  if (asm_node == NULL ||
+      (asm_node->outputs.length == 0 && asm_node->inputs.length == 0 &&
+       asm_node->clobbers.length == 0 && asm_node->labels.length == 0)) {
+    TargetInstruction* result = Emit(rv, NewInstruction1(X86_64_OP(asm), literal));
+
+    SetLoweredNode(node, result);
+    return result;
+  }
+
+  assert(asm_node->outputs.length + asm_node->inputs.length <= X86_64_MAX_ASM_OPERANDS);
+  X86_64AsmInstruction* asm_inst = malloc(sizeof(X86_64AsmInstruction));
+  TargetInitInstruction(&asm_inst->base, (TargetOpcode)X86_64_OP(asm));
+  asm_inst->base.flags |= X86_64_INST_EXTENDED_ASM;
+  asm_inst->base.operand[0] = literal;
+  asm_inst->asm_node = asm_node;
+  asm_inst->num_operands = (int)(asm_node->outputs.length + asm_node->inputs.length);
+  memset(asm_inst->immediate_values, 0, sizeof(asm_inst->immediate_values));
+
+  size_t ir_index = 1;
+  int operand_index = 0;
+  TargetInstruction* output_regs[X86_64_MAX_ASM_OPERANDS] = {0};
+  for (size_t i = 0; i < asm_node->outputs.length; i++, operand_index++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[ir_index++];
+    int arg_reg = 5 - (int)i;
+    if (arg_reg < 0) {
+      arg_reg = 5;
+    }
+    TargetInstruction* reg = IntArgumentRegister(rv, arg_reg);
+    asm_inst->reg_nums[operand_index] = X86_64_INT_ARG_START + arg_reg;
+    asm_inst->is_fp[operand_index] = false;
+    asm_inst->sizes[operand_index] = operand->expr->type->size;
+    output_regs[i] = reg;
+    if (operand->is_readwrite) {
+      TargetInstruction* loaded = Load(rv, addr_node, operand->expr->type->size <= 4
+                                                    ? X86_64_OP(loadl)
+                                                    : X86_64_OP(loadq));
+      SetDestOrMove(rv, loaded, reg, X86_64_OP(mv));
+    }
+  }
+
+  for (size_t i = 0; i < asm_node->inputs.length; i++, operand_index++) {
+    AsmOperand* operand = asm_node->inputs.value.p[i];
+    IRNode* input_node = node->inputs.value.p[ir_index++];
+    asm_inst->is_fp[operand_index] = false;
+    asm_inst->sizes[operand_index] = operand->expr->type->size;
+    if (strchr(operand->constraint.value, 'i') != NULL && IRIsIntConst(input_node)) {
+      asm_inst->reg_nums[operand_index] = INT_MIN;
+      asm_inst->immediate_values[operand_index] = IRIntConstValue(input_node);
+      continue;
+    }
+    int arg_reg = (int)i;
+    TargetInstruction* reg = IntArgumentRegister(rv, arg_reg);
+    asm_inst->reg_nums[operand_index] = X86_64_INT_ARG_START + arg_reg;
+    SetDestOrMove(rv, Materialize(rv, input_node), reg, X86_64_OP(mv));
+  }
+
+  TargetInstruction* result = Emit(rv, &asm_inst->base);
+  for (size_t i = 0; i < asm_node->outputs.length; i++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[1 + i];
+    Store(rv, addr_node, output_regs[i],
+          operand->expr->type->size <= 4 ? X86_64_OP(storel) : X86_64_OP(storeq));
+  }
 
   SetLoweredNode(node, result);
   return result;

@@ -2345,6 +2345,15 @@ ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLoca
 static void AsmASTNodeDelete(ASTNode* node) {
   AsmASTNode* anode = (AsmASTNode*)node;
   StringDelete(anode->text);
+  VectorDestructWithContents(&anode->outputs, (VectorElementDestructor)AsmOperandDelete,
+                             false);
+  VectorDestructWithContents(&anode->inputs, (VectorElementDestructor)AsmOperandDelete,
+                             false);
+  VectorDestructWithContents(&anode->clobbers, (VectorElementDestructor)StringDelete,
+                             false);
+  VectorDestructWithContents(&anode->labels, (VectorElementDestructor)StringDelete,
+                             false);
+  VectorDestruct(&anode->label_nodes);
   ASTNodeBaseDelete(node);
 }
 
@@ -2362,6 +2371,30 @@ static ASTNode* AsmASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->text = NewString(from->text->value);
   to->is_volatile = from->is_volatile;
+  to->is_goto = from->is_goto;
+  VectorInit(&to->outputs);
+  VectorInit(&to->inputs);
+  VectorInit(&to->clobbers);
+  VectorInit(&to->labels);
+  VectorInit(&to->label_nodes);
+  for (size_t i = 0; i < from->outputs.length; i++) {
+    VectorAppend(&to->outputs,
+                 AsmOperandClone(from->outputs.value.p[i], func, data, &to->base));
+  }
+  for (size_t i = 0; i < from->inputs.length; i++) {
+    VectorAppend(&to->inputs,
+                 AsmOperandClone(from->inputs.value.p[i], func, data, &to->base));
+  }
+  for (size_t i = 0; i < from->clobbers.length; i++) {
+    String* from_clobber = from->clobbers.value.p[i];
+    VectorAppend(&to->clobbers, NewString(from_clobber->value));
+  }
+  for (size_t i = 0; i < from->labels.length; i++) {
+    String* from_label = from->labels.value.p[i];
+    VectorAppend(&to->labels, NewString(from_label->value));
+    VectorAppend(&to->label_nodes,
+                 i < from->label_nodes.length ? from->label_nodes.value.p[i] : NULL);
+  }
   return func(&to->base, data);
 }
 
@@ -2375,7 +2408,48 @@ ASTNode* NewAsmASTNode(String* text, bool is_volatile,
   ASTNodeInit(&node->base, AST_OP(asm), type, location, &asm_vtbl);
   node->text = text;
   node->is_volatile = is_volatile;
+  node->is_goto = false;
+  VectorInit(&node->outputs);
+  VectorInit(&node->inputs);
+  VectorInit(&node->clobbers);
+  VectorInit(&node->labels);
+  VectorInit(&node->label_nodes);
   return (ASTNode*)node;
+}
+
+AsmOperand* NewAsmOperand(const char* constraint, const char* name,
+                          ASTNode* expr, bool is_output) {
+  AsmOperand* operand = malloc(sizeof(AsmOperand));
+  StringInit(&operand->constraint, constraint);
+  StringInit(&operand->name, name == NULL ? "" : name);
+  operand->expr = expr;
+  operand->is_output = is_output;
+  operand->is_readwrite = constraint != NULL && constraint[0] == '+';
+  operand->is_early_clobber = constraint != NULL && strchr(constraint, '&') != NULL;
+  return operand;
+}
+
+void AsmOperandDelete(AsmOperand* operand) {
+  if (operand == NULL) {
+    return;
+  }
+  StringDestruct(&operand->constraint);
+  StringDestruct(&operand->name);
+  ASTNodeDelete(operand->expr);
+  free(operand);
+}
+
+AsmOperand* AsmOperandClone(AsmOperand* operand,
+                            ASTNode* (*func)(ASTNode* node, void*),
+                            void* data, ASTNode* new_parent) {
+  ASTNode* expr = operand->expr == NULL ? NULL : ASTNodeClone(operand->expr, func, data,
+                                                              new_parent);
+  AsmOperand* clone = NewAsmOperand(operand->constraint.value,
+                                    operand->name.length == 0 ? NULL : operand->name.value,
+                                    expr, operand->is_output);
+  clone->is_readwrite = operand->is_readwrite;
+  clone->is_early_clobber = operand->is_early_clobber;
+  return clone;
 }
 
 //

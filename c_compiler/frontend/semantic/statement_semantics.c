@@ -9,6 +9,7 @@
 #include "statement_semantics.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
 #include "compiler.h"
 #include "expr_evaluator.h"
@@ -83,6 +84,209 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   if (expr != NULL && expr->type != NULL && !TypeIsVoid(expr->type) &&
       !ExpressionHasSideEffects(expr)) {
     SemanticWarning(expr, "unused-value", "expression result unused");
+  }
+}
+
+static bool AsmOutputHasAddress(ASTNode* node) {
+  if (node == NULL || TypeIsConst(node->type) || TypeIsFunction(node->type) ||
+      TypeIsArray(node->type)) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(identifier):
+    case AST_OP(subscript):
+    case AST_OP(contents):
+    case AST_OP(dot):
+    case AST_OP(arrow):
+    case AST_OP(cast):
+    case AST_OP(compound_literal):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool IsAArch64RegisterClobber(const char* name) {
+  if (name[0] == 'x' || name[0] == 'w' || name[0] == 'd' || name[0] == 's' ||
+      name[0] == 'v') {
+    char* end = NULL;
+    long reg = strtol(name + 1, &end, 10);
+    return end != name + 1 && *end == '\0' && reg >= 0 && reg <= 31;
+  }
+  return strcmp(name, "lr") == 0 || strcmp(name, "sp") == 0 ||
+         strcmp(name, "xzr") == 0 || strcmp(name, "wzr") == 0;
+}
+
+static bool IsNumericRegisterClobber(const char* name, const char* prefix,
+                                     long max_reg) {
+  size_t prefix_len = strlen(prefix);
+  if (strncmp(name, prefix, prefix_len) != 0) {
+    return false;
+  }
+  char* end = NULL;
+  long reg = strtol(name + prefix_len, &end, 10);
+  return end != name + prefix_len && *end == '\0' && reg >= 0 && reg <= max_reg;
+}
+
+static const char* AsmTargetName(void) {
+  if (compiler->target == NULL) {
+    return "target";
+  }
+  return compiler->target->name.value;
+}
+
+static bool IsSupportedAsmConstraint(const char* constraint, bool is_output) {
+  const char* target = AsmTargetName();
+  if (strcmp(target, "6502") == 0) {
+    bool saw_constraint = false;
+    for (const char* p = constraint; *p != '\0'; p++) {
+      switch (*p) {
+        case '=':
+        case '+':
+        case '&':
+          break;
+        case 'r':
+        case 'i':
+        case 'g':
+          saw_constraint = true;
+          break;
+        default:
+          return false;
+      }
+    }
+    if (is_output) {
+      return saw_constraint && (constraint[0] == '=' || constraint[0] == '+');
+    }
+    return saw_constraint;
+  }
+  bool saw_constraint = false;
+  for (const char* p = constraint; *p != '\0'; p++) {
+    switch (*p) {
+      case '=':
+      case '+':
+      case '&':
+      case '%':
+        break;
+      case 'r':
+      case 'm':
+      case 'i':
+      case 'g':
+        saw_constraint = true;
+        break;
+      case 'w':
+        if (strcmp(target, "aarch64") != 0) {
+          return false;
+        }
+        saw_constraint = true;
+        break;
+      default:
+        return false;
+    }
+  }
+  if (is_output) {
+    return saw_constraint && (constraint[0] == '=' || constraint[0] == '+');
+  }
+  return saw_constraint;
+}
+
+static bool IsSupportedAsmClobber(const char* name) {
+  const char* target = AsmTargetName();
+  if (strcmp(name, "memory") == 0 || strcmp(name, "cc") == 0) {
+    return true;
+  }
+  if (strcmp(target, "aarch64") == 0) {
+    return IsAArch64RegisterClobber(name);
+  }
+  if (strcmp(target, "arm") == 0) {
+    return IsNumericRegisterClobber(name, "r", 15) || strcmp(name, "lr") == 0 ||
+           strcmp(name, "sp") == 0 || strcmp(name, "pc") == 0;
+  }
+  if (strcmp(target, "riscv") == 0) {
+    return IsNumericRegisterClobber(name, "x", 31) ||
+           IsNumericRegisterClobber(name, "f", 31) ||
+           strcmp(name, "ra") == 0 || strcmp(name, "sp") == 0 ||
+           strcmp(name, "fp") == 0;
+  }
+  if (strcmp(target, "x86_64") == 0 || strcmp(target, "x86-64") == 0) {
+    static const char* regs[] = {
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+        "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+      if (strcmp(name, regs[i]) == 0) {
+        return true;
+      }
+    }
+    return strncmp(name, "xmm", 3) == 0 && IsNumericRegisterClobber(name, "xmm", 15);
+  }
+  return strcmp(target, "6502") == 0;
+}
+
+typedef struct {
+  String* label_name;
+  ASTNode* label;
+} AsmLabelFinder;
+
+static void FindAsmLabel(ASTNode* node, void* data, int child_id,
+                         VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  AsmLabelFinder* finder = data;
+  if (finder->label != NULL) {
+    return;
+  }
+  if (node->op == AST_OP(label)) {
+    LabelASTNode* label = (LabelASTNode*)node;
+    if (StringEqualString(finder->label_name, &label->name)) {
+      finder->label = node;
+    }
+  }
+}
+
+static void AnalyzeAsmStatement(AsmASTNode* node) {
+  if (node->outputs.length + node->inputs.length > 16) {
+    SemanticError(&node->base, "Too many asm operands");
+  }
+  for (size_t i = 0; i < node->outputs.length; i++) {
+    AsmOperand* operand = node->outputs.value.p[i];
+    operand->expr = AnalyzeExpression(operand->expr);
+    if (!AsmOutputHasAddress(operand->expr)) {
+      SemanticError(operand->expr, "asm output operand must be an assignable lvalue");
+    }
+    if (!IsSupportedAsmConstraint(operand->constraint.value, true)) {
+      SemanticError(&node->base, "Unsupported %s asm output constraint '%s'",
+                    AsmTargetName(), operand->constraint.value);
+    }
+  }
+  for (size_t i = 0; i < node->inputs.length; i++) {
+    AsmOperand* operand = node->inputs.value.p[i];
+    operand->expr = AnalyzeExpression(operand->expr);
+    if (!IsSupportedAsmConstraint(operand->constraint.value, false)) {
+      SemanticError(&node->base, "Unsupported %s asm input constraint '%s'",
+                    AsmTargetName(), operand->constraint.value);
+    }
+  }
+  for (size_t i = 0; i < node->clobbers.length; i++) {
+    String* clobber = node->clobbers.value.p[i];
+    if (!IsSupportedAsmClobber(clobber->value)) {
+      SemanticError(&node->base, "Unsupported %s asm clobber '%s'",
+                    AsmTargetName(), clobber->value);
+    }
+  }
+  for (size_t i = 0; i < node->labels.length; i++) {
+    String* label_name = node->labels.value.p[i];
+    AsmLabelFinder finder = {.label_name = label_name, .label = NULL};
+    ASTNodeVisit(compiler->current_function->info.function.body, FindAsmLabel, 0,
+                 &finder);
+    if (finder.label == NULL) {
+      SemanticError(&node->base, "Undefined asm goto label '%s'",
+                    label_name->value);
+    } else {
+      finder.label->flags |= kASTLabelUsed;
+      ((LabelASTNode*)finder.label)->named = true;
+      VectorAppend(&node->label_nodes, finder.label);
+    }
   }
 }
 
@@ -906,8 +1110,10 @@ void AnalyzeStatement(ASTNode* node) {
 
     case AST_OP(break):
     case AST_OP(continue):
-    case AST_OP(asm):
       // No analysis needed for these.
+      break;
+    case AST_OP(asm):
+      AnalyzeAsmStatement((AsmASTNode*)node);
       break;
 
     default:

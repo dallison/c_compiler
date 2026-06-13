@@ -8,6 +8,7 @@
 
 #include "aarch64_codegen.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
@@ -2737,7 +2738,76 @@ static TargetInstruction* LowerAsm(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* literal =
       Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
 
-  TargetInstruction* result = Emit(g, NewInstruction1(AARCH64_OP(asm), literal));
+  AsmASTNode* asm_node = node->aux;
+  if (asm_node == NULL ||
+      (asm_node->outputs.length == 0 && asm_node->inputs.length == 0 &&
+       asm_node->clobbers.length == 0 && asm_node->labels.length == 0)) {
+    TargetInstruction* result = Emit(g, NewInstruction1(AARCH64_OP(asm), literal));
+
+    SetLoweredNode(node, result);
+    return result;
+  }
+
+  if (asm_node->outputs.length + asm_node->inputs.length > AARCH64_MAX_ASM_OPERANDS) {
+    assert(false);
+  }
+
+  AARCH64AsmInstruction* asm_inst = malloc(sizeof(AARCH64AsmInstruction));
+  TargetInitInstruction(&asm_inst->base, (TargetOpcode)AARCH64_OP(asm));
+  asm_inst->base.flags |= AARCH64_INST_EXTENDED_ASM;
+  asm_inst->base.operand[0] = literal;
+  asm_inst->asm_node = asm_node;
+  asm_inst->num_operands = (int)(asm_node->outputs.length + asm_node->inputs.length);
+  memset(asm_inst->immediates, 0, sizeof(asm_inst->immediates));
+  memset(asm_inst->immediate_values, 0, sizeof(asm_inst->immediate_values));
+
+  size_t ir_index = 1;
+  int operand_index = 0;
+  TargetInstruction* output_regs[AARCH64_MAX_ASM_OPERANDS] = {0};
+  for (size_t i = 0; i < asm_node->outputs.length; i++, operand_index++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[ir_index++];
+    int reg_num = 9 - (int)i;
+    if (reg_num < 0) {
+      reg_num = 9;
+    }
+    TargetInstruction* reg =
+        EmitSymbol(g, NewInstruction((AARCH64Opcode)(AARCH64_OP(r0) + reg_num)));
+    asm_inst->reg_nums[operand_index] = reg_num;
+    asm_inst->is_fp[operand_index] = false;
+    asm_inst->sizes[operand_index] = operand->expr->type->size <= 4 ? kSize32Bit : kSize64Bit;
+    output_regs[i] = reg;
+    if (operand->is_readwrite) {
+      TargetInstruction* loaded = Load(g, addr_node, AARCH64_OP(ldr),
+                                       asm_inst->sizes[operand_index]);
+      SetDestOrMove(g, loaded, reg, AARCH64_OP(mov));
+    }
+  }
+
+  for (size_t i = 0; i < asm_node->inputs.length; i++, operand_index++) {
+    AsmOperand* operand = asm_node->inputs.value.p[i];
+    IRNode* input_node = node->inputs.value.p[ir_index++];
+    int reg_num = (int)i;
+    TargetInstruction* reg =
+        EmitSymbol(g, NewInstruction((AARCH64Opcode)(AARCH64_OP(r0) + reg_num)));
+    asm_inst->reg_nums[operand_index] = reg_num;
+    asm_inst->is_fp[operand_index] = false;
+    asm_inst->sizes[operand_index] = operand->expr->type->size <= 4 ? kSize32Bit : kSize64Bit;
+    if (strchr(operand->constraint.value, 'i') != NULL && IRIsIntConst(input_node)) {
+      asm_inst->reg_nums[operand_index] = INT_MIN;
+      asm_inst->immediate_values[operand_index] = IRIntConstValue(input_node);
+      continue;
+    }
+    SetDestOrMove(g, Materialize(g, input_node), reg, AARCH64_OP(mov));
+  }
+
+  TargetInstruction* result = Emit(g, &asm_inst->base);
+  for (size_t i = 0; i < asm_node->outputs.length; i++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[1 + i];
+    Store(g, addr_node, output_regs[i], AARCH64_OP(str),
+          operand->expr->type->size <= 4 ? kSize32Bit : kSize64Bit);
+  }
 
   SetLoweredNode(node, result);
   return result;

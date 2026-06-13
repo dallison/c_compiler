@@ -68,6 +68,7 @@ void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
 // A symbol.  This is a variable, function or type used in a program.
 typedef struct Symbol {
   String name;                // Symbol name.
+  String asm_name;            // Optional assembler-visible name.
   int id;
   struct TypeRecord* type;    // Type.
   Storage storage;            // Storage (static, typedef, etc.)

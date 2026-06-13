@@ -28,6 +28,18 @@ struct TargetBasicBlock;
 #define RV_REG_VAR_MASK 0xc0000000
 #define RV_IS_REG_VAR(offset) ((offset & RV_REG_VAR_MASK) == RV_REG_VAR)
 
+#define RV_INST_EXTENDED_ASM (1 << 24)
+#define RV_MAX_ASM_OPERANDS 16
+
+typedef struct {
+  TargetInstruction base;
+  AsmASTNode* asm_node;
+  int num_operands;
+  int reg_nums[RV_MAX_ASM_OPERANDS];
+  bool is_fp[RV_MAX_ASM_OPERANDS];
+  int64_t immediate_values[RV_MAX_ASM_OPERANDS];
+} RVAsmInstruction;
+
 #define RV_OP(op) kRV_##op
 
 // RISC-V code generator opcodes.

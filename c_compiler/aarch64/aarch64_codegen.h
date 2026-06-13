@@ -332,6 +332,20 @@ typedef enum {
 // slot used for ?: / && / ||).  The register allocator uses this to place the
 // value in an FP register instead of defaulting to a general register.
 #define AARCH64_INST_FP (1 << 23)
+#define AARCH64_INST_EXTENDED_ASM (1 << 24)
+
+#define AARCH64_MAX_ASM_OPERANDS 16
+
+typedef struct {
+  TargetInstruction base;
+  AsmASTNode* asm_node;
+  int num_operands;
+  int reg_nums[AARCH64_MAX_ASM_OPERANDS];
+  bool is_fp[AARCH64_MAX_ASM_OPERANDS];
+  int sizes[AARCH64_MAX_ASM_OPERANDS];
+  TargetInstruction* immediates[AARCH64_MAX_ASM_OPERANDS];
+  int64_t immediate_values[AARCH64_MAX_ASM_OPERANDS];
+} AARCH64AsmInstruction;
 
 typedef struct {
   int reg_num;

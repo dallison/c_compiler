@@ -6378,8 +6378,92 @@ static void LowerAsm(W65C02Generator* g, IRNode* node) {
   TargetInstruction* literal =
       Emit(g, TargetNewLiteral((int)id_node->value.ivalue));
 
-  TargetInstruction* result =
-      Emit(g, NewInstruction1(W65C02_OP(asm), literal, kAddrModeImplied));
+  AsmASTNode* asm_node = node->aux;
+  if (asm_node == NULL ||
+      (asm_node->outputs.length == 0 && asm_node->inputs.length == 0 &&
+       asm_node->clobbers.length == 0 && asm_node->labels.length == 0)) {
+    if (node->inputs.length > 1) {
+      W65C02AsmInstruction* asm_inst = malloc(sizeof(W65C02AsmInstruction));
+      TargetInitInstruction(&asm_inst->base, (TargetOpcode)W65C02_OP(asm));
+      SetAddrMode(&asm_inst->base, kAddrModeImplied);
+      asm_inst->base.flags |= k6502ExtendedAsm;
+      asm_inst->base.operand[0] = literal;
+      asm_inst->asm_node = NULL;
+      asm_inst->num_operands = (int)node->inputs.length - 1;
+      memset(asm_inst->immediate_values, 0, sizeof(asm_inst->immediate_values));
+      memset(asm_inst->is_immediate, 0, sizeof(asm_inst->is_immediate));
+      memset(asm_inst->zp_operands, 0, sizeof(asm_inst->zp_operands));
+      for (size_t i = 1; i < node->inputs.length && i <= W65C02_MAX_ASM_OPERANDS; i++) {
+        IRNode* input_node = node->inputs.value.p[i];
+        if (IRIsIntConst(input_node)) {
+          asm_inst->is_immediate[i - 1] = true;
+          asm_inst->immediate_values[i - 1] = IRIntConstValue(input_node);
+        }
+      }
+      TargetInstruction* result = Emit(g, &asm_inst->base);
+      SetLoweredNode(node, result);
+      return;
+    }
+    TargetInstruction* result =
+        Emit(g, NewInstruction1(W65C02_OP(asm), literal, kAddrModeImplied));
+
+    SetLoweredNode(node, result);
+    return;
+  }
+
+  assert(asm_node->outputs.length + asm_node->inputs.length <= W65C02_MAX_ASM_OPERANDS);
+  W65C02AsmInstruction* asm_inst = malloc(sizeof(W65C02AsmInstruction));
+  TargetInitInstruction(&asm_inst->base, (TargetOpcode)W65C02_OP(asm));
+  SetAddrMode(&asm_inst->base, kAddrModeImplied);
+  asm_inst->base.flags |= k6502ExtendedAsm;
+  asm_inst->base.operand[0] = literal;
+  asm_inst->asm_node = asm_node;
+  asm_inst->num_operands = (int)(asm_node->outputs.length + asm_node->inputs.length);
+  memset(asm_inst->immediate_values, 0, sizeof(asm_inst->immediate_values));
+  memset(asm_inst->is_immediate, 0, sizeof(asm_inst->is_immediate));
+  memset(asm_inst->zp_operands, 0, sizeof(asm_inst->zp_operands));
+
+  size_t ir_index = 1;
+  for (size_t i = 0; i < asm_node->outputs.length; i++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[ir_index++];
+    int size = Sizeof(operand->expr->type);
+    TargetInstruction* temp = TempRegister(g, operand->expr->type, size);
+    AddSpillPoint(g, temp);
+    asm_inst->zp_operands[i] = temp;
+    TargetAddUser(temp, &asm_inst->base);
+    if (operand->is_readwrite) {
+      TargetInstruction* addr = GetAddress(g, addr_node, true);
+      Copy(g, temp, addr, 0, 0, size, GetAddrMode(temp), GetAddrMode(addr));
+      AddSpillPoint(g, temp);
+    }
+  }
+
+  for (size_t i = 0; i < asm_node->inputs.length; i++) {
+    AsmOperand* operand = asm_node->inputs.value.p[i];
+    IRNode* input_node = node->inputs.value.p[ir_index++];
+    int operand_index = (int)(asm_node->outputs.length + i);
+    if (strchr(operand->constraint.value, 'i') != NULL && IRIsIntConst(input_node)) {
+      asm_inst->is_immediate[operand_index] = true;
+      asm_inst->immediate_values[operand_index] = IRIntConstValue(input_node);
+      continue;
+    }
+    TargetInstruction* temp =
+        Materialize(g, input_node, Sizeof(operand->expr->type), true);
+    asm_inst->zp_operands[operand_index] = temp;
+    TargetAddUser(temp, &asm_inst->base);
+  }
+
+  TargetInstruction* result = Emit(g, &asm_inst->base);
+  for (size_t i = 0; i < asm_node->outputs.length; i++) {
+    AsmOperand* operand = asm_node->outputs.value.p[i];
+    IRNode* addr_node = node->inputs.value.p[1 + i];
+    int size = Sizeof(operand->expr->type);
+    TargetInstruction* addr = GetAddress(g, addr_node, true);
+    TargetInstruction* temp = asm_inst->zp_operands[i];
+    AddReloadPoint(g, temp);
+    Copy(g, addr, temp, 0, 0, size, GetAddrMode(addr), GetAddrMode(temp));
+  }
 
   SetLoweredNode(node, result);
 }

@@ -84,6 +84,18 @@ typedef enum {
 // but need it not to be emitted (for example, a CMP #0).
 #define k6502DontEmit (1 << 31)
 
+#define k6502ExtendedAsm (1 << 21)
+#define W65C02_MAX_ASM_OPERANDS 16
+
+typedef struct {
+  TargetInstruction base;
+  AsmASTNode* asm_node;
+  int num_operands;
+  int64_t immediate_values[W65C02_MAX_ASM_OPERANDS];
+  bool is_immediate[W65C02_MAX_ASM_OPERANDS];
+  TargetInstruction* zp_operands[W65C02_MAX_ASM_OPERANDS];
+} W65C02AsmInstruction;
+
 // These opcodes are an extension of the TargetOpcode enumeration.
 typedef enum {
   // The initial sequence for these oW65C02 must match the TargetOpcode

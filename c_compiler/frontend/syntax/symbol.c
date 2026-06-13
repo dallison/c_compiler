@@ -118,6 +118,7 @@ void AttributeListClone(Vector* dest, Vector* src) {
 void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
                 Storage storage) {
   StringInit(&sym->name, name);
+  StringInit(&sym->asm_name, NULL);
   sym->type = NULL;
   sym->storage = storage;
   sym->flags.is_defined = false;
@@ -155,6 +156,7 @@ Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
 
 void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->name);
+  StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
   AttributeListDestruct(&symbol->attributes);
 }
@@ -176,6 +178,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->stack_offset = sym->stack_offset;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
+  StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep
   // copy of the source's attributes.
   VectorDestruct(&new_sym->attributes);

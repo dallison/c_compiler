@@ -842,6 +842,30 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(sym);
+
+    // Check for GCC-style assembler name after a declarator:
+    //   int x asm("external_name");
+    //   void f(void) asm("external_name");
+    if (LexMatch(syntax->lex, TOK(asm))) {
+      SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
+      String asm_name;
+      StringInit(&asm_name, "");
+      while (LexLookingAt(syntax->lex, TOK(string))) {
+        StringAppend(&asm_name, syntax->lex->spelling.value);
+        LexNextToken(syntax->lex);
+      }
+      SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
+      StringSetString(&sym->asm_name, &asm_name);
+      StringDestruct(&asm_name);
+    }
+
+    if (old_sym != NULL) {
+      if (sym->asm_name.length != 0) {
+        StringSetString(&old_sym->asm_name, &sym->asm_name);
+      } else if (old_sym->asm_name.length != 0) {
+        StringSetString(&sym->asm_name, &old_sym->asm_name);
+      }
+    }
   
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
@@ -864,19 +888,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (old_sym != NULL) {
       // We now refer to the previously defined symbol rather than this new
       // one.
+      if (sym->asm_name.length != 0) {
+        StringSetString(&old_sym->asm_name, &sym->asm_name);
+      }
       SymbolDelete(sym);
       sym = old_sym;
-    }
-
-    // Check for "asm" after declaration
-    if (LexMatch(syntax->lex, TOK(asm))) {
-      SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
-      // TODO: actually do something with this?
-      // TODO: gcc asm syntax?
-      while (LexLookingAt(syntax->lex, TOK(string))) {
-        LexNextToken(syntax->lex);
-      }
-      SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
     }
 
     // Any initializer?

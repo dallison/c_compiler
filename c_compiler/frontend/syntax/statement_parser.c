@@ -7,6 +7,7 @@
 //
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "expr_parser.h"
 #include "statement_parser.h"
@@ -129,19 +130,127 @@ static ASTNode* ParseSwitchStatement(Syntax* syntax, TokenClass followers,
   return NewSwitchStatementASTNode(expr, stmt, location);
 }
 
-static ASTNode* ParseAsmStatement(Syntax* syntax, TokenClass followers,
-                         SourceLocation location) {
-  SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
-  bool is_volatile = LexMatch(syntax->lex, TOK(volatile));
-  // TODO: gcc asm syntax?
+static String* ParseAsmString(Syntax* syntax) {
   String* text = NewString("");
   while (LexLookingAt(syntax->lex, TOK(string))) {
     StringAppend(text, syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
   }
+  return text;
+}
+
+static char* ParseAsmSymbolicName(Syntax* syntax) {
+  if (!LexMatch(syntax->lex, TOK(lsquare))) {
+    return NULL;
+  }
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected asm operand name");
+    return NULL;
+  }
+  char* name = strdup(syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  SyntaxNeedBracket(syntax, TOK(rsquare), TC(openbra));
+  return name;
+}
+
+static AsmOperand* ParseAsmOperand(Syntax* syntax, bool is_output,
+                                   TokenClass followers) {
+  char* name = ParseAsmSymbolicName(syntax);
+  if (!LexLookingAt(syntax->lex, TOK(string))) {
+    SyntaxError(syntax, "Expected asm operand constraint");
+    free(name);
+    return NULL;
+  }
+  String* constraint = ParseAsmString(syntax);
+  SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
+  ASTNode* expr = SyntaxParseExpression(syntax, followers | TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  AsmOperand* operand =
+      NewAsmOperand(constraint->value, name, expr, is_output);
+  StringDelete(constraint);
+  free(name);
+  return operand;
+}
+
+static void ParseAsmOperandList(Syntax* syntax, Vector* operands, bool is_output,
+                                TokenClass followers) {
+  while (!LexLookingAt(syntax->lex, TOK(colon)) &&
+         !LexLookingAt(syntax->lex, TOK(rparen))) {
+    AsmOperand* operand = ParseAsmOperand(syntax, is_output, followers);
+    if (operand != NULL) {
+      VectorAppend(operands, operand);
+    }
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static void ParseAsmClobberList(Syntax* syntax, Vector* clobbers) {
+  while (!LexLookingAt(syntax->lex, TOK(colon)) &&
+         !LexLookingAt(syntax->lex, TOK(rparen))) {
+    if (!LexLookingAt(syntax->lex, TOK(string))) {
+      SyntaxError(syntax, "Expected asm clobber string");
+      return;
+    }
+    String* clobber = ParseAsmString(syntax);
+    VectorAppend(clobbers, clobber);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static void ParseAsmLabelList(Syntax* syntax, Vector* labels) {
+  while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected asm goto label");
+      return;
+    }
+    VectorAppend(labels, NewString(syntax->lex->spelling.value));
+    LexNextToken(syntax->lex);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static ASTNode* ParseAsmStatement(Syntax* syntax, TokenClass followers,
+                         SourceLocation location) {
+  bool is_volatile = false;
+  bool is_goto = false;
+  bool parsed_modifier = true;
+  while (parsed_modifier) {
+    parsed_modifier = false;
+    if (LexMatch(syntax->lex, TOK(volatile))) {
+      is_volatile = true;
+      parsed_modifier = true;
+    } else if (LexMatch(syntax->lex, TOK(goto))) {
+      is_goto = true;
+      parsed_modifier = true;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
+  String* text = ParseAsmString(syntax);
+  ASTNode* node = NewAsmASTNode(text, is_volatile, location);
+  AsmASTNode* asm_node = (AsmASTNode*)node;
+  asm_node->is_goto = is_goto;
+  if (LexMatch(syntax->lex, TOK(colon))) {
+    ParseAsmOperandList(syntax, &asm_node->outputs, true,
+                        followers | TC(exprsep));
+    if (LexMatch(syntax->lex, TOK(colon))) {
+      ParseAsmOperandList(syntax, &asm_node->inputs, false,
+                          followers | TC(exprsep));
+      if (LexMatch(syntax->lex, TOK(colon))) {
+        ParseAsmClobberList(syntax, &asm_node->clobbers);
+        if (LexMatch(syntax->lex, TOK(colon))) {
+          ParseAsmLabelList(syntax, &asm_node->labels);
+        }
+      }
+    }
+  }
   SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
-  // The AsmASTNode takes ownership of the text string.
-  return NewAsmASTNode(text, is_volatile, location);
+  return node;
 }
 
 // For statement.

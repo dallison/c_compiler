@@ -214,6 +214,19 @@ typedef enum {
 // PrintCompareAndSet in the emitter.
 #define X86_64_FCMP_SS 0x80000
 #define X86_64_FCMP_SD 0x100000
+#define X86_64_INST_EXTENDED_ASM 0x200000
+
+#define X86_64_MAX_ASM_OPERANDS 16
+
+typedef struct {
+  TargetInstruction base;
+  AsmASTNode* asm_node;
+  int num_operands;
+  int reg_nums[X86_64_MAX_ASM_OPERANDS];
+  bool is_fp[X86_64_MAX_ASM_OPERANDS];
+  int sizes[X86_64_MAX_ASM_OPERANDS];
+  int64_t immediate_values[X86_64_MAX_ASM_OPERANDS];
+} X86_64AsmInstruction;
 
 typedef struct {
   int reg_num;
