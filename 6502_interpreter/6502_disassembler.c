@@ -98,6 +98,9 @@ const char* RegNameOrAddress(int16_t value) {
 }
 
 const char* FindSymbolName(Loader* loader, uint16_t addr) {
+  if (loader == NULL) {
+    return NULL;
+  }
   SymbolScope sym;
   if (LoaderFindSymbol(loader, addr, &sym)) {
     return sym.name;

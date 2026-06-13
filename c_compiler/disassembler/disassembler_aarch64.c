@@ -94,7 +94,7 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     DAsmSetTarget(out, target);
     return true;
   }
-  if ((inst & 0x9f000000u) == 0x10000000u) {
+  if ((inst & 0x1f000000u) == 0x10000000u) {
     bool page = (inst >> 31) != 0;
     uint64_t base = page ? (address & ~0xfffULL) : address;
     int64_t offset = DecodeAArch64ADR(inst);
@@ -195,6 +195,20 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
                          : (set_flags ? "adds" : "add");
     DAsmFormat(out, "%s %s, %s, %s, %s #%d", op, XReg(rd, sf, true),
                XReg(rn, sf, true), XReg(rm, sf, false), shifts[shift], amount);
+    return true;
+  }
+  if ((inst & 0x7fe0fc00u) == 0x1a000000u ||
+      (inst & 0x7fe0fc00u) == 0x3a000000u ||
+      (inst & 0x7fe0fc00u) == 0x5a000000u ||
+      (inst & 0x7fe0fc00u) == 0x7a000000u) {
+    bool sf = (inst >> 31) != 0;
+    int rd = inst & 0x1f;
+    int rn = (inst >> 5) & 0x1f;
+    int rm = (inst >> 16) & 0x1f;
+    int op = (inst >> 29) & 3;
+    static const char* names[] = {"adc", "adcs", "sbc", "sbcs"};
+    DAsmFormat(out, "%s %s, %s, %s", names[op], XReg(rd, sf, false),
+               XReg(rn, sf, false), XReg(rm, sf, false));
     return true;
   }
   if ((inst & 0x1f000000u) == 0x0a000000u) {

@@ -173,6 +173,27 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
+  if ((inst & 0x0fbf0fd0u) == (0xeeb00a40u & 0x0fbf0fd0u) ||
+      (inst & 0x0fbf0fd0u) == (0xeeb00b40u & 0x0fbf0fd0u)) {
+    bool double_reg = ((inst >> 8) & 1) != 0;
+    int vd = double_reg ? DecodeVfpDd(inst) : DecodeVfpSd(inst);
+    int vm = double_reg ? DecodeVfpDm(inst) : DecodeVfpSm(inst);
+    DAsmFormat(out, "vmov%s.f%d %s, %s", cc, double_reg ? 64 : 32,
+               FRegName(vd, double_reg), FRegName(vm, double_reg));
+    return true;
+  }
+  if ((inst & 0x0fb00f10u) == 0x0e000a10u ||
+      (inst & 0x0fb00f10u) == 0x0e100a10u) {
+    bool from_fp = (inst & 0x00100000u) != 0;
+    int rt = (inst >> 12) & 0xf;
+    int sn = DecodeVfpSn(inst);
+    if (from_fp) {
+      DAsmFormat(out, "vmov%s %s, %s", cc, RegName(rt), FRegName(sn, false));
+    } else {
+      DAsmFormat(out, "vmov%s %s, %s", cc, FRegName(sn, false), RegName(rt));
+    }
+    return true;
+  }
   if ((inst & 0x0ff00f10u) == 0x0e000b10u ||
       (inst & 0x0ff00f10u) == 0x0e400b10u) {
     bool unsigned_convert = (inst & 0x00400000u) != 0;
@@ -205,6 +226,25 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
   }
   if ((inst & 0x0f000000u) == 0x0f000000u) {
     DAsmFormat(out, "svc%s #0x%x", cc, inst & 0x00ffffffu);
+    return true;
+  }
+  if ((inst & 0x0fe000f0u) == 0x00000090u) {
+    int rd = (inst >> 16) & 0xf;
+    int rn = (inst >> 12) & 0xf;
+    int rs = (inst >> 8) & 0xf;
+    int rm = inst & 0xf;
+    DAsmFormat(out, "mul%s %s, %s, %s%s%s", cc,
+               rn == 0 ? RegName(rd) : RegName(rn), RegName(rm), RegName(rs),
+               rn == 0 ? "" : ", ", rn == 0 ? "" : RegName(rd));
+    return true;
+  }
+  if ((inst & 0x0ff00000u) == 0x03000000u ||
+      (inst & 0x0ff00000u) == 0x03400000u) {
+    bool top_half = (inst & 0x00400000u) != 0;
+    int rd = (inst >> 12) & 0xf;
+    uint32_t imm = ((inst >> 4) & 0xf000u) | (inst & 0xfffu);
+    DAsmFormat(out, "%s%s %s, #0x%x", top_half ? "movt" : "movw", cc,
+               RegName(rd), imm);
     return true;
   }
   if ((inst & 0x0c000000u) == 0x00000000u) {
@@ -249,29 +289,20 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
-  if ((inst & 0x0fe000f0u) == 0x00000090u) {
-    int rd = (inst >> 16) & 0xf;
-    int rn = (inst >> 12) & 0xf;
-    int rs = (inst >> 8) & 0xf;
-    int rm = inst & 0xf;
-    DAsmFormat(out, "mul%s %s, %s, %s%s%s", cc, rn == 0 ? RegName(rd) : RegName(rn),
-               RegName(rm), RegName(rs), rn == 0 ? "" : ", ", rn == 0 ? "" : RegName(rd));
-    return true;
-  }
-  if ((inst & 0x0f000a10u) == 0x0e000a00u) {
+  if ((inst & 0x0fb00e50u) == (0xee300a00u & 0x0fb00e50u) ||
+      (inst & 0x0fb00e50u) == (0xee300a40u & 0x0fb00e50u) ||
+      (inst & 0x0fb00e50u) == (0xee200a00u & 0x0fb00e50u) ||
+      (inst & 0x0fb00e50u) == (0xee800a00u & 0x0fb00e50u)) {
     bool double_reg = ((inst >> 8) & 1) != 0;
-    int opcode = (inst >> 20) & 0xf;
     int vd = double_reg ? DecodeVfpDd(inst) : DecodeVfpSd(inst);
     int vn = double_reg ? DecodeVfpDn(inst) : DecodeVfpSn(inst);
     int vm = double_reg ? DecodeVfpDm(inst) : DecodeVfpSm(inst);
     const char* op = NULL;
-    if (opcode == 0) op = "vmla";
-    if (opcode == 2) op = "vmls";
-    if (opcode == 3) op = "vnmla";
-    if (opcode == 4) op = "vmul";
-    if (opcode == 8) op = "vdiv";
-    if (opcode == 11) op = "vadd";
-    if (opcode == 13) op = "vsub";
+    uint32_t key = inst & 0x0fb00e50u;
+    if (key == (0xee300a00u & 0x0fb00e50u)) op = "vadd";
+    if (key == (0xee300a40u & 0x0fb00e50u)) op = "vsub";
+    if (key == (0xee200a00u & 0x0fb00e50u)) op = "vmul";
+    if (key == (0xee800a00u & 0x0fb00e50u)) op = "vdiv";
     if (op != NULL) {
       DAsmFormat(out, "%s%s.f%d %s, %s, %s", op, cc, double_reg ? 64 : 32,
                  FRegName(vd, double_reg), FRegName(vn, double_reg),

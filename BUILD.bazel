@@ -1470,6 +1470,39 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "asm_disasm_sweep_test",
+    srcs = ["tests/asm_disasm_sweep_test.sh"],
+    args = [
+        "$(rootpath :rvasm)",
+        "$(rootpath :riscvdasm)",
+        "$(rootpath :aarch64asm)",
+        "$(rootpath :aarch64dasm)",
+        "$(rootpath :armasm)",
+        "$(rootpath :armdasm)",
+        "$(rootpath :x86asm)",
+        "$(rootpath :x86_64dasm)",
+        "$(rootpath :6502asm)",
+        "$(rootpath :6502dasm)",
+        "$(rootpath :elfdump)",
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":6502asm",
+        ":6502dasm",
+        ":aarch64asm",
+        ":aarch64dasm",
+        ":armasm",
+        ":armdasm",
+        ":davecc",
+        ":elfdump",
+        ":riscvdasm",
+        ":rvasm",
+        ":x86_64dasm",
+        ":x86asm",
+    ],
+)
+
 genrule(
     name = "support_rom_65c02",
     srcs = [

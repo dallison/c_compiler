@@ -895,6 +895,15 @@ static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
     }                                                                     \
   }
 
+#define ASSEMBLE_INT_ALU_REG_32(inst)                                        \
+  static void Assemble_##inst(RVAssembler* assembler) {                      \
+    int regs[3];                                                             \
+    if (ParseRegisterTriple(assembler, kRVRegTypeInt, "integer", regs)) {    \
+      AssembleALUReg(assembler, RV_OPCODE(op_32), RV_F3(inst), RV_F7(inst),  \
+                     regs);                                                  \
+    }                                                                        \
+  }
+
 #define ASSEMBLE_INT_ALU_IMM(inst)                                          \
   static void Assemble_##inst(RVAssembler* assembler) {                     \
     int regs[2];                                                            \
@@ -923,6 +932,22 @@ static void AssembleLoadStoreSymbol(RVAssembler* assembler, bool isload,
       AssembleALUReg(assembler, RV_OPCODE(op_imm), RV_F3(inst), RV_F7(inst), \
                      regs);                                                  \
     }                                                                        \
+  }
+
+#define ASSEMBLE_INT_SHIFT_IMM_32(inst)                                             \
+  static void Assemble_##inst(RVAssembler* assembler) {                             \
+    int regs[3];                                                                    \
+    if (ParseRegisterPair(assembler, kRVRegTypeInt, "integer", regs)) {             \
+      if (!LexMatch(&ASM.lex, TOK(comma))) {                                        \
+        AssemblerError(&ASM, "Missing comma");                                      \
+        return;                                                                     \
+      }                                                                             \
+      int imm = (int)AssemblerEvaluateExpression(&ASM);                             \
+      imm &= 0x1f;                                                                  \
+      regs[2] = imm;                                                                \
+      AssembleALUReg(assembler, RV_OPCODE(op_imm_32), RV_F3(inst), RV_F7(inst),     \
+                     regs);                                                         \
+    }                                                                               \
   }
 
 // Assemble a load or store instruction.
@@ -1360,14 +1385,14 @@ ASSEMBLE_INT_LOAD_STORE(lwu, true);
 ASSEMBLE_INT_LOAD_STORE(ld, true);
 ASSEMBLE_INT_LOAD_STORE(sd, false);
 ASSEMBLE_INT_ALU_IMM(addiw);
-ASSEMBLE_INT_SHIFT_IMM(slliw);
-ASSEMBLE_INT_SHIFT_IMM(srliw);
-ASSEMBLE_INT_SHIFT_IMM(sraiw);
-ASSEMBLE_INT_ALU_REG(addw);
-ASSEMBLE_INT_ALU_REG(subw);
-ASSEMBLE_INT_ALU_REG(sllw);
-ASSEMBLE_INT_ALU_REG(srlw);
-ASSEMBLE_INT_ALU_REG(sraw);
+ASSEMBLE_INT_SHIFT_IMM_32(slliw);
+ASSEMBLE_INT_SHIFT_IMM_32(srliw);
+ASSEMBLE_INT_SHIFT_IMM_32(sraiw);
+ASSEMBLE_INT_ALU_REG_32(addw);
+ASSEMBLE_INT_ALU_REG_32(subw);
+ASSEMBLE_INT_ALU_REG_32(sllw);
+ASSEMBLE_INT_ALU_REG_32(srlw);
+ASSEMBLE_INT_ALU_REG_32(sraw);
 
 // RV32M instructions.
 ASSEMBLE_INT_ALU_REG(mul);
@@ -1380,11 +1405,11 @@ ASSEMBLE_INT_ALU_REG(rem);
 ASSEMBLE_INT_ALU_REG(remu);
 
 // RV64M instructions.
-ASSEMBLE_INT_ALU_REG(mulw);
-ASSEMBLE_INT_ALU_REG(divw);
-ASSEMBLE_INT_ALU_REG(divuw);
-ASSEMBLE_INT_ALU_REG(remw);
-ASSEMBLE_INT_ALU_REG(remuw);
+ASSEMBLE_INT_ALU_REG_32(mulw);
+ASSEMBLE_INT_ALU_REG_32(divw);
+ASSEMBLE_INT_ALU_REG_32(divuw);
+ASSEMBLE_INT_ALU_REG_32(remw);
+ASSEMBLE_INT_ALU_REG_32(remuw);
 
 static void AssembleFpLoadStore(RVAssembler* assembler, bool isload, int funct3,
                                 int offset, int* regs) {

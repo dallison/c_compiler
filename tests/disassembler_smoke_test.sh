@@ -58,5 +58,5 @@ check_target() {
 
 check_target riscv "$riscvdasm" '^add:' 'add|addi'
 check_target aarch64 "$aarch64dasm" '^add:' 'stp' 'adr' 'printf' ' ret$'
-check_target arm "$armdasm" '^add:' 'add|bl|bx'
+check_target arm "$armdasm" '^add:' 'add|bl|bx' 'movw' 'movt'
 check_target x86_64 "$x86_64dasm" '^add:' 'mov|add|call|ret'

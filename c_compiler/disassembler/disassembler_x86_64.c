@@ -286,6 +286,9 @@ bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
     case 0x99:
       text = RexW(&d) ? "cqo" : "cdq";
       break;
+    case 0x98:
+      text = RexW(&d) ? "cltq" : "cwde";
+      break;
     case 0xfa:
       text = "cli";
       break;
@@ -648,6 +651,9 @@ bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
         char rm_text[80];
         DecodeRM(rm_text, sizeof(rm_text), &d, modrm, 8);
         const char* scalar = d.prefixf2 ? "sd" : (d.prefixf3 ? "ss" : "");
+        if (op2 == 0x2e) {
+          scalar = d.prefix66 ? "sd" : "ss";
+        }
         const char* base = op2 == 0x10 ? "mov"
                            : op2 == 0x11 ? "mov"
                            : op2 == 0x2a ? "cvtsi2"
