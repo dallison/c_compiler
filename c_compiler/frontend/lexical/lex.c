@@ -58,6 +58,12 @@ typedef struct {
   Token token;
 } ReservedWord;
 
+typedef struct {
+  const char* spelling;
+  Token token;
+  LanguageStandard min_standard;
+} CXXReservedWord;
+
 // All reserved words with associated token values, sorted in
 // alphabetic order so we can do a binary search on them.
 static ReservedWord reserved_words[] = {
@@ -103,8 +109,107 @@ static ReservedWord reserved_words[] = {
   {"while", TOK(while)},
 };
 
+// C++ reserved words and alternative operator spellings.  This table is sorted
+// alphabetically by spelling and is only used when a C++ -std= mode is active.
+static CXXReservedWord cxx_reserved_words[] = {
+  {"alignas", TOK(alignas), kLanguageStandardCXX11},
+  {"alignof", TOK(alignof), kLanguageStandardCXX11},
+  {"and", TOK(ampamp), kLanguageStandardCXX98},
+  {"and_eq", TOK(ampeq), kLanguageStandardCXX98},
+  {"asm", TOK(asm), kLanguageStandardCXX98},
+  {"auto", TOK(auto), kLanguageStandardCXX98},
+  {"bitand", TOK(amp), kLanguageStandardCXX98},
+  {"bitor", TOK(bar), kLanguageStandardCXX98},
+  {"bool", TOK(bool), kLanguageStandardCXX98},
+  {"break", TOK(break), kLanguageStandardCXX98},
+  {"case", TOK(case), kLanguageStandardCXX98},
+  {"catch", TOK(catch), kLanguageStandardCXX98},
+  {"char", TOK(char), kLanguageStandardCXX98},
+  {"char16_t", TOK(char16_t), kLanguageStandardCXX11},
+  {"char32_t", TOK(char32_t), kLanguageStandardCXX11},
+  {"char8_t", TOK(char8_t), kLanguageStandardCXX20},
+  {"class", TOK(class), kLanguageStandardCXX98},
+  {"co_await", TOK(co_await), kLanguageStandardCXX20},
+  {"co_return", TOK(co_return), kLanguageStandardCXX20},
+  {"co_yield", TOK(co_yield), kLanguageStandardCXX20},
+  {"compl", TOK(tilde), kLanguageStandardCXX98},
+  {"concept", TOK(concept), kLanguageStandardCXX20},
+  {"const", TOK(const), kLanguageStandardCXX98},
+  {"const_cast", TOK(const_cast), kLanguageStandardCXX98},
+  {"consteval", TOK(consteval), kLanguageStandardCXX20},
+  {"constexpr", TOK(constexpr), kLanguageStandardCXX11},
+  {"constinit", TOK(constinit), kLanguageStandardCXX20},
+  {"continue", TOK(continue), kLanguageStandardCXX98},
+  {"decltype", TOK(decltype), kLanguageStandardCXX11},
+  {"default", TOK(default), kLanguageStandardCXX98},
+  {"delete", TOK(delete), kLanguageStandardCXX98},
+  {"do", TOK(do), kLanguageStandardCXX98},
+  {"double", TOK(double), kLanguageStandardCXX98},
+  {"dynamic_cast", TOK(dynamic_cast), kLanguageStandardCXX98},
+  {"else", TOK(else), kLanguageStandardCXX98},
+  {"enum", TOK(enum), kLanguageStandardCXX98},
+  {"explicit", TOK(explicit), kLanguageStandardCXX98},
+  {"export", TOK(export), kLanguageStandardCXX98},
+  {"extern", TOK(extern), kLanguageStandardCXX98},
+  {"false", TOK(false), kLanguageStandardCXX98},
+  {"float", TOK(float), kLanguageStandardCXX98},
+  {"for", TOK(for), kLanguageStandardCXX98},
+  {"friend", TOK(friend), kLanguageStandardCXX98},
+  {"goto", TOK(goto), kLanguageStandardCXX98},
+  {"if", TOK(if), kLanguageStandardCXX98},
+  {"inline", TOK(inline), kLanguageStandardCXX98},
+  {"int", TOK(int), kLanguageStandardCXX98},
+  {"long", TOK(long), kLanguageStandardCXX98},
+  {"mutable", TOK(mutable), kLanguageStandardCXX98},
+  {"namespace", TOK(namespace), kLanguageStandardCXX98},
+  {"new", TOK(new), kLanguageStandardCXX98},
+  {"noexcept", TOK(noexcept), kLanguageStandardCXX11},
+  {"not", TOK(bang), kLanguageStandardCXX98},
+  {"not_eq", TOK(bangeq), kLanguageStandardCXX98},
+  {"nullptr", TOK(nullptr), kLanguageStandardCXX11},
+  {"operator", TOK(operator), kLanguageStandardCXX98},
+  {"or", TOK(barbar), kLanguageStandardCXX98},
+  {"or_eq", TOK(bareq), kLanguageStandardCXX98},
+  {"private", TOK(private), kLanguageStandardCXX98},
+  {"protected", TOK(protected), kLanguageStandardCXX98},
+  {"public", TOK(public), kLanguageStandardCXX98},
+  {"register", TOK(register), kLanguageStandardCXX98},
+  {"reinterpret_cast", TOK(reinterpret_cast), kLanguageStandardCXX98},
+  {"requires", TOK(requires), kLanguageStandardCXX20},
+  {"return", TOK(return), kLanguageStandardCXX98},
+  {"short", TOK(short), kLanguageStandardCXX98},
+  {"signed", TOK(signed), kLanguageStandardCXX98},
+  {"sizeof", TOK(sizeof), kLanguageStandardCXX98},
+  {"static", TOK(static), kLanguageStandardCXX98},
+  {"static_assert", TOK(static_assert), kLanguageStandardCXX11},
+  {"static_cast", TOK(static_cast), kLanguageStandardCXX98},
+  {"struct", TOK(struct), kLanguageStandardCXX98},
+  {"switch", TOK(switch), kLanguageStandardCXX98},
+  {"template", TOK(template), kLanguageStandardCXX98},
+  {"this", TOK(this), kLanguageStandardCXX98},
+  {"thread_local", TOK(thread_local), kLanguageStandardCXX11},
+  {"throw", TOK(throw), kLanguageStandardCXX98},
+  {"true", TOK(true), kLanguageStandardCXX98},
+  {"try", TOK(try), kLanguageStandardCXX98},
+  {"typedef", TOK(typedef), kLanguageStandardCXX98},
+  {"typeid", TOK(typeid), kLanguageStandardCXX98},
+  {"typename", TOK(typename), kLanguageStandardCXX98},
+  {"union", TOK(union), kLanguageStandardCXX98},
+  {"unsigned", TOK(unsigned), kLanguageStandardCXX98},
+  {"using", TOK(using), kLanguageStandardCXX98},
+  {"virtual", TOK(virtual), kLanguageStandardCXX98},
+  {"void", TOK(void), kLanguageStandardCXX98},
+  {"volatile", TOK(volatile), kLanguageStandardCXX98},
+  {"wchar_t", TOK(wchar_t), kLanguageStandardCXX98},
+  {"while", TOK(while), kLanguageStandardCXX98},
+  {"xor", TOK(caret), kLanguageStandardCXX98},
+  {"xor_eq", TOK(careteq), kLanguageStandardCXX98},
+};
+
 // Number of reserved words in the array.
 #define NUM_RESERVED_WORDS() (sizeof(reserved_words) / sizeof(ReservedWord))
+#define NUM_CXX_RESERVED_WORDS() \
+  (sizeof(cxx_reserved_words) / sizeof(CXXReservedWord))
 
 static int CompareReservedWord(const void* a, const void* b) {
   const ReservedWord* word1 = a;
@@ -112,10 +217,29 @@ static int CompareReservedWord(const void* a, const void* b) {
   return strcmp(word1->spelling, word2->spelling);
 }
 
+static int CompareCXXReservedWord(const void* a, const void* b) {
+  const CXXReservedWord* word1 = a;
+  const CXXReservedWord* word2 = b;
+  return strcmp(word1->spelling, word2->spelling);
+}
+
 // Perform a binary search on the reserved_words array (sorted in alphabetic
 // order of keyword) to find the given spelling.  If found, set *token
 // to the token value and return true.
 static bool IsReservedWord(const char* spelling, Token* token) {
+  if (CompilerIsCXX()) {
+    CXXReservedWord key;
+    key.spelling = spelling;
+    CXXReservedWord* value =
+        bsearch(&key, cxx_reserved_words, NUM_CXX_RESERVED_WORDS(),
+                sizeof(CXXReservedWord), CompareCXXReservedWord);
+    if (value != NULL && CompilerCXXAtLeast(value->min_standard)) {
+      *token = value->token;
+      return true;
+    }
+    return false;
+  }
+
   ReservedWord key;
   key.spelling = spelling;
   ReservedWord* value = bsearch(&key, reserved_words, NUM_RESERVED_WORDS(),
@@ -638,8 +762,13 @@ static void CollectOperator(Lex* lex) {
         lex->current_token = TOK(minusminus);
         lex->pos++;
       } else if (ch == '>') {
-        lex->current_token = TOK(arrow);
         lex->pos++;
+        if (CompilerIsCXX() && lex->line.value[lex->pos] == '*') {
+          lex->current_token = TOK(arrowstar);
+          lex->pos++;
+        } else {
+          lex->current_token = TOK(arrow);
+        }
       } else {
         lex->current_token = TOK(minus);
       }
@@ -717,7 +846,11 @@ static void CollectOperator(Lex* lex) {
       break;
     case '<':
       ch = lex->line.value[++lex->pos];
-      if (ch == '=') {
+      if (CompilerIsCXX() && ch == '=' &&
+          lex->line.value[lex->pos + 1] == '>') {
+        lex->current_token = TOK(spaceship);
+        lex->pos += 2;
+      } else if (ch == '=') {
         lex->current_token = TOK(lesseq);
         lex->pos++;
       } else if (ch == '<') {
@@ -794,6 +927,9 @@ static void CollectOperator(Lex* lex) {
         // Check for "..." (ellipsis)
         lex->current_token = TOK(ellipsis);
         lex->pos += 2;
+      } else if (CompilerIsCXX() && ch == '*') {
+        lex->current_token = TOK(dotstar);
+        lex->pos++;
       } else {
         lex->current_token = TOK(dot);
       }
@@ -804,8 +940,13 @@ static void CollectOperator(Lex* lex) {
       lex->pos++;
       break;
     case ':':
-      lex->current_token = TOK(colon);
       lex->pos++;
+      if (CompilerIsCXX() && lex->line.value[lex->pos] == ':') {
+        lex->current_token = TOK(coloncolon);
+        lex->pos++;
+      } else {
+        lex->current_token = TOK(colon);
+      }
       break;
 
     case ';':

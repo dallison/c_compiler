@@ -32,6 +32,19 @@ typedef enum {
 } TlsModel;
 
 typedef enum {
+  kLanguageStandardC89,
+  kLanguageStandardC99,
+  kLanguageStandardC11,
+  kLanguageStandardC17,
+  kLanguageStandardCXX98,
+  kLanguageStandardCXX03,
+  kLanguageStandardCXX11,
+  kLanguageStandardCXX14,
+  kLanguageStandardCXX17,
+  kLanguageStandardCXX20,
+} LanguageStandard;
+
+typedef enum {
   kInitTypeByte,    // 8-bit constant.
   kInitTypeHalf,    // 16-bit constant.
   kInitTypeWord,    // 32-bit constant.
@@ -209,6 +222,7 @@ typedef struct {
   // Front end.
   int num_errors;
   int max_errors;
+  LanguageStandard language_standard;
   bool convert_warnings_to_errors;
   bool enable_all_warnings;
   Set disabled_warnings;
@@ -326,6 +340,8 @@ bool OptLevel0(void);
 bool OptLevel1(void);
 bool OptLevel2(void);
 bool OptLevel3(void);
+bool CompilerIsCXX(void);
+bool CompilerCXXAtLeast(LanguageStandard standard);
 
 int CharSize(void);
 int IntSize(void);

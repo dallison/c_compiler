@@ -30,6 +30,7 @@ typedef enum {
   kOptionWerror,             // All warnings are errors.
   kOptionWall,               // Enable all warnings.
   kOptionErrorLimit,         // Max error limit.
+  kOptionStandard,           // Language standard.
   kOptionTlsModel,           // TLS model.
   kOptionChdir,              // Change dir before running.
   kOptionPrintFrontend,      // Debug front end.

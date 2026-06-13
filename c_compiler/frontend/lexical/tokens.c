@@ -34,6 +34,8 @@ const char* TokenName(Token tok) {
       return "&=";
     case TOK(arrow):
       return "->";
+    case TOK(arrowstar):
+      return "->*";
     case TOK(equal):
       return "=";
     case TOK(auto):
@@ -56,6 +58,8 @@ const char* TokenName(Token tok) {
       return "char";
     case TOK(colon):
       return ":";
+    case TOK(coloncolon):
+      return "::";
     case TOK(comma):
       return ",";
     case TOK(complex):
@@ -70,6 +74,8 @@ const char* TokenName(Token tok) {
       return "do";
     case TOK(dot):
       return ".";
+    case TOK(dotstar):
+      return ".*";
     case TOK(double):
       return "double";
     case TOK(ellipsis):
@@ -94,6 +100,8 @@ const char* TokenName(Token tok) {
       return ">";
     case TOK(greatereq):
       return ">=";
+    case TOK(spaceship):
+      return "<=>";
     case TOK(if):
       return "if";
     case TOK(imaginary):
@@ -200,6 +208,94 @@ const char* TokenName(Token tok) {
       return "whar_t";
     case TOK(while):
       return "while";
+    case TOK(alignas):
+      return "alignas";
+    case TOK(alignof):
+      return "alignof";
+    case TOK(catch):
+      return "catch";
+    case TOK(char8_t):
+      return "char8_t";
+    case TOK(char16_t):
+      return "char16_t";
+    case TOK(char32_t):
+      return "char32_t";
+    case TOK(class):
+      return "class";
+    case TOK(concept):
+      return "concept";
+    case TOK(consteval):
+      return "consteval";
+    case TOK(constexpr):
+      return "constexpr";
+    case TOK(constinit):
+      return "constinit";
+    case TOK(const_cast):
+      return "const_cast";
+    case TOK(co_await):
+      return "co_await";
+    case TOK(co_return):
+      return "co_return";
+    case TOK(co_yield):
+      return "co_yield";
+    case TOK(decltype):
+      return "decltype";
+    case TOK(delete):
+      return "delete";
+    case TOK(dynamic_cast):
+      return "dynamic_cast";
+    case TOK(explicit):
+      return "explicit";
+    case TOK(export):
+      return "export";
+    case TOK(friend):
+      return "friend";
+    case TOK(mutable):
+      return "mutable";
+    case TOK(namespace):
+      return "namespace";
+    case TOK(new):
+      return "new";
+    case TOK(noexcept):
+      return "noexcept";
+    case TOK(nullptr):
+      return "nullptr";
+    case TOK(operator):
+      return "operator";
+    case TOK(private):
+      return "private";
+    case TOK(protected):
+      return "protected";
+    case TOK(public):
+      return "public";
+    case TOK(reinterpret_cast):
+      return "reinterpret_cast";
+    case TOK(requires):
+      return "requires";
+    case TOK(static_assert):
+      return "static_assert";
+    case TOK(static_cast):
+      return "static_cast";
+    case TOK(template):
+      return "template";
+    case TOK(this):
+      return "this";
+    case TOK(thread_local):
+      return "thread_local";
+    case TOK(throw):
+      return "throw";
+    case TOK(true):
+      return "true";
+    case TOK(try):
+      return "try";
+    case TOK(typeid):
+      return "typeid";
+    case TOK(typename):
+      return "typename";
+    case TOK(using):
+      return "using";
+    case TOK(virtual):
+      return "virtual";
     case TOK(asm):
       return "__asm";
     case TOK(attribute):

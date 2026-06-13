@@ -50,6 +50,8 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-W", kCompilerOptionString, kOptionWarning, true,
      "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]"},
     {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
+    {"-std", kCompilerOptionString, kOptionStandard, false,
+     "Select language standard: c89, c99, c11, c17, c++11, c++17, c++20"},
     {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
     {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
     {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false, "Print fron end dump"},
@@ -75,6 +77,15 @@ bool OptLevel2(void) {
 
 bool OptLevel3(void) {
   return compiler->optimize && compiler->opt_level >= 3;
+}
+
+bool CompilerIsCXX(void) {
+  return compiler != NULL &&
+         compiler->language_standard >= kLanguageStandardCXX98;
+}
+
+bool CompilerCXXAtLeast(LanguageStandard standard) {
+  return CompilerIsCXX() && compiler->language_standard >= standard;
 }
 
 // Add new targets here.
@@ -955,6 +966,51 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options) {
   
 }
 
+static void ParseStandardOption(Compiler* compiler, Vector* options) {
+  compiler->language_standard = kLanguageStandardC99;
+  String* value = OptionStringValue(kOptionStandard, options);
+  if (value == NULL) {
+    return;
+  }
+
+  if (StringEqual(value, "c89") || StringEqual(value, "c90") ||
+      StringEqual(value, "iso9899:1990") || StringEqual(value, "gnu89") ||
+      StringEqual(value, "gnu90")) {
+    compiler->language_standard = kLanguageStandardC89;
+  } else if (StringEqual(value, "c99") || StringEqual(value, "iso9899:1999") ||
+             StringEqual(value, "gnu99")) {
+    compiler->language_standard = kLanguageStandardC99;
+  } else if (StringEqual(value, "c11") || StringEqual(value, "c1x") ||
+             StringEqual(value, "iso9899:2011") || StringEqual(value, "gnu11")) {
+    compiler->language_standard = kLanguageStandardC11;
+  } else if (StringEqual(value, "c17") || StringEqual(value, "c18") ||
+             StringEqual(value, "iso9899:2017") || StringEqual(value, "gnu17") ||
+             StringEqual(value, "gnu18")) {
+    compiler->language_standard = kLanguageStandardC17;
+  } else if (StringEqual(value, "c++98") || StringEqual(value, "c++03") ||
+             StringEqual(value, "gnu++98") || StringEqual(value, "gnu++03")) {
+    compiler->language_standard = StringEqual(value, "c++03") ||
+                                          StringEqual(value, "gnu++03")
+                                      ? kLanguageStandardCXX03
+                                      : kLanguageStandardCXX98;
+  } else if (StringEqual(value, "c++11") || StringEqual(value, "c++0x") ||
+             StringEqual(value, "gnu++11") || StringEqual(value, "gnu++0x")) {
+    compiler->language_standard = kLanguageStandardCXX11;
+  } else if (StringEqual(value, "c++14") || StringEqual(value, "c++1y") ||
+             StringEqual(value, "gnu++14") || StringEqual(value, "gnu++1y")) {
+    compiler->language_standard = kLanguageStandardCXX14;
+  } else if (StringEqual(value, "c++17") || StringEqual(value, "c++1z") ||
+             StringEqual(value, "gnu++17") || StringEqual(value, "gnu++1z")) {
+    compiler->language_standard = kLanguageStandardCXX17;
+  } else if (StringEqual(value, "c++20") || StringEqual(value, "c++2a") ||
+             StringEqual(value, "gnu++20") || StringEqual(value, "gnu++2a")) {
+    compiler->language_standard = kLanguageStandardCXX20;
+  } else {
+    fprintf(stderr, "Invalid language standard -std=%s\n", value->value);
+    exit(1);
+  }
+}
+
 static void InitBasicOptionsOrDie(Compiler* compiler,
                                   Vector* options, Vector* target_opts) {
   compiler->max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
@@ -989,6 +1045,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   StringSet(compiler->target_name, target->canonical_name);
 
   compiler->debug_output = OptionBoolValue(kOptionDebug, options, false);
+  ParseStandardOption(compiler, options);
   ParseOptimizationOption(compiler, options);
   compiler->pic = OptionBoolValue(kOptionPic, options, false);
   if (target->static_linkage_only && compiler->pic) {
