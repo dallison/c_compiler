@@ -1,6 +1,10 @@
 # Bazel output directories and symlinks
 /bazel-*
 
+# CMake out-of-tree build directories
+/build/
+/cmake-build*/
+
 # Compiled object and archive artifacts
 *.o
 *.a

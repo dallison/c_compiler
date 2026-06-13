@@ -1808,7 +1808,7 @@ static TargetInstruction* LowerWideExpression(ARMGenerator* g, IRNode* node) {
         break;
       }
       int n = (int)(((IRConstant*)amount)->value.ivalue) & 63;
-      ARMOpcode op = node->opcode;
+      IROpcode op = node->opcode;
       if (n == 0) {
         lo = WideMov(g, alo);
         hi = WideMov(g, ahi);
@@ -2936,6 +2936,7 @@ static TargetInstruction* LowerWideStore(ARMGenerator* g, IRNode* node) {
   TargetInstruction* scale;
   bool on_stack = GetRegAndOffset(g, addr_node, &addr, &offset, &scale);
   assert(on_stack && "wide store target must be addressable");
+  (void)on_stack;
   assert(TargetIsConst(offset) &&
          "wide store with non-constant offset not supported");
   int off = (int)TargetIntValue(offset);
@@ -4972,7 +4973,10 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(ARMGenerator* g,
     case kArgLocationPushed:
     case kArgLocationPassedByReferenceOnStack:
       return PopArg(g, symbol, arg_loc.location.offset);
+    default:
+      abort();
   }
+  return NULL;
 }
 
 static TargetInstruction* LoadIntArgumentIntoRegisterVariable(ARMGenerator* g,
@@ -4993,7 +4997,10 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(ARMGenerator* g,
     case kArgLocationPassedByReferenceOnStack:
     case kArgLocationPushed:
       return PopArg(g, symbol, arg_loc.location.offset);
+    default:
+      abort();
   }
+  return NULL;
 }
 
 // Assign a register to a variable or argument if possible.  The

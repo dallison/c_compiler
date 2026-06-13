@@ -149,7 +149,7 @@ static TargetInstruction* PullExpression(W65C02Generator* g, TargetInstruction* 
 // in the output set and push each one onto the stack at the start of
 // the block.  Pop them in reverse order at the end of the block.
 // This saves the values of expressions held in 'registers' over calls.
-static void SpillExpressions(TargetBasicBlock* block, void* data) {
+static COMPILER_UNUSED void SpillExpressions(TargetBasicBlock* block, void* data) {
    if (!block->contains_call) {
     return;
   }

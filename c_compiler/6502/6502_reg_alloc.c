@@ -11,6 +11,7 @@
 #include <assert.h>
 #include "6502_codegen.h"
 #include "6502_machine.h"
+#include "map.h"
 #include "target_basic_block.h"
 
 static void DumpRegisters(W65C02RegisterAllocator* allocator);
@@ -739,8 +740,8 @@ static bool UsesFixedRegister(TargetInstruction* inst) {
 
 // rmov instructions use the register allocated to their first
 // operand as their own register.
-static void AllocateForRmov(W65C02RegisterAllocator* allocator,
-                            TargetInstruction* inst) {
+static COMPILER_UNUSED void AllocateForRmov(W65C02RegisterAllocator* allocator,
+                                            TargetInstruction* inst) {
   W65C02Register* reg = (W65C02Register*)inst->operand[0]->reg;
   TargetInstruction* src = inst->operand[1];
 

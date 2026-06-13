@@ -10,16 +10,29 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
+#include "disassembler.h"
 #include "elf_reader.h"
-#include "risc_v_interpreter.h"
-#include "risc_v_disassembler.h"
-#include "6502_interpreter.h"
-#include "6502_disassembler.h"
 
-static void Usage(void) {
-  fprintf(stderr, "usage: elfdump filename\n");
-  exit(1);
+static void Usage(FILE* fp, const char* program_name) {
+  fprintf(fp,
+          "usage: %s [option] filename\n"
+          "\n"
+          "Dump information from an ELF file.\n"
+          "\n"
+          "Options:\n"
+          "  -h, --help       Show this help message\n"
+          "  -H               Print ELF header (default)\n"
+          "  -S               Print sections\n"
+          "  -s               Print symbols\n"
+          "  -l               Print program headers / segments\n"
+          "  -r               Print relocations\n"
+          "  -d               Print dynamic section\n"
+          "  -c               Disassemble code sections\n"
+          "  -x SECTION       Hex dump section number SECTION\n"
+          "  -a               Print all standard sections\n",
+          program_name);
 }
 
 static const char* ProgramHeaderType(int t) {
@@ -503,16 +516,6 @@ static const char* W65C02RelocType(int32_t reloc_type) {
   return "unknown";
 }
 
-static int DisassembleRISCV(void* interpreter, void* addr) {
-  DisassembleRiscVInstruction((RISCVInterpreter*)interpreter, addr, stdout);
-  return 0;
-}
-
-static int Disassemble6502(void* interpreter, void* addr) {
-  void* next = Disassemble6502Instruction(NULL, NULL, (uint16_t)(uintptr_t)addr, addr, stdout);
-  return (int)((char*)next - (char*)addr);
-}
-
 static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
                             const char* symbol_table_address,
                             ELFReaderSection* reloc_section,
@@ -539,23 +542,19 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
   const char* string_table_address = (const char*)elf->header +
        strtab->header->offset;
 
-  int (*disassembler)(void*, void*) = NULL;
-  void *interpreter = NULL;
   String type = {0};
   switch (elf->header->machine) {
     case ELF_MACHINE_TYPE_PCODE:
       StringPrintf(&type, "%08x", reloc_type);
-      disassembler = NULL;
        break;
     case ELF_MACHINE_TYPE_RISC_V:
       StringSet(&type, RISCVRelocType(reloc_type));
-      interpreter = malloc(sizeof(RISCVInterpreter));
-      RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
-      disassembler = DisassembleRISCV;
       break;
     case ELF_MACHINE_TYPEW65C02:
       StringSet(&type, W65C02RelocType(reloc_type));
-      disassembler = Disassemble6502;
+      break;
+    default:
+      StringPrintf(&type, "%08x", reloc_type);
       break;
   }
   String sym_name = {0};
@@ -571,10 +570,19 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
   if (addend != 0) {
     printf(" + %" PRId64 "", addend);
   }
-  void* target = (char*)target_section->contents + reloc->offset;
-  if ((target_section->header->flags & SHF(execinstr)) != 0
-      && disassembler != NULL) {
-    disassembler(interpreter, target);
+  DAsmArchitecture arch;
+  if ((target_section->header->flags & SHF(execinstr)) != 0 &&
+      DAsmArchitectureFromELFMachine(elf->header->machine, &arch)) {
+    DAsmInstruction inst;
+    const void* target = (const char*)target_section->contents + reloc->offset;
+    uint64_t addr = target_section->header->addr + reloc->offset;
+    if (DAsmDisassembleInstruction(arch, target,
+                                   target_section->header->size - reloc->offset,
+                                   addr, &inst)) {
+      printf("%s\n", inst.text);
+    } else {
+      printf("\n");
+    }
   } else {
     printf("\n");
   }
@@ -624,47 +632,11 @@ static void PrintRelocations(ELFReaderFile* elf) {
 }
 
 static void Disassemble(ELFReaderFile* elf) {
-  Vector code_sections;
-  VectorInit(&code_sections);
-
-  ELFReaderFileFindSectionsByType(elf, SHT(progbits), &code_sections);
-  void* interpreter = NULL;
-
-  switch (elf->header->machine) {
-    case ELF_MACHINE_TYPE_PCODE:
-       break;
-    case ELF_MACHINE_TYPE_RISC_V:
-      interpreter = malloc(sizeof(RISCVInterpreter));
-      RISCVInterpreterInit(interpreter, false, false, 0, NULL, false, false);
-      break;
-    case ELF_MACHINE_TYPEW65C02:
-      break;
-  }
-  
-  for (size_t i = 0; i < code_sections.length; i++) {
-    ELFReaderSection* code_section = code_sections.value.p[i];
-    if ((code_section->header->flags & SHF(execinstr)) != 0) {
-      uint64_t length = code_section->header->size;
-      char* start = (char*)code_section->contents;
-      char* end = start + length;
-      
-      char* p = start;
-      while (p < end) {
-        switch (elf->header->machine) {
-          case ELF_MACHINE_TYPE_PCODE:
-             break;
-          case ELF_MACHINE_TYPE_RISC_V:
-            DisassembleRISCV(interpreter, p);
-            p += 4;
-            break;
-          case ELF_MACHINE_TYPEW65C02:
-            p += Disassemble6502(interpreter, p);
-            break;
-        }
-      }
-    }
-  }
-  VectorDestruct(&code_sections);
+  DAsmOptions options = {
+      .arch = kDAsmUnknown,
+      .print_section_names = true,
+  };
+  DAsmDisassembleELF(elf, &options, stdout);
 }
 
 enum Command {
@@ -1031,12 +1003,20 @@ int main(int argc, const char * argv[]) {
   String filename = {0};
   enum Command command = kHeader;
   int command_arg = 0;
+  const char* program_name = argc > 0 ? argv[0] : "elfdump";
   
   for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-help") == 0) {
+      Usage(stdout, program_name);
+      return 0;
+    }
     if (argv[i][0] == '-') {
       // Flags here.
       switch (argv[i][1]) {
         case 'h':
+          Usage(stdout, program_name);
+          return 0;
+        case 'H':
           command = kHeader;
           break;
         case 'S':
@@ -1061,8 +1041,9 @@ int main(int argc, const char * argv[]) {
           command = kHexDump;
           i++;
           if (i >= argc) {
-            fprintf(stderr, "-x needs a section number\n");
-            exit(1);
+            fprintf(stderr, "elfdump: -x needs a section number\n\n");
+            Usage(stderr, program_name);
+            return 1;
           }
           command_arg = atoi(argv[i]);
           break;
@@ -1070,19 +1051,30 @@ int main(int argc, const char * argv[]) {
           command = kAll;
           break;
         default:
-          Usage();
+          fprintf(stderr, "elfdump: unknown option '%s'\n\n", argv[i]);
+          Usage(stderr, program_name);
+          return 1;
       }
     } else {
       if (filename.length != 0) {
-        Usage();
+        fprintf(stderr, "elfdump: too many input files: '%s'\n\n", argv[i]);
+        Usage(stderr, program_name);
+        StringDestruct(&filename);
+        return 1;
       }
       StringSet(&filename, argv[i]);
     }
   }
+  if (filename.length == 0) {
+    fprintf(stderr, "elfdump: missing input file\n\n");
+    Usage(stderr, program_name);
+    return 1;
+  }
   ELFReaderFile* elf_file = NewELFReaderFile(&filename);
   bool ok = ELFReaderFileRead(elf_file, 0, 0);
   if (!ok) {
-    fprintf(stderr, "Can't open file %s\n", filename.value);
+    fprintf(stderr, "elfdump: unable to open or read ELF file '%s'\n",
+            filename.value);
     exit(1);
   }
   if (command == kAll) {

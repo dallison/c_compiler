@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "elf.h"
+#include "map.h"
 #include "x86_64_machine.h"
 
 typedef enum {
@@ -778,7 +779,7 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
   AssemblerError(&ASM, "Unsupported mov operand combination");
 }
 
-static void EmitMov(X86_64Assembler* assembler) {
+static COMPILER_UNUSED void EmitMov(X86_64Assembler* assembler) {
   EmitMovSized(assembler, 0);
 }
 

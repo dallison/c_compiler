@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -8,6 +9,43 @@ filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]),
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "davecc_bin_scripts",
+    srcs = glob(["bin/*"]),
+)
+
+sh_binary(
+    name = "install_davecc_tools",
+    srcs = ["bin/install-davecc-tools"],
+    data = [
+        ":6502",
+        ":6502asm",
+        ":6502dasm",
+        ":aarch64",
+        ":aarch64dasm",
+        ":aarch64asm",
+        ":arm",
+        ":armdasm",
+        ":armasm",
+        ":davecc",
+        ":davecc_bin_scripts",
+        ":elfdump",
+        ":libc_65c02",
+        ":libc_aarch64",
+        ":libc_arm",
+        ":libc_headers",
+        ":libc_riscv",
+        ":libc_x86_64",
+        ":riscv",
+        ":riscvdasm",
+        ":rvasm",
+        ":support_rom_65c02",
+        ":x86asm",
+        ":x86_64",
+        ":x86_64dasm",
+    ],
 )
 
 config_setting(
@@ -41,6 +79,7 @@ COMMON_INCLUDES = [
     "c_compiler/assembler",
     "c_compiler/util",
     "c_compiler/driver",
+    "c_compiler/disassembler",
     "c_compiler/6502",
     "c_compiler/aarch64",
     "c_compiler/arm",
@@ -163,6 +202,27 @@ cc_library(
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [":utils"],
+)
+
+cc_library(
+    name = "disassembler",
+    srcs = [
+        "c_compiler/disassembler/disassembler.c",
+        "c_compiler/disassembler/disassembler_aarch64.c",
+        "c_compiler/disassembler/disassembler_arm.c",
+        "c_compiler/disassembler/disassembler_riscv.c",
+        "c_compiler/disassembler/disassembler_tool.c",
+        "c_compiler/disassembler/disassembler_x86_64.c",
+    ],
+    hdrs = glob([
+        "c_compiler/disassembler/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":utils",
+    ],
 )
 
 cc_library(
@@ -421,7 +481,6 @@ cc_library(
     ]),
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
-    linkopts = ["-lm"],
     deps = [
         ":elf",
         ":linker",
@@ -493,6 +552,39 @@ cc_binary(
 )
 
 cc_binary(
+    name = "rvasm",
+    srcs = ["rvasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "aarch64asm",
+    srcs = ["aarch64asm/main.c"],
+    copts = COMMON_COPTS + AARCH64_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "armasm",
+    srcs = ["armasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
     name = "6502dasm",
     srcs = ["6502dasm/main.c"],
     copts = COMMON_COPTS,
@@ -500,6 +592,50 @@ cc_binary(
         ":6502_lib",
         ":elf",
         ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "riscvdasm",
+    srcs = ["riscvdasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "aarch64dasm",
+    srcs = ["aarch64dasm/main.c"],
+    copts = COMMON_COPTS + AARCH64_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "armdasm",
+    srcs = ["armdasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "x86_64dasm",
+    srcs = ["x86_64dasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
         ":utils",
     ],
 )
@@ -555,11 +691,10 @@ cc_binary(
     srcs = ["elfdump/main.c"],
     copts = COMMON_COPTS,
     deps = [
-        ":6502_lib",
+        ":disassembler",
         ":elf",
         ":linker",
         ":loader",
-        ":risc_v_lib",
         ":utils",
     ],
 )
@@ -568,7 +703,6 @@ cc_binary(
     name = "riscv",
     srcs = ["risc_v_interpreter/main.c"],
     copts = COMMON_COPTS,
-    linkopts = ["-lm"],
     deps = [
         ":elf",
         ":linker",
@@ -595,7 +729,6 @@ cc_binary(
     name = "arm",
     srcs = ["arm_interpreter/main.c"],
     copts = COMMON_COPTS,
-    linkopts = ["-lm"],
     deps = [
         ":arm_lib",
         ":elf",
@@ -1313,6 +1446,27 @@ sh_test(
         ":davecc",
         ":libc_riscv",
         ":riscv",
+    ],
+)
+
+sh_test(
+    name = "disassembler_smoke_test",
+    srcs = ["tests/disassembler_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :riscvdasm)",
+        "$(rootpath :aarch64dasm)",
+        "$(rootpath :armdasm)",
+        "$(rootpath :x86_64dasm)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":aarch64dasm",
+        ":armdasm",
+        ":davecc",
+        ":elfdump",
+        ":riscvdasm",
+        ":x86_64dasm",
     ],
 )
 

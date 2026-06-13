@@ -264,11 +264,11 @@ static TargetInstruction* PrevInstruction(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
     prev = TargetPrev(prev);
-  } while (prev != NULL && !(prev->opcode != W65C02_OP(reloadpoint) &&
-           prev->opcode != W65C02_OP(expr1) &&
-           prev->opcode != W65C02_OP(expr2) &&
-           prev->opcode != W65C02_OP(expr4) &&
-           prev->opcode != W65C02_OP(expr8)));
+  } while (prev != NULL && !(TargetOpcodeNe(prev->opcode, W65C02_OP(reloadpoint)) &&
+           TargetOpcodeNe(prev->opcode, W65C02_OP(expr1)) &&
+           TargetOpcodeNe(prev->opcode, W65C02_OP(expr2)) &&
+           TargetOpcodeNe(prev->opcode, W65C02_OP(expr4)) &&
+           TargetOpcodeNe(prev->opcode, W65C02_OP(expr8))));
   return prev;
 }
 
@@ -486,7 +486,7 @@ static TargetInstruction* PreviousModifierOfA(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
     prev = TargetPrev(prev);
-    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+    if (prev == NULL || TargetOpcodeEq(prev->opcode, W65C02_OP(label))) {
       // Don't go past a label.
       return NULL;
     }
@@ -510,7 +510,7 @@ static TargetInstruction* PreviousModifierOfFlags(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
     prev = TargetPrev(prev);
-    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+    if (prev == NULL || TargetOpcodeEq(prev->opcode, W65C02_OP(label))) {
       // Don't go past a label.
       return NULL;
     }
@@ -527,7 +527,7 @@ static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
     prev = TargetPrev(prev);
-    if (prev == NULL || prev->opcode == W65C02_OP(label)) {
+    if (prev == NULL || TargetOpcodeEq(prev->opcode, W65C02_OP(label))) {
       // Don't go past a label.
       return NULL;
     }
@@ -671,7 +671,6 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
     }
      switch ((W65C02Opcode)inst->opcode) {
       case W65C02_OP(lda): {
-        TargetInstruction* prev = PrevInstruction(inst);
         TargetInstruction* prev_user = PreviousUserOfA(inst);
         TargetInstruction* prev_modifier = PreviousModifierOfA(inst);
         if (prev_modifier != NULL && prev_modifier->opcode == (TargetOpcode)W65C02_OP(lda)) {
@@ -831,7 +830,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
          // We can remove the INY and set the LDY instruction to the newly
          // calculated value.
          TargetInstruction* prev = PrevInstruction(inst);
-         if (prev->opcode == W65C02_OP(ldy) && GetAddrMode(prev) == kAddrModeImmediate) {
+         if (TargetOpcodeEq(prev->opcode, W65C02_OP(ldy)) &&
+             GetAddrMode(prev) == kAddrModeImmediate) {
            SetImmediateValue(opt_data, prev, trackers->Y.value.c);
            TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
            opt_data->modified = true;
@@ -856,12 +856,12 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         if (prev == NULL) {
           break;
         }
-        if (prev->opcode == W65C02_OP(jsr)) {
+        if (TargetOpcodeEq(prev->opcode, W65C02_OP(jsr))) {
           prev->opcode = (TargetOpcode)W65C02_OP(jmp);
           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
           opt_data->modified = true;
-        } else if (prev->opcode == W65C02_OP(leave) ||
-                   prev->opcode == W65C02_OP(leave_leaf)) {
+        } else if (TargetOpcodeEq(prev->opcode, W65C02_OP(leave)) ||
+                   TargetOpcodeEq(prev->opcode, W65C02_OP(leave_leaf))) {
           // leave and leave_leaf can be told to use JMP instead of JSR.
           prev->flags |= k6502JmpForJSR;
           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
@@ -893,7 +893,7 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           //
           // ORA preceeded by an STZ with the same operand can be eliminated.
           TargetInstruction* prev = PrevInstruction(inst);
-          if (prev->opcode == W65C02_OP(stz)) {
+          if (TargetOpcodeEq(prev->opcode, W65C02_OP(stz))) {
             if (prev->operand[0] == inst->operand[0]) {
               TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
               opt_data->modified = true;
@@ -963,9 +963,12 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
       case W65C02_OP(cmp):
          if ((inst->flags & k6502GeneratesFlags) == 0 && GetAddrMode(inst) == kAddrModeImmediate) {
            TargetInstruction* prev = PreviousModifierOfFlags(inst);
-           if (prev != NULL && (prev->opcode == W65C02_OP(lda) || prev->opcode == W65C02_OP(ora) ||
-                                prev->opcode == W65C02_OP(and) || prev->opcode == W65C02_OP(eor)
-                                || prev->opcode == W65C02_OP(inc) || prev->opcode == W65C02_OP(dec))) {
+           if (prev != NULL && (TargetOpcodeEq(prev->opcode, W65C02_OP(lda)) ||
+                                TargetOpcodeEq(prev->opcode, W65C02_OP(ora)) ||
+                                TargetOpcodeEq(prev->opcode, W65C02_OP(and)) ||
+                                TargetOpcodeEq(prev->opcode, W65C02_OP(eor)) ||
+                                TargetOpcodeEq(prev->opcode, W65C02_OP(inc)) ||
+                                TargetOpcodeEq(prev->opcode, W65C02_OP(dec)))) {
              if (ImmediateValue(inst) == 0) {
                // We can't remove this instruction because it's a user of A
                // and it will make other optimizations incorrect.

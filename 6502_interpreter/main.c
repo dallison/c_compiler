@@ -77,13 +77,6 @@ int main(int argc, char *argv[]) {
   }
   W65C02InterpreterInit(&interpreter, debug, cycle_accurate, trace, rom_filename);
   
-  // The environment variable LD_BIND_NOW tells the dynamic loader to
-  // replace the GOT entries for functions with the function address
-  // at load time rather than delaying the resolution to the first
-  // call.  It needs to be set to a non-empty string.
-  char* bind_now = getenv("LD_BIND_NOW");
-  bool lazy = bind_now == NULL || bind_now[0] == '\0';
-  
   // The LD_TRACE_LOADED_OBJECTS variable shows the loaded objects
   // and doesn't run the program.
   char* ld_trace = getenv("LD_TRACE_LOADED_OBJECTS");

@@ -11,6 +11,7 @@
 #include <string.h>
 #include "loader_arch_arm.h"
 #include "elf.h"
+#include "map.h"
 #include <unistd.h>
 
 static int64_t SegmentFileOffsetDelta(const ELFProgramHeader* segment) {
@@ -79,9 +80,10 @@ static void FixupPLTTrampoline(uint64_t trampoline_runtime,
   p[3] = (uint32_t)(got_slot_runtime - (trampoline_runtime + 12));
 }
 
-static void RedirectCallsToPlt(Loader* loader, LoadedDynamicLibrary* lib,
-                               uint64_t trampoline_runtime,
-                               uint64_t target_linked) {
+static COMPILER_UNUSED void RedirectCallsToPlt(Loader* loader,
+                                               LoadedDynamicLibrary* lib,
+                                               uint64_t trampoline_runtime,
+                                               uint64_t target_linked) {
   uint64_t target_runtime = target_linked;
   if (!LoaderLinkedAddressToRuntime(loader, NULL, target_linked,
                                     &target_runtime)) {

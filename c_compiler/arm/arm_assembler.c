@@ -8,6 +8,7 @@
 #include "arm_assembler.h"
 #include "arm_machine.h"
 #include "elf.h"
+#include "map.h"
 #include <assert.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -92,18 +93,19 @@ static uint32_t EncodeDataProcImm(int cond, int opcode, int s, int rn, int rd,
          (rd << 12) | enc;
 }
 
-static uint32_t EncodeMul(int cond, int rd, int rn, int rs, int rm) {
+static COMPILER_UNUSED uint32_t EncodeMul(int cond, int rd, int rn, int rs, int rm) {
   return ARM_COND(cond) | (0x9 << 4) | (rd << 16) | (rn << 12) | (rs << 8) | rm;
 }
 
-static uint32_t EncodeLongMul(int cond, int rd_lo, int rd_hi, int rm, int rs,
-                              bool signed_mul) {
+static COMPILER_UNUSED uint32_t EncodeLongMul(int cond, int rd_lo, int rd_hi,
+                                              int rm, int rs, bool signed_mul) {
   return ARM_COND(cond) | (signed_mul ? 0 : (1 << 22)) | (0x9 << 4) |
          (rd_hi << 16) | (rd_lo << 12) | (rs << 8) | rm | (1 << 21);
 }
 
-static uint32_t EncodeLoadStore(int cond, int p, int u, int b, int w, int l,
-                                int rn, int rd, int32_t offset) {
+static COMPILER_UNUSED uint32_t EncodeLoadStore(int cond, int p, int u, int b,
+                                                int w, int l, int rn, int rd,
+                                                int32_t offset) {
   return ARM_COND(cond) | (p << 24) | (u << 23) | (b << 22) | (w << 21) |
          (l << 20) | (rn << 16) | (rd << 12) | (offset & 0xfff);
 }

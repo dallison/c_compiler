@@ -448,7 +448,7 @@ static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void PoolConstants(RVGenerator* rv) {
+static COMPILER_UNUSED void PoolConstants(RVGenerator* rv) {
   ConstantPooler pooler = {rv};
   MapInitForInt64Keys(&pooler.pool);
   PoolConstantsInBlock(rv->base.entry_block, &pooler);

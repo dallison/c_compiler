@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/davecc-common.sh"
+
+args=("$@")
+if ! davecc_has_arg "-rom" "$@"; then
+  args=("-rom" "$(davecc_6502_rom)" "${args[@]}")
+fi
+
+davecc_run_target "65c02" "6502" "no" "${args[@]}"

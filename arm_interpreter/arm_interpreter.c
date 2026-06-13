@@ -137,7 +137,10 @@ static uint32_t Fetch32(ARMInterpreter* interpreter) {
 static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 1);
   if (p == NULL) {
-    fprintf(stderr, "Store8 outside mapped memory at 0x%08x pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n", addr, interpreter->pc, (uint32_t)interpreter->regs[13], (uint32_t)interpreter->regs[11]);
+    fprintf(stderr, "Store8 outside mapped memory at 0x%08" PRIx64
+            " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
+            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
+            (uint32_t)interpreter->regs[11]);
     ARMInterpreterDumpRegisters(interpreter);
     exit(1);
   }
@@ -147,7 +150,7 @@ static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
 static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 2);
   if (p == NULL) {
-    fprintf(stderr, "Store16 outside mapped memory at 0x%08x\n", addr);
+    fprintf(stderr, "Store16 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   *(uint16_t*)p = value;
@@ -156,7 +159,7 @@ static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) 
 static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Store32 outside mapped memory at 0x%08x\n", addr);
+    fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   *(uint32_t*)p = value;
@@ -165,7 +168,7 @@ static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) 
 static uint8_t Load8(ARMInterpreter* interpreter, uint64_t addr) {
   void* p = ResolveHostPtr(interpreter, addr, 1);
   if (p == NULL) {
-    fprintf(stderr, "Load8 outside mapped memory at 0x%08x\n", addr);
+    fprintf(stderr, "Load8 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   return *(uint8_t*)p;
@@ -174,7 +177,7 @@ static uint8_t Load8(ARMInterpreter* interpreter, uint64_t addr) {
 static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
   void* p = ResolveHostPtr(interpreter, addr, 2);
   if (p == NULL) {
-    fprintf(stderr, "Load16 outside mapped memory at 0x%08x\n", addr);
+    fprintf(stderr, "Load16 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   return *(uint16_t*)p;
@@ -183,7 +186,7 @@ static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
 static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Load32 outside mapped memory at 0x%08x\n", addr);
+    fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   return *(uint32_t*)p;
@@ -759,7 +762,7 @@ static bool ExecuteDataProcessingReg(ARMInterpreter* interpreter, uint32_t insn)
   int rn = (int)((insn >> 16) & 0xfu);
   int rd = (int)((insn >> 12) & 0xfu);
   uint64_t lhs = ReadReg(interpreter, rn);
-  uint64_t rhs = 0;
+  uint32_t rhs = 0;
   if (!DecodeRegShift(interpreter, insn, &rhs, set_flags)) {
     return false;
   }
@@ -935,6 +938,7 @@ static bool ExecuteMovwMovt(ARMInterpreter* interpreter, uint32_t insn) {
 // immediate is split across two nibbles.
 static bool ExecuteHalfword(ARMInterpreter* interpreter, uint32_t insn) {
   bool preindex = ((insn >> 24) & 1u) != 0;
+  (void)preindex;
   bool add_offset = ((insn >> 23) & 1u) != 0;
   bool writeback = ((insn >> 21) & 1u) != 0;
   bool load = ((insn >> 20) & 1u) != 0;
@@ -1026,7 +1030,6 @@ static bool ExecuteLoadStore(ARMInterpreter* interpreter, uint32_t insn,
 
 static bool ExecuteBlockTransfer(ARMInterpreter* interpreter, uint32_t insn,
                                  bool* pc_updated) {
-  bool preindex = ((insn >> 24) & 1u) != 0;
   bool add_offset = ((insn >> 23) & 1u) != 0;
   bool writeback = ((insn >> 21) & 1u) != 0;
   bool load = ((insn >> 20) & 1u) != 0;
@@ -1293,7 +1296,7 @@ static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
   }
 
   // vmrs APSR_nzcv, FPSCR : flags already set by vcmp, so this is a no-op.
-  if ((insn & 0x0fff0fffu) == 0x0ef1fa10u) {
+  if ((insn & 0x0fffffffu) == 0x0ef1fa10u) {
     return true;
   }
 
@@ -1682,8 +1685,8 @@ void ARMInterpreterCycle(ARMInterpreter* interpreter) {
     if (interpreter->trace_regs) {
       for (int i = 0; i < ARM_PC_REG; i++) {
         if (interpreter->regs[i] != interpreter->old_regs[i]) {
-          printf("r%d: 0x%08x -> 0x%08x\n", i, interpreter->old_regs[i],
-                 interpreter->regs[i]);
+          printf("r%d: 0x%08" PRIx64 " -> 0x%08" PRIx64 "\n", i,
+                 interpreter->old_regs[i], interpreter->regs[i]);
         }
       }
     }

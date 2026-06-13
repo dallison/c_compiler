@@ -402,7 +402,7 @@ static bool CheckBranchRanges(W65C02Generator* g) {
     TargetInstruction* bra = g->branches.value.p[i];
     TargetInstruction* target = bra->operand[0];
     assert(target != NULL);
-    if (bra->opcode == W65C02_OP(jumptable)) {
+    if (TargetOpcodeEq(bra->opcode, W65C02_OP(jumptable))) {
       continue;
     }
     int diff = target->addr - (bra->addr + 2);

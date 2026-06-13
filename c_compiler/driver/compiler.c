@@ -78,7 +78,7 @@ bool OptLevel3(void) {
 }
 
 // Add new targets here.
-#define kMaxTargetNames 3
+#define kMaxTargetNames 4
 static struct CompilerTargetDefinition{
   const char* canonical_name;
   const char* names[kMaxTargetNames];
