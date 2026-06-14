@@ -33,8 +33,34 @@ typedef struct LocalSymbolTable {
   struct LocalSymbolTable* prev;
 } LocalSymbolTable;
 
+// C++ namespace scope.  Namespace scopes form a tree rooted at the translation
+// unit; the root represents global scope and does not own global C symbols.
+typedef struct Namespace {
+  String name;
+  String qualified_name;
+  bool is_anonymous;
+  BinaryTree symbol_table;
+  BinaryTree tag_table;
+  Vector children;  // Namespace* children, owned by this namespace.
+  struct Namespace* parent;
+  struct Namespace* anonymous_child;
+} Namespace;
+
 // Create the global symbol tables.
 void CreateGlobalSymbolTables(void);
+void DeleteGlobalNamespace(void);
+
+Namespace* NewNamespace(const char* name, Namespace* parent, bool is_anonymous);
+void NamespaceDelete(Namespace* ns);
+Namespace* NamespaceFindChild(Namespace* parent, String* name);
+Namespace* NamespaceFindOrCreateChild(Namespace* parent, String* name);
+Namespace* NamespaceFindOrCreateAnonymousChild(Namespace* parent);
+bool NamespaceInsertSymbol(Namespace* ns, Symbol* symbol);
+bool NamespaceInsertTag(Namespace* ns, Symbol* symbol);
+Symbol* NamespaceFindSymbol(Namespace* ns, String* name);
+Symbol* NamespaceFindTag(Namespace* ns, String* name);
+Symbol* NamespaceFindSymbolInScope(Namespace* ns, String* name);
+Symbol* NamespaceFindTagInScope(Namespace* ns, String* name);
 
 // Create a new local symbol table.
 LocalSymbolTable* NewLocalSymbolTable(void);

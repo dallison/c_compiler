@@ -189,7 +189,10 @@ static int ParseArg(int i, int argc, char** argv,
   } else {
     String arg;
     StringInit(&arg, argv[i]);
-    if (StringEndsWith(&arg, ".c")) {
+    if (StringEndsWith(&arg, ".c") ||
+        StringEndsWith(&arg, ".cc") ||
+        StringEndsWith(&arg, ".cpp") ||
+        StringEndsWith(&arg, ".cxx")) {
       VectorAppend(compiler_args, argv[i]);
       *run_compiler = true;
     } else if (StringEndsWith(&arg, ".s")) {

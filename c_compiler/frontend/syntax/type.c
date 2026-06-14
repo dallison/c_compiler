@@ -441,6 +441,9 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->bit_offset = 0;
   mem->bit_size = 0;
   mem->is_anon = false;
+  mem->is_static = false;
+  mem->is_member_function = false;
+  mem->access = kAccessPublic;
   return mem;
 }
 
@@ -465,6 +468,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->members);
   MapInit(&s->symbol_table, CompareStructMember);
   s->is_union = is_union;
+  s->is_class = false;
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;
@@ -696,6 +700,8 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->dimension_count = 0;
   parser->is_inline = false;
   parser->context = context;
+  parser->cxx_member_owner = NULL;
+  parser->cxx_member_definition = NULL;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -703,6 +709,8 @@ void TypeParserReset(TypeParser* parser) {
   parser->storage = STO(implicit);
   parser->found_void = false;
   parser->dimension_count = 0;
+  parser->cxx_member_owner = NULL;
+  parser->cxx_member_definition = NULL;
   VectorDestruct(&parser->stack);
   VectorInit(&parser->stack);
 }
@@ -722,7 +730,8 @@ static struct {
     {TOK(char), kTypeChar},         {TOK(int), kTypeInt},
     {TOK(short), kTypeShort},       {TOK(long), kTypeLong},
     {TOK(float), kTypeFloat},       {TOK(double), kTypeDouble},
-    {TOK(struct), kTypeStruct},     {TOK(union), kTypeUnion},
+    {TOK(class), kTypeStruct},      {TOK(struct), kTypeStruct},
+    {TOK(union), kTypeUnion},
     {TOK(enum), kTypeEnum},         {TOK(void), kTypeVoid},
     {TOK(bool), kTypeBool},         {TOK(signed), kTypeSigned},
     {TOK(unsigned), kTypeUnsigned}, {TOK(bad), kTypeImplicit},
@@ -771,6 +780,19 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       quals |= kQualVolatile;
     } else if (LexMatch(lex, TOK(restrict))) {
       quals |= kQualRestrict;
+    } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
+      FullyQualifiedIdentifier typedef_name;
+      FullyQualifiedIdentifierInit(&typedef_name);
+      SyntaxParseFullyQualifiedIdentifier(parser->syntax, &typedef_name);
+      Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, &typedef_name);
+      if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+        type_record = TypeRecordCopy(symbol->type);
+        type |= type_record->type;
+      } else {
+        SyntaxError(parser->syntax, "Unknown type name %s",
+                    typedef_name.spelling.value);
+      }
+      FullyQualifiedIdentifierDestruct(&typedef_name);
     } else if (allow_typedef && tok == TOK(identifier)) {
       // Identifier.  If this is a known typedef name consume it
       // and keep the type.
@@ -800,7 +822,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     
     if ((type & (kTypeStruct | kTypeUnion)) != 0) {
       bool is_union = (type & kTypeUnion) != 0;
-      tag = TypeParserParseStruct(&composite_parser, is_union);
+      bool is_class = tok == TOK(class);
+      tag = TypeParserParseStruct(&composite_parser, is_union, is_class);
     } else {
       tag = TypeParserParseEnum(&composite_parser);
     }
@@ -1461,6 +1484,35 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
 }
 
 
+static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
+                                             FullyQualifiedIdentifier* name) {
+  if (!name->is_qualified || name->components.length < 2) {
+    return;
+  }
+
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
+      parser->syntax, name, name->components.length - 1);
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL ||
+      !owner->type->info.struct_info->is_class) {
+    SyntaxError(parser->syntax, "Qualified declarator %s does not name a class member",
+                name->spelling.value);
+    return;
+  }
+
+  parser->cxx_member_owner = owner->type->info.struct_info;
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+  parser->cxx_member_definition =
+      FindStructMember(parser->cxx_member_owner, &member_name);
+  if (parser->cxx_member_definition == NULL) {
+    SyntaxError(parser->syntax, "No class member named %s",
+                name->spelling.value);
+  }
+  StringDestruct(&member_name);
+}
+
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
     if (SyntaxLookingAtType(parser->syntax) || LexLookingAt(parser->lex, TOK(rparen))) {
@@ -1474,13 +1526,21 @@ void TypeParserParseBase(TypeParser* parser) {
       LexError(parser->lex, "Missing close parenthesis in declaration");
     }
   } else {
-    if (LexLookingAt(parser->lex, TOK(identifier))) {
+    if (LexLookingAt(parser->lex, TOK(identifier)) ||
+        LexLookingAt(parser->lex, TOK(coloncolon))) {
       SourceLocation location = parser->lex->current_token_location;
-      String* name = &parser->lex->spelling;
-      LexNextToken(parser->lex);
+      FullyQualifiedIdentifier name;
+      FullyQualifiedIdentifierInit(&name);
+      if (!SyntaxParseFullyQualifiedIdentifier(parser->syntax, &name)) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return;
+      }
+      ResolveQualifiedMemberDeclarator(parser, &name);
       parser->symbol =
-          NewSymbol(name->value, parser->base_type, parser->storage);
+          NewSymbol(FullyQualifiedIdentifierLast(&name), parser->base_type,
+                    parser->storage);
       parser->symbol->location = location;
+      FullyQualifiedIdentifierDestruct(&name);
     }
   }
 }
@@ -1629,6 +1689,89 @@ static void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union
    }
 }
 
+static void AddStructMember(TypeParser* parser, Struct* str,
+                            StructMember* member) {
+  VectorAppend(&str->members, member);
+  MapKeyValue kv;
+  kv.key.p = &member->symbol->name;
+  kv.value.p = member;
+  MapInsert(&str->symbol_table, kv);
+}
+
+static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
+  if (!LexMatch(parser->lex, TOK(lbrace))) {
+    return false;
+  }
+  int brace_count = 1;
+  while (brace_count > 0 && !LexEof(parser->lex)) {
+    if (LexLookingAt(parser->lex, TOK(lbrace))) {
+      brace_count++;
+    } else if (LexLookingAt(parser->lex, TOK(rbrace))) {
+      brace_count--;
+    }
+    LexNextToken(parser->lex);
+  }
+  return true;
+}
+
+static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
+                                    String* class_name, CXXAccess access) {
+  if (!str->is_class || class_name->length == 0) {
+    return false;
+  }
+
+  bool is_destructor = LexMatch(parser->lex, TOK(tilde));
+  if (!LexLookingAt(parser->lex, TOK(identifier)) ||
+      !StringEqualString(&parser->lex->spelling, class_name)) {
+    if (is_destructor) {
+      SyntaxError(parser->syntax, "Expected class name after '~'");
+    }
+    return is_destructor;
+  }
+
+  SourceLocation location = parser->lex->current_token_location;
+  LexNextToken(parser->lex);
+  if (!LexMatch(parser->lex, TOK(lparen))) {
+    if (is_destructor) {
+      SyntaxError(parser->syntax, "Expected '(' in destructor declaration");
+    }
+    return is_destructor;
+  }
+
+  TypeParser proto_parser;
+  TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),
+                 kParsingPrototype);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constructor = !is_destructor;
+  func->info.function.is_destructor = is_destructor;
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  ParseFunctionPrototype(&proto_parser, func);
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+  TypeParserDestruct(&proto_parser);
+
+  String member_name;
+  StringInit(&member_name, is_destructor ? "~" : "");
+  StringAppendString(&member_name, class_name);
+  if (!CheckStructMember(str, &member_name)) {
+    SyntaxError(parser->syntax, "Duplicate class member %s",
+                member_name.value);
+    StringDestruct(&member_name);
+    TypeRecordDelete(func);
+    SkipInlineMemberFunctionBody(parser);
+    return true;
+  }
+
+  Symbol* member_symbol = NewSymbol(member_name.value, func, STO(implicit));
+  member_symbol->location = location;
+  StructMember* member = NewStructMember(member_symbol);
+  member->is_member_function = true;
+  member->access = access;
+  AddStructMember(parser, str, member);
+  StringDestruct(&member_name);
+  SkipInlineMemberFunctionBody(parser);
+  return true;
+}
+
 
 // Copy an anoymous union into the destination struct.  Members of the union
 // are inserted into the symbol table of the dest struct and each of the
@@ -1680,12 +1823,41 @@ static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src )
 }
 
 
-static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
+static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
+                               String* tag_name) {
+  CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
+    if (LexLookingAt(parser->lex, TOK(public))) {
+      current_access = kAccessPublic;
+      LexNextToken(parser->lex);
+      SyntaxNeedBracket(parser->syntax, TOK(colon), TC(decl));
+      continue;
+    } else if (LexLookingAt(parser->lex, TOK(private))) {
+      current_access = kAccessPrivate;
+      LexNextToken(parser->lex);
+      SyntaxNeedBracket(parser->syntax, TOK(colon), TC(decl));
+      continue;
+    } else if (LexLookingAt(parser->lex, TOK(protected))) {
+      current_access = kAccessProtected;
+      LexNextToken(parser->lex);
+      SyntaxNeedBracket(parser->syntax, TOK(colon), TC(decl));
+      continue;
+    }
+
+    if (ParseClassSpecialMember(parser, str, tag_name, current_access)) {
+      if (!LexLookingAt(parser->lex, TOK(rbrace))) {
+        LexMatch(parser->lex, TOK(semicolon));
+      }
+      continue;
+    }
+
+    bool is_static_member = LexMatch(parser->lex, TOK(static));
     bool possible_anon = LexLookingAt(parser->lex, TOK(union)) ||
             LexLookingAt(parser->lex, TOK(struct));
     TypeRecord* member_type = TypeParserParseType(parser, true);
+    bool member_decl_had_inline_body = false;
     while (!LexEof(parser->lex)) {
+      bool has_inline_body = false;
       if (possible_anon && LexLookingAt(parser->lex, TOK(semicolon))) {
         TypeRecordCalculateSize(member_type);
         AlignNextOffset(str, member_type);
@@ -1698,6 +1870,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
                                           member_type, STO(implicit));
         StructMember* member = NewStructMember(member_symbol);
         member->byte_offset = anon_base;
+        member->access = current_access;
         VectorAppend(&str->members, member);
 
         // Account for the space occupied by the anonymous aggregate.  In a
@@ -1727,17 +1900,24 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
         SymbolDelete(member_symbol);
       } else {
         StructMember* member = NewStructMember(member_symbol);
+        member->is_static = is_static_member;
+        member->is_member_function = TypeIsFunction(member_symbol->type);
+        member->access = current_access;
         
         // Add to symbol table.
-        VectorAppend(&str->members, member);
-        MapKeyValue kv;
-        kv.key.p = &member->symbol->name;
-        kv.value.p = member;
-        MapInsert(&str->symbol_table, kv);
+        AddStructMember(parser, str, member);
 
         // Check for bitfield.
         if (LexMatch(parser->lex, TOK(colon))) {
+          if (member->is_static || member->is_member_function) {
+            SyntaxError(parser->syntax,
+                        "Only non-static data members can be bitfields");
+          }
           ParseBitField(parser, is_union, str, member_symbol, member);
+        } else if (member->is_static || member->is_member_function) {
+          has_inline_body = member->is_member_function &&
+                            SkipInlineMemberFunctionBody(parser);
+          member_decl_had_inline_body |= has_inline_body;
         } else {
           // Regular member, align the member to the appropriate boundary.
           AlignNextOffset(str, member_symbol->type);
@@ -1748,11 +1928,16 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union) {
         }
       }
       if (!LexMatch(parser->lex, TOK(comma))) {
+        if (has_inline_body) {
+          break;
+        }
         break;
       }
     }
   
-    SyntaxNeedSemicolon(parser->syntax, TC(type));
+    if (!member_decl_had_inline_body && !LexLookingAt(parser->lex, TOK(rbrace))) {
+      SyntaxNeedSemicolon(parser->syntax, TC(type));
+    }
   }
 }
 
@@ -1805,8 +1990,26 @@ static void CheckTagType(TypeParser* parser, Symbol* old,
   }
 }
 
+static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
+  if (tag == NULL || tag->flags.invented || tag->type == NULL ||
+      tag->type->info.struct_info == NULL ||
+      !tag->type->info.struct_info->is_class) {
+    return;
+  }
+  if (SyntaxFindSymbol(parser->syntax, &tag->name) != NULL) {
+    return;
+  }
+
+  Symbol* alias = NewSymbol(tag->name.value, tag->type, STO(typedef));
+  alias->namespace_ = tag->namespace_;
+  if (!SyntaxAddSymbol(parser->syntax, alias)) {
+    SymbolDelete(alias);
+  }
+}
+
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
-                               bool is_union, Vector* attributes) {
+                               bool is_union, bool is_class,
+                               Vector* attributes) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -1826,6 +2029,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   } else {
     // Tag doesn't exist in the, create one.
     str = NewStruct(is_union);
+    str->is_class = is_class;
     TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                       kQualPlain);
     type->info.struct_info = str;
@@ -1851,7 +2055,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // Apply layout attributes (packed, aligned) before laying out members so the
   // member offsets reflect them in a single pass.
   StructApplyLayoutAttributes(str, attributes);
-  ParseStructMembers(parser, str, is_union);
+  ParseStructMembers(parser, str, is_union, tag_name);
   
   // Round the size of the struct up to its own alignment (the maximum
   // alignment of its members, or an explicit aligned(N)), as required by the
@@ -1860,7 +2064,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
    
   CheckFlexibleArrays(parser, str, is_union);
-  
+  AddInjectedClassName(parser, tag);
   return tag;
 }
 
@@ -1948,7 +2152,7 @@ void TypeApplyStructAttributesFromSymbol(Symbol* sym) {
 // consumed and the current token will be the follower.  This may
 // be a tag name or an open brace, or semicolon.  Don't consume
 // a semicolon at the end of the struct.
-Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
+Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) {
   // Parse common __attribute__ syntax (e.g. struct __attribute__((packed)) ...).
   Vector attributes = {0};
   while (LexMatch(parser->lex, TOK(attribute))) {
@@ -1956,7 +2160,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   }
 
   String tag_name = {0};
+  FullyQualifiedIdentifier qualified_tag = {0};
+  bool has_qualified_tag = false;
   Symbol* tag = NULL;
+  FullyQualifiedIdentifierInit(&qualified_tag);
 
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
@@ -1964,30 +2171,48 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   }
 
   // Read the tag name if there is one.
-  if (LexLookingAt(parser->lex, TOK(identifier))) {
+  if (SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
+    SyntaxParseFullyQualifiedIdentifier(parser->syntax, &qualified_tag);
+    has_qualified_tag = qualified_tag.is_qualified;
+    if (!has_qualified_tag) {
+      StringSet(&tag_name, FullyQualifiedIdentifierLast(&qualified_tag));
+    }
+  } else if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
   if (LexMatch(parser->lex, TOK(lbrace))) {
-    tag = ParseStructBody(parser, &tag_name, is_union, &attributes);
+    if (has_qualified_tag) {
+      SyntaxError(parser->syntax, "Cannot define qualified struct tag %s",
+                  qualified_tag.spelling.value);
+    }
+    tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes);
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.
-    if (tag_name.length == 0) {
+    if (tag_name.length == 0 && !has_qualified_tag) {
       // No tag name, nothing to do.
       goto done;
     }
-    tag = SyntaxFindTag(parser->syntax, &tag_name);
+    tag = has_qualified_tag ? SyntaxFindQualifiedTag(parser->syntax, &qualified_tag)
+                            : SyntaxFindTag(parser->syntax, &tag_name);
     if (tag == NULL) {
+      if (has_qualified_tag) {
+        SyntaxError(parser->syntax, "Unknown struct tag %s",
+                    qualified_tag.spelling.value);
+        goto done;
+      }
       // New tag.
       Struct* str = NewStruct(is_union);
+      str->is_class = is_class;
       TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
       type->info.struct_info = str;
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;
       SyntaxAddTag(parser->syntax, tag);
+      AddInjectedClassName(parser, tag);
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, is_union, false);
@@ -1995,6 +2220,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union) {
   }
 
 done:
+  FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);
   AttributeListDestruct(&attributes);
   return tag;
@@ -2154,7 +2380,10 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   }
 
   String tag_name = {0};
+  FullyQualifiedIdentifier qualified_tag = {0};
+  bool has_qualified_tag = false;
   Symbol* tag = NULL;
+  FullyQualifiedIdentifierInit(&qualified_tag);
 
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
@@ -2162,22 +2391,38 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   }
 
   // Read the tag name if there is one.
-  if (LexLookingAt(parser->lex, TOK(identifier))) {
+  if (SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
+    SyntaxParseFullyQualifiedIdentifier(parser->syntax, &qualified_tag);
+    has_qualified_tag = qualified_tag.is_qualified;
+    if (!has_qualified_tag) {
+      StringSet(&tag_name, FullyQualifiedIdentifierLast(&qualified_tag));
+    }
+  } else if (LexLookingAt(parser->lex, TOK(identifier))) {
     // Struct tag is present.
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
   if (LexMatch(parser->lex, TOK(lbrace))) {
+    if (has_qualified_tag) {
+      SyntaxError(parser->syntax, "Cannot define qualified enum tag %s",
+                  qualified_tag.spelling.value);
+    }
     tag = ParseEnumBody(parser, &tag_name);
   } else {
     // No open brace, this is a reference to an existing enum or the
     // creation of a new one.
-    if (tag_name.length == 0) {
+    if (tag_name.length == 0 && !has_qualified_tag) {
       // No tag name, nothing to do.
       goto done;
     }
-    tag = SyntaxFindTag(parser->syntax, &tag_name);
+    tag = has_qualified_tag ? SyntaxFindQualifiedTag(parser->syntax, &qualified_tag)
+                            : SyntaxFindTag(parser->syntax, &tag_name);
     if (tag == NULL) {
+      if (has_qualified_tag) {
+        SyntaxError(parser->syntax, "Unknown enum tag %s",
+                    qualified_tag.spelling.value);
+        goto done;
+      }
       // New tag.
       Enum* e = NewEnum();
       TypeRecord* type = NewTypeRecordWithSize(kTypeEnum, kQualPlain);
@@ -2193,6 +2438,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   }
 
 done:
+  FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);
   AttributeListDestruct(&attributes);
   return tag;

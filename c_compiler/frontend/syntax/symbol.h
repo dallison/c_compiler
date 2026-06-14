@@ -18,6 +18,7 @@
 
 struct TypeRecord;
 struct DIE;
+struct Namespace;
 
 // Storage for symbol (where it is located in memory).
 #define STO(x) kStorage_##x
@@ -69,6 +70,7 @@ void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
 typedef struct Symbol {
   String name;                // Symbol name.
   String asm_name;            // Optional assembler-visible name.
+  struct Namespace* namespace_;  // C++ namespace owning the symbol, if any.
   int id;
   struct TypeRecord* type;    // Type.
   Storage storage;            // Storage (static, typedef, etc.)
@@ -87,6 +89,7 @@ typedef struct Symbol {
     bool noreturn: 1;              // __attribute__((noreturn)) / _Noreturn.
     bool always_inline: 1;         // __attribute__((always_inline)).
     bool noinline: 1;              // __attribute__((noinline)).
+    bool is_using_alias: 1;        // C++ using-declaration alias.
   } flags;
   
   struct {
@@ -108,6 +111,7 @@ typedef struct Symbol {
     struct Symbol* func_defn;      // Defintion of this func declaration.
   } value;
   int32_t stack_offset;     // Stack offset if local.
+  struct Symbol* alias_target;  // Target for a C++ using-declaration alias.
   struct DIE* die;
 } Symbol;
 

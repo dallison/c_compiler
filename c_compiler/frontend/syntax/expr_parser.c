@@ -48,40 +48,55 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
 
-  String name;
-  StringInit(&name, lex->spelling.value);
-  LexNextToken(lex);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+    SyntaxError(syntax, "Expected identifier");
+    FullyQualifiedIdentifierDestruct(&name);
+    return (ASTNode*)NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+        syntax->lex->current_token_location);
+  }
   
   // In preprocesor mode we have no symbols, everything is a macro name.
   if (lex->preprocessor_mode) {
-    if (PreprocessorFindMacro(lex->preprocessor, &name) == NULL) {
+    String macro_name;
+    StringInit(&macro_name, FullyQualifiedIdentifierLast(&name));
+    if (PreprocessorFindMacro(lex->preprocessor, &macro_name) == NULL) {
       PreprocessorWarning(lex->preprocessor, "undef",
                           "'%s' is not defined, evaluates to 0",
-                          name.value);
+                          macro_name.value);
     }
-    ASTNode* result = NewMacroNameASTNode(&name, lex->current_token_location);
-    StringDestruct(&name);
+    ASTNode* result = NewMacroNameASTNode(&macro_name, lex->current_token_location);
+    StringDestruct(&macro_name);
+    FullyQualifiedIdentifierDestruct(&name);
     return result;
   }
   
   // Find the symbol by searching all symbol tables.  It must exist.
-  Symbol* symbol = SyntaxFindSymbol(syntax, &name);
+  Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
   if (symbol == NULL) {
-    if (lex->assembler_mode) {
+    if (name.is_qualified) {
+      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+      TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
+      symbol->flags.invented = true;
+    } else if (lex->assembler_mode) {
       // In assembler mode we have symbols but we pre-declare them
       // if they don't exist.  They are declared as variables with
       // type unsigned long.
       TypeRecord* type = NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
-      symbol = NewSymbol(name.value, type, STO(implicit));
+      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
       symbol->flags.is_forward_declared = true;
       // Register it so it is found on later references (and owned/freed by a
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else if (LexLookingAt(lex, TOK(lparen))) {
-      if (GetIntrinsicIndex(name.value) == -1) {
+      if (GetIntrinsicIndex(FullyQualifiedIdentifierLast(&name)) == -1) {
         // Calling an unknown function is a warning.
         SyntaxWarning(syntax, "implicit-function-declaration",
-                      "Calling undeclared function %s", name.value);
+                      "Calling undeclared function %s",
+                      FullyQualifiedIdentifierLast(&name));
       }
       
       // Declare the function so we don't get more warnings for the same
@@ -90,20 +105,20 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecord* func_type = NewFunctionTypeRecord();
       func_type->info.function.unknown_args = true;
       TypeRecordChain(func_type, type);
-      symbol = NewSymbol(name.value, func_type, STO(implicit));
+      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), func_type, STO(implicit));
       symbol->flags.is_forward_declared = true;
       // Declare it so repeated calls find this symbol (no duplicate warnings)
       // and so it is owned/freed by a symbol table rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else {
-      SyntaxError(syntax, "No such symbol \"%s\"", name.value);
+      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
       TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-      symbol = NewSymbol(name.value, type, STO(implicit));
+      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
       symbol->flags.invented = true;
       SyntaxAddSymbol(syntax, symbol);
     }
   }
-  StringDestruct(&name);
+  FullyQualifiedIdentifierDestruct(&name);
   return NewIdentifierASTNode(symbol, lex->current_token_location);
 }
 
@@ -447,7 +462,8 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   }
 
   // Check for identifier.
-  if (LexLookingAt(lex, TOK(identifier))) {
+  if (LexLookingAt(lex, TOK(identifier)) ||
+      LexLookingAt(lex, TOK(coloncolon))) {
     return ParseIdentifier(syntax, followers);
   }
 

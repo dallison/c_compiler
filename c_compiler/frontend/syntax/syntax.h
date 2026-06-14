@@ -28,6 +28,7 @@ typedef struct Syntax {
   ASTNode* ast;                         // Output AST.
   LocalSymbolTable* local_symbol_stack; // Local symbol tables.
   LocalSymbolTable* local_tag_stack;    // Local tags.
+  Namespace* current_namespace;         // Current C++ namespace scope.
   char fake_name_buffer[32];            // Buffer to generate fake names.
   int fake_name_index;                  // Next fake name index.
   bool found_open_paren;                // We've consumed an open paren.
@@ -45,6 +46,13 @@ typedef struct Syntax {
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
 } Syntax;
+
+typedef struct FullyQualifiedIdentifier {
+  bool absolute;       // Starts with ::.
+  bool is_qualified;   // Contains :: or starts with ::.
+  Vector components;   // String* components, owned by this object.
+  String spelling;     // Full spelling for diagnostics.
+} FullyQualifiedIdentifier;
 
 // Token classes allow us to recover from syntax errors by
 // skipping tokens until the current token matches a certain
@@ -71,6 +79,21 @@ void SyntaxResetForNewDeclaration(Syntax* syntax);
 
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name);
+void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name);
+void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name);
+bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
+                                         FullyQualifiedIdentifier* name);
+Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
+                                  FullyQualifiedIdentifier* name);
+Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name,
+                                        size_t component_count);
+Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
+                               FullyQualifiedIdentifier* name);
+Namespace* SyntaxFindQualifiedNamespace(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name);
+const char* FullyQualifiedIdentifierLast(FullyQualifiedIdentifier* name);
+bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax);
 
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindTag(Syntax* syntax, String* name);

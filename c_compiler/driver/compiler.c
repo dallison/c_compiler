@@ -886,6 +886,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
   compiler->current_include_path_index = 0;
+  compiler->global_namespace = NULL;
   
   char dirname[4096];
   char* wd = getcwd(dirname, sizeof(dirname));
@@ -1268,6 +1269,7 @@ void CompilerDestruct(Compiler* compiler) {
   }
   DebugBuilderDestruct(&compiler->debug_builder);
   
+  DeleteGlobalNamespace();
   ClearSymbolTable(&compiler->global_symbol_table, true);
   ClearSymbolTable(&compiler->global_tag_table, true);
   // ClearSymbolTable only empties the tables; release their bucket arrays too.

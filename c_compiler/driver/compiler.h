@@ -20,6 +20,7 @@
 #include "options.h"
 
 struct Generator;
+struct Namespace;
 
 // Thread local storage model.
 #define TLS(x) kTls_##x
@@ -246,6 +247,7 @@ typedef struct {
   // Global symbol and tag tables created by front end.
   HashTable global_symbol_table;
   HashTable global_tag_table;
+  struct Namespace* global_namespace;
 
   int pointer_size;  // Size of a pointer.
   int short_size;  // Size of native short int.

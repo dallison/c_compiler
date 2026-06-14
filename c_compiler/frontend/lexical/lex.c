@@ -559,7 +559,7 @@ static bool RawDelimiterChar(char ch) {
          ch != '\t' && ch != '\v' && ch != '\f' && ch != '\n';
 }
 
-static bool LexReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
+static bool ReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
   if (SourceEof(lex->source)) {
     return false;
   }
@@ -598,7 +598,7 @@ static void CollectRawStringLiteral(Lex* lex, LiteralEncoding encoding) {
   bool closed = false;
   while (!SourceEof(lex->source) || lex->pos < lex->line.length) {
     if (lex->pos >= lex->line.length) {
-      if (!LexReadRawStringContinuation(lex, encoding)) {
+      if (!ReadRawStringContinuation(lex, encoding)) {
         break;
       }
       continue;
@@ -1162,7 +1162,7 @@ static void CollectOperator(Lex* lex) {
   }
 }
 
-static void LexInitCommon(Lex* lex, Preprocessor* preprocessor) {
+static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->current_token = TOK(bad);
   StringInit(&lex->line, NULL);
   StringInit(&lex->spelling, NULL);
@@ -1189,14 +1189,14 @@ bool LexInitFromFile(Lex* lex, const char* filename,
     return false;
   }
   lex->source = NewSourceFromFile(filename, in);
-  LexInitCommon(lex, preprocessor);
+  InitCommon(lex, preprocessor);
   return true;
 }
 
 bool LexInitFromString(Lex* lex, const char* filename, String* code,
                        Preprocessor* preprocessor) {
   lex->source = NewSourceFromString(filename, code);
-  LexInitCommon(lex, preprocessor);
+  InitCommon(lex, preprocessor);
   lex->source->path_index = preprocessor->lex->source->path_index;
   return true;
 }

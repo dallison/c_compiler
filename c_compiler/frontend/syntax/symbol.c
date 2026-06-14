@@ -119,6 +119,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
                 Storage storage) {
   StringInit(&sym->name, name);
   StringInit(&sym->asm_name, NULL);
+  sym->namespace_ = NULL;
   sym->type = NULL;
   sym->storage = storage;
   sym->flags.is_defined = false;
@@ -135,8 +136,10 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.noreturn = false;
   sym->flags.always_inline = false;
   sym->flags.noinline = false;
+  sym->flags.is_using_alias = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
+  sym->alias_target = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -176,8 +179,10 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
+  new_sym->alias_target = sym->alias_target;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
+  new_sym->namespace_ = sym->namespace_;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep
   // copy of the source's attributes.

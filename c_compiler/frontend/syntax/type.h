@@ -73,6 +73,12 @@ typedef struct {
   bool is_destructor;   // Called after exit.
 } FunctionInfo;
 
+typedef enum {
+  kAccessPublic,
+  kAccessProtected,
+  kAccessPrivate,
+} CXXAccess;
+
 // A struct or union member.  Behaves like a Symbol with extra information.
 typedef struct {
   Symbol* symbol;   // Embedded Symbol.
@@ -81,6 +87,9 @@ typedef struct {
   int bit_size;     // Bitfield size in bits.
   size_t index;     // Index into members vector.
   bool is_anon;     // This is an anonymous member.
+  bool is_static;   // C++ static data/function member.
+  bool is_member_function;
+  CXXAccess access;
   } StructMember;
 
 // A struct or union type.
@@ -93,6 +102,7 @@ typedef struct Struct {
   int size;          // Size of struct in bytes.
   int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
+  bool is_class;     // True if this is a C++ class.
   bool packed;       // __attribute__((packed)): no inter-member padding.
   int explicit_alignment;  // __attribute__((aligned(N))) minimum; 0 = none.
   int pack;          // #pragma pack(n) member alignment cap; 0 = no cap.
@@ -168,6 +178,8 @@ typedef struct {
   int dimension_count;    // Dimensions in array.
   bool is_inline;
   enum ParserContext context;
+  Struct* cxx_member_owner;
+  StructMember* cxx_member_definition;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
@@ -247,7 +259,7 @@ void TypeParserParseBase(TypeParser* parser);
 void TypeParserParsePointer(TypeParser* parser);
 void TypeParserParseFuncOrArray(TypeParser* parser);
 
-Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union);
+Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class);
 Symbol* TypeParserParseEnum(TypeParser* parser);
 
 TypeRecord* NewSizeTypeRecord(void);

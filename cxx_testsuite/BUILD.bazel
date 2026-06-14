@@ -1,0 +1,54 @@
+# C++ testsuite scaffolding for DaveCC.
+#
+# The initial suite is compile-only so it can validate lexical and
+# preprocessor behavior before later C++ parser/semantic phases are complete.
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CXX_TEST_DATA = glob([
+    "include/**",
+    "tests/**/*.cpp",
+]) + glob([
+    "tests/**/*.expected",
+], allow_empty = True) + [
+    "README.md",
+    "run_compile_tests.sh",
+]
+
+sh_test(
+    name = "lexical",
+    srcs = ["run_compile_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--tests-dir",
+        "tests/lexical",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+    ],
+)
+
+sh_test(
+    name = "syntax",
+    srcs = ["run_compile_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--tests-dir",
+        "tests/syntax",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+    ],
+)
+
+test_suite(
+    name = "all",
+    tests = [
+        ":lexical",
+        ":syntax",
+    ],
+)

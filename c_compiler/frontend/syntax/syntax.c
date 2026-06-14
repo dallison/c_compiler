@@ -27,11 +27,267 @@ bool abort_on_error;
 static int next_pc_label_id = 0;
 static String next_pc_label;
 
+static bool InNamedNamespace(Syntax* syntax) {
+  return syntax->current_namespace != NULL &&
+         syntax->current_namespace != compiler->global_namespace;
+}
+
+static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  if (!LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+
+  size_t pos = lex->pos;
+  while (pos < lex->line.length &&
+         isspace((unsigned char)lex->line.value[pos])) {
+    pos++;
+  }
+  return pos + 1 < lex->line.length &&
+         lex->line.value[pos] == ':' &&
+         lex->line.value[pos + 1] == ':';
+}
+
+static Symbol* FindFileScopeSymbol(Syntax* syntax, String* name) {
+  if (InNamedNamespace(syntax)) {
+    Symbol* symbol = NamespaceFindSymbol(syntax->current_namespace, name);
+    if (symbol != NULL) {
+      return symbol;
+    }
+    return NULL;
+  }
+  return FindGlobalSymbol(name);
+}
+
+static bool InsertFileScopeSymbol(Syntax* syntax, Symbol* symbol) {
+  if (InNamedNamespace(syntax)) {
+    return NamespaceInsertSymbol(syntax->current_namespace, symbol);
+  }
+  return InsertGlobalSymbol(symbol);
+}
+
+static Symbol* FollowAlias(Symbol* symbol) {
+  int depth = 0;
+  while (symbol != NULL && symbol->flags.is_using_alias &&
+         symbol->alias_target != NULL && depth < 64) {
+    symbol = symbol->alias_target;
+    depth++;
+  }
+  return symbol;
+}
+
+void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name) {
+  name->absolute = false;
+  name->is_qualified = false;
+  VectorInit(&name->components);
+  StringInit(&name->spelling, NULL);
+}
+
+void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name) {
+  VectorDestructWithContents(&name->components,
+                             (VectorElementDestructor)StringDestruct,
+                             /*free_element=*/true);
+  StringDestruct(&name->spelling);
+}
+
+const char* FullyQualifiedIdentifierLast(FullyQualifiedIdentifier* name) {
+  if (name->components.length == 0) {
+    return "";
+  }
+  String* last = name->components.value.p[name->components.length - 1];
+  return last->value;
+}
+
+static void FullyQualifiedIdentifierAppend(FullyQualifiedIdentifier* name,
+                                           String* component) {
+  if (name->spelling.length != 0 || name->absolute) {
+    StringAppend(&name->spelling, "::");
+  }
+  StringAppendString(&name->spelling, component);
+  VectorAppend(&name->components, NewString(component->value));
+}
+
+bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
+                                         FullyQualifiedIdentifier* name) {
+  Lex* lex = syntax->lex;
+  if (LexMatch(lex, TOK(coloncolon))) {
+    name->absolute = true;
+    name->is_qualified = true;
+  }
+
+  if (!LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+
+  FullyQualifiedIdentifierAppend(name, &lex->spelling);
+  LexNextToken(lex);
+  while (LexMatch(lex, TOK(coloncolon))) {
+    name->is_qualified = true;
+    bool is_destructor = LexMatch(lex, TOK(tilde));
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected identifier after '::'");
+      return true;
+    }
+    if (is_destructor) {
+      String destructor_name;
+      StringInit(&destructor_name, "~");
+      StringAppendString(&destructor_name, &lex->spelling);
+      FullyQualifiedIdentifierAppend(name, &destructor_name);
+      StringDestruct(&destructor_name);
+    } else {
+      FullyQualifiedIdentifierAppend(name, &lex->spelling);
+    }
+    LexNextToken(lex);
+  }
+  return true;
+}
+
+static Namespace* FindNamespaceChildInScope(Syntax* syntax, String* name) {
+  Namespace* ns = syntax->current_namespace != NULL ? syntax->current_namespace
+                                                    : compiler->global_namespace;
+  while (ns != NULL) {
+    Namespace* child = NamespaceFindChild(ns, name);
+    if (child != NULL) {
+      return child;
+    }
+    ns = ns->parent;
+  }
+  return NamespaceFindChild(compiler->global_namespace, name);
+}
+
+bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
+  if (LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    return true;
+  }
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  return FindNamespaceChildInScope(syntax, &syntax->lex->spelling) != NULL;
+}
+
+static Namespace* ResolveQualifiedNamespace(Syntax* syntax,
+                                            FullyQualifiedIdentifier* name) {
+  if (name->components.length <= 1 && !name->absolute) {
+    return NULL;
+  }
+
+  size_t namespace_components =
+      name->components.length == 0 ? 0 : name->components.length - 1;
+  if (namespace_components == 0) {
+    return compiler->global_namespace;
+  }
+
+  String* first = name->components.value.p[0];
+  Namespace* ns = name->absolute
+      ? NamespaceFindChild(compiler->global_namespace, first)
+      : FindNamespaceChildInScope(syntax, first);
+  for (size_t i = 1; ns != NULL && i < namespace_components; i++) {
+    ns = NamespaceFindChild(ns, name->components.value.p[i]);
+  }
+  return ns;
+}
+
+Namespace* SyntaxFindQualifiedNamespace(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name) {
+  if (name->components.length == 0) {
+    return NULL;
+  }
+
+  String* first = name->components.value.p[0];
+  Namespace* ns = name->absolute
+      ? NamespaceFindChild(compiler->global_namespace, first)
+      : FindNamespaceChildInScope(syntax, first);
+  for (size_t i = 1; ns != NULL && i < name->components.length; i++) {
+    ns = NamespaceFindChild(ns, name->components.value.p[i]);
+  }
+  return ns;
+}
+
+Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
+                                  FullyQualifiedIdentifier* name) {
+  if (!name->is_qualified && name->components.length == 1) {
+    String* simple = name->components.value.p[0];
+    return FollowAlias(SyntaxFindSymbol(syntax, simple));
+  }
+
+  const char* last_name = FullyQualifiedIdentifierLast(name);
+  String last;
+  StringInit(&last, last_name);
+  Symbol* symbol = NULL;
+  Namespace* ns = ResolveQualifiedNamespace(syntax, name);
+  if (ns != NULL && ns != compiler->global_namespace) {
+    symbol = NamespaceFindSymbol(ns, &last);
+  } else if (ns == compiler->global_namespace) {
+    symbol = FindGlobalSymbol(&last);
+  }
+  StringDestruct(&last);
+  return FollowAlias(symbol);
+}
+
+Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name,
+                                        size_t component_count) {
+  if (component_count == 0 || component_count > name->components.length) {
+    return NULL;
+  }
+  if (component_count == name->components.length) {
+    return SyntaxFindQualifiedSymbol(syntax, name);
+  }
+  if (component_count == 1 && !name->absolute) {
+    return SyntaxFindSymbol(syntax, name->components.value.p[0]);
+  }
+
+  size_t namespace_components = component_count - 1;
+  Namespace* ns = NULL;
+  if (namespace_components == 0) {
+    ns = compiler->global_namespace;
+  } else {
+    String* first = name->components.value.p[0];
+    ns = name->absolute
+        ? NamespaceFindChild(compiler->global_namespace, first)
+        : FindNamespaceChildInScope(syntax, first);
+    for (size_t i = 1; ns != NULL && i < namespace_components; i++) {
+      ns = NamespaceFindChild(ns, name->components.value.p[i]);
+    }
+  }
+  if (ns == NULL) {
+    return NULL;
+  }
+
+  String* last = name->components.value.p[component_count - 1];
+  Symbol* symbol = ns == compiler->global_namespace
+      ? FindGlobalSymbol(last)
+      : NamespaceFindSymbol(ns, last);
+  return FollowAlias(symbol);
+}
+
+Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
+                               FullyQualifiedIdentifier* name) {
+  if (!name->is_qualified && name->components.length == 1) {
+    String* simple = name->components.value.p[0];
+    return FollowAlias(SyntaxFindTag(syntax, simple));
+  }
+
+  const char* last_name = FullyQualifiedIdentifierLast(name);
+  String last;
+  StringInit(&last, last_name);
+  Symbol* symbol = NULL;
+  Namespace* ns = ResolveQualifiedNamespace(syntax, name);
+  if (ns != NULL && ns != compiler->global_namespace) {
+    symbol = NamespaceFindTag(ns, &last);
+  } else if (ns == compiler->global_namespace) {
+    symbol = FindGlobalTag(&last);
+  }
+  StringDestruct(&last);
+  return FollowAlias(symbol);
+}
+
 void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->ast = NULL;
   syntax->lex = lex;
   syntax->local_symbol_stack = NULL;
   syntax->local_tag_stack = NULL;
+  syntax->current_namespace = compiler != NULL ? compiler->global_namespace : NULL;
   syntax->fake_name_index = 1;
   syntax->found_open_paren = false;
   syntax->compound_literal_type = NULL;
@@ -96,13 +352,22 @@ Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_symbol_stack;
   Symbol* symbol = FindLocalSymbol(scope, name);
   if (symbol != NULL) {
-    return symbol;
+    return FollowAlias(symbol);
   }
-  return FindGlobalSymbol(name);
+  if (InNamedNamespace(syntax)) {
+    symbol = NamespaceFindSymbolInScope(syntax->current_namespace, name);
+    if (symbol != NULL) {
+      return FollowAlias(symbol);
+    }
+  }
+  return FollowAlias(FindGlobalSymbol(name));
 }
 
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_symbol_stack == NULL) {
+    if (InNamedNamespace(syntax)) {
+      return NamespaceInsertSymbol(syntax->current_namespace, symbol);
+    }
     return InsertGlobalSymbol(symbol);
   }
   bool ok = InsertLocalSymbol(syntax->local_symbol_stack, symbol);
@@ -116,9 +381,15 @@ Symbol* SyntaxFindTag(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_tag_stack;
   Symbol* symbol = FindLocalSymbol(scope, name);
   if (symbol != NULL) {
-    return symbol;
+    return FollowAlias(symbol);
   }
-  return FindGlobalTag(name);
+  if (InNamedNamespace(syntax)) {
+    symbol = NamespaceFindTagInScope(syntax->current_namespace, name);
+    if (symbol != NULL) {
+      return FollowAlias(symbol);
+    }
+  }
+  return FollowAlias(FindGlobalTag(name));
 }
 
 Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
@@ -130,11 +401,17 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
     }
     return NULL;
   }
+  if (InNamedNamespace(syntax)) {
+    return NamespaceFindTag(syntax->current_namespace, name);
+  }
   return FindGlobalTag(name);
 }
 
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_tag_stack == NULL) {
+    if (InNamedNamespace(syntax)) {
+      return NamespaceInsertTag(syntax->current_namespace, symbol);
+    }
     return InsertGlobalTag(symbol);
   }
   bool ok = InsertLocalSymbol(syntax->local_tag_stack, symbol);
@@ -220,6 +497,8 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
 }
 
 static ASTNode* ParseBracedInitializer(Syntax* syntax);
+static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
+static ASTNode* ParseUsingDeclaration(Syntax* syntax);
 
 // Identity transform used when deep-cloning an AST node.
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
@@ -517,7 +796,7 @@ void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
 
 // Interprets attributes that have just been attached to a declared symbol and
 // affect the symbol/type directly (layout and function-behavior flags).
-static void SyntaxApplyDeclarationAttributes(Symbol* sym) {
+static void ApplyDeclarationAttributes(Symbol* sym) {
   if (sym == NULL) {
     return;
   }
@@ -726,7 +1005,9 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
                       "Duplicate 'inline' specifier");
       }
       *is_inline = true;
-    } else if (SyntaxLookingAtType(syntax) &&
+    } else if (!(type_specifier.type != kTypeImplicit &&
+                 CurrentIdentifierFollowedByScopeOperator(syntax)) &&
+               SyntaxLookingAtType(syntax) &&
                (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
     } else if (LexMatch(syntax->lex, TOK(attribute))) {
@@ -761,7 +1042,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     // The old_sym refers to a previous declaration if found.
     Symbol* old_sym = NULL;
     if (sym != NULL) {
-      old_sym = FindGlobalSymbol(&sym->name);
+      old_sym = parser->cxx_member_definition != NULL
+          ? parser->cxx_member_definition->symbol
+          : FindFileScopeSymbol(syntax, &sym->name);
       if (old_sym != NULL) {
         // We have this symbol already.  If it's a declaration then it's
         // OK to declare (and define) it now.  If it's a definition then
@@ -813,7 +1096,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       } else {
         // This is the first declaration of this symbol, add to the symbol
         // table.
-        bool inserted = InsertGlobalSymbol(sym);
+        bool inserted = InsertFileScopeSymbol(syntax, sym);
         assert(inserted);
         (void)inserted;
         if (IsDefinition(parser, sym, storage)) {
@@ -841,7 +1124,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    SyntaxApplyDeclarationAttributes(sym);
+    ApplyDeclarationAttributes(sym);
 
     // Check for GCC-style assembler name after a declarator:
     //   int x asm("external_name");
@@ -923,13 +1206,231 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
   return NULL;
 }
 
+static void AppendDeclarationsFromNode(Vector* declarations, ASTNode* node) {
+  if (node == NULL) {
+    return;
+  }
+  if (node->op != AST_OP(decl_list)) {
+    VectorAppend(declarations, node);
+    return;
+  }
+
+  DeclarationListASTNode* list = (DeclarationListASTNode*)node;
+  VectorAppendVector(declarations, list->declarations);
+  // The declarations have been transferred to the containing namespace list.
+  // Leave the child list empty so its idempotent teardown does not delete them.
+  VectorClear(list->declarations);
+}
+
+static Symbol* NewUsingAliasSymbol(const char* name, Symbol* target,
+                                   SourceLocation location) {
+  Symbol* alias = NewSymbol(name, NULL, target != NULL ? target->storage : STO(implicit));
+  alias->flags.is_using_alias = true;
+  alias->alias_target = target;
+  alias->location = location;
+  return alias;
+}
+
+static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag) {
+  bool added = is_tag ? SyntaxAddTag(syntax, alias) : SyntaxAddSymbol(syntax, alias);
+  if (!added) {
+    SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
+                alias->name.value);
+    SymbolDelete(alias);
+    return false;
+  }
+  return true;
+}
+
+static void ImportNamespaceSymbol(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  Syntax* syntax = data;
+  Symbol* target = ((SymbolNode*)node)->symbol;
+  AddUsingAlias(syntax, NewUsingAliasSymbol(target->name.value, target,
+                                            syntax->lex->current_token_location),
+                /*is_tag=*/false);
+}
+
+static void ImportNamespaceTag(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  Syntax* syntax = data;
+  Symbol* target = ((SymbolNode*)node)->symbol;
+  AddUsingAlias(syntax, NewUsingAliasSymbol(target->name.value, target,
+                                            syntax->lex->current_token_location),
+                /*is_tag=*/true);
+}
+
+static void ImportNamespace(Syntax* syntax, Namespace* ns) {
+  BinaryTreeTraverse(&ns->symbol_table, ImportNamespaceSymbol, syntax);
+  BinaryTreeTraverse(&ns->tag_table, ImportNamespaceTag, syntax);
+}
+
+static ASTNode* EmptyDeclarationList(SourceLocation location) {
+  return NewDeclarationListASTNode(NewVector(), location);
+}
+
+static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
+                                           FullyQualifiedIdentifier* name,
+                                           SourceLocation location) {
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  Symbol* parsed = TypeParserParseDeclarator(&parser, type);
+  TypeParserDestruct(&parser);
+
+  TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
+  Symbol* alias =
+      NewSymbol(FullyQualifiedIdentifierLast(name), alias_type, STO(typedef));
+  alias->location = location;
+  bool added = SyntaxAddSymbol(syntax, alias);
+  if (!added) {
+    SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
+                alias->name.value);
+    SymbolDelete(alias);
+  }
+  if (parsed != NULL) {
+    SymbolDelete(parsed);
+  }
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
+static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // using
+
+  if (LexMatch(syntax->lex, TOK(namespace))) {
+    FullyQualifiedIdentifier ns_name;
+    FullyQualifiedIdentifierInit(&ns_name);
+    if (!SyntaxParseFullyQualifiedIdentifier(syntax, &ns_name)) {
+      SyntaxError(syntax, "Expected namespace name in using directive");
+    } else {
+      Namespace* ns = SyntaxFindQualifiedNamespace(syntax, &ns_name);
+      if (ns == NULL) {
+        SyntaxError(syntax, "Unknown namespace %s", ns_name.spelling.value);
+      } else {
+        ImportNamespace(syntax, ns);
+      }
+    }
+    FullyQualifiedIdentifierDestruct(&ns_name);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+    SyntaxError(syntax, "Expected identifier in using declaration");
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  if (!name.is_qualified && LexMatch(syntax->lex, TOK(equal))) {
+    ASTNode* result = ParseUsingAliasDeclaration(syntax, &name, location);
+    FullyQualifiedIdentifierDestruct(&name);
+    return result;
+  }
+
+  if (!name.is_qualified) {
+    SyntaxError(syntax, "Using declaration requires a qualified name");
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  Symbol* target = SyntaxFindQualifiedSymbol(syntax, &name);
+  if (target == NULL) {
+    target = SyntaxFindQualifiedTag(syntax, &name);
+    if (target == NULL) {
+      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+    } else {
+      AddUsingAlias(syntax, NewUsingAliasSymbol(FullyQualifiedIdentifierLast(&name),
+                                                target, location),
+                    /*is_tag=*/true);
+    }
+  } else {
+    AddUsingAlias(syntax, NewUsingAliasSymbol(FullyQualifiedIdentifierLast(&name),
+                                              target, location),
+                  /*is_tag=*/false);
+  }
+
+  FullyQualifiedIdentifierDestruct(&name);
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
+static Namespace* ParseNamespaceName(Syntax* syntax, Namespace* parent) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected namespace name");
+    return parent;
+  }
+
+  Namespace* ns = parent;
+  while (true) {
+    String name;
+    StringInit(&name, syntax->lex->spelling.value);
+    ns = NamespaceFindOrCreateChild(ns, &name);
+    StringDestruct(&name);
+    LexNextToken(syntax->lex);
+
+    if (!LexMatch(syntax->lex, TOK(coloncolon))) {
+      break;
+    }
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected namespace name after '::'");
+      break;
+    }
+  }
+  return ns;
+}
+
+static ASTNode* ParseNamespaceDeclaration(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // namespace
+
+  Namespace* previous_namespace = syntax->current_namespace;
+  Namespace* parent = previous_namespace != NULL ? previous_namespace
+                                                 : compiler->global_namespace;
+  Namespace* ns = NULL;
+  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+    ns = ParseNamespaceName(syntax, parent);
+  } else {
+    ns = NamespaceFindOrCreateAnonymousChild(parent);
+  }
+
+  SyntaxNeedBracket(syntax, TOK(lbrace), TC(openbra) | TC(decl));
+
+  Vector* declarations = NewVector();
+  syntax->current_namespace = ns;
+  while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
+    ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+    AppendDeclarationsFromNode(declarations, node);
+  }
+  syntax->current_namespace = previous_namespace;
+
+  SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebrace) | TC(decl));
+  return NewDeclarationListASTNode(declarations, location);
+}
+
 
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
+  syntax->context = kParsingFileScope;
+  if (syntax->current_namespace == NULL) {
+    syntax->current_namespace = compiler->global_namespace;
+  }
+
+  if (LexLookingAt(syntax->lex, TOK(namespace))) {
+    return ParseNamespaceDeclaration(syntax);
+  }
+  if (LexLookingAt(syntax->lex, TOK(using))) {
+    return ParseUsingDeclaration(syntax);
+  }
+
   Vector* declarations = NewVector();
   Vector attributes = {0};
-  syntax->context = kParsingFileScope;
   
   // Parse common __attribute__ syntax.
   while (LexMatch(syntax->lex, TOK(attribute))) {
@@ -1114,7 +1615,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     // Symbol takes ownerhip of attribute strings.
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    SyntaxApplyDeclarationAttributes(sym);
+    ApplyDeclarationAttributes(sym);
     
     // Check for __thread violations.
     CheckThreadLocal(syntax, sym);
@@ -1177,6 +1678,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 // function.  The symbol is added to the local scope (top symbol table in the
 // local symbol stack).
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
+  if (LexLookingAt(syntax->lex, TOK(using))) {
+    return ParseUsingDeclaration(syntax);
+  }
+
   Vector* declarations = NewVector();
 
   Storage storage = STO(implicit);
@@ -1240,6 +1745,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(long):
     case TOK(float):
     case TOK(double):
+    case TOK(class):
     case TOK(struct):
     case TOK(union):
     case TOK(enum):
@@ -1254,13 +1760,15 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(identifier): {
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
-        return false;
+        return SyntaxCurrentTokenStartsQualifiedName(syntax);
       }
       if (StorageIs(sym->storage , STO(typedef))) {
         return true;
       }
       return false;
     }
+    case TOK(coloncolon):
+      return SyntaxCurrentTokenStartsQualifiedName(syntax);
     default:
       return false;
   }
@@ -1273,6 +1781,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(auto):
     case TOK(register):
     case TOK(typedef):
+    case TOK(using):
       return true;
     default:
       return SyntaxLookingAtType(syntax);
@@ -1380,6 +1889,7 @@ TokenClass ClassifyToken(Token tok) {
 
     case TOK(bool):
     case TOK(char):
+    case TOK(class):
     case TOK(complex):
     case TOK(const):
     case TOK(double):
