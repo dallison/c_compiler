@@ -715,6 +715,35 @@ static void GetCurrentTokenSpelling(TokenIterator* t, String* spelling) {
   AppendCurrentTokenSpelling(t, spelling);
 }
 
+static void StripLiteralSpelling(String* spelling, String* content) {
+  StringInit(content, NULL);
+  size_t quote = 0;
+  while (quote < spelling->length && spelling->value[quote] != '"' &&
+         spelling->value[quote] != '\'') {
+    quote++;
+  }
+  if (quote >= spelling->length) {
+    StringSetString(content, spelling);
+    return;
+  }
+  char quote_char = spelling->value[quote];
+  size_t end = spelling->length;
+  while (end > quote + 1 && spelling->value[end - 1] != quote_char) {
+    end--;
+  }
+  if (end <= quote + 1) {
+    return;
+  }
+  StringAppendSegment(content, &spelling->value[quote + 1], end - quote - 2);
+}
+
+static void GetCurrentLiteralContent(TokenIterator* t, String* content) {
+  String spelling = {0};
+  GetCurrentTokenSpelling(t, &spelling);
+  StripLiteralSpelling(&spelling, content);
+  StringDestruct(&spelling);
+}
+
 static bool IsSpaceToken(TokenIterator* t) {
   char tok = CurrentToken(t);
   return tok == PPTOK(space) || tok == PPTOK(comment);
@@ -730,89 +759,58 @@ static void MoveToNextToken(TokenIterator* t) {
 }
 
 
-static size_t SkipIntegerSuffix(String* line, size_t pos) {
-  char ch = toupper(line->value[pos]);
-  bool foundu = false;
-  if (ch == 'U') {
-    pos++;
-    foundu = true;
+static size_t SkipUserDefinedLiteralSuffix(String* line, size_t pos) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+    return pos;
   }
-  ch = toupper(line->value[pos]);
-  if (ch == 'L') {
-    pos++;
+  size_t bytes = LexIdentifierCharByteCount(line->value, pos, line->length, true);
+  if (bytes == 0) {
+    return pos;
   }
-  ch = toupper(line->value[pos]);
-  if (ch == 'L') {
-    pos++;
-  }
-  if (!foundu) {
-    ch = toupper(line->value[pos]);
-    // Allow U to appear after L or LL.
-    if (ch == 'U') {
-      pos++;
+  while (pos < line->length) {
+    bytes = LexIdentifierCharByteCount(line->value, pos, line->length, false);
+    if (bytes == 0) {
+      break;
     }
-  }
-  return pos;
-}
-
-// Collect a floating point suffix
-// Allows F or L.
-static size_t SkipFloatingSuffix(String* line, size_t pos) {
-  char ch = toupper(line->value[pos]);
-  if (ch == 'F') {
-    pos++;
-  } else {
-    ch = toupper(line->value[pos]);
-    if (ch == 'L') {
-      pos++;
-    }
+    pos += bytes;
   }
   return pos;
 }
 
 // Skip a number preprocessing token.
 static size_t SkipNumber(String* line, size_t pos) {
-  bool seenexp = false;      // Have we seen an exponent?
-  bool seendot = false;  // Have we seen a dot?
-  bool seensign = false;     // Have we seen a sign char?
-  
+  bool exponent_marker = false;
   while (pos < line->length) {
     char ch = line->value[pos];
-    if (ch == '.') {
-      if (seendot) {
-        // Two dots terminate number.
-        break;
-      }
-      seendot = true;
-    } else if (ch == 'e' || ch == 'E') {
-      if (seenexp) {
-        // Already seen exponent, terminate.
-        break;
-      }
-      seenexp = true;
-    } else if (ch == '+' || ch == '-') {
-      if (!seenexp || seensign) {
-        // Signs can only be after exponent.
-        break;
-      }
-      seensign = true;
-    } else if (!isdigit((unsigned char)ch)) {
-      // Not a digit, terminate.
-      break;
+    if (isdigit((unsigned char)ch) || ch == '.') {
+      exponent_marker = false;
+      pos++;
+      continue;
     }
-    pos++;
-  }
-  
-  // Now we can determine the type.  If we've seen a dot
-  // or exponent then we are a floating point number.
-  // A suffix of ‘F’ or ‘f’ is also floating point.
-  bool isfp = seendot || seenexp || toupper(line->value[pos]) == 'F';
-  
-  // Skip the appropriate type of suffix.
-  if (isfp) {
-    SkipFloatingSuffix(line, pos);
-  } else {
-    SkipIntegerSuffix(line, pos);
+    if (LexIdentifierCharByteCount(line->value, pos, line->length, false) != 0) {
+      exponent_marker = ch == 'e' || ch == 'E' || ch == 'p' || ch == 'P';
+      do {
+        pos++;
+      } while (pos < line->length &&
+               LexIdentifierCharByteCount(line->value, pos, line->length,
+                                          false) != 0);
+      continue;
+    }
+    if ((ch == '+' || ch == '-') && exponent_marker) {
+      exponent_marker = false;
+      pos++;
+      continue;
+    }
+    if (CompilerCXXAtLeast(kLanguageStandardCXX14) && ch == '\'' &&
+        pos + 1 < line->length &&
+        (isdigit((unsigned char)line->value[pos + 1]) ||
+         LexIdentifierCharByteCount(line->value, pos + 1, line->length,
+                                    false) != 0)) {
+      exponent_marker = false;
+      pos += 2;
+      continue;
+    }
+    break;
   }
   return pos;
 }
@@ -826,12 +824,20 @@ static size_t AppendNumber(String* input, String* output, size_t pos) {
   return pos;
 }
 
-static size_t AppendStringLiteral(String* input, String* output, size_t pos) {
-  // Count length, not including quotes.
-  size_t start = pos;
+static void AppendLengthDelimitedSegment(String* output, String* input,
+                                         size_t start, size_t end) {
+  size_t length = end - start;
+  EncodeLength(output, length);
+  StringAppendSegment(output, &input->value[start], length);
+}
+
+static size_t AppendStringLiteral(String* input, String* output, size_t start,
+                                  size_t pos) {
+  // Count through the closing quote.
   while (pos < input->length) {
     char ch = input->value[pos];
     if (ch == '"') {
+      pos++;
       break;
     }
     if (ch == '\\') {
@@ -839,18 +845,18 @@ static size_t AppendStringLiteral(String* input, String* output, size_t pos) {
     }
     pos++;
   }
-  size_t length = pos - start;
-  EncodeLength(output, length);
-  StringAppendSegment(output, &input->value[start], length);
-  return pos + 1;
+  pos = SkipUserDefinedLiteralSuffix(input, pos);
+  AppendLengthDelimitedSegment(output, input, start, pos);
+  return pos;
 }
 
-static size_t AppendCharLiteral(String* input, String* output, size_t pos) {
-  // Count length, not including quotes.
-  size_t start = pos;
+static size_t AppendCharLiteral(String* input, String* output, size_t start,
+                                size_t pos) {
+  // Count through the closing quote.
   while (pos < input->length) {
     char ch = input->value[pos];
     if (ch == '\'') {
+      pos++;
       break;
     }
     if (ch == '\\') {
@@ -858,10 +864,40 @@ static size_t AppendCharLiteral(String* input, String* output, size_t pos) {
     }
     pos++;
   }
-  size_t length = pos - start;
-  EncodeLength(output, length);
-  StringAppendSegment(output, &input->value[start], length);
-  return pos + 1;
+  pos = SkipUserDefinedLiteralSuffix(input, pos);
+  AppendLengthDelimitedSegment(output, input, start, pos);
+  return pos;
+}
+
+static size_t AppendRawStringLiteral(String* input, String* output, size_t start,
+                                     size_t pos) {
+  // pos points at R in R"...".
+  pos += 2;
+  String delimiter = {0};
+  StringInit(&delimiter, NULL);
+  while (pos < input->length && input->value[pos] != '(') {
+    StringAppendChar(&delimiter, input->value[pos++]);
+  }
+  if (pos < input->length && input->value[pos] == '(') {
+    pos++;
+  }
+
+  while (pos < input->length) {
+    if (input->value[pos] == ')' &&
+        pos + delimiter.length + 1 < input->length &&
+        strncmp(&input->value[pos + 1], delimiter.value, delimiter.length) == 0 &&
+        input->value[pos + delimiter.length + 1] == '"') {
+      break;
+    }
+    pos++;
+  }
+  if (pos < input->length) {
+    pos += delimiter.length + 2;
+  }
+  StringDestruct(&delimiter);
+  pos = SkipUserDefinedLiteralSuffix(input, pos);
+  AppendLengthDelimitedSegment(output, input, start, pos);
+  return pos;
 }
 
 static bool CanStartToken(String* input, size_t pos) {
@@ -1073,12 +1109,46 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
     char ch = input->value[i];
     if (LexIdentifierCharByteCount(input->value, i, input->length, true) != 0 ||
         (assembler_mode && (ch == '.' || ch == '@'))) {
-      if ((ch == 'L' || ch == 'l') && input->value[i+1] == '"') {
+      if (CompilerIsCXX() && ch == 'R' && i + 1 < input->length &&
+          input->value[i + 1] == '"') {
+        StringAppendChar(output, PPTOK(literal));
+        i = AppendRawStringLiteral(input, output, i, i);
+      } else if (CompilerIsCXX() && ch == 'L' && i + 2 < input->length &&
+                 input->value[i + 1] == 'R' && input->value[i + 2] == '"') {
         StringAppendChar(output, PPTOK(wide_literal));
-        i = AppendStringLiteral(input, output, i + 2);
+        i = AppendRawStringLiteral(input, output, i, i + 1);
+      } else if (CompilerIsCXX() && ch == 'u' && i + 2 < input->length &&
+                 input->value[i + 1] == '8' && input->value[i + 2] == '"') {
+        StringAppendChar(output, PPTOK(literal));
+        i = AppendStringLiteral(input, output, i, i + 3);
+      } else if (CompilerIsCXX() && ch == 'u' && i + 2 < input->length &&
+                 input->value[i + 1] == '8' && input->value[i + 2] == '\'') {
+        StringAppendChar(output, PPTOK(char_literal));
+        i = AppendCharLiteral(input, output, i, i + 3);
+      } else if (CompilerIsCXX() && ch == 'u' && i + 3 < input->length &&
+                 input->value[i + 1] == '8' && input->value[i + 2] == 'R' &&
+                 input->value[i + 3] == '"') {
+        StringAppendChar(output, PPTOK(literal));
+        i = AppendRawStringLiteral(input, output, i, i + 2);
+      } else if (CompilerIsCXX() && (ch == 'u' || ch == 'U') &&
+                 i + 1 < input->length && input->value[i + 1] == '"') {
+        StringAppendChar(output, PPTOK(literal));
+        i = AppendStringLiteral(input, output, i, i + 2);
+      } else if (CompilerIsCXX() && (ch == 'u' || ch == 'U') &&
+                 i + 1 < input->length && input->value[i + 1] == '\'') {
+        StringAppendChar(output, PPTOK(char_literal));
+        i = AppendCharLiteral(input, output, i, i + 2);
+      } else if (CompilerIsCXX() && (ch == 'u' || ch == 'U') &&
+                 i + 2 < input->length && input->value[i + 1] == 'R' &&
+                 input->value[i + 2] == '"') {
+        StringAppendChar(output, PPTOK(literal));
+        i = AppendRawStringLiteral(input, output, i, i + 1);
+      } else if ((ch == 'L' || ch == 'l') && input->value[i+1] == '"') {
+        StringAppendChar(output, PPTOK(wide_literal));
+        i = AppendStringLiteral(input, output, i, i + 2);
       } else if ((ch == 'L' || ch == 'l') && input->value[i+1] == '\'') {
         StringAppendChar(output, PPTOK(wide_char_literal));
-        i = AppendCharLiteral(input, output, i + 2);
+        i = AppendCharLiteral(input, output, i, i + 2);
       } else {
         size_t start = i;
         String spelling = {0};
@@ -1121,16 +1191,19 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       size_t length = i - start;
       EncodeLength(output, length);
       StringAppendString(output, &spelling);
+      if (i < input->length && input->value[i] == '>') {
+        i++;
+      }
       continue;
     }
     if (ch == '"') {
       StringAppendChar(output, PPTOK(literal));
-      i = AppendStringLiteral(input, output, i+1);
+      i = AppendStringLiteral(input, output, i, i + 1);
       continue;
     }
     if (ch == '\'') {
       StringAppendChar(output, PPTOK(char_literal));
-      i = AppendCharLiteral(input, output, i+1);
+      i = AppendCharLiteral(input, output, i, i + 1);
       continue;
     }
     if (isdigit((unsigned char)ch) ||
@@ -1305,24 +1378,14 @@ static void DetokenizeToken(String* tokens,
       }
       break;
     case PPTOK(literal):
-      AppendTokenSpelling(tokens, index, &spelling);
-      StringPrintf(text, "\"%s\"", spelling.value);
-      break;
     case PPTOK(wide_literal):
-      AppendTokenSpelling(tokens, index, &spelling);
-      StringPrintf(text, "L\"%s\"", spelling.value);
-      break;
     case PPTOK(char_literal):
-      AppendTokenSpelling(tokens, index, &spelling);
-      StringPrintf(text, "'%s'", spelling.value);
+    case PPTOK(wide_char_literal):
+      AppendTokenSpelling(tokens, index, text);
       break;
     case PPTOK(system_header):
       AppendTokenSpelling(tokens, index, &spelling);
       StringPrintf(text, "<%s>", spelling.value);
-      break;
-    case PPTOK(wide_char_literal):
-      AppendTokenSpelling(tokens, index, &spelling);
-      StringPrintf(text, "L'%s'", spelling.value);
       break;
     case PPTOK(other_char):
       StringAppendChar(text, tokens->value[index+1]);
@@ -1864,7 +1927,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   String filename;
   bool system_include = false;
   if (CurrentToken(&ti) == PPTOK(literal)) {
-    GetCurrentTokenSpelling(&ti, &filename);
+    GetCurrentLiteralContent(&ti, &filename);
   } else if (CurrentToken(&ti) == PPTOK(system_header)) {
     GetCurrentTokenSpelling(&ti, &filename);
     system_include = true;
@@ -2189,7 +2252,7 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
   String filename;
   bool filename_set = false;
   if (!error && CurrentToken(&ti) == PPTOK(literal)) {
-    GetCurrentTokenSpelling(&ti, &filename);
+    GetCurrentLiteralContent(&ti, &filename);
     filename_set = true;
   }
   
@@ -2338,7 +2401,7 @@ static bool GetPragmaMacroArg(TokenIterator* ti, String* name) {
   if (CurrentToken(ti) != PPTOK(literal)) {
     return false;
   }
-  GetCurrentTokenSpelling(ti, name);
+  GetCurrentLiteralContent(ti, name);
   MoveToNextToken(ti);
   SkipSpaceTokens(ti);
   if (CurrentToken(ti) == PPTOK(closeparen)) {
@@ -2365,7 +2428,7 @@ static bool GetPragmaMessageString(TokenIterator* ti, String* out) {
   bool got = false;
   while (CurrentToken(ti) == PPTOK(literal)) {
     String piece = {0};
-    GetCurrentTokenSpelling(ti, &piece);
+    GetCurrentLiteralContent(ti, &piece);
     StringAppend(out, piece.value);
     StringDestruct(&piece);
     MoveToNextToken(ti);
@@ -2418,7 +2481,7 @@ static void HandleDiagnosticPragma(TokenIterator* ti, DiagnosticVendor vendor) {
     return;
   }
   String spelling = {0};
-  GetCurrentTokenSpelling(ti, &spelling);
+  GetCurrentLiteralContent(ti, &spelling);
   MoveToNextToken(ti);
 
   const char* name = spelling.value;
@@ -2989,8 +3052,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
           String literal = {0};
           // Append a PPTOK(literal) to the temp value.
           StringAppendChar(&literal, PPTOK(literal));
-          EncodeLength(&literal, escaped.length);
+          EncodeLength(&literal, escaped.length + 2);
+          StringAppendChar(&literal, '"');
           StringAppendString(&literal, &escaped);
+          StringAppendChar(&literal, '"');
           ReplaceCurrentToken(&rep_ti, &literal);
           StringDestruct(&detokenized);
           StringDestruct(&escaped);
@@ -3096,7 +3161,7 @@ static void ProcessPragmaOperator(Preprocessor* p, TokenIterator* ti) {
     goto bail;
   }
   String content = {0};
-  GetCurrentTokenSpelling(ti, &content);
+  GetCurrentLiteralContent(ti, &content);
   MoveToNextToken(ti);
   SkipSpaceTokens(ti);
   if (CurrentToken(ti) != PPTOK(closeparen)) {

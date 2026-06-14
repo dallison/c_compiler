@@ -20,6 +20,14 @@
 #include "tokens.h"
 #include "vector.h"
 
+typedef enum {
+  kLiteralEncodingNone,
+  kLiteralEncodingWide,
+  kLiteralEncodingUTF8,
+  kLiteralEncodingUTF16,
+  kLiteralEncodingUTF32,
+} LiteralEncoding;
+
 // The lexical analyzer.  This struct contains all the data
 // necessary to convert the input source code to the tokens
 // in the C language.
@@ -49,6 +57,9 @@ typedef struct Lex {
   int64_t number;       // Integer literal value.
   double fnumber;       // Floating point literal value.
   String suffix;        // Integer or floating suffix.
+  String ud_suffix;     // C++ user-defined literal suffix.
+  LiteralEncoding literal_encoding;
+  bool literal_is_raw;
   
   bool preprocessor_mode;  // Running in preprocessor mode.
   bool in_comment;         // We are inside a multi-line comment.

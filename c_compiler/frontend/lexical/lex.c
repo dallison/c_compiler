@@ -157,9 +157,11 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"friend", TOK(friend), kLanguageStandardCXX98},
   {"goto", TOK(goto), kLanguageStandardCXX98},
   {"if", TOK(if), kLanguageStandardCXX98},
+  {"import", TOK(import), kLanguageStandardCXX20},
   {"inline", TOK(inline), kLanguageStandardCXX98},
   {"int", TOK(int), kLanguageStandardCXX98},
   {"long", TOK(long), kLanguageStandardCXX98},
+  {"module", TOK(module), kLanguageStandardCXX20},
   {"mutable", TOK(mutable), kLanguageStandardCXX98},
   {"namespace", TOK(namespace), kLanguageStandardCXX98},
   {"new", TOK(new), kLanguageStandardCXX98},
@@ -516,9 +518,116 @@ static void CollectFloatingSuffix(Lex* lex) {
   }
 }
 
+static void CollectUserDefinedLiteralSuffix(Lex* lex) {
+  StringClear(&lex->ud_suffix);
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+    return;
+  }
+  size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
+                                            lex->line.length, true);
+  if (bytes == 0) {
+    return;
+  }
+  while (lex->pos < lex->line.length) {
+    bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
+                                       lex->line.length, false);
+    if (bytes == 0) {
+      break;
+    }
+    StringAppendSegment(&lex->ud_suffix, &lex->line.value[lex->pos], bytes);
+    lex->pos += bytes;
+  }
+}
+
+static bool CharAt(Lex* lex, size_t offset, char ch) {
+  return lex->pos + offset < lex->line.length &&
+         lex->line.value[lex->pos + offset] == ch;
+}
+
+static void AppendRawLiteralChar(Lex* lex, LiteralEncoding encoding, char ch) {
+  if (encoding == kLiteralEncodingWide) {
+    for (int i = 0; i < compiler->wchar_size; i++) {
+      StringAppendChar(&lex->spelling, ((unsigned char)ch >> i*8) & 0xff);
+    }
+    return;
+  }
+  StringAppendChar(&lex->spelling, ch);
+}
+
+static bool RawDelimiterChar(char ch) {
+  return ch != ' ' && ch != '(' && ch != ')' && ch != '\\' &&
+         ch != '\t' && ch != '\v' && ch != '\f' && ch != '\n';
+}
+
+static bool LexReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
+  if (SourceEof(lex->source)) {
+    return false;
+  }
+  AppendRawLiteralChar(lex, encoding, '\n');
+  StringClear(&lex->line);
+  SourceReadLine(lex->source, &lex->line);
+  lex->pos = 0;
+  return lex->line.length != 0 || !SourceEof(lex->source);
+}
+
+// Collect a C++ raw string literal.  lex->pos points at the R in R"...".
+static void CollectRawStringLiteral(Lex* lex, LiteralEncoding encoding) {
+  lex->literal_encoding = encoding;
+  lex->literal_is_raw = true;
+  StringClear(&lex->spelling);
+  lex->pos += 2;  // Skip R".
+
+  String delimiter = {0};
+  StringInit(&delimiter, NULL);
+  while (lex->pos < lex->line.length && lex->line.value[lex->pos] != '(') {
+    char ch = lex->line.value[lex->pos++];
+    if (!RawDelimiterChar(ch) || delimiter.length == 16) {
+      LexError(lex, "Invalid raw string delimiter");
+      StringDestruct(&delimiter);
+      return;
+    }
+    StringAppendChar(&delimiter, ch);
+  }
+  if (lex->pos >= lex->line.length || lex->line.value[lex->pos] != '(') {
+    LexError(lex, "Missing ( in raw string literal");
+    StringDestruct(&delimiter);
+    return;
+  }
+  lex->pos++;  // Skip (.
+
+  bool closed = false;
+  while (!SourceEof(lex->source) || lex->pos < lex->line.length) {
+    if (lex->pos >= lex->line.length) {
+      if (!LexReadRawStringContinuation(lex, encoding)) {
+        break;
+      }
+      continue;
+    }
+    char ch = lex->line.value[lex->pos];
+    if (ch == ')' &&
+        lex->pos + delimiter.length + 1 < lex->line.length &&
+        strncmp(&lex->line.value[lex->pos + 1], delimiter.value,
+                delimiter.length) == 0 &&
+        lex->line.value[lex->pos + delimiter.length + 1] == '"') {
+      lex->pos += delimiter.length + 2;
+      closed = true;
+      break;
+    }
+    AppendRawLiteralChar(lex, encoding, ch);
+    lex->pos++;
+  }
+  if (!closed) {
+    LexError(lex, "Unterminated raw string literal");
+  }
+  StringDestruct(&delimiter);
+  CollectUserDefinedLiteralSuffix(lex);
+}
+
 // Collect a string literal into lex->spelling, omitting enclosing quotes.
 // lex->pos is pointing at the open quote
 static void CollectStringLiteral(Lex* lex) {
+  lex->literal_encoding = kLiteralEncodingNone;
+  lex->literal_is_raw = false;
   lex->pos++;
   StringClear(&lex->spelling);
   bool newline = lex->pos == lex->line.length;
@@ -543,9 +652,12 @@ static void CollectStringLiteral(Lex* lex) {
   if (newline) {
     LexError(lex, "Newline in string literal");
   }
+  CollectUserDefinedLiteralSuffix(lex);
 }
 
 static void CollectWideStringLiteral(Lex* lex) {
+  lex->literal_encoding = kLiteralEncodingWide;
+  lex->literal_is_raw = false;
   lex->pos++;
   StringClear(&lex->spelling);
   bool newline = lex->pos == lex->line.length;
@@ -598,10 +710,13 @@ static void CollectWideStringLiteral(Lex* lex) {
   if (newline) {
     LexError(lex, "Newline in string literal");
   }
+  CollectUserDefinedLiteralSuffix(lex);
 }
 // Collect a character constant.  The current pos is the open single quote.
 // Returns the binary value of the character constant.
 static int CollectCharConst(Lex* lex) {
+  lex->literal_encoding = kLiteralEncodingNone;
+  lex->literal_is_raw = false;
   lex->pos++;
   int value = 0;
   int nchars = 0;
@@ -635,10 +750,13 @@ static int CollectCharConst(Lex* lex) {
   if (nchars == 0 || newline) {
     LexError(lex, "Newline in character constant");
   }
+  CollectUserDefinedLiteralSuffix(lex);
   return value;
 }
 
 static int CollectWideCharConst(Lex* lex) {
+  lex->literal_encoding = kLiteralEncodingWide;
+  lex->literal_is_raw = false;
   lex->pos++;
   int value = 0;
   int nchars = 0;
@@ -668,6 +786,7 @@ static int CollectWideCharConst(Lex* lex) {
   if (nchars == 0 || newline) {
     LexError(lex, "Newline in character constant");
   }
+  CollectUserDefinedLiteralSuffix(lex);
   return value;
 }
 
@@ -690,21 +809,92 @@ bool IsIdentifierChar(Lex* lex, char ch, bool start) {
 // of a wide string or char.  If it is an identifier, check for reserved
 // word.
 static void CollectIdentifierOrWide(Lex* lex) {
-  if (CurrentChar(lex) == 'L') {
+  if (CurrentChar(lex) == 'L' &&
+      (LookaheadChar(lex) == '"' || LookaheadChar(lex) == '\'')) {
     if (LookaheadChar(lex) == '"') {
-      // Wide string, collect into
       lex->pos++;
       CollectWideStringLiteral(lex);
       lex->current_token = TOK(string_wide);
-      return;
-    } else if (LookaheadChar(lex) == '\'') {
-      // Wide char const.
+    } else {
       lex->pos++;
       lex->number = CollectWideCharConst(lex);
       lex->current_token = TOK(charconst_wide);
+    }
+    return;
+  }
+
+  if (CompilerIsCXX()) {
+    LiteralEncoding encoding = kLiteralEncodingNone;
+    size_t prefix_len = 0;
+    bool raw = false;
+    bool string_literal = false;
+    bool char_literal = false;
+
+    if (CharAt(lex, 0, 'R') && CharAt(lex, 1, '"')) {
+      raw = true;
+      string_literal = true;
+    } else if (CharAt(lex, 0, 'L') && CharAt(lex, 1, 'R') &&
+               CharAt(lex, 2, '"')) {
+      encoding = kLiteralEncodingWide;
+      prefix_len = 1;
+      raw = true;
+      string_literal = true;
+    } else if (CharAt(lex, 0, 'u') && CharAt(lex, 1, '8')) {
+      encoding = kLiteralEncodingUTF8;
+      prefix_len = 2;
+      if (CharAt(lex, 2, 'R') && CharAt(lex, 3, '"')) {
+        raw = true;
+        string_literal = true;
+      } else if (CharAt(lex, 2, '"')) {
+        string_literal = true;
+      } else if (CharAt(lex, 2, '\'')) {
+        char_literal = true;
+      }
+    } else if (CharAt(lex, 0, 'u')) {
+      encoding = kLiteralEncodingUTF16;
+      prefix_len = 1;
+      if (CharAt(lex, 1, 'R') && CharAt(lex, 2, '"')) {
+        raw = true;
+        string_literal = true;
+      } else if (CharAt(lex, 1, '"')) {
+        string_literal = true;
+      } else if (CharAt(lex, 1, '\'')) {
+        char_literal = true;
+      }
+    } else if (CharAt(lex, 0, 'U')) {
+      encoding = kLiteralEncodingUTF32;
+      prefix_len = 1;
+      if (CharAt(lex, 1, 'R') && CharAt(lex, 2, '"')) {
+        raw = true;
+        string_literal = true;
+      } else if (CharAt(lex, 1, '"')) {
+        string_literal = true;
+      } else if (CharAt(lex, 1, '\'')) {
+        char_literal = true;
+      }
+    }
+
+    if (string_literal) {
+      lex->pos += prefix_len;
+      if (raw) {
+        CollectRawStringLiteral(lex, encoding);
+      } else {
+        CollectStringLiteral(lex);
+        lex->literal_encoding = encoding;
+      }
+      lex->current_token = encoding == kLiteralEncodingWide ? TOK(string_wide)
+                                                            : TOK(string);
+      return;
+    }
+    if (char_literal) {
+      lex->pos += prefix_len;
+      lex->number = CollectCharConst(lex);
+      lex->literal_encoding = encoding;
+      lex->current_token = TOK(charconst);
       return;
     }
   }
+
   // Identifier, collect into spelling.
   StringClear(&lex->spelling);
   while (lex->pos < lex->line.length) {
@@ -977,8 +1167,11 @@ static void LexInitCommon(Lex* lex, Preprocessor* preprocessor) {
   StringInit(&lex->line, NULL);
   StringInit(&lex->spelling, NULL);
   StringInit(&lex->suffix, NULL);
+  StringInit(&lex->ud_suffix, NULL);
   lex->number = 0;
   lex->fnumber = 0;
+  lex->literal_encoding = kLiteralEncodingNone;
+  lex->literal_is_raw = false;
   lex->pos = 0;
   lex->preprocessor = preprocessor;
   lex->preprocessor_mode = false;
@@ -1017,6 +1210,8 @@ void LexDestruct(Lex* lex) {
 
   StringDestruct(&lex->line);
   StringDestruct(&lex->spelling);
+  StringDestruct(&lex->suffix);
+  StringDestruct(&lex->ud_suffix);
 }
 
 // Collects a hexadecimal number prefixed by a $.
@@ -1038,6 +1233,25 @@ static void CollectHex(Lex* lex) {
   lex->current_token = TOK(number);
 }
 
+static bool IsDigitSeparator(Lex* lex, bool ishex, bool isoctal,
+                             bool isbinary) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX14) ||
+      lex->line.value[lex->pos] != '\'' || lex->pos + 1 >= lex->line.length) {
+    return false;
+  }
+  char next = lex->line.value[lex->pos + 1];
+  if (isbinary) {
+    return next == '0' || next == '1';
+  }
+  if (ishex) {
+    return isxdigit((unsigned char)next);
+  }
+  if (isoctal) {
+    return next >= '0' && next <= '7';
+  }
+  return isdigit((unsigned char)next);
+}
+
 static void CollectNumber(Lex* lex, char ch) {
   if (lex->assembler_mode && ch == '$') {
     lex->pos++;     // Skip $.
@@ -1047,6 +1261,7 @@ static void CollectNumber(Lex* lex, char ch) {
     bool seendot = ch == '.';  // Have we seen a dot?
     bool seensign = false;     // Have we seen a sign char?
     bool ishex = false;        // Have seen an x or X after initial 0.
+    bool isbinary = false;     // Have seen a b or B after initial 0.
     bool seenzero = ch == '0';     // Seen a zero at start.
     bool isoctal = seenzero;      // Number is octal.
     
@@ -1055,6 +1270,14 @@ static void CollectNumber(Lex* lex, char ch) {
     StringClear(&lex->spelling);
     StringAppendChar(&lex->spelling, ch);
     lex->pos++;
+    if (seenzero && !CompilerCXXAtLeast(kLanguageStandardCXX14) &&
+        lex->pos + 1 < lex->line.length &&
+        (lex->line.value[lex->pos] == 'b' ||
+         lex->line.value[lex->pos] == 'B') &&
+        (lex->line.value[lex->pos + 1] == '0' ||
+         lex->line.value[lex->pos + 1] == '1')) {
+      LexError(lex, "Binary integer literals require C++14");
+    }
     // Collect the number into spelling.  Then, when we know
     // what type of number it is, we can do the conversion to
     // binary.
@@ -1063,6 +1286,11 @@ static void CollectNumber(Lex* lex, char ch) {
       if (seenzero && (ch == 'x' || ch == 'X')) {
         // 0x or 0X.
         ishex = true;
+        isoctal = false;
+      } else if (seenzero && CompilerCXXAtLeast(kLanguageStandardCXX14) &&
+                 (ch == 'b' || ch == 'B')) {
+        // 0b or 0B.
+        isbinary = true;
         isoctal = false;
       } else if (ch == '.') {
         if (seendot) {
@@ -1092,6 +1320,13 @@ static void CollectNumber(Lex* lex, char ch) {
           break;
         }
         seensign = true;
+      } else if (IsDigitSeparator(lex, ishex, isoctal, isbinary)) {
+        lex->pos++;
+        continue;
+      } else if (isbinary) {
+        if (ch != '0' && ch != '1') {
+          break;
+        }
       } else if (isoctal) {
         // Octal number.
         if (ch < '0' || ch > '7') {
@@ -1124,6 +1359,7 @@ static void CollectNumber(Lex* lex, char ch) {
     } else {
       CollectIntegerSuffix(lex);
     }
+    CollectUserDefinedLiteralSuffix(lex);
     
     // Finally we can convert to binary using a standard library
     // function.
@@ -1132,7 +1368,14 @@ static void CollectNumber(Lex* lex, char ch) {
       lex->current_token = TOK(fnumber);
     } else {
       errno = 0;
-      lex->number = strtoull(lex->spelling.value, NULL, 0);
+      if (isbinary) {
+        lex->number = 0;
+        for (size_t i = 2; i + 1 < lex->spelling.length; i++) {
+          lex->number = (lex->number << 1) | (lex->spelling.value[i] - '0');
+        }
+      } else {
+        lex->number = strtoull(lex->spelling.value, NULL, 0);
+      }
       if (lex->number == ULLONG_MAX) {
         // Possible overflow.
         if (errno == ERANGE) {
@@ -1148,6 +1391,9 @@ static void CollectNumber(Lex* lex, char ch) {
 // Reads another token into current_token.
 void LexNextToken(Lex* lex) {
   // lex->current_token = TOK(eof);
+  StringClear(&lex->ud_suffix);
+  lex->literal_encoding = kLiteralEncodingNone;
+  lex->literal_is_raw = false;
   LexSkipSpacesAndComments(lex);
 
   // Keep track of the start of the token before we read it.

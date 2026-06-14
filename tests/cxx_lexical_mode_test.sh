@@ -65,6 +65,65 @@ expect_compile cxx11_alt_operator_expr \
   'int main(void) { return (1 and 1) && (1 not_eq 0); }' \
   -std=c++11
 
+expect_fail cxx11_digit_separator \
+  "int main(void) { return 1'000; }" \
+  -std=c++11
+expect_compile cxx14_digit_separator \
+  "int main(void) { return 1'000 == 1000 ? 0 : 1; }" \
+  -std=c++14
+expect_fail cxx11_binary_literal \
+  'int main(void) { return 0b1010; }' \
+  -std=c++11
+expect_compile cxx14_binary_literal \
+  "int main(void) { return 0b1010'0101 == 165 ? 0 : 1; }" \
+  -std=c++14
+expect_compile cxx14_macro_pp_number \
+  "#define N 0b1010'0101_suffix
+int main(void) { return N == 165 ? 0 : 1; }" \
+  -std=c++14
+
+expect_fail c_mode_user_defined_literal \
+  'int main(void) { return 123_km; }'
+expect_compile cxx11_user_defined_literal \
+  'int main(void) { return 123_km == 123 ? 0 : 1; }' \
+  -std=c++11
+
+expect_compile cxx11_prefixed_literals \
+  'int main(void) { u8"text"; u"text"; U"text"; u8'"'"'x'"'"'; u'"'"'x'"'"'; U'"'"'x'"'"'; return 0; }' \
+  -std=c++11
+expect_compile cxx11_raw_literals \
+  'int main(void) { R"delim(raw \ text)delim"; u8R"(raw)"; LR"(raw)"; return 0; }' \
+  -std=c++11
+
+multiline_raw="$WORK/cxx11_multiline_raw.c"
+printf '%s\n' \
+  'int main(void) { R"raw(first line' \
+  'second line)raw"; return 0; }' > "$multiline_raw"
+"$ROOT/$DAVECC" -target pcode -S -std=c++11 "$multiline_raw" \
+    -o "$WORK/cxx11_multiline_raw.s" >"$WORK/cxx11_multiline_raw.out" 2>&1
+
+macro_raw="$WORK/cxx11_macro_raw.c"
+printf '%s\n' \
+  '#define RAW R"raw(a"b)raw"' \
+  'int main(void) { RAW; return 0; }' > "$macro_raw"
+"$ROOT/$DAVECC" -target pcode -S -std=c++11 "$macro_raw" \
+    -o "$WORK/cxx11_macro_raw.s" >"$WORK/cxx11_macro_raw.out" 2>&1
+
+printf '%s\n' 'int pp_header_value(void) { return 0; }' > "$WORK/pp_header.h"
+include_header="$WORK/cxx11_include_header.c"
+printf '%s\n' \
+  '#include <pp_header.h>' \
+  'int main(void) { return pp_header_value(); }' > "$include_header"
+"$ROOT/$DAVECC" -target pcode -S -std=c++11 -isystem "$WORK" "$include_header" \
+    -o "$WORK/cxx11_include_header.s" >"$WORK/cxx11_include_header.out" 2>&1
+
+expect_compile cxx17_module_identifiers \
+  'int module; int import; int main(void) { module = 1; import = 2; return module + import; }' \
+  -std=c++17
+expect_fail cxx20_module_keywords \
+  'int module; int import; int main(void) { return 0; }' \
+  -std=c++20
+
 expect_fail cxx11_constexpr \
   'int constexpr; int main(void) { return 0; }' \
   -std=c++11

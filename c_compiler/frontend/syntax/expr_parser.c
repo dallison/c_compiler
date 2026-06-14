@@ -121,6 +121,7 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
   const char* spelling = lex->spelling.value;
   bool octal_or_hex = spelling != NULL && spelling[0] == '0' &&
                       (spelling[1] == 'x' || spelling[1] == 'X' ||
+                       spelling[1] == 'b' || spelling[1] == 'B' ||
                        (spelling[1] >= '0' && spelling[1] <= '7'));
   bool has_u = StringContainsChar(&lex->suffix, 'U');
   bool has_ll = StringContainsString(&lex->suffix, "LL");

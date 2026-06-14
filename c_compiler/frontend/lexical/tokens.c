@@ -250,8 +250,12 @@ const char* TokenName(Token tok) {
       return "export";
     case TOK(friend):
       return "friend";
+    case TOK(import):
+      return "import";
     case TOK(mutable):
       return "mutable";
+    case TOK(module):
+      return "module";
     case TOK(namespace):
       return "namespace";
     case TOK(new):
