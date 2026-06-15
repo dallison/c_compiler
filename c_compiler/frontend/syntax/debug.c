@@ -455,6 +455,8 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
       break;
 
     case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
       die = NewPointerDIE(builder, NewTypeRecordDIE(builder, type->next));
       break;
 

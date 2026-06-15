@@ -90,6 +90,7 @@ typedef struct Symbol {
     bool always_inline: 1;         // __attribute__((always_inline)).
     bool noinline: 1;              // __attribute__((noinline)).
     bool is_using_alias: 1;        // C++ using-declaration alias.
+    bool is_overloaded: 1;         // Has C++ overload alternatives.
   } flags;
   
   struct {
@@ -112,6 +113,7 @@ typedef struct Symbol {
   } value;
   int32_t stack_offset;     // Stack offset if local.
   struct Symbol* alias_target;  // Target for a C++ using-declaration alias.
+  struct Symbol* overload_next;  // Next C++ overload with the same source name.
   struct DIE* die;
 } Symbol;
 

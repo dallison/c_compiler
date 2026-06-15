@@ -1823,7 +1823,7 @@ bool PreprocessorParseIncludeFilename(Preprocessor* p, String* line,
       }
       end++;
     }
-    if (line->value[end] != '>') {
+    if (end == line->length || line->value[end] != '>') {
       PreprocessorError(p, "Missing > for #include filename");
       return false;
     }
@@ -1837,7 +1837,7 @@ bool PreprocessorParseIncludeFilename(Preprocessor* p, String* line,
       }
       end++;
     }
-    if (line->value[end] != '"') {
+    if (end == line->length || line->value[end] != '"') {
       PreprocessorError(p, "Missing closing \" for #include filename");
       return false;
     }

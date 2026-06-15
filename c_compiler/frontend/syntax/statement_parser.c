@@ -12,6 +12,63 @@
 #include "expr_parser.h"
 #include "statement_parser.h"
 #include "compiler.h"
+#include "type.h"
+
+static ASTNode* NewCXXDestructorCall(Symbol* sym, SourceLocation location) {
+  if (!CompilerIsCXX() || sym == NULL || StorageIs(sym->storage, STO(static)) ||
+      !TypeIsStructOrUnion(sym->type) || sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(sym->type->info.struct_info, &destructor_name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      !destructor->symbol->type->info.function.is_destructor) {
+    StringDestruct(&destructor_name);
+    return NULL;
+  }
+
+  ASTNode* receiver = NewIdentifierASTNode(sym, location);
+  ASTNode* member = NewStringConstantASTNode(NewString(destructor_name.value),
+                                            NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  StringDestruct(&destructor_name);
+  return NewExpressionStatementASTNode(
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector()),
+      location);
+}
+
+static void AppendCXXDestructorCalls(Vector* statements) {
+  if (!CompilerIsCXX()) {
+    return;
+  }
+
+  for (size_t i = statements->length; i > 0; i--) {
+    ASTNode* stmt = statements->value.p[i - 1];
+    if (stmt->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
+    for (size_t j = decls->declarations->length; j > 0; j--) {
+      ASTNode* decl_node = decls->declarations->value.p[j - 1];
+      if (decl_node->op != AST_OP(vardecl)) {
+        continue;
+      }
+      VariableDeclarationASTNode* decl =
+          (VariableDeclarationASTNode*)decl_node;
+      ASTNode* destructor =
+          NewCXXDestructorCall(decl->symbol, decl->base.location);
+      if (destructor != NULL) {
+        VectorAppend(statements, destructor);
+      }
+    }
+  }
+}
 
 // A compound statement is a brace-enclosed sequence of statements.
 // The AST node holding this is a CompoundStatementASTNode.
@@ -49,6 +106,8 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
     }
   }
    
+  AppendCXXDestructorCalls(statements);
+
   if (compiler->debug_output) {
     // Label at end of statements in block.
     VectorAppend(statements, SyntaxNewPCLabel(location));

@@ -275,6 +275,8 @@ int TypeRecordAlignment(TypeRecord* record) {
     case kDeclArray:
       return TypeRecordAlignment(record->next);
     case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
       return SizeofPointer();
     case kDeclFunction:
       return SizeofPointer();
@@ -315,6 +317,8 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
         }
         break;
       case kDeclPointer:
+      case kDeclReference:
+      case kDeclRValueReference:
         record->size = SizeofPointer();
         break;
       case kDeclFunction:
@@ -383,10 +387,52 @@ TypeRecord* NewPointerTypeRecord(Qualifiers quals) {
   return t;
 }
 
+TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue) {
+  TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
+  t->declarator = rvalue ? kDeclRValueReference : kDeclReference;
+  t->size = compiler->pointer_size;
+  return t;
+}
+
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type) {
   TypeRecord* ptr = NewPointerTypeRecord(quals);
   TypeRecordChain(ptr, type);
   return ptr;
+}
+
+Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
+                         SourceLocation location) {
+  TypeRecord* class_type =
+      NewTypeRecord(kTypeStruct, is_const_member ? kQualConst : kQualPlain);
+  class_type->info.struct_info = owner;
+  TypeRecord* this_type = NewPointerTo(kQualPlain, class_type);
+  Symbol* this_symbol = NewSymbol("this", this_type, STO(implicit));
+  this_symbol->flags.is_argument = true;
+  this_symbol->flags.invented = true;
+  this_symbol->flags.is_defined = true;
+  this_symbol->value.arg_number = 0;
+  this_symbol->location = location;
+  return this_symbol;
+}
+
+void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
+                                   SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) || owner == NULL ||
+      func->info.function.cxx_member_owner != NULL) {
+    return;
+  }
+  Symbol* this_symbol =
+      NewCXXThisSymbol(owner, func->info.function.is_const_member, location);
+  if (func->info.function.prototype.length == 0) {
+    VectorAppend(&func->info.function.prototype, this_symbol);
+  } else {
+    VectorInsertBefore(&func->info.function.prototype, 0, this_symbol);
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    formal->value.arg_number = (int32_t)i;
+  }
+  func->info.function.cxx_member_owner = owner;
 }
 
 TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static) {
@@ -420,6 +466,8 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.definition = false;
   t->info.function.is_constructor = false;
   t->info.function.is_destructor = false;
+  t->info.function.is_const_member = false;
+  t->info.function.cxx_member_owner = NULL;
   t->info.function.old_style = false;
   t->info.function.is_inline = false;
   t->info.function.body = NULL;
@@ -444,6 +492,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->is_static = false;
   mem->is_member_function = false;
   mem->access = kAccessPublic;
+  mem->overload_next = NULL;
   return mem;
 }
 
@@ -582,6 +631,10 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
   while (record != NULL) {
     if (record->declarator == kDeclPointer) {
       fprintf(fp, "pointer to ");
+    } else if (record->declarator == kDeclReference) {
+      fprintf(fp, "reference to ");
+    } else if (record->declarator == kDeclRValueReference) {
+      fprintf(fp, "rvalue reference to ");
     }
     QualifiersToString(record->qualifiers, &str);
     TypeToString(record->type, &str);
@@ -661,6 +714,13 @@ void TypeRecordToString(TypeRecord* type, String* result) {
         StringAppendChar(result, '*');
         QualifiersToString(type->qualifiers, result);
       }
+      break;
+
+    case kDeclReference:
+    case kDeclRValueReference:
+      TypeRecordToString(type->next, result);
+      StringAppend(result,
+                   type->declarator == kDeclRValueReference ? "&&" : "&");
       break;
 
     case kDeclArray:
@@ -1187,6 +1247,16 @@ void TypeParserParsePointer(TypeParser* parser) {
     TypeParserParsePointer(parser);
     TypeRecord* p = NewPointerTypeRecord(quals);
     VectorAppend(&parser->stack, p);
+  } else if (CompilerIsCXX() &&
+             (LexLookingAt(parser->lex, TOK(amp)) ||
+              LexLookingAt(parser->lex, TOK(ampamp)))) {
+    bool rvalue = LexMatch(parser->lex, TOK(ampamp));
+    if (!rvalue) {
+      LexMatch(parser->lex, TOK(amp));
+    }
+    TypeParserParsePointer(parser);
+    TypeRecord* p = NewReferenceTypeRecord(kQualPlain, rvalue);
+    VectorAppend(&parser->stack, p);
   } else {
     TypeParserParseFuncOrArray(parser);
   }
@@ -1361,8 +1431,14 @@ static void ParseFunctionDecl(TypeParser* parser) {
   }
   
   ParseFunctionPrototype(&proto_parser, func);
-
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+  func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  if (parser->cxx_member_definition != NULL &&
+      !parser->cxx_member_definition->is_static) {
+    TypeRecordAddCXXThisParameter(
+        func, parser->cxx_member_owner, parser->symbol->location);
+  }
+
   VectorAppend(&parser->stack, func);
   TypeParserDestruct(&proto_parser);
 }
@@ -1473,6 +1549,14 @@ void TypeParserParseFuncOrArray(TypeParser* parser) {
   while (parser->syntax->found_open_paren ||
          LexLookingAt(parser->lex, TOK(lparen)) ||
          LexLookingAt(parser->lex, TOK(lsquare))) {
+    if (CompilerIsCXX() && parser->context == kParsingBlockScope &&
+        parser->symbol != NULL && parser->stack.length == 0 &&
+        TypeIsStructOrUnion(parser->base_type) &&
+        LexLookingAt(parser->lex, TOK(lparen))) {
+      // In a local declaration like `T obj(args);`, the parens are direct
+      // initialization of `obj`, not a function declarator.
+      break;
+    }
     // Check for function prototype declaration.
     if (parser->syntax->found_open_paren || LexMatch(parser->lex, TOK(lparen))) {
       parser->syntax->found_open_paren = false;
@@ -1494,8 +1578,7 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
       parser->syntax, name, name->components.length - 1);
   if (owner == NULL || owner->type == NULL ||
       !TypeIsStructOrUnion(owner->type) ||
-      owner->type->info.struct_info == NULL ||
-      !owner->type->info.struct_info->is_class) {
+      owner->type->info.struct_info == NULL) {
     SyntaxError(parser->syntax, "Qualified declarator %s does not name a class member",
                 name->spelling.value);
     return;
@@ -1511,6 +1594,90 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
                 name->spelling.value);
   }
   StringDestruct(&member_name);
+}
+
+static bool QualifiedNameIsSpecialMember(Symbol* owner,
+                                         FullyQualifiedIdentifier* name,
+                                         bool* is_destructor) {
+  const char* member_name = FullyQualifiedIdentifierLast(name);
+  *is_destructor = member_name[0] == '~';
+  const char* class_name = owner->name.value;
+  if (*is_destructor) {
+    return strcmp(member_name + 1, class_name) == 0;
+  }
+  return strcmp(member_name, class_name) == 0;
+}
+
+Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
+  SourceLocation location = parser->lex->current_token_location;
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(parser->syntax, &name)) {
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+  if (!name.is_qualified || name.components.length < 2) {
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
+      parser->syntax, &name, name.components.length - 1);
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL) {
+    SyntaxError(parser->syntax, "Qualified declarator %s does not name a class member",
+                name.spelling.value);
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+
+  bool is_destructor = false;
+  if (!QualifiedNameIsSpecialMember(owner, &name, &is_destructor)) {
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+  parser->cxx_member_owner = owner->type->info.struct_info;
+  parser->cxx_member_definition =
+      FindStructMember(parser->cxx_member_owner, &member_name);
+  if (parser->cxx_member_definition == NULL) {
+    SyntaxError(parser->syntax, "No class member named %s", name.spelling.value);
+    StringDestruct(&member_name);
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+
+  if (!LexMatch(parser->lex, TOK(lparen))) {
+    SyntaxError(parser->syntax, "Expected '(' in special member definition");
+    StringDestruct(&member_name);
+    FullyQualifiedIdentifierDestruct(&name);
+    return NULL;
+  }
+
+  TypeParser proto_parser;
+  TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),
+                 kParsingPrototype);
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constructor = !is_destructor;
+  func->info.function.is_destructor = is_destructor;
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  ParseFunctionPrototype(&proto_parser, func);
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+  if (LexMatch(parser->lex, TOK(const))) {
+    SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
+  }
+  TypeParserDestruct(&proto_parser);
+  TypeRecordAddCXXThisParameter(func, parser->cxx_member_owner, location);
+
+  Symbol* sym = NewSymbol(member_name.value, func, STO(implicit));
+  sym->location = location;
+  func->info.function.symbol = sym;
+  StringDestruct(&member_name);
+  FullyQualifiedIdentifierDestruct(&name);
+  return sym;
 }
 
 void TypeParserParseBase(TypeParser* parser) {
@@ -1556,6 +1723,16 @@ StructMember* FindStructMember(Struct* str, String* name) {
 //  MapPrint(&str->symbol_table, PrintStructMember);
 //  printf("\n");
   return MapFindPointerKey(&str->symbol_table, name);
+}
+
+StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
+  for (StructMember* overload = first; overload != NULL;
+       overload = overload->overload_next) {
+    if (TypeEqual(overload->symbol->type, type)) {
+      return overload;
+    }
+  }
+  return NULL;
 }
 
 static bool CheckStructMember(Struct* str, String* name) {
@@ -1698,6 +1875,58 @@ static void AddStructMember(TypeParser* parser, Struct* str,
   MapInsert(&str->symbol_table, kv);
 }
 
+static bool CanOverloadStructMember(StructMember* existing,
+                                    StructMember* member) {
+  return CompilerIsCXX() && existing != NULL && member != NULL &&
+         existing->is_member_function && member->is_member_function;
+}
+
+static int StructMemberOverloadIndex(StructMember* first,
+                                     StructMember* target) {
+  int index = 0;
+  for (StructMember* overload = first; overload != NULL;
+       overload = overload->overload_next, index++) {
+    if (overload == target) {
+      return index;
+    }
+  }
+  return index;
+}
+
+static void SetStructMemberOverloadAsmName(Struct* str,
+                                           StructMember* first,
+                                           StructMember* overload) {
+  if (overload->symbol->asm_name.length != 0) {
+    return;
+  }
+
+  const char* owner_name =
+      str->tag_name != NULL ? str->tag_name->value : "anonymous";
+  String asm_name;
+  StringInit(&asm_name, NULL);
+  StringPrintf(&asm_name, "%s_%s__ov%d", owner_name,
+               overload->symbol->name.value,
+               StructMemberOverloadIndex(first, overload));
+  StringSetString(&overload->symbol->asm_name, &asm_name);
+  StringDestruct(&asm_name);
+}
+
+static void AppendStructMemberOverload(TypeParser* parser, Struct* str,
+                                       StructMember* first,
+                                       StructMember* member) {
+  VectorAppend(&str->members, member);
+  StructMember* tail = first;
+  while (tail->overload_next != NULL) {
+    tail = tail->overload_next;
+  }
+  tail->overload_next = member;
+  first->symbol->flags.is_overloaded = true;
+  member->symbol->flags.is_overloaded = true;
+  SetStructMemberOverloadAsmName(str, first, first);
+  SetStructMemberOverloadAsmName(str, first, member);
+  (void)parser;
+}
+
 static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
   if (!LexMatch(parser->lex, TOK(lbrace))) {
     return false;
@@ -1716,7 +1945,7 @@ static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
 
 static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
                                     String* class_name, CXXAccess access) {
-  if (!str->is_class || class_name->length == 0) {
+  if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
   }
 
@@ -1747,26 +1976,42 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+  if (LexMatch(parser->lex, TOK(const))) {
+    SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
+  }
   TypeParserDestruct(&proto_parser);
+  TypeRecordAddCXXThisParameter(func, str, location);
 
   String member_name;
   StringInit(&member_name, is_destructor ? "~" : "");
   StringAppendString(&member_name, class_name);
-  if (!CheckStructMember(str, &member_name)) {
-    SyntaxError(parser->syntax, "Duplicate class member %s",
-                member_name.value);
-    StringDestruct(&member_name);
-    TypeRecordDelete(func);
-    SkipInlineMemberFunctionBody(parser);
-    return true;
-  }
-
   Symbol* member_symbol = NewSymbol(member_name.value, func, STO(implicit));
   member_symbol->location = location;
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
-  AddStructMember(parser, str, member);
+  StructMember* existing = FindStructMember(str, &member_name);
+  if (existing != NULL) {
+    if (!CanOverloadStructMember(existing, member)) {
+      SyntaxError(parser->syntax, "Duplicate class member %s",
+                  member_name.value);
+      StructMemberDelete(member);
+      StringDestruct(&member_name);
+      SkipInlineMemberFunctionBody(parser);
+      return true;
+    }
+    if (FindStructMemberOverload(existing, member_symbol->type) != NULL) {
+      SyntaxError(parser->syntax, "Duplicate class member %s",
+                  member_name.value);
+      StructMemberDelete(member);
+      StringDestruct(&member_name);
+      SkipInlineMemberFunctionBody(parser);
+      return true;
+    }
+    AppendStructMemberOverload(parser, str, existing, member);
+  } else {
+    AddStructMember(parser, str, member);
+  }
   StringDestruct(&member_name);
   SkipInlineMemberFunctionBody(parser);
   return true;
@@ -1894,21 +2139,40 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
       if (member_symbol == NULL) {
         SyntaxError(parser->syntax, "Invalid type for struct member");
-      } else if (!CheckStructMember(str, &member_symbol->name)) {
-        SyntaxError(parser->syntax, "Duplicate struct/union member %s",
-                    member_symbol->name.value);
-        SymbolDelete(member_symbol);
       } else {
         StructMember* member = NewStructMember(member_symbol);
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
         member->access = current_access;
-        
-        // Add to symbol table.
-        AddStructMember(parser, str, member);
+        if (member->is_member_function && !member->is_static) {
+          TypeRecordAddCXXThisParameter(member_symbol->type, str,
+                                        member_symbol->location);
+        }
+        StructMember* existing = FindStructMember(str, &member_symbol->name);
+        if (existing != NULL) {
+          if (!CanOverloadStructMember(existing, member)) {
+            SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                        member_symbol->name.value);
+            StructMemberDelete(member);
+            member = NULL;
+          } else if (FindStructMemberOverload(existing,
+                                             member_symbol->type) != NULL) {
+            SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                        member_symbol->name.value);
+            StructMemberDelete(member);
+            member = NULL;
+          } else {
+            AppendStructMemberOverload(parser, str, existing, member);
+          }
+        } else {
+          // Add to symbol table.
+          AddStructMember(parser, str, member);
+        }
 
         // Check for bitfield.
-        if (LexMatch(parser->lex, TOK(colon))) {
+        if (member == NULL) {
+          // Already diagnosed as a duplicate.
+        } else if (LexMatch(parser->lex, TOK(colon))) {
           if (member->is_static || member->is_member_function) {
             SyntaxError(parser->syntax,
                         "Only non-static data members can be bitfields");
@@ -1992,8 +2256,11 @@ static void CheckTagType(TypeParser* parser, Symbol* old,
 
 static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   if (tag == NULL || tag->flags.invented || tag->type == NULL ||
-      tag->type->info.struct_info == NULL ||
-      !tag->type->info.struct_info->is_class) {
+      tag->type->info.struct_info == NULL) {
+    return;
+  }
+  Struct* str = tag->type->info.struct_info;
+  if (!str->is_class && (!CompilerIsCXX() || str->is_union)) {
     return;
   }
   if (SyntaxFindSymbol(parser->syntax, &tag->name) != NULL) {
@@ -2499,6 +2766,11 @@ bool TypeIsSigned(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
 }
 
+bool TypeIsReference(TypeRecord* type) {
+  return type->declarator == kDeclReference ||
+         type->declarator == kDeclRValueReference;
+}
+
 
 bool TypeIsIntConstant(TypeRecord* type);
 bool TypeIsFloatingPointConstant(TypeRecord* type);
@@ -2535,6 +2807,8 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       }
       return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
       return TypeEqual(t1->next, t2->next);
 
     case kDeclFunction:
@@ -2559,7 +2833,8 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
     return true;
   }
   // A pointer can be assigned to a const pointer of the same type.
-  if (TypeIsPointerOrArray(to)) {
+  if (TypeIsPointerOrArray(to) && TypeIsPointerOrArray(from) &&
+      to->next != NULL && from->next != NULL) {
     int to_quals = to->next->qualifiers & ~kQualConst;
     int from_quals = from->next->qualifiers & ~kQualConst;
     if (to_quals == from_quals) {
@@ -2580,6 +2855,8 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
       }
       return t1->info.array.size.fixed == t2->info.array.size.fixed;
     case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
       return TypeEqual(t1->next, t2->next);
 
     case kDeclFunction:
@@ -2634,6 +2911,8 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
   switch (t1->declarator) {
     case kDeclArray:
     case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
       ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
                  error1.value, error2.value);
       TypeErrorDetails(location, t1->next, t2->next);

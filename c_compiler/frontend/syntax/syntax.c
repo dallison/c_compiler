@@ -48,6 +48,99 @@ static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
          lex->line.value[pos + 1] == ':';
 }
 
+static bool ReadLookaheadIdentifier(Lex* lex, size_t* pos, String* out) {
+  while (*pos < lex->line.length &&
+         isspace((unsigned char)lex->line.value[*pos])) {
+    (*pos)++;
+  }
+  size_t i = 0;
+  while (*pos < lex->line.length) {
+    char ch = lex->line.value[*pos];
+    if (!(isalnum((unsigned char)ch) || ch == '_')) {
+      break;
+    }
+    StringAppendChar(out, ch);
+    i++;
+    (*pos)++;
+  }
+  return i != 0;
+}
+
+static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  String previous;
+  StringInit(&previous, NULL);
+  String current;
+  StringInit(&current, NULL);
+  size_t pos = lex->pos;
+  bool result = false;
+
+  if (LexLookingAt(lex, TOK(identifier))) {
+    StringSetString(&previous, &lex->spelling);
+  } else if (LexLookingAt(lex, TOK(coloncolon))) {
+    if (!ReadLookaheadIdentifier(lex, &pos, &previous)) {
+      goto done;
+    }
+  } else {
+    goto done;
+  }
+
+  while (true) {
+    StringClear(&current);
+    while (pos < lex->line.length &&
+           isspace((unsigned char)lex->line.value[pos])) {
+      pos++;
+    }
+    if (pos + 1 >= lex->line.length ||
+        lex->line.value[pos] != ':' ||
+        lex->line.value[pos + 1] != ':') {
+      goto done;
+    }
+    pos += 2;
+
+    while (pos < lex->line.length &&
+           isspace((unsigned char)lex->line.value[pos])) {
+      pos++;
+    }
+    bool is_destructor = pos < lex->line.length && lex->line.value[pos] == '~';
+    if (is_destructor) {
+      pos++;
+      StringAppendChar(&current, '~');
+      if (!ReadLookaheadIdentifier(lex, &pos, &current)) {
+        goto done;
+      }
+    } else if (!ReadLookaheadIdentifier(lex, &pos, &current)) {
+      goto done;
+    }
+
+    while (pos < lex->line.length &&
+           isspace((unsigned char)lex->line.value[pos])) {
+      pos++;
+    }
+    if (pos + 1 < lex->line.length &&
+        lex->line.value[pos] == ':' &&
+        lex->line.value[pos + 1] == ':') {
+      StringSetString(&previous, &current);
+      continue;
+    }
+
+    if (pos >= lex->line.length || lex->line.value[pos] != '(') {
+      goto done;
+    }
+    if (current.length > 0 && current.value[0] == '~') {
+      result = strcmp(current.value + 1, previous.value) == 0;
+    } else {
+      result = StringEqualString(&current, &previous);
+    }
+    break;
+  }
+
+done:
+  StringDestruct(&current);
+  StringDestruct(&previous);
+  return result;
+}
+
 static Symbol* FindFileScopeSymbol(Syntax* syntax, String* name) {
   if (InNamedNamespace(syntax)) {
     Symbol* symbol = NamespaceFindSymbol(syntax->current_namespace, name);
@@ -64,6 +157,56 @@ static bool InsertFileScopeSymbol(Syntax* syntax, Symbol* symbol) {
     return NamespaceInsertSymbol(syntax->current_namespace, symbol);
   }
   return InsertGlobalSymbol(symbol);
+}
+
+static bool CanOverloadFunctions(Symbol* a, Symbol* b) {
+  return CompilerIsCXX() && a != NULL && b != NULL &&
+         TypeIsFunction(a->type) && TypeIsFunction(b->type);
+}
+
+static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
+  for (Symbol* overload = first; overload != NULL;
+       overload = overload->overload_next) {
+    if (TypeEqual(overload->type, type)) {
+      return overload;
+    }
+  }
+  return NULL;
+}
+
+static int OverloadIndex(Symbol* first, Symbol* target) {
+  int index = 0;
+  for (Symbol* overload = first; overload != NULL;
+       overload = overload->overload_next, index++) {
+    if (overload == target) {
+      return index;
+    }
+  }
+  return index;
+}
+
+static void SetOverloadAsmName(Symbol* first, Symbol* overload) {
+  if (overload->asm_name.length != 0) {
+    return;
+  }
+  String asm_name;
+  StringInit(&asm_name, NULL);
+  StringPrintf(&asm_name, "%s__ov%d", overload->name.value,
+               OverloadIndex(first, overload));
+  StringSetString(&overload->asm_name, &asm_name);
+  StringDestruct(&asm_name);
+}
+
+static void AppendOverload(Symbol* first, Symbol* overload) {
+  Symbol* tail = first;
+  while (tail->overload_next != NULL) {
+    tail = tail->overload_next;
+  }
+  tail->overload_next = overload;
+  first->flags.is_overloaded = true;
+  overload->flags.is_overloaded = true;
+  SetOverloadAsmName(first, first);
+  SetOverloadAsmName(first, overload);
 }
 
 static Symbol* FollowAlias(Symbol* symbol) {
@@ -846,6 +989,14 @@ static void ResolveOldStyleFormalArgument(Syntax* syntax, TypeRecord* func, Symb
   SyntaxError(syntax, "No such function parameter %s", formal->name.value);
 }
 
+static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
+  Vector* formals = &func->info.function.prototype;
+  for (size_t i = 0; i < formals->length; i++) {
+    Symbol* formal = formals->value.p[i];
+    InsertLocalSymbol(syntax->local_symbol_stack, formal);
+  }
+}
+
 static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                         Vector* declarations,
                              Symbol* sym, Symbol* old_sym) {
@@ -892,6 +1043,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;
+    SyntaxOpenScope(syntax);
+    AddFunctionScopeSymbols(syntax, sym->type);
     
     sym->flags.is_defined = true;
     sym->type->info.function.definition = true;
@@ -921,6 +1074,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         VectorAppend(body, stmt);
       }
     }
+    SyntaxCloseScope(syntax);
     syntax->context = old_context;
     
     if (compiler->debug_output) {
@@ -1041,10 +1195,30 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     Symbol* sym = TypeParserParseDeclarator(parser, type);
     // The old_sym refers to a previous declaration if found.
     Symbol* old_sym = NULL;
+    bool overload_was_appended = false;
     if (sym != NULL) {
       old_sym = parser->cxx_member_definition != NULL
           ? parser->cxx_member_definition->symbol
           : FindFileScopeSymbol(syntax, &sym->name);
+      if (parser->cxx_member_definition == NULL &&
+          CanOverloadFunctions(old_sym, sym)) {
+        Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+        if (matching_overload != NULL) {
+          old_sym = matching_overload;
+        } else {
+          AppendOverload(old_sym, sym);
+          old_sym = NULL;
+          overload_was_appended = true;
+        }
+      }
+      if (parser->cxx_member_definition != NULL) {
+        StructMember* matching_member = FindStructMemberOverload(
+            parser->cxx_member_definition, sym->type);
+        if (matching_member != NULL) {
+          parser->cxx_member_definition = matching_member;
+          old_sym = matching_member->symbol;
+        }
+      }
       if (old_sym != NULL) {
         // We have this symbol already.  If it's a declaration then it's
         // OK to declare (and define) it now.  If it's a definition then
@@ -1094,11 +1268,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           sym->flags.is_defined = true;
         }
       } else {
-        // This is the first declaration of this symbol, add to the symbol
-        // table.
-        bool inserted = InsertFileScopeSymbol(syntax, sym);
-        assert(inserted);
-        (void)inserted;
+        if (!overload_was_appended) {
+          // This is the first declaration of this symbol, add to the symbol
+          // table.
+          bool inserted = InsertFileScopeSymbol(syntax, sym);
+          assert(inserted);
+          (void)inserted;
+        }
         if (IsDefinition(parser, sym, storage)) {
           sym->flags.is_defined = true;
         } else if (!StorageIs(storage, STO(extern))) {
@@ -1269,6 +1445,58 @@ static ASTNode* EmptyDeclarationList(SourceLocation location) {
   return NewDeclarationListASTNode(NewVector(), location);
 }
 
+static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  Vector* declarations = NewVector();
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingFileScope);
+
+  Symbol* sym = TypeParserParseCXXSpecialMemberDeclarator(&parser);
+  Symbol* old_sym = parser.cxx_member_definition != NULL
+      ? parser.cxx_member_definition->symbol
+      : NULL;
+  if (sym != NULL && parser.cxx_member_definition != NULL) {
+    StructMember* matching_member =
+        FindStructMemberOverload(parser.cxx_member_definition, sym->type);
+    if (matching_member != NULL) {
+      parser.cxx_member_definition = matching_member;
+      old_sym = matching_member->symbol;
+    }
+  }
+  if (sym == NULL || old_sym == NULL) {
+    if (sym != NULL) {
+      SymbolDelete(sym);
+    }
+    VectorDelete(declarations);
+    TypeParserDestruct(&parser);
+    return EmptyDeclarationList(location);
+  }
+
+  if (old_sym->flags.is_defined && LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax, "Duplicate definition of symbol %s", sym->name.value);
+  } else if (!TypeEqual(sym->type, old_sym->type)) {
+    SyntaxError(syntax, "Symbol %s redeclared with different type",
+                sym->name.value);
+    TypeErrorDetails(syntax->lex->current_token_location,
+                     sym->type, old_sym->type);
+  } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    old_sym->flags.is_defined = true;
+  }
+
+  ASTNode* result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
+  if (result != NULL) {
+    VectorAppend(&compiler->orphan_function_symbols, sym);
+    TypeParserDestruct(&parser);
+    return result;
+  }
+
+  SyntaxError(syntax, "Special member definition requires a function body");
+  SymbolDelete(sym);
+  VectorDelete(declarations);
+  TypeParserDestruct(&parser);
+  return EmptyDeclarationList(location);
+}
+
 static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
                                            FullyQualifiedIdentifier* name,
                                            SourceLocation location) {
@@ -1428,6 +1656,9 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
   }
+  if (CurrentLineLooksLikeSpecialMemberDefinition(syntax)) {
+    return ParseCXXSpecialMemberDefinition(syntax);
+  }
 
   Vector* declarations = NewVector();
   Vector attributes = {0};
@@ -1508,6 +1739,70 @@ static void SkipFunctionBody(Syntax* syntax) {
     }
     LexNextToken(lex);
   }
+}
+
+static const char* CXXConstructorNameForType(TypeRecord* type) {
+  if (!CompilerIsCXX() || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  return type->info.struct_info->tag_name->value;
+}
+
+static ASTNode* NewCXXConstructorCall(Syntax* syntax, Symbol* sym,
+                                      Vector* actuals,
+                                      SourceLocation location) {
+  (void)syntax;
+  const char* constructor_name = CXXConstructorNameForType(sym->type);
+  if (constructor_name == NULL) {
+    VectorDelete(actuals);
+    return NULL;
+  }
+
+  ASTNode* receiver = NewIdentifierASTNode(sym, location);
+  ASTNode* member = NewStringConstantASTNode(NewString(constructor_name), NULL,
+                                            location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+}
+
+static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+      !LexMatch(syntax->lex, TOK(lparen))) {
+    return NULL;
+  }
+
+  SourceLocation location = syntax->lex->current_token_location;
+  Vector* actuals = NewVector();
+  while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+    ASTNode* actual =
+        SyntaxParseSingleExpression(syntax, TC(closebra) | TC(exprsep));
+    VectorAppend(actuals, actual);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
+  return NewCXXConstructorCall(syntax, sym, actuals, location);
+}
+
+static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
+                                                    Symbol* sym) {
+  const char* constructor_name = CXXConstructorNameForType(sym->type);
+  if (constructor_name == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, constructor_name);
+  StructMember* ctor = FindStructMember(sym->type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (ctor == NULL || !ctor->is_member_function ||
+      !ctor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
 }
 
 static void ParseLocalDeclarationList(TypeParser* parser,
@@ -1652,6 +1947,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 
         // Set flags to help semantic analyzer.
         decl_id->flags |= kASTIsDeclaration;
+      } else {
+        initializer = ParseCXXDirectInitializer(syntax, sym);
+        if (initializer == NULL && !StorageIs(storage, STO(static))) {
+          initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+        }
       }
 
       ASTNode* decl = NewVariableDeclarationASTNode(

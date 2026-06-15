@@ -550,6 +550,20 @@ static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
 static IRNode* GenerateVariableReference(Generator* gen,
                                          IdentifierASTNode* node) {
   IRNode* var_ref = GeneratorGetVariable(gen, node->symbol);
+  if (TypeIsReference(node->symbol->type)) {
+    IRNode* ref_addr =
+        IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), var_ref)),
+                  NewPointerTo(kQualPlain, node->base.type));
+    if ((node->base.flags & kASTNeedAddress) != 0 ||
+        TypeIsStructOrUnion(node->base.type)) {
+      return ref_addr;
+    }
+    IROpcode load = GetLoadOpcode(&node->base);
+    IRNode* result = IRSetType(GeneratorEmit(gen, NewIR1(load, ref_addr)),
+                               node->base.type);
+    IRSetVarUse(result, node->symbol);
+    return result;
+  }
   IRNode* result;
   if ((node->base.flags & kASTNeedAddress) != 0) {
     // Need the address of the node, not the value.

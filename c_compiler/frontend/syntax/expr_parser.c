@@ -39,6 +39,58 @@ static int GetIntrinsicIndex(const char* name) {
   return -1;
 }
 
+static Symbol* FindThisSymbol(Syntax* syntax) {
+  String this_name;
+  StringInit(&this_name, "this");
+  Symbol* symbol = SyntaxFindSymbol(syntax, &this_name);
+  StringDestruct(&this_name);
+  return symbol;
+}
+
+static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name) {
+  if (name->is_qualified) {
+    return NULL;
+  }
+  Symbol* this_symbol = FindThisSymbol(syntax);
+  if (this_symbol == NULL || this_symbol->type == NULL ||
+      !TypeIsStructOrUnionPointer(this_symbol->type) ||
+      this_symbol->type->next == NULL ||
+      this_symbol->type->next->info.struct_info == NULL) {
+    return NULL;
+  }
+
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+  StructMember* member =
+      FindStructMember(this_symbol->type->next->info.struct_info, &member_name);
+  if (member == NULL || member->is_static || member->is_member_function) {
+    StringDestruct(&member_name);
+    return NULL;
+  }
+
+  ASTNode* left =
+      NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
+  ASTNode* right = NewStringConstantASTNode(NewString(member_name.value), NULL,
+                                            syntax->lex->current_token_location);
+  StringDestruct(&member_name);
+  return NewBinaryASTNode(AST_OP(arrow), NULL,
+                          syntax->lex->current_token_location, left, right);
+}
+
+static ASTNode* ParseThisExpression(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);
+  Symbol* this_symbol = FindThisSymbol(syntax);
+  if (this_symbol == NULL) {
+    SyntaxError(syntax, "'this' is only valid inside a C++ member function");
+    TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                             kQualPlain);
+    return (ASTNode*)NewIntConstantASTNode(0, type, location);
+  }
+  return NewIdentifierASTNode(this_symbol, location);
+}
+
 // Forward declarations.
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers);
 static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers);
@@ -111,6 +163,11 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // and so it is owned/freed by a symbol table rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else {
+      ASTNode* member_access = NewMemberAccessFromThis(syntax, &name);
+      if (member_access != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return member_access;
+      }
       SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
       TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
@@ -465,6 +522,17 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   if (LexLookingAt(lex, TOK(identifier)) ||
       LexLookingAt(lex, TOK(coloncolon))) {
     return ParseIdentifier(syntax, followers);
+  }
+
+  if (LexLookingAt(lex, TOK(this))) {
+    return ParseThisExpression(syntax);
+  }
+
+  if (LexLookingAt(lex, TOK(nullptr))) {
+    LexNextToken(lex);
+    TypeRecord* type =
+        NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+    return NewIntConstantASTNode(0, type, syntax->lex->current_token_location);
   }
 
   // Check for integer constant.

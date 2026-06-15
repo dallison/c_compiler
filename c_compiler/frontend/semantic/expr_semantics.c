@@ -61,6 +61,11 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     }
   }
   
+  if ((node->base.flags & kASTIsDeclaration) == 0 &&
+      TypeIsReference(node->symbol->type)) {
+    ASTNodeSetType(&node->base, node->symbol->type->next);
+  }
+
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
       TypeIsFunction(node->base.type)) {
     node->base.flags |= kASTNeedAddress;
@@ -612,10 +617,19 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
   (void)AnalyzeExpression(&id_node->base);
   init = AnalyzeExpression(init);
+  bool is_reference_init = TypeIsReference(id_node->symbol->type);
   switch (init->op) {
     case AST_OP(expr_init):{
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)init;
-      NormalConversion(e->expr, id_node->base.type);
+      if (is_reference_init) {
+        NormalConversion(e->expr, id_node->symbol->type->next);
+        if (!IsAssignable(e->expr, false)) {
+          SemanticError(e->expr, "Reference initializer must be an lvalue");
+        }
+        e->expr->flags |= kASTNeedAddress;
+      } else {
+        NormalConversion(e->expr, id_node->base.type);
+      }
       break;
     default:
       break;
@@ -1244,12 +1258,309 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
   (void)conversions;
 }
 
+static void RenumberVectorChildren(VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* child = node->children->value.p[i];
+    child->parent = &node->base;
+    child->child_id = (int)i;
+  }
+}
+
+static bool MemberReceiverIsConst(BinaryASTNode* node);
+static const char* CXXAccessName(CXXAccess access);
+static bool CurrentFunctionCanAccessMember(Struct* owner,
+                                           StructMember* member);
+static StructMember* ResolveMemberFunctionOverload(StructMember* first,
+                                                   VectorASTNode* node,
+                                                   BinaryASTNode* member_access);
+
+static bool LowerMemberFunctionCall(VectorASTNode* node) {
+  if (node->left == NULL ||
+      (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
+    return false;
+  }
+
+  BinaryASTNode* member_access = (BinaryASTNode*)node->left;
+  if (member_access->right == NULL ||
+      member_access->right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMemberASTNode* member_node =
+      (StructMemberASTNode*)member_access->right;
+  StructMember* member = member_node->member;
+  if (!member->is_member_function) {
+    return false;
+  }
+
+  member = ResolveMemberFunctionOverload(member, node, member_access);
+  member_node->member = member;
+
+  Struct* owner = member->symbol->type->info.function.cxx_member_owner;
+  if (!CurrentFunctionCanAccessMember(owner, member)) {
+    const char* owner_name =
+        owner != NULL && owner->tag_name != NULL
+            ? owner->tag_name->value
+            : "<anonymous>";
+    SemanticError((ASTNode*)member_access, "%s is a %s member of %s",
+                  member->symbol->name.value, CXXAccessName(member->access),
+                  owner_name);
+  }
+
+  ASTNode* receiver = NULL;
+  if (!member->is_static) {
+    if (!member->symbol->type->info.function.is_const_member &&
+        MemberReceiverIsConst(member_access)) {
+      SemanticError((ASTNode*)member_access,
+                    "Cannot call non-const member function %s on const object",
+                    member->symbol->name.value);
+    }
+    receiver = ASTNodeMove(member_access->left);
+    if (member_access->base.op == AST_OP(dot)) {
+      receiver = NewUnaryASTNode(AST_OP(address), NULL, receiver->location,
+                                 receiver);
+      receiver = AnalyzeExpression(receiver);
+    }
+  }
+
+  ASTNode* old_left = node->left;
+  node->left = NewIdentifierASTNode(member->symbol, old_left->location);
+  node->left->parent = &node->base;
+  node->left->child_id = 0;
+  node->left = AnalyzeExpression(node->left);
+  ASTNodeDelete(old_left);
+
+  if (receiver != NULL) {
+    if (node->children->length == 0) {
+      VectorAppend(node->children, receiver);
+    } else {
+      VectorInsertBefore(node->children, 0, receiver);
+    }
+    RenumberVectorChildren(node);
+  }
+  return true;
+}
+
+static const char* CXXAccessName(CXXAccess access) {
+  switch (access) {
+    case kAccessPublic:
+      return "public";
+    case kAccessProtected:
+      return "protected";
+    case kAccessPrivate:
+      return "private";
+  }
+  return "unknown";
+}
+
+static bool CurrentFunctionCanAccessMember(Struct* owner,
+                                           StructMember* member) {
+  if (member->access == kAccessPublic) {
+    return true;
+  }
+  if (compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function)) {
+    return false;
+  }
+  return compiler->current_function->info.function.cxx_member_owner == owner;
+}
+
+static bool MemberReceiverIsConst(BinaryASTNode* node) {
+  if (node->base.op == AST_OP(arrow)) {
+    return TypeIsPointerOrArray(node->left->type) &&
+           TypeIsConst(node->left->type->next);
+  }
+  return TypeIsConst(node->left->type);
+}
+
+static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
+  TypeRecord* target = formal_type;
+  bool reference = TypeIsReference(formal_type);
+  if (reference) {
+    target = formal_type->next;
+    if (formal_type->declarator == kDeclReference &&
+        !IsAssignable(actual, false)) {
+      return -1;
+    }
+  }
+
+  if (TypeEqual(actual->type, target)) {
+    return 0;
+  }
+  if (TypeEqualIgnoringSign(actual->type, target)) {
+    return 1;
+  }
+  if (TypeIsIntegral(actual->type) && TypeIsIntegral(target)) {
+    return 2;
+  }
+  if (TypeIsPointerOrArray(actual->type) && TypeIsPointerOrArray(target)) {
+    if (TypeAssignmentCompatible(actual->type, target)) {
+      return 1;
+    }
+    if (TypeIsVoidPointer(actual->type) || TypeIsVoidPointer(target)) {
+      return 2;
+    }
+  }
+  if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
+    return 2;
+  }
+  return -1;
+}
+
+static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
+                             size_t first_formal_arg) {
+  if (!TypeIsFunction(func) || func->info.function.unknown_args) {
+    return -1;
+  }
+  size_t num_actual_args = node->children->length;
+  size_t num_formal_args = func->info.function.prototype.length;
+  if (first_formal_arg > num_formal_args) {
+    return -1;
+  }
+  size_t num_user_formal_args = num_formal_args - first_formal_arg;
+  if (num_actual_args < num_user_formal_args) {
+    return -1;
+  }
+  if (!func->info.function.varargs &&
+      num_actual_args != num_user_formal_args) {
+    return -1;
+  }
+
+  int score = 0;
+  for (size_t i = 0; i < num_user_formal_args; i++) {
+    ASTNode* actual = (ASTNode*)node->children->value.p[i];
+    Symbol* formal =
+        (Symbol*)func->info.function.prototype.value.p[i + first_formal_arg];
+    int rank = OverloadConversionRank(actual, formal->type);
+    if (rank < 0) {
+      return -1;
+    }
+    score += rank;
+  }
+  return score;
+}
+
+static int OverloadCallScore(Symbol* candidate, VectorASTNode* node) {
+  return FunctionCallScore(candidate->type, node, 0);
+}
+
+static int MemberOverloadCallScore(StructMember* candidate,
+                                   VectorASTNode* node,
+                                   BinaryASTNode* member_access,
+                                   bool check_receiver_const) {
+  size_t first_formal_arg = candidate->is_static ? 0 : 1;
+  if (check_receiver_const && !candidate->is_static &&
+      !candidate->symbol->type->info.function.is_const_member &&
+      MemberReceiverIsConst(member_access)) {
+    return -1;
+  }
+  int score = FunctionCallScore(candidate->symbol->type, node, first_formal_arg);
+  if (score >= 0 && !candidate->is_static &&
+      candidate->symbol->type->info.function.is_const_member &&
+      !MemberReceiverIsConst(member_access)) {
+    score++;
+  }
+  return score;
+}
+
+static StructMember* ResolveMemberFunctionOverload(StructMember* first,
+                                                   VectorASTNode* node,
+                                                   BinaryASTNode* member_access) {
+  StructMember* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  bool receiver_const = MemberReceiverIsConst(member_access);
+  bool receiver_const_rejected = false;
+
+  for (StructMember* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    int score = MemberOverloadCallScore(candidate, node, member_access, true);
+    if (score < 0) {
+      if (receiver_const &&
+          MemberOverloadCallScore(candidate, node, member_access, false) >= 0) {
+        receiver_const_rejected = true;
+      }
+      continue;
+    }
+    if (best == NULL || score < best_score) {
+      best = candidate;
+      best_score = score;
+      ambiguous = false;
+    } else if (score == best_score) {
+      ambiguous = true;
+    }
+  }
+
+  if (best == NULL) {
+    if (receiver_const_rejected) {
+      SemanticError((ASTNode*)member_access,
+                    "Cannot call non-const member function %s on const object",
+                    first->symbol->name.value);
+    } else if (first->overload_next != NULL ||
+               first->symbol->type->info.function.is_constructor) {
+      SemanticError((ASTNode*)node, "No matching overload for %s",
+                    first->symbol->name.value);
+    }
+    return first;
+  }
+  if (ambiguous) {
+    SemanticError((ASTNode*)node, "Ambiguous overload for %s",
+                  first->symbol->name.value);
+    return best;
+  }
+  return best;
+}
+
+static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
+  if (node->left == NULL || node->left->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+  if (!id->symbol->flags.is_overloaded) {
+    return;
+  }
+
+  Symbol* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  for (Symbol* candidate = id->symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    int score = OverloadCallScore(candidate, node);
+    if (score < 0) {
+      continue;
+    }
+    if (best == NULL || score < best_score) {
+      best = candidate;
+      best_score = score;
+      ambiguous = false;
+    } else if (score == best_score) {
+      ambiguous = true;
+    }
+  }
+
+  if (best == NULL) {
+    SemanticError((ASTNode*)node, "No matching overload for %s",
+                  id->symbol->name.value);
+    return;
+  }
+  if (ambiguous) {
+    SemanticError((ASTNode*)node, "Ambiguous overload for %s",
+                  id->symbol->name.value);
+    return;
+  }
+
+  id->symbol = best;
+  ASTNodeSetType(node->left, best->type);
+}
+
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
+  LowerMemberFunctionCall(node);
+  ResolveOverloadedFunctionCall(node);
+  num_actual_args = node->children->length;
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
@@ -1292,7 +1603,16 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     for (size_t i = 0; i < num_formal_args && i < num_actual_args; i++) {
       ASTNode* actual = (ASTNode*)node->children->value.p[i];
       Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
-      NormalConversion(actual, formal->type);
+      if (TypeIsReference(formal->type)) {
+        NormalConversion(actual, formal->type->next);
+        if (formal->type->declarator == kDeclReference &&
+            !IsAssignable(actual, false)) {
+          SemanticError(actual, "Reference argument must be an lvalue");
+        }
+        actual->flags |= kASTNeedAddress;
+      } else {
+        NormalConversion(actual, formal->type);
+      }
 
       // Composites (structs/unions), arrays and functions need addresses, not
       // values.
@@ -1402,11 +1722,26 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     return;
   }
 
+  if (!member->is_member_function &&
+      !CurrentFunctionCanAccessMember(struct_info, member)) {
+    const char* owner_name =
+        struct_info->tag_name != NULL ? struct_info->tag_name->value : "<anonymous>";
+    SemanticError((ASTNode*)node, "%s is a %s member of %s",
+                  member_name->value, CXXAccessName(member->access),
+                  owner_name);
+  }
+
   // Replace the right node with a StructMember AST node.
   ASTNode* old_right = node->right;
   node->right = NewStructMemberASTNode(member, node->right->location);
   ASTNodeDelete(old_right);
-  ASTNodeSetType((ASTNode*)node, member->symbol->type);
+  TypeRecord* member_type = member->symbol->type;
+  if (!member->is_static && !member->is_member_function &&
+      MemberReceiverIsConst(node)) {
+    member_type = TypeRecordCopy(member_type);
+    member_type->qualifiers |= kQualConst;
+  }
+  ASTNodeSetType((ASTNode*)node, member_type);
 }
 
 // Address-of operator.  If the operand has an address the type is

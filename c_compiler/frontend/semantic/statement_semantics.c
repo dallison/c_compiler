@@ -807,7 +807,17 @@ static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
 
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   node->initializer = AnalyzeExpression(node->initializer);
-  if (node->initializer != NULL) {
+  bool constructor_call = false;
+  if (node->initializer != NULL && node->initializer->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)node->initializer;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+      constructor_call =
+          callee != NULL && TypeIsFunction(callee->type) &&
+          callee->type->info.function.is_constructor;
+    }
+  }
+  if (node->initializer != NULL && !constructor_call) {
     NormalConversion(node->initializer, node->symbol->type);
   }
 }

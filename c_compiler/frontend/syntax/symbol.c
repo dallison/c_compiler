@@ -137,9 +137,11 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.always_inline = false;
   sym->flags.noinline = false;
   sym->flags.is_using_alias = false;
+  sym->flags.is_overloaded = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
+  sym->overload_next = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -162,6 +164,9 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
   AttributeListDestruct(&symbol->attributes);
+  if (symbol->overload_next != NULL) {
+    SymbolDelete(symbol->overload_next);
+  }
 }
 
 void SymbolDelete(Symbol* symbol) {
@@ -180,6 +185,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
   new_sym->alias_target = sym->alias_target;
+  new_sym->overload_next = NULL;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->namespace_ = sym->namespace_;

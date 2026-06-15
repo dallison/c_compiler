@@ -1,4 +1,4 @@
-#include "vars.s
+#include "vars.s"
 
 .text
 

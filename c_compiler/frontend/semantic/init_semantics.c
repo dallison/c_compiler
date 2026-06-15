@@ -502,7 +502,12 @@ static ASTNode* BuildDesignatedInitializer(INode* inode) {
   ASTNode* designated_init = NewDesignatedInitializerASTNode(designators,
                                                 inode->expr,
                                                 inode->expr->location);
-  NormalConversion(inode->expr, inode->type);
+  if (TypeIsReference(inode->type)) {
+    NormalConversion(inode->expr, inode->type->next);
+    inode->expr->flags |= kASTNeedAddress;
+  } else {
+    NormalConversion(inode->expr, inode->type);
+  }
   ASTNodeSetType(designated_init, inode->type);
   return designated_init;
 }

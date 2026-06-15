@@ -55,9 +55,13 @@ typedef enum {
 typedef enum {
   kDeclPrimitive,
   kDeclPointer,
+  kDeclReference,
+  kDeclRValueReference,
   kDeclArray,
   kDeclFunction,
 } Declarator;
+
+typedef struct Struct Struct;
 
 // Function info.
 typedef struct {
@@ -71,6 +75,8 @@ typedef struct {
   bool is_inline;       // This is an inline function.
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
+  bool is_const_member; // C++ member function has trailing const qualifier.
+  Struct* cxx_member_owner;  // Owning class for C++ member functions.
 } FunctionInfo;
 
 typedef enum {
@@ -80,7 +86,7 @@ typedef enum {
 } CXXAccess;
 
 // A struct or union member.  Behaves like a Symbol with extra information.
-typedef struct {
+typedef struct StructMember {
   Symbol* symbol;   // Embedded Symbol.
   int byte_offset;  // Byte offset into struct.
   int bit_offset;   // Bit offset into word.
@@ -90,10 +96,11 @@ typedef struct {
   bool is_static;   // C++ static data/function member.
   bool is_member_function;
   CXXAccess access;
-  } StructMember;
+  struct StructMember* overload_next;  // Next C++ member overload by name.
+} StructMember;
 
 // A struct or union type.
-typedef struct Struct {
+struct Struct {
   int refs;
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
   Vector members;    // Vector of StructMember* (owns StructMembers)
@@ -108,7 +115,7 @@ typedef struct Struct {
   int pack;          // #pragma pack(n) member alignment cap; 0 = no cap.
   int next_bit_pos;  // Next bit position for bit fields.
   int current_offset;
-} Struct;
+};
 
 // Applies layout-affecting attributes (packed, aligned) from an Attribute
 // vector to a struct.  Must be called before the struct is laid out (or
@@ -211,11 +218,16 @@ TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
+TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
 TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
 TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);
 
 TypeRecord* NewFunctionTypeRecord(void);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
+Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
+                         SourceLocation location);
+void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
+                                   SourceLocation location);
 
 StructMember* NewStructMember(Symbol* symbol);
 Struct* NewStruct(bool is_union);
@@ -232,6 +244,7 @@ int SizeofType(Type type);
 int SizeofPointer(void);
 
 StructMember* FindStructMember(Struct* str, String* name);
+StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 
 void TypeRecordToString(TypeRecord* type, String* result);
 
@@ -261,6 +274,7 @@ void TypeParserParseFuncOrArray(TypeParser* parser);
 
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class);
 Symbol* TypeParserParseEnum(TypeParser* parser);
+Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser);
 
 TypeRecord* NewSizeTypeRecord(void);
 
@@ -272,11 +286,16 @@ inline bool TypeIsPointer(TypeRecord* type) {
   return type->declarator == kDeclPointer;
 }
 
+bool TypeIsReference(TypeRecord* type);
+
 inline bool TypeIsPrimitive(TypeRecord* type) {
   return type->declarator == kDeclPrimitive;
 }
 inline bool TypeIsPointerOrArray(TypeRecord* type) {
-  return type->declarator == kDeclPointer || type->declarator == kDeclArray;
+  return type->declarator == kDeclPointer ||
+         type->declarator == kDeclReference ||
+         type->declarator == kDeclRValueReference ||
+         type->declarator == kDeclArray;
 }
 
 inline bool TypeIsFunction(TypeRecord* type) {
