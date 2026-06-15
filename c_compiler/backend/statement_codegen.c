@@ -8,6 +8,7 @@
 
 #include "statement_codegen.h"
 #include <assert.h>
+#include <string.h>
 #include "compiler.h"
 #include "expr_codegen.h"
 
@@ -855,6 +856,13 @@ static void GenerateReturnStatement(Generator* gen,
         }
         GeneratorEmit(gen, NewIR1(result, expr));
       }
+    }
+  }
+
+  if (CompilerIsCXX() &&
+      strcmp(gen->func->info.function.symbol->name.value, "main") == 0) {
+    for (size_t i = 0; i < compiler->cxx_global_destructor_calls.length; i++) {
+      GenerateStatement(gen, compiler->cxx_global_destructor_calls.value.p[i]);
     }
   }
 

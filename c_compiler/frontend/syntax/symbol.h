@@ -127,6 +127,7 @@ void SymbolDestruct(Symbol* symbol);
 Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
+void SymbolSetCXXMangledAsmName(Symbol* symbol);
 
 // Adds attribute and takes ownership of the Attribute.
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);

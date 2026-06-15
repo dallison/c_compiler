@@ -126,6 +126,32 @@ void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
   VReportWarning(filename, lineno, warn, format, ap);
 }
 
+bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
+                            ASTNode* diagnostic_node) {
+  if (sym == NULL || !TypeContainsAuto(sym->type)) {
+    return true;
+  }
+  if (initializer == NULL) {
+    SemanticError(diagnostic_node, "auto variable requires an initializer");
+    return false;
+  }
+
+  TypeRecord* initializer_type = initializer->type;
+  if (initializer->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)initializer;
+    initializer_type = expr_init->expr->type;
+  }
+  TypeRecord* deduced = TypeDeduceAuto(sym->type, initializer_type);
+  if (deduced == NULL) {
+    SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
+                  sym->name.value);
+    return false;
+  }
+  SymbolSetType(sym, deduced);
+  return true;
+}
+
 void SemanticCheckScalarType(ASTNode* node) {
   if (node == NULL) {
     return;
@@ -630,9 +656,12 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         return;
       }
       
-      // Treat enum and ints as same.
-      if ((TypeIsEnum(from->type) && TypeIsInt(to)) ||
-          (TypeIsInt(from->type) && TypeIsEnum(to))) {
+      // Unscoped enums behave like integers. C++ scoped enums require an
+      // explicit cast.
+      if ((TypeIsEnum(from->type) && !TypeIsScopedEnum(from->type) &&
+           TypeIsInt(to)) ||
+          (TypeIsInt(from->type) && TypeIsEnum(to) &&
+           !TypeIsScopedEnum(to))) {
         return;
       }
 
@@ -650,6 +679,16 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
       if (TypeIsUnknown(to) || TypeIsUnknown(from->type)) {
         // Unknown types don't cause errors.
+        return;
+      }
+
+      if (TypeIsScopedEnum(to) || TypeIsScopedEnum(from->type)) {
+        if (TypeIsScopedEnum(to) && TypeIsScopedEnum(from->type) &&
+            to->info.enum_info == from->type->info.enum_info) {
+          return;
+        }
+        SemanticTypeConversionError(
+            from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
         return;
       }
       
@@ -672,6 +711,10 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     return;
   }
   node->initializer = AnalyzeExpression(node->initializer);
+  if (!SemanticDeduceAutoType(node->symbol, node->initializer,
+                              (ASTNode*)node)) {
+    return;
+  }
   // TODO: at this level the expression must be evaluatable at compile time.
   NormalConversion(node->initializer, node->symbol->type);
   ASTNodeSetType((ASTNode*)node, node->symbol->type);

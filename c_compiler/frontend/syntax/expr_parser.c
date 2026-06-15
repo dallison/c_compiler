@@ -15,7 +15,9 @@
 #include "expr_semantics.h"
 #include "preprocessor.h"
 #include "statement_parser.h"
+#include "symbol_table.h"
 #include "type.h"
+#include "compiler.h"
 
 static struct Intrinsic {
   const char* name;
@@ -909,6 +911,544 @@ done:
   return result;
 }
 
+static Symbol* GetImplicitCXXAllocationFunction(const char* name,
+                                                TypeRecord* return_type,
+                                                TypeRecord* arg_type,
+                                                SourceLocation location) {
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  Symbol* symbol = FindGlobalSymbol(&symbol_name);
+  StringDestruct(&symbol_name);
+  if (symbol != NULL) {
+    TypeRecordDelete(return_type);
+    TypeRecordDelete(arg_type);
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, return_type);
+  Symbol* formal = NewSymbol(SyntaxFakeName(&compiler->syntax), arg_type,
+                             STO(auto));
+  formal->flags.is_argument = true;
+  formal->flags.invented = true;
+  VectorAppend(&func_type->info.function.prototype, formal);
+
+  symbol = NewSymbol(name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->location = location;
+  func_type->info.function.symbol = symbol;
+  SymbolSetCXXMangledAsmName(symbol);
+  bool ok = InsertGlobalSymbol(symbol);
+  assert(ok);
+  (void)ok;
+  return symbol;
+}
+
+static Symbol* GetImplicitCXXOperatorNew(SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* return_type = NewPointerTo(kQualPlain, void_type);
+  return GetImplicitCXXAllocationFunction("operator new", return_type,
+                                          NewSizeTypeRecord(), location);
+}
+
+static Symbol* GetImplicitCXXOperatorNewArray(SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* return_type = NewPointerTo(kQualPlain, void_type);
+  return GetImplicitCXXAllocationFunction("operator new[]", return_type,
+                                          NewSizeTypeRecord(), location);
+}
+
+static Symbol* GetImplicitCXXOperatorDelete(SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* arg_type =
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  return GetImplicitCXXAllocationFunction("operator delete", void_type,
+                                          arg_type, location);
+}
+
+static Symbol* GetImplicitCXXOperatorDeleteArray(SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* arg_type =
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  return GetImplicitCXXAllocationFunction("operator delete[]", void_type,
+                                          arg_type, location);
+}
+
+static ASTNode* NewCallASTNode(Symbol* callee, SourceLocation location,
+                               Vector* actuals) {
+  return NewVectorASTNode(AST_OP(call), NULL, location,
+                          NewIdentifierASTNode(callee, location), actuals);
+}
+
+static StructMember* FindCXXConstructorForType(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, type->info.struct_info->tag_name->value);
+  StructMember* ctor = FindStructMember(type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (ctor == NULL || !ctor->is_member_function ||
+      !ctor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  return ctor;
+}
+
+static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
+                                               TokenClass followers) {
+  Token close = open == TOK(lparen) ? TOK(rparen) : TOK(rbrace);
+  LexNextToken(syntax->lex);
+  Vector* actuals = NewVector();
+  while (!LexLookingAt(syntax->lex, close)) {
+    ASTNode* actual = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+    VectorAppend(actuals, actual);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, close, followers | TC(exprsep));
+  return actuals;
+}
+
+static ASTNode* NewCXXConstructorCallForReceiver(TypeRecord* allocated_type,
+                                                 ASTNode* receiver,
+                                                 Vector* actuals,
+                                                 SourceLocation location);
+
+static ASTNode* NewCXXConstructorCallForPointer(TypeRecord* allocated_type,
+                                                Symbol* ptr,
+                                                Vector* actuals,
+                                                SourceLocation location) {
+  ASTNode* receiver = NewUnaryASTNode(AST_OP(contents), allocated_type, location,
+                                      NewIdentifierASTNode(ptr, location));
+  return NewCXXConstructorCallForReceiver(allocated_type, receiver, actuals,
+                                          location);
+}
+
+static ASTNode* NewCXXConstructorCallForReceiver(TypeRecord* allocated_type,
+                                                 ASTNode* receiver,
+                                                 Vector* actuals,
+                                                 SourceLocation location) {
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(allocated_type->info.struct_info
+                                             ->tag_name->value),
+                               NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+}
+
+static StructMember* FindCXXDestructorForType(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, "~");
+  StringAppendString(&name, type->info.struct_info->tag_name);
+  StructMember* destructor = FindStructMember(type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      !destructor->symbol->type->info.function.is_destructor) {
+    return NULL;
+  }
+  return destructor;
+}
+
+static ASTNode* NewCXXDestructorCallForPointer(TypeRecord* object_type,
+                                               Symbol* ptr,
+                                               SourceLocation location) {
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, object_type->info.struct_info->tag_name);
+  ASTNode* receiver =
+      NewUnaryASTNode(AST_OP(contents), object_type, location,
+                      NewIdentifierASTNode(ptr, location));
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL,
+                               location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  StringDestruct(&destructor_name);
+  return NewVectorASTNode(AST_OP(call), NULL, location, member_access,
+                          NewVector());
+}
+
+static ASTNode* NewExpressionStatement(ASTNode* expr, SourceLocation location) {
+  return NewExpressionStatementASTNode(expr, location);
+}
+
+static ASTNode* NewAssign(ASTNode* left, ASTNode* right, TypeRecord* type,
+                          SourceLocation location) {
+  return NewBinaryASTNode(AST_OP(assign), type, location, left, right);
+}
+
+static ASTNode* NewTypedCast(TypeRecord* type, ASTNode* expr,
+                             SourceLocation location) {
+  ASTNode* result = NewCastASTNode(type, location, expr);
+  ((CastASTNode*)result)->kind = kCastStatic;
+  return result;
+}
+
+static ASTNode* NewPtrAdd(ASTNode* ptr, ASTNode* offset,
+                          SourceLocation location) {
+  return NewBinaryASTNode(AST_OP(plus), NULL, location, ptr, offset);
+}
+
+static ASTNode* NewPtrSub(ASTNode* ptr, ASTNode* offset,
+                          SourceLocation location) {
+  return NewBinaryASTNode(AST_OP(minus), NULL, location, ptr, offset);
+}
+
+static ASTNode* NewIntLiteral(int64_t value, SourceLocation location) {
+  return NewIntConstantASTNode(value,
+                               NewTypeRecordWithSize(kTypeInt, kQualConst),
+                               location);
+}
+
+static ASTNode* NewPostIncrement(Symbol* sym, SourceLocation location) {
+  return NewUnaryASTNode(AST_OP(postinc), NULL, location,
+                         NewIdentifierASTNode(sym, location));
+}
+
+static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_type,
+                                         Symbol* ptr, Symbol* count,
+                                         SourceLocation location) {
+  Symbol* index =
+      SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  Symbol* element_ptr =
+      SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, element_type));
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(index, location),
+                             NewIntLiteral(0, location), index->type,
+                             location),
+                   location));
+
+  Vector* body_statements = NewVector();
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(element_ptr, location),
+                             NewPtrAdd(NewIdentifierASTNode(ptr, location),
+                                       NewIdentifierASTNode(index, location),
+                                       location),
+                             element_ptr->type, location),
+                   location));
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewCXXConstructorCallForPointer(element_type, element_ptr,
+                                                   NewVector(), location),
+                   location));
+  VectorAppend(body_statements,
+               NewExpressionStatement(NewPostIncrement(index, location),
+                                      location));
+  ASTNode* body = NewCompoundStatementASTNode(body_statements, location);
+  ASTNode* cond =
+      NewBinaryASTNode(AST_OP(less), NULL, location,
+                       NewIdentifierASTNode(index, location),
+                       NewIdentifierASTNode(count, location));
+  VectorAppend(statements,
+               NewCombinedStatementASTNode(AST_OP(while), cond, body,
+                                           location));
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static ASTNode* NewArrayDestructionLoop(Syntax* syntax, TypeRecord* element_type,
+                                        Symbol* ptr, Symbol* count,
+                                        SourceLocation location) {
+  Symbol* index =
+      SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  Symbol* element_ptr =
+      SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, element_type));
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(index, location),
+                             NewIntLiteral(0, location), index->type,
+                             location),
+                   location));
+
+  Vector* body_statements = NewVector();
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(element_ptr, location),
+                             NewPtrAdd(NewIdentifierASTNode(ptr, location),
+                                       NewIdentifierASTNode(index, location),
+                                       location),
+                             element_ptr->type, location),
+                   location));
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewCXXDestructorCallForPointer(element_type, element_ptr,
+                                                  location),
+                   location));
+  VectorAppend(body_statements,
+               NewExpressionStatement(NewPostIncrement(index, location),
+                                      location));
+  ASTNode* body = NewCompoundStatementASTNode(body_statements, location);
+  ASTNode* cond =
+      NewBinaryASTNode(AST_OP(less), NULL, location,
+                       NewIdentifierASTNode(index, location),
+                       NewIdentifierASTNode(count, location));
+  VectorAppend(statements,
+               NewCombinedStatementASTNode(AST_OP(while), cond, body,
+                                           location));
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // new
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* allocated_type = TypeParserParseType(&parser, true);
+  Token initializer_open = TOK(bad);
+  ASTNode* array_size = NULL;
+  if (LexLookingAt(syntax->lex, TOK(lparen)) ||
+      LexLookingAt(syntax->lex, TOK(lbrace)) ||
+      LexLookingAt(syntax->lex, TOK(lsquare))) {
+    initializer_open = syntax->lex->current_token;
+  }
+  Symbol* sym = initializer_open == TOK(bad)
+      ? TypeParserParseDeclarator(&parser, allocated_type)
+      : NULL;
+  if (sym == NULL) {
+    if (allocated_type == NULL) {
+      SyntaxError(syntax, "Invalid type in new expression");
+      allocated_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+  } else {
+    allocated_type = sym->type;
+  }
+  if (initializer_open == TOK(bad) &&
+      (LexLookingAt(syntax->lex, TOK(lparen)) ||
+       LexLookingAt(syntax->lex, TOK(lbrace)) ||
+       LexLookingAt(syntax->lex, TOK(lsquare)))) {
+    initializer_open = syntax->lex->current_token;
+  }
+  TypeParserDestruct(&parser);
+  TypeRecordCalculateSize(allocated_type);
+  if (TypeIsAbstractClass(allocated_type)) {
+    SyntaxError(syntax, "Cannot allocate object of abstract class %s",
+                allocated_type->info.struct_info->tag_name != NULL
+                    ? allocated_type->info.struct_info->tag_name->value
+                    : "<anonymous>");
+  }
+
+  Vector* ctor_actuals = NULL;
+  ASTNode* scalar_initializer = NULL;
+  if (initializer_open == TOK(lsquare)) {
+    LexNextToken(syntax->lex);
+    array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+  } else if (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace)) {
+    if (FindCXXConstructorForType(allocated_type) == NULL) {
+      Vector* initializers =
+          ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+      if (initializers->length == 1) {
+        scalar_initializer = initializers->value.p[0];
+        VectorDestruct(initializers);
+      } else {
+        SyntaxError(syntax, "new initializer for non-class type requires one expression");
+        VectorDelete(initializers);
+      }
+    } else {
+      ctor_actuals =
+          ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+    }
+  } else if (FindCXXConstructorForType(allocated_type) != NULL) {
+    ctor_actuals = NewVector();
+  }
+
+  Vector* actuals = NewVector();
+  ASTNode* allocation_size =
+      NewSizeofASTNodeWithKnownSize(allocated_type->size, location);
+  Symbol* array_count = NULL;
+  if (array_size != NULL) {
+    array_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
+    allocation_size =
+        NewBinaryASTNode(AST_OP(plus), NULL, location,
+                         NewBinaryASTNode(AST_OP(mult), NULL, location,
+                                          NewIdentifierASTNode(array_count,
+                                                               location),
+                                          allocation_size),
+                         NewSizeofASTNodeWithKnownSize(
+                             NewSizeTypeRecord()->size, location));
+  }
+  VectorAppend(actuals, allocation_size);
+  ASTNode* allocation =
+      NewCallASTNode(array_size != NULL ? GetImplicitCXXOperatorNewArray(location)
+                                        : GetImplicitCXXOperatorNew(location),
+                     location, actuals);
+  TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
+  ASTNode* result = NewCastASTNode(result_type, location, allocation);
+  ((CastASTNode*)result)->kind = kCastStatic;
+  if (array_size != NULL) {
+    TypeRecord* size_type = NewSizeTypeRecord();
+    TypeRecord* size_ptr_type = NewPointerTo(kQualPlain, size_type);
+    Symbol* header = SyntaxNewTemporary(syntax, size_ptr_type);
+    Symbol* object_ptr = SyntaxNewTemporary(syntax, result_type);
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(array_count, location),
+                               array_size, array_count->type, location),
+                     location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(header, location),
+                               NewTypedCast(size_ptr_type, result, location),
+                               header->type, location),
+                     location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewUnaryASTNode(AST_OP(contents), size_type,
+                                              location,
+                                              NewIdentifierASTNode(header,
+                                                                   location)),
+                               NewIdentifierASTNode(array_count, location),
+                               size_type, location),
+                     location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(object_ptr, location),
+                               NewTypedCast(result_type,
+                                            NewPtrAdd(
+                                                NewIdentifierASTNode(header,
+                                                                     location),
+                                                NewIntLiteral(1, location),
+                                                location),
+                                            location),
+                               object_ptr->type, location),
+                     location));
+    if (TypeIsStructOrUnion(allocated_type) &&
+        FindCXXConstructorForType(allocated_type) != NULL) {
+      VectorAppend(statements,
+                   NewArrayConstructionLoop(syntax, allocated_type, object_ptr,
+                                            array_count, location));
+    }
+    VectorAppend(statements,
+                 NewExpressionStatement(NewIdentifierASTNode(object_ptr,
+                                                             location),
+                                        location));
+    result = NewUnaryASTNode(AST_OP(stmt_expr), result_type, location,
+                             NewCompoundStatementASTNode(statements, location));
+  } else if (ctor_actuals != NULL || scalar_initializer != NULL) {
+    Symbol* temp = SyntaxNewTemporary(syntax, result_type);
+    ASTNode* assign =
+        NewBinaryASTNode(AST_OP(assign), result_type, location,
+                         NewIdentifierASTNode(temp, location), result);
+    ASTNode* init = ctor_actuals != NULL
+        ? NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
+                                          location)
+        : NewAssign(NewUnaryASTNode(AST_OP(contents), allocated_type, location,
+                                    NewIdentifierASTNode(temp, location)),
+                    scalar_initializer, allocated_type, location);
+    result = NewBinaryASTNode(
+        AST_OP(comma), result_type, location, assign,
+        NewBinaryASTNode(AST_OP(comma), result_type, location, init,
+                         NewIdentifierASTNode(temp, location)));
+  }
+  if (sym != NULL) {
+    SymbolDelete(sym);
+  }
+  return result;
+}
+
+static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // delete
+  bool is_array_delete = false;
+  if (LexMatch(syntax->lex, TOK(lsquare))) {
+    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+    is_array_delete = true;
+  }
+  ASTNode* expr = ParseCastExpression(syntax, followers);
+  TypeRecord* pointer_type = expr->type;
+  if (is_array_delete) {
+    if (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)) {
+      Vector* actuals = NewVector();
+      VectorAppend(actuals, expr);
+      return NewCallASTNode(GetImplicitCXXOperatorDeleteArray(location),
+                            location, actuals);
+    }
+    TypeRecord* size_type = NewSizeTypeRecord();
+    TypeRecord* size_ptr_type = NewPointerTo(kQualPlain, size_type);
+    Symbol* object_ptr = SyntaxNewTemporary(syntax, pointer_type);
+    Symbol* header = SyntaxNewTemporary(syntax, size_ptr_type);
+    Symbol* count = SyntaxNewTemporary(syntax, size_type);
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(object_ptr, location),
+                               expr, object_ptr->type, location),
+                     location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(header, location),
+                               NewPtrSub(NewTypedCast(size_ptr_type,
+                                                      NewIdentifierASTNode(
+                                                          object_ptr,
+                                                          location),
+                                                      location),
+                                         NewIntLiteral(1, location), location),
+                               header->type, location),
+                     location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(count, location),
+                               NewUnaryASTNode(AST_OP(contents), size_type,
+                                                location,
+                                                NewIdentifierASTNode(header,
+                                                                     location)),
+                               count->type, location),
+                     location));
+    if (TypeIsStructOrUnionPointer(pointer_type) &&
+        FindCXXDestructorForType(pointer_type->next) != NULL) {
+      VectorAppend(statements,
+                   NewArrayDestructionLoop(syntax, pointer_type->next,
+                                           object_ptr, count, location));
+    }
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, NewIdentifierASTNode(header, location));
+    VectorAppend(statements,
+                 NewExpressionStatement(
+                     NewCallASTNode(GetImplicitCXXOperatorDeleteArray(location),
+                                    location, actuals),
+                     location));
+    return NewUnaryASTNode(
+        AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        location, NewCompoundStatementASTNode(statements, location));
+  }
+  if (pointer_type == NULL || !TypeIsStructOrUnionPointer(pointer_type) ||
+      FindCXXDestructorForType(pointer_type->next) == NULL) {
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, expr);
+    return NewCallASTNode(GetImplicitCXXOperatorDelete(location), location,
+                          actuals);
+  }
+
+  Symbol* temp = SyntaxNewTemporary(syntax, pointer_type);
+  ASTNode* assign =
+      NewBinaryASTNode(AST_OP(assign), pointer_type, location,
+                       NewIdentifierASTNode(temp, location), expr);
+  ASTNode* destructor =
+      NewCXXDestructorCallForPointer(pointer_type->next, temp, location);
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, NewIdentifierASTNode(temp, location));
+  ASTNode* deallocate =
+      NewCallASTNode(GetImplicitCXXOperatorDelete(location), location, actuals);
+  return NewBinaryASTNode(
+      AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
+      assign, NewBinaryASTNode(AST_OP(comma),
+                               NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+                               location, destructor, deallocate));
+}
+
 // Parse a unary expression with syntax:
 // unary-expression:
 //    postfix-expression
@@ -994,7 +1534,69 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
     return ParseSizeof(syntax, followers);
   }
 
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(new))) {
+    return ParseCXXNewExpression(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(delete))) {
+    return ParseCXXDeleteExpression(syntax, followers);
+  }
+
   return ParsePostfixExpression(syntax, followers);
+}
+
+static CastKind CXXNamedCastKind(Token token) {
+  switch (token) {
+    case TOK(static_cast):
+      return kCastStatic;
+    case TOK(reinterpret_cast):
+      return kCastReinterpret;
+    case TOK(const_cast):
+      return kCastConst;
+    case TOK(dynamic_cast):
+      return kCastDynamic;
+    default:
+      assert(false);
+      return kCastCStyle;
+  }
+}
+
+static bool TokenIsCXXNamedCast(Token token) {
+  return token == TOK(static_cast) || token == TOK(reinterpret_cast) ||
+         token == TOK(const_cast) || token == TOK(dynamic_cast);
+}
+
+static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
+                                            TokenClass followers) {
+  Token cast_token = syntax->lex->current_token;
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);
+  SyntaxNeedBracket(syntax, TOK(less), followers);
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* type = TypeParserParseType(&parser, false);
+  Symbol* sym = NULL;
+  if (type == NULL) {
+    SyntaxError(syntax, "Invalid type name");
+    type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  } else {
+    sym = TypeParserParseDeclarator(&parser, type);
+    type = sym->type;
+  }
+  TypeParserDestruct(&parser);
+
+  SyntaxNeedBracket(syntax, TOK(greater), followers);
+  SyntaxNeedBracket(syntax, TOK(lparen), followers);
+  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(expr));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  ASTNode* result = NewCastASTNode(type, location, expr);
+  ((CastASTNode*)result)->kind = CXXNamedCastKind(cast_token);
+  if (sym != NULL) {
+    SymbolDelete(sym);
+  }
+  return result;
 }
 
 // Parse cast expression with syntax:
@@ -1004,6 +1606,9 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 //
 // This also handles compound literals, which are actually postfix expressions.
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
+  if (CompilerIsCXX() && TokenIsCXXNamedCast(syntax->lex->current_token)) {
+    return ParseCXXNamedCastExpression(syntax, followers);
+  }
   if (!syntax->lex->preprocessor_mode && !syntax->lex->assembler_mode &&
       LexMatch(syntax->lex, TOK(lparen))) {
     // A leading __attribute__ (GCC extension) only appears in type names, so

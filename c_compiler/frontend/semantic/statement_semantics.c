@@ -817,7 +817,10 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
           callee->type->info.function.is_constructor;
     }
   }
-  if (node->initializer != NULL && !constructor_call) {
+  bool side_effect_initializer =
+      node->initializer != NULL && node->initializer->op == AST_OP(stmt_expr);
+  if (node->initializer != NULL && !constructor_call &&
+      !side_effect_initializer) {
     NormalConversion(node->initializer, node->symbol->type);
   }
 }

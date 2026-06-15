@@ -14,6 +14,7 @@
 #include <string.h>
 #include "dstring.h"
 #include "compiler.h"
+#include "symbol_table.h"
 
 bool StorageIs(Storage storage, Storage value) {
   return (storage & value) != 0;
@@ -176,6 +177,258 @@ void SymbolDelete(Symbol* symbol) {
 
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute) {
   VectorAppend(&symbol->attributes, attribute);   // Takes ownership.
+}
+
+static bool CXXSymbolShouldMangle(Symbol* symbol) {
+  if (!CompilerIsCXX() || symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  if (symbol->asm_name.length != 0) {
+    return false;
+  }
+  if (strcmp(symbol->name.value, "main") == 0 &&
+      symbol->type->info.function.cxx_member_owner == NULL &&
+      symbol->namespace_ == NULL) {
+    return false;
+  }
+  return true;
+}
+
+typedef struct {
+  const char* name;
+  const char* encoding;
+} CXXOperatorEncodingEntry;
+
+static int CompareCXXOperatorEncodingEntry(const void* key,
+                                           const void* element) {
+  const char* name = key;
+  const CXXOperatorEncodingEntry* entry = element;
+  return strcmp(name, entry->name);
+}
+
+static const char* CXXOperatorEncoding(const char* name) {
+  static const CXXOperatorEncodingEntry entries[] = {
+      {"operator delete", "dl"},
+      {"operator delete[]", "da"},
+      {"operator new", "nw"},
+      {"operator new[]", "na"},
+      {"operator!", "nt"},
+      {"operator!=", "ne"},
+      {"operator%", "rm"},
+      {"operator%=", "rM"},
+      {"operator&", "an"},
+      {"operator&&", "aa"},
+      {"operator&=", "aN"},
+      {"operator()", "cl"},
+      {"operator*", "ml"},
+      {"operator*=", "mL"},
+      {"operator+", "pl"},
+      {"operator++", "pp"},
+      {"operator+=", "pL"},
+      {"operator,", "cm"},
+      {"operator-", "mi"},
+      {"operator--", "mm"},
+      {"operator-=", "mI"},
+      {"operator->", "pt"},
+      {"operator->*", "pm"},
+      {"operator/", "dv"},
+      {"operator/=", "dV"},
+      {"operator<", "lt"},
+      {"operator<<", "ls"},
+      {"operator<<=", "lS"},
+      {"operator<=", "le"},
+      {"operator=", "aS"},
+      {"operator==", "eq"},
+      {"operator>", "gt"},
+      {"operator>=", "ge"},
+      {"operator>>", "rs"},
+      {"operator>>=", "rS"},
+      {"operator[]", "ix"},
+      {"operator^", "eo"},
+      {"operator^=", "eO"},
+      {"operator|", "or"},
+      {"operator|=", "oR"},
+      {"operator||", "oo"},
+      {"operator~", "co"},
+  };
+  const CXXOperatorEncodingEntry* entry =
+      bsearch(name, entries, sizeof(entries) / sizeof(entries[0]),
+              sizeof(entries[0]), CompareCXXOperatorEncodingEntry);
+  return entry != NULL ? entry->encoding : NULL;
+}
+
+static void AppendCXXNameComponent(String* out, const char* name) {
+  const char* op_encoding = CXXOperatorEncoding(name);
+  if (op_encoding != NULL) {
+    StringAppend(out, op_encoding);
+    return;
+  }
+  String length;
+  StringInit(&length, NULL);
+  StringPrintf(&length, "%zu", strlen(name));
+  StringAppendString(out, &length);
+  StringAppend(out, name);
+  StringDestruct(&length);
+}
+
+static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
+  if (ns == NULL || ns->parent == NULL) {
+    return;
+  }
+  AppendCXXNestedNamespaceComponents(out, ns->parent);
+  if (ns->name.length != 0) {
+    AppendCXXNameComponent(out, ns->name.value);
+  }
+}
+
+static void AppendCXXUnqualifiedName(String* out, Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  Struct* owner = func->info.function.cxx_member_owner;
+  if (func->info.function.is_constructor) {
+    if (owner == NULL || owner->tag_name == NULL) {
+      AppendCXXNameComponent(out, symbol->name.value);
+    }
+    StringAppend(out, "C1");
+    return;
+  }
+  if (func->info.function.is_destructor) {
+    if (owner == NULL || owner->tag_name == NULL) {
+      AppendCXXNameComponent(out, symbol->name.value);
+    }
+    StringAppend(out, "D1");
+    return;
+  }
+  AppendCXXNameComponent(out, symbol->name.value);
+}
+
+static bool CXXNameNeedsNestedEncoding(Symbol* symbol) {
+  return symbol->namespace_ != NULL ||
+         symbol->type->info.function.cxx_member_owner != NULL;
+}
+
+static void AppendCXXName(String* out, Symbol* symbol) {
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  if (!CXXNameNeedsNestedEncoding(symbol)) {
+    AppendCXXUnqualifiedName(out, symbol);
+    return;
+  }
+
+  StringAppendChar(out, 'N');
+  if (symbol->type->info.function.is_const_member) {
+    StringAppendChar(out, 'K');
+  }
+  AppendCXXNestedNamespaceComponents(out, symbol->namespace_);
+  if (owner != NULL && owner->tag_name != NULL) {
+    AppendCXXNameComponent(out, owner->tag_name->value);
+  }
+  AppendCXXUnqualifiedName(out, symbol);
+  StringAppendChar(out, 'E');
+}
+
+static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
+  if (type == NULL) {
+    StringAppendChar(out, 'v');
+    return;
+  }
+  if (TypeIsConst(type)) {
+    StringAppendChar(out, 'K');
+  }
+  if (TypeIsVolatile(type)) {
+    StringAppendChar(out, 'V');
+  }
+  switch (type->declarator) {
+    case kDeclPointer:
+      StringAppendChar(out, 'P');
+      AppendCXXTypeEncoding(out, type->next);
+      return;
+    case kDeclReference:
+      StringAppendChar(out, 'R');
+      AppendCXXTypeEncoding(out, type->next);
+      return;
+    case kDeclRValueReference:
+      StringAppendChar(out, 'O');
+      AppendCXXTypeEncoding(out, type->next);
+      return;
+    case kDeclArray:
+      StringAppendChar(out, 'P');
+      AppendCXXTypeEncoding(out, type->next);
+      return;
+    case kDeclFunction:
+      StringAppendChar(out, 'F');
+      AppendCXXTypeEncoding(out, type->next);
+      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+        Symbol* formal = type->info.function.prototype.value.p[i];
+        AppendCXXTypeEncoding(out, formal->type);
+      }
+      StringAppendChar(out, 'E');
+      return;
+    case kDeclPrimitive:
+      break;
+  }
+
+  if (TypeIsVoid(type)) {
+    StringAppendChar(out, 'v');
+  } else if (TypeIsBool(type)) {
+    StringAppendChar(out, 'b');
+  } else if (TypeIsChar(type)) {
+    StringAppendChar(out, TypeIsUnsigned(type) ? 'h' : 'c');
+  } else if (TypeIsShort(type)) {
+    StringAppendChar(out, TypeIsUnsigned(type) ? 't' : 's');
+  } else if (TypeIsLongLong(type)) {
+    StringAppend(out, TypeIsUnsigned(type) ? "y" : "x");
+  } else if (TypeIsLong(type)) {
+    StringAppendChar(out, TypeIsUnsigned(type) ? 'm' : 'l');
+  } else if (TypeIsInt(type)) {
+    StringAppendChar(out, TypeIsUnsigned(type) ? 'j' : 'i');
+  } else if (TypeIsFloat(type)) {
+    StringAppendChar(out, 'f');
+  } else if (TypeIsDouble(type)) {
+    StringAppendChar(out, 'd');
+  } else if (TypeIsLongDouble(type)) {
+    StringAppendChar(out, 'e');
+  } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+             type->info.struct_info->tag_name != NULL) {
+    AppendCXXNameComponent(out, type->info.struct_info->tag_name->value);
+  } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
+             type->info.enum_info->tag_name != NULL) {
+    AppendCXXNameComponent(out, type->info.enum_info->tag_name->value);
+  } else {
+    StringAppendChar(out, 'v');
+  }
+}
+
+static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  bool has_implicit_this =
+      func->info.function.prototype.length > 0 &&
+      strcmp(((Symbol*)func->info.function.prototype.value.p[0])->name.value,
+             "this") == 0;
+  size_t first_arg = has_implicit_this ? 1 : 0;
+  if (func->info.function.prototype.length <= first_arg) {
+    StringAppendChar(out, 'v');
+    return;
+  }
+  for (size_t i = first_arg; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    AppendCXXTypeEncoding(out, formal->type);
+  }
+}
+
+void SymbolSetCXXMangledAsmName(Symbol* symbol) {
+  if (!CXXSymbolShouldMangle(symbol)) {
+    return;
+  }
+  String mangled;
+  StringInit(&mangled, NULL);
+  if (compiler->prepend_underscore) {
+    StringAppendChar(&mangled, '_');
+  }
+  StringAppend(&mangled, "_Z");
+  AppendCXXName(&mangled, symbol);
+  AppendCXXFunctionParameterTypes(&mangled, symbol);
+  StringSetString(&symbol->asm_name, &mangled);
+  StringDestruct(&mangled);
 }
 
 Symbol* SymbolClone(Symbol* sym) {

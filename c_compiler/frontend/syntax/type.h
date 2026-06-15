@@ -36,12 +36,13 @@ typedef enum {
   kTypeSigned = 1 << 13,
   kTypeUnsigned = 1 << 14,
   kTypeUnknown = 1 << 15,
+  kTypeAuto = 1 << 16,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 12
+#define TYPE_LAST_BIT 16
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {
@@ -76,6 +77,11 @@ typedef struct {
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
   bool is_const_member; // C++ member function has trailing const qualifier.
+  bool is_virtual;      // C++ virtual member function.
+  bool is_override;     // C++ override virt-specifier.
+  bool is_final;        // C++ final virt-specifier.
+  bool is_pure_virtual; // C++ pure virtual function (`= 0`).
+  int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
 } FunctionInfo;
 
@@ -84,6 +90,12 @@ typedef enum {
   kAccessProtected,
   kAccessPrivate,
 } CXXAccess;
+
+typedef struct CXXBaseSpecifier {
+  struct TypeRecord* type;  // Base class type.
+  CXXAccess access;
+  int byte_offset;
+} CXXBaseSpecifier;
 
 // A struct or union member.  Behaves like a Symbol with extra information.
 typedef struct StructMember {
@@ -103,7 +115,11 @@ typedef struct StructMember {
 struct Struct {
   int refs;
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
+  Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
   Vector members;    // Vector of StructMember* (owns StructMembers)
+  Vector virtual_members;  // Vector of StructMember* (not owned), by slot.
+  StructMember* vptr_member;  // Hidden C++ vptr field, if owned by this class.
+  Symbol* vtable_symbol;      // Hidden C++ vtable static symbol.
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
   int size;          // Size of struct in bytes.
@@ -111,6 +127,7 @@ struct Struct {
   bool is_union;     // True if this is a union.
   bool is_class;     // True if this is a C++ class.
   bool packed;       // __attribute__((packed)): no inter-member padding.
+  bool is_abstract;  // C++ class has at least one unimplemented pure virtual.
   int explicit_alignment;  // __attribute__((aligned(N))) minimum; 0 = none.
   int pack;          // #pragma pack(n) member alignment cap; 0 = no cap.
   int next_bit_pos;  // Next bit position for bit fields.
@@ -132,6 +149,10 @@ typedef struct {
   String* tag_name;  // Tag name (owned by Symbol).
   Vector constants;  // Vector of Symbol* (not owned).
   int next_value;    // Value to give to next constant.
+  bool is_scoped;    // C++ scoped enum: enum class / enum struct.
+  bool has_fixed_underlying;
+  Type fixed_underlying_type;
+  int fixed_underlying_size;
 } Enum;
 
 typedef struct {
@@ -236,14 +257,19 @@ void StructMemberDelete(StructMember* member);
 bool StructMemberIsBitField(StructMember* member);
 
 Symbol* NewEnumConstant(const char* name, int value);
+Symbol* NewScopedEnumConstant(const char* name, int value, TypeRecord* enum_type);
 Enum* NewEnum(void);
 void EnumDelete(Enum* e);
+Symbol* EnumFindConstant(Enum* e, String* name);
 
 // What is the size of a given type in bytes?
 int SizeofType(Type type);
 int SizeofPointer(void);
 
 StructMember* FindStructMember(Struct* str, String* name);
+StructMember* FindStructMemberWithAccess(Struct* str, String* name,
+                                         CXXAccess* access,
+                                         Struct** owner);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 
 void TypeRecordToString(TypeRecord* type, String* result);
@@ -319,6 +345,10 @@ inline bool TypeIsFunctionPointer(TypeRecord* type) {
 
 inline bool TypeIsVoid(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeVoid) != 0;
+}
+
+inline bool TypeIsAuto(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeAuto) != 0;
 }
 
 inline bool TypeIsVoidFunction(TypeRecord* type) {
@@ -450,6 +480,8 @@ inline bool TypeIsEnum(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeEnum) != 0;
 }
 
+bool TypeIsScopedEnum(TypeRecord* type);
+
 inline bool TypeIsVoidPointer(TypeRecord* type) {
   return TypeIsPointer(type) && type->next != NULL && TypeIsVoid(type->next);
 }
@@ -483,6 +515,11 @@ inline bool TypeIsUnknown(TypeRecord* type) {
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
+bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only);
+bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to);
+bool TypeIsAbstractClass(TypeRecord* type);
+bool TypeContainsAuto(TypeRecord* type);
+TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);
 void TypeErrorDetails(SourceLocation location,
                       TypeRecord* t1, TypeRecord* t2);

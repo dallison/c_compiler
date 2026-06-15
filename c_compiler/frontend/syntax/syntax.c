@@ -174,27 +174,9 @@ static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
   return NULL;
 }
 
-static int OverloadIndex(Symbol* first, Symbol* target) {
-  int index = 0;
-  for (Symbol* overload = first; overload != NULL;
-       overload = overload->overload_next, index++) {
-    if (overload == target) {
-      return index;
-    }
-  }
-  return index;
-}
-
 static void SetOverloadAsmName(Symbol* first, Symbol* overload) {
-  if (overload->asm_name.length != 0) {
-    return;
-  }
-  String asm_name;
-  StringInit(&asm_name, NULL);
-  StringPrintf(&asm_name, "%s__ov%d", overload->name.value,
-               OverloadIndex(first, overload));
-  StringSetString(&overload->asm_name, &asm_name);
-  StringDestruct(&asm_name);
+  (void)first;
+  SymbolSetCXXMangledAsmName(overload);
 }
 
 static void AppendOverload(Symbol* first, Symbol* overload) {
@@ -202,6 +184,7 @@ static void AppendOverload(Symbol* first, Symbol* overload) {
   while (tail->overload_next != NULL) {
     tail = tail->overload_next;
   }
+  overload->namespace_ = first->namespace_;
   tail->overload_next = overload;
   first->flags.is_overloaded = true;
   overload->flags.is_overloaded = true;
@@ -250,6 +233,55 @@ static void FullyQualifiedIdentifierAppend(FullyQualifiedIdentifier* name,
   VectorAppend(&name->components, NewString(component->value));
 }
 
+bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
+  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(operator))) {
+    return false;
+  }
+  Token op = syntax->lex->current_token;
+  switch (op) {
+    case TOK(plus):
+    case TOK(minus):
+    case TOK(star):
+    case TOK(slash):
+    case TOK(percent):
+    case TOK(lessless):
+    case TOK(greatergreater):
+    case TOK(amp):
+    case TOK(bar):
+    case TOK(caret):
+    case TOK(tilde):
+    case TOK(bang):
+    case TOK(ampamp):
+    case TOK(barbar):
+    case TOK(equalequal):
+    case TOK(bangeq):
+    case TOK(less):
+    case TOK(lesseq):
+    case TOK(greater):
+    case TOK(greatereq):
+      StringInit(name, "operator");
+      StringAppend(name, TokenName(op));
+      LexNextToken(syntax->lex);
+      return true;
+    default:
+      SyntaxError(syntax, "Unsupported overloaded operator %s", TokenName(op));
+      StringInit(name, "operator?");
+      if (!LexEof(syntax->lex)) {
+        LexNextToken(syntax->lex);
+      }
+      return true;
+  }
+}
+
+static bool ParseQualifiedIdentifierComponent(Syntax* syntax, String* component) {
+  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+    StringInit(component, syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+    return true;
+  }
+  return SyntaxParseOperatorFunctionName(syntax, component);
+}
+
 bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
                                          FullyQualifiedIdentifier* name) {
   Lex* lex = syntax->lex;
@@ -258,29 +290,30 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
     name->is_qualified = true;
   }
 
-  if (!LexLookingAt(lex, TOK(identifier))) {
+  String component;
+  if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
     return false;
   }
 
-  FullyQualifiedIdentifierAppend(name, &lex->spelling);
-  LexNextToken(lex);
+  FullyQualifiedIdentifierAppend(name, &component);
+  StringDestruct(&component);
   while (LexMatch(lex, TOK(coloncolon))) {
     name->is_qualified = true;
     bool is_destructor = LexMatch(lex, TOK(tilde));
-    if (!LexLookingAt(lex, TOK(identifier))) {
+    if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
       SyntaxError(syntax, "Expected identifier after '::'");
       return true;
     }
     if (is_destructor) {
       String destructor_name;
       StringInit(&destructor_name, "~");
-      StringAppendString(&destructor_name, &lex->spelling);
+      StringAppendString(&destructor_name, &component);
       FullyQualifiedIdentifierAppend(name, &destructor_name);
       StringDestruct(&destructor_name);
     } else {
-      FullyQualifiedIdentifierAppend(name, &lex->spelling);
+      FullyQualifiedIdentifierAppend(name, &component);
     }
-    LexNextToken(lex);
+    StringDestruct(&component);
   }
   return true;
 }
@@ -362,6 +395,20 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
     symbol = NamespaceFindSymbol(ns, &last);
   } else if (ns == compiler->global_namespace) {
     symbol = FindGlobalSymbol(&last);
+  }
+  if (symbol == NULL && name->components.length >= 2) {
+    FullyQualifiedIdentifier prefix;
+    FullyQualifiedIdentifierInit(&prefix);
+    prefix.absolute = name->absolute;
+    prefix.is_qualified = name->absolute || name->components.length > 2;
+    for (size_t i = 0; i + 1 < name->components.length; i++) {
+      FullyQualifiedIdentifierAppend(&prefix, name->components.value.p[i]);
+    }
+    Symbol* tag = SyntaxFindQualifiedTag(syntax, &prefix);
+    if (tag != NULL && tag->type != NULL && TypeIsScopedEnum(tag->type)) {
+      symbol = EnumFindConstant(tag->type->info.enum_info, &last);
+    }
+    FullyQualifiedIdentifierDestruct(&prefix);
   }
   StringDestruct(&last);
   return FollowAlias(symbol);
@@ -612,6 +659,9 @@ Storage SyntaxParseStorage(Syntax* syntax) {
       LexNextToken(syntax->lex);
       return STO(typedef);
     case TOK(auto):
+      if (CompilerIsCXX()) {
+        return STO(implicit);
+      }
       LexNextToken(syntax->lex);
       return STO(auto);
     case TOK(static):
@@ -642,6 +692,35 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
 static ASTNode* ParseBracedInitializer(Syntax* syntax);
 static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
+
+void SyntaxParseStaticAssert(Syntax* syntax) {
+  LexNextToken(syntax->lex);  // static_assert
+  SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
+
+  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
+  expr = AnalyzeExpression(expr);
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+  }
+
+  const char* message = "static assertion failed";
+  if (LexMatch(syntax->lex, TOK(comma))) {
+    if (LexLookingAt(syntax->lex, TOK(string))) {
+      message = syntax->lex->spelling.value;
+      LexNextToken(syntax->lex);
+    } else {
+      SyntaxError(syntax, "static_assert message must be a string literal");
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
+
+  if (value == 0) {
+    SyntaxError(syntax, "%s", message);
+  }
+  ASTNodeDelete(expr);
+}
 
 // Identity transform used when deep-cloning an AST node.
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
@@ -997,6 +1076,381 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   }
 }
 
+static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close);
+static const char* CXXConstructorNameForType(TypeRecord* type);
+static StructMember* FindCXXConstructor(TypeRecord* type);
+
+static Symbol* FindThisSymbol(Syntax* syntax) {
+  String this_name;
+  StringInit(&this_name, "this");
+  Symbol* symbol = SyntaxFindSymbol(syntax, &this_name);
+  StringDestruct(&this_name);
+  return symbol;
+}
+
+static StructMember* FindCXXBaseSpecialMember(CXXBaseSpecifier* base,
+                                              bool destructor) {
+  if (base == NULL || base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+      base->type->info.struct_info == NULL ||
+      base->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String member_name;
+  if (destructor) {
+    StringInit(&member_name, "~");
+    StringAppendString(&member_name, base->type->info.struct_info->tag_name);
+  } else {
+    StringInit(&member_name, base->type->info.struct_info->tag_name->value);
+  }
+  StructMember* member =
+      FindStructMember(base->type->info.struct_info, &member_name);
+  StringDestruct(&member_name);
+  if (member == NULL || !member->is_member_function) {
+    return NULL;
+  }
+  TypeRecord* func = member->symbol->type;
+  if (!TypeIsFunction(func)) {
+    return NULL;
+  }
+  if (destructor && !func->info.function.is_destructor) {
+    return NULL;
+  }
+  if (!destructor && !func->info.function.is_constructor) {
+    return NULL;
+  }
+  return member;
+}
+
+static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
+                                            TypeRecord* receiver_func,
+                                            CXXBaseSpecifier* base,
+                                            bool destructor,
+                                            Vector* actuals,
+                                            SourceLocation location) {
+  StructMember* member = FindCXXBaseSpecialMember(base, destructor);
+  Symbol* this_symbol = FindThisSymbol(syntax);
+  if (this_symbol == NULL && receiver_func != NULL &&
+      TypeIsFunction(receiver_func) &&
+      receiver_func->info.function.prototype.length > 0) {
+    this_symbol = receiver_func->info.function.prototype.value.p[0];
+  }
+  if (member == NULL || this_symbol == NULL) {
+    if (actuals != NULL) {
+      VectorDelete(actuals);
+    }
+    return NULL;
+  }
+
+  String member_name;
+  if (destructor) {
+    StringInit(&member_name, "~");
+    StringAppendString(&member_name, base->type->info.struct_info->tag_name);
+  } else {
+    StringInit(&member_name, base->type->info.struct_info->tag_name->value);
+  }
+  ASTNode* receiver = NewIdentifierASTNode(this_symbol, location);
+  ASTNode* member_node =
+      NewStringConstantASTNode(NewString(member_name.value), NULL, location);
+  StringDestruct(&member_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver, member_node);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access,
+                       actuals != NULL ? actuals : NewVector());
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
+                                        Vector* body,
+                                        SourceLocation location) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = owner->bases.length; i > 0; i--) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i - 1];
+    ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, true,
+                                                NULL, location);
+    if (call == NULL) {
+      continue;
+    }
+    if (compiler->debug_output && body->length > 0) {
+      VectorInsertBefore(body, body->length - 1, call);
+    } else {
+      VectorAppend(body, call);
+    }
+  }
+}
+
+typedef struct {
+  Vector base_specs;       // CXXBaseSpecifier*; not owned.
+  Vector base_statements;  // ASTNode*; transferred into function body.
+  Vector member_statements;  // ASTNode*; transferred into function body.
+} CXXConstructorInitList;
+
+static void CXXConstructorInitListInit(CXXConstructorInitList* init_list) {
+  VectorInit(&init_list->base_specs);
+  VectorInit(&init_list->base_statements);
+  VectorInit(&init_list->member_statements);
+}
+
+static void CXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
+  VectorDestruct(&init_list->base_specs);
+  VectorDestruct(&init_list->base_statements);
+  VectorDestruct(&init_list->member_statements);
+}
+
+static void VectorInsertOrAppend(Vector* vec, size_t index, void* value) {
+  if (index >= vec->length) {
+    VectorAppend(vec, value);
+  } else {
+    VectorInsertBefore(vec, index, value);
+  }
+}
+
+static bool VectorContainsPointer(Vector* vec, void* value) {
+  for (size_t i = 0; i < vec->length; i++) {
+    if (vec->value.p[i] == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
+                                                 const char* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        base->type->info.struct_info->tag_name != NULL &&
+        StringEqual(base->type->info.struct_info->tag_name, name)) {
+      return base;
+    }
+  }
+  return NULL;
+}
+
+static StructMember* FindCXXDirectDataMemberByName(Struct* owner,
+                                                   const char* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member->symbol != NULL && StringEqual(&member->symbol->name, name) &&
+        !member->is_static && !member->is_member_function) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static Symbol* CXXThisSymbolFromFunction(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  return func->info.function.prototype.value.p[0];
+}
+
+static ASTNode* NewCXXThisMemberAccess(TypeRecord* func,
+                                       const char* member_name,
+                                       SourceLocation location) {
+  Symbol* this_symbol = CXXThisSymbolFromFunction(func);
+  if (this_symbol == NULL) {
+    return NULL;
+  }
+  return NewBinaryASTNode(
+      AST_OP(arrow), NULL, location,
+      NewIdentifierASTNode(this_symbol, location),
+      NewStringConstantASTNode(NewString(member_name), NULL, location));
+}
+
+static ASTNode* NewCXXVPtrInitializer(TypeRecord* func,
+                                      SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL) {
+    return NULL;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  if (owner->vtable_symbol == NULL) {
+    return NULL;
+  }
+  String vptr_name;
+  StringInit(&vptr_name, "__vptr");
+  StructMember* vptr_member = FindStructMember(owner, &vptr_name);
+  StringDestruct(&vptr_name);
+  if (vptr_member == NULL) {
+    return NULL;
+  }
+  ASTNode* target = NewCXXThisMemberAccess(func, "__vptr", location);
+  if (target == NULL) {
+    return NULL;
+  }
+  ASTNode* value = NewIdentifierASTNode(owner->vtable_symbol, location);
+  return NewExpressionStatementASTNode(
+      NewBinaryASTNode(AST_OP(assign), vptr_member->symbol->type,
+                       location, target, value),
+      location);
+}
+
+static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
+                                                TypeRecord* func,
+                                                StructMember* member,
+                                                Vector* actuals,
+                                                SourceLocation location) {
+  if (member == NULL || member->symbol == NULL || actuals == NULL) {
+    if (actuals != NULL) {
+      VectorDelete(actuals);
+    }
+    return NULL;
+  }
+
+  TypeRecord* member_type = member->symbol->type;
+  if (TypeIsStructOrUnion(member_type) && FindCXXConstructor(member_type) != NULL) {
+    const char* constructor_name = CXXConstructorNameForType(member_type);
+    ASTNode* receiver =
+        NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+    if (receiver == NULL || constructor_name == NULL) {
+      VectorDelete(actuals);
+      return NULL;
+    }
+    ASTNode* member_name =
+        NewStringConstantASTNode(NewString(constructor_name), NULL, location);
+    ASTNode* member_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
+    return NewExpressionStatementASTNode(
+        NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals),
+        location);
+  }
+
+  if (actuals->length != 1) {
+    SyntaxError(syntax,
+                "member initializer for %s requires one expression",
+                member->symbol->name.value);
+    VectorDelete(actuals);
+    return NULL;
+  }
+  ASTNode* value = actuals->value.p[0];
+  VectorDelete(actuals);
+  ASTNode* target =
+      NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+  if (target == NULL) {
+    return NULL;
+  }
+  return NewExpressionStatementASTNode(
+      NewBinaryASTNode(AST_OP(assign), member_type, location, target, value),
+      location);
+}
+
+static void ParseCXXConstructorInitializerList(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
+      func->info.function.cxx_member_owner == NULL ||
+      !LexMatch(syntax->lex, TOK(colon))) {
+    return;
+  }
+
+  Struct* owner = func->info.function.cxx_member_owner;
+  while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    FullyQualifiedIdentifier name;
+    FullyQualifiedIdentifierInit(&name);
+    if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+      SyntaxError(syntax, "Expected constructor initializer name");
+      FullyQualifiedIdentifierDestruct(&name);
+      break;
+    }
+
+    Vector* actuals = NULL;
+    if (LexMatch(syntax->lex, TOK(lparen))) {
+      actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
+    } else if (LexMatch(syntax->lex, TOK(lbrace))) {
+      actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+    } else {
+      SyntaxError(syntax, "Expected constructor initializer argument list");
+      actuals = NewVector();
+    }
+
+    const char* init_name = FullyQualifiedIdentifierLast(&name);
+    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
+    if (base != NULL) {
+      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                                  actuals, location);
+      if (call != NULL) {
+        VectorAppend(&init_list->base_specs, base);
+        VectorAppend(&init_list->base_statements, call);
+      }
+    } else {
+      StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
+      if (member == NULL) {
+        SyntaxError(syntax, "%s is not a direct base or member of %s",
+                    init_name,
+                    owner->tag_name != NULL ? owner->tag_name->value
+                                            : "<anonymous>");
+        VectorDelete(actuals);
+      } else {
+        ASTNode* stmt = NewCXXMemberInitializerStatement(
+            syntax, func, member, actuals, location);
+        if (stmt != NULL) {
+          VectorAppend(&init_list->member_statements, stmt);
+        }
+      }
+    }
+    FullyQualifiedIdentifierDestruct(&name);
+
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static void InsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
+                                        Vector* body,
+                                        CXXConstructorInitList* init_list,
+                                        SourceLocation location) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  size_t insert_at = 0;
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    ASTNode* call = NULL;
+    for (size_t j = 0; j < init_list->base_specs.length; j++) {
+      if (init_list->base_specs.value.p[j] == base) {
+        call = init_list->base_statements.value.p[j];
+        break;
+      }
+    }
+    if (call == NULL && !VectorContainsPointer(&init_list->base_specs, base)) {
+      call = NewCXXBaseSpecialMemberCall(syntax, func, base, false, NULL,
+                                         location);
+    }
+    if (call == NULL) {
+      continue;
+    }
+    VectorInsertOrAppend(body, insert_at, call);
+    insert_at++;
+  }
+  ASTNode* vptr_init = NewCXXVPtrInitializer(func, location);
+  if (vptr_init != NULL) {
+    VectorInsertOrAppend(body, insert_at, vptr_init);
+    insert_at++;
+  }
+  for (size_t i = 0; i < init_list->member_statements.length; i++) {
+    ASTNode* stmt = init_list->member_statements.value.p[i];
+    VectorInsertOrAppend(body, insert_at, stmt);
+    insert_at++;
+  }
+}
+
 static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                         Vector* declarations,
                              Symbol* sym, Symbol* old_sym) {
@@ -1033,6 +1487,10 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   }
   
   
+  CXXConstructorInitList cxx_initializers;
+  CXXConstructorInitListInit(&cxx_initializers);
+  ParseCXXConstructorInitializerList(syntax, sym->type, &cxx_initializers);
+
   if (LexMatch(syntax->lex, TOK(lbrace))) {
     if (sym->type->info.function.old_style) {
       SyntaxWarning(syntax, "old-style-definition",
@@ -1074,6 +1532,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         VectorAppend(body, stmt);
       }
     }
+    InsertCXXConstructorPreamble(syntax, sym->type, body, &cxx_initializers,
+                                 sym->location);
+    AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
     
@@ -1089,6 +1550,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     ASTNode* decl = NewVariableDeclarationASTNode(sym, NULL,
                                                   syntax->lex->current_token_location);
     VectorAppend(declarations, decl);
+    CXXConstructorInitListDestruct(&cxx_initializers);
     
     return NewDeclarationListASTNode(declarations,
                                      syntax->lex->current_token_location);
@@ -1099,6 +1561,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       old_sym->flags.is_inline_defn = true;
     }
   }
+  CXXConstructorInitListDestruct(&cxx_initializers);
   return NULL;
 }
 
@@ -1325,9 +1788,18 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         StringSetString(&sym->asm_name, &old_sym->asm_name);
       }
     }
+    if (TypeIsFunction(sym->type)) {
+      SymbolSetCXXMangledAsmName(sym);
+      if (old_sym != NULL && old_sym->asm_name.length == 0) {
+        SymbolSetCXXMangledAsmName(old_sym);
+      }
+    }
   
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
+      if (TypeContainsAuto(sym->type)) {
+        SyntaxError(syntax, "auto function return type is not supported yet");
+      }
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
       if (result != NULL) {
         // A function definition whose name was already declared: `old_sym`
@@ -1342,6 +1814,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     } else if (parser->is_inline) {
       SyntaxError(syntax, "inline can only be applied to functions");
+    }
+    if (TypeIsAbstractClass(sym->type)) {
+      SyntaxError(syntax, "Cannot declare object of abstract class %s",
+                  sym->type->info.struct_info->tag_name != NULL
+                      ? sym->type->info.struct_info->tag_name->value
+                      : "<anonymous>");
     }
     
     if (old_sym != NULL) {
@@ -1359,6 +1837,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (LexMatch(syntax->lex, TOK(equal))) {
       syntax->init_storage = storage;
       initializer = SyntaxParseInitializer(syntax, sym, storage);
+    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))) {
+      initializer = ParseBracedInitializer(syntax);
+      if (!StorageIs(storage, STO(extern))) {
+        sym->flags.is_defined = true;
+      }
+    }
+    if (TypeContainsAuto(sym->type) && initializer == NULL) {
+      SyntaxError(syntax, "auto variable requires an initializer");
+    } else if (TypeContainsAuto(sym->type)) {
+      initializer = AnalyzeExpression(initializer);
+      SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
     }
     ASTNode* decl = NewVariableDeclarationASTNode(
         sym, initializer, syntax->lex->current_token_location);
@@ -1650,6 +2139,11 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     syntax->current_namespace = compiler->global_namespace;
   }
 
+  if (LexLookingAt(syntax->lex, TOK(static_assert))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    SyntaxParseStaticAssert(syntax);
+    return EmptyDeclarationList(location);
+  }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
     return ParseNamespaceDeclaration(syntax);
   }
@@ -1768,15 +2262,25 @@ static ASTNode* NewCXXConstructorCall(Syntax* syntax, Symbol* sym,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
-static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
-      !LexMatch(syntax->lex, TOK(lparen))) {
+static StructMember* FindCXXConstructor(TypeRecord* type) {
+  const char* constructor_name = CXXConstructorNameForType(type);
+  if (constructor_name == NULL) {
     return NULL;
   }
+  String name;
+  StringInit(&name, constructor_name);
+  StructMember* ctor = FindStructMember(type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (ctor == NULL || !ctor->is_member_function ||
+      !ctor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  return ctor;
+}
 
-  SourceLocation location = syntax->lex->current_token_location;
+static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
   Vector* actuals = NewVector();
-  while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+  while (!LexLookingAt(syntax->lex, close)) {
     ASTNode* actual =
         SyntaxParseSingleExpression(syntax, TC(closebra) | TC(exprsep));
     VectorAppend(actuals, actual);
@@ -1784,7 +2288,25 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
       break;
     }
   }
-  SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
+  SyntaxNeedBracket(syntax, close, TC(exprsep) | TC(decl));
+  return actuals;
+}
+
+static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+      FindCXXConstructor(sym->type) == NULL) {
+    return NULL;
+  }
+
+  SourceLocation location = syntax->lex->current_token_location;
+  Vector* actuals = NULL;
+  if (LexMatch(syntax->lex, TOK(lparen))) {
+    actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
+  } else if (LexMatch(syntax->lex, TOK(lbrace))) {
+    actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+  } else {
+    return NULL;
+  }
   return NewCXXConstructorCall(syntax, sym, actuals, location);
 }
 
@@ -1803,6 +2325,123 @@ static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
     return NULL;
   }
   return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
+}
+
+static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+      sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  SourceLocation location = sym->location;
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(sym->type->info.struct_info, &destructor_name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      !destructor->symbol->type->info.function.is_destructor) {
+    StringDestruct(&destructor_name);
+    return NULL;
+  }
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL,
+                               location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location,
+                       NewIdentifierASTNode(sym, location), member);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access,
+                       NewVector());
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static ASTNode* NewIntAssignment(Symbol* sym, int value,
+                                 SourceLocation location) {
+  return NewBinaryASTNode(
+      AST_OP(assign), sym->type, location,
+      NewIdentifierASTNode(sym, location),
+      NewIntConstantASTNode(value,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+}
+
+static void RegisterCXXLocalStaticDestructor(Symbol* sym, Symbol* guard) {
+  ASTNode* destructor = NewCXXDestructorCallIfNeeded(sym);
+  if (destructor == NULL) {
+    return;
+  }
+  SourceLocation location = sym->location;
+  ASTNode* condition = NewBinaryASTNode(
+      AST_OP(noteq), NULL, location, NewIdentifierASTNode(guard, location),
+      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+  Vector* destructor_statements = NewVector();
+  VectorAppend(destructor_statements, destructor);
+  ASTNode* guarded_destructor = NewIfStatementASTNode(
+      condition, NewCompoundStatementASTNode(destructor_statements, location),
+      NULL, location);
+  VectorAppend(&compiler->cxx_global_destructor_calls, guarded_destructor);
+}
+
+static ASTNode* NewCXXLocalStaticGuardedConstructor(Syntax* syntax,
+                                                   Symbol* sym) {
+  ASTNode* constructor = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+  if (constructor == NULL) {
+    return NULL;
+  }
+
+  SourceLocation location = sym->location;
+  Symbol* guard =
+      NewSymbol(SyntaxFakeName(syntax),
+                NewTypeRecordWithSize(kTypeInt, kQualPlain), STO(static));
+  guard->flags.invented = true;
+  guard->flags.is_defined = true;
+  guard->flags.is_local = true;
+  guard->location = location;
+  bool added = SyntaxAddSymbol(syntax, guard);
+  assert(added);
+  (void)added;
+  VectorAppend(&syntax->local_statics,
+               NewVariableDeclarationASTNode(guard, NULL, location));
+  RegisterCXXLocalStaticDestructor(sym, guard);
+
+  Vector* guarded_statements = NewVector();
+  VectorAppend(guarded_statements,
+               NewExpressionStatementASTNode(constructor, location));
+  VectorAppend(guarded_statements,
+               NewExpressionStatementASTNode(
+                   NewIntAssignment(guard, 1, location), location));
+
+  ASTNode* condition = NewBinaryASTNode(
+      AST_OP(equal), NULL, location, NewIdentifierASTNode(guard, location),
+      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+  ASTNode* guarded =
+      NewIfStatementASTNode(condition,
+                            NewCompoundStatementASTNode(guarded_statements,
+                                                        location),
+                            NULL, location);
+
+  Vector* statements = NewVector();
+  VectorAppend(statements, guarded);
+  return NewUnaryASTNode(AST_OP(stmt_expr),
+                         NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+                         location, NewCompoundStatementASTNode(statements,
+                                                               location));
+}
+
+static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
+                                          ASTNode* initializer) {
+  ASTNode* decl_id =
+      NewIdentifierASTNode(sym, syntax->lex->current_token_location);
+  decl_id->flags |= kASTNeedAddress;
+  ASTNode* init = NewBinaryASTNode(AST_OP(init), sym->type,
+                                  syntax->lex->current_token_location, decl_id,
+                                  initializer);
+  decl_id->flags |= kASTIsDeclaration;
+  return init;
 }
 
 static void ParseLocalDeclarationList(TypeParser* parser,
@@ -1917,6 +2556,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
+      if (TypeContainsAuto(sym->type)) {
+        SyntaxError(syntax, "auto function return type is not supported yet");
+      }
       if (LexMatch(syntax->lex, TOK(lbrace))) {
         // C does not supported nested functions.
         SyntaxError(syntax, "Function definition not allowed here");
@@ -1930,27 +2572,33 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (parser->is_inline) {
          SyntaxError(syntax, "inline can only be applied to functions");
       }
+      if (TypeIsAbstractClass(sym->type)) {
+        SyntaxError(syntax, "Cannot declare object of abstract class %s",
+                    sym->type->info.struct_info->tag_name != NULL
+                        ? sym->type->info.struct_info->tag_name->value
+                        : "<anonymous>");
+      }
       // Any initializer?
       ASTNode* initializer = NULL;
       if (LexMatch(syntax->lex, TOK(equal))) {
         syntax->init_storage = storage;
         initializer = SyntaxParseInitializer(syntax, sym, storage);
-
-        ASTNode* decl_id =
-            NewIdentifierASTNode(sym, syntax->lex->current_token_location);
-        decl_id->flags |= kASTNeedAddress;
-
-        // Create an assignment expression to initialize the variable.
-        initializer = NewBinaryASTNode(AST_OP(init), sym->type,
-                                       syntax->lex->current_token_location,
-                                       decl_id, initializer);
-
-        // Set flags to help semantic analyzer.
-        decl_id->flags |= kASTIsDeclaration;
+        initializer = NewVariableInitExpression(syntax, sym, initializer);
       } else {
         initializer = ParseCXXDirectInitializer(syntax, sym);
-        if (initializer == NULL && !StorageIs(storage, STO(static))) {
-          initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+        if (initializer == NULL && CompilerIsCXX() &&
+            LexMatch(syntax->lex, TOK(lbrace))) {
+          initializer =
+              NewVariableInitExpression(syntax, sym, ParseBracedInitializer(syntax));
+        }
+        if (initializer == NULL) {
+          if (TypeContainsAuto(sym->type)) {
+            SyntaxError(syntax, "auto variable requires an initializer");
+          } else if (StorageIs(storage, STO(static))) {
+            initializer = NewCXXLocalStaticGuardedConstructor(syntax, sym);
+          } else {
+            initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+          }
         }
       }
 
@@ -1978,6 +2626,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 // function.  The symbol is added to the local scope (top symbol table in the
 // local symbol stack).
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
+  if (LexLookingAt(syntax->lex, TOK(static_assert))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    SyntaxParseStaticAssert(syntax);
+    return EmptyDeclarationList(location);
+  }
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
   }
@@ -2057,6 +2710,10 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(restrict):
     case TOK(void):
       return true;
+    case TOK(auto):
+      return CompilerIsCXX();
+    case TOK(decltype):
+      return CompilerIsCXX();
     case TOK(identifier): {
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
@@ -2082,6 +2739,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(register):
     case TOK(typedef):
     case TOK(using):
+    case TOK(static_assert):
       return true;
     default:
       return SyntaxLookingAtType(syntax);

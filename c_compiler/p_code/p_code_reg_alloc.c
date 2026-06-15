@@ -142,6 +142,10 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(cmple):
     case P_OP(cmpgt):
     case P_OP(cmpge):
+    case P_OP(cmpltu):
+    case P_OP(cmpleu):
+    case P_OP(cmpgtu):
+    case P_OP(cmpgeu):
     case P_OP(cmpeqf):
     case P_OP(cmpnef):
     case P_OP(cmpltf):

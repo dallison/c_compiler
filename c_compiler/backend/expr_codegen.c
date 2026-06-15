@@ -551,6 +551,10 @@ static IRNode* GenerateVariableReference(Generator* gen,
                                          IdentifierASTNode* node) {
   IRNode* var_ref = GeneratorGetVariable(gen, node->symbol);
   if (TypeIsReference(node->symbol->type)) {
+    if ((node->base.flags & kASTIsDeclaration) != 0 &&
+        (node->base.flags & kASTNeedAddress) != 0) {
+      return var_ref;
+    }
     IRNode* ref_addr =
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), var_ref)),
                   NewPointerTo(kQualPlain, node->base.type));
@@ -1187,12 +1191,25 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   bool stash_call_results = call_arg_count >= 2;
 
   Vector args_right_to_left = {0};
+  TypeRecord* callee_type = node->left->type;
+  if (node->left->op == AST_OP(identifier)) {
+    callee_type = ((IdentifierASTNode*)node->left)->symbol->type;
+  }
+  if (TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
   
   // All arguments, in reverse order.
   for (ssize_t i = node->children->length-1; i >= 0; i--) {
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
     IRNode* arg_value = GenerateExpression(gen, arg);
+    bool reference_formal = false;
+    if (callee_type != NULL && TypeIsFunction(callee_type) &&
+        (size_t)i < callee_type->info.function.prototype.length) {
+      Symbol* formal = callee_type->info.function.prototype.value.p[i];
+      reference_formal = TypeIsReference(formal->type);
+    }
 
     // Scalar arguments (integer, pointer and floating-point) need stashing
     // here: a call returns its result in a fixed return register, so an
@@ -1205,7 +1222,13 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       arg_value = StashCallResult(gen, arg_value);
     }
 
-    if (TypeIsStructOrUnion(arg->type)) {
+    if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
+      arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
+      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+      CheckForVarDef(arg_value, arg);
+    }
+
+    if (TypeIsStructOrUnion(arg->type) && !reference_formal) {
       // If the argument is the result of another call it may
       // have been converted to an IR_OP(addressof) which is no longer
       // a struct type (we want its address, not its value)
@@ -1325,6 +1348,11 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   // The sub node has the kASTNeedAddress flag set so generating code for
   // it will calculate its address.
   IRNode* expr = GenerateExpression(gen, node->sub);
+  if (node->sub->op == AST_OP(identifier) &&
+      TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type)) {
+    IRSetType(expr, node->base.type);
+    return expr;
+  }
   IRNode* result = GeneratorEmit(gen, NewIR1(IR_OP(addressof), expr));
   CheckForVarDef(result, &node->base);
   IRSetType(result, node->base.type);

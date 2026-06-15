@@ -467,6 +467,11 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_constructor = false;
   t->info.function.is_destructor = false;
   t->info.function.is_const_member = false;
+  t->info.function.is_virtual = false;
+  t->info.function.is_override = false;
+  t->info.function.is_final = false;
+  t->info.function.is_pure_virtual = false;
+  t->info.function.virtual_index = -1;
   t->info.function.cxx_member_owner = NULL;
   t->info.function.old_style = false;
   t->info.function.is_inline = false;
@@ -496,6 +501,21 @@ StructMember* NewStructMember(Symbol* symbol) {
   return mem;
 }
 
+static CXXBaseSpecifier* NewCXXBaseSpecifier(TypeRecord* type,
+                                             CXXAccess access) {
+  CXXBaseSpecifier* base = malloc(sizeof(CXXBaseSpecifier));
+  base->type = type;
+  TypeRecordIncRef(type);
+  base->access = access;
+  base->byte_offset = 0;
+  return base;
+}
+
+static void CXXBaseSpecifierDelete(CXXBaseSpecifier* base) {
+  TypeRecordDelete(base->type);
+  free(base);
+}
+
 void StructMemberDelete(StructMember* member) {
   SymbolDelete(member->symbol);
   free(member);
@@ -514,7 +534,11 @@ static int CompareStructMember(const void* a, const void* b) {
 Struct* NewStruct(bool is_union) {
   Struct* s = malloc(sizeof(Struct));
   s->refs = 1;
+  VectorInit(&s->bases);
   VectorInit(&s->members);
+  VectorInit(&s->virtual_members);
+  s->vptr_member = NULL;
+  s->vtable_symbol = NULL;
   MapInit(&s->symbol_table, CompareStructMember);
   s->is_union = is_union;
   s->is_class = false;
@@ -523,6 +547,7 @@ Struct* NewStruct(bool is_union) {
   s->size = 0;
   s->alignment = 1;
   s->packed = false;
+  s->is_abstract = false;
   s->explicit_alignment = 0;
   s->pack = 0;
   s->next_bit_pos = 65;
@@ -539,8 +564,12 @@ Struct* NewStruct(bool is_union) {
 // Tear down a struct's members and member tables, but do NOT free the Struct
 // itself (see StructRegistryRelease's two-phase teardown).
 static void StructTeardownMembers(Struct* s) {
+  VectorDestructWithContents(&s->bases,
+                             (VectorElementDestructor)CXXBaseSpecifierDelete,
+                             /*free_element=*/false);
   VectorDestructWithContents(&s->members,
                              (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
+  VectorDestruct(&s->virtual_members);
   MapDestruct(&s->symbol_table);
 }
 
@@ -557,11 +586,25 @@ Symbol* NewEnumConstant(const char* name, int value) {
   return c;
 }
 
+Symbol* NewScopedEnumConstant(const char* name, int value,
+                              TypeRecord* enum_type) {
+  TypeRecord* type = TypeRecordCopy(enum_type);
+  type->qualifiers |= kQualConst;
+  Symbol* c = NewSymbol(name, type, STO(implicit));
+  c->value.ivalue = value;
+  c->flags.value_set = true;
+  return c;
+}
+
 Enum* NewEnum() {
   Enum* e = malloc(sizeof(Enum));
   e->refs = 1;
   VectorInit(&e->constants);
   e->next_value = 0;
+  e->is_scoped = false;
+  e->has_fixed_underlying = false;
+  e->fixed_underlying_type = 0;
+  e->fixed_underlying_size = 0;
   // Track every enum so it can be freed in bulk by StructRegistryRelease; this
   // keeps composite-info teardown uniform and cycle/UAF-safe.
   if (!enum_registry_initialized) {
@@ -575,6 +618,19 @@ Enum* NewEnum() {
 void EnumDelete(Enum* e) {
   VectorDestruct(&e->constants);
   free(e);
+}
+
+Symbol* EnumFindConstant(Enum* e, String* name) {
+  if (e == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < e->constants.length; i++) {
+    Symbol* constant = e->constants.value.p[i];
+    if (StringEqualString(&constant->name, name)) {
+      return constant;
+    }
+  }
+  return NULL;
 }
 
 // Mapping of type to its name.
@@ -794,8 +850,60 @@ static struct {
     {TOK(union), kTypeUnion},
     {TOK(enum), kTypeEnum},         {TOK(void), kTypeVoid},
     {TOK(bool), kTypeBool},         {TOK(signed), kTypeSigned},
-    {TOK(unsigned), kTypeUnsigned}, {TOK(bad), kTypeImplicit},
+    {TOK(unsigned), kTypeUnsigned}, {TOK(auto), kTypeAuto},
+    {TOK(bad), kTypeImplicit},
 };
+
+static TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
+  TypeRecord* base = TypeIsReference(expr_type) ? expr_type->next : expr_type;
+  TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
+  TypeRecordChain(ref, base);
+  TypeRecordCalculateSize(ref);
+  return ref;
+}
+
+static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
+  LexNextToken(parser->lex);
+  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
+
+  bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));
+  bool unparenthesized_identifier =
+      !parenthesized_expression &&
+      (LexLookingAt(parser->lex, TOK(identifier)) ||
+       LexLookingAt(parser->lex, TOK(coloncolon)));
+  ASTNode* expr = SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+  Symbol* declared_symbol = NULL;
+  if (unparenthesized_identifier && expr != NULL &&
+      expr->op == AST_OP(identifier)) {
+    declared_symbol = ((IdentifierASTNode*)expr)->symbol;
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+
+  TypeRecord* result = NULL;
+  if (declared_symbol != NULL) {
+    result = TypeRecordCopy(declared_symbol->type);
+  } else {
+    expr = AnalyzeExpression(expr);
+    if (expr == NULL || expr->type == NULL) {
+      SyntaxError(parser->syntax, "Invalid expression in decltype");
+      result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    } else if (expr->value_category == kValueCategoryLvalue) {
+      result = NewDecltypeReference(expr->type, false);
+    } else if (expr->value_category == kValueCategoryXvalue) {
+      result = NewDecltypeReference(expr->type, true);
+    } else {
+      result = TypeRecordCopy(expr->type);
+    }
+  }
+  if (expr != NULL) {
+    ASTNodeDelete(expr);
+  }
+  if (result == NULL) {
+    SyntaxError(parser->syntax, "Invalid decltype specifier");
+    result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  return result;
+}
 
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
@@ -821,6 +929,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     // Check for known type.
     for (int i = 0; type_map[i].token != TOK(bad); i++) {
       if (type_map[i].token == tok) {
+        if (tok == TOK(auto) && !CompilerIsCXX()) {
+          break;
+        }
         // First check for a typedef name reference.
         LexNextToken(lex);
         
@@ -840,6 +951,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       quals |= kQualVolatile;
     } else if (LexMatch(lex, TOK(restrict))) {
       quals |= kQualRestrict;
+    } else if (CompilerIsCXX() && LexLookingAt(lex, TOK(decltype))) {
+      type_record = ParseCXXDecltypeSpecifier(parser);
+      type |= type_record->type;
     } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
       FullyQualifiedIdentifier typedef_name;
       FullyQualifiedIdentifierInit(&typedef_name);
@@ -956,6 +1070,8 @@ static Type valid_types[] = {
   kTypeDouble | kTypeLong,
   
   kTypeBool,
+
+  kTypeAuto,
   
   kTypeStruct,
   
@@ -1414,7 +1530,7 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
 
   // If we were not told (void) and there are no formal args then the C
   // language says that this is a variable arguments function.
-  if (info->prototype.length == 0 && !void_args) {
+  if (!CompilerIsCXX() && info->prototype.length == 0 && !void_args) {
     info->unknown_args = true;
     SyntaxWarning(proto_parser->syntax, "strict-prototypes",
                   "function declaration without a prototype");
@@ -1437,6 +1553,8 @@ static void ParseFunctionDecl(TypeParser* parser) {
       !parser->cxx_member_definition->is_static) {
     TypeRecordAddCXXThisParameter(
         func, parser->cxx_member_owner, parser->symbol->location);
+  } else if (parser->cxx_member_definition != NULL) {
+    func->info.function.cxx_member_owner = parser->cxx_member_owner;
   }
 
   VectorAppend(&parser->stack, func);
@@ -1675,6 +1793,7 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   Symbol* sym = NewSymbol(member_name.value, func, STO(implicit));
   sym->location = location;
   func->info.function.symbol = sym;
+  SymbolSetCXXMangledAsmName(sym);
   StringDestruct(&member_name);
   FullyQualifiedIdentifierDestruct(&name);
   return sym;
@@ -1694,6 +1813,7 @@ void TypeParserParseBase(TypeParser* parser) {
     }
   } else {
     if (LexLookingAt(parser->lex, TOK(identifier)) ||
+        LexLookingAt(parser->lex, TOK(operator)) ||
         LexLookingAt(parser->lex, TOK(coloncolon))) {
       SourceLocation location = parser->lex->current_token_location;
       FullyQualifiedIdentifier name;
@@ -1722,7 +1842,89 @@ static void PrintStructMember(const MapKeyValue* kv) {
 StructMember* FindStructMember(Struct* str, String* name) {
 //  MapPrint(&str->symbol_table, PrintStructMember);
 //  printf("\n");
-  return MapFindPointerKey(&str->symbol_table, name);
+  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  if (member != NULL) {
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMember(base->type->info.struct_info, name);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
+static CXXAccess CombineInheritedAccess(CXXAccess base_access,
+                                        CXXAccess member_access) {
+  if (member_access == kAccessPrivate || base_access == kAccessPrivate) {
+    return kAccessPrivate;
+  }
+  if (member_access == kAccessProtected || base_access == kAccessProtected) {
+    return kAccessProtected;
+  }
+  return kAccessPublic;
+}
+
+static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
+                                                        String* name,
+                                                        CXXAccess inherited,
+                                                        CXXAccess* access,
+                                                        Struct** owner) {
+  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  if (member != NULL) {
+    if (access != NULL) {
+      *access = CombineInheritedAccess(inherited, member->access);
+    }
+    if (owner != NULL) {
+      *owner = str;
+    }
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMemberWithAccessFromBase(
+          base->type->info.struct_info, name,
+          CombineInheritedAccess(inherited, base->access), access, owner);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
+StructMember* FindStructMemberWithAccess(Struct* str, String* name,
+                                         CXXAccess* access,
+                                         Struct** owner) {
+  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  if (member != NULL) {
+    if (access != NULL) {
+      *access = member->access;
+    }
+    if (owner != NULL) {
+      *owner = str;
+    }
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMemberWithAccessFromBase(
+          base->type->info.struct_info, name, base->access, access, owner);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
 }
 
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
@@ -1736,7 +1938,7 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
 }
 
 static bool CheckStructMember(Struct* str, String* name) {
-  return FindStructMember(str, name) == NULL;
+  return MapFindPointerKey(&str->symbol_table, name) == NULL;
 }
 
 static void AlignNextOffset(Struct* str, TypeRecord* type) {
@@ -1784,6 +1986,219 @@ void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {
       str->explicit_alignment = a;
     }
   }
+}
+
+static CXXAccess ParseBaseAccess(TypeParser* parser, bool is_class) {
+  if (LexMatch(parser->lex, TOK(public))) {
+    return kAccessPublic;
+  }
+  if (LexMatch(parser->lex, TOK(protected))) {
+    return kAccessProtected;
+  }
+  if (LexMatch(parser->lex, TOK(private))) {
+    return kAccessPrivate;
+  }
+  return is_class ? kAccessPrivate : kAccessPublic;
+}
+
+static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
+                                   bool is_union, bool is_class) {
+  if (!CompilerIsCXX() || is_union || !LexMatch(parser->lex, TOK(colon))) {
+    return;
+  }
+  do {
+    bool keep_base = true;
+    if (bases->length > 0) {
+      SyntaxError(parser->syntax,
+                  "multiple inheritance is not supported yet");
+      keep_base = false;
+    }
+    if (LexMatch(parser->lex, TOK(virtual))) {
+      SyntaxError(parser->syntax, "virtual base classes are not supported yet");
+    }
+    CXXAccess access = ParseBaseAccess(parser, is_class);
+    if (LexMatch(parser->lex, TOK(virtual))) {
+      SyntaxError(parser->syntax, "virtual base classes are not supported yet");
+    }
+    TypeRecord* base_type = TypeParserParseType(parser, true);
+    if (base_type == NULL || !TypeIsStructOrUnion(base_type) ||
+        base_type->info.struct_info == NULL) {
+      SyntaxError(parser->syntax, "base class must be a class or struct type");
+      TypeRecordDelete(base_type);
+      continue;
+    }
+    TypeRecordCalculateSize(base_type);
+    if (keep_base) {
+      VectorAppend(bases, NewCXXBaseSpecifier(base_type, access));
+    }
+    TypeRecordDelete(base_type);
+  } while (LexMatch(parser->lex, TOK(comma)));
+}
+
+static void LayoutCXXBaseSpecifiers(Struct* str) {
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    AlignNextOffset(str, base->type);
+    base->byte_offset = str->next_offset;
+    if (!str->is_union) {
+      str->next_offset += base->type->size;
+      str->size = str->next_offset;
+    } else if (base->type->size > str->size) {
+      str->size = base->type->size;
+    }
+  }
+}
+
+static void CopyCXXBaseVirtualMembers(Struct* str) {
+  if (!CompilerIsCXX() || str->virtual_members.length != 0) {
+    return;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    for (size_t j = 0; j < base_struct->virtual_members.length; j++) {
+      VectorAppend(&str->virtual_members, base_struct->virtual_members.value.p[j]);
+    }
+  }
+}
+
+static bool StructHasPolymorphicBase(Struct* str) {
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        base->type->info.struct_info->virtual_members.length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TypeRecord* NewCXXVTableEntryType(void) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  return NewPointerTo(kQualPlain, void_type);
+}
+
+static TypeRecord* NewCXXVPtrType(void) {
+  TypeRecord* entry_type = NewCXXVTableEntryType();
+  return NewPointerTo(kQualPlain, entry_type);
+}
+
+static void AddCXXVPtrMember(TypeParser* parser, Struct* str) {
+  if (!CompilerIsCXX() || str->vptr_member != NULL ||
+      str->virtual_members.length == 0 || StructHasPolymorphicBase(str)) {
+    return;
+  }
+  int ptr_size = SizeofPointer();
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    base->byte_offset += ptr_size;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    member->byte_offset += ptr_size;
+  }
+  str->next_offset += ptr_size;
+  str->current_offset += ptr_size;
+  str->size += ptr_size;
+  if (ptr_size > str->alignment) {
+    str->alignment = ptr_size;
+  }
+
+  Symbol* symbol =
+      NewSymbol("__vptr", NewCXXVPtrType(), STO(implicit));
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->location = parser->lex->current_token_location;
+  StructMember* member = NewStructMember(symbol);
+  member->access = kAccessPublic;
+  member->byte_offset = 0;
+  str->vptr_member = member;
+  VectorAppend(&str->members, member);
+  MapKeyValue kv;
+  kv.key.p = &member->symbol->name;
+  kv.value.p = member;
+  MapInsert(&str->symbol_table, kv);
+}
+
+static TypeRecord* NewCXXVTableType(size_t slots) {
+  TypeRecord* entry_type = NewCXXVTableEntryType();
+  TypeRecord* array_type =
+      NewBasicArrayTypeRecord(kQualPlain, (int)slots, false);
+  TypeRecordChain(array_type, entry_type);
+  TypeRecordCalculateSize(array_type);
+  return array_type;
+}
+
+static void UpdateCXXAbstractStatus(Struct* str) {
+  str->is_abstract = false;
+  if (!CompilerIsCXX()) {
+    return;
+  }
+  for (size_t i = 0; i < str->virtual_members.length; i++) {
+    StructMember* member = str->virtual_members.value.p[i];
+    if (member != NULL && member->symbol != NULL &&
+        TypeIsFunction(member->symbol->type) &&
+        member->symbol->type->info.function.is_pure_virtual) {
+      str->is_abstract = true;
+      return;
+    }
+  }
+}
+
+static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
+  if (!CompilerIsCXX() || str->vtable_symbol != NULL ||
+      str->virtual_members.length == 0 || str->tag_name == NULL) {
+    return;
+  }
+
+  String name;
+  StringInit(&name, "__davecc_vtbl_");
+  StringAppendString(&name, str->tag_name);
+  Symbol* symbol = NewSymbol(name.value,
+                             NewCXXVTableType(str->virtual_members.length),
+                             STO(static));
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->location = parser->lex->current_token_location;
+  SyntaxAddSymbol(parser->syntax, symbol);
+  str->vtable_symbol = symbol;
+  StringDestruct(&name);
+
+  InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
+  var->symbol = symbol;
+  var->is_global = false;
+  var->size = symbol->type->size;
+  var->alignment = TypeRecordAlignment(symbol->type->next);
+  VectorInit(&var->initializers);
+  var->is_tls = false;
+  var->is_local = false;
+  for (size_t i = 0; i < str->virtual_members.length; i++) {
+    StructMember* member = str->virtual_members.value.p[i];
+    if (member == NULL || member->symbol == NULL) {
+      continue;
+    }
+    Initializer* init = malloc(sizeof(Initializer));
+    init->offset = (int32_t)(i * SizeofPointer());
+    if (member->symbol->type->info.function.is_pure_virtual) {
+      if (SizeofPointer() == 8) {
+        init->type = kInitTypeLong;
+        init->value._long = 0;
+      } else {
+        init->type = kInitTypeWord;
+        init->value.word = 0;
+      }
+    } else {
+      init->type = kInitTypeSymbol;
+      init->value.symbol = member->symbol;
+    }
+    VectorAppend(&var->initializers, init);
+  }
+  VectorAppend(&compiler->initialized_static_variables, var);
 }
 
 // Parse a bitfield.  We are just after the : in the member definition.
@@ -1866,8 +2281,175 @@ static void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union
    }
 }
 
+static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b) {
+  if (!TypeIsFunction(a) || !TypeIsFunction(b) ||
+      !TypeEqual(a->next, b->next) ||
+      a->info.function.is_const_member != b->info.function.is_const_member) {
+    return false;
+  }
+  size_t a_first = a->info.function.cxx_member_owner != NULL ? 1 : 0;
+  size_t b_first = b->info.function.cxx_member_owner != NULL ? 1 : 0;
+  if (a->info.function.prototype.length - a_first !=
+      b->info.function.prototype.length - b_first) {
+    return false;
+  }
+  for (size_t i = 0; i < a->info.function.prototype.length - a_first; i++) {
+    Symbol* a_arg = a->info.function.prototype.value.p[i + a_first];
+    Symbol* b_arg = b->info.function.prototype.value.p[i + b_first];
+    if (!TypeEqual(a_arg->type, b_arg->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool LexMatchContextualIdentifier(Lex* lex, const char* name) {
+  if (!LexLookingAt(lex, TOK(identifier)) ||
+      !StringEqual(&lex->spelling, name)) {
+    return false;
+  }
+  LexNextToken(lex);
+  return true;
+}
+
+static void ParseCXXVirtSpecifiers(TypeParser* parser, TypeRecord* func) {
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    if (LexMatchContextualIdentifier(parser->lex, "override")) {
+      if (func->info.function.is_override) {
+        SyntaxError(parser->syntax, "duplicate override specifier");
+      }
+      func->info.function.is_override = true;
+      progress = true;
+    } else if (LexMatchContextualIdentifier(parser->lex, "final")) {
+      if (func->info.function.is_final) {
+        SyntaxError(parser->syntax, "duplicate final specifier");
+      }
+      func->info.function.is_final = true;
+      progress = true;
+    }
+  }
+}
+
+static void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
+      !LexMatch(parser->lex, TOK(equal))) {
+    return;
+  }
+  if (!LexLookingAt(parser->lex, TOK(number)) || parser->lex->number != 0) {
+    SyntaxError(parser->syntax, "pure virtual specifier must be '= 0'");
+    if (!LexLookingAt(parser->lex, TOK(semicolon)) &&
+        !LexLookingAt(parser->lex, TOK(rbrace))) {
+      LexNextToken(parser->lex);
+    }
+    return;
+  }
+  LexNextToken(parser->lex);
+  if (!func->info.function.is_virtual) {
+    SyntaxError(parser->syntax, "pure specifier requires a virtual function");
+  }
+  func->info.function.is_pure_virtual = true;
+}
+
+static StructMember* FindCXXBaseVirtualOverride(Struct* str,
+                                                StructMember* member) {
+  if (str == NULL || member == NULL || member->symbol == NULL ||
+      !member->is_member_function) {
+    return NULL;
+  }
+  TypeRecord* func = member->symbol->type;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    String destructor_name = {0};
+    StructMember* base_member = NULL;
+    if (func->info.function.is_destructor) {
+      StringInit(&destructor_name, "~");
+      StringAppendString(&destructor_name,
+                         base->type->info.struct_info->tag_name);
+      base_member = FindStructMember(base->type->info.struct_info,
+                                     &destructor_name);
+    } else {
+      base_member =
+          FindStructMember(base->type->info.struct_info, &member->symbol->name);
+    }
+    for (StructMember* candidate = base_member; candidate != NULL;
+         candidate = candidate->overload_next) {
+      if (candidate->is_member_function &&
+          candidate->symbol->type->info.function.is_virtual &&
+          CXXMemberFunctionSignaturesMatch(member->symbol->type,
+                                           candidate->symbol->type)) {
+        if (destructor_name.value != NULL) {
+          StringDestruct(&destructor_name);
+        }
+        return candidate;
+      }
+    }
+    if (destructor_name.value != NULL) {
+      StringDestruct(&destructor_name);
+    }
+  }
+  return NULL;
+}
+
+static void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
+                                     StructMember* member) {
+  if (!CompilerIsCXX() || str == NULL || member == NULL ||
+      !member->is_member_function || member->is_static ||
+      member->symbol == NULL || !TypeIsFunction(member->symbol->type)) {
+    return;
+  }
+  TypeRecord* func = member->symbol->type;
+  StructMember* override = FindCXXBaseVirtualOverride(str, member);
+  if (func->info.function.is_override && override == NULL) {
+    SyntaxError(parser->syntax, "%s marked override but does not override",
+                member->symbol->name.value);
+  }
+  if (override != NULL) {
+    if (override->symbol->type->info.function.is_final) {
+      SyntaxError(parser->syntax, "%s overrides final function",
+                  member->symbol->name.value);
+    }
+    func->info.function.is_virtual = true;
+    func->info.function.virtual_index =
+        override->symbol->type->info.function.virtual_index;
+  }
+  if (func->info.function.is_final && !func->info.function.is_virtual) {
+    SyntaxError(parser->syntax, "%s marked final but is not virtual",
+                member->symbol->name.value);
+  }
+  if (func->info.function.is_pure_virtual && !func->info.function.is_virtual) {
+    SyntaxError(parser->syntax, "%s is pure but is not virtual",
+                member->symbol->name.value);
+  }
+  if (!func->info.function.is_virtual) {
+    return;
+  }
+  if (func->info.function.virtual_index < 0) {
+    func->info.function.virtual_index = (int)str->virtual_members.length;
+    VectorAppend(&str->virtual_members, member);
+    return;
+  }
+  size_t index = (size_t)func->info.function.virtual_index;
+  while (str->virtual_members.length <= index) {
+    VectorAppend(&str->virtual_members, NULL);
+  }
+  VectorSet(&str->virtual_members, index, member);
+}
+
 static void AddStructMember(TypeParser* parser, Struct* str,
                             StructMember* member) {
+  if (member->is_member_function) {
+    RegisterCXXVirtualMember(parser, str, member);
+    SymbolSetCXXMangledAsmName(member->symbol);
+  }
   VectorAppend(&str->members, member);
   MapKeyValue kv;
   kv.key.p = &member->symbol->name;
@@ -1881,34 +2463,12 @@ static bool CanOverloadStructMember(StructMember* existing,
          existing->is_member_function && member->is_member_function;
 }
 
-static int StructMemberOverloadIndex(StructMember* first,
-                                     StructMember* target) {
-  int index = 0;
-  for (StructMember* overload = first; overload != NULL;
-       overload = overload->overload_next, index++) {
-    if (overload == target) {
-      return index;
-    }
-  }
-  return index;
-}
-
 static void SetStructMemberOverloadAsmName(Struct* str,
                                            StructMember* first,
                                            StructMember* overload) {
-  if (overload->symbol->asm_name.length != 0) {
-    return;
-  }
-
-  const char* owner_name =
-      str->tag_name != NULL ? str->tag_name->value : "anonymous";
-  String asm_name;
-  StringInit(&asm_name, NULL);
-  StringPrintf(&asm_name, "%s_%s__ov%d", owner_name,
-               overload->symbol->name.value,
-               StructMemberOverloadIndex(first, overload));
-  StringSetString(&overload->symbol->asm_name, &asm_name);
-  StringDestruct(&asm_name);
+  (void)str;
+  (void)first;
+  SymbolSetCXXMangledAsmName(overload->symbol);
 }
 
 static void AppendStructMemberOverload(TypeParser* parser, Struct* str,
@@ -1922,6 +2482,7 @@ static void AppendStructMemberOverload(TypeParser* parser, Struct* str,
   tail->overload_next = member;
   first->symbol->flags.is_overloaded = true;
   member->symbol->flags.is_overloaded = true;
+  RegisterCXXVirtualMember(parser, str, member);
   SetStructMemberOverloadAsmName(str, first, first);
   SetStructMemberOverloadAsmName(str, first, member);
   (void)parser;
@@ -1944,7 +2505,8 @@ static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
 }
 
 static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
-                                    String* class_name, CXXAccess access) {
+                                    String* class_name, CXXAccess access,
+                                    bool is_virtual) {
   if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
   }
@@ -1973,12 +2535,18 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
+  if (is_virtual && !is_destructor) {
+    SyntaxError(parser->syntax, "Constructors cannot be virtual");
+  }
+  func->info.function.is_virtual = is_virtual && is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   if (LexMatch(parser->lex, TOK(const))) {
     SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
   }
+  ParseCXXVirtSpecifiers(parser, func);
+  ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
   TypeRecordAddCXXThisParameter(func, str, location);
 
@@ -1990,7 +2558,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
-  StructMember* existing = FindStructMember(str, &member_name);
+  StructMember* existing = MapFindPointerKey(&str->symbol_table, &member_name);
   if (existing != NULL) {
     if (!CanOverloadStructMember(existing, member)) {
       SyntaxError(parser->syntax, "Duplicate class member %s",
@@ -2072,7 +2640,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                String* tag_name) {
   CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
-    if (LexLookingAt(parser->lex, TOK(public))) {
+    if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(static_assert))) {
+      SyntaxParseStaticAssert(parser->syntax);
+      continue;
+    } else if (LexLookingAt(parser->lex, TOK(public))) {
       current_access = kAccessPublic;
       LexNextToken(parser->lex);
       SyntaxNeedBracket(parser->syntax, TOK(colon), TC(decl));
@@ -2089,7 +2660,9 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       continue;
     }
 
-    if (ParseClassSpecialMember(parser, str, tag_name, current_access)) {
+    bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
+    if (ParseClassSpecialMember(parser, str, tag_name, current_access,
+                                is_virtual_member)) {
       if (!LexLookingAt(parser->lex, TOK(rbrace))) {
         LexMatch(parser->lex, TOK(semicolon));
       }
@@ -2097,6 +2670,9 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     bool is_static_member = LexMatch(parser->lex, TOK(static));
+    if (is_virtual_member && is_static_member) {
+      SyntaxError(parser->syntax, "static member functions cannot be virtual");
+    }
     bool possible_anon = LexLookingAt(parser->lex, TOK(union)) ||
             LexLookingAt(parser->lex, TOK(struct));
     TypeRecord* member_type = TypeParserParseType(parser, true);
@@ -2145,10 +2721,25 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         member->is_member_function = TypeIsFunction(member_symbol->type);
         member->access = current_access;
         if (member->is_member_function && !member->is_static) {
+          member_symbol->type->info.function.is_virtual = is_virtual_member;
           TypeRecordAddCXXThisParameter(member_symbol->type, str,
                                         member_symbol->location);
+        } else if (member->is_member_function) {
+          member_symbol->type->info.function.cxx_member_owner = str;
         }
-        StructMember* existing = FindStructMember(str, &member_symbol->name);
+        if (member->is_member_function) {
+          ParseCXXVirtSpecifiers(parser, member_symbol->type);
+          ParseCXXPureSpecifier(parser, member_symbol->type);
+          if (member->is_static &&
+              (member_symbol->type->info.function.is_override ||
+               member_symbol->type->info.function.is_final ||
+               member_symbol->type->info.function.is_pure_virtual)) {
+            SyntaxError(parser->syntax,
+                        "static member functions cannot use virtual specifiers");
+          }
+        }
+        StructMember* existing =
+            MapFindPointerKey(&str->symbol_table, &member_symbol->name);
         if (existing != NULL) {
           if (!CanOverloadStructMember(existing, member)) {
             SyntaxError(parser->syntax, "Duplicate struct/union member %s",
@@ -2274,9 +2865,25 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   }
 }
 
+static void AddInjectedEnumName(TypeParser* parser, Symbol* tag) {
+  if (!CompilerIsCXX() || tag == NULL || tag->flags.invented ||
+      tag->type == NULL || tag->type->info.enum_info == NULL) {
+    return;
+  }
+  if (SyntaxFindSymbol(parser->syntax, &tag->name) != NULL) {
+    return;
+  }
+
+  Symbol* alias = NewSymbol(tag->name.value, tag->type, STO(typedef));
+  alias->namespace_ = tag->namespace_;
+  if (!SyntaxAddSymbol(parser->syntax, alias)) {
+    SymbolDelete(alias);
+  }
+}
+
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
-                               Vector* attributes) {
+                               Vector* attributes, Vector* bases) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -2306,6 +2913,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
       tag->flags.invented = true;
     }
     SyntaxAddTag(parser->syntax, tag);
+    AddInjectedEnumName(parser, tag);
   }
 
   // Note in the symbol that this tag is now defined and not
@@ -2322,7 +2930,16 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // Apply layout attributes (packed, aligned) before laying out members so the
   // member offsets reflect them in a single pass.
   StructApplyLayoutAttributes(str, attributes);
+  for (size_t i = 0; i < bases->length; i++) {
+    VectorAppend(&str->bases, bases->value.p[i]);
+  }
+  bases->length = 0;
+  CopyCXXBaseVirtualMembers(str);
+  LayoutCXXBaseSpecifiers(str);
   ParseStructMembers(parser, str, is_union, tag_name);
+  UpdateCXXAbstractStatus(str);
+  AddCXXVPtrMember(parser, str);
+  RegisterCXXVTable(parser, str);
   
   // Round the size of the struct up to its own alignment (the maximum
   // alignment of its members, or an explicit aligned(N)), as required by the
@@ -2353,6 +2970,7 @@ static bool RelayoutStruct(Struct* str) {
   str->size = 0;
   str->alignment = 1;
   str->next_bit_pos = 65;
+  LayoutCXXBaseSpecifiers(str);
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* m = str->members.value.p[i];
     TypeRecord* type = m->symbol->type;
@@ -2422,6 +3040,8 @@ void TypeApplyStructAttributesFromSymbol(Symbol* sym) {
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) {
   // Parse common __attribute__ syntax (e.g. struct __attribute__((packed)) ...).
   Vector attributes = {0};
+  Vector bases = {0};
+  VectorInit(&bases);
   while (LexMatch(parser->lex, TOK(attribute))) {
     SyntaxParseAttribute(parser->syntax, &attributes);
   }
@@ -2449,12 +3069,14 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
+  ParseCXXBaseSpecifiers(parser, &bases, is_union, is_class);
   if (LexMatch(parser->lex, TOK(lbrace))) {
     if (has_qualified_tag) {
       SyntaxError(parser->syntax, "Cannot define qualified struct tag %s",
                   qualified_tag.spelling.value);
     }
-    tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes);
+    tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes,
+                          &bases);
   } else {
     // No open brace, this is a reference to an existing struct or the
     // creation of a new one.
@@ -2489,6 +3111,9 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
 done:
   FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);
+  VectorDestructWithContents(&bases,
+                             (VectorElementDestructor)CXXBaseSpecifierDelete,
+                             /*free_element=*/false);
   AttributeListDestruct(&attributes);
   return tag;
 }
@@ -2506,7 +3131,68 @@ done:
 // However, it appears that using a char as a type isn't a good idea since
 // exising code might treat enums as ints and pass pointers to them.
 // TODO: add a pragma or command line option to enable chars?
-static Type ParseEnumConstants(TypeParser* parser, Enum* e) {
+static bool EnumUnderlyingTypesMatch(Enum* e, TypeRecord* type) {
+  return e != NULL && type != NULL && e->has_fixed_underlying &&
+         e->fixed_underlying_type == type->type &&
+         e->fixed_underlying_size == type->size;
+}
+
+static void SetEnumFixedUnderlying(Enum* e, TypeRecord* type) {
+  if (e == NULL || type == NULL) {
+    return;
+  }
+  e->has_fixed_underlying = true;
+  e->fixed_underlying_type = type->type;
+  e->fixed_underlying_size = type->size;
+}
+
+static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
+  if (!CompilerIsCXX() || !LexMatch(parser->lex, TOK(colon))) {
+    return NULL;
+  }
+
+  TypeParser underlying_parser;
+  TypeParserInit(&underlying_parser, parser->lex, parser->syntax, STO(implicit),
+                 parser->context);
+  TypeRecord* type = TypeParserParseType(&underlying_parser, true);
+  TypeParserDestruct(&underlying_parser);
+  if (type == NULL) {
+    type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
+  if (!TypeIsIntegral(type) || TypeIsEnum(type)) {
+    SyntaxError(parser->syntax, "Enum underlying type must be integral");
+    TypeRecordDelete(type);
+    type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
+  return type;
+}
+
+static void ApplyEnumUnderlyingType(Syntax* syntax, Enum* e,
+                                    TypeRecord* enum_type,
+                                    TypeRecord* explicit_underlying,
+                                    bool is_scoped) {
+  TypeRecord* fixed_underlying = explicit_underlying;
+  if (fixed_underlying == NULL && is_scoped && !e->has_fixed_underlying) {
+    fixed_underlying = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
+  if (fixed_underlying == NULL) {
+    return;
+  }
+  if (e->has_fixed_underlying &&
+      !EnumUnderlyingTypesMatch(e, fixed_underlying)) {
+    SyntaxError(syntax, "Enum %s redeclared with different underlying type",
+                e->tag_name != NULL ? e->tag_name->value : "<anonymous>");
+  }
+  SetEnumFixedUnderlying(e, fixed_underlying);
+  enum_type->type = kTypeEnum | e->fixed_underlying_type;
+  enum_type->size = e->fixed_underlying_size;
+  if (explicit_underlying == NULL) {
+    TypeRecordDelete(fixed_underlying);
+  }
+}
+
+static Type ParseEnumConstants(TypeParser* parser, Enum* e,
+                               TypeRecord* enum_type) {
   enum TypeSelection {
     kUnsignedChar,      // Not used.
     kSignedChar,        // Not used.
@@ -2562,24 +3248,33 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e) {
           break;
       }
 
-      Symbol* ec = NewEnumConstant(const_name.value, e->next_value);
+      Symbol* ec = e->is_scoped
+          ? NewScopedEnumConstant(const_name.value, e->next_value, enum_type)
+          : NewEnumConstant(const_name.value, e->next_value);
       e->next_value++;
       StringDestruct(&const_name);
 
-      // Insert the constant as a symbol in the current scope.
-      bool ok = SyntaxAddSymbol(parser->syntax, ec);
-      if (!ok) {
-        SyntaxError(parser->syntax,
-                    "Enum constant %s is already defined in this scope",
-                    ec->name.value);
-        SymbolDelete(ec);
-      } else {
+      if (e->is_scoped) {
         VectorAppend(&e->constants, ec);
+      } else {
+        // Insert the constant as a symbol in the current scope.
+        bool ok = SyntaxAddSymbol(parser->syntax, ec);
+        if (!ok) {
+          SyntaxError(parser->syntax,
+                      "Enum constant %s is already defined in this scope",
+                      ec->name.value);
+          SymbolDelete(ec);
+        } else {
+          VectorAppend(&e->constants, ec);
+        }
       }
     }
     if (!LexMatch(parser->lex, TOK(comma))) {
       break;
     }
+  }
+  if (e->has_fixed_underlying) {
+    return e->fixed_underlying_type;
   }
   switch (type_selection) {
     case kUnsignedInt:
@@ -2593,7 +3288,9 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e) {
   }
 }
 
-static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
+static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
+                             bool is_scoped,
+                             TypeRecord* explicit_underlying) {
   // We have an enum body.
   // First check that this is not a duplicate definition.
   Enum* e = NULL;
@@ -2608,6 +3305,11 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
                   tag_name->value);
     } else {
       CheckTagType(parser, tag, false, true);
+      if (tag->type->info.enum_info != NULL &&
+          tag->type->info.enum_info->is_scoped != is_scoped) {
+        SyntaxError(parser->syntax, "Enum %s redeclared with different scopedness",
+                    tag->name.value);
+      }
     }
     e = tag->type->info.enum_info;
   } else {
@@ -2617,11 +3319,15 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
     type->info.enum_info = e;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     e->tag_name = &tag->name;
+    e->is_scoped = is_scoped;
     if (empty_tag_name) {
       tag->flags.invented = true;
     }
     SyntaxAddTag(parser->syntax, tag);
+    AddInjectedEnumName(parser, tag);
   }
+  ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
+                          is_scoped);
 
   // Note in the symbol that this tag is now defined and not
   // forward declared.
@@ -2630,9 +3336,17 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name) {
 
   // Now 'tag' will be the struct tag pointer
   // and 'e' will be a pointer to the Enum information.
-  Type t = ParseEnumConstants(parser, e);
+  e->is_scoped = is_scoped;
+  Type t = ParseEnumConstants(parser, e, tag->type);
   tag->type->type |= t;
   tag->type->size = SizeofType(t);
+  if (e->is_scoped) {
+    for (size_t i = 0; i < e->constants.length; i++) {
+      Symbol* constant = e->constants.value.p[i];
+      constant->type->type |= t;
+      constant->type->size = tag->type->size;
+    }
+  }
   
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(expr));
   return tag;
@@ -2651,6 +3365,15 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
   bool has_qualified_tag = false;
   Symbol* tag = NULL;
   FullyQualifiedIdentifierInit(&qualified_tag);
+  bool is_scoped = false;
+  TypeRecord* explicit_underlying = NULL;
+
+  if (CompilerIsCXX() &&
+      (LexLookingAt(parser->lex, TOK(class)) ||
+       LexLookingAt(parser->lex, TOK(struct)))) {
+    is_scoped = true;
+    LexNextToken(parser->lex);
+  }
 
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
     // Don't consume the semicolon.
@@ -2669,12 +3392,13 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
+  explicit_underlying = ParseEnumUnderlyingType(parser);
   if (LexMatch(parser->lex, TOK(lbrace))) {
     if (has_qualified_tag) {
       SyntaxError(parser->syntax, "Cannot define qualified enum tag %s",
                   qualified_tag.spelling.value);
     }
-    tag = ParseEnumBody(parser, &tag_name);
+    tag = ParseEnumBody(parser, &tag_name, is_scoped, explicit_underlying);
   } else {
     // No open brace, this is a reference to an existing enum or the
     // creation of a new one.
@@ -2697,14 +3421,28 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
       e->tag_name = &tag->name;
+      e->is_scoped = is_scoped;
+      ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
+                              is_scoped);
       SyntaxAddTag(parser->syntax, tag);
+      AddInjectedEnumName(parser, tag);
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, false, true);
+      if (tag->type->info.enum_info != NULL &&
+          tag->type->info.enum_info->is_scoped != is_scoped) {
+        SyntaxError(parser->syntax, "Enum %s redeclared with different scopedness",
+                    tag->name.value);
+      }
+      ApplyEnumUnderlyingType(parser->syntax, tag->type->info.enum_info,
+                              tag->type, explicit_underlying, is_scoped);
     }
   }
 
 done:
+  if (explicit_underlying != NULL) {
+    TypeRecordDelete(explicit_underlying);
+  }
   FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);
   AttributeListDestruct(&attributes);
@@ -2771,6 +3509,11 @@ bool TypeIsReference(TypeRecord* type) {
          type->declarator == kDeclRValueReference;
 }
 
+bool TypeIsScopedEnum(TypeRecord* type) {
+  return TypeIsEnum(type) && type->info.enum_info != NULL &&
+         type->info.enum_info->is_scoped;
+}
+
 
 bool TypeIsIntConstant(TypeRecord* type);
 bool TypeIsFloatingPointConstant(TypeRecord* type);
@@ -2818,14 +3561,135 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
     case kDeclPrimitive:
       if (TypeIsEnum(t1) && TypeIsEnum(t2)) {
+        if (TypeIsScopedEnum(t1) || TypeIsScopedEnum(t2)) {
+          return t1->info.enum_info == t2->info.enum_info &&
+                 t1->qualifiers == t2->qualifiers;
+        }
         // Enums can be char, signed int or unsigned int.
         int e1 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
-        int e2 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+        int e2 = t2->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
         return e1 == e2 && t1->qualifiers == t2->qualifiers;
 
       }
       return t1->type == t2->type && t1->qualifiers == t2->qualifiers;
   }
+}
+
+bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->type->info.struct_info == to ||
+        StructIsDerivedFrom(base->type->info.struct_info, to, public_only)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  return StructIsDerivedFrom(from->info.struct_info, to->info.struct_info,
+                             /*public_only=*/true);
+}
+
+bool TypeIsAbstractClass(TypeRecord* type) {
+  return CompilerIsCXX() && type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL && type->info.struct_info->is_abstract;
+}
+
+bool TypeContainsAuto(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if ((t->type & kTypeAuto) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {
+  TypeRecord* result = NULL;
+  switch (pattern->declarator) {
+    case kDeclPointer:
+      result = NewPointerTypeRecord(pattern->qualifiers);
+      break;
+    case kDeclReference:
+      result = NewReferenceTypeRecord(pattern->qualifiers, false);
+      break;
+    case kDeclRValueReference:
+      result = NewReferenceTypeRecord(pattern->qualifiers, true);
+      break;
+    case kDeclArray:
+      result = NewBasicArrayTypeRecord(pattern->qualifiers,
+                                       pattern->info.array.size.fixed,
+                                       pattern->info.array.is_vla);
+      break;
+    default:
+      result = TypeRecordCopy(pattern);
+      break;
+  }
+  return result;
+}
+
+TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
+  if (pattern == NULL || initializer_type == NULL) {
+    return NULL;
+  }
+  if ((pattern->type & kTypeAuto) != 0 &&
+      pattern->declarator == kDeclPrimitive) {
+    TypeRecord* deduced = TypeRecordCopy(initializer_type);
+    deduced->qualifiers |= pattern->qualifiers;
+    TypeRecordCalculateSize(deduced);
+    return deduced;
+  }
+
+  switch (pattern->declarator) {
+    case kDeclPointer:
+      if (!TypeIsPointerOrArray(initializer_type)) {
+        return NULL;
+      }
+      break;
+    case kDeclArray:
+      if (!TypeIsArray(initializer_type)) {
+        return NULL;
+      }
+      break;
+    case kDeclReference:
+    case kDeclRValueReference:
+      break;
+    default:
+      if ((pattern->type & kTypeAuto) != 0) {
+        return NULL;
+      }
+      return TypeRecordCopy(pattern);
+  }
+
+  TypeRecord* next_initializer =
+      TypeIsPointerOrArray(initializer_type) &&
+              pattern->declarator != kDeclReference &&
+              pattern->declarator != kDeclRValueReference
+          ? initializer_type->next
+          : initializer_type;
+  TypeRecord* next = TypeDeduceAuto(pattern->next, next_initializer);
+  if (next == NULL) {
+    return NULL;
+  }
+  TypeRecord* result = NewDeclaratorLike(pattern);
+  TypeRecordChain(result, next);
+  result->type = next->type;
+  TypeRecordCalculateSize(result);
+  return result;
 }
 
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
@@ -2835,6 +3699,9 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
   // A pointer can be assigned to a const pointer of the same type.
   if (TypeIsPointerOrArray(to) && TypeIsPointerOrArray(from) &&
       to->next != NULL && from->next != NULL) {
+    if (TypeIsDerivedFrom(from->next, to->next)) {
+      return true;
+    }
     int to_quals = to->next->qualifiers & ~kQualConst;
     int from_quals = from->next->qualifiers & ~kQualConst;
     if (to_quals == from_quals) {

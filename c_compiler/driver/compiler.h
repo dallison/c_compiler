@@ -286,6 +286,12 @@ typedef struct {
   // (UninitializedStaticVariable*)
   Vector uninitialized_static_variables;
 
+  // Namespace-scope C++ objects that need dynamic construction/destruction.
+  // Elements are Symbol* owned by the normal symbol tables.
+  Vector cxx_global_constructors;
+  Vector cxx_global_destructors;
+  Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
+
   Vector literals;     // Literals
   int next_literal_id;
 

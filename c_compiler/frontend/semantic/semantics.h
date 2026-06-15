@@ -26,6 +26,8 @@ bool SemanticNodeIsCompilerGenerated(ASTNode* node);
 
 void SemanticAnalyzeVariableDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* node);
+bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
+                            ASTNode* diagnostic_node);
 
 typedef enum {
   kConvertNormal,

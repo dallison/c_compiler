@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "codegen.h"
 #include "errors.h"
+#include "expr_semantics.h"
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "lex.h"
@@ -579,7 +580,7 @@ static void AddLocalStatics(Syntax* syntax) {
   for (size_t i = 0; i < syntax->local_statics.length; i++) {
     VariableDeclarationASTNode* decl =
         (VariableDeclarationASTNode*)syntax->local_statics.value.p[i];
-    if (decl->initializer == NULL) {
+    if (decl->initializer == NULL || decl->initializer->op != AST_OP(init)) {
       // No initializer.  Add as unitialized static variable.
       UninitializedStaticVariable* var =
           malloc(sizeof(UninitializedStaticVariable));
@@ -601,6 +602,95 @@ static void AddLocalStatics(Syntax* syntax) {
 static bool IsFunctionOrInlineDefinition(Symbol* sym) {
   return TypeIsFunctionDefinition(sym->type) || (TypeIsFunction(sym->type) &&
                                             sym->flags.is_inline_defn);
+}
+
+static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
+                                                   bool destructor) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+      sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String name;
+  if (destructor) {
+    StringInit(&name, "~");
+    StringAppendString(&name, sym->type->info.struct_info->tag_name);
+  } else {
+    StringInit(&name, sym->type->info.struct_info->tag_name->value);
+  }
+  StructMember* member = FindStructMember(sym->type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (member == NULL || !member->is_member_function) {
+    return NULL;
+  }
+  TypeRecord* func = member->symbol->type;
+  if (!TypeIsFunction(func)) {
+    return NULL;
+  }
+  if (destructor && !func->info.function.is_destructor) {
+    return NULL;
+  }
+  if (!destructor && !func->info.function.is_constructor) {
+    return NULL;
+  }
+  return member;
+}
+
+static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
+  SourceLocation location = sym->location;
+  ASTNode* receiver = NewIdentifierASTNode(sym, location);
+  String member_name;
+  if (destructor) {
+    StringInit(&member_name, "~");
+    StringAppendString(&member_name, sym->type->info.struct_info->tag_name);
+  } else {
+    StringInit(&member_name, sym->type->info.struct_info->tag_name->value);
+  }
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(member_name.value), NULL, location);
+  StringDestruct(&member_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector());
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static void AppendCXXGlobalDestructorCalls(Vector* statements) {
+  for (size_t i = compiler->cxx_global_destructors.length; i > 0; i--) {
+    Symbol* object = compiler->cxx_global_destructors.value.p[i - 1];
+    ASTNode* call = NewCXXGlobalSpecialMemberCall(object, true);
+    VectorAppend(statements, call);
+    VectorAppend(&compiler->cxx_global_destructor_calls, call);
+  }
+}
+
+static void RegisterCXXGlobalObject(Symbol* sym) {
+  if (FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
+    VectorAppend(&compiler->cxx_global_constructors, sym);
+  }
+  if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
+    VectorAppend(&compiler->cxx_global_destructors, sym);
+  }
+}
+
+static void InjectCXXGlobalLifetimeCalls(Symbol* sym) {
+  if (!CompilerIsCXX() || !StringEqual(&sym->name, "main") ||
+      sym->type->info.function.body == NULL) {
+    return;
+  }
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)sym->type->info.function.body;
+  for (size_t i = compiler->cxx_global_constructors.length; i > 0; i--) {
+    Symbol* object = compiler->cxx_global_constructors.value.p[i - 1];
+    CompoundASTNodeInsertStatement(
+        body, NewCXXGlobalSpecialMemberCall(object, false), 0);
+  }
+  size_t registered_destructors = compiler->cxx_global_destructor_calls.length;
+  for (size_t i = 0; i < registered_destructors; i++) {
+    VectorAppend(body->statements, compiler->cxx_global_destructor_calls.value.p[i]);
+  }
+  AppendCXXGlobalDestructorCalls(body->statements);
 }
 
 static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
@@ -688,6 +778,7 @@ static void CompileDeclaration(Syntax* syntax) {
 
         if (IsFunctionOrInlineDefinition(decl->symbol)) {
           CheckMainSignature(syntax, decl->symbol);
+          InjectCXXGlobalLifetimeCalls(decl->symbol);
           
           // This is a function definition, generate the code.
           compiler->current_function = decl->base.type;
@@ -758,10 +849,19 @@ static void CompileDeclaration(Syntax* syntax) {
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                 var->is_local = decl->symbol->flags.is_local;
                 VectorAppend(&compiler->uninitialized_static_variables, var);
+                RegisterCXXGlobalObject(decl->symbol);
               } else {
                 decl->symbol->flags.is_tentative_decl = false;
+                if (TypeContainsAuto(decl->symbol->type)) {
+                  decl->initializer = AnalyzeExpression(decl->initializer);
+                  if (!SemanticDeduceAutoType(decl->symbol, decl->initializer,
+                                              (ASTNode*)decl)) {
+                    continue;
+                  }
+                  ASTNodeSetType((ASTNode*)decl, decl->symbol->type);
+                }
                 ASTNode* simplified_init = AnalyzeInitializer(
-                    decl->base.type, decl->initializer, true);
+                    decl->symbol->type, decl->initializer, true);
                 // This is an initialized static variable.  The initializer has
                 // been simplified to a braced initializer containing only
                 // designated initializers.
@@ -770,6 +870,7 @@ static void CompileDeclaration(Syntax* syntax) {
                   ASTNodePrint(simplified_init, 0, compiler->ast_output_file);
                 }
                 AddInitializedStaticVariable(decl, simplified_init);
+                RegisterCXXGlobalObject(decl->symbol);
               }
             }
             if (compiler->debug_output) {
@@ -873,6 +974,9 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->functions);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
+  VectorInit(&compiler->cxx_global_constructors);
+  VectorInit(&compiler->cxx_global_destructors);
+  VectorInit(&compiler->cxx_global_destructor_calls);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->orphan_function_symbols);
@@ -896,6 +1000,22 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   DebugBuilderInit(&compiler->debug_builder, filename, "davecc", wd);
 }
 
+static void ReplaceSourceExtension(String* filename, const char* extension) {
+  const char* suffixes[] = {".cpp", ".cxx", ".cc", ".c"};
+  for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+    const char* suffix = suffixes[i];
+    size_t suffix_len = strlen(suffix);
+    if (filename->length >= suffix_len &&
+        strcmp(filename->value + filename->length - suffix_len, suffix) == 0) {
+      filename->value[filename->length - suffix_len] = '\0';
+      filename->length -= suffix_len;
+      StringAppend(filename, extension);
+      return;
+    }
+  }
+  StringAppend(filename, extension);
+}
+
 static void OpenSaveFiles(Compiler* compiler) {
   // Open IR and AST files if required.
   compiler->ir_output_file = stdout;
@@ -903,15 +1023,7 @@ static void OpenSaveFiles(Compiler* compiler) {
     String ir_filename;
     StringInit(&ir_filename, compiler->infile.value);
 
-    // If the file ends in ".c", make it ".ir", otherwise append ".ir".
-    char* suffix = strstr(ir_filename.value, ".c");
-    if (suffix == NULL) {
-      StringAppend(&ir_filename, ".ir");
-    } else {
-      // Overwrite 'c' with 'ir'.
-      suffix[1] = 'i';
-      StringAppendChar(&ir_filename, 'r');
-    }
+    ReplaceSourceExtension(&ir_filename, ".ir");
     compiler->ir_output_file = fopen(ir_filename.value, "w");
     if (compiler->ir_output_file == NULL) {
       compiler->ir_output_file = stdout;
@@ -922,15 +1034,7 @@ static void OpenSaveFiles(Compiler* compiler) {
     String ast_filename;
     StringInit(&ast_filename, compiler->infile.value);
 
-    // If the file ends in ".c", make it ".ast", otherwise append ".ast".
-    char* suffix = strstr(ast_filename.value, ".c");
-    if (suffix == NULL) {
-      StringAppend(&ast_filename, ".ast");
-    } else {
-      // Overwrite 'c' with 'ir'.
-      suffix[1] = 'a';
-      StringAppend(&ast_filename, "st");
-    }
+    ReplaceSourceExtension(&ast_filename, ".ast");
     compiler->ast_output_file = fopen(ast_filename.value, "w");
     if (compiler->ast_output_file == NULL) {
       compiler->ast_output_file = stdout;
@@ -1300,6 +1404,10 @@ void CompilerDestruct(Compiler* compiler) {
   }
   VectorDestruct(&compiler->uninitialized_static_variables);
 
+  VectorDestruct(&compiler->cxx_global_constructors);
+  VectorDestruct(&compiler->cxx_global_destructors);
+  VectorDestruct(&compiler->cxx_global_destructor_calls);
+
   for (size_t i = 0; i < compiler->literals.length; i++) {
     LiteralDelete(compiler->literals.value.p[i]);
   }
@@ -1475,15 +1583,7 @@ static String* Assemble(Compiler* compiler, String* asm_filename, Vector* option
     object_filename = NewString(output_filename->value);
   } else {
     object_filename = NewString(compiler->infile.value);
-
-    // If the file ends in ".c", make it ".o", otherwise append ".o".
-    char* suffix = strstr(object_filename->value, ".c");
-    if (suffix == NULL) {
-      StringAppend(object_filename, ".o");
-    } else {
-      // Overwrite 'c' with 'o'.
-      suffix[1] = 'o';
-    }
+    ReplaceSourceExtension(object_filename, ".o");
   }
 
   // Assemble using target-specific assembler.
@@ -1560,15 +1660,7 @@ static String* Compile(Compiler* compiler, Vector* options) {
     StringInit(&asm_filename, output_filename->value);
   } else {
     StringInit(&asm_filename, compiler->infile.value);
-
-    // If the file ends in ".c", make it ".s", otherwise append ".s".
-    char* suffix = strstr(asm_filename.value, ".c");
-    if (suffix == NULL) {
-      StringAppend(&asm_filename, ".s");
-    } else {
-      // Overwrite 'c' with 's'.
-      suffix[1] = 's';
-    }
+    ReplaceSourceExtension(&asm_filename, ".s");
   }
   bool ok = EmitAssemblyFile(compiler, &asm_filename);
   if (!ok) {

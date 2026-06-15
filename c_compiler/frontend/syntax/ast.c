@@ -458,6 +458,7 @@ void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
   node->id = next_ast_node_id++;
   node->flags = 0;
   node->type = NULL;
+  node->value_category = kValueCategoryPrvalue;
   node->parent = NULL;
   node->child_id = 0;
   node->location = location;
@@ -697,6 +698,7 @@ static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
   StructMemberASTNode* to = ASTArenaAlloc(sizeof(StructMemberASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->member = from->member;
+  to->access = from->access;
   return func(&to->base, data);
 }
 
@@ -711,6 +713,7 @@ ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(structmember), member->symbol->type, location,
               &struct_member_vtbl);
   node->member = member;
+  node->access = member->access;
   return (ASTNode*)node;
 }
 
@@ -1195,6 +1198,7 @@ static ASTNode* CastASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->cast_type = from->cast_type;
   to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  to->kind = from->kind;
   TypeRecordIncRef(to->cast_type);
   return func(&to->base, data);
 }
@@ -1219,6 +1223,7 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
   node->cast_type = type;
   TypeRecordIncRef(type);
   node->expr = expr;
+  node->kind = kCastCStyle;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;
 }

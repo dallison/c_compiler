@@ -83,6 +83,8 @@ void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name);
 void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name);
 bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
                                          FullyQualifiedIdentifier* name);
+bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
+void SyntaxParseStaticAssert(Syntax* syntax);
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name);
 Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,

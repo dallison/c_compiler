@@ -258,11 +258,18 @@ typedef struct {
 //
 // Each AST node has an identifiying field called 'op'.
 
+typedef enum {
+  kValueCategoryPrvalue,
+  kValueCategoryLvalue,
+  kValueCategoryXvalue,
+} ASTValueCategory;
+
 typedef struct ASTNode {
   ASTOpcode op;             // Opcode.
   int id;                   // Node id (for debugging).
   int flags;                // Flags
   TypeRecord* type;         // Node type (mostly set by semantic analyzer)
+  ASTValueCategory value_category;  // C++ expression value category.
   struct ASTNode* parent;   // Parent node (if any).
   int child_id;             // Which child am I in the parent node?
   SourceLocation location;  // Location in input.
@@ -370,6 +377,7 @@ ASTNode* NewRawIdentifierASTNode(void* symbol, SourceLocation location);
 typedef struct {
   ASTNode base;
   StructMember* member;
+  CXXAccess access;
 } StructMemberASTNode;
 
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location);
@@ -402,10 +410,19 @@ void IntConstantASTNodeInit(ConstantASTNode* node, int64_t value,
                             TypeRecord* type, SourceLocation location);
 
 // AST node holding a type cast of an expression to a particular type.
+typedef enum {
+  kCastCStyle,
+  kCastStatic,
+  kCastReinterpret,
+  kCastConst,
+  kCastDynamic,
+} CastKind;
+
 typedef struct {
   ASTNode base;
   TypeRecord* cast_type;
   ASTNode* expr;
+  CastKind kind;
 } CastASTNode;
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,

@@ -106,6 +106,7 @@ LIBC_SRCS = [
     "libc/calloc.c",
     "libc/cdiv.c",
     "libc/ctype.c",
+    "libc/cxx_new.c",
     "libc/exit.c",
     "libc/fabs.c",
     "libc/fclose.c",
@@ -833,6 +834,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_new.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -952,6 +954,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_new.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1071,6 +1074,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_new.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1186,6 +1190,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_new.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1303,6 +1308,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_new.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
