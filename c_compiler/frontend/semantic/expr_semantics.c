@@ -39,6 +39,8 @@ static bool ASTNodeIsGLValue(ASTNode* node) {
   return ASTNodeIsLValue(node) || ASTNodeIsXValue(node);
 }
 
+static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
     // Symbol has now been used.
@@ -854,20 +856,29 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     case AST_OP(expr_init):{
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)init;
       if (is_reference_init) {
-        bool lvalue_ref =
-            id_node->symbol->type->declarator == kDeclReference;
+        TypeRecord* reference_type = id_node->symbol->type;
         bool rvalue_ref =
-            id_node->symbol->type->declarator == kDeclRValueReference;
-        NormalConversion(e->expr, id_node->symbol->type->next);
-        if (lvalue_ref && !ASTNodeIsLValue(e->expr)) {
-          SemanticError(e->expr, "Reference initializer must be an lvalue");
-        } else if (rvalue_ref && ASTNodeIsLValue(e->expr)) {
-          SemanticError(e->expr,
-                        "Rvalue reference initializer must not be an lvalue");
+            reference_type->declarator == kDeclRValueReference;
+        bool discards_qualifiers =
+            TypeIsConst(e->expr->type) && !TypeIsConst(reference_type->next);
+        NormalConversion(e->expr, reference_type->next);
+        if (discards_qualifiers) {
+          SemanticError(e->expr, "Reference initializer discards qualifiers");
+        } else if (!ReferenceCanBind(e->expr, reference_type)) {
+          if (rvalue_ref) {
+            SemanticError(e->expr,
+                          "Rvalue reference initializer must not be an lvalue");
+          } else if (TypeIsConst(reference_type->next)) {
+            SemanticError(e->expr,
+                          "Const reference initializer has incompatible type");
+          } else {
+            SemanticError(e->expr, "Reference initializer must be an lvalue");
+          }
         }
-        if (rvalue_ref && !HasAddress(e->expr)) {
+        if (ReferenceCanBind(e->expr, reference_type) &&
+            !HasAddress(e->expr)) {
           ASTNode* materialized =
-              MaterializeTemporary(e->expr, id_node->symbol->type->next);
+              MaterializeTemporary(e->expr, reference_type->next);
           ASTNodeReplaceChild((ASTNode*)e, 0, materialized, false);
           e->expr = materialized;
         }
@@ -1735,40 +1746,78 @@ static bool MemberReceiverIsConst(BinaryASTNode* node) {
   return TypeIsConst(node->left->type);
 }
 
+static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
+static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
+  if (!TypeIsReference(reference_type)) {
+    return false;
+  }
+  if (TypeIsConst(actual->type) && !TypeIsConst(reference_type->next)) {
+    return false;
+  }
+  if (reference_type->declarator == kDeclRValueReference) {
+    return !ASTNodeIsLValue(actual);
+  }
+  if (ASTNodeIsLValue(actual)) {
+    return true;
+  }
+  return TypeIsConst(reference_type->next);
+}
+
+static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
+  if (!ReferenceCanBind(actual, reference_type)) {
+    return -1;
+  }
+  bool target_const = TypeIsConst(reference_type->next);
+  if (reference_type->declarator == kDeclRValueReference) {
+    return 0;
+  }
+  if (ASTNodeIsLValue(actual)) {
+    return target_const ? 1 : 0;
+  }
+  return 2;
+}
+
+static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
+  if (TypeEqual(actual, target) || TypeEqualIgnoringQualifiers(actual, target)) {
+    return 0;
+  }
+  if (TypeEqualIgnoringSign(actual, target)) {
+    return 1;
+  }
+  if (TypeIsIntegral(actual) && TypeIsIntegral(target)) {
+    return 2;
+  }
+  if (TypeIsPointerOrArray(actual) && TypeIsPointerOrArray(target)) {
+    if (TypeAssignmentCompatible(actual, target)) {
+      return 1;
+    }
+    if (TypeIsVoidPointer(actual) || TypeIsVoidPointer(target)) {
+      return 2;
+    }
+  }
+  return -1;
+}
+
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   TypeRecord* target = formal_type;
   bool reference = TypeIsReference(formal_type);
   if (reference) {
     target = formal_type->next;
-    if (formal_type->declarator == kDeclReference &&
-        !ASTNodeIsLValue(actual)) {
+    int binding_rank = ReferenceBindingRank(actual, formal_type);
+    if (binding_rank < 0) {
       return -1;
     }
-    if (formal_type->declarator == kDeclRValueReference &&
-        ASTNodeIsLValue(actual)) {
-      return -1;
-    }
+    int base_rank = OverloadBaseConversionRank(actual->type, target);
+    return base_rank < 0 ? -1 : base_rank * 10 + binding_rank;
   }
 
-  if (TypeEqual(actual->type, target)) {
-    return 0;
-  }
-  if (TypeEqualIgnoringSign(actual->type, target)) {
-    return 1;
-  }
-  if (TypeIsIntegral(actual->type) && TypeIsIntegral(target)) {
-    return 2;
-  }
-  if (TypeIsPointerOrArray(actual->type) && TypeIsPointerOrArray(target)) {
-    if (TypeAssignmentCompatible(actual->type, target)) {
-      return 1;
-    }
-    if (TypeIsVoidPointer(actual->type) || TypeIsVoidPointer(target)) {
-      return 2;
-    }
+  int base_rank = OverloadBaseConversionRank(actual->type, target);
+  if (base_rank >= 0) {
+    return base_rank * 10 + 5;
   }
   if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
-    return 2;
+    return 25;
   }
   return -1;
 }
@@ -1980,19 +2029,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       ASTNode* actual = (ASTNode*)node->children->value.p[i];
       Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
       if (TypeIsReference(formal->type)) {
-        NormalConversion(actual, formal->type->next);
-        if (formal->type->declarator == kDeclReference &&
-            !ASTNodeIsLValue(actual)) {
-          SemanticError(actual, "Reference argument must be an lvalue");
-        } else if (formal->type->declarator == kDeclRValueReference &&
-                   ASTNodeIsLValue(actual)) {
-          SemanticError(actual,
-                        "Rvalue reference argument must not be an lvalue");
+        TypeRecord* reference_type = formal->type;
+        bool discards_qualifiers =
+            TypeIsConst(actual->type) && !TypeIsConst(reference_type->next);
+        NormalConversion(actual, reference_type->next);
+        if (discards_qualifiers) {
+          SemanticError(actual, "Reference argument discards qualifiers");
+        } else if (!ReferenceCanBind(actual, reference_type)) {
+          if (reference_type->declarator == kDeclRValueReference) {
+            SemanticError(actual,
+                          "Rvalue reference argument must not be an lvalue");
+          } else if (TypeIsConst(reference_type->next)) {
+            SemanticError(actual, "Const reference argument has incompatible type");
+          } else {
+            SemanticError(actual, "Reference argument must be an lvalue");
+          }
         }
-        if (formal->type->declarator == kDeclRValueReference &&
-            !HasAddress(actual)) {
+        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual)) {
           ASTNode* materialized =
-              MaterializeTemporary(actual, formal->type->next);
+              MaterializeTemporary(actual, reference_type->next);
           ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
           actual = materialized;
         }
