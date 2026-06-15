@@ -393,6 +393,8 @@ static const char* BinaryOperatorFunctionName(ASTOpcode op) {
       return "operator&&";
     case AST_OP(logor):
       return "operator||";
+    case AST_OP(assign):
+      return "operator=";
     case AST_OP(equal):
       return "operator==";
     case AST_OP(noteq):
@@ -944,9 +946,15 @@ static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
   NormalConversion(node->right, node->left->type);
 }
 
-static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
+static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
+  if (node->base.op == AST_OP(assign)) {
+    ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
+    if (overloaded != NULL) {
+      return overloaded;
+    }
+  }
   if (!IsAssignable(node->left, false)) {
     SemanticError(node->left, "Cannot assign to this expression");
   }
@@ -1022,6 +1030,7 @@ static void AnalyzeAssignmentExpression(BinaryASTNode* node) {
   if (CompilerIsCXX()) {
     node->base.value_category = kValueCategoryLvalue;
   }
+  return (ASTNode*)node;
 }
 
 // Increment and decrement operators, both pre and post.
@@ -2457,7 +2466,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(andeq):
     case AST_OP(oreq):
     case AST_OP(exoreq):
-      AnalyzeAssignmentExpression(binary_node);
+      node = AnalyzeAssignmentExpression(binary_node);
       break;
 
     case AST_OP(preinc):

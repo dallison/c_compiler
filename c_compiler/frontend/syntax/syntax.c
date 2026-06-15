@@ -253,6 +253,7 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
     case TOK(bang):
     case TOK(ampamp):
     case TOK(barbar):
+    case TOK(equal):
     case TOK(equalequal):
     case TOK(bangeq):
     case TOK(less):
