@@ -1653,6 +1653,8 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   ASTNode* receiver = NULL;
   if (!member->is_static) {
     if (!member->symbol->type->info.function.is_const_member &&
+        !member->symbol->type->info.function.is_constructor &&
+        !member->symbol->type->info.function.is_destructor &&
         MemberReceiverIsConst(member_access)) {
       SemanticError((ASTNode*)member_access,
                     "Cannot call non-const member function %s on const object",
@@ -1866,6 +1868,8 @@ static int MemberOverloadCallScore(StructMember* candidate,
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
   if (check_receiver_const && !candidate->is_static &&
       !candidate->symbol->type->info.function.is_const_member &&
+      !candidate->symbol->type->info.function.is_constructor &&
+      !candidate->symbol->type->info.function.is_destructor &&
       MemberReceiverIsConst(member_access)) {
     return -1;
   }
@@ -2292,15 +2296,17 @@ static void AnalyzeCastExpression(CastASTNode* node) {
   } else if (node->kind == kCastConst) {
     ValidateCXXConstCast(node);
   }
-  SemanticConvertType(node->expr, node->cast_type, kConvertCast);
-
   if (TypeIsReference(node->cast_type)) {
+    if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
+      SemanticConvertType(node->expr, node->cast_type->next, kConvertCast);
+    }
     ASTNodeSetType((ASTNode*)node, node->cast_type->next);
     node->base.value_category =
         node->cast_type->declarator == kDeclRValueReference
             ? kValueCategoryXvalue
             : kValueCategoryLvalue;
   } else {
+    SemanticConvertType(node->expr, node->cast_type, kConvertCast);
     // Result is the requested type.
     ASTNodeSetType((ASTNode*)node, node->cast_type);
   }

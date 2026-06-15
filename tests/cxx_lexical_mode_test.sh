@@ -58,7 +58,7 @@ expect_fail cxx20_char8_t \
 expect_compile c_mode_alt_operator_word \
   'int and; int main(void) { and = 1; return and; }'
 expect_fail cxx11_alt_operator_word \
-  'int and; int main(void) { return 0; }' \
+  'int and = 1; int main(void) { return and; }' \
   -std=c++11
 
 expect_compile cxx11_alt_operator_expr \

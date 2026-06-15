@@ -2605,7 +2605,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
       VectorAppend(declarations, decl);
-      if (TypeIsConst(sym->type)) {
+      if (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }
