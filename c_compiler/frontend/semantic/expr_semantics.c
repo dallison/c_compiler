@@ -1981,11 +1981,62 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   ASTNodeSetType(node->left, best->type);
 }
 
+static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL ||
+      !TypeIsStructOrUnion(node->left->type) ||
+      node->left->type->info.struct_info == NULL ||
+      node->left->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+
+  TypeRecord* type = TypeRecordCopy(node->left->type);
+  TypeRecordCalculateSize(type);
+  SourceLocation location = node->base.location;
+  String* constructor_name = type->info.struct_info->tag_name;
+  StructMember* constructor =
+      FindStructMember(type->info.struct_info, constructor_name);
+  if (constructor == NULL || !constructor->is_member_function ||
+      !constructor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+  temp->location = location;
+  ASTNode* receiver = NewIdentifierASTNode(temp, location);
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(constructor_name->value), NULL,
+                               location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < node->children->length; i++) {
+    VectorAppend(actuals, ASTNodeMove(node->children->value.p[i]));
+  }
+  ASTNode* constructor_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  ASTNode* result = NewIdentifierASTNode(temp, location);
+  ASTNode* comma =
+      NewBinaryASTNode(AST_OP(comma), type, location, constructor_call, result);
+
+  ASTNode* parent = node->base.parent;
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, node->base.child_id, comma, true);
+  }
+  ASTNode* analyzed = AnalyzeExpression(comma);
+  analyzed->value_category = kValueCategoryPrvalue;
+  return analyzed;
+}
+
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
+  }
+  ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
+  if (construction != NULL) {
+    return construction;
   }
   LowerMemberFunctionCall(node);
   ResolveOverloadedFunctionCall(node);
