@@ -59,6 +59,12 @@ typedef struct FullyQualifiedIdentifier {
   String spelling;     // Full spelling for diagnostics.
 } FullyQualifiedIdentifier;
 
+typedef struct CXXConstructorInitList {
+  Vector base_specs;         // CXXBaseSpecifier*; not owned.
+  Vector base_statements;    // ASTNode*; transferred into function body.
+  Vector member_statements;  // ASTNode*; transferred into function body.
+} CXXConstructorInitList;
+
 // Token classes allow us to recover from syntax errors by
 // skipping tokens until the current token matches a certain
 // class.
@@ -88,6 +94,8 @@ void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name);
 void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name);
 bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
                                          FullyQualifiedIdentifier* name);
+bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+    Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 void SyntaxParseStaticAssert(Syntax* syntax);
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers);
@@ -130,5 +138,12 @@ Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
+void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
+void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);
+void SyntaxParseCXXConstructorInitializerList(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list);
+void SyntaxInsertCXXConstructorPreamble(
+    Syntax* syntax, TypeRecord* func, Vector* body,
+    CXXConstructorInitList* init_list, SourceLocation location);
 
 #endif /* syntax_h */

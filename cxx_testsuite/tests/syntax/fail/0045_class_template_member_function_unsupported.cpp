@@ -2,10 +2,10 @@
 // EXPECT: Class template instantiation is not supported yet
 
 template <typename T>
-struct WithMemberFunction {
+struct WithStaticMemberFunction {
   T value;
-  int get(void);
+  static int get(void);
 };
 
-WithMemberFunction<int> first;
-WithMemberFunction<int> second;
+WithStaticMemberFunction<int> first;
+WithStaticMemberFunction<int> second;

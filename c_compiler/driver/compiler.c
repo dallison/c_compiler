@@ -756,15 +756,7 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
 }
 
 
-static void CompileDeclaration(Syntax* syntax) {
-  // Capture the diagnostic state active at the start of this declaration.
-  // Parsing reads a lookahead token that can process a following
-  // "#pragma diagnostic pop", so we reinstall this snapshot around semantic
-  // analysis and codegen (which emit deferred warnings) and then restore the
-  // post-parse state for the next declaration.
-  void* diag_state = DiagnosticSnapshotState();
-  ASTNode* node = SyntaxParseExternalDeclaration(syntax);
-  DiagnosticSwapState(diag_state);
+static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
     VectorAppend(&compiler->declaration_asts, node);
@@ -776,6 +768,9 @@ static void CompileDeclaration(Syntax* syntax) {
         VariableDeclarationASTNode* decl =
             (VariableDeclarationASTNode*)decls->declarations->value.p[i];
 
+        if (decl->symbol->flags.is_template) {
+          continue;
+        }
         if (IsFunctionOrInlineDefinition(decl->symbol)) {
           CheckMainSignature(syntax, decl->symbol);
           InjectCXXGlobalLifetimeCalls(decl->symbol);
@@ -887,6 +882,28 @@ static void CompileDeclaration(Syntax* syntax) {
       }
     }
   }
+}
+
+static void CompilePendingTemplateInstantiations(Syntax* syntax) {
+  while (compiler->pending_template_instantiations.length != 0) {
+    ASTNode* node = compiler->pending_template_instantiations.value.p[0];
+    VectorDeleteElement(&compiler->pending_template_instantiations, 0);
+    SyntaxResetForNewDeclaration(syntax);
+    CompileDeclarationNode(syntax, node);
+  }
+}
+
+static void CompileDeclaration(Syntax* syntax) {
+  // Capture the diagnostic state active at the start of this declaration.
+  // Parsing reads a lookahead token that can process a following
+  // "#pragma diagnostic pop", so we reinstall this snapshot around semantic
+  // analysis and codegen (which emit deferred warnings) and then restore the
+  // post-parse state for the next declaration.
+  void* diag_state = DiagnosticSnapshotState();
+  ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+  DiagnosticSwapState(diag_state);
+  CompileDeclarationNode(syntax, node);
+  CompilePendingTemplateInstantiations(syntax);
   // Restore the post-parse diagnostic state so the next declaration starts from
   // where the lexer left off.
   DiagnosticSwapState(diag_state);
@@ -979,6 +996,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_global_destructor_calls);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
+  VectorInit(&compiler->pending_template_instantiations);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
   SetInit(&compiler->error_warnings, CompareWarning);
@@ -1355,6 +1373,10 @@ void CompilerDestruct(Compiler* compiler) {
     ASTNodeDelete((ASTNode*)compiler->declaration_asts.value.p[i]);
   }
   VectorDestruct(&compiler->declaration_asts);
+  for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
+    ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
+  }
+  VectorDestruct(&compiler->pending_template_instantiations);
   ASTArenaRelease();
 
   // Free function-definition symbols that were superseded by an earlier

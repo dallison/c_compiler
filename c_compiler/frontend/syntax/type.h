@@ -80,6 +80,7 @@ typedef struct TemplateArgument {
   TemplateParameterKind kind;
   struct TypeRecord* type;  // Non-NULL for type arguments.
   long long int_value;      // Valid for simple non-type integer arguments.
+  int template_parameter_index;  // >= 0 when non-type arg is a template param.
 } TemplateArgument;
 
 // Function info.
@@ -205,6 +206,8 @@ typedef struct TypeRecord {
   Declarator declarator;
   int size;
   int template_parameter_index;  // >= 0 for template parameter placeholder types.
+  Symbol* template_origin;       // Primary class template for dependent template-ids.
+  Vector* template_arguments;    // TemplateArgument* entries owned by this type.
   struct TypeRecord* next;
   union {
     ArrayInfo array;

@@ -43,6 +43,22 @@ static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
          isspace((unsigned char)lex->line.value[pos])) {
     pos++;
   }
+  if (CompilerIsCXX() && pos < lex->line.length && lex->line.value[pos] == '<') {
+    int depth = 1;
+    pos++;
+    while (pos < lex->line.length && depth > 0) {
+      if (lex->line.value[pos] == '<') {
+        depth++;
+      } else if (lex->line.value[pos] == '>') {
+        depth--;
+      }
+      pos++;
+    }
+    while (pos < lex->line.length &&
+           isspace((unsigned char)lex->line.value[pos])) {
+      pos++;
+    }
+  }
   return pos + 1 < lex->line.length &&
          lex->line.value[pos] == ':' &&
          lex->line.value[pos + 1] == ':';
@@ -66,6 +82,30 @@ static bool ReadLookaheadIdentifier(Lex* lex, size_t* pos, String* out) {
   return i != 0;
 }
 
+static void SkipLookaheadTemplateId(Lex* lex, size_t* pos) {
+  while (*pos < lex->line.length &&
+         isspace((unsigned char)lex->line.value[*pos])) {
+    (*pos)++;
+  }
+  if (*pos >= lex->line.length || lex->line.value[*pos] != '<') {
+    return;
+  }
+  int depth = 1;
+  (*pos)++;
+  while (*pos < lex->line.length && depth > 0) {
+    if (lex->line.value[*pos] == '<') {
+      depth++;
+    } else if (lex->line.value[*pos] == '>') {
+      depth--;
+    }
+    (*pos)++;
+  }
+  while (*pos < lex->line.length &&
+         isspace((unsigned char)lex->line.value[*pos])) {
+    (*pos)++;
+  }
+}
+
 static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
   Lex* lex = syntax->lex;
   String previous;
@@ -77,10 +117,12 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
 
   if (LexLookingAt(lex, TOK(identifier))) {
     StringSetString(&previous, &lex->spelling);
+    SkipLookaheadTemplateId(lex, &pos);
   } else if (LexLookingAt(lex, TOK(coloncolon))) {
     if (!ReadLookaheadIdentifier(lex, &pos, &previous)) {
       goto done;
     }
+    SkipLookaheadTemplateId(lex, &pos);
   } else {
     goto done;
   }
@@ -112,6 +154,7 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
     } else if (!ReadLookaheadIdentifier(lex, &pos, &current)) {
       goto done;
     }
+    SkipLookaheadTemplateId(lex, &pos);
 
     while (pos < lex->line.length &&
            isspace((unsigned char)lex->line.value[pos])) {
@@ -315,6 +358,57 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
       FullyQualifiedIdentifierAppend(name, &component);
     }
     StringDestruct(&component);
+  }
+  return true;
+}
+
+static void SyntaxConsumeOptionalTemplateId(Syntax* syntax,
+                                            TokenClass followers) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(less))) {
+    return;
+  }
+  Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
+  if (args != NULL) {
+    VectorDestructWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+  }
+}
+
+bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+    Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers) {
+  Lex* lex = syntax->lex;
+  if (LexMatch(lex, TOK(coloncolon))) {
+    name->absolute = true;
+    name->is_qualified = true;
+  }
+
+  String component;
+  if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
+    return false;
+  }
+  FullyQualifiedIdentifierAppend(name, &component);
+  StringDestruct(&component);
+  SyntaxConsumeOptionalTemplateId(syntax, followers);
+
+  while (LexMatch(lex, TOK(coloncolon))) {
+    name->is_qualified = true;
+    bool is_destructor = LexMatch(lex, TOK(tilde));
+    if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
+      SyntaxError(syntax, "Expected identifier after '::'");
+      return true;
+    }
+    if (is_destructor) {
+      String destructor_name;
+      StringInit(&destructor_name, "~");
+      StringAppendString(&destructor_name, &component);
+      FullyQualifiedIdentifierAppend(name, &destructor_name);
+      StringDestruct(&destructor_name);
+    } else {
+      FullyQualifiedIdentifierAppend(name, &component);
+    }
+    StringDestruct(&component);
+    SyntaxConsumeOptionalTemplateId(syntax, followers);
   }
   return true;
 }
@@ -1194,19 +1288,13 @@ static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
   }
 }
 
-typedef struct {
-  Vector base_specs;       // CXXBaseSpecifier*; not owned.
-  Vector base_statements;  // ASTNode*; transferred into function body.
-  Vector member_statements;  // ASTNode*; transferred into function body.
-} CXXConstructorInitList;
-
-static void CXXConstructorInitListInit(CXXConstructorInitList* init_list) {
+void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
   VectorInit(&init_list->base_specs);
   VectorInit(&init_list->base_statements);
   VectorInit(&init_list->member_statements);
 }
 
-static void CXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
+void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
   VectorDestruct(&init_list->base_specs);
   VectorDestruct(&init_list->base_statements);
   VectorDestruct(&init_list->member_statements);
@@ -1359,7 +1447,7 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
       location);
 }
 
-static void ParseCXXConstructorInitializerList(
+void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
       func->info.function.cxx_member_owner == NULL ||
@@ -1421,7 +1509,7 @@ static void ParseCXXConstructorInitializerList(
   }
 }
 
-static void InsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
+void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
                                         Vector* body,
                                         CXXConstructorInitList* init_list,
                                         SourceLocation location) {
@@ -1499,8 +1587,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   
   
   CXXConstructorInitList cxx_initializers;
-  CXXConstructorInitListInit(&cxx_initializers);
-  ParseCXXConstructorInitializerList(syntax, sym->type, &cxx_initializers);
+  SyntaxCXXConstructorInitListInit(&cxx_initializers);
+  SyntaxParseCXXConstructorInitializerList(syntax, sym->type,
+                                           &cxx_initializers);
 
   if (LexMatch(syntax->lex, TOK(lbrace))) {
     if (sym->type->info.function.old_style) {
@@ -1543,8 +1632,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         VectorAppend(body, stmt);
       }
     }
-    InsertCXXConstructorPreamble(syntax, sym->type, body, &cxx_initializers,
-                                 sym->location);
+    SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
+                                       &cxx_initializers, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
@@ -1561,7 +1650,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     ASTNode* decl = NewVariableDeclarationASTNode(sym, NULL,
                                                   syntax->lex->current_token_location);
     VectorAppend(declarations, decl);
-    CXXConstructorInitListDestruct(&cxx_initializers);
+    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
     
     return NewDeclarationListASTNode(declarations,
                                      syntax->lex->current_token_location);
@@ -1572,7 +1661,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       old_sym->flags.is_inline_defn = true;
     }
   }
-  CXXConstructorInitListDestruct(&cxx_initializers);
+  SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
   return NULL;
 }
 
@@ -2247,6 +2336,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     arg->kind = kTemplateParameterType;
     arg->type = NULL;
     arg->int_value = 0;
+    arg->template_parameter_index = -1;
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
@@ -2268,8 +2358,19 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       expr = AnalyzeExpression(expr);
       int64_t value = 0;
       if (!EvaluateIntegerExpression(expr, &value)) {
-        SyntaxError(syntax,
-                    "Template non-type argument must be an integer constant expression");
+        if (syntax->parsing_template_declaration &&
+            expr->op == AST_OP(identifier)) {
+          IdentifierASTNode* id = (IdentifierASTNode*)expr;
+          if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
+              !id->symbol->flags.is_template_type_parameter) {
+            arg->template_parameter_index =
+                id->symbol->template_parameter_index;
+          }
+        }
+        if (arg->template_parameter_index < 0) {
+          SyntaxError(syntax,
+                      "Template non-type argument must be an integer constant expression");
+        }
       }
       arg->kind = kTemplateParameterNonType;
       arg->int_value = value;

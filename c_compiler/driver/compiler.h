@@ -300,6 +300,10 @@ typedef struct {
   // structs themselves are arena allocated and freed by ASTArenaRelease.
   Vector declaration_asts;
 
+  // Declaration ASTs synthesized while instantiating templates.  Drained by
+  // the driver through the normal semantic/codegen path.
+  Vector pending_template_instantiations;
+
   // Function-definition symbols (Symbol*) that are not stored in the global
   // symbol table because the function was previously declared.  Each owns a
   // freshly-parsed function type (forming a symbol<->type cycle), so they are

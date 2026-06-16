@@ -9,6 +9,7 @@
 #include "symbol.h"
 #include "type.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -268,12 +269,26 @@ static void AppendCXXNameComponent(String* out, const char* name) {
     StringAppend(out, op_encoding);
     return;
   }
+  String sanitized;
+  StringInit(&sanitized, NULL);
+  bool needs_sanitizing = false;
+  for (const char* p = name; *p != '\0'; p++) {
+    char ch = *p;
+    if (isalnum((unsigned char)ch) || ch == '_') {
+      StringAppendChar(&sanitized, ch);
+    } else {
+      needs_sanitizing = true;
+      StringAppendChar(&sanitized, '_');
+    }
+  }
+  const char* component = needs_sanitizing ? sanitized.value : name;
   String length;
   StringInit(&length, NULL);
-  StringPrintf(&length, "%zu", strlen(name));
+  StringPrintf(&length, "%zu", strlen(component));
   StringAppendString(out, &length);
-  StringAppend(out, name);
+  StringAppend(out, component);
   StringDestruct(&length);
+  StringDestruct(&sanitized);
 }
 
 static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
