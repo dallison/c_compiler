@@ -220,6 +220,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->type = type;
   record->qualifiers = quals;
   record->size = 0;
+  record->template_parameter_index = -1;
   record->refs = 0;
   record->next = NULL;
   record->declarator = kDeclPrimitive;
@@ -445,6 +446,7 @@ TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static) {
   t->info.array.size.vla.codegen_info = NULL;
   t->info.array.is_vla = false;
   t->info.array.is_placeholder_vla = false;
+  t->info.array.template_parameter_index = -1;
   t->size = 0;  // Don't know yet.
   return t;
 }
@@ -501,6 +503,23 @@ StructMember* NewStructMember(Symbol* symbol) {
   return mem;
 }
 
+void TemplateParameterDelete(TemplateParameter* param) {
+  if (param == NULL) {
+    return;
+  }
+  StringDestruct(&param->name);
+  TypeRecordDelete(param->type);
+  free(param);
+}
+
+void TemplateArgumentDelete(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return;
+  }
+  TypeRecordDelete(arg->type);
+  free(arg);
+}
+
 static CXXBaseSpecifier* NewCXXBaseSpecifier(TypeRecord* type,
                                              CXXAccess access) {
   CXXBaseSpecifier* base = malloc(sizeof(CXXBaseSpecifier));
@@ -534,14 +553,18 @@ static int CompareStructMember(const void* a, const void* b) {
 Struct* NewStruct(bool is_union) {
   Struct* s = malloc(sizeof(Struct));
   s->refs = 1;
+  s->tag_symbol = NULL;
   VectorInit(&s->bases);
   VectorInit(&s->members);
   VectorInit(&s->virtual_members);
+  VectorInit(&s->template_parameters);
   s->vptr_member = NULL;
   s->vtable_symbol = NULL;
   MapInit(&s->symbol_table, CompareStructMember);
   s->is_union = is_union;
   s->is_class = false;
+  s->is_template = false;
+  s->template_parameter_count = 0;
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;
@@ -570,6 +593,9 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->members,
                              (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
   VectorDestruct(&s->virtual_members);
+  VectorDestructWithContents(&s->template_parameters,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
   MapDestruct(&s->symbol_table);
 }
 
@@ -801,6 +827,56 @@ void TypeRecordToString(TypeRecord* type, String* result) {
   }
 }
 
+static void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
+  switch (type->declarator) {
+    case kDeclPrimitive:
+      QualifiersToString(type->qualifiers, result);
+      TypeToString(type->type, result);
+      if (TypeIsStructOrUnion(type)) {
+        Struct* str = type->info.struct_info;
+        if (str != NULL && str->tag_name != NULL) {
+          if (str->tag_symbol != NULL && str->tag_symbol->namespace_ != NULL &&
+              str->tag_symbol->namespace_ != compiler->global_namespace) {
+            StringAppendString(result,
+                               &str->tag_symbol->namespace_->qualified_name);
+            StringAppend(result, "::");
+          }
+          if (str->tag_name->value[0] != '<') {
+            StringAppendString(result, str->tag_name);
+          }
+        }
+      } else if (TypeIsEnum(type)) {
+        Enum* e = type->info.enum_info;
+        if (e != NULL && e->tag_name != NULL) {
+          StringAppendString(result, e->tag_name);
+        }
+      }
+      break;
+
+    case kDeclPointer:
+      TypeRecordToTemplateKeyString(type->next, result);
+      StringAppendChar(result, '*');
+      QualifiersToString(type->qualifiers, result);
+      break;
+
+    case kDeclReference:
+    case kDeclRValueReference:
+      TypeRecordToTemplateKeyString(type->next, result);
+      StringAppend(result,
+                   type->declarator == kDeclRValueReference ? "&&" : "&");
+      break;
+
+    case kDeclArray:
+      TypeRecordToTemplateKeyString(type->next, result);
+      StringPrintf(result, "[%d]", type->info.array.size.fixed);
+      break;
+
+    case kDeclFunction:
+      TypeRecordToString(type, result);
+      break;
+  }
+}
+
 //
 // The type parser: a recursive descent parser for the C language's complex
 // type system.
@@ -905,6 +981,212 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   return result;
 }
 
+static void AlignNextOffset(Struct* str, TypeRecord* type);
+static void AddStructMember(TypeParser* parser, Struct* str,
+                            StructMember* member);
+static void UpdateStructSize(Struct* str, TypeRecord* member_type,
+                             bool is_union);
+static void FinalizeStructAlignment(Struct* str);
+
+static TypeRecord* SubstituteTemplateParameters(TypeRecord* type, Vector* args) {
+  if (type == NULL) {
+    return NULL;
+  }
+  if (type->declarator == kDeclPrimitive &&
+      type->template_parameter_index >= 0) {
+    int index = type->template_parameter_index;
+    if (index < 0 || (size_t)index >= args->length) {
+      return TypeRecordCopy(type);
+    }
+    TemplateArgument* arg = args->value.p[index];
+    if (arg->kind != kTemplateParameterType || arg->type == NULL) {
+      return TypeRecordCopy(type);
+    }
+    TypeRecord* subst = TypeRecordCopy(arg->type);
+    subst->qualifiers |= type->qualifiers;
+    return subst;
+  }
+
+  TypeRecord* copy = TypeRecordCopy(type);
+  if (copy->declarator == kDeclArray &&
+      type->info.array.template_parameter_index >= 0) {
+    int index = type->info.array.template_parameter_index;
+    if ((size_t)index < args->length) {
+      TemplateArgument* arg = args->value.p[index];
+      if (arg->kind == kTemplateParameterNonType) {
+        copy->info.array.size.fixed = (int)arg->int_value;
+        copy->info.array.template_parameter_index = -1;
+        copy->size = 0;
+      }
+    }
+  }
+  if (copy->next != NULL) {
+    TypeRecordDelete(copy->next);
+    copy->next = SubstituteTemplateParameters(type->next, args);
+    if (copy->next != NULL) {
+      TypeRecordIncRef(copy->next);
+      copy->type = copy->next->type;
+    }
+  }
+  return TypeRecordCalculateSize(copy);
+}
+
+static void AppendTemplateInstantiationName(String* name, Symbol* templ,
+                                            Vector* args) {
+  StringSet(name, templ->name.value);
+  StringAppendChar(name, '<');
+  for (size_t i = 0; i < args->length; i++) {
+    if (i != 0) {
+      StringAppend(name, ",");
+    }
+    String arg_name;
+    StringInit(&arg_name, NULL);
+    TemplateArgument* arg = args->value.p[i];
+    if (arg->kind == kTemplateParameterType) {
+      TypeRecordToTemplateKeyString(arg->type, &arg_name);
+    } else {
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%lld", arg->int_value);
+      StringAppend(&arg_name, buffer);
+    }
+    StringAppendString(name, &arg_name);
+    StringDestruct(&arg_name);
+  }
+  StringAppendChar(name, '>');
+}
+
+static Symbol* FindTemplateInstantiationTag(TypeParser* parser, Symbol* templ,
+                                            String* name) {
+  LocalSymbolTable* saved_tag_stack = parser->syntax->local_tag_stack;
+  Namespace* saved_namespace = parser->syntax->current_namespace;
+  parser->syntax->local_tag_stack = NULL;
+  parser->syntax->current_namespace =
+      templ->namespace_ != NULL ? templ->namespace_ : compiler->global_namespace;
+  Symbol* symbol = SyntaxFindTag(parser->syntax, name);
+  parser->syntax->local_tag_stack = saved_tag_stack;
+  parser->syntax->current_namespace = saved_namespace;
+  return symbol;
+}
+
+static bool AddTemplateInstantiationTag(TypeParser* parser, Symbol* templ,
+                                        Symbol* tag) {
+  LocalSymbolTable* saved_tag_stack = parser->syntax->local_tag_stack;
+  Namespace* saved_namespace = parser->syntax->current_namespace;
+  parser->syntax->local_tag_stack = NULL;
+  parser->syntax->current_namespace =
+      templ->namespace_ != NULL ? templ->namespace_ : compiler->global_namespace;
+  bool added = SyntaxAddTag(parser->syntax, tag);
+  parser->syntax->local_tag_stack = saved_tag_stack;
+  parser->syntax->current_namespace = saved_namespace;
+  return added;
+}
+
+static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
+                                                       Struct* str) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member->is_member_function || member->is_static || member->is_anon ||
+        StructMemberIsBitField(member)) {
+      SyntaxError(parser->syntax,
+                  "Class template instantiation is not supported yet");
+      return false;
+    }
+  }
+  return true;
+}
+
+static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
+                                                  Symbol* templ,
+                                                  Vector* args) {
+  if (templ == NULL || templ->type == NULL ||
+      !TypeIsStructOrUnion(templ->type) ||
+      templ->type->info.struct_info == NULL ||
+      !templ->type->info.struct_info->is_template) {
+    return TypeRecordCopy(templ->type);
+  }
+  Struct* template_struct = templ->type->info.struct_info;
+  if (args == NULL ||
+      args->length != (size_t)template_struct->template_parameter_count) {
+    SyntaxError(parser->syntax, "Class template instantiation is not supported yet");
+    return TypeRecordCopy(templ->type);
+  }
+  for (size_t i = 0; i < template_struct->template_parameters.length; i++) {
+    TemplateParameter* param = template_struct->template_parameters.value.p[i];
+    TemplateArgument* arg = args->value.p[i];
+    if (param->kind != arg->kind) {
+      SyntaxError(parser->syntax,
+                  "Class template instantiation is not supported yet");
+      return TypeRecordCopy(templ->type);
+    }
+  }
+
+  String instantiated_name;
+  StringInit(&instantiated_name, NULL);
+  AppendTemplateInstantiationName(&instantiated_name, templ, args);
+  Symbol* existing =
+      FindTemplateInstantiationTag(parser, templ, &instantiated_name);
+  if (existing != NULL && existing->type != NULL &&
+      TypeIsStructOrUnion(existing->type) &&
+      existing->type->info.struct_info != NULL &&
+      !existing->type->info.struct_info->is_template) {
+    StringDestruct(&instantiated_name);
+    return TypeRecordCopy(existing->type);
+  }
+  if (existing != NULL) {
+    SyntaxError(parser->syntax,
+                "Class template instantiation conflicts with existing tag %s",
+                instantiated_name.value);
+    StringDestruct(&instantiated_name);
+    return TypeRecordCopy(templ->type);
+  }
+  if (!ClassTemplateInstantiationMembersSupported(parser, template_struct)) {
+    StringDestruct(&instantiated_name);
+    return TypeRecordCopy(templ->type);
+  }
+
+  Struct* str = NewStruct(template_struct->is_union);
+  str->is_class = template_struct->is_class;
+  str->packed = template_struct->packed;
+  str->explicit_alignment = template_struct->explicit_alignment;
+  str->pack = template_struct->pack;
+  TypeRecord* type = NewTypeRecord(template_struct->is_union ? kTypeUnion
+                                                            : kTypeStruct,
+                                  kQualPlain);
+  type->info.struct_info = str;
+  Symbol* tag = NewSymbol(instantiated_name.value, type, STO(implicit));
+  tag->flags.is_defined = true;
+  str->tag_name = &tag->name;
+  str->tag_symbol = tag;
+  if (!AddTemplateInstantiationTag(parser, templ, tag)) {
+    SyntaxError(parser->syntax,
+                "Class template instantiation conflicts with existing tag %s",
+                instantiated_name.value);
+    StringDestruct(&instantiated_name);
+    return TypeRecordCopy(templ->type);
+  }
+
+  for (size_t i = 0; i < template_struct->members.length; i++) {
+    StructMember* member = template_struct->members.value.p[i];
+    TypeRecord* member_type =
+        SubstituteTemplateParameters(member->symbol->type, args);
+    TypeRecordCalculateSize(member_type);
+    Symbol* member_symbol =
+        NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
+    member_symbol->location = member->symbol->location;
+    StructMember* instantiated = NewStructMember(member_symbol);
+    instantiated->access = member->access;
+    AlignNextOffset(str, member_type);
+    instantiated->byte_offset = str->next_offset;
+    instantiated->index = str->members.length;
+    AddStructMember(parser, str, instantiated);
+    UpdateStructSize(str, member_type, str->is_union);
+  }
+  FinalizeStructAlignment(str);
+  TypeRecordCalculateSize(type);
+  StringDestruct(&instantiated_name);
+  return TypeRecordCopy(type);
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
@@ -960,8 +1242,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       SyntaxParseFullyQualifiedIdentifier(parser->syntax, &typedef_name);
       Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, &typedef_name);
       if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
-        type_record = TypeRecordCopy(symbol->type);
+        Vector* args = NULL;
+        if (symbol->flags.is_template) {
+          args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+        }
+        if (symbol->flags.is_template && args != NULL &&
+            !parser->syntax->parsing_template_declaration &&
+            TypeIsStructOrUnion(symbol->type)) {
+          type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
+        } else {
+          type_record = TypeRecordCopy(symbol->type);
+        }
         type |= type_record->type;
+        if (args != NULL) {
+          VectorDestructWithContents(args,
+                                     (VectorElementDestructor)TemplateArgumentDelete,
+                                     /*free_element=*/false);
+        }
       } else {
         SyntaxError(parser->syntax, "Unknown type name %s",
                     typedef_name.spelling.value);
@@ -977,8 +1274,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         // Reference to a typedef?
         if (StorageIs(symbol->storage, STO(typedef))) {
           LexNextToken(lex);
-          type_record = TypeRecordCopy(symbol->type);
+          Vector* args = NULL;
+          if (symbol->flags.is_template) {
+            args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+          }
+          if (symbol->flags.is_template && args != NULL &&
+              !parser->syntax->parsing_template_declaration &&
+              TypeIsStructOrUnion(symbol->type)) {
+            type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
+          } else {
+            type_record = TypeRecordCopy(symbol->type);
+          }
           type |= type_record->type;
+          if (args != NULL) {
+            VectorDestructWithContents(args,
+                                       (VectorElementDestructor)TemplateArgumentDelete,
+                                       /*free_element=*/false);
+          }
         }
       }
       StringDestruct(&typedef_name);
@@ -1629,6 +1941,17 @@ static void ParseArrayDecl(TypeParser* parser) {
     int64_t size;
     bool ok = EvaluateIntegerExpression(size_expr, &size);
     if (!ok) {
+      if (parser->syntax->parsing_template_declaration &&
+          size_expr->op == AST_OP(identifier)) {
+        IdentifierASTNode* id = (IdentifierASTNode*)size_expr;
+        if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
+            !id->symbol->flags.is_template_type_parameter) {
+          p->info.array.template_parameter_index =
+              id->symbol->template_parameter_index;
+          p->info.array.size.fixed = 0;
+          goto parsed_bound;
+        }
+      }
       // VLA.
       if (!TypeIsIntegral(size_expr->type)) {
         SyntaxError(parser->syntax, "Variable length array size must be integral");
@@ -1651,6 +1974,7 @@ static void ParseArrayDecl(TypeParser* parser) {
       // the end of a struct like a flexible array member.
       p->info.array.size.fixed = (int)size;
     }
+parsed_bound:
     if (delete_expr) {
       ASTNodeDelete(size_expr);
     }
@@ -2900,6 +3224,9 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
       CheckTagType(parser, tag, is_union, false);
     }
     str = tag->type->info.struct_info;
+    if (str != NULL && str->tag_symbol == NULL) {
+      str->tag_symbol = tag;
+    }
   } else {
     // Tag doesn't exist in the, create one.
     str = NewStruct(is_union);
@@ -2909,6 +3236,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     type->info.struct_info = str;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     str->tag_name = &tag->name;
+    str->tag_symbol = tag;
     if (empty_tag_name) {
       tag->flags.invented = true;
     }
@@ -3100,6 +3428,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;
+      str->tag_symbol = tag;
       SyntaxAddTag(parser->syntax, tag);
       AddInjectedClassName(parser, tag);
     } else {
@@ -3109,6 +3438,9 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
   }
 
 done:
+  if (tag != NULL) {
+    parser->syntax->last_parsed_tag = tag;
+  }
   FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);
   VectorDestructWithContents(&bases,

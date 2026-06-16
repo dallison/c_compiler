@@ -64,6 +64,24 @@ typedef enum {
 
 typedef struct Struct Struct;
 
+typedef enum {
+  kTemplateParameterType,
+  kTemplateParameterNonType,
+} TemplateParameterKind;
+
+typedef struct TemplateParameter {
+  String name;
+  TemplateParameterKind kind;
+  struct TypeRecord* type;  // NULL for type parameters.
+  int index;
+} TemplateParameter;
+
+typedef struct TemplateArgument {
+  TemplateParameterKind kind;
+  struct TypeRecord* type;  // Non-NULL for type arguments.
+  long long int_value;      // Valid for simple non-type integer arguments.
+} TemplateArgument;
+
 // Function info.
 typedef struct {
   Symbol* symbol;       // Symbol for function (or NULL).
@@ -115,6 +133,7 @@ typedef struct StructMember {
 struct Struct {
   int refs;
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
+  Symbol* tag_symbol;  // Owning tag symbol, if named.
   Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
   Vector members;    // Vector of StructMember* (owns StructMembers)
   Vector virtual_members;  // Vector of StructMember* (not owned), by slot.
@@ -126,6 +145,9 @@ struct Struct {
   int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
   bool is_class;     // True if this is a C++ class.
+  bool is_template;  // True if this is a C++ class template.
+  Vector template_parameters;  // TemplateParameter* entries.
+  int template_parameter_count;  // Number of parameters for simple templates.
   bool packed;       // __attribute__((packed)): no inter-member padding.
   bool is_abstract;  // C++ class has at least one unimplemented pure virtual.
   int explicit_alignment;  // __attribute__((aligned(N))) minimum; 0 = none.
@@ -167,6 +189,7 @@ typedef struct {
   bool is_static:1;             // In call, actual and formal must match.
   bool is_vla:1;                // This is a variable length array.
   bool is_placeholder_vla:1;    // [*] used in function prototype.
+  int template_parameter_index;  // >= 0 when fixed bound is a non-type param.
 } ArrayInfo;
 
 
@@ -181,6 +204,7 @@ typedef struct TypeRecord {
   Qualifiers qualifiers;
   Declarator declarator;
   int size;
+  int template_parameter_index;  // >= 0 for template parameter placeholder types.
   struct TypeRecord* next;
   union {
     ArrayInfo array;
@@ -237,6 +261,8 @@ void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
+void TemplateParameterDelete(TemplateParameter* param);
+void TemplateArgumentDelete(TemplateArgument* arg);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);

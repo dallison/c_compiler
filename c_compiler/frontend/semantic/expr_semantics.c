@@ -2040,6 +2040,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   LowerMemberFunctionCall(node);
   ResolveOverloadedFunctionCall(node);
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL && id->symbol->flags.is_template) {
+      SemanticError((ASTNode*)node, "Template instantiation is not supported yet");
+    }
+  }
   num_actual_args = node->children->length;
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");

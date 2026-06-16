@@ -91,6 +91,9 @@ typedef struct Symbol {
     bool noinline: 1;              // __attribute__((noinline)).
     bool is_using_alias: 1;        // C++ using-declaration alias.
     bool is_overloaded: 1;         // Has C++ overload alternatives.
+    bool is_template: 1;           // C++ template declaration.
+    bool is_template_parameter: 1; // C++ template parameter.
+    bool is_template_type_parameter: 1; // `typename`/`class` parameter.
   } flags;
   
   struct {
@@ -101,6 +104,7 @@ typedef struct Symbol {
   
   Vector attributes;          // Attributes (owns Attribute*).
   int alignment;              // __attribute__((aligned(N))) override; 0 = natural.
+  int template_parameter_index;  // Index for template parameter symbols.
   SourceLocation location;
   
   // Symbol value, one of these.

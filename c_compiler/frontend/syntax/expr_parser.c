@@ -177,6 +177,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       SyntaxAddSymbol(syntax, symbol);
     }
   }
+  if (symbol != NULL && symbol->flags.is_template &&
+      LexLookingAt(lex, TOK(less))) {
+    Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
+    if (args != NULL) {
+      VectorDestructWithContents(args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+    }
+  }
   FullyQualifiedIdentifierDestruct(&name);
   return NewIdentifierASTNode(symbol, lex->current_token_location);
 }
@@ -1744,6 +1753,9 @@ static ASTNode* ParseRelationalExpression(Syntax* syntax,
       result =
           NewBinaryASTNode(AST_OP(lesseq), NULL,
                            syntax->lex->current_token_location, result, right);
+    } else if (syntax->parsing_template_argument &&
+               LexLookingAt(syntax->lex, TOK(greater))) {
+      break;
     } else if (LexMatch(syntax->lex, TOK(greater))) {
       ASTNode* right = ParseShiftExpression(syntax, followers);
       result =

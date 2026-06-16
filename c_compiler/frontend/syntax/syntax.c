@@ -487,6 +487,11 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->all_symbols);
+  syntax->last_parsed_tag = NULL;
+  syntax->parsing_template_declaration = false;
+  syntax->parsing_template_argument = false;
+  syntax->current_template_parameter_count = 0;
+  syntax->current_template_parameters = NULL;
   syntax->context = kParsingFileScope;
 }
 
@@ -527,6 +532,11 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->compound_literal_type = NULL;
   syntax->loop_count = 0;
   syntax->switch_count = 0;
+  syntax->last_parsed_tag = NULL;
+  syntax->parsing_template_declaration = false;
+  syntax->parsing_template_argument = false;
+  syntax->current_template_parameter_count = 0;
+  syntax->current_template_parameters = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
 }
@@ -1644,6 +1654,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
   TypeParserDestruct(&parser);
 }
 
+static bool TypeContainsClassTemplate(TypeRecord* type);
+
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
                                          Storage storage,
@@ -1821,6 +1833,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                   sym->type->info.struct_info->tag_name != NULL
                       ? sym->type->info.struct_info->tag_name->value
                       : "<anonymous>");
+    }
+    if (!syntax->parsing_template_declaration &&
+        TypeContainsClassTemplate(sym->type)) {
+      SyntaxError(syntax, "Class template instantiation is not supported yet");
     }
     
     if (old_sym != NULL) {
@@ -2131,6 +2147,232 @@ static ASTNode* ParseNamespaceDeclaration(Syntax* syntax) {
   return NewDeclarationListASTNode(declarations, location);
 }
 
+static TemplateParameter* NewTemplateParameter(const char* name,
+                                               TemplateParameterKind kind,
+                                               TypeRecord* type,
+                                               int index) {
+  TemplateParameter* param = malloc(sizeof(TemplateParameter));
+  StringInit(&param->name, name);
+  param->kind = kind;
+  param->type = type;
+  if (type != NULL) {
+    TypeRecordIncRef(type);
+  }
+  param->index = index;
+  return param;
+}
+
+static bool ParseTemplateParameter(Syntax* syntax, Vector* params) {
+  Lex* lex = syntax->lex;
+  int index = (int)params->length;
+  if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected template parameter name");
+      SyntaxRecover(syntax, TC(closebra));
+      return false;
+    }
+
+    TypeRecord* placeholder =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    placeholder->template_parameter_index = index;
+    Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
+    param->flags.invented = true;
+    param->flags.is_template_parameter = true;
+    param->flags.is_template_type_parameter = true;
+    param->template_parameter_index = index;
+    param->location = lex->current_token_location;
+    bool added = SyntaxAddSymbol(syntax, param);
+    if (!added) {
+      SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
+      SymbolDelete(param);
+    }
+    VectorAppend(params, NewTemplateParameter(lex->spelling.value,
+                                              kTemplateParameterType, NULL,
+                                              index));
+    LexNextToken(lex);
+    return true;
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  Symbol* param = TypeParserParseDeclarator(&parser, type);
+  TypeParserDestruct(&parser);
+  TypeRecordDelete(type);
+  if (param == NULL) {
+    SyntaxError(syntax, "Expected template parameter name");
+    SyntaxRecover(syntax, TC(closebra));
+    return false;
+  }
+  param->flags.invented = true;
+  param->flags.is_template_parameter = true;
+  param->flags.is_template_type_parameter = false;
+  param->template_parameter_index = index;
+  bool added = SyntaxAddSymbol(syntax, param);
+  if (!added) {
+    SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
+    SymbolDelete(param);
+  }
+  VectorAppend(params, NewTemplateParameter(param->name.value,
+                                            kTemplateParameterNonType,
+                                            param->type, index));
+  return true;
+}
+
+static Vector* ParseTemplateParameterList(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  if (!LexMatch(lex, TOK(less))) {
+    SyntaxError(syntax, "Expected '<' after template");
+    return NewVector();
+  }
+  Vector* params = NewVector();
+  while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
+    ParseTemplateParameter(syntax, params);
+    if (!LexMatch(lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(greater), TC(decl));
+  return params;
+}
+
+Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
+  Lex* lex = syntax->lex;
+  if (!LexMatch(lex, TOK(less))) {
+    return NULL;
+  }
+  Vector* args = NewVector();
+  while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
+    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+    arg->kind = kTemplateParameterType;
+    arg->type = NULL;
+    arg->int_value = 0;
+    if (SyntaxLookingAtType(syntax)) {
+      TypeParser parser;
+      TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
+      TypeRecord* type = TypeParserParseType(&parser, true);
+      Symbol* sym = TypeParserParseDeclarator(&parser, type);
+      TypeParserDestruct(&parser);
+      if (sym != NULL) {
+        arg->type = TypeRecordCopy(sym->type);
+        SymbolDelete(sym);
+      } else {
+        arg->type = type;
+      }
+    } else {
+      bool old_parsing_template_argument = syntax->parsing_template_argument;
+      syntax->parsing_template_argument = true;
+      ASTNode* expr = SyntaxParseSingleExpression(syntax,
+                                                  TC(closebra) | TC(exprsep));
+      syntax->parsing_template_argument = old_parsing_template_argument;
+      expr = AnalyzeExpression(expr);
+      int64_t value = 0;
+      if (!EvaluateIntegerExpression(expr, &value)) {
+        SyntaxError(syntax,
+                    "Template non-type argument must be an integer constant expression");
+      }
+      arg->kind = kTemplateParameterNonType;
+      arg->int_value = value;
+      ASTNodeDelete(expr);
+    }
+    VectorAppend(args, arg);
+    if (!LexMatch(lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(greater), followers);
+  return args;
+}
+
+static bool TypeContainsClassTemplate(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+        t->info.struct_info->is_template) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(decl_list)) {
+    return;
+  }
+  DeclarationListASTNode* list = (DeclarationListASTNode*)node;
+  bool marked_symbol = false;
+  for (size_t i = 0; i < list->declarations->length; i++) {
+    ASTNode* decl = list->declarations->value.p[i];
+    if (decl != NULL && decl->op == AST_OP(vardecl)) {
+      VariableDeclarationASTNode* var = (VariableDeclarationASTNode*)decl;
+      if (var->symbol != NULL) {
+        var->symbol->flags.is_template = true;
+        marked_symbol = true;
+      }
+    }
+  }
+  if (!marked_symbol && syntax->last_parsed_tag != NULL &&
+      syntax->last_parsed_tag->type != NULL &&
+      TypeIsStructOrUnion(syntax->last_parsed_tag->type) &&
+      syntax->last_parsed_tag->type->info.struct_info != NULL) {
+    syntax->last_parsed_tag->flags.is_template = true;
+    syntax->last_parsed_tag->type->info.struct_info->is_template = true;
+    syntax->last_parsed_tag->type->info.struct_info->template_parameter_count =
+        syntax->current_template_parameter_count;
+    VectorDestructWithContents(
+        &syntax->last_parsed_tag->type->info.struct_info->template_parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    VectorInit(&syntax->last_parsed_tag->type->info.struct_info->template_parameters);
+    if (syntax->current_template_parameters != NULL) {
+      for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
+        VectorAppend(&syntax->last_parsed_tag->type->info.struct_info->template_parameters,
+                     syntax->current_template_parameters->value.p[i]);
+      }
+      syntax->current_template_parameters->length = 0;
+    }
+    Symbol* alias = NewSymbol(syntax->last_parsed_tag->name.value,
+                              syntax->last_parsed_tag->type, STO(typedef));
+    alias->namespace_ = syntax->last_parsed_tag->namespace_;
+    alias->flags.is_template = true;
+    if (!SyntaxAddSymbol(syntax, alias)) {
+      SymbolDelete(alias);
+      Symbol* existing_alias =
+          SyntaxFindSymbol(syntax, &syntax->last_parsed_tag->name);
+      if (existing_alias != NULL && StorageIs(existing_alias->storage, STO(typedef))) {
+        existing_alias->flags.is_template = true;
+      }
+    }
+  }
+}
+
+static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // template
+
+  SyntaxOpenScope(syntax);
+  LocalSymbolTable* template_tag_scope = syntax->local_tag_stack;
+  syntax->local_tag_stack = template_tag_scope->prev;
+  int old_template_parameter_count = syntax->current_template_parameter_count;
+  Vector* old_template_parameters = syntax->current_template_parameters;
+  syntax->current_template_parameters = ParseTemplateParameterList(syntax);
+  syntax->current_template_parameter_count =
+      (int)syntax->current_template_parameters->length;
+  syntax->last_parsed_tag = NULL;
+  bool old_parsing_template = syntax->parsing_template_declaration;
+  syntax->parsing_template_declaration = true;
+  ASTNode* declaration = SyntaxParseExternalDeclaration(syntax);
+  syntax->parsing_template_declaration = old_parsing_template;
+  syntax->local_tag_stack = template_tag_scope;
+  SyntaxCloseScope(syntax);
+  MarkTemplateDeclaration(syntax, declaration);
+  VectorDestructWithContents(syntax->current_template_parameters,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
+  syntax->current_template_parameter_count = old_template_parameter_count;
+  syntax->current_template_parameters = old_template_parameters;
+  return declaration != NULL ? declaration : EmptyDeclarationList(location);
+}
+
 
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
@@ -2147,6 +2389,9 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
     return ParseNamespaceDeclaration(syntax);
+  }
+  if (LexLookingAt(syntax->lex, TOK(template))) {
+    return ParseTemplateDeclaration(syntax);
   }
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
@@ -2578,6 +2823,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                     sym->type->info.struct_info->tag_name != NULL
                         ? sym->type->info.struct_info->tag_name->value
                         : "<anonymous>");
+      }
+      if (!syntax->parsing_template_declaration &&
+          TypeContainsClassTemplate(sym->type)) {
+        SyntaxError(syntax, "Class template instantiation is not supported yet");
       }
       // Any initializer?
       ASTNode* initializer = NULL;

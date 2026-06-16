@@ -139,6 +139,9 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.noinline = false;
   sym->flags.is_using_alias = false;
   sym->flags.is_overloaded = false;
+  sym->flags.is_template = false;
+  sym->flags.is_template_parameter = false;
+  sym->flags.is_template_type_parameter = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
@@ -150,6 +153,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->id = compiler->next_symbol_id++;
   VectorInit(&sym->attributes);
   sym->alignment = 0;
+  sym->template_parameter_index = -1;
   SymbolSetType(sym, type);
   sym->die = NULL;
 }
@@ -441,6 +445,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->overload_next = NULL;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
+  new_sym->template_parameter_index = sym->template_parameter_index;
   new_sym->namespace_ = sym->namespace_;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep

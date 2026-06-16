@@ -42,6 +42,11 @@ typedef struct Syntax {
                              // here by SyntaxResetForNewDeclaration so they
                              // outlive the reset; owned by this vector and freed
                              // at SyntaxDestruct.
+  Symbol* last_parsed_tag;   // Most recent struct/union tag parsed as a type.
+  bool parsing_template_declaration;  // Parsing declaration after template<...>.
+  bool parsing_template_argument;  // Parsing expression inside template args.
+  int current_template_parameter_count;  // Type params for current template.
+  Vector* current_template_parameters;  // TemplateParameter* for current template.
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -85,6 +90,7 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
                                          FullyQualifiedIdentifier* name);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 void SyntaxParseStaticAssert(Syntax* syntax);
+Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers);
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name);
 Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
