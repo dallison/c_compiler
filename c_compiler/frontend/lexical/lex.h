@@ -66,6 +66,31 @@ typedef struct Lex {
   bool assembler_mode;     // Running in assembler mode.
 } Lex;
 
+typedef struct {
+  Source* source;
+  SourceDevice source_device;
+  fpos_t file_pos;
+  size_t string_index;
+  int lineno;
+  uint32_t file_index;
+  size_t path_index;
+
+  String line;
+  size_t pos;
+  SourceLocation current_token_location;
+  Token current_token;
+  String spelling;
+  int64_t number;
+  double fnumber;
+  String suffix;
+  String ud_suffix;
+  LiteralEncoding literal_encoding;
+  bool literal_is_raw;
+  bool preprocessor_mode;
+  bool in_comment;
+  bool assembler_mode;
+} LexCheckpoint;
+
 // Initializes a lexical analyzer from a file.
 bool LexInitFromFile(Lex* lex, const char* filename,
                      Preprocessor* preprocessor);
@@ -73,6 +98,9 @@ bool LexInitFromString(Lex* lex, const char* filename, String* string,
                        Preprocessor* preprocessor);
 
 void LexRewind(Lex* lex);
+void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint);
+void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint);
+void LexCheckpointDestruct(LexCheckpoint* checkpoint);
 
 // Destructs a lexical analyzer but does not free the memory.
 void LexDestruct(Lex* lex);

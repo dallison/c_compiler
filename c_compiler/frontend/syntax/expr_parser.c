@@ -181,6 +181,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       LexLookingAt(lex, TOK(less))) {
     Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
     if (args != NULL) {
+      if (TypeIsFunction(symbol->type)) {
+        symbol = TypeInstantiateFunctionTemplate(syntax, symbol, args);
+      }
       VectorDestructWithContents(args,
                                  (VectorElementDestructor)TemplateArgumentDelete,
                                  /*free_element=*/false);
@@ -701,9 +704,34 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     SyntaxError(syntax, "Expected struct or union member name");
     member_name = NewString(SyntaxFakeName(syntax));
   }
+  bool has_template_arguments = false;
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(less))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    int depth = 0;
+    do {
+      if (LexLookingAt(syntax->lex, TOK(less))) {
+        depth++;
+      } else if (LexLookingAt(syntax->lex, TOK(greater))) {
+        depth--;
+      } else if (LexLookingAt(syntax->lex, TOK(greatergreater))) {
+        depth -= 2;
+      }
+      LexNextToken(syntax->lex);
+    } while (depth > 0 && !LexEof(syntax->lex));
+    has_template_arguments =
+        depth == 0 && LexLookingAt(syntax->lex, TOK(lparen));
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+  }
+  Vector* template_arguments =
+      has_template_arguments
+          ? SyntaxParseTemplateArgumentList(syntax, followers)
+          : NULL;
   ASTNode* member_node = NewStringConstantASTNode(member_name,
                                           NULL,
                                           syntax->lex->current_token_location);
+  ((ConstantASTNode*)member_node)->template_arguments = template_arguments;
   return NewBinaryASTNode(op, NULL,
                           syntax->lex->current_token_location, left,
                           member_node);

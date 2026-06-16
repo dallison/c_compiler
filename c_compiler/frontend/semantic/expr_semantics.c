@@ -1870,6 +1870,24 @@ static int OverloadCallScore(Symbol* candidate, VectorASTNode* node) {
   return FunctionCallScore(candidate->type, node, 0);
 }
 
+static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
+                                                 VectorASTNode* node) {
+  if (candidate == NULL || candidate->type == NULL ||
+      !TypeIsFunction(candidate->type)) {
+    return candidate;
+  }
+  if (candidate->type->info.function.template_origin != NULL) {
+    return NULL;
+  }
+  if (!candidate->flags.is_template) {
+    return candidate;
+  }
+  Symbol* instantiated =
+      TypeDeduceFunctionTemplateFromCall(&compiler->syntax, candidate,
+                                         node->children);
+  return instantiated == candidate ? NULL : instantiated;
+}
+
 static int MemberOverloadCallScore(StructMember* candidate,
                                    VectorASTNode* node,
                                    BinaryASTNode* member_access,
@@ -1891,6 +1909,32 @@ static int MemberOverloadCallScore(StructMember* candidate,
   return score;
 }
 
+static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
+                                                     VectorASTNode* node) {
+  if (candidate == NULL || candidate->symbol == NULL ||
+      candidate->symbol->type == NULL ||
+      !TypeIsFunction(candidate->symbol->type)) {
+    return candidate;
+  }
+  if (candidate->symbol->type->info.function.template_origin != NULL) {
+    return NULL;
+  }
+  if (!candidate->symbol->flags.is_template) {
+    return candidate;
+  }
+  size_t first_formal_arg = candidate->is_static ? 0 : 1;
+  Symbol* instantiated = TypeDeduceFunctionTemplateFromCallWithOffset(
+      &compiler->syntax, candidate->symbol, node->children, first_formal_arg);
+  if (instantiated == candidate->symbol) {
+    return NULL;
+  }
+  StructMember* member = NewStructMember(instantiated);
+  member->is_member_function = true;
+  member->is_static = candidate->is_static;
+  member->access = candidate->access;
+  return member;
+}
+
 static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                                                    VectorASTNode* node,
                                                    BinaryASTNode* member_access) {
@@ -1902,6 +1946,13 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
 
   for (StructMember* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
+    if (candidate->symbol != NULL &&
+        (candidate->symbol->flags.is_template ||
+         (candidate->symbol->type != NULL &&
+          TypeIsFunction(candidate->symbol->type) &&
+          candidate->symbol->type->info.function.template_origin != NULL))) {
+      continue;
+    }
     int score = MemberOverloadCallScore(candidate, node, member_access, true);
     if (score < 0) {
       if (receiver_const &&
@@ -1916,6 +1967,45 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       ambiguous = false;
     } else if (score == best_score) {
       ambiguous = true;
+    }
+  }
+
+  if (best_score < 0 || best_score > 5) {
+    for (StructMember* candidate = first; candidate != NULL;
+         candidate = candidate->overload_next) {
+      StructMember* effective = MemberTemplateOverloadCandidate(candidate, node);
+      if (effective == NULL) {
+        continue;
+      }
+      int score = MemberOverloadCallScore(effective, node, member_access, true);
+      if (score < 0) {
+        if (receiver_const &&
+            MemberOverloadCallScore(effective, node, member_access, false) >= 0) {
+          receiver_const_rejected = true;
+        }
+        continue;
+      }
+      if (best == NULL || score < best_score) {
+        best = effective;
+        best_score = score;
+        ambiguous = false;
+      } else if (score == best_score) {
+        bool best_is_template =
+            best->symbol != NULL && best->symbol->type != NULL &&
+            TypeIsFunction(best->symbol->type) &&
+            best->symbol->type->info.function.template_origin != NULL;
+        bool effective_is_template =
+            effective->symbol != NULL && effective->symbol->type != NULL &&
+            TypeIsFunction(effective->symbol->type) &&
+            effective->symbol->type->info.function.template_origin != NULL;
+        if (best_is_template && !effective_is_template) {
+          best = effective;
+          ambiguous = false;
+        } else if (best != effective &&
+                   best_is_template == effective_is_template) {
+          ambiguous = true;
+        }
+      }
     }
   }
 
@@ -1944,6 +2034,11 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
     return;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+  if (id->symbol != NULL && id->symbol->type != NULL &&
+      TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.template_origin != NULL) {
+    return;
+  }
   if (!id->symbol->flags.is_overloaded) {
     return;
   }
@@ -1953,6 +2048,11 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   bool ambiguous = false;
   for (Symbol* candidate = id->symbol; candidate != NULL;
        candidate = candidate->overload_next) {
+    if (candidate->flags.is_template ||
+        (candidate->type != NULL && TypeIsFunction(candidate->type) &&
+         candidate->type->info.function.template_origin != NULL)) {
+      continue;
+    }
     int score = OverloadCallScore(candidate, node);
     if (score < 0) {
       continue;
@@ -1963,6 +2063,39 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       ambiguous = false;
     } else if (score == best_score) {
       ambiguous = true;
+    }
+  }
+
+  if (best_score < 0 || best_score > 5) {
+    for (Symbol* candidate = id->symbol; candidate != NULL;
+         candidate = candidate->overload_next) {
+      Symbol* effective = FunctionTemplateOverloadCandidate(candidate, node);
+      if (effective == NULL) {
+        continue;
+      }
+      int score = OverloadCallScore(effective, node);
+      if (score < 0) {
+        continue;
+      }
+      if (best == NULL || score < best_score) {
+        best = effective;
+        best_score = score;
+        ambiguous = false;
+      } else if (score == best_score) {
+        bool best_is_template =
+            best->type != NULL && TypeIsFunction(best->type) &&
+            best->type->info.function.template_origin != NULL;
+        bool effective_is_template =
+            effective->type != NULL && TypeIsFunction(effective->type) &&
+            effective->type->info.function.template_origin != NULL;
+        if (best_is_template && !effective_is_template) {
+          best = effective;
+          ambiguous = false;
+        } else if (best != effective &&
+                   best_is_template == effective_is_template) {
+          ambiguous = true;
+        }
+      }
     }
   }
 
@@ -2039,6 +2172,19 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     return construction;
   }
   LowerMemberFunctionCall(node);
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL && id->symbol->flags.is_template &&
+        !id->symbol->flags.is_overloaded && TypeIsFunction(id->symbol->type)) {
+      Symbol* instantiated =
+          TypeDeduceFunctionTemplateFromCall(&compiler->syntax, id->symbol,
+                                             node->children);
+      if (instantiated != id->symbol) {
+        id->symbol = instantiated;
+        ASTNodeSetType(node->left, instantiated->type);
+      }
+    }
+  }
   ResolveOverloadedFunctionCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
@@ -2179,6 +2325,28 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   return &node->base;
 }
 
+static StructMember* InstantiateExplicitMemberTemplate(StructMember* first,
+                                                       Vector* args) {
+  for (StructMember* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL || !candidate->symbol->flags.is_template) {
+      continue;
+    }
+    Symbol* instantiated =
+        TypeInstantiateFunctionTemplate(&compiler->syntax, candidate->symbol,
+                                        args);
+    if (instantiated == candidate->symbol) {
+      return NULL;
+    }
+    StructMember* member = NewStructMember(instantiated);
+    member->is_member_function = candidate->is_member_function;
+    member->is_static = candidate->is_static;
+    member->access = candidate->access;
+    return member;
+  }
+  return NULL;
+}
+
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // Already analyzed.
@@ -2236,6 +2404,18 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
                   member_name->value, struct_info->tag_name->value);
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
+  }
+  Vector* explicit_template_arguments =
+      ((ConstantASTNode*)node->right)->template_arguments;
+  if (explicit_template_arguments != NULL) {
+    StructMember* instantiated =
+        InstantiateExplicitMemberTemplate(member, explicit_template_arguments);
+    if (instantiated == NULL) {
+      SemanticError((ASTNode*)node, "%s is not a member template of %s",
+                    member_name->value, struct_info->tag_name->value);
+    } else {
+      member = instantiated;
+    }
   }
 
   if (!member->is_member_function &&

@@ -47,6 +47,23 @@ struct WithMemberFunction {
   }
 };
 
+template <typename T>
+struct WithMemberTemplate {
+  T value;
+
+  template <typename U>
+  U choose(T input, U fallback) {
+    this->value = input;
+    return fallback;
+  }
+
+  template <typename U>
+  U explicit_choose(T input, U fallback) {
+    this->value = input;
+    return fallback + 1;
+  }
+};
+
 template <typename T, int N>
 struct WithDependentMember {
   ConstructedHolder<T> stored;
@@ -86,6 +103,8 @@ WithOutOfClassDtor<T>::~WithOutOfClassDtor() {
   template_destructor_trace = this->value;
 }
 
+template struct WithOutOfClassCtor<long>;
+
 template <typename T>
 T WithMemberFunction<T>::get(void) {
   return this->value;
@@ -119,6 +138,8 @@ struct Box {
   T value;
 };
 }
+
+template struct cache::Box<int>;
 
 namespace left {
 struct Item {
@@ -160,6 +181,7 @@ int main(void) {
   Buffer<8> bigger_buffer;
   WithMemberFunction<int> member_function_holder;
   WithMemberFunction<char> char_member_function_holder;
+  WithMemberTemplate<int> member_template_holder;
   WithDependentMember<int, 4> dependent_member_holder;
   WithDependentMember<char, 2 + 2> dependent_char_member_holder;
   WithDependentMember<int, 4> constructed_member(9);
@@ -189,6 +211,9 @@ int main(void) {
   Holder<char> wrapped_char_member = char_member_function_holder.wrap(2);
   char_member_function_holder.value =
       char_member_function_holder.unwrap(wrapped_char_member);
+  char deduced_member_template = member_template_holder.choose(9, 'a');
+  char explicit_member_template =
+      member_template_holder.explicit_choose<char>(10, 'b');
   dependent_member_holder.stored.value = member_function_holder.value;
   dependent_member_holder.buffer.data[3] =
       dependent_member_holder.stored.value;
@@ -213,6 +238,7 @@ int main(void) {
   InlinePlain plain;
   plain.value = 4;
   int plain_result = plain.bump(3);
-  return pair.first + box.value + left_box.value.left_value +
+  return pair.first + box.value + deduced_member_template +
+         explicit_member_template + left_box.value.left_value +
          right_box.value.right_value + plain_result;
 }

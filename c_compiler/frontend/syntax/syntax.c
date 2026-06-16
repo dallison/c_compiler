@@ -210,6 +210,12 @@ static bool CanOverloadFunctions(Symbol* a, Symbol* b) {
 static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
+    bool overload_is_template = overload->flags.is_template;
+    bool type_is_template =
+        TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
+    if (overload_is_template != type_is_template) {
+      continue;
+    }
     if (TypeEqual(overload->type, type)) {
       return overload;
     }
@@ -1762,6 +1768,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     Symbol* old_sym = NULL;
     bool overload_was_appended = false;
     if (sym != NULL) {
+      if (syntax->parsing_template_declaration && TypeIsFunction(sym->type)) {
+        sym->flags.is_template = true;
+        sym->type->info.function.template_parameter_count =
+            syntax->current_template_parameter_count;
+      }
       old_sym = parser->cxx_member_definition != NULL
           ? parser->cxx_member_definition->symbol
           : FindFileScopeSymbol(syntax, &sym->name);
@@ -2251,9 +2262,9 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   return param;
 }
 
-static bool ParseTemplateParameter(Syntax* syntax, Vector* params) {
+static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
-  int index = (int)params->length;
+  int index = base + (int)params->length;
   if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
     if (!LexLookingAt(lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected template parameter name");
@@ -2308,7 +2319,7 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params) {
   return true;
 }
 
-static Vector* ParseTemplateParameterList(Syntax* syntax) {
+Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
   Lex* lex = syntax->lex;
   if (!LexMatch(lex, TOK(less))) {
     SyntaxError(syntax, "Expected '<' after template");
@@ -2316,13 +2327,17 @@ static Vector* ParseTemplateParameterList(Syntax* syntax) {
   }
   Vector* params = NewVector();
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
-    ParseTemplateParameter(syntax, params);
+    ParseTemplateParameter(syntax, params, base);
     if (!LexMatch(lex, TOK(comma))) {
       break;
     }
   }
   SyntaxNeedBracket(syntax, TOK(greater), TC(decl));
   return params;
+}
+
+Vector* SyntaxParseTemplateParameterList(Syntax* syntax) {
+  return SyntaxParseTemplateParameterListWithBase(syntax, 0);
 }
 
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
@@ -2407,6 +2422,10 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
       VariableDeclarationASTNode* var = (VariableDeclarationASTNode*)decl;
       if (var->symbol != NULL) {
         var->symbol->flags.is_template = true;
+        if (var->symbol->type != NULL && TypeIsFunction(var->symbol->type)) {
+          var->symbol->type->info.function.template_parameter_count =
+              syntax->current_template_parameter_count;
+        }
         marked_symbol = true;
       }
     }
@@ -2446,16 +2465,66 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
   }
 }
 
+static ASTNode* ParseExplicitTemplateInstantiation(Syntax* syntax,
+                                                   SourceLocation location) {
+  if (!(LexMatch(syntax->lex, TOK(struct)) ||
+        LexMatch(syntax->lex, TOK(class)) ||
+        LexMatch(syntax->lex, TOK(union)))) {
+    SyntaxError(syntax, "Expected class template name after template");
+    SyntaxRecover(syntax, TC(semicolon));
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+    SyntaxError(syntax, "Expected class template name");
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxRecover(syntax, TC(semicolon));
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  Symbol* templ = SyntaxFindQualifiedSymbol(syntax, &name);
+  if (templ == NULL || !templ->flags.is_template ||
+      templ->type == NULL || !TypeIsStructOrUnion(templ->type)) {
+    SyntaxError(syntax, "%s is not a class template", name.spelling.value);
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxRecover(syntax, TC(semicolon));
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  Vector* args = SyntaxParseTemplateArgumentList(syntax, TC(decl));
+  if (args == NULL) {
+    SyntaxError(syntax, "Expected template argument list");
+  } else {
+    TypeRecord* type = TypeInstantiateClassTemplate(syntax, templ, args);
+    TypeRecordDelete(type);
+    VectorDestructWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
 static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // template
+
+  if (!LexLookingAt(syntax->lex, TOK(less))) {
+    return ParseExplicitTemplateInstantiation(syntax, location);
+  }
 
   SyntaxOpenScope(syntax);
   LocalSymbolTable* template_tag_scope = syntax->local_tag_stack;
   syntax->local_tag_stack = template_tag_scope->prev;
   int old_template_parameter_count = syntax->current_template_parameter_count;
   Vector* old_template_parameters = syntax->current_template_parameters;
-  syntax->current_template_parameters = ParseTemplateParameterList(syntax);
+  syntax->current_template_parameters = SyntaxParseTemplateParameterList(syntax);
   syntax->current_template_parameter_count =
       (int)syntax->current_template_parameters->length;
   syntax->last_parsed_tag = NULL;

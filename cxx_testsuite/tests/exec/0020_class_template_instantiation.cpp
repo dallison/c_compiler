@@ -45,6 +45,23 @@ struct WithMemberFunction {
   }
 };
 
+template <typename T>
+struct WithMemberTemplate {
+  T value;
+
+  template <typename U>
+  U choose(T input, U fallback) {
+    this->value = input;
+    return fallback;
+  }
+
+  template <typename U>
+  U explicit_choose(T input, U fallback) {
+    this->value = input;
+    return fallback + 1;
+  }
+};
+
 template <typename T, int N>
 struct WithDependentMember {
   ConstructedHolder<T> stored;
@@ -84,6 +101,8 @@ WithOutOfClassDtor<T>::~WithOutOfClassDtor() {
   template_destructor_trace = this->value;
 }
 
+template struct WithOutOfClassCtor<long>;
+
 template <typename T>
 T WithMemberFunction<T>::get(void) {
   return this->value;
@@ -117,6 +136,8 @@ struct Box {
   T value;
 };
 }
+
+template struct cache::Box<int>;
 
 namespace left {
 struct Item {
@@ -154,6 +175,7 @@ int main(void) {
   Buffer<8> bigger_buffer;
   WithMemberFunction<int> member_function_holder;
   WithMemberFunction<char> char_member_function_holder;
+  WithMemberTemplate<int> member_template_holder;
   WithDependentMember<int, 4> dependent_member_holder;
   WithDependentMember<int, 4> constructed_member(9);
   WithOutOfClassCtor<int> out_of_class_constructed(11);
@@ -179,6 +201,9 @@ int main(void) {
   alias_holder.value = member_function_holder.inline_add(
       member_function_holder.unwrap(wrapped_member)) +
       member_function_holder.unwrap(inline_wrapped_member);
+  char deduced_member_template = member_template_holder.choose(9, 'a');
+  char explicit_member_template =
+      member_template_holder.explicit_choose<char>(10, 'b');
   dependent_member_holder.stored.value = alias_holder.value;
   dependent_member_holder.buffer.data[3] =
       dependent_member_holder.stored.value + 4;
@@ -202,7 +227,8 @@ int main(void) {
   return buffer.data[0] + alias_holder.value + left_box.value.left_value +
          right_box.value.right_value +
          char_member_function_holder.unwrap(wrapped_char_member) +
+         deduced_member_template + explicit_member_template +
          plain_result + dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
-         124 + template_destructor_trace - 13;
+         320 + template_destructor_trace - 13;
 }

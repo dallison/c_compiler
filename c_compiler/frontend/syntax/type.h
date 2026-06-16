@@ -102,6 +102,9 @@ typedef struct {
   bool is_pure_virtual; // C++ pure virtual function (`= 0`).
   int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
+  Symbol* template_origin;  // Primary function template for instantiations.
+  int template_parameter_count;  // C++ function template arity.
+  int template_parameter_base;  // Parameter index base for nested templates.
 } FunctionInfo;
 
 typedef enum {
@@ -266,6 +269,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
+Vector* TemplateArgumentVectorCopy(Vector* args);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
@@ -326,6 +330,16 @@ bool TypeParserSkipAttributes(TypeParser* parser);
 void TypeParserParseBase(TypeParser* parser);
 void TypeParserParsePointer(TypeParser* parser);
 void TypeParserParseFuncOrArray(TypeParser* parser);
+Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
+                                        Vector* args);
+Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,
+                                           Vector* actuals);
+Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(struct Syntax* syntax,
+                                                     Symbol* templ,
+                                                     Vector* actuals,
+                                                     size_t first_formal_arg);
+TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
+                                         Vector* args);
 
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class);
 Symbol* TypeParserParseEnum(TypeParser* parser);

@@ -434,6 +434,32 @@ static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
   }
 }
 
+static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  if (!TypeIsFunction(func) ||
+      func->info.function.template_origin == NULL ||
+      func->template_arguments == NULL) {
+    return;
+  }
+  StringAppendChar(out, 'I');
+  for (size_t i = 0; i < func->template_arguments->length; i++) {
+    TemplateArgument* arg = func->template_arguments->value.p[i];
+    if (arg->kind == kTemplateParameterType) {
+      AppendCXXTypeEncoding(out, arg->type);
+    } else {
+      char value[64];
+      long long int_value = arg->int_value;
+      if (int_value < 0) {
+        snprintf(value, sizeof(value), "Lin%lldE", -int_value);
+      } else {
+        snprintf(value, sizeof(value), "Li%lldE", int_value);
+      }
+      StringAppend(out, value);
+    }
+  }
+  StringAppendChar(out, 'E');
+}
+
 void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   if (!CXXSymbolShouldMangle(symbol)) {
     return;
@@ -445,6 +471,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   }
   StringAppend(&mangled, "_Z");
   AppendCXXName(&mangled, symbol);
+  AppendCXXTemplateArguments(&mangled, symbol);
   AppendCXXFunctionParameterTypes(&mangled, symbol);
   StringSetString(&symbol->asm_name, &mangled);
   StringDestruct(&mangled);

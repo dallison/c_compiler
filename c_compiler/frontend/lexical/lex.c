@@ -1201,6 +1201,73 @@ bool LexInitFromString(Lex* lex, const char* filename, String* code,
   return true;
 }
 
+void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
+  checkpoint->source = lex->source;
+  checkpoint->source_device = lex->source->device;
+  if (lex->source->device == kSourceFromFile) {
+    fgetpos(lex->source->from.file, &checkpoint->file_pos);
+    checkpoint->string_index = 0;
+  } else {
+    checkpoint->string_index = lex->source->from.string.index;
+  }
+  checkpoint->lineno = lex->source->lineno;
+  checkpoint->file_index = lex->source->file_index;
+  checkpoint->path_index = lex->source->path_index;
+
+  StringInitFromSegment(&checkpoint->line, lex->line.value, lex->line.length);
+  checkpoint->pos = lex->pos;
+  checkpoint->current_token_location = lex->current_token_location;
+  checkpoint->current_token = lex->current_token;
+  StringInitFromSegment(&checkpoint->spelling, lex->spelling.value,
+                        lex->spelling.length);
+  checkpoint->number = lex->number;
+  checkpoint->fnumber = lex->fnumber;
+  StringInitFromSegment(&checkpoint->suffix, lex->suffix.value,
+                        lex->suffix.length);
+  StringInitFromSegment(&checkpoint->ud_suffix, lex->ud_suffix.value,
+                        lex->ud_suffix.length);
+  checkpoint->literal_encoding = lex->literal_encoding;
+  checkpoint->literal_is_raw = lex->literal_is_raw;
+  checkpoint->preprocessor_mode = lex->preprocessor_mode;
+  checkpoint->in_comment = lex->in_comment;
+  checkpoint->assembler_mode = lex->assembler_mode;
+}
+
+void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
+  lex->source = checkpoint->source;
+  if (checkpoint->source_device == kSourceFromFile) {
+    fsetpos(lex->source->from.file, &checkpoint->file_pos);
+    clearerr(lex->source->from.file);
+  } else {
+    lex->source->from.string.index = checkpoint->string_index;
+  }
+  lex->source->lineno = checkpoint->lineno;
+  lex->source->file_index = checkpoint->file_index;
+  lex->source->path_index = checkpoint->path_index;
+
+  StringSetString(&lex->line, &checkpoint->line);
+  lex->pos = checkpoint->pos;
+  lex->current_token_location = checkpoint->current_token_location;
+  lex->current_token = checkpoint->current_token;
+  StringSetString(&lex->spelling, &checkpoint->spelling);
+  lex->number = checkpoint->number;
+  lex->fnumber = checkpoint->fnumber;
+  StringSetString(&lex->suffix, &checkpoint->suffix);
+  StringSetString(&lex->ud_suffix, &checkpoint->ud_suffix);
+  lex->literal_encoding = checkpoint->literal_encoding;
+  lex->literal_is_raw = checkpoint->literal_is_raw;
+  lex->preprocessor_mode = checkpoint->preprocessor_mode;
+  lex->in_comment = checkpoint->in_comment;
+  lex->assembler_mode = checkpoint->assembler_mode;
+}
+
+void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
+  StringDestruct(&checkpoint->line);
+  StringDestruct(&checkpoint->spelling);
+  StringDestruct(&checkpoint->suffix);
+  StringDestruct(&checkpoint->ud_suffix);
+}
+
 // Destruct a lexical analyzer.
 void LexDestruct(Lex* lex) {
   if (lex->source != NULL) {

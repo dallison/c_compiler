@@ -99,6 +99,8 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 void SyntaxParseStaticAssert(Syntax* syntax);
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers);
+Vector* SyntaxParseTemplateParameterList(Syntax* syntax);
+Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base);
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name);
 Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,

@@ -375,7 +375,7 @@ static TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   return copy;
 }
 
-static Vector* TemplateArgumentVectorCopy(Vector* args) {
+Vector* TemplateArgumentVectorCopy(Vector* args) {
   if (args == NULL) {
     return NULL;
   }
@@ -508,6 +508,9 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_pure_virtual = false;
   t->info.function.virtual_index = -1;
   t->info.function.cxx_member_owner = NULL;
+  t->info.function.template_origin = NULL;
+  t->info.function.template_parameter_count = 0;
+  t->info.function.template_parameter_base = 0;
   t->info.function.old_style = false;
   t->info.function.is_inline = false;
   t->info.function.body = NULL;
@@ -1103,6 +1106,82 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   return TypeRecordCalculateSize(copy);
 }
 
+static bool TypeContainsTemplateParameter(TypeRecord* type);
+
+static void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
+                                                   int base);
+
+static void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
+  if (type == NULL || base <= 0) {
+    return;
+  }
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->template_parameter_index >= base) {
+      t->template_parameter_index -= base;
+    }
+    if (t->declarator == kDeclArray &&
+        t->info.array.template_parameter_index >= base) {
+      t->info.array.template_parameter_index -= base;
+    }
+    if (t->template_arguments != NULL) {
+      for (size_t i = 0; i < t->template_arguments->length; i++) {
+        RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
+                                               base);
+      }
+    }
+  }
+}
+
+static void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
+                                                   int base) {
+  if (arg == NULL || base <= 0) {
+    return;
+  }
+  if (arg->template_parameter_index >= base) {
+    arg->template_parameter_index -= base;
+  }
+  RebaseTemplateParameterIndices(arg->type, base);
+}
+
+static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= 0) {
+    return true;
+  }
+  return TypeContainsTemplateParameter(arg->type);
+}
+
+static bool TypeContainsTemplateParameter(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->template_parameter_index >= 0) {
+      return true;
+    }
+    if (t->declarator == kDeclArray &&
+        t->info.array.template_parameter_index >= 0) {
+      return true;
+    }
+    if (t->template_arguments != NULL) {
+      for (size_t i = 0; i < t->template_arguments->length; i++) {
+        if (TemplateArgumentContainsTemplateParameter(
+                t->template_arguments->value.p[i])) {
+          return true;
+        }
+      }
+    }
+    if (TypeIsFunction(t)) {
+      for (size_t i = 0; i < t->info.function.prototype.length; i++) {
+        Symbol* formal = t->info.function.prototype.value.p[i];
+        if (formal != NULL && TypeContainsTemplateParameter(formal->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 static void AppendTemplateInstantiationName(String* name, Symbol* templ,
                                             Vector* args) {
   StringSet(name, templ->name.value);
@@ -1189,7 +1268,12 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_destructor = from->info.function.is_destructor;
   func->info.function.is_const_member = from->info.function.is_const_member;
   func->info.function.is_final = from->info.function.is_final;
+  func->info.function.template_parameter_count =
+      from->info.function.template_parameter_count;
+  func->info.function.template_parameter_base = 0;
   TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
+  RebaseTemplateParameterIndices(return_type,
+                                 from->info.function.template_parameter_base);
   TypeRecordChain(func, return_type);
 
   TypeRecordAddCXXThisParameter(func, owner, location);
@@ -1197,6 +1281,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   for (size_t i = first_formal; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
     TypeRecord* formal_type = SubstituteTemplateParameters(parser, formal->type, args);
+    RebaseTemplateParameterIndices(formal_type,
+                                   from->info.function.template_parameter_base);
     Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
@@ -1216,6 +1302,7 @@ typedef struct {
   TypeParser* parser;
   Vector* args;
   TypeRecord* to_func;
+  int rebase_template_parameter_base;
 } TemplateFunctionBodyClone;
 
 static const char* CXXConstructorNameForRecord(TypeRecord* type) {
@@ -1322,6 +1409,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
 
   TypeRecord* type =
       SubstituteTemplateParameters(clone->parser, old_symbol->type, clone->args);
+  RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
   Symbol* replacement =
       NewSymbol(old_symbol->name.value, type, old_symbol->storage);
   replacement->flags = old_symbol->flags;
@@ -1345,6 +1433,7 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   if (node->type != NULL) {
     TypeRecord* type =
         SubstituteTemplateParameters(clone->parser, node->type, clone->args);
+    RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
     ASTNodeSetType(node, type);
     TypeRecordDelete(type);
   }
@@ -1373,6 +1462,8 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   clone.parser = parser;
   clone.args = args;
   clone.to_func = to;
+  clone.rebase_template_parameter_base =
+      from->info.function.template_parameter_base;
   size_t formal_count = from->info.function.prototype.length;
   if (formal_count > to->info.function.prototype.length) {
     formal_count = to->info.function.prototype.length;
@@ -1406,12 +1497,276 @@ static void QueueTemplateMemberFunctionDefinition(Symbol* symbol,
   if (symbol->type->info.function.is_inline) {
     symbol->flags.is_inline_defn = true;
   }
+  if (symbol->flags.is_template) {
+    VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
+    return;
+  }
   Vector* declarations = NewVector();
   VectorAppend(declarations,
                NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
   VectorAppend(&compiler->pending_template_instantiations,
                NewDeclarationListASTNode(declarations, symbol->location));
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
+}
+
+static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
+                                                   TypeRecord* from,
+                                                   Vector* args) {
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.varargs = from->info.function.varargs;
+  func->info.function.unknown_args = from->info.function.unknown_args;
+  func->info.function.definition = false;
+  func->info.function.old_style = from->info.function.old_style;
+  func->info.function.is_inline = from->info.function.is_inline;
+  func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.is_virtual = from->info.function.is_virtual;
+  func->info.function.is_override = from->info.function.is_override;
+  func->info.function.is_final = from->info.function.is_final;
+  func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
+  func->info.function.virtual_index = from->info.function.virtual_index;
+  func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
+  TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
+  TypeRecordChain(func, return_type);
+
+  for (size_t i = 0; i < from->info.function.prototype.length; i++) {
+    Symbol* formal = from->info.function.prototype.value.p[i];
+    TypeRecord* formal_type = SubstituteTemplateParameters(parser, formal->type, args);
+    Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
+    clone->flags = formal->flags;
+    clone->flags.is_argument = true;
+    clone->location = formal->location;
+    VectorAppend(&func->info.function.prototype, clone);
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    formal->value.arg_number = (int32_t)i;
+  }
+  return func;
+}
+
+static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
+                                                 TypeRecord* type) {
+  for (Symbol* candidate = templ; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->flags.is_template && candidate->type != NULL &&
+        TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type)) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+static void AppendFunctionTemplateInstantiation(Symbol* templ,
+                                                Symbol* instantiated) {
+  Symbol* tail = templ;
+  while (tail->overload_next != NULL) {
+    tail = tail->overload_next;
+  }
+  tail->overload_next = instantiated;
+  templ->flags.is_overloaded = true;
+  instantiated->flags.is_overloaded = true;
+}
+
+static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
+                                                 Symbol* templ,
+                                                 Vector* args) {
+  if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
+      !TypeIsFunction(templ->type)) {
+    return templ;
+  }
+  if (args == NULL ||
+      args->length != (size_t)templ->type->info.function.template_parameter_count) {
+    SyntaxError(parser->syntax,
+                "Function template instantiation is not supported yet");
+    return templ;
+  }
+
+  Symbol* template_definition = templ->value.func_defn;
+  if (template_definition == NULL || template_definition->type == NULL ||
+      template_definition->type->info.function.body == NULL) {
+    template_definition = templ;
+  }
+  if (template_definition->type->info.function.body == NULL) {
+    SyntaxError(parser->syntax,
+                "Function template instantiation is not supported yet");
+    return templ;
+  }
+  TypeRecord* func =
+      InstantiateFunctionTemplateType(parser, template_definition->type, args);
+  if (TypeContainsTemplateParameter(func)) {
+    SyntaxError(parser->syntax,
+                "Function template instantiation is not supported yet");
+    TypeRecordDelete(func);
+    return templ;
+  }
+
+  Symbol* existing = FindFunctionTemplateInstantiation(templ, func);
+  if (existing != NULL) {
+    TypeRecordDelete(func);
+    return existing;
+  }
+
+  Symbol* symbol = NewSymbol(templ->name.value, func, templ->storage);
+  symbol->location = templ->location;
+  symbol->namespace_ = templ->namespace_;
+  func->info.function.symbol = symbol;
+  func->info.function.template_origin = templ;
+  func->template_arguments = TemplateArgumentVectorCopy(args);
+  SymbolSetCXXMangledAsmName(symbol);
+  VectorDestruct(&symbol->attributes);
+  AttributeListClone(&symbol->attributes, &templ->attributes);
+  if (template_definition->type->info.function.body != NULL) {
+    symbol->type->info.function.body =
+        CloneTemplateFunctionBody(parser, template_definition->type,
+                                  symbol->type, args);
+    symbol->type->info.function.definition = true;
+    symbol->flags.is_defined = true;
+    if (symbol->type->info.function.is_inline) {
+      symbol->flags.is_inline_defn = true;
+    }
+    Vector* declarations = NewVector();
+    VectorAppend(declarations,
+                 NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
+    VectorAppend(&compiler->pending_template_instantiations,
+                 NewDeclarationListASTNode(declarations, symbol->location));
+    VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
+  }
+  AppendFunctionTemplateInstantiation(templ, symbol);
+  return symbol;
+}
+
+static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  arg->kind = kTemplateParameterType;
+  arg->type = TypeRecordCopy(type);
+  arg->int_value = 0;
+  arg->template_parameter_index = -1;
+  return arg;
+}
+
+static TypeRecord* FunctionTemplateDeductionActualType(TypeRecord* actual) {
+  if (actual == NULL) {
+    return NULL;
+  }
+  TypeRecord* deduced = TypeRecordCopy(actual);
+  deduced->qualifiers = kQualPlain;
+  return deduced;
+}
+
+static bool DeduceFunctionTemplateTypeArgument(Vector* args, TypeRecord* formal,
+                                               TypeRecord* actual) {
+  if (formal == NULL || actual == NULL) {
+    return false;
+  }
+  if (formal->declarator == kDeclPrimitive &&
+      formal->template_parameter_index >= 0) {
+    int index = formal->template_parameter_index;
+    if (index < 0 || (size_t)index >= args->length) {
+      return false;
+    }
+    TypeRecord* deduced = FunctionTemplateDeductionActualType(actual);
+    TemplateArgument* existing = args->value.p[index];
+    if (existing == NULL) {
+      args->value.p[index] = NewDeducedTypeTemplateArgument(deduced);
+      TypeRecordDelete(deduced);
+      return true;
+    }
+    bool same = existing->kind == kTemplateParameterType &&
+                existing->type != NULL &&
+                TypeEqual(existing->type, deduced);
+    TypeRecordDelete(deduced);
+    return same;
+  }
+
+  if (TypeIsReference(formal)) {
+    return DeduceFunctionTemplateTypeArgument(args, formal->next, actual);
+  }
+
+  if (formal->declarator != actual->declarator) {
+    return false;
+  }
+  switch (formal->declarator) {
+    case kDeclPointer:
+    case kDeclArray:
+      return DeduceFunctionTemplateTypeArgument(args, formal->next,
+                                                actual->next);
+    case kDeclReference:
+    case kDeclRValueReference:
+      return false;
+    case kDeclPrimitive:
+      return TypeEqual(formal, actual);
+    case kDeclFunction:
+      return false;
+  }
+  return false;
+}
+
+static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
+                                                     Vector* actuals,
+                                                     size_t first_formal_arg) {
+  if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
+      !TypeIsFunction(templ->type)) {
+    return NULL;
+  }
+  TypeRecord* func = templ->value.func_defn != NULL &&
+                             templ->value.func_defn->type != NULL
+                         ? templ->value.func_defn->type
+                         : templ->type;
+  if (first_formal_arg > func->info.function.prototype.length) {
+    return NULL;
+  }
+  if (func->info.function.template_parameter_count <= 0 ||
+      func->info.function.unknown_args || func->info.function.varargs ||
+      actuals->length != func->info.function.prototype.length - first_formal_arg) {
+    return NULL;
+  }
+
+  Vector* args = NewVector();
+  for (int i = 0; i < func->info.function.template_parameter_count; i++) {
+    VectorAppend(args, NULL);
+  }
+  for (size_t i = 0; i < actuals->length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i + first_formal_arg];
+    ASTNode* actual = actuals->value.p[i];
+    if (formal == NULL || actual == NULL ||
+        !DeduceFunctionTemplateTypeArgument(args, formal->type,
+                                            actual->type)) {
+      VectorDeleteWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (args->value.p[i] == NULL) {
+      VectorDeleteWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+  }
+  return args;
+}
+
+Symbol* TypeDeduceFunctionTemplateFromCall(Syntax* syntax, Symbol* templ,
+                                           Vector* actuals) {
+  return TypeDeduceFunctionTemplateFromCallWithOffset(syntax, templ, actuals, 0);
+}
+
+Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(Syntax* syntax,
+                                                     Symbol* templ,
+                                                     Vector* actuals,
+                                                     size_t first_formal_arg) {
+  Vector* args =
+      DeduceSimpleFunctionTemplateArguments(templ, actuals, first_formal_arg);
+  if (args == NULL) {
+    return templ;
+  }
+  Symbol* symbol = TypeInstantiateFunctionTemplate(syntax, templ, args);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return symbol;
 }
 
 static StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
@@ -1434,6 +1789,10 @@ static StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
                              member->symbol->storage);
   StringDestruct(&destructor_name);
   symbol->location = member->symbol->location;
+  symbol->flags.is_template = member->symbol->flags.is_template;
+  symbol->type->info.function.template_parameter_count =
+      member->symbol->type->info.function.template_parameter_count;
+  symbol->type->info.function.template_parameter_base = 0;
   func->info.function.symbol = symbol;
   SymbolSetCXXMangledAsmName(symbol);
   Symbol* template_definition = member->symbol->value.func_defn;
@@ -1551,6 +1910,26 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
   TypeRecordCalculateSize(type);
   StringDestruct(&instantiated_name);
   return TypeRecordCopy(type);
+}
+
+TypeRecord* TypeInstantiateClassTemplate(Syntax* syntax, Symbol* templ,
+                                         Vector* args) {
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* type = InstantiateSimpleClassTemplate(&parser, templ, args);
+  TypeParserDestruct(&parser);
+  return type;
+}
+
+Symbol* TypeInstantiateFunctionTemplate(Syntax* syntax, Symbol* templ,
+                                        Vector* args) {
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Symbol* symbol = InstantiateSimpleFunctionTemplate(&parser, templ, args);
+  TypeParserDestruct(&parser);
+  return symbol;
 }
 
 // Parse a type-specifier.  This might also be a typedef reference which
@@ -1854,6 +2233,32 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
     t1->type |= kTypeLongLong;
     t2->type = kTypeImplicit;
   }
+  if (t1->type_record != NULL || t2->type_record != NULL) {
+    // Either t1->type_record or t2->type_record is non-NULL. Put the non-NULL
+    // one in t1 so qualifier-only combinations like `const T` and `T const`
+    // can be handled before the primitive valid-type check sees T's internal
+    // unknown marker.
+    if (t1->type_record == NULL) {
+      PartialTypeSpecifier* tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+    }
+    if (t2->type_record != NULL) {
+      TypeComboError3(syntax, t1->type_record, t2->type_record);
+      result.error = true;
+    } else if (t2->type != kTypeImplicit) {
+      TypeComboError2(syntax, t1->type_record, t2->type);
+      result.error = true;
+    }
+    if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
+      QualifierComboError(syntax, t1->quals, t2->quals);
+      result.error = true;
+    }
+    result.type = t1->type;
+    result.quals = t1->quals | t2->quals;
+    result.type_record = t1->type_record;
+    return result;
+  }
   result.type = t1->type | t2->type;
   
   bool type_ok = result.type == kTypeImplicit ||
@@ -1883,28 +2288,6 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
 
   if (result.error) {
     return result;
-  }
-  if (t1->type_record != NULL || t2->type_record != NULL) {
-    // Either t1->typedef_record or t2->typedef_record is non-NULL.
-    // Put the non-NULL one in t1 to avoid code duplication.
-    if (t1->type_record == NULL) {
-      PartialTypeSpecifier* tmp = t1;
-      t1 = t2;
-      t2 = tmp;
-    }
-    if (t2->type_record != NULL) {
-      TypeComboError3(syntax, t1->type_record, t2->type_record);
-      result.error = true;
-    } else if (t2->type != kTypeImplicit) {
-      TypeComboError2(syntax, t1->type_record, t2->type);
-      result.error = true;
-    }
-    result.type = t1->type;
-    if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
-      QualifierComboError(syntax, t1->quals, t2->quals);
-    }
-    result.quals = t1->quals | t2->quals;
-    result.type_record = t1->type_record;
   }
   return result;
 }
@@ -2639,6 +3022,13 @@ StructMember* FindStructMemberWithAccess(Struct* str, String* name,
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
+    bool overload_is_template =
+        overload->symbol != NULL && overload->symbol->flags.is_template;
+    bool type_is_template =
+        TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
+    if (overload_is_template != type_is_template) {
+      continue;
+    }
     if (TypeEqual(overload->symbol->type, type)) {
       return overload;
     }
@@ -3452,9 +3842,40 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       continue;
     }
 
+    bool is_member_template = false;
+    bool old_parsing_template = parser->syntax->parsing_template_declaration;
+    int old_template_parameter_count =
+        parser->syntax->current_template_parameter_count;
+    Vector* old_template_parameters = parser->syntax->current_template_parameters;
+    Vector* member_template_parameters = NULL;
+    int member_template_parameter_base = old_template_parameter_count;
+    if (CompilerIsCXX() && LexMatch(parser->lex, TOK(template))) {
+      SyntaxOpenScope(parser->syntax);
+      member_template_parameters =
+          SyntaxParseTemplateParameterListWithBase(
+              parser->syntax, member_template_parameter_base);
+      parser->syntax->parsing_template_declaration = true;
+      parser->syntax->current_template_parameters = member_template_parameters;
+      parser->syntax->current_template_parameter_count =
+          member_template_parameter_base +
+          (int)member_template_parameters->length;
+      is_member_template = true;
+    }
+
     bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
     if (ParseClassSpecialMember(parser, str, tag_name, current_access,
                                 is_virtual_member)) {
+      if (is_member_template) {
+        SyntaxError(parser->syntax, "Special member templates are not supported yet");
+        SyntaxCloseScope(parser->syntax);
+        VectorDestructWithContents(member_template_parameters,
+                                   (VectorElementDestructor)TemplateParameterDelete,
+                                   /*free_element=*/false);
+        parser->syntax->parsing_template_declaration = old_parsing_template;
+        parser->syntax->current_template_parameter_count =
+            old_template_parameter_count;
+        parser->syntax->current_template_parameters = old_template_parameters;
+      }
       if (!LexLookingAt(parser->lex, TOK(rbrace))) {
         LexMatch(parser->lex, TOK(semicolon));
       }
@@ -3518,6 +3939,18 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                         member_symbol->location);
         } else if (member->is_member_function) {
           member_symbol->type->info.function.cxx_member_owner = str;
+        }
+        if (is_member_template) {
+          if (member->is_member_function) {
+            member_symbol->flags.is_template = true;
+            member_symbol->type->info.function.template_parameter_count =
+                (int)member_template_parameters->length;
+            member_symbol->type->info.function.template_parameter_base =
+                member_template_parameter_base;
+          } else {
+            SyntaxError(parser->syntax,
+                        "Member templates must be function templates");
+          }
         }
         if (member->is_member_function) {
           ParseCXXVirtSpecifiers(parser, member_symbol->type);
@@ -3585,6 +4018,16 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   
     if (!member_decl_had_inline_body && !LexLookingAt(parser->lex, TOK(rbrace))) {
       SyntaxNeedSemicolon(parser->syntax, TC(type));
+    }
+    if (is_member_template) {
+      SyntaxCloseScope(parser->syntax);
+      VectorDestructWithContents(member_template_parameters,
+                                 (VectorElementDestructor)TemplateParameterDelete,
+                                 /*free_element=*/false);
+      parser->syntax->parsing_template_declaration = old_parsing_template;
+      parser->syntax->current_template_parameter_count =
+          old_template_parameter_count;
+      parser->syntax->current_template_parameters = old_template_parameters;
     }
   }
 }

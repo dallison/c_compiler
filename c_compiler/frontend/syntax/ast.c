@@ -764,6 +764,11 @@ static void ConstantASTNodeDelete(ASTNode* node) {
   if (ConstantOwnsString(node) && cnode->value.string != NULL) {
     StringDelete(cnode->value.string);
   }
+  if (cnode->template_arguments != NULL) {
+    VectorDeleteWithContents(cnode->template_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   ASTNodeBaseDelete(node);
 }
 
@@ -778,6 +783,8 @@ static ASTNode* ConstantASTNodeClone(const ASTNode* node,
   if (ConstantOwnsString(node) && from->value.string != NULL) {
     to->value.string = NewString(from->value.string->value);
   }
+  to->template_arguments =
+      TemplateArgumentVectorCopy(from->template_arguments);
   return func(&to->base, data);
 }
 
@@ -789,6 +796,7 @@ void IntConstantASTNodeInit(ConstantASTNode* node, int64_t value,
                             TypeRecord* type, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(number), type, location, &constant_vtbl);
   node->value.ivalue = value;
+  node->template_arguments = NULL;
 }
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
@@ -803,6 +811,7 @@ ASTNode* NewRealConstantASTNode(double value, TypeRecord* type,
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(fnumber), type, location, &constant_vtbl);
   node->value.fvalue = value;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 
@@ -811,6 +820,7 @@ ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string), type, location, &constant_vtbl);
   node->value.string = value;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 
@@ -819,6 +829,7 @@ ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string_wide), type, location, &constant_vtbl);
   node->value.string = value;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 
@@ -827,6 +838,7 @@ ASTNode* NewCharConstantASTNode(int value, TypeRecord* type,
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(charconst), type, location, &constant_vtbl);
   node->value.ivalue = value;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 

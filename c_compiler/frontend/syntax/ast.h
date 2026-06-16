@@ -393,6 +393,7 @@ typedef struct {
     double fvalue;
     String* string;
   } value;
+  Vector* template_arguments;
 } ConstantASTNode;
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
