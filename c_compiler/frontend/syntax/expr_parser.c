@@ -98,6 +98,17 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers);
 static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers);
 static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type);
 
+static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
+  for (Symbol* candidate = symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->flags.is_template && candidate->type != NULL &&
+        TypeIsFunction(candidate->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
@@ -177,20 +188,28 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       SyntaxAddSymbol(syntax, symbol);
     }
   }
-  if (symbol != NULL && symbol->flags.is_template &&
+  Vector* template_arguments = NULL;
+  if (symbol != NULL &&
+      (symbol->flags.is_template || SymbolHasFunctionTemplateOverload(symbol)) &&
       LexLookingAt(lex, TOK(less))) {
     Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
     if (args != NULL) {
-      if (TypeIsFunction(symbol->type)) {
-        symbol = TypeInstantiateFunctionTemplate(syntax, symbol, args);
+      if (TypeIsFunction(symbol->type) ||
+          SymbolHasFunctionTemplateOverload(symbol)) {
+        template_arguments = args;
+        args = NULL;
       }
-      VectorDestructWithContents(args,
-                                 (VectorElementDestructor)TemplateArgumentDelete,
-                                 /*free_element=*/false);
+      if (args != NULL) {
+        VectorDestructWithContents(args,
+                                   (VectorElementDestructor)TemplateArgumentDelete,
+                                   /*free_element=*/false);
+      }
     }
   }
   FullyQualifiedIdentifierDestruct(&name);
-  return NewIdentifierASTNode(symbol, lex->current_token_location);
+  ASTNode* node = NewIdentifierASTNode(symbol, lex->current_token_location);
+  ((IdentifierASTNode*)node)->template_arguments = template_arguments;
+  return node;
 }
 
 static ASTNode* ParseIntegerConstant(Syntax* syntax,

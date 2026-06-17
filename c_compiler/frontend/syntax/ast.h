@@ -369,6 +369,7 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
 typedef struct {
   ASTNode base;
   Symbol* symbol;
+  Vector* template_arguments;
 } IdentifierASTNode;
 
 ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location);
@@ -378,6 +379,7 @@ typedef struct {
   ASTNode base;
   StructMember* member;
   CXXAccess access;
+  Vector* template_arguments;
 } StructMemberASTNode;
 
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location);

@@ -73,6 +73,10 @@ typedef struct TemplateParameter {
   String name;
   TemplateParameterKind kind;
   struct TypeRecord* type;  // NULL for type parameters.
+  struct TypeRecord* default_type;  // Optional default for type parameters.
+  bool has_default_int;  // Optional default for non-type integer parameters.
+  long long default_int_value;
+  int default_template_parameter_index;  // >= 0 when default names a parameter.
   int index;
 } TemplateParameter;
 
@@ -105,6 +109,7 @@ typedef struct {
   Symbol* template_origin;  // Primary function template for instantiations.
   int template_parameter_count;  // C++ function template arity.
   int template_parameter_base;  // Parameter index base for nested templates.
+  Vector template_parameters;  // TemplateParameter* entries for defaults.
 } FunctionInfo;
 
 typedef enum {
@@ -238,6 +243,7 @@ typedef struct {
   enum ParserContext context;
   Struct* cxx_member_owner;
   StructMember* cxx_member_definition;
+  Vector* declarator_template_arguments;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
@@ -334,10 +340,16 @@ Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
                                         Vector* args);
 Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,
                                            Vector* actuals);
+Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+    struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
+    Vector* actuals);
 Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(struct Syntax* syntax,
                                                      Symbol* templ,
                                                      Vector* actuals,
                                                      size_t first_formal_arg);
+Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+    struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
+    Vector* actuals, size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
 

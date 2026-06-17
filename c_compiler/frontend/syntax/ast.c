@@ -651,6 +651,16 @@ static void IdentifierASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   ASTNodeBasePrint(node, indents + 2, fp);
 }
 
+static void IdentifierASTNodeDelete(ASTNode* node) {
+  IdentifierASTNode* inode = (IdentifierASTNode*)node;
+  if (inode->template_arguments != NULL) {
+    VectorDeleteWithContents(inode->template_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  ASTNodeBaseDelete(node);
+}
+
 static ASTNode* IdentifierASTNodeClone(const ASTNode* node,
                                        ASTNode* (*func)(ASTNode* node, void*),
                                        void* data) {
@@ -658,10 +668,12 @@ static ASTNode* IdentifierASTNodeClone(const ASTNode* node,
   IdentifierASTNode* to = ASTArenaAlloc(sizeof(IdentifierASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->symbol = from->symbol;
+  to->template_arguments =
+      TemplateArgumentVectorCopy(from->template_arguments);
   return func(&to->base, data);
 }
 
-static ASTNodeVirtuals identifier_vtbl = {ASTNodeBaseDelete,
+static ASTNodeVirtuals identifier_vtbl = {IdentifierASTNodeDelete,
                                           IdentifierASTNodePrint, NULL,
                                           IdentifierASTNodeClone, NULL,
                                           NULL,
@@ -672,6 +684,7 @@ ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(identifier), symbol->type, location,
               &identifier_vtbl);
   node->symbol = symbol;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 
@@ -680,6 +693,7 @@ ASTNode* NewRawIdentifierASTNode(void* symbol, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(identifier), NULL, location,
               &identifier_vtbl);
   node->symbol = symbol;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 
@@ -691,6 +705,16 @@ static void StructMemberASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   ASTNodeBasePrint(node, indents + 2, fp);
 }
 
+static void StructMemberASTNodeDelete(ASTNode* node) {
+  StructMemberASTNode* mnode = (StructMemberASTNode*)node;
+  if (mnode->template_arguments != NULL) {
+    VectorDeleteWithContents(mnode->template_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  ASTNodeBaseDelete(node);
+}
+
 static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
                                          ASTNode* (*func)(ASTNode* node, void*),
                                          void* data) {
@@ -699,10 +723,12 @@ static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->member = from->member;
   to->access = from->access;
+  to->template_arguments =
+      TemplateArgumentVectorCopy(from->template_arguments);
   return func(&to->base, data);
 }
 
-static ASTNodeVirtuals struct_member_vtbl = {ASTNodeBaseDelete,
+static ASTNodeVirtuals struct_member_vtbl = {StructMemberASTNodeDelete,
                                              StructMemberASTNodePrint, NULL,
                                              StructMemberASTNodeClone, NULL,
                                              NULL,
@@ -714,6 +740,7 @@ ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location) {
               &struct_member_vtbl);
   node->member = member;
   node->access = member->access;
+  node->template_arguments = NULL;
   return (ASTNode*)node;
 }
 

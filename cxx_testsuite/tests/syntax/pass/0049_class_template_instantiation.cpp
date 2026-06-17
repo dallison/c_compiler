@@ -7,6 +7,17 @@ struct Holder {
   T value;
 };
 
+template <typename T = int>
+struct DefaultHolder {
+  T value;
+};
+
+template <typename T = int, typename U = Holder<T> >
+struct DefaultedPair {
+  T first;
+  U second;
+};
+
 template <typename T>
 struct ConstructedHolder {
   T value;
@@ -24,10 +35,86 @@ struct Pair {
   U second;
 };
 
-template <int N>
+template <int N = 4>
 struct Buffer {
   int data[N];
 };
+
+template <int N, int M = N>
+struct Matrix {
+  int data[M];
+};
+
+template <typename T>
+struct SpecializedHolder {
+  T value;
+};
+
+template <>
+struct SpecializedHolder<int> {
+  int value;
+  int bonus;
+  int get_bonus(void);
+};
+
+int SpecializedHolder<int>::get_bonus(void) {
+  return this->bonus;
+}
+
+template <typename T>
+struct DeclaredSpecializedHolder {
+  T value;
+};
+
+template <>
+struct DeclaredSpecializedHolder<int>;
+
+template <>
+struct DeclaredSpecializedHolder<int> {
+  int value;
+  int bonus;
+  int sum(void);
+};
+
+int DeclaredSpecializedHolder<int>::sum(void) {
+  return this->value + this->bonus;
+}
+
+template <typename T = int>
+struct DefaultSpecializedHolder {
+  T value;
+};
+
+template <>
+struct DefaultSpecializedHolder<> {
+  int value;
+  int bonus;
+  int sum(void);
+};
+
+int DefaultSpecializedHolder<>::sum(void) {
+  return this->value + this->bonus;
+}
+
+template <typename T>
+struct SpecializedLifecycleHolder {
+  T value;
+};
+
+template <>
+struct SpecializedLifecycleHolder<int> {
+  int value;
+  SpecializedLifecycleHolder(int initial);
+  ~SpecializedLifecycleHolder();
+};
+
+SpecializedLifecycleHolder<int>::SpecializedLifecycleHolder(int initial) {
+  this->value = initial + 1;
+}
+
+SpecializedLifecycleHolder<int>::~SpecializedLifecycleHolder() {
+  template_destructor_trace = this->value + 2;
+}
 
 template <typename T>
 struct WithMemberFunction {
@@ -62,7 +149,17 @@ struct WithMemberTemplate {
     this->value = input;
     return fallback + 1;
   }
+
+  template <typename U>
+  U out_of_class_choose(T input, U fallback);
 };
+
+template <typename T>
+template <typename U>
+U WithMemberTemplate<T>::out_of_class_choose(T input, U fallback) {
+  this->value = input;
+  return fallback + 2;
+}
 
 template <typename T, int N>
 struct WithDependentMember {
@@ -141,6 +238,20 @@ struct Box {
 
 template struct cache::Box<int>;
 
+template <>
+struct cache::Box<long>;
+
+template <>
+struct cache::Box<long> {
+  long value;
+  long bonus;
+  long sum(void);
+};
+
+long cache::Box<long>::sum(void) {
+  return this->value + this->bonus;
+}
+
 namespace left {
 struct Item {
   int left_value;
@@ -179,6 +290,17 @@ int main(void) {
   Buffer<4> same_buffer;
   Buffer<2 + 2> expression_buffer;
   Buffer<8> bigger_buffer;
+  Buffer<> default_buffer;
+  Buffer<2> explicit_default_buffer;
+  Matrix<4> default_matrix;
+  Matrix<2, 3> explicit_matrix;
+  SpecializedHolder<int> specialized_holder;
+  SpecializedHolder<char> primary_holder;
+  DeclaredSpecializedHolder<int> declared_specialized_holder;
+  DeclaredSpecializedHolder<char> declared_primary_holder;
+  DefaultSpecializedHolder<> default_specialized_holder;
+  DefaultSpecializedHolder<char> default_primary_holder;
+  int specialized_lifecycle_trace;
   WithMemberFunction<int> member_function_holder;
   WithMemberFunction<char> char_member_function_holder;
   WithMemberTemplate<int> member_template_holder;
@@ -196,8 +318,30 @@ int main(void) {
   enum_buffer.data[3] = expression_buffer.data[3];
   const_buffer.data[3] = enum_buffer.data[3];
   bigger_buffer.data[7] = const_buffer.data[3];
+  default_buffer.data[3] = 11;
+  explicit_default_buffer.data[1] = 12;
+  default_matrix.data[3] = 13;
+  explicit_matrix.data[2] = 14;
+  specialized_holder.value = 15;
+  specialized_holder.bonus = 16;
+  primary_holder.value = 17;
+  declared_specialized_holder.value = 18;
+  declared_specialized_holder.bonus = 19;
+  declared_primary_holder.value = 20;
+  default_specialized_holder.value = 21;
+  default_specialized_holder.bonus = 22;
+  default_primary_holder.value = 23;
+  {
+    SpecializedLifecycleHolder<int> lifecycle_holder(24);
+    specialized_lifecycle_trace = lifecycle_holder.value;
+  }
+  specialized_lifecycle_trace =
+      specialized_lifecycle_trace + template_destructor_trace;
   cache::Box<int> box;
   box.value = bigger_buffer.data[7];
+  cache::Box<long> specialized_box;
+  specialized_box.value = box.value;
+  specialized_box.bonus = 24;
   member_function_holder.value = box.value;
   member_function_holder.set(member_function_holder.get());
   member_function_holder.value = member_function_holder.add(1);
@@ -214,6 +358,8 @@ int main(void) {
   char deduced_member_template = member_template_holder.choose(9, 'a');
   char explicit_member_template =
       member_template_holder.explicit_choose<char>(10, 'b');
+  char out_of_class_member_template =
+      member_template_holder.out_of_class_choose<char>(11, 'c');
   dependent_member_holder.stored.value = member_function_holder.value;
   dependent_member_holder.buffer.data[3] =
       dependent_member_holder.stored.value;
@@ -231,14 +377,40 @@ int main(void) {
   Holder<const int> const_holder;
   Holder<int*> pointer_holder;
   Holder<int&> reference_holder;
+  DefaultHolder<> default_holder;
+  DefaultHolder<char> explicit_default_holder;
+  DefaultedPair<> default_pair;
+  DefaultedPair<char> partial_default_pair;
   cache::Box<left::Item> left_box;
   cache::Box<right::Item> right_box;
   left_box.value.left_value = 1;
   right_box.value.right_value = 2;
+  default_holder.value = 5;
+  explicit_default_holder.value = 6;
+  default_pair.first = 7;
+  default_pair.second.value = 8;
+  partial_default_pair.first = 9;
+  partial_default_pair.second.value = 10;
   InlinePlain plain;
   plain.value = 4;
   int plain_result = plain.bump(3);
   return pair.first + box.value + deduced_member_template +
-         explicit_member_template + left_box.value.left_value +
-         right_box.value.right_value + plain_result;
+         explicit_member_template + out_of_class_member_template +
+         default_holder.value + explicit_default_holder.value +
+         default_pair.first + default_pair.second.value +
+         partial_default_pair.first + partial_default_pair.second.value +
+         default_buffer.data[3] + explicit_default_buffer.data[1] +
+         default_matrix.data[3] + explicit_matrix.data[2] +
+         specialized_holder.value + specialized_holder.bonus +
+         specialized_holder.get_bonus() +
+         primary_holder.value + declared_specialized_holder.value +
+         declared_specialized_holder.bonus +
+         declared_specialized_holder.sum() + declared_primary_holder.value +
+         default_specialized_holder.value + default_specialized_holder.bonus +
+         default_specialized_holder.sum() +
+         default_primary_holder.value + specialized_lifecycle_trace +
+         specialized_box.bonus +
+         specialized_box.sum() +
+         left_box.value.left_value + right_box.value.right_value +
+         plain_result;
 }

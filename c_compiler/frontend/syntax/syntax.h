@@ -44,6 +44,7 @@ typedef struct Syntax {
                              // at SyntaxDestruct.
   Symbol* last_parsed_tag;   // Most recent struct/union tag parsed as a type.
   bool parsing_template_declaration;  // Parsing declaration after template<...>.
+  bool parsing_template_specialization;  // Parsing declaration after template<>.
   bool parsing_template_argument;  // Parsing expression inside template args.
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
@@ -56,6 +57,7 @@ typedef struct FullyQualifiedIdentifier {
   bool absolute;       // Starts with ::.
   bool is_qualified;   // Contains :: or starts with ::.
   Vector components;   // String* components, owned by this object.
+  Vector template_arguments;  // Vector* template args per component, owned.
   String spelling;     // Full spelling for diagnostics.
 } FullyQualifiedIdentifier;
 

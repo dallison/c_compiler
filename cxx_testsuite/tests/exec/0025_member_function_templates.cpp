@@ -20,6 +20,11 @@ struct Box {
     return value;
   }
 
+  template <typename T, typename U>
+  T first_as(U value) {
+    return value;
+  }
+
   template <typename T>
   T declared_then_defined(T value);
 };
@@ -27,6 +32,16 @@ struct Box {
 template <typename T>
 T Box::declared_then_defined(T value) {
   return value + 1;
+}
+
+template <>
+int Box::identity<int>(int value) {
+  return value + 20;
+}
+
+template <>
+int Box::declared_then_defined<int>(int value) {
+  return value + 30;
 }
 
 int main(void) {
@@ -44,10 +59,11 @@ int main(void) {
   char explicit_char = box.identity
       <char>(small);
   int explicit_arrow = box_ptr->identity<int>(2);
+  int partial_explicit_member = box.first_as<int>(6);
   int out_of_class = box.declared_then_defined(8);
   int explicit_out_of_class = box.declared_then_defined<int>(9);
   int comparison = box.padding < 3;
   return concrete + templated + *same_pointer + by_ref + explicit_int +
          explicit_char + explicit_arrow + out_of_class +
-         explicit_out_of_class + comparison - 61;
+         explicit_out_of_class + partial_explicit_member + comparison - 165;
 }
