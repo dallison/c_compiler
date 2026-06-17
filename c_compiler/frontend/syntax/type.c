@@ -2318,6 +2318,27 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     } else if (CompilerIsCXX() && LexLookingAt(lex, TOK(decltype))) {
       type_record = ParseCXXDecltypeSpecifier(parser);
       type |= type_record->type;
+    } else if (CompilerIsCXX() && allow_typedef &&
+               LexMatch(lex, TOK(typename))) {
+      FullyQualifiedIdentifier typename_name;
+      FullyQualifiedIdentifierInit(&typename_name);
+      if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+              parser->syntax, &typename_name, TC(decl))) {
+        SyntaxError(parser->syntax, "Expected qualified type name after typename");
+      } else if (!typename_name.is_qualified) {
+        SyntaxError(parser->syntax, "typename requires a qualified type name");
+      } else {
+        Symbol* symbol =
+            SyntaxFindQualifiedSymbol(parser->syntax, &typename_name);
+        if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+          type_record = TypeRecordCopy(symbol->type);
+          type |= type_record->type;
+        } else {
+          SyntaxError(parser->syntax, "Unknown type name %s",
+                      typename_name.spelling.value);
+        }
+      }
+      FullyQualifiedIdentifierDestruct(&typename_name);
     } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
       FullyQualifiedIdentifier typedef_name;
       FullyQualifiedIdentifierInit(&typedef_name);

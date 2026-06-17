@@ -3523,6 +3523,8 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       return CompilerIsCXX();
     case TOK(decltype):
       return CompilerIsCXX();
+    case TOK(typename):
+      return CompilerIsCXX();
     case TOK(identifier): {
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {

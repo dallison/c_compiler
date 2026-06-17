@@ -53,6 +53,20 @@ struct NestedOwner {
 };
 
 template <typename T>
+struct UsesNested {
+  typename NestedOwner<T>::Inner value;
+};
+
+namespace nested_ns {
+template <typename T>
+struct Owner {
+  struct Inner {
+    T value;
+  };
+};
+}
+
+template <typename T>
 struct SpecializedHolder {
   T value;
 };
@@ -314,6 +328,16 @@ struct InlinePlain {
   }
 };
 
+NestedOwner<int>::Inner make_nested_inner(void) {
+  NestedOwner<int>::Inner result;
+  result.value = 19;
+  return result;
+}
+
+int read_nested_inner(NestedOwner<int>::Inner value) {
+  return value.value;
+}
+
 Holder<int> make_holder(void);
 Buffer<4> make_buffer4(void);
 cache::Box<int> make_box(void);
@@ -454,6 +478,18 @@ int main(void) {
   DefaultedPair<char> partial_default_pair;
   NestedOwner<int>::Inner nested_inner;
   nested_inner.value = 11;
+  NestedOwner<char>::Inner nested_char_inner;
+  nested_char_inner.value = 'x';
+  NestedOwner<long>::Inner nested_long_inner;
+  nested_long_inner.value = 123;
+  nested_ns::Owner<int>::Inner namespaced_nested_inner;
+  namespaced_nested_inner.value = 17;
+  NestedOwner<int>::Inner signature_nested_inner = make_nested_inner();
+  int signature_nested_value = read_nested_inner(signature_nested_inner);
+  Holder<NestedOwner<int>::Inner> wrapped_nested_inner;
+  wrapped_nested_inner.value.value = 7;
+  UsesNested<int> uses_nested;
+  uses_nested.value.value = 29;
   cache::Box<left::Item> left_box;
   cache::Box<right::Item> right_box;
   left_box.value.left_value = 1;
@@ -472,7 +508,11 @@ int main(void) {
          default_holder.value + explicit_default_holder.value +
          default_pair.first + default_pair.second.value +
          partial_default_pair.first + partial_default_pair.second.value +
-         nested_inner.value +
+         nested_inner.value + nested_char_inner.value +
+         nested_long_inner.value + namespaced_nested_inner.value +
+         signature_nested_inner.value + signature_nested_value +
+         wrapped_nested_inner.value.value +
+         uses_nested.value.value +
          default_buffer.data[3] + explicit_default_buffer.data[1] +
          default_matrix.data[3] + explicit_matrix.data[2] +
          specialized_holder.value + specialized_holder.bonus +
