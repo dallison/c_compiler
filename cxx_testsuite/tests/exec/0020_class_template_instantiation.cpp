@@ -50,6 +50,31 @@ struct NestedOwner {
   };
 };
 
+template <typename T, typename U>
+struct PairNestedOwner {
+  struct Inner {
+    T first;
+    U second;
+  };
+};
+
+template <typename T, int N>
+struct SizedNestedOwner {
+  struct Inner {
+    T value;
+    int data[N];
+  };
+};
+
+template <typename T, int N>
+struct SizedMemberOwner {
+  struct Inner {
+    T value;
+    int data[N];
+  };
+  Inner stored;
+};
+
 template <typename T>
 struct UsesNested {
   typename NestedOwner<T>::Inner value;
@@ -62,6 +87,24 @@ struct Owner {
     T value;
   };
 };
+
+template <typename T, int N>
+struct SizedOwner {
+  struct Inner {
+    T value;
+    int data[N];
+  };
+};
+
+template <typename T, int N>
+struct SizedMemberOwner {
+  struct Inner {
+    T value;
+    int data[N];
+  };
+  Inner stored;
+};
+
 }
 
 template <typename T>
@@ -72,6 +115,16 @@ struct UsesNamespacedNested {
 template <typename T>
 struct UsesWrappedNested {
   Holder<typename NestedOwner<T>::Inner> value;
+};
+
+template <typename T, int N>
+struct UsesSizedNested {
+  typename SizedNestedOwner<T, N>::Inner value;
+};
+
+template <typename T, int N>
+struct UsesWrappedSizedNested {
+  Holder<typename SizedNestedOwner<T, N>::Inner> value;
 };
 
 template <typename T>
@@ -358,6 +411,346 @@ T read_dependent_nested(typename NestedOwner<T>::Inner value) {
   return value.value;
 }
 
+template <typename T, typename U>
+int read_pair_dependent_nested(
+    typename PairNestedOwner<T, U>::Inner value) {
+  return value.first + value.second;
+}
+
+template <typename T, int N>
+int read_sized_dependent_nested(
+    typename SizedNestedOwner<T, N>::Inner value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+typename SizedNestedOwner<T, N>::Inner make_sized_dependent_nested(
+    T value, int extra) {
+  typename SizedNestedOwner<T, N>::Inner result;
+  result.value = value;
+  result.data[2] = extra;
+  return result;
+}
+
+template <typename T, int N>
+int read_wrapped_sized_dependent_nested(
+    Holder<typename SizedNestedOwner<T, N>::Inner> value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_sized_dependent_nested(
+    typename nested_ns::SizedOwner<T, N>::Inner value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_dependent_nested(
+    Holder<typename nested_ns::SizedOwner<T, N>::Inner> value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+typename nested_ns::SizedOwner<T, N>::Inner
+make_namespaced_sized_dependent_nested(T value, int extra) {
+  typename nested_ns::SizedOwner<T, N>::Inner result;
+  result.value = value;
+  result.data[2] = extra;
+  return result;
+}
+
+template <typename T, int N>
+Holder<typename nested_ns::SizedOwner<T, N>::Inner>
+make_wrapped_namespaced_sized_dependent_nested(T value, int extra) {
+  Holder<typename nested_ns::SizedOwner<T, N>::Inner> result;
+  result.value.value = value;
+  result.value.data[2] = extra;
+  return result;
+}
+
+template <typename T, int N>
+int read_namespaced_sized_dependent_nested_pointer(
+    typename nested_ns::SizedOwner<T, N>::Inner* value) {
+  return value->value + value->data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_sized_dependent_nested_reference(
+    typename nested_ns::SizedOwner<T, N>::Inner& value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_dependent_nested_pointer(
+    Holder<typename nested_ns::SizedOwner<T, N>::Inner>* value) {
+  return value->value.value + value->value.data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_dependent_nested_reference(
+    Holder<typename nested_ns::SizedOwner<T, N>::Inner>& value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+int read_const_namespaced_sized_dependent_nested_pointer(
+    const typename nested_ns::SizedOwner<T, N>::Inner* value) {
+  return value->value + value->data[2];
+}
+
+template <typename T, int N>
+int read_const_namespaced_sized_dependent_nested_reference(
+    const typename nested_ns::SizedOwner<T, N>::Inner& value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+int read_const_wrapped_namespaced_sized_dependent_nested_pointer(
+    const Holder<typename nested_ns::SizedOwner<T, N>::Inner>* value) {
+  return value->value.value + value->value.data[2];
+}
+
+template <typename T, int N>
+int read_const_wrapped_namespaced_sized_dependent_nested_reference(
+    const Holder<typename nested_ns::SizedOwner<T, N>::Inner>& value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_sized_dependent_nested_array(
+    typename nested_ns::SizedOwner<T, N>::Inner value[1]) {
+  return value[0].value + value[0].data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_dependent_nested_array(
+    Holder<typename nested_ns::SizedOwner<T, N>::Inner> value[1]) {
+  return value[0].value.value + value[0].value.data[2];
+}
+
+template <typename T, int N>
+Holder<typename SizedNestedOwner<T, N>::Inner>
+make_wrapped_sized_dependent_nested(T value, int extra) {
+  Holder<typename SizedNestedOwner<T, N>::Inner> result;
+  result.value.value = value;
+  result.value.data[2] = extra;
+  return result;
+}
+
+template <typename T, int N>
+int read_wrapped_sized_dependent_nested_pointer(
+    Holder<typename SizedNestedOwner<T, N>::Inner>* value) {
+  return value->value.value + value->value.data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_sized_dependent_nested_reference(
+    Holder<typename SizedNestedOwner<T, N>::Inner>& value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+int read_sized_dependent_nested_pointer(
+    typename SizedNestedOwner<T, N>::Inner* value) {
+  return value->value + value->data[2];
+}
+
+template <typename T, int N>
+int read_sized_dependent_nested_reference(
+    typename SizedNestedOwner<T, N>::Inner& value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+int read_const_sized_dependent_nested_pointer(
+    const typename SizedNestedOwner<T, N>::Inner* value) {
+  return value->value + value->data[2];
+}
+
+template <typename T, int N>
+int read_const_sized_dependent_nested_reference(
+    const typename SizedNestedOwner<T, N>::Inner& value) {
+  return value.value + value.data[2];
+}
+
+template <typename T, int N>
+int read_const_wrapped_sized_dependent_nested_pointer(
+    const Holder<typename SizedNestedOwner<T, N>::Inner>* value) {
+  return value->value.value + value->value.data[2];
+}
+
+template <typename T, int N>
+int read_const_wrapped_sized_dependent_nested_reference(
+    const Holder<typename SizedNestedOwner<T, N>::Inner>& value) {
+  return value.value.value + value.value.data[2];
+}
+
+template <typename T, int N>
+int read_sized_dependent_nested_array(
+    typename SizedNestedOwner<T, N>::Inner value[1]) {
+  return value[0].value + value[0].data[2];
+}
+
+template <typename T, int N>
+int read_sized_member_owner_array(SizedMemberOwner<T, N> owners[1]) {
+  return owners[0].stored.value + owners[0].stored.data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_sized_member_owner_array(
+    nested_ns::SizedMemberOwner<T, N> owners[1]) {
+  return owners[0].stored.value + owners[0].stored.data[2];
+}
+
+template <typename T, int N>
+int read_wrapped_sized_dependent_nested_array(
+    Holder<typename SizedNestedOwner<T, N>::Inner> value[1]) {
+  return value[0].value.value + value[0].value.data[2];
+}
+
+template <typename T>
+T read_dependent_nested_pointer(typename NestedOwner<T>::Inner* value) {
+  return value->value;
+}
+
+template <typename T>
+T read_dependent_nested_reference(typename NestedOwner<T>::Inner& value) {
+  return value.value;
+}
+
+template <typename T>
+T read_const_dependent_nested_pointer(
+    const typename NestedOwner<T>::Inner* value) {
+  return value->value;
+}
+
+template <typename T>
+T read_const_dependent_nested_reference(
+    const typename NestedOwner<T>::Inner& value) {
+  return value.value;
+}
+
+template <typename T>
+T read_dependent_nested_array(typename NestedOwner<T>::Inner value[1]) {
+  return value[0].value;
+}
+
+template <typename T>
+T read_namespaced_dependent_nested_pointer(
+    typename nested_ns::Owner<T>::Inner* value) {
+  return value->value;
+}
+
+template <typename T>
+T read_namespaced_dependent_nested_reference(
+    typename nested_ns::Owner<T>::Inner& value) {
+  return value.value;
+}
+
+template <typename T>
+T read_const_namespaced_dependent_nested_pointer(
+    const typename nested_ns::Owner<T>::Inner* value) {
+  return value->value;
+}
+
+template <typename T>
+T read_const_namespaced_dependent_nested_reference(
+    const typename nested_ns::Owner<T>::Inner& value) {
+  return value.value;
+}
+
+template <typename T>
+T read_namespaced_dependent_nested_array(
+    typename nested_ns::Owner<T>::Inner value[1]) {
+  return value[0].value;
+}
+
+template <typename T>
+T read_wrapped_dependent_nested(Holder<typename NestedOwner<T>::Inner> value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_wrapped_dependent_nested_pointer(
+    Holder<typename NestedOwner<T>::Inner>* value) {
+  return value->value.value;
+}
+
+template <typename T>
+T read_wrapped_dependent_nested_reference(
+    Holder<typename NestedOwner<T>::Inner>& value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_const_wrapped_dependent_nested_pointer(
+    const Holder<typename NestedOwner<T>::Inner>* value) {
+  return value->value.value;
+}
+
+template <typename T>
+T read_const_wrapped_dependent_nested_reference(
+    const Holder<typename NestedOwner<T>::Inner>& value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_wrapped_dependent_nested_array(
+    Holder<typename NestedOwner<T>::Inner> value[1]) {
+  return value[0].value.value;
+}
+
+template <typename T>
+Holder<typename NestedOwner<T>::Inner> make_wrapped_dependent_nested(T value) {
+  Holder<typename NestedOwner<T>::Inner> result;
+  result.value.value = value;
+  return result;
+}
+
+template <typename T>
+Holder<typename nested_ns::Owner<T>::Inner>
+make_wrapped_namespaced_dependent_nested(T value) {
+  Holder<typename nested_ns::Owner<T>::Inner> result;
+  result.value.value = value;
+  return result;
+}
+
+template <typename T>
+T read_wrapped_namespaced_dependent_nested(
+    Holder<typename nested_ns::Owner<T>::Inner> value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_wrapped_namespaced_dependent_pointer(
+    Holder<typename nested_ns::Owner<T>::Inner>* value) {
+  return value->value.value;
+}
+
+template <typename T>
+T read_wrapped_namespaced_dependent_reference(
+    Holder<typename nested_ns::Owner<T>::Inner>& value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_const_wrapped_namespaced_dependent_pointer(
+    const Holder<typename nested_ns::Owner<T>::Inner>* value) {
+  return value->value.value;
+}
+
+template <typename T>
+T read_const_wrapped_namespaced_dependent_reference(
+    const Holder<typename nested_ns::Owner<T>::Inner>& value) {
+  return value.value.value;
+}
+
+template <typename T>
+T read_wrapped_namespaced_dependent_array(
+    Holder<typename nested_ns::Owner<T>::Inner> value[1]) {
+  return value[0].value.value;
+}
+
 int main(void) {
   Holder<int> local;
   Holder<int> again;
@@ -475,16 +868,350 @@ int main(void) {
   int signature_nested_value = read_nested_inner(signature_nested_inner);
   Holder<NestedOwner<int>::Inner> wrapped_nested_inner;
   wrapped_nested_inner.value.value = 7;
+  Holder<nested_ns::Owner<int>::Inner> wrapped_namespaced_nested_inner;
+  wrapped_namespaced_nested_inner.value.value = 23;
   UsesNested<int> uses_nested;
   uses_nested.value.value = 29;
   UsesNamespacedNested<int> uses_namespaced_nested;
   uses_namespaced_nested.value.value = 31;
   UsesWrappedNested<int> uses_wrapped_nested;
   uses_wrapped_nested.value.value.value = 37;
+  UsesSizedNested<int, 3> uses_sized_nested;
+  uses_sized_nested.value.value = 127;
+  uses_sized_nested.value.data[2] = 18;
+  if (uses_sized_nested.value.value + uses_sized_nested.value.data[2] != 145) {
+    return 44;
+  }
+  UsesWrappedSizedNested<int, 3> uses_wrapped_sized_nested;
+  uses_wrapped_sized_nested.value.value.value = 131;
+  uses_wrapped_sized_nested.value.value.data[2] = 20;
+  if (uses_wrapped_sized_nested.value.value.value +
+          uses_wrapped_sized_nested.value.value.data[2] != 151) {
+    return 45;
+  }
   NestedOwner<int>::Inner dependent_signature_nested =
       make_dependent_nested<int>(41);
   int dependent_signature_value =
       read_dependent_nested<int>(dependent_signature_nested);
+  NestedOwner<int>::Inner deduced_signature_nested = make_dependent_nested(43);
+  int deduced_signature_value = read_dependent_nested(deduced_signature_nested);
+  PairNestedOwner<int, char>::Inner pair_dependent_nested;
+  pair_dependent_nested.first = 73;
+  pair_dependent_nested.second = 5;
+  int pair_dependent_nested_value =
+      read_pair_dependent_nested(pair_dependent_nested);
+  if (pair_dependent_nested_value != 78) {
+    return 29;
+  }
+  SizedNestedOwner<int, 3>::Inner sized_dependent_nested;
+  sized_dependent_nested.value = 79;
+  sized_dependent_nested.data[2] = 6;
+  int sized_dependent_nested_value =
+      read_sized_dependent_nested(sized_dependent_nested);
+  if (sized_dependent_nested_value != 85) {
+    return 30;
+  }
+  Holder<SizedNestedOwner<int, 3>::Inner> wrapped_sized_dependent_nested;
+  wrapped_sized_dependent_nested.value.value = 83;
+  wrapped_sized_dependent_nested.value.data[2] = 8;
+  int wrapped_sized_dependent_nested_value =
+      read_wrapped_sized_dependent_nested(wrapped_sized_dependent_nested);
+  if (wrapped_sized_dependent_nested_value != 91) {
+    return 31;
+  }
+  int sized_dependent_pointer_value =
+      read_sized_dependent_nested_pointer(&sized_dependent_nested);
+  if (sized_dependent_pointer_value != 85) {
+    return 32;
+  }
+  int sized_dependent_reference_value =
+      read_sized_dependent_nested_reference(sized_dependent_nested);
+  if (sized_dependent_reference_value != 85) {
+    return 33;
+  }
+  int wrapped_sized_dependent_pointer_value =
+      read_wrapped_sized_dependent_nested_pointer(
+          &wrapped_sized_dependent_nested);
+  if (wrapped_sized_dependent_pointer_value != 91) {
+    return 34;
+  }
+  int wrapped_sized_dependent_reference_value =
+      read_wrapped_sized_dependent_nested_reference(
+          wrapped_sized_dependent_nested);
+  if (wrapped_sized_dependent_reference_value != 91) {
+    return 35;
+  }
+  int const_sized_dependent_pointer_value =
+      read_const_sized_dependent_nested_pointer(&sized_dependent_nested);
+  if (const_sized_dependent_pointer_value != 85) {
+    return 38;
+  }
+  int const_sized_dependent_reference_value =
+      read_const_sized_dependent_nested_reference(sized_dependent_nested);
+  if (const_sized_dependent_reference_value != 85) {
+    return 39;
+  }
+  int const_wrapped_sized_dependent_pointer_value =
+      read_const_wrapped_sized_dependent_nested_pointer(
+          &wrapped_sized_dependent_nested);
+  if (const_wrapped_sized_dependent_pointer_value != 91) {
+    return 40;
+  }
+  int const_wrapped_sized_dependent_reference_value =
+      read_const_wrapped_sized_dependent_nested_reference(
+          wrapped_sized_dependent_nested);
+  if (const_wrapped_sized_dependent_reference_value != 91) {
+    return 41;
+  }
+  SizedNestedOwner<int, 3>::Inner sized_dependent_array[1];
+  sized_dependent_array[0].value = 89;
+  sized_dependent_array[0].data[2] = 10;
+  int sized_dependent_array_value =
+      read_sized_dependent_nested_array(sized_dependent_array);
+  if (sized_dependent_array_value != 99) {
+    return 36;
+  }
+  Holder<SizedNestedOwner<int, 3>::Inner> wrapped_sized_dependent_array[1];
+  wrapped_sized_dependent_array[0].value.value = 97;
+  wrapped_sized_dependent_array[0].value.data[2] = 12;
+  int wrapped_sized_dependent_array_value =
+      read_wrapped_sized_dependent_nested_array(
+          wrapped_sized_dependent_array);
+  if (wrapped_sized_dependent_array_value != 109) {
+    return 37;
+  }
+  SizedMemberOwner<int, 3> sized_member_owner_array[1];
+  sized_member_owner_array[0].stored.value = 181;
+  sized_member_owner_array[0].stored.data[2] = 38;
+  int sized_member_owner_array_value =
+      read_sized_member_owner_array(sized_member_owner_array);
+  if (sized_member_owner_array_value != 219) {
+    return 60;
+  }
+  SizedNestedOwner<int, 3>::Inner made_sized_dependent_nested =
+      make_sized_dependent_nested<int, 3>(101, 14);
+  int made_sized_dependent_nested_value =
+      read_sized_dependent_nested(made_sized_dependent_nested);
+  if (made_sized_dependent_nested_value != 115) {
+    return 42;
+  }
+  Holder<SizedNestedOwner<int, 3>::Inner> made_wrapped_sized_dependent_nested =
+      make_wrapped_sized_dependent_nested<int, 3>(117, 16);
+  int made_wrapped_sized_dependent_nested_value =
+      read_wrapped_sized_dependent_nested(made_wrapped_sized_dependent_nested);
+  if (made_wrapped_sized_dependent_nested_value != 133) {
+    return 43;
+  }
+  nested_ns::SizedOwner<int, 3>::Inner namespaced_sized_dependent_nested;
+  namespaced_sized_dependent_nested.value = 137;
+  namespaced_sized_dependent_nested.data[2] = 22;
+  int namespaced_sized_dependent_nested_value =
+      read_namespaced_sized_dependent_nested(
+          namespaced_sized_dependent_nested);
+  if (namespaced_sized_dependent_nested_value != 159) {
+    return 46;
+  }
+  Holder<nested_ns::SizedOwner<int, 3>::Inner>
+      wrapped_namespaced_sized_dependent_nested;
+  wrapped_namespaced_sized_dependent_nested.value.value = 139;
+  wrapped_namespaced_sized_dependent_nested.value.data[2] = 24;
+  int wrapped_namespaced_sized_dependent_nested_value =
+      read_wrapped_namespaced_sized_dependent_nested(
+          wrapped_namespaced_sized_dependent_nested);
+  if (wrapped_namespaced_sized_dependent_nested_value != 163) {
+    return 47;
+  }
+  int namespaced_sized_dependent_pointer_value =
+      read_namespaced_sized_dependent_nested_pointer(
+          &namespaced_sized_dependent_nested);
+  if (namespaced_sized_dependent_pointer_value != 159) {
+    return 48;
+  }
+  int namespaced_sized_dependent_reference_value =
+      read_namespaced_sized_dependent_nested_reference(
+          namespaced_sized_dependent_nested);
+  if (namespaced_sized_dependent_reference_value != 159) {
+    return 49;
+  }
+  int wrapped_namespaced_sized_dependent_pointer_value =
+      read_wrapped_namespaced_sized_dependent_nested_pointer(
+          &wrapped_namespaced_sized_dependent_nested);
+  if (wrapped_namespaced_sized_dependent_pointer_value != 163) {
+    return 50;
+  }
+  int wrapped_namespaced_sized_dependent_reference_value =
+      read_wrapped_namespaced_sized_dependent_nested_reference(
+          wrapped_namespaced_sized_dependent_nested);
+  if (wrapped_namespaced_sized_dependent_reference_value != 163) {
+    return 51;
+  }
+  int const_namespaced_sized_dependent_pointer_value =
+      read_const_namespaced_sized_dependent_nested_pointer(
+          &namespaced_sized_dependent_nested);
+  if (const_namespaced_sized_dependent_pointer_value != 159) {
+    return 54;
+  }
+  int const_namespaced_sized_dependent_reference_value =
+      read_const_namespaced_sized_dependent_nested_reference(
+          namespaced_sized_dependent_nested);
+  if (const_namespaced_sized_dependent_reference_value != 159) {
+    return 55;
+  }
+  int const_wrapped_namespaced_sized_dependent_pointer_value =
+      read_const_wrapped_namespaced_sized_dependent_nested_pointer(
+          &wrapped_namespaced_sized_dependent_nested);
+  if (const_wrapped_namespaced_sized_dependent_pointer_value != 163) {
+    return 56;
+  }
+  int const_wrapped_namespaced_sized_dependent_reference_value =
+      read_const_wrapped_namespaced_sized_dependent_nested_reference(
+          wrapped_namespaced_sized_dependent_nested);
+  if (const_wrapped_namespaced_sized_dependent_reference_value != 163) {
+    return 57;
+  }
+  nested_ns::SizedOwner<int, 3>::Inner namespaced_sized_dependent_array[1];
+  namespaced_sized_dependent_array[0].value = 149;
+  namespaced_sized_dependent_array[0].data[2] = 26;
+  int namespaced_sized_dependent_array_value =
+      read_namespaced_sized_dependent_nested_array(
+          namespaced_sized_dependent_array);
+  if (namespaced_sized_dependent_array_value != 175) {
+    return 52;
+  }
+  Holder<nested_ns::SizedOwner<int, 3>::Inner>
+      wrapped_namespaced_sized_dependent_array[1];
+  wrapped_namespaced_sized_dependent_array[0].value.value = 151;
+  wrapped_namespaced_sized_dependent_array[0].value.data[2] = 28;
+  int wrapped_namespaced_sized_dependent_array_value =
+      read_wrapped_namespaced_sized_dependent_nested_array(
+          wrapped_namespaced_sized_dependent_array);
+  if (wrapped_namespaced_sized_dependent_array_value != 179) {
+    return 53;
+  }
+  nested_ns::SizedMemberOwner<int, 3>
+      namespaced_sized_member_owner_array[1];
+  namespaced_sized_member_owner_array[0].stored.value = 191;
+  namespaced_sized_member_owner_array[0].stored.data[2] = 40;
+  int namespaced_sized_member_owner_array_value =
+      read_namespaced_sized_member_owner_array(
+          namespaced_sized_member_owner_array);
+  if (namespaced_sized_member_owner_array_value != 231) {
+    return 61;
+  }
+  nested_ns::SizedOwner<int, 3>::Inner made_namespaced_sized_dependent_nested =
+      make_namespaced_sized_dependent_nested<int, 3>(167, 34);
+  int made_namespaced_sized_dependent_nested_value =
+      read_namespaced_sized_dependent_nested(
+          made_namespaced_sized_dependent_nested);
+  if (made_namespaced_sized_dependent_nested_value != 201) {
+    return 58;
+  }
+  Holder<nested_ns::SizedOwner<int, 3>::Inner>
+      made_wrapped_namespaced_sized_dependent_nested =
+          make_wrapped_namespaced_sized_dependent_nested<int, 3>(173, 36);
+  int made_wrapped_namespaced_sized_dependent_nested_value =
+      read_wrapped_namespaced_sized_dependent_nested(
+          made_wrapped_namespaced_sized_dependent_nested);
+  if (made_wrapped_namespaced_sized_dependent_nested_value != 209) {
+    return 59;
+  }
+  int dependent_pointer_value =
+      read_dependent_nested_pointer(&deduced_signature_nested);
+  int dependent_reference_value =
+      read_dependent_nested_reference(deduced_signature_nested);
+  int const_dependent_pointer_value =
+      read_const_dependent_nested_pointer(&deduced_signature_nested);
+  if (const_dependent_pointer_value != 43) {
+    return 21;
+  }
+  int const_dependent_reference_value =
+      read_const_dependent_nested_reference(deduced_signature_nested);
+  if (const_dependent_reference_value != 43) {
+    return 22;
+  }
+  NestedOwner<int>::Inner dependent_nested_array[1];
+  dependent_nested_array[0].value = 59;
+  int dependent_array_value =
+      read_dependent_nested_array(dependent_nested_array);
+  if (dependent_array_value != 59) {
+    return 17;
+  }
+  int namespaced_dependent_pointer_value =
+      read_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+  int namespaced_dependent_reference_value =
+      read_namespaced_dependent_nested_reference(namespaced_nested_inner);
+  int const_namespaced_dependent_pointer_value =
+      read_const_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+  if (const_namespaced_dependent_pointer_value != 17) {
+    return 23;
+  }
+  int const_namespaced_dependent_reference_value =
+      read_const_namespaced_dependent_nested_reference(namespaced_nested_inner);
+  if (const_namespaced_dependent_reference_value != 17) {
+    return 24;
+  }
+  nested_ns::Owner<int>::Inner namespaced_dependent_array[1];
+  namespaced_dependent_array[0].value = 67;
+  int namespaced_dependent_array_value =
+      read_namespaced_dependent_nested_array(namespaced_dependent_array);
+  if (namespaced_dependent_array_value != 67) {
+    return 19;
+  }
+  int wrapped_dependent_value =
+      read_wrapped_dependent_nested(wrapped_nested_inner);
+  int wrapped_dependent_pointer_value =
+      read_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+  int wrapped_dependent_reference_value =
+      read_wrapped_dependent_nested_reference(wrapped_nested_inner);
+  int const_wrapped_dependent_pointer_value =
+      read_const_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+  if (const_wrapped_dependent_pointer_value != 7) {
+    return 25;
+  }
+  int const_wrapped_dependent_reference_value =
+      read_const_wrapped_dependent_nested_reference(wrapped_nested_inner);
+  if (const_wrapped_dependent_reference_value != 7) {
+    return 26;
+  }
+  Holder<NestedOwner<int>::Inner> wrapped_dependent_array[1];
+  wrapped_dependent_array[0].value.value = 61;
+  int wrapped_dependent_array_value =
+      read_wrapped_dependent_nested_array(wrapped_dependent_array);
+  if (wrapped_dependent_array_value != 61) {
+    return 18;
+  }
+  Holder<NestedOwner<int>::Inner> made_wrapped_dependent_nested =
+      make_wrapped_dependent_nested(47);
+  Holder<nested_ns::Owner<int>::Inner> made_wrapped_namespaced_dependent_nested =
+      make_wrapped_namespaced_dependent_nested(53);
+  int wrapped_namespaced_dependent_value =
+      read_wrapped_namespaced_dependent_nested(wrapped_namespaced_nested_inner);
+  int wrapped_namespaced_dependent_pointer_value =
+      read_wrapped_namespaced_dependent_pointer(
+          &wrapped_namespaced_nested_inner);
+  int wrapped_namespaced_dependent_reference_value =
+      read_wrapped_namespaced_dependent_reference(
+          wrapped_namespaced_nested_inner);
+  int const_wrapped_namespaced_dependent_pointer_value =
+      read_const_wrapped_namespaced_dependent_pointer(
+          &wrapped_namespaced_nested_inner);
+  if (const_wrapped_namespaced_dependent_pointer_value != 23) {
+    return 27;
+  }
+  int const_wrapped_namespaced_dependent_reference_value =
+      read_const_wrapped_namespaced_dependent_reference(
+          wrapped_namespaced_nested_inner);
+  if (const_wrapped_namespaced_dependent_reference_value != 23) {
+    return 28;
+  }
+  Holder<nested_ns::Owner<int>::Inner> wrapped_namespaced_dependent_array[1];
+  wrapped_namespaced_dependent_array[0].value.value = 71;
+  int wrapped_namespaced_dependent_array_value =
+      read_wrapped_namespaced_dependent_array(
+          wrapped_namespaced_dependent_array);
+  if (wrapped_namespaced_dependent_array_value != 71) {
+    return 20;
+  }
   alias_holder.value = member_function_holder.inline_add(
       member_function_holder.unwrap(wrapped_member)) +
       member_function_holder.unwrap(inline_wrapped_member);
@@ -533,10 +1260,66 @@ int main(void) {
          nested_long_inner.value + namespaced_nested_inner.value +
          signature_nested_inner.value + signature_nested_value +
          wrapped_nested_inner.value.value +
+         wrapped_namespaced_nested_inner.value.value +
          uses_nested.value.value +
          uses_namespaced_nested.value.value +
          uses_wrapped_nested.value.value.value +
+         uses_sized_nested.value.value + uses_sized_nested.value.data[2] +
+         uses_wrapped_sized_nested.value.value.value +
+         uses_wrapped_sized_nested.value.value.data[2] +
          dependent_signature_nested.value + dependent_signature_value +
+         deduced_signature_nested.value + deduced_signature_value +
+         pair_dependent_nested_value +
+         sized_dependent_nested_value +
+         wrapped_sized_dependent_nested_value +
+         sized_dependent_pointer_value + sized_dependent_reference_value +
+         wrapped_sized_dependent_pointer_value +
+         wrapped_sized_dependent_reference_value +
+         const_sized_dependent_pointer_value +
+         const_sized_dependent_reference_value +
+         const_wrapped_sized_dependent_pointer_value +
+         const_wrapped_sized_dependent_reference_value +
+         sized_dependent_array_value + wrapped_sized_dependent_array_value +
+         sized_member_owner_array_value +
+         made_sized_dependent_nested_value +
+         made_wrapped_sized_dependent_nested_value +
+         namespaced_sized_dependent_nested_value +
+         wrapped_namespaced_sized_dependent_nested_value +
+         namespaced_sized_dependent_pointer_value +
+         namespaced_sized_dependent_reference_value +
+         wrapped_namespaced_sized_dependent_pointer_value +
+         wrapped_namespaced_sized_dependent_reference_value +
+         const_namespaced_sized_dependent_pointer_value +
+         const_namespaced_sized_dependent_reference_value +
+         const_wrapped_namespaced_sized_dependent_pointer_value +
+         const_wrapped_namespaced_sized_dependent_reference_value +
+         namespaced_sized_dependent_array_value +
+         wrapped_namespaced_sized_dependent_array_value +
+         namespaced_sized_member_owner_array_value +
+         made_namespaced_sized_dependent_nested_value +
+         made_wrapped_namespaced_sized_dependent_nested_value +
+         dependent_pointer_value + dependent_reference_value +
+         const_dependent_pointer_value + const_dependent_reference_value +
+         dependent_array_value +
+         namespaced_dependent_pointer_value +
+         namespaced_dependent_reference_value +
+         const_namespaced_dependent_pointer_value +
+         const_namespaced_dependent_reference_value +
+         namespaced_dependent_array_value +
+         wrapped_dependent_value +
+         wrapped_dependent_pointer_value +
+         wrapped_dependent_reference_value +
+         const_wrapped_dependent_pointer_value +
+         const_wrapped_dependent_reference_value +
+         wrapped_dependent_array_value +
+         made_wrapped_dependent_nested.value.value +
+         made_wrapped_namespaced_dependent_nested.value.value +
+         wrapped_namespaced_dependent_value +
+         wrapped_namespaced_dependent_pointer_value +
+         wrapped_namespaced_dependent_reference_value +
+         const_wrapped_namespaced_dependent_pointer_value +
+         const_wrapped_namespaced_dependent_reference_value +
+         wrapped_namespaced_dependent_array_value +
          specialized_holder.value + specialized_holder.bonus +
          specialized_holder.get_bonus() + specialized_holder.inline_total() +
          SpecializedHolder<int>::specialized_static_value +
@@ -573,8 +1356,8 @@ int main(void) {
          specialized_box.box_static_total() + box_static_post +
          box_static_pre + specialized_box_ptr->box_static_value +
          specialized_box_ptr->box_static_total() + box_arrow_static_post +
-         box_arrow_static_pre + box_arrow_static_total - 2642 + plain_result +
+         box_arrow_static_pre + box_arrow_static_total - 3868 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
-         516 + template_destructor_trace - 13;
+        5024 + template_destructor_trace - 13;
 }

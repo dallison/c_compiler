@@ -49,6 +49,38 @@ typedef struct INode {
 
 INode* BuildINode(TypeRecord* type, INode* parent);
 
+static bool StructInitializationTypesMatch(TypeRecord* expr_type,
+                                           TypeRecord* target_type) {
+  if (!TypeIsStructOrUnion(expr_type) || !TypeIsStructOrUnion(target_type) ||
+      expr_type->info.struct_info == NULL ||
+      target_type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* expr_struct = expr_type->info.struct_info;
+  Struct* target_struct = target_type->info.struct_info;
+  if (expr_struct == target_struct) {
+    return true;
+  }
+  if (expr_struct->is_union != target_struct->is_union ||
+      expr_struct->members.length != target_struct->members.length) {
+    return false;
+  }
+  for (size_t i = 0; i < expr_struct->members.length; i++) {
+    StructMember* expr_member = expr_struct->members.value.p[i];
+    StructMember* target_member = target_struct->members.value.p[i];
+    if (expr_member == NULL || target_member == NULL ||
+        expr_member->symbol == NULL || target_member->symbol == NULL ||
+        expr_member->is_static != target_member->is_static ||
+        expr_member->is_member_function != target_member->is_member_function ||
+        !StringEqualString(&expr_member->symbol->name,
+                           &target_member->symbol->name) ||
+        !TypeEqual(expr_member->symbol->type, target_member->symbol->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static INode* NewINode(IKind kind, TypeRecord* type, INode* parent) {
   INode* inode = malloc(sizeof(INode));
   inode->kind = kind;
@@ -295,8 +327,7 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
       return InitArrayAndAdvance(inode, expr, constants_only);
  
     case kIStruct:
-      if (TypeIsStructOrUnion(expr->type) &&
-          expr->type->info.struct_info == inode->type->info.struct_info) {
+      if (StructInitializationTypesMatch(expr->type, inode->type)) {
         // A struct/union can be initialized by an expression of the same
         // struct/union type (ignoring top-level qualifiers on the source).
         if (constants_only) {
