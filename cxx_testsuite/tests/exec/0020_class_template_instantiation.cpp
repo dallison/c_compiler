@@ -52,11 +52,22 @@ template <>
 struct SpecializedHolder<int> {
   int value;
   int bonus;
+  static int specialized_static_value;
   int get_bonus(void);
+  static int specialized_static_total(void);
+  int inline_total(void) {
+    return this->value + this->bonus + 1;
+  }
 };
+
+int SpecializedHolder<int>::specialized_static_value = 31;
 
 int SpecializedHolder<int>::get_bonus(void) {
   return this->bonus;
+}
+
+int SpecializedHolder<int>::specialized_static_total(void) {
+  return SpecializedHolder<int>::specialized_static_value + 1;
 }
 
 template <typename T>
@@ -87,11 +98,22 @@ template <>
 struct DefaultSpecializedHolder<> {
   int value;
   int bonus;
+  static int default_static_value;
   int sum(void);
+  static int default_static_total(void);
+  int inline_total(void) {
+    return this->value + this->bonus + 3;
+  }
 };
+
+int DefaultSpecializedHolder<>::default_static_value = 33;
 
 int DefaultSpecializedHolder<>::sum(void) {
   return this->value + this->bonus;
+}
+
+int DefaultSpecializedHolder<>::default_static_total(void) {
+  return DefaultSpecializedHolder<>::default_static_value + 2;
 }
 
 template <typename T>
@@ -243,11 +265,22 @@ template <>
 struct cache::Box<long> {
   long value;
   long bonus;
+  static long box_static_value;
   long sum(void);
+  static long box_static_total(void);
+  long inline_sum(void) {
+    return this->value + this->bonus + 5;
+  }
 };
+
+long cache::Box<long>::box_static_value = 37;
 
 long cache::Box<long>::sum(void) {
   return this->value + this->bonus;
+}
+
+long cache::Box<long>::box_static_total(void) {
+  return cache::Box<long>::box_static_value + 3;
 }
 
 namespace left {
@@ -391,14 +424,23 @@ int main(void) {
          default_pair.first + default_pair.second.value +
          partial_default_pair.first + partial_default_pair.second.value +
          specialized_holder.value + specialized_holder.bonus +
-         specialized_holder.get_bonus() + primary_holder.value +
+         specialized_holder.get_bonus() + specialized_holder.inline_total() +
+         SpecializedHolder<int>::specialized_static_value +
+         SpecializedHolder<int>::specialized_static_total() +
+         primary_holder.value +
          declared_specialized_holder.value +
          declared_specialized_holder.bonus + declared_primary_holder.value +
          declared_specialized_holder.sum() +
          default_specialized_holder.value + default_specialized_holder.bonus +
-         default_specialized_holder.sum() + default_primary_holder.value +
+         default_specialized_holder.sum() +
+         default_specialized_holder.inline_total() +
+         DefaultSpecializedHolder<>::default_static_value +
+         DefaultSpecializedHolder<>::default_static_total() +
+         default_primary_holder.value +
          specialized_lifecycle_trace + specialized_box.bonus +
-         specialized_box.sum() - 398 + plain_result +
+         specialized_box.sum() + specialized_box.inline_sum() +
+         cache::Box<long>::box_static_value +
+         cache::Box<long>::box_static_total() - 744 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
          516 + template_destructor_trace - 13;

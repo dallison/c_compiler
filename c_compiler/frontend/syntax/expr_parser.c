@@ -109,13 +109,56 @@ static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   return false;
 }
 
+static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool needs_template_ids = false;
+  if (LexMatch(syntax->lex, TOK(coloncolon)) &&
+      !LexLookingAt(syntax->lex, TOK(identifier))) {
+    goto done;
+  }
+  while (LexLookingAt(syntax->lex, TOK(identifier))) {
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(less))) {
+      int depth = 0;
+      do {
+        if (LexLookingAt(syntax->lex, TOK(less))) {
+          depth++;
+        } else if (LexLookingAt(syntax->lex, TOK(greater))) {
+          depth--;
+        }
+        LexNextToken(syntax->lex);
+      } while (!LexEof(syntax->lex) && depth > 0);
+      if (depth == 0 && LexLookingAt(syntax->lex, TOK(coloncolon))) {
+        needs_template_ids = true;
+        goto done;
+      }
+    }
+    if (!LexMatch(syntax->lex, TOK(coloncolon))) {
+      break;
+    }
+  }
+
+done:
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return needs_template_ids;
+}
+
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
 
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
-  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+  bool parsed = ExpressionIdentifierNeedsTemplateIdParser(syntax)
+      ? SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                          followers)
+      : SyntaxParseFullyQualifiedIdentifier(syntax, &name);
+  if (!parsed) {
     SyntaxError(syntax, "Expected identifier");
     FullyQualifiedIdentifierDestruct(&name);
     return (ASTNode*)NewIntConstantASTNode(
@@ -189,7 +232,14 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   Vector* template_arguments = NULL;
-  if (symbol != NULL &&
+  if (symbol != NULL && name.template_arguments.length > 0 &&
+      (TypeIsFunction(symbol->type) ||
+       SymbolHasFunctionTemplateOverload(symbol))) {
+    Vector* parsed_args =
+        name.template_arguments.value.p[name.template_arguments.length - 1];
+    template_arguments = TemplateArgumentVectorCopy(parsed_args);
+  }
+  if (template_arguments == NULL && symbol != NULL &&
       (symbol->flags.is_template || SymbolHasFunctionTemplateOverload(symbol)) &&
       LexLookingAt(lex, TOK(less))) {
     Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);

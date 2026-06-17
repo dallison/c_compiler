@@ -629,6 +629,20 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
     }
     FullyQualifiedIdentifierDestruct(&prefix);
   }
+  if (symbol == NULL && name->components.length >= 2) {
+    Symbol* owner =
+        SyntaxFindQualifiedPrefixSymbol(syntax, name,
+                                        name->components.length - 1);
+    if (owner != NULL && owner->type != NULL &&
+        TypeIsStructOrUnion(owner->type) &&
+        owner->type->info.struct_info != NULL) {
+      StructMember* member =
+          FindStructMember(owner->type->info.struct_info, &last);
+      if (member != NULL && member->is_static) {
+        symbol = member->symbol;
+      }
+    }
+  }
   StringDestruct(&last);
   return FollowAlias(symbol);
 }
