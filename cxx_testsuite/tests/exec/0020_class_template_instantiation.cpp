@@ -346,6 +346,18 @@ int read_nested_inner(NestedOwner<int>::Inner value) {
   return value.value;
 }
 
+template <typename T>
+typename NestedOwner<T>::Inner make_dependent_nested(T value) {
+  typename NestedOwner<T>::Inner result;
+  result.value = value;
+  return result;
+}
+
+template <typename T>
+T read_dependent_nested(typename NestedOwner<T>::Inner value) {
+  return value.value;
+}
+
 int main(void) {
   Holder<int> local;
   Holder<int> again;
@@ -469,6 +481,10 @@ int main(void) {
   uses_namespaced_nested.value.value = 31;
   UsesWrappedNested<int> uses_wrapped_nested;
   uses_wrapped_nested.value.value.value = 37;
+  NestedOwner<int>::Inner dependent_signature_nested =
+      make_dependent_nested<int>(41);
+  int dependent_signature_value =
+      read_dependent_nested<int>(dependent_signature_nested);
   alias_holder.value = member_function_holder.inline_add(
       member_function_holder.unwrap(wrapped_member)) +
       member_function_holder.unwrap(inline_wrapped_member);
@@ -520,6 +536,7 @@ int main(void) {
          uses_nested.value.value +
          uses_namespaced_nested.value.value +
          uses_wrapped_nested.value.value.value +
+         dependent_signature_nested.value + dependent_signature_value +
          specialized_holder.value + specialized_holder.bonus +
          specialized_holder.get_bonus() + specialized_holder.inline_total() +
          SpecializedHolder<int>::specialized_static_value +
@@ -556,7 +573,7 @@ int main(void) {
          specialized_box.box_static_total() + box_static_post +
          box_static_pre + specialized_box_ptr->box_static_value +
          specialized_box_ptr->box_static_total() + box_arrow_static_post +
-         box_arrow_static_pre + box_arrow_static_total - 2560 + plain_result +
+         box_arrow_static_pre + box_arrow_static_total - 2642 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
          516 + template_destructor_trace - 13;

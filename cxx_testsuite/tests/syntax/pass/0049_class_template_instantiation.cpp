@@ -348,6 +348,18 @@ int read_nested_inner(NestedOwner<int>::Inner value) {
   return value.value;
 }
 
+template <typename T>
+typename NestedOwner<T>::Inner make_dependent_nested(T value) {
+  typename NestedOwner<T>::Inner result;
+  result.value = value;
+  return result;
+}
+
+template <typename T>
+T read_dependent_nested(typename NestedOwner<T>::Inner value) {
+  return value.value;
+}
+
 Holder<int> make_holder(void);
 Buffer<4> make_buffer4(void);
 cache::Box<int> make_box(void);
@@ -504,6 +516,10 @@ int main(void) {
   uses_namespaced_nested.value.value = 31;
   UsesWrappedNested<int> uses_wrapped_nested;
   uses_wrapped_nested.value.value.value = 37;
+  NestedOwner<int>::Inner dependent_signature_nested =
+      make_dependent_nested<int>(41);
+  int dependent_signature_value =
+      read_dependent_nested<int>(dependent_signature_nested);
   cache::Box<left::Item> left_box;
   cache::Box<right::Item> right_box;
   left_box.value.left_value = 1;
@@ -529,6 +545,7 @@ int main(void) {
          uses_nested.value.value +
          uses_namespaced_nested.value.value +
          uses_wrapped_nested.value.value.value +
+         dependent_signature_nested.value + dependent_signature_value +
          default_buffer.data[3] + explicit_default_buffer.data[1] +
          default_matrix.data[3] + explicit_matrix.data[2] +
          specialized_holder.value + specialized_holder.bonus +
