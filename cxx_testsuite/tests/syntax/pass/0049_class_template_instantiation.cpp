@@ -67,6 +67,16 @@ struct Owner {
 }
 
 template <typename T>
+struct UsesNamespacedNested {
+  typename nested_ns::Owner<T>::Inner value;
+};
+
+template <typename T>
+struct UsesWrappedNested {
+  Holder<typename NestedOwner<T>::Inner> value;
+};
+
+template <typename T>
 struct SpecializedHolder {
   T value;
 };
@@ -490,6 +500,10 @@ int main(void) {
   wrapped_nested_inner.value.value = 7;
   UsesNested<int> uses_nested;
   uses_nested.value.value = 29;
+  UsesNamespacedNested<int> uses_namespaced_nested;
+  uses_namespaced_nested.value.value = 31;
+  UsesWrappedNested<int> uses_wrapped_nested;
+  uses_wrapped_nested.value.value.value = 37;
   cache::Box<left::Item> left_box;
   cache::Box<right::Item> right_box;
   left_box.value.left_value = 1;
@@ -513,6 +527,8 @@ int main(void) {
          signature_nested_inner.value + signature_nested_value +
          wrapped_nested_inner.value.value +
          uses_nested.value.value +
+         uses_namespaced_nested.value.value +
+         uses_wrapped_nested.value.value.value +
          default_buffer.data[3] + explicit_default_buffer.data[1] +
          default_matrix.data[3] + explicit_matrix.data[2] +
          specialized_holder.value + specialized_holder.bonus +

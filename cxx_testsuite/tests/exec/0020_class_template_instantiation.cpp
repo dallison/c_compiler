@@ -65,6 +65,16 @@ struct Owner {
 }
 
 template <typename T>
+struct UsesNamespacedNested {
+  typename nested_ns::Owner<T>::Inner value;
+};
+
+template <typename T>
+struct UsesWrappedNested {
+  Holder<typename NestedOwner<T>::Inner> value;
+};
+
+template <typename T>
 struct SpecializedHolder {
   T value;
 };
@@ -455,6 +465,10 @@ int main(void) {
   wrapped_nested_inner.value.value = 7;
   UsesNested<int> uses_nested;
   uses_nested.value.value = 29;
+  UsesNamespacedNested<int> uses_namespaced_nested;
+  uses_namespaced_nested.value.value = 31;
+  UsesWrappedNested<int> uses_wrapped_nested;
+  uses_wrapped_nested.value.value.value = 37;
   alias_holder.value = member_function_holder.inline_add(
       member_function_holder.unwrap(wrapped_member)) +
       member_function_holder.unwrap(inline_wrapped_member);
@@ -504,6 +518,8 @@ int main(void) {
          signature_nested_inner.value + signature_nested_value +
          wrapped_nested_inner.value.value +
          uses_nested.value.value +
+         uses_namespaced_nested.value.value +
+         uses_wrapped_nested.value.value.value +
          specialized_holder.value + specialized_holder.bonus +
          specialized_holder.get_bonus() + specialized_holder.inline_total() +
          SpecializedHolder<int>::specialized_static_value +
@@ -540,7 +556,7 @@ int main(void) {
          specialized_box.box_static_total() + box_static_post +
          box_static_pre + specialized_box_ptr->box_static_value +
          specialized_box_ptr->box_static_total() + box_arrow_static_post +
-         box_arrow_static_pre + box_arrow_static_total - 2492 + plain_result +
+         box_arrow_static_pre + box_arrow_static_total - 2560 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
          516 + template_destructor_trace - 13;
