@@ -557,7 +557,40 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
   if (!LexLookingAt(syntax->lex, TOK(identifier))) {
     return false;
   }
-  return FindNamespaceChildInScope(syntax, &syntax->lex->spelling) != NULL;
+  if (FindNamespaceChildInScope(syntax, &syntax->lex->spelling) != NULL) {
+    return true;
+  }
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool has_template_qualified_prefix = false;
+  while (LexLookingAt(syntax->lex, TOK(identifier))) {
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(less))) {
+      int depth = 0;
+      do {
+        if (LexLookingAt(syntax->lex, TOK(less))) {
+          depth++;
+        } else if (LexLookingAt(syntax->lex, TOK(greater))) {
+          depth--;
+        }
+        LexNextToken(syntax->lex);
+      } while (!LexEof(syntax->lex) && depth > 0);
+      if (depth == 0 && LexLookingAt(syntax->lex, TOK(coloncolon))) {
+        has_template_qualified_prefix = true;
+        break;
+      }
+    }
+    if (!LexMatch(syntax->lex, TOK(coloncolon))) {
+      break;
+    }
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return has_template_qualified_prefix;
 }
 
 static Namespace* ResolveQualifiedNamespace(Syntax* syntax,
@@ -638,7 +671,10 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         owner->type->info.struct_info != NULL) {
       StructMember* member =
           FindStructMember(owner->type->info.struct_info, &last);
-      if (member != NULL && member->is_static) {
+      if (member != NULL &&
+          (member->is_static ||
+           (member->symbol != NULL &&
+            StorageIs(member->symbol->storage, STO(typedef))))) {
         symbol = member->symbol;
       }
     }

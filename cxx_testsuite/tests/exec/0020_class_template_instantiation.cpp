@@ -44,6 +44,13 @@ struct Matrix {
 };
 
 template <typename T>
+struct NestedOwner {
+  struct Inner {
+    T value;
+  };
+};
+
+template <typename T>
 struct SpecializedHolder {
   T value;
 };
@@ -369,6 +376,37 @@ int main(void) {
   cache::Box<long> specialized_box;
   specialized_box.value = box.value;
   specialized_box.bonus = 27;
+  specialized_holder.specialized_static_value = 41;
+  specialized_holder.specialized_static_value += 1;
+  default_specialized_holder.default_static_value = 44;
+  default_specialized_holder.default_static_value += 2;
+  specialized_box.box_static_value = 50;
+  specialized_box.box_static_value += 3;
+  int specialized_static_post = specialized_holder.specialized_static_value++;
+  int specialized_static_pre = ++specialized_holder.specialized_static_value;
+  int default_static_post = default_specialized_holder.default_static_value--;
+  int default_static_pre = --default_specialized_holder.default_static_value;
+  long box_static_post = specialized_box.box_static_value++;
+  long box_static_pre = ++specialized_box.box_static_value;
+  SpecializedHolder<int>* specialized_holder_ptr = &specialized_holder;
+  DefaultSpecializedHolder<>* default_specialized_holder_ptr =
+      &default_specialized_holder;
+  cache::Box<long>* specialized_box_ptr = &specialized_box;
+  int specialized_arrow_static_post =
+      specialized_holder_ptr->specialized_static_value++;
+  int specialized_arrow_static_pre =
+      ++specialized_holder_ptr->specialized_static_value;
+  int specialized_arrow_static_total =
+      specialized_holder_ptr->specialized_static_total();
+  int default_arrow_static_post =
+      default_specialized_holder_ptr->default_static_value--;
+  int default_arrow_static_pre =
+      --default_specialized_holder_ptr->default_static_value;
+  int default_arrow_static_total =
+      default_specialized_holder_ptr->default_static_total();
+  long box_arrow_static_post = specialized_box_ptr->box_static_value++;
+  long box_arrow_static_pre = ++specialized_box_ptr->box_static_value;
+  long box_arrow_static_total = specialized_box_ptr->box_static_total();
   member_function_holder.set(box.value);
   char_member_function_holder.set(5);
   Holder<int> wrapped_member = member_function_holder.wrap(3);
@@ -379,6 +417,8 @@ int main(void) {
   DefaultHolder<char> explicit_default_holder;
   DefaultedPair<> default_pair;
   DefaultedPair<char> partial_default_pair;
+  NestedOwner<int>::Inner nested_inner;
+  nested_inner.value = 11;
   alias_holder.value = member_function_holder.inline_add(
       member_function_holder.unwrap(wrapped_member)) +
       member_function_holder.unwrap(inline_wrapped_member);
@@ -423,10 +463,18 @@ int main(void) {
          default_holder.value + explicit_default_holder.value +
          default_pair.first + default_pair.second.value +
          partial_default_pair.first + partial_default_pair.second.value +
+         nested_inner.value +
          specialized_holder.value + specialized_holder.bonus +
          specialized_holder.get_bonus() + specialized_holder.inline_total() +
          SpecializedHolder<int>::specialized_static_value +
          SpecializedHolder<int>::specialized_static_total() +
+         specialized_holder.specialized_static_value +
+         specialized_holder.specialized_static_total() +
+         specialized_static_post + specialized_static_pre +
+         specialized_holder_ptr->specialized_static_value +
+         specialized_holder_ptr->specialized_static_total() +
+         specialized_arrow_static_post + specialized_arrow_static_pre +
+         specialized_arrow_static_total +
          primary_holder.value +
          declared_specialized_holder.value +
          declared_specialized_holder.bonus + declared_primary_holder.value +
@@ -436,11 +484,23 @@ int main(void) {
          default_specialized_holder.inline_total() +
          DefaultSpecializedHolder<>::default_static_value +
          DefaultSpecializedHolder<>::default_static_total() +
+         default_specialized_holder.default_static_value +
+         default_specialized_holder.default_static_total() +
+         default_static_post + default_static_pre +
+         default_specialized_holder_ptr->default_static_value +
+         default_specialized_holder_ptr->default_static_total() +
+         default_arrow_static_post + default_arrow_static_pre +
+         default_arrow_static_total +
          default_primary_holder.value +
          specialized_lifecycle_trace + specialized_box.bonus +
          specialized_box.sum() + specialized_box.inline_sum() +
          cache::Box<long>::box_static_value +
-         cache::Box<long>::box_static_total() - 744 + plain_result +
+         cache::Box<long>::box_static_total() +
+         specialized_box.box_static_value +
+         specialized_box.box_static_total() + box_static_post +
+         box_static_pre + specialized_box_ptr->box_static_value +
+         specialized_box_ptr->box_static_total() + box_arrow_static_post +
+         box_arrow_static_pre + box_arrow_static_total - 2158 + plain_result +
          dependent_member_holder.buffer.data[3] +
          constructed_member.buffer.data[3] + out_of_class_constructed.marker -
          516 + template_destructor_trace - 13;

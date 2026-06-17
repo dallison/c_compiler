@@ -115,6 +115,13 @@ void CheckForVarUse(IRNode* read, ASTNode* node) {
     case AST_OP(dot):
     case AST_OP(arrow): {
       BinaryASTNode* b = (BinaryASTNode*)node;
+      if (b->right != NULL && b->right->op == AST_OP(structmember)) {
+        StructMemberASTNode* member = (StructMemberASTNode*)b->right;
+        if (member->member->is_static) {
+          IRSetVarUse(read, member->member->symbol);
+          break;
+        }
+      }
       CheckForVarUse(read, b->left);
       break;
     }
@@ -148,6 +155,13 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
     case AST_OP(dot):
     case AST_OP(arrow): {
       BinaryASTNode* b = (BinaryASTNode*)node;
+      if (b->right != NULL && b->right->op == AST_OP(structmember)) {
+        StructMemberASTNode* member = (StructMemberASTNode*)b->right;
+        if (member->member->is_static) {
+          IRSetVarDef(write, member->member->symbol);
+          break;
+        }
+      }
       CheckForVarDef(write, b->left);
       break;
     }

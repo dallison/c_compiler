@@ -1079,6 +1079,36 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  Vector* args,
                                                  bool emit_error);
 
+static bool StructMemberIsNestedType(StructMember* member) {
+  return member != NULL && member->symbol != NULL &&
+         StorageIs(member->symbol->storage, STO(typedef));
+}
+
+static bool TypeIsNamedCXXNestedType(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      type->info.struct_info->tag_symbol == NULL) {
+    return false;
+  }
+  return !type->info.struct_info->tag_symbol->flags.invented;
+}
+
+static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
+                                   TypeRecord* type, CXXAccess access) {
+  Struct* nested = type->info.struct_info;
+  Symbol* tag = nested->tag_symbol;
+  if (FindStructMember(owner, &tag->name) != NULL) {
+    SyntaxError(parser->syntax, "Duplicate nested type %s", tag->name.value);
+    return;
+  }
+
+  Symbol* alias = NewSymbol(tag->name.value, TypeRecordCopy(type), STO(typedef));
+  alias->location = tag->location;
+  StructMember* member = NewStructMember(alias);
+  member->access = access;
+  AddStructMember(parser, owner, member);
+}
+
 static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 TypeRecord* type,
                                                 Vector* args) {
@@ -1310,6 +1340,9 @@ static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
                                                        Struct* str) {
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
+    if (StructMemberIsNestedType(member)) {
+      continue;
+    }
     if (member->is_static || member->is_anon || StructMemberIsBitField(member)) {
       SyntaxError(parser->syntax,
                   "Class template instantiation is not supported yet");
@@ -2168,6 +2201,18 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
 
   for (size_t i = 0; i < template_struct->members.length; i++) {
     StructMember* member = template_struct->members.value.p[i];
+    if (StructMemberIsNestedType(member)) {
+      TypeRecord* nested_type =
+          SubstituteTemplateParameters(parser, member->symbol->type,
+                                       completed_args);
+      Symbol* nested_symbol =
+          NewSymbol(member->symbol->name.value, nested_type, STO(typedef));
+      nested_symbol->location = member->symbol->location;
+      StructMember* nested_member = NewStructMember(nested_symbol);
+      nested_member->access = member->access;
+      AddStructMember(parser, str, nested_member);
+      continue;
+    }
     if (member->is_member_function) {
       StructMember* instantiated =
           InstantiateTemplateMemberFunction(parser, str, member, completed_args);
@@ -2276,12 +2321,20 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
       FullyQualifiedIdentifier typedef_name;
       FullyQualifiedIdentifierInit(&typedef_name);
-      SyntaxParseFullyQualifiedIdentifier(parser->syntax, &typedef_name);
+      SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+          parser->syntax, &typedef_name, TC(decl));
       Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, &typedef_name);
       if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
         Vector* args = NULL;
         if (symbol->flags.is_template) {
-          args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+          if (typedef_name.template_arguments.length > 0) {
+            Vector* parsed_args =
+                typedef_name.template_arguments.value.p[
+                    typedef_name.template_arguments.length - 1];
+            args = TemplateArgumentVectorCopy(parsed_args);
+          } else {
+            args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+          }
         }
         if (symbol->flags.is_template && args != NULL &&
             !parser->syntax->parsing_template_declaration &&
@@ -4225,6 +4278,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     while (!LexEof(parser->lex)) {
       bool has_inline_body = false;
       if (possible_anon && LexLookingAt(parser->lex, TOK(semicolon))) {
+        if (TypeIsNamedCXXNestedType(member_type)) {
+          AddCXXNestedTypeMember(parser, str, member_type, current_access);
+          break;
+        }
         TypeRecordCalculateSize(member_type);
         AlignNextOffset(str, member_type);
         int anon_base = str->next_offset;

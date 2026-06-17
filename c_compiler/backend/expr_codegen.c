@@ -1360,11 +1360,28 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
 }
 
 static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
+  StructMemberASTNode* member = (StructMemberASTNode*)node->right;
+  if (member->member->is_static) {
+    Symbol* symbol = member->member->symbol;
+    IRNode* var_ref = GeneratorGetVariable(gen, symbol);
+    if ((node->base.flags & kASTNeedAddress) != 0) {
+      return var_ref;
+    }
+    if (TypeIsArray(symbol->type) || TypeIsStructOrUnion(symbol->type)) {
+      IRSetType(var_ref, node->base.type);
+      return var_ref;
+    }
+    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+    IRNode* load = GeneratorEmit(gen, NewIR1(load_op, var_ref));
+    IRSetType(load, node->base.type);
+    IRSetVarUse(load, symbol);
+    return load;
+  }
+
   // Address of struct or pointer.
   IRNode* addr = GenerateExpression(gen, node->left);
 
   // Member, containing information on the location inside the struct.
-  StructMemberASTNode* member = (StructMemberASTNode*)node->right;
 
   addr = GeneratorEmit(
       gen,
