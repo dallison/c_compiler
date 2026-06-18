@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: Template instantiation is not supported yet
+// EXPECT: Template argument deduction failed
 
 template <typename T>
 T same(T left, T right) {

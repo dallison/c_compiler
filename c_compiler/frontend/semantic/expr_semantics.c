@@ -750,6 +750,79 @@ static void AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
 }
 
+typedef enum {
+  kConditionalFunctionArmOther,
+  kConditionalFunctionArmNull,
+  kConditionalFunctionArmFunction,
+  kConditionalFunctionArmFunctionPointer,
+} ConditionalFunctionArmKind;
+
+static ConditionalFunctionArmKind GetConditionalFunctionArmKind(
+    ASTNode* arm, TypeRecord** function_type) {
+  *function_type = NULL;
+  if (TypeIsFunction(arm->type)) {
+    *function_type = arm->type;
+    return kConditionalFunctionArmFunction;
+  }
+  if (TypeIsFunctionPointer(arm->type)) {
+    *function_type = arm->type->next;
+    return kConditionalFunctionArmFunctionPointer;
+  }
+  return IsNullPointer(arm) ? kConditionalFunctionArmNull
+                            : kConditionalFunctionArmOther;
+}
+
+static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
+                                                 BinaryASTNode* colon) {
+  TypeRecord* left_function = NULL;
+  TypeRecord* right_function = NULL;
+  ConditionalFunctionArmKind left_kind =
+      GetConditionalFunctionArmKind(colon->left, &left_function);
+  ConditionalFunctionArmKind right_kind =
+      GetConditionalFunctionArmKind(colon->right, &right_function);
+
+  if (left_kind == kConditionalFunctionArmOther ||
+      right_kind == kConditionalFunctionArmOther ||
+      (left_kind == kConditionalFunctionArmNull &&
+       right_kind == kConditionalFunctionArmNull)) {
+    return false;
+  }
+
+  TypeRecord* common_function =
+      left_function != NULL ? left_function : right_function;
+  if (common_function == NULL ||
+      (left_function != NULL && right_function != NULL &&
+       !TypeEqual(left_function, right_function))) {
+    return false;
+  }
+
+  TypeRecord* common_type = NULL;
+  bool owns_common_type = false;
+  if (left_kind == kConditionalFunctionArmFunctionPointer) {
+    common_type = colon->left->type;
+  } else if (right_kind == kConditionalFunctionArmFunctionPointer) {
+    common_type = colon->right->type;
+  } else {
+    common_type = NewPointerTo(kQualPlain, common_function);
+    owns_common_type = true;
+  }
+
+  if (left_kind == kConditionalFunctionArmFunction) {
+    colon->left->flags |= kASTNeedAddress;
+  }
+  if (right_kind == kConditionalFunctionArmFunction) {
+    colon->right->flags |= kASTNeedAddress;
+  }
+  ASTNodeSetType(colon->left, common_type);
+  ASTNodeSetType(colon->right, common_type);
+  ASTNodeSetType((ASTNode*)colon, common_type);
+  ASTNodeSetType((ASTNode*)node, colon->base.type);
+  if (owns_common_type) {
+    TypeRecordDelete(common_type);
+  }
+  return true;
+}
+
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   if (!TypeIsScalar(node->left->type)) {
@@ -766,6 +839,9 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   if (TypeIsVoid(colon->left->type) || TypeIsVoid(colon->right->type)) {
     ASTNodeSetType((ASTNode*)colon, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
     ASTNodeSetType((ASTNode*)node, colon->base.type);
+    return;
+  }
+  if (TryAnalyzeConditionalFunctionPointer(node, colon)) {
     return;
   }
   InsertNumericConversions(colon, false);
@@ -2207,7 +2283,14 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template) {
-      SemanticError((ASTNode*)node, "Template instantiation is not supported yet");
+      if (TypeIsFunction(id->symbol->type) &&
+          !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+              id->symbol, id->template_arguments, node->children, 0)) {
+        SemanticError((ASTNode*)node, "Template argument deduction failed");
+      } else {
+        SemanticError((ASTNode*)node,
+                      "Template instantiation is not supported yet");
+      }
     }
   }
   num_actual_args = node->children->length;

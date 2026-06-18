@@ -631,6 +631,11 @@ Namespace* SyntaxFindQualifiedNamespace(Syntax* syntax,
   return ns;
 }
 
+static bool TypeContainsTemplateParameterReference(TypeRecord* type);
+static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
+    Syntax* syntax, FullyQualifiedIdentifier* name, size_t component_count,
+    bool allow_dependent_template_args);
+
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name) {
   if (!name->is_qualified && name->components.length == 1) {
@@ -664,8 +669,9 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
   }
   if (symbol == NULL && name->components.length >= 2) {
     Symbol* owner =
-        SyntaxFindQualifiedPrefixSymbol(syntax, name,
-                                        name->components.length - 1);
+        SyntaxFindQualifiedPrefixSymbolImpl(
+            syntax, name, name->components.length - 1,
+            /*allow_dependent_template_args=*/true);
     if (owner != NULL && owner->type != NULL &&
         TypeIsStructOrUnion(owner->type) &&
         owner->type->info.struct_info != NULL) {
@@ -682,8 +688,6 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
   StringDestruct(&last);
   return FollowAlias(symbol);
 }
-
-static bool TypeContainsTemplateParameterReference(TypeRecord* type);
 
 static bool TemplateArgumentIsDependent(TemplateArgument* arg) {
   if (arg == NULL) {
@@ -722,9 +726,9 @@ static bool TypeContainsTemplateParameterReference(TypeRecord* type) {
   return false;
 }
 
-Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
-                                        FullyQualifiedIdentifier* name,
-                                        size_t component_count) {
+static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
+    Syntax* syntax, FullyQualifiedIdentifier* name, size_t component_count,
+    bool allow_dependent_template_args) {
   if (component_count == 0 || component_count > name->components.length) {
     return NULL;
   }
@@ -740,7 +744,8 @@ Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
   if (component_count == 1 && !name->absolute) {
     Symbol* symbol = SyntaxFindSymbol(syntax, name->components.value.p[0]);
     if (template_args != NULL &&
-        !TemplateArgumentVectorIsDependent(template_args) &&
+        (allow_dependent_template_args ||
+         !TemplateArgumentVectorIsDependent(template_args)) &&
         symbol != NULL && symbol->flags.is_template &&
         symbol->type != NULL && TypeIsStructOrUnion(symbol->type)) {
       TypeRecord* type = TypeInstantiateClassTemplate(syntax, symbol,
@@ -752,6 +757,24 @@ Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
       return tag;
     }
     return symbol;
+  }
+
+  Symbol* parent = allow_dependent_template_args
+      ? SyntaxFindQualifiedPrefixSymbolImpl(
+            syntax, name, component_count - 1, allow_dependent_template_args)
+      : NULL;
+  if (parent != NULL && parent->type != NULL &&
+      TypeIsStructOrUnion(parent->type) &&
+      parent->type->info.struct_info != NULL) {
+    String* member_name = name->components.value.p[component_count - 1];
+    StructMember* member =
+        FindStructMember(parent->type->info.struct_info, member_name);
+    if (member != NULL &&
+        (member->is_static ||
+         (member->symbol != NULL &&
+          StorageIs(member->symbol->storage, STO(typedef))))) {
+      return FollowAlias(member->symbol);
+    }
   }
 
   size_t namespace_components = component_count - 1;
@@ -776,7 +799,8 @@ Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
       ? FindGlobalSymbol(last)
       : NamespaceFindSymbol(ns, last);
   if (template_args != NULL &&
-      !TemplateArgumentVectorIsDependent(template_args) &&
+      (allow_dependent_template_args ||
+       !TemplateArgumentVectorIsDependent(template_args)) &&
       symbol != NULL && symbol->flags.is_template &&
       symbol->type != NULL && TypeIsStructOrUnion(symbol->type)) {
     TypeRecord* type = TypeInstantiateClassTemplate(syntax, symbol,
@@ -788,6 +812,14 @@ Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
     return tag;
   }
   return FollowAlias(symbol);
+}
+
+Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
+                                        FullyQualifiedIdentifier* name,
+                                        size_t component_count) {
+  return SyntaxFindQualifiedPrefixSymbolImpl(
+      syntax, name, component_count,
+      /*allow_dependent_template_args=*/false);
 }
 
 Symbol* SyntaxFindQualifiedTag(Syntax* syntax,

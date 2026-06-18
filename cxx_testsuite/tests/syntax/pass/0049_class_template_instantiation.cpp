@@ -77,6 +77,30 @@ struct SizedMemberOwner {
   Inner stored;
 };
 
+template <typename T, int N>
+struct StaticMemberOwner {
+  static T shared;
+  T value;
+  int data[N];
+};
+
+template <typename T, int N>
+struct SizedMethodOwner {
+  struct Inner {
+    T value;
+    int data[N];
+    int total(void) {
+      return value + data[2];
+    }
+    int const_total(void) const {
+      return value + data[2];
+    }
+    static int static_total(T value, int extra) {
+      return value + extra + N;
+    }
+  };
+};
+
 template <typename T>
 struct UsesNested {
   typename NestedOwner<T>::Inner value;
@@ -105,6 +129,30 @@ struct SizedMemberOwner {
     int data[N];
   };
   Inner stored;
+};
+
+template <typename T, int N>
+struct StaticMemberOwner {
+  static T shared;
+  T value;
+  int data[N];
+};
+
+template <typename T, int N>
+struct SizedMethodOwner {
+  struct Inner {
+    T value;
+    int data[N];
+    int total(void) {
+      return value + data[2];
+    }
+    int const_total(void) const {
+      return value + data[2];
+    }
+    static int static_total(T value, int extra) {
+      return value + extra + N;
+    }
+  };
 };
 
 }
@@ -599,9 +647,866 @@ int read_sized_member_owner_array(SizedMemberOwner<T, N> owners[1]) {
 }
 
 template <typename T, int N>
+int read_static_member_owner(StaticMemberOwner<T, N> owner) {
+  return owner.value + owner.data[2];
+}
+
+template <typename T, int N>
+int read_sized_method_nested(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  return value.total();
+}
+
+template <typename T, int N>
+int read_wrapped_sized_method_nested(
+    Holder<typename SizedMethodOwner<T, N>::Inner> value) {
+  return value.value.total();
+}
+
+template <typename T, int N>
+int read_sized_method_nested_pointer(
+    typename SizedMethodOwner<T, N>::Inner* value) {
+  return value->total();
+}
+
+template <typename T, int N>
+int read_sized_method_nested_reference(
+    typename SizedMethodOwner<T, N>::Inner& value) {
+  return value.total();
+}
+
+template <typename T, int N>
+int read_const_sized_method_nested_pointer(
+    const typename SizedMethodOwner<T, N>::Inner* value) {
+  return value->const_total();
+}
+
+template <typename T, int N>
+int read_const_sized_method_nested_reference(
+    const typename SizedMethodOwner<T, N>::Inner& value) {
+  return value.const_total();
+}
+
+template <typename T, int N>
+int read_const_wrapped_sized_method_nested_pointer(
+    const Holder<typename SizedMethodOwner<T, N>::Inner>* value) {
+  return value->value.const_total();
+}
+
+template <typename T, int N>
+int read_const_wrapped_sized_method_nested_reference(
+    const Holder<typename SizedMethodOwner<T, N>::Inner>& value) {
+  return value.value.const_total();
+}
+
+template <typename T, int N>
+int read_sized_static_method_nested(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  return value.static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_wrapped_sized_static_method_nested(
+    Holder<typename SizedMethodOwner<T, N>::Inner> value) {
+  return value.value.static_total(value.value.value, value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_sized_static_method_nested_pointer(
+    typename SizedMethodOwner<T, N>::Inner* value) {
+  return value->static_total(value->value, value->data[2]);
+}
+
+template <typename T, int N>
+int read_sized_static_method_nested_reference(
+    typename SizedMethodOwner<T, N>::Inner& value) {
+  return value.static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_sized_static_method_nested_array(
+    typename SizedMethodOwner<T, N>::Inner value[1]) {
+  return value[0].static_total(value[0].value, value[0].data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method(T value, int extra) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value, extra);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_nested(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                    value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_sized_static_method_nested(
+    Holder<typename SizedMethodOwner<T, N>::Inner> value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value.value,
+                                                    value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_nested_pointer(
+    typename SizedMethodOwner<T, N>::Inner* value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value->value,
+                                                    value->data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_nested_reference(
+    typename SizedMethodOwner<T, N>::Inner& value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                    value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_nested_array(
+    typename SizedMethodOwner<T, N>::Inner value[1]) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value[0].value,
+                                                    value[0].data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_sized_static_method_nested_pointer(
+    const typename SizedMethodOwner<T, N>::Inner* value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value->value,
+                                                    value->data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_sized_static_method_nested_reference(
+    const typename SizedMethodOwner<T, N>::Inner& value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                    value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_sized_static_method_nested_pointer(
+    Holder<typename SizedMethodOwner<T, N>::Inner>* value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value->value.value,
+                                                    value->value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_sized_static_method_nested_reference(
+    Holder<typename SizedMethodOwner<T, N>::Inner>& value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value.value,
+                                                    value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_sized_static_method_nested_pointer(
+    const Holder<typename SizedMethodOwner<T, N>::Inner>* value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value->value.value,
+                                                    value->value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_sized_static_method_nested_reference(
+    const Holder<typename SizedMethodOwner<T, N>::Inner>& value) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value.value.value,
+                                                    value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_sized_static_method_nested_array(
+    Holder<typename SizedMethodOwner<T, N>::Inner> value[1]) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value[0].value.value,
+                                                    value[0].value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_sized_static_method_nested_array(
+    const Holder<typename SizedMethodOwner<T, N>::Inner> value[1]) {
+  return SizedMethodOwner<T, N>::Inner::static_total(value[0].value.value,
+                                                    value[0].value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_alias_sized_static_method_nested(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  typedef typename SizedMethodOwner<T, N>::Inner Inner;
+  return Inner::static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int) = SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_typedef_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  typedef int (*StaticFn)(T, int);
+  StaticFn fn = SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_address_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int) = &SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_function_pointer_array(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  int (*fns[1])(T, int) = {SizedMethodOwner<T, N>::Inner::static_total};
+  return fns[0](value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int call_sized_static_method_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int (*fn)(T, int)) {
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_function_pointer_parameter(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  return call_sized_static_method_function_pointer<T, N>(
+      value, SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_address_function_pointer_parameter(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  return call_sized_static_method_function_pointer<T, N>(
+      value, &SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_function_pointer_assignment(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int);
+  fn = SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_address_function_pointer_assignment(
+    typename SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int);
+  fn = &SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? SizedMethodOwner<T, N>::Inner::static_total
+                           : &SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_designator_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? SizedMethodOwner<T, N>::Inner::static_total
+                           : SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_function_pointer_parameter(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  return call_sized_static_method_function_pointer<T, N>(
+      value, pick ? SizedMethodOwner<T, N>::Inner::static_total
+                  : &SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int (*select_qualified_sized_static_method_conditional_function_pointer(
+    int pick))(T, int) {
+  return pick ? SizedMethodOwner<T, N>::Inner::static_total
+              : &SizedMethodOwner<T, N>::Inner::static_total;
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_function_pointer_return(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      select_qualified_sized_static_method_conditional_function_pointer<T, N>(
+          pick);
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_direct_call(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  return (pick ? SizedMethodOwner<T, N>::Inner::static_total
+               : &SizedMethodOwner<T, N>::Inner::static_total)(value.value,
+                                                               value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_function_null_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? 0 : SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_address_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? &SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_address_function_null_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) = pick ? 0 : &SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_nullptr_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? SizedMethodOwner<T, N>::Inner::static_total : nullptr;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer_assignment(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int);
+  fn = pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer_parameter(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  return call_sized_static_method_function_pointer<T, N>(
+      value, pick ? SizedMethodOwner<T, N>::Inner::static_total : 0);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_direct_call(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  return (pick ? SizedMethodOwner<T, N>::Inner::static_total : 0)(
+      value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_auto_conditional_null_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  auto fn = pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_decltype_conditional_null_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  typedef decltype(pick ? SizedMethodOwner<T, N>::Inner::static_total : 0)
+      StaticFn;
+  StaticFn fn = pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer_compare(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  auto fn = pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn == 0 ? 0 : fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int (*select_qualified_sized_static_method_conditional_null_function_pointer(
+    int pick))(T, int) {
+  return pick ? SizedMethodOwner<T, N>::Inner::static_total : 0;
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer_return(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      select_qualified_sized_static_method_conditional_null_function_pointer<
+          T, N>(pick);
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_sized_static_method_conditional_null_function_pointer_array(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fns[1])(T, int) = {
+      pick ? SizedMethodOwner<T, N>::Inner::static_total : 0};
+  return fns[0](value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_wrapped_qualified_sized_static_method_conditional_null_function_pointer(
+    typename SizedMethodOwner<T, N>::Inner value, int pick) {
+  Holder<int (*)(T, int)> holder = {
+      pick ? SizedMethodOwner<T, N>::Inner::static_total : 0};
+  return holder.value(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_sized_method_nested_array(
+    typename SizedMethodOwner<T, N>::Inner value[1]) {
+  return value[0].total();
+}
+
+template <typename T, int N>
+int read_wrapped_sized_method_nested_array(
+    Holder<typename SizedMethodOwner<T, N>::Inner> value[1]) {
+  return value[0].value.total();
+}
+
+template <typename T, int N>
 int read_namespaced_sized_member_owner_array(
     nested_ns::SizedMemberOwner<T, N> owners[1]) {
   return owners[0].stored.value + owners[0].stored.data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_static_member_owner(
+    nested_ns::StaticMemberOwner<T, N> owner) {
+  return owner.value + owner.data[2];
+}
+
+template <typename T, int N>
+int read_namespaced_sized_method_nested(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  return value.total();
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_method_nested(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value) {
+  return value.value.total();
+}
+
+template <typename T, int N>
+int read_namespaced_sized_method_nested_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner* value) {
+  return value->total();
+}
+
+template <typename T, int N>
+int read_namespaced_sized_method_nested_reference(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner& value) {
+  return value.total();
+}
+
+template <typename T, int N>
+int read_const_namespaced_sized_method_nested_pointer(
+    const typename nested_ns::SizedMethodOwner<T, N>::Inner* value) {
+  return value->const_total();
+}
+
+template <typename T, int N>
+int read_const_namespaced_sized_method_nested_reference(
+    const typename nested_ns::SizedMethodOwner<T, N>::Inner& value) {
+  return value.const_total();
+}
+
+template <typename T, int N>
+int read_const_wrapped_namespaced_sized_method_nested_pointer(
+    const Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>* value) {
+  return value->value.const_total();
+}
+
+template <typename T, int N>
+int read_const_wrapped_namespaced_sized_method_nested_reference(
+    const Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>& value) {
+  return value.value.const_total();
+}
+
+template <typename T, int N>
+int read_namespaced_sized_static_method_nested(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  return value.static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_static_method_nested(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value) {
+  return value.value.static_total(value.value.value, value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_namespaced_sized_static_method_nested_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner* value) {
+  return value->static_total(value->value, value->data[2]);
+}
+
+template <typename T, int N>
+int read_namespaced_sized_static_method_nested_reference(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner& value) {
+  return value.static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_namespaced_sized_static_method_nested_array(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value[1]) {
+  return value[0].static_total(value[0].value, value[0].data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method(T value, int extra) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value, extra);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_nested(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                               value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_namespaced_sized_static_method_nested(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value.value.value, value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_nested_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner* value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value->value,
+                                                               value->data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_nested_reference(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner& value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                               value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_nested_array(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value[1]) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value[0].value, value[0].data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_namespaced_sized_static_method_nested_pointer(
+    const typename nested_ns::SizedMethodOwner<T, N>::Inner* value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value->value,
+                                                               value->data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_namespaced_sized_static_method_nested_reference(
+    const typename nested_ns::SizedMethodOwner<T, N>::Inner& value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(value.value,
+                                                               value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_namespaced_sized_static_method_nested_pointer(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>* value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value->value.value, value->value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_namespaced_sized_static_method_nested_reference(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>& value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value.value.value, value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer(
+    const Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>* value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value->value.value, value->value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference(
+    const Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner>& value) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value.value.value, value.value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_wrapped_namespaced_sized_static_method_nested_array(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value[1]) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value[0].value.value, value[0].value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_const_wrapped_namespaced_sized_static_method_nested_array(
+    const Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value[1]) {
+  return nested_ns::SizedMethodOwner<T, N>::Inner::static_total(
+      value[0].value.value, value[0].value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_alias_namespaced_sized_static_method_nested(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  typedef typename nested_ns::SizedMethodOwner<T, N>::Inner Inner;
+  return Inner::static_total(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int) = nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_typedef_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  typedef int (*StaticFn)(T, int);
+  StaticFn fn = nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_address_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int) = &nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_function_pointer_array(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  int (*fns[1])(T, int) = {
+      nested_ns::SizedMethodOwner<T, N>::Inner::static_total};
+  return fns[0](value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int call_namespaced_sized_static_method_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value,
+    int (*fn)(T, int)) {
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_function_pointer_parameter(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  return call_namespaced_sized_static_method_function_pointer<T, N>(
+      value, nested_ns::SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_address_function_pointer_parameter(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  return call_namespaced_sized_static_method_function_pointer<T, N>(
+      value, &nested_ns::SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_function_pointer_assignment(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int);
+  fn = nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_address_function_pointer_assignment(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value) {
+  int (*fn)(T, int);
+  fn = &nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total
+           : &nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total
+           : nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  return call_namespaced_sized_static_method_function_pointer<T, N>(
+      value, pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total
+                  : &nested_ns::SizedMethodOwner<T, N>::Inner::static_total);
+}
+
+template <typename T, int N>
+int (*select_qualified_namespaced_sized_static_method_conditional_function_pointer(
+    int pick))(T, int) {
+  return pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total
+              : &nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_function_pointer_return(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      select_qualified_namespaced_sized_static_method_conditional_function_pointer<
+          T, N>(pick);
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_direct_call(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  return (pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total
+               : &nested_ns::SizedMethodOwner<T, N>::Inner::static_total)(
+      value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_function_null_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? 0 : nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? &nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? 0 : &nested_ns::SizedMethodOwner<T, N>::Inner::static_total;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : nullptr;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int);
+  fn = pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  return call_namespaced_sized_static_method_function_pointer<T, N>(
+      value, pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_direct_call(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  return (pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0)(
+      value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  auto fn = pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  typedef decltype(
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0)
+      StaticFn;
+  StaticFn fn =
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  auto fn = pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+  return fn == 0 ? 0 : fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int (*select_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+    int pick))(T, int) {
+  return pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0;
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fn)(T, int) =
+      select_qualified_namespaced_sized_static_method_conditional_null_function_pointer<
+          T, N>(pick);
+  return fn(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  int (*fns[1])(T, int) = {
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0};
+  return fns[0](value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value, int pick) {
+  Holder<int (*)(T, int)> holder = {
+      pick ? nested_ns::SizedMethodOwner<T, N>::Inner::static_total : 0};
+  return holder.value(value.value, value.data[2]);
+}
+
+template <typename T, int N>
+int read_namespaced_sized_method_nested_array(
+    typename nested_ns::SizedMethodOwner<T, N>::Inner value[1]) {
+  return value[0].total();
+}
+
+template <typename T, int N>
+int read_wrapped_namespaced_sized_method_nested_array(
+    Holder<typename nested_ns::SizedMethodOwner<T, N>::Inner> value[1]) {
+  return value[0].value.total();
 }
 
 template <typename T, int N>
@@ -974,6 +1879,177 @@ int main(void) {
   sized_member_owner_array[0].stored.data[2] = 38;
   int sized_member_owner_array_value =
       read_sized_member_owner_array(sized_member_owner_array);
+  StaticMemberOwner<int, 3> static_member_owner;
+  static_member_owner.value = 179;
+  static_member_owner.data[2] = 36;
+  int static_member_owner_value =
+      read_static_member_owner(static_member_owner);
+  SizedMethodOwner<int, 3>::Inner sized_method_nested;
+  sized_method_nested.value = 193;
+  sized_method_nested.data[2] = 42;
+  int sized_method_nested_value =
+      read_sized_method_nested(sized_method_nested);
+  Holder<SizedMethodOwner<int, 3>::Inner> wrapped_sized_method_nested;
+  wrapped_sized_method_nested.value.value = 199;
+  wrapped_sized_method_nested.value.data[2] = 46;
+  int wrapped_sized_method_nested_value =
+      read_wrapped_sized_method_nested(wrapped_sized_method_nested);
+  int sized_method_nested_pointer_value =
+      read_sized_method_nested_pointer(&sized_method_nested);
+  int sized_method_nested_reference_value =
+      read_sized_method_nested_reference(sized_method_nested);
+  int const_sized_method_nested_pointer_value =
+      read_const_sized_method_nested_pointer(&sized_method_nested);
+  int const_sized_method_nested_reference_value =
+      read_const_sized_method_nested_reference(sized_method_nested);
+  int const_wrapped_sized_method_nested_pointer_value =
+      read_const_wrapped_sized_method_nested_pointer(
+          &wrapped_sized_method_nested);
+  int const_wrapped_sized_method_nested_reference_value =
+      read_const_wrapped_sized_method_nested_reference(
+          wrapped_sized_method_nested);
+  int sized_static_method_nested_value =
+      read_sized_static_method_nested(sized_method_nested);
+  int wrapped_sized_static_method_nested_value =
+      read_wrapped_sized_static_method_nested(wrapped_sized_method_nested);
+  int sized_static_method_nested_pointer_value =
+      read_sized_static_method_nested_pointer(&sized_method_nested);
+  int sized_static_method_nested_reference_value =
+      read_sized_static_method_nested_reference(sized_method_nested);
+  SizedMethodOwner<int, 3>::Inner sized_method_nested_array[1];
+  sized_method_nested_array[0].value = 223;
+  sized_method_nested_array[0].data[2] = 50;
+  int sized_method_nested_array_value =
+      read_sized_method_nested_array(sized_method_nested_array);
+  Holder<SizedMethodOwner<int, 3>::Inner> wrapped_sized_method_nested_array[1];
+  wrapped_sized_method_nested_array[0].value.value = 227;
+  wrapped_sized_method_nested_array[0].value.data[2] = 52;
+  int wrapped_sized_method_nested_array_value =
+      read_wrapped_sized_method_nested_array(
+          wrapped_sized_method_nested_array);
+  int sized_static_method_nested_array_value =
+      read_sized_static_method_nested_array(sized_method_nested_array);
+  int qualified_sized_static_method_value =
+      read_qualified_sized_static_method<int, 3>(239, 58);
+  int qualified_sized_static_method_nested_value =
+      read_qualified_sized_static_method_nested(sized_method_nested);
+  int qualified_wrapped_sized_static_method_nested_value =
+      read_qualified_wrapped_sized_static_method_nested(
+          wrapped_sized_method_nested);
+  int qualified_sized_static_method_nested_pointer_value =
+      read_qualified_sized_static_method_nested_pointer(&sized_method_nested);
+  int qualified_sized_static_method_nested_reference_value =
+      read_qualified_sized_static_method_nested_reference(sized_method_nested);
+  int qualified_sized_static_method_nested_array_value =
+      read_qualified_sized_static_method_nested_array(
+          sized_method_nested_array);
+  int qualified_const_sized_static_method_nested_pointer_value =
+      read_qualified_const_sized_static_method_nested_pointer(
+          &sized_method_nested);
+  int qualified_const_sized_static_method_nested_reference_value =
+      read_qualified_const_sized_static_method_nested_reference(
+          sized_method_nested);
+  int qualified_wrapped_sized_static_method_nested_pointer_value =
+      read_qualified_wrapped_sized_static_method_nested_pointer(
+          &wrapped_sized_method_nested);
+  int qualified_wrapped_sized_static_method_nested_reference_value =
+      read_qualified_wrapped_sized_static_method_nested_reference(
+          wrapped_sized_method_nested);
+  int qualified_const_wrapped_sized_static_method_nested_pointer_value =
+      read_qualified_const_wrapped_sized_static_method_nested_pointer(
+          &wrapped_sized_method_nested);
+  int qualified_const_wrapped_sized_static_method_nested_reference_value =
+      read_qualified_const_wrapped_sized_static_method_nested_reference(
+          wrapped_sized_method_nested);
+  int qualified_wrapped_sized_static_method_nested_array_value =
+      read_qualified_wrapped_sized_static_method_nested_array(
+          wrapped_sized_method_nested_array);
+  int qualified_const_wrapped_sized_static_method_nested_array_value =
+      read_qualified_const_wrapped_sized_static_method_nested_array(
+          wrapped_sized_method_nested_array);
+  int qualified_alias_sized_static_method_nested_value =
+      read_qualified_alias_sized_static_method_nested(sized_method_nested);
+  int qualified_sized_static_method_function_pointer_value =
+      read_qualified_sized_static_method_function_pointer(
+          sized_method_nested);
+  int qualified_sized_static_method_typedef_function_pointer_value =
+      read_qualified_sized_static_method_typedef_function_pointer(
+          sized_method_nested);
+  int qualified_sized_static_method_address_function_pointer_value =
+      read_qualified_sized_static_method_address_function_pointer(
+          sized_method_nested);
+  int qualified_sized_static_method_function_pointer_array_value =
+      read_qualified_sized_static_method_function_pointer_array(
+          sized_method_nested);
+  int qualified_sized_static_method_function_pointer_parameter_value =
+      read_qualified_sized_static_method_function_pointer_parameter(
+          sized_method_nested);
+  int qualified_sized_static_method_address_function_pointer_parameter_value =
+      read_qualified_sized_static_method_address_function_pointer_parameter(
+          sized_method_nested);
+  int qualified_sized_static_method_function_pointer_assignment_value =
+      read_qualified_sized_static_method_function_pointer_assignment(
+          sized_method_nested);
+  int qualified_sized_static_method_address_function_pointer_assignment_value =
+      read_qualified_sized_static_method_address_function_pointer_assignment(
+          sized_method_nested);
+  int qualified_sized_static_method_conditional_function_pointer_value =
+      read_qualified_sized_static_method_conditional_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_designator_function_pointer_value =
+      read_qualified_sized_static_method_conditional_designator_function_pointer(
+          sized_method_nested, 0);
+  int qualified_sized_static_method_conditional_function_pointer_parameter_value =
+      read_qualified_sized_static_method_conditional_function_pointer_parameter(
+          sized_method_nested, 0);
+  int qualified_sized_static_method_conditional_function_pointer_return_value =
+      read_qualified_sized_static_method_conditional_function_pointer_return(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_direct_call_value =
+      read_qualified_sized_static_method_conditional_direct_call(
+          sized_method_nested, 0);
+  int qualified_sized_static_method_conditional_null_function_pointer_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_function_null_pointer_value =
+      read_qualified_sized_static_method_conditional_function_null_pointer(
+          sized_method_nested, 0);
+  int qualified_sized_static_method_conditional_null_address_function_pointer_value =
+      read_qualified_sized_static_method_conditional_null_address_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_address_function_null_pointer_value =
+      read_qualified_sized_static_method_conditional_address_function_null_pointer(
+          sized_method_nested, 0);
+  int qualified_sized_static_method_conditional_nullptr_function_pointer_value =
+      read_qualified_sized_static_method_conditional_nullptr_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_function_pointer_assignment_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer_assignment(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_function_pointer_parameter_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer_parameter(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_direct_call_value =
+      read_qualified_sized_static_method_conditional_null_direct_call(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_auto_conditional_null_function_pointer_value =
+      read_qualified_sized_static_method_auto_conditional_null_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_decltype_conditional_null_function_pointer_value =
+      read_qualified_sized_static_method_decltype_conditional_null_function_pointer(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_function_pointer_compare_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer_compare(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_function_pointer_return_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer_return(
+          sized_method_nested, 1);
+  int qualified_sized_static_method_conditional_null_function_pointer_array_value =
+      read_qualified_sized_static_method_conditional_null_function_pointer_array(
+          sized_method_nested, 1);
+  int wrapped_qualified_sized_static_method_conditional_null_function_pointer_value =
+      read_wrapped_qualified_sized_static_method_conditional_null_function_pointer(
+          sized_method_nested, 1);
   SizedNestedOwner<int, 3>::Inner made_sized_dependent_nested =
       make_sized_dependent_nested<int, 3>(101, 14);
   int made_sized_dependent_nested_value =
@@ -1039,6 +2115,196 @@ int main(void) {
   int namespaced_sized_member_owner_array_value =
       read_namespaced_sized_member_owner_array(
           namespaced_sized_member_owner_array);
+  nested_ns::StaticMemberOwner<int, 3> namespaced_static_member_owner;
+  namespaced_static_member_owner.value = 189;
+  namespaced_static_member_owner.data[2] = 38;
+  int namespaced_static_member_owner_value =
+      read_namespaced_static_member_owner(namespaced_static_member_owner);
+  nested_ns::SizedMethodOwner<int, 3>::Inner
+      namespaced_sized_method_nested;
+  namespaced_sized_method_nested.value = 197;
+  namespaced_sized_method_nested.data[2] = 44;
+  int namespaced_sized_method_nested_value =
+      read_namespaced_sized_method_nested(namespaced_sized_method_nested);
+  Holder<nested_ns::SizedMethodOwner<int, 3>::Inner>
+      wrapped_namespaced_sized_method_nested;
+  wrapped_namespaced_sized_method_nested.value.value = 211;
+  wrapped_namespaced_sized_method_nested.value.data[2] = 48;
+  int wrapped_namespaced_sized_method_nested_value =
+      read_wrapped_namespaced_sized_method_nested(
+          wrapped_namespaced_sized_method_nested);
+  int namespaced_sized_method_nested_pointer_value =
+      read_namespaced_sized_method_nested_pointer(
+          &namespaced_sized_method_nested);
+  int namespaced_sized_method_nested_reference_value =
+      read_namespaced_sized_method_nested_reference(
+          namespaced_sized_method_nested);
+  int const_namespaced_sized_method_nested_pointer_value =
+      read_const_namespaced_sized_method_nested_pointer(
+          &namespaced_sized_method_nested);
+  int const_namespaced_sized_method_nested_reference_value =
+      read_const_namespaced_sized_method_nested_reference(
+          namespaced_sized_method_nested);
+  int const_wrapped_namespaced_sized_method_nested_pointer_value =
+      read_const_wrapped_namespaced_sized_method_nested_pointer(
+          &wrapped_namespaced_sized_method_nested);
+  int const_wrapped_namespaced_sized_method_nested_reference_value =
+      read_const_wrapped_namespaced_sized_method_nested_reference(
+          wrapped_namespaced_sized_method_nested);
+  int namespaced_sized_static_method_nested_value =
+      read_namespaced_sized_static_method_nested(
+          namespaced_sized_method_nested);
+  int wrapped_namespaced_sized_static_method_nested_value =
+      read_wrapped_namespaced_sized_static_method_nested(
+          wrapped_namespaced_sized_method_nested);
+  int namespaced_sized_static_method_nested_pointer_value =
+      read_namespaced_sized_static_method_nested_pointer(
+          &namespaced_sized_method_nested);
+  int namespaced_sized_static_method_nested_reference_value =
+      read_namespaced_sized_static_method_nested_reference(
+          namespaced_sized_method_nested);
+  nested_ns::SizedMethodOwner<int, 3>::Inner
+      namespaced_sized_method_nested_array[1];
+  namespaced_sized_method_nested_array[0].value = 229;
+  namespaced_sized_method_nested_array[0].data[2] = 54;
+  int namespaced_sized_method_nested_array_value =
+      read_namespaced_sized_method_nested_array(
+          namespaced_sized_method_nested_array);
+  Holder<nested_ns::SizedMethodOwner<int, 3>::Inner>
+      wrapped_namespaced_sized_method_nested_array[1];
+  wrapped_namespaced_sized_method_nested_array[0].value.value = 233;
+  wrapped_namespaced_sized_method_nested_array[0].value.data[2] = 56;
+  int wrapped_namespaced_sized_method_nested_array_value =
+      read_wrapped_namespaced_sized_method_nested_array(
+          wrapped_namespaced_sized_method_nested_array);
+  int namespaced_sized_static_method_nested_array_value =
+      read_namespaced_sized_static_method_nested_array(
+          namespaced_sized_method_nested_array);
+  int qualified_namespaced_sized_static_method_value =
+      read_qualified_namespaced_sized_static_method<int, 3>(241, 60);
+  int qualified_namespaced_sized_static_method_nested_value =
+      read_qualified_namespaced_sized_static_method_nested(
+          namespaced_sized_method_nested);
+  int qualified_wrapped_namespaced_sized_static_method_nested_value =
+      read_qualified_wrapped_namespaced_sized_static_method_nested(
+          wrapped_namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_nested_pointer_value =
+      read_qualified_namespaced_sized_static_method_nested_pointer(
+          &namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_nested_reference_value =
+      read_qualified_namespaced_sized_static_method_nested_reference(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_nested_array_value =
+      read_qualified_namespaced_sized_static_method_nested_array(
+          namespaced_sized_method_nested_array);
+  int qualified_const_namespaced_sized_static_method_nested_pointer_value =
+      read_qualified_const_namespaced_sized_static_method_nested_pointer(
+          &namespaced_sized_method_nested);
+  int qualified_const_namespaced_sized_static_method_nested_reference_value =
+      read_qualified_const_namespaced_sized_static_method_nested_reference(
+          namespaced_sized_method_nested);
+  int qualified_wrapped_namespaced_sized_static_method_nested_pointer_value =
+      read_qualified_wrapped_namespaced_sized_static_method_nested_pointer(
+          &wrapped_namespaced_sized_method_nested);
+  int qualified_wrapped_namespaced_sized_static_method_nested_reference_value =
+      read_qualified_wrapped_namespaced_sized_static_method_nested_reference(
+          wrapped_namespaced_sized_method_nested);
+  int qualified_const_wrapped_namespaced_sized_static_method_nested_pointer_value =
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer(
+          &wrapped_namespaced_sized_method_nested);
+  int qualified_const_wrapped_namespaced_sized_static_method_nested_reference_value =
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference(
+          wrapped_namespaced_sized_method_nested);
+  int qualified_wrapped_namespaced_sized_static_method_nested_array_value =
+      read_qualified_wrapped_namespaced_sized_static_method_nested_array(
+          wrapped_namespaced_sized_method_nested_array);
+  int qualified_const_wrapped_namespaced_sized_static_method_nested_array_value =
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_array(
+          wrapped_namespaced_sized_method_nested_array);
+  int qualified_alias_namespaced_sized_static_method_nested_value =
+      read_qualified_alias_namespaced_sized_static_method_nested(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_function_pointer(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_typedef_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_typedef_function_pointer(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_address_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_address_function_pointer(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_function_pointer_array_value =
+      read_qualified_namespaced_sized_static_method_function_pointer_array(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_function_pointer_parameter_value =
+      read_qualified_namespaced_sized_static_method_function_pointer_parameter(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_address_function_pointer_parameter_value =
+      read_qualified_namespaced_sized_static_method_address_function_pointer_parameter(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_function_pointer_assignment_value =
+      read_qualified_namespaced_sized_static_method_function_pointer_assignment(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_address_function_pointer_assignment_value =
+      read_qualified_namespaced_sized_static_method_address_function_pointer_assignment(
+          namespaced_sized_method_nested);
+  int qualified_namespaced_sized_static_method_conditional_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer(
+          namespaced_sized_method_nested, 0);
+  int qualified_namespaced_sized_static_method_conditional_designator_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_function_pointer_parameter_value =
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_function_pointer_return_value =
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_return(
+          namespaced_sized_method_nested, 0);
+  int qualified_namespaced_sized_static_method_conditional_direct_call_value =
+      read_qualified_namespaced_sized_static_method_conditional_direct_call(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_function_null_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_function_null_pointer(
+          namespaced_sized_method_nested, 0);
+  int qualified_namespaced_sized_static_method_conditional_null_address_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_address_function_null_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer(
+          namespaced_sized_method_nested, 0);
+  int qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_direct_call_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_direct_call(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer_value =
+      read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_return_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return(
+          namespaced_sized_method_nested, 1);
+  int qualified_namespaced_sized_static_method_conditional_null_function_pointer_array_value =
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array(
+          namespaced_sized_method_nested, 1);
+  int wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
+      read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+          namespaced_sized_method_nested, 1);
   nested_ns::SizedOwner<int, 3>::Inner made_namespaced_sized_dependent_nested =
       make_namespaced_sized_dependent_nested<int, 3>(167, 34);
   int made_namespaced_sized_dependent_nested_value =
@@ -1154,6 +2420,64 @@ int main(void) {
          const_wrapped_sized_dependent_reference_value +
          sized_dependent_array_value + wrapped_sized_dependent_array_value +
          sized_member_owner_array_value +
+         static_member_owner_value +
+         sized_method_nested_value +
+         wrapped_sized_method_nested_value +
+         sized_method_nested_pointer_value +
+         sized_method_nested_reference_value +
+         const_sized_method_nested_pointer_value +
+         const_sized_method_nested_reference_value +
+         const_wrapped_sized_method_nested_pointer_value +
+         const_wrapped_sized_method_nested_reference_value +
+         sized_static_method_nested_value +
+         wrapped_sized_static_method_nested_value +
+         sized_static_method_nested_pointer_value +
+         sized_static_method_nested_reference_value +
+         sized_method_nested_array_value +
+         wrapped_sized_method_nested_array_value +
+         sized_static_method_nested_array_value +
+         qualified_sized_static_method_value +
+         qualified_sized_static_method_nested_value +
+         qualified_wrapped_sized_static_method_nested_value +
+         qualified_sized_static_method_nested_pointer_value +
+         qualified_sized_static_method_nested_reference_value +
+         qualified_sized_static_method_nested_array_value +
+         qualified_const_sized_static_method_nested_pointer_value +
+         qualified_const_sized_static_method_nested_reference_value +
+         qualified_wrapped_sized_static_method_nested_pointer_value +
+         qualified_wrapped_sized_static_method_nested_reference_value +
+         qualified_const_wrapped_sized_static_method_nested_pointer_value +
+         qualified_const_wrapped_sized_static_method_nested_reference_value +
+         qualified_wrapped_sized_static_method_nested_array_value +
+         qualified_const_wrapped_sized_static_method_nested_array_value +
+         qualified_alias_sized_static_method_nested_value +
+         qualified_sized_static_method_function_pointer_value +
+         qualified_sized_static_method_typedef_function_pointer_value +
+         qualified_sized_static_method_address_function_pointer_value +
+         qualified_sized_static_method_function_pointer_array_value +
+         qualified_sized_static_method_function_pointer_parameter_value +
+         qualified_sized_static_method_address_function_pointer_parameter_value +
+         qualified_sized_static_method_function_pointer_assignment_value +
+         qualified_sized_static_method_address_function_pointer_assignment_value +
+         qualified_sized_static_method_conditional_function_pointer_value +
+         qualified_sized_static_method_conditional_designator_function_pointer_value +
+         qualified_sized_static_method_conditional_function_pointer_parameter_value +
+         qualified_sized_static_method_conditional_function_pointer_return_value +
+         qualified_sized_static_method_conditional_direct_call_value +
+         qualified_sized_static_method_conditional_null_function_pointer_value +
+         qualified_sized_static_method_conditional_function_null_pointer_value +
+         qualified_sized_static_method_conditional_null_address_function_pointer_value +
+         qualified_sized_static_method_conditional_address_function_null_pointer_value +
+         qualified_sized_static_method_conditional_nullptr_function_pointer_value +
+         qualified_sized_static_method_conditional_null_function_pointer_assignment_value +
+         qualified_sized_static_method_conditional_null_function_pointer_parameter_value +
+         qualified_sized_static_method_conditional_null_direct_call_value +
+         qualified_sized_static_method_auto_conditional_null_function_pointer_value +
+         qualified_sized_static_method_decltype_conditional_null_function_pointer_value +
+         qualified_sized_static_method_conditional_null_function_pointer_compare_value +
+         qualified_sized_static_method_conditional_null_function_pointer_return_value +
+         qualified_sized_static_method_conditional_null_function_pointer_array_value +
+         wrapped_qualified_sized_static_method_conditional_null_function_pointer_value +
          made_sized_dependent_nested_value +
          made_wrapped_sized_dependent_nested_value +
          namespaced_sized_dependent_nested_value +
@@ -1169,6 +2493,64 @@ int main(void) {
          namespaced_sized_dependent_array_value +
          wrapped_namespaced_sized_dependent_array_value +
          namespaced_sized_member_owner_array_value +
+         namespaced_static_member_owner_value +
+         namespaced_sized_method_nested_value +
+         wrapped_namespaced_sized_method_nested_value +
+         namespaced_sized_method_nested_pointer_value +
+         namespaced_sized_method_nested_reference_value +
+         const_namespaced_sized_method_nested_pointer_value +
+         const_namespaced_sized_method_nested_reference_value +
+         const_wrapped_namespaced_sized_method_nested_pointer_value +
+         const_wrapped_namespaced_sized_method_nested_reference_value +
+         namespaced_sized_static_method_nested_value +
+         wrapped_namespaced_sized_static_method_nested_value +
+         namespaced_sized_static_method_nested_pointer_value +
+         namespaced_sized_static_method_nested_reference_value +
+         namespaced_sized_method_nested_array_value +
+         wrapped_namespaced_sized_method_nested_array_value +
+         namespaced_sized_static_method_nested_array_value +
+         qualified_namespaced_sized_static_method_value +
+         qualified_namespaced_sized_static_method_nested_value +
+         qualified_wrapped_namespaced_sized_static_method_nested_value +
+         qualified_namespaced_sized_static_method_nested_pointer_value +
+         qualified_namespaced_sized_static_method_nested_reference_value +
+         qualified_namespaced_sized_static_method_nested_array_value +
+         qualified_const_namespaced_sized_static_method_nested_pointer_value +
+         qualified_const_namespaced_sized_static_method_nested_reference_value +
+         qualified_wrapped_namespaced_sized_static_method_nested_pointer_value +
+         qualified_wrapped_namespaced_sized_static_method_nested_reference_value +
+         qualified_const_wrapped_namespaced_sized_static_method_nested_pointer_value +
+         qualified_const_wrapped_namespaced_sized_static_method_nested_reference_value +
+         qualified_wrapped_namespaced_sized_static_method_nested_array_value +
+         qualified_const_wrapped_namespaced_sized_static_method_nested_array_value +
+         qualified_alias_namespaced_sized_static_method_nested_value +
+         qualified_namespaced_sized_static_method_function_pointer_value +
+         qualified_namespaced_sized_static_method_typedef_function_pointer_value +
+         qualified_namespaced_sized_static_method_address_function_pointer_value +
+         qualified_namespaced_sized_static_method_function_pointer_array_value +
+         qualified_namespaced_sized_static_method_function_pointer_parameter_value +
+         qualified_namespaced_sized_static_method_address_function_pointer_parameter_value +
+         qualified_namespaced_sized_static_method_function_pointer_assignment_value +
+         qualified_namespaced_sized_static_method_address_function_pointer_assignment_value +
+         qualified_namespaced_sized_static_method_conditional_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_designator_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_function_pointer_parameter_value +
+         qualified_namespaced_sized_static_method_conditional_function_pointer_return_value +
+         qualified_namespaced_sized_static_method_conditional_direct_call_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_function_null_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_null_address_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_address_function_null_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter_value +
+         qualified_namespaced_sized_static_method_conditional_null_direct_call_value +
+         qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer_value +
+         qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_return_value +
+         qualified_namespaced_sized_static_method_conditional_null_function_pointer_array_value +
+         wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer_value +
          made_namespaced_sized_dependent_nested_value +
          made_wrapped_namespaced_sized_dependent_nested_value +
          dependent_pointer_value + dependent_reference_value +

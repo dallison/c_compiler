@@ -1,5 +1,4 @@
 // RUN: -std=c++20
-// EXPECT: Class template instantiation is not supported yet
 
 template <typename T>
 struct WithStaticMemberFunction {

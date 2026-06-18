@@ -1118,11 +1118,16 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   IRNode* addr = GenerateExpression(gen, node->left);
   IRNode* index = GenerateExpression(gen, node->right);
   IRNode* scaled_index;
-  if (TypeIsVLA(node->left->type->next)) {
-    IRNode* size = node->left->type->next->info.array.size.vla.codegen_info;
+  TypeRecord* element_type =
+      node->left->type != NULL ? node->left->type->next : NULL;
+  if (element_type == NULL) {
+    element_type = node->base.type;
+  }
+  if (TypeIsVLA(element_type)) {
+    IRNode* size = element_type->info.array.size.vla.codegen_info;
     scaled_index = GeneratorEmit(gen, NewIR2(IR_OP(muli), index, size));
   } else {
-    int size = node->left->type->next->size;
+    int size = element_type != NULL ? element_type->size : 1;
     if (IRIsConst(index)) {
       // Index is constant, do scale in compiler.
       IRConstant* c = (IRConstant*)index;
@@ -1350,6 +1355,10 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   IRNode* expr = GenerateExpression(gen, node->sub);
   if (node->sub->op == AST_OP(identifier) &&
       TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type)) {
+    IRSetType(expr, node->base.type);
+    return expr;
+  }
+  if (TypeIsFunction(node->sub->type)) {
     IRSetType(expr, node->base.type);
     return expr;
   }

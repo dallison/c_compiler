@@ -350,6 +350,9 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(struct Syntax* syntax,
 Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
     Vector* actuals, size_t first_formal_arg);
+bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+    Symbol* templ, Vector* explicit_args, Vector* actuals,
+    size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
 
@@ -391,9 +394,12 @@ inline bool TypeIsFunctionDefinition(TypeRecord* type) {
 }
 
 inline bool TypeIsFunctionPointer(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   if (TypeIsPointer(type)) {
     TypeRecord* subtype = type->next;
-    return TypeIsFunction(subtype);
+    return subtype != NULL && TypeIsFunction(subtype);
   }
   return TypeIsFunction(type);
 }

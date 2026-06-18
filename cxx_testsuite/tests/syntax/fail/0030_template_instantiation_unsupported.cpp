@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: Template instantiation is not supported yet
+// EXPECT: Function template definition is required for instantiation
 
 template <typename T>
 T identity(T value);
