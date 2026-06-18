@@ -358,7 +358,12 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
   if (stash_call_results) {
     right = StashCallResult(gen, right);
   }
-  IROpcode opcode = FindIROpcode(node->right, node->base.op);
+  ASTNode* opcode_type_node =
+      (node->base.op == AST_OP(plus) || node->base.op == AST_OP(minus)) &&
+              TypeIsPointerOrArray(node->base.type)
+          ? &node->base
+          : node->right;
+  IROpcode opcode = FindIROpcode(opcode_type_node, node->base.op);
   return IRSetType(GeneratorEmit(gen, NewIR2(opcode, left, right)), node->base.type);
 }
 
@@ -1395,7 +1400,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
   addr = GeneratorEmit(
       gen,
       NewIR2(IR_OP(adda), addr,
-             GeneratorGetIntConstant(gen, NULL, member->member->byte_offset)));
+             GeneratorGetIntConstant(gen, NULL, member->byte_offset)));
   IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
   if ((node->base.flags & kASTNeedAddress) != 0) {
     // Only address needed.

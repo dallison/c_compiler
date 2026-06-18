@@ -1462,6 +1462,9 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static StructMember* FindCXXConstructor(TypeRecord* type);
+static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
+                                                    Vector* statements,
+                                                    SourceLocation location);
 
 static Symbol* FindThisSymbol(Syntax* syntax) {
   String this_name;
@@ -1504,10 +1507,37 @@ static StructMember* FindCXXBaseSpecialMember(CXXBaseSpecifier* base,
   return member;
 }
 
+static bool TypeNeedsCXXCompleteObjectArgument(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+         StructHasVirtualBases(type->info.struct_info);
+}
+
+static ASTNode* NewCXXCompleteObjectArgument(bool complete_object,
+                                            SourceLocation location) {
+  return NewIntConstantASTNode(complete_object ? 1 : 0,
+                               NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               location);
+}
+
+static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
+                                             bool complete_object,
+                                             SourceLocation location) {
+  if (actuals == NULL || !TypeNeedsCXXCompleteObjectArgument(type)) {
+    return;
+  }
+  ASTNode* arg = NewCXXCompleteObjectArgument(complete_object, location);
+  if (actuals->length == 0) {
+    VectorAppend(actuals, arg);
+  } else {
+    VectorInsertBefore(actuals, 0, arg);
+  }
+}
+
 static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
                                             TypeRecord* receiver_func,
                                             CXXBaseSpecifier* base,
                                             bool destructor,
+                                            bool complete_object,
                                             Vector* actuals,
                                             SourceLocation location) {
   StructMember* member = FindCXXBaseSpecialMember(base, destructor);
@@ -1523,6 +1553,11 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
     }
     return NULL;
   }
+  if (actuals == NULL) {
+    actuals = NewVector();
+  }
+  CXXPrependCompleteObjectArgument(base->type, actuals, complete_object,
+                                   location);
 
   String member_name;
   if (destructor) {
@@ -1539,8 +1574,30 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
       NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver, member_node);
   ASTNode* call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access,
-                       actuals != NULL ? actuals : NewVector());
+                       actuals);
   return NewExpressionStatementASTNode(call, location);
+}
+
+static ASTNode* NewCXXVirtualBaseSpecialMemberCall(Syntax* syntax,
+                                                   TypeRecord* receiver_func,
+                                                   CXXVirtualBaseInfo* vbase,
+                                                   bool destructor,
+                                                   Vector* actuals,
+                                                   SourceLocation location) {
+  if (vbase == NULL) {
+    if (actuals != NULL) {
+      VectorDelete(actuals);
+    }
+    return NULL;
+  }
+  CXXBaseSpecifier base;
+  base.type = vbase->type;
+  base.access = vbase->access;
+  base.byte_offset = vbase->byte_offset;
+  base.is_virtual = true;
+  return NewCXXBaseSpecialMemberCall(syntax, receiver_func, &base, destructor,
+                                     /*complete_object=*/false, actuals,
+                                     location);
 }
 
 static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
@@ -1553,7 +1610,11 @@ static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
   Struct* owner = func->info.function.cxx_member_owner;
   for (size_t i = owner->bases.length; i > 0; i--) {
     CXXBaseSpecifier* base = owner->bases.value.p[i - 1];
+    if (base->is_virtual) {
+      continue;
+    }
     ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, true,
+                                                /*complete_object=*/false,
                                                 NULL, location);
     if (call == NULL) {
       continue;
@@ -1562,6 +1623,25 @@ static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
       VectorInsertBefore(body, body->length - 1, call);
     } else {
       VectorAppend(body, call);
+    }
+  }
+  Vector* virtual_base_destructors = NewVector();
+  for (size_t i = owner->virtual_bases.length; i > 0; i--) {
+    CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i - 1];
+    ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(syntax, func, base,
+                                                       true, NULL, location);
+    if (call == NULL) {
+      continue;
+    }
+    VectorAppend(virtual_base_destructors, call);
+  }
+  ASTNode* guarded = NewCXXCompleteObjectGuardedStatement(
+      func, virtual_base_destructors, location);
+  if (guarded != NULL) {
+    if (compiler->debug_output && body->length > 0) {
+      VectorInsertBefore(body, body->length - 1, guarded);
+    } else {
+      VectorAppend(body, guarded);
     }
   }
 }
@@ -1676,6 +1756,116 @@ static ASTNode* NewCXXVPtrInitializer(TypeRecord* func,
       location);
 }
 
+static TypeRecord* NewCXXStructType(Struct* str) {
+  TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
+  type->info.struct_info = str;
+  TypeRecordCalculateSize(type);
+  return type;
+}
+
+static ASTNode* NewCXXVBPtrReceiver(TypeRecord* func,
+                                    CXXVBTableInfo* info,
+                                    SourceLocation location) {
+  Symbol* this_symbol = CXXThisSymbolFromFunction(func);
+  if (this_symbol == NULL || info == NULL || info->source == NULL) {
+    return NULL;
+  }
+  ASTNode* receiver = NewIdentifierASTNode(this_symbol, location);
+  TypeRecord* source_pointer =
+      NewPointerTo(kQualPlain, NewCXXStructType(info->source));
+  ASTNode* offset =
+      NewIntConstantASTNode(info->source_offset,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  ASTNode* adjusted =
+      NewBinaryASTNode(AST_OP(plus), source_pointer, location, receiver,
+                       offset);
+  adjusted->flags |= kASTAnalyzed;
+  return adjusted;
+}
+
+static ASTNode* NewCXXVBPtrInitializer(TypeRecord* func,
+                                       CXXVBTableInfo* info,
+                                       SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) || info == NULL ||
+      info->symbol == NULL) {
+    return NULL;
+  }
+  ASTNode* receiver = NewCXXVBPtrReceiver(func, info, location);
+  if (receiver == NULL) {
+    return NULL;
+  }
+  ASTNode* target =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver,
+                       NewStringConstantASTNode(NewString("__vbptr"), NULL,
+                                                location));
+  ASTNode* value = NewIdentifierASTNode(info->symbol, location);
+  return NewExpressionStatementASTNode(
+      NewBinaryASTNode(AST_OP(assign), info->symbol->type, location, target,
+                       value),
+      location);
+}
+
+static void AppendCXXVBPtrInitializers(TypeRecord* func, Vector* body,
+                                       SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL || body == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = 0; i < owner->vbtable_symbols.length; i++) {
+    CXXVBTableInfo* info = owner->vbtable_symbols.value.p[i];
+    ASTNode* init = NewCXXVBPtrInitializer(func, info, location);
+    if (init != NULL) {
+      VectorAppend(body, init);
+    }
+  }
+}
+
+static Symbol* CXXCompleteObjectSymbolFromFunction(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.prototype.length < 2 ||
+      func->info.function.cxx_member_owner == NULL ||
+      !StructHasVirtualBases(func->info.function.cxx_member_owner) ||
+      (!func->info.function.is_constructor &&
+       !func->info.function.is_destructor)) {
+    return NULL;
+  }
+  return func->info.function.prototype.value.p[1];
+}
+
+static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
+                                                    Vector* statements,
+                                                    SourceLocation location) {
+  if (statements == NULL || statements->length == 0) {
+    if (statements != NULL) {
+      VectorDelete(statements);
+    }
+    return NULL;
+  }
+  ASTNode* body = NewCompoundStatementASTNode(statements, location);
+  Symbol* complete_object = CXXCompleteObjectSymbolFromFunction(func);
+  if (complete_object == NULL) {
+    return body;
+  }
+  return NewIfStatementASTNode(NewIdentifierASTNode(complete_object, location),
+                               body, NULL, location);
+}
+
+static void InsertCXXCompleteObjectGuardedStatements(TypeRecord* func,
+                                                    Vector* body,
+                                                    size_t* insert_at,
+                                                    Vector* statements,
+                                                    SourceLocation location) {
+  ASTNode* guarded =
+      NewCXXCompleteObjectGuardedStatement(func, statements, location);
+  if (guarded == NULL) {
+    return;
+  }
+  VectorInsertOrAppend(body, *insert_at, guarded);
+  (*insert_at)++;
+}
+
 static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
                                                 TypeRecord* func,
                                                 StructMember* member,
@@ -1697,6 +1887,8 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
       VectorDelete(actuals);
       return NULL;
     }
+    CXXPrependCompleteObjectArgument(member_type, actuals,
+                                     /*complete_object=*/true, location);
     ASTNode* member_name =
         NewStringConstantASTNode(NewString(constructor_name), NULL, location);
     ASTNode* member_access =
@@ -1758,6 +1950,7 @@ void SyntaxParseCXXConstructorInitializerList(
     CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
     if (base != NULL) {
       ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                                  /*complete_object=*/false,
                                                   actuals, location);
       if (call != NULL) {
         VectorAppend(&init_list->base_specs, base);
@@ -1797,8 +1990,24 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   }
   Struct* owner = func->info.function.cxx_member_owner;
   size_t insert_at = 0;
+  Vector* complete_initializers = NewVector();
+  AppendCXXVBPtrInitializers(func, complete_initializers, location);
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
+    ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(syntax, func, base,
+                                                       false, NULL, location);
+    if (call == NULL) {
+      continue;
+    }
+    VectorAppend(complete_initializers, call);
+  }
+  InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
+                                           complete_initializers, location);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base->is_virtual) {
+      continue;
+    }
     ASTNode* call = NULL;
     for (size_t j = 0; j < init_list->base_specs.length; j++) {
       if (init_list->base_specs.value.p[j] == base) {
@@ -1807,7 +2016,8 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
       }
     }
     if (call == NULL && !VectorContainsPointer(&init_list->base_specs, base)) {
-      call = NewCXXBaseSpecialMemberCall(syntax, func, base, false, NULL,
+      call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                         /*complete_object=*/false, NULL,
                                          location);
     }
     if (call == NULL) {
@@ -1821,6 +2031,10 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     VectorInsertOrAppend(body, insert_at, vptr_init);
     insert_at++;
   }
+  Vector* complete_restores = NewVector();
+  AppendCXXVBPtrInitializers(func, complete_restores, location);
+  InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
+                                           complete_restores, location);
   for (size_t i = 0; i < init_list->member_statements.length; i++) {
     ASTNode* stmt = init_list->member_statements.value.p[i];
     VectorInsertOrAppend(body, insert_at, stmt);
@@ -3091,6 +3305,8 @@ static ASTNode* NewCXXConstructorCall(Syntax* syntax, Symbol* sym,
     return NULL;
   }
 
+  CXXPrependCompleteObjectArgument(sym->type, actuals,
+                                   /*complete_object=*/true, location);
   ASTNode* receiver = NewIdentifierASTNode(sym, location);
   ASTNode* member = NewStringConstantASTNode(NewString(constructor_name), NULL,
                                             location);
@@ -3188,9 +3404,11 @@ static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location,
                        NewIdentifierASTNode(sym, location), member);
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(sym->type, actuals,
+                                   /*complete_object=*/true, location);
   ASTNode* call =
-      NewVectorASTNode(AST_OP(call), NULL, location, member_access,
-                       NewVector());
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
   return NewExpressionStatementASTNode(call, location);
 }
 

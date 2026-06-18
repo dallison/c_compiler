@@ -701,7 +701,7 @@ static void StructMemberASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   Indent(indents, fp);
   StructMemberASTNode* mnode = (StructMemberASTNode*)node;
   fprintf(fp,"%s@%d\n", mnode->member->symbol->name.value,
-         mnode->member->byte_offset);
+         mnode->byte_offset);
   ASTNodeBasePrint(node, indents + 2, fp);
 }
 
@@ -723,6 +723,7 @@ static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->member = from->member;
   to->access = from->access;
+  to->byte_offset = from->byte_offset;
   to->template_arguments =
       TemplateArgumentVectorCopy(from->template_arguments);
   return func(&to->base, data);
@@ -740,6 +741,7 @@ ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location) {
               &struct_member_vtbl);
   node->member = member;
   node->access = member->access;
+  node->byte_offset = member->byte_offset;
   node->template_arguments = NULL;
   return (ASTNode*)node;
 }

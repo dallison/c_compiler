@@ -379,6 +379,7 @@ typedef struct {
   ASTNode base;
   StructMember* member;
   CXXAccess access;
+  int byte_offset;
   Vector* template_arguments;
 } StructMemberASTNode;
 

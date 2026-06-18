@@ -122,7 +122,33 @@ typedef struct CXXBaseSpecifier {
   struct TypeRecord* type;  // Base class type.
   CXXAccess access;
   int byte_offset;
+  bool is_virtual;
 } CXXBaseSpecifier;
+
+typedef struct CXXVirtualBaseInfo {
+  struct TypeRecord* type;  // Virtual base class type.
+  CXXAccess access;
+  int byte_offset;      // Complete-object offset.
+  int vbtable_index;    // Index in this class's vbtable.
+} CXXVirtualBaseInfo;
+
+typedef enum {
+  kCXXBaseAdjustmentNone,
+  kCXXBaseAdjustmentStatic,
+  kCXXBaseAdjustmentVirtual,
+} CXXBaseAdjustmentKind;
+
+typedef struct CXXBaseAdjustment {
+  CXXBaseAdjustmentKind kind;
+  int byte_offset;
+  int vbtable_index;
+} CXXBaseAdjustment;
+
+typedef struct CXXVBTableInfo {
+  struct Struct* source;
+  int source_offset;
+  Symbol* symbol;
+} CXXVBTableInfo;
 
 // A struct or union member.  Behaves like a Symbol with extra information.
 typedef struct StructMember {
@@ -144,13 +170,18 @@ struct Struct {
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
   Symbol* tag_symbol;  // Owning tag symbol, if named.
   Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
+  Vector virtual_bases;  // Vector of CXXVirtualBaseInfo* (owns entries).
   Vector members;    // Vector of StructMember* (owns StructMembers)
   Vector virtual_members;  // Vector of StructMember* (not owned), by slot.
   StructMember* vptr_member;  // Hidden C++ vptr field, if owned by this class.
   Symbol* vtable_symbol;      // Hidden C++ vtable static symbol.
+  StructMember* vbptr_member;  // Hidden C++ virtual-base offset table pointer.
+  Symbol* vbtable_symbol;      // Hidden C++ virtual-base offset table.
+  Vector vbtable_symbols;  // CXXVBTableInfo* entries for complete-object tables.
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
   int size;          // Size of struct in bytes.
+  int non_virtual_size;  // Size excluding appended virtual base subobjects.
   int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
   bool is_class;     // True if this is a C++ class.
@@ -309,7 +340,14 @@ StructMember* FindStructMember(Struct* str, String* name);
 StructMember* FindStructMemberWithAccess(Struct* str, String* name,
                                          CXXAccess* access,
                                          Struct** owner);
+StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
+                                                  CXXAccess* access,
+                                                  Struct** owner,
+                                                  int* byte_offset);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
+bool StructHasVirtualBases(Struct* str);
+Symbol* StructFindVBTableSymbol(Struct* complete, Struct* source,
+                                int source_offset);
 
 void TypeRecordToString(TypeRecord* type, String* result);
 
@@ -578,6 +616,10 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
 bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only);
 bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to);
+bool TypeBaseOffset(TypeRecord* from, TypeRecord* to, bool public_only,
+                    int* offset);
+bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
+                        CXXBaseAdjustment* adjustment);
 bool TypeIsAbstractClass(TypeRecord* type);
 bool TypeContainsAuto(TypeRecord* type);
 TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type);

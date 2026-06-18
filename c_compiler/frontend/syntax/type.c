@@ -494,6 +494,17 @@ Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
   return this_symbol;
 }
 
+static Symbol* NewCXXCompleteObjectSymbol(SourceLocation location) {
+  Symbol* symbol =
+      NewSymbol("__complete_object",
+                NewTypeRecordWithSize(kTypeInt, kQualPlain), STO(implicit));
+  symbol->flags.is_argument = true;
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->location = location;
+  return symbol;
+}
+
 void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location) {
   if (func == NULL || !TypeIsFunction(func) || owner == NULL ||
@@ -506,6 +517,16 @@ void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
     VectorAppend(&func->info.function.prototype, this_symbol);
   } else {
     VectorInsertBefore(&func->info.function.prototype, 0, this_symbol);
+  }
+  if ((func->info.function.is_constructor ||
+       func->info.function.is_destructor) &&
+      StructHasVirtualBases(owner)) {
+    Symbol* complete_object = NewCXXCompleteObjectSymbol(location);
+    if (func->info.function.prototype.length <= 1) {
+      VectorAppend(&func->info.function.prototype, complete_object);
+    } else {
+      VectorInsertBefore(&func->info.function.prototype, 1, complete_object);
+    }
   }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
@@ -604,18 +625,41 @@ void TemplateArgumentDelete(TemplateArgument* arg) {
 }
 
 static CXXBaseSpecifier* NewCXXBaseSpecifier(TypeRecord* type,
-                                             CXXAccess access) {
+                                             CXXAccess access,
+                                             bool is_virtual) {
   CXXBaseSpecifier* base = malloc(sizeof(CXXBaseSpecifier));
   base->type = type;
   TypeRecordIncRef(type);
   base->access = access;
   base->byte_offset = 0;
+  base->is_virtual = is_virtual;
   return base;
 }
 
 static void CXXBaseSpecifierDelete(CXXBaseSpecifier* base) {
   TypeRecordDelete(base->type);
   free(base);
+}
+
+static CXXVirtualBaseInfo* NewCXXVirtualBaseInfo(TypeRecord* type,
+                                                CXXAccess access,
+                                                int vbtable_index) {
+  CXXVirtualBaseInfo* base = malloc(sizeof(CXXVirtualBaseInfo));
+  base->type = type;
+  TypeRecordIncRef(type);
+  base->access = access;
+  base->byte_offset = 0;
+  base->vbtable_index = vbtable_index;
+  return base;
+}
+
+static void CXXVirtualBaseInfoDelete(CXXVirtualBaseInfo* base) {
+  TypeRecordDelete(base->type);
+  free(base);
+}
+
+static void CXXVBTableInfoDelete(CXXVBTableInfo* info) {
+  free(info);
 }
 
 void StructMemberDelete(StructMember* member) {
@@ -638,11 +682,15 @@ Struct* NewStruct(bool is_union) {
   s->refs = 1;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);
+  VectorInit(&s->virtual_bases);
   VectorInit(&s->members);
   VectorInit(&s->virtual_members);
   VectorInit(&s->template_parameters);
   s->vptr_member = NULL;
   s->vtable_symbol = NULL;
+  s->vbptr_member = NULL;
+  s->vbtable_symbol = NULL;
+  VectorInit(&s->vbtable_symbols);
   MapInit(&s->symbol_table, CompareStructMember);
   s->is_union = is_union;
   s->is_class = false;
@@ -651,6 +699,7 @@ Struct* NewStruct(bool is_union) {
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;
+  s->non_virtual_size = 0;
   s->alignment = 1;
   s->packed = false;
   s->is_abstract = false;
@@ -673,9 +722,15 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->bases,
                              (VectorElementDestructor)CXXBaseSpecifierDelete,
                              /*free_element=*/false);
+  VectorDestructWithContents(&s->virtual_bases,
+                             (VectorElementDestructor)CXXVirtualBaseInfoDelete,
+                             /*free_element=*/false);
   VectorDestructWithContents(&s->members,
                              (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
   VectorDestruct(&s->virtual_members);
+  VectorDestructWithContents(&s->vbtable_symbols,
+                             (VectorElementDestructor)CXXVBTableInfoDelete,
+                             /*free_element=*/false);
   VectorDestructWithContents(&s->template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
@@ -3849,8 +3904,10 @@ static CXXAccess CombineInheritedAccess(CXXAccess base_access,
 static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
                                                         String* name,
                                                         CXXAccess inherited,
+                                                        int inherited_offset,
                                                         CXXAccess* access,
-                                                        Struct** owner) {
+                                                        Struct** owner,
+                                                        int* byte_offset) {
   StructMember* member = MapFindPointerKey(&str->symbol_table, name);
   if (member != NULL) {
     if (access != NULL) {
@@ -3858,6 +3915,9 @@ static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
     }
     if (owner != NULL) {
       *owner = str;
+    }
+    if (byte_offset != NULL) {
+      *byte_offset = inherited_offset + member->byte_offset;
     }
     return member;
   }
@@ -3867,7 +3927,8 @@ static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
         base->type->info.struct_info != NULL) {
       member = FindStructMemberWithAccessFromBase(
           base->type->info.struct_info, name,
-          CombineInheritedAccess(inherited, base->access), access, owner);
+          CombineInheritedAccess(inherited, base->access),
+          inherited_offset + base->byte_offset, access, owner, byte_offset);
       if (member != NULL) {
         return member;
       }
@@ -3879,6 +3940,13 @@ static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
 StructMember* FindStructMemberWithAccess(Struct* str, String* name,
                                          CXXAccess* access,
                                          Struct** owner) {
+  return FindStructMemberWithAccessAndOffset(str, name, access, owner, NULL);
+}
+
+StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
+                                                  CXXAccess* access,
+                                                  Struct** owner,
+                                                  int* byte_offset) {
   StructMember* member = MapFindPointerKey(&str->symbol_table, name);
   if (member != NULL) {
     if (access != NULL) {
@@ -3887,6 +3955,9 @@ StructMember* FindStructMemberWithAccess(Struct* str, String* name,
     if (owner != NULL) {
       *owner = str;
     }
+    if (byte_offset != NULL) {
+      *byte_offset = member->byte_offset;
+    }
     return member;
   }
   for (size_t i = 0; i < str->bases.length; i++) {
@@ -3894,7 +3965,8 @@ StructMember* FindStructMemberWithAccess(Struct* str, String* name,
     if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
         base->type->info.struct_info != NULL) {
       member = FindStructMemberWithAccessFromBase(
-          base->type->info.struct_info, name, base->access, access, owner);
+          base->type->info.struct_info, name, base->access, base->byte_offset,
+          access, owner, byte_offset);
       if (member != NULL) {
         return member;
       }
@@ -3990,18 +4062,13 @@ static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
     return;
   }
   do {
-    bool keep_base = true;
-    if (bases->length > 0) {
-      SyntaxError(parser->syntax,
-                  "multiple inheritance is not supported yet");
-      keep_base = false;
-    }
+    bool is_virtual = false;
     if (LexMatch(parser->lex, TOK(virtual))) {
-      SyntaxError(parser->syntax, "virtual base classes are not supported yet");
+      is_virtual = true;
     }
     CXXAccess access = ParseBaseAccess(parser, is_class);
     if (LexMatch(parser->lex, TOK(virtual))) {
-      SyntaxError(parser->syntax, "virtual base classes are not supported yet");
+      is_virtual = true;
     }
     TypeRecord* base_type = TypeParserParseType(parser, true);
     if (base_type == NULL || !TypeIsStructOrUnion(base_type) ||
@@ -4011,9 +4078,7 @@ static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       continue;
     }
     TypeRecordCalculateSize(base_type);
-    if (keep_base) {
-      VectorAppend(bases, NewCXXBaseSpecifier(base_type, access));
-    }
+    VectorAppend(bases, NewCXXBaseSpecifier(base_type, access, is_virtual));
     TypeRecordDelete(base_type);
   } while (LexMatch(parser->lex, TOK(comma)));
 }
@@ -4021,15 +4086,93 @@ static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
 static void LayoutCXXBaseSpecifiers(Struct* str) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->is_virtual) {
+      continue;
+    }
     AlignNextOffset(str, base->type);
     base->byte_offset = str->next_offset;
+    int base_size = base->type->size;
+    if (TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        base->type->info.struct_info->non_virtual_size > 0) {
+      base_size = base->type->info.struct_info->non_virtual_size;
+    }
     if (!str->is_union) {
-      str->next_offset += base->type->size;
+      str->next_offset += base_size;
       str->size = str->next_offset;
     } else if (base->type->size > str->size) {
       str->size = base->type->size;
     }
   }
+}
+
+static bool SameStructType(TypeRecord* left, TypeRecord* right) {
+  return left != NULL && right != NULL && TypeIsStructOrUnion(left) &&
+         TypeIsStructOrUnion(right) && left->info.struct_info != NULL &&
+         left->info.struct_info == right->info.struct_info;
+}
+
+static CXXVirtualBaseInfo* FindCXXVirtualBaseInfo(Struct* str,
+                                                  TypeRecord* type) {
+  if (str == NULL || type == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (SameStructType(base->type, type)) {
+      return base;
+    }
+  }
+  return NULL;
+}
+
+static CXXVirtualBaseInfo* AddCXXVirtualBaseInfo(Struct* str,
+                                                 TypeRecord* type,
+                                                 CXXAccess access) {
+  CXXVirtualBaseInfo* existing = FindCXXVirtualBaseInfo(str, type);
+  if (existing != NULL) {
+    if (access == kAccessPrivate || existing->access == kAccessPrivate) {
+      existing->access = kAccessPrivate;
+    } else if (access == kAccessProtected ||
+               existing->access == kAccessProtected) {
+      existing->access = kAccessProtected;
+    }
+    return existing;
+  }
+  CXXVirtualBaseInfo* base =
+      NewCXXVirtualBaseInfo(type, access, (int)str->virtual_bases.length);
+  VectorAppend(&str->virtual_bases, base);
+  return base;
+}
+
+static void CollectCXXVirtualBasesFromBase(Struct* str,
+                                           CXXBaseSpecifier* base) {
+  if (str == NULL || base == NULL || base->type == NULL ||
+      !TypeIsStructOrUnion(base->type) ||
+      base->type->info.struct_info == NULL) {
+    return;
+  }
+  Struct* base_struct = base->type->info.struct_info;
+  if (base->is_virtual) {
+    AddCXXVirtualBaseInfo(str, base->type, base->access);
+  }
+  for (size_t i = 0; i < base_struct->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* inherited = base_struct->virtual_bases.value.p[i];
+    AddCXXVirtualBaseInfo(str, inherited->type, inherited->access);
+  }
+}
+
+static void CollectCXXVirtualBases(Struct* str) {
+  if (!CompilerIsCXX() || str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CollectCXXVirtualBasesFromBase(str, str->bases.value.p[i]);
+  }
+}
+
+bool StructHasVirtualBases(Struct* str) {
+  return str != NULL && str->virtual_bases.length > 0;
 }
 
 static void CopyCXXBaseVirtualMembers(Struct* str) {
@@ -4071,6 +4214,11 @@ static TypeRecord* NewCXXVPtrType(void) {
   return NewPointerTo(kQualPlain, entry_type);
 }
 
+static TypeRecord* NewCXXVBPtrType(void) {
+  TypeRecord* entry_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  return NewPointerTo(kQualPlain, entry_type);
+}
+
 static void AddCXXVPtrMember(TypeParser* parser, Struct* str) {
   if (!CompilerIsCXX() || str->vptr_member != NULL ||
       str->virtual_members.length == 0 || StructHasPolymorphicBase(str)) {
@@ -4108,8 +4256,58 @@ static void AddCXXVPtrMember(TypeParser* parser, Struct* str) {
   MapInsert(&str->symbol_table, kv);
 }
 
+static void AddCXXVBPtrMember(TypeParser* parser, Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->vbptr_member != NULL ||
+      str->virtual_bases.length == 0) {
+    return;
+  }
+  Symbol* symbol =
+      NewSymbol("__vbptr", NewCXXVBPtrType(), STO(implicit));
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->location = parser->lex->current_token_location;
+  StructMember* member = NewStructMember(symbol);
+  member->access = kAccessPublic;
+  AlignNextOffset(str, symbol->type);
+  member->byte_offset = str->next_offset;
+  member->index = str->members.length;
+  UpdateStructSize(str, symbol->type, str->is_union);
+  str->vbptr_member = member;
+  VectorAppend(&str->members, member);
+  MapKeyValue kv;
+  kv.key.p = &member->symbol->name;
+  kv.value.p = member;
+  MapInsert(&str->symbol_table, kv);
+}
+
+static void LayoutCXXVirtualBaseSpecifiers(Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->virtual_bases.length == 0) {
+    return;
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    AlignNextOffset(str, base->type);
+    base->byte_offset = str->next_offset;
+    if (!str->is_union) {
+      str->next_offset += base->type->size;
+      str->size = str->next_offset;
+    } else if (base->type->size > str->size) {
+      str->size = base->type->size;
+    }
+  }
+}
+
 static TypeRecord* NewCXXVTableType(size_t slots) {
   TypeRecord* entry_type = NewCXXVTableEntryType();
+  TypeRecord* array_type =
+      NewBasicArrayTypeRecord(kQualPlain, (int)slots, false);
+  TypeRecordChain(array_type, entry_type);
+  TypeRecordCalculateSize(array_type);
+  return array_type;
+}
+
+static TypeRecord* NewCXXVBTableType(size_t slots) {
+  TypeRecord* entry_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   TypeRecord* array_type =
       NewBasicArrayTypeRecord(kQualPlain, (int)slots, false);
   TypeRecordChain(array_type, entry_type);
@@ -4182,6 +4380,118 @@ static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
     VectorAppend(&var->initializers, init);
   }
   VectorAppend(&compiler->initialized_static_variables, var);
+}
+
+static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
+                                              Struct* complete,
+                                              Struct* source,
+                                              int source_offset) {
+  if (!CompilerIsCXX() || complete == NULL || source == NULL ||
+      source->virtual_bases.length == 0 || complete->tag_name == NULL ||
+      source->tag_name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < complete->vbtable_symbols.length; i++) {
+    CXXVBTableInfo* info = complete->vbtable_symbols.value.p[i];
+    if (info->source == source && info->source_offset == source_offset) {
+      return info->symbol;
+    }
+  }
+  String name;
+  StringInit(&name, "__davecc_vbtbl_");
+  StringAppendString(&name, complete->tag_name);
+  StringAppend(&name, "_");
+  StringAppendString(&name, source->tag_name);
+  StringAppend(&name, "_");
+  char offset_suffix[32];
+  snprintf(offset_suffix, sizeof(offset_suffix), "%d", source_offset);
+  StringAppend(&name, offset_suffix);
+  Symbol* symbol = NewSymbol(name.value,
+                             NewCXXVBTableType(source->virtual_bases.length),
+                             STO(static));
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->location = parser->lex->current_token_location;
+  SyntaxAddSymbol(parser->syntax, symbol);
+  if (complete == source && source_offset == 0) {
+    complete->vbtable_symbol = symbol;
+  }
+  StringDestruct(&name);
+
+  InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
+  var->symbol = symbol;
+  var->is_global = false;
+  var->size = symbol->type->size;
+  var->alignment = TypeRecordAlignment(symbol->type->next);
+  VectorInit(&var->initializers);
+  var->is_tls = false;
+  var->is_local = false;
+  for (size_t i = 0; i < source->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* source_base = source->virtual_bases.value.p[i];
+    CXXVirtualBaseInfo* complete_base =
+        FindCXXVirtualBaseInfo(complete, source_base->type);
+    int offset = complete_base != NULL
+                     ? complete_base->byte_offset - source_offset
+                     : source_base->byte_offset;
+    Initializer* init = malloc(sizeof(Initializer));
+    init->offset = (int32_t)(i * (size_t)SizeofType(kTypeInt));
+    init->type = kInitTypeWord;
+    init->value.word = (uint32_t)offset;
+    VectorAppend(&var->initializers, init);
+  }
+  VectorAppend(&compiler->initialized_static_variables, var);
+
+  CXXVBTableInfo* info = malloc(sizeof(CXXVBTableInfo));
+  info->source = source;
+  info->source_offset = source_offset;
+  info->symbol = symbol;
+  VectorAppend(&complete->vbtable_symbols, info);
+  return symbol;
+}
+
+static void RegisterCXXVBSubobjectTables(TypeParser* parser,
+                                         Struct* complete,
+                                         Struct* source,
+                                         int source_offset) {
+  if (source == NULL) {
+    return;
+  }
+  if (source->virtual_bases.length > 0) {
+    RegisterCXXVBTableForSubobject(parser, complete, source, source_offset);
+  }
+  for (size_t i = 0; i < source->bases.length; i++) {
+    CXXBaseSpecifier* base = source->bases.value.p[i];
+    if (base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    RegisterCXXVBSubobjectTables(parser, complete,
+                                 base->type->info.struct_info,
+                                 source_offset + base->byte_offset);
+  }
+}
+
+static void RegisterCXXVBTables(TypeParser* parser, Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->virtual_bases.length == 0 ||
+      str->tag_name == NULL) {
+    return;
+  }
+  RegisterCXXVBSubobjectTables(parser, str, str, 0);
+}
+
+Symbol* StructFindVBTableSymbol(Struct* complete, Struct* source,
+                                int source_offset) {
+  if (complete == NULL || source == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < complete->vbtable_symbols.length; i++) {
+    CXXVBTableInfo* info = complete->vbtable_symbols.value.p[i];
+    if (info->source == source && info->source_offset == source_offset) {
+      return info->symbol;
+    }
+  }
+  return NULL;
 }
 
 // Parse a bitfield.  We are just after the : in the member definition.
@@ -5088,6 +5398,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     VectorAppend(&str->bases, bases->value.p[i]);
   }
   bases->length = 0;
+  CollectCXXVirtualBases(str);
   CopyCXXBaseVirtualMembers(str);
   LayoutCXXBaseSpecifiers(str);
 
@@ -5105,7 +5416,11 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   }
   UpdateCXXAbstractStatus(str);
   AddCXXVPtrMember(parser, str);
+  AddCXXVBPtrMember(parser, str);
+  str->non_virtual_size = str->size;
+  LayoutCXXVirtualBaseSpecifiers(str);
   RegisterCXXVTable(parser, str);
+  RegisterCXXVBTables(parser, str);
   
   // Round the size of the struct up to its own alignment (the maximum
   // alignment of its members, or an explicit aligned(N)), as required by the
@@ -5134,6 +5449,7 @@ static bool RelayoutStruct(Struct* str) {
   str->next_offset = 0;
   str->current_offset = 0;
   str->size = 0;
+  str->non_virtual_size = 0;
   str->alignment = 1;
   str->next_bit_pos = 65;
   LayoutCXXBaseSpecifiers(str);
@@ -5168,6 +5484,8 @@ static bool RelayoutStruct(Struct* str) {
       UpdateStructSize(str, type, is_union);
     }
   }
+  str->non_virtual_size = str->size;
+  LayoutCXXVirtualBaseSpecifiers(str);
   FinalizeStructAlignment(str);
   return true;
 }
@@ -5844,6 +6162,154 @@ bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to) {
                              /*public_only=*/true);
 }
 
+static bool StructBaseOffset(Struct* from, Struct* to, bool public_only,
+                             int inherited_offset, int* offset) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      if (offset != NULL) {
+        *offset = base_offset;
+      }
+      return true;
+    }
+    if (StructBaseOffset(base->type->info.struct_info, to, public_only,
+                         base_offset, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeBaseOffset(TypeRecord* from, TypeRecord* to, bool public_only,
+                    int* offset) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  if (from->info.struct_info == to->info.struct_info) {
+    if (offset != NULL) {
+      *offset = 0;
+    }
+    return true;
+  }
+  return StructBaseOffset(from->info.struct_info, to->info.struct_info,
+                          public_only, 0, offset);
+}
+
+static void CXXBaseAdjustmentSet(CXXBaseAdjustment* adjustment,
+                                 CXXBaseAdjustmentKind kind,
+                                 int byte_offset,
+                                 int vbtable_index) {
+  if (adjustment == NULL) {
+    return;
+  }
+  adjustment->kind = kind;
+  adjustment->byte_offset = byte_offset;
+  adjustment->vbtable_index = vbtable_index;
+}
+
+static bool StructNonVirtualBaseOffset(Struct* from, Struct* to,
+                                       bool public_only,
+                                       int inherited_offset,
+                                       int* offset) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if (base->is_virtual ||
+        (public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      if (offset != NULL) {
+        *offset = base_offset;
+      }
+      return true;
+    }
+    if (StructNonVirtualBaseOffset(base->type->info.struct_info, to,
+                                   public_only, base_offset, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool StructBaseAdjustment(Struct* from, Struct* to, bool public_only,
+                                 int inherited_offset,
+                                 CXXBaseAdjustment* adjustment) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = from->virtual_bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    int virtual_base_offset = 0;
+    if (base_struct == to ||
+        StructNonVirtualBaseOffset(base_struct, to, public_only, 0,
+                                   &virtual_base_offset)) {
+      CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentVirtual,
+                           virtual_base_offset, base->vbtable_index);
+      return true;
+    }
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->is_virtual) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentStatic,
+                           base_offset, -1);
+      return true;
+    }
+    if (StructBaseAdjustment(base->type->info.struct_info, to, public_only,
+                             base_offset, adjustment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
+                        CXXBaseAdjustment* adjustment) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  if (from->info.struct_info == to->info.struct_info) {
+    CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentNone, 0, -1);
+    return true;
+  }
+  return StructBaseAdjustment(from->info.struct_info, to->info.struct_info,
+                              public_only, 0, adjustment);
+}
+
 bool TypeIsAbstractClass(TypeRecord* type) {
   return CompilerIsCXX() && type != NULL && TypeIsStructOrUnion(type) &&
          type->info.struct_info != NULL && type->info.struct_info->is_abstract;
@@ -5939,7 +6405,7 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
   // A pointer can be assigned to a const pointer of the same type.
   if (TypeIsPointerOrArray(to) && TypeIsPointerOrArray(from) &&
       to->next != NULL && from->next != NULL) {
-    if (TypeIsDerivedFrom(from->next, to->next)) {
+    if (TypeBaseOffset(from->next, to->next, /*public_only=*/true, NULL)) {
       return true;
     }
     int to_quals = to->next->qualifiers & ~kQualConst;

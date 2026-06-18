@@ -1123,6 +1123,26 @@ static ASTNode* NewCXXConstructorCallForReceiver(TypeRecord* allocated_type,
                                                  Vector* actuals,
                                                  SourceLocation location);
 
+static bool TypeNeedsCXXCompleteObjectArgument(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+         StructHasVirtualBases(type->info.struct_info);
+}
+
+static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
+                                             SourceLocation location) {
+  if (actuals == NULL || !TypeNeedsCXXCompleteObjectArgument(type)) {
+    return;
+  }
+  ASTNode* arg =
+      NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  if (actuals->length == 0) {
+    VectorAppend(actuals, arg);
+  } else {
+    VectorInsertBefore(actuals, 0, arg);
+  }
+}
+
 static ASTNode* NewCXXConstructorCallForPointer(TypeRecord* allocated_type,
                                                 Symbol* ptr,
                                                 Vector* actuals,
@@ -1137,6 +1157,7 @@ static ASTNode* NewCXXConstructorCallForReceiver(TypeRecord* allocated_type,
                                                  ASTNode* receiver,
                                                  Vector* actuals,
                                                  SourceLocation location) {
+  CXXPrependCompleteObjectArgument(allocated_type, actuals, location);
   ASTNode* member =
       NewStringConstantASTNode(NewString(allocated_type->info.struct_info
                                              ->tag_name->value),
@@ -1178,8 +1199,10 @@ static ASTNode* NewCXXDestructorCallForPointer(TypeRecord* object_type,
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
   StringDestruct(&destructor_name);
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(object_type, actuals, location);
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access,
-                          NewVector());
+                          actuals);
 }
 
 static ASTNode* NewExpressionStatement(ASTNode* expr, SourceLocation location) {

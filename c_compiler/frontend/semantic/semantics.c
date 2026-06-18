@@ -553,7 +553,98 @@ static bool PointerSignednessDiffers(TypeRecord* from, TypeRecord* to) {
          TypeIsUnsigned(from_pointee) != TypeIsUnsigned(to_pointee);
 }
 
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static ASTNode* NewVirtualBaseOffsetLoad(ASTNode* receiver, int vbtable_index) {
+  SourceLocation location = receiver->location;
+  ASTNode* receiver_clone = ASTNodeClone(receiver, IdentityCloneNode, NULL,
+                                        NULL);
+  ASTNode* vbptr_name =
+      NewStringConstantASTNode(NewString("__vbptr"), NULL, location);
+  ASTNode* vbptr =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver_clone,
+                       vbptr_name);
+  ASTNode* index =
+      NewIntConstantASTNode(vbtable_index,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  ASTNode* load = NewBinaryASTNode(AST_OP(subscript), NULL, location, vbptr,
+                                   index);
+  return AnalyzeExpression(load);
+}
+
+static ASTNode* AddStaticOffsetToRuntimeOffset(ASTNode* offset, int byte_offset,
+                                               SourceLocation location) {
+  if (byte_offset == 0) {
+    return offset;
+  }
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  ASTNode* tail = NewIntConstantASTNode(byte_offset, int_type, location);
+  ASTNode* combined =
+      NewBinaryASTNode(AST_OP(plus), int_type, location, offset, tail);
+  combined->flags |= kASTAnalyzed;
+  return combined;
+}
+
+static ASTNode* NewRawPointerAdjustment(ASTNode* from, TypeRecord* to,
+                                        ASTNode* offset) {
+  TypeRecordIncRef(to);
+  ASTNode* converted_node =
+      NewBinaryASTNode(AST_OP(plus), to, from->location, from, offset);
+  converted_node->flags |= kASTAnalyzed;
+  return converted_node;
+}
+
+static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
+  if (from == NULL || to == NULL || !TypeIsPointer(from->type) || !TypeIsPointer(to) ||
+      from->type->next == NULL || to->next == NULL) {
+    return false;
+  }
+
+  CXXBaseAdjustment adjustment;
+  if (!TypeBaseAdjustment(from->type->next, to->next, /*public_only=*/true,
+                          &adjustment)) {
+    return false;
+  }
+  if (from->type->next->info.struct_info == to->next->info.struct_info) {
+    return false;
+  }
+  if (adjustment.kind == kCXXBaseAdjustmentStatic &&
+      to->next->info.struct_info->virtual_members.length > 0) {
+    adjustment.byte_offset = 0;
+  }
+  if (adjustment.kind == kCXXBaseAdjustmentNone ||
+      (adjustment.kind == kCXXBaseAdjustmentStatic &&
+       adjustment.byte_offset == 0)) {
+    ASTNodeSetType(from, to);
+    return true;
+  }
+
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  ASTNode* offset_node = NULL;
+  if (adjustment.kind == kCXXBaseAdjustmentVirtual) {
+    offset_node = NewVirtualBaseOffsetLoad(from, adjustment.vbtable_index);
+    offset_node = AddStaticOffsetToRuntimeOffset(
+        offset_node, adjustment.byte_offset, from->location);
+  } else {
+    offset_node = NewIntConstantASTNode(
+        adjustment.byte_offset,
+        NewTypeRecordWithSize(kTypeInt, kQualPlain), from->location);
+  }
+  ASTNode* converted_node = NewRawPointerAdjustment(from, to, offset_node);
+  ASTNodeReplaceChild(parent, child_id, converted_node, false);
+  return true;
+}
+
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
+  if (TryConvertDerivedPointer(from, to)) {
+    return;
+  }
+
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
     return;

@@ -1,5 +1,5 @@
 // RUN: -std=c++17
-// EXPECT: dynamic_cast is not supported yet
+// EXPECT: dynamic_cast requires pointer to class type
 int main(void) {
   int value = 7;
   int* ptr = &value;

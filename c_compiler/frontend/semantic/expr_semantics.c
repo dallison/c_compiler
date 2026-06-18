@@ -965,9 +965,22 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
         NormalConversion(e->expr, id_node->base.type);
       }
       break;
-    default:
+    }
+    case AST_OP(braced_init): {
+      BracedInitializerASTNode* braced = (BracedInitializerASTNode*)init;
+      if (!is_reference_init && TypeIsScalar(id_node->base.type) &&
+          braced->initializers->length == 1) {
+        ASTNode* initializer = braced->initializers->value.p[0];
+        if (initializer->op == AST_OP(designated_init)) {
+          DesignatedInitializerASTNode* designated =
+              (DesignatedInitializerASTNode*)initializer;
+          NormalConversion(designated->init, id_node->base.type);
+        }
+      }
       break;
     }
+    default:
+      break;
   }
   ASTNodeSetType((ASTNode*)init, id_node->base.type);
   ASTNodeSetType(node, id_node->base.type);
@@ -1736,6 +1749,13 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   }
 
   ASTNode* receiver = NULL;
+  bool use_virtual_dispatch =
+      member->symbol->type->info.function.is_virtual &&
+      !member->is_static && !CurrentFunctionIsCXXCtorOrDtor();
+  bool polymorphic_special_member =
+      (member->symbol->type->info.function.is_constructor ||
+       member->symbol->type->info.function.is_destructor) &&
+      owner != NULL && owner->virtual_members.length > 0;
   if (!member->is_static) {
     if (!member->symbol->type->info.function.is_const_member &&
         !member->symbol->type->info.function.is_constructor &&
@@ -1751,12 +1771,26 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
                                  receiver);
       receiver = AnalyzeExpression(receiver);
     }
+    if (!use_virtual_dispatch && !polymorphic_special_member &&
+        member_node->byte_offset != 0) {
+      TypeRecord* receiver_type = receiver->type;
+      if (member->symbol->type->info.function.prototype.length > 0) {
+        Symbol* this_arg =
+            member->symbol->type->info.function.prototype.value.p[0];
+        receiver_type = this_arg->type;
+      }
+      ASTNode* offset_node = NewIntConstantASTNode(
+          member_node->byte_offset,
+          NewTypeRecordWithSize(kTypeInt, kQualPlain),
+          receiver->location);
+      receiver = NewBinaryASTNode(AST_OP(plus), receiver_type,
+                                  receiver->location, receiver, offset_node);
+      ASTNodeSetType(receiver, receiver_type);
+      receiver->flags |= kASTAnalyzed;
+    }
   }
 
   ASTNode* old_left = node->left;
-  bool use_virtual_dispatch =
-      member->symbol->type->info.function.is_virtual &&
-      !member->is_static && !CurrentFunctionIsCXXCtorOrDtor();
   ASTNode* virtual_callee = NULL;
   if (use_virtual_dispatch) {
     virtual_callee =
@@ -1834,6 +1868,88 @@ static bool MemberReceiverIsConst(BinaryASTNode* node) {
 }
 
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
+static TypeRecord* NewStructTypeForAdjustment(Struct* str) {
+  TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
+  type->info.struct_info = str;
+  TypeRecordCalculateSize(type);
+  return type;
+}
+
+static ASTNode* NewVirtualBaseOffsetLoad(ASTNode* receiver,
+                                         int vbtable_index,
+                                         SourceLocation location) {
+  ASTNode* receiver_clone = CloneReceiverForVirtualLookup(receiver);
+  ASTNode* vbptr_name =
+      NewStringConstantASTNode(NewString("__vbptr"), NULL, location);
+  ASTNode* vbptr =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver_clone,
+                       vbptr_name);
+  ASTNode* index =
+      NewIntConstantASTNode(vbtable_index,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  ASTNode* load =
+      NewBinaryASTNode(AST_OP(subscript), NULL, location, vbptr, index);
+  return AnalyzeExpression(load);
+}
+
+static ASTNode* AddStaticOffsetToRuntimeOffset(ASTNode* offset, int byte_offset,
+                                               SourceLocation location) {
+  if (byte_offset == 0) {
+    return offset;
+  }
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  ASTNode* tail = NewIntConstantASTNode(byte_offset, int_type, location);
+  ASTNode* combined =
+      NewBinaryASTNode(AST_OP(plus), int_type, location, offset, tail);
+  combined->flags |= kASTAnalyzed;
+  return combined;
+}
+
+static void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node,
+                                                        Struct* from,
+                                                        Struct* owner,
+                                                        int* member_offset) {
+  if (node == NULL || from == NULL || owner == NULL || from == owner) {
+    return;
+  }
+  TypeRecord* from_type = NewStructTypeForAdjustment(from);
+  TypeRecord* owner_type = NewStructTypeForAdjustment(owner);
+  CXXBaseAdjustment adjustment;
+  bool found = TypeBaseAdjustment(from_type, owner_type, /*public_only=*/true,
+                                  &adjustment);
+  TypeRecordDelete(from_type);
+  TypeRecordDelete(owner_type);
+  if (!found || adjustment.kind != kCXXBaseAdjustmentVirtual) {
+    return;
+  }
+
+  ASTNode* receiver = ASTNodeMove(node->left);
+  if (node->base.op == AST_OP(dot)) {
+    receiver = NewUnaryASTNode(AST_OP(address), NULL, receiver->location,
+                               receiver);
+    receiver = AnalyzeExpression(receiver);
+  }
+  ASTNode* offset =
+      NewVirtualBaseOffsetLoad(receiver, adjustment.vbtable_index,
+                               node->base.location);
+  offset = AddStaticOffsetToRuntimeOffset(offset, adjustment.byte_offset,
+                                          node->base.location);
+  TypeRecord* adjusted_type =
+      NewPointerTo(kQualPlain, NewStructTypeForAdjustment(owner));
+  ASTNode* adjusted =
+      NewBinaryASTNode(AST_OP(plus), adjusted_type, node->base.location,
+                       receiver, offset);
+  adjusted->flags |= kASTAnalyzed;
+  node->base.op = AST_OP(arrow);
+  node->left = adjusted;
+  node->left->parent = (ASTNode*)node;
+  node->left->child_id = 0;
+  if (member_offset != NULL) {
+    *member_offset = -1;
+  }
+}
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
   if (!TypeIsReference(reference_type)) {
@@ -2345,11 +2461,19 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     for (size_t i = 0; i < num_formal_args && i < num_actual_args; i++) {
       ASTNode* actual = (ASTNode*)node->children->value.p[i];
       Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
+      bool polymorphic_special_this =
+          i == 0 &&
+          (subtype->info.function.is_constructor ||
+           subtype->info.function.is_destructor) &&
+          subtype->info.function.cxx_member_owner != NULL &&
+          subtype->info.function.cxx_member_owner->virtual_members.length > 0;
       if (TypeIsReference(formal->type)) {
         TypeRecord* reference_type = formal->type;
         bool discards_qualifiers =
             TypeIsConst(actual->type) && !TypeIsConst(reference_type->next);
-        NormalConversion(actual, reference_type->next);
+        if (!polymorphic_special_this) {
+          NormalConversion(actual, reference_type->next);
+        }
         if (discards_qualifiers) {
           SemanticError(actual, "Reference argument discards qualifiers");
         } else if (!ReferenceCanBind(actual, reference_type)) {
@@ -2370,7 +2494,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         }
         actual->flags |= kASTNeedAddress;
       } else {
-        NormalConversion(actual, formal->type);
+        if (!polymorphic_special_this) {
+          NormalConversion(actual, formal->type);
+        }
       }
 
       // Composites (structs/unions), arrays and functions need addresses, not
@@ -2475,14 +2601,20 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   // Look up struct member.
   CXXAccess access = kAccessPublic;
   Struct* member_owner = NULL;
+  int member_offset = 0;
   StructMember* member =
-      FindStructMemberWithAccess(struct_info, member_name, &access,
-                                 &member_owner);
+      FindStructMemberWithAccessAndOffset(struct_info, member_name, &access,
+                                          &member_owner, &member_offset);
   if (member == NULL) {
     SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
                   member_name->value, struct_info->tag_name->value);
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return;
+  }
+  ApplyVirtualBaseAdjustmentToMemberReference(node, struct_info, member_owner,
+                                              &member_offset);
+  if (member_offset < 0) {
+    member_offset = member->byte_offset;
   }
   Vector* explicit_template_arguments =
       ((ConstantASTNode*)node->right)->template_arguments;
@@ -2503,6 +2635,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   ASTNode* old_right = node->right;
   node->right = NewStructMemberASTNode(member, node->right->location);
   ((StructMemberASTNode*)node->right)->access = access;
+  ((StructMemberASTNode*)node->right)->byte_offset = member_offset;
   ((StructMemberASTNode*)node->right)->template_arguments =
       TemplateArgumentVectorCopy(explicit_template_arguments);
   ASTNodeDelete(old_right);
@@ -2606,10 +2739,27 @@ static void ValidateCXXConstCast(CastASTNode* node) {
   }
 }
 
+static void ValidateCXXDynamicCast(CastASTNode* node) {
+  TypeRecord* to = node->cast_type;
+  TypeRecord* from = node->expr->type;
+  if (to == NULL || from == NULL || !TypeIsPointer(to) ||
+      !TypeIsPointer(from) || to->next == NULL || from->next == NULL ||
+      !TypeIsStructOrUnion(to->next) || !TypeIsStructOrUnion(from->next)) {
+    SemanticError((ASTNode*)node,
+                  "dynamic_cast requires pointer to class type");
+    return;
+  }
+  if (!TypeEqual(to->next, from->next) &&
+      !TypeIsDerivedFrom(from->next, to->next)) {
+    SemanticError((ASTNode*)node,
+                  "dynamic_cast is only supported for public base pointer casts");
+  }
+}
+
 static void AnalyzeCastExpression(CastASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   if (node->kind == kCastDynamic) {
-    SemanticError((ASTNode*)node, "dynamic_cast is not supported yet");
+    ValidateCXXDynamicCast(node);
   } else if (node->kind == kCastConst) {
     ValidateCXXConstCast(node);
   }
