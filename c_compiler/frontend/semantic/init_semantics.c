@@ -106,6 +106,9 @@ static void AppendStructMembers(INode* inode) {
   size_t num_children = type->info.struct_info->members.length;
   for (size_t i = 0; i < num_children; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
+    if (member->is_static || member->is_member_function) {
+      continue;
+    }
     INode* child = BuildINode(member->symbol->type, inode);
     child->index = i;
     VectorAppend(&inode->children, child);
@@ -345,10 +348,13 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
 
 // Get an inode child given its index, or NULL if index is invalid.
 static INode* GetChildAtIndex(INode* inode, size_t index) {
-  if (index >= inode->children.length) {
-    return NULL;
+  for (size_t i = 0; i < inode->children.length; i++) {
+    INode* child = inode->children.value.p[i];
+    if (child->index == index) {
+      return child;
+    }
   }
-  return inode->children.value.p[index];
+  return NULL;
 }
 
 // Given a designator and an inode, find the child inode corresponding
@@ -381,11 +387,17 @@ static INode* FindDesignator(INode* inode,
         return NULL;
       }
       AppendStructMembers(inode);
-      StructMember* member = FindStructMember(inode->type->info.struct_info,
-                                              designator->value.struct_member_name);
+      StructMember* member =
+          designator->is_resolved_member
+              ? designator->value.struct_member
+              : FindStructMember(inode->type->info.struct_info,
+                                 designator->value.struct_member_name);
       if (member == NULL) {
+        const char* name = designator->is_resolved_member
+                               ? "<resolved>"
+                               : designator->value.struct_member_name->value;
         SemanticError(ast_node, "Unknown struct member %s used in designator",
-                      designator->value.struct_member_name->value);
+                      name);
         return NULL;
       }
       if (TypeIsArray(member->symbol->type) &&
@@ -393,6 +405,8 @@ static INode* FindDesignator(INode* inode,
         SemanticError(ast_node, "Use of flexible array member in designator");
         return NULL;
       }
+      designator->value.struct_member = member;
+      designator->is_resolved_member = true;
       return GetChildAtIndex(inode, member->index);
     }
   }
@@ -483,7 +497,16 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       // [start ... end] range designators.  Clear any existing value so the
       // re-initialization is not rejected as "too many initializers".
       designated_node->expr = NULL;
-      return InitializeINode(designated_node, designated_init->init, constants_only);
+      switch (designated_init->init->op) {
+        case AST_OP(expr_init):
+        case AST_OP(braced_init):
+        case AST_OP(designated_init):
+          return InitializeINode(designated_node, designated_init->init,
+                                 constants_only);
+        default:
+          return InitCurrentAndAdvance(designated_node, designated_init->init,
+                                       constants_only);
+      }
     }
     default:
       return false;
@@ -499,10 +522,11 @@ static void BuildSingleDesignator(INode* inode, IKind kind,
                    NewArrayDesignator(inode->type, (int)inode->index));
       break;
     case kIStruct:
-      VectorAppend(designators,
-                   NewStructMemberDesignator(
-                                       type->info.struct_info->
-                                       members.value.p[inode->index]));
+      {
+        StructMember* member = type->info.struct_info->members.value.p[inode->index];
+        VectorAppend(designators,
+                     NewStructMemberDesignator(member));
+      }
       break;
 
     case kIScalar:

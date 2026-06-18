@@ -144,6 +144,12 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
            isspace((unsigned char)lex->line.value[pos])) {
       pos++;
     }
+    if (strncmp(lex->line.value + pos, "operator", 8) == 0 &&
+        (pos + 8 == lex->line.length ||
+         !isalnum((unsigned char)lex->line.value[pos + 8]))) {
+      result = true;
+      break;
+    }
     bool is_destructor = pos < lex->line.length && lex->line.value[pos] == '~';
     if (is_destructor) {
       pos++;
@@ -398,6 +404,8 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
     case TOK(star):
     case TOK(slash):
     case TOK(percent):
+    case TOK(plusplus):
+    case TOK(minusminus):
     case TOK(lessless):
     case TOK(greatergreater):
     case TOK(amp):
@@ -408,15 +416,48 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
     case TOK(ampamp):
     case TOK(barbar):
     case TOK(equal):
+    case TOK(pluseq):
+    case TOK(minuseq):
+    case TOK(stareq):
+    case TOK(slasheq):
+    case TOK(percenteq):
+    case TOK(lesslesseq):
+    case TOK(greatergreatereq):
+    case TOK(ampeq):
+    case TOK(bareq):
+    case TOK(careteq):
     case TOK(equalequal):
     case TOK(bangeq):
     case TOK(less):
     case TOK(lesseq):
     case TOK(greater):
     case TOK(greatereq):
+    case TOK(arrow):
+    case TOK(arrowstar):
+    case TOK(comma):
       StringInit(name, "operator");
       StringAppend(name, TokenName(op));
       LexNextToken(syntax->lex);
+      return true;
+    case TOK(new):
+    case TOK(delete):
+      StringInit(name, "operator ");
+      StringAppend(name, TokenName(op));
+      LexNextToken(syntax->lex);
+      if (LexMatch(syntax->lex, TOK(lsquare))) {
+        SyntaxNeedBracket(syntax, TOK(rsquare), TC(decl));
+        StringAppend(name, "[]");
+      }
+      return true;
+    case TOK(lsquare):
+      LexNextToken(syntax->lex);
+      SyntaxNeedBracket(syntax, TOK(rsquare), TC(decl));
+      StringInit(name, "operator[]");
+      return true;
+    case TOK(lparen):
+      LexNextToken(syntax->lex);
+      SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
+      StringInit(name, "operator()");
       return true;
     default:
       SyntaxError(syntax, "Unsupported overloaded operator %s", TokenName(op));

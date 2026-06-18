@@ -2653,6 +2653,7 @@ Designator* NewArrayDesignator(TypeRecord* type, int index) {
   d->value.array_index = index;
   d->array_index_end = index;
   d->type = type;
+  d->is_resolved_member = false;
   TypeRecordIncRef(type);
   return d;
 }
@@ -2662,6 +2663,7 @@ Designator* NewStructDesignator(String* member) {
   d->designator_type = kDesignatorStruct;
   d->value.struct_member_name = member;
   d->type = NULL;
+  d->is_resolved_member = false;
   return d;
 }
 
@@ -2670,6 +2672,7 @@ Designator* NewStructMemberDesignator(StructMember* member) {
   d->designator_type = kDesignatorStruct;
   d->value.struct_member = member;
   d->type = NULL;
+  d->is_resolved_member = true;
   return d;
 }
 
@@ -2698,9 +2701,10 @@ static void DesignatedInitializerASTNodePrint(ASTNode* node, int indents, FILE* 
       if (d->designator_type == kDesignatorArray) {
         fprintf(fp,"[%d]", d->value.array_index);
       } else {
-        if (d->value.struct_member != NULL) {
+        if (d->is_resolved_member && d->value.struct_member != NULL) {
           fprintf(fp,".%s", d->value.struct_member->symbol->name.value);
-        } else if (d->value.struct_member != NULL) {
+        } else if (!d->is_resolved_member &&
+                   d->value.struct_member_name != NULL) {
           fprintf(fp,".%s", d->value.struct_member_name->value);
         }
       }

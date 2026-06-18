@@ -321,6 +321,7 @@ void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location);
 
 StructMember* NewStructMember(Symbol* symbol);
+void StructAddSyntheticMember(Struct* str, StructMember* member);
 Struct* NewStruct(bool is_union);
 void StructDelete(Struct* s);
 void StructMemberDelete(StructMember* member);

@@ -14,6 +14,64 @@
 #include "compiler.h"
 #include "type.h"
 
+static ASTNode* NewRangeForInitExpression(Symbol* sym, ASTNode* initializer,
+                                          SourceLocation location) {
+  ASTNode* decl_id = NewIdentifierASTNode(sym, location);
+  decl_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  return NewBinaryASTNode(AST_OP(init), sym->type, location, decl_id,
+                          NewExpressionInitializerASTNode(initializer,
+                                                          location));
+}
+
+static ASTNode* NewRangeForDeclaration(Symbol* sym, ASTNode* initializer,
+                                       SourceLocation location) {
+  sym->flags.is_local = true;
+  sym->flags.is_defined = true;
+  return NewVariableDeclarationASTNode(
+      sym, NewRangeForInitExpression(sym, initializer, location), location);
+}
+
+static ASTNode* NewRangeForDeclarationList(Symbol* sym, ASTNode* initializer,
+                                           SourceLocation location) {
+  Vector* declarations = NewVector();
+  VectorAppend(declarations, NewRangeForDeclaration(sym, initializer,
+                                                    location));
+  return NewDeclarationListASTNode(declarations, location);
+}
+
+static TypeRecord* NewRangeForAutoType(void) {
+  return NewTypeRecord(kTypeAuto, kQualPlain);
+}
+
+static Symbol* NewRangeForAutoSymbol(Syntax* syntax, const char* name,
+                                     SourceLocation location) {
+  Symbol* sym = NewSymbol(name != NULL ? name : SyntaxFakeName(syntax),
+                          NewRangeForAutoType(), STO(auto));
+  sym->location = location;
+  sym->flags.is_local = true;
+  sym->flags.is_defined = true;
+  return sym;
+}
+
+typedef struct {
+  Symbol* loop_var;
+  Vector names;  // String* entries for [x, y] bindings.
+  Vector symbols;  // Symbol* entries corresponding to names.
+} RangeForBinding;
+
+static void RangeForBindingInit(RangeForBinding* binding) {
+  binding->loop_var = NULL;
+  VectorInit(&binding->names);
+  VectorInit(&binding->symbols);
+}
+
+static void RangeForBindingDestruct(RangeForBinding* binding) {
+  VectorDestructWithContents(&binding->names,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+  VectorDestruct(&binding->symbols);
+}
+
 static ASTNode* NewCXXDestructorCall(Symbol* sym, SourceLocation location) {
   if (!CompilerIsCXX() || sym == NULL || StorageIs(sym->storage, STO(static)) ||
       !TypeIsStructOrUnion(sym->type) || sym->type->info.struct_info == NULL ||
@@ -312,6 +370,261 @@ static ASTNode* ParseAsmStatement(Syntax* syntax, TokenClass followers,
   return node;
 }
 
+static bool AddRangeForVariable(Syntax* syntax, Symbol* sym) {
+  if (sym == NULL) {
+    return false;
+  }
+  Symbol* old = SyntaxFindSymbol(syntax, &sym->name);
+  if (old != NULL) {
+    SyntaxError(syntax, "Duplicate definition of local symbol %s",
+                sym->name.value);
+    return false;
+  }
+  if (!SyntaxAddSymbol(syntax, sym)) {
+    SyntaxError(syntax, "Duplicate definition of local symbol %s",
+                sym->name.value);
+    return false;
+  }
+  sym->flags.is_local = true;
+  sym->flags.is_defined = true;
+  return true;
+}
+
+static ASTNode* NewRangeForMemberCall(Symbol* range_sym, const char* name,
+                                      SourceLocation location) {
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(name), NULL, location);
+  ASTNode* access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location,
+                       NewIdentifierASTNode(range_sym, location), member);
+  return NewVectorASTNode(AST_OP(call), NULL, location, access, NewVector());
+}
+
+static ASTNode* NewRangeForMemberAccess(Symbol* object, const char* name,
+                                        SourceLocation location) {
+  return NewBinaryASTNode(
+      AST_OP(dot), NULL, location,
+      NewIdentifierASTNode(object, location),
+      NewStringConstantASTNode(NewString(name), NULL, location));
+}
+
+static void AppendRangeForBindingDeclarations(Syntax* syntax,
+                                              RangeForBinding* binding,
+                                              ASTNode* current,
+                                              Vector* body_statements,
+                                              SourceLocation location) {
+  if (binding->loop_var != NULL) {
+    VectorAppend(body_statements,
+                 NewRangeForDeclarationList(binding->loop_var, current,
+                                            location));
+    return;
+  }
+
+  Symbol* item = NewRangeForAutoSymbol(syntax, NULL, location);
+  SyntaxAddSymbol(syntax, item);
+  VectorAppend(body_statements, NewRangeForDeclarationList(item, current,
+                                                           location));
+  for (size_t i = 0; i < binding->symbols.length; i++) {
+    Symbol* sym = binding->symbols.value.p[i];
+    VectorAppend(body_statements,
+                 NewRangeForDeclarationList(
+                     sym,
+                     NewRangeForMemberAccess(item, sym->name.value, location),
+                     location));
+  }
+}
+
+static ASTNode* NewRangeForIteratorLoop(Syntax* syntax,
+                                        RangeForBinding* binding,
+                                        TypeRecord* iterator_type,
+                                        ASTNode* begin_init,
+                                        ASTNode* end_init,
+                                        ASTNode* stmt,
+                                        SourceLocation location) {
+  Symbol* begin = iterator_type != NULL
+                      ? SyntaxNewTemporary(syntax, iterator_type)
+                      : NewRangeForAutoSymbol(syntax, NULL, location);
+  Symbol* end = iterator_type != NULL
+                    ? SyntaxNewTemporary(syntax, TypeRecordCopy(iterator_type))
+                    : NewRangeForAutoSymbol(syntax, NULL, location);
+  if (iterator_type == NULL) {
+    SyntaxAddSymbol(syntax, begin);
+    SyntaxAddSymbol(syntax, end);
+  }
+
+  Vector* statements = NewVector();
+  VectorAppend(statements, NewRangeForDeclarationList(begin, begin_init,
+                                                      location));
+  VectorAppend(statements, NewRangeForDeclarationList(end, end_init,
+                                                      location));
+
+  Vector* body_statements = NewVector();
+  ASTNode* current =
+      NewUnaryASTNode(AST_OP(contents), NULL, location,
+                      NewIdentifierASTNode(begin, location));
+  AppendRangeForBindingDeclarations(syntax, binding, current, body_statements,
+                                    location);
+  VectorAppend(body_statements, stmt);
+  ASTNode* body = NewCompoundStatementASTNode(body_statements, location);
+
+  ASTNode* cond =
+      NewBinaryASTNode(AST_OP(noteq), NULL, location,
+                       NewIdentifierASTNode(begin, location),
+                       NewIdentifierASTNode(end, location));
+  ASTNode* next =
+      NewUnaryASTNode(AST_OP(preinc), NULL, location,
+                      NewIdentifierASTNode(begin, location));
+  ASTNode* loop = NewForStatementASTNode(NULL, cond, next, body, location);
+  VectorAppend(statements, loop);
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static ASTNode* NewRangeForArrayLoop(Syntax* syntax,
+                                     RangeForBinding* binding,
+                                     Symbol* range_sym,
+                                     TypeRecord* range_type,
+                                     ASTNode* stmt,
+                                     SourceLocation location) {
+  ASTNode* begin_init = NewIdentifierASTNode(range_sym, location);
+  TypeRecord* iterator_type = NewPointerTo(kQualPlain, range_type->next);
+  ASTNode* end_init =
+      NewBinaryASTNode(AST_OP(plus), NULL, location,
+                       NewIdentifierASTNode(range_sym, location),
+                       NewIntConstantASTNode(range_type->info.array.size.fixed,
+                                             NewTypeRecordWithSize(kTypeInt,
+                                                                   kQualPlain),
+                                             location));
+  return NewRangeForIteratorLoop(syntax, binding, iterator_type, begin_init,
+                                 end_init, stmt, location);
+}
+
+static ASTNode* NewRangeForMemberIteratorLoop(Syntax* syntax,
+                                              RangeForBinding* binding,
+                                              Symbol* range_sym,
+                                              ASTNode* stmt,
+                                              SourceLocation location) {
+  return NewRangeForIteratorLoop(
+      syntax, binding, NULL,
+      NewRangeForMemberCall(range_sym, "begin", location),
+      NewRangeForMemberCall(range_sym, "end", location), stmt, location);
+}
+
+static bool TryParseRangeForStructuredBinding(Syntax* syntax,
+                                              RangeForBinding* binding) {
+  if (!LexMatch(syntax->lex, TOK(lsquare))) {
+    return false;
+  }
+  while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected structured binding name");
+      break;
+    }
+    VectorAppend(&binding->names, NewString(syntax->lex->spelling.value));
+    LexNextToken(syntax->lex);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+  return true;
+}
+
+static bool TryParseRangeForBinding(Syntax* syntax,
+                                    RangeForBinding* binding) {
+  if (TryParseRangeForStructuredBinding(syntax, binding)) {
+    return true;
+  }
+  if (!SyntaxLookingAtType(syntax)) {
+    return false;
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  TypeRecordIncRef(type);
+  binding->loop_var = TypeParserParseDeclarator(&parser, type);
+  TypeRecordDelete(type);
+  TypeParserDestruct(&parser);
+  return binding->loop_var != NULL;
+}
+
+static void AddRangeForStructuredBindingVariables(Syntax* syntax,
+                                                  RangeForBinding* binding,
+                                                  SourceLocation location) {
+  for (size_t i = 0; i < binding->names.length; i++) {
+    String* name = binding->names.value.p[i];
+    Symbol* sym = NewRangeForAutoSymbol(syntax, name->value, location);
+    AddRangeForVariable(syntax, sym);
+    VectorAppend(&binding->symbols, sym);
+  }
+}
+
+static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
+                                             TokenClass followers,
+                                             SourceLocation location) {
+  if (!CompilerIsCXX()) {
+    return NULL;
+  }
+
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+
+  RangeForBinding binding;
+  RangeForBindingInit(&binding);
+  if (!TryParseRangeForBinding(syntax, &binding) ||
+      !LexMatch(syntax->lex, TOK(colon))) {
+    RangeForBindingDestruct(&binding);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+
+  if (binding.loop_var != NULL) {
+    AddRangeForVariable(syntax, binding.loop_var);
+  } else {
+    AddRangeForStructuredBindingVariables(syntax, &binding, location);
+  }
+  ASTNode* range = SyntaxParseExpression(syntax, followers | TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  Symbol* range_sym = NULL;
+  TypeRecord* range_type = NULL;
+  if (range != NULL && range->op == AST_OP(identifier)) {
+    range_sym = ((IdentifierASTNode*)range)->symbol;
+    range_type = range_sym != NULL ? range_sym->type : NULL;
+  }
+  bool valid_named_range = range_type != NULL;
+  if (!valid_named_range) {
+    SyntaxError(syntax,
+                "range-based for currently supports named ranges");
+  }
+  if (range != NULL) {
+    ASTNodeDelete(range);
+  }
+
+  location = syntax->lex->current_token_location;
+  syntax->loop_count++;
+  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  syntax->loop_count--;
+  ASTNode* result = NULL;
+  if (!valid_named_range) {
+    result = NewCompoundStatementASTNode(NewVector(), location);
+  } else if (TypeIsArray(range_type) && !TypeIsVLA(range_type)) {
+    result = NewRangeForArrayLoop(syntax, &binding, range_sym, range_type, stmt,
+                                  location);
+  } else if (TypeIsStructOrUnion(range_type)) {
+    result = NewRangeForMemberIteratorLoop(syntax, &binding, range_sym, stmt,
+                                           location);
+  } else {
+    SyntaxError(syntax,
+                "range-based for supports fixed arrays or member begin/end ranges");
+    result = NewCompoundStatementASTNode(NewVector(), location);
+  }
+  RangeForBindingDestruct(&binding);
+  return result;
+}
+
 // For statement.
 static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
                                   SourceLocation location) {
@@ -322,6 +635,12 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
   ASTNode* c3 = NULL;
 
   SyntaxOpenScope(syntax);
+  ASTNode* range_for = TryParseCXXRangeForStatement(syntax, followers,
+                                                   location);
+  if (range_for != NULL) {
+    SyntaxCloseScope(syntax);
+    return range_for;
+  }
   if (!LexLookingAt(lex, TOK(semicolon))) {
     if (SyntaxLookingAtType(syntax)) {
       c1 = SyntaxParseLocalDeclaration(syntax);

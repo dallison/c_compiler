@@ -652,6 +652,7 @@ typedef struct {
   TypeRecord* type;
   int array_index_end;  // For GCC range designators [start ... end]; == index
                         // when not a range.
+  bool is_resolved_member;
   union {
     int array_index;
     String* struct_member_name;   // Before semantic analysis.

@@ -292,6 +292,7 @@ static void AnalyzeAsmStatement(AsmASTNode* node) {
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
+  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->if_part);
   AnalyzeStatement(node->else_part);
@@ -300,6 +301,7 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
 
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
+  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
@@ -307,6 +309,7 @@ static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
 
 static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
+  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
@@ -636,6 +639,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 
   node->c2 = AnalyzeExpression(node->c2);
   if (node->c2 != NULL) {
+    NormalConversion(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain));
     SemanticCheckScalarType(node->c2);
   }
 
@@ -750,6 +754,18 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     if (return_value == NULL) {
       SemanticError((ASTNode*)node,
                     "Must return a value from a non-void function");
+    } else if (TypeIsReference(compiler->current_function->next)) {
+      TypeRecord* reference_type = compiler->current_function->next;
+      NormalConversion(return_value, reference_type->next);
+      if (reference_type->declarator == kDeclRValueReference) {
+        if (return_value->value_category == kValueCategoryLvalue) {
+          SemanticError(return_value,
+                        "Rvalue reference return value must not be an lvalue");
+        }
+      } else if (return_value->value_category != kValueCategoryLvalue) {
+        SemanticError(return_value, "Reference return value must be an lvalue");
+      }
+      return_value->flags |= kASTNeedAddress;
     } else {
       NormalConversion(return_value, compiler->current_function->next);
     }

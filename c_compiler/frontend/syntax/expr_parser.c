@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include "expr_evaluator.h"
 #include "expr_parser.h"
@@ -30,6 +31,18 @@ static struct Intrinsic {
     {"__builtin_va_copy", AST_OP(builtin_va_copy), 2},
     {NULL, 0, 0},
 };
+
+typedef enum {
+  kLambdaCaptureDefaultNone,
+  kLambdaCaptureDefaultValue,
+  kLambdaCaptureDefaultReference,
+} LambdaCaptureDefault;
+
+typedef struct {
+  Symbol* captured;
+  Symbol* field;
+  bool by_reference;
+} LambdaCapture;
 
 // Returns -1 for not intrinsic.
 static int GetIntrinsicIndex(const char* name) {
@@ -567,6 +580,442 @@ static ASTNode* ParseGenericSelection(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
+static LambdaCapture* NewLambdaCapture(Symbol* captured, bool by_reference) {
+  LambdaCapture* capture = malloc(sizeof(LambdaCapture));
+  capture->captured = captured;
+  capture->field = NULL;
+  capture->by_reference = by_reference;
+  return capture;
+}
+
+static LambdaCapture* FindLambdaCapture(Vector* captures, Symbol* symbol) {
+  for (size_t i = 0; i < captures->length; i++) {
+    LambdaCapture* capture = captures->value.p[i];
+    if (capture->captured == symbol) {
+      return capture;
+    }
+  }
+  return NULL;
+}
+
+static bool LambdaFunctionOwnsSymbol(TypeRecord* func, Symbol* symbol) {
+  if (func == NULL || symbol == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    if (func->info.function.prototype.value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
+  if (symbol == NULL || LambdaFunctionOwnsSymbol(lambda_func, symbol) ||
+      symbol->flags.invented || TypeIsFunction(symbol->type) ||
+      StorageIs(symbol->storage, STO(static) | STO(extern) | STO(typedef))) {
+    return false;
+  }
+  Symbol* global = FindGlobalSymbol(&symbol->name);
+  return global != symbol;
+}
+
+static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
+                                   LambdaCaptureDefault* capture_default,
+                                   TokenClass followers) {
+  *capture_default = kLambdaCaptureDefaultNone;
+  if (LexMatch(syntax->lex, TOK(rsquare))) {
+    return;
+  }
+  if (LexMatch(syntax->lex, TOK(equal))) {
+    *capture_default = kLambdaCaptureDefaultValue;
+    LexMatch(syntax->lex, TOK(comma));
+  } else if (LexLookingAt(syntax->lex, TOK(amp))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(rsquare)) ||
+        LexLookingAt(syntax->lex, TOK(comma))) {
+      *capture_default = kLambdaCaptureDefaultReference;
+      LexMatch(syntax->lex, TOK(comma));
+      LexCheckpointDestruct(&checkpoint);
+    } else {
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      LexCheckpointDestruct(&checkpoint);
+    }
+  }
+
+  while (!LexLookingAt(syntax->lex, TOK(rsquare)) && !LexEof(syntax->lex)) {
+    bool by_reference = LexMatch(syntax->lex, TOK(amp));
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected lambda capture name");
+      break;
+    }
+    String name;
+    StringInit(&name, syntax->lex->spelling.value);
+    Symbol* symbol = SyntaxFindSymbol(syntax, &name);
+    if (symbol == NULL) {
+      SyntaxError(syntax, "Unknown lambda capture %s", name.value);
+    } else if (FindLambdaCapture(captures, symbol) == NULL) {
+      VectorAppend(captures, NewLambdaCapture(symbol, by_reference));
+    }
+    StringDestruct(&name);
+    LexNextToken(syntax->lex);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+}
+
+static void QueueLambdaCallOperatorDefinition(Symbol* symbol) {
+  Vector* declarations = NewVector();
+  VectorAppend(declarations,
+               NewVariableDeclarationASTNode(symbol, NULL, symbol->location));
+  VectorAppend(&compiler->pending_template_instantiations,
+               NewDeclarationListASTNode(declarations, symbol->location));
+}
+
+static void AddLambdaFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
+  Vector* formals = &func->info.function.prototype;
+  for (size_t i = 0; i < formals->length; i++) {
+    Symbol* formal = formals->value.p[i];
+    InsertLocalSymbol(syntax->local_symbol_stack, formal);
+  }
+}
+
+static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
+                                     TokenClass followers) {
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    return;
+  }
+  int arg_number = 0;
+  while (!LexLookingAt(syntax->lex, TOK(rparen)) && !LexEof(syntax->lex)) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    Symbol* formal = TypeParserParseDeclarator(&parser, type);
+    TypeParserDestruct(&parser);
+    if (formal != NULL) {
+      if (TypeContainsAuto(formal->type)) {
+        SymbolSetType(formal, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      }
+      formal->flags.is_defined = true;
+      formal->flags.is_argument = true;
+      formal->value.arg_number = arg_number++;
+      VectorAppend(&func->info.function.prototype, formal);
+    }
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+}
+
+static void SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
+  if (!LexMatch(syntax->lex, TOK(noexcept))) {
+    return;
+  }
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    return;
+  }
+  int depth = 1;
+  while (depth > 0 && !LexEof(syntax->lex)) {
+    if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      depth++;
+    } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+      depth--;
+    }
+    LexNextToken(syntax->lex);
+  }
+  if (depth != 0) {
+    SyntaxRecover(syntax, followers);
+  }
+}
+
+static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
+                                                      bool* is_mutable,
+                                                      TypeRecord* default_type,
+                                                      TokenClass followers) {
+  *is_mutable = false;
+  bool keep_parsing = true;
+  while (keep_parsing) {
+    if (LexMatch(syntax->lex, TOK(mutable))) {
+      *is_mutable = true;
+    } else if (LexMatch(syntax->lex, TOK(constexpr))) {
+      // The current frontend has no constexpr evaluation model for functions;
+      // parsing it here preserves the lambda surface without changing codegen.
+    } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {
+      SkipNoexceptSpecifier(syntax, followers);
+    } else {
+      keep_parsing = false;
+    }
+  }
+
+  if (!LexMatch(syntax->lex, TOK(arrow))) {
+    return default_type;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
+  TypeRecord* return_type = TypeParserParseType(&parser, true);
+  Symbol* declarator = TypeParserParseDeclarator(&parser, return_type);
+  if (declarator != NULL) {
+    return_type = declarator->type;
+    SymbolDelete(declarator);
+  }
+  TypeParserDestruct(&parser);
+  return return_type;
+}
+
+static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
+                                   TypeRecord** closure_type) {
+  String tag_name;
+  StringInit(&tag_name, NULL);
+  SyntaxFakeTagName(syntax, &tag_name);
+
+  Struct* closure = NewStruct(false);
+  closure->is_class = true;
+  TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
+  type->info.struct_info = closure;
+  Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));
+  tag->flags.invented = true;
+  tag->flags.is_defined = true;
+  tag->location = location;
+  closure->tag_name = &tag->name;
+  closure->tag_symbol = tag;
+  SyntaxAddTag(syntax, tag);
+  Symbol* empty_member =
+      NewSymbol("__lambda_empty", NewTypeRecordWithSize(kTypeChar, kQualPlain),
+                STO(implicit));
+  empty_member->flags.invented = true;
+  empty_member->flags.is_defined = true;
+  empty_member->location = location;
+  StructMember* member = NewStructMember(empty_member);
+  member->access = kAccessPrivate;
+  StructAddSyntheticMember(closure, member);
+  TypeRecordCalculateSize(type);
+  StringDestruct(&tag_name);
+  *closure_type = type;
+  return tag;
+}
+
+static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
+                                     TypeRecord* return_type, bool is_mutable,
+                                     SourceLocation location) {
+  Struct* closure = closure_type->info.struct_info;
+  TypeRecord* func = NewFunctionTypeRecord();
+  ParseLambdaParameterList(syntax, func, TC(closebra));
+  return_type = ParseLambdaSpecifiersAndReturnType(syntax, &is_mutable,
+                                                   return_type, TC(closebra));
+  func->info.function.is_const_member = !is_mutable;
+  TypeRecordChain(func, return_type);
+  TypeRecordAddCXXThisParameter(func, closure, location);
+
+  Symbol* op = NewSymbol("operator()", func, STO(implicit));
+  op->location = location;
+  op->flags.is_defined = true;
+  op->flags.is_inline_defn = true;
+  op->value.func_defn = op;
+  func->info.function.symbol = op;
+  func->info.function.is_inline = true;
+  func->info.function.definition = true;
+
+  StructMember* member = NewStructMember(op);
+  member->is_member_function = true;
+  member->access = kAccessPublic;
+  StructAddSyntheticMember(closure, member);
+  return op;
+}
+
+typedef struct {
+  Vector* captures;
+  TypeRecord* lambda_func;
+  LambdaCaptureDefault capture_default;
+} LambdaCaptureScan;
+
+static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
+                                         int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  LambdaCaptureScan* scan = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (!CanCaptureSymbol(id->symbol, scan->lambda_func) ||
+      FindLambdaCapture(scan->captures, id->symbol) != NULL) {
+    return;
+  }
+  bool by_reference =
+      scan->capture_default == kLambdaCaptureDefaultReference;
+  VectorAppend(scan->captures, NewLambdaCapture(id->symbol, by_reference));
+}
+
+static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture) {
+  TypeRecord* captured_type = TypeIsReference(capture->captured->type)
+                                  ? capture->captured->type->next
+                                  : capture->captured->type;
+  if (capture->by_reference) {
+    return NewPointerTo(kQualPlain, captured_type);
+  }
+  return TypeRecordCopy(captured_type);
+}
+
+static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
+                                   SourceLocation location) {
+  Struct* closure = closure_type->info.struct_info;
+  for (size_t i = 0; i < captures->length; i++) {
+    LambdaCapture* capture = captures->value.p[i];
+    Symbol* field = NewSymbol(capture->captured->name.value,
+                              LambdaCaptureFieldType(capture), STO(implicit));
+    field->flags.invented = true;
+    field->flags.is_defined = true;
+    field->location = location;
+    StructMember* member = NewStructMember(field);
+    member->access = kAccessPrivate;
+    StructAddSyntheticMember(closure, member);
+    capture->field = field;
+  }
+  closure_type->size = closure->size;
+}
+
+static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture,
+                                            SourceLocation location) {
+  ASTNode* value = NewIdentifierASTNode(capture->captured, location);
+  if (capture->by_reference) {
+    value = NewUnaryASTNode(AST_OP(address), NULL, location, value);
+  }
+  Vector* designators = NewVector();
+  VectorAppend(designators, NewStructDesignator(NewString(capture->field->name.value)));
+  return NewDesignatedInitializerASTNode(
+      designators, NewExpressionInitializerASTNode(value, location), location);
+}
+
+static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
+                                       LambdaCapture* capture,
+                                       SourceLocation location) {
+  ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
+  ASTNode* member = NewStringConstantASTNode(
+      NewString(capture->field->name.value), NULL, location);
+  ASTNode* access =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node, member);
+  if (capture->by_reference) {
+    return NewUnaryASTNode(AST_OP(contents), NULL, location, access);
+  }
+  return access;
+}
+
+typedef struct {
+  Vector* captures;
+  Symbol* this_symbol;
+} LambdaRewrite;
+
+static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
+                                         ASTNode* replacement) {
+  if (parent == NULL) {
+    ASTNodeDelete(replacement);
+    return;
+  }
+  if ((parent->op == AST_OP(call) || parent->op == AST_OP(inline_call) ||
+       parent->op == AST_OP(builtin_va_start) ||
+       parent->op == AST_OP(builtin_va_arg) ||
+       parent->op == AST_OP(builtin_va_end) ||
+       parent->op == AST_OP(builtin_va_copy)) &&
+      child_id > 0) {
+    VectorASTNode* vector = (VectorASTNode*)parent;
+    ASTNode* old = vector->children->value.p[child_id - 1];
+    VectorSet(vector->children, (size_t)child_id - 1, replacement);
+    replacement->parent = parent;
+    replacement->child_id = child_id;
+    ASTNodeDelete(old);
+    return;
+  }
+  ASTNodeReplaceChild(parent, child_id, replacement, true);
+}
+
+static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
+                                     int child_id, VisitorMode mode) {
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  LambdaRewrite* rewrite = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  LambdaCapture* capture = FindLambdaCapture(rewrite->captures, id->symbol);
+  if (capture == NULL || capture->field == NULL) {
+    return;
+  }
+  ASTNode* replacement =
+      NewLambdaCaptureAccess(rewrite->this_symbol, capture, node->location);
+  ReplaceChildForLambdaCapture(node->parent, child_id, replacement);
+}
+
+static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
+                                TokenClass followers) {
+  ParserContext old_context = syntax->context;
+  syntax->context = kParsingBlockScope;
+  SyntaxOpenScope(syntax);
+  AddLambdaFunctionScopeSymbols(syntax, call_operator->type);
+  ASTNode* body = SyntaxParseStatement(syntax, followers);
+  SyntaxCloseScope(syntax);
+  syntax->context = old_context;
+  call_operator->type->info.function.body = body;
+  VectorAppend(&compiler->declaration_asts, body);
+  QueueLambdaCallOperatorDefinition(call_operator);
+  return body;
+}
+
+static ASTNode* NewLambdaClosureInitializer(TypeRecord* closure_type,
+                                            Vector* captures,
+                                            SourceLocation location) {
+  Vector* initializers = NewVector();
+  for (size_t i = 0; i < captures->length; i++) {
+    VectorAppend(initializers,
+                 NewLambdaCaptureInitializer(captures->value.p[i], location));
+  }
+  return NewBracedInitializerASTNode(initializers, closure_type, location);
+}
+
+static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
+                                         TokenClass followers) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(lsquare))) {
+    return NULL;
+  }
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);
+  Vector captures;
+  VectorInit(&captures);
+  LambdaCaptureDefault capture_default;
+  ParseLambdaCaptureList(syntax, &captures, &capture_default, followers);
+
+  TypeRecord* closure_type = NULL;
+  NewLambdaClosureTag(syntax, location, &closure_type);
+  Symbol* call_operator =
+      NewLambdaCallOperator(syntax, closure_type,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            /*is_mutable=*/false, location);
+  ParseLambdaBody(syntax, call_operator, followers);
+  if (capture_default != kLambdaCaptureDefaultNone) {
+    LambdaCaptureScan scan = {&captures, call_operator->type, capture_default};
+    ASTNodeVisit(call_operator->type->info.function.body,
+                 CollectDefaultLambdaCaptures, 0, &scan);
+  }
+  AddLambdaCaptureFields(closure_type, &captures, location);
+  LambdaRewrite rewrite = {
+      &captures, call_operator->type->info.function.prototype.value.p[0]};
+  ASTNodeVisit(call_operator->type->info.function.body,
+               RewriteLambdaCaptureUses, 0, &rewrite);
+
+  Symbol* temp = SyntaxNewTemporary(syntax, closure_type);
+  temp->location = location;
+  ASTNode* initializer =
+      NewLambdaClosureInitializer(closure_type, &captures, location);
+  ASTNode* result = NewCompoundLiteralASTNode(NewIdentifierASTNode(temp, location),
+                                             location, initializer);
+  VectorDestructWithContents(&captures, NULL, true);
+  return result;
+}
+
 // primary-expression:
 //   identifier
 //   constant
@@ -616,6 +1065,11 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     TypeRecord* type =
         NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
     return NewIntConstantASTNode(0, type, syntax->lex->current_token_location);
+  }
+
+  ASTNode* lambda = ParseCXXLambdaExpression(syntax, followers);
+  if (lambda != NULL) {
+    return lambda;
   }
 
   // Check for integer constant.
@@ -1080,6 +1534,46 @@ static Symbol* GetImplicitCXXOperatorDeleteArray(SourceLocation location) {
                                           arg_type, location);
 }
 
+static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
+                                             const char* name) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, name);
+  StructMember* member = FindStructMember(type->info.struct_info, &member_name);
+  StringDestruct(&member_name);
+  if (member == NULL || !member->is_member_function ||
+      member->symbol == NULL || !TypeIsFunction(member->symbol->type)) {
+    return NULL;
+  }
+  return member->symbol;
+}
+
+static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
+                                        bool is_array,
+                                        SourceLocation location) {
+  Symbol* member = GetCXXClassAllocationFunction(
+      type, is_array ? "operator new[]" : "operator new");
+  if (member != NULL) {
+    return member;
+  }
+  return is_array ? GetImplicitCXXOperatorNewArray(location)
+                  : GetImplicitCXXOperatorNew(location);
+}
+
+static Symbol* GetCXXOperatorDeleteForType(TypeRecord* type,
+                                           bool is_array,
+                                           SourceLocation location) {
+  Symbol* member = GetCXXClassAllocationFunction(
+      type, is_array ? "operator delete[]" : "operator delete");
+  if (member != NULL) {
+    return member;
+  }
+  return is_array ? GetImplicitCXXOperatorDeleteArray(location)
+                  : GetImplicitCXXOperatorDelete(location);
+}
+
 static ASTNode* NewCallASTNode(Symbol* callee, SourceLocation location,
                                Vector* actuals) {
   return NewVectorASTNode(AST_OP(call), NULL, location,
@@ -1410,8 +1904,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
   }
   VectorAppend(actuals, allocation_size);
   ASTNode* allocation =
-      NewCallASTNode(array_size != NULL ? GetImplicitCXXOperatorNewArray(location)
-                                        : GetImplicitCXXOperatorNew(location),
+      NewCallASTNode(GetCXXOperatorNewForType(allocated_type,
+                                              array_size != NULL,
+                                              location),
                      location, actuals);
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
@@ -1502,7 +1997,7 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
     if (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)) {
       Vector* actuals = NewVector();
       VectorAppend(actuals, expr);
-      return NewCallASTNode(GetImplicitCXXOperatorDeleteArray(location),
+    return NewCallASTNode(GetImplicitCXXOperatorDeleteArray(location),
                             location, actuals);
     }
     TypeRecord* size_type = NewSizeTypeRecord();
@@ -1546,7 +2041,8 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
     VectorAppend(actuals, NewIdentifierASTNode(header, location));
     VectorAppend(statements,
                  NewExpressionStatement(
-                     NewCallASTNode(GetImplicitCXXOperatorDeleteArray(location),
+                     NewCallASTNode(GetCXXOperatorDeleteForType(
+                                        pointer_type->next, true, location),
                                     location, actuals),
                      location));
     return NewUnaryASTNode(
@@ -1557,8 +2053,11 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
       FindCXXDestructorForType(pointer_type->next) == NULL) {
     Vector* actuals = NewVector();
     VectorAppend(actuals, expr);
-    return NewCallASTNode(GetImplicitCXXOperatorDelete(location), location,
-                          actuals);
+    TypeRecord* object_type =
+        TypeIsPointerOrArray(pointer_type) ? pointer_type->next : NULL;
+    return NewCallASTNode(GetCXXOperatorDeleteForType(object_type, false,
+                                                     location),
+                          location, actuals);
   }
 
   Symbol* temp = SyntaxNewTemporary(syntax, pointer_type);
@@ -1570,7 +2069,9 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
   Vector* actuals = NewVector();
   VectorAppend(actuals, NewIdentifierASTNode(temp, location));
   ASTNode* deallocate =
-      NewCallASTNode(GetImplicitCXXOperatorDelete(location), location, actuals);
+      NewCallASTNode(GetCXXOperatorDeleteForType(pointer_type->next, false,
+                                                 location),
+                     location, actuals);
   return NewBinaryASTNode(
       AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
       assign, NewBinaryASTNode(AST_OP(comma),

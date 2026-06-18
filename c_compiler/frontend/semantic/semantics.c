@@ -8,6 +8,7 @@
 
 #include "semantics.h"
 #include <string.h>
+#include "compiler.h"
 #include "errors.h"
 #include "expr_semantics.h"
 #include "lex.h"
@@ -640,6 +641,82 @@ static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
   return true;
 }
 
+static void ConversionOperatorName(TypeRecord* type, String* name) {
+  String type_name;
+  StringInit(&type_name, "");
+  TypeRecordToString(type, &type_name);
+  StringInit(name, "operator ");
+  for (size_t i = 0; i < type_name.length; i++) {
+    char ch = type_name.value[i];
+    if (ch == '*') {
+      StringAppend(name, " pointer");
+    } else if (ch == '&') {
+      if (i + 1 < type_name.length && type_name.value[i + 1] == '&') {
+        StringAppend(name, " rvalue_reference");
+        i++;
+      } else {
+        StringAppend(name, " reference");
+      }
+    } else {
+      StringAppendChar(name, ch);
+    }
+  }
+  while (name->length > 0 && name->value[name->length - 1] == ' ') {
+    name->value[name->length - 1] = '\0';
+    name->length--;
+  }
+  StringDestruct(&type_name);
+}
+
+static StructMember* FindConversionOperator(Struct* str, TypeRecord* to) {
+  if (str == NULL) {
+    return NULL;
+  }
+  String name;
+  ConversionOperatorName(to, &name);
+  StructMember* member = FindStructMember(str, &name);
+  StringDestruct(&name);
+  while (member != NULL) {
+    if (member->is_member_function && member->symbol != NULL &&
+        TypeIsFunction(member->symbol->type) &&
+        TypeEqual(member->symbol->type->next, to)) {
+      return member;
+    }
+    member = member->overload_next;
+  }
+  return NULL;
+}
+
+static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL ||
+      !TypeIsStructOrUnion(from->type)) {
+    return false;
+  }
+  StructMember* member = FindConversionOperator(from->type->info.struct_info, to);
+  if (member == NULL) {
+    return false;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  ASTNode* receiver = ASTNodeMove(from);
+  ASTNode* member_name =
+      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+                               from->location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, from->location, receiver,
+                       member_name);
+  ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, from->location,
+                                   member_access, NewVector());
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, call, true);
+  }
+  call = AnalyzeExpression(call);
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, call, false);
+  }
+  return true;
+}
+
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   if (TryConvertDerivedPointer(from, to)) {
     return;
@@ -653,6 +730,10 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   if (TypeEqualIgnoringSign(from->type, to)) {
     // Use the 'to' type as the node type.
     ASTNodeSetType(from, to);
+    return;
+  }
+
+  if (TryConvertWithConversionOperator(from, to)) {
     return;
   }
 

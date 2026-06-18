@@ -3745,7 +3745,128 @@ static bool QualifiedNameIsSpecialMember(Symbol* owner,
   return true;
 }
 
+static void ConversionOperatorName(TypeRecord* type, String* name);
+static TypeRecord* ParseCXXConversionType(TypeParser* parser);
+static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
+                                              Struct* owner,
+                                              TypeRecord* return_type,
+                                              SourceLocation location,
+                                              bool is_virtual);
+
+static void AppendConversionOwnerComponent(FullyQualifiedIdentifier* name,
+                                           String* component) {
+  if (name->spelling.length != 0 || name->absolute) {
+    StringAppend(&name->spelling, "::");
+  }
+  StringAppendString(&name->spelling, component);
+  VectorAppend(&name->components, NewString(component->value));
+  VectorAppend(&name->template_arguments, NULL);
+}
+
+static bool ParseCXXConversionOperatorOwner(TypeParser* parser,
+                                            FullyQualifiedIdentifier* owner_name) {
+  if (LexMatch(parser->lex, TOK(coloncolon))) {
+    owner_name->absolute = true;
+    owner_name->is_qualified = true;
+  }
+  if (!LexLookingAt(parser->lex, TOK(identifier))) {
+    return false;
+  }
+
+  while (!LexEof(parser->lex)) {
+    String component;
+    StringInit(&component, parser->lex->spelling.value);
+    LexNextToken(parser->lex);
+    AppendConversionOwnerComponent(owner_name, &component);
+    StringDestruct(&component);
+
+    if (!LexMatch(parser->lex, TOK(coloncolon))) {
+      return false;
+    }
+    owner_name->is_qualified = true;
+    if (LexLookingAt(parser->lex, TOK(operator))) {
+      return true;
+    }
+    if (!LexLookingAt(parser->lex, TOK(identifier))) {
+      return false;
+    }
+  }
+  return false;
+}
+
+static Symbol* TryParseCXXQualifiedConversionOperatorDeclarator(
+    TypeParser* parser) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+
+  SourceLocation location = parser->lex->current_token_location;
+  FullyQualifiedIdentifier owner_name;
+  FullyQualifiedIdentifierInit(&owner_name);
+  if (!ParseCXXConversionOperatorOwner(parser, &owner_name) ||
+      !LexMatch(parser->lex, TOK(operator))) {
+    FullyQualifiedIdentifierDestruct(&owner_name);
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+
+  if (!owner_name.absolute && owner_name.components.length == 1) {
+    owner_name.is_qualified = false;
+  }
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
+      parser->syntax, &owner_name, owner_name.components.length);
+  if (owner == NULL) {
+    owner = SyntaxFindQualifiedTag(parser->syntax, &owner_name);
+  }
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL) {
+    SyntaxError(parser->syntax,
+                "Qualified conversion operator does not name a class member");
+    FullyQualifiedIdentifierDestruct(&owner_name);
+    return NULL;
+  }
+
+  parser->cxx_member_owner = owner->type->info.struct_info;
+  TypeRecord* return_type = ParseCXXConversionType(parser);
+  String member_name;
+  ConversionOperatorName(return_type, &member_name);
+  parser->cxx_member_definition =
+      FindStructMember(parser->cxx_member_owner, &member_name);
+  if (parser->cxx_member_definition == NULL) {
+    SyntaxError(parser->syntax, "No class member named %s",
+                member_name.value);
+    StringDestruct(&member_name);
+    FullyQualifiedIdentifierDestruct(&owner_name);
+    return NULL;
+  }
+
+  if (!LexMatch(parser->lex, TOK(lparen))) {
+    SyntaxError(parser->syntax,
+                "Expected '(' in conversion operator definition");
+    StringDestruct(&member_name);
+    FullyQualifiedIdentifierDestruct(&owner_name);
+    return NULL;
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+
+  Symbol* sym =
+      NewCXXConversionOperatorSymbol(parser, parser->cxx_member_owner,
+                                     return_type, location,
+                                     /*is_virtual=*/false);
+  SymbolSetCXXMangledAsmName(sym);
+  StringDestruct(&member_name);
+  FullyQualifiedIdentifierDestruct(&owner_name);
+  return sym;
+}
+
 Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
+  Symbol* conversion = TryParseCXXQualifiedConversionOperatorDeclarator(parser);
+  if (conversion != NULL) {
+    return conversion;
+  }
+
   SourceLocation location = parser->lex->current_token_location;
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
@@ -4750,10 +4871,38 @@ static void AddStructMember(TypeParser* parser, Struct* str,
   MapInsert(&str->symbol_table, kv);
 }
 
+void StructAddSyntheticMember(Struct* str, StructMember* member) {
+  if (member->is_member_function) {
+    SymbolSetCXXMangledAsmName(member->symbol);
+  } else if (!member->is_static) {
+    AlignNextOffset(str, member->symbol->type);
+    member->byte_offset = str->next_offset;
+  }
+  member->index = str->members.length;
+  VectorAppend(&str->members, member);
+  MapKeyValue kv;
+  kv.key.p = &member->symbol->name;
+  kv.value.p = member;
+  MapInsert(&str->symbol_table, kv);
+  if (!member->is_static && !member->is_member_function) {
+    UpdateStructSize(str, member->symbol->type, str->is_union);
+  }
+}
+
 static bool CanOverloadStructMember(StructMember* existing,
                                     StructMember* member) {
   return CompilerIsCXX() && existing != NULL && member != NULL &&
          existing->is_member_function && member->is_member_function;
+}
+
+static bool SymbolIsCXXAllocationFunction(Symbol* symbol) {
+  if (!CompilerIsCXX() || symbol == NULL) {
+    return false;
+  }
+  return strcmp(symbol->name.value, "operator new") == 0 ||
+         strcmp(symbol->name.value, "operator new[]") == 0 ||
+         strcmp(symbol->name.value, "operator delete") == 0 ||
+         strcmp(symbol->name.value, "operator delete[]") == 0;
 }
 
 static void SetStructMemberOverloadAsmName(Struct* str,
@@ -4976,6 +5125,151 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   return true;
 }
 
+static void ConversionOperatorName(TypeRecord* type, String* name) {
+  String type_name;
+  StringInit(&type_name, "");
+  TypeRecordToString(type, &type_name);
+  StringInit(name, "operator ");
+  for (size_t i = 0; i < type_name.length; i++) {
+    char ch = type_name.value[i];
+    if (ch == '*') {
+      StringAppend(name, " pointer");
+    } else if (ch == '&') {
+      if (i + 1 < type_name.length && type_name.value[i + 1] == '&') {
+        StringAppend(name, " rvalue_reference");
+        i++;
+      } else {
+        StringAppend(name, " reference");
+      }
+    } else {
+      StringAppendChar(name, ch);
+    }
+  }
+  while (name->length > 0 && name->value[name->length - 1] == ' ') {
+    name->value[name->length - 1] = '\0';
+    name->length--;
+  }
+  StringDestruct(&type_name);
+}
+
+static TypeRecord* ParseCXXConversionType(TypeParser* parser) {
+  TypeParser return_parser;
+  TypeParserInit(&return_parser, parser->lex, parser->syntax, STO(auto),
+                 kParsingPrototype);
+  TypeRecord* return_type = TypeParserParseType(&return_parser, true);
+  TypeParserDestruct(&return_parser);
+  if (return_type == NULL) {
+    return_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+
+  Vector wrappers;
+  VectorInit(&wrappers);
+  while (!LexEof(parser->lex)) {
+    if (LexMatch(parser->lex, TOK(star))) {
+      VectorAppend(&wrappers, NewPointerTypeRecord(ParseQualifiers(parser)));
+    } else if (LexLookingAt(parser->lex, TOK(amp)) ||
+               LexLookingAt(parser->lex, TOK(ampamp))) {
+      bool rvalue = LexMatch(parser->lex, TOK(ampamp));
+      if (!rvalue) {
+        LexMatch(parser->lex, TOK(amp));
+      }
+      VectorAppend(&wrappers, NewReferenceTypeRecord(kQualPlain, rvalue));
+    } else {
+      break;
+    }
+  }
+
+  TypeRecord* result = return_type;
+  for (size_t i = wrappers.length; i > 0; i--) {
+    TypeRecord* wrapper = wrappers.value.p[i - 1];
+    TypeRecordChain(wrapper, result);
+    wrapper->type = result->type;
+    result = wrapper;
+  }
+  VectorDestruct(&wrappers);
+  TypeRecordCalculateSize(result);
+  return result;
+}
+
+static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
+                                              Struct* owner,
+                                              TypeRecord* return_type,
+                                              SourceLocation location,
+                                              bool is_virtual) {
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_virtual = is_virtual;
+  TypeRecordChain(func, return_type);
+  func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  TypeRecordAddCXXThisParameter(func, owner, location);
+
+  String member_name;
+  ConversionOperatorName(return_type, &member_name);
+  Symbol* member_symbol = NewSymbol(member_name.value, func, STO(implicit));
+  member_symbol->location = location;
+  func->info.function.symbol = member_symbol;
+  StringDestruct(&member_name);
+  return member_symbol;
+}
+
+static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
+                                             CXXAccess access,
+                                             bool is_virtual) {
+  if (!CompilerIsCXX() || !LexLookingAt(parser->lex, TOK(operator))) {
+    return false;
+  }
+
+  SourceLocation location = parser->lex->current_token_location;
+  LexNextToken(parser->lex);
+
+  TypeRecord* return_type = ParseCXXConversionType(parser);
+  if (!LexLookingAt(parser->lex, TOK(lparen))) {
+    SyntaxError(parser->syntax,
+                "Unsupported conversion operator target type");
+    SyntaxRecover(parser->syntax, TC(semicolon) | TC(openbra) | TC(closebra));
+    return true;
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(decl));
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(decl));
+
+  String member_name;
+  ConversionOperatorName(return_type, &member_name);
+  Symbol* member_symbol =
+      NewCXXConversionOperatorSymbol(parser, str, return_type, location,
+                                     is_virtual);
+  TypeRecord* func = member_symbol->type;
+  StructMember* member = NewStructMember(member_symbol);
+  member->is_member_function = true;
+  member->access = access;
+
+  StructMember* existing = MapFindPointerKey(&str->symbol_table, &member_name);
+  if (existing != NULL) {
+    if (!CanOverloadStructMember(existing, member)) {
+      SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                  member_name.value);
+      StructMemberDelete(member);
+      SkipInlineMemberFunctionBody(parser);
+      StringDestruct(&member_name);
+      return true;
+    }
+    if (FindStructMemberOverload(existing, member_symbol->type) != NULL) {
+      SyntaxError(parser->syntax, "Duplicate struct/union member %s",
+                  member_name.value);
+      StructMemberDelete(member);
+      SkipInlineMemberFunctionBody(parser);
+      StringDestruct(&member_name);
+      return true;
+    }
+    AppendStructMemberOverload(parser, str, existing, member);
+  } else {
+    AddStructMember(parser, str, member);
+  }
+  ParseCXXVirtSpecifiers(parser, func);
+  ParseCXXPureSpecifier(parser, func);
+  ParseInlineMemberFunctionBody(parser, member_symbol);
+  StringDestruct(&member_name);
+  return true;
+}
+
 
 // Copy an anoymous union into the destination struct.  Members of the union
 // are inserted into the symbol table of the dest struct and each of the
@@ -5095,6 +5389,27 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (is_virtual_member && is_static_member) {
       SyntaxError(parser->syntax, "static member functions cannot be virtual");
     }
+    if (!is_static_member &&
+        ParseCXXConversionOperatorMember(parser, str, current_access,
+                                         is_virtual_member)) {
+      if (is_member_template) {
+        SyntaxError(parser->syntax,
+                    "Conversion operator templates are not supported yet");
+        SyntaxCloseScope(parser->syntax);
+        VectorDestructWithContents(
+            member_template_parameters,
+            (VectorElementDestructor)TemplateParameterDelete,
+            /*free_element=*/false);
+        parser->syntax->parsing_template_declaration = old_parsing_template;
+        parser->syntax->current_template_parameter_count =
+            old_template_parameter_count;
+        parser->syntax->current_template_parameters = old_template_parameters;
+      }
+      if (!LexLookingAt(parser->lex, TOK(rbrace))) {
+        LexMatch(parser->lex, TOK(semicolon));
+      }
+      continue;
+    }
     bool possible_anon = LexLookingAt(parser->lex, TOK(union)) ||
             LexLookingAt(parser->lex, TOK(struct));
     TypeRecord* member_type = TypeParserParseType(parser, true);
@@ -5145,6 +5460,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         StructMember* member = NewStructMember(member_symbol);
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
+        if (member->is_member_function &&
+            SymbolIsCXXAllocationFunction(member_symbol)) {
+          member->is_static = true;
+        }
         member->access = current_access;
         if (member->is_member_function && !member->is_static) {
           member_symbol->type->info.function.is_virtual = is_virtual_member;

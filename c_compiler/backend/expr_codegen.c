@@ -1358,6 +1358,10 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   // The sub node has the kASTNeedAddress flag set so generating code for
   // it will calculate its address.
   IRNode* expr = GenerateExpression(gen, node->sub);
+  if (node->sub->op == AST_OP(compound_literal)) {
+    IRSetType(expr, node->base.type);
+    return expr;
+  }
   if (node->sub->op == AST_OP(identifier) &&
       TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type)) {
     IRSetType(expr, node->base.type);

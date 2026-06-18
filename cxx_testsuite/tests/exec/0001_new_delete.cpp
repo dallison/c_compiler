@@ -4,11 +4,78 @@ struct Box {
   int value;
 };
 
+unsigned long global_new_storage[8];
+unsigned long global_array_new_storage[32];
+int global_new_count;
+int global_delete_count;
+int global_new_array_count;
+int global_delete_array_count;
+
+void* operator new(unsigned long size) {
+  global_new_count += 1;
+  return global_new_storage;
+}
+
+void operator delete(void* ptr) {
+  global_delete_count += 1;
+}
+
+void* operator new[](unsigned long size) {
+  global_new_array_count += 1;
+  return global_array_new_storage;
+}
+
+void operator delete[](void* ptr) {
+  global_delete_array_count += 1;
+}
+
+struct CustomBox {
+  CustomBox();
+  ~CustomBox();
+  int value;
+  void* operator new(unsigned long size);
+  void operator delete(void* ptr);
+  void* operator new[](unsigned long size);
+  void operator delete[](void* ptr);
+};
+
+unsigned long custom_new_storage[8];
+unsigned long custom_array_new_storage[32];
+int custom_new_count;
+int custom_delete_count;
+int custom_new_array_count;
+int custom_delete_array_count;
+
 Box::Box() {
   value = 7;
 }
 
 Box::~Box() {
+}
+
+CustomBox::CustomBox() {
+  value = 11;
+}
+
+CustomBox::~CustomBox() {
+}
+
+void* CustomBox::operator new(unsigned long size) {
+  custom_new_count += 1;
+  return custom_new_storage;
+}
+
+void CustomBox::operator delete(void* ptr) {
+  custom_delete_count += 1;
+}
+
+void* CustomBox::operator new[](unsigned long size) {
+  custom_new_array_count += 1;
+  return custom_array_new_storage;
+}
+
+void CustomBox::operator delete[](void* ptr) {
+  custom_delete_array_count += 1;
 }
 
 int main(void) {
@@ -38,6 +105,26 @@ int main(void) {
   delete[] values;
   if (sum != 7) {
     return 6;
+  }
+
+  CustomBox* custom = new CustomBox;
+  if (custom->value != 11 || custom_new_count != 1 ||
+      global_new_count != 2) {
+    return 7;
+  }
+  delete custom;
+  if (custom_delete_count != 1 || global_delete_count != 2) {
+    return 8;
+  }
+
+  CustomBox* customs = new CustomBox[2];
+  if (customs[0].value != 11 || customs[1].value != 11 ||
+      custom_new_array_count != 1 || global_new_array_count != 2) {
+    return 9;
+  }
+  delete[] customs;
+  if (custom_delete_array_count != 1 || global_delete_array_count != 2) {
+    return 10;
   }
 
   return 0;

@@ -232,11 +232,13 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
     return;
   }
   node->sub = AnalyzeExpression(node->sub);
+  if (node->base.op == AST_OP(not)) {
+    NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  }
   SemanticCheckScalarType(node->sub);
   switch (node->base.op) {
     case AST_OP(not):
       // Not operator is boolean.
-      NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
       break;
     case AST_OP(uminus): {
       int rank = GetRank(node->sub->type);
@@ -393,8 +395,32 @@ static const char* BinaryOperatorFunctionName(ASTOpcode op) {
       return "operator&&";
     case AST_OP(logor):
       return "operator||";
+    case AST_OP(comma):
+      return "operator,";
     case AST_OP(assign):
       return "operator=";
+    case AST_OP(pluseq):
+      return "operator+=";
+    case AST_OP(minuseq):
+      return "operator-=";
+    case AST_OP(multeq):
+      return "operator*=";
+    case AST_OP(diveq):
+      return "operator/=";
+    case AST_OP(percenteq):
+      return "operator%=";
+    case AST_OP(lshifteq):
+      return "operator<<=";
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+      return "operator>>=";
+    case AST_OP(andeq):
+      return "operator&=";
+    case AST_OP(oreq):
+      return "operator|=";
+    case AST_OP(exoreq):
+      return "operator^=";
     case AST_OP(equal):
       return "operator==";
     case AST_OP(noteq):
@@ -418,6 +444,10 @@ static const char* UnaryOperatorFunctionName(ASTOpcode op) {
       return "operator+";
     case AST_OP(uminus):
       return "operator-";
+    case AST_OP(address):
+      return "operator&";
+    case AST_OP(contents):
+      return "operator*";
     case AST_OP(not):
       return "operator!";
     case AST_OP(onescomp):
@@ -445,6 +475,40 @@ static ASTNode* ReplaceUnaryWithCall(UnaryASTNode* node, ASTNode* call) {
   return AnalyzeExpression(call);
 }
 
+static ASTNode* ReplaceVectorWithCall(VectorASTNode* node, ASTNode* call) {
+  ASTNode* parent = node->base.parent;
+  int child_id = node->base.child_id;
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, call, true);
+  }
+  return AnalyzeExpression(call);
+}
+
+static ASTNode* NewOperatorMemberCall(ASTNode* receiver, const char* op_name,
+                                      Vector* actuals,
+                                      SourceLocation location) {
+  ASTNode* member_name =
+      NewStringConstantASTNode(NewString(op_name), NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
+  return NewVectorASTNode(AST_OP(call), NULL, location, member_access,
+                          actuals != NULL ? actuals : NewVector());
+}
+
+static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
+                                    Vector* remaining_actuals,
+                                    SourceLocation location) {
+  Vector* actuals = NewVector();
+  if (first_actual != NULL) {
+    VectorAppend(actuals, first_actual);
+  }
+  if (remaining_actuals != NULL) {
+    VectorAppendVector(actuals, remaining_actuals);
+  }
+  return NewVectorASTNode(AST_OP(call), NULL, location,
+                          NewIdentifierASTNode(function, location), actuals);
+}
+
 static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
   const char* op_name = UnaryOperatorFunctionName(node->base.op);
   if (!CompilerIsCXX() || op_name == NULL) {
@@ -462,14 +526,8 @@ static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
                                           &name);
   if (member != NULL && member->is_member_function) {
     ASTNode* receiver = ASTNodeMove(node->sub);
-    ASTNode* member_name =
-        NewStringConstantASTNode(NewString(op_name), NULL,
-                                 node->base.location);
-    ASTNode* member_access = NewBinaryASTNode(AST_OP(dot), NULL,
-                                              node->base.location, receiver,
-                                              member_name);
-    ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, node->base.location,
-                                     member_access, NewVector());
+    ASTNode* call = NewOperatorMemberCall(receiver, op_name, NULL,
+                                          node->base.location);
     StringDestruct(&name);
     return ReplaceUnaryWithCall(node, call);
   }
@@ -477,11 +535,74 @@ static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
   Symbol* function = FindGlobalSymbol(&name);
   if (function != NULL && TypeIsFunction(function->type)) {
     ASTNode* actual = ASTNodeMove(node->sub);
+    ASTNode* call = NewOperatorFreeCall(function, actual, NULL,
+                                        node->base.location);
+    StringDestruct(&name);
+    return ReplaceUnaryWithCall(node, call);
+  }
+  StringDestruct(&name);
+  return NULL;
+}
+
+static const char* IncDecOperatorFunctionName(ASTOpcode op) {
+  switch (op) {
+    case AST_OP(preinc):
+    case AST_OP(postinc):
+      return "operator++";
+    case AST_OP(predec):
+    case AST_OP(postdec):
+      return "operator--";
+    default:
+      return NULL;
+  }
+}
+
+static bool IsPostIncDec(ASTOpcode op) {
+  return op == AST_OP(postinc) || op == AST_OP(postdec);
+}
+
+static ASTNode* NewPostfixDummyArgument(SourceLocation location) {
+  return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               location);
+}
+
+static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
+  const char* op_name = IncDecOperatorFunctionName(node->base.op);
+  if (!CompilerIsCXX() || op_name == NULL) {
+    return NULL;
+  }
+
+  node->sub = AnalyzeExpression(node->sub);
+  if (!TypeIsStructOrUnion(node->sub->type)) {
+    return NULL;
+  }
+
+  String name;
+  StringInit(&name, op_name);
+  bool postfix = IsPostIncDec(node->base.op);
+  StructMember* member = FindStructMember(node->sub->type->info.struct_info,
+                                          &name);
+  if (member != NULL && member->is_member_function) {
     Vector* actuals = NewVector();
-    VectorAppend(actuals, actual);
-    ASTNode* call = NewVectorASTNode(
-        AST_OP(call), NULL, node->base.location,
-        NewIdentifierASTNode(function, node->base.location), actuals);
+    if (postfix) {
+      VectorAppend(actuals, NewPostfixDummyArgument(node->base.location));
+    }
+    ASTNode* call =
+        NewOperatorMemberCall(ASTNodeMove(node->sub), op_name, actuals,
+                              node->base.location);
+    StringDestruct(&name);
+    return ReplaceUnaryWithCall(node, call);
+  }
+
+  Symbol* function = FindGlobalSymbol(&name);
+  if (function != NULL && TypeIsFunction(function->type)) {
+    Vector* actuals = NULL;
+    if (postfix) {
+      actuals = NewVector();
+      VectorAppend(actuals, NewPostfixDummyArgument(node->base.location));
+    }
+    ASTNode* call = NewOperatorFreeCall(function, ASTNodeMove(node->sub),
+                                        actuals, node->base.location);
     StringDestruct(&name);
     return ReplaceUnaryWithCall(node, call);
   }
@@ -680,8 +801,16 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
 }
 
 // Both sides of a shift operator needs to be an integral type.
-static void AnalyzeShift(BinaryASTNode* node) {
-  AnalyzeBinaryExpression(node);
+static ASTNode* AnalyzeShift(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+  ASTNodeSetType((ASTNode*)node, node->left->type);
+  ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
+  if (overloaded != NULL) {
+    return overloaded;
+  }
+  SemanticCheckScalarType(node->left);
+  SemanticCheckScalarType(node->right);
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Shift operator needs integral types");
   }
@@ -718,16 +847,26 @@ static void AnalyzeShift(BinaryASTNode* node) {
       node->base.op = AST_OP(rshifta);
     }
   }
+  return (ASTNode*)node;
 }
 
 // Bitwise operators need integers.
-static void AnalyzeBitwiseOperator(BinaryASTNode* node) {
-  AnalyzeBinaryExpression(node);
+static ASTNode* AnalyzeBitwiseOperator(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+  ASTNodeSetType((ASTNode*)node, node->left->type);
+  ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
+  if (overloaded != NULL) {
+    return overloaded;
+  }
+  SemanticCheckScalarType(node->left);
+  SemanticCheckScalarType(node->right);
   if (!TypeIsIntegral(node->left->type) || !TypeIsIntegral(node->right->type)) {
     SemanticError((ASTNode*)node, "Bitwise operator needs integral types");
   } else {
     InsertNumericConversions(node, true);
   }
+  return (ASTNode*)node;
 }
 
 static bool IsZeroIntegerConstant(ASTNode* node) {
@@ -736,8 +875,16 @@ static bool IsZeroIntegerConstant(ASTNode* node) {
          ((ConstantASTNode*)node)->value.ivalue == 0;
 }
 
-static void AnalyzeComparisonOperator(BinaryASTNode* node) {
-  AnalyzeBinaryExpression(node);
+static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+  ASTNodeSetType((ASTNode*)node, node->left->type);
+  ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
+  if (overloaded != NULL) {
+    return overloaded;
+  }
+  SemanticCheckScalarType(node->left);
+  SemanticCheckScalarType(node->right);
   if (TypeIsIntegral(node->left->type) && TypeIsIntegral(node->right->type) &&
       TypeIsUnsigned(node->left->type) != TypeIsUnsigned(node->right->type) &&
       !IsZeroIntegerConstant(node->left) && !IsZeroIntegerConstant(node->right)) {
@@ -748,6 +895,7 @@ static void AnalyzeComparisonOperator(BinaryASTNode* node) {
 
   // Comparison operators produce boolean values.
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  return (ASTNode*)node;
 }
 
 typedef enum {
@@ -825,12 +973,12 @@ static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
 
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
+  SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain), kConvertNormal);
   if (!TypeIsScalar(node->left->type)) {
     SemanticError((ASTNode*)node, "Condition for ? operator must be scalar");
     ASTNodeSetType((ASTNode*)node, node->left->type);
     return;
   }
-  SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain), kConvertNormal);
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
   colon->left = AnalyzeExpression(colon->left);
   colon->right = AnalyzeExpression(colon->right);
@@ -918,6 +1066,67 @@ static bool IsAssignable(ASTNode* node, bool is_init) {
   return IsBitfieldReference(node) || HasAddress(node);
 }
 
+static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
+static void ConversionOperatorName(TypeRecord* type, String* name) {
+  String type_name;
+  StringInit(&type_name, "");
+  TypeRecordToString(type, &type_name);
+  StringInit(name, "operator ");
+  for (size_t i = 0; i < type_name.length; i++) {
+    char ch = type_name.value[i];
+    if (ch == '*') {
+      StringAppend(name, " pointer");
+    } else if (ch == '&') {
+      if (i + 1 < type_name.length && type_name.value[i + 1] == '&') {
+        StringAppend(name, " rvalue_reference");
+        i++;
+      } else {
+        StringAppend(name, " reference");
+      }
+    } else {
+      StringAppendChar(name, ch);
+    }
+  }
+  while (name->length > 0 && name->value[name->length - 1] == ' ') {
+    name->value[name->length - 1] = '\0';
+    name->length--;
+  }
+  StringDestruct(&type_name);
+}
+
+static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
+  if (!CompilerIsCXX() || actual == NULL || actual->type == NULL ||
+      !TypeIsStructOrUnion(actual->type)) {
+    return false;
+  }
+  String name;
+  ConversionOperatorName(target, &name);
+  StructMember* member = FindStructMember(actual->type->info.struct_info, &name);
+  StringDestruct(&name);
+  while (member != NULL) {
+    if (member->is_member_function && member->symbol != NULL &&
+        TypeIsFunction(member->symbol->type) &&
+        TypeEqual(member->symbol->type->next, target)) {
+      return true;
+    }
+    member = member->overload_next;
+  }
+  return false;
+}
+
+static TypeRecord* ReferenceConversionTarget(ASTNode* actual,
+                                             TypeRecord* reference_type) {
+  if (!CompilerIsCXX() || actual == NULL || actual->type == NULL ||
+      !TypeIsStructOrUnion(actual->type) ||
+      TypeEqualIgnoringQualifiers(actual->type, reference_type->next) ||
+      TypeIsDerivedFrom(actual->type, reference_type->next) ||
+      !ClassHasConversionOperatorTo(actual, reference_type)) {
+    return reference_type->next;
+  }
+  return reference_type;
+}
+
 static ASTNode* AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
   (void)AnalyzeExpression(&id_node->base);
@@ -939,7 +1148,8 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             reference_type->declarator == kDeclRValueReference;
         bool discards_qualifiers =
             TypeIsConst(e->expr->type) && !TypeIsConst(reference_type->next);
-        NormalConversion(e->expr, reference_type->next);
+        NormalConversion(e->expr,
+                         ReferenceConversionTarget(e->expr, reference_type));
         if (discards_qualifiers) {
           SemanticError(e->expr, "Reference initializer discards qualifiers");
         } else if (!ReferenceCanBind(e->expr, reference_type)) {
@@ -1038,7 +1248,7 @@ static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
 static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
-  if (node->base.op == AST_OP(assign)) {
+  if (BinaryOperatorFunctionName(node->base.op) != NULL) {
     ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
     if (overloaded != NULL) {
       return overloaded;
@@ -1123,7 +1333,11 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
 }
 
 // Increment and decrement operators, both pre and post.
-static void AnalyzeIncDec(UnaryASTNode* node) {
+static ASTNode* AnalyzeIncDec(UnaryASTNode* node) {
+  ASTNode* overloaded = TryAnalyzeOverloadedIncDecOperator(node);
+  if (overloaded != NULL) {
+    return overloaded;
+  }
   AnalyzeUnaryExpression(node);
   if (!IsAssignable(node->sub, false)) {
     SemanticError(node->sub, "Cannot increment or decrement this value");
@@ -1137,12 +1351,38 @@ static void AnalyzeIncDec(UnaryASTNode* node) {
       (node->base.op == AST_OP(preinc) || node->base.op == AST_OP(predec))) {
     node->base.value_category = kValueCategoryLvalue;
   }
+  return (ASTNode*)node;
 }
 
 // Array subscripting operator.
-static void AnalyzeArraySubscript(BinaryASTNode* node) {
+static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
+  if (CompilerIsCXX() && TypeIsStructOrUnion(node->left->type)) {
+    String name;
+    StringInit(&name, "operator[]");
+    StructMember* member =
+        FindStructMember(node->left->type->info.struct_info, &name);
+    if (member != NULL && member->is_member_function) {
+      Vector* actuals = NewVector();
+      VectorAppend(actuals, ASTNodeMove(node->right));
+      ASTNode* call = NewOperatorMemberCall(ASTNodeMove(node->left),
+                                            "operator[]", actuals,
+                                            node->base.location);
+      StringDestruct(&name);
+      return ReplaceBinaryWithCall(node, call);
+    }
+    Symbol* function = FindGlobalSymbol(&name);
+    if (function != NULL && TypeIsFunction(function->type)) {
+      Vector* actuals = NewVector();
+      VectorAppend(actuals, ASTNodeMove(node->right));
+      ASTNode* call = NewOperatorFreeCall(function, ASTNodeMove(node->left),
+                                          actuals, node->base.location);
+      StringDestruct(&name);
+      return ReplaceBinaryWithCall(node, call);
+    }
+    StringDestruct(&name);
+  }
   SemanticConvertType(node->right,
                       NewTypeRecordWithSize(kTypeInt, kQualPlain), kConvertNormal);
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
@@ -1151,13 +1391,14 @@ static void AnalyzeArraySubscript(BinaryASTNode* node) {
   if (node->left != NULL && !TypeIsPointerOrArray(node->left->type)) {
     SemanticError(node->left, "Can only subscript arrays and pointers");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
 
   // Dereference the array type.
   TypeRecord* subtype = node->left->type->next;
   ASTNodeSetType((ASTNode*)node, subtype);
   node->base.value_category = kValueCategoryLvalue;
+  return (ASTNode*)node;
 }
 
 // Inliner data.
@@ -1671,6 +1912,17 @@ static TypeRecord* CopyFunctionTypeForVirtualCall(TypeRecord* function_type) {
   return copy;
 }
 
+static ASTNode* NewAnalyzedBuiltinAddressOf(ASTNode* sub,
+                                            SourceLocation location) {
+  TypeRecord* pointer_type = NewPointerTo(kQualPlain, sub->type);
+  ASTNode* address =
+      NewUnaryASTNode(AST_OP(address), pointer_type, location, sub);
+  ASTNodeSetType(address, pointer_type);
+  sub->flags |= kASTNeedAddress;
+  address->flags |= kASTAnalyzed;
+  return address;
+}
+
 static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
                                             StructMember* member,
                                             bool receiver_is_pointer,
@@ -1682,8 +1934,7 @@ static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
   }
   ASTNode* receiver_clone = CloneReceiverForVirtualLookup(receiver);
   if (!receiver_is_pointer) {
-    receiver_clone =
-        NewUnaryASTNode(AST_OP(address), NULL, location, receiver_clone);
+    receiver_clone = NewAnalyzedBuiltinAddressOf(receiver_clone, location);
   }
   ASTNode* vptr_name =
       NewStringConstantASTNode(NewString("__vptr"), NULL, location);
@@ -1767,9 +2018,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
     }
     receiver = ASTNodeMove(member_access->left);
     if (member_access->base.op == AST_OP(dot)) {
-      receiver = NewUnaryASTNode(AST_OP(address), NULL, receiver->location,
-                                 receiver);
-      receiver = AnalyzeExpression(receiver);
+      receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
     }
     if (!use_virtual_dispatch && !polymorphic_special_member &&
         member_node->byte_offset != 0) {
@@ -1927,9 +2176,7 @@ static void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node,
 
   ASTNode* receiver = ASTNodeMove(node->left);
   if (node->base.op == AST_OP(dot)) {
-    receiver = NewUnaryASTNode(AST_OP(address), NULL, receiver->location,
-                               receiver);
-    receiver = AnalyzeExpression(receiver);
+    receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
   }
   ASTNode* offset =
       NewVirtualBaseOffsetLoad(receiver, adjustment.vbtable_index,
@@ -2370,6 +2617,42 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   return analyzed;
 }
 
+static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL ||
+      !TypeIsStructOrUnion(node->left->type)) {
+    return NULL;
+  }
+
+  String name;
+  StringInit(&name, "operator()");
+  StructMember* member = FindStructMember(node->left->type->info.struct_info,
+                                          &name);
+  if (member == NULL || !member->is_member_function) {
+    StringDestruct(&name);
+    return NULL;
+  }
+
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* actual = node->children->value.p[i];
+    VectorSet(node->children, i, NULL);
+    if (actual != NULL) {
+      actual->parent = NULL;
+    }
+    VectorAppend(actuals, actual);
+  }
+  ASTNode* receiver = node->left;
+  node->left = NULL;
+  if (receiver != NULL) {
+    receiver->parent = NULL;
+  }
+  ASTNode* call =
+      NewOperatorMemberCall(receiver, "operator()", actuals,
+                            node->base.location);
+  StringDestruct(&name);
+  return ReplaceVectorWithCall(node, call);
+}
+
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
@@ -2379,6 +2662,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
   if (construction != NULL) {
     return construction;
+  }
+  ASTNode* overloaded_call = TryAnalyzeOverloadedCallOperator(node);
+  if (overloaded_call != NULL) {
+    return overloaded_call;
   }
   LowerMemberFunctionCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
@@ -2472,7 +2759,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         bool discards_qualifiers =
             TypeIsConst(actual->type) && !TypeIsConst(reference_type->next);
         if (!polymorphic_special_this) {
-          NormalConversion(actual, reference_type->next);
+          NormalConversion(actual,
+                           ReferenceConversionTarget(actual, reference_type));
         }
         if (discards_qualifiers) {
           SemanticError(actual, "Reference argument discards qualifiers");
@@ -2552,6 +2840,28 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   return &node->base;
 }
 
+static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
+                                                  SourceLocation location) {
+  if (!CompilerIsCXX() || receiver == NULL ||
+      !TypeIsStructOrUnion(receiver->type)) {
+    return NULL;
+  }
+
+  String name;
+  StringInit(&name, "operator->");
+  StructMember* member = FindStructMember(receiver->type->info.struct_info,
+                                          &name);
+  if (member == NULL || !member->is_member_function) {
+    StringDestruct(&name);
+    return NULL;
+  }
+
+  ASTNode* call = NewOperatorMemberCall(ASTNodeMove(receiver), "operator->",
+                                        NULL, location);
+  StringDestruct(&name);
+  return AnalyzeExpression(call);
+}
+
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // Already analyzed.
@@ -2560,6 +2870,16 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   Struct* struct_info = NULL;
 
   node->left = AnalyzeExpression(node->left);
+  if (node->base.op == AST_OP(arrow) &&
+      !TypeIsStructOrUnionPointer(node->left->type)) {
+    ASTNode* overloaded_arrow =
+        TryAnalyzeOverloadedArrowOperator(node->left, node->base.location);
+    if (overloaded_arrow != NULL) {
+      node->left = overloaded_arrow;
+      node->left->parent = (ASTNode*)node;
+      node->left->child_id = 0;
+    }
+  }
   node->right = AnalyzeExpression(node->right);
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
@@ -2891,13 +3211,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(lshift):
     case AST_OP(rshift):
-      AnalyzeShift(binary_node);
+      node = AnalyzeShift(binary_node);
       break;
 
     case AST_OP(and):
     case AST_OP(bitor):
     case AST_OP(exor):
-      AnalyzeBitwiseOperator(binary_node);
+      node = AnalyzeBitwiseOperator(binary_node);
       break;
 
     case AST_OP(less):
@@ -2906,7 +3226,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(greatereq):
     case AST_OP(equal):
     case AST_OP(noteq):
-      AnalyzeComparisonOperator(binary_node);
+      node = AnalyzeComparisonOperator(binary_node);
       break;
 
     case AST_OP(question):
@@ -2931,7 +3251,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(predec):
     case AST_OP(postinc):
     case AST_OP(postdec):
-      AnalyzeIncDec(unary_node);
+      node = AnalyzeIncDec(unary_node);
       break;
 
     case AST_OP(uplus):
@@ -2968,7 +3288,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(subscript):  // Array subscript.
-      AnalyzeArraySubscript(binary_node);
+      node = AnalyzeArraySubscript(binary_node);
       break;
 
     case AST_OP(call):  // Function call.
@@ -2983,6 +3303,13 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(comma):
       binary_node->left = AnalyzeExpression(binary_node->left);
       binary_node->right = AnalyzeExpression(binary_node->right);
+      {
+        ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(binary_node);
+        if (overloaded != NULL) {
+          node = overloaded;
+          break;
+        }
+      }
 
       // Type of comma operator is type of right operand.
       ASTNodeSetType(node, binary_node->right->type);
