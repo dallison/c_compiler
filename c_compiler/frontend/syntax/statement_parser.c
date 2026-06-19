@@ -186,6 +186,10 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
 // 3. An optional 'else' statement clause - NULL is absent.
 static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
                                  SourceLocation location) {
+  bool is_constexpr = false;
+  if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+    is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
+  }
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
   ASTNode* cond = SyntaxParseExpression(syntax, followers);
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
@@ -197,7 +201,8 @@ static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
   if (LexMatch(lex, TOK(else))) {
     else_part = SyntaxParseStatement(syntax, followers);
   }
-  return NewIfStatementASTNode(cond, if_part, else_part, location);
+  return NewIfStatementASTNode(cond, if_part, else_part, is_constexpr,
+                               location);
 }
 
 // A while statement.

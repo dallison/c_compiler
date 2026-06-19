@@ -463,10 +463,12 @@ typedef struct {
   ASTNode* cond;
   ASTNode* if_part;
   ASTNode* else_part;
+  bool is_constexpr;
 } IfStatementASTNode;
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
-                               ASTNode* else_part, SourceLocation location);
+                               ASTNode* else_part, bool is_constexpr,
+                               SourceLocation location);
 
 // While and do statements.
 // These all contain a condition and a statement.

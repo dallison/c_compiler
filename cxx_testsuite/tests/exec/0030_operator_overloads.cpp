@@ -44,6 +44,21 @@ struct FreeNumber {
   int value;
 };
 
+struct SfinaeOperatorNumber {
+  int value;
+};
+
+struct SfinaeDependentOperatorNumber {
+  int value;
+};
+
+struct HasNestedOperatorType {
+  int value;
+  struct type {
+    int value;
+  };
+};
+
 struct ConvertibleNumber {
   int value;
   operator int() const {
@@ -53,6 +68,18 @@ struct ConvertibleNumber {
   operator int*();
   operator int&();
 };
+
+struct ExplicitNumber {
+  int value;
+  explicit operator int() const {
+    return value + 1;
+  }
+  explicit operator bool() const;
+};
+
+ExplicitNumber::operator bool() const {
+  return value != 0;
+}
 
 ConvertibleNumber::operator bool() const {
   return value != 0;
@@ -68,6 +95,33 @@ ConvertibleNumber::operator int&() {
 
 int operator,(FreeNumber left, FreeNumber right) {
   return left.value + right.value + 20;
+}
+
+template <typename T, typename U>
+U operator+(SfinaeOperatorNumber left, T right) {
+  return right;
+}
+
+int operator+(SfinaeOperatorNumber left, char right) {
+  return left.value + right + 30;
+}
+
+template <typename T>
+typename T::type operator/(SfinaeDependentOperatorNumber left, T right) {
+  typename T::type result;
+  result.value = left.value + right.value + 70;
+  return result;
+}
+
+int operator/(SfinaeDependentOperatorNumber left, int right) {
+  return left.value + right + 80;
+}
+
+template <typename T>
+typename T::type operator%(SfinaeDependentOperatorNumber left, T right) {
+  typename T::type result;
+  result.value = left.value + right.value + 90;
+  return result;
 }
 
 struct Item {
@@ -155,6 +209,23 @@ int main(void) {
   if ((free_left, free_right) != 23) {
     return 10;
   }
+  SfinaeOperatorNumber sfinae_operator;
+  sfinae_operator.value = 2;
+  if (sfinae_operator + 'a' != 129) {
+    return 19;
+  }
+  SfinaeDependentOperatorNumber sfinae_dependent_operator;
+  sfinae_dependent_operator.value = 3;
+  if (sfinae_dependent_operator / 5 != 88) {
+    return 20;
+  }
+  HasNestedOperatorType nested_operator_type;
+  nested_operator_type.value = 4;
+  typename HasNestedOperatorType::type sfinae_dependent_operator_template =
+      sfinae_dependent_operator % nested_operator_type;
+  if (sfinae_dependent_operator_template.value != 97) {
+    return 21;
+  }
   ConvertibleNumber convertible;
   convertible.value = 9;
   int converted_int = convertible;
@@ -176,6 +247,19 @@ int main(void) {
   convertible.value = 0;
   if (convertible) {
     return 13;
+  }
+  ExplicitNumber explicit_number;
+  explicit_number.value = 6;
+  int explicit_int = static_cast<int>(explicit_number);
+  if (explicit_int != 7) {
+    return 16;
+  }
+  if (!explicit_number) {
+    return 17;
+  }
+  explicit_number.value = 0;
+  if (explicit_number) {
+    return 18;
   }
 
   Item items[2];

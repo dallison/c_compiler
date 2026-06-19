@@ -257,6 +257,20 @@ void DiagnosticSwapState(void* handle) {
   s->werror = tw;
 }
 
+void DiagnosticSuppressBegin(void) {
+  compiler->diagnostic_suppression_depth++;
+}
+
+void DiagnosticSuppressEnd(void) {
+  if (compiler->diagnostic_suppression_depth > 0) {
+    compiler->diagnostic_suppression_depth--;
+  }
+}
+
+bool DiagnosticsSuppressed(void) {
+  return compiler->diagnostic_suppression_depth > 0;
+}
+
 void DiagnosticPush(void) {
   VectorAppend(&compiler->diagnostic_stack, DiagnosticSnapshotState());
 }
@@ -341,6 +355,9 @@ static bool IsWarningError(const char* warning) {
 
 void VReportError(const char* filename, int lineno, const char* error,
                   va_list arg) {
+  if (DiagnosticsSuppressed()) {
+    return;
+  }
   char buf[4096];
   vsnprintf(buf, sizeof(buf), error, arg);
   PrintDiagnosticKind("error", ANSI_ERROR);
@@ -364,6 +381,9 @@ void ReportError(const char* filename, int lineno, const char* error, ...) {
 
 void VReportWarning(const char* filename, int lineno, const char* warn,
                     const char* warning, va_list arg) {
+  if (DiagnosticsSuppressed()) {
+    return;
+  }
   if (IsWarningDisabled(warn)) {
     return;
   }
@@ -410,6 +430,9 @@ void ReportWarning(const char* filename, int lineno, const char* warn,
 
 void VReportNote(const char* filename, int lineno, const char* note,
                  va_list arg) {
+  if (DiagnosticsSuppressed()) {
+    return;
+  }
   char buf[4096];
   vsnprintf(buf, sizeof(buf), note, arg);
   if (filename == NULL) {

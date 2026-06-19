@@ -8,16 +8,24 @@
 
 #include "expr_evaluator.h"
 #include "assembler.h"
+#include "constexpr.h"
 #include "type.h"
 
-bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
+bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
+                                              ASTNode* node,
+                                              double* result);
+
+bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
+                                               ASTNode* node,
+                                               int64_t* result) {
   if (node == NULL) {
     return false;
   }
-  if (node->type == NULL) {
+  if (!ConstEvalStep(ctx)) {
     return false;
   }
-  if (!TypeIsIntegral(node->type) && !TypeIsFloatingPoint(node->type)) {
+  if (node->type != NULL &&
+      !TypeIsIntegral(node->type) && !TypeIsFloatingPoint(node->type)) {
     return false;
   }
   ConstantASTNode* const_node = (ConstantASTNode*)node;
@@ -29,6 +37,26 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
   int64_t right;
 
   switch (node->op) {
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(comma): {
+      return ConstexprEvaluateMutationAsInteger(ctx, node, node->type, result);
+    }
     case AST_OP(number):
     case AST_OP(charconst):
     case AST_OP(charwide):
@@ -37,7 +65,16 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
     case AST_OP(fnumber):
       *result = (int64_t)const_node->value.fvalue;
       return true;
+    case AST_OP(subscript):
+    case AST_OP(dot):
+    case AST_OP(arrow):
+      return ConstexprEvaluateObjectAccessAsInteger(ctx, node, result);
+    case AST_OP(contents):
+      return ConstexprEvaluatePointerDereferenceAsInteger(ctx, node, result);
     case AST_OP(identifier): {
+      if (ConstexprBindingAsInteger(ctx, id_node->symbol, result)) {
+        return true;
+      }
       if (StorageIs(id_node->symbol->storage, STO(assembler))) {
         // Assembler symbol, extract the value from the 'other'
         // value field.
@@ -68,6 +105,10 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       return true;
     }
 
+    case AST_OP(call): {
+      return ConstexprEvaluateCallAsInteger(ctx, node, result);
+    }
+
     // Macros are always evaluated as the constant zero.
     case AST_OP(macro):
       *result = 0;
@@ -75,8 +116,8 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
 
 #define EVAL_BINARY_OP(ast_op, op) \
     case AST_OP(ast_op): \
-      if (EvaluateIntegerExpression(binary_node->left, &left) && \
-          EvaluateIntegerExpression(binary_node->right, &right)) { \
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) && \
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) { \
         *result = left op right; \
         return true; \
       } \
@@ -88,8 +129,8 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
 
 
     case AST_OP(div):
-      if (EvaluateIntegerExpression(binary_node->left, &left) &&
-          EvaluateIntegerExpression(binary_node->right, &right)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
         if (right == 0) {
           return false;
         }
@@ -99,8 +140,8 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       break;
 
     case AST_OP(mod):
-      if (EvaluateIntegerExpression(binary_node->left, &left) &&
-          EvaluateIntegerExpression(binary_node->right, &right)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
         if (right == 0) {
           return false;
         }
@@ -114,8 +155,8 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
 
   
     case AST_OP(rshiftl):
-      if (EvaluateIntegerExpression(binary_node->left, &left) &&
-          EvaluateIntegerExpression(binary_node->right, &right)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
         *result = (uint64_t)left >> right;
         return true;
       }
@@ -125,15 +166,24 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
       EVAL_BINARY_OP(lesseq, <=)
       EVAL_BINARY_OP(greater, >)
       EVAL_BINARY_OP(greatereq, >=)
-      EVAL_BINARY_OP(equal, ==)
-      EVAL_BINARY_OP(noteq, !=)
+    case AST_OP(equal):
+    case AST_OP(noteq):
+      if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
+        return true;
+      }
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
+        *result = node->op == AST_OP(equal) ? left == right : left != right;
+        return true;
+      }
+      break;
       EVAL_BINARY_OP(and, &)
       EVAL_BINARY_OP(bitor, |)
       EVAL_BINARY_OP(exor, ^)
 
 #define EVAL_UNARY_OP(ast_op, op) \
 case AST_OP(ast_op): \
-      if (EvaluateIntegerExpression(unary_node->sub, &left)) { \
+      if (EvaluateIntegerExpressionInContext(ctx, unary_node->sub, &left)) { \
         *result = op left; \
         return true; \
       } \
@@ -143,11 +193,18 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(uplus, +)
       EVAL_UNARY_OP(not, !)
       EVAL_UNARY_OP(onescomp, ~)
+      EVAL_UNARY_OP(b2c, (char))
+      EVAL_UNARY_OP(i2c, (char))
+      EVAL_UNARY_OP(s2c, (char))
+      EVAL_UNARY_OP(l2c, (char))
+      EVAL_UNARY_OP(ll2c, (char))
+      EVAL_UNARY_OP(c2b, (_Bool))
 
     case AST_OP(logand):
-      if (EvaluateIntegerExpression(binary_node->left, &left)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
         if (left != 0) {
-          if (EvaluateIntegerExpression(binary_node->right, &right)) {
+          if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
+                                                 &right)) {
             *result = right != 0;
             return true;
           }
@@ -156,9 +213,10 @@ case AST_OP(ast_op): \
       break;
 
     case AST_OP(logor):
-      if (EvaluateIntegerExpression(binary_node->left, &left)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
         if (left == 0) {
-          if (EvaluateIntegerExpression(binary_node->right, &right)) {
+          if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
+                                                 &right)) {
             *result = right != 0;
             return true;
           }
@@ -170,7 +228,7 @@ case AST_OP(ast_op): \
       break;
 
     case AST_OP(question):
-      if (EvaluateIntegerExpression(binary_node->left, &left)) {
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
         // node of the ? operator).
@@ -179,7 +237,7 @@ case AST_OP(ast_op): \
         } else {
           node = ((BinaryASTNode*)binary_node->right)->right;
         }
-        if (EvaluateIntegerExpression(node, &left)) {
+        if (EvaluateIntegerExpressionInContext(ctx, node, &left)) {
           *result = left;
           return true;
         }
@@ -188,7 +246,7 @@ case AST_OP(ast_op): \
 
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
-      if (EvaluateIntegerExpression(c->expr, &left)) {
+      if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
         *result = left;
         return true;
       }
@@ -204,7 +262,7 @@ case AST_OP(ast_op): \
     case AST_OP(f2b):
     case AST_OP(d2b):
     case AST_OP(ld2b):
-      if (EvaluateIntegerExpression(unary_node->sub, &left)) {
+      if (EvaluateIntegerExpressionInContext(ctx, unary_node->sub, &left)) {
         *result = left != 0 ? 1 : 0;
         return true;
       }
@@ -259,7 +317,7 @@ case AST_OP(ast_op): \
 
     case AST_OP(expr_init): {
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)node;
-      return EvaluateIntegerExpression(e->expr, result);
+      return EvaluateIntegerExpressionInContext(ctx, e->expr, result);
       break;
     }
     default:
@@ -271,8 +329,48 @@ case AST_OP(ast_op): \
 #undef EVAL_BINARY_OP
 #undef EVAL_UNARY_OP
 
+bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok = EvaluateIntegerExpressionInContext(&ctx, node, result);
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
 bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok = EvaluateFloatingPointExpressionInContext(&ctx, node, result);
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
+bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
+  if (symbol == NULL || symbol->type == NULL || initializer == NULL) {
+    return false;
+  }
+  initializer = ConstexprInitializerExpression(initializer);
+  if (initializer == NULL) {
+    return false;
+  }
+  if (TypeIsIntegral(symbol->type)) {
+    symbol->flags.value_set =
+        EvaluateIntegerExpression(initializer, &symbol->value.ivalue);
+    return symbol->flags.value_set;
+  }
+  if (TypeIsFloatingPoint(symbol->type)) {
+    symbol->flags.value_set =
+        EvaluateFloatingPointExpression(initializer, &symbol->value.fvalue);
+    return symbol->flags.value_set;
+  }
+  return false;
+}
+
+bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* node, double* result) {
   if (node == NULL) {
+    return false;
+  }
+  if (!ConstEvalStep(ctx)) {
     return false;
   }
   if (node->type == NULL) {
@@ -290,6 +388,26 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
   double right;
 
   switch (node->op) {
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(comma): {
+      return ConstexprEvaluateMutationAsFloating(ctx, node, node->type, result);
+    }
     case AST_OP(number):
     case AST_OP(charconst):
       *result = const_node->value.ivalue;
@@ -297,7 +415,16 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
     case AST_OP(fnumber):
       *result = const_node->value.fvalue;
       return true;
+    case AST_OP(subscript):
+    case AST_OP(dot):
+    case AST_OP(arrow):
+      return ConstexprEvaluateObjectAccessAsFloating(ctx, node, result);
+    case AST_OP(contents):
+      return ConstexprEvaluatePointerDereferenceAsFloating(ctx, node, result);
     case AST_OP(identifier): {
+      if (ConstexprBindingAsFloating(ctx, id_node->symbol, result)) {
+        return true;
+      }
       TypeRecord* type = id_node->symbol->type;
       if ((type->qualifiers & kQualConst) == 0) {
         return false;
@@ -315,10 +442,14 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       return true;
     }
 
+    case AST_OP(call): {
+      return ConstexprEvaluateCallAsFloating(ctx, node, result);
+    }
+
 #define EVAL_BINARY_OP(ast_op, op) \
   case AST_OP(ast_op): \
-    if (EvaluateFloatingPointExpression(binary_node->left, &left) && \
-        EvaluateFloatingPointExpression(binary_node->right, &right)) { \
+    if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left) && \
+        EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) { \
       *result = left op right; \
       return true; \
     } \
@@ -329,8 +460,8 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       EVAL_BINARY_OP(mult, *)
       
     case AST_OP(div):
-      if (EvaluateFloatingPointExpression(binary_node->left, &left) &&
-          EvaluateFloatingPointExpression(binary_node->right, &right)) {
+      if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
         if (right == 0) {
           return false;
         }
@@ -348,7 +479,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
 
 #define EVAL_UNARY_OP(ast_op, op) \
   case AST_OP(ast_op): \
-    if (EvaluateFloatingPointExpression(unary_node->sub, &left)) { \
+    if (EvaluateFloatingPointExpressionInContext(ctx, unary_node->sub, &left)) { \
       *result = op left; \
       return true; \
     } \
@@ -360,9 +491,9 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
 
 
     case AST_OP(logand):
-      if (EvaluateFloatingPointExpression(binary_node->left, &left)) {
+      if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
         if (left != 0) {
-          if (EvaluateFloatingPointExpression(binary_node->right, &right)) {
+          if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
             *result = right != 0;
             return true;
           }
@@ -371,9 +502,9 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       break;
 
     case AST_OP(logor):
-      if (EvaluateFloatingPointExpression(binary_node->left, &left)) {
+      if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
         if (left == 0) {
-          if (EvaluateFloatingPointExpression(binary_node->right, &right)) {
+          if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
             *result = right != 0;
             return true;
           }
@@ -385,7 +516,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
       break;
 
     case AST_OP(question):
-      if (EvaluateFloatingPointExpression(binary_node->left, &left)) {
+      if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
         // node of the ? operator).
@@ -394,7 +525,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
         } else {
           node = ((BinaryASTNode*)binary_node->right)->right;
         }
-        if (EvaluateFloatingPointExpression(node, &left)) {
+        if (EvaluateFloatingPointExpressionInContext(ctx, node, &left)) {
           *result = left;
           return true;
         }
@@ -403,7 +534,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
 
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
-      if (EvaluateFloatingPointExpression(c->expr, &left)) {
+      if (EvaluateFloatingPointExpressionInContext(ctx, c->expr, &left)) {
         *result = left;
         return true;
       }
@@ -437,7 +568,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
 
       case AST_OP(expr_init): {
          ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)node;
-         return EvaluateFloatingPointExpression(e->expr, result);
+         return EvaluateFloatingPointExpressionInContext(ctx, e->expr, result);
          break;
        }
 
@@ -449,4 +580,3 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
 
 #undef EVAL_BINARY_OP
 #undef EVAL_UNARY_OP
-

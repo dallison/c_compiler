@@ -94,6 +94,8 @@ typedef struct Symbol {
     bool is_template: 1;           // C++ template declaration.
     bool is_template_parameter: 1; // C++ template parameter.
     bool is_template_type_parameter: 1; // `typename`/`class` parameter.
+    bool is_constexpr: 1;          // C++ constexpr variable.
+    bool is_constinit: 1;          // C++ constinit variable.
   } flags;
   
   struct {

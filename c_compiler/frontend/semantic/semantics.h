@@ -32,6 +32,7 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
 typedef enum {
   kConvertNormal,
   kConvertCast,
+  kConvertContextualBool,
 } ConversionContext;
 
 // Convert a type 'from' to 'to', replacing 'from' with new ASTNode that

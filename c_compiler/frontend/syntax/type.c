@@ -222,6 +222,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->qualifiers = quals;
   record->size = 0;
   record->template_parameter_index = -1;
+  record->dependent_member_name = NULL;
   record->template_origin = NULL;
   record->template_arguments = NULL;
   record->refs = 0;
@@ -252,6 +253,10 @@ void TypeRecordDelete(TypeRecord* record) {
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       record->template_arguments = NULL;
+    }
+    if (record->dependent_member_name != NULL) {
+      StringDelete(record->dependent_member_name);
+      record->dependent_member_name = NULL;
     }
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
@@ -414,6 +419,9 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   memcpy(r, record, sizeof(TypeRecord));
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
+  r->dependent_member_name = record->dependent_member_name != NULL
+      ? NewString(record->dependent_member_name->value)
+      : NULL;
   if (r->next != NULL) {
     TypeRecordIncRef(r->next);  // Another ref to next.
   }
@@ -568,6 +576,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_constructor = false;
   t->info.function.is_destructor = false;
   t->info.function.is_const_member = false;
+  t->info.function.is_explicit_conversion = false;
   t->info.function.is_virtual = false;
   t->info.function.is_override = false;
   t->info.function.is_final = false;
@@ -579,6 +588,8 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.template_parameter_base = 0;
   t->info.function.old_style = false;
   t->info.function.is_inline = false;
+  t->info.function.is_constexpr = false;
+  t->info.function.is_consteval = false;
   t->info.function.body = NULL;
   VectorInit(&t->info.function.prototype);
   VectorInit(&t->info.function.template_parameters);
@@ -920,6 +931,10 @@ void TypeRecordToString(TypeRecord* type, String* result) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
         StringPrintf(result, "$T%d", type->template_parameter_index);
+        if (type->dependent_member_name != NULL) {
+          StringAppend(result, "::");
+          StringAppendString(result, type->dependent_member_name);
+        }
         break;
       }
       QualifiersToString(type->qualifiers, result);
@@ -979,6 +994,10 @@ static void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
         StringPrintf(result, "$T%d", type->template_parameter_index);
+        if (type->dependent_member_name != NULL) {
+          StringAppend(result, "::");
+          StringAppendString(result, type->dependent_member_name);
+        }
         break;
       }
       QualifiersToString(type->qualifiers, result);
@@ -1043,6 +1062,9 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->found_void = false;
   parser->dimension_count = 0;
   parser->is_inline = false;
+  parser->is_constexpr = false;
+  parser->is_consteval = false;
+  parser->is_constinit = false;
   parser->context = context;
   parser->cxx_member_owner = NULL;
   parser->cxx_member_definition = NULL;
@@ -1054,6 +1076,8 @@ void TypeParserReset(TypeParser* parser) {
   parser->storage = STO(implicit);
   parser->found_void = false;
   parser->dimension_count = 0;
+  parser->is_consteval = false;
+  parser->is_constinit = false;
   parser->cxx_member_owner = NULL;
   parser->cxx_member_definition = NULL;
   if (parser->declarator_template_arguments != NULL) {
@@ -1223,6 +1247,30 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 Vector* args) {
   if (type == NULL) {
     return NULL;
+  }
+  if (type->declarator == kDeclPrimitive &&
+      type->template_parameter_index >= 0 &&
+      type->dependent_member_name != NULL) {
+    int index = type->template_parameter_index;
+    if (index < 0 || (size_t)index >= args->length) {
+      return TypeRecordCopy(type);
+    }
+    TemplateArgument* arg = args->value.p[index];
+    if (arg == NULL || arg->kind != kTemplateParameterType ||
+        arg->type == NULL || !TypeIsStructOrUnion(arg->type) ||
+        arg->type->info.struct_info == NULL) {
+      return TypeRecordCopy(type);
+    }
+    StructMember* member =
+        FindStructMember(arg->type->info.struct_info,
+                         type->dependent_member_name);
+    if (member == NULL || member->symbol == NULL ||
+        !StorageIs(member->symbol->storage, STO(typedef))) {
+      return TypeRecordCopy(type);
+    }
+    TypeRecord* subst = TypeRecordCopy(member->symbol->type);
+    subst->qualifiers |= type->qualifiers;
+    return TypeRecordCalculateSize(subst);
   }
   if (type->template_origin != NULL && type->template_arguments != NULL) {
     Vector* concrete_args = NewVector();
@@ -1591,9 +1639,13 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.unknown_args = from->info.function.unknown_args;
   func->info.function.definition = false;
   func->info.function.is_inline = from->info.function.is_inline;
+  func->info.function.is_constexpr = from->info.function.is_constexpr;
+  func->info.function.is_consteval = from->info.function.is_consteval;
   func->info.function.is_constructor = from->info.function.is_constructor;
   func->info.function.is_destructor = from->info.function.is_destructor;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.is_explicit_conversion =
+      from->info.function.is_explicit_conversion;
   func->info.function.is_final = from->info.function.is_final;
   func->info.function.template_parameter_count =
       from->info.function.template_parameter_count;
@@ -1958,7 +2010,11 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.definition = false;
   func->info.function.old_style = from->info.function.old_style;
   func->info.function.is_inline = from->info.function.is_inline;
+  func->info.function.is_constexpr = from->info.function.is_constexpr;
+  func->info.function.is_consteval = from->info.function.is_consteval;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.is_explicit_conversion =
+      from->info.function.is_explicit_conversion;
   func->info.function.is_virtual = from->info.function.is_virtual;
   func->info.function.is_override = from->info.function.is_override;
   func->info.function.is_final = from->info.function.is_final;
@@ -2881,6 +2937,24 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
           type_record = TypeRecordCopy(symbol->type);
           type |= type_record->type;
+        } else if (typename_name.components.length == 2) {
+          String* base_name = typename_name.components.value.p[0];
+          Symbol* base = SyntaxFindSymbol(parser->syntax, base_name);
+          if (base != NULL && base->flags.is_template_parameter &&
+              base->flags.is_template_type_parameter &&
+              base->template_parameter_index >= 0) {
+            String* member_name = typename_name.components.value.p[1];
+            type_record =
+                NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+            type_record->template_parameter_index =
+                base->template_parameter_index;
+            type_record->dependent_member_name =
+                NewString(member_name->value);
+            type |= type_record->type;
+          } else {
+            SyntaxError(parser->syntax, "Unknown type name %s",
+                        typename_name.spelling.value);
+          }
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
                       typename_name.spelling.value);
@@ -3537,6 +3611,8 @@ static void ParseFunctionDecl(TypeParser* parser) {
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.is_inline = parser->is_inline;
+  func->info.function.is_constexpr = parser->is_constexpr;
+  func->info.function.is_consteval = parser->is_consteval;
   if (parser->symbol != NULL) {
     func->info.function.symbol = parser->symbol;
   }
@@ -3669,17 +3745,39 @@ parsed_bound:
   }
 }
 
+static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
+  if (!CompilerIsCXX() || parser->symbol == NULL ||
+      parser->stack.length != 0 || !TypeIsStructOrUnion(parser->base_type) ||
+      !LexLookingAt(parser->lex, TOK(lparen))) {
+    return false;
+  }
+  if (parser->context == kParsingBlockScope) {
+    return true;
+  }
+  if (parser->context != kParsingFileScope ||
+      (!parser->is_constexpr && !parser->is_constinit)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool direct_initializer =
+      !LexLookingAt(parser->lex, TOK(rparen)) &&
+      !SyntaxLookingAtType(parser->syntax);
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return direct_initializer;
+}
+
 void TypeParserParseFuncOrArray(TypeParser* parser) {
   TypeParserParseBase(parser);
   while (parser->syntax->found_open_paren ||
          LexLookingAt(parser->lex, TOK(lparen)) ||
          LexLookingAt(parser->lex, TOK(lsquare))) {
-    if (CompilerIsCXX() && parser->context == kParsingBlockScope &&
-        parser->symbol != NULL && parser->stack.length == 0 &&
-        TypeIsStructOrUnion(parser->base_type) &&
-        LexLookingAt(parser->lex, TOK(lparen))) {
-      // In a local declaration like `T obj(args);`, the parens are direct
-      // initialization of `obj`, not a function declarator.
+    if (CXXDirectInitializerAfterDeclarator(parser)) {
+      // In `T obj(args);`, the parens are direct initialization of `obj`,
+      // not a function declarator. At namespace scope this is limited to
+      // constexpr/constinit objects so ordinary declarations keep the old path.
       break;
     }
     // Check for function prototype declaration.
@@ -3922,6 +4020,8 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),
                  kParsingPrototype);
   TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constexpr = parser->is_constexpr;
+  func->info.function.is_consteval = parser->is_consteval;
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
@@ -4905,6 +5005,29 @@ static bool SymbolIsCXXAllocationFunction(Symbol* symbol) {
          strcmp(symbol->name.value, "operator delete[]") == 0;
 }
 
+static bool ParseCXXExplicitSpecifier(TypeParser* parser, bool* saw_explicit) {
+  *saw_explicit = false;
+  if (!CompilerIsCXX() || !LexMatch(parser->lex, TOK(explicit))) {
+    return false;
+  }
+  *saw_explicit = true;
+  if (!LexMatch(parser->lex, TOK(lparen))) {
+    return true;
+  }
+  ASTNode* expr =
+      SyntaxParseExpression(parser->syntax, TC(closebra) | TC(exprsep));
+  expr = AnalyzeExpression(expr);
+  int64_t value = 0;
+  bool ok = EvaluateIntegerExpression(expr, &value);
+  if (!ok) {
+    SyntaxError(parser->syntax,
+                "explicit specifier must be a constant expression");
+  }
+  ASTNodeDelete(expr);
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(decl));
+  return ok && value != 0;
+}
+
 static void SetStructMemberOverloadAsmName(Struct* str,
                                            StructMember* first,
                                            StructMember* overload) {
@@ -5041,7 +5164,7 @@ static bool CXXClassNameMatchesUnqualifiedTemplateName(String* class_name,
 
 static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
                                     String* class_name, CXXAccess access,
-                                    bool is_virtual) {
+                                    bool is_virtual, bool is_constexpr) {
   if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
   }
@@ -5069,6 +5192,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),
                  kParsingPrototype);
   TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constexpr = is_constexpr;
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
   if (is_virtual && !is_destructor) {
@@ -5091,6 +5215,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   StringAppendString(&member_name, class_name);
   Symbol* member_symbol = NewSymbol(member_name.value, func, STO(implicit));
   member_symbol->location = location;
+  func->info.function.symbol = member_symbol;
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
@@ -5197,6 +5322,8 @@ static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
                                               SourceLocation location,
                                               bool is_virtual) {
   TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constexpr = parser->is_constexpr;
+  func->info.function.is_consteval = parser->is_consteval;
   func->info.function.is_virtual = is_virtual;
   TypeRecordChain(func, return_type);
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
@@ -5213,7 +5340,8 @@ static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
 
 static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
                                              CXXAccess access,
-                                             bool is_virtual) {
+                                             bool is_virtual,
+                                             bool is_explicit) {
   if (!CompilerIsCXX() || !LexLookingAt(parser->lex, TOK(operator))) {
     return false;
   }
@@ -5237,6 +5365,7 @@ static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
       NewCXXConversionOperatorSymbol(parser, str, return_type, location,
                                      is_virtual);
   TypeRecord* func = member_symbol->type;
+  func->info.function.is_explicit_conversion = is_explicit;
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
@@ -5365,9 +5494,18 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       is_member_template = true;
     }
 
+    bool is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+    parser->is_constexpr = is_constexpr_member;
+    bool saw_explicit_member = false;
+    bool is_explicit_member =
+        ParseCXXExplicitSpecifier(parser, &saw_explicit_member);
+    if (!is_constexpr_member) {
+      is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+      parser->is_constexpr = is_constexpr_member;
+    }
     bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
     if (ParseClassSpecialMember(parser, str, tag_name, current_access,
-                                is_virtual_member)) {
+                                is_virtual_member, is_constexpr_member)) {
       if (is_member_template) {
         SyntaxError(parser->syntax, "Special member templates are not supported yet");
         SyntaxCloseScope(parser->syntax);
@@ -5386,12 +5524,17 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     bool is_static_member = LexMatch(parser->lex, TOK(static));
+    if (!is_constexpr_member) {
+      is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+      parser->is_constexpr = is_constexpr_member;
+    }
     if (is_virtual_member && is_static_member) {
       SyntaxError(parser->syntax, "static member functions cannot be virtual");
     }
     if (!is_static_member &&
         ParseCXXConversionOperatorMember(parser, str, current_access,
-                                         is_virtual_member)) {
+                                         is_virtual_member,
+                                         is_explicit_member)) {
       if (is_member_template) {
         SyntaxError(parser->syntax,
                     "Conversion operator templates are not supported yet");
@@ -5409,6 +5552,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         LexMatch(parser->lex, TOK(semicolon));
       }
       continue;
+    }
+    if (saw_explicit_member) {
+      SyntaxError(parser->syntax,
+                  "explicit is only supported on conversion operators");
     }
     bool possible_anon = LexLookingAt(parser->lex, TOK(union)) ||
             LexLookingAt(parser->lex, TOK(struct));
@@ -5458,6 +5605,8 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         SyntaxError(parser->syntax, "Invalid type for struct member");
       } else {
         StructMember* member = NewStructMember(member_symbol);
+        member_symbol->flags.is_constexpr = is_constexpr_member &&
+                                            !TypeIsFunction(member_symbol->type);
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
         if (member->is_member_function &&
@@ -5465,6 +5614,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           member->is_static = true;
         }
         member->access = current_access;
+        if (member->is_member_function) {
+          member_symbol->type->info.function.is_constexpr =
+              is_constexpr_member;
+        }
         if (member->is_member_function && !member->is_static) {
           member_symbol->type->info.function.is_virtual = is_virtual_member;
           TypeRecordAddCXXThisParameter(member_symbol->type, str,

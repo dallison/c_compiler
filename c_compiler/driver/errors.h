@@ -79,6 +79,9 @@ void DiagnosticPop(void);
 void* DiagnosticSnapshotState(void);
 void DiagnosticSwapState(void* snapshot);
 void DiagnosticFreeState(void* snapshot);
+void DiagnosticSuppressBegin(void);
+void DiagnosticSuppressEnd(void);
+bool DiagnosticsSuppressed(void);
 
 // #pragma diagnostic {ignored,warning,error} "-W<name>" actions.
 void DiagnosticIgnore(const char* warning);

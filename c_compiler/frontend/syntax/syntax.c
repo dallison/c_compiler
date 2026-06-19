@@ -1501,6 +1501,7 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
 }
 
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close);
+static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static StructMember* FindCXXConstructor(TypeRecord* type);
 static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
@@ -1890,7 +1891,7 @@ static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
     return body;
   }
   return NewIfStatementASTNode(NewIdentifierASTNode(complete_object, location),
-                               body, NULL, location);
+                               body, NULL, false, location);
 }
 
 static void InsertCXXCompleteObjectGuardedStatements(TypeRecord* func,
@@ -2131,6 +2132,13 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
       old_sym->value.func_defn = sym;
+      if (old_sym->type->info.function.is_constexpr) {
+        sym->type->info.function.is_constexpr = true;
+      }
+      if (old_sym->type->info.function.is_consteval) {
+        sym->type->info.function.is_consteval = true;
+        sym->type->info.function.is_constexpr = true;
+      }
     }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;
@@ -2219,7 +2227,9 @@ static void CheckThreadLocal(Syntax* syntax, Symbol* symbol) {
 // 2. type specifier
 // 3. function specifier (inline).
 // This collects them into the output variables.
-static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is_inline,
+static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
+                                      bool* is_inline, bool* is_constexpr,
+                                      bool* is_consteval, bool* is_constinit,
                                       TypeRecord** type, Vector* attributes, ParserContext context) {
   PartialTypeSpecifier type_specifier = {
     .type = kTypeImplicit,
@@ -2255,6 +2265,26 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage, bool* is
                       "Duplicate 'inline' specifier");
       }
       *is_inline = true;
+    } else if (LexMatch(syntax->lex, TOK(constexpr))) {
+      if (*is_constexpr) {
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate 'constexpr' specifier");
+      }
+      *is_constexpr = true;
+      type_specifier.quals |= kQualConst;
+    } else if (LexMatch(syntax->lex, TOK(consteval))) {
+      if (*is_consteval) {
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate 'consteval' specifier");
+      }
+      *is_consteval = true;
+      *is_constexpr = true;
+    } else if (LexMatch(syntax->lex, TOK(constinit))) {
+      if (*is_constinit) {
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate 'constinit' specifier");
+      }
+      *is_constinit = true;
     } else if (!(type_specifier.type != kTypeImplicit &&
                  CurrentIdentifierFollowedByScopeOperator(syntax)) &&
                SyntaxLookingAtType(syntax) &&
@@ -2399,6 +2429,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           }
           sym->flags.is_defined = true;
         }
+        if (TypeIsFunction(sym->type) && sym->type->info.function.is_constexpr) {
+          old_sym->type->info.function.is_constexpr = true;
+        }
+        if (TypeIsFunction(sym->type) && sym->type->info.function.is_consteval) {
+          old_sym->type->info.function.is_consteval = true;
+          old_sym->type->info.function.is_constexpr = true;
+        }
       } else {
         if (!overload_was_appended) {
           // This is the first declaration of this symbol, add to the symbol
@@ -2504,16 +2541,27 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       SymbolDelete(sym);
       sym = old_sym;
     }
+    if (!TypeIsFunction(sym->type)) {
+      sym->flags.is_constexpr = parser->is_constexpr;
+      sym->flags.is_constinit = parser->is_constinit;
+    }
 
     // Any initializer?
     ASTNode* initializer = NULL;
     if (LexMatch(syntax->lex, TOK(equal))) {
       syntax->init_storage = storage;
       initializer = SyntaxParseInitializer(syntax, sym, storage);
-    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))) {
-      initializer = ParseBracedInitializer(syntax);
-      if (!StorageIs(storage, STO(extern))) {
-        sym->flags.is_defined = true;
+    } else {
+      initializer = ParseCXXDirectInitializer(syntax, sym);
+      if (initializer != NULL) {
+        if (!StorageIs(storage, STO(extern))) {
+          sym->flags.is_defined = true;
+        }
+      } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))) {
+        initializer = ParseBracedInitializer(syntax);
+        if (!StorageIs(storage, STO(extern))) {
+          sym->flags.is_defined = true;
+        }
       }
     }
     if (TypeContainsAuto(sym->type) && initializer == NULL) {
@@ -2522,9 +2570,20 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       initializer = AnalyzeExpression(initializer);
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
     }
+    if ((sym->flags.is_constexpr || sym->flags.is_constinit) &&
+        initializer == NULL) {
+      SyntaxError(syntax, sym->flags.is_constinit
+                              ? "constinit variable requires an initializer"
+                              : "constexpr variable requires an initializer");
+    }
     ASTNode* decl = NewVariableDeclarationASTNode(
         sym, initializer, syntax->lex->current_token_location);
     VectorAppend(declarations, decl);
+    if (sym->flags.is_constexpr || sym->flags.is_constinit ||
+        (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
+      SemanticAnalyzeVariableDefinition(syntax,
+                                        (VariableDeclarationASTNode*)decl);
+    }
 
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
@@ -3256,8 +3315,13 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   Storage storage = STO(implicit);
   bool is_inline = false;
+  bool is_constexpr = false;
+  bool is_consteval = false;
+  bool is_constinit = false;
   TypeRecord* type = NULL;
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes, kParsingFileScope);
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
+                            &is_consteval, &is_constinit,
+                            &type, &attributes, kParsingFileScope);
 
   if (StorageIs(storage, STO(auto)|STO(register))) {
     SyntaxError(syntax, "Illegal global storage specified: %s",
@@ -3274,6 +3338,9 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingFileScope);
   parser.is_inline = is_inline;
+  parser.is_constexpr = is_constexpr;
+  parser.is_consteval = is_consteval;
+  parser.is_constinit = is_constinit;
  
   // Open a scope (local symbol stack) for the symbols declared in the
   // type declaration list.
@@ -3477,7 +3544,7 @@ static void RegisterCXXLocalStaticDestructor(Symbol* sym, Symbol* guard) {
   VectorAppend(destructor_statements, destructor);
   ASTNode* guarded_destructor = NewIfStatementASTNode(
       condition, NewCompoundStatementASTNode(destructor_statements, location),
-      NULL, location);
+      NULL, false, location);
   VectorAppend(&compiler->cxx_global_destructor_calls, guarded_destructor);
 }
 
@@ -3518,7 +3585,7 @@ static ASTNode* NewCXXLocalStaticGuardedConstructor(Syntax* syntax,
       NewIfStatementASTNode(condition,
                             NewCompoundStatementASTNode(guarded_statements,
                                                         location),
-                            NULL, location);
+                            NULL, false, location);
 
   Vector* statements = NewVector();
   VectorAppend(statements, guarded);
@@ -3551,6 +3618,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     }
     Symbol* sym = TypeParserParseDeclarator(parser, type);
     if (sym != NULL) {
+      if (!TypeIsFunction(sym->type)) {
+        sym->flags.is_constexpr = parser->is_constexpr;
+        sym->flags.is_constinit = parser->is_constinit;
+      }
       Symbol* old_sym =
           FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
       bool ok = true;
@@ -3612,6 +3683,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           // one.
           SymbolDelete(sym);
           sym = old_sym;
+          if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
+            sym->flags.is_constexpr = true;
+          }
+          if (!TypeIsFunction(sym->type) && parser->is_constinit) {
+            sym->flags.is_constinit = true;
+          }
         }
       } else {
         // This is the first declaration of this symbol, add to the symbol
@@ -3694,6 +3771,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         if (initializer == NULL) {
           if (TypeContainsAuto(sym->type)) {
             SyntaxError(syntax, "auto variable requires an initializer");
+          } else if (sym->flags.is_constexpr || sym->flags.is_constinit) {
+            SyntaxError(syntax, sym->flags.is_constinit
+                                    ? "constinit variable requires an initializer"
+                                    : "constexpr variable requires an initializer");
           } else if (StorageIs(storage, STO(static))) {
             initializer = NewCXXLocalStaticGuardedConstructor(syntax, sym);
           } else {
@@ -3705,7 +3786,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
       VectorAppend(declarations, decl);
-      if (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)) {
+      if (sym->flags.is_constexpr || sym->flags.is_constinit ||
+          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }
@@ -3739,11 +3821,16 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
 
   Storage storage = STO(implicit);
   bool is_inline = false;
+  bool is_constexpr = false;
+  bool is_consteval = false;
+  bool is_constinit = false;
   TypeRecord* type = NULL;
   Vector attributes = {0};
   syntax->context = kParsingBlockScope;
   
-  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &type, &attributes, kParsingBlockScope);
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
+                            &is_consteval, &is_constinit,
+                            &type, &attributes, kParsingBlockScope);
 
   if (is_inline) {
     SyntaxError(syntax, "inline is not allowed here");
@@ -3752,6 +3839,9 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   // Parse the type specifier (char, unsigned int, etc.)
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingBlockScope);
+  parser.is_constexpr = is_constexpr;
+  parser.is_consteval = is_consteval;
+  parser.is_constinit = is_constinit;
 
   // Claim a reference on the freshly built base type for the duration of
   // declarator parsing.  Each declarator that adopts it takes its own
@@ -3809,6 +3899,9 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(volatile):
     case TOK(restrict):
     case TOK(void):
+    case TOK(consteval):
+    case TOK(constexpr):
+    case TOK(constinit):
       return true;
     case TOK(auto):
       return CompilerIsCXX();
@@ -3842,6 +3935,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(typedef):
     case TOK(using):
     case TOK(static_assert):
+    case TOK(consteval):
+    case TOK(constexpr):
+    case TOK(constinit):
       return true;
     default:
       return SyntaxLookingAtType(syntax);
@@ -3897,6 +3993,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(caret):
     case TOK(ellipsis):
     case TOK(false):
+    case TOK(true):
     case TOK(sizeof):
     case TOK(tilde):
       return TC(expr);

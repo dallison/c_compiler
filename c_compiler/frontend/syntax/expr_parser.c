@@ -735,16 +735,17 @@ static void SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
 
 static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
                                                       bool* is_mutable,
+                                                      bool* is_constexpr,
                                                       TypeRecord* default_type,
                                                       TokenClass followers) {
   *is_mutable = false;
+  *is_constexpr = false;
   bool keep_parsing = true;
   while (keep_parsing) {
     if (LexMatch(syntax->lex, TOK(mutable))) {
       *is_mutable = true;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
-      // The current frontend has no constexpr evaluation model for functions;
-      // parsing it here preserves the lambda surface without changing codegen.
+      *is_constexpr = true;
     } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {
       SkipNoexceptSpecifier(syntax, followers);
     } else {
@@ -805,9 +806,12 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   Struct* closure = closure_type->info.struct_info;
   TypeRecord* func = NewFunctionTypeRecord();
   ParseLambdaParameterList(syntax, func, TC(closebra));
+  bool is_constexpr = false;
   return_type = ParseLambdaSpecifiersAndReturnType(syntax, &is_mutable,
+                                                   &is_constexpr,
                                                    return_type, TC(closebra));
   func->info.function.is_const_member = !is_mutable;
+  func->info.function.is_constexpr = is_constexpr;
   TypeRecordChain(func, return_type);
   TypeRecordAddCXXThisParameter(func, closure, location);
 
@@ -1065,6 +1069,15 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     TypeRecord* type =
         NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
     return NewIntConstantASTNode(0, type, syntax->lex->current_token_location);
+  }
+
+  if (LexLookingAt(lex, TOK(true)) || LexLookingAt(lex, TOK(false))) {
+    bool value = LexLookingAt(lex, TOK(true));
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    return NewIntConstantASTNode(value ? 1 : 0,
+                                 NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                                 location);
   }
 
   ASTNode* lambda = ParseCXXLambdaExpression(syntax, followers);

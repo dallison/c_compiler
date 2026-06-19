@@ -292,8 +292,32 @@ static void AnalyzeAsmStatement(AsmASTNode* node) {
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
-  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                      kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
+  if (node->is_constexpr) {
+    int64_t value;
+    if (!EvaluateIntegerExpression(node->cond, &value)) {
+      SemanticError(node->cond,
+                    "if constexpr condition is not a constant expression");
+      return;
+    }
+    ASTNode* selected = value != 0 ? node->if_part : node->else_part;
+    if (selected == NULL) {
+      selected = NewCompoundStatementASTNode(NewVector(), node->base.location);
+    }
+    AnalyzeStatement(selected);
+    node->cond = NewIntConstantASTNode(
+        1, NewTypeRecordWithSize(kTypeBool, kQualPlain), node->base.location);
+    node->cond->parent = (ASTNode*)node;
+    node->cond->child_id = 0;
+    node->if_part = selected;
+    node->if_part->parent = (ASTNode*)node;
+    node->if_part->child_id = 1;
+    node->else_part = NULL;
+    SemanticCheckScalarType(node->cond);
+    return;
+  }
   AnalyzeStatement(node->if_part);
   AnalyzeStatement(node->else_part);
   SemanticCheckScalarType(node->cond);
@@ -301,7 +325,8 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
 
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
-  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                      kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
@@ -309,7 +334,8 @@ static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
 
 static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
-  NormalConversion(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                      kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   AnalyzeStatement(node->stmt);
   SemanticCheckScalarType(node->cond);
@@ -639,7 +665,8 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 
   node->c2 = AnalyzeExpression(node->c2);
   if (node->c2 != NULL) {
-    NormalConversion(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    SemanticConvertType(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                        kConvertContextualBool);
     SemanticCheckScalarType(node->c2);
   }
 

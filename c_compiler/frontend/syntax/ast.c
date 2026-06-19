@@ -1607,6 +1607,7 @@ static ASTNode* IfStatementASTNodeClone(const ASTNode* node,
   to->cond = ASTNodeClone(from->cond, func, data, &to->base);
   to->if_part = ASTNodeClone(from->if_part, func, data, &to->base);
   to->else_part = ASTNodeClone(from->else_part, func, data, &to->base);
+  to->is_constexpr = from->is_constexpr;
   return func(&to->base, data);
 }
 
@@ -1637,7 +1638,8 @@ static ASTNodeVirtuals if_stmt_vtbl = {
     IfStatementASTNodeVisit, IfStatementUsesValue};
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
-                               ASTNode* else_part, SourceLocation location) {
+                               ASTNode* else_part, bool is_constexpr,
+                               SourceLocation location) {
   IfStatementASTNode* node = ASTArenaAlloc(sizeof(IfStatementASTNode));
   ASTNodeInit(&node->base, AST_OP(if), NULL, location, &if_stmt_vtbl);
   node->cond = cond;
@@ -1651,6 +1653,7 @@ ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
     else_part->parent = (ASTNode*)node;
     else_part->child_id = 2;
   }
+  node->is_constexpr = is_constexpr;
   return (ASTNode*)node;
 }
 

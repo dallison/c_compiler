@@ -9,9 +9,10 @@
 #ifndef expr_evaluator_h
 #define expr_evaluator_h
 
-#include "syntax.h"
+#include "constexpr.h"
 
 bool EvaluateIntegerExpression(ASTNode* node, int64_t* result);
 bool EvaluateFloatingPointExpression(ASTNode* node, double* result);
+bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer);
 
 #endif /* expr_evaluator_h */

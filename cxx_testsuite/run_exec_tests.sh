@@ -91,7 +91,7 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   exp="${src}.expected"
   bin="$work/test.bin"
   out="$work/test.out"
-  compile_cmd=("$DAVECC" -target "$TARGET" -static -std=c++17
+  compile_cmd=("$DAVECC" -target "$TARGET" -static -std=c++20
                -isystem "$INCLUDE_DIR")
   compile_cmd+=("${COMPILE_ARGS[@]}" "$src" "$LIBC" -o "$bin")
   if ! "${compile_cmd[@]}" >"$work/compile.log" 2>&1; then

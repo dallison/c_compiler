@@ -124,8 +124,8 @@ expect_fail cxx20_module_keywords \
   'int module; int import; int main(void) { return 0; }' \
   -std=c++20
 
-expect_fail cxx11_constexpr \
-  'int constexpr; int main(void) { return 0; }' \
+expect_compile cxx11_constexpr \
+  'constexpr int value = 1; int main(void) { return value; }' \
   -std=c++11
 
 if "$ROOT/$DAVECC" -target pcode -std=c++26 -S "$WORK/no_such.c" \

@@ -666,7 +666,10 @@ static void AppendCXXGlobalDestructorCalls(Vector* statements) {
 }
 
 static void RegisterCXXGlobalObject(Symbol* sym) {
-  if (FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
+  bool statically_constructed =
+      sym != NULL && sym->flags.value_set && sym->value.other != NULL &&
+      (TypeIsFixedArray(sym->type) || TypeIsStructOrUnion(sym->type));
+  if (!statically_constructed && FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
     VectorAppend(&compiler->cxx_global_constructors, sym);
   }
   if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
@@ -855,8 +858,13 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   }
                   ASTNodeSetType((ASTNode*)decl, decl->symbol->type);
                 }
+                ASTNode* initializer = ConstexprObjectInitializerForSymbol(
+                    decl->symbol, decl->initializer->location);
+                if (initializer == NULL) {
+                  initializer = decl->initializer;
+                }
                 ASTNode* simplified_init = AnalyzeInitializer(
-                    decl->symbol->type, decl->initializer, true);
+                    decl->symbol->type, initializer, true);
                 // This is an initialized static variable.  The initializer has
                 // been simplified to a braced initializer containing only
                 // designated initializers.
@@ -1002,6 +1010,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   SetInit(&compiler->error_warnings, CompareWarning);
   SetInit(&compiler->no_error_warnings, CompareWarning);
   VectorInit(&compiler->diagnostic_stack);
+  compiler->diagnostic_suppression_depth = 0;
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;

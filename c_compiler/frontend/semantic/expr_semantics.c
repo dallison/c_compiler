@@ -14,6 +14,7 @@
 #include "init_semantics.h"
 #include "statement_semantics.h"
 #include "compiler.h"
+#include "errors.h"
 #include "symbol_table.h"
 
 // This is the semantic analyzer for expressions.  It propagates type
@@ -162,6 +163,11 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   return NULL;
 }
 
+static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
+  return EvaluateScalarConstantForSymbol(symbol, initializer) ||
+         ConstexprEvaluateObjectConstantForSymbol(symbol, initializer);
+}
+
 static bool IsNullPointer(ASTNode* node) {
   switch (node->op) {
     case AST_OP(number): {
@@ -233,7 +239,9 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   }
   node->sub = AnalyzeExpression(node->sub);
   if (node->base.op == AST_OP(not)) {
-    NormalConversion(node->sub, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    SemanticConvertType(node->sub,
+                        NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                        kConvertContextualBool);
   }
   SemanticCheckScalarType(node->sub);
   switch (node->base.op) {
@@ -973,7 +981,8 @@ static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
 
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
-  SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain), kConvertNormal);
+  SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                      kConvertContextualBool);
   if (!TypeIsScalar(node->left->type)) {
     SemanticError((ASTNode*)node, "Condition for ? operator must be scalar");
     ASTNodeSetType((ASTNode*)node, node->left->type);
@@ -1208,12 +1217,23 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
   // to the constant so we can use it as a constant in further expressions.
-  if (TypeIsConst(id_node->symbol->type)) {
-    if (TypeIsIntegral(init->type)) {
-      id_node->symbol->flags.value_set = EvaluateIntegerExpression(init, &id_node->symbol->value.ivalue);
-    } else if (TypeIsFloatingPoint(init->type)) {
-      id_node->symbol->flags.value_set = EvaluateFloatingPointExpression(init, &id_node->symbol->value.fvalue);
-    }
+  if (TypeIsConst(id_node->symbol->type) ||
+      id_node->symbol->flags.is_constexpr ||
+      id_node->symbol->flags.is_constinit) {
+    EvaluateConstantForSymbol(id_node->symbol, init);
+  }
+  if ((id_node->symbol->flags.is_constexpr ||
+       id_node->symbol->flags.is_constinit) &&
+      !id_node->symbol->flags.value_set) {
+    SemanticError(init,
+                  id_node->symbol->flags.is_constinit
+                      ? "constinit variable initializer is not a constant expression"
+                      : "constexpr variable initializer is not a constant expression");
+  }
+  ASTNode* object_init = ConstexprObjectInitializerForSymbol(
+      id_node->symbol, init->location);
+  if (object_init != NULL) {
+    init = object_init;
   }
   ASTNode* simplified_init = AnalyzeInitializer(node->type, init, is_static);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
@@ -2322,9 +2342,11 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   if (!candidate->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
   }
+  DiagnosticSuppressBegin();
   Symbol* instantiated =
       TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
           &compiler->syntax, candidate, explicit_args, node->children);
+  DiagnosticSuppressEnd();
   return instantiated == candidate ? NULL : instantiated;
 }
 
@@ -2364,10 +2386,12 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
     return explicit_args == NULL ? candidate : NULL;
   }
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
+  DiagnosticSuppressBegin();
   Symbol* instantiated =
       TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
           &compiler->syntax, candidate->symbol, explicit_args, node->children,
           first_formal_arg);
+  DiagnosticSuppressEnd();
   if (instantiated == candidate->symbol) {
     return NULL;
   }
@@ -2815,6 +2839,26 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   
+  if (call_ok && subtype->info.function.is_consteval) {
+    bool ok = false;
+    if (TypeIsFloatingPoint(return_type)) {
+      double value;
+      ok = EvaluateFloatingPointExpression((ASTNode*)node, &value);
+    } else if (TypeIsIntegral(return_type)) {
+      int64_t value;
+      ok = EvaluateIntegerExpression((ASTNode*)node, &value);
+    } else if (TypeIsFixedArray(return_type) || TypeIsStructOrUnion(return_type)) {
+      ConstEvalContext ctx;
+      ConstEvalContextInit(&ctx);
+      ok = ConstexprEvaluateCallAsObject(&ctx, (ASTNode*)node);
+      ConstEvalContextDestruct(&ctx);
+    }
+    if (!ok) {
+      SemanticError((ASTNode*)node,
+                    "consteval function call is not a constant expression");
+    }
+  }
+
   // Validate printf/scanf-style format strings on functions annotated with
   // __attribute__((format(...))).
   if (call_ok && node->left->op == AST_OP(identifier)) {
@@ -3110,9 +3154,9 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   
   node->left = AnalyzeExpression(node->left);
-  SemanticConvertType(node->left, bool_type, kConvertNormal);
+  SemanticConvertType(node->left, bool_type, kConvertContextualBool);
   node->right = AnalyzeExpression(node->right);
-  SemanticConvertType(node->right, bool_type, kConvertNormal);
+  SemanticConvertType(node->right, bool_type, kConvertContextualBool);
   ASTNodeSetType((ASTNode*)node, node->left->type);
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);

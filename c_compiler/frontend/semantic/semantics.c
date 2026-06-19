@@ -10,6 +10,7 @@
 #include <string.h>
 #include "compiler.h"
 #include "errors.h"
+#include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "lex.h"
 #include "statement_semantics.h"
@@ -668,7 +669,18 @@ static void ConversionOperatorName(TypeRecord* type, String* name) {
   StringDestruct(&type_name);
 }
 
-static StructMember* FindConversionOperator(Struct* str, TypeRecord* to) {
+static bool ConversionOperatorAllowedInContext(TypeRecord* func,
+                                               TypeRecord* to,
+                                               ConversionContext ctx) {
+  if (!func->info.function.is_explicit_conversion) {
+    return true;
+  }
+  return ctx == kConvertCast ||
+         (ctx == kConvertContextualBool && TypeIsBool(to));
+}
+
+static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
+                                            ConversionContext ctx) {
   if (str == NULL) {
     return NULL;
   }
@@ -679,7 +691,8 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to) {
   while (member != NULL) {
     if (member->is_member_function && member->symbol != NULL &&
         TypeIsFunction(member->symbol->type) &&
-        TypeEqual(member->symbol->type->next, to)) {
+        TypeEqual(member->symbol->type->next, to) &&
+        ConversionOperatorAllowedInContext(member->symbol->type, to, ctx)) {
       return member;
     }
     member = member->overload_next;
@@ -687,12 +700,14 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to) {
   return NULL;
 }
 
-static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to) {
+static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
+                                             ConversionContext ctx) {
   if (!CompilerIsCXX() || from == NULL || from->type == NULL ||
       !TypeIsStructOrUnion(from->type)) {
     return false;
   }
-  StructMember* member = FindConversionOperator(from->type->info.struct_info, to);
+  StructMember* member =
+      FindConversionOperator(from->type->info.struct_info, to, ctx);
   if (member == NULL) {
     return false;
   }
@@ -733,7 +748,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
-  if (TryConvertWithConversionOperator(from, to)) {
+  if (TryConvertWithConversionOperator(from, to, ctx)) {
     return;
   }
 
@@ -790,6 +805,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
        }
       break;
       
+    case kConvertContextualBool:
     case kConvertNormal:
       if (TypeIsVoidPointer(to)) {
         // Can convert any pointer, array or function to void*.
@@ -882,12 +898,31 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
   if (node->initializer == NULL) {
     return;
   }
-  node->initializer = AnalyzeExpression(node->initializer);
-  if (!SemanticDeduceAutoType(node->symbol, node->initializer,
-                              (ASTNode*)node)) {
-    return;
+  bool object_initializer =
+      (TypeIsFixedArray(node->symbol->type) ||
+       TypeIsStructOrUnion(node->symbol->type)) &&
+      (node->initializer->op == AST_OP(braced_init) ||
+       node->initializer->op == AST_OP(call));
+  if (!object_initializer) {
+    node->initializer = AnalyzeExpression(node->initializer);
+    if (!SemanticDeduceAutoType(node->symbol, node->initializer,
+                                (ASTNode*)node)) {
+      return;
+    }
+    NormalConversion(node->initializer, node->symbol->type);
   }
-  // TODO: at this level the expression must be evaluatable at compile time.
-  NormalConversion(node->initializer, node->symbol->type);
+  if (TypeIsConst(node->symbol->type) || node->symbol->flags.is_constexpr ||
+      node->symbol->flags.is_constinit) {
+    EvaluateScalarConstantForSymbol(node->symbol, node->initializer) ||
+        ConstexprEvaluateObjectConstantForSymbol(node->symbol,
+                                                node->initializer);
+  }
+  if ((node->symbol->flags.is_constexpr || node->symbol->flags.is_constinit) &&
+      !node->symbol->flags.value_set) {
+    SemanticError(node->initializer,
+                  node->symbol->flags.is_constinit
+                      ? "constinit variable initializer is not a constant expression"
+                      : "constexpr variable initializer is not a constant expression");
+  }
   ASTNodeSetType((ASTNode*)node, node->symbol->type);
 }

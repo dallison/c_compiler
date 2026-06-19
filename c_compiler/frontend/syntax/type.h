@@ -97,9 +97,12 @@ typedef struct {
   bool definition;      // Function is a definition.
   bool old_style;       // Old-style arguments.
   bool is_inline;       // This is an inline function.
+  bool is_constexpr;    // C++ constexpr function.
+  bool is_consteval;    // C++ consteval immediate function.
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
   bool is_const_member; // C++ member function has trailing const qualifier.
+  bool is_explicit_conversion;  // C++ explicit conversion operator.
   bool is_virtual;      // C++ virtual member function.
   bool is_override;     // C++ override virt-specifier.
   bool is_final;        // C++ final virt-specifier.
@@ -245,6 +248,7 @@ typedef struct TypeRecord {
   Declarator declarator;
   int size;
   int template_parameter_index;  // >= 0 for template parameter placeholder types.
+  String* dependent_member_name;  // For dependent qualified types like T::type.
   Symbol* template_origin;       // Primary class template for dependent template-ids.
   Vector* template_arguments;    // TemplateArgument* entries owned by this type.
   struct TypeRecord* next;
@@ -271,6 +275,9 @@ typedef struct {
   bool found_void;        // Flag: we've found 'void'.
   int dimension_count;    // Dimensions in array.
   bool is_inline;
+  bool is_constexpr;
+  bool is_consteval;
+  bool is_constinit;
   enum ParserContext context;
   Struct* cxx_member_owner;
   StructMember* cxx_member_definition;

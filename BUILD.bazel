@@ -339,6 +339,7 @@ cc_library(
         "c_compiler/frontend/syntax/dwarf_defs.c",
         "c_compiler/driver/errors.c",
         "c_compiler/backend/expr_codegen.c",
+        "c_compiler/frontend/syntax/constexpr.c",
         "c_compiler/frontend/syntax/expr_evaluator.c",
         "c_compiler/frontend/syntax/expr_parser.c",
         "c_compiler/frontend/semantic/expr_semantics.c",

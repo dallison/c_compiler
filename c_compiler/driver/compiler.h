@@ -233,6 +233,7 @@ typedef struct {
   Set no_error_warnings;
   // Stack of saved warning states for #pragma diagnostic push/pop.
   Vector diagnostic_stack;
+  int diagnostic_suppression_depth;
   // Current #pragma pack(n) member alignment cap (0 = no packing in effect).
   int pack_alignment;
   // Stack of saved pack values for #pragma pack(push[,n]) / pack(pop).
