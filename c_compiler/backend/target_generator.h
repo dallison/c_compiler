@@ -128,6 +128,10 @@ typedef struct TargetInstruction {
 // at entry so temporaries do not steal it before the argument is consumed.
 #define TARGET_INST_INCOMING_ARG 16
 
+// Keep this instruction's block even when it has no normal CFG predecessor.
+// Used for exception landing pads, which are reached by unwind metadata.
+#define TARGET_INST_KEEP_UNREACHABLE 32
+
 // A constant.
 typedef struct {
   TargetInstruction base;

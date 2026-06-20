@@ -173,6 +173,10 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "_Imaginary";
     case AST_OP(compound):
       return "{";
+    case AST_OP(try):
+      return "try";
+    case AST_OP(catch):
+      return "catch";
     case AST_OP(less):
       return "<";
     case AST_OP(lesseq):
@@ -214,6 +218,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "?";
     case AST_OP(return ):
       return "return";
+    case AST_OP(throw):
+      return "throw";
     case AST_OP(rshift):
     case AST_OP(rshiftl):
     case AST_OP(rshifta):
@@ -1751,6 +1757,66 @@ ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
   return (ASTNode*)node;
 }
 
+static void ThrowASTNodeDelete(ASTNode* node) {
+  ThrowASTNode* tnode = (ThrowASTNode*)node;
+  if (tnode->expr != NULL) {
+    ASTNodeDelete(tnode->expr);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void ThrowASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  ThrowASTNode* tnode = (ThrowASTNode*)node;
+  ASTNodeBasePrint(node, indents, fp);
+  if (tnode->expr != NULL) {
+    ASTNodePrint(tnode->expr, indents + 2, fp);
+  }
+}
+
+static void ThrowASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                     ASTNode* child, bool delete_old_child) {
+  (void)child_id;
+  ThrowASTNode* node = (ThrowASTNode*)parent;
+  ASTNode* old = node->expr;
+  node->expr = child;
+  SetParent(child, parent, 0);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* ThrowASTNodeClone(const ASTNode* node,
+                                  ASTNode* (*func)(ASTNode* node, void*),
+                                  void* data) {
+  ThrowASTNode* from = (ThrowASTNode*)node;
+  ThrowASTNode* to = ASTArenaAlloc(sizeof(ThrowASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void ThrowASTNodeVisit(ASTNode* node,
+                              void (*func)(ASTNode* node, void*,
+                                           int, VisitorMode),
+                              int child_id, void* data) {
+  ThrowASTNode* n = (ThrowASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals throw_vtbl = {
+    ThrowASTNodeDelete, ThrowASTNodePrint, ThrowASTNodeReplaceChild,
+    ThrowASTNodeClone, ThrowASTNodeVisit, ValueNotUsed};
+
+ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location) {
+  ThrowASTNode* node = ASTArenaAlloc(sizeof(ThrowASTNode));
+  ASTNodeInit(&node->base, AST_OP(throw), NULL, location, &throw_vtbl);
+  node->expr = expr;
+  SetParent(expr, (ASTNode*)node, 0);
+  return (ASTNode*)node;
+}
+
 static void CompoundStatementASTNodeDelete(ASTNode* node) {
   CompoundStatementASTNode* vnode = (CompoundStatementASTNode*)node;
   for (size_t i = 0; i < vnode->statements->length; i++) {
@@ -1847,6 +1913,163 @@ void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
     ASTNode* child = node->statements->value.p[i];
     child->child_id++;
   }
+}
+
+static void CatchASTNodeDelete(ASTNode* node) {
+  CatchASTNode* cnode = (CatchASTNode*)node;
+  if (cnode->stmt != NULL) {
+    ASTNodeDelete(cnode->stmt);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void CatchASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  CatchASTNode* cnode = (CatchASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "%s\n", cnode->is_catch_all ? "catch (...)" : "catch");
+  if (cnode->symbol != NULL) {
+    Indent(indents + 2, fp);
+    fprintf(fp, "%s\n", cnode->symbol->name.value);
+  }
+  if (cnode->stmt != NULL) {
+    ASTNodePrint(cnode->stmt, indents + 2, fp);
+  }
+}
+
+static void CatchASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                     ASTNode* child, bool delete_old_child) {
+  (void)child_id;
+  CatchASTNode* node = (CatchASTNode*)parent;
+  ASTNode* old = node->stmt;
+  node->stmt = child;
+  SetParent(child, parent, 0);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* CatchASTNodeClone(const ASTNode* node,
+                                  ASTNode* (*func)(ASTNode* node, void*),
+                                  void* data) {
+  CatchASTNode* from = (CatchASTNode*)node;
+  CatchASTNode* to = ASTArenaAlloc(sizeof(CatchASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->symbol = from->symbol;
+  to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
+  to->is_catch_all = from->is_catch_all;
+  return func(&to->base, data);
+}
+
+static void CatchASTNodeVisit(ASTNode* node,
+                              void (*func)(ASTNode* node, void*,
+                                           int, VisitorMode),
+                              int child_id, void* data) {
+  CatchASTNode* n = (CatchASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->stmt, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals catch_vtbl = {
+    CatchASTNodeDelete, CatchASTNodePrint, CatchASTNodeReplaceChild,
+    CatchASTNodeClone, CatchASTNodeVisit, ValueNotUsed};
+
+ASTNode* NewCatchASTNode(Symbol* symbol, bool is_catch_all, ASTNode* stmt,
+                         SourceLocation location) {
+  CatchASTNode* node = ASTArenaAlloc(sizeof(CatchASTNode));
+  ASTNodeInit(&node->base, AST_OP(catch), NULL, location, &catch_vtbl);
+  node->symbol = symbol;
+  node->stmt = stmt;
+  node->is_catch_all = is_catch_all;
+  SetParent(stmt, (ASTNode*)node, 0);
+  return (ASTNode*)node;
+}
+
+static void TryASTNodeDelete(ASTNode* node) {
+  TryASTNode* tnode = (TryASTNode*)node;
+  if (tnode->try_stmt != NULL) {
+    ASTNodeDelete(tnode->try_stmt);
+  }
+  for (size_t i = 0; i < tnode->catches->length; i++) {
+    ASTNodeDelete(tnode->catches->value.p[i]);
+  }
+  VectorDelete(tnode->catches);
+  ASTNodeBaseDelete(node);
+}
+
+static void TryASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  TryASTNode* tnode = (TryASTNode*)node;
+  ASTNodeBasePrint(node, indents, fp);
+  if (tnode->try_stmt != NULL) {
+    ASTNodePrint(tnode->try_stmt, indents + 2, fp);
+  }
+  for (size_t i = 0; i < tnode->catches->length; i++) {
+    ASTNodePrint(tnode->catches->value.p[i], indents + 2, fp);
+  }
+}
+
+static void TryASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                   ASTNode* child, bool delete_old_child) {
+  TryASTNode* node = (TryASTNode*)parent;
+  ASTNode* old = NULL;
+  if (child_id == 0) {
+    old = node->try_stmt;
+    node->try_stmt = child;
+  } else {
+    size_t index = (size_t)(child_id - 1);
+    old = node->catches->value.p[index];
+    node->catches->value.p[index] = child;
+  }
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* TryASTNodeClone(const ASTNode* node,
+                                ASTNode* (*func)(ASTNode* node, void*),
+                                void* data) {
+  TryASTNode* from = (TryASTNode*)node;
+  TryASTNode* to = ASTArenaAlloc(sizeof(TryASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->try_stmt = ASTNodeClone(from->try_stmt, func, data, &to->base);
+  to->catches = NewVector();
+  for (size_t i = 0; i < from->catches->length; i++) {
+    ASTNode* child =
+        ASTNodeClone(from->catches->value.p[i], func, data, &to->base);
+    VectorAppend(to->catches, child);
+  }
+  return func(&to->base, data);
+}
+
+static void TryASTNodeVisit(ASTNode* node,
+                            void (*func)(ASTNode* node, void*,
+                                         int, VisitorMode),
+                            int child_id, void* data) {
+  TryASTNode* n = (TryASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->try_stmt, func, 0, data);
+  for (size_t i = 0; i < n->catches->length; i++) {
+    ASTNodeVisit(n->catches->value.p[i], func, (int)i + 1, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static ASTNodeVirtuals try_vtbl = {
+    TryASTNodeDelete, TryASTNodePrint, TryASTNodeReplaceChild,
+    TryASTNodeClone, TryASTNodeVisit, ValueNotUsed};
+
+ASTNode* NewTryASTNode(ASTNode* try_stmt, Vector* catches,
+                       SourceLocation location) {
+  TryASTNode* node = ASTArenaAlloc(sizeof(TryASTNode));
+  ASTNodeInit(&node->base, AST_OP(try), NULL, location, &try_vtbl);
+  node->try_stmt = try_stmt;
+  node->catches = catches;
+  SetParent(try_stmt, (ASTNode*)node, 0);
+  for (size_t i = 0; i < catches->length; i++) {
+    SetParent(catches->value.p[i], (ASTNode*)node, (int)i + 1);
+  }
+  return (ASTNode*)node;
 }
 
 static void ForStatementASTNodeDelete(ASTNode* node) {

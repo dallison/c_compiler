@@ -609,6 +609,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->byte_offset = 0;
   mem->bit_offset = 0;
   mem->bit_size = 0;
+  mem->cxx_vcall_offset = 0;
   mem->is_anon = false;
   mem->is_static = false;
   mem->is_member_function = false;
@@ -673,6 +674,10 @@ static void CXXVBTableInfoDelete(CXXVBTableInfo* info) {
   free(info);
 }
 
+static void CXXVTableInfoDelete(CXXVTableInfo* info) {
+  free(info);
+}
+
 void StructMemberDelete(StructMember* member) {
   SymbolDelete(member->symbol);
   free(member);
@@ -701,6 +706,7 @@ Struct* NewStruct(bool is_union) {
   s->vtable_symbol = NULL;
   s->vbptr_member = NULL;
   s->vbtable_symbol = NULL;
+  VectorInit(&s->vtable_symbols);
   VectorInit(&s->vbtable_symbols);
   MapInit(&s->symbol_table, CompareStructMember);
   s->is_union = is_union;
@@ -739,6 +745,9 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->members,
                              (VectorElementDestructor)StructMemberDelete, /*free_element=*/false);
   VectorDestruct(&s->virtual_members);
+  VectorDestructWithContents(&s->vtable_symbols,
+                             (VectorElementDestructor)CXXVTableInfoDelete,
+                             /*free_element=*/false);
   VectorDestructWithContents(&s->vbtable_symbols,
                              (VectorElementDestructor)CXXVBTableInfoDelete,
                              /*free_element=*/false);
@@ -1429,6 +1438,7 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     instantiated->is_member_function = member->is_member_function;
     instantiated->bit_size = member->bit_size;
     instantiated->bit_offset = member->bit_offset;
+    instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
 
     if (!instantiated->is_static && !instantiated->is_member_function &&
         !StructMemberIsNestedType(instantiated)) {
@@ -2832,6 +2842,7 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
     instantiated->is_member_function = member->is_member_function;
     instantiated->bit_size = member->bit_size;
     instantiated->bit_offset = member->bit_offset;
+    instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
     if (!instantiated->is_static && !StructMemberIsNestedType(instantiated)) {
       AlignNextOffset(str, member_type);
       instantiated->byte_offset = str->next_offset;
@@ -3606,6 +3617,39 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   }
 }
 
+static void SkipBalancedParenthesizedTokens(TypeParser* parser) {
+  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(exprsep));
+  int depth = 1;
+  while (depth > 0 && !LexEof(parser->lex)) {
+    if (LexMatch(parser->lex, TOK(lparen))) {
+      depth++;
+    } else if (LexMatch(parser->lex, TOK(rparen))) {
+      depth--;
+    } else {
+      LexNextToken(parser->lex);
+    }
+  }
+}
+
+static void ParseCXXExceptionSpecifier(TypeParser* parser) {
+  if (!CompilerIsCXX()) {
+    return;
+  }
+  if (LexMatch(parser->lex, TOK(noexcept))) {
+    if (LexLookingAt(parser->lex, TOK(lparen))) {
+      SkipBalancedParenthesizedTokens(parser);
+    }
+    return;
+  }
+  if (LexMatch(parser->lex, TOK(throw))) {
+    if (LexLookingAt(parser->lex, TOK(lparen))) {
+      SkipBalancedParenthesizedTokens(parser);
+    } else {
+      SyntaxError(parser->syntax, "Expected exception specification");
+    }
+  }
+}
+
 static void ParseFunctionDecl(TypeParser* parser) {
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
@@ -3620,6 +3664,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  ParseCXXExceptionSpecifier(parser);
   if (parser->cxx_member_definition != NULL &&
       !parser->cxx_member_definition->is_static) {
     TypeRecordAddCXXThisParameter(
@@ -4430,6 +4475,8 @@ static TypeRecord* NewCXXVTableEntryType(void) {
   return NewPointerTo(kQualPlain, void_type);
 }
 
+static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b);
+
 static TypeRecord* NewCXXVPtrType(void) {
   TypeRecord* entry_type = NewCXXVTableEntryType();
   return NewPointerTo(kQualPlain, entry_type);
@@ -4452,6 +4499,10 @@ static void AddCXXVPtrMember(TypeParser* parser, Struct* str) {
   }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
+    if (member->is_static || member->is_member_function ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
     member->byte_offset += ptr_size;
   }
   str->next_offset += ptr_size;
@@ -4527,6 +4578,86 @@ static TypeRecord* NewCXXVTableType(size_t slots) {
   return array_type;
 }
 
+static bool CXXVirtualNamesCompatible(StructMember* candidate,
+                                      StructMember* base_member) {
+  if (candidate == NULL || candidate->symbol == NULL ||
+      candidate->symbol->type == NULL || base_member == NULL ||
+      base_member->symbol == NULL || base_member->symbol->type == NULL) {
+    return false;
+  }
+  TypeRecord* candidate_func = candidate->symbol->type;
+  TypeRecord* base_func = base_member->symbol->type;
+  if (candidate_func->info.function.is_destructor &&
+      base_func->info.function.is_destructor) {
+    return true;
+  }
+  return StringEqualString(&candidate->symbol->name, &base_member->symbol->name);
+}
+
+static StructMember* FindCXXFinalOverrider(Struct* complete,
+                                           StructMember* base_member) {
+  if (complete == NULL || base_member == NULL || base_member->symbol == NULL ||
+      base_member->symbol->type == NULL) {
+    return base_member;
+  }
+  for (size_t i = 0; i < complete->members.length; i++) {
+    StructMember* candidate = complete->members.value.p[i];
+    if (candidate == NULL || !candidate->is_member_function ||
+        candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !candidate->symbol->type->info.function.is_virtual ||
+        !CXXVirtualNamesCompatible(candidate, base_member)) {
+      continue;
+    }
+    if (CXXMemberFunctionSignaturesMatch(candidate->symbol->type,
+                                         base_member->symbol->type)) {
+      return candidate;
+    }
+  }
+  return base_member;
+}
+
+static Symbol* RegisterCXXThisAdjustorThunk(TypeParser* parser, Symbol* target,
+                                            int adjustment) {
+  if (adjustment == 0 || target == NULL) {
+    return target;
+  }
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk->target == target && thunk->this_adjustment == adjustment) {
+      return thunk->thunk;
+    }
+  }
+  String name;
+  StringInit(&name, "__davecc_this_adjustor_");
+  char suffix[64];
+  snprintf(suffix, sizeof(suffix), "%zu_%d_",
+           compiler->cxx_this_adjustor_thunks.length,
+           adjustment < 0 ? -adjustment : adjustment);
+  StringAppend(&name, suffix);
+  StringAppendString(&name, &target->name);
+  for (size_t i = 0; i < name.length; i++) {
+    char ch = name.value[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+          (ch >= '0' && ch <= '9') || ch == '_')) {
+      name.value[i] = '_';
+    }
+  }
+  Symbol* thunk_symbol =
+      NewSymbol(name.value, TypeRecordCopy(target->type), STO(static));
+  thunk_symbol->flags.invented = true;
+  thunk_symbol->flags.is_defined = true;
+  thunk_symbol->location = parser->lex->current_token_location;
+  SyntaxAddSymbol(parser->syntax, thunk_symbol);
+  StringDestruct(&name);
+
+  CXXThisAdjustorThunk* thunk = malloc(sizeof(CXXThisAdjustorThunk));
+  thunk->thunk = thunk_symbol;
+  thunk->target = target;
+  thunk->this_adjustment = adjustment;
+  VectorAppend(&compiler->cxx_this_adjustor_thunks, thunk);
+  return thunk_symbol;
+}
+
 static TypeRecord* NewCXXVBTableType(size_t slots) {
   TypeRecord* entry_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   TypeRecord* array_type =
@@ -4552,23 +4683,43 @@ static void UpdateCXXAbstractStatus(Struct* str) {
   }
 }
 
-static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
-  if (!CompilerIsCXX() || str->vtable_symbol != NULL ||
-      str->virtual_members.length == 0 || str->tag_name == NULL) {
-    return;
+static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
+                                             Struct* complete,
+                                             Struct* source,
+                                             int source_offset) {
+  if (!CompilerIsCXX() || complete == NULL || source == NULL ||
+      source->virtual_members.length == 0 || complete->tag_name == NULL ||
+      source->tag_name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < complete->vtable_symbols.length; i++) {
+    CXXVTableInfo* info = complete->vtable_symbols.value.p[i];
+    if (info->source == source && info->source_offset == source_offset) {
+      return info->symbol;
+    }
   }
 
   String name;
   StringInit(&name, "__davecc_vtbl_");
-  StringAppendString(&name, str->tag_name);
+  StringAppendString(&name, complete->tag_name);
+  if (!(complete == source && source_offset == 0)) {
+    StringAppend(&name, "_");
+    StringAppendString(&name, source->tag_name);
+    StringAppend(&name, "_");
+    char offset_suffix[32];
+    snprintf(offset_suffix, sizeof(offset_suffix), "%d", source_offset);
+    StringAppend(&name, offset_suffix);
+  }
   Symbol* symbol = NewSymbol(name.value,
-                             NewCXXVTableType(str->virtual_members.length),
+                             NewCXXVTableType(source->virtual_members.length),
                              STO(static));
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
   symbol->location = parser->lex->current_token_location;
   SyntaxAddSymbol(parser->syntax, symbol);
-  str->vtable_symbol = symbol;
+  if (complete == source && source_offset == 0) {
+    complete->vtable_symbol = symbol;
+  }
   StringDestruct(&name);
 
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
@@ -4579,8 +4730,9 @@ static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
   VectorInit(&var->initializers);
   var->is_tls = false;
   var->is_local = false;
-  for (size_t i = 0; i < str->virtual_members.length; i++) {
-    StructMember* member = str->virtual_members.value.p[i];
+  for (size_t i = 0; i < source->virtual_members.length; i++) {
+    StructMember* member = source->virtual_members.value.p[i];
+    member = FindCXXFinalOverrider(complete, member);
     if (member == NULL || member->symbol == NULL) {
       continue;
     }
@@ -4596,11 +4748,52 @@ static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
       }
     } else {
       init->type = kInitTypeSymbol;
-      init->value.symbol = member->symbol;
+      int adjustment = member->symbol->type->info.function.cxx_member_owner ==
+                               complete
+                           ? -source_offset
+                           : 0;
+      init->value.symbol =
+          RegisterCXXThisAdjustorThunk(parser, member->symbol, adjustment);
     }
     VectorAppend(&var->initializers, init);
   }
   VectorAppend(&compiler->initialized_static_variables, var);
+  CXXVTableInfo* info = malloc(sizeof(CXXVTableInfo));
+  info->source = source;
+  info->source_offset = source_offset;
+  info->symbol = symbol;
+  VectorAppend(&complete->vtable_symbols, info);
+  return symbol;
+}
+
+static void RegisterCXXVSubobjectTables(TypeParser* parser,
+                                        Struct* complete,
+                                        Struct* source,
+                                        int source_offset) {
+  if (source == NULL) {
+    return;
+  }
+  if (source->virtual_members.length > 0) {
+    RegisterCXXVTableForSubobject(parser, complete, source, source_offset);
+  }
+  for (size_t i = 0; i < source->bases.length; i++) {
+    CXXBaseSpecifier* base = source->bases.value.p[i];
+    if (base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    RegisterCXXVSubobjectTables(parser, complete, base->type->info.struct_info,
+                                source_offset + base->byte_offset);
+  }
+}
+
+static void RegisterCXXVTable(TypeParser* parser, Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->vtable_symbol != NULL ||
+      str->virtual_members.length == 0 || str->tag_name == NULL) {
+    return;
+  }
+  RegisterCXXVSubobjectTables(parser, str, str, 0);
 }
 
 static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
@@ -4708,6 +4901,20 @@ Symbol* StructFindVBTableSymbol(Struct* complete, Struct* source,
   }
   for (size_t i = 0; i < complete->vbtable_symbols.length; i++) {
     CXXVBTableInfo* info = complete->vbtable_symbols.value.p[i];
+    if (info->source == source && info->source_offset == source_offset) {
+      return info->symbol;
+    }
+  }
+  return NULL;
+}
+
+Symbol* StructFindVTableSymbol(Struct* complete, Struct* source,
+                               int source_offset) {
+  if (complete == NULL || source == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < complete->vtable_symbols.length; i++) {
+    CXXVTableInfo* info = complete->vtable_symbols.value.p[i];
     if (info->source == source && info->source_offset == source_offset) {
       return info->symbol;
     }
@@ -4913,6 +5120,34 @@ static StructMember* FindCXXBaseVirtualOverride(Struct* str,
   return NULL;
 }
 
+static int CXXBaseOffsetForMember(Struct* str, StructMember* member) {
+  if (str == NULL || member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      member->symbol->type->info.function.cxx_member_owner == NULL) {
+    return 0;
+  }
+  Struct* owner = member->symbol->type->info.function.cxx_member_owner;
+  if (owner == str) {
+    return 0;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == owner) {
+      return base->byte_offset;
+    }
+    int nested_offset = CXXBaseOffsetForMember(base_struct, member);
+    if (nested_offset != 0 || base_struct == owner) {
+      return base->byte_offset + nested_offset;
+    }
+  }
+  return 0;
+}
+
 static void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
                                      StructMember* member) {
   if (!CompilerIsCXX() || str == NULL || member == NULL ||
@@ -4934,6 +5169,7 @@ static void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
     func->info.function.is_virtual = true;
     func->info.function.virtual_index =
         override->symbol->type->info.function.virtual_index;
+    member->cxx_vcall_offset = CXXBaseOffsetForMember(str, override);
   }
   if (func->info.function.is_final && !func->info.function.is_virtual) {
     SyntaxError(parser->syntax, "%s marked final but is not virtual",
@@ -4949,6 +5185,9 @@ static void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
   if (func->info.function.virtual_index < 0) {
     func->info.function.virtual_index = (int)str->virtual_members.length;
     VectorAppend(&str->virtual_members, member);
+    return;
+  }
+  if (member->cxx_vcall_offset != 0) {
     return;
   }
   size_t index = (size_t)func->info.function.virtual_index;

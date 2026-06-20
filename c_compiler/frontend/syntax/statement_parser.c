@@ -759,6 +759,65 @@ static ASTNode* ParseGotoStatement(Syntax* syntax, TokenClass followers,
   }
 }
 
+static Symbol* ParseCatchDeclaration(Syntax* syntax, TokenClass followers) {
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  Symbol* symbol = TypeParserParseDeclarator(&parser, type);
+  TypeParserDestruct(&parser);
+  if (symbol == NULL) {
+    SyntaxError(syntax, "Expected catch declaration");
+    SyntaxRecover(syntax, followers);
+    return NULL;
+  }
+  symbol->flags.is_local = true;
+  symbol->flags.is_defined = true;
+  return symbol;
+}
+
+static ASTNode* ParseCatchHandler(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  SyntaxNeedBracket(syntax, TOK(lparen), followers);
+
+  bool is_catch_all = false;
+  Symbol* symbol = NULL;
+  if (LexMatch(syntax->lex, TOK(ellipsis))) {
+    is_catch_all = true;
+  } else {
+    symbol = ParseCatchDeclaration(syntax, followers | TC(closebra));
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax, "catch handler requires a compound statement");
+  }
+
+  SyntaxOpenScope(syntax);
+  if (symbol != NULL && !SyntaxAddSymbol(syntax, symbol)) {
+    SyntaxError(syntax, "Duplicate definition of local symbol %s",
+                symbol->name.value);
+  }
+  ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  SyntaxCloseScope(syntax);
+  return NewCatchASTNode(symbol, is_catch_all, stmt, location);
+}
+
+static ASTNode* ParseTryStatement(Syntax* syntax, TokenClass followers,
+                                  SourceLocation location) {
+  if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax, "try statement requires a compound statement");
+  }
+  ASTNode* try_stmt = SyntaxParseStatement(syntax, followers);
+  Vector* catches = NewVector();
+  while (LexMatch(syntax->lex, TOK(catch))) {
+    VectorAppend(catches, ParseCatchHandler(syntax, followers));
+  }
+  if (catches->length == 0) {
+    SyntaxError(syntax, "try statement requires at least one catch handler");
+  }
+  return NewTryASTNode(try_stmt, catches, location);
+}
+
 // Table of statement parsers.
 struct StatementParser {
   Token token;
@@ -779,6 +838,7 @@ struct StatementParser {
   {TOK(default), ParseDefaultStatement, false},
   {TOK(return), ParseReturnStatement, true},
   {TOK(goto), ParseGotoStatement, true},
+  {TOK(try), ParseTryStatement, false},
   {TOK(asm), ParseAsmStatement, true},
 };
 

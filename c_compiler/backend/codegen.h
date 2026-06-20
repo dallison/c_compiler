@@ -9,6 +9,7 @@
 #ifndef codegen_h
 #define codegen_h
 
+#include <stdint.h>
 #include <stdarg.h>
 
 #include "ast.h"
@@ -33,6 +34,18 @@ typedef struct {
   IRNode* pooled;
 } PoolEntry;
 
+typedef struct {
+  IRNode* try_start;
+  IRNode* try_end;
+  IRNode* catch_label;
+  struct EHTypeInfo* catch_typeinfo;
+} ExceptionHandlerRange;
+
+typedef struct EHTypeInfo {
+  String symbol_name;
+  String type_name;
+} EHTypeInfo;
+
 // Main IR code generator.
 typedef struct Generator {
   Syntax* syntax;
@@ -52,6 +65,9 @@ typedef struct Generator {
   Vector int_constant_pool;  // Pooled integer constants.
   Vector fp_constant_pool;   // Pooled floating point constants.
   Vector variable_pool;      // Pooled variables.
+  Vector exception_ranges;   // ExceptionHandlerRange* entries.
+  Vector exception_keep_labels;  // IR labels reachable only through EH pads.
+  Vector exception_typeinfos; // EHTypeInfo* entries emitted for this function.
 
   Vector basic_blocks;      // Basic Blocks (indexed by block id).
   BasicBlock* entry_block;  // Entry block.
@@ -87,6 +103,8 @@ IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym);
 void* GenerateFunction(Generator* gen);
 
 int GeneratorNumCalls(Generator* gen);
+uint64_t CXXExceptionTypeID(TypeRecord* type);
+EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type);
 
 void GeneratorError(Generator* gen, ASTNode* node, const char* format, ...);
 void VGeneratorError(Generator* gen, ASTNode* node, const char* format,

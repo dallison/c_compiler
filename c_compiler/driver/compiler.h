@@ -95,6 +95,12 @@ typedef struct {
   bool is_local;    // Local (inside a function).
 } UninitializedStaticVariable;
 
+typedef struct {
+  Symbol* thunk;
+  Symbol* target;
+  int this_adjustment;
+} CXXThisAdjustorThunk;
+
 // A literal has an id.  The value is in a derived class.
 typedef enum {
   kLiteralString,
@@ -205,6 +211,9 @@ typedef struct {
   // Emit a literal.
   void (*emit_literal)(Literal* literal, FILE* asm_file);
 
+  // Emit target-specific C++ helper thunks.
+  void (*emit_cxx_thunks)(FILE* asm_file);
+
   // Emit debug information.
   void (*emit_debug)(FILE* asm_file);
 
@@ -292,6 +301,7 @@ typedef struct {
   Vector cxx_global_constructors;
   Vector cxx_global_destructors;
   Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
+  Vector cxx_this_adjustor_thunks;  // CXXThisAdjustorThunk* entries.
 
   Vector literals;     // Literals
   int next_literal_id;

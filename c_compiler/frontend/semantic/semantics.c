@@ -16,6 +16,22 @@
 #include "statement_semantics.h"
 #include "var_analysis.h"
 
+static int semantic_catch_depth = 0;
+
+void SemanticEnterCatchHandler(void) {
+  semantic_catch_depth++;
+}
+
+void SemanticLeaveCatchHandler(void) {
+  if (semantic_catch_depth > 0) {
+    semantic_catch_depth--;
+  }
+}
+
+bool SemanticInCatchHandler(void) {
+  return semantic_catch_depth > 0;
+}
+
 void SemanticError(ASTNode* node, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
@@ -613,10 +629,6 @@ static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
   }
   if (from->type->next->info.struct_info == to->next->info.struct_info) {
     return false;
-  }
-  if (adjustment.kind == kCXXBaseAdjustmentStatic &&
-      to->next->info.struct_info->virtual_members.length > 0) {
-    adjustment.byte_offset = 0;
   }
   if (adjustment.kind == kCXXBaseAdjustmentNone ||
       (adjustment.kind == kCXXBaseAdjustmentStatic &&

@@ -252,6 +252,13 @@ typedef struct {
   bool is_fp;
 } RegisterVariable;
 
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* try_end;
+  TargetInstruction* catch_label;
+  EHTypeInfo* catch_typeinfo;
+} X86_64ExceptionRange;
+
 typedef struct X86_64Generator {
   TargetGenerator base;
 
@@ -273,6 +280,8 @@ typedef struct X86_64Generator {
   // the frame pointer and do not depend on stack_frame_size.
   int saved_arg_area_size;
   Vector offsets;
+  Vector exception_ranges;
+  Vector exception_typeinfos;
 
   TargetInstruction* int_argument_registers[X86_64_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[X86_64_NUM_FP_ARGS];

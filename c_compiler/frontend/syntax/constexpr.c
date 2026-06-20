@@ -8,6 +8,7 @@
 
 #include "constexpr.h"
 #include <stdlib.h>
+#include "constexpr_pcode.h"
 #include "type.h"
 
 typedef struct ConstexprObject ConstexprObject;
@@ -491,6 +492,9 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   if (symbol == NULL || symbol->type == NULL || initializer == NULL ||
       (!TypeIsFixedArray(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
     return false;
+  }
+  if (ConstexprPCodeEvaluateObjectConstantForSymbol(symbol, initializer)) {
+    return true;
   }
 
   ConstEvalContext ctx;
@@ -2192,6 +2196,9 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
 
 bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                     int64_t* result) {
+  if (ConstexprPCodeEvaluateCallAsInteger(ctx, node, result)) {
+    return true;
+  }
   ConstexprValue value;
   return EvaluateConstexprCall(ctx, node, &value) &&
          ConstexprValueAsInteger(value, result);
@@ -2199,12 +2206,18 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
 
 bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                      double* result) {
+  if (ConstexprPCodeEvaluateCallAsFloating(ctx, node, result)) {
+    return true;
+  }
   ConstexprValue value;
   return EvaluateConstexprCall(ctx, node, &value) &&
          ConstexprValueAsFloating(value, result);
 }
 
 bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node) {
+  if (ConstexprPCodeEvaluateCallAsObject(ctx, node)) {
+    return true;
+  }
   ConstexprValue value;
   return EvaluateConstexprCall(ctx, node, &value) && value.is_object &&
          value.object != NULL;

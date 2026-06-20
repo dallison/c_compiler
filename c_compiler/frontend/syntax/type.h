@@ -153,6 +153,12 @@ typedef struct CXXVBTableInfo {
   Symbol* symbol;
 } CXXVBTableInfo;
 
+typedef struct CXXVTableInfo {
+  struct Struct* source;
+  int source_offset;
+  Symbol* symbol;
+} CXXVTableInfo;
+
 // A struct or union member.  Behaves like a Symbol with extra information.
 typedef struct StructMember {
   Symbol* symbol;   // Embedded Symbol.
@@ -160,6 +166,7 @@ typedef struct StructMember {
   int bit_offset;   // Bit offset into word.
   int bit_size;     // Bitfield size in bits.
   size_t index;     // Index into members vector.
+  int cxx_vcall_offset;  // Subobject offset whose vptr owns this virtual slot.
   bool is_anon;     // This is an anonymous member.
   bool is_static;   // C++ static data/function member.
   bool is_member_function;
@@ -180,6 +187,7 @@ struct Struct {
   Symbol* vtable_symbol;      // Hidden C++ vtable static symbol.
   StructMember* vbptr_member;  // Hidden C++ virtual-base offset table pointer.
   Symbol* vbtable_symbol;      // Hidden C++ virtual-base offset table.
+  Vector vtable_symbols;  // CXXVTableInfo* entries for subobject vtables.
   Vector vbtable_symbols;  // CXXVBTableInfo* entries for complete-object tables.
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
@@ -356,6 +364,8 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 bool StructHasVirtualBases(Struct* str);
 Symbol* StructFindVBTableSymbol(Struct* complete, Struct* source,
                                 int source_offset);
+Symbol* StructFindVTableSymbol(Struct* complete, Struct* source,
+                               int source_offset);
 
 void TypeRecordToString(TypeRecord* type, String* result);
 

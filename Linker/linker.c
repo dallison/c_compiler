@@ -457,8 +457,11 @@ static void AssignGroupRegion(Segment* segment, SectionGroup* group) {
      }
    }
   if (region_index == -1) {
-    // No region for this section.  Ignore.
-    return;
+    if (segment->regions.length != 1) {
+      // No region for this section.  Ignore.
+      return;
+    }
+    region_index = 0;
   }
   SegmentMemoryRegion* region = segment->regions.value.p[region_index];
   group->region = region;
@@ -946,6 +949,59 @@ static LinkerSymbol* InventSymbol(Linker* linker, const char* name, int size, ui
   return sym;
 }
 
+static SectionGroup* FindSectionGroup(Linker* linker, const char* name) {
+  for (size_t i = 0; i < linker->section_groups.length; i++) {
+    SectionGroup* group = linker->section_groups.value.p[i];
+    if (strcmp(group->name.value, name) == 0) {
+      return group;
+    }
+  }
+  return NULL;
+}
+
+static uint64_t SectionGroupSize(SectionGroup* group) {
+  uint64_t size = 0;
+  for (size_t i = 0; i < group->components.length; i++) {
+    GroupedSection* section = group->components.value.p[i];
+    switch (section->source) {
+      case kGroupedSectionExisting:
+        size += section->section.existing->header->size;
+        break;
+      case kGroupedSectionNew:
+        size += section->section.new->contents->size;
+        break;
+      case kGroupedSectionPadding:
+        size += section->section.padding->size;
+        break;
+    }
+  }
+  return size;
+}
+
+static void InventEHFrameBounds(Linker* linker) {
+  SectionGroup* eh_frame = FindSectionGroup(linker, ".eh_frame");
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (eh_frame != NULL && eh_frame->region != NULL) {
+    start = eh_frame->address;
+    end = start + SectionGroupSize(eh_frame);
+  }
+  InventSymbol(linker, "__eh_frame_start", 8, start);
+  InventSymbol(linker, "__eh_frame_end", 8, end);
+}
+
+static void InventExceptionTableBounds(Linker* linker) {
+  SectionGroup* table = FindSectionGroup(linker, ".davecc_except_table");
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (table != NULL && table->region != NULL) {
+    start = table->address;
+    end = start + SectionGroupSize(table);
+  }
+  InventSymbol(linker, "__davecc_except_table_start", 8, start);
+  InventSymbol(linker, "__davecc_except_table_end", 8, end);
+}
+
 static int CompareGroupRegion(const void* a, const void* b) {
   const SectionGroup* g1 = *(const SectionGroup**)a;
   const SectionGroup* g2 = *(const SectionGroup**)b;
@@ -1189,6 +1245,10 @@ void LinkerLinkAllFiles(Linker* linker) {
 
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);
+
+  // Expose the linked .eh_frame range to the in-process unwind runtime.
+  InventEHFrameBounds(linker);
+  InventExceptionTableBounds(linker);
   
   if (!linker->fully_static) {
     // Define the dynamic linker symbols.  This includes

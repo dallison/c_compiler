@@ -44,6 +44,9 @@ typedef struct {
   bool by_reference;
 } LambdaCapture;
 
+static ASTNode* ParseAssignmentExpression(Syntax* syntax,
+                                          TokenClass followers);
+
 // Returns -1 for not intrinsic.
 static int GetIntrinsicIndex(const char* name) {
   for (int i = 0; intrinsics[i].name != NULL; i++) {
@@ -2092,6 +2095,18 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
                                location, destructor, deallocate));
 }
 
+static ASTNode* ParseCXXThrowExpression(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // throw
+  ASTNode* expr = NULL;
+  if (!LexLookingAt(syntax->lex, TOK(semicolon)) &&
+      !LexLookingAt(syntax->lex, TOK(rparen)) &&
+      !LexLookingAt(syntax->lex, TOK(comma))) {
+    expr = ParseAssignmentExpression(syntax, followers);
+  }
+  return NewThrowASTNode(expr, location);
+}
+
 // Parse a unary expression with syntax:
 // unary-expression:
 //    postfix-expression
@@ -2183,6 +2198,10 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(delete))) {
     return ParseCXXDeleteExpression(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(throw))) {
+    return ParseCXXThrowExpression(syntax, followers);
   }
 
   return ParsePostfixExpression(syntax, followers);

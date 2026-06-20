@@ -11,19 +11,18 @@
 // void longjmp(jmp_buf buf, int value);
 // SysV: buf in %rdi, value in %rsi
 longjmp:
-	mov %rsi, %r12
-	test %r12, %r12
+	mov %rsi, %rax
+	test %rax, %rax
 	jnz Lj_skip_one
-	mov $1, %r12
+	mov $1, %rax
 Lj_skip_one:
 	// Restore the saved register file.  Skip slots that map to %rax (0, 1),
-	// %rdi (10, the buf pointer), and %r12 (7, 18, 22) which holds the
-	// return value until the end.
-	mov 248(%rdi), %r11
+	// because %rax holds the setjmp return value.  Do not restore %r11 here:
+	// DaveCC reserves it as a scratch register, and we use it for the saved
+	// return address.
 	mov 240(%rdi), %r10
 	mov 232(%rdi), %r9
 	mov 224(%rdi), %r8
-	mov 216(%rdi), %r11
 	mov 208(%rdi), %r10
 	mov 200(%rdi), %r15
 	mov 192(%rdi), %r14
@@ -31,7 +30,7 @@ Lj_skip_one:
 	mov 168(%rdi), %r15
 	mov 160(%rdi), %r14
 	mov 152(%rdi), %r13
-	mov 136(%rdi), %r11
+	mov 144(%rdi), %r12
 	mov 128(%rdi), %r10
 	mov 120(%rdi), %r9
 	mov 112(%rdi), %r8
@@ -40,13 +39,10 @@ Lj_skip_one:
 	mov 88(%rdi), %rsi
 	mov 72(%rdi), %rbx
 	mov 64(%rdi), %rbp
-	mov 48(%rdi), %r11
 	mov 40(%rdi), %r10
 	mov 32(%rdi), %r10
-	mov 24(%rdi), %r11
 	mov 16(%rdi), %rsp
-
-	mov %r12, %rax
 	mov 256(%rdi), %r11
-	pushq %r11
-	ret
+	mov 80(%rdi), %rdi
+
+	jmp *%r11

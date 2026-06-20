@@ -539,6 +539,8 @@ void X86_64GeneratorInit(X86_64Generator* rv, Generator* gen) {
   VectorInit(&rv->saved_regs);
   rv->saved_arg_area_size = 0;
   VectorInit(&rv->offsets);
+  VectorInit(&rv->exception_ranges);
+  VectorInit(&rv->exception_typeinfos);
 
   X86_64RegisterAllocatorInit(&rv->register_allocator, rv);
 }
@@ -554,8 +556,41 @@ void X86_64GeneratorDestruct(X86_64Generator* rv) {
   VectorDestructWithContents(&rv->var_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->saved_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->offsets, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&rv->exception_ranges, NULL, /*free_element=*/true);
+  VectorDestruct(&rv->exception_typeinfos);
   X86_64RegisterAllocatorDestruct(&rv->register_allocator);
   
+}
+
+static void ResolveExceptionRanges(X86_64Generator* rv, Generator* gen) {
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    VectorAppend(&rv->exception_typeinfos, gen->exception_typeinfos.value.p[i]);
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* ir_range = gen->exception_ranges.value.p[i];
+    TargetInstruction* try_start = ir_range->try_start->data.ptr;
+    TargetInstruction* try_end = ir_range->try_end->data.ptr;
+    TargetInstruction* catch_label = ir_range->catch_label->data.ptr;
+    if (try_start == NULL || try_end == NULL || catch_label == NULL) {
+      continue;
+    }
+    try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    X86_64ExceptionRange* range = malloc(sizeof(X86_64ExceptionRange));
+    range->try_start = try_start;
+    range->try_end = try_end;
+    range->catch_label = catch_label;
+    range->catch_typeinfo = ir_range->catch_typeinfo;
+    VectorAppend(&rv->exception_ranges, range);
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    TargetInstruction* target_label = label->data.ptr;
+    if (target_label != NULL) {
+      target_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    }
+  }
 }
 
 void X86_64GeneratorDelete(X86_64Generator* rv) {
@@ -4456,6 +4491,7 @@ void X86_64Lower(X86_64Generator* rv, Generator* gen) {
     LowerIRNode(rv, gen, node);
     node = IRNext(node);
   }
+  ResolveExceptionRanges(rv, gen);
 
   if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
     X86_64Print(rv, compiler->ir_output_file);

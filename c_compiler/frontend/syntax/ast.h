@@ -59,6 +59,8 @@ typedef enum {
   AST_OP(if),
   AST_OP(imaginary),
   AST_OP(compound),
+  AST_OP(try),
+  AST_OP(catch),
   AST_OP(less),
   AST_OP(lesseq),
   AST_OP(logand),
@@ -80,6 +82,7 @@ typedef enum {
   AST_OP(preinc),
   AST_OP(question),
   AST_OP(return),
+  AST_OP(throw),
   AST_OP(rshift),
   AST_OP(rshifteq),
   AST_OP(sizeof),
@@ -481,6 +484,13 @@ typedef struct {
 ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
                                      ASTNode* stmt, SourceLocation location);
 
+typedef struct {
+  ASTNode base;
+  ASTNode* expr;
+} ThrowASTNode;
+
+ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location);
+
 // Compound statment, containing a vector of statements.
 typedef struct {
   ASTNode base;
@@ -493,6 +503,25 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
                                      SourceLocation location);
 void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
                                     ASTNode* stmt, size_t at_index);
+
+typedef struct {
+  ASTNode base;
+  Symbol* symbol;  // NULL for catch (...).
+  ASTNode* stmt;
+  bool is_catch_all;
+} CatchASTNode;
+
+ASTNode* NewCatchASTNode(Symbol* symbol, bool is_catch_all, ASTNode* stmt,
+                         SourceLocation location);
+
+typedef struct {
+  ASTNode base;
+  ASTNode* try_stmt;
+  Vector* catches;  // CatchASTNode*
+} TryASTNode;
+
+ASTNode* NewTryASTNode(ASTNode* try_stmt, Vector* catches,
+                       SourceLocation location);
 
 // For statement.  All expressions (e1, e2 and e3) are optional.
 typedef struct {

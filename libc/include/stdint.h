@@ -22,6 +22,7 @@ typedef unsigned int uint16_t;
 typedef unsigned long uint32_t;
 typedef unsigned long long uint64_t;
 typedef unsigned int uintptr_t;
+typedef int intptr_t;
 typedef int64_t intmax_t;
 #elif defined(__LP64__)
 // LP64 (e.g. x86-64): long is 64 bits.
@@ -34,6 +35,7 @@ typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
 typedef unsigned long uint64_t;
 typedef unsigned long uintptr_t;
+typedef long intptr_t;
 typedef int64_t intmax_t;
 #else
 // ILP32 (e.g. 32-bit ARM): long is 32 bits, so 64-bit needs long long.
@@ -46,6 +48,7 @@ typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 typedef unsigned int uintptr_t;
+typedef int intptr_t;
 typedef int64_t intmax_t;
 #endif
 

@@ -252,6 +252,19 @@ static void InitializeInstructions(Map* instructions) {
 
 #undef INST
 
+static bool PCodeAssemblerInitCommon(PCodeAssembler* assembler) {
+  MapInit(&assembler->instructions, CompareString);
+
+  InitializeInstructions(&assembler->instructions);
+
+  // Add a NULL section at the start of the file.
+  AssemblerAddSection(&assembler->base, NULL, SHT(null), 0, 0);
+  // Add a .bss section.
+  assembler->bss = AssemblerAddSection(&assembler->base, NewString(".bss"),
+                                       SHT(nobits), SHF(alloc) | SHF(write), 8);
+  return true;
+}
+
 // Initialize the assembler.  Returns true if it worked.
 bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
                         String* outfile) {
@@ -267,16 +280,22 @@ bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
     return false;
   }
 
-  MapInit(&assembler->instructions, CompareString);
+  return PCodeAssemblerInitCommon(assembler);
+}
 
-  InitializeInstructions(&assembler->instructions);
+bool PCodeAssemblerInitFromString(PCodeAssembler* assembler, const char* name,
+                                  String* input, String* outfile) {
+  static int reloc_types[] = {
+      R_PCODE_ADD16, R_PCODE_DATA32, R_PCODE_DATA64, R_PCODE_ADD16, R_PCODE_ADD32,
+      R_PCODE_ADD64,  R_PCODE_SUB16,  R_PCODE_SUB32, R_PCODE_SUB64,
+  };
 
-  // Add a NULL section at the start of the file.
-  AssemblerAddSection(&assembler->base, NULL, SHT(null), 0, 0);
-  // Add a .bss section.
-  assembler->bss = AssemblerAddSection(&assembler->base, NewString(".bss"),
-                                       SHT(nobits), SHF(alloc) | SHF(write), 8);
-  return true;
+  if (!AssemblerInitFromString(&assembler->base, ELF_MACHINE_TYPE_PCODE, 0,
+                               reloc_types, name, input, outfile)) {
+    return false;
+  }
+
+  return PCodeAssemblerInitCommon(assembler);
 }
 
 PCodeAssembler* NewPCodeAssembler(String* infile, String* outfile) {

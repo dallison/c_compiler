@@ -121,6 +121,22 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
       "${test_objs[@]}" \
       -o "$exe" \
       "$LIBC_ARCHIVE"
+  elif [ "$target" = "x86_64" ]; then
+    runtime_objs=()
+    for src in \
+        "x86_64 support/setjmp.s" \
+        "x86_64 support/longjmp.s" \
+        "x86_64 support/eh_transfer.s" \
+        "x86_64 support/syscall.s" \
+        "x86_64 support/abs.s"; do
+      obj="$work/rt_$(basename "${src%.s}").o"
+      "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
+      runtime_objs+=("$obj")
+    done
+    "$davecc" "${link_cflags[@]}" \
+      "${test_objs[@]}" "${runtime_objs[@]}" \
+      libc/eh_frame.c \
+      -o "$exe"
   else
     abs_obj="$work/abs.o"
     "$davecc" "${rt_cflags[@]}" libc/abs.c -o "$abs_obj"
@@ -142,6 +158,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
     runtime_srcs=(
       "x86_64 support/setjmp.s"
       "x86_64 support/longjmp.s"
+      "x86_64 support/eh_transfer.s"
       "x86_64 support/syscall.s"
       "x86_64 support/abs.s"
     )
@@ -165,6 +182,7 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
     exe="$work/libc_runtime_test.exe"
     "$davecc" -target x86_64 -static -Wl,-e -Wl,main \
       "${test_objs[@]}" "${runtime_objs[@]}" \
+      libc/eh_frame.c \
       -o "$exe"
 
     run_step "runtime libc tests (full)" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'

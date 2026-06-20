@@ -345,6 +345,20 @@ void TargetBasicBlockClear(struct TargetGenerator* gen, TargetBasicBlock* b) {
   b->end_code = NULL;
 }
 
+static bool TargetBasicBlockHasKeptInstruction(TargetBasicBlock* b) {
+  if (b->code == NULL) {
+    return false;
+  }
+  for (TargetInstruction* inst = b->code; inst != NULL && inst != b->end_code;
+       inst = TargetNext(inst)) {
+    if ((inst->flags & TARGET_INST_KEEP_UNREACHABLE) != 0) {
+      return true;
+    }
+  }
+  return b->end_code != NULL &&
+         (b->end_code->flags & TARGET_INST_KEEP_UNREACHABLE) != 0;
+}
+
 static TargetBasicBlock* TargetGeneratorNewTargetBasicBlock(TargetGenerator* gen) {
   TargetBasicBlock* b = NewTargetBasicBlock(gen->basic_blocks.length);
   VectorAppend(&gen->basic_blocks, b);
@@ -491,6 +505,18 @@ static void AddMissingLinks(TargetGenerator* gen) {
     }
     if (b->out_edges.length == 0) {
       TargetBasicBlockAddEdge(b, gen->exit_block);
+    }
+  }
+}
+
+static void AddKeptBlockLinks(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b == gen->entry_block || b == gen->exit_block) {
+      continue;
+    }
+    if (b->in_edges.length == 0 && TargetBasicBlockHasKeptInstruction(b)) {
+      TargetBasicBlockAddEdge(gen->entry_block, b);
     }
   }
 }
@@ -751,7 +777,8 @@ static void RemoveUnreachableBlocks(TargetGenerator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[i];
 
-    if (TargetBasicBlockIsUnreachable(gen, b)) {
+    if (TargetBasicBlockIsUnreachable(gen, b) &&
+        !TargetBasicBlockHasKeptInstruction(b)) {
       TargetBasicBlockClear(gen, b);
     }
   }
@@ -802,6 +829,7 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
   // Phase 3: all blocks with no output edges link to exit block.  Also blocks
   // that do not end in a branch or return fall through to next block.
   AddMissingLinks(gen);
+  AddKeptBlockLinks(gen);
   
   // RVPrintBasicBlocks(gen, stdout);
   

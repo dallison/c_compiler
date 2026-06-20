@@ -104,6 +104,8 @@ typedef struct {
 
 bool PCodeAssemblerInit(PCodeAssembler* assembler, String* infile,
                         String* outfile);
+bool PCodeAssemblerInitFromString(PCodeAssembler* assembler, const char* name,
+                                  String* input, String* outfile);
 PCodeAssembler* NewPCodeAssembler(String* infile, String* outfile);
 void PCodeAssemblerDestruct(PCodeAssembler* assembler);
 void PCodeAssemblerDelete(PCodeAssembler* assembler);

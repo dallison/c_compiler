@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "assembler.h"
 #include "ast.h"
 #include "compiler.h"
@@ -28,6 +29,111 @@ static void TrapInstruction(IRNode* inst) {
   if (inst->id == 19) {
     Trap();
   }
+}
+
+static uint64_t HashExceptionTypePart(uint64_t hash, uint64_t value) {
+  hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+  return hash;
+}
+
+uint64_t CXXExceptionTypeID(TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  while (TypeIsReference(type)) {
+    type = type->next;
+  }
+
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  while (type != NULL) {
+    hash = HashExceptionTypePart(hash, (uint64_t)type->declarator);
+    switch (type->declarator) {
+      case kDeclPointer:
+        hash = HashExceptionTypePart(hash, (uint64_t)(type->qualifiers & ~kQualConst));
+        type = type->next;
+        continue;
+      case kDeclArray:
+        hash = HashExceptionTypePart(hash, (uint64_t)type->info.array.size.fixed);
+        type = type->next;
+        continue;
+      case kDeclFunction:
+        hash = HashExceptionTypePart(hash, (uint64_t)kDeclFunction);
+        type = type->next;
+        continue;
+      case kDeclReference:
+      case kDeclRValueReference:
+        type = type->next;
+        continue;
+      case kDeclPrimitive:
+        hash = HashExceptionTypePart(hash, (uint64_t)type->type);
+        if (TypeIsStructOrUnion(type)) {
+          hash = HashExceptionTypePart(hash,
+                                      (uint64_t)(uintptr_t)type->info.struct_info);
+        } else if (TypeIsEnum(type)) {
+          hash = HashExceptionTypePart(hash,
+                                      (uint64_t)(uintptr_t)type->info.enum_info);
+        }
+        return hash == 0 ? 1 : hash;
+    }
+  }
+  return hash == 0 ? 1 : hash;
+}
+
+static TypeRecord* CXXExceptionCanonicalType(TypeRecord* type) {
+  while (type != NULL && TypeIsReference(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
+static void CXXExceptionTypeName(TypeRecord* type, String* result) {
+  type = CXXExceptionCanonicalType(type);
+  if (type == NULL) {
+    StringAppend(result, "<unknown>");
+    return;
+  }
+  Qualifiers old_qualifiers = type->qualifiers;
+  type->qualifiers &= ~kQualConst;
+  TypeRecordToString(type, result);
+  type->qualifiers = old_qualifiers;
+}
+
+static void SanitizeTypeInfoSymbolName(String* name) {
+  for (size_t i = 0; i < name->length; i++) {
+    char ch = name->value[i];
+    bool valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                 (ch >= '0' && ch <= '9') || ch == '_';
+    if (!valid) {
+      name->value[i] = '_';
+    }
+  }
+}
+
+EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
+  String type_name = {0};
+  CXXExceptionTypeName(type, &type_name);
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = gen->exception_typeinfos.value.p[i];
+    if (StringEqualString(&info->type_name, &type_name)) {
+      StringDestruct(&type_name);
+      return info;
+    }
+  }
+
+  EHTypeInfo* info = malloc(sizeof(EHTypeInfo));
+  StringInit(&info->type_name, type_name.value);
+  StringDestruct(&type_name);
+  StringInit(&info->symbol_name, "__davecc_typeinfo_");
+  if (gen->func != NULL && gen->func->info.function.symbol != NULL) {
+    StringAppendString(&info->symbol_name,
+                       &gen->func->info.function.symbol->name);
+    StringAppendChar(&info->symbol_name, '_');
+  }
+  StringPrintf(&info->symbol_name, "%zu_", gen->exception_typeinfos.length);
+  StringAppendString(&info->symbol_name, &info->type_name);
+  SanitizeTypeInfoSymbolName(&info->symbol_name);
+  VectorAppend(&gen->exception_typeinfos, info);
+  return info;
 }
 
 static void TrapFunctionBeforeCodegen(Generator* gen) {
@@ -57,6 +163,9 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->int_constant_pool);
   VectorInit(&gen->fp_constant_pool);
   VectorInit(&gen->variable_pool);
+  VectorInit(&gen->exception_ranges);
+  VectorInit(&gen->exception_keep_labels);
+  VectorInit(&gen->exception_typeinfos);
   VectorInit(&gen->basic_blocks);
 
   IRResetNodeId();
@@ -93,6 +202,11 @@ void GeneratorDestruct(Generator* gen) {
   VectorDestructWithContents(&gen->int_constant_pool, NULL, /*free_element=*/true);
   VectorDestructWithContents(&gen->fp_constant_pool, NULL, /*free_element=*/true);
   VectorDestructWithContents(&gen->variable_pool, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&gen->exception_ranges, NULL, /*free_element=*/true);
+  VectorDestruct(&gen->exception_keep_labels);
+  // Target generators keep pointers to these records until final assembly
+  // emission, which can happen after the transient IR generator is destroyed.
+  VectorDestruct(&gen->exception_typeinfos);
 
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
@@ -796,11 +910,113 @@ static void BuildBasicBlocks(Generator* gen) {
 // executed.  The blocks aren't removed from the set of blocks
 // in the generator, we merely remove all the instructions from
 // them.
+static bool BasicBlockContainsInstruction(BasicBlock* block, IRNode* needle) {
+  if (block == NULL || needle == NULL || block->code == NULL) {
+    return false;
+  }
+  for (IRNode* inst = BasicBlockBegin(block);
+       !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
+       inst = IRNext(inst)) {
+    if (inst == needle) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool BasicBlockHasExceptionMetadata(Generator* gen, BasicBlock* block) {
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (BasicBlockContainsInstruction(block, range->try_start) ||
+        BasicBlockContainsInstruction(block, range->try_end) ||
+        BasicBlockContainsInstruction(block, range->catch_label)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    if (BasicBlockContainsInstruction(block,
+                                      gen->exception_keep_labels.value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool BasicBlockHasExceptionLandingMetadata(Generator* gen,
+                                                  BasicBlock* block) {
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (BasicBlockContainsInstruction(block, range->catch_label)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    if (BasicBlockContainsInstruction(block,
+                                      gen->exception_keep_labels.value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool BasicBlockIsExceptionReachable(Generator* gen, BasicBlock* block,
+                                           BitSet* visited) {
+  if (block == NULL) {
+    return false;
+  }
+  if (BasicBlockHasExceptionMetadata(gen, block)) {
+    return true;
+  }
+  if (BitSetContains(visited, block->block_id)) {
+    return false;
+  }
+  BitSetInsert(visited, block->block_id);
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* candidate = gen->basic_blocks.value.p[i];
+    if (!BasicBlockHasExceptionLandingMetadata(gen, candidate)) {
+      continue;
+    }
+    BitSet path_visited;
+    BitSetInit(&path_visited);
+    bool found = false;
+    Vector work;
+    VectorInit(&work);
+    VectorAppend(&work, candidate);
+    while (!found && work.length > 0) {
+      BasicBlock* current = VectorLast(&work);
+      VectorPop(&work);
+      if (current == block) {
+        found = true;
+        break;
+      }
+      if (BitSetContains(&path_visited, current->block_id)) {
+        continue;
+      }
+      BitSetInsert(&path_visited, current->block_id);
+      for (size_t j = 0; j < current->out_edges.length; j++) {
+        BasicBlock* out =
+            VectorGet(&gen->basic_blocks, current->out_edges.value.w[j]);
+        VectorAppend(&work, out);
+      }
+    }
+    VectorDestruct(&work);
+    BitSetDestruct(&path_visited);
+    if (found) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void RemoveUnreachableBlocks(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* b = gen->basic_blocks.value.p[i];
 
-    if (BasicBlockIsUnreachable(gen, b)) {
+    BitSet visited;
+    BitSetInit(&visited);
+    bool keep_for_exception = BasicBlockIsExceptionReachable(gen, b, &visited);
+    BitSetDestruct(&visited);
+    if (BasicBlockIsUnreachable(gen, b) && !keep_for_exception) {
       BasicBlockClear(gen, b);
     }
   }
@@ -829,6 +1045,21 @@ static bool VisitBlockForResultInstruction(IRNode* inst, ReturnVisitor* v) {
   if (inst == NULL) {
     return false;
   }
+
+  if (IRIsCall(inst)) {
+    IRNode* callee = inst->inputs.value.p[0];
+    if (IRIsVariable(callee)) {
+      Symbol* callee_symbol = ((IRVariable*)callee)->symbol;
+      if (callee_symbol != NULL &&
+          (callee_symbol->flags.noreturn ||
+           SymbolHasAttribute(callee_symbol, "noreturn"))) {
+        v->found_result = true;
+        v->result_known = true;
+        return true;
+      }
+    }
+  }
+
   // Scalar result return;
   if (IRIsResult(inst)) {
     v->found_result = true;
@@ -875,6 +1106,9 @@ static void VisitBlockForResult(Generator* gen, BasicBlock* block, ReturnVisitor
   }
   if (IRIsReturn(last_inst)) {
     v->result_known = true;
+    return;
+  }
+  if (VisitBlockForResultInstruction(last_inst, v)) {
     return;
   }
   // Look in the block for a result assignment.

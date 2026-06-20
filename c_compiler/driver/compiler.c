@@ -1002,6 +1002,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_global_destructor_calls);
+  VectorInit(&compiler->cxx_this_adjustor_thunks);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->pending_template_instantiations);
@@ -1438,6 +1439,8 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
   VectorDestruct(&compiler->cxx_global_destructor_calls);
+  VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
+                             /*free_element=*/true);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {
     LiteralDelete(compiler->literals.value.p[i]);
@@ -1529,6 +1532,9 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
 
     compiler->target->emit_function_assembly(compiler->functions.value.p[i],
                                              asm_file);
+  }
+  if (compiler->target->emit_cxx_thunks != NULL) {
+    compiler->target->emit_cxx_thunks(asm_file);
   }
   // Now emit the data to the assembly file.
   compiler->target->emit_data_start(asm_file);

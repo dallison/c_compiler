@@ -98,6 +98,7 @@ CompilerTarget* NewPCodeTarget() {
   target->emit_tbss_space = EmitTlsBSSVariable;
   target->emit_literals_start = EmitStringLiteralSection;
   target->emit_literal = EmitLiteral;
+  target->emit_cxx_thunks = NULL;
   target->emit_debug = EmitDebug;
   target->handle_options = HandleOptions;
   return target;

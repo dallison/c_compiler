@@ -79,6 +79,29 @@ trap 'rm -rf "$work"' EXIT
 pass=0
 fail=0
 
+read_expected_exit() {
+  local file=$1
+  local line
+  EXPECT_EXIT=""
+  while IFS= read -r line; do
+    case "$line" in
+      "// EXPECT_EXIT:"*)
+        EXPECT_EXIT="${line#// EXPECT_EXIT: }"
+        ;;
+    esac
+  done < "$file"
+}
+
+exit_status_matches() {
+  local expected=$1
+  local actual=$2
+  if [ "$expected" = "nonzero" ]; then
+    [ "$actual" -ne 0 ]
+    return $?
+  fi
+  [ "$actual" -eq "$expected" ]
+}
+
 echo "=== cxx_testsuite exec: target=$TARGET ==="
 echo "davecc=$DAVECC"
 echo "libc=$LIBC"
@@ -88,6 +111,7 @@ echo
 for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   [ -e "$src" ] || continue
   base=$(basename "$src")
+  read_expected_exit "$src"
   exp="${src}.expected"
   bin="$work/test.bin"
   out="$work/test.out"
@@ -105,6 +129,23 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/*.cpp; do
   run_cmd+=("${INTERP_ARGS[@]}" "$bin")
   "${run_cmd[@]}" >"$out" 2>"$work/run.err"
   run_status=$?
+  if [ -n "$EXPECT_EXIT" ]; then
+    if ! exit_status_matches "$EXPECT_EXIT" "$run_status"; then
+      echo "FAIL $base (run exit $run_status, expected $EXPECT_EXIT)"
+      sed 's/^/  /' "$work/run.err" | head -20
+      fail=$((fail + 1))
+      continue
+    fi
+    if [ -f "$exp" ] && ! diff -u "$exp" "$out" >"$work/diff"; then
+      echo "FAIL $base (output)"
+      sed 's/^/  /' "$work/diff" | head -40
+      fail=$((fail + 1))
+      continue
+    fi
+    echo "ok $base"
+    pass=$((pass + 1))
+    continue
+  fi
   if [ "$run_status" -ne 0 ]; then
     echo "FAIL $base (run exit $run_status)"
     sed 's/^/  /' "$work/run.err" | head -20

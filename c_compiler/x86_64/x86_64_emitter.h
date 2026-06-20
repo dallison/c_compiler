@@ -29,5 +29,6 @@ void X86_64EmitterDestruct(X86_64Emitter* emitter);
 void X86_64EmitterDelete(X86_64Emitter* emitter);
 
 void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp);
+void X86_64PrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* x86_64_emitter_h */

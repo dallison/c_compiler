@@ -1100,6 +1100,38 @@ void AnalyzeLabel(LabelASTNode* node) {
   }
 }
 
+static void AnalyzeCatchStatement(CatchASTNode* node) {
+  if (node->is_catch_all) {
+    if (node->symbol != NULL) {
+      SemanticError((ASTNode*)node, "catch (...) cannot declare a variable");
+    }
+  } else if (node->symbol == NULL || node->symbol->type == NULL) {
+    SemanticError((ASTNode*)node, "catch handler requires a declaration");
+  } else if (TypeIsVoid(node->symbol->type) ||
+             TypeIsFunction(node->symbol->type)) {
+    SemanticError((ASTNode*)node, "Invalid catch declaration type");
+  }
+  SemanticEnterCatchHandler();
+  AnalyzeStatement(node->stmt);
+  SemanticLeaveCatchHandler();
+}
+
+static void AnalyzeTryStatement(TryASTNode* node) {
+  AnalyzeStatement(node->try_stmt);
+  bool seen_catch_all = false;
+  for (size_t i = 0; i < node->catches->length; i++) {
+    CatchASTNode* catch_node = node->catches->value.p[i];
+    if (seen_catch_all) {
+      SemanticError((ASTNode*)catch_node,
+                    "catch (...) must be the last catch handler");
+    }
+    AnalyzeCatchStatement(catch_node);
+    if (catch_node->is_catch_all) {
+      seen_catch_all = true;
+    }
+  }
+}
+
 static void FindUnusedLabel(ASTNode* node, void* data, int child_id,
                             VisitorMode mode) {
   (void)data;
@@ -1162,6 +1194,12 @@ void AnalyzeStatement(ASTNode* node) {
       break;
     case AST_OP(label):
       AnalyzeLabel((LabelASTNode*)node);
+      break;
+    case AST_OP(try):
+      AnalyzeTryStatement((TryASTNode*)node);
+      break;
+    case AST_OP(catch):
+      AnalyzeCatchStatement((CatchASTNode*)node);
       break;
 
     case AST_OP(break):

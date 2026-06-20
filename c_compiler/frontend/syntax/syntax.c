@@ -1609,6 +1609,18 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
     StringInit(&member_name, base->type->info.struct_info->tag_name->value);
   }
   ASTNode* receiver = NewIdentifierASTNode(this_symbol, location);
+  if (base->byte_offset != 0) {
+    TypeRecord* base_pointer =
+        NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
+    ASTNode* offset =
+        NewIntConstantASTNode(base->byte_offset,
+                              NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                              location);
+    receiver = NewBinaryASTNode(AST_OP(plus), base_pointer, location,
+                                receiver, offset);
+    receiver->flags |= kASTAnalyzed;
+    ASTNodeSetType(receiver, base_pointer);
+  }
   ASTNode* member_node =
       NewStringConstantASTNode(NewString(member_name.value), NULL, location);
   StringDestruct(&member_name);
@@ -1770,32 +1782,73 @@ static ASTNode* NewCXXThisMemberAccess(TypeRecord* func,
       NewStringConstantASTNode(NewString(member_name), NULL, location));
 }
 
-static ASTNode* NewCXXVPtrInitializer(TypeRecord* func,
-                                      SourceLocation location) {
-  if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.cxx_member_owner == NULL) {
+static TypeRecord* NewCXXStructType(Struct* str);
+
+static ASTNode* NewCXXVPtrReceiver(TypeRecord* func, Struct* source,
+                                   int source_offset,
+                                   SourceLocation location) {
+  Symbol* this_symbol = CXXThisSymbolFromFunction(func);
+  if (this_symbol == NULL || source == NULL) {
     return NULL;
   }
-  Struct* owner = func->info.function.cxx_member_owner;
-  if (owner->vtable_symbol == NULL) {
+  ASTNode* receiver = NewIdentifierASTNode(this_symbol, location);
+  TypeRecord* source_pointer =
+      NewPointerTo(kQualPlain, NewCXXStructType(source));
+  ASTNode* offset =
+      NewIntConstantASTNode(source_offset,
+                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  ASTNode* adjusted =
+      NewBinaryASTNode(AST_OP(plus), source_pointer, location, receiver,
+                       offset);
+  adjusted->flags |= kASTAnalyzed;
+  return adjusted;
+}
+
+static ASTNode* NewCXXVPtrInitializer(TypeRecord* func, CXXVTableInfo* info,
+                                      SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL || info == NULL ||
+      info->source == NULL || info->symbol == NULL) {
     return NULL;
   }
   String vptr_name;
   StringInit(&vptr_name, "__vptr");
-  StructMember* vptr_member = FindStructMember(owner, &vptr_name);
+  StructMember* vptr_member = FindStructMember(info->source, &vptr_name);
   StringDestruct(&vptr_name);
   if (vptr_member == NULL) {
     return NULL;
   }
-  ASTNode* target = NewCXXThisMemberAccess(func, "__vptr", location);
-  if (target == NULL) {
+  ASTNode* receiver =
+      NewCXXVPtrReceiver(func, info->source, info->source_offset, location);
+  if (receiver == NULL) {
     return NULL;
   }
-  ASTNode* value = NewIdentifierASTNode(owner->vtable_symbol, location);
+  ASTNode* target =
+      NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver,
+                       NewStringConstantASTNode(NewString("__vptr"), NULL,
+                                                location));
+  ASTNode* value = NewIdentifierASTNode(info->symbol, location);
   return NewExpressionStatementASTNode(
       NewBinaryASTNode(AST_OP(assign), vptr_member->symbol->type,
                        location, target, value),
       location);
+}
+
+static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
+                                      SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL || body == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = 0; i < owner->vtable_symbols.length; i++) {
+    CXXVTableInfo* info = owner->vtable_symbols.value.p[i];
+    ASTNode* init = NewCXXVPtrInitializer(func, info, location);
+    if (init != NULL) {
+      VectorAppend(body, init);
+    }
+  }
 }
 
 static TypeRecord* NewCXXStructType(Struct* str) {
@@ -2068,11 +2121,13 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     VectorInsertOrAppend(body, insert_at, call);
     insert_at++;
   }
-  ASTNode* vptr_init = NewCXXVPtrInitializer(func, location);
-  if (vptr_init != NULL) {
-    VectorInsertOrAppend(body, insert_at, vptr_init);
+  Vector* vptr_initializers = NewVector();
+  AppendCXXVPtrInitializers(func, vptr_initializers, location);
+  for (size_t i = 0; i < vptr_initializers->length; i++) {
+    VectorInsertOrAppend(body, insert_at, vptr_initializers->value.p[i]);
     insert_at++;
   }
+  VectorDelete(vptr_initializers);
   Vector* complete_restores = NewVector();
   AppendCXXVBPtrInitializers(func, complete_restores, location);
   InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,

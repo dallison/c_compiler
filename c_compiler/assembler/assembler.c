@@ -364,9 +364,9 @@ static int CompareCharPointer(const void* a, const void* b) {
   return strcmp(s1->key.p, s2->key.p);
 }
 
-bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
-                   uint16_t elf_flags, int* reloc_types, String* infile,
-                   String* outfile) {
+static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
+                                uint16_t elf_flags, int* reloc_types,
+                                String* outfile) {
   // Open output file.
   assembler->out = fopen(outfile->value, "w");
   if (assembler->out == NULL) {
@@ -375,11 +375,6 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
   }
 
   PreprocessorInit(&assembler->preprocessor);
-  LexInitFromFile(&assembler->lex, infile->value, &assembler->preprocessor);
-  assembler->lex.assembler_mode = true;
-  SyntaxInit(&assembler->syntax, &assembler->lex);
-  SyntaxOpenScope(&assembler->syntax);
-
   StringInit(&assembler->filename, "");
 
   MapInit(&assembler->directives, CompareCharPointer);
@@ -413,6 +408,75 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
 
   // Default label defining function.
   assembler->define_label = DefineLabel;
+  return true;
+}
+
+bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
+                   uint16_t elf_flags, int* reloc_types, String* infile,
+                   String* outfile) {
+  if (!AssemblerInitCommon(assembler, elf_machine_type, elf_flags, reloc_types,
+                           outfile)) {
+    return false;
+  }
+  if (!LexInitFromFile(&assembler->lex, infile->value,
+                       &assembler->preprocessor)) {
+    MapDestruct(&assembler->directives);
+    VectorDestruct(&assembler->sections);
+    VectorDestruct(&assembler->relocations);
+    VectorDestruct(&assembler->orphan_symbols);
+    HashTableDestruct(&assembler->symbol_table);
+    DwarfDestruct(&assembler->dwarf);
+    PreprocessorDestruct(&assembler->preprocessor);
+    StringDestruct(&assembler->filename);
+    fclose(assembler->out);
+    return false;
+  }
+  assembler->lex.assembler_mode = true;
+  SyntaxInit(&assembler->syntax, &assembler->lex);
+  SyntaxOpenScope(&assembler->syntax);
+  return true;
+}
+
+bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
+                             uint16_t elf_flags, int* reloc_types,
+                             const char* name, String* input,
+                             String* outfile) {
+  if (!AssemblerInitCommon(assembler, elf_machine_type, elf_flags, reloc_types,
+                           outfile)) {
+    return false;
+  }
+  String* owned_input = malloc(sizeof(String));
+  if (owned_input == NULL) {
+    MapDestruct(&assembler->directives);
+    VectorDestruct(&assembler->sections);
+    VectorDestruct(&assembler->relocations);
+    VectorDestruct(&assembler->orphan_symbols);
+    HashTableDestruct(&assembler->symbol_table);
+    DwarfDestruct(&assembler->dwarf);
+    PreprocessorDestruct(&assembler->preprocessor);
+    StringDestruct(&assembler->filename);
+    fclose(assembler->out);
+    return false;
+  }
+  StringInitFromSegment(owned_input, input->value, input->length);
+  if (!LexInitFromString(&assembler->lex, name, owned_input,
+                         &assembler->preprocessor)) {
+    StringDestruct(owned_input);
+    free(owned_input);
+    MapDestruct(&assembler->directives);
+    VectorDestruct(&assembler->sections);
+    VectorDestruct(&assembler->relocations);
+    VectorDestruct(&assembler->orphan_symbols);
+    HashTableDestruct(&assembler->symbol_table);
+    DwarfDestruct(&assembler->dwarf);
+    PreprocessorDestruct(&assembler->preprocessor);
+    StringDestruct(&assembler->filename);
+    fclose(assembler->out);
+    return false;
+  }
+  assembler->lex.assembler_mode = true;
+  SyntaxInit(&assembler->syntax, &assembler->lex);
+  SyntaxOpenScope(&assembler->syntax);
   return true;
 }
 

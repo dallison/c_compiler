@@ -414,7 +414,15 @@ static void SaveRegisters(X86_64Emitter* emitter, FILE* fp) {
     // Empty stack frame, no need to store frame pointer.
   } else {
     fprintf(fp, "\tpushq %%rbp\n");
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_push:\n",
+              emitter->rv->base.function_name.value);
+    }
     fprintf(fp, "\tleaq 8(%%rsp), %%rbp\n");
+    if (!varargs) {
+      fprintf(fp, ".Leh_%s_after_leaq:\n",
+              emitter->rv->base.function_name.value);
+    }
     int remaining = stack_frame_size - 8;
     if (remaining > 0) {
       DecrementStackPointer(emitter, remaining, fp);
@@ -2570,9 +2578,121 @@ void X86_64EmitterDelete(X86_64Emitter* emitter) {
   free(emitter);
 }
 
+static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
+                               const char* func_name) {
+  if (emitter->rv->base.varargs) {
+    return;
+  }
+
+  bool has_frame = !EmptyStackFrame(emitter);
+
+  fprintf(fp, "\t.section \".eh_frame\", \"a\", @progbits\n");
+
+  // CIE: absolute FDE pointers, code alignment 1, data alignment -8, return
+  // address register 16 (RIP). Initial CFA at function entry is rsp+8.
+  fprintf(fp, ".Leh_%s_cie:\n", func_name);
+  fprintf(fp, "\t.4byte .Leh_%s_cie_end-.Leh_%s_cie_start\n", func_name,
+          func_name);
+  fprintf(fp, ".Leh_%s_cie_start:\n", func_name);
+  fprintf(fp, "\t.4byte 0\n");
+  fprintf(fp, "\t.byte 1\n");
+  fprintf(fp, "\t.asciz \"zR\"\n");
+  fprintf(fp, "\t.byte 1\n");
+  fprintf(fp, "\t.byte 120\n");
+  fprintf(fp, "\t.byte 16\n");
+  fprintf(fp, "\t.byte 1\n");
+  fprintf(fp, "\t.byte 0\n");
+  fprintf(fp, "\t.byte 12, 7, 8\n");
+  fprintf(fp, "\t.byte 144, 1\n");
+  fprintf(fp, "\t.p2align 3\n");
+  fprintf(fp, ".Leh_%s_cie_end:\n", func_name);
+
+  fprintf(fp, ".Leh_%s_fde:\n", func_name);
+  fprintf(fp, "\t.4byte .Leh_%s_fde_end-.Leh_%s_fde_start\n", func_name,
+          func_name);
+  fprintf(fp, ".Leh_%s_fde_start:\n", func_name);
+  fprintf(fp, "\t.4byte .Leh_%s_fde_start-.Leh_%s_cie\n", func_name,
+          func_name);
+  fprintf(fp, "\t.8byte %s\n", func_name);
+  fprintf(fp, "\t.8byte (.func_end_%s-%s)\n", func_name, func_name);
+  fprintf(fp, "\t.byte 0\n");
+  if (has_frame) {
+    fprintf(fp, "\t.byte 4\n");
+    fprintf(fp, "\t.4byte (.Leh_%s_after_push-%s)\n", func_name, func_name);
+    fprintf(fp, "\t.byte 14, 16\n");
+    fprintf(fp, "\t.byte 134, 2\n");
+    fprintf(fp, "\t.byte 4\n");
+    fprintf(fp, "\t.4byte (.Leh_%s_after_leaq-.Leh_%s_after_push)\n",
+            func_name, func_name);
+    fprintf(fp, "\t.byte 12, 6, 8\n");
+  }
+  fprintf(fp, "\t.p2align 3\n");
+  fprintf(fp, ".Leh_%s_fde_end:\n", func_name);
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
+                                     TargetInstruction* label) {
+  fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void PrintEscapedAsmString(FILE* fp, const char* s) {
+  for (; *s != '\0'; s++) {
+    unsigned char ch = (unsigned char)*s;
+    if (ch == '"' || ch == '\\') {
+      fprintf(fp, "\\%c", ch);
+    } else if (ch >= 32 && ch < 127) {
+      fputc(ch, fp);
+    } else {
+      fprintf(fp, "\\%03o", ch);
+    }
+  }
+}
+
+static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
+  if (emitter->rv->exception_typeinfos.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 3\n");
+  for (size_t i = 0; i < emitter->rv->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = emitter->rv->exception_typeinfos.value.p[i];
+    fprintf(fp, "%s:\n\t.asciz \"", info->symbol_name.value);
+    PrintEscapedAsmString(fp, info->type_name.value);
+    fprintf(fp, "\"\n");
+    fprintf(fp, "\t.p2align 3\n");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void X86_64PrintExceptionTable(X86_64Emitter* emitter, FILE* fp,
+                                      const char* func_name) {
+  if (emitter->rv->exception_ranges.length == 0) {
+    return;
+  }
+
+  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 3\n");
+  for (size_t i = 0; i < emitter->rv->exception_ranges.length; i++) {
+    X86_64ExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
+    fprintf(fp, "\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_start);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_end);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->catch_label);
+    fprintf(fp, "\n\t.8byte %s",
+            range->catch_typeinfo != NULL
+                ? range->catch_typeinfo->symbol_name.value
+                : "0");
+    fprintf(fp, "\n");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
 
 void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
+  fprintf(fp, "\t.text\n");
   if (emitter->rv->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
@@ -2588,4 +2708,36 @@ void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
+  X86_64PrintTypeInfoRecords(emitter, fp);
+  X86_64PrintEHFrame(emitter, fp, func_name);
+  X86_64PrintExceptionTable(emitter, fp, func_name);
+}
+
+void X86_64PrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    fprintf(fp, "\t.local  %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n\n", thunk_name);
+    fprintf(fp, "%s:\n", thunk_name);
+    if (thunk->this_adjustment != 0) {
+      fprintf(fp, "\taddq        $%d, %%rdi\n", thunk->this_adjustment);
+    }
+    fprintf(fp, "\tjmp         %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
 }

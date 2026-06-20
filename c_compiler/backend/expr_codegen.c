@@ -9,6 +9,7 @@
 #include "expr_codegen.h"
 #include <assert.h>
 #include "compiler.h"
+#include "symbol_table.h"
 
 // Table to translate an AST node and type into an IR operation.
 static struct {
@@ -1310,6 +1311,76 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   return call;
 }
 
+static Symbol* GetDaveCCThrowFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__davecc_throw");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__davecc_throw", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
+                                          SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* typeinfo_type = NewPointerTo(kQualPlain, void_type);
+  Symbol* symbol = NewSymbol(info->symbol_name.value, typeinfo_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  return symbol;
+}
+
+static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
+  IRNode* exception_object = NULL;
+  if (node->expr != NULL) {
+    exception_object = GenerateExpression(gen, node->expr);
+    if (TypeIsStructOrUnion(node->expr->type) &&
+        exception_object->opcode != IR_OP(addressof)) {
+      IRNode* address = GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                                  exception_object));
+      IRSetType(address, NewPointerTo(kQualPlain, node->expr->type));
+      exception_object = address;
+    }
+  }
+
+  Symbol* throw_symbol = GetDaveCCThrowFunction(node->base.location);
+  IRNode* func = GeneratorGetVariable(gen, throw_symbol);
+  IRNode* call = NewIR1(IR_OP(calla), func);
+  Vector args = {0};
+  if (exception_object == NULL || TypeIsVoid(exception_object->type)) {
+    exception_object = GeneratorGetIntConstant(gen, NULL, 0);
+  }
+  IRNode* exception_typeinfo = GeneratorGetIntConstant(gen, NULL, 0);
+  if (node->expr != NULL) {
+    EHTypeInfo* info = GeneratorGetExceptionTypeInfo(gen, node->expr->type);
+    Symbol* typeinfo_symbol =
+        NewExceptionTypeInfoSymbol(info, node->base.location);
+    exception_typeinfo = GeneratorGetVariable(gen, typeinfo_symbol);
+  }
+  PushArg(gen, call, exception_typeinfo, 1, &args);
+  PushArg(gen, call, exception_object, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  call = IRSetType(GeneratorEmit(gen, call),
+                   NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  return call;
+}
+
 static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
   IRNode* addr = GenerateExpression(gen, node->sub);
   if ((node->base.flags & kASTNeedAddress) != 0) {
@@ -1550,7 +1621,7 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
 
   // Generate true branch.
   IRNode* left = GenerateExpression(gen, colon->left);
-  if (value_is_used) {
+  if (value_is_used && colon->left->op != AST_OP(throw)) {
     if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left)) {
       left = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), left)), colon->left->type);
    }
@@ -1559,14 +1630,16 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   }
   
   // Branch to end.
-  GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+  if (colon->left->op != AST_OP(throw)) {
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+  }
 
   // false_label:
   GeneratorEmit(gen, false_label);
 
   // Generate false branch,
   IRNode* right = GenerateExpression(gen, colon->right);
-  if (value_is_used) {
+  if (value_is_used && colon->right->op != AST_OP(throw)) {
     if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right)) {
       right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), right)), colon->left->type);
    }
@@ -2073,6 +2146,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(call):
       result = GenerateFunctionCall(gen, vector_node);
+      break;
+
+    case AST_OP(throw):
+      result = GenerateThrowExpression(gen, (ThrowASTNode*)node);
       break;
 
     case AST_OP(inline_call):

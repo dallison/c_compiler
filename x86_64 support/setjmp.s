@@ -16,7 +16,8 @@
 setjmp:
 	mov %rax, 0(%rdi)
 	mov %rax, 8(%rdi)
-	mov %rsp, 16(%rdi)
+	lea 8(%rsp), %rax
+	mov %rax, 16(%rdi)
 	mov %r11, 24(%rdi)
 	mov %r10, 32(%rdi)
 	mov %r10, 40(%rdi)

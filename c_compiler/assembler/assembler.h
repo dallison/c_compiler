@@ -153,6 +153,10 @@ typedef struct Assembler {
 bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
                    uint16_t elf_flags, int* reloc_types, String* infile,
                    String* outfile);
+bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
+                             uint16_t elf_flags, int* reloc_types,
+                             const char* name, String* input,
+                             String* outfile);
 void AssemblerDestruct(Assembler* assembler);
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name);
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym);

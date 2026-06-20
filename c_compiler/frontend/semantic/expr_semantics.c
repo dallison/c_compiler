@@ -991,9 +991,28 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
   colon->left = AnalyzeExpression(colon->left);
   colon->right = AnalyzeExpression(colon->right);
-  // If either arm has void type (e.g. a statement expression whose last
-  // statement is not an expression) the result of the conditional is void.
+  if (colon->left->op == AST_OP(throw) && colon->right->op == AST_OP(throw)) {
+    ASTNodeSetType((ASTNode*)colon, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    return;
+  }
+  if (colon->left->op == AST_OP(throw)) {
+    ASTNodeSetType((ASTNode*)colon, colon->right->type);
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    node->base.value_category = colon->right->value_category;
+    return;
+  }
+  if (colon->right->op == AST_OP(throw)) {
+    ASTNodeSetType((ASTNode*)colon, colon->left->type);
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    node->base.value_category = colon->left->value_category;
+    return;
+  }
   if (TypeIsVoid(colon->left->type) || TypeIsVoid(colon->right->type)) {
+    if (!TypeIsVoid(colon->left->type) || !TypeIsVoid(colon->right->type)) {
+      SemanticError((ASTNode*)node,
+                    "Conditional operator with void expression requires both arms to be void");
+    }
     ASTNodeSetType((ASTNode*)colon, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     return;
@@ -2040,8 +2059,11 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
     if (member_access->base.op == AST_OP(dot)) {
       receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
     }
-    if (!use_virtual_dispatch && !polymorphic_special_member &&
-        member_node->byte_offset != 0) {
+    int this_adjustment = member_node->byte_offset;
+    if (use_virtual_dispatch && member->cxx_vcall_offset != 0) {
+      this_adjustment = member->cxx_vcall_offset;
+    }
+    if (!polymorphic_special_member && this_adjustment != 0) {
       TypeRecord* receiver_type = receiver->type;
       if (member->symbol->type->info.function.prototype.length > 0) {
         Symbol* this_arg =
@@ -2049,7 +2071,7 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
         receiver_type = this_arg->type;
       }
       ASTNode* offset_node = NewIntConstantASTNode(
-          member_node->byte_offset,
+          this_adjustment,
           NewTypeRecordWithSize(kTypeInt, kQualPlain),
           receiver->location);
       receiver = NewBinaryASTNode(AST_OP(plus), receiver_type,
@@ -3164,6 +3186,21 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, bool_type);
 }
 
+static void AnalyzeThrowExpression(ThrowASTNode* node) {
+  if (node->expr == NULL) {
+    if (!SemanticInCatchHandler()) {
+      SemanticError((ASTNode*)node,
+                    "throw without operand is only valid in a catch handler");
+    }
+  } else {
+    node->expr = AnalyzeExpression(node->expr);
+    if (TypeIsVoid(node->expr->type) || TypeIsFunction(node->expr->type)) {
+      SemanticError(node->expr, "Cannot throw expression of this type");
+    }
+  }
+  ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static void SetNeedAddress(ASTNode* node) {
   node->flags |= kASTNeedAddress;
   if (node->op == AST_OP(identifier)) {
@@ -3417,6 +3454,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       ASTNodeSetType(node, type);
       break;
     }
+
+    case AST_OP(throw):
+      AnalyzeThrowExpression((ThrowASTNode*)node);
+      break;
 
     default:
       break;

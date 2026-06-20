@@ -8,6 +8,7 @@
 
 #include "statement_codegen.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
 #include "expr_codegen.h"
@@ -17,6 +18,290 @@ static void GenerateDeclarationList(Generator* gen,
   size_t num_decls = node->declarations->length;
   for (size_t i = 0; i < num_decls; i++) {
     GenerateStatement(gen, node->declarations->value.p[i]);
+  }
+}
+
+static bool IsSupportedTypedCatch(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL) {
+    return false;
+  }
+  TypeRecord* type = symbol->type;
+  if (TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsIntegral(type) || TypeIsPointer(type) || TypeIsStructOrUnion(type);
+}
+
+static bool IsSupportedCatchHandler(CatchASTNode* handler) {
+  return handler != NULL &&
+         (handler->is_catch_all || IsSupportedTypedCatch(handler->symbol));
+}
+
+static bool TryStatementHasSupportedHandler(TryASTNode* node) {
+  for (size_t i = 0; i < node->catches->length; i++) {
+    CatchASTNode* handler = node->catches->value.p[i];
+    if (IsSupportedCatchHandler(handler)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static const char* CurrentExceptionAccessorName(TypeRecord* type) {
+  if (TypeIsReference(type)) {
+    type = type->next;
+  }
+  if (TypeIsStructOrUnion(type)) {
+    return "__davecc_current_exception_object";
+  }
+  if (TypeIsPointer(type)) {
+    return "__davecc_current_exception_ptr";
+  }
+  switch (type->size) {
+    case 1:
+      return "__davecc_current_exception_i1";
+    case 2:
+      return "__davecc_current_exception_i2";
+    case 4:
+      return "__davecc_current_exception_i4";
+    case 8:
+      return "__davecc_current_exception_i8";
+    default:
+      return "__davecc_current_exception_i4";
+  }
+}
+
+static TypeRecord* CurrentExceptionAccessorReturnType(TypeRecord* catch_type) {
+  if (TypeIsReference(catch_type)) {
+    catch_type = catch_type->next;
+  }
+  if (TypeIsStructOrUnion(catch_type)) {
+    TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+    return NewPointerTo(kQualPlain, void_type);
+  }
+  if (TypeIsPointer(catch_type)) {
+    TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+    return NewPointerTo(kQualPlain, void_type);
+  }
+  return TypeRecordCopy(catch_type);
+}
+
+static Symbol* GetCurrentExceptionFunction(TypeRecord* catch_type,
+                                           SourceLocation location) {
+  const char* name = CurrentExceptionAccessorName(catch_type);
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  Symbol* symbol = FindGlobalSymbol(&symbol_name);
+  StringDestruct(&symbol_name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, CurrentExceptionAccessorReturnType(catch_type));
+  symbol = NewSymbol(name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static Symbol* GetCurrentExceptionAddressFunction(SourceLocation location) {
+  String symbol_name;
+  StringInit(&symbol_name, "__davecc_current_exception_addr");
+  Symbol* symbol = FindGlobalSymbol(&symbol_name);
+  StringDestruct(&symbol_name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewPointerTo(kQualPlain, void_type));
+  symbol = NewSymbol("__davecc_current_exception_addr", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol) {
+  IRNode* func = GeneratorGetVariable(gen, symbol);
+  IRNode* call = NewIR1(IR_OP(calla), func);
+  TypeRecord* return_type = symbol->type->next;
+  return IRSetType(GeneratorEmit(gen, call), return_type);
+}
+
+static void GenerateReferenceCatchBinding(Generator* gen, CatchASTNode* handler) {
+  SourceLocation location = handler->base.location;
+  TypeRecord* referred_type = handler->symbol->type->next;
+  Symbol* accessor = TypeIsStructOrUnion(referred_type)
+                         ? GetCurrentExceptionFunction(handler->symbol->type,
+                                                       location)
+                         : GetCurrentExceptionAddressFunction(location);
+  IRNode* ref_storage = GeneratorGetVariable(gen, handler->symbol);
+  IRNode* address = GenerateNoArgRuntimeCall(gen, accessor);
+  IRSetType(address, NewPointerTo(kQualPlain, referred_type));
+  IRNode* store =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(storea), ref_storage, address)),
+                handler->symbol->type);
+  IRSetVarDef(store, handler->symbol);
+}
+
+static void GenerateStructCatchBinding(Generator* gen, CatchASTNode* handler) {
+  SourceLocation location = handler->base.location;
+  Symbol* accessor = GetCurrentExceptionFunction(handler->symbol->type,
+                                                 location);
+  IRNode* dest = GeneratorGetVariable(gen, handler->symbol);
+  IRNode* source = GenerateNoArgRuntimeCall(gen, accessor);
+  IRSetType(source, NewPointerTo(kQualPlain, handler->symbol->type));
+  IRNode* copy = GeneratorEmit(
+      gen, NewIR3(IR_OP(memcpy), dest, source,
+                  GeneratorGetIntConstant(gen, NULL,
+                                          handler->symbol->type->size)));
+  IRSetVarDef(copy, handler->symbol);
+}
+
+static void GenerateCatchBinding(Generator* gen, CatchASTNode* handler) {
+  if (handler == NULL || handler->is_catch_all || handler->symbol == NULL ||
+      !IsSupportedTypedCatch(handler->symbol)) {
+    return;
+  }
+
+  if (TypeIsReference(handler->symbol->type)) {
+    GenerateReferenceCatchBinding(gen, handler);
+    return;
+  }
+  if (TypeIsStructOrUnion(handler->symbol->type)) {
+    GenerateStructCatchBinding(gen, handler);
+    return;
+  }
+
+  SourceLocation location = handler->base.location;
+  Symbol* current_exception =
+      GetCurrentExceptionFunction(handler->symbol->type, location);
+  ASTNode* lhs = NewIdentifierASTNode(handler->symbol, location);
+  ASTNode* callee = NewIdentifierASTNode(current_exception, location);
+  lhs->flags |= kASTNeedAddress;
+  callee->flags |= kASTNeedAddress;
+  ASTNode* rhs = NewVectorASTNode(AST_OP(call), handler->symbol->type,
+                                  location, callee, NewVector());
+  ASTNode* assignment = NewBinaryASTNode(AST_OP(assign), handler->symbol->type,
+                                        location, lhs, rhs);
+  GenerateExpression(gen, assignment);
+}
+
+static EHTypeInfo* CatchHandlerTypeInfo(Generator* gen, CatchASTNode* handler) {
+  if (handler == NULL || handler->is_catch_all || handler->symbol == NULL) {
+    return NULL;
+  }
+  return GeneratorGetExceptionTypeInfo(gen, handler->symbol->type);
+}
+
+static void RecordExceptionRange(Generator* gen, IRNode* try_start,
+                                 IRNode* try_end, IRNode* catch_label,
+                                 EHTypeInfo* catch_typeinfo) {
+  ExceptionHandlerRange* range = malloc(sizeof(ExceptionHandlerRange));
+  range->try_start = try_start;
+  range->try_end = try_end;
+  range->catch_label = catch_label;
+  range->catch_typeinfo = catch_typeinfo;
+  VectorAppend(&gen->exception_ranges, range);
+}
+
+static void RecordExceptionKeepLabel(Generator* gen, IRNode* label) {
+  VectorAppend(&gen->exception_keep_labels, label);
+}
+
+static bool IsDestructorStatement(ASTNode* stmt) {
+  if (stmt == NULL || stmt->op != AST_OP(expr)) {
+    return false;
+  }
+  ExpressionStatementASTNode* expr_stmt = (ExpressionStatementASTNode*)stmt;
+  if (expr_stmt->expr == NULL || expr_stmt->expr->op != AST_OP(call)) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr_stmt->expr;
+  if (call->left == NULL) {
+    return false;
+  }
+  if (call->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+    return id->symbol != NULL && id->symbol->type != NULL &&
+           id->symbol->type->info.function.is_destructor;
+  }
+  if (call->left->op != AST_OP(dot) && call->left->op != AST_OP(arrow)) {
+    return false;
+  }
+  BinaryASTNode* member_access = (BinaryASTNode*)call->left;
+  if (member_access->right == NULL) {
+    return false;
+  }
+  if (member_access->right->op == AST_OP(structmember)) {
+    StructMemberASTNode* member = (StructMemberASTNode*)member_access->right;
+    return member->member != NULL && member->member->is_member_function &&
+           member->member->symbol != NULL &&
+           member->member->symbol->type != NULL &&
+           member->member->symbol->type->info.function.is_destructor;
+  }
+  if (member_access->right->op == AST_OP(string)) {
+    ConstantASTNode* name = (ConstantASTNode*)member_access->right;
+    return name->value.string != NULL && name->value.string->value[0] == '~';
+  }
+  return false;
+}
+
+static bool TryStatementHasCleanup(ASTNode* stmt) {
+  if (stmt == NULL || stmt->op != AST_OP(compound)) {
+    return false;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    if (IsDestructorStatement(compound->statements->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void GenerateTryCleanupStatements(Generator* gen, ASTNode* stmt) {
+  if (stmt == NULL || stmt->op != AST_OP(compound)) {
+    return;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    ASTNode* cleanup = compound->statements->value.p[i];
+    if (IsDestructorStatement(cleanup)) {
+      GenerateStatement(gen, cleanup);
+    }
+  }
+}
+
+static bool StatementMayFallThrough(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return true;
+  }
+  switch (stmt->op) {
+    case AST_OP(return):
+    case AST_OP(throw):
+      return false;
+    case AST_OP(compound): {
+      CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
+      if (compound->statements->length == 0) {
+        return true;
+      }
+      return StatementMayFallThrough(VectorLast(compound->statements));
+    }
+    case AST_OP(if): {
+      IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
+      return if_stmt->else_part == NULL ||
+             StatementMayFallThrough(if_stmt->if_part) ||
+             StatementMayFallThrough(if_stmt->else_part);
+    }
+    default:
+      return true;
   }
 }
 
@@ -242,6 +527,20 @@ static bool StatementContainsLabel(ASTNode* node) {
       return StatementContainsLabel(((ForStatementASTNode*)node)->stmt);
     case AST_OP(switch):
       return StatementContainsLabel(((SwitchStatementASTNode*)node)->stmt);
+    case AST_OP(try): {
+      TryASTNode* t = (TryASTNode*)node;
+      if (StatementContainsLabel(t->try_stmt)) {
+        return true;
+      }
+      for (size_t i = 0; i < t->catches->length; i++) {
+        if (StatementContainsLabel(t->catches->value.p[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case AST_OP(catch):
+      return StatementContainsLabel(((CatchASTNode*)node)->stmt);
     default:
       return false;
   }
@@ -339,6 +638,84 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
     // else_label:
     GeneratorEmit(gen, else_label);
   }
+}
+
+static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
+  if (!TryStatementHasSupportedHandler(node)) {
+    GenerateStatement(gen, node->try_stmt);
+    return;
+  }
+
+  IRNode* try_start = NewIR(IR_OP(label));
+  IRNode* try_end = NewIR(IR_OP(label));
+  IRNode* after_try = NewIR(IR_OP(label));
+  bool has_cleanup = TryStatementHasCleanup(node->try_stmt);
+  Vector catch_labels;
+  Vector cleanup_labels;
+  Vector landing_labels;
+  Vector catch_typeinfos;
+  VectorInit(&catch_labels);
+  VectorInit(&cleanup_labels);
+  VectorInit(&landing_labels);
+  VectorInit(&catch_typeinfos);
+
+  for (size_t i = 0; i < node->catches->length; i++) {
+    CatchASTNode* handler = node->catches->value.p[i];
+    if (!IsSupportedCatchHandler(handler)) {
+      continue;
+    }
+    IRNode* catch_label = NewIR(IR_OP(label));
+    IRNode* landing_label = catch_label;
+    VectorAppend(&catch_labels, catch_label);
+    if (has_cleanup) {
+      landing_label = NewIR(IR_OP(label));
+      VectorAppend(&cleanup_labels, landing_label);
+      RecordExceptionKeepLabel(gen, catch_label);
+    }
+    VectorAppend(&landing_labels, landing_label);
+    VectorAppend(&catch_typeinfos, CatchHandlerTypeInfo(gen, handler));
+  }
+
+  GeneratorEmit(gen, try_start);
+  GenerateStatement(gen, node->try_stmt);
+  GeneratorEmit(gen, try_end);
+  for (size_t i = 0; i < landing_labels.length; i++) {
+    RecordExceptionRange(gen, try_start, try_end, landing_labels.value.p[i],
+                         catch_typeinfos.value.p[i]);
+  }
+  if (StatementMayFallThrough(node->try_stmt)) {
+    GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
+  }
+
+  if (has_cleanup) {
+    for (size_t i = 0; i < cleanup_labels.length; i++) {
+      IRNode* cleanup_label = cleanup_labels.value.p[i];
+      IRNode* catch_label = catch_labels.value.p[i];
+      GeneratorEmit(gen, cleanup_label);
+      GenerateTryCleanupStatements(gen, node->try_stmt);
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), catch_label));
+    }
+  }
+
+  size_t catch_index = 0;
+  for (size_t i = 0; i < node->catches->length; i++) {
+    CatchASTNode* handler = node->catches->value.p[i];
+    if (!IsSupportedCatchHandler(handler)) {
+      continue;
+    }
+    IRNode* catch_label = catch_labels.value.p[catch_index++];
+    GeneratorEmit(gen, catch_label);
+    GenerateCatchBinding(gen, handler);
+    GenerateStatement(gen, handler->stmt);
+    if (StatementMayFallThrough(handler->stmt)) {
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
+    }
+  }
+  GeneratorEmit(gen, after_try);
+  VectorDestruct(&catch_labels);
+  VectorDestruct(&cleanup_labels);
+  VectorDestruct(&landing_labels);
+  VectorDestruct(&catch_typeinfos);
 }
 
 // Unless we are generating code for size:
@@ -1006,6 +1383,8 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
         break;
       }
       case AST_OP(compound):
+      case AST_OP(try):
+      case AST_OP(catch):
         // A compound statement contains statements, so there is no code for
         // itself.
         emit_loc = false;
@@ -1034,6 +1413,11 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
     break;
   case AST_OP(compound):
     GenerateCompoundStatement(gen, (CompoundStatementASTNode*)node);
+    break;
+  case AST_OP(try):
+    GenerateTryStatement(gen, (TryASTNode*)node);
+    break;
+  case AST_OP(catch):
     break;
   case AST_OP(if):
     GenerateIfStatement(gen, (IfStatementASTNode*)node);

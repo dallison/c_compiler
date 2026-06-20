@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -107,6 +108,8 @@ LIBC_SRCS = [
     "libc/cdiv.c",
     "libc/ctype.c",
     "libc/cxx_new.c",
+    "libc/eh_frame.c",
+    "libc/eh_throw.c",
     "libc/exit.c",
     "libc/fabs.c",
     "libc/fclose.c",
@@ -340,6 +343,7 @@ cc_library(
         "c_compiler/driver/errors.c",
         "c_compiler/backend/expr_codegen.c",
         "c_compiler/frontend/syntax/constexpr.c",
+        "c_compiler/frontend/syntax/constexpr_pcode.c",
         "c_compiler/frontend/syntax/expr_evaluator.c",
         "c_compiler/frontend/syntax/expr_parser.c",
         "c_compiler/frontend/semantic/expr_semantics.c",
@@ -355,6 +359,7 @@ cc_library(
         "c_compiler/p_code/p_code_optimize.c",
         "c_compiler/p_code/p_code_reg_alloc.c",
         "c_compiler/p_code/p_code_target.c",
+        "c_compiler/p_code/p_code_vm.c",
         "c_compiler/frontend/lexical/preprocessor.c",
         "c_compiler/risc_v/risc_v_assembler.c",
         "c_compiler/risc_v/risc_v_codegen.c",
@@ -671,6 +676,14 @@ cc_binary(
     ],
 )
 
+cc_test(
+    name = "p_code_vm_test",
+    srcs = ["tests/p_code_vm_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":compiler"],
+)
+
 # Cross-build genrules use exec configuration (optimized by default).  The
 # compiler mis-parses some libc headers at -O2 on 65c02; use -O0 for tools.
 cc_binary(
@@ -836,6 +849,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -937,6 +951,7 @@ cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
 runtime_srcs=(
   "x86_64 support/setjmp.s"
   "x86_64 support/longjmp.s"
+  "x86_64 support/eh_transfer.s"
   "x86_64 support/syscall.s"
   "x86_64 support/abs.s"
 )
@@ -956,6 +971,8 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/eh_frame.c"
+  "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1474,6 +1491,19 @@ sh_test(
         ":elfdump",
         ":riscvdasm",
         ":x86_64dasm",
+    ],
+)
+
+sh_test(
+    name = "eh_frame_smoke_test",
+    srcs = ["tests/eh_frame_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
     ],
 )
 
