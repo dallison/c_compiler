@@ -1020,6 +1020,16 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   if (TryAnalyzeConditionalFunctionPointer(node, colon)) {
     return;
   }
+  if (CompilerIsCXX() &&
+      colon->left->value_category == colon->right->value_category &&
+      colon->left->value_category != kValueCategoryPrvalue &&
+      TypeEqual(colon->left->type, colon->right->type)) {
+    ASTNodeSetType((ASTNode*)colon, colon->left->type);
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    colon->base.value_category = colon->left->value_category;
+    node->base.value_category = colon->left->value_category;
+    return;
+  }
   InsertNumericConversions(colon, false);
   ASTNodeSetType((ASTNode*)node, colon->left->type);
 

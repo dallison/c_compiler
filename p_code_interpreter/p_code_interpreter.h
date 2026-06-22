@@ -9,6 +9,7 @@
 #ifndef p_code_interpreter_h
 #define p_code_interpreter_h
 
+#include <stdbool.h>
 #include "loader.h"
 #include "p_code_machine.h"
 
@@ -40,6 +41,7 @@ typedef struct PCodeInterpreter {
 } PCodeInterpreter;
 
 void PCodeInterpreterInit(PCodeInterpreter* interpreter);
+void PCodeInterpreterSetDisassemble(bool enabled);
 
 void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
 void PCodeInterpreterDestruct(PCodeInterpreter* interpreter);

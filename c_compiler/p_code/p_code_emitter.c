@@ -12,6 +12,7 @@
 
 #include "p_code_emitter.h"
 #include <assert.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include "compiler.h"
 #include "p_code_assembler.h"
@@ -44,8 +45,8 @@ static bool IsPrintable(TargetInstruction* inst) {
   return true;
 }
 
-// The rmov instructions are an explicit mov from operand[1] to
-// operand[0].  Both are registers.
+// The rmov instructions are an explicit mov from operand[0] to dest.  Both are
+// registers.
 static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
                       FILE* fp) {
   assert(inst->operand[0] != NULL);
@@ -53,8 +54,28 @@ static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
   assert(inst->operand[0]->reg != NULL);
   assert(inst->dest->reg != NULL);
 
+  PCodeRegister return_reg = {0};
+  bool use_return_reg = false;
+  PCodeOpcode operand_opcode = (PCodeOpcode)inst->operand[0]->opcode;
+  if (operand_opcode == P_OP(call) || operand_opcode == P_OP(rcall)) {
+    return_reg.base.num = PCODE_INT_RETURN_REG;
+    return_reg.type = kPCodeRegTypeInt;
+    use_return_reg = true;
+  } else if (operand_opcode == P_OP(callf) || operand_opcode == P_OP(rcallf)) {
+    return_reg.base.num = PCODE_FLOAT_RETURN_REG;
+    return_reg.type = kPCodeRegTypeFloat;
+    use_return_reg = true;
+  } else if (operand_opcode == P_OP(calld) || operand_opcode == P_OP(rcalld)) {
+    return_reg.base.num = PCODE_DOUBLE_RETURN_REG;
+    return_reg.type = kPCodeRegTypeDouble;
+    use_return_reg = true;
+  }
+  PCodeRegister* src_reg =
+      use_return_reg ? &return_reg : (PCodeRegister*)inst->operand[0]->reg;
+
   // Don't output mov rx,rx.
-  if (inst->dest->reg == inst->operand[1]->reg) {
+  if (((PCodeRegister*)inst->dest->reg)->type == src_reg->type &&
+      inst->dest->reg->num == src_reg->base.num) {
     return;
   }
 
@@ -76,8 +97,7 @@ static void PrintRmov(PCodeEmitter* emitter, TargetInstruction* inst,
   fprintf(fp, "\t%-8s%s, %s\n", mnemonic,
           PCodeRegisterName((PCodeRegister*)inst->dest->reg, buf1,
                             sizeof(buf1)),
-          PCodeRegisterName((PCodeRegister*)inst->operand[0]->reg, buf2,
-                            sizeof(buf2)));
+          PCodeRegisterName(src_reg, buf2, sizeof(buf2)));
 }
 
 // Save all used registers on the stack.
@@ -86,6 +106,9 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
     int reg = (int)regs.value.w[i];
+    if (reg == PCODE_INT_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpushx   r%d\n", reg);
   }
   VectorClear(&regs);
@@ -93,6 +116,9 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
     int reg = (int)regs.value.w[i];
+    if (reg == PCODE_FLOAT_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpushf    f%d\n", reg);
   }
   VectorClear(&regs);
@@ -100,6 +126,9 @@ static void SaveRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = 0; i < regs.length; i++) {
     int reg = (int)regs.value.w[i];
+    if (reg == PCODE_DOUBLE_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpushd    d%d\n", reg);
   }
   VectorDestruct(&regs);
@@ -113,6 +142,9 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_double_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
     int reg = (int)regs.value.w[i - 1];
+    if (reg == PCODE_DOUBLE_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpopd    d%d\n", reg);
   }
   VectorClear(&regs);
@@ -120,6 +152,9 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_float_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
     int reg = (int)regs.value.w[i - 1];
+    if (reg == PCODE_FLOAT_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpopf    f%d\n", reg);
   }
   VectorClear(&regs);
@@ -127,6 +162,9 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
   BitSetExpand(&emitter->regs->used_int_regs, &regs);
   for (size_t i = regs.length; i > 0; i--) {
     int reg = (int)regs.value.w[i - 1];
+    if (reg == PCODE_INT_RETURN_REG) {
+      continue;
+    }
     fprintf(fp, "\tpopx    r%d\n", reg);
   }
   VectorDestruct(&regs);
@@ -163,7 +201,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
         PrintRmov(emitter, inst, fp);
         return;
       }
-      return;
+      break;
     case P_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
       char namebuf[256];
@@ -215,6 +253,9 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
     }
 
     case P_OP(loc): {
+      if (!emitter->emit_locations) {
+        return;
+      }
       int fileno, lineno, colno;
       TargetLocation* loc = (TargetLocation*)inst;
       SourceLocationNumbers(loc->location, &fileno, &lineno, &colno);
@@ -299,11 +340,18 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
       for (int i = 0; i < 2; i++) {
         if (inst->operand[i] != NULL) {
           if (TargetIsConst(inst->operand[i])) {
-            fprintf(fp, "%s#%d", sep, (int)TargetIntValue(inst->operand[i]));
+            TargetConstant* constant = (TargetConstant*)inst->operand[i];
+            if (constant->type == kTargetTypeFloat ||
+                constant->type == kTargetTypeDouble) {
+              fprintf(fp, "%s#%g", sep, constant->value.dvalue);
+            } else {
+              fprintf(fp, "%s#%" PRId64, sep, constant->value.ivalue);
+            }
           } else if (((int)inst->operand[i]->opcode == (int)P_OP(symbol))) {
             TargetSymbol* sym = (TargetSymbol*)inst->operand[i];
+            char namebuf[256];
             fprintf(fp, "%s%s", sep,
-                    sym->symbol->name.value);
+                    TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf)));
             if (StorageIs(sym->symbol->storage, STO(thread))) {
               fprintf(fp, "@tls");
             }
@@ -326,6 +374,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
 void PCodeEmitterInit(PCodeEmitter* emitter, PCodeGenerator* pcode) {
   emitter->pcode = pcode;
   emitter->regs = &pcode->register_allocator;
+  emitter->emit_locations = true;
 }
 
 PCodeEmitter* NewPCodeEmitter(PCodeGenerator* pcode) {

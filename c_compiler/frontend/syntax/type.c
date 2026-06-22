@@ -606,6 +606,7 @@ TypeRecord* NewSizeTypeRecord() {
 StructMember* NewStructMember(Symbol* symbol) {
   StructMember* mem = malloc(sizeof(StructMember));
   mem->symbol = symbol;
+  mem->default_initializer = NULL;
   mem->byte_offset = 0;
   mem->bit_offset = 0;
   mem->bit_size = 0;
@@ -679,6 +680,9 @@ static void CXXVTableInfoDelete(CXXVTableInfo* info) {
 }
 
 void StructMemberDelete(StructMember* member) {
+  if (member->default_initializer != NULL) {
+    ASTNodeDelete(member->default_initializer);
+  }
   SymbolDelete(member->symbol);
   free(member);
 }
@@ -1208,6 +1212,15 @@ static StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
                                                        StructMember* member,
                                                        Vector* args);
 
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static ASTNode* CloneCXXDefaultMemberInitializer(ASTNode* initializer) {
+  return ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);
+}
+
 static bool StructMemberIsNestedType(StructMember* member) {
   return member != NULL && member->symbol != NULL &&
          StorageIs(member->symbol->storage, STO(typedef));
@@ -1432,6 +1445,8 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     member_symbol->flags = member->symbol->flags;
 
     StructMember* instantiated = NewStructMember(member_symbol);
+    instantiated->default_initializer =
+        CloneCXXDefaultMemberInitializer(member->default_initializer);
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
@@ -2836,6 +2851,8 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
     StructMember* instantiated = NewStructMember(member_symbol);
+    instantiated->default_initializer =
+        CloneCXXDefaultMemberInitializer(member->default_initializer);
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
@@ -3261,8 +3278,8 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
   result.type = t1->type | t2->type;
   
   bool type_ok = result.type == kTypeImplicit ||
-              (t1->type & t2->type) == 0;
-  if (type_ok) {
+                 (t1->type & t2->type) == 0;
+  if (type_ok && result.type != kTypeImplicit) {
     type_ok = IsValidType(result.type);
   }
   if (!type_ok) {
@@ -5929,6 +5946,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         "Only non-static data members can be bitfields");
           }
           ParseBitField(parser, is_union, str, member_symbol, member);
+          if (!member->is_static && !member->is_member_function) {
+            member->default_initializer =
+                SyntaxParseCXXDefaultMemberInitializer(parser->syntax);
+          }
         } else if (member->is_static || member->is_member_function) {
           has_inline_body = member->is_member_function &&
                             ParseInlineMemberFunctionBody(parser,
@@ -5941,6 +5962,8 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           member->index = str->members.length - 1;
 
           UpdateStructSize(str, member_symbol->type, is_union);
+          member->default_initializer =
+              SyntaxParseCXXDefaultMemberInitializer(parser->syntax);
         }
       }
       if (!LexMatch(parser->lex, TOK(comma))) {

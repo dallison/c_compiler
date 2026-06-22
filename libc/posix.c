@@ -17,6 +17,56 @@ int errno;
 
 // The open function can take an extra arg for the open mode
 // if O_CREAT is in the flags.
+#if defined(__p_code__)
+int open(const char* filename, int flags, ...) {
+  (void)filename;
+  (void)flags;
+  return -1;
+}
+
+int close(int fd) {
+  (void)fd;
+  return 0;
+}
+
+int write(int fd, const char* buffer, size_t len) {
+  (void)fd;
+  (void)buffer;
+  (void)len;
+  return asm(
+      "ldw r0, [ap, #16]\n"
+      "ldx r1, [ap, #20]\n"
+      "ldx r2, [ap, #28]\n"
+      "esc #2");
+}
+
+int read(int fd, char* buffer, size_t len) {
+  (void)fd;
+  (void)buffer;
+  (void)len;
+  return asm(
+      "ldw r0, [ap, #16]\n"
+      "ldx r1, [ap, #20]\n"
+      "ldx r2, [ap, #28]\n"
+      "esc #3");
+}
+
+long lseek(int fd, fpos_t pos, int whence) {
+  (void)fd;
+  (void)pos;
+  (void)whence;
+  return -1;
+}
+
+void abort() {
+  asm("esc #4");
+}
+
+void _Exit(int status) {
+  (void)status;
+  asm("esc #4");
+}
+#else
 int open(const char* filename, int flags, ...) {
   va_list ap;
   va_start(ap, flags);
@@ -50,3 +100,4 @@ void abort() {
 void _Exit(int status) {
   syscall(SYS_EXIT, status);
 }
+#endif

@@ -8,6 +8,8 @@
 
 #include "syntax.h"
 
+typedef struct ConstexprValue ConstexprValue;
+
 typedef struct {
   Vector bindings;  // ConstexprBinding*
   Vector objects;   // ConstexprObject*

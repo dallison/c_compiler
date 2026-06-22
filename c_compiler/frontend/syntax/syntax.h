@@ -62,9 +62,13 @@ typedef struct FullyQualifiedIdentifier {
 } FullyQualifiedIdentifier;
 
 typedef struct CXXConstructorInitList {
+  Vector virtual_base_specs;  // CXXVirtualBaseInfo*; not owned.
+  Vector virtual_base_statements;  // ASTNode*; transferred into function body.
   Vector base_specs;         // CXXBaseSpecifier*; not owned.
   Vector base_statements;    // ASTNode*; transferred into function body.
+  Vector member_specs;       // StructMember*; not owned.
   Vector member_statements;  // ASTNode*; transferred into function body.
+  int last_initializer_order;
 } CXXConstructorInitList;
 
 // Token classes allow us to recover from syntax errors by
@@ -141,6 +145,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax);
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
+ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax);
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);

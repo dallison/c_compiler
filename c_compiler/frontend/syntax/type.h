@@ -162,6 +162,7 @@ typedef struct CXXVTableInfo {
 // A struct or union member.  Behaves like a Symbol with extra information.
 typedef struct StructMember {
   Symbol* symbol;   // Embedded Symbol.
+  struct ASTNode* default_initializer;  // C++ default member initializer.
   int byte_offset;  // Byte offset into struct.
   int bit_offset;   // Bit offset into word.
   int bit_size;     // Bitfield size in bits.
@@ -423,15 +424,24 @@ TypeRecord* NewSizeTypeRecord(void);
 //
 
 inline bool TypeIsPointer(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return type->declarator == kDeclPointer;
 }
 
 bool TypeIsReference(TypeRecord* type);
 
 inline bool TypeIsPrimitive(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return type->declarator == kDeclPrimitive;
 }
 inline bool TypeIsPointerOrArray(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return type->declarator == kDeclPointer ||
          type->declarator == kDeclReference ||
          type->declarator == kDeclRValueReference ||
@@ -439,6 +449,9 @@ inline bool TypeIsPointerOrArray(TypeRecord* type) {
 }
 
 inline bool TypeIsFunction(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return type->declarator == kDeclFunction;
 }
 
@@ -477,6 +490,9 @@ bool TypeIsSigned(TypeRecord* type);
 
 
 inline bool TypeIsConst(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
   return (type->qualifiers & kQualConst) != 0;
 }
 
@@ -487,16 +503,19 @@ inline bool TypeIsVolatile(TypeRecord* type) {
   return (type->qualifiers & kQualVolatile) != 0;
 }
 
-inline bool TypeIsArray(TypeRecord* type) { return type->declarator == kDeclArray; }
+inline bool TypeIsArray(TypeRecord* type) {
+  return type != NULL && type->declarator == kDeclArray;
+}
 inline bool TypeIsFixedArray(TypeRecord* type) {
-  return type->declarator == kDeclArray &&
+  return type != NULL && type->declarator == kDeclArray &&
       !type->info.array.is_vla;
 }
 
 // A VLA passed to a function is converted to a pointer but its array info
 // remains intact.  A pointer will have all zeros in its array info.
 inline bool TypeIsVLA(TypeRecord* type) {
-  return (type->declarator == kDeclArray || type->declarator == kDeclPointer) &&
+  return type != NULL &&
+      (type->declarator == kDeclArray || type->declarator == kDeclPointer) &&
       type->info.array.is_vla;
 }
 

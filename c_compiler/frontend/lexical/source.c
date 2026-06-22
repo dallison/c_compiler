@@ -213,7 +213,6 @@ void SourceRewind(Source* src) {
   }
   src->lineno = 0;
   src->file_index = -1;
-  ResetFiles();         // TODO this causes errors in assembler second pass to fail to find the source location.
 }
 
 void SourceResetFiles(Source* src) {

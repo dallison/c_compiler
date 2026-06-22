@@ -552,7 +552,7 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   // contains no labels.  A label inside the dead arm is a valid goto/switch
   // target, so that code is reachable and must still be generated (otherwise
   // the label is dropped while branches to it survive, dangling the target).
-  if (OptLevel1() && ASTNodeIsIntConstant(node->cond) &&
+  if (ASTNodeIsIntConstant(node->cond) &&
       !StatementContainsLabel(node->if_part) &&
       !StatementContainsLabel(node->else_part)) {
     ConstantASTNode* c = (ConstantASTNode*)node->cond;
@@ -1203,7 +1203,9 @@ static void GenerateReturnStatement(Generator* gen,
       GenerateStatement(gen, node->cond);
     } else {
       IRNode* expr = GenerateExpression(gen, node->cond);
-      if (TypeIsStructOrUnion(node->cond->type)) {
+      if (TypeIsReference(gen->func->next)) {
+        GeneratorEmit(gen, NewIR1(IR_OP(resulta), expr));
+      } else if (TypeIsStructOrUnion(node->cond->type)) {
         if ((node->cond->flags & kASTRvoCall) != 0) {
           // An RVO call is passed the structresult directly from the
           // current function so there's no need to copy the result.

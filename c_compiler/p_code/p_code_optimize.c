@@ -24,16 +24,12 @@ static void RemoveUnusedExpressions(PCodeGenerator* pcode) {
     assert(inst != prev);
     if (PCodeIsExpression(inst)) {
       if (inst->users.length == 0) {
-        // No references to an expression, remove it.
-        TargetDeleteInstruction(&pcode->base, inst);
-      }
-    } else if (((int)inst->opcode == (int)P_OP(mov)) && inst->dest != NULL) {
-      // A mov can be eliminated if it has zero references and
-      // its dest is a tmp with one reference.
-      TargetInstruction* dest = inst->dest;
-      if (inst->users.length == 0 && ((int)dest->opcode == (int)P_OP(tmp)) &&
-          dest->users.length == 1) {
-        TargetDeleteInstruction(&pcode->base, inst);
+        // No references to an expression, remove it unless it writes into an
+        // explicit destination (for example a conditional-expression merge
+        // temporary).
+        if (inst->dest == NULL) {
+          TargetDeleteInstruction(&pcode->base, inst);
+        }
       }
     } else if ((PCodeOpcode)((int)inst->opcode == (int)P_OP(decsp)) ||
               (PCodeOpcode)((int)inst->opcode == (int)P_OP(incsp))) {

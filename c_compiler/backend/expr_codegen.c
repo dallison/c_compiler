@@ -1183,8 +1183,6 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // Call instruction (not yet emitted).
   IRNode* call = NewIR1(IR_OP(calla), func);
   
-  bool returns_struct = TypeIsStructOrUnion(node->base.type);
-
   // Arguments are evaluated right-to-left.  When more than one argument
   // contains a call, an earlier-evaluated call's result (held in the fixed
   // return register) would be clobbered by a later argument's call before it
@@ -1209,6 +1207,10 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   if (TypeIsPointer(callee_type)) {
     callee_type = callee_type->next;
   }
+  bool returns_reference = TypeIsFunction(callee_type) &&
+                           TypeIsReference(callee_type->next);
+  bool returns_struct = TypeIsStructOrUnion(node->base.type) &&
+                        !returns_reference;
   
   // All arguments, in reverse order.
   for (ssize_t i = node->children->length-1; i >= 0; i--) {
@@ -1237,6 +1239,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
       CheckForVarDef(arg_value, arg);
+    } else if (reference_formal) {
+      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
     if (TypeIsStructOrUnion(arg->type) && !reference_formal) {
@@ -1602,6 +1606,7 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   }
   
   bool value_is_used = OptLevel0() || ASTNodeUsesValue(node->base.parent, &node->base);
+  bool need_address = (node->base.flags & kASTNeedAddress) != 0;
 
   // Non-constant condition, emit comparison and assignments to tmp.
   IRNode* false_label = NewIR(IR_OP(label));
@@ -1610,7 +1615,8 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   IRNode* tmp = NULL;
   if (value_is_used) {
     tmp = GeneratorEmitVariable(gen, NewIR(IR_OP(tmp)));
-    IRSetType(tmp, node->base.type);
+    IRSetType(tmp, need_address ? NewPointerTo(kQualPlain, node->base.type)
+                                 : node->base.type);
   }
 
   // Evaluate condition.
@@ -1620,10 +1626,16 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, false_label));
 
   // Generate true branch.
+  if (need_address) {
+    colon->left->flags |= kASTNeedAddress;
+  }
   IRNode* left = GenerateExpression(gen, colon->left);
   if (value_is_used && colon->left->op != AST_OP(throw)) {
     if (!IRIsExpression(left) || IRIsConstant(left) || IRIsVariable(left)) {
-      left = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), left)), colon->left->type);
+      IROpcode move_opcode = need_address ? IR_OP(mova) :
+          MoveToTmpOpcode(colon->left->type);
+      left = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, left)),
+                       need_address ? tmp->type : colon->left->type);
    }
     left->dest = tmp;
     // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->left->type), tmp, left)), colon->left->type);
@@ -1638,10 +1650,16 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   GeneratorEmit(gen, false_label);
 
   // Generate false branch,
+  if (need_address) {
+    colon->right->flags |= kASTNeedAddress;
+  }
   IRNode* right = GenerateExpression(gen, colon->right);
   if (value_is_used && colon->right->op != AST_OP(throw)) {
     if (!IRIsExpression(right) || IRIsConstant(right) || IRIsVariable(right)) {
-      right = IRSetType(GeneratorEmit(gen, NewIR1(MoveToTmpOpcode(colon->left->type), right)), colon->left->type);
+      IROpcode move_opcode = need_address ? IR_OP(mova) :
+          MoveToTmpOpcode(colon->left->type);
+      right = IRSetType(GeneratorEmit(gen, NewIR1(move_opcode, right)),
+                        need_address ? tmp->type : colon->left->type);
    }
     right->dest = tmp;
     // IRSetType(GeneratorEmit(gen, NewIR2(MoveToTmpOpcode(colon->right->type), tmp, right)), colon->right->type);

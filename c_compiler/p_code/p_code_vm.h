@@ -20,9 +20,19 @@ typedef enum {
   kPCodeVMStatusUndefinedInstruction,
   kPCodeVMStatusDivisionByZero,
   kPCodeVMStatusUndefinedEscape,
+  kPCodeVMStatusInvalidRead,
+  kPCodeVMStatusInvalidWrite,
+  kPCodeVMStatusInvalidFree,
+  kPCodeVMStatusAllocationFailure,
 } PCodeVMStatus;
 
 typedef struct PCodeVM PCodeVM;
+
+typedef struct {
+  uint64_t start;
+  size_t size;
+  bool writable;
+} PCodeVMMemoryRegion;
 
 typedef PCodeVMStatus (*PCodeVMEscapeHandler)(PCodeVM* vm, int32_t code,
                                               void* data);
@@ -41,6 +51,11 @@ struct PCodeVM {
   PCodeVMStatus status;
   PCodeVMEscapeHandler escape;
   void* escape_data;
+
+  bool checked_memory;
+  PCodeVMMemoryRegion* memory_regions;
+  size_t memory_region_count;
+  size_t memory_region_capacity;
 };
 
 void PCodeVMInit(PCodeVM* vm);
@@ -51,6 +66,10 @@ void PCodeVMSetStack(PCodeVM* vm, void* stack, size_t stack_size);
 void PCodeVMSetEntry(PCodeVM* vm, uint64_t entry_address);
 void PCodeVMSetEscapeHandler(PCodeVM* vm, PCodeVMEscapeHandler handler,
                              void* data);
+bool PCodeVMEnableCheckedMemory(PCodeVM* vm);
+bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                 bool writable);
+bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory);
 PCodeVMStatus PCodeVMStep(PCodeVM* vm);
 PCodeVMStatus PCodeVMRun(PCodeVM* vm);
 const char* PCodeVMStatusName(PCodeVMStatus status);

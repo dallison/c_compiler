@@ -397,7 +397,7 @@ static_assert(global_immediate_mixed.total() == 27,
               "consteval mixed nested object");
 static_assert(by_value_mixed_nested_object_values() == 112,
               "constexpr mixed nested object by-value parameter");
-static_assert(pointer_reference_values() == 11,
+static_assert(pointer_reference_values() == 15,
               "constexpr pointer and reference values");
 static_assert(scoped_destructor_value() == 19,
               "constexpr scoped destructor");

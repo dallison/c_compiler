@@ -37,8 +37,10 @@ sh_binary(
         ":libc_aarch64",
         ":libc_arm",
         ":libc_headers",
+        ":libc_pcode",
         ":libc_riscv",
         ":libc_x86_64",
+        ":pcode",
         ":riscv",
         ":riscvdasm",
         ":rvasm",
@@ -521,6 +523,29 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "p_code_lib",
+    srcs = [
+        "p_code_interpreter/p_code_disassembler.c",
+        "p_code_interpreter/p_code_interpreter.c",
+    ],
+    hdrs = glob([
+        "p_code_interpreter/*.h",
+        "c_compiler/**/*.h",
+        "c_compiler/p_code/*.h",
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES + ["p_code_interpreter"],
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
 cc_binary(
     name = "6502",
     srcs = ["6502_interpreter/main.c"],
@@ -762,6 +787,20 @@ cc_binary(
         ":elf",
         ":linker",
         ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "pcode",
+    srcs = ["p_code_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES + ["p_code_interpreter"],
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":p_code_lib",
         ":utils",
     ],
 )
@@ -1407,6 +1446,43 @@ cd "$$work"
 """,
 )
 
+genrule(
+    name = "libc_pcode",
+    srcs = LIBC_SRCS + glob([
+        "libc/include/**/*.h",
+    ]) + [
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcpcode.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcpcode.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target pcode -O1 -c -isystem libc/include -Ilibc)
+
+libc_objs=()
+for src in libc/*.c; do
+  case "$$(basename "$$src")" in
+    libc_test.c)
+      continue
+      ;;
+  esac
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${libc_objs[@]}"
+""",
+)
+
 LIBC_TEST_DATA = LIBC_SRCS + glob([
     "libc/include/**/*.h",
     "libc/tests/**",
@@ -1454,6 +1530,35 @@ sh_test(
         ":davecc",
     ],
     tags = ["manual"],
+)
+
+sh_test(
+    name = "libc_pcode_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "pcode",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "pcode_runtime_smoke_test",
+    srcs = ["tests/pcode_runtime_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_pcode)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+        ":libc_pcode",
+        ":pcode",
+    ],
 )
 
 sh_test(

@@ -15,20 +15,47 @@
 extern bool print_libraries_only;
 
 int main(int argc, char *argv[]) {
-  String filename;
-  StringInit(&filename, argv[1]);
+  String filename = {0};
+  bool trace_instructions = false;
+  for (int i = 1; i < argc; i++) {
+    if (argv[i][0] == '-') {
+      switch (argv[i][1]) {
+        case 'd':
+          trace_instructions = true;
+          break;
+        default:
+          fprintf(stderr, "unsupported flag -%c\n", argv[i][1]);
+          exit(2);
+      }
+    } else {
+      if (filename.length != 0) {
+        fprintf(stderr, "Only one file to interpret please\n");
+        exit(1);
+      }
+      StringSet(&filename, argv[i]);
+    }
+  }
 
-  Interpreter interpreter;
+  if (filename.length == 0) {
+    fprintf(stderr, "usage: %s [-d] <program>\n", argv[0]);
+    exit(2);
+  }
+
+  PCodeInterpreter interpreter;
   Loader loader;
   
-  InterpreterInit(&interpreter);
+  PCodeInterpreterInit(&interpreter);
+  PCodeInterpreterSetDisassemble(trace_instructions);
   
   // The environment variable LD_BIND_NOW tells the dynamic loader to
   // replace the GOT entries for functions with the function address
   // at load time rather than delaying the resolution to the first
   // call.  It needs to be set to a non-empty string.
   char* bind_now = getenv("LD_BIND_NOW");
-  bool lazy = bind_now == NULL || bind_now[0] == '\0';
+  int32_t loader_flags = 0;
+  if (bind_now == NULL || bind_now[0] == '\0') {
+    loader_flags |= LOADER_LAZY_RESOLVE;
+  }
   
   // The LD_TRACE_LOADED_OBJECTS variable shows the loaded objects
   // and doesn't run the program.
@@ -42,9 +69,10 @@ int main(int argc, char *argv[]) {
   PCodeLoaderArchitectureInit(&arch);
   
   // Initialize the loader from the given exe file.
-  bool ok = LoaderInitFromFile(&loader, &filename, lazy,
+  bool ok = LoaderInitFromFile(&loader, &filename, loader_flags,
                                &arch,
-                               &interpreter.symbol_resolver_code);
+                               &interpreter.symbol_resolver_code,
+                               ".");
   if (!ok) {
     printf("Error Loading %s\n", filename.value);
     exit(1);
@@ -54,8 +82,8 @@ int main(int argc, char *argv[]) {
     exit(0);
   }
   // Run the code at its entry address.
-  InterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
+  PCodeInterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
 
-  InterpreterDestruct(&interpreter);
+  PCodeInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
 }

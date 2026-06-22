@@ -337,6 +337,7 @@ int64_t AssemblerEvaluateKnownExpression(Assembler* assembler, bool* known) {
 
 double AssemblerGetDoubleConst(Assembler* assembler) {
   double v = 0;
+  bool negative = LexMatch(&assembler->lex, TOK(minus));
   if (LexLookingAt(&assembler->lex, TOK(fnumber))) {
     v = assembler->lex.fnumber;
     LexNextToken(&assembler->lex);
@@ -345,6 +346,9 @@ double AssemblerGetDoubleConst(Assembler* assembler) {
     LexNextToken(&assembler->lex);
   } else {
     AssemblerError(assembler, "Floating point constant expected");
+  }
+  if (negative) {
+    v = -v;
   }
   return v;
 }

@@ -73,6 +73,55 @@ static int TestStepLimit(void) {
   return status == kPCodeVMStatusStepLimit ? 0 : 6;
 }
 
+static int TestCheckedMemory(void) {
+  uint32_t slot = 0;
+  uint32_t program[] = {
+      0xc0000000 | (PCODE_OP(movxc) << 24) | (1 << 16),
+      (uint32_t)((uint64_t)(uintptr_t)&slot & 0xffffffffu),
+      (uint32_t)((uint64_t)(uintptr_t)&slot >> 32),
+      0x80000000 | (PCODE_OP(movc) << 24) | (2 << 16),
+      123,
+      0x80000000 | (PCODE_OP(stw) << 24) | (2 << 16) | (1 << 8),
+      0,
+      (PCODE_OP(esc) << 24) | 4,
+  };
+  PCodeVM vm;
+  if (!PCodeVMInitWithStack(&vm, 4096)) {
+    return 7;
+  }
+  PCodeVMSetEscapeHandler(&vm, TestEscape, 0);
+  if (!PCodeVMEnableCheckedMemory(&vm) ||
+      !PCodeVMRegisterMemoryRegion(&vm, program, sizeof(program), false) ||
+      !PCodeVMRegisterMemoryRegion(&vm, &slot, sizeof(slot), true)) {
+    PCodeVMDestruct(&vm);
+    return 8;
+  }
+  PCodeVMSetEntry(&vm, (uint64_t)(uintptr_t)program);
+  vm.max_steps = 8;
+  PCodeVMStatus status = PCodeVMRun(&vm);
+  int ok = status == kPCodeVMStatusHalted && slot == 123;
+  PCodeVMDestruct(&vm);
+  if (!ok) {
+    return 9;
+  }
+
+  slot = 0;
+  if (!PCodeVMInitWithStack(&vm, 4096)) {
+    return 10;
+  }
+  PCodeVMSetEscapeHandler(&vm, TestEscape, 0);
+  if (!PCodeVMEnableCheckedMemory(&vm) ||
+      !PCodeVMRegisterMemoryRegion(&vm, program, sizeof(program), false)) {
+    PCodeVMDestruct(&vm);
+    return 11;
+  }
+  PCodeVMSetEntry(&vm, (uint64_t)(uintptr_t)program);
+  vm.max_steps = 8;
+  status = PCodeVMRun(&vm);
+  PCodeVMDestruct(&vm);
+  return status == kPCodeVMStatusInvalidWrite ? 0 : 12;
+}
+
 int main(void) {
   int result = TestIntegerProgram();
   if (result != 0) {
@@ -82,5 +131,9 @@ int main(void) {
   if (result != 0) {
     return result;
   }
-  return TestStepLimit();
+  result = TestStepLimit();
+  if (result != 0) {
+    return result;
+  }
+  return TestCheckedMemory();
 }

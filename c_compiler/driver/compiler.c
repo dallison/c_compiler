@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "codegen.h"
+#include "constexpr_pcode.h"
 #include "errors.h"
 #include "expr_semantics.h"
 #include "expr_evaluator.h"
@@ -1374,6 +1375,8 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
 }
 
 void CompilerDestruct(Compiler* compiler) {
+  ConstexprPCodeClearImageCache();
+
   // Tear down the AST forest first, while the symbol table and type records it
   // references are still alive.  Destructing releases each node's non-arena
   // resources (type references, owned strings/vectors); it is idempotent and

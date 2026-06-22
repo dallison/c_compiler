@@ -1128,10 +1128,11 @@ void SyntaxParseStaticAssert(Syntax* syntax) {
     SyntaxError(syntax, "static_assert expression is not an integer constant expression");
   }
 
-  const char* message = "static assertion failed";
+  String message = {0};
+  StringInit(&message, "static assertion failed");
   if (LexMatch(syntax->lex, TOK(comma))) {
     if (LexLookingAt(syntax->lex, TOK(string))) {
-      message = syntax->lex->spelling.value;
+      StringSetString(&message, &syntax->lex->spelling);
       LexNextToken(syntax->lex);
     } else {
       SyntaxError(syntax, "static_assert message must be a string literal");
@@ -1141,8 +1142,9 @@ void SyntaxParseStaticAssert(Syntax* syntax) {
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
 
   if (value == 0) {
-    SyntaxError(syntax, "%s", message);
+    SyntaxError(syntax, "%s", message.value);
   }
+  StringDestruct(&message);
   ASTNodeDelete(expr);
 }
 
@@ -1319,6 +1321,22 @@ ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
   SourceLocation location = syntax->lex->current_token_location;
   return NewExpressionInitializerASTNode(
       SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(stmt)), location);
+}
+
+ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax) {
+  if (!CompilerIsCXX()) {
+    return NULL;
+  }
+  if (LexMatch(syntax->lex, TOK(lbrace))) {
+    return ParseBracedInitializer(syntax);
+  }
+  if (!LexMatch(syntax->lex, TOK(equal))) {
+    return NULL;
+  }
+  SourceLocation location = syntax->lex->current_token_location;
+  return NewExpressionInitializerASTNode(
+      SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(exprsep)),
+      location);
 }
 
 // Appends the [start,end) text (trimmed of surrounding whitespace) to the
@@ -1701,14 +1719,21 @@ static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
 }
 
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
+  VectorInit(&init_list->virtual_base_specs);
+  VectorInit(&init_list->virtual_base_statements);
   VectorInit(&init_list->base_specs);
   VectorInit(&init_list->base_statements);
+  VectorInit(&init_list->member_specs);
   VectorInit(&init_list->member_statements);
+  init_list->last_initializer_order = -1;
 }
 
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
+  VectorDestruct(&init_list->virtual_base_specs);
+  VectorDestruct(&init_list->virtual_base_statements);
   VectorDestruct(&init_list->base_specs);
   VectorDestruct(&init_list->base_statements);
+  VectorDestruct(&init_list->member_specs);
   VectorDestruct(&init_list->member_statements);
 }
 
@@ -1729,6 +1754,52 @@ static bool VectorContainsPointer(Vector* vec, void* value) {
   return false;
 }
 
+static int CXXDirectBaseOrder(Struct* owner, CXXBaseSpecifier* base) {
+  if (owner == NULL || base == NULL) {
+    return -1;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    if (owner->bases.value.p[i] == base) {
+      return (int)owner->virtual_bases.length + (int)i;
+    }
+  }
+  return -1;
+}
+
+static int CXXVirtualBaseOrder(Struct* owner, CXXVirtualBaseInfo* base) {
+  if (owner == NULL || base == NULL) {
+    return -1;
+  }
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    if (owner->virtual_bases.value.p[i] == base) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static int CXXDirectMemberOrder(Struct* owner, StructMember* member) {
+  if (owner == NULL || member == NULL) {
+    return -1;
+  }
+  return (int)owner->virtual_bases.length + (int)owner->bases.length +
+         (int)member->index;
+}
+
+static void CheckCXXConstructorInitializerOrder(
+    Syntax* syntax, CXXConstructorInitList* init_list, const char* name,
+    int order) {
+  if (order < 0) {
+    return;
+  }
+  if (init_list->last_initializer_order > order) {
+    SyntaxWarning(syntax, "reorder-ctor-init",
+                  "constructor initializer for %s does not match declaration order",
+                  name);
+  }
+  init_list->last_initializer_order = order;
+}
+
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
   if (owner == NULL || name == NULL) {
@@ -1736,6 +1807,23 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
   }
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        base->type->info.struct_info->tag_name != NULL &&
+        StringEqual(base->type->info.struct_info->tag_name, name)) {
+      return base;
+    }
+  }
+  return NULL;
+}
+
+static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
+                                                    const char* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
         base->type->info.struct_info != NULL &&
         base->type->info.struct_info->tag_name != NULL &&
@@ -2012,6 +2100,70 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
       location);
 }
 
+static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
+  if (initializer == NULL) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  if (initializer->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)initializer;
+    VectorAppend(actuals,
+                 ASTNodeClone(expr_init->expr, IdentityCloneNode, NULL, NULL));
+    return actuals;
+  }
+  if (initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* init = braced->initializers->value.p[i];
+      if (init != NULL && init->op == AST_OP(expr_init)) {
+        ExpressionInitializerASTNode* expr_init =
+            (ExpressionInitializerASTNode*)init;
+        VectorAppend(actuals,
+                     ASTNodeClone(expr_init->expr, IdentityCloneNode, NULL,
+                                  NULL));
+      } else {
+        VectorAppend(actuals, CloneInitializer(init));
+      }
+    }
+    return actuals;
+  }
+  VectorAppend(actuals, ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL));
+  return actuals;
+}
+
+static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
+                                                       TypeRecord* func,
+                                                       StructMember* member) {
+  if (member == NULL || member->default_initializer == NULL) {
+    return NULL;
+  }
+  Vector* actuals = CXXDefaultMemberInitializerActuals(
+      member->default_initializer);
+  return NewCXXMemberInitializerStatement(syntax, func, member, actuals,
+                                          member->default_initializer->location);
+}
+
+static ASTNode* FindCXXExplicitMemberInitializer(CXXConstructorInitList* init_list,
+                                                StructMember* member) {
+  for (size_t i = 0; i < init_list->member_specs.length; i++) {
+    if (init_list->member_specs.value.p[i] == member) {
+      return init_list->member_statements.value.p[i];
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* FindCXXExplicitVirtualBaseInitializer(
+    CXXConstructorInitList* init_list, CXXVirtualBaseInfo* base) {
+  for (size_t i = 0; i < init_list->virtual_base_specs.length; i++) {
+    if (init_list->virtual_base_specs.value.p[i] == base) {
+      return init_list->virtual_base_statements.value.p[i];
+    }
+  }
+  return NULL;
+}
+
 void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
@@ -2043,13 +2195,52 @@ void SyntaxParseCXXConstructorInitializerList(
 
     const char* init_name = FullyQualifiedIdentifierLast(&name);
     CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
+    CXXVirtualBaseInfo* virtual_base = NULL;
+    if (base != NULL && base->is_virtual) {
+      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
+      base = NULL;
+    }
     if (base != NULL) {
+      if (VectorContainsPointer(&init_list->base_specs, base)) {
+        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
+        VectorDelete(actuals);
+        FullyQualifiedIdentifierDestruct(&name);
+        if (!LexMatch(syntax->lex, TOK(comma))) {
+          break;
+        }
+        continue;
+      }
+      CheckCXXConstructorInitializerOrder(
+          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
       ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
                                                   /*complete_object=*/false,
                                                   actuals, location);
       if (call != NULL) {
         VectorAppend(&init_list->base_specs, base);
         VectorAppend(&init_list->base_statements, call);
+      }
+    } else if ((virtual_base = virtual_base != NULL
+                                   ? virtual_base
+                                   : FindCXXVirtualBaseByName(owner,
+                                                              init_name)) != NULL) {
+      if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
+        SyntaxError(syntax, "Duplicate initializer for virtual base %s",
+                    init_name);
+        VectorDelete(actuals);
+        FullyQualifiedIdentifierDestruct(&name);
+        if (!LexMatch(syntax->lex, TOK(comma))) {
+          break;
+        }
+        continue;
+      }
+      CheckCXXConstructorInitializerOrder(
+          syntax, init_list, init_name,
+          CXXVirtualBaseOrder(owner, virtual_base));
+      ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(
+          syntax, func, virtual_base, false, actuals, location);
+      if (call != NULL) {
+        VectorAppend(&init_list->virtual_base_specs, virtual_base);
+        VectorAppend(&init_list->virtual_base_statements, call);
       }
     } else {
       StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
@@ -2059,10 +2250,17 @@ void SyntaxParseCXXConstructorInitializerList(
                     owner->tag_name != NULL ? owner->tag_name->value
                                             : "<anonymous>");
         VectorDelete(actuals);
+      } else if (VectorContainsPointer(&init_list->member_specs, member)) {
+        SyntaxError(syntax, "Duplicate initializer for member %s", init_name);
+        VectorDelete(actuals);
       } else {
+        CheckCXXConstructorInitializerOrder(
+            syntax, init_list, init_name,
+            CXXDirectMemberOrder(owner, member));
         ASTNode* stmt = NewCXXMemberInitializerStatement(
             syntax, func, member, actuals, location);
         if (stmt != NULL) {
+          VectorAppend(&init_list->member_specs, member);
           VectorAppend(&init_list->member_statements, stmt);
         }
       }
@@ -2089,8 +2287,13 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   AppendCXXVBPtrInitializers(func, complete_initializers, location);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
-    ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(syntax, func, base,
-                                                       false, NULL, location);
+    ASTNode* call =
+        FindCXXExplicitVirtualBaseInitializer(init_list, base);
+    if (call == NULL &&
+        !VectorContainsPointer(&init_list->virtual_base_specs, base)) {
+      call = NewCXXVirtualBaseSpecialMemberCall(syntax, func, base, false,
+                                                NULL, location);
+    }
     if (call == NULL) {
       continue;
     }
@@ -2132,8 +2335,20 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   AppendCXXVBPtrInitializers(func, complete_restores, location);
   InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
                                            complete_restores, location);
-  for (size_t i = 0; i < init_list->member_statements.length; i++) {
-    ASTNode* stmt = init_list->member_statements.value.p[i];
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || StorageIs(member->symbol->storage,
+                                                STO(typedef))) {
+      continue;
+    }
+    ASTNode* stmt = FindCXXExplicitMemberInitializer(init_list, member);
+    if (stmt == NULL) {
+      stmt = NewCXXDefaultMemberInitializerStatement(syntax, func, member);
+    }
+    if (stmt == NULL) {
+      continue;
+    }
     VectorInsertOrAppend(body, insert_at, stmt);
     insert_at++;
   }
@@ -2322,11 +2537,9 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       *is_inline = true;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
       if (*is_constexpr) {
-        SyntaxWarning(syntax, "duplicate-decl-specifier",
-                      "Duplicate 'constexpr' specifier");
+        SyntaxError(syntax, "Duplicate 'constexpr' specifier");
       }
       *is_constexpr = true;
-      type_specifier.quals |= kQualConst;
     } else if (LexMatch(syntax->lex, TOK(consteval))) {
       if (*is_consteval) {
         SyntaxWarning(syntax, "duplicate-decl-specifier",
@@ -2599,6 +2812,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (!TypeIsFunction(sym->type)) {
       sym->flags.is_constexpr = parser->is_constexpr;
       sym->flags.is_constinit = parser->is_constinit;
+      if (sym->flags.is_constexpr) {
+        sym->type->qualifiers |= kQualConst;
+      }
     }
 
     // Any initializer?
@@ -3676,6 +3892,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (!TypeIsFunction(sym->type)) {
         sym->flags.is_constexpr = parser->is_constexpr;
         sym->flags.is_constinit = parser->is_constinit;
+        if (sym->flags.is_constexpr) {
+          sym->type->qualifiers |= kQualConst;
+        }
       }
       Symbol* old_sym =
           FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
@@ -3740,6 +3959,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           sym = old_sym;
           if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
             sym->flags.is_constexpr = true;
+            sym->type->qualifiers |= kQualConst;
           }
           if (!TypeIsFunction(sym->type) && parser->is_constinit) {
             sym->flags.is_constinit = true;

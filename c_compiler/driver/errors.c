@@ -100,6 +100,7 @@ static const WarningInfo kWarnings[] = {
     {"strict-prototypes", NULL, true, true, false, kWarningGroupExtra},
     {"old-style-definition", NULL, true, true, false, kWarningGroupExtra},
     {"declaration-after-statement", NULL, true, true, false, kWarningGroupPedantic},
+    {"reorder-ctor-init", NULL, true, true, true, kWarningGroupWall},
     {"unused-parameter", NULL, true, true, false, kWarningGroupExtra},
     {"unused-function", NULL, true, true, false, kWarningGroupWall},
     {"unused-label", NULL, true, true, false, kWarningGroupWall},
@@ -406,7 +407,13 @@ void VReportWarning(const char* filename, int lineno, const char* warn,
   char buf[4096];
   vsnprintf(buf, sizeof(buf), warning, arg);
   PrintDiagnosticKind(begin_text, is_error ? ANSI_ERROR : ANSI_WARNING);
-  fprintf(stderr, "[%s%s%s]: ", Color(ANSI_OPTION), warn, Color(ANSI_RESET));
+  if (is_error) {
+    fprintf(stderr, ": [%s%s%s]: ", Color(ANSI_OPTION), warn,
+            Color(ANSI_RESET));
+  } else {
+    fprintf(stderr, "[%s%s%s]: ", Color(ANSI_OPTION), warn,
+            Color(ANSI_RESET));
+  }
   PrintDiagnosticLocation(filename, lineno);
   fprintf(stderr, "%s [%s%s%s]\n", buf, Color(ANSI_OPTION), end_text,
           Color(ANSI_RESET));

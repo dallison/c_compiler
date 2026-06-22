@@ -23,7 +23,61 @@ static void DumpStateAndExit(PCodeInterpreter* interpreter) {
   exit(1);
 }
 
-static bool disassemble = true;
+static bool disassemble = false;
+
+void PCodeInterpreterSetDisassemble(bool enabled) {
+  disassemble = enabled;
+}
+
+static uint16_t ReadU16(const void* p) {
+  uint16_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static uint32_t ReadU32(const void* p) {
+  uint32_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static uint64_t ReadU64(const void* p) {
+  uint64_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static float ReadFloat(const void* p) {
+  float value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static double ReadDouble(const void* p) {
+  double value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static void WriteU16(void* p, uint16_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteU32(void* p, uint32_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteU64(void* p, uint64_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteFloat(void* p, float value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteDouble(void* p, double value) {
+  memcpy(p, &value, sizeof(value));
+}
 
 // Resolve a PLT symbol and fixup the GOT entry.
 // On entry:
@@ -165,9 +219,9 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
 
   // Push argv and argc onto stack.
   iregs[PCODE_SP_REG] -= 8;
-  *((uint64_t*)iregs[PCODE_SP_REG]) = (int64_t)argv;
+  WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)argv);
   iregs[PCODE_SP_REG] -= 4;
-  *((int32_t*)iregs[PCODE_SP_REG]) = argc;
+  WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)argc);
 
   for (;;) {
     // Fetch instruction from current PC location.
@@ -180,6 +234,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
 
     if (disassemble) {
       DisassemblePCodeInstruction(interpreter, pc, stdout);
+      fflush(stdout);
     }
     
     // Fetch first word and advance PC to next word.  All instructions are at least
@@ -367,34 +422,34 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           break;
         case PCODE_OP(push):
           iregs[PCODE_SP_REG] -= 4;
-          *((int32_t*)iregs[PCODE_SP_REG]) = (int32_t)iregs[DEST(inst)];
+          WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)iregs[DEST(inst)]);
           break;
         case PCODE_OP(pushf):
           iregs[PCODE_SP_REG] -= 4;
-          *((float*)iregs[PCODE_SP_REG]) = fregs[DEST(inst)];
+          WriteFloat((void*)iregs[PCODE_SP_REG], fregs[DEST(inst)]);
           break;
         case PCODE_OP(pushd):
           iregs[PCODE_SP_REG] -= 8;
-         *((double*)iregs[PCODE_SP_REG]) = dregs[DEST(inst)];
+          WriteDouble((void*)iregs[PCODE_SP_REG], dregs[DEST(inst)]);
           break;
         case PCODE_OP(pushx):
           iregs[PCODE_SP_REG] -= 8;
-          *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[DEST(inst)];
+          WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)iregs[DEST(inst)]);
           break;
         case PCODE_OP(pop):
-          iregs[DEST(inst)] = *((int32_t*)iregs[PCODE_SP_REG]);
+          iregs[DEST(inst)] = (int32_t)ReadU32((void*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 4;
           break;
         case PCODE_OP(popf):
-          fregs[DEST(inst)] = *((float*)iregs[PCODE_SP_REG]);
+          fregs[DEST(inst)] = ReadFloat((void*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 4;
           break;
         case PCODE_OP(popd):
-          dregs[DEST(inst)] = *((double*)iregs[PCODE_SP_REG]);
+          dregs[DEST(inst)] = ReadDouble((void*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
           break;
         case PCODE_OP(popx):
-          iregs[DEST(inst)] = *((uint64_t*)iregs[PCODE_SP_REG]);
+          iregs[DEST(inst)] = ReadU64((void*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
           break;
         case PCODE_OP(mov):
@@ -408,7 +463,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           break;
         case PCODE_OP(ret):
           // Return from function.  sp[0] contains 64 bit return address;
-          iregs[PCODE_PC_REG] = *((uint64_t*)iregs[PCODE_SP_REG]);
+          iregs[PCODE_PC_REG] = ReadU64((void*)iregs[PCODE_SP_REG]);
           iregs[PCODE_SP_REG] += 8;
           break;
 
@@ -447,7 +502,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           break;
        case PCODE_OP(rcall):
           iregs[PCODE_SP_REG] -= 8;
-          *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
+          WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)iregs[PCODE_PC_REG]);
           iregs[PCODE_PC_REG] = iregs[DEST(inst)];
           break;
 
@@ -469,11 +524,11 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
         // 6 bit opcode
         switch ((inst >> 24) & 0x3f) {
         case PCODE_OP(ldw):
-          iregs[DEST(inst)] = *(int32_t*)(iregs[SRC1(inst)] + *pc);
+          iregs[DEST(inst)] = (int32_t)ReadU32((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldh):
-          iregs[DEST(inst)] = *(int16_t*)(iregs[SRC1(inst)] + *pc);
+          iregs[DEST(inst)] = (int16_t)ReadU16((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldb):
@@ -481,7 +536,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(lduw):
-          iregs[DEST(inst)] = *(uint32_t*)(iregs[SRC1(inst)] + *pc);
+          iregs[DEST(inst)] = ReadU32((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldub):
@@ -489,39 +544,39 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(lduh):
-          iregs[DEST(inst)] = *(uint16_t*)(iregs[SRC1(inst)] + *pc);
+          iregs[DEST(inst)] = ReadU16((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldx):
-          iregs[DEST(inst)] = *(uint64_t*)(iregs[SRC1(inst)] + *pc);
+          iregs[DEST(inst)] = ReadU64((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldf):
-          fregs[DEST(inst)] = *(float*)(iregs[SRC1(inst)] + *pc);
+          fregs[DEST(inst)] = ReadFloat((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(ldd):
-          dregs[DEST(inst)] = *(double*)(iregs[SRC1(inst)] + *pc);
+          dregs[DEST(inst)] = ReadDouble((void*)(iregs[SRC1(inst)] + *pc));
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(stw):
-          *(int32_t*)(iregs[SRC1(inst)] + *pc) = (int32_t)iregs[DEST(inst)];
+          WriteU32((void*)(iregs[SRC1(inst)] + *pc), (uint32_t)iregs[DEST(inst)]);
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(sth):
-          *(int16_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
+          WriteU16((void*)(iregs[SRC1(inst)] + *pc), (uint16_t)iregs[DEST(inst)]);
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(stx):
-          *(uint64_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
+          WriteU64((void*)(iregs[SRC1(inst)] + *pc), (uint64_t)iregs[DEST(inst)]);
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(stf):
-          *(float*)(iregs[SRC1(inst)] + *pc) = fregs[DEST(inst)];
+          WriteFloat((void*)(iregs[SRC1(inst)] + *pc), fregs[DEST(inst)]);
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(std):
-          *(double*)(iregs[SRC1(inst)] + *pc) = dregs[DEST(inst)];
+          WriteDouble((void*)(iregs[SRC1(inst)] + *pc), dregs[DEST(inst)]);
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(stb):
@@ -534,7 +589,7 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
           iregs[PCODE_PC_REG] += 4;
           break;
         case PCODE_OP(movfc):
-          fregs[DEST(inst)] = *pc++;
+          fregs[DEST(inst)] = ReadFloat(pc);
           iregs[PCODE_PC_REG] += 4;
           break;
 
@@ -572,32 +627,32 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
         // 6 bit opcode.
         switch ((inst >> 24) & 0x3f) {
          case PCODE_OP(movdc):
-          dregs[DEST(inst)] = *(double*)pc;
+          dregs[DEST(inst)] = ReadDouble(pc);
           iregs[PCODE_PC_REG] += 8;
           break;
         case PCODE_OP(movxc):
-          iregs[DEST(inst)] = *(uint64_t*)pc;
+          iregs[DEST(inst)] = ReadU64(pc);
           iregs[PCODE_PC_REG] += 8;
           break;
         case PCODE_OP(jmp):
-          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
+          iregs[PCODE_PC_REG] = ReadU64(pc) + iregs[PCODE_PC_REG] + 8;
           break;
         case PCODE_OP(call):
           iregs[PCODE_SP_REG] -= 8;
-          *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
-          iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
+          WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)(iregs[PCODE_PC_REG] + 8));
+          iregs[PCODE_PC_REG] = ReadU64(pc) + iregs[PCODE_PC_REG] + 8;
           break;
        case PCODE_OP(cjmp): {
             // Load the value at the pc-relative address in the operand.
             // Then jump to that value.
-            uint64_t offset = *(uint64_t*)pc;    // Offset from PC.
-            uint64_t* addr = (uint64_t*)(iregs[PCODE_PC_REG] + 8 + offset);
-            iregs[PCODE_PC_REG] = *addr;
+            uint64_t offset = ReadU64(pc);    // Offset from PC.
+            iregs[PCODE_PC_REG] =
+                ReadU64((void*)(iregs[PCODE_PC_REG] + 8 + offset));
           break;
           }
         case PCODE_OP(adr): {
           // Operand is offset from PC to address.
-          uint64_t addr = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
+          uint64_t addr = ReadU64(pc) + iregs[PCODE_PC_REG] + 8;
           iregs[DEST(inst)] = addr;
           iregs[PCODE_PC_REG] += 8;
         break;

@@ -11,6 +11,9 @@
 #define SRC1(inst) (((inst) >> 8) & 0xff)
 #define SRC2(inst) ((inst) & 0xff)
 
+bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                 bool writable);
+
 static PCodeVMStatus DefaultEscape(PCodeVM* vm, int32_t code, void* data) {
   (void)vm;
   (void)data;
@@ -24,6 +27,223 @@ static PCodeVMStatus DefaultEscape(PCodeVM* vm, int32_t code, void* data) {
     default:
       return kPCodeVMStatusUndefinedEscape;
   }
+}
+
+static uint16_t ReadU16(const void* p) {
+  uint16_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static uint32_t ReadU32(const void* p) {
+  uint32_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static uint64_t ReadU64(const void* p) {
+  uint64_t value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static float ReadFloat(const void* p) {
+  float value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static double ReadDouble(const void* p) {
+  double value;
+  memcpy(&value, p, sizeof(value));
+  return value;
+}
+
+static void WriteU16(void* p, uint16_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteU32(void* p, uint32_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteU64(void* p, uint64_t value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteFloat(void* p, float value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static void WriteDouble(void* p, double value) {
+  memcpy(p, &value, sizeof(value));
+}
+
+static bool RegionContains(PCodeVMMemoryRegion* region, uint64_t address,
+                           size_t size, bool write) {
+  if (write && !region->writable) {
+    return false;
+  }
+  if (size == 0) {
+    return address >= region->start &&
+           address <= region->start + region->size;
+  }
+  if (size > UINT64_MAX - region->start ||
+      address < region->start || size > UINT64_MAX - address) {
+    return false;
+  }
+  uint64_t end = address + size;
+  uint64_t region_end = region->start + region->size;
+  return end <= region_end;
+}
+
+static bool CheckMemoryAccess(PCodeVM* vm, uint64_t address, size_t size,
+                              bool write) {
+  if (!vm->checked_memory) {
+    return true;
+  }
+  if (vm->stack != NULL && vm->stack_size != 0) {
+    uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+    uint64_t stack_end = stack_start + vm->stack_size;
+    if (address >= stack_start && address < stack_end) {
+      if (size > UINT64_MAX - address) {
+        vm->status =
+            write ? kPCodeVMStatusInvalidWrite : kPCodeVMStatusInvalidRead;
+        return false;
+      }
+      uint64_t end = address + size;
+      if (address >= (uint64_t)vm->iregs[PCODE_SP_REG] && end <= stack_end) {
+        return true;
+      }
+      vm->status =
+          write ? kPCodeVMStatusInvalidWrite : kPCodeVMStatusInvalidRead;
+      return false;
+    }
+  }
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    if (RegionContains(&vm->memory_regions[i], address, size, write)) {
+      return true;
+    }
+  }
+  vm->status =
+      write ? kPCodeVMStatusInvalidWrite : kPCodeVMStatusInvalidRead;
+  return false;
+}
+
+static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
+                           bool write) {
+  if (!CheckMemoryAccess(vm, address, size, write)) {
+    return NULL;
+  }
+  return (void*)(uintptr_t)address;
+}
+
+static bool ReadVMU8(PCodeVM* vm, uint64_t address, uint8_t* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = *(uint8_t*)p;
+  return true;
+}
+
+static bool ReadVMU16(PCodeVM* vm, uint64_t address, uint16_t* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = ReadU16(p);
+  return true;
+}
+
+static bool ReadVMU32(PCodeVM* vm, uint64_t address, uint32_t* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = ReadU32(p);
+  return true;
+}
+
+static bool ReadVMU64(PCodeVM* vm, uint64_t address, uint64_t* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = ReadU64(p);
+  return true;
+}
+
+static bool ReadVMFloat(PCodeVM* vm, uint64_t address, float* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = ReadFloat(p);
+  return true;
+}
+
+static bool ReadVMDouble(PCodeVM* vm, uint64_t address, double* value) {
+  void* p = AccessPointer(vm, address, sizeof(*value), false);
+  if (p == NULL) {
+    return false;
+  }
+  *value = ReadDouble(p);
+  return true;
+}
+
+static bool WriteVMU8(PCodeVM* vm, uint64_t address, uint8_t value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  *(uint8_t*)p = value;
+  return true;
+}
+
+static bool WriteVMU16(PCodeVM* vm, uint64_t address, uint16_t value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  WriteU16(p, value);
+  return true;
+}
+
+static bool WriteVMU32(PCodeVM* vm, uint64_t address, uint32_t value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  WriteU32(p, value);
+  return true;
+}
+
+static bool WriteVMU64(PCodeVM* vm, uint64_t address, uint64_t value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  WriteU64(p, value);
+  return true;
+}
+
+static bool WriteVMFloat(PCodeVM* vm, uint64_t address, float value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  WriteFloat(p, value);
+  return true;
+}
+
+static bool WriteVMDouble(PCodeVM* vm, uint64_t address, double value) {
+  void* p = AccessPointer(vm, address, sizeof(value), true);
+  if (p == NULL) {
+    return false;
+  }
+  WriteDouble(p, value);
+  return true;
 }
 
 void PCodeVMInit(PCodeVM* vm) {
@@ -49,9 +269,14 @@ void PCodeVMDestruct(PCodeVM* vm) {
   if (vm->owns_stack) {
     free(vm->stack);
   }
+  free(vm->memory_regions);
   vm->stack = NULL;
   vm->stack_size = 0;
   vm->owns_stack = false;
+  vm->memory_regions = NULL;
+  vm->memory_region_count = 0;
+  vm->memory_region_capacity = 0;
+  vm->checked_memory = false;
 }
 
 void PCodeVMSetStack(PCodeVM* vm, void* stack, size_t stack_size) {
@@ -73,6 +298,50 @@ void PCodeVMSetEscapeHandler(PCodeVM* vm, PCodeVMEscapeHandler handler,
                              void* data) {
   vm->escape = handler != NULL ? handler : DefaultEscape;
   vm->escape_data = data;
+}
+
+bool PCodeVMEnableCheckedMemory(PCodeVM* vm) {
+  vm->checked_memory = true;
+  if (vm->stack != NULL && vm->stack_size != 0) {
+    return PCodeVMRegisterMemoryRegion(vm, vm->stack, vm->stack_size, true);
+  }
+  return true;
+}
+
+bool PCodeVMRegisterMemoryRegion(PCodeVM* vm, void* memory, size_t size,
+                                 bool writable) {
+  if (memory == NULL || size == 0) {
+    return true;
+  }
+  if (vm->memory_region_count == vm->memory_region_capacity) {
+    size_t new_capacity =
+        vm->memory_region_capacity == 0 ? 8 : vm->memory_region_capacity * 2;
+    PCodeVMMemoryRegion* new_regions =
+        realloc(vm->memory_regions, new_capacity * sizeof(*new_regions));
+    if (new_regions == NULL) {
+      return false;
+    }
+    vm->memory_regions = new_regions;
+    vm->memory_region_capacity = new_capacity;
+  }
+  vm->memory_regions[vm->memory_region_count++] = (PCodeVMMemoryRegion){
+      .start = (uint64_t)(uintptr_t)memory,
+      .size = size,
+      .writable = writable,
+  };
+  return true;
+}
+
+bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory) {
+  uint64_t start = (uint64_t)(uintptr_t)memory;
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    if (vm->memory_regions[i].start == start) {
+      vm->memory_regions[i] = vm->memory_regions[vm->memory_region_count - 1];
+      vm->memory_region_count--;
+      return true;
+    }
+  }
+  return false;
 }
 
 static PCodeVMStatus HandleEscape(PCodeVM* vm, int32_t code) {
@@ -103,8 +372,12 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
   int64_t* iregs = vm->iregs;
   float* fregs = vm->fregs;
   double* dregs = vm->dregs;
-  int32_t* pc = (int32_t*)iregs[PCODE_PC_REG];
-  uint32_t inst = *pc++;
+  uint64_t pc = (uint64_t)iregs[PCODE_PC_REG];
+  uint32_t inst;
+  if (!ReadVMU32(vm, pc, &inst)) {
+    return vm->status;
+  }
+  pc += 4;
   iregs[PCODE_PC_REG] += 4;
 
   bool is_32_bit = (inst & 0x80000000) == 0;
@@ -293,36 +566,68 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
         break;
       case PCODE_OP(push):
         iregs[PCODE_SP_REG] -= 4;
-        *((int32_t*)iregs[PCODE_SP_REG]) = (int32_t)iregs[DEST(inst)];
+        if (!WriteVMU32(vm, (uint64_t)iregs[PCODE_SP_REG],
+                        (uint32_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         break;
       case PCODE_OP(pushf):
         iregs[PCODE_SP_REG] -= 4;
-        *((float*)iregs[PCODE_SP_REG]) = fregs[DEST(inst)];
+        if (!WriteVMFloat(vm, (uint64_t)iregs[PCODE_SP_REG],
+                          fregs[DEST(inst)])) {
+          return vm->status;
+        }
         break;
       case PCODE_OP(pushd):
         iregs[PCODE_SP_REG] -= 8;
-        *((double*)iregs[PCODE_SP_REG]) = dregs[DEST(inst)];
+        if (!WriteVMDouble(vm, (uint64_t)iregs[PCODE_SP_REG],
+                           dregs[DEST(inst)])) {
+          return vm->status;
+        }
         break;
       case PCODE_OP(pushx):
         iregs[PCODE_SP_REG] -= 8;
-        *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[DEST(inst)];
+        if (!WriteVMU64(vm, (uint64_t)iregs[PCODE_SP_REG],
+                        (uint64_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         break;
-      case PCODE_OP(pop):
-        iregs[DEST(inst)] = *((int32_t*)iregs[PCODE_SP_REG]);
+      case PCODE_OP(pop): {
+        uint32_t value;
+        if (!ReadVMU32(vm, (uint64_t)iregs[PCODE_SP_REG], &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = (int32_t)value;
         iregs[PCODE_SP_REG] += 4;
         break;
-      case PCODE_OP(popf):
-        fregs[DEST(inst)] = *((float*)iregs[PCODE_SP_REG]);
+      }
+      case PCODE_OP(popf): {
+        float value;
+        if (!ReadVMFloat(vm, (uint64_t)iregs[PCODE_SP_REG], &value)) {
+          return vm->status;
+        }
+        fregs[DEST(inst)] = value;
         iregs[PCODE_SP_REG] += 4;
         break;
-      case PCODE_OP(popd):
-        dregs[DEST(inst)] = *((double*)iregs[PCODE_SP_REG]);
+      }
+      case PCODE_OP(popd): {
+        double value;
+        if (!ReadVMDouble(vm, (uint64_t)iregs[PCODE_SP_REG], &value)) {
+          return vm->status;
+        }
+        dregs[DEST(inst)] = value;
         iregs[PCODE_SP_REG] += 8;
         break;
-      case PCODE_OP(popx):
-        iregs[DEST(inst)] = *((uint64_t*)iregs[PCODE_SP_REG]);
+      }
+      case PCODE_OP(popx): {
+        uint64_t value;
+        if (!ReadVMU64(vm, (uint64_t)iregs[PCODE_SP_REG], &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = value;
         iregs[PCODE_SP_REG] += 8;
         break;
+      }
       case PCODE_OP(mov):
         iregs[DEST(inst)] = iregs[SRC1(inst)];
         break;
@@ -332,10 +637,15 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
       case PCODE_OP(movd):
         dregs[DEST(inst)] = dregs[SRC1(inst)];
         break;
-      case PCODE_OP(ret):
-        iregs[PCODE_PC_REG] = *((uint64_t*)iregs[PCODE_SP_REG]);
+      case PCODE_OP(ret): {
+        uint64_t return_address;
+        if (!ReadVMU64(vm, (uint64_t)iregs[PCODE_SP_REG], &return_address)) {
+          return vm->status;
+        }
+        iregs[PCODE_PC_REG] = return_address;
         iregs[PCODE_SP_REG] += 8;
         break;
+      }
       case PCODE_OP(cbra):
         if (iregs[DEST(inst)] != 0) {
           iregs[PCODE_PC_REG] = iregs[SRC1(inst)];
@@ -373,7 +683,10 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
         break;
       case PCODE_OP(rcall):
         iregs[PCODE_SP_REG] -= 8;
-        *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
+        if (!WriteVMU64(vm, (uint64_t)iregs[PCODE_SP_REG],
+                        (uint64_t)iregs[PCODE_PC_REG])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] = iregs[DEST(inst)];
         break;
       case PCODE_OP(esc): {
@@ -393,87 +706,227 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
   bool is_64_bit = (inst & 0x40000000) == 0;
   if (is_64_bit) {
     switch ((inst >> 24) & 0x3f) {
-      case PCODE_OP(ldw):
-        iregs[DEST(inst)] = *(int32_t*)(iregs[SRC1(inst)] + *pc);
+      case PCODE_OP(ldw): {
+        uint32_t offset;
+        uint32_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU32(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = (int32_t)value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldh):
-        iregs[DEST(inst)] = *(int16_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldh): {
+        uint32_t offset;
+        uint16_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU16(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = (int16_t)value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldb):
-        iregs[DEST(inst)] = *(int8_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldb): {
+        uint32_t offset;
+        uint8_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU8(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                      &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = (int8_t)value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(lduw):
-        iregs[DEST(inst)] = *(uint32_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(lduw): {
+        uint32_t offset;
+        uint32_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU32(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldub):
-        iregs[DEST(inst)] = *(uint8_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldub): {
+        uint32_t offset;
+        uint8_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU8(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                      &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(lduh):
-        iregs[DEST(inst)] = *(uint16_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(lduh): {
+        uint32_t offset;
+        uint16_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU16(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldx):
-        iregs[DEST(inst)] = *(uint64_t*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldx): {
+        uint32_t offset;
+        uint64_t value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMU64(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldf):
-        fregs[DEST(inst)] = *(float*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldf): {
+        uint32_t offset;
+        float value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMFloat(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                         &value)) {
+          return vm->status;
+        }
+        fregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(ldd):
-        dregs[DEST(inst)] = *(double*)(iregs[SRC1(inst)] + *pc);
+      }
+      case PCODE_OP(ldd): {
+        uint32_t offset;
+        double value;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !ReadVMDouble(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                          &value)) {
+          return vm->status;
+        }
+        dregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(stw):
-        *(int32_t*)(iregs[SRC1(inst)] + *pc) = (int32_t)iregs[DEST(inst)];
+      }
+      case PCODE_OP(stw): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMU32(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                        (uint32_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(sth):
-        *(int16_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
+      }
+      case PCODE_OP(sth): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMU16(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                        (uint16_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(stx):
-        *(uint64_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
+      }
+      case PCODE_OP(stx): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMU64(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                        (uint64_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(stf):
-        *(float*)(iregs[SRC1(inst)] + *pc) = fregs[DEST(inst)];
+      }
+      case PCODE_OP(stf): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMFloat(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                          fregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(std):
-        *(double*)(iregs[SRC1(inst)] + *pc) = dregs[DEST(inst)];
+      }
+      case PCODE_OP(std): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMDouble(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                           dregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(stb):
-        *(int8_t*)(iregs[SRC1(inst)] + *pc) = iregs[DEST(inst)];
+      }
+      case PCODE_OP(stb): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset) ||
+            !WriteVMU8(vm, (uint64_t)iregs[SRC1(inst)] + (int32_t)offset,
+                       (uint8_t)iregs[DEST(inst)])) {
+          return vm->status;
+        }
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(movc):
-        iregs[DEST(inst)] = *pc;
+      }
+      case PCODE_OP(movc): {
+        uint32_t value;
+        if (!ReadVMU32(vm, pc, &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = (int32_t)value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(movfc):
-        fregs[DEST(inst)] = *(float*)pc;
+      }
+      case PCODE_OP(movfc): {
+        float value;
+        if (!ReadVMFloat(vm, pc, &value)) {
+          return vm->status;
+        }
+        fregs[DEST(inst)] = value;
         iregs[PCODE_PC_REG] += 4;
         break;
-      case PCODE_OP(bz):
-        iregs[PCODE_PC_REG] += iregs[DEST(inst)] == 0 ? (int32_t)*pc + 4 : 4;
+      }
+      case PCODE_OP(bz): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset)) {
+          return vm->status;
+        }
+        iregs[PCODE_PC_REG] +=
+            iregs[DEST(inst)] == 0 ? (int32_t)offset + 4 : 4;
         break;
-      case PCODE_OP(bnz):
-        iregs[PCODE_PC_REG] += iregs[DEST(inst)] != 0 ? (int32_t)*pc + 4 : 4;
+      }
+      case PCODE_OP(bnz): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset)) {
+          return vm->status;
+        }
+        iregs[PCODE_PC_REG] +=
+            iregs[DEST(inst)] != 0 ? (int32_t)offset + 4 : 4;
         break;
-      case PCODE_OP(bra):
-        iregs[PCODE_PC_REG] += (int32_t)*pc + 4;
+      }
+      case PCODE_OP(bra): {
+        uint32_t offset;
+        if (!ReadVMU32(vm, pc, &offset)) {
+          return vm->status;
+        }
+        iregs[PCODE_PC_REG] += (int32_t)offset + 4;
         break;
-      case PCODE_OP(addc):
-        iregs[DEST(inst)] = iregs[SRC1(inst)] + *pc;
+      }
+      case PCODE_OP(addc): {
+        uint32_t value;
+        if (!ReadVMU32(vm, pc, &value)) {
+          return vm->status;
+        }
+        iregs[DEST(inst)] = iregs[SRC1(inst)] + (int32_t)value;
         iregs[PCODE_PC_REG] += 4;
         break;
+      }
       default:
         vm->status = UndefinedInstruction(vm);
         break;
@@ -482,32 +935,65 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
   }
 
   switch ((inst >> 24) & 0x3f) {
-    case PCODE_OP(movdc):
-      dregs[DEST(inst)] = *(double*)pc;
+    case PCODE_OP(movdc): {
+      double value;
+      if (!ReadVMDouble(vm, pc, &value)) {
+        return vm->status;
+      }
+      dregs[DEST(inst)] = value;
       iregs[PCODE_PC_REG] += 8;
-      break;
-    case PCODE_OP(movxc):
-      iregs[DEST(inst)] = *(uint64_t*)pc;
-      iregs[PCODE_PC_REG] += 8;
-      break;
-    case PCODE_OP(jmp):
-      iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
-      break;
-    case PCODE_OP(call):
-      iregs[PCODE_SP_REG] -= 8;
-      *((uint64_t*)iregs[PCODE_SP_REG]) = iregs[PCODE_PC_REG] + 8;
-      iregs[PCODE_PC_REG] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
-      break;
-    case PCODE_OP(cjmp): {
-      uint64_t offset = *(uint64_t*)pc;
-      uint64_t* addr = (uint64_t*)(iregs[PCODE_PC_REG] + 8 + offset);
-      iregs[PCODE_PC_REG] = *addr;
       break;
     }
-    case PCODE_OP(adr):
-      iregs[DEST(inst)] = *(uint64_t*)pc + iregs[PCODE_PC_REG] + 8;
+    case PCODE_OP(movxc): {
+      uint64_t value;
+      if (!ReadVMU64(vm, pc, &value)) {
+        return vm->status;
+      }
+      iregs[DEST(inst)] = value;
       iregs[PCODE_PC_REG] += 8;
       break;
+    }
+    case PCODE_OP(jmp): {
+      uint64_t offset;
+      if (!ReadVMU64(vm, pc, &offset)) {
+        return vm->status;
+      }
+      iregs[PCODE_PC_REG] = offset + iregs[PCODE_PC_REG] + 8;
+      break;
+    }
+    case PCODE_OP(call): {
+      iregs[PCODE_SP_REG] -= 8;
+      if (!WriteVMU64(vm, (uint64_t)iregs[PCODE_SP_REG],
+                      (uint64_t)(iregs[PCODE_PC_REG] + 8))) {
+        return vm->status;
+      }
+      uint64_t offset;
+      if (!ReadVMU64(vm, pc, &offset)) {
+        return vm->status;
+      }
+      iregs[PCODE_PC_REG] = offset + iregs[PCODE_PC_REG] + 8;
+      break;
+    }
+    case PCODE_OP(cjmp): {
+      uint64_t offset;
+      uint64_t target;
+      if (!ReadVMU64(vm, pc, &offset) ||
+          !ReadVMU64(vm, (uint64_t)iregs[PCODE_PC_REG] + 8 + offset,
+                     &target)) {
+        return vm->status;
+      }
+      iregs[PCODE_PC_REG] = target;
+      break;
+    }
+    case PCODE_OP(adr): {
+      uint64_t offset;
+      if (!ReadVMU64(vm, pc, &offset)) {
+        return vm->status;
+      }
+      iregs[DEST(inst)] = offset + iregs[PCODE_PC_REG] + 8;
+      iregs[PCODE_PC_REG] += 8;
+      break;
+    }
     default:
       vm->status = UndefinedInstruction(vm);
       break;
@@ -536,6 +1022,14 @@ const char* PCodeVMStatusName(PCodeVMStatus status) {
       return "division by zero";
     case kPCodeVMStatusUndefinedEscape:
       return "undefined escape";
+    case kPCodeVMStatusInvalidRead:
+      return "invalid read";
+    case kPCodeVMStatusInvalidWrite:
+      return "invalid write";
+    case kPCodeVMStatusInvalidFree:
+      return "invalid free";
+    case kPCodeVMStatusAllocationFailure:
+      return "allocation failure";
   }
   return "unknown";
 }

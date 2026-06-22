@@ -14,11 +14,14 @@
 #include "p_code_emitter.h"
 #include "p_code_reg_alloc.h"
 #include "common_emitter.h"
+#include "compiler.h"
 
 static void* GenerateCode(Generator* gen) {
   PCodeGenerator* pcode = NewPCodeGenerator(gen);
   PCodeLower(pcode, gen);
-  PCodePrint(pcode);
+  if (compiler->print_back_end) {
+    PCodePrint(pcode);
+  }
   return pcode;
 }
 

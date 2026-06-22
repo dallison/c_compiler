@@ -9,6 +9,7 @@
 #ifndef pcode_emitter_h
 #define pcode_emitter_h
 
+#include <stdbool.h>
 #include <stdio.h>
 #include "p_code_codegen.h"
 #include "p_code_reg_alloc.h"
@@ -16,6 +17,7 @@
 typedef struct {
   PCodeGenerator* pcode;
   PCodeRegisterAllocator* regs;
+  bool emit_locations;
 } PCodeEmitter;
 
 void PCodeEmitterInit(PCodeEmitter* emitter, PCodeGenerator* pcode);

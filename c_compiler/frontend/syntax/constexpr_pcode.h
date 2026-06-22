@@ -14,7 +14,10 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                           double* result);
 bool ConstexprPCodeEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node);
+bool ConstexprPCodeEvaluateCallAsAddress(ConstEvalContext* ctx, ASTNode* node,
+                                         ConstexprValue* result);
 bool ConstexprPCodeEvaluateObjectConstantForSymbol(Symbol* symbol,
                                                    ASTNode* initializer);
+void ConstexprPCodeClearImageCache(void);
 
 #endif /* constexpr_pcode_h */

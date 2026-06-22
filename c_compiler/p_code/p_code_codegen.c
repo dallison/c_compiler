@@ -740,6 +740,27 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
   return GetLoweredNode(node);
 }
 
+static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node);
+
+static TargetInstruction* GetDestInstruction(PCodeGenerator* pcode,
+                                             IRNode* node) {
+  if (node->dest == NULL) {
+    return NULL;
+  }
+  LowerIRNode(pcode, node->dest);
+  return GetLoweredNode(node->dest);
+}
+
+static TargetInstruction* ApplyDestInstruction(PCodeGenerator* pcode,
+                                               IRNode* node,
+                                               TargetInstruction* inst) {
+  TargetInstruction* dest = GetDestInstruction(pcode, node);
+  if (dest != NULL) {
+    inst->dest = dest;
+  }
+  return inst;
+}
+
 static PCodeOpcode IR2PCode(IROpcode op, bool is_unsigned) {
   switch (op) {
     case IR_OP(addi):
@@ -1082,6 +1103,7 @@ static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
     }
   }
   TargetUpdateOperandUsers(inst);
+  ApplyDestInstruction(pcode, node, inst);
   SetLoweredNode(node, inst);
   return Emit(pcode, inst);
 }
@@ -1105,7 +1127,7 @@ static TargetInstruction* LowerConditionalBranch(PCodeGenerator* pcode,
   IRNode* target_node = node->inputs.value.p[1];
 
   TargetInstruction* inst = (TargetInstruction*)Emit(
-      pcode, NewInstruction1(opcode, GetLoweredNode(expr)));
+      pcode, NewInstruction1(opcode, Materialize(pcode, expr)));
 
   TargetInstruction* target = target_node->data.ptr;
   if (target == NULL) {
@@ -1181,9 +1203,11 @@ static void GetAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
     *addr = LoadStaticVariable(pcode, addr_node);
     *offset = GetIntConstant(pcode, NULL, kTargetType32Bit, 0);
   } else if (addr_node->opcode == IR_OP(structreturn)) {
-    // Struct return value is the first argument, at ap + 16.
-    *addr = ArgumentPointer(pcode);
-    *offset = GetIntConstant(pcode, NULL, kTargetType32Bit, 16);
+    // Struct return value is an invisible first argument at ap + 16.
+    *addr = Emit(pcode, NewInstruction2(
+                            P_OP(ldx), ArgumentPointer(pcode),
+                            GetIntConstant(pcode, NULL, kTargetType32Bit, 16)));
+    *offset = GetIntConstant(pcode, NULL, kTargetType32Bit, 0);
   } else {
     // All others have a calculated address.
     *addr = GetLoweredNode(addr_node);
@@ -1242,7 +1266,9 @@ static TargetInstruction* LowerLoad(PCodeGenerator* pcode, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
 
-  return SetLoweredNode(node, Load(pcode, addr_node, opcode));
+  TargetInstruction* load = Load(pcode, addr_node, opcode);
+  ApplyDestInstruction(pcode, node, load);
+  return SetLoweredNode(node, load);
 }
 
 static TargetInstruction* Store(PCodeGenerator* pcode, IRNode* addr_node, TargetInstruction* src, PCodeOpcode opcode) {
@@ -1304,6 +1330,7 @@ static struct {
   size_t size;
 } push_map[] = {
     {TypeIsInt, P_OP(push), 4},
+    {TypeIsBool, P_OP(push), 4},
     {TypeIsShort, P_OP(push), 4},
     {TypeIsChar, P_OP(push), 4},
     {TypeIsLong, P_OP(pushx), 8},
@@ -1313,6 +1340,7 @@ static struct {
     {TypeIsLongDouble, P_OP(pushd), 8},
     {TypeIsPointerOrArray, P_OP(pushx), 8},
     {TypeIsFunction, P_OP(pushx), 8},
+    {TypeIsReference, P_OP(pushx), 8},
     {TypeIsStructOrUnion, P_OP(pushx), 8},
     {NULL, P_OP(push), 0},
 };
@@ -1363,7 +1391,7 @@ static COMPILER_UNUSED void PushStructArg(PCodeGenerator* pcode, IRNode* node, s
   Emit(pcode, NewInstruction1(P_OP(pushx), src_addr));
   
   // Push dest address.
-  Emit(pcode, NewInstruction1(P_OP(push), dest_addr));
+  Emit(pcode, NewInstruction1(P_OP(pushx), dest_addr));
   
   // Call memcpy.
   TargetInstruction* memcpy = GetSymbol(pcode, NULL, pcode->base.memcpy);
@@ -1386,7 +1414,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
       PushArg(pcode, arg_node, arg, &args_size);
     }
   }
-  TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
+  TargetInstruction* addr = Materialize(pcode, node->inputs.value.p[0]);
   PCodeOpcode opcode;
   if (((int)addr->opcode == (int)P_OP(symbol))) {
     if (TypeIsFloat(node->type)) {
@@ -1410,6 +1438,24 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
     Emit(pcode,
        NewInstruction1(P_OP(incsp), GetIntConstant(pcode, NULL, kTargetType32Bit,
                                                   args_size)));
+  }
+  if (node->type != NULL && !TypeIsVoid(node->type)) {
+    PCodeOpcode move_opcode = P_OP(mov);
+    if (TypeIsFloat(node->type)) {
+      move_opcode = P_OP(movf);
+    } else if (TypeIsDouble(node->type)) {
+      move_opcode = P_OP(movd);
+    }
+    TargetInstruction* dest = GetDestInstruction(pcode, node);
+    if (dest != NULL) {
+      TargetInstruction* result = Emit(pcode, NewInstruction1(move_opcode, call));
+      result->dest = dest;
+      SetLoweredNode(node, result);
+      return result;
+    }
+    TargetInstruction* result = Emit(pcode, NewInstruction1(move_opcode, call));
+    SetLoweredNode(node, result);
+    return result;
   }
   SetLoweredNode(node, call);
   return call;
@@ -1461,7 +1507,15 @@ static TargetInstruction* LowerLiteralReference(PCodeGenerator* pcode,
 }
 
 static TargetInstruction* LowerAddressOf(PCodeGenerator* pcode, IRNode* node) {
-  return SetLoweredNode(node, Materialize(pcode, node->inputs.value.p[0]));
+  TargetInstruction* address = Materialize(pcode, node->inputs.value.p[0]);
+  TargetInstruction* dest = GetDestInstruction(pcode, node);
+  if (dest != NULL) {
+    TargetInstruction* result = NewInstruction1(P_OP(mov), address);
+    result->dest = dest;
+    TargetUpdateOperandUsers(result);
+    address = Emit(pcode, result);
+  }
+  return SetLoweredNode(node, address);
 }
 
 static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
@@ -1469,10 +1523,36 @@ static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
   // function.  However, there are no load nodes for the desination
   // or source addresses.
   assert(node->inputs.length == 3);
+  IRNode* length_node = node->inputs.value.p[2];
+  if (IRIsIntConst(length_node)) {
+    IRNode* src_node = node->inputs.value.p[1];
+    TargetInstruction* src_addr;
+    TargetInstruction* src_offset;
+    GetAddressAndOffset(pcode, src_node, &src_addr, &src_offset);
+    src_addr = Emit(pcode, NewInstruction2(P_OP(addc), src_addr, src_offset));
+
+    IRNode* dest_node = node->inputs.value.p[0];
+    TargetInstruction* dest_addr;
+    TargetInstruction* dest_offset;
+    GetAddressAndOffset(pcode, dest_node, &dest_addr, &dest_offset);
+    dest_addr = Emit(pcode, NewInstruction2(P_OP(addc), dest_addr, dest_offset));
+
+    TargetInstruction* last = dest_addr;
+    int64_t length_value = IRIntConstValue(length_node);
+    for (int64_t i = 0; i < length_value; i++) {
+      TargetInstruction* offset =
+          GetIntConstant(pcode, NULL, kTargetType32Bit, i);
+      TargetInstruction* byte =
+          Emit(pcode, NewInstruction2(P_OP(ldub), src_addr, offset));
+      last = Emit(pcode, NewInstruction3(P_OP(stb), byte, dest_addr, offset));
+    }
+    SetLoweredNode(node, last);
+    return last;
+  }
 
   // First push the constant for the length.
   TargetInstruction* length =
-      Emit(pcode, Materialize(pcode, node->inputs.value.p[2]));
+      Emit(pcode, Materialize(pcode, length_node));
   Emit(pcode, NewInstruction1(P_OP(pushx), length));
 
   // Now push src.
@@ -1509,24 +1589,12 @@ static TargetInstruction* LowerMemcpy(PCodeGenerator* pcode, IRNode* node) {
 }
 
 static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
-  // The memzero IR node has one input: the variable to zero.  We
-  // emit this is as a call to memset using the size of the symbol.
+  // The memzero IR node has one input: the variable to zero.  Keep this
+  // self-contained for pcode execution by emitting direct byte stores instead
+  // of relying on an external memset implementation.
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
   IRVariable* var = (IRVariable*)addr_node;
-
-  // Third parameter to memset is the length.
-  TargetInstruction* size = Emit(
-      pcode,
-      NewInstruction1(P_OP(movc), GetIntConstant(pcode, NULL, kTargetType32Bit,
-                                                 var->symbol->type->size)));
-  Emit(pcode, NewInstruction1(P_OP(pushx), size));
-
-  // Push a zero constant as the second argument.
-  TargetInstruction* zero = Emit(
-      pcode, NewInstruction1(P_OP(movc),
-                             GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
-  Emit(pcode, NewInstruction1(P_OP(push), zero));
 
   TargetInstruction* addr;
   TargetInstruction* offset;
@@ -1535,24 +1603,35 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
   // We have an address and register for the address, add them together
   // to produce the address to zero.
   addr = Emit(pcode, NewInstruction2(P_OP(addc), addr, offset));
-  addr_node->data.ptr = addr;
-
-  PushArg(pcode, addr_node, addr, NULL);
-
-  TargetInstruction* memset = GetSymbol(pcode, NULL, pcode->base.memset);
-  TargetInstruction* call = Emit(pcode, NewInstruction1(P_OP(call), memset));
-  Emit(pcode,
-       NewInstruction1(P_OP(incsp),
-                       GetIntConstant(pcode, NULL, kTargetType32Bit, 20)));
-  SetLoweredNode(node, call);
-  return call;
+  TargetInstruction* zero = Emit(
+      pcode, NewInstruction1(P_OP(movc),
+                             GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
+  TargetInstruction* last = zero;
+  int64_t size = var->symbol->type->size;
+  for (int64_t i = 0; i < size; i++) {
+    last = Emit(pcode, NewInstruction3(P_OP(stb), zero, addr,
+                                       GetIntConstant(pcode, NULL,
+                                                      kTargetType32Bit, i)));
+  }
+  SetLoweredNode(node, last);
+  return last;
 }
 
 static TargetInstruction* LowerZeroExtend(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
-  value =
-      Emit(pcode, NewInstruction2(P_OP(and), value,
-                                  Materialize(pcode, node->inputs.value.p[1])));
+  IRConstant* extend = node->inputs.value.p[1];
+  int64_t bits = extend->value.ivalue;
+  if (bits > 0 && bits < 64 && bits % 8 == 0) {
+    TargetInstruction* shift =
+        Emit(pcode, NewInstruction1(P_OP(movc),
+                                    GetIntConstant(pcode, NULL,
+                                                   kTargetType32Bit, bits)));
+    TargetInstruction* lsl = Emit(pcode, NewInstruction2(P_OP(lsl), value, shift));
+    value = Emit(pcode, NewInstruction2(P_OP(lsr), lsl, shift));
+  } else {
+    value = Emit(pcode, NewInstruction2(P_OP(and), value,
+                                        Materialize(pcode, node->inputs.value.p[1])));
+  }
   SetLoweredNode(node, value);
   return value;
 }
@@ -1832,23 +1911,30 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
       Emit(pcode, NewInstruction2(P_OP(ldx), ap_addr, ap_offset));
 
   PCodeOpcode load_opcode = P_OP(ldx);
-  switch (node->type->size) {
-    case 1:
-      load_opcode = TypeIsUnsigned(node->type) ? P_OP(ldub) : P_OP(ldb);
-      break;
-    case 2:
-      load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduh) : P_OP(ldh);
-      break;
-    case 4:
-      load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduw) : P_OP(ldw);
-      break;
+  if (TypeIsFloat(node->type)) {
+    load_opcode = P_OP(ldf);
+  } else if (TypeIsDouble(node->type) || TypeIsLongDouble(node->type)) {
+    load_opcode = P_OP(ldd);
+  } else {
+    switch (node->type->size) {
+      case 1:
+        load_opcode = TypeIsUnsigned(node->type) ? P_OP(ldub) : P_OP(ldb);
+        break;
+      case 2:
+        load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduh) : P_OP(ldh);
+        break;
+      case 4:
+        load_opcode = TypeIsUnsigned(node->type) ? P_OP(lduw) : P_OP(ldw);
+        break;
+    }
   }
 
   TargetInstruction* result = Emit(
       pcode, NewInstruction2(load_opcode, ap_load,
                              GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
 
-  TargetInstruction* size = GetLoweredNode(node->inputs.value.p[1]);
+  TargetInstruction* size =
+      GetIntConstant(pcode, NULL, kTargetType32Bit, node->type->size);
   TargetInstruction* addc =
       Emit(pcode, NewInstruction2(P_OP(addc), ap_load, size));
   Emit(pcode, NewInstruction3(P_OP(stx), addc, ap_addr, ap_offset));
@@ -1891,8 +1977,10 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
       break;
 
     case IR_OP(structreturn): {
-      TargetInstruction* result =
-          Emit(pcode, NewInstruction(P_OP(structreturn)));
+      TargetInstruction* result = Emit(
+          pcode,
+          NewInstruction2(P_OP(ldx), ArgumentPointer(pcode),
+                          GetIntConstant(pcode, NULL, kTargetType32Bit, 16)));
       SetLoweredNode(node, result);
       return result;
     }
@@ -2190,13 +2278,16 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
 
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(Symbol* arg) {
+  if (arg == NULL || arg->type == NULL) {
+    return 0;
+  }
   if (TypeIsFloatingPoint(arg->type)) {
     if (TypeIsDouble(arg->type)) {
       return 8;
     }
     return 4;
   }
-  if (TypeIsPointerOrArray(arg->type)) {
+  if (TypeIsPointerOrArray(arg->type) || TypeIsReference(arg->type)) {
     return 8;
   }
   if (TypeIsStructOrUnion(arg->type)) {
@@ -2209,12 +2300,19 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
   // Variables are allocated below the frame, arguments are above.
   int32_t var_offset = 0;
   int32_t arg_offset = 16;  // Leave room for return address and saved ap.
+  if (TypeIsStructOrUnion(compiler->current_function->next)) {
+    // Struct/union returns use an invisible first argument at ap + 16.
+    arg_offset += 8;
+  }
   
   // Calculate the offset on the stack for all the arguments.  Store this offset
   // in the stack_offset field of the Symbol.
   Vector* prototype = &compiler->current_function->info.function.prototype;
   for (size_t i = 0; i < prototype->length; i++) {
     Symbol* arg = prototype->value.p[i];
+    if (arg == NULL || arg->type == NULL) {
+      continue;
+    }
     arg->stack_offset = arg_offset;
     int64_t size = CalculateArgumentSize(arg);
     arg_offset += size;
@@ -2269,6 +2367,10 @@ void PCodePrint(PCodeGenerator* pcode) {
 
 bool PCodeIsExpression(TargetInstruction* inst) {
   switch ((PCodeOpcode)inst->opcode) {
+    case P_OP(mov):
+    case P_OP(movf):
+    case P_OP(movd):
+      return inst->dest == NULL;
     case P_OP(save):
     case P_OP(restore):
     case P_OP(label):

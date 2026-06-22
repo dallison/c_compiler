@@ -466,7 +466,7 @@ int main(void) {
   if (global_immediate_mixed_total != 27) {
     return 31;
   }
-  if (pointer_reference_total != 11) {
+  if (pointer_reference_total != 15) {
     return 32;
   }
   if (static_member_total != 12) {

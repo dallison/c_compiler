@@ -102,6 +102,58 @@ static void FreeRegister(PCodeRegisterAllocator* allocator,
   reg->base.owner = NULL;
 }
 
+static PCodeRegisterType RegisterTypeFromTmpUsers(TargetInstruction* inst) {
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    for (size_t operand = 0; operand < TARGET_MAX_OPERANDS; operand++) {
+      if (user->operand[operand] != inst) {
+        continue;
+      }
+      switch ((PCodeOpcode)user->opcode) {
+        case P_OP(movf):
+        case P_OP(stf):
+        case P_OP(addf):
+        case P_OP(subf):
+        case P_OP(mulf):
+        case P_OP(divf):
+        case P_OP(negf):
+        case P_OP(f2i):
+        case P_OP(f2ui):
+        case P_OP(f2d):
+        case P_OP(cmpeqf):
+        case P_OP(cmpnef):
+        case P_OP(cmpltf):
+        case P_OP(cmplef):
+        case P_OP(cmpgtf):
+        case P_OP(cmpgef):
+          return kPCodeRegTypeFloat;
+
+        case P_OP(movd):
+        case P_OP(std):
+        case P_OP(addd):
+        case P_OP(subd):
+        case P_OP(muld):
+        case P_OP(divd):
+        case P_OP(negd):
+        case P_OP(d2i):
+        case P_OP(d2ui):
+        case P_OP(d2f):
+        case P_OP(cmpeqd):
+        case P_OP(cmpned):
+        case P_OP(cmpltd):
+        case P_OP(cmpled):
+        case P_OP(cmpgtd):
+        case P_OP(cmpged):
+          return kPCodeRegTypeDouble;
+
+        default:
+          break;
+      }
+    }
+  }
+  return kPCodeRegTypeInt;
+}
+
 static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
   switch ((PCodeOpcode)inst->opcode) {
     case P_OP(mov):
@@ -126,7 +178,9 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(sub):
     case P_OP(mul):
     case P_OP(div):
+    case P_OP(divu):
     case P_OP(mod):
+    case P_OP(modu):
     case P_OP(lsr):
     case P_OP(asr):
     case P_OP(lsl):
@@ -160,6 +214,8 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(cmpged):
     case P_OP(f2i):
     case P_OP(d2i):
+    case P_OP(f2ui):
+    case P_OP(d2ui):
     case P_OP(literal):
     case P_OP(fp):
     case P_OP(sp):
@@ -167,9 +223,12 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(tp):
     case P_OP(resulti):
     case P_OP(call):
-    case P_OP(tmp):
+    case P_OP(rcall):
     case P_OP(structreturn):
       return kPCodeRegTypeInt;
+
+    case P_OP(tmp):
+      return RegisterTypeFromTmpUsers(inst);
 
     case P_OP(movf):
     case P_OP(movfc):
@@ -181,9 +240,11 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(divf):
     case P_OP(negf):
     case P_OP(i2f):
+    case P_OP(ui2f):
     case P_OP(d2f):
     case P_OP(resultf):
     case P_OP(callf):
+    case P_OP(rcallf):
       return kPCodeRegTypeFloat;
 
     case P_OP(movd):
@@ -197,7 +258,9 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(negd):
     case P_OP(resultd):
     case P_OP(calld):
+    case P_OP(rcalld):
     case P_OP(i2d):
+    case P_OP(ui2d):
     case P_OP(f2d):
       return kPCodeRegTypeDouble;
     default:
@@ -249,6 +312,9 @@ static bool UsesFixedRegister(TargetInstruction* inst) {
     case P_OP(call):
     case P_OP(callf):
     case P_OP(calld):
+    case P_OP(rcall):
+    case P_OP(rcallf):
+    case P_OP(rcalld):
     case P_OP(ap):
     case P_OP(sp):
     case P_OP(fp):

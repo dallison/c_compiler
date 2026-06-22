@@ -34,6 +34,13 @@
 #define SYS_EXIT 12
 
 #elif defined(__p_code__)
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_WRITE 4
+#define SYS_READ 5
+#define SYS_LSEEK 7
+#define SYS_ABORT 11
+#define SYS_EXIT 12
 
 #elif defined(__aarch64__)
 #define SYS_OPEN 2

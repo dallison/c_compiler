@@ -12,7 +12,6 @@
 #include "type.h"
 
 typedef struct ConstexprObject ConstexprObject;
-typedef struct ConstexprValue ConstexprValue;
 typedef struct ConstexprBinding ConstexprBinding;
 
 struct ConstexprValue {
@@ -1385,6 +1384,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     }
   }
   if (node->op == AST_OP(call)) {
+    if (ConstexprPCodeEvaluateCallAsAddress(ctx, node, result)) {
+      return true;
+    }
     return EvaluateConstexprCall(ctx, node, result) && result->is_address;
   }
   return false;

@@ -6,6 +6,9 @@
 //  Copyright © 2020 David Allison. All rights reserved.
 //
 
+#include <stdarg.h>
+#include <stddef.h>
+#include <syscall.h>
 
 #if defined(__risc_v__)
 // Args are:
@@ -18,6 +21,10 @@ int syscall(int n, ...) {
               );
 }
 #elif defined(__p_code__)
+int syscall(int n, ...) {
+  (void)n;
+  return -1;
+}
 #elif defined(__x86_64__)
 // Implemented in x86_64 support/syscall.s
 #elif defined(__aarch64__)
