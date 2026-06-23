@@ -130,6 +130,7 @@ typedef struct {
   bool is_constexpr_eligible;  // C++ constexpr-suitable special member.
   bool is_noexcept_eligible;   // C++ nothrow special member.
   bool is_auto_return_deduced;  // C++ auto return type has been deduced.
+  bool is_deduction_guide;  // C++ class template deduction guide.
   int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
   Symbol* template_origin;  // Primary function template for instantiations.
@@ -224,6 +225,7 @@ struct Struct {
   bool is_aggregate; // True if this is a C++ aggregate class.
   bool cxx_special_members_complete;  // C++ special members declared.
   Vector template_parameters;  // TemplateParameter* entries.
+  Vector deduction_guides;  // Symbol* function-like C++ deduction guides.
   int template_parameter_count;  // Number of parameters for simple templates.
   bool packed;       // __attribute__((packed)): no inter-member padding.
   bool is_abstract;  // C++ class has at least one unimplemented pure virtual.
@@ -435,8 +437,17 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
 bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     Symbol* templ, Vector* explicit_args, Vector* actuals,
     size_t first_formal_arg);
+Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
+                                                    Vector* actuals,
+                                                    size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
+void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
+void TypeEnsureCXXDeductionGuides(Symbol* class_template);
+TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
+                                             Symbol* class_template,
+                                             Vector* actuals);
+bool TypeIsClassTemplatePlaceholder(TypeRecord* type);
 bool TypeIsCXXInitializerList(TypeRecord* type);
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
 TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,

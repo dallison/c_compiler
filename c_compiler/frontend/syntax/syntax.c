@@ -1715,9 +1715,12 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
 }
 
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close);
-static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym);
+static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
+                                          bool wrap_aggregate_braces);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static StructMember* FindCXXConstructor(TypeRecord* type);
+static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
+                                          ASTNode* initializer);
 static ASTNode* NewCXXCompleteObjectGuardedStatement(TypeRecord* func,
                                                     Vector* statements,
                                                     SourceLocation location);
@@ -3069,6 +3072,74 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
 static bool TypeContainsClassTemplate(TypeRecord* type);
 static int CurrentTemplateParameterListLength(Syntax* syntax);
 static int CurrentTemplateParameterBase(Syntax* syntax);
+static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
+                                                    TypeRecord* func);
+
+static TypeRecord* CXXClassTemplatePlaceholderBase(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
+        t->template_arguments == NULL && t->info.struct_info != NULL &&
+        t->info.struct_info->is_template) {
+      return t;
+    }
+  }
+  return NULL;
+}
+
+static Symbol* CXXClassTemplateOrigin(TypeRecord* type) {
+  TypeRecord* base = CXXClassTemplatePlaceholderBase(type);
+  if (base != NULL) {
+    return base->template_origin;
+  }
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->template_origin != NULL) {
+      return t->template_origin;
+    }
+  }
+  return NULL;
+}
+
+static bool TryParseCXXDeductionGuide(Syntax* syntax, Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      !TypeIsFunction(sym->type) || !LexLookingAt(syntax->lex, TOK(arrow))) {
+    return false;
+  }
+  Symbol* declared_template = CXXClassTemplateOrigin(sym->type->next);
+
+  LexNextToken(syntax->lex);
+  TypeParser return_parser;
+  TypeParserInit(&return_parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* guide_return = TypeParserParseType(&return_parser, true);
+  TypeParserDestruct(&return_parser);
+  Symbol* deduced_template = CXXClassTemplateOrigin(guide_return);
+  if (deduced_template == NULL) {
+    SyntaxError(syntax, "Deduction guide return type must be a class template-id");
+  } else if (declared_template != NULL && deduced_template != declared_template) {
+    SyntaxError(syntax, "Deduction guide return type does not match %s",
+                declared_template->name.value);
+  }
+  Symbol* class_template =
+      deduced_template != NULL ? deduced_template : declared_template;
+  if (class_template == NULL) {
+    TypeRecordDelete(guide_return);
+    SymbolDelete(sym);
+    return true;
+  }
+
+  if (sym->type->next != NULL) {
+    TypeRecordDelete(sym->type->next);
+  }
+  TypeRecordIncRef(guide_return);
+  sym->type->next = guide_return;
+  sym->type->info.function.is_deduction_guide = true;
+  if (syntax->parsing_template_declaration &&
+      sym->type->info.function.template_parameters.length == 0) {
+    MoveCurrentTemplateParametersToFunction(syntax, sym->type);
+  }
+  TypeAddCXXDeductionGuide(class_template, sym);
+  return true;
+}
 
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
@@ -3093,6 +3164,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             CurrentTemplateParameterListLength(syntax);
         sym->type->info.function.template_parameter_base =
             CurrentTemplateParameterBase(syntax);
+      }
+      if (TryParseCXXDeductionGuide(syntax, sym)) {
+        TypeParserReset(parser);
+        continue;
       }
       old_sym = parser->cxx_member_definition != NULL
           ? parser->cxx_member_definition->symbol
@@ -3303,14 +3378,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     } else if (parser->is_inline) {
       SyntaxError(syntax, "inline can only be applied to functions");
     }
-    if (TypeIsAbstractClass(sym->type)) {
+    if (!TypeIsClassTemplatePlaceholder(sym->type) &&
+        TypeIsAbstractClass(sym->type)) {
       SyntaxError(syntax, "Cannot declare object of abstract class %s",
                   sym->type->info.struct_info->tag_name != NULL
                       ? sym->type->info.struct_info->tag_name->value
                       : "<anonymous>");
     }
     if (!syntax->parsing_template_declaration &&
-        TypeContainsClassTemplate(sym->type)) {
+        TypeContainsClassTemplate(sym->type) &&
+        !TypeIsClassTemplatePlaceholder(sym->type)) {
       SyntaxError(syntax, "Class template instantiation is not supported yet");
     }
     
@@ -3337,7 +3414,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       syntax->init_storage = storage;
       initializer = SyntaxParseInitializer(syntax, sym, storage);
     } else {
-      initializer = ParseCXXDirectInitializer(syntax, sym);
+      initializer = ParseCXXDirectInitializer(syntax, sym, false);
       if (initializer != NULL) {
         if (!StorageIs(storage, STO(extern))) {
           sym->flags.is_defined = true;
@@ -3360,6 +3437,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       SyntaxError(syntax, sym->flags.is_constinit
                               ? "constinit variable requires an initializer"
                               : "constexpr variable requires an initializer");
+    }
+    if (!syntax->parsing_template_declaration &&
+        TypeIsClassTemplatePlaceholder(sym->type)) {
+      SyntaxError(syntax, "Class template argument deduction requires an initializer");
     }
     ASTNode* decl = NewVariableDeclarationASTNode(
         sym, initializer, syntax->lex->current_token_location);
@@ -3973,6 +4054,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
         existing_alias->flags.is_template = true;
       }
     }
+    TypeEnsureCXXDeductionGuides(syntax->last_parsed_tag);
   }
 }
 
@@ -4274,24 +4356,72 @@ static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
   return actuals;
 }
 
-static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
+static void AnalyzeCXXInitializerArgumentTypes(Vector* actuals) {
+  for (size_t i = 0; actuals != NULL && i < actuals->length; i++) {
+    ASTNode* actual = actuals->value.p[i];
+    if (actual != NULL) {
+      VectorSet(actuals, i, AnalyzeExpression(actual));
+    }
+  }
+}
+
+static bool ResolveCXXClassTemplateArgumentDeduction(Syntax* syntax,
+                                                     Symbol* sym,
+                                                     Vector* actuals) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      !TypeIsClassTemplatePlaceholder(sym->type)) {
+    return true;
+  }
+  Symbol* class_template = CXXClassTemplateOrigin(sym->type);
+  AnalyzeCXXInitializerArgumentTypes(actuals);
+  TypeRecord* deduced =
+      TypeDeduceClassTemplateFromGuide(syntax, class_template, actuals);
+  if (deduced == NULL) {
+    SyntaxError(syntax, "Could not deduce template arguments for %s",
+                class_template != NULL ? class_template->name.value
+                                       : "<class template>");
+    return false;
+  }
+  SymbolSetType(sym, deduced);
+  TypeRecordDelete(deduced);
+  return true;
+}
+
+static ASTNode* NewCXXBracedInitializerFromActuals(Vector* actuals,
+                                                   SourceLocation location) {
+  Vector* initializers = NewVector();
+  for (size_t i = 0; actuals != NULL && i < actuals->length; i++) {
+    ASTNode* actual = actuals->value.p[i];
+    VectorAppend(initializers,
+                 NewExpressionInitializerASTNode(actual, location));
+  }
+  if (actuals != NULL) {
+    actuals->length = 0;
+    VectorDelete(actuals);
+  }
+  return NewBracedInitializerASTNode(initializers, NULL, location);
+}
+
+static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
+                                          bool wrap_aggregate_braces) {
   if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type)) {
     return NULL;
   }
-  StructMember* constructor = FindCXXConstructor(sym->type);
-  if (constructor == NULL) {
-    return NULL;
-  }
-  if (sym->type->info.struct_info->is_aggregate &&
+  if (!TypeIsClassTemplatePlaceholder(sym->type) &&
+      sym->type->info.struct_info->is_aggregate &&
       LexLookingAt(syntax->lex, TOK(lbrace))) {
     return NULL;
   }
-
   SourceLocation location = syntax->lex->current_token_location;
   Vector* actuals = NULL;
+  bool braced = false;
   if (LexMatch(syntax->lex, TOK(lparen))) {
     actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
   } else if (LexMatch(syntax->lex, TOK(lbrace))) {
+    braced = true;
+    StructMember* constructor = TypeIsClassTemplatePlaceholder(sym->type)
+                                    ? NULL
+                                    : FindCXXConstructor(sym->type);
     if (CXXConstructorSetHasInitializerList(constructor)) {
       actuals = NewVector();
       VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
@@ -4300,6 +4430,25 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
     }
   } else {
     return NULL;
+  }
+  if (!ResolveCXXClassTemplateArgumentDeduction(syntax, sym, actuals)) {
+    VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  StructMember* constructor = FindCXXConstructor(sym->type);
+  if (constructor == NULL ||
+      (braced && sym->type->info.struct_info->is_aggregate)) {
+    ASTNode* braced_initializer =
+        braced ? NewCXXBracedInitializerFromActuals(actuals, location) : NULL;
+    if (braced_initializer == NULL) {
+      VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
+                               /*free_element=*/false);
+    }
+    if (braced_initializer != NULL && wrap_aggregate_braces) {
+      return NewVariableInitExpression(syntax, sym, braced_initializer);
+    }
+    return braced_initializer;
   }
   return NewCXXConstructorCall(syntax, sym, actuals, location);
 }
@@ -4591,14 +4740,16 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (parser->is_inline) {
          SyntaxError(syntax, "inline can only be applied to functions");
       }
-      if (TypeIsAbstractClass(sym->type)) {
+      if (!TypeIsClassTemplatePlaceholder(sym->type) &&
+          TypeIsAbstractClass(sym->type)) {
         SyntaxError(syntax, "Cannot declare object of abstract class %s",
                     sym->type->info.struct_info->tag_name != NULL
                         ? sym->type->info.struct_info->tag_name->value
                         : "<anonymous>");
       }
       if (!syntax->parsing_template_declaration &&
-          TypeContainsClassTemplate(sym->type)) {
+          TypeContainsClassTemplate(sym->type) &&
+          !TypeIsClassTemplatePlaceholder(sym->type)) {
         SyntaxError(syntax, "Class template instantiation is not supported yet");
       }
       // Any initializer?
@@ -4608,7 +4759,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         initializer = SyntaxParseInitializer(syntax, sym, storage);
         initializer = NewVariableInitExpression(syntax, sym, initializer);
       } else {
-        initializer = ParseCXXDirectInitializer(syntax, sym);
+        initializer = ParseCXXDirectInitializer(syntax, sym, true);
         if (initializer == NULL && CompilerIsCXX() &&
             LexMatch(syntax->lex, TOK(lbrace))) {
           initializer =
@@ -4626,6 +4777,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           } else {
             initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
           }
+        }
+        if (!syntax->parsing_template_declaration &&
+            TypeIsClassTemplatePlaceholder(sym->type)) {
+          SyntaxError(syntax,
+                      "Class template argument deduction requires an initializer");
         }
       }
 

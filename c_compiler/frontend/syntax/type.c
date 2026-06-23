@@ -594,6 +594,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_constexpr_eligible = false;
   t->info.function.is_noexcept_eligible = true;
   t->info.function.is_auto_return_deduced = false;
+  t->info.function.is_deduction_guide = false;
   t->info.function.virtual_index = -1;
   t->info.function.cxx_member_owner = NULL;
   t->info.function.template_origin = NULL;
@@ -719,6 +720,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->members);
   VectorInit(&s->virtual_members);
   VectorInit(&s->template_parameters);
+  VectorInit(&s->deduction_guides);
   s->vptr_member = NULL;
   s->vtable_symbol = NULL;
   s->vbptr_member = NULL;
@@ -773,6 +775,9 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
+  VectorDestructWithContents(&s->deduction_guides,
+                             (VectorElementDestructor)SymbolDestruct,
+                             /*free_element=*/true);
   MapDestruct(&s->symbol_table);
 }
 
@@ -1212,6 +1217,7 @@ static void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
                                          Symbol* tag);
 static void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
                                              Symbol* tag);
+static void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag);
 static void UpdateStructSize(Struct* str, TypeRecord* member_type,
                              bool is_union);
 static void FinalizeStructAlignment(Struct* str);
@@ -2114,6 +2120,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.is_noexcept_eligible;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
+  func->info.function.is_deduction_guide =
+      from->info.function.is_deduction_guide;
   func->info.function.virtual_index = from->info.function.virtual_index;
   func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
   TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
@@ -2640,6 +2648,120 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   return true;
 }
 
+Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
+                                                    Vector* actuals,
+                                                    size_t first_formal_arg) {
+  return DeduceSimpleFunctionTemplateArguments(templ, NULL, actuals,
+                                               first_formal_arg);
+}
+
+void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide) {
+  if (class_template == NULL || class_template->type == NULL ||
+      !TypeIsStructOrUnion(class_template->type) ||
+      class_template->type->info.struct_info == NULL || guide == NULL) {
+    return;
+  }
+  VectorAppend(&class_template->type->info.struct_info->deduction_guides, guide);
+}
+
+bool TypeIsClassTemplatePlaceholder(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
+        t->template_arguments == NULL && t->info.struct_info != NULL &&
+        t->info.struct_info->is_template) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TypeRecord* TypeDeduceClassTemplateFromGuide(Syntax* syntax,
+                                             Symbol* class_template,
+                                             Vector* actuals) {
+  if (syntax == NULL || class_template == NULL || class_template->type == NULL ||
+      !class_template->flags.is_template || actuals == NULL ||
+      !TypeIsStructOrUnion(class_template->type) ||
+      class_template->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = class_template->type->info.struct_info;
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* result = NULL;
+  bool ambiguous = false;
+  for (size_t i = 0; i < str->deduction_guides.length; i++) {
+    Symbol* guide = str->deduction_guides.value.p[i];
+    if (guide == NULL || guide->type == NULL || !TypeIsFunction(guide->type)) {
+      continue;
+    }
+    TypeRecord* guide_return = NULL;
+    if (guide->flags.is_template) {
+      Vector* args =
+          TypeDeduceFunctionTemplateArgumentsFromCall(guide, actuals, 0);
+      if (args == NULL) {
+        continue;
+      }
+      guide_return = SubstituteTemplateParameters(&parser, guide->type->next,
+                                                  args);
+      VectorDeleteWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    } else {
+      if (actuals->length != guide->type->info.function.prototype.length) {
+        continue;
+      }
+      bool viable = true;
+      for (size_t j = 0; viable && j < actuals->length; j++) {
+        Symbol* formal = guide->type->info.function.prototype.value.p[j];
+        ASTNode* actual = actuals->value.p[j];
+        viable = formal != NULL && actual != NULL &&
+                 TypeEqual(formal->type, actual->type);
+      }
+      if (!viable) {
+        continue;
+      }
+      guide_return = TypeRecordCopy(guide->type->next);
+    }
+    if (guide_return == NULL) {
+      continue;
+    }
+    TypeRecord* candidate = NULL;
+    if (guide_return->template_origin == class_template &&
+        guide_return->template_arguments != NULL) {
+      candidate =
+          TypeInstantiateClassTemplate(syntax, class_template,
+                                       guide_return->template_arguments);
+    } else if (guide_return->template_origin == class_template ||
+               (TypeIsStructOrUnion(guide_return) &&
+                guide_return->info.struct_info != NULL &&
+                !guide_return->info.struct_info->is_template)) {
+      candidate = TypeRecordCopy(guide_return);
+    }
+    TypeRecordDelete(guide_return);
+    if (candidate == NULL) {
+      continue;
+    }
+    if (result == NULL) {
+      result = candidate;
+    } else if (!TypeEqual(result, candidate)) {
+      ambiguous = true;
+      TypeRecordDelete(candidate);
+    } else {
+      TypeRecordDelete(candidate);
+    }
+  }
+  TypeParserDestruct(&parser);
+  if (ambiguous) {
+    SyntaxError(syntax, "Ambiguous class template argument deduction for %s",
+                class_template->name.value);
+    if (result != NULL) {
+      TypeRecordDelete(result);
+    }
+    return NULL;
+  }
+  return result;
+}
+
 static StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
                                                        Struct* owner,
                                                        StructMember* member,
@@ -2947,6 +3069,7 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
   ComputeCXXAggregateStatus(str);
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
+  AddImplicitCXXDeductionGuides(str, tag);
   StringDestruct(&instantiated_name);
   VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -3138,7 +3261,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 typedef_name.template_arguments.value.p[
                     typedef_name.template_arguments.length - 1];
             args = TemplateArgumentVectorCopy(parsed_args);
-          } else {
+          } else if (LexLookingAt(lex, TOK(less))) {
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
         }
@@ -3148,6 +3271,11 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else {
           type_record = TypeRecordCopy(symbol->type);
+          if (symbol->flags.is_template && args == NULL &&
+              !parser->syntax->parsing_template_declaration &&
+              TypeIsStructOrUnion(symbol->type)) {
+            type_record->template_origin = symbol;
+          }
           if (symbol->flags.is_template && args != NULL &&
               parser->syntax->parsing_template_declaration &&
               TypeIsStructOrUnion(symbol->type)) {
@@ -3178,7 +3306,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         if (StorageIs(symbol->storage, STO(typedef))) {
           LexNextToken(lex);
           Vector* args = NULL;
-          if (symbol->flags.is_template) {
+          if (symbol->flags.is_template && LexLookingAt(lex, TOK(less))) {
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
           if (symbol->flags.is_template && args != NULL &&
@@ -3187,6 +3315,11 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = TypeRecordCopy(symbol->type);
+            if (symbol->flags.is_template && args == NULL &&
+                !parser->syntax->parsing_template_declaration &&
+                TypeIsStructOrUnion(symbol->type)) {
+              type_record->template_origin = symbol;
+            }
             if (symbol->flags.is_template && args != NULL &&
                 parser->syntax->parsing_template_declaration &&
                 TypeIsStructOrUnion(symbol->type)) {
@@ -7083,6 +7216,180 @@ static void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
   str->cxx_special_members_complete = true;
 }
 
+static TemplateArgument* NewTemplateParameterPatternArgument(
+    TemplateParameter* param) {
+  if (param == NULL) {
+    return NULL;
+  }
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  arg->kind = param->kind;
+  arg->type = NULL;
+  arg->int_value = 0;
+  arg->template_parameter_index = -1;
+  if (param->kind == kTemplateParameterType) {
+    arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    arg->type->template_parameter_index = param->index;
+  } else {
+    arg->template_parameter_index = param->index;
+  }
+  return arg;
+}
+
+static TypeRecord* NewCXXDeductionGuideReturnType(Symbol* tag) {
+  if (tag == NULL || tag->type == NULL ||
+      !TypeIsStructOrUnion(tag->type) ||
+      tag->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = TypeRecordCopy(tag->type);
+  type->template_origin = tag;
+  type->template_arguments = NewVector();
+  Struct* str = tag->type->info.struct_info;
+  for (size_t i = 0; i < str->template_parameters.length; i++) {
+    TemplateArgument* arg = NewTemplateParameterPatternArgument(
+        str->template_parameters.value.p[i]);
+    if (arg != NULL) {
+      VectorAppend(type->template_arguments, arg);
+    }
+  }
+  return type;
+}
+
+static void CopyClassTemplateParametersToGuide(Struct* str, TypeRecord* func) {
+  if (str == NULL || func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  VectorDestructWithContents(&func->info.function.template_parameters,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
+  VectorInit(&func->info.function.template_parameters);
+  for (size_t i = 0; i < str->template_parameters.length; i++) {
+    VectorAppend(&func->info.function.template_parameters,
+                 TemplateParameterCopy(str->template_parameters.value.p[i]));
+  }
+  func->info.function.template_parameter_count =
+      (int)str->template_parameters.length;
+  func->info.function.template_parameter_base = 0;
+}
+
+static size_t CXXConstructorImplicitParameterCount(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL) {
+    return 0;
+  }
+  size_t count = 1;
+  if (func->info.function.is_constructor &&
+      StructHasVirtualBases(func->info.function.cxx_member_owner)) {
+    count++;
+  }
+  return count;
+}
+
+static Symbol* NewCXXDeductionGuideSymbol(Struct* str, Symbol* tag,
+                                          TypeRecord* pattern,
+                                          size_t first_formal) {
+  TypeRecord* guide_type = NewFunctionTypeRecord();
+  guide_type->info.function.is_deduction_guide = true;
+  CopyClassTemplateParametersToGuide(str, guide_type);
+  TypeRecord* return_type = NewCXXDeductionGuideReturnType(tag);
+  if (return_type == NULL) {
+    TypeRecordDelete(guide_type);
+    return NULL;
+  }
+  TypeRecordChain(guide_type, return_type);
+  if (pattern != NULL && TypeIsFunction(pattern)) {
+    for (size_t i = first_formal; i < pattern->info.function.prototype.length; i++) {
+      Symbol* formal = pattern->info.function.prototype.value.p[i];
+      if (formal == NULL || formal->type == NULL) {
+        continue;
+      }
+      Symbol* clone = NewSymbol(formal->name.value, formal->type, formal->storage);
+      clone->flags = formal->flags;
+      clone->flags.is_argument = true;
+      clone->location = formal->location;
+      clone->value.arg_number = (int32_t)guide_type->info.function.prototype.length;
+      VectorAppend(&guide_type->info.function.prototype, clone);
+    }
+  }
+  Symbol* guide = NewSymbol(tag->name.value, guide_type, STO(implicit));
+  guide->flags.is_template = guide_type->info.function.template_parameter_count > 0;
+  guide->location = tag->location;
+  guide_type->info.function.symbol = guide;
+  return guide;
+}
+
+static void AddImplicitCXXConstructorDeductionGuide(Struct* str, Symbol* tag,
+                                                   StructMember* member) {
+  if (member == NULL || !member->is_member_function ||
+      member->symbol == NULL || member->symbol->type == NULL ||
+      !member->symbol->type->info.function.is_constructor ||
+      member->symbol->flags.is_template) {
+    return;
+  }
+  TypeRecord* func = member->symbol->type;
+  Symbol* guide = NewCXXDeductionGuideSymbol(
+      str, tag, func, CXXConstructorImplicitParameterCount(func));
+  TypeAddCXXDeductionGuide(tag, guide);
+}
+
+static void AddImplicitCXXAggregateDeductionGuide(Struct* str, Symbol* tag) {
+  if (!str->is_aggregate) {
+    return;
+  }
+  TypeRecord* guide_type = NewFunctionTypeRecord();
+  guide_type->info.function.is_deduction_guide = true;
+  CopyClassTemplateParametersToGuide(str, guide_type);
+  TypeRecord* return_type = NewCXXDeductionGuideReturnType(tag);
+  if (return_type == NULL) {
+    TypeRecordDelete(guide_type);
+    return;
+  }
+  TypeRecordChain(guide_type, return_type);
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || StructMemberIsNestedType(member)) {
+      continue;
+    }
+    Symbol* formal =
+        NewSymbol(member->symbol->name.value, member->symbol->type, STO(auto));
+    formal->flags.is_argument = true;
+    formal->location = member->symbol->location;
+    formal->value.arg_number = (int32_t)guide_type->info.function.prototype.length;
+    VectorAppend(&guide_type->info.function.prototype, formal);
+  }
+  Symbol* guide = NewSymbol(tag->name.value, guide_type, STO(implicit));
+  guide->flags.is_template = guide_type->info.function.template_parameter_count > 0;
+  guide->location = tag->location;
+  guide_type->info.function.symbol = guide;
+  TypeAddCXXDeductionGuide(tag, guide);
+}
+
+static void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag) {
+  if (!CompilerIsCXX() || str == NULL || tag == NULL || !str->is_template ||
+      str->template_parameters.length == 0 || str->deduction_guides.length > 0) {
+    return;
+  }
+  if (str->tag_name != NULL) {
+    StructMember* first = FindStructMember(str, str->tag_name);
+    for (StructMember* member = first; member != NULL;
+         member = member->overload_next) {
+      AddImplicitCXXConstructorDeductionGuide(str, tag, member);
+    }
+  }
+  AddImplicitCXXAggregateDeductionGuide(str, tag);
+}
+
+void TypeEnsureCXXDeductionGuides(Symbol* class_template) {
+  if (class_template == NULL || class_template->type == NULL ||
+      !TypeIsStructOrUnion(class_template->type) ||
+      class_template->type->info.struct_info == NULL) {
+    return;
+  }
+  AddImplicitCXXDeductionGuides(class_template->type->info.struct_info,
+                                class_template);
+}
+
 static void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union) {
   // Check the constraints for flexible arrays.
   // 1. Flexible array cannot be the only member
@@ -7239,6 +7546,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   ComputeCXXAggregateStatus(str);
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
+  AddImplicitCXXDeductionGuides(str, tag);
   if (class_tag_scope != NULL) {
     assert(parser->syntax->local_tag_stack == class_tag_scope);
     parser->syntax->local_tag_stack = class_tag_scope->prev;
