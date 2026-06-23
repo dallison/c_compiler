@@ -5341,6 +5341,140 @@ static void QueueInlineMemberFunctionDefinition(Symbol* symbol) {
                NewDeclarationListASTNode(declarations, symbol->location));
 }
 
+static bool TypeNeedsCXXCompleteObjectArgument(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+         StructHasVirtualBases(type->info.struct_info);
+}
+
+static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
+                                             SourceLocation location) {
+  if (actuals == NULL || !TypeNeedsCXXCompleteObjectArgument(type)) {
+    return;
+  }
+  ASTNode* arg =
+      NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location);
+  if (actuals->length == 0) {
+    VectorAppend(actuals, arg);
+  } else {
+    VectorInsertBefore(actuals, 0, arg);
+  }
+}
+
+static StructMember* FindCXXDestructorForObjectType(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(type->info.struct_info, &destructor_name);
+  StringDestruct(&destructor_name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      destructor->symbol == NULL || destructor->symbol->type == NULL ||
+      !destructor->symbol->type->info.function.is_destructor) {
+    return NULL;
+  }
+  return destructor;
+}
+
+static TypeRecord* CXXDestructibleElementType(TypeRecord* type) {
+  if (TypeIsFixedArray(type) && type->next != NULL &&
+      FindCXXDestructorForObjectType(type->next) != NULL) {
+    return type->next;
+  }
+  if (FindCXXDestructorForObjectType(type) != NULL) {
+    return type;
+  }
+  return NULL;
+}
+
+static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
+                                     SourceLocation location) {
+  if (func == NULL || func->info.function.prototype.length == 0 ||
+      member == NULL || member->symbol == NULL) {
+    return NULL;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
+  ASTNode* member_name =
+      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+                               location);
+  return NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node,
+                          member_name);
+}
+
+static ASTNode* NewCXXMemberDestructorCall(TypeRecord* func,
+                                           TypeRecord* object_type,
+                                           ASTNode* receiver,
+                                           SourceLocation location) {
+  if (func == NULL || object_type == NULL ||
+      object_type->info.struct_info == NULL ||
+      object_type->info.struct_info->tag_name == NULL) {
+    ASTNodeDelete(receiver);
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(object_type, actuals, location);
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, object_type->info.struct_info->tag_name);
+  ASTNode* destructor =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL, location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, destructor);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
+                                           SourceLocation location) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = owner->members.length; i > 0; i--) {
+    StructMember* member = owner->members.value.p[i - 1];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    TypeRecord* member_type = member->symbol->type;
+    TypeRecord* object_type = CXXDestructibleElementType(member_type);
+    if (object_type == NULL) {
+      continue;
+    }
+    if (TypeIsFixedArray(member_type)) {
+      for (size_t index = member_type->info.array.size.fixed; index > 0;
+           index--) {
+        ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+        ASTNode* index_node = NewIntConstantASTNode(
+            (int64_t)index - 1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+            location);
+        receiver = NewBinaryASTNode(AST_OP(subscript), NULL, location,
+                                    receiver, index_node);
+        ASTNode* call = NewCXXMemberDestructorCall(func, object_type, receiver,
+                                                   location);
+        if (call != NULL) {
+          VectorAppend(body, call);
+        }
+      }
+    } else {
+      ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+      ASTNode* call = NewCXXMemberDestructorCall(func, object_type, receiver,
+                                                 location);
+      if (call != NULL) {
+        VectorAppend(body, call);
+      }
+    }
+  }
+}
+
 static bool ParseInlineMemberFunctionBody(TypeParser* parser,
                                           Symbol* member_symbol) {
   Syntax* syntax = parser->syntax;
@@ -5388,6 +5522,8 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   SyntaxInsertCXXConstructorPreamble(syntax, member_symbol->type, body,
                                      &cxx_initializers,
                                      member_symbol->location);
+  AppendCXXMemberDestructorCalls(member_symbol->type, body,
+                                 member_symbol->location);
   SyntaxCloseScope(syntax);
   syntax->context = old_context;
   member_symbol->type->info.function.body =
@@ -5498,11 +5634,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
     AddStructMember(parser, str, member);
   }
   StringDestruct(&member_name);
-  if (is_destructor) {
-    SkipInlineMemberFunctionBody(parser);
-  } else {
-    ParseInlineMemberFunctionBody(parser, member_symbol);
-  }
+  ParseInlineMemberFunctionBody(parser, member_symbol);
   return true;
 }
 
@@ -5990,6 +6122,80 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   }
 }
 
+static bool StructHasDeclaredCXXDestructor(Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->tag_name == NULL) {
+    return false;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, str->tag_name);
+  StructMember* destructor = FindStructMember(str, &destructor_name);
+  StringDestruct(&destructor_name);
+  return destructor != NULL && destructor->is_member_function &&
+         destructor->symbol != NULL && destructor->symbol->type != NULL &&
+         destructor->symbol->type->info.function.is_destructor;
+}
+
+static bool StructNeedsImplicitCXXDestructor(Struct* str) {
+  if (!CompilerIsCXX() || str == NULL || str->is_union) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    if (CXXDestructibleElementType(member->symbol->type) != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
+                                             Symbol* tag) {
+  if (!CompilerIsCXX() || parser == NULL || str == NULL || tag == NULL ||
+      str->tag_name == NULL || StructHasDeclaredCXXDestructor(str) ||
+      !StructNeedsImplicitCXXDestructor(str)) {
+    return;
+  }
+
+  SourceLocation location = tag->location;
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_destructor = true;
+  func->info.function.is_constexpr = true;
+  func->info.function.is_inline = true;
+  func->info.function.definition = true;
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  TypeRecordAddCXXThisParameter(func, str, location);
+
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, str->tag_name);
+  Symbol* symbol = NewSymbol(destructor_name.value, func, STO(implicit));
+  StringDestruct(&destructor_name);
+  symbol->flags.invented = true;
+  symbol->flags.is_defined = true;
+  symbol->flags.is_inline_defn = true;
+  symbol->location = location;
+  symbol->value.func_defn = symbol;
+  func->info.function.symbol = symbol;
+
+  StructMember* member = NewStructMember(symbol);
+  member->is_member_function = true;
+  member->access = str->is_class ? kAccessPublic : kAccessPublic;
+  AddStructMember(parser, str, member);
+
+  Vector* body = NewVector();
+  AppendCXXMemberDestructorCalls(func, body, location);
+  func->info.function.body = NewCompoundStatementASTNode(body, location);
+  VectorAppend(&compiler->declaration_asts, func->info.function.body);
+  if (!parser->syntax->parsing_template_declaration) {
+    QueueInlineMemberFunctionDefinition(symbol);
+  }
+}
+
 static void CheckFlexibleArrays(TypeParser* parser, Struct* str, bool is_union) {
   // Check the constraints for flexible arrays.
   // 1. Flexible array cannot be the only member
@@ -6143,6 +6349,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     parser->syntax->local_tag_stack = class_tag_scope;
   }
   ParseStructMembers(parser, str, is_union, tag_name);
+  AddImplicitCXXDestructorIfNeeded(parser, str, tag);
   if (class_tag_scope != NULL) {
     assert(parser->syntax->local_tag_stack == class_tag_scope);
     parser->syntax->local_tag_stack = class_tag_scope->prev;

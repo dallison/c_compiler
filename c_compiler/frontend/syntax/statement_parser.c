@@ -72,25 +72,25 @@ static void RangeForBindingDestruct(RangeForBinding* binding) {
   VectorDestruct(&binding->symbols);
 }
 
-static ASTNode* NewCXXDestructorCall(Symbol* sym, SourceLocation location) {
-  if (!CompilerIsCXX() || sym == NULL || StorageIs(sym->storage, STO(static)) ||
-      !TypeIsStructOrUnion(sym->type) || sym->type->info.struct_info == NULL ||
-      sym->type->info.struct_info->tag_name == NULL) {
+static ASTNode* NewCXXDestructorCallForReceiver(TypeRecord* type,
+                                                ASTNode* receiver,
+                                                SourceLocation location) {
+  if (!CompilerIsCXX() || receiver == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
 
   String destructor_name;
   StringInit(&destructor_name, "~");
-  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
   StructMember* destructor =
-      FindStructMember(sym->type->info.struct_info, &destructor_name);
+      FindStructMember(type->info.struct_info, &destructor_name);
   if (destructor == NULL || !destructor->is_member_function ||
       !destructor->symbol->type->info.function.is_destructor) {
     StringDestruct(&destructor_name);
     return NULL;
   }
 
-  ASTNode* receiver = NewIdentifierASTNode(sym, location);
   ASTNode* member = NewStringConstantASTNode(NewString(destructor_name.value),
                                             NULL, location);
   ASTNode* member_access =
@@ -99,6 +99,29 @@ static ASTNode* NewCXXDestructorCall(Symbol* sym, SourceLocation location) {
   return NewExpressionStatementASTNode(
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector()),
       location);
+}
+
+static ASTNode* NewCXXDestructorCall(Symbol* sym, SourceLocation location) {
+  if (sym == NULL || StorageIs(sym->storage, STO(static)) ||
+      !TypeIsStructOrUnion(sym->type)) {
+    return NULL;
+  }
+  return NewCXXDestructorCallForReceiver(
+      sym->type, NewIdentifierASTNode(sym, location), location);
+}
+
+static ASTNode* NewCXXArrayElementDestructorCall(Symbol* sym, int64_t index,
+                                                 SourceLocation location) {
+  if (sym == NULL || StorageIs(sym->storage, STO(static)) ||
+      !TypeIsFixedArray(sym->type) || !TypeIsStructOrUnion(sym->type->next)) {
+    return NULL;
+  }
+  ASTNode* array = NewIdentifierASTNode(sym, location);
+  ASTNode* subscript = NewBinaryASTNode(
+      AST_OP(subscript), NULL, location, array,
+      NewIntConstantASTNode(index, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+  return NewCXXDestructorCallForReceiver(sym->type->next, subscript, location);
 }
 
 static void AppendCXXDestructorCalls(Vector* statements) {
@@ -119,10 +142,22 @@ static void AppendCXXDestructorCalls(Vector* statements) {
       }
       VariableDeclarationASTNode* decl =
           (VariableDeclarationASTNode*)decl_node;
-      ASTNode* destructor =
-          NewCXXDestructorCall(decl->symbol, decl->base.location);
-      if (destructor != NULL) {
-        VectorAppend(statements, destructor);
+      if (TypeIsFixedArray(decl->symbol->type) &&
+          TypeIsStructOrUnion(decl->symbol->type->next)) {
+        int64_t length = decl->symbol->type->info.array.size.fixed;
+        for (int64_t k = length; k > 0; k--) {
+          ASTNode* destructor = NewCXXArrayElementDestructorCall(
+              decl->symbol, k - 1, decl->base.location);
+          if (destructor != NULL) {
+            VectorAppend(statements, destructor);
+          }
+        }
+      } else {
+        ASTNode* destructor =
+            NewCXXDestructorCall(decl->symbol, decl->base.location);
+        if (destructor != NULL) {
+          VectorAppend(statements, destructor);
+        }
       }
     }
   }

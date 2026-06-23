@@ -101,6 +101,7 @@ enum {
   kConstexprPCodeEscapeMalloc = 100,
   kConstexprPCodeEscapeFree = 101,
   kConstexprPCodeEscapeRealloc = 102,
+  kConstexprPCodeEscapePlacementNew = 103,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -115,6 +116,11 @@ static const uint32_t constexpr_pcode_free_stub[] = {
 
 static const uint32_t constexpr_pcode_realloc_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeRealloc,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_placement_new_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapePlacementNew,
     (PCODE_OP(ret) << 24),
 };
 
@@ -410,6 +416,11 @@ static bool ConstexprPCodeRuntimeSymbolAddress(AssemblerSymbol* symbol,
   if (IsConstexprPCodeRuntimeSymbol(symbol, "malloc") ||
       IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_Z6malloc")) {
     *address = (uint64_t)(uintptr_t)constexpr_pcode_malloc_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwmPv") ||
+      IsConstexprPCodeRuntimeSymbolPrefix(symbol, "_ZnwyPv")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_placement_new_stub;
     return true;
   }
   if (IsConstexprPCodeRuntimeSymbol(symbol, "operator new") ||
@@ -1137,6 +1148,9 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
           vm, (void*)constexpr_pcode_malloc_stub,
           sizeof(constexpr_pcode_malloc_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_placement_new_stub,
+          sizeof(constexpr_pcode_placement_new_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_free_stub, sizeof(constexpr_pcode_free_stub),
           false) ||
       !PCodeVMRegisterMemoryRegion(
@@ -1839,6 +1853,12 @@ static PCodeVMStatus ConstexprPCodeEscapeRealloc(
   return kPCodeVMStatusRunning;
 }
 
+static PCodeVMStatus ConstexprPCodeEscapePlacementNew(PCodeVM* vm) {
+  vm->iregs[PCODE_INT_RETURN_REG] =
+      (int64_t)(uintptr_t)ConstexprPCodeStackArgument(vm, 1);
+  return kPCodeVMStatusRunning;
+}
+
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
   ConstexprPCodeRuntime* runtime = data;
   switch (code) {
@@ -1853,6 +1873,8 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
     case kConstexprPCodeEscapeRealloc:
       return runtime != NULL ? ConstexprPCodeEscapeRealloc(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapePlacementNew:
+      return ConstexprPCodeEscapePlacementNew(vm);
     default:
       return kPCodeVMStatusUndefinedEscape;
   }

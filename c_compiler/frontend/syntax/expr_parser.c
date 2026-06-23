@@ -1239,6 +1239,15 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
+  } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(tilde))) {
+    if (LexLookingAt(syntax->lex, TOK(identifier))) {
+      member_name = NewString("~");
+      StringAppend(member_name, syntax->lex->spelling.value);
+      LexNextToken(syntax->lex);
+    } else {
+      SyntaxError(syntax, "Expected destructor name");
+      member_name = NewString(SyntaxFakeName(syntax));
+    }
   } else {
     SyntaxError(syntax, "Expected struct or union member name");
     member_name = NewString(SyntaxFakeName(syntax));
@@ -1487,6 +1496,9 @@ done:
   return result;
 }
 
+static Symbol* FindCXXAllocationFunctionByArgCount(Symbol* first,
+                                                   size_t arg_count);
+
 static Symbol* GetImplicitCXXAllocationFunction(const char* name,
                                                 TypeRecord* return_type,
                                                 TypeRecord* arg_type,
@@ -1495,10 +1507,11 @@ static Symbol* GetImplicitCXXAllocationFunction(const char* name,
   StringInit(&symbol_name, name);
   Symbol* symbol = FindGlobalSymbol(&symbol_name);
   StringDestruct(&symbol_name);
-  if (symbol != NULL) {
+  Symbol* existing = FindCXXAllocationFunctionByArgCount(symbol, 1);
+  if (existing != NULL) {
     TypeRecordDelete(return_type);
     TypeRecordDelete(arg_type);
-    return symbol;
+    return existing;
   }
 
   TypeRecord* func_type = NewFunctionTypeRecord();
@@ -1514,10 +1527,44 @@ static Symbol* GetImplicitCXXAllocationFunction(const char* name,
   symbol->location = location;
   func_type->info.function.symbol = symbol;
   SymbolSetCXXMangledAsmName(symbol);
-  bool ok = InsertGlobalSymbol(symbol);
-  assert(ok);
-  (void)ok;
+  if (FindGlobalSymbol(&symbol->name) == NULL) {
+    bool ok = InsertGlobalSymbol(symbol);
+    assert(ok);
+    (void)ok;
+  } else {
+    Symbol* first = FindGlobalSymbol(&symbol->name);
+    Symbol* tail = first;
+    while (tail->overload_next != NULL) {
+      tail = tail->overload_next;
+    }
+    symbol->namespace_ = first->namespace_;
+    tail->overload_next = symbol;
+    first->flags.is_overloaded = true;
+    symbol->flags.is_overloaded = true;
+    SymbolSetCXXMangledAsmName(first);
+    SymbolSetCXXMangledAsmName(symbol);
+  }
   return symbol;
+}
+
+static Symbol* FindCXXAllocationFunctionByArgCount(Symbol* first,
+                                                   size_t arg_count) {
+  for (Symbol* symbol = first; symbol != NULL; symbol = symbol->overload_next) {
+    if (symbol->type != NULL && TypeIsFunction(symbol->type) &&
+        symbol->type->info.function.prototype.length == arg_count) {
+      return symbol;
+    }
+  }
+  return NULL;
+}
+
+static Symbol* FindGlobalCXXAllocationFunction(const char* name,
+                                               size_t arg_count) {
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  Symbol* first = FindGlobalSymbol(&symbol_name);
+  StringDestruct(&symbol_name);
+  return FindCXXAllocationFunctionByArgCount(first, arg_count);
 }
 
 static Symbol* GetImplicitCXXOperatorNew(SourceLocation location) {
@@ -1532,6 +1579,57 @@ static Symbol* GetImplicitCXXOperatorNewArray(SourceLocation location) {
   TypeRecord* return_type = NewPointerTo(kQualPlain, void_type);
   return GetImplicitCXXAllocationFunction("operator new[]", return_type,
                                           NewSizeTypeRecord(), location);
+}
+
+static Symbol* GetImplicitCXXPlacementOperatorNew(SourceLocation location) {
+  Symbol* existing = FindGlobalCXXAllocationFunction("operator new", 2);
+  if (existing != NULL) {
+    return existing;
+  }
+
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* return_type = NewPointerTo(kQualPlain, void_type);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, return_type);
+
+  Symbol* size_formal = NewSymbol(SyntaxFakeName(&compiler->syntax),
+                                  NewSizeTypeRecord(), STO(auto));
+  size_formal->flags.is_argument = true;
+  size_formal->flags.invented = true;
+  VectorAppend(&func_type->info.function.prototype, size_formal);
+
+  TypeRecord* ptr_type =
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  Symbol* ptr_formal = NewSymbol(SyntaxFakeName(&compiler->syntax), ptr_type,
+                                 STO(auto));
+  ptr_formal->flags.is_argument = true;
+  ptr_formal->flags.invented = true;
+  VectorAppend(&func_type->info.function.prototype, ptr_formal);
+
+  Symbol* symbol = NewSymbol("operator new", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->location = location;
+  func_type->info.function.symbol = symbol;
+  SymbolSetCXXMangledAsmName(symbol);
+
+  Symbol* first = FindGlobalSymbol(&symbol->name);
+  if (first == NULL) {
+    bool ok = InsertGlobalSymbol(symbol);
+    assert(ok);
+    (void)ok;
+  } else {
+    Symbol* tail = first;
+    while (tail->overload_next != NULL) {
+      tail = tail->overload_next;
+    }
+    symbol->namespace_ = first->namespace_;
+    tail->overload_next = symbol;
+    first->flags.is_overloaded = true;
+    symbol->flags.is_overloaded = true;
+    SymbolSetCXXMangledAsmName(first);
+    SymbolSetCXXMangledAsmName(symbol);
+  }
+  return symbol;
 }
 
 static Symbol* GetImplicitCXXOperatorDelete(SourceLocation location) {
@@ -1551,7 +1649,8 @@ static Symbol* GetImplicitCXXOperatorDeleteArray(SourceLocation location) {
 }
 
 static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
-                                             const char* name) {
+                                             const char* name,
+                                             size_t arg_count) {
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
     return NULL;
   }
@@ -1563,17 +1662,31 @@ static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
       member->symbol == NULL || !TypeIsFunction(member->symbol->type)) {
     return NULL;
   }
-  return member->symbol;
+  return FindCXXAllocationFunctionByArgCount(member->symbol, arg_count);
 }
 
 static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
                                         bool is_array,
+                                        size_t arg_count,
                                         SourceLocation location) {
   Symbol* member = GetCXXClassAllocationFunction(
-      type, is_array ? "operator new[]" : "operator new");
+      type, is_array ? "operator new[]" : "operator new", arg_count);
   if (member != NULL) {
     return member;
   }
+  const char* name = is_array ? "operator new[]" : "operator new";
+  Symbol* global = FindGlobalCXXAllocationFunction(name, arg_count);
+  if (global != NULL) {
+    return global;
+  }
+  if (arg_count == 1) {
+    return is_array ? GetImplicitCXXOperatorNewArray(location)
+                    : GetImplicitCXXOperatorNew(location);
+  }
+  if (!is_array && arg_count == 2) {
+    return GetImplicitCXXPlacementOperatorNew(location);
+  }
+  SyntaxError(&compiler->syntax, "No matching allocation function for placement new");
   return is_array ? GetImplicitCXXOperatorNewArray(location)
                   : GetImplicitCXXOperatorNew(location);
 }
@@ -1582,7 +1695,7 @@ static Symbol* GetCXXOperatorDeleteForType(TypeRecord* type,
                                            bool is_array,
                                            SourceLocation location) {
   Symbol* member = GetCXXClassAllocationFunction(
-      type, is_array ? "operator delete[]" : "operator delete");
+      type, is_array ? "operator delete[]" : "operator delete", 1);
   if (member != NULL) {
     return member;
   }
@@ -1626,6 +1739,20 @@ static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
   }
   SyntaxNeedBracket(syntax, close, followers | TC(exprsep));
   return actuals;
+}
+
+static bool CXXNewHasPlacementArguments(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(lparen))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result =
+      !LexLookingAt(syntax->lex, TOK(rparen)) && !SyntaxLookingAtType(syntax);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
 }
 
 static ASTNode* NewCXXConstructorCallForReceiver(TypeRecord* allocated_type,
@@ -1842,6 +1969,12 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // new
 
+  Vector* placement_actuals = NULL;
+  if (CXXNewHasPlacementArguments(syntax)) {
+    placement_actuals =
+        ParseCXXNewInitializerArguments(syntax, TOK(lparen), followers);
+  }
+
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   TypeRecord* allocated_type = TypeParserParseType(&parser, true);
@@ -1919,9 +2052,16 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
                              NewSizeTypeRecord()->size, location));
   }
   VectorAppend(actuals, allocation_size);
+  if (placement_actuals != NULL) {
+    for (size_t i = 0; i < placement_actuals->length; i++) {
+      VectorAppend(actuals, placement_actuals->value.p[i]);
+    }
+    VectorDelete(placement_actuals);
+  }
   ASTNode* allocation =
       NewCallASTNode(GetCXXOperatorNewForType(allocated_type,
                                               array_size != NULL,
+                                              actuals->length,
                                               location),
                      location, actuals);
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);

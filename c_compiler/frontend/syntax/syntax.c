@@ -1718,6 +1718,125 @@ static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
   }
 }
 
+static StructMember* FindCXXDestructorForObjectType(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(type->info.struct_info, &destructor_name);
+  StringDestruct(&destructor_name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      destructor->symbol == NULL || destructor->symbol->type == NULL ||
+      !destructor->symbol->type->info.function.is_destructor) {
+    return NULL;
+  }
+  return destructor;
+}
+
+static TypeRecord* CXXDestructibleElementType(TypeRecord* type) {
+  if (TypeIsFixedArray(type) && type->next != NULL &&
+      FindCXXDestructorForObjectType(type->next) != NULL) {
+    return type->next;
+  }
+  if (FindCXXDestructorForObjectType(type) != NULL) {
+    return type;
+  }
+  return NULL;
+}
+
+static ASTNode* NewCXXMemberDestructorCall(Syntax* syntax, TypeRecord* func,
+                                           StructMember* member,
+                                           TypeRecord* object_type,
+                                           ASTNode* receiver,
+                                           SourceLocation location) {
+  (void)syntax;
+  if (func == NULL || func->info.function.prototype.length == 0 ||
+      member == NULL || object_type == NULL ||
+      object_type->info.struct_info == NULL ||
+      object_type->info.struct_info->tag_name == NULL) {
+    ASTNodeDelete(receiver);
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(object_type, actuals,
+                                   /*complete_object=*/true, location);
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, object_type->info.struct_info->tag_name);
+  ASTNode* destructor =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL, location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, destructor);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
+                                     SourceLocation location) {
+  if (func == NULL || func->info.function.prototype.length == 0 ||
+      member == NULL || member->symbol == NULL) {
+    return NULL;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
+  ASTNode* member_name =
+      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+                               location);
+  return NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node,
+                          member_name);
+}
+
+static void AppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* func,
+                                           Vector* body,
+                                           SourceLocation location) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = owner->members.length; i > 0; i--) {
+    StructMember* member = owner->members.value.p[i - 1];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    TypeRecord* member_type = member->symbol->type;
+    TypeRecord* object_type = CXXDestructibleElementType(member_type);
+    if (object_type == NULL) {
+      continue;
+    }
+    if (TypeIsFixedArray(member_type)) {
+      for (size_t index = member_type->info.array.size.fixed; index > 0;
+           index--) {
+        ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+        ASTNode* index_node = NewIntConstantASTNode(
+            (int64_t)index - 1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+            location);
+        receiver = NewBinaryASTNode(AST_OP(subscript), NULL, location,
+                                    receiver, index_node);
+        ASTNode* call = NewCXXMemberDestructorCall(
+            syntax, func, member, object_type, receiver, location);
+        if (call != NULL) {
+          VectorAppend(body, call);
+        }
+      }
+    } else {
+      ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
+      ASTNode* call = NewCXXMemberDestructorCall(
+          syntax, func, member, object_type, receiver, location);
+      if (call != NULL) {
+        VectorAppend(body, call);
+      }
+    }
+  }
+}
+
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
   VectorInit(&init_list->virtual_base_specs);
   VectorInit(&init_list->virtual_base_statements);
@@ -2445,6 +2564,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
                                        &cxx_initializers, sym->location);
+    AppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
