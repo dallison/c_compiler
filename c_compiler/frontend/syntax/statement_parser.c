@@ -90,6 +90,11 @@ static ASTNode* NewCXXDestructorCallForReceiver(TypeRecord* type,
     StringDestruct(&destructor_name);
     return NULL;
   }
+  if (destructor->symbol->type->info.function.is_implicitly_declared &&
+      destructor->symbol->type->info.function.is_trivial_special_member) {
+    StringDestruct(&destructor_name);
+    return NULL;
+  }
 
   ASTNode* member = NewStringConstantASTNode(NewString(destructor_name.value),
                                             NULL, location);

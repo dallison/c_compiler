@@ -87,6 +87,16 @@ typedef struct TemplateArgument {
   int template_parameter_index;  // >= 0 when non-type arg is a template param.
 } TemplateArgument;
 
+typedef enum {
+  kCXXSpecialMemberNone,
+  kCXXSpecialMemberDefaultConstructor,
+  kCXXSpecialMemberDestructor,
+  kCXXSpecialMemberCopyConstructor,
+  kCXXSpecialMemberMoveConstructor,
+  kCXXSpecialMemberCopyAssignment,
+  kCXXSpecialMemberMoveAssignment,
+} CXXSpecialMemberKind;
+
 // Function info.
 typedef struct {
   Symbol* symbol;       // Symbol for function (or NULL).
@@ -107,6 +117,18 @@ typedef struct {
   bool is_override;     // C++ override virt-specifier.
   bool is_final;        // C++ final virt-specifier.
   bool is_pure_virtual; // C++ pure virtual function (`= 0`).
+  bool is_defaulted;    // C++ explicitly defaulted function (`= default`).
+  bool is_deleted;      // C++ deleted function (`= delete`).
+  CXXSpecialMemberKind cxx_special_member_kind;  // C++ special member kind.
+  bool is_user_declared;      // C++ user-declared function.
+  bool is_user_provided;      // C++ user-provided function body.
+  bool is_explicitly_defaulted;  // C++ explicitly defaulted function.
+  bool is_explicitly_deleted;    // C++ explicitly deleted function.
+  bool is_implicitly_declared;   // C++ implicitly declared function.
+  bool is_implicitly_deleted;    // C++ implicitly deleted function.
+  bool is_trivial_special_member;  // C++ trivial special member.
+  bool is_constexpr_eligible;  // C++ constexpr-suitable special member.
+  bool is_noexcept_eligible;   // C++ nothrow special member.
   int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
   Symbol* template_origin;  // Primary function template for instantiations.
@@ -198,6 +220,8 @@ struct Struct {
   bool is_union;     // True if this is a union.
   bool is_class;     // True if this is a C++ class.
   bool is_template;  // True if this is a C++ class template.
+  bool is_aggregate; // True if this is a C++ aggregate class.
+  bool cxx_special_members_complete;  // C++ special members declared.
   Vector template_parameters;  // TemplateParameter* entries.
   int template_parameter_count;  // Number of parameters for simple templates.
   bool packed;       // __attribute__((packed)): no inter-member padding.

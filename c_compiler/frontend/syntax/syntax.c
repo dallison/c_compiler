@@ -1989,6 +1989,119 @@ static ASTNode* NewCXXThisMemberAccess(TypeRecord* func,
       NewStringConstantASTNode(NewString(member_name), NULL, location));
 }
 
+static Symbol* CXXSourceObjectParameter(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.prototype.length < 2) {
+    return NULL;
+  }
+  return func->info.function.prototype.value.p[func->info.function.prototype.length - 1];
+}
+
+static ASTNode* NewCXXSourceMemberAccess(Symbol* source,
+                                         const char* member_name,
+                                         SourceLocation location) {
+  if (source == NULL) {
+    return NULL;
+  }
+  return NewBinaryASTNode(
+      AST_OP(dot), NULL, location, NewIdentifierASTNode(source, location),
+      NewStringConstantASTNode(NewString(member_name), NULL, location));
+}
+
+static bool CXXFunctionNeedsMemberwiseDefaultedBody(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  switch (func->info.function.cxx_special_member_kind) {
+    case kCXXSpecialMemberCopyConstructor:
+    case kCXXSpecialMemberMoveConstructor:
+    case kCXXSpecialMemberCopyAssignment:
+    case kCXXSpecialMemberMoveAssignment:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
+                                                    Vector* body,
+                                                    SourceLocation location) {
+  if (!CXXFunctionNeedsMemberwiseDefaultedBody(func) ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Symbol* source = CXXSourceObjectParameter(func);
+  if (source == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    TypeRecord* member_type = member->symbol->type;
+    if (TypeIsFixedArray(member_type)) {
+      for (size_t index = 0; index < member_type->info.array.size.fixed;
+           index++) {
+        ASTNode* target =
+            NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+        ASTNode* value =
+            NewCXXSourceMemberAccess(source, member->symbol->name.value,
+                                     location);
+        target = NewBinaryASTNode(
+            AST_OP(subscript), NULL, location, target,
+            NewIntConstantASTNode((int64_t)index,
+                                  NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                  location));
+        value = NewBinaryASTNode(
+            AST_OP(subscript), NULL, location, value,
+            NewIntConstantASTNode((int64_t)index,
+                                  NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                  location));
+        VectorAppend(body, NewExpressionStatementASTNode(
+                               NewBinaryASTNode(AST_OP(assign),
+                                                member_type->next, location,
+                                                target, value),
+                               location));
+      }
+    } else {
+      ASTNode* target =
+          NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+      ASTNode* value =
+          NewCXXSourceMemberAccess(source, member->symbol->name.value,
+                                   location);
+      VectorAppend(body, NewExpressionStatementASTNode(
+                             NewBinaryASTNode(AST_OP(assign), member_type,
+                                              location, target, value),
+                             location));
+    }
+  }
+}
+
+static void AppendCXXDefaultedAssignmentReturnThis(TypeRecord* func,
+                                                   Vector* body,
+                                                   SourceLocation location) {
+  if (func == NULL || !TypeIsFunction(func) || func->next == NULL ||
+      TypeIsVoid(func->next) || func->info.function.prototype.length == 0 ||
+      (func->info.function.cxx_special_member_kind !=
+           kCXXSpecialMemberCopyAssignment &&
+       func->info.function.cxx_special_member_kind !=
+           kCXXSpecialMemberMoveAssignment)) {
+    return;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  TypeRecord* object_type =
+      TypeIsPointer(this_symbol->type) ? this_symbol->type->next : NULL;
+  ASTNode* object =
+      NewUnaryASTNode(AST_OP(contents), object_type, location,
+                      NewIdentifierASTNode(this_symbol, location));
+  VectorAppend(body,
+               NewCombinedStatementASTNode(AST_OP(return), object, NULL,
+                                           location));
+}
+
 static TypeRecord* NewCXXStructType(Struct* str);
 
 static ASTNode* NewCXXVPtrReceiver(TypeRecord* func, Struct* source,
@@ -2473,6 +2586,27 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   }
 }
 
+static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
+                                                   TypeRecord* func) {
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
+      !LexMatch(syntax->lex, TOK(equal))) {
+    return;
+  }
+  if (LexMatch(syntax->lex, TOK(default))) {
+    func->info.function.is_defaulted = true;
+    func->info.function.is_explicitly_defaulted = true;
+    func->info.function.is_constexpr_eligible = true;
+    func->info.function.is_inline = true;
+    return;
+  }
+  if (LexMatch(syntax->lex, TOK(delete))) {
+    func->info.function.is_deleted = true;
+    func->info.function.is_explicitly_deleted = true;
+    return;
+  }
+  SyntaxError(syntax, "function specifier must be '= default' or '= delete'");
+}
+
 static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                         Vector* declarations,
                              Symbol* sym, Symbol* old_sym) {
@@ -2513,6 +2647,43 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
   SyntaxParseCXXConstructorInitializerList(syntax, sym->type,
                                            &cxx_initializers);
+
+  if (sym->type->info.function.is_defaulted) {
+    if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
+      old_sym->value.func_defn = sym;
+      old_sym->type->info.function.is_defaulted = true;
+    }
+    ParserContext old_context = syntax->context;
+    syntax->context = kParsingBlockScope;
+    SyntaxOpenScope(syntax);
+    AddFunctionScopeSymbols(syntax, sym->type);
+    sym->flags.is_defined = true;
+    sym->type->info.function.definition = true;
+    sym->type->info.function.is_user_provided = true;
+    Vector* body = NewVector();
+    SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
+                                       &cxx_initializers, sym->location);
+    AppendCXXDefaultedMemberwiseAssignments(sym->type, body, sym->location);
+    AppendCXXDefaultedAssignmentReturnThis(sym->type, body, sym->location);
+    AppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
+    AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
+    SyntaxCloseScope(syntax);
+    syntax->context = old_context;
+    sym->type->info.function.body =
+        NewCompoundStatementASTNode(body, sym->location);
+    VectorAppend(&compiler->declaration_asts, sym->type->info.function.body);
+    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return NewVariableDeclarationASTNode(sym, NULL, sym->location);
+  }
+
+  if (sym->type->info.function.is_deleted) {
+    if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
+      old_sym->type->info.function.is_deleted = true;
+    }
+    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+    return NULL;
+  }
 
   if (LexMatch(syntax->lex, TOK(lbrace))) {
     if (sym->type->info.function.old_style) {
@@ -2880,6 +3051,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         StringSetString(&old_sym->asm_name, &sym->asm_name);
       } else if (old_sym->asm_name.length != 0) {
         StringSetString(&sym->asm_name, &old_sym->asm_name);
+      }
+    }
+    if (TypeIsFunction(sym->type)) {
+      ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+      if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
+        if (sym->type->info.function.is_defaulted) {
+          old_sym->type->info.function.is_defaulted = true;
+        }
+        if (sym->type->info.function.is_deleted) {
+          old_sym->type->info.function.is_deleted = true;
+        }
       }
     }
     if (TypeIsFunction(sym->type)) {
@@ -3849,6 +4031,10 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
       FindCXXConstructor(sym->type) == NULL) {
     return NULL;
   }
+  if (sym->type->info.struct_info->is_aggregate &&
+      LexLookingAt(syntax->lex, TOK(lbrace))) {
+    return NULL;
+  }
 
   SourceLocation location = syntax->lex->current_token_location;
   Vector* actuals = NULL;
@@ -3866,6 +4052,10 @@ static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym) {
   const char* constructor_name = CXXConstructorNameForType(sym->type);
   if (constructor_name == NULL) {
+    return NULL;
+  }
+  if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
+      sym->type->info.struct_info->is_aggregate) {
     return NULL;
   }
   String name;

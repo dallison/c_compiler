@@ -1928,6 +1928,20 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                                                    VectorASTNode* node,
                                                    BinaryASTNode* member_access);
 
+static void CheckDeletedFunctionUse(Symbol* function, ASTNode* use) {
+  if (!CompilerIsCXX() || function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) ||
+      !function->type->info.function.is_deleted) {
+    return;
+  }
+  if (function->type->info.function.is_implicitly_deleted) {
+    SemanticError(use, "Use of implicitly deleted function %s",
+                  function->name.value);
+  } else {
+    SemanticError(use, "Use of deleted function %s", function->name.value);
+  }
+}
+
 static bool CurrentFunctionIsCXXCtorOrDtor(void) {
   return compiler->current_function != NULL &&
          TypeIsFunction(compiler->current_function) &&
@@ -2024,6 +2038,9 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
 
   member = ResolveMemberFunctionOverload(member, node, member_access);
   member_node->member = member;
+  if (member != NULL) {
+    CheckDeletedFunctionUse(member->symbol, (ASTNode*)node);
+  }
 
   Struct* owner = member->symbol->type->info.function.cxx_member_owner;
   CXXAccess access = member->access;
@@ -2624,6 +2641,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
 
   id->symbol = best;
   ASTNodeSetType(node->left, best->type);
+  CheckDeletedFunctionUse(best, (ASTNode*)node);
 }
 
 static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
@@ -2642,6 +2660,18 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       FindStructMember(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||
       !constructor->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  bool has_non_invented_constructor = false;
+  for (StructMember* candidate = constructor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->is_member_function && candidate->symbol != NULL &&
+        !candidate->symbol->flags.invented) {
+      has_non_invented_constructor = true;
+      break;
+    }
+  }
+  if (!has_non_invented_constructor && node->children->length > 1) {
     return NULL;
   }
 
@@ -2715,13 +2745,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
-  ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
-  if (construction != NULL) {
-    return construction;
-  }
   ASTNode* overloaded_call = TryAnalyzeOverloadedCallOperator(node);
   if (overloaded_call != NULL) {
     return overloaded_call;
+  }
+  ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
+  if (construction != NULL) {
+    return construction;
   }
   LowerMemberFunctionCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
@@ -2741,6 +2771,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   ResolveOverloadedFunctionCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);
     if (id->symbol != NULL && id->symbol->flags.is_template) {
       if (TypeIsFunction(id->symbol->type) &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(

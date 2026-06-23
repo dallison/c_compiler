@@ -54,6 +54,23 @@ struct PCodeLifetimeProbePair {
       : first(target, 1), second(target, 2) {}
 };
 
+struct PCodeLifetimeDefaultedCopy {
+  int left;
+  int right;
+
+  constexpr PCodeLifetimeDefaultedCopy(int l, int r) : left(l), right(r) {}
+  constexpr PCodeLifetimeDefaultedCopy(
+      const PCodeLifetimeDefaultedCopy& other) = default;
+  constexpr struct PCodeLifetimeDefaultedCopy& operator=(
+      const PCodeLifetimeDefaultedCopy& other) = default;
+};
+
+struct PCodeLifetimeImplicitCopy {
+  int value;
+
+  constexpr PCodeLifetimeImplicitCopy(int v) : value(v) {}
+};
+
 constexpr int& pcode_right_ref(int& left, int& right) {
   (void)left;
   return right;
@@ -231,6 +248,20 @@ constexpr int pcode_implicit_member_destructor_cleanup(void) {
   return result;
 }
 
+constexpr int pcode_defaulted_copy_and_assignment(void) {
+  PCodeLifetimeDefaultedCopy first(10, 11);
+  PCodeLifetimeDefaultedCopy second(first);
+  PCodeLifetimeDefaultedCopy third(1, 2);
+  third = second;
+  return first.left + second.right + third.left + third.right;
+}
+
+constexpr int pcode_implicit_special_member_copy(void) {
+  PCodeLifetimeImplicitCopy first(42);
+  PCodeLifetimeImplicitCopy second(first);
+  return second.value;
+}
+
 static_assert(pcode_reference_return_lvalue() == 52,
               "pcode constexpr reference return lvalue");
 static_assert(pcode_conditional_reference_return_lvalue() == 52,
@@ -267,3 +298,7 @@ static_assert(pcode_placement_new_subobject_reuse() == 42,
               "pcode constexpr placement new subobject reuse");
 static_assert(pcode_implicit_member_destructor_cleanup() == 42,
               "pcode constexpr implicit member destructor cleanup");
+static_assert(pcode_defaulted_copy_and_assignment() == 42,
+              "pcode constexpr defaulted copy and assignment");
+static_assert(pcode_implicit_special_member_copy() == 42,
+              "pcode constexpr implicit special member copy");
