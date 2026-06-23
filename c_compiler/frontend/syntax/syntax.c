@@ -1302,6 +1302,10 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
   return NewBracedInitializerASTNode(initializers, NULL, location);
 }
 
+ASTNode* SyntaxParseBracedInitializer(Syntax* syntax) {
+  return ParseBracedInitializer(syntax);
+}
+
 // Parses a symbol initializer.
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
   if (StorageIs(storage, STO(extern))) {
@@ -1430,7 +1434,8 @@ static bool IsKnownAttribute(const char* name) {
     "designated_init", "fallthrough", "warning", "error", "alloc_size",
     "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
     "weakref", "dllimport", "dllexport", "common", "nocommon", "tls_model",
-    "aligned_alloc", "assume_aligned",
+    "aligned_alloc", "assume_aligned", "likely", "unlikely",
+    "no_unique_address",
   };
   for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
     if (strcmp(known[i], name) == 0) {
@@ -1458,9 +1463,200 @@ void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
   StringDestruct(&attribute_list);
 }
 
+bool SyntaxLookingAtCXXAttribute(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(lsquare))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = LexLookingAt(syntax->lex, TOK(lsquare));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+static void AppendCXXAttributeArgToken(Lex* lex, String* arg) {
+  if (arg->length > 0) {
+    StringAppendChar(arg, ' ');
+  }
+  switch (lex->current_token) {
+    case TOK(identifier):
+    case TOK(string):
+    case TOK(string_wide):
+    case TOK(charconst):
+    case TOK(charconst_wide):
+      StringAppendString(arg, &lex->spelling);
+      break;
+    case TOK(number): {
+      String buf;
+      StringInit(&buf, NULL);
+      StringPrintf(&buf, "%lld", (long long)lex->number);
+      StringAppendString(arg, &buf);
+      StringDestruct(&buf);
+      break;
+    }
+    case TOK(fnumber): {
+      String buf;
+      StringInit(&buf, NULL);
+      StringPrintf(&buf, "%g", lex->fnumber);
+      StringAppendString(arg, &buf);
+      StringDestruct(&buf);
+      break;
+    }
+    default:
+      StringAppend(arg, TokenName(lex->current_token));
+      break;
+  }
+}
+
+static void ParseCXXAttributeArguments(Syntax* syntax, Attribute* attr) {
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    return;
+  }
+
+  int depth = 1;
+  String arg;
+  StringInit(&arg, NULL);
+  while (!LexEof(syntax->lex) && depth > 0) {
+    if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      if (depth > 0) {
+        AppendCXXAttributeArgToken(syntax->lex, &arg);
+      }
+      depth++;
+      LexNextToken(syntax->lex);
+    } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+      depth--;
+      if (depth == 0) {
+        if (arg.length > 0) {
+          AttributeAddArg(attr, arg.value, arg.length);
+          StringClear(&arg);
+        }
+        LexNextToken(syntax->lex);
+        break;
+      }
+      AppendCXXAttributeArgToken(syntax->lex, &arg);
+      LexNextToken(syntax->lex);
+    } else if (LexLookingAt(syntax->lex, TOK(comma)) && depth == 1) {
+      AttributeAddArg(attr, arg.value != NULL ? arg.value : "", arg.length);
+      StringClear(&arg);
+      LexNextToken(syntax->lex);
+    } else {
+      AppendCXXAttributeArgToken(syntax->lex, &arg);
+      LexNextToken(syntax->lex);
+    }
+  }
+  if (depth != 0) {
+    SyntaxError(syntax, "Unterminated attribute argument list");
+  }
+  StringDestruct(&arg);
+}
+
+static bool ParseCXXAttributeIdentifier(Syntax* syntax, String* out) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  StringSetString(out, &syntax->lex->spelling);
+  LexNextToken(syntax->lex);
+  return true;
+}
+
+static const char* CanonicalCXXAttributeName(const char* ns,
+                                             const char* name) {
+  if (ns != NULL && strcmp(ns, "gnu") != 0) {
+    return name;
+  }
+  if (strcmp(name, "maybe_unused") == 0) {
+    return "unused";
+  }
+  if (strcmp(name, "nodiscard") == 0) {
+    return "warn_unused_result";
+  }
+  return name;
+}
+
+static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
+                                    const char* using_namespace) {
+  String first;
+  String second;
+  StringInit(&first, NULL);
+  StringInit(&second, NULL);
+  if (!ParseCXXAttributeIdentifier(syntax, &first)) {
+    SyntaxError(syntax, "Expected attribute name");
+    StringDestruct(&first);
+    StringDestruct(&second);
+    return;
+  }
+
+  const char* namespace_name = using_namespace;
+  const char* attr_name = first.value;
+  if (LexMatch(syntax->lex, TOK(coloncolon))) {
+    namespace_name = first.value;
+    if (!ParseCXXAttributeIdentifier(syntax, &second)) {
+      SyntaxError(syntax, "Expected attribute name after ::");
+      StringDestruct(&first);
+      StringDestruct(&second);
+      return;
+    }
+    attr_name = second.value;
+  }
+
+  Attribute* attr =
+      NewAttribute(CanonicalCXXAttributeName(namespace_name, attr_name));
+  ParseCXXAttributeArguments(syntax, attr);
+  if (StringEqual(&attr->name, "aligned") && AttributeArgCount(attr) > 0) {
+    long ignored = 0;
+    if (!AttributeArgInt(attr, 0, &ignored)) {
+      SyntaxError(syntax, "aligned attribute argument must be an integer");
+    }
+  }
+  if (!IsKnownAttribute(attr->name.value)) {
+    SyntaxWarning(syntax, "attributes", "'%s' attribute directive ignored",
+                  attr->name.value);
+  }
+  VectorAppend(attrs, attr);
+  StringDestruct(&first);
+  StringDestruct(&second);
+}
+
+bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs) {
+  bool any = false;
+  while (SyntaxLookingAtCXXAttribute(syntax)) {
+    any = true;
+    LexMatch(syntax->lex, TOK(lsquare));
+    LexMatch(syntax->lex, TOK(lsquare));
+
+    const char* using_namespace = NULL;
+    String using_name;
+    StringInit(&using_name, NULL);
+    if (LexMatch(syntax->lex, TOK(using))) {
+      if (ParseCXXAttributeIdentifier(syntax, &using_name)) {
+        using_namespace = using_name.value;
+      } else {
+        SyntaxError(syntax, "Expected attribute namespace after using");
+      }
+      SyntaxNeedBracket(syntax, TOK(colon), TC(closebra));
+    }
+
+    while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+      ParseCXXSingleAttribute(syntax, attrs, using_namespace);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      if (LexLookingAt(syntax->lex, TOK(rsquare))) {
+        break;
+      }
+    }
+    SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+    StringDestruct(&using_name);
+  }
+  return any;
+}
+
 // Interprets attributes that have just been attached to a declared symbol and
 // affect the symbol/type directly (layout and function-behavior flags).
-static void ApplyDeclarationAttributes(Symbol* sym) {
+void SyntaxApplyDeclarationAttributes(Symbol* sym) {
   if (sym == NULL) {
     return;
   }
@@ -2849,8 +3045,13 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                SyntaxLookingAtType(syntax) &&
                (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
-    } else if (LexMatch(syntax->lex, TOK(attribute))) {
-      SyntaxParseAttribute(syntax, attributes);
+    } else if (LexLookingAt(syntax->lex, TOK(attribute)) ||
+               SyntaxLookingAtCXXAttribute(syntax)) {
+      if (LexMatch(syntax->lex, TOK(attribute))) {
+        SyntaxParseAttribute(syntax, attributes);
+      } else {
+        SyntaxParseCXXAttributes(syntax, attributes);
+      }
     } else {
       if (type_specifier.type == kTypeImplicit &&
           type_specifier.type_record == NULL) {
@@ -3021,14 +3222,19 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       continue;
     }
 
-    // Parse common __attribute__ syntax.
-    while (LexMatch(syntax->lex, TOK(attribute))) {
-      SyntaxParseAttribute(syntax, attributes);
+    // Parse common __attribute__ / C++ attribute syntax.
+    while (LexLookingAt(syntax->lex, TOK(attribute)) ||
+           SyntaxLookingAtCXXAttribute(syntax)) {
+      if (LexMatch(syntax->lex, TOK(attribute))) {
+        SyntaxParseAttribute(syntax, attributes);
+      } else {
+        SyntaxParseCXXAttributes(syntax, attributes);
+      }
     }
     
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    ApplyDeclarationAttributes(sym);
+    SyntaxApplyDeclarationAttributes(sym);
 
     // Check for GCC-style assembler name after a declarator:
     //   int x asm("external_name");
@@ -3073,8 +3279,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
   
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
-      if (TypeContainsAuto(sym->type)) {
-        SyntaxError(syntax, "auto function return type is not supported yet");
+      if (TypeContainsAuto(sym->type) &&
+          !TypeFunctionReturnContainsAuto(sym->type)) {
+        SyntaxError(syntax, "auto function parameter type is not supported yet");
+      }
+      if (TypeFunctionReturnContainsAuto(sym->type) &&
+          !LexLookingAt(syntax->lex, TOK(lbrace))) {
+        SyntaxError(syntax,
+                    "auto function return type requires a function body");
       }
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
       if (result != NULL) {
@@ -3881,9 +4093,14 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   Vector* declarations = NewVector();
   Vector attributes = {0};
   
-  // Parse common __attribute__ syntax.
-  while (LexMatch(syntax->lex, TOK(attribute))) {
-    SyntaxParseAttribute(syntax, &attributes);
+  // Parse common __attribute__ / C++ attribute syntax.
+  while (LexLookingAt(syntax->lex, TOK(attribute)) ||
+         SyntaxLookingAtCXXAttribute(syntax)) {
+    if (LexMatch(syntax->lex, TOK(attribute))) {
+      SyntaxParseAttribute(syntax, &attributes);
+    } else {
+      SyntaxParseCXXAttributes(syntax, &attributes);
+    }
   }
 
   Storage storage = STO(implicit);
@@ -3902,9 +4119,14 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     storage = STO(implicit);
   }
 
-  // Parse common __attribute__ syntax.
-  while (LexMatch(syntax->lex, TOK(attribute))) {
-    SyntaxParseAttribute(syntax, &attributes);
+  // Parse common __attribute__ / C++ attribute syntax.
+  while (LexLookingAt(syntax->lex, TOK(attribute)) ||
+         SyntaxLookingAtCXXAttribute(syntax)) {
+    if (LexMatch(syntax->lex, TOK(attribute))) {
+      SyntaxParseAttribute(syntax, &attributes);
+    } else {
+      SyntaxParseCXXAttributes(syntax, &attributes);
+    }
   }
 
   // Create a type parser for the declarators.
@@ -4012,6 +4234,32 @@ static StructMember* FindCXXConstructor(TypeRecord* type) {
   return ctor;
 }
 
+static bool CXXConstructorSetHasInitializerList(StructMember* ctor) {
+  for (StructMember* candidate = ctor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type)) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (!info->is_constructor) {
+      continue;
+    }
+    for (size_t i = 0; i < info->prototype.length; i++) {
+      Symbol* formal = info->prototype.value.p[i];
+      TypeRecord* formal_type = formal->type;
+      if (TypeIsReference(formal_type)) {
+        formal_type = formal_type->next;
+      }
+      if (TypeIsCXXInitializerList(formal_type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
   Vector* actuals = NewVector();
   while (!LexLookingAt(syntax->lex, close)) {
@@ -4027,8 +4275,11 @@ static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
 }
 
 static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
-      FindCXXConstructor(sym->type) == NULL) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type)) {
+    return NULL;
+  }
+  StructMember* constructor = FindCXXConstructor(sym->type);
+  if (constructor == NULL) {
     return NULL;
   }
   if (sym->type->info.struct_info->is_aggregate &&
@@ -4041,7 +4292,12 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym) {
   if (LexMatch(syntax->lex, TOK(lparen))) {
     actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
   } else if (LexMatch(syntax->lex, TOK(lbrace))) {
-    actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+    if (CXXConstructorSetHasInitializerList(constructor)) {
+      actuals = NewVector();
+      VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
+    } else {
+      actuals = ParseCXXInitializerArgumentList(syntax, TOK(rbrace));
+    }
   } else {
     return NULL;
   }
@@ -4299,15 +4555,20 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       sym->flags.is_local = true;
     }
 
-    // Parse trailing __attribute__ syntax (e.g. `int x __attribute__((...))`).
-    while (LexMatch(syntax->lex, TOK(attribute))) {
-      SyntaxParseAttribute(syntax, attributes);
+    // Parse trailing __attribute__ / C++ attribute syntax.
+    while (LexLookingAt(syntax->lex, TOK(attribute)) ||
+           SyntaxLookingAtCXXAttribute(syntax)) {
+      if (LexMatch(syntax->lex, TOK(attribute))) {
+        SyntaxParseAttribute(syntax, attributes);
+      } else {
+        SyntaxParseCXXAttributes(syntax, attributes);
+      }
     }
 
     // Symbol takes ownerhip of attribute strings.
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
-    ApplyDeclarationAttributes(sym);
+    SyntaxApplyDeclarationAttributes(sym);
     
     // Check for __thread violations.
     CheckThreadLocal(syntax, sym);
@@ -4512,6 +4773,18 @@ bool SyntaxLookingAtType(Syntax* syntax) {
 }
 
 bool SyntaxLookingAtDeclaration(Syntax* syntax) {
+  if (SyntaxLookingAtCXXAttribute(syntax)) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    Vector attrs = {0};
+    VectorInit(&attrs);
+    SyntaxParseCXXAttributes(syntax, &attrs);
+    AttributeListDestruct(&attrs);
+    bool result = SyntaxLookingAtDeclaration(syntax);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return result;
+  }
   switch (syntax->lex->current_token) {
     case TOK(extern):
     case TOK(static):

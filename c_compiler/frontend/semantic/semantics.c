@@ -32,6 +32,48 @@ bool SemanticInCatchHandler(void) {
   return semantic_catch_depth > 0;
 }
 
+static TypeRecord* DeduceCXXInitializerListAuto(ASTNode* initializer,
+                                                ASTNode* diagnostic_node) {
+  if (!CompilerIsCXX() || initializer == NULL ||
+      initializer->op != AST_OP(braced_init)) {
+    return NULL;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  if (braced->initializers->length == 0) {
+    SemanticError(diagnostic_node,
+                  "Cannot deduce auto type from empty braced initializer");
+    return NULL;
+  }
+
+  TypeRecord* element_type = NULL;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* element = braced->initializers->value.p[i];
+    if (element == NULL || element->op != AST_OP(expr_init)) {
+      SemanticError(diagnostic_node,
+                    "Cannot deduce auto type from braced initializer");
+      return NULL;
+    }
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)element;
+    expr_init->expr = AnalyzeExpression(expr_init->expr);
+    if (element_type == NULL) {
+      element_type = expr_init->expr->type;
+    } else if (!TypeEqual(element_type, expr_init->expr->type)) {
+      SemanticError(diagnostic_node,
+                    "Cannot deduce auto type from mixed braced initializer types");
+      return NULL;
+    }
+  }
+
+  TypeRecord* deduced =
+      TypeInstantiateCXXInitializerList(&compiler->syntax, element_type);
+  if (deduced == NULL) {
+    SemanticError(diagnostic_node,
+                  "std::initializer_list must be declared before auto braced deduction");
+  }
+  return deduced;
+}
+
 void SemanticError(ASTNode* node, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
@@ -155,12 +197,18 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   }
 
   TypeRecord* initializer_type = initializer->type;
+  TypeRecord* deduced =
+      DeduceCXXInitializerListAuto(initializer, diagnostic_node);
+  if (deduced != NULL) {
+    SymbolSetType(sym, deduced);
+    return true;
+  }
   if (initializer->op == AST_OP(expr_init)) {
     ExpressionInitializerASTNode* expr_init =
         (ExpressionInitializerASTNode*)initializer;
     initializer_type = expr_init->expr->type;
   }
-  TypeRecord* deduced = TypeDeduceAuto(sym->type, initializer_type);
+  deduced = TypeDeduceAuto(sym->type, initializer_type);
   if (deduced == NULL) {
     SemanticError(diagnostic_node, "Cannot deduce auto type for %s",
                   sym->name.value);
@@ -253,6 +301,9 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
+  if (TypeFunctionReturnContainsAuto(node->type)) {
+    SemanticError(node, "Cannot deduce auto function return type");
+  }
   CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);

@@ -855,10 +855,16 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       gen->current_struct_address = ref;
     }
     
+    ASTNode* designated_expr = designated_init->init;
+    if (designated_expr->op == AST_OP(expr_init)) {
+      designated_expr =
+          ((ExpressionInitializerASTNode*)designated_expr)->expr;
+    }
     IRNode* value = GenerateExpression(gen, designated_init->init);
     IRNode* write = NULL;
     if (TypeIsStructOrUnion(designated_init->base.type)) {
-      if (designated_init->init->op != AST_OP(call)) {
+      if (designated_expr->op != AST_OP(call) &&
+          designated_expr->op != AST_OP(comma)) {
         // A call will place its result in the address given.  If the
         // value is a struct we need to be copied in.
         
@@ -959,7 +965,10 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
   assert(node->initializer->op == AST_OP(braced_init));
 
   // Get destination address.
-  IRNode* dest = GenerateExpression(gen, node->sym);
+  IRNode* dest = gen->current_struct_address != NULL &&
+                         TypeIsStructOrUnion(node->base.type)
+                     ? gen->current_struct_address
+                     : GenerateExpression(gen, node->sym);
 
   BracedInitializerASTNode* init = (BracedInitializerASTNode*)node->initializer;
 
@@ -1211,12 +1220,22 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
                            TypeIsReference(callee_type->next);
   bool returns_struct = TypeIsStructOrUnion(node->base.type) &&
                         !returns_reference;
+  bool cxx_constructor_call = TypeIsFunction(callee_type) &&
+                              callee_type->info.function.is_constructor;
   
   // All arguments, in reverse order.
   for (ssize_t i = node->children->length-1; i >= 0; i--) {
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
-    IRNode* arg_value = GenerateExpression(gen, arg);
+    IRNode* arg_value = cxx_constructor_call && i == 0 &&
+                                gen->current_struct_address != NULL
+                            ? gen->current_struct_address
+                            : GenerateExpression(gen, arg);
+    if (cxx_constructor_call && i == 0 &&
+        arg_value == gen->current_struct_address &&
+        TypeIsStructOrUnion(arg_value->type)) {
+      IRSetType(arg_value, NewPointerTo(kQualPlain, arg_value->type));
+    }
     bool reference_formal = false;
     if (callee_type != NULL && TypeIsFunction(callee_type) &&
         (size_t)i < callee_type->info.function.prototype.length) {

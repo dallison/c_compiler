@@ -593,6 +593,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_trivial_special_member = false;
   t->info.function.is_constexpr_eligible = false;
   t->info.function.is_noexcept_eligible = true;
+  t->info.function.is_auto_return_deduced = false;
   t->info.function.virtual_index = -1;
   t->info.function.cxx_member_owner = NULL;
   t->info.function.template_origin = NULL;
@@ -1717,6 +1718,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.is_constexpr_eligible;
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
+  func->info.function.is_auto_return_deduced =
+      from->info.function.is_auto_return_deduced;
   func->info.function.template_parameter_count =
       from->info.function.template_parameter_count;
   func->info.function.template_parameter_base = 0;
@@ -2109,6 +2112,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.is_constexpr_eligible;
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
+  func->info.function.is_auto_return_deduced =
+      from->info.function.is_auto_return_deduced;
   func->info.function.virtual_index = from->info.function.virtual_index;
   func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
   TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
@@ -2959,6 +2964,68 @@ TypeRecord* TypeInstantiateClassTemplate(Syntax* syntax, Symbol* templ,
   return type;
 }
 
+static bool CXXSymbolIsStdInitializerListTemplate(Symbol* symbol) {
+  return symbol != NULL && strcmp(symbol->name.value, "initializer_list") == 0 &&
+         symbol->namespace_ != NULL &&
+         strcmp(symbol->namespace_->qualified_name.value, "std") == 0;
+}
+
+bool TypeIsCXXInitializerList(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      type->info.struct_info->tag_symbol == NULL) {
+    return false;
+  }
+  Symbol* tag = type->info.struct_info->tag_symbol;
+  if (CXXSymbolIsStdInitializerListTemplate(tag->type != NULL
+                                                ? tag->type->template_origin
+                                                : NULL)) {
+    return true;
+  }
+  return CXXSymbolIsStdInitializerListTemplate(type->template_origin);
+}
+
+TypeRecord* TypeCXXInitializerListElement(TypeRecord* type) {
+  if (!TypeIsCXXInitializerList(type) || type->template_arguments == NULL ||
+      type->template_arguments->length != 1) {
+    return NULL;
+  }
+  TemplateArgument* arg = type->template_arguments->value.p[0];
+  return arg != NULL && arg->kind == kTemplateParameterType ? arg->type : NULL;
+}
+
+TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
+                                              TypeRecord* element_type) {
+  if (!CompilerIsCXX() || syntax == NULL || element_type == NULL) {
+    return NULL;
+  }
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  if (std_ns == NULL) {
+    return NULL;
+  }
+  String initializer_list_name;
+  StringInit(&initializer_list_name, "initializer_list");
+  Symbol* templ = NamespaceFindSymbol(std_ns, &initializer_list_name);
+  StringDestruct(&initializer_list_name);
+  if (!CXXSymbolIsStdInitializerListTemplate(templ) || !templ->flags.is_template) {
+    return NULL;
+  }
+  Vector* args = NewVector();
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  arg->kind = kTemplateParameterType;
+  arg->type = TypeRecordCopy(element_type);
+  arg->int_value = 0;
+  arg->template_parameter_index = -1;
+  VectorAppend(args, arg);
+  TypeRecord* type = TypeInstantiateClassTemplate(syntax, templ, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return type;
+}
+
 Symbol* TypeInstantiateFunctionTemplate(Syntax* syntax, Symbol* templ,
                                         Vector* args) {
   TypeParser parser;
@@ -3484,10 +3551,15 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
 // seen.
 bool TypeParserSkipAttributes(TypeParser* parser) {
   bool any = false;
-  while (LexMatch(parser->lex, TOK(attribute))) {
+  while (LexLookingAt(parser->lex, TOK(attribute)) ||
+         SyntaxLookingAtCXXAttribute(parser->syntax)) {
     Vector attrs = {0};
     VectorInit(&attrs);
-    SyntaxParseAttribute(parser->syntax, &attrs);
+    if (LexMatch(parser->lex, TOK(attribute))) {
+      SyntaxParseAttribute(parser->syntax, &attrs);
+    } else {
+      SyntaxParseCXXAttributes(parser->syntax, &attrs);
+    }
     AttributeListDestruct(&attrs);
     any = true;
   }
@@ -3509,7 +3581,8 @@ static Qualifiers ParseQualifiers(TypeParser* parser) {
     } else if (LexMatch(parser->lex, TOK(restrict))) {
       num_restricts++;
       quals |= kQualRestrict;
-    } else if (LexLookingAt(parser->lex, TOK(attribute))) {
+    } else if (LexLookingAt(parser->lex, TOK(attribute)) ||
+               SyntaxLookingAtCXXAttribute(parser->syntax)) {
       TypeParserSkipAttributes(parser);
     } else {
       break;
@@ -6186,6 +6259,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       continue;
     }
 
+    Vector member_attributes = {0};
+    VectorInit(&member_attributes);
+    SyntaxParseCXXAttributes(parser->syntax, &member_attributes);
+
     bool is_member_template = false;
     bool old_parsing_template = parser->syntax->parsing_template_declaration;
     int old_template_parameter_count =
@@ -6218,6 +6295,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
     if (ParseClassSpecialMember(parser, str, tag_name, current_access,
                                 is_virtual_member, is_constexpr_member)) {
+      AttributeListDestruct(&member_attributes);
       if (is_member_template) {
         SyntaxError(parser->syntax, "Special member templates are not supported yet");
         SyntaxCloseScope(parser->syntax);
@@ -6247,6 +6325,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         ParseCXXConversionOperatorMember(parser, str, current_access,
                                          is_virtual_member,
                                          is_explicit_member)) {
+      AttributeListDestruct(&member_attributes);
       if (is_member_template) {
         SyntaxError(parser->syntax,
                     "Conversion operator templates are not supported yet");
@@ -6316,6 +6395,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       if (member_symbol == NULL) {
         SyntaxError(parser->syntax, "Invalid type for struct member");
       } else {
+        SyntaxParseCXXAttributes(parser->syntax, &member_attributes);
+        VectorCopy(&member_symbol->attributes, &member_attributes);
+        VectorClear(&member_attributes);
+        SyntaxApplyDeclarationAttributes(member_symbol);
         StructMember* member = NewStructMember(member_symbol);
         member_symbol->flags.is_constexpr = is_constexpr_member &&
                                             !TypeIsFunction(member_symbol->type);
@@ -6442,6 +6525,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (!member_decl_had_inline_body && !LexLookingAt(parser->lex, TOK(rbrace))) {
       SyntaxNeedSemicolon(parser->syntax, TC(type));
     }
+    AttributeListDestruct(&member_attributes);
     if (is_member_template) {
       SyntaxCloseScope(parser->syntax);
       VectorDestructWithContents(member_template_parameters,
@@ -7272,8 +7356,13 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
   Vector attributes = {0};
   Vector bases = {0};
   VectorInit(&bases);
-  while (LexMatch(parser->lex, TOK(attribute))) {
-    SyntaxParseAttribute(parser->syntax, &attributes);
+  while (LexLookingAt(parser->lex, TOK(attribute)) ||
+         SyntaxLookingAtCXXAttribute(parser->syntax)) {
+    if (LexMatch(parser->lex, TOK(attribute))) {
+      SyntaxParseAttribute(parser->syntax, &attributes);
+    } else {
+      SyntaxParseCXXAttributes(parser->syntax, &attributes);
+    }
   }
 
   String tag_name = {0};
@@ -7320,6 +7409,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
+  SyntaxParseCXXAttributes(parser->syntax, &attributes);
   if (parser->syntax->parsing_template_specialization &&
       specialization_args != NULL) {
     specialization_template =
@@ -7660,8 +7750,13 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
 Symbol* TypeParserParseEnum(TypeParser* parser) {
   // Parse common __attribute__ syntax.
   Vector attributes = {0};
-  while (LexMatch(parser->lex, TOK(attribute))) {
-    SyntaxParseAttribute(parser->syntax, &attributes);
+  while (LexLookingAt(parser->lex, TOK(attribute)) ||
+         SyntaxLookingAtCXXAttribute(parser->syntax)) {
+    if (LexMatch(parser->lex, TOK(attribute))) {
+      SyntaxParseAttribute(parser->syntax, &attributes);
+    } else {
+      SyntaxParseCXXAttributes(parser->syntax, &attributes);
+    }
   }
 
   String tag_name = {0};
@@ -7677,6 +7772,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
        LexLookingAt(parser->lex, TOK(struct)))) {
     is_scoped = true;
     LexNextToken(parser->lex);
+    SyntaxParseCXXAttributes(parser->syntax, &attributes);
   }
 
   if (LexLookingAt(parser->lex, TOK(semicolon))) {
@@ -7696,6 +7792,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
+  SyntaxParseCXXAttributes(parser->syntax, &attributes);
   explicit_underlying = ParseEnumUnderlyingType(parser);
   if (LexMatch(parser->lex, TOK(lbrace))) {
     if (has_qualified_tag) {
@@ -8068,6 +8165,10 @@ bool TypeContainsAuto(TypeRecord* type) {
     }
   }
   return false;
+}
+
+bool TypeFunctionReturnContainsAuto(TypeRecord* type) {
+  return TypeIsFunction(type) && TypeContainsAuto(type->next);
 }
 
 static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {

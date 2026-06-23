@@ -892,6 +892,12 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
   ASTNode* stmt = NULL;
   bool need_semicolon = true;
   SourceLocation location = syntax->lex->current_token_location;
+  if (SyntaxLookingAtCXXAttribute(syntax)) {
+    Vector attrs = {0};
+    VectorInit(&attrs);
+    SyntaxParseCXXAttributes(syntax, &attrs);
+    AttributeListDestruct(&attrs);
+  }
 
   bool found = false;
   for (size_t i = 0; i < NUM_STATEMENT_PARSERS; i++) {

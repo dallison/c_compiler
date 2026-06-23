@@ -711,6 +711,12 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
     }
   }
   // Variables are materialized as their address.
+  if ((node->flags & kIRNrvoMarker) != 0) {
+    return Emit(
+        pcode,
+        NewInstruction2(P_OP(ldx), ArgumentPointer(pcode),
+                        GetIntConstant(pcode, NULL, kTargetType32Bit, 16)));
+  }
   if (IRIsAutoVariable(node)) {
     // Auto variables are in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
@@ -1182,6 +1188,13 @@ static TargetInstruction* LowerNamedLabel(PCodeGenerator* rv, IRNode* label) {
 static void GetAddressAndOffset(PCodeGenerator* pcode, IRNode* addr_node,
                             TargetInstruction** addr,
                             TargetInstruction** offset) {
+  if ((addr_node->flags & kIRNrvoMarker) != 0) {
+    *addr = Emit(pcode, NewInstruction2(
+                            P_OP(ldx), ArgumentPointer(pcode),
+                            GetIntConstant(pcode, NULL, kTargetType32Bit, 16)));
+    *offset = GetIntConstant(pcode, NULL, kTargetType32Bit, 0);
+    return;
+  }
   if (IRIsAutoVariable(addr_node)) {
     // Auto variables are in the stack frame.  These are accessed through
     // the frame pointer with a negative offset.
@@ -2322,6 +2335,9 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
     PoolEntry* entry = (PoolEntry*)gen->variable_pool.value.p[i];
     if (entry->pooled->opcode == IR_OP(localvar) ||
         entry->pooled->opcode == IR_OP(tempvar)) {
+      if ((entry->pooled->flags & kIRNrvoMarker) != 0) {
+        continue;
+      }
       int32_t size = entry->value.symbol->type->size;
       var_offset = (var_offset + (size - 1)) & ~(size - 1);   // Align.
       entry->pooled->data.ivalue = var_offset;

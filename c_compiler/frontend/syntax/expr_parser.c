@@ -1221,7 +1221,9 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
   // Normal function call.
   Vector* actuals = NewVector();
   while (!LexLookingAt(syntax->lex, TOK(rparen))) {
-    ASTNode* actual = SyntaxParseSingleExpression(syntax, followers);
+    ASTNode* actual = LexMatch(syntax->lex, TOK(lbrace))
+                          ? SyntaxParseBracedInitializer(syntax)
+                          : SyntaxParseSingleExpression(syntax, followers);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
@@ -2416,7 +2418,8 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
     // A leading __attribute__ (GCC extension) only appears in type names, so
     // treat "( __attribute__((...)) type-name )" as a cast / compound literal.
     if (SyntaxLookingAtType(syntax) ||
-        LexLookingAt(syntax->lex, TOK(attribute))) {
+        LexLookingAt(syntax->lex, TOK(attribute)) ||
+        SyntaxLookingAtCXXAttribute(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
       TypeRecord* type = TypeParserParseType(&parser, false);

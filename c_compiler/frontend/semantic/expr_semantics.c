@@ -40,6 +40,8 @@ static bool ASTNodeIsGLValue(ASTNode* node) {
   return ASTNodeIsLValue(node) || ASTNodeIsXValue(node);
 }
 
+static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target);
+
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
@@ -1165,6 +1167,96 @@ static TypeRecord* ReferenceConversionTarget(ASTNode* actual,
   return reference_type;
 }
 
+static ASTNode* NewCXXInitializerListBackingArray(TypeRecord* element_type,
+                                                  BracedInitializerASTNode* braced,
+                                                  SourceLocation location) {
+  TypeRecord* array_type =
+      NewBasicArrayTypeRecord(kQualPlain, (int)braced->initializers->length,
+                              /*is_flexible=*/false);
+  TypeRecordChain(array_type, TypeRecordCopy(element_type));
+  TypeRecordCalculateSize(array_type);
+
+  Vector* array_initializers = NewVector();
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    VectorAppend(array_initializers, ASTNodeMove(initializer));
+  }
+  ASTNode* array_init =
+      NewBracedInitializerASTNode(array_initializers, array_type, location);
+  Symbol* array_symbol = SyntaxNewTemporary(&compiler->syntax, array_type);
+  array_symbol->location = location;
+  ASTNode* array_id = NewIdentifierASTNode(array_symbol, location);
+  array_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  return NewCompoundLiteralASTNode(array_id, location, array_init);
+}
+
+static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type,
+                                                  BracedInitializerASTNode* braced,
+                                                  SourceLocation location) {
+  TypeRecord* element_type = TypeCXXInitializerListElement(target_type);
+  if (element_type == NULL) {
+    return (ASTNode*)braced;
+  }
+
+  ASTNode* backing_array =
+      NewCXXInitializerListBackingArray(element_type, braced, location);
+  Vector* list_initializers = NewVector();
+  VectorAppend(list_initializers,
+               NewExpressionInitializerASTNode(backing_array, location));
+  VectorAppend(list_initializers,
+               NewExpressionInitializerASTNode(
+                   NewIntConstantASTNode((int64_t)braced->initializers->length,
+                                         NewSizeTypeRecord(), location),
+                   location));
+  return NewBracedInitializerASTNode(list_initializers, target_type, location);
+}
+
+static bool CXXInitializerListBracedInitIsViable(ASTNode* actual,
+                                                 TypeRecord* formal_type) {
+  if (actual == NULL || actual->op != AST_OP(braced_init) ||
+      !TypeIsCXXInitializerList(formal_type)) {
+    return false;
+  }
+  TypeRecord* element_type = TypeCXXInitializerListElement(formal_type);
+  if (element_type == NULL) {
+    return false;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    if (initializer == NULL || initializer->op != AST_OP(expr_init)) {
+      return false;
+    }
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)initializer;
+    expr_init->expr = AnalyzeExpression(expr_init->expr);
+    if (OverloadBaseConversionRank(expr_init->expr->type, element_type) < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
+                                                  TypeRecord* formal_type) {
+  TypeRecord* target = TypeIsReference(formal_type) ? formal_type->next
+                                                    : formal_type;
+  if (actual == NULL || actual->op != AST_OP(braced_init) ||
+      !TypeIsCXXInitializerList(target)) {
+    return actual;
+  }
+  ASTNode* initializer = LowerCXXInitializerListBracedInit(
+      target, (BracedInitializerASTNode*)actual, actual->location);
+  Symbol* list_symbol = SyntaxNewTemporary(&compiler->syntax,
+                                           TypeRecordCopy(target));
+  list_symbol->location = actual->location;
+  ASTNode* list_id = NewIdentifierASTNode(list_symbol, actual->location);
+  list_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  ASTNode* lowered =
+      NewCompoundLiteralASTNode(list_id, actual->location, initializer);
+  return AnalyzeExpression(lowered);
+}
+
 static ASTNode* AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
   (void)AnalyzeExpression(&id_node->base);
@@ -1210,12 +1302,34 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
         }
         e->expr->flags |= kASTNeedAddress;
       } else {
-        NormalConversion(e->expr, id_node->base.type);
+        bool constructor_call = false;
+        if (e->expr->op == AST_OP(call)) {
+          VectorASTNode* call = (VectorASTNode*)e->expr;
+          if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+            Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+            constructor_call = callee != NULL && TypeIsFunction(callee->type) &&
+                               callee->type->info.function.is_constructor;
+          }
+        }
+        bool cxx_return_elision_initializer =
+            CompilerIsCXX() && e->expr->op == AST_OP(call) &&
+            !constructor_call &&
+            TypeIsStructOrUnion(id_node->base.type) &&
+            TypeEqual(e->expr->type, id_node->base.type);
+        if (!cxx_return_elision_initializer) {
+          NormalConversion(e->expr, id_node->base.type);
+        }
       }
       break;
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced = (BracedInitializerASTNode*)init;
+      if (!is_reference_init && TypeIsCXXInitializerList(id_node->base.type) &&
+          !TypeIsCXXInitializerList(init->type)) {
+        init = LowerCXXInitializerListBracedInit(id_node->base.type, braced,
+                                                init->location);
+        break;
+      }
       if (!is_reference_init && TypeIsScalar(id_node->base.type) &&
           braced->initializers->length == 1) {
         ASTNode* initializer = braced->initializers->value.p[0];
@@ -2323,6 +2437,9 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   bool reference = TypeIsReference(formal_type);
   if (reference) {
     target = formal_type->next;
+    if (actual != NULL && actual->op == AST_OP(braced_init)) {
+      return CXXInitializerListBracedInitIsViable(actual, target) ? 0 : -1;
+    }
     int binding_rank = ReferenceBindingRank(actual, formal_type);
     if (binding_rank < 0) {
       return -1;
@@ -2331,6 +2448,9 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     return base_rank < 0 ? -1 : base_rank * 10 + binding_rank;
   }
 
+  if (actual != NULL && actual->op == AST_OP(braced_init)) {
+    return CXXInitializerListBracedInitIsViable(actual, target) ? 0 : -1;
+  }
   int base_rank = OverloadBaseConversionRank(actual->type, target);
   if (base_rank >= 0) {
     return base_rank * 10 + 5;
@@ -2835,6 +2955,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     for (size_t i = 0; i < num_formal_args && i < num_actual_args; i++) {
       ASTNode* actual = (ASTNode*)node->children->value.p[i];
       Symbol* formal = (Symbol*)subtype->info.function.prototype.value.p[i];
+      ASTNode* converted_initializer_list =
+          ConvertCXXInitializerListArgument(actual, formal->type);
+      if (converted_initializer_list != actual) {
+        ASTNodeReplaceChild((ASTNode*)node, (int)i, converted_initializer_list,
+                            true);
+        actual = converted_initializer_list;
+      }
       bool polymorphic_special_this =
           i == 0 &&
           (subtype->info.function.is_constructor ||

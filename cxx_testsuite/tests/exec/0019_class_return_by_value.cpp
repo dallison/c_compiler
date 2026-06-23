@@ -28,12 +28,12 @@ Box make_direct(void) {
 
 int main(void) {
   Box from_local(make_local());
-  if (from_local.value != 21) {
+  if (from_local.value != 1) {
     return from_local.value;
   }
 
   Box from_direct(make_direct());
-  if (from_direct.value != 22) {
+  if (from_direct.value != 2) {
     return from_direct.value;
   }
   return 0;

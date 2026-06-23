@@ -144,9 +144,13 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
+ASTNode* SyntaxParseBracedInitializer(Syntax* syntax);
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
 ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax);
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
+bool SyntaxLookingAtCXXAttribute(Syntax* syntax);
+bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs);
+void SyntaxApplyDeclarationAttributes(Symbol* sym);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);
 void SyntaxParseCXXConstructorInitializerList(

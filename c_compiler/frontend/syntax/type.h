@@ -129,6 +129,7 @@ typedef struct {
   bool is_trivial_special_member;  // C++ trivial special member.
   bool is_constexpr_eligible;  // C++ constexpr-suitable special member.
   bool is_noexcept_eligible;   // C++ nothrow special member.
+  bool is_auto_return_deduced;  // C++ auto return type has been deduced.
   int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
   Symbol* template_origin;  // Primary function template for instantiations.
@@ -436,6 +437,10 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
+bool TypeIsCXXInitializerList(TypeRecord* type);
+TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
+TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,
+                                              TypeRecord* element_type);
 
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class);
 Symbol* TypeParserParseEnum(TypeParser* parser);
@@ -683,6 +688,7 @@ bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
                         CXXBaseAdjustment* adjustment);
 bool TypeIsAbstractClass(TypeRecord* type);
 bool TypeContainsAuto(TypeRecord* type);
+bool TypeFunctionReturnContainsAuto(TypeRecord* type);
 TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type);
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2);
 void TypeErrorDetails(SourceLocation location,

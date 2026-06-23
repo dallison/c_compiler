@@ -757,6 +757,53 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
   AnalyzeStatement(result);
 }
 
+static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
+  TypeRecord* old_return = compiler->current_function->next;
+  TypeRecordIncRef(deduced);
+  compiler->current_function->next = deduced;
+  compiler->current_function->info.function.is_auto_return_deduced = true;
+  TypeRecordDelete(old_return);
+  if (compiler->current_function->info.function.symbol != NULL) {
+    compiler->current_function->info.function.symbol->type =
+        compiler->current_function;
+  }
+}
+
+static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
+                                            ASTNode* diagnostic_node) {
+  TypeRecord* pattern = compiler->current_function->next;
+  TypeRecord* initializer_type =
+      return_value != NULL ? return_value->type
+                           : NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* deduced = TypeDeduceAuto(pattern, initializer_type);
+  if (return_value == NULL) {
+    TypeRecordDelete(initializer_type);
+  }
+  if (deduced == NULL) {
+    SemanticError(diagnostic_node, "Cannot deduce auto function return type");
+    return false;
+  }
+  SetCurrentFunctionReturnType(deduced);
+  return true;
+}
+
+static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
+  if (!CompilerIsCXX() || return_value == NULL ||
+      !TypeIsStructOrUnion(compiler->current_function->next) ||
+      !TypeEqual(return_value->type, compiler->current_function->next)) {
+    return false;
+  }
+  if (return_value->op == AST_OP(call)) {
+    return true;
+  }
+  if (return_value->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
+  return sym != NULL && sym->flags.is_local && !sym->flags.is_argument &&
+         !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
+}
+
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   ASTNode* return_value = node->cond;
   if (return_value != NULL && return_value->op == AST_OP(asm)) {
@@ -766,6 +813,19 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     return;
   }
   return_value = AnalyzeExpression(return_value);
+
+  if (TypeFunctionReturnContainsAuto(compiler->current_function)) {
+    if (!DeduceCurrentFunctionAutoReturn(return_value, (ASTNode*)node)) {
+      return;
+    }
+  } else if (return_value != NULL &&
+             compiler->current_function->info.function.is_auto_return_deduced &&
+             !TypeEqual(return_value->type, compiler->current_function->next)) {
+    SemanticError(return_value, "Inconsistent auto function return type");
+    return;
+  }
+
+  bool cxx_return_elision = IsEligibleCXXReturnElisionValue(return_value);
 
   // Check current function return type.
   if (TypeIsVoid(compiler->current_function->next)) {
@@ -793,14 +853,14 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
         SemanticError(return_value, "Reference return value must be an lvalue");
       }
       return_value->flags |= kASTNeedAddress;
-    } else {
+    } else if (!cxx_return_elision) {
       NormalConversion(return_value, compiler->current_function->next);
     }
   }
   
   // Returns a struct.  If this is a call node it might be subject
   // to RVO.
-  if (compiler->optimize) {
+  if (return_value != NULL && (cxx_return_elision || compiler->optimize)) {
     if (TypeIsStructOrUnion(compiler->current_function->next)) {
       if (return_value->op == AST_OP(call)) {
         return_value->flags |= kASTRvoCall;
@@ -848,11 +908,19 @@ static void AnalyzeCaseLabel(CaseLabelASTNode* node) {
   // switch statement.
 }
 
+static ASTNode* InitializerExpression(ASTNode* initializer) {
+  if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  return initializer;
+}
+
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   node->initializer = AnalyzeExpression(node->initializer);
+  ASTNode* initializer_expr = InitializerExpression(node->initializer);
   bool constructor_call = false;
-  if (node->initializer != NULL && node->initializer->op == AST_OP(call)) {
-    VectorASTNode* call = (VectorASTNode*)node->initializer;
+  if (initializer_expr != NULL && initializer_expr->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)initializer_expr;
     if (call->left != NULL && call->left->op == AST_OP(identifier)) {
       Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
       constructor_call =
@@ -862,8 +930,13 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   }
   bool side_effect_initializer =
       node->initializer != NULL && node->initializer->op == AST_OP(stmt_expr);
+  bool cxx_return_elision_initializer =
+      CompilerIsCXX() && initializer_expr != NULL &&
+      initializer_expr->op == AST_OP(call) &&
+      TypeIsStructOrUnion(node->symbol->type) &&
+      TypeEqual(initializer_expr->type, node->symbol->type);
   if (node->initializer != NULL && !constructor_call &&
-      !side_effect_initializer) {
+      !side_effect_initializer && !cxx_return_elision_initializer) {
     NormalConversion(node->initializer, node->symbol->type);
   }
 }

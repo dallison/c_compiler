@@ -193,6 +193,68 @@ static void GenerateCatchBinding(Generator* gen, CatchASTNode* handler) {
   GenerateExpression(gen, assignment);
 }
 
+static ASTNode* UnwrapExpressionInitializer(ASTNode* node) {
+  if (node != NULL && node->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)node)->expr;
+  }
+  return node;
+}
+
+static ASTNode* CXXSingleCompoundLiteralInitializer(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(compound_literal)) {
+    return NULL;
+  }
+  CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
+  if (literal->initializer == NULL ||
+      literal->initializer->op != AST_OP(braced_init)) {
+    return NULL;
+  }
+  BracedInitializerASTNode* braced =
+      (BracedInitializerASTNode*)literal->initializer;
+  if (braced->initializers->length != 1) {
+    return NULL;
+  }
+  ASTNode* only = braced->initializers->value.p[0];
+  if (only == NULL || only->op != AST_OP(designated_init)) {
+    return NULL;
+  }
+  return UnwrapExpressionInitializer(((DesignatedInitializerASTNode*)only)->init);
+}
+
+static ASTNode* CXXElidableStructReturnInitializer(ASTNode* initializer,
+                                                   TypeRecord* target) {
+  ASTNode* expr = UnwrapExpressionInitializer(initializer);
+  if (!CompilerIsCXX() || expr == NULL || target == NULL ||
+      !TypeIsStructOrUnion(target)) {
+    return NULL;
+  }
+  if ((expr->op == AST_OP(call) || expr->op == AST_OP(compound_literal) ||
+       expr->op == AST_OP(comma)) &&
+      TypeEqual(expr->type, target)) {
+    return expr;
+  }
+  if (expr->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  if (call->left == NULL || call->left->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+  if (callee == NULL || !TypeIsFunction(callee->type) ||
+      !callee->type->info.function.is_constructor) {
+    return NULL;
+  }
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    ASTNode* inner = CXXSingleCompoundLiteralInitializer(actual);
+    if (inner != NULL && TypeEqual(inner->type, target)) {
+      return inner;
+    }
+  }
+  return NULL;
+}
+
 static EHTypeInfo* CatchHandlerTypeInfo(Generator* gen, CatchASTNode* handler) {
   if (handler == NULL || handler->is_catch_all || handler->symbol == NULL) {
     return NULL;
@@ -440,7 +502,19 @@ static void GenerateVariableDeclaration(Generator* gen,
     node->symbol->value.other = addr;
   }
   if (node->initializer != NULL) {
-    GenerateExpression(gen, node->initializer);
+    ASTNode* elidable = CXXElidableStructReturnInitializer(
+        node->initializer, node->symbol->type);
+    if (elidable != NULL) {
+      IRNode* old_struct_address = gen->current_struct_address;
+      IRNode* var = GeneratorGetVariable(gen, node->symbol);
+      IRNode* ref = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
+                              NewPointerTo(kQualPlain, node->symbol->type));
+      gen->current_struct_address = ref;
+      GenerateExpression(gen, elidable);
+      gen->current_struct_address = old_struct_address;
+    } else {
+      GenerateExpression(gen, node->initializer);
+    }
   }
 }
 
@@ -1202,6 +1276,16 @@ static void GenerateReturnStatement(Generator* gen,
       // Extension: return asm(..)
       GenerateStatement(gen, node->cond);
     } else {
+      ASTNode* elidable =
+          CXXElidableStructReturnInitializer(node->cond, gen->func->next);
+      if (elidable != NULL) {
+        IRNode* old_struct_address = gen->current_struct_address;
+        gen->current_struct_address = gen->struct_return_value;
+        IRNode* direct_result = GenerateExpression(gen, elidable);
+        direct_result->flags |= kIRRvoCall;
+        gen->current_struct_address = old_struct_address;
+        goto emit_return_branch;
+      }
       IRNode* expr = GenerateExpression(gen, node->cond);
       if (TypeIsReference(gen->func->next)) {
         GeneratorEmit(gen, NewIR1(IR_OP(resulta), expr));
@@ -1238,6 +1322,7 @@ static void GenerateReturnStatement(Generator* gen,
     }
   }
 
+emit_return_branch:
   if (CompilerIsCXX() &&
       strcmp(gen->func->info.function.symbol->name.value, "main") == 0) {
     for (size_t i = 0; i < compiler->cxx_global_destructor_calls.length; i++) {
