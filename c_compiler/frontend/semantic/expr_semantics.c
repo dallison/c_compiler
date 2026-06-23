@@ -2772,7 +2772,51 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     return NULL;
   }
 
-  TypeRecord* type = TypeRecordCopy(node->left->type);
+  TypeRecord* placeholder_type = NULL;
+  TypeRecord* construction_type = node->left->type;
+  if (!TypeIsClassTemplatePlaceholder(construction_type) &&
+      node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    placeholder_type = TypeClassTemplatePlaceholderFromSymbol(id->symbol);
+    if (placeholder_type != NULL) {
+      construction_type = placeholder_type;
+    }
+  }
+  TypeRecord* deduced_type = NULL;
+  if (TypeIsClassTemplatePlaceholder(construction_type)) {
+    bool alias_rejected = false;
+    Symbol* class_template =
+        TypeClassTemplatePlaceholderOrigin(construction_type);
+    deduced_type = TypeDeduceClassTemplateFromPlaceholder(
+        &compiler->syntax, construction_type, node->children,
+        /*allow_explicit=*/true, &alias_rejected);
+    if (deduced_type == NULL) {
+      if (alias_rejected) {
+        SemanticError((ASTNode*)node,
+                      "Deduced template arguments do not match alias template");
+      } else {
+        SemanticError((ASTNode*)node,
+                      "Could not deduce template arguments for %s",
+                      class_template != NULL ? class_template->name.value
+                                             : "<class template>");
+      }
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      if (placeholder_type != NULL) {
+        TypeRecordDelete(placeholder_type);
+      }
+      return &node->base;
+    }
+    construction_type = deduced_type;
+  }
+
+  TypeRecord* type = TypeRecordCopy(construction_type);
+  if (placeholder_type != NULL) {
+    TypeRecordDelete(placeholder_type);
+  }
+  if (deduced_type != NULL) {
+    TypeRecordDelete(deduced_type);
+  }
   TypeRecordCalculateSize(type);
   SourceLocation location = node->base.location;
   String* constructor_name = type->info.struct_info->tag_name;
@@ -2798,8 +2842,11 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
   temp->location = location;
   ASTNode* receiver = NewIdentifierASTNode(temp, location);
+  const char* constructor_member_name = constructor->symbol != NULL
+                                            ? constructor->symbol->name.value
+                                            : constructor_name->value;
   ASTNode* member =
-      NewStringConstantASTNode(NewString(constructor_name->value), NULL,
+      NewStringConstantASTNode(NewString(constructor_member_name), NULL,
                                location);
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);

@@ -676,6 +676,7 @@ ASTNode* NewBracedInitializerASTNode(Vector* initializers,
 typedef enum {
   kDesignatorArray,
   kDesignatorStruct,
+  kDesignatorBase,
 } DesignatorType;
 
 typedef struct {
@@ -688,12 +689,14 @@ typedef struct {
     int array_index;
     String* struct_member_name;   // Before semantic analysis.
     StructMember* struct_member;  // After semantic analysis.
+    CXXBaseSpecifier* base;
   } value;
 } Designator;
 
 Designator* NewArrayDesignator(TypeRecord* type, int index);
 Designator* NewStructDesignator(String* member);
 Designator* NewStructMemberDesignator(StructMember* member);
+Designator* NewCXXBaseDesignator(CXXBaseSpecifier* base);
 
 typedef struct {
   ASTNode base;

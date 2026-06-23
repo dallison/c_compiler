@@ -440,6 +440,9 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
           case kDesignatorStruct:
             offset += d->value.struct_member->byte_offset;
             break;
+          case kDesignatorBase:
+            offset += d->value.base->byte_offset;
+            break;
         }
       }
     }

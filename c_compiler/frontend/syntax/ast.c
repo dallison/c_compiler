@@ -2902,6 +2902,15 @@ Designator* NewStructMemberDesignator(StructMember* member) {
   return d;
 }
 
+Designator* NewCXXBaseDesignator(CXXBaseSpecifier* base) {
+  Designator* d = malloc(sizeof(Designator));
+  d->designator_type = kDesignatorBase;
+  d->value.base = base;
+  d->type = NULL;
+  d->is_resolved_member = true;
+  return d;
+}
+
 // Frees a Designator's owned resources.  Only array designators take a
 // reference on their type (NewArrayDesignator/clone); struct designators leave
 // it NULL so the decref is a no-op.
@@ -2926,13 +2935,15 @@ static void DesignatedInitializerASTNodePrint(ASTNode* node, int indents, FILE* 
       Designator* d = (Designator*)dnode->designators->value.p[i];
       if (d->designator_type == kDesignatorArray) {
         fprintf(fp,"[%d]", d->value.array_index);
-      } else {
+      } else if (d->designator_type == kDesignatorStruct) {
         if (d->is_resolved_member && d->value.struct_member != NULL) {
           fprintf(fp,".%s", d->value.struct_member->symbol->name.value);
         } else if (!d->is_resolved_member &&
                    d->value.struct_member_name != NULL) {
           fprintf(fp,".%s", d->value.struct_member_name->value);
         }
+      } else {
+        fprintf(fp, ".<base>");
       }
     }
     fprintf(fp,"\n");
@@ -2970,6 +2981,8 @@ static ASTNode* DesignatedInitializerASTNodeClone(
     to_d->type = from_d->type;
     TypeRecordIncRef(to_d->type);
     memcpy(&to_d->value, &from_d->value, sizeof(to_d->value));
+    to_d->array_index_end = from_d->array_index_end;
+    to_d->is_resolved_member = from_d->is_resolved_member;
     VectorAppend(to->designators, to_d);
   }
   to->init = ASTNodeClone(from->init, func, data, &to->base);

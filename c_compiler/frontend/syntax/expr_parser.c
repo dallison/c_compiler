@@ -1727,6 +1727,32 @@ static StructMember* FindCXXConstructorForType(TypeRecord* type) {
   return ctor;
 }
 
+static bool CXXNewConstructorSetHasInitializerList(StructMember* ctor) {
+  for (StructMember* candidate = ctor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type)) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (!info->is_constructor) {
+      continue;
+    }
+    for (size_t i = 0; i < info->prototype.length; i++) {
+      Symbol* formal = info->prototype.value.p[i];
+      TypeRecord* formal_type = formal->type;
+      if (TypeIsReference(formal_type)) {
+        formal_type = formal_type->next;
+      }
+      if (TypeIsCXXInitializerList(formal_type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
                                                TokenClass followers) {
   Token close = open == TOK(lparen) ? TOK(rparen) : TOK(rbrace);
@@ -1967,6 +1993,79 @@ static ASTNode* NewArrayDestructionLoop(Syntax* syntax, TypeRecord* element_type
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static ASTNode* IdentityCloneNodeForCXXNew(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static Vector* CloneAndAnalyzeCXXNewDeductionActuals(Vector* actuals) {
+  Vector* clones = NewVector();
+  for (size_t i = 0; actuals != NULL && i < actuals->length; i++) {
+    ASTNode* actual = actuals->value.p[i];
+    if (actual == NULL) {
+      continue;
+    }
+    ASTNode* clone =
+        ASTNodeClone(actual, IdentityCloneNodeForCXXNew, NULL, NULL);
+    VectorAppend(clones, AnalyzeExpression(clone));
+  }
+  return clones;
+}
+
+static TypeRecord* DeduceCXXNewAllocatedType(Syntax* syntax,
+                                             TypeRecord* allocated_type,
+                                             Vector* actuals) {
+  if (!CompilerIsCXX() || syntax == NULL ||
+      !TypeIsClassTemplatePlaceholder(allocated_type) || actuals == NULL) {
+    return allocated_type;
+  }
+  Symbol* class_template = TypeClassTemplatePlaceholderOrigin(allocated_type);
+  Vector* deduction_actuals = CloneAndAnalyzeCXXNewDeductionActuals(actuals);
+  bool alias_rejected = false;
+  TypeRecord* deduced =
+      TypeDeduceClassTemplateFromPlaceholder(syntax, allocated_type,
+                                             deduction_actuals,
+                                             /*allow_explicit=*/true,
+                                             &alias_rejected);
+  VectorDeleteWithContents(deduction_actuals,
+                           (VectorElementDestructor)ASTNodeDelete,
+                           /*free_element=*/false);
+  if (deduced != NULL &&
+      !TypeClassTemplatePlaceholderAcceptsDeduced(allocated_type, deduced)) {
+    SyntaxError(syntax,
+                "Deduced template arguments do not match alias template");
+    TypeRecordDelete(deduced);
+    deduced = NULL;
+  }
+  if (deduced == NULL) {
+    if (alias_rejected) {
+      SyntaxError(syntax,
+                  "Deduced template arguments do not match alias template");
+    } else {
+      SyntaxError(syntax, "Could not deduce template arguments for %s",
+                  class_template != NULL ? class_template->name.value
+                                         : "<class template>");
+    }
+    return allocated_type;
+  }
+  TypeRecordDelete(allocated_type);
+  return deduced;
+}
+
+static Vector* ParseCXXNewDeductionInitializerArguments(Syntax* syntax,
+                                                        TypeRecord* type,
+                                                        Token open,
+                                                        TokenClass followers) {
+  if (open == TOK(lbrace) &&
+      CXXNewConstructorSetHasInitializerList(FindCXXConstructorForType(type))) {
+    Vector* actuals = NewVector();
+    LexNextToken(syntax->lex);
+    VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
+    return actuals;
+  }
+  return ParseCXXNewInitializerArguments(syntax, open, followers);
+}
+
 static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // new
@@ -2005,6 +2104,18 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
     initializer_open = syntax->lex->current_token;
   }
   TypeParserDestruct(&parser);
+  Vector* ctor_actuals = NULL;
+  if (TypeIsClassTemplatePlaceholder(allocated_type) &&
+      (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace))) {
+    ctor_actuals = ParseCXXNewDeductionInitializerArguments(
+        syntax, allocated_type, initializer_open, followers);
+    allocated_type = DeduceCXXNewAllocatedType(syntax, allocated_type,
+                                               ctor_actuals);
+  }
+  if (TypeIsClassTemplatePlaceholder(allocated_type)) {
+    SyntaxError(syntax,
+                "Class template argument deduction requires an initializer");
+  }
   TypeRecordCalculateSize(allocated_type);
   if (TypeIsAbstractClass(allocated_type)) {
     SyntaxError(syntax, "Cannot allocate object of abstract class %s",
@@ -2013,13 +2124,13 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
                     : "<anonymous>");
   }
 
-  Vector* ctor_actuals = NULL;
   ASTNode* scalar_initializer = NULL;
   if (initializer_open == TOK(lsquare)) {
     LexNextToken(syntax->lex);
     array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rsquare), followers);
-  } else if (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace)) {
+  } else if (ctor_actuals == NULL &&
+             (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace))) {
     if (FindCXXConstructorForType(allocated_type) == NULL) {
       Vector* initializers =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
@@ -2034,7 +2145,8 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
       ctor_actuals =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
     }
-  } else if (FindCXXConstructorForType(allocated_type) != NULL) {
+  } else if (ctor_actuals == NULL &&
+             FindCXXConstructorForType(allocated_type) != NULL) {
     ctor_actuals = NewVector();
   }
 

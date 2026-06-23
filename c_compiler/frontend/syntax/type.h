@@ -112,6 +112,7 @@ typedef struct {
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
   bool is_const_member; // C++ member function has trailing const qualifier.
+  bool is_explicit;     // C++ explicit constructor/conversion/deduction guide.
   bool is_explicit_conversion;  // C++ explicit conversion operator.
   bool is_virtual;      // C++ virtual member function.
   bool is_override;     // C++ override virt-specifier.
@@ -446,8 +447,18 @@ void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
 void TypeEnsureCXXDeductionGuides(Symbol* class_template);
 TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
                                              Symbol* class_template,
-                                             Vector* actuals);
+                                             Vector* actuals,
+                                             bool allow_explicit);
+TypeRecord* TypeDeduceClassTemplateFromPlaceholder(struct Syntax* syntax,
+                                                   TypeRecord* placeholder,
+                                                   Vector* actuals,
+                                                   bool allow_explicit,
+                                                   bool* alias_rejected);
+TypeRecord* TypeClassTemplatePlaceholderFromSymbol(Symbol* symbol);
 bool TypeIsClassTemplatePlaceholder(TypeRecord* type);
+Symbol* TypeClassTemplatePlaceholderOrigin(TypeRecord* type);
+bool TypeClassTemplatePlaceholderAcceptsDeduced(TypeRecord* placeholder,
+                                                TypeRecord* deduced);
 bool TypeIsCXXInitializerList(TypeRecord* type);
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
 TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,

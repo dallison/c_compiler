@@ -9,6 +9,7 @@
 
 #include "init_semantics.h"
 #include <stdlib.h>
+#include "compiler.h"
 #include "expr_semantics.h"
 #include "list.h"
 
@@ -44,6 +45,7 @@ typedef struct INode {
   struct INode* current;  // Not owned.
   Vector children;
   size_t index;             // Index into parent.
+  bool is_base_subobject;
   int num_initializers;  // Number of initializers for this node.
 } INode;
 
@@ -90,6 +92,7 @@ static INode* NewINode(IKind kind, TypeRecord* type, INode* parent) {
   inode->next = NULL;
   inode->current = NULL;
   inode->index = 0;
+  inode->is_base_subobject = false;
   inode->num_initializers = 0;
   VectorInit(&inode->children);
   return inode;
@@ -103,6 +106,23 @@ static void AppendStructMembers(INode* inode) {
   }
   TypeRecord* type = inode->type;
   INode* prev = NULL;
+  for (size_t i = 0; i < type->info.struct_info->bases.length; i++) {
+    CXXBaseSpecifier* base = type->info.struct_info->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->access != kAccessPublic ||
+        base->type == NULL) {
+      continue;
+    }
+    INode* child = BuildINode(base->type, inode);
+    child->index = i;
+    child->is_base_subobject = true;
+    VectorAppend(&inode->children, child);
+    if (!type->info.struct_info->is_union) {
+      if (prev != NULL) {
+        prev->next = child;
+      }
+      prev = child;
+    }
+  }
   size_t num_children = type->info.struct_info->members.length;
   for (size_t i = 0; i < num_children; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
@@ -228,6 +248,59 @@ static bool AdvanceCurrent(INode* inode) {
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only);
 static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only);
 
+static ASTNode* IdentityCloneNodeForInitializer(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static ASTNode* CloneInitializer(ASTNode* init) {
+  if (init == NULL) {
+    return NULL;
+  }
+  if (init->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)init;
+    return NewExpressionInitializerASTNode(
+        ASTNodeClone(expr_init->expr, IdentityCloneNodeForInitializer, NULL,
+                     NULL),
+        init->location);
+  }
+  return ASTNodeClone(init, IdentityCloneNodeForInitializer, NULL, NULL);
+}
+
+static void ApplyCXXDefaultMemberInitializers(INode* inode,
+                                              bool constants_only) {
+  if (!CompilerIsCXX() || inode == NULL) {
+    return;
+  }
+  if (inode->kind != kIStruct) {
+    for (size_t i = 0; i < inode->children.length; i++) {
+      ApplyCXXDefaultMemberInitializers(inode->children.value.p[i],
+                                        constants_only);
+    }
+    return;
+  }
+  LazyInitINode(inode);
+  for (size_t i = 0; i < inode->children.length; i++) {
+    INode* child = inode->children.value.p[i];
+    if (child == NULL) {
+      continue;
+    }
+    StructMember* member =
+        child->is_base_subobject
+            ? NULL
+            : inode->type->info.struct_info->members.value.p[child->index];
+    if (member != NULL && member->default_initializer != NULL &&
+        child->expr == NULL && child->children.length == 0) {
+      ASTNode* default_init = CloneInitializer(member->default_initializer);
+      if (default_init != NULL) {
+        InitializeINode(child, default_init, constants_only);
+      }
+    }
+    ApplyCXXDefaultMemberInitializers(child, constants_only);
+  }
+}
+
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
   if (expr->op == AST_OP(string)) {
     // Array initialized by string?
@@ -347,10 +420,10 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
 }
 
 // Get an inode child given its index, or NULL if index is invalid.
-static INode* GetChildAtIndex(INode* inode, size_t index) {
+static INode* GetChildAtIndex(INode* inode, size_t index, bool is_base) {
   for (size_t i = 0; i < inode->children.length; i++) {
     INode* child = inode->children.value.p[i];
-    if (child->index == index) {
+    if (child->index == index && child->is_base_subobject == is_base) {
       return child;
     }
   }
@@ -370,7 +443,7 @@ static INode* FindDesignator(INode* inode,
       }
       AppendArrayINodeChildren(inode, designator->value.array_index);
       INode* element = GetChildAtIndex(inode,
-                                       designator->value.array_index);
+                                       designator->value.array_index, false);
       if (element == NULL) {
         // Too few elements in array.
         SemanticError(ast_node,
@@ -407,9 +480,26 @@ static INode* FindDesignator(INode* inode,
       }
       designator->value.struct_member = member;
       designator->is_resolved_member = true;
-      return GetChildAtIndex(inode, member->index);
+      return GetChildAtIndex(inode, member->index, false);
+    }
+
+    case kDesignatorBase: {
+      if (inode->kind != kIStruct) {
+        SemanticError(ast_node, "Use of base designator on a non-struct");
+        return NULL;
+      }
+      AppendStructMembers(inode);
+      for (size_t i = 0; i < inode->type->info.struct_info->bases.length; i++) {
+        CXXBaseSpecifier* base = inode->type->info.struct_info->bases.value.p[i];
+        if (base == designator->value.base) {
+          return GetChildAtIndex(inode, i, true);
+        }
+      }
+      SemanticError(ast_node, "Unknown base class used in designator");
+      return NULL;
     }
   }
+  return NULL;
 }
 
 // If a flexible array (without a size) is initialized with a braced
@@ -523,9 +613,16 @@ static void BuildSingleDesignator(INode* inode, IKind kind,
       break;
     case kIStruct:
       {
-        StructMember* member = type->info.struct_info->members.value.p[inode->index];
-        VectorAppend(designators,
-                     NewStructMemberDesignator(member));
+        if (inode->is_base_subobject) {
+          CXXBaseSpecifier* base =
+              type->info.struct_info->bases.value.p[inode->index];
+          VectorAppend(designators, NewCXXBaseDesignator(base));
+        } else {
+          StructMember* member =
+              type->info.struct_info->members.value.p[inode->index];
+          VectorAppend(designators,
+                       NewStructMemberDesignator(member));
+        }
       }
       break;
 
@@ -581,6 +678,7 @@ static void FlattenINode(INode* inode,
 ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_only) {
   INode* inode = BuildINode(type, NULL);
   InitializeINode(inode, ast_node, constants_only);
+  ApplyCXXDefaultMemberInitializers(inode, constants_only);
   // PrintINode(inode, 0);
   ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), type, ast_node->location);
   FlattenINode(inode, (BracedInitializerASTNode*)braced_init);

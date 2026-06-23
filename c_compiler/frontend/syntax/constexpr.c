@@ -925,6 +925,9 @@ static bool ConstexprDesignatorSlotIndex(TypeRecord* type, Designator* designato
     *slot_index = (size_t)designator->value.array_index;
     return true;
   }
+  if (designator->designator_type == kDesignatorBase) {
+    return false;
+  }
   StructMember* member = ConstexprDesignatorMember(type, designator);
   if (member == NULL) {
     return false;

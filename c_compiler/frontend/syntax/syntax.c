@@ -1717,6 +1717,8 @@ static void AddFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close);
 static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
                                           bool wrap_aggregate_braces);
+static bool ResolveCXXClassTemplateArgumentDeductionFromInitializer(
+    Syntax* syntax, Symbol* sym, ASTNode* initializer);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static StructMember* FindCXXConstructor(TypeRecord* type);
 static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
@@ -2987,10 +2989,35 @@ static void CheckThreadLocal(Syntax* syntax, Symbol* symbol) {
 // 2. type specifier
 // 3. function specifier (inline).
 // This collects them into the output variables.
+static bool ParseCXXExplicitDeclarationSpecifier(Syntax* syntax,
+                                                 bool* saw_explicit) {
+  *saw_explicit = false;
+  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(explicit))) {
+    return false;
+  }
+  *saw_explicit = true;
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    return true;
+  }
+  ASTNode* expr =
+      SyntaxParseExpression(syntax, TC(closebra) | TC(exprsep));
+  expr = AnalyzeExpression(expr);
+  int64_t value = 0;
+  bool ok = EvaluateIntegerExpression(expr, &value);
+  if (!ok) {
+    SyntaxError(syntax, "explicit specifier must be a constant expression");
+  }
+  ASTNodeDelete(expr);
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
+  return ok && value != 0;
+}
+
 static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                                       bool* is_inline, bool* is_constexpr,
                                       bool* is_consteval, bool* is_constinit,
-                                      TypeRecord** type, Vector* attributes, ParserContext context) {
+                                      bool* is_explicit, TypeRecord** type,
+                                      Vector* attributes,
+                                      ParserContext context) {
   PartialTypeSpecifier type_specifier = {
     .type = kTypeImplicit,
     .quals = kQualPlain,
@@ -3025,6 +3052,15 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                       "Duplicate 'inline' specifier");
       }
       *is_inline = true;
+    } else if (LexLookingAt(syntax->lex, TOK(explicit))) {
+      bool saw_explicit = false;
+      bool explicit_value =
+          ParseCXXExplicitDeclarationSpecifier(syntax, &saw_explicit);
+      if (saw_explicit && *is_explicit) {
+        SyntaxWarning(syntax, "duplicate-decl-specifier",
+                      "Duplicate 'explicit' specifier");
+      }
+      *is_explicit = *is_explicit || explicit_value;
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
       if (*is_constexpr) {
         SyntaxError(syntax, "Duplicate 'constexpr' specifier");
@@ -3075,21 +3111,10 @@ static int CurrentTemplateParameterBase(Syntax* syntax);
 static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
                                                     TypeRecord* func);
 
-static TypeRecord* CXXClassTemplatePlaceholderBase(TypeRecord* type) {
-  for (TypeRecord* t = type; t != NULL; t = t->next) {
-    if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
-        t->template_arguments == NULL && t->info.struct_info != NULL &&
-        t->info.struct_info->is_template) {
-      return t;
-    }
-  }
-  return NULL;
-}
-
 static Symbol* CXXClassTemplateOrigin(TypeRecord* type) {
-  TypeRecord* base = CXXClassTemplatePlaceholderBase(type);
-  if (base != NULL) {
-    return base->template_origin;
+  Symbol* placeholder_origin = TypeClassTemplatePlaceholderOrigin(type);
+  if (placeholder_origin != NULL) {
+    return placeholder_origin;
   }
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     if (TypeIsStructOrUnion(t) && t->template_origin != NULL) {
@@ -3144,6 +3169,7 @@ static bool TryParseCXXDeductionGuide(Syntax* syntax, Symbol* sym) {
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
                                          Storage storage,
+                                         bool is_explicit,
                                          Vector* attributes,
                                          Vector* declarations) {
   Syntax* syntax = parser->syntax;
@@ -3165,9 +3191,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         sym->type->info.function.template_parameter_base =
             CurrentTemplateParameterBase(syntax);
       }
+      if (TypeIsFunction(sym->type)) {
+        sym->type->info.function.is_explicit = is_explicit;
+      }
       if (TryParseCXXDeductionGuide(syntax, sym)) {
         TypeParserReset(parser);
         continue;
+      }
+      if (is_explicit) {
+        SyntaxError(syntax,
+                    "explicit is only supported on deduction guides");
       }
       old_sym = parser->cxx_member_definition != NULL
           ? parser->cxx_member_definition->symbol
@@ -3413,6 +3446,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (LexMatch(syntax->lex, TOK(equal))) {
       syntax->init_storage = storage;
       initializer = SyntaxParseInitializer(syntax, sym, storage);
+      ResolveCXXClassTemplateArgumentDeductionFromInitializer(
+          syntax, sym, initializer);
     } else {
       initializer = ParseCXXDirectInitializer(syntax, sym, false);
       if (initializer != NULL) {
@@ -3597,7 +3632,19 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   Symbol* alias =
       NewSymbol(FullyQualifiedIdentifierLast(name), alias_type, STO(typedef));
   alias->location = location;
+  if (syntax->parsing_template_declaration) {
+    alias->flags.is_template = true;
+  }
+  LocalSymbolTable* template_parameter_scope = NULL;
+  if (syntax->parsing_template_declaration &&
+      syntax->local_symbol_stack != NULL) {
+    template_parameter_scope = syntax->local_symbol_stack;
+    syntax->local_symbol_stack = template_parameter_scope->prev;
+  }
   bool added = SyntaxAddSymbol(syntax, alias);
+  if (template_parameter_scope != NULL) {
+    syntax->local_symbol_stack = template_parameter_scope;
+  }
   if (!added) {
     SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
                 alias->name.value);
@@ -3994,6 +4041,21 @@ static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
   syntax->current_template_parameters->length = 0;
 }
 
+static void MoveCurrentTemplateParametersToStruct(Syntax* syntax, Struct* str) {
+  if (syntax->current_template_parameters == NULL || str == NULL) {
+    return;
+  }
+  VectorDestructWithContents(&str->template_parameters,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
+  VectorInit(&str->template_parameters);
+  for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
+    VectorAppend(&str->template_parameters,
+                 syntax->current_template_parameters->value.p[i]);
+  }
+  syntax->current_template_parameters->length = 0;
+}
+
 static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
   if (node == NULL || node->op != AST_OP(decl_list)) {
     return;
@@ -4030,18 +4092,8 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
     syntax->last_parsed_tag->type->info.struct_info->is_template = true;
     syntax->last_parsed_tag->type->info.struct_info->template_parameter_count =
         CurrentTemplateParameterListLength(syntax);
-    VectorDestructWithContents(
-        &syntax->last_parsed_tag->type->info.struct_info->template_parameters,
-        (VectorElementDestructor)TemplateParameterDelete,
-        /*free_element=*/false);
-    VectorInit(&syntax->last_parsed_tag->type->info.struct_info->template_parameters);
-    if (syntax->current_template_parameters != NULL) {
-      for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
-        VectorAppend(&syntax->last_parsed_tag->type->info.struct_info->template_parameters,
-                     syntax->current_template_parameters->value.p[i]);
-      }
-      syntax->current_template_parameters->length = 0;
-    }
+    MoveCurrentTemplateParametersToStruct(
+        syntax, syntax->last_parsed_tag->type->info.struct_info);
     Symbol* alias = NewSymbol(syntax->last_parsed_tag->name.value,
                               syntax->last_parsed_tag->type, STO(typedef));
     alias->namespace_ = syntax->last_parsed_tag->namespace_;
@@ -4190,10 +4242,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  bool is_explicit = false;
   TypeRecord* type = NULL;
   ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
                             &is_consteval, &is_constinit,
-                            &type, &attributes, kParsingFileScope);
+                            &is_explicit, &type, &attributes,
+                            kParsingFileScope);
 
   if (StorageIs(storage, STO(auto)|STO(register))) {
     SyntaxError(syntax, "Illegal global storage specified: %s",
@@ -4232,6 +4286,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   // Now we get a sequence of declarations, separated by commas.
   ASTNode* result = ParseExternalDeclarationList(&parser,
                                                  type, storage,
+                                                 is_explicit,
                                                  &attributes,
                                                  declarations);
   SyntaxCloseScope(syntax);
@@ -4342,11 +4397,49 @@ static bool CXXConstructorSetHasInitializerList(StructMember* ctor) {
   return false;
 }
 
+static bool TypeHasCXXInitializerListConstructor(TypeRecord* type) {
+  return CXXConstructorSetHasInitializerList(FindCXXConstructor(type));
+}
+
+static ASTNode* NewCXXCopyListConstructorInitializer(Syntax* syntax,
+                                                    Symbol* sym,
+                                                    ASTNode* initializer) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      initializer == NULL || initializer->op != AST_OP(braced_init) ||
+      !TypeIsStructOrUnion(sym->type) || sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->is_aggregate) {
+    return initializer;
+  }
+  StructMember* constructor = FindCXXConstructor(sym->type);
+  if (constructor == NULL) {
+    return initializer;
+  }
+  Vector* actuals = NewVector();
+  if (CXXConstructorSetHasInitializerList(constructor)) {
+    VectorAppend(actuals, initializer);
+    return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* init = braced->initializers->value.p[i];
+    if (init != NULL && init->op == AST_OP(expr_init)) {
+      VectorAppend(actuals, ((ExpressionInitializerASTNode*)init)->expr);
+    } else if (init != NULL) {
+      VectorAppend(actuals, init);
+    }
+  }
+  braced->initializers->length = 0;
+  return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+}
+
 static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
   Vector* actuals = NewVector();
   while (!LexLookingAt(syntax->lex, close)) {
-    ASTNode* actual =
-        SyntaxParseSingleExpression(syntax, TC(closebra) | TC(exprsep));
+    ASTNode* actual = LexMatch(syntax->lex, TOK(lbrace))
+                          ? SyntaxParseBracedInitializer(syntax)
+                          : SyntaxParseSingleExpression(syntax,
+                                                        TC(closebra) |
+                                                            TC(exprsep));
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
@@ -4367,19 +4460,32 @@ static void AnalyzeCXXInitializerArgumentTypes(Vector* actuals) {
 
 static bool ResolveCXXClassTemplateArgumentDeduction(Syntax* syntax,
                                                      Symbol* sym,
-                                                     Vector* actuals) {
+                                                     Vector* actuals,
+                                                     bool allow_explicit) {
   if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
       !TypeIsClassTemplatePlaceholder(sym->type)) {
     return true;
   }
   Symbol* class_template = CXXClassTemplateOrigin(sym->type);
   AnalyzeCXXInitializerArgumentTypes(actuals);
-  TypeRecord* deduced =
-      TypeDeduceClassTemplateFromGuide(syntax, class_template, actuals);
+  bool alias_rejected = false;
+  TypeRecord* deduced = TypeDeduceClassTemplateFromPlaceholder(
+      syntax, sym->type, actuals, allow_explicit, &alias_rejected);
   if (deduced == NULL) {
-    SyntaxError(syntax, "Could not deduce template arguments for %s",
-                class_template != NULL ? class_template->name.value
-                                       : "<class template>");
+    if (alias_rejected) {
+      SyntaxError(syntax,
+                  "Deduced template arguments do not match alias template");
+    } else {
+      SyntaxError(syntax, "Could not deduce template arguments for %s",
+                  class_template != NULL ? class_template->name.value
+                                         : "<class template>");
+    }
+    return false;
+  }
+  if (!TypeClassTemplatePlaceholderAcceptsDeduced(sym->type, deduced)) {
+    SyntaxError(syntax,
+                "Deduced template arguments do not match alias template");
+    TypeRecordDelete(deduced);
     return false;
   }
   SymbolSetType(sym, deduced);
@@ -4387,13 +4493,70 @@ static bool ResolveCXXClassTemplateArgumentDeduction(Syntax* syntax,
   return true;
 }
 
+static Vector* CXXDeductionActualsFromInitializer(ASTNode* initializer,
+                                                  bool preserve_braced) {
+  if (initializer == NULL) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  if (initializer->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)initializer;
+    expr_init->expr = AnalyzeExpression(expr_init->expr);
+    VectorAppend(actuals, expr_init->expr);
+    return actuals;
+  }
+  if (initializer->op == AST_OP(braced_init)) {
+    if (preserve_braced) {
+      VectorAppend(actuals, initializer);
+      return actuals;
+    }
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* init = braced->initializers->value.p[i];
+      if (init != NULL && init->op == AST_OP(expr_init)) {
+        ExpressionInitializerASTNode* expr_init =
+            (ExpressionInitializerASTNode*)init;
+        expr_init->expr = AnalyzeExpression(expr_init->expr);
+        VectorAppend(actuals, expr_init->expr);
+      } else if (init != NULL) {
+        VectorAppend(actuals, init);
+      }
+    }
+    return actuals;
+  }
+  VectorAppend(actuals, AnalyzeExpression(initializer));
+  return actuals;
+}
+
+static bool ResolveCXXClassTemplateArgumentDeductionFromInitializer(
+    Syntax* syntax, Symbol* sym, ASTNode* initializer) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      !TypeIsClassTemplatePlaceholder(sym->type)) {
+    return true;
+  }
+  bool preserve_braced = initializer != NULL &&
+                         initializer->op == AST_OP(braced_init) &&
+                         TypeHasCXXInitializerListConstructor(sym->type);
+  Vector* actuals =
+      CXXDeductionActualsFromInitializer(initializer, preserve_braced);
+  bool ok = ResolveCXXClassTemplateArgumentDeduction(
+      syntax, sym, actuals, /*allow_explicit=*/false);
+  VectorDelete(actuals);
+  return ok;
+}
+
 static ASTNode* NewCXXBracedInitializerFromActuals(Vector* actuals,
                                                    SourceLocation location) {
   Vector* initializers = NewVector();
   for (size_t i = 0; actuals != NULL && i < actuals->length; i++) {
     ASTNode* actual = actuals->value.p[i];
-    VectorAppend(initializers,
-                 NewExpressionInitializerASTNode(actual, location));
+    if (actual != NULL && actual->op == AST_OP(braced_init)) {
+      VectorAppend(initializers, actual);
+    } else {
+      VectorAppend(initializers,
+                   NewExpressionInitializerASTNode(actual, location));
+    }
   }
   if (actuals != NULL) {
     actuals->length = 0;
@@ -4419,9 +4582,7 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
     actuals = ParseCXXInitializerArgumentList(syntax, TOK(rparen));
   } else if (LexMatch(syntax->lex, TOK(lbrace))) {
     braced = true;
-    StructMember* constructor = TypeIsClassTemplatePlaceholder(sym->type)
-                                    ? NULL
-                                    : FindCXXConstructor(sym->type);
+    StructMember* constructor = FindCXXConstructor(sym->type);
     if (CXXConstructorSetHasInitializerList(constructor)) {
       actuals = NewVector();
       VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
@@ -4431,7 +4592,8 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
   } else {
     return NULL;
   }
-  if (!ResolveCXXClassTemplateArgumentDeduction(syntax, sym, actuals)) {
+  if (!ResolveCXXClassTemplateArgumentDeduction(
+          syntax, sym, actuals, /*allow_explicit=*/true)) {
     VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
                              /*free_element=*/false);
     return NULL;
@@ -4757,7 +4919,13 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       if (LexMatch(syntax->lex, TOK(equal))) {
         syntax->init_storage = storage;
         initializer = SyntaxParseInitializer(syntax, sym, storage);
-        initializer = NewVariableInitExpression(syntax, sym, initializer);
+        ResolveCXXClassTemplateArgumentDeductionFromInitializer(
+            syntax, sym, initializer);
+        initializer =
+            NewCXXCopyListConstructorInitializer(syntax, sym, initializer);
+        if (initializer == NULL || initializer->op != AST_OP(call)) {
+          initializer = NewVariableInitExpression(syntax, sym, initializer);
+        }
       } else {
         initializer = ParseCXXDirectInitializer(syntax, sym, true);
         if (initializer == NULL && CompilerIsCXX() &&
@@ -4826,16 +4994,21 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  bool is_explicit = false;
   TypeRecord* type = NULL;
   Vector attributes = {0};
   syntax->context = kParsingBlockScope;
   
   ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
                             &is_consteval, &is_constinit,
-                            &type, &attributes, kParsingBlockScope);
+                            &is_explicit, &type, &attributes,
+                            kParsingBlockScope);
 
   if (is_inline) {
     SyntaxError(syntax, "inline is not allowed here");
+  }
+  if (is_explicit) {
+    SyntaxError(syntax, "explicit is not allowed here");
   }
   
   // Parse the type specifier (char, unsigned int, etc.)
@@ -4949,6 +5122,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(typedef):
     case TOK(using):
     case TOK(static_assert):
+    case TOK(explicit):
     case TOK(consteval):
     case TOK(constexpr):
     case TOK(constinit):
