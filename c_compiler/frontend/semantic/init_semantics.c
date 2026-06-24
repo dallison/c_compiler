@@ -51,6 +51,12 @@ typedef struct INode {
 
 INode* BuildINode(TypeRecord* type, INode* parent);
 
+static bool StructMemberIsObjectMember(StructMember* member) {
+  return member != NULL && member->symbol != NULL && !member->is_static &&
+         !member->is_member_function &&
+         !StorageIs(member->symbol->storage, STO(typedef));
+}
+
 static bool StructInitializationTypesMatch(TypeRecord* expr_type,
                                            TypeRecord* target_type) {
   if (!TypeIsStructOrUnion(expr_type) || !TypeIsStructOrUnion(target_type) ||
@@ -126,7 +132,7 @@ static void AppendStructMembers(INode* inode) {
   size_t num_children = type->info.struct_info->members.length;
   for (size_t i = 0; i < num_children; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
-    if (member->is_static || member->is_member_function) {
+    if (!StructMemberIsObjectMember(member)) {
       continue;
     }
     INode* child = BuildINode(member->symbol->type, inode);

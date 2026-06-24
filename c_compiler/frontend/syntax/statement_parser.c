@@ -787,6 +787,15 @@ static ASTNode* ParseReturnStatement(Syntax* syntax, TokenClass followers,
                                      location);
 }
 
+static ASTNode* ParseCoReturnStatement(Syntax* syntax, TokenClass followers,
+                                       SourceLocation location) {
+  ASTNode* expr = NULL;
+  if (!LexLookingAt(syntax->lex, TOK(semicolon))) {
+    expr = SyntaxParseExpression(syntax, followers);
+  }
+  return NewCombinedStatementASTNode(AST_OP(co_return), expr, NULL, location);
+}
+
 static ASTNode* ParseGotoStatement(Syntax* syntax, TokenClass followers,
                                    SourceLocation location) {
   if (!LexLookingAt(syntax->lex, TOK(identifier))) {
@@ -877,6 +886,7 @@ struct StatementParser {
   {TOK(case), ParseCaseStatement, false},
   {TOK(default), ParseDefaultStatement, false},
   {TOK(return), ParseReturnStatement, true},
+  {TOK(co_return), ParseCoReturnStatement, true},
   {TOK(goto), ParseGotoStatement, true},
   {TOK(try), ParseTryStatement, false},
   {TOK(asm), ParseAsmStatement, true},

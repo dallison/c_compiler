@@ -132,6 +132,10 @@ typedef struct {
   bool is_noexcept_eligible;   // C++ nothrow special member.
   bool is_auto_return_deduced;  // C++ auto return type has been deduced.
   bool is_deduction_guide;  // C++ class template deduction guide.
+  bool is_coroutine;  // C++ coroutine function.
+  struct TypeRecord* coroutine_promise_type;  // Deduced promise_type, if any.
+  struct TypeRecord* coroutine_frame_type;  // Lowered coroutine frame, if any.
+  int coroutine_suspend_count;  // Number of suspension points in the body.
   int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
   Struct* cxx_member_owner;  // Owning class for C++ member functions.
   Symbol* template_origin;  // Primary function template for instantiations.

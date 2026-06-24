@@ -805,6 +805,13 @@ static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
 }
 
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
+  if (compiler->current_function != NULL &&
+      compiler->current_function->info.function.is_coroutine &&
+      (((ASTNode*)node)->flags & kASTCoroutineLoweredReturn) == 0) {
+    SemanticError((ASTNode*)node,
+                  "return statement is not allowed in a coroutine; use co_return");
+    return;
+  }
   ASTNode* return_value = node->cond;
   if (return_value != NULL && return_value->op == AST_OP(asm)) {
     // Extension: return asm("foo") is allowed
@@ -892,6 +899,17 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
         AnalyzeTailRecursion(node, call);
       }
     }
+  }
+}
+
+static void AnalyzeCoReturnStatement(CombinedStatementASTNode* node) {
+  ASTNode* return_value = node->cond;
+  if (return_value != NULL) {
+    node->cond = AnalyzeExpression(return_value);
+  }
+  if (compiler->current_function == NULL ||
+      !compiler->current_function->info.function.is_coroutine) {
+    SemanticError((ASTNode*)node, "co_return used outside a coroutine");
   }
 }
 
@@ -1258,6 +1276,9 @@ void AnalyzeStatement(ASTNode* node) {
       break;
     case AST_OP(return ):
       AnalyzeReturnStatement((CombinedStatementASTNode*)node);
+      break;
+    case AST_OP(co_return):
+      AnalyzeCoReturnStatement((CombinedStatementASTNode*)node);
       break;
     case AST_OP(case):
       AnalyzeCaseLabel((CaseLabelASTNode*)node);

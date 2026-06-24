@@ -9,6 +9,7 @@
 #include "semantics.h"
 #include <string.h>
 #include "compiler.h"
+#include "coro_semantics.h"
 #include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
@@ -298,6 +299,7 @@ static bool NodeIsZero(ASTNode* node) {
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
+  SemanticAnalyzeCoroutineFunction(node);
   
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);

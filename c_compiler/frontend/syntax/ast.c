@@ -218,8 +218,14 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "?";
     case AST_OP(return ):
       return "return";
+    case AST_OP(co_return):
+      return "co_return";
     case AST_OP(throw):
       return "throw";
+    case AST_OP(co_await):
+      return "co_await";
+    case AST_OP(co_yield):
+      return "co_yield";
     case AST_OP(rshift):
     case AST_OP(rshiftl):
     case AST_OP(rshifta):

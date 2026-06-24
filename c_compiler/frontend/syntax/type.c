@@ -270,6 +270,10 @@ void TypeRecordDelete(TypeRecord* record) {
       // already-freed info.  Keep the count balanced for any reader.
       record->info.enum_info->refs--;
     } else if (TypeIsFunction(record)) {
+      TypeRecordDelete(record->info.function.coroutine_promise_type);
+      record->info.function.coroutine_promise_type = NULL;
+      TypeRecordDelete(record->info.function.coroutine_frame_type);
+      record->info.function.coroutine_frame_type = NULL;
       VectorDestructWithContents(&record->info.function.prototype,
                                 (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
       VectorDestructWithContents(&record->info.function.template_parameters,
@@ -449,6 +453,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
                    TemplateParameterCopy(
                        record->info.function.template_parameters.value.p[i]));
     }
+    TypeRecordIncRef(r->info.function.coroutine_promise_type);
+    TypeRecordIncRef(r->info.function.coroutine_frame_type);
   }
   // Increment ref counts for type-specific objects.
   if (TypeIsStructOrUnion(record)) {
@@ -596,6 +602,10 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_noexcept_eligible = true;
   t->info.function.is_auto_return_deduced = false;
   t->info.function.is_deduction_guide = false;
+  t->info.function.is_coroutine = false;
+  t->info.function.coroutine_promise_type = NULL;
+  t->info.function.coroutine_frame_type = NULL;
+  t->info.function.coroutine_suspend_count = 0;
   t->info.function.virtual_index = -1;
   t->info.function.cxx_member_owner = NULL;
   t->info.function.template_origin = NULL;
@@ -1298,6 +1308,80 @@ static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
   AddStructMember(parser, owner, member);
 }
 
+static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
+                                    const char* name, TypeRecord* type,
+                                    CXXAccess access,
+                                    SourceLocation location) {
+  if (!CompilerIsCXX() || owner == NULL || name == NULL || type == NULL) {
+    return;
+  }
+  String alias_name;
+  StringInit(&alias_name, name);
+  if (FindStructMember(owner, &alias_name) != NULL) {
+    SyntaxError(parser->syntax, "Duplicate nested type %s", name);
+    StringDestruct(&alias_name);
+    return;
+  }
+  StringDestruct(&alias_name);
+
+  Symbol* alias = NewSymbol(name, type, STO(typedef));
+  alias->location = location;
+  StructMember* member = NewStructMember(alias);
+  member->access = access;
+  AddStructMember(parser, owner, member);
+}
+
+static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
+                                     CXXAccess access,
+                                     SourceLocation location) {
+  if (!LexLookingAt(parser->lex, TOK(identifier))) {
+    SyntaxError(parser->syntax, "Expected alias name after using");
+    SyntaxRecover(parser->syntax, TC(semicolon));
+    return;
+  }
+  String alias_name;
+  StringInit(&alias_name, parser->lex->spelling.value);
+  LexNextToken(parser->lex);
+  if (!LexMatch(parser->lex, TOK(equal))) {
+    SyntaxError(parser->syntax, "Expected = in using alias declaration");
+    StringDestruct(&alias_name);
+    SyntaxRecover(parser->syntax, TC(semicolon));
+    return;
+  }
+  TypeRecord* type = TypeParserParseType(parser, true);
+  Symbol* parsed = type != NULL ? TypeParserParseDeclarator(parser, type) : NULL;
+  TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
+  AddCXXNestedAliasMember(parser, owner, alias_name.value, alias_type, access,
+                          location);
+  if (parsed != NULL) {
+    SymbolDelete(parsed);
+  }
+  StringDestruct(&alias_name);
+}
+
+static void ParseCXXMemberTypedef(TypeParser* parser, Struct* owner,
+                                  CXXAccess access,
+                                  SourceLocation location) {
+  Storage old_storage = parser->storage;
+  parser->storage = STO(typedef);
+  TypeRecord* type = TypeParserParseType(parser, true);
+  while (!LexEof(parser->lex)) {
+    Symbol* alias = TypeParserParseDeclarator(parser, type);
+    if (alias == NULL) {
+      SyntaxError(parser->syntax, "Invalid typedef member");
+      break;
+    }
+    AddCXXNestedAliasMember(parser, owner, alias->name.value, alias->type,
+                            access, alias->location != 0 ? alias->location
+                                                         : location);
+    SymbolDelete(alias);
+    if (!LexMatch(parser->lex, TOK(comma))) {
+      break;
+    }
+  }
+  parser->storage = old_storage;
+}
+
 static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 TypeRecord* type,
                                                 Vector* args) {
@@ -1741,6 +1825,17 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.is_noexcept_eligible;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
+  func->info.function.is_coroutine = from->info.function.is_coroutine;
+  func->info.function.coroutine_promise_type =
+      from->info.function.coroutine_promise_type != NULL
+          ? TypeRecordCopy(from->info.function.coroutine_promise_type)
+          : NULL;
+  func->info.function.coroutine_frame_type =
+      from->info.function.coroutine_frame_type != NULL
+          ? TypeRecordCopy(from->info.function.coroutine_frame_type)
+          : NULL;
+  func->info.function.coroutine_suspend_count =
+      from->info.function.coroutine_suspend_count;
   func->info.function.template_parameter_count =
       from->info.function.template_parameter_count;
   func->info.function.template_parameter_base = 0;
@@ -2138,6 +2233,17 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.is_auto_return_deduced;
   func->info.function.is_deduction_guide =
       from->info.function.is_deduction_guide;
+  func->info.function.is_coroutine = from->info.function.is_coroutine;
+  func->info.function.coroutine_promise_type =
+      from->info.function.coroutine_promise_type != NULL
+          ? TypeRecordCopy(from->info.function.coroutine_promise_type)
+          : NULL;
+  func->info.function.coroutine_frame_type =
+      from->info.function.coroutine_frame_type != NULL
+          ? TypeRecordCopy(from->info.function.coroutine_frame_type)
+          : NULL;
+  func->info.function.coroutine_suspend_count =
+      from->info.function.coroutine_suspend_count;
   func->info.function.virtual_index = from->info.function.virtual_index;
   func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
   TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
@@ -3886,6 +3992,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                                        /*free_element=*/false);
           }
         }
+      } else if (CompilerIsCXX()) {
+        Symbol* tag = SyntaxFindTag(parser->syntax, &typedef_name);
+        if (tag != NULL && tag->type != NULL &&
+            TypeIsStructOrUnion(tag->type)) {
+          LexNextToken(lex);
+          type_record = TypeRecordCopy(tag->type);
+          type |= type_record->type;
+        }
       }
       StringDestruct(&typedef_name);
     }
@@ -4204,8 +4318,12 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   TypeRecord* t = parser->base_type;
   while (i > 0) {
     TypeRecord* record = (TypeRecord*)parser->stack.value.p[i - 1];
-    TypeRecordChain(record, t);
-    record->type = t->type;
+    if (TypeIsFunction(record) && record->next != NULL) {
+      record->type = record->next->type;
+    } else {
+      TypeRecordChain(record, t);
+      record->type = t->type;
+    }
     t = record;
     i--;
   }
@@ -4492,6 +4610,27 @@ static void ParseCXXExceptionSpecifier(TypeParser* parser) {
   }
 }
 
+static TypeRecord* ParseCXXTrailingReturnType(TypeParser* parser) {
+  TypeParser return_parser;
+  TypeParserInit(&return_parser, parser->lex, parser->syntax, STO(auto),
+                 kParsingPrototype);
+  TypeRecord* return_type = TypeParserParseType(&return_parser, true);
+  Symbol* parsed = return_type != NULL
+                       ? TypeParserParseDeclarator(&return_parser, return_type)
+                       : NULL;
+  TypeParserDestruct(&return_parser);
+  if (parsed != NULL) {
+    TypeRecord* result = TypeRecordCopy(parsed->type);
+    SymbolDelete(parsed);
+    TypeRecordDelete(return_type);
+    return result;
+  }
+  if (return_type == NULL) {
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  return return_type;
+}
+
 static void ParseFunctionDecl(TypeParser* parser) {
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
@@ -4507,6 +4646,11 @@ static void ParseFunctionDecl(TypeParser* parser) {
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
   ParseCXXExceptionSpecifier(parser);
+  if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
+      LexMatch(parser->lex, TOK(arrow))) {
+    TypeRecord* trailing_return = ParseCXXTrailingReturnType(parser);
+    TypeRecordChain(func, trailing_return);
+  }
   if (parser->cxx_member_definition != NULL &&
       !parser->cxx_member_definition->is_static) {
     TypeRecordAddCXXThisParameter(
@@ -5126,6 +5270,10 @@ static void AlignNextOffset(Struct* str, TypeRecord* type) {
 // aligned(N) override.
 static void FinalizeStructAlignment(Struct* str) {
   int align = str->alignment > 0 ? str->alignment : 1;
+  if (CompilerIsCXX() && !str->is_union && str->size == 0) {
+    str->size = 1;
+    str->alignment = align;
+  }
   if (str->explicit_alignment > align) {
     align = str->explicit_alignment;
     str->alignment = align;
@@ -6947,6 +7095,26 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     Vector member_attributes = {0};
     VectorInit(&member_attributes);
     SyntaxParseCXXAttributes(parser->syntax, &member_attributes);
+
+    if (CompilerIsCXX() && LexMatch(parser->lex, TOK(using))) {
+      ParseCXXMemberUsingAlias(parser, str, current_access,
+                               parser->lex->current_token_location);
+      AttributeListDestruct(&member_attributes);
+      if (!LexLookingAt(parser->lex, TOK(rbrace))) {
+        SyntaxNeedSemicolon(parser->syntax, TC(type));
+      }
+      continue;
+    }
+
+    if (CompilerIsCXX() && LexMatch(parser->lex, TOK(typedef))) {
+      ParseCXXMemberTypedef(parser, str, current_access,
+                            parser->lex->current_token_location);
+      AttributeListDestruct(&member_attributes);
+      if (!LexLookingAt(parser->lex, TOK(rbrace))) {
+        SyntaxNeedSemicolon(parser->syntax, TC(type));
+      }
+      continue;
+    }
 
     bool is_member_template = false;
     bool old_parsing_template = parser->syntax->parsing_template_declaration;

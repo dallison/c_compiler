@@ -268,6 +268,59 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   ASTNodeSetType((ASTNode*)node, node->sub->type);
 }
 
+static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
+  node->sub = AnalyzeExpression(node->sub);
+  if (compiler->current_function == NULL ||
+      !compiler->current_function->info.function.is_coroutine) {
+    SemanticError((ASTNode*)node, "co_await used outside a coroutine");
+  }
+  TypeRecord* awaitable_type = node->sub != NULL ? node->sub->type : NULL;
+  StructMember* await_resume = NULL;
+  if (TypeIsStructOrUnion(awaitable_type) &&
+      awaitable_type->info.struct_info != NULL) {
+    String name;
+    StringInit(&name, "await_ready");
+    StructMember* await_ready =
+        FindStructMember(awaitable_type->info.struct_info, &name);
+    StringSet(&name, "await_suspend");
+    StructMember* await_suspend =
+        FindStructMember(awaitable_type->info.struct_info, &name);
+    StringSet(&name, "await_resume");
+    await_resume = FindStructMember(awaitable_type->info.struct_info, &name);
+    StringDestruct(&name);
+    if (await_ready == NULL || !await_ready->is_member_function) {
+      SemanticError((ASTNode*)node, "awaiter is missing await_ready");
+    }
+    if (await_suspend == NULL || !await_suspend->is_member_function) {
+      SemanticError((ASTNode*)node, "awaiter is missing await_suspend");
+    }
+    if (await_resume == NULL || !await_resume->is_member_function) {
+      SemanticError((ASTNode*)node, "awaiter is missing await_resume");
+    }
+  } else {
+    SemanticError((ASTNode*)node, "co_await operand must be an awaiter object");
+  }
+  if (await_resume != NULL && await_resume->symbol != NULL &&
+      TypeIsFunction(await_resume->symbol->type) &&
+      await_resume->symbol->type->next != NULL) {
+    ASTNodeSetType((ASTNode*)node, await_resume->symbol->type->next);
+    return;
+  }
+  ASTNodeSetType((ASTNode*)node,
+                 node->sub != NULL && node->sub->type != NULL
+                     ? node->sub->type
+                     : NewTypeRecordWithSize(kTypeInt, kQualPlain));
+}
+
+static void AnalyzeCoYieldExpression(UnaryASTNode* node) {
+  node->sub = AnalyzeExpression(node->sub);
+  if (compiler->current_function == NULL ||
+      !compiler->current_function->info.function.is_coroutine) {
+    SemanticError((ASTNode*)node, "co_yield used outside a coroutine");
+  }
+  ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
 static bool IsIntConstant(ASTNode* node) {
   return node->op == AST_OP(number) || node->op == AST_OP(charconst);
 }
@@ -3672,6 +3725,14 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
 
     case AST_OP(throw):
       AnalyzeThrowExpression((ThrowASTNode*)node);
+      break;
+
+    case AST_OP(co_await):
+      AnalyzeCoAwaitExpression(unary_node);
+      break;
+
+    case AST_OP(co_yield):
+      AnalyzeCoYieldExpression(unary_node);
       break;
 
     default:

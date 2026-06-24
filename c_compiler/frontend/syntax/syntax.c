@@ -5087,6 +5087,9 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(identifier): {
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
+        if (CompilerIsCXX() && SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
+          return true;
+        }
         return SyntaxCurrentTokenStartsQualifiedName(syntax);
       }
       if (StorageIs(sym->storage , STO(typedef))) {
@@ -5184,6 +5187,8 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(true):
     case TOK(sizeof):
     case TOK(tilde):
+    case TOK(co_await):
+    case TOK(co_yield):
       return TC(expr);
 
     case TOK(identifier):
@@ -5215,6 +5220,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(if):
     case TOK(goto):
     case TOK(return ):
+    case TOK(co_return):
     case TOK(switch):
     case TOK(while):
     case TOK(asm):

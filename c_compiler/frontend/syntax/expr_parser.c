@@ -764,8 +764,10 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
   TypeRecord* return_type = TypeParserParseType(&parser, true);
   Symbol* declarator = TypeParserParseDeclarator(&parser, return_type);
   if (declarator != NULL) {
-    return_type = declarator->type;
+    TypeRecord* parsed_type = TypeRecordCopy(declarator->type);
     SymbolDelete(declarator);
+    TypeRecordDelete(return_type);
+    return_type = parsed_type;
   }
   TypeParserDestruct(&parser);
   return return_type;
@@ -2361,6 +2363,31 @@ static ASTNode* ParseCXXThrowExpression(Syntax* syntax, TokenClass followers) {
   return NewThrowASTNode(expr, location);
 }
 
+static ASTNode* ParseCXXCoAwaitExpression(Syntax* syntax,
+                                          TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // co_await
+  ASTNode* expr = ParseCastExpression(syntax, followers);
+  return NewUnaryASTNode(AST_OP(co_await), NULL, location, expr);
+}
+
+static ASTNode* ParseCXXCoYieldExpression(Syntax* syntax,
+                                          TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // co_yield
+  ASTNode* expr = NULL;
+  if (!LexLookingAt(syntax->lex, TOK(semicolon)) &&
+      !LexLookingAt(syntax->lex, TOK(rparen)) &&
+      !LexLookingAt(syntax->lex, TOK(comma))) {
+    expr = ParseAssignmentExpression(syntax, followers);
+  } else {
+    SyntaxError(syntax, "Expected expression after co_yield");
+    expr = NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  return NewUnaryASTNode(AST_OP(co_yield), NULL, location, expr);
+}
+
 // Parse a unary expression with syntax:
 // unary-expression:
 //    postfix-expression
@@ -2456,6 +2483,10 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(throw))) {
     return ParseCXXThrowExpression(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(co_await))) {
+    return ParseCXXCoAwaitExpression(syntax, followers);
   }
 
   return ParsePostfixExpression(syntax, followers);
@@ -2811,6 +2842,10 @@ static ASTOpcode AssignASTOpcode(Syntax* syntax, Token tok) {
 
 static ASTNode* ParseAssignmentExpression(Syntax* syntax,
                                           TokenClass followers) {
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(co_yield))) {
+    return ParseCXXCoYieldExpression(syntax, followers);
+  }
+
   ASTNode* result = ParseConditionalExpression(syntax, followers);
   if (syntax->lex->preprocessor_mode || syntax->lex->assembler_mode) {
     return result;
