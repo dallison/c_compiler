@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: coroutine suspension is not supported yet
+// EXPECT: coroutine final_suspend suspension is not supported yet
 
 struct Awaiter {
   bool await_ready(void) {
@@ -37,14 +37,16 @@ struct Promise {
   void return_value(int result) {
     value = result;
   }
+  Awaiter yield_value(int result) {
+    (void)result;
+    Awaiter awaiter = {};
+    return awaiter;
+  }
   void unhandled_exception(void) {
   }
 };
 
 Task suspended_coroutine(void) {
-  Awaiter first = {};
-  Awaiter second = {};
-  int first_value = co_await first;
-  int second_value = co_await second;
-  co_return first_value + second_value;
+  co_yield 3;
+  co_return 0;
 }
