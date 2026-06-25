@@ -7,11 +7,12 @@ ELFDUMP=""
 LIBC=""
 INTERPRETER=""
 SUITE_ROOT=""
+TARGET="x86_64"
 TIMEOUT=30
 declare -a INTERP_ARGS=()
 
 usage() {
-  echo "usage: $0 --davecc PATH --elfdump PATH --libc PATH --interpreter PATH [--suite-root PATH]" >&2
+  echo "usage: $0 --davecc PATH --elfdump PATH --libc PATH --interpreter PATH [--target NAME] [--suite-root PATH]" >&2
   exit 2
 }
 
@@ -21,6 +22,7 @@ while [ "$#" -gt 0 ]; do
     --elfdump) ELFDUMP=$2; shift 2 ;;
     --libc) LIBC=$2; shift 2 ;;
     --interpreter) INTERPRETER=$2; shift 2 ;;
+    --target) TARGET=$2; shift 2 ;;
     --suite-root) SUITE_ROOT=$2; shift 2 ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
     --interp-arg) INTERP_ARGS+=("$2"); shift 2 ;;
@@ -74,37 +76,50 @@ work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-weak.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 compile_obj() {
-  "$DAVECC" -target x86_64 -c "$1" -o "$2"
+  "$DAVECC" -target "$TARGET" -c "$1" -o "$2"
 }
 
 compile_cxx_obj() {
-  "$DAVECC" -target x86_64 -std=c++20 -isystem "$INCLUDE_DIR" -c "$1" -o "$2"
+  "$DAVECC" -target "$TARGET" -std=c++20 -isystem "$INCLUDE_DIR" -c "$1" -o "$2"
 }
 
 link_and_run() {
   local bin=$1
   shift
-  "$DAVECC" -target x86_64 -static "$@" "$LIBC" -o "$bin" -Wl,-e -Wl,main
+  "$DAVECC" -target "$TARGET" -static "$@" "$LIBC" -o "$bin" -Wl,-e -Wl,main
   "${TIMEOUT_CMD[@]}" "$INTERPRETER" "${INTERP_ARGS[@]}" "$bin"
 }
 
-echo "=== weak binding tests ==="
+asm_return_instruction() {
+  case "$TARGET" in
+    x86_64|aarch64) echo "	ret" ;;
+    arm) echo "	bx lr" ;;
+    riscv) echo "	jalr x0, x1, 0" ;;
+    *) echo "unsupported weak asm target: $TARGET" >&2; exit 2 ;;
+  esac
+}
 
-cat >"$work/weak_asm.s" <<'EOF'
+echo "=== weak binding tests: target=$TARGET ==="
+
+if [ "$TARGET" = "arm" ]; then
+  echo "skip assembler weak symbol dump on arm"
+else
+cat >"$work/weak_asm.s" <<EOF
 	.text
 	.weak weak_asm_func
 	.type weak_asm_func, @function
 weak_asm_func:
-	ret
+$(asm_return_instruction)
 EOF
-compile_obj "$work/weak_asm.s" "$work/weak_asm.o"
-"$ELFDUMP" -s "$work/weak_asm.o" >"$work/weak_asm.symbols"
-if ! grep -q "weal.*weak_asm_func" "$work/weak_asm.symbols"; then
-  echo "FAIL assembler weak symbol binding"
-  sed 's/^/  /' "$work/weak_asm.symbols"
-  exit 1
+  compile_obj "$work/weak_asm.s" "$work/weak_asm.o"
+  "$ELFDUMP" -s "$work/weak_asm.o" >"$work/weak_asm.symbols"
+  if ! grep -q "weal.*weak_asm_func" "$work/weak_asm.symbols"; then
+    echo "FAIL assembler weak symbol binding"
+    sed 's/^/  /' "$work/weak_asm.symbols"
+    exit 1
+  fi
+  echo "ok assembler emits STB_WEAK"
 fi
-echo "ok assembler emits STB_WEAK"
 
 cat >"$work/weak_choose.c" <<'EOF'
 __attribute__((weak)) int choose(void) {

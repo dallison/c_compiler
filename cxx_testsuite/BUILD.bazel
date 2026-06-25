@@ -97,6 +97,8 @@ sh_test(
         "$(rootpath //:davecc)",
         "--elfdump",
         "$(rootpath //:elfdump)",
+        "--target",
+        "x86_64",
         "--libc",
         "$(rootpath //:libc_x86_64)",
         "--interpreter",
@@ -113,6 +115,82 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "weak_bindings_riscv",
+    srcs = ["run_weak_binding_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--elfdump",
+        "$(rootpath //:elfdump)",
+        "--target",
+        "riscv",
+        "--libc",
+        "$(rootpath //:libc_riscv)",
+        "--interpreter",
+        "$(rootpath //:riscv)",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:elfdump",
+        "//:libc_riscv",
+        "//:libc_headers",
+        "//:riscv",
+    ],
+)
+
+sh_test(
+    name = "weak_bindings_aarch64",
+    srcs = ["run_weak_binding_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--elfdump",
+        "$(rootpath //:elfdump)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:elfdump",
+        "//:libc_aarch64",
+        "//:libc_headers",
+        "//:aarch64",
+    ],
+)
+
+sh_test(
+    name = "weak_bindings_arm",
+    srcs = ["run_weak_binding_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--elfdump",
+        "$(rootpath //:elfdump)",
+        "--target",
+        "arm",
+        "--libc",
+        "$(rootpath //:libc_arm)",
+        "--interpreter",
+        "$(rootpath //:arm)",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:elfdump",
+        "//:libc_arm",
+        "//:libc_headers",
+        "//:arm",
+    ],
+)
+
 test_suite(
     name = "all",
     tests = [
@@ -120,6 +198,9 @@ test_suite(
         ":lexical",
         ":mangling",
         ":syntax",
+        ":weak_bindings_aarch64",
+        ":weak_bindings_arm",
+        ":weak_bindings_riscv",
         ":weak_bindings_x86_64",
     ],
 )
