@@ -43,6 +43,20 @@ static bool ASTNodeIsGLValue(ASTNode* node) {
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target);
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
+static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
+                                          bool diagnose_ambiguous);
+static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
+                                                 VectorASTNode* node,
+                                                 Vector* explicit_args);
+static int OperatorCoAwaitCallScore(Symbol* candidate, VectorASTNode* node);
+static Symbol* ResolveFreeOperatorCoAwaitForActual(ASTNode* actual,
+                                                   bool diagnose_ambiguous);
+static ASTNode* NewOperatorMemberCall(ASTNode* receiver, const char* op_name,
+                                      Vector* actuals,
+                                      SourceLocation location);
+static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
+                                    Vector* remaining_actuals,
+                                    SourceLocation location);
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
@@ -273,6 +287,43 @@ static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
   if (compiler->current_function == NULL ||
       !compiler->current_function->info.function.is_coroutine) {
     SemanticError((ASTNode*)node, "co_await used outside a coroutine");
+  }
+  if (CompilerIsCXX() && TypeIsStructOrUnion(node->sub->type) &&
+      node->sub->type->info.struct_info != NULL) {
+    String name;
+    StringInit(&name, "operator co_await");
+    StructMember* member =
+        FindStructMember(node->sub->type->info.struct_info, &name);
+    StringDestruct(&name);
+    if (member != NULL && member->is_member_function) {
+      ASTNode* receiver = ASTNodeMove(node->sub);
+      ASTNode* call = NewOperatorMemberCall(receiver, "operator co_await", NULL,
+                                            node->base.location);
+      ASTNodeReplaceChild((ASTNode*)node, 0, AnalyzeExpression(call), true);
+    }
+  }
+  bool already_awaiter = false;
+  if (CompilerIsCXX() && node->sub != NULL &&
+      TypeIsStructOrUnion(node->sub->type) &&
+      node->sub->type->info.struct_info != NULL) {
+    String await_ready_name;
+    StringInit(&await_ready_name, "await_ready");
+    StructMember* await_ready =
+        FindStructMember(node->sub->type->info.struct_info, &await_ready_name);
+    StringDestruct(&await_ready_name);
+    already_awaiter = await_ready != NULL && await_ready->is_member_function;
+  }
+  if (CompilerIsCXX() && !already_awaiter && node->sub != NULL &&
+      node->sub->type != NULL) {
+    Symbol* function =
+        ResolveFreeOperatorCoAwaitForActual(node->sub,
+                                            /*diagnose_ambiguous=*/true);
+    if (function != NULL) {
+      ASTNode* actual = ASTNodeMove(node->sub);
+      ASTNode* call = NewOperatorFreeCall(function, actual, NULL,
+                                          node->base.location);
+      ASTNodeReplaceChild((ASTNode*)node, 0, AnalyzeExpression(call), true);
+    }
   }
   TypeRecord* awaitable_type = node->sub != NULL ? node->sub->type : NULL;
   StructMember* await_resume = NULL;
@@ -572,6 +623,124 @@ static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
                           NewIdentifierASTNode(function, location), actuals);
 }
 
+static Symbol* FollowUsingAliasForADL(Symbol* symbol) {
+  int depth = 0;
+  while (symbol != NULL && symbol->flags.is_using_alias &&
+         symbol->alias_target != NULL && depth < 64) {
+    symbol = symbol->alias_target;
+    depth++;
+  }
+  return symbol;
+}
+
+static bool VectorContainsPointer(Vector* vec, void* value) {
+  for (size_t i = 0; i < vec->length; i++) {
+    if (vec->value.p[i] == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ADLAddNamespace(Vector* namespaces, Namespace* ns) {
+  while (ns != NULL) {
+    if (!VectorContainsPointer(namespaces, ns)) {
+      VectorAppend(namespaces, ns);
+    }
+    if (ns == compiler->global_namespace) {
+      break;
+    }
+    ns = ns->parent;
+  }
+}
+
+static TypeRecord* ADLCanonicalType(TypeRecord* type) {
+  while (type != NULL &&
+         (TypeIsReference(type) || TypeIsPointer(type) || TypeIsArray(type))) {
+    type = type->next;
+  }
+  return type;
+}
+
+static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
+                                        int depth) {
+  if (type == NULL || depth > 8) {
+    return;
+  }
+  type = ADLCanonicalType(type);
+  if (type == NULL) {
+    return;
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    Struct* str = type->info.struct_info;
+    if (str->tag_symbol != NULL) {
+      ADLAddNamespace(namespaces, str->tag_symbol->namespace_ != NULL
+                                      ? str->tag_symbol->namespace_
+                                      : compiler->global_namespace);
+    }
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base != NULL) {
+        ADLCollectNamespacesForType(base->type, namespaces, depth + 1);
+      }
+    }
+  } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
+             type->info.enum_info->tag_symbol != NULL) {
+    Symbol* tag = type->info.enum_info->tag_symbol;
+    ADLAddNamespace(namespaces, tag->namespace_ != NULL
+                                    ? tag->namespace_
+                                    : compiler->global_namespace);
+  }
+  if (type->template_arguments != NULL) {
+    for (size_t i = 0; i < type->template_arguments->length; i++) {
+      TemplateArgument* arg = type->template_arguments->value.p[i];
+      if (arg != NULL && arg->kind == kTemplateParameterType) {
+        ADLCollectNamespacesForType(arg->type, namespaces, depth + 1);
+      }
+    }
+  }
+}
+
+static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
+  first = FollowUsingAliasForADL(first);
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    Symbol* effective = FollowUsingAliasForADL(candidate);
+    if (effective != NULL && effective->type != NULL &&
+        TypeIsFunction(effective->type) &&
+        !VectorContainsPointer(candidates, effective)) {
+      VectorAppend(candidates, effective);
+    }
+  }
+}
+
+static void AddNamedFunctionCandidates(String* name, Namespace* ns,
+                                       Vector* candidates) {
+  Symbol* found = (ns == NULL || ns == compiler->global_namespace)
+                      ? FindGlobalSymbol(name)
+                      : NamespaceFindSymbol(ns, name);
+  AddFunctionOverloadCandidates(candidates, found);
+}
+
+static void AddADLFunctionCandidates(String* name, Vector* actuals,
+                                     Vector* candidates) {
+  if (!CompilerIsCXX() || actuals == NULL) {
+    return;
+  }
+  Vector namespaces;
+  VectorInit(&namespaces);
+  for (size_t i = 0; i < actuals->length; i++) {
+    ASTNode* actual = actuals->value.p[i];
+    if (actual != NULL) {
+      ADLCollectNamespacesForType(actual->type, &namespaces, 0);
+    }
+  }
+  for (size_t i = 0; i < namespaces.length; i++) {
+    AddNamedFunctionCandidates(name, namespaces.value.p[i], candidates);
+  }
+  VectorDestruct(&namespaces);
+}
+
 static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
   const char* op_name = UnaryOperatorFunctionName(node->base.op);
   if (!CompilerIsCXX() || op_name == NULL) {
@@ -595,7 +764,12 @@ static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
     return ReplaceUnaryWithCall(node, call);
   }
 
-  Symbol* function = FindGlobalSymbol(&name);
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, node->sub);
+  Symbol* function = ResolveFreeFunctionWithADL(&name, &actuals,
+                                                /*diagnose_ambiguous=*/true);
+  VectorDestruct(&actuals);
   if (function != NULL && TypeIsFunction(function->type)) {
     ASTNode* actual = ASTNodeMove(node->sub);
     ASTNode* call = NewOperatorFreeCall(function, actual, NULL,
@@ -657,7 +831,15 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
     return ReplaceUnaryWithCall(node, call);
   }
 
-  Symbol* function = FindGlobalSymbol(&name);
+  Vector lookup_actuals;
+  VectorInit(&lookup_actuals);
+  VectorAppend(&lookup_actuals, node->sub);
+  if (postfix) {
+    VectorAppend(&lookup_actuals, NewPostfixDummyArgument(node->base.location));
+  }
+  Symbol* function = ResolveFreeFunctionWithADL(&name, &lookup_actuals,
+                                                /*diagnose_ambiguous=*/true);
+  VectorDestruct(&lookup_actuals);
   if (function != NULL && TypeIsFunction(function->type)) {
     Vector* actuals = NULL;
     if (postfix) {
@@ -707,7 +889,13 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     }
   }
 
-  Symbol* function = FindGlobalSymbol(&name);
+  Vector lookup_actuals;
+  VectorInit(&lookup_actuals);
+  VectorAppend(&lookup_actuals, node->left);
+  VectorAppend(&lookup_actuals, node->right);
+  Symbol* function = ResolveFreeFunctionWithADL(&name, &lookup_actuals,
+                                                /*diagnose_ambiguous=*/true);
+  VectorDestruct(&lookup_actuals);
   if (function != NULL && TypeIsFunction(function->type)) {
     ASTNode* left = ASTNodeMove(node->left);
     ASTNode* right = ASTNodeMove(node->right);
@@ -1588,7 +1776,13 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
       StringDestruct(&name);
       return ReplaceBinaryWithCall(node, call);
     }
-    Symbol* function = FindGlobalSymbol(&name);
+    Vector lookup_actuals;
+    VectorInit(&lookup_actuals);
+    VectorAppend(&lookup_actuals, node->left);
+    VectorAppend(&lookup_actuals, node->right);
+    Symbol* function = ResolveFreeFunctionWithADL(&name, &lookup_actuals,
+                                                  /*diagnose_ambiguous=*/true);
+    VectorDestruct(&lookup_actuals);
     if (function != NULL && TypeIsFunction(function->type)) {
       Vector* actuals = NewVector();
       VectorAppend(actuals, ASTNodeMove(node->right));
@@ -2547,8 +2741,215 @@ static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
   return score;
 }
 
+static bool SymbolIsOperatorCoAwait(Symbol* symbol) {
+  return symbol != NULL && strcmp(symbol->name.value, "operator co_await") == 0;
+}
+
+static bool FunctionNameSkipsADL(String* name) {
+  return name != NULL &&
+         (strcmp(name->value, "operator new") == 0 ||
+          strcmp(name->value, "operator new[]") == 0 ||
+          strcmp(name->value, "operator delete") == 0 ||
+          strcmp(name->value, "operator delete[]") == 0);
+}
+
+static bool CoAwaitActualIsLValue(ASTNode* actual) {
+  if (ASTNodeIsLValue(actual)) {
+    return true;
+  }
+  return actual != NULL && actual->op == AST_OP(identifier) &&
+         actual->type != NULL && !TypeIsFunction(actual->type);
+}
+
+static int CoAwaitOperatorActualScore(Symbol* candidate, ASTNode* actual) {
+  if (candidate == NULL || candidate->type == NULL ||
+      !TypeIsFunction(candidate->type) ||
+      candidate->type->info.function.prototype.length != 1) {
+    return -1;
+  }
+  Symbol* formal = candidate->type->info.function.prototype.value.p[0];
+  if (actual == NULL || formal == NULL || formal->type == NULL) {
+    return -1;
+  }
+  TypeRecord* target = TypeIsReference(formal->type) ? formal->type->next
+                                                     : formal->type;
+  if (TypeIsStructOrUnion(actual->type) || TypeIsStructOrUnion(target)) {
+    if (!TypeIsStructOrUnion(actual->type) || !TypeIsStructOrUnion(target) ||
+        actual->type->info.struct_info != target->info.struct_info) {
+      return -1;
+    }
+  }
+  if (TypeIsReference(formal->type)) {
+    if (TypeIsConst(actual->type) && !TypeIsConst(target)) {
+      return -1;
+    }
+    if (formal->type->declarator == kDeclRValueReference) {
+      return CoAwaitActualIsLValue(actual) ? -1 : 0;
+    }
+    if (CoAwaitActualIsLValue(actual)) {
+      return TypeIsConst(target) ? 1 : 0;
+    }
+    return TypeIsConst(target) ? 2 : -1;
+  }
+  return OverloadConversionRank(actual, formal->type);
+}
+
+static Symbol* ResolveFreeOperatorCoAwaitForActual(ASTNode* actual,
+                                                   bool diagnose_ambiguous) {
+  if (!CompilerIsCXX() || actual == NULL || actual->type == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, "operator co_await");
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, actual);
+  Vector candidates;
+  VectorInit(&candidates);
+  AddNamedFunctionCandidates(&name, compiler->global_namespace, &candidates);
+  AddADLFunctionCandidates(&name, &actuals, &candidates);
+  Symbol* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  VectorASTNode call = {0};
+  call.children = &actuals;
+  for (size_t i = 0; i < candidates.length; i++) {
+    Symbol* candidate = candidates.value.p[i];
+    if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+        candidate->type->next == NULL) {
+      continue;
+    }
+    int score = OperatorCoAwaitCallScore(candidate, &call);
+    if (score < 0) {
+      continue;
+    }
+    if (best == NULL || score < best_score) {
+      best = candidate;
+      best_score = score;
+      ambiguous = false;
+    } else if (score == best_score) {
+      ambiguous = true;
+    }
+  }
+  if (ambiguous && diagnose_ambiguous) {
+    SemanticError(actual, "Ambiguous overload for operator co_await");
+  }
+  VectorDestruct(&candidates);
+  VectorDestruct(&actuals);
+  StringDestruct(&name);
+  return best;
+}
+
+static int OperatorCoAwaitCallScore(Symbol* candidate, VectorASTNode* node) {
+  if (node == NULL || node->children == NULL || node->children->length != 1) {
+    return -1;
+  }
+  return CoAwaitOperatorActualScore(candidate, node->children->value.p[0]);
+}
+
 static int OverloadCallScore(Symbol* candidate, VectorASTNode* node) {
+  if (SymbolIsOperatorCoAwait(candidate)) {
+    return OperatorCoAwaitCallScore(candidate, node);
+  }
   return FunctionCallScore(candidate->type, node, 0);
+}
+
+static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
+                                              Vector* actuals,
+                                              Vector* explicit_args,
+                                              bool diagnose_no_match,
+                                              bool diagnose_ambiguous,
+                                              ASTNode* diagnostic_node) {
+  VectorASTNode call = {0};
+  call.children = actuals;
+  Symbol* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  if (explicit_args == NULL) {
+    for (size_t i = 0; i < candidates->length; i++) {
+      Symbol* candidate = candidates->value.p[i];
+      if (candidate == NULL || candidate->flags.is_template ||
+          (candidate->type != NULL && TypeIsFunction(candidate->type) &&
+           candidate->type->info.function.template_origin != NULL)) {
+        continue;
+      }
+      int score = OverloadCallScore(candidate, &call);
+      if (score < 0) {
+        continue;
+      }
+      if (best == NULL || score < best_score) {
+        best = candidate;
+        best_score = score;
+        ambiguous = false;
+      } else if (score == best_score) {
+        ambiguous = true;
+      }
+    }
+  }
+
+  if (best_score < 0 || best_score > 5) {
+    for (size_t i = 0; i < candidates->length; i++) {
+      Symbol* candidate = candidates->value.p[i];
+      Symbol* effective =
+          FunctionTemplateOverloadCandidate(candidate, &call, explicit_args);
+      if (effective == NULL) {
+        continue;
+      }
+      int score = OverloadCallScore(effective, &call);
+      if (score < 0) {
+        continue;
+      }
+      if (best == NULL || score < best_score) {
+        best = effective;
+        best_score = score;
+        ambiguous = false;
+      } else if (score == best_score) {
+        bool best_is_template =
+            best->type != NULL && TypeIsFunction(best->type) &&
+            best->type->info.function.template_origin != NULL;
+        bool effective_is_template =
+            effective->type != NULL && TypeIsFunction(effective->type) &&
+            effective->type->info.function.template_origin != NULL;
+        if (best_is_template && !effective_is_template) {
+          best = effective;
+          ambiguous = false;
+        } else if (best != effective &&
+                   best_is_template == effective_is_template) {
+          ambiguous = true;
+        }
+      }
+    }
+  }
+
+  if (best == NULL) {
+    if (diagnose_no_match) {
+      SemanticError(diagnostic_node, "No matching overload for %s",
+                    name->value);
+    }
+    return NULL;
+  }
+  if (ambiguous) {
+    if (diagnose_ambiguous) {
+      SemanticError(diagnostic_node, "Ambiguous overload for %s", name->value);
+    }
+    return best;
+  }
+  return best;
+}
+
+static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
+                                          bool diagnose_ambiguous) {
+  Vector candidates;
+  VectorInit(&candidates);
+  AddNamedFunctionCandidates(name, compiler->global_namespace, &candidates);
+  AddADLFunctionCandidates(name, actuals, &candidates);
+  ASTNode* diagnostic_node =
+      actuals != NULL && actuals->length > 0 ? actuals->value.p[0] : NULL;
+  Symbol* best = ResolveFunctionCandidateVector(
+      name, &candidates, actuals, NULL,
+      /*diagnose_no_match=*/false, diagnose_ambiguous, diagnostic_node);
+  VectorDestruct(&candidates);
+  return best;
 }
 
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
@@ -2737,78 +3138,38 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol->type->info.function.template_origin != NULL) {
     return;
   }
-  if (!id->symbol->flags.is_overloaded) {
+  if (!CompilerIsCXX() && !id->symbol->flags.is_overloaded) {
     return;
   }
-
-  Symbol* best = NULL;
-  int best_score = -1;
-  bool ambiguous = false;
-  if (id->template_arguments == NULL) {
-    for (Symbol* candidate = id->symbol; candidate != NULL;
-         candidate = candidate->overload_next) {
-      if (candidate->flags.is_template ||
-          (candidate->type != NULL && TypeIsFunction(candidate->type) &&
-           candidate->type->info.function.template_origin != NULL)) {
-        continue;
-      }
-      int score = OverloadCallScore(candidate, node);
-      if (score < 0) {
-        continue;
-      }
-      if (best == NULL || score < best_score) {
-        best = candidate;
-        best_score = score;
-        ambiguous = false;
-      } else if (score == best_score) {
-        ambiguous = true;
-      }
-    }
+  Vector candidates;
+  VectorInit(&candidates);
+  AddFunctionOverloadCandidates(&candidates, id->symbol);
+  size_t ordinary_count = candidates.length;
+  bool allow_adl = CompilerIsCXX() &&
+                   (node->left->flags & kASTQualifiedName) == 0 &&
+                   !FunctionNameSkipsADL(&id->symbol->name);
+  if (allow_adl) {
+    AddADLFunctionCandidates(&id->symbol->name, node->children, &candidates);
   }
-
-  if (best_score < 0 || best_score > 5) {
-    for (Symbol* candidate = id->symbol; candidate != NULL;
-         candidate = candidate->overload_next) {
-      Symbol* effective =
-          FunctionTemplateOverloadCandidate(candidate, node,
-                                            id->template_arguments);
-      if (effective == NULL) {
-        continue;
-      }
-      int score = OverloadCallScore(effective, node);
-      if (score < 0) {
-        continue;
-      }
-      if (best == NULL || score < best_score) {
-        best = effective;
-        best_score = score;
-        ambiguous = false;
-      } else if (score == best_score) {
-        bool best_is_template =
-            best->type != NULL && TypeIsFunction(best->type) &&
-            best->type->info.function.template_origin != NULL;
-        bool effective_is_template =
-            effective->type != NULL && TypeIsFunction(effective->type) &&
-            effective->type->info.function.template_origin != NULL;
-        if (best_is_template && !effective_is_template) {
-          best = effective;
-          ambiguous = false;
-        } else if (best != effective &&
-                   best_is_template == effective_is_template) {
-          ambiguous = true;
-        }
-      }
-    }
+  bool has_adl_candidates = candidates.length > ordinary_count;
+  bool ordinary_unknown =
+      id->symbol != NULL && id->symbol->type != NULL &&
+      TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.unknown_args;
+  if (!id->symbol->flags.is_overloaded && !has_adl_candidates &&
+      !ordinary_unknown) {
+    VectorDestruct(&candidates);
+    return;
   }
-
+  Symbol* best = ResolveFunctionCandidateVector(
+      &id->symbol->name, &candidates, node->children, id->template_arguments,
+      /*diagnose_no_match=*/id->symbol->flags.is_overloaded || has_adl_candidates ||
+          ordinary_unknown,
+      /*diagnose_ambiguous=*/id->symbol->flags.is_overloaded ||
+          has_adl_candidates || ordinary_unknown,
+      (ASTNode*)node);
+  VectorDestruct(&candidates);
   if (best == NULL) {
-    SemanticError((ASTNode*)node, "No matching overload for %s",
-                  id->symbol->name.value);
-    return;
-  }
-  if (ambiguous) {
-    SemanticError((ASTNode*)node, "Ambiguous overload for %s",
-                  id->symbol->name.value);
     return;
   }
 

@@ -214,6 +214,7 @@ static int CompareCXXOperatorEncodingEntry(const void* key,
 
 static const char* CXXOperatorEncoding(const char* name) {
   static const CXXOperatorEncodingEntry entries[] = {
+      {"operator co_await", "aw"},
       {"operator delete", "dl"},
       {"operator delete[]", "da"},
       {"operator new", "nw"},

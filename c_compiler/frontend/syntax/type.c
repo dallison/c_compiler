@@ -822,6 +822,7 @@ Symbol* NewScopedEnumConstant(const char* name, int value,
 Enum* NewEnum() {
   Enum* e = malloc(sizeof(Enum));
   e->refs = 1;
+  e->tag_symbol = NULL;
   VectorInit(&e->constants);
   e->next_value = 0;
   e->is_scoped = false;
@@ -8855,6 +8856,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     type->info.enum_info = e;
     tag = NewSymbol(tag_name->value, type, STO(implicit));
     e->tag_name = &tag->name;
+    e->tag_symbol = tag;
     e->is_scoped = is_scoped;
     if (empty_tag_name) {
       tag->flags.invented = true;
@@ -8872,6 +8874,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
 
   // Now 'tag' will be the struct tag pointer
   // and 'e' will be a pointer to the Enum information.
+  e->tag_symbol = tag;
   e->is_scoped = is_scoped;
   Type t = ParseEnumConstants(parser, e, tag->type);
   tag->type->type |= t;
@@ -8964,6 +8967,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       tag = NewSymbol(tag_name.value, type, STO(implicit));
       tag->flags.is_forward_declared = true;
       e->tag_name = &tag->name;
+      e->tag_symbol = tag;
       e->is_scoped = is_scoped;
       ApplyEnumUnderlyingType(parser->syntax, e, tag->type, explicit_underlying,
                               is_scoped);
@@ -8972,6 +8976,9 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, false, true);
+      if (tag->type->info.enum_info != NULL) {
+        tag->type->info.enum_info->tag_symbol = tag;
+      }
       if (tag->type->info.enum_info != NULL &&
           tag->type->info.enum_info->is_scoped != is_scoped) {
         SyntaxError(parser->syntax, "Enum %s redeclared with different scopedness",

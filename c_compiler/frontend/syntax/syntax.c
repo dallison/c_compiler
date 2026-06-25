@@ -304,6 +304,59 @@ static void MarkMemberFunctionTemplateSpecialization(
   sym->type->info.function.template_origin = templ;
 }
 
+static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right);
+
+static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
+                                            FunctionInfo* right) {
+  if (left->prototype.length != right->prototype.length ||
+      left->varargs != right->varargs ||
+      left->is_const_member != right->is_const_member) {
+    return false;
+  }
+  for (size_t i = 0; i < left->prototype.length; i++) {
+    Symbol* left_arg = left->prototype.value.p[i];
+    Symbol* right_arg = right->prototype.value.p[i];
+    if (left_arg == NULL || right_arg == NULL ||
+        !OverloadTypesEqual(left_arg->type, right_arg->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL || left->declarator != right->declarator) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(left) || TypeIsStructOrUnion(right)) {
+    return TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
+           left->type == right->type &&
+           left->qualifiers == right->qualifiers &&
+           left->info.struct_info == right->info.struct_info;
+  }
+  switch (left->declarator) {
+    case kDeclArray:
+      return left->info.array.size.fixed == right->info.array.size.fixed &&
+             OverloadTypesEqual(left->next, right->next);
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      return OverloadTypesEqual(left->next, right->next);
+    case kDeclFunction:
+      return OverloadTypesEqual(left->next, right->next) &&
+             OverloadFunctionPrototypesEqual(&left->info.function,
+                                             &right->info.function);
+    case kDeclPrimitive:
+      return TypeEqual(left, right);
+  }
+  return false;
+}
+
+static bool OverloadFunctionTypesEqual(TypeRecord* left, TypeRecord* right) {
+  return TypeIsFunction(left) && TypeIsFunction(right) &&
+         OverloadTypesEqual(left, right);
+}
+
 static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
@@ -313,7 +366,7 @@ static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
     if (overload_is_template != type_is_template) {
       continue;
     }
-    if (TypeEqual(overload->type, type)) {
+    if (OverloadFunctionTypesEqual(overload->type, type)) {
       return overload;
     }
   }
@@ -448,6 +501,10 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
         SyntaxNeedBracket(syntax, TOK(rsquare), TC(decl));
         StringAppend(name, "[]");
       }
+      return true;
+    case TOK(co_await):
+      StringInit(name, "operator co_await");
+      LexNextToken(syntax->lex);
       return true;
     case TOK(lsquare):
       LexNextToken(syntax->lex);

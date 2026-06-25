@@ -184,6 +184,8 @@ int main(void) {
   auto functional_constructed = Holder(10);
   auto alias_functional_constructed = AliasHolder(11);
   int functional_argument = take_holder(Holder(12));
+  int braced_temporary_argument = take_holder(Holder{13});
+  Pair<int, int> braced_temporary_aggregate = Pair<int, int>{26, 27};
   auto heap_paren = new Holder(8);
   auto heap_brace = new Holder{10};
   Wrapped guided{6};
@@ -228,7 +230,8 @@ int main(void) {
   }
   if (functional_constructed.value != 11 ||
       alias_functional_constructed.value != 12 ||
-      functional_argument != 13) {
+      functional_argument != 13 ||
+      braced_temporary_argument != 14) {
     return 7;
   }
   if (copied.first != 3 || copied.second != 4) {
@@ -302,6 +305,10 @@ int main(void) {
   if (string_aggregate.text[0] != 'a' ||
       string_aggregate.text[3] != '\0') {
     return 28;
+  }
+  if (braced_temporary_aggregate.first != 26 ||
+      braced_temporary_aggregate.second != 27) {
+    return 29;
   }
   return 0;
 }

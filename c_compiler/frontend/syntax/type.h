@@ -253,6 +253,7 @@ void TypeApplyStructAttributesFromSymbol(Symbol* sym);
 typedef struct {
   int refs;
   String* tag_name;  // Tag name (owned by Symbol).
+  Symbol* tag_symbol;  // Owning tag symbol, if named.
   Vector constants;  // Vector of Symbol* (not owned).
   int next_value;    // Value to give to next constant.
   bool is_scoped;    // C++ scoped enum: enum class / enum struct.

@@ -32,6 +32,8 @@ typedef struct {
   VariableDeclarationASTNode* value_decl;
   VariableDeclarationASTNode* awaiter_decl;
   Symbol* awaiter;
+  ASTNode* awaiter_init;
+  Symbol* awaitable_temp;
   StructMember* frame_member;
   StructMember* frame_constructed_member;
   DeclarationListASTNode* decl_list;
@@ -82,8 +84,16 @@ static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
                                               Vector* actuals,
                                               SourceLocation location);
 static ASTNode* NewNullPointerConstant(SourceLocation location);
+static ASTNode* NewAwaiterMemberCall(ASTNode* awaiter,
+                                     const char* member_name,
+                                     SourceLocation location);
 static ASTNode* NewAwaitResumeStatement(Symbol* awaiter,
                                         SourceLocation location);
+static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
+                                           SourceLocation location);
+static const char* CXXConstructorNameForType(TypeRecord* type);
+static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
+                                                   TypeRecord* type);
 static void ResetCompoundStatementParents(CompoundStatementASTNode* compound);
 static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          Symbol* symbol,
@@ -144,6 +154,392 @@ static bool CoAwaitIsAlwaysReady(ASTNode* node) {
          await_ready->symbol->type != NULL &&
          TypeIsFunction(await_ready->symbol->type) &&
          FunctionBodyIsReturnTrue(await_ready->symbol->type->info.function.body);
+}
+
+static StructMember* FindMemberOperatorCoAwait(TypeRecord* type) {
+  return FindAwaiterMember(type, "operator co_await");
+}
+
+static bool ValidateCoAwaiterType(ASTNode* node, TypeRecord* awaiter_type) {
+  if (!TypeIsStructOrUnion(awaiter_type) ||
+      awaiter_type->info.struct_info == NULL) {
+    SemanticError(node, "co_await operand must be an awaiter object");
+    return false;
+  }
+  if (FindAwaiterMember(awaiter_type, "await_ready") == NULL) {
+    SemanticError(node, "awaiter is missing await_ready");
+    return false;
+  }
+  StructMember* await_suspend = FindAwaiterMember(awaiter_type, "await_suspend");
+  if (await_suspend == NULL) {
+    SemanticError(node, "awaiter is missing await_suspend");
+    return false;
+  }
+  TypeRecord* await_suspend_return = NULL;
+  if (await_suspend->symbol != NULL && await_suspend->symbol->type != NULL &&
+      TypeIsFunction(await_suspend->symbol->type)) {
+    await_suspend_return = await_suspend->symbol->type->next;
+  }
+  if (await_suspend_return != NULL && !TypeIsVoid(await_suspend_return) &&
+      !TypeIsBool(await_suspend_return)) {
+    SemanticError(node, "await_suspend return type is not supported yet");
+    return false;
+  }
+  if (FindAwaiterMember(awaiter_type, "await_resume") == NULL) {
+    SemanticError(node, "awaiter is missing await_resume");
+    return false;
+  }
+  return true;
+}
+
+static TypeRecord* CoAwaitOperandMemberLookupType(ASTNode* operand) {
+  if (operand == NULL) {
+    return NULL;
+  }
+  if (operand->type != NULL) {
+    return operand->type;
+  }
+  if (operand->op == AST_OP(compound_literal)) {
+    CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)operand;
+    return literal->sym != NULL ? literal->sym->type : NULL;
+  }
+  if (operand->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)operand;
+    return call->left != NULL && TypeIsStructOrUnion(call->left->type)
+               ? call->left->type
+               : NULL;
+  }
+  return NULL;
+}
+
+static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
+                                       Symbol** awaitable_temp_out) {
+  if (!CompilerIsCXX() || co_await == NULL || co_await->sub == NULL) {
+    return false;
+  }
+  TypeRecord* operand_type = CoAwaitOperandMemberLookupType(co_await->sub);
+  StructMember* member = FindMemberOperatorCoAwait(operand_type);
+  if (member == NULL || member->symbol == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
+      member->symbol->type->next == NULL) {
+    return false;
+  }
+  Vector* constructor_actuals =
+      TakeCXXTemporaryConstructionActuals(co_await->sub, operand_type);
+  if (constructor_actuals != NULL) {
+    TypeRecord* temp_type = TypeRecordCopy(operand_type);
+    temp_type = TypeRecordCalculateSize(temp_type);
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
+    temp->flags.is_local = true;
+    temp->flags.is_defined = true;
+    temp->location = co_await->base.location;
+    if (awaitable_temp_out != NULL) {
+      *awaitable_temp_out = temp;
+    }
+
+    const char* constructor_name = CXXConstructorNameForType(operand_type);
+    ASTNode* constructor_member =
+        NewStringConstantASTNode(NewString(constructor_name), NULL,
+                                 co_await->base.location);
+    ASTNode* constructor_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, co_await->base.location,
+                         NewIdentifierASTNode(temp, co_await->base.location),
+                         constructor_member);
+    ASTNode* constructor_call =
+        NewVectorASTNode(AST_OP(call), NULL, co_await->base.location,
+                         constructor_access, constructor_actuals);
+
+    ASTNode* operator_call =
+        NewAwaiterMemberCall(NewIdentifierASTNode(temp, co_await->base.location),
+                             "operator co_await", co_await->base.location);
+    ASTNodeSetType(operator_call, TypeRecordCopy(member->symbol->type->next));
+    ASTNode* comma =
+        NewBinaryASTNode(AST_OP(comma), TypeRecordCopy(member->symbol->type->next),
+                         co_await->base.location, constructor_call,
+                         operator_call);
+    ASTNodeSetType(comma, TypeRecordCopy(member->symbol->type->next));
+    ASTNodeReplaceChild((ASTNode*)co_await, 0, comma, true);
+    return true;
+  }
+  ASTNode* receiver = ASTNodeMove(co_await->sub);
+  ASTNode* call =
+      NewAwaiterMemberCall(receiver, "operator co_await",
+                           co_await->base.location);
+  ASTNodeSetType(call, TypeRecordCopy(member->symbol->type->next));
+  ASTNodeReplaceChild((ASTNode*)co_await, 0, call, true);
+  return true;
+}
+
+static bool CoAwaitOperandIsLValue(ASTNode* operand) {
+  return operand != NULL &&
+         (operand->value_category == kValueCategoryLvalue ||
+          (operand->op == AST_OP(identifier) && operand->type != NULL &&
+           !TypeIsFunction(operand->type)));
+}
+
+static bool CoroVectorContainsPointer(Vector* vec, void* value) {
+  for (size_t i = 0; i < vec->length; i++) {
+    if (vec->value.p[i] == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static Symbol* CoroFollowUsingAlias(Symbol* symbol) {
+  int depth = 0;
+  while (symbol != NULL && symbol->flags.is_using_alias &&
+         symbol->alias_target != NULL && depth < 64) {
+    symbol = symbol->alias_target;
+    depth++;
+  }
+  return symbol;
+}
+
+static void CoroADLAddNamespace(Vector* namespaces, Namespace* ns) {
+  while (ns != NULL) {
+    if (!CoroVectorContainsPointer(namespaces, ns)) {
+      VectorAppend(namespaces, ns);
+    }
+    if (ns == compiler->global_namespace) {
+      break;
+    }
+    ns = ns->parent;
+  }
+}
+
+static TypeRecord* CoroADLCanonicalType(TypeRecord* type) {
+  while (type != NULL &&
+         (TypeIsReference(type) || TypeIsPointer(type) || TypeIsArray(type))) {
+    type = type->next;
+  }
+  return type;
+}
+
+static void CoroADLCollectNamespacesForType(TypeRecord* type,
+                                            Vector* namespaces, int depth) {
+  if (type == NULL || depth > 8) {
+    return;
+  }
+  type = CoroADLCanonicalType(type);
+  if (type == NULL) {
+    return;
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    Struct* str = type->info.struct_info;
+    if (str->tag_symbol != NULL) {
+      CoroADLAddNamespace(namespaces, str->tag_symbol->namespace_ != NULL
+                                          ? str->tag_symbol->namespace_
+                                          : compiler->global_namespace);
+    }
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base != NULL) {
+        CoroADLCollectNamespacesForType(base->type, namespaces, depth + 1);
+      }
+    }
+  } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
+             type->info.enum_info->tag_symbol != NULL) {
+    Symbol* tag = type->info.enum_info->tag_symbol;
+    CoroADLAddNamespace(namespaces, tag->namespace_ != NULL
+                                        ? tag->namespace_
+                                        : compiler->global_namespace);
+  }
+  if (type->template_arguments != NULL) {
+    for (size_t i = 0; i < type->template_arguments->length; i++) {
+      TemplateArgument* arg = type->template_arguments->value.p[i];
+      if (arg != NULL && arg->kind == kTemplateParameterType) {
+        CoroADLCollectNamespacesForType(arg->type, namespaces, depth + 1);
+      }
+    }
+  }
+}
+
+static void CoroADLAddFunctionOverloadCandidates(Vector* candidates,
+                                                 Symbol* first) {
+  first = CoroFollowUsingAlias(first);
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    Symbol* effective = CoroFollowUsingAlias(candidate);
+    if (effective != NULL && effective->type != NULL &&
+        TypeIsFunction(effective->type) &&
+        !CoroVectorContainsPointer(candidates, effective)) {
+      VectorAppend(candidates, effective);
+    }
+  }
+}
+
+static void CoroADLAddNamedFunctionCandidates(String* name, Namespace* ns,
+                                              Vector* candidates) {
+  Symbol* found = (ns == NULL || ns == compiler->global_namespace)
+                      ? FindGlobalSymbol(name)
+                      : NamespaceFindSymbol(ns, name);
+  CoroADLAddFunctionOverloadCandidates(candidates, found);
+}
+
+static void CoroADLAddCandidatesForType(String* name, TypeRecord* type,
+                                        Vector* candidates) {
+  Vector namespaces;
+  VectorInit(&namespaces);
+  CoroADLCollectNamespacesForType(type, &namespaces, 0);
+  for (size_t i = 0; i < namespaces.length; i++) {
+    CoroADLAddNamedFunctionCandidates(name, namespaces.value.p[i], candidates);
+  }
+  VectorDestruct(&namespaces);
+}
+
+static int CoAwaitOperatorFormalScore(TypeRecord* formal, ASTNode* operand,
+                                      TypeRecord* operand_type) {
+  if (formal == NULL || operand == NULL || operand_type == NULL) {
+    return -1;
+  }
+  TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
+  if (TypeIsStructOrUnion(target) || TypeIsStructOrUnion(operand_type)) {
+    if (!TypeIsStructOrUnion(target) || !TypeIsStructOrUnion(operand_type) ||
+        target->info.struct_info != operand_type->info.struct_info) {
+      return -1;
+    }
+  } else if (!TypeEqual(target, operand_type)) {
+    return -1;
+  }
+  if (TypeIsReference(formal)) {
+    if (TypeIsConst(operand_type) && !TypeIsConst(target)) {
+      return -1;
+    }
+    if (formal->declarator == kDeclRValueReference) {
+      return CoAwaitOperandIsLValue(operand) ? -1 : 0;
+    }
+    if (CoAwaitOperandIsLValue(operand)) {
+      return TypeIsConst(target) ? 1 : 0;
+    }
+    return TypeIsConst(target) ? 2 : -1;
+  }
+  return 5;
+}
+
+static Symbol* FindFreeOperatorCoAwait(ASTNode* operand,
+                                       TypeRecord* operand_type) {
+  if (!CompilerIsCXX() || operand == NULL || operand_type == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, "operator co_await");
+  Vector candidates;
+  VectorInit(&candidates);
+  CoroADLAddNamedFunctionCandidates(&name, compiler->global_namespace,
+                                    &candidates);
+  CoroADLAddCandidatesForType(&name, operand_type, &candidates);
+  Symbol* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  for (size_t i = 0; i < candidates.length; i++) {
+    Symbol* candidate = candidates.value.p[i];
+    if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+        candidate->type->info.function.prototype.length != 1 ||
+        candidate->type->next == NULL) {
+      continue;
+    }
+    Symbol* formal = candidate->type->info.function.prototype.value.p[0];
+    if (formal == NULL) {
+      continue;
+    }
+    int score = CoAwaitOperatorFormalScore(formal->type, operand, operand_type);
+    if (score < 0) {
+      continue;
+    }
+    if (best == NULL || score < best_score) {
+      best = candidate;
+      best_score = score;
+      ambiguous = false;
+    } else if (score == best_score) {
+      ambiguous = true;
+    }
+  }
+  if (ambiguous) {
+    SemanticError(operand, "Ambiguous overload for operator co_await");
+  }
+  VectorDestruct(&candidates);
+  StringDestruct(&name);
+  return best;
+}
+
+static bool FreeOperatorCoAwaitTakesRValueReference(Symbol* function) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) ||
+      function->type->info.function.prototype.length != 1) {
+    return false;
+  }
+  Symbol* formal = function->type->info.function.prototype.value.p[0];
+  return formal != NULL && formal->type != NULL &&
+         formal->type->declarator == kDeclRValueReference;
+}
+
+static bool ApplyFreeOperatorCoAwait(UnaryASTNode* co_await,
+                                     Symbol** awaitable_temp_out) {
+  if (!CompilerIsCXX() || co_await == NULL || co_await->sub == NULL) {
+    return false;
+  }
+  TypeRecord* operand_type = CoAwaitOperandMemberLookupType(co_await->sub);
+  Symbol* function = FindFreeOperatorCoAwait(co_await->sub, operand_type);
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) || function->type->next == NULL) {
+    return false;
+  }
+  Vector* constructor_actuals =
+      TakeCXXTemporaryConstructionActuals(co_await->sub, operand_type);
+  if (constructor_actuals != NULL) {
+    TypeRecord* temp_type = TypeRecordCopy(operand_type);
+    temp_type = TypeRecordCalculateSize(temp_type);
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
+    temp->flags.is_local = true;
+    temp->flags.is_defined = true;
+    temp->location = co_await->base.location;
+    if (awaitable_temp_out != NULL) {
+      *awaitable_temp_out = temp;
+    }
+
+    const char* constructor_name = CXXConstructorNameForType(operand_type);
+    ASTNode* constructor_member =
+        NewStringConstantASTNode(NewString(constructor_name), NULL,
+                                 co_await->base.location);
+    ASTNode* constructor_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, co_await->base.location,
+                         NewIdentifierASTNode(temp, co_await->base.location),
+                         constructor_member);
+    ASTNode* constructor_call =
+        NewVectorASTNode(AST_OP(call), NULL, co_await->base.location,
+                         constructor_access, constructor_actuals);
+
+    Vector* operator_actuals = NewVector();
+    ASTNode* operator_actual =
+        FreeOperatorCoAwaitTakesRValueReference(function)
+            ? NewCoroutineMoveExpression(temp, co_await->base.location)
+            : NewIdentifierASTNode(temp, co_await->base.location);
+    VectorAppend(operator_actuals, operator_actual);
+    ASTNode* operator_call =
+        NewVectorASTNode(AST_OP(call), TypeRecordCopy(function->type->next),
+                         co_await->base.location,
+                         NewIdentifierASTNode(function, co_await->base.location),
+                         operator_actuals);
+    ASTNodeSetType(operator_call, TypeRecordCopy(function->type->next));
+    ASTNode* comma =
+        NewBinaryASTNode(AST_OP(comma), TypeRecordCopy(function->type->next),
+                         co_await->base.location, constructor_call,
+                         operator_call);
+    ASTNodeSetType(comma, TypeRecordCopy(function->type->next));
+    ASTNodeReplaceChild((ASTNode*)co_await, 0, comma, true);
+    return true;
+  }
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, ASTNodeMove(co_await->sub));
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), TypeRecordCopy(function->type->next),
+                       co_await->base.location,
+                       NewIdentifierASTNode(function, co_await->base.location),
+                       actuals);
+  ASTNodeSetType(call, TypeRecordCopy(function->type->next));
+  ASTNodeReplaceChild((ASTNode*)co_await, 0, call, true);
+  return true;
 }
 
 static ASTNode* NewAwaiterMemberCallWithActuals(ASTNode* awaiter,
@@ -466,6 +862,92 @@ static ASTNode* NewFrameMemberInitialization(CoroutineFrame* frame,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static ASTNode* NewFrameMemberConstructorInitialization(
+    CoroutineFrame* frame, StructMember* member,
+    StructMember* constructed_member, Vector* actuals,
+    SourceLocation location) {
+  Vector* statements = NewVector();
+  ASTNode* init = NewCoroutineFrameMemberConstructorCallWithActuals(
+      frame, member, actuals, location);
+  if (init != NULL) {
+    VectorAppend(statements, init);
+  }
+  if (constructed_member != NULL) {
+    VectorAppend(statements,
+                 NewFrameIntAssignment(frame, constructed_member, 1,
+                                       location));
+  }
+  if (statements->length == 1) {
+    return statements->value.p[0];
+  }
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
+                                                   TypeRecord* type) {
+  if (expr == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)expr;
+    if (call->left == NULL || !TypeIsStructOrUnion(call->left->type) ||
+        call->left->type->info.struct_info != type->info.struct_info) {
+      return NULL;
+    }
+    Vector* actuals = NewVector();
+    for (size_t i = 0; i < call->children->length; i++) {
+      VectorAppend(actuals, ASTNodeMove(call->children->value.p[i]));
+    }
+    call->children->length = 0;
+    return actuals;
+  }
+  if (expr->op != AST_OP(comma)) {
+    return NULL;
+  }
+  BinaryASTNode* comma = (BinaryASTNode*)expr;
+  if (comma->right == NULL || !TypeIsStructOrUnion(comma->right->type) ||
+      comma->right->type->info.struct_info != type->info.struct_info ||
+      comma->left == NULL || comma->left->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)comma->left;
+  size_t first_actual = 0;
+  if (call->left == NULL) {
+    return NULL;
+  }
+  if (call->left->op == AST_OP(identifier)) {
+    Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+    if (callee == NULL || callee->type == NULL ||
+        !TypeIsFunction(callee->type) ||
+        !callee->type->info.function.is_constructor ||
+        callee->type->info.function.cxx_member_owner !=
+            type->info.struct_info) {
+      return NULL;
+    }
+    first_actual = 1;
+  } else if (call->left->op == AST_OP(dot)) {
+    BinaryASTNode* member_access = (BinaryASTNode*)call->left;
+    TypeRecord* receiver_type =
+        member_access->left != NULL ? member_access->left->type : NULL;
+    if (!TypeIsStructOrUnion(receiver_type) ||
+        receiver_type->info.struct_info != type->info.struct_info) {
+      return NULL;
+    }
+  } else {
+    return NULL;
+  }
+  if (call->children->length < first_actual) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  for (size_t i = first_actual; i < call->children->length; i++) {
+    VectorAppend(actuals, ASTNodeMove(call->children->value.p[i]));
+  }
+  call->children->length = 0;
+  return actuals;
+}
+
 static ASTNode* NewCoroutineFrameMemberDestructorCall(
     CoroutineFrame* frame, StructMember* member, SourceLocation location) {
   TypeRecord* type = member != NULL && member->symbol != NULL
@@ -478,6 +960,29 @@ static ASTNode* NewCoroutineFrameMemberDestructorCall(
   StringInit(&destructor_name, "~");
   StringAppendString(&destructor_name, type->info.struct_info->tag_name);
   ASTNode* receiver = NewFrameMemberAccess(frame, member, location);
+  ASTNode* destructor =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL,
+                               location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, destructor);
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(type, actuals, location);
+  return NewExpressionStatementASTNode(
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals),
+      location);
+}
+
+static ASTNode* NewCoroutineLocalDestructorCall(Symbol* symbol,
+                                               SourceLocation location) {
+  TypeRecord* type = symbol != NULL ? symbol->type : NULL;
+  if (FindCXXDestructorForType(type) == NULL) {
+    return NULL;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
+  ASTNode* receiver = NewIdentifierASTNode(symbol, location);
   ASTNode* destructor =
       NewStringConstantASTNode(NewString(destructor_name.value), NULL,
                                location);
@@ -643,6 +1148,17 @@ static bool AwaiterTypeIsAlwaysReady(TypeRecord* awaiter_type) {
          await_ready->symbol->type != NULL &&
          TypeIsFunction(await_ready->symbol->type) &&
          FunctionBodyIsReturnTrue(await_ready->symbol->type->info.function.body);
+}
+
+static TypeRecord* AwaiterAwaitSuspendReturnType(Symbol* awaiter) {
+  StructMember* await_suspend =
+      awaiter != NULL ? FindAwaiterMember(awaiter->type, "await_suspend") : NULL;
+  if (await_suspend == NULL || await_suspend->symbol == NULL ||
+      await_suspend->symbol->type == NULL ||
+      !TypeIsFunction(await_suspend->symbol->type)) {
+    return NULL;
+  }
+  return await_suspend->symbol->type->next;
 }
 
 static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
@@ -867,6 +1383,62 @@ static Symbol* CoAwaitIdentifierOperand(ASTNode* co_await) {
   return ((IdentifierASTNode*)operand)->symbol;
 }
 
+static TypeRecord* CoAwaitOperandType(ASTNode* co_await) {
+  if (co_await == NULL || co_await->op != AST_OP(co_await)) {
+    return NULL;
+  }
+  ASTNode* operand = ((UnaryASTNode*)co_await)->sub;
+  if (operand == NULL) {
+    return NULL;
+  }
+  if (operand->type != NULL) {
+    return operand->type;
+  }
+  if (operand->op == AST_OP(comma)) {
+    BinaryASTNode* comma = (BinaryASTNode*)operand;
+    return comma->right != NULL ? comma->right->type : NULL;
+  }
+  if (operand->op == AST_OP(inline_call)) {
+    InlineCallASTNode* inline_call = (InlineCallASTNode*)operand;
+    return inline_call->ret_value != NULL ? inline_call->ret_value->type : NULL;
+  }
+  if (operand->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)operand;
+    if (call->left != NULL && TypeIsStructOrUnion(call->left->type)) {
+      return call->left->type;
+    }
+    TypeRecord* callee_type = call->left != NULL ? call->left->type : NULL;
+    if (TypeIsPointer(callee_type)) {
+      callee_type = callee_type->next;
+    }
+    if (TypeIsFunction(callee_type) && callee_type->next != NULL) {
+      ASTNodeSetType(operand, TypeRecordCopy(callee_type->next));
+      return operand->type;
+    }
+    return NULL;
+  }
+  if (operand->op == AST_OP(compound_literal)) {
+    CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)operand;
+    return literal->sym != NULL ? literal->sym->type : NULL;
+  }
+  return NULL;
+}
+
+static Symbol* NewCoroutineAwaiterTemporary(TypeRecord* type,
+                                            SourceLocation location) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* temp_type = TypeRecordCopy(type);
+  temp_type = TypeRecordCalculateSize(temp_type);
+  Symbol* awaiter =
+      SyntaxNewTemporary(&compiler->syntax, temp_type);
+  awaiter->flags.is_local = true;
+  awaiter->flags.is_defined = true;
+  awaiter->location = location;
+  return awaiter;
+}
+
 static VariableDeclarationASTNode* FindAwaiterDeclarationBefore(
     SuspensionPoint* point, Symbol* awaiter) {
   if (point == NULL || point->compound == NULL || awaiter == NULL) {
@@ -934,7 +1506,9 @@ static StructMember* AddCoroutineFrameIntMember(Struct* str,
 static StructMember* AddCoroutineFrameTypedMember(Struct* str,
                                                   const char* name,
                                                   TypeRecord* type) {
-  Symbol* symbol = NewSymbol(name, TypeRecordCopy(type), STO(auto));
+  TypeRecord* member_type = TypeRecordCopy(type);
+  member_type = TypeRecordCalculateSize(member_type);
+  Symbol* symbol = NewSymbol(name, member_type, STO(auto));
   StructMember* member = NewStructMember(symbol);
   StructAddSyntheticMember(str, member);
   return member;
@@ -1691,15 +2265,24 @@ static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* promise,
                                      location));
   Vector* suspend_actuals = NewVector();
   VectorAppend(suspend_actuals, NewFrameAddress(frame, location));
-  VectorAppend(suspend_statements,
-               NewExpressionStatementASTNode(
-                   NewAwaiterMemberCallWithActuals(
-                       NewIdentifierASTNode(awaiter, location),
-                       "await_suspend", suspend_actuals, location),
-                   location));
-  VectorAppend(suspend_statements,
-               NewCoroutineReturnObjectStatement(promise, return_type,
-                                                 location));
+  ASTNode* await_suspend = NewAwaiterMemberCallWithActuals(
+      NewIdentifierASTNode(awaiter, location), "await_suspend",
+      suspend_actuals, location);
+  TypeRecord* await_suspend_return = AwaiterAwaitSuspendReturnType(awaiter);
+  if (await_suspend_return != NULL && TypeIsBool(await_suspend_return)) {
+    VectorAppend(suspend_statements,
+                 NewIfStatementASTNode(
+                     await_suspend,
+                     NewCoroutineReturnObjectStatement(promise, return_type,
+                                                       location),
+                     NULL, false, location));
+  } else {
+    VectorAppend(suspend_statements,
+                 NewExpressionStatementASTNode(await_suspend, location));
+    VectorAppend(suspend_statements,
+                 NewCoroutineReturnObjectStatement(promise, return_type,
+                                                   location));
+  }
   return NewIfStatementASTNode(
       not_ready, NewCompoundStatementASTNode(suspend_statements, location),
       NULL, false, location);
@@ -1753,15 +2336,24 @@ static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
                NewFrameIntAssignment(frame, frame->state, 0, location));
   Vector* suspend_actuals = NewVector();
   VectorAppend(suspend_actuals, NewFrameAddress(frame, location));
-  VectorAppend(suspend_statements,
-               NewExpressionStatementASTNode(
-                   NewAwaiterMemberCallWithActuals(
-                       NewIdentifierASTNode(awaiter, location),
-                       "await_suspend", suspend_actuals, location),
-                   location));
-  VectorAppend(suspend_statements,
-               NewCoroutineReturnObjectStatement(promise, return_type,
-                                                 location));
+  ASTNode* await_suspend = NewAwaiterMemberCallWithActuals(
+      NewIdentifierASTNode(awaiter, location), "await_suspend",
+      suspend_actuals, location);
+  TypeRecord* await_suspend_return = AwaiterAwaitSuspendReturnType(awaiter);
+  if (await_suspend_return != NULL && TypeIsBool(await_suspend_return)) {
+    VectorAppend(suspend_statements,
+                 NewIfStatementASTNode(
+                     await_suspend,
+                     NewCoroutineReturnObjectStatement(promise, return_type,
+                                                       location),
+                     NULL, false, location));
+  } else {
+    VectorAppend(suspend_statements,
+                 NewExpressionStatementASTNode(await_suspend, location));
+    VectorAppend(suspend_statements,
+                 NewCoroutineReturnObjectStatement(promise, return_type,
+                                                   location));
+  }
   return NewIfStatementASTNode(
       not_ready, NewCompoundStatementASTNode(suspend_statements, location),
       NULL, false, location);
@@ -2396,13 +2988,40 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
                   "suspending co_await declaration must be isolated");
     return false;
   }
+  Symbol* awaitable_temp = NULL;
+  if (!ApplyMemberOperatorCoAwait((UnaryASTNode*)point->co_await,
+                                  &awaitable_temp)) {
+    ApplyFreeOperatorCoAwait((UnaryASTNode*)point->co_await,
+                             &awaitable_temp);
+  }
+  point->awaitable_temp = awaitable_temp;
   Symbol* awaiter = CoAwaitIdentifierOperand(point->co_await);
   if (awaiter == NULL) {
-    SemanticError(point->co_await,
-                  "suspending co_await currently requires a named awaiter");
-    return false;
+    TypeRecord* awaiter_type = CoAwaitOperandType(point->co_await);
+    if (awaiter_type == NULL) {
+      SemanticError(point->co_await,
+                    "coroutine co_await operand type is invalid");
+      return false;
+    }
+    if (!ValidateCoAwaiterType(point->co_await, awaiter_type)) {
+      return false;
+    }
+    awaiter = NewCoroutineAwaiterTemporary(awaiter_type,
+                                           point->co_await->location);
+    if (awaiter == NULL) {
+      SemanticError(point->co_await,
+                    "coroutine co_await operand type is invalid");
+      return false;
+    }
+    point->awaiter = awaiter;
+    point->awaiter_init =
+        ASTNodeMove(((UnaryASTNode*)point->co_await)->sub);
+    return true;
   }
   point->awaiter = awaiter;
+  if (!ValidateCoAwaiterType(point->co_await, awaiter->type)) {
+    return false;
+  }
   point->awaiter_decl = FindAwaiterDeclarationBefore(point, awaiter);
   if (point->awaiter_decl == NULL) {
     SemanticError(point->co_await,
@@ -2478,18 +3097,40 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
           point->compound, NewAwaitResumeStatement(awaiter, location),
           point->statement_index + 4);
     } else {
-      CoroutineCompoundInsertStatement(
-          point->compound,
-          NewFrameMemberInitialization(
+      ASTNode* awaiter_init = NULL;
+      if (point->awaiter_init != NULL) {
+        Vector* constructor_actuals = TakeCXXTemporaryConstructionActuals(
+            point->awaiter_init, point->frame_member->symbol->type);
+        if (constructor_actuals != NULL) {
+          awaiter_init = NewFrameMemberConstructorInitialization(
               frame, point->frame_member, point->frame_constructed_member,
-              NewIdentifierASTNode(awaiter, location), location),
-          point->statement_index);
+              constructor_actuals, location);
+        }
+      }
+      ASTNode* awaiter_value =
+          point->awaiter_init != NULL ? point->awaiter_init
+                                      : NewIdentifierASTNode(awaiter, location);
+      if (awaiter_init == NULL) {
+        awaiter_init = NewFrameMemberInitialization(
+            frame, point->frame_member, point->frame_constructed_member,
+            awaiter_value, location);
+      }
+      CoroutineCompoundInsertStatement(
+          point->compound, awaiter_init, point->statement_index);
+      size_t next_index = point->statement_index + 1;
+      ASTNode* awaitable_dtor = NewCoroutineLocalDestructorCall(
+          point->awaitable_temp, location);
+      if (awaitable_dtor != NULL) {
+        CoroutineCompoundInsertStatement(point->compound, awaitable_dtor,
+                                         next_index);
+        next_index++;
+      }
       CoroutineCompoundInsertStatement(point->compound, suspend_if,
-                                       point->statement_index + 1);
+                                       next_index);
       CoroutineCompoundInsertStatement(point->compound, (ASTNode*)labels[i],
-                                       point->statement_index + 2);
+                                       next_index + 1);
       CoroutineCompoundInsertStatement(point->compound, reset_state,
-                                       point->statement_index + 3);
+                                       next_index + 2);
     }
   }
 

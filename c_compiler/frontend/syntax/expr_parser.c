@@ -113,6 +113,10 @@ static ASTNode* ParseThisExpression(Syntax* syntax) {
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers);
 static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers);
 static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type);
+static StructMember* FindCXXConstructorForType(TypeRecord* type);
+static bool CXXNewConstructorSetHasInitializerList(StructMember* ctor);
+static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
+                                               TokenClass followers);
 
 static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   for (Symbol* candidate = symbol; candidate != NULL;
@@ -216,7 +220,8 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else if (LexLookingAt(lex, TOK(lparen))) {
-      if (GetIntrinsicIndex(FullyQualifiedIdentifierLast(&name)) == -1) {
+      if (!CompilerIsCXX() &&
+          GetIntrinsicIndex(FullyQualifiedIdentifierLast(&name)) == -1) {
         // Calling an unknown function is a warning.
         SyntaxWarning(syntax, "implicit-function-declaration",
                       "Calling undeclared function %s",
@@ -272,8 +277,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       }
     }
   }
+  bool is_qualified_name = name.is_qualified;
   FullyQualifiedIdentifierDestruct(&name);
   ASTNode* node = NewIdentifierASTNode(symbol, lex->current_token_location);
+  if (is_qualified_name) {
+    node->flags |= kASTQualifiedName;
+  }
   ((IdentifierASTNode*)node)->template_arguments = template_arguments;
   return node;
 }
@@ -1291,10 +1300,50 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
 
 static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type) {
   SourceLocation location = syntax->lex->current_token_location;
+  type = TypeRecordCalculateSize(type);
   Symbol* sym = SyntaxNewTemporary(syntax, type);
   ASTNode* initializer = SyntaxParseInitializer(syntax, sym, syntax->init_storage);
   return NewCompoundLiteralASTNode(NewIdentifierASTNode(sym, location),
                                    location, initializer);
+}
+
+static bool CXXPostfixExpressionNamesType(ASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  return id->symbol != NULL && StorageIs(id->symbol->storage, STO(typedef)) &&
+         id->symbol->type != NULL && TypeIsStructOrUnion(id->symbol->type);
+}
+
+static Vector* ParseCXXBracedTemporaryActuals(Syntax* syntax, TypeRecord* type,
+                                              TokenClass followers) {
+  StructMember* ctor = FindCXXConstructorForType(type);
+  if (CXXNewConstructorSetHasInitializerList(ctor)) {
+    Vector* actuals = NewVector();
+    LexNextToken(syntax->lex);
+    VectorAppend(actuals, SyntaxParseBracedInitializer(syntax));
+    return actuals;
+  }
+  return ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
+}
+
+static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
+                                                  Syntax* syntax,
+                                                  TokenClass followers) {
+  if (!CXXPostfixExpressionNamesType(type_expr)) {
+    return NULL;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)type_expr;
+  TypeRecord* type = id->symbol->type;
+  SourceLocation location = type_expr->location;
+  if (TypeIsClassTemplatePlaceholder(type) ||
+      FindCXXConstructorForType(type) != NULL) {
+    Vector* actuals =
+        ParseCXXBracedTemporaryActuals(syntax, type, followers);
+    return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
+  }
+  return ParseCompoundLiteral(syntax, TypeRecordCopy(type));
 }
 
 // Parse a postfix-expression.  This is a primary expression with a postfixed
@@ -1334,6 +1383,13 @@ static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
       result = ParseArraySubscript(result, syntax, followers);
     } else if (LexMatch(syntax->lex, TOK(lparen))) {
       result = ParseFunctionCall(result, syntax, followers);
+    } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(lbrace))) {
+      ASTNode* braced =
+          ParseCXXBracedTemporaryExpression(result, syntax, followers);
+      if (braced == NULL) {
+        break;
+      }
+      result = braced;
      } else if (LexMatch(syntax->lex, TOK(plusplus))) {
       result = NewUnaryASTNode(AST_OP(postinc), NULL,
                                syntax->lex->current_token_location, result);
