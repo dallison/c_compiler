@@ -2669,6 +2669,10 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     return 2;
   }
   if (TypeIsPointerOrArray(actual) && TypeIsPointerOrArray(target)) {
+    if (CompilerIsCXX() && TypeIsVoidPointer(actual) &&
+        TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
+      return -1;
+    }
     if (TypeAssignmentCompatible(actual, target)) {
       return 1;
     }

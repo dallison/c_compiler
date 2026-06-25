@@ -410,6 +410,13 @@ struct {
 
 #define NUM_TYPE_CONVERSIONS (sizeof(type_conversions) / sizeof(type_conversions[0]))
 
+static bool CXXForbidsImplicitVoidPointerConversion(TypeRecord* from,
+                                                    TypeRecord* to,
+                                                    ConversionContext ctx) {
+  return CompilerIsCXX() && ctx != kConvertCast && TypeIsVoidPointer(from) &&
+         TypeIsPointer(to) && !TypeIsVoidPointer(to);
+}
+
 void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,
                                  const char* format) {
   String from_string = {0};
@@ -814,6 +821,17 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   }
 
   if (TryConvertWithConversionOperator(from, to, ctx)) {
+    return;
+  }
+
+  if (TypeIsNullPointer(from->type) && TypeIsPointer(to)) {
+    ASTNodeSetType(from, to);
+    return;
+  }
+
+  if (CXXForbidsImplicitVoidPointerConversion(from->type, to, ctx)) {
+    SemanticTypeConversionError(
+        from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
     return;
   }
 

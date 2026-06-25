@@ -868,7 +868,8 @@ static struct {
     {kTypeDouble, "double"},      {kTypeLongDouble, "long double"},
     {kTypeStruct, "struct"},      {kTypeUnion, "union"},
     {kTypeVoid, "void"},          {kTypeBool, "bool"},
-    {kTypeEnum, "enum"},          {kTypeImplicit, ""},
+    {kTypeEnum, "enum"},          {kTypeNullPointer, "std::nullptr_t"},
+    {kTypeImplicit, ""},
 };
 
 // Converts a type to a string and appends it to result.
@@ -9018,6 +9019,7 @@ bool TypeIsDouble(TypeRecord* type);
 bool TypeIsLongDouble(TypeRecord* type);
 bool TypeIsBool(TypeRecord* type);
 bool TypeIsVoid(TypeRecord* type);
+bool TypeIsNullPointer(TypeRecord* type);
 
 bool TypeIsPointer(TypeRecord* type);
 bool TypeIsPrimitive(TypeRecord* type);

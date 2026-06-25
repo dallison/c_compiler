@@ -37,12 +37,13 @@ typedef enum {
   kTypeUnsigned = 1 << 14,
   kTypeUnknown = 1 << 15,
   kTypeAuto = 1 << 16,
+  kTypeNullPointer = 1 << 17,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 16
+#define TYPE_LAST_BIT 17
 
 // Type qualifiers, multiple active at the same time.
 typedef enum {
@@ -535,6 +536,10 @@ inline bool TypeIsVoid(TypeRecord* type) {
 
 inline bool TypeIsAuto(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeAuto) != 0;
+}
+
+inline bool TypeIsNullPointer(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeNullPointer) != 0;
 }
 
 inline bool TypeIsVoidFunction(TypeRecord* type) {

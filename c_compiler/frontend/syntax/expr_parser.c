@@ -1080,8 +1080,7 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (LexLookingAt(lex, TOK(nullptr))) {
     LexNextToken(lex);
-    TypeRecord* type =
-        NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+    TypeRecord* type = NewTypeRecordWithSize(kTypeNullPointer, kQualPlain);
     return NewIntConstantASTNode(0, type, syntax->lex->current_token_location);
   }
 

@@ -358,6 +358,12 @@ typedef struct {
   int switch_level;
 } SwitchResolver;
 
+static void CheckJumpBypassedDeclarations(ASTNode* target, ASTNode* jump,
+                                          GotoStatementASTNode* g,
+                                          const char* jump_kind,
+                                          const char* target_kind,
+                                          bool diagnose);
+
 // Check for duplicate case labels and defaults in statement.
 // Also fill in the 'cases' vector in the switch statement AST node
 // and the default_node if present.
@@ -564,6 +570,14 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   if (node->default_node == NULL) {
     SemanticWarning(&node->base, "switch-default",
                     "switch statement has no default label");
+  } else {
+    CheckJumpBypassedDeclarations((ASTNode*)node->default_node, (ASTNode*)node,
+                                  NULL, "Switch statement", "Default label",
+                                  true);
+  }
+  for (size_t i = 0; i < node->cases.length; i++) {
+    CheckJumpBypassedDeclarations(node->cases.value.p[i], (ASTNode*)node, NULL,
+                                  "Switch statement", "Case label", true);
   }
 
   size_t num_cases = node->cases.length;
@@ -983,84 +997,103 @@ static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode)
   }
 }
 
-static bool ContainsVLA(ASTNode* node) {
-  if (node->op != AST_OP(decl_list)) {
+static bool DeclarationHasAutomaticStorage(VariableDeclarationASTNode* decl) {
+  if (decl == NULL || decl->symbol == NULL) {
     return false;
   }
-  DeclarationListASTNode* decl_list = (DeclarationListASTNode*)node;
-  for (size_t j = 0; j < decl_list->declarations->length; j++) {
-     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[j];
-     if (TypeIsVLA(decl->base.type)) {
-       return true;
-     }
-  }
-  return false;
+  return StorageIs(decl->symbol->storage, STO(auto)) ||
+         StorageIs(decl->symbol->storage, STO(register)) ||
+         decl->symbol->storage == STO(implicit);
 }
 
-static void GetVLAs(DeclarationListASTNode* decl_list, Vector* vlas) {
+static bool CXXDeclarationHasBypassedInitialization(
+    VariableDeclarationASTNode* decl) {
+  return CompilerIsCXX() && DeclarationHasAutomaticStorage(decl) &&
+         decl->initializer != NULL;
+}
+
+static bool DeclarationCannotBeBypassed(VariableDeclarationASTNode* decl) {
+  return TypeIsVLA(decl->base.type) ||
+         CXXDeclarationHasBypassedInitialization(decl);
+}
+
+static void GetBypassedDeclarations(DeclarationListASTNode* decl_list,
+                                    Vector* bypassed_decls) {
   for (size_t i = 0; i < decl_list->declarations->length; i++) {
-     VariableDeclarationASTNode* decl = decl_list->declarations->value.p[i];
-     if (TypeIsVLA(decl->base.type)) {
-       VectorAppend(vlas, decl);
-     }
+    VariableDeclarationASTNode* decl = decl_list->declarations->value.p[i];
+    if (DeclarationCannotBeBypassed(decl)) {
+      VectorAppend(bypassed_decls, decl);
+    }
   }
 }
 
-static void ReportJumpError(ASTNode* jump, ASTNode* label,
-                            Vector* bypassed_vlas) {
-  SemanticError(jump, "Goto cannot jump to this label as it "
-                "would bypass a variable length array definition");
+static void CollectBypassedDeclarationsInCompound(
+    CompoundStatementASTNode* compound, size_t begin, size_t end,
+    Vector* bypassed_decls) {
+  if (end > compound->statements->length) {
+    end = compound->statements->length;
+  }
+  for (size_t i = begin; i < end; i++) {
+    ASTNode* stmt = compound->statements->value.p[i];
+    if (stmt->op == AST_OP(decl_list)) {
+      GetBypassedDeclarations((DeclarationListASTNode*)stmt, bypassed_decls);
+    }
+  }
+}
+
+static void CollectBypassedDeclarationsOnTargetPath(Vector* target_path,
+                                                    int start_index,
+                                                    Vector* bypassed_decls) {
+  for (int i = start_index; i > 0; i--) {
+    ASTNode* block = target_path->value.p[i];
+    ASTNode* branch = target_path->value.p[i - 1];
+    if (block->op == AST_OP(compound) && branch->child_id > 0) {
+      CollectBypassedDeclarationsInCompound((CompoundStatementASTNode*)block, 0,
+                                            (size_t)branch->child_id,
+                                            bypassed_decls);
+    }
+  }
+}
+
+static void ReportJumpError(ASTNode* jump, ASTNode* target,
+                            Vector* bypassed_decls,
+                            const char* jump_kind,
+                            const char* target_kind) {
+  SemanticError(jump, "%s cannot enter a scope by bypassing a variable "
+                "initialization",
+                jump_kind);
   const char* filename;
   int lineno;
   int start, end;
-  DecodeSourceLocation(label->location, &filename, &lineno, &start, &end);
-  ReportNote(filename, lineno, "Label is here");
-  
-  for (size_t i = 0; i < bypassed_vlas->length; i++) {
-    VariableDeclarationASTNode* decl = bypassed_vlas->value.p[i];
+  DecodeSourceLocation(target->location, &filename, &lineno, &start, &end);
+  ReportNote(filename, lineno, "%s is here", target_kind);
+
+  for (size_t i = 0; i < bypassed_decls->length; i++) {
+    VariableDeclarationASTNode* decl = bypassed_decls->value.p[i];
     DecodeSourceLocation(decl->base.location, &filename, &lineno, &start, &end);
-    ReportNote(filename, lineno,
-               "Variable length array '%s' is bypassed",
-               decl->symbol->name.value);
+    if (TypeIsVLA(decl->base.type)) {
+      ReportNote(filename, lineno,
+                 "Variable length array '%s' is bypassed",
+                 decl->symbol->name.value);
+    } else {
+      ReportNote(filename, lineno, "Initialization of '%s' is bypassed",
+                 decl->symbol->name.value);
+    }
   }
 }
 
-// Check a goto.
-//
-// Find the Lowest Common Ancestor (LCA) of the label and the jump.
-// This is the AST closest AST node that has both as descendants.
-//
-// Build two vectors of AST nodes, one from the label to the
-// and one from the jump to the root.
-//
-// At some point there will be a sequence of AST nodes that are the
-// same.  The first of these is a Lowest Common Ancestor.  That's
-// where the two tree branches converge.  This will be a compound
-// statement and both branches will emerge from there.
-//
-// We need to verify that the jump from the goto to the label doesn't
-// go past the definition of a variable length array because those
-// decrement the stack pointer when they are allocated.
-//
-// In the LCA we go through the statements in the block starting at
-// the branch containing the jump until we reach the branch containing
-// the label.  If we see any VLA definitions between the two we have jumped
-// over the VLA definition.
-//
-// If we reach the end of the block there isn't a branch to the label after
-// the goto so this is a backward branch.  They can't jump over a VLA.
-//
-// We then need to look inside the branch
-// containing the label.  In each AST node, if it's a compound statement
-// we look for VLA decls before we reach the label's branch.
-
-
-static void CheckGoto(ASTNode* label, ASTNode* jump, GotoStatementASTNode* g) {
-  Vector label_path = {0};
+// Check a control transfer to a label-like target. It is invalid to enter a
+// scope by bypassing C/C++ VLA definitions or non-vacuous C++ initialization.
+static void CheckJumpBypassedDeclarations(ASTNode* target, ASTNode* jump,
+                                          GotoStatementASTNode* g,
+                                          const char* jump_kind,
+                                          const char* target_kind,
+                                          bool diagnose) {
+  Vector target_path = {0};
   Vector jump_path = {0};
-  ASTNode* node = label;
+  ASTNode* node = target;
   while (node != NULL) {
-    VectorAppend(&label_path, node);
+    VectorAppend(&target_path, node);
     node = node->parent;
   }
   node = jump;
@@ -1068,74 +1101,62 @@ static void CheckGoto(ASTNode* label, ASTNode* jump, GotoStatementASTNode* g) {
     VectorAppend(&jump_path, node);
     node = node->parent;
   }
-#if 0
-  // Debugging, enable to see vectors.
-  printf("label: ");
-  for (size_t i = 0; i < label_path.length; i++) {
-    printf("%d ", ((ASTNode*)label_path.value.p[i])->id);
-  }
-  printf("\njump: ");
-  for (size_t i = 0; i < jump_path.length; i++) {
-    printf("%d ", ((ASTNode*)jump_path.value.p[i])->id);
-  }
-  printf("\n");
-#endif
-  ASTNode* lca = NULL;
-  // Go from end of the vectors (root of tree) and find the last common
-  // node.
-  int label_index = (int)label_path.length - 1;
-  int jump_index = (int)jump_path.length - 1;
 
-  // Find Lowest Common Ancestor of jump and label.
-  while (label_index >= 0 && jump_index >= 0) {
-    if (label_path.value.p[label_index] != jump_path.value.p[jump_index]) {
-      lca = label_path.value.p[label_index+1];
+  ASTNode* lca = NULL;
+  int target_index = (int)target_path.length - 1;
+  int jump_index = (int)jump_path.length - 1;
+  while (target_index >= 0 && jump_index >= 0) {
+    if (target_path.value.p[target_index] != jump_path.value.p[jump_index]) {
+      lca = target_path.value.p[target_index + 1];
       break;
     }
-    label_index--;
+    target_index--;
     jump_index--;
   }
+  if (lca == NULL) {
+    if (jump_index < 0) {
+      lca = jump_path.value.p[0];
+    } else if (target_index < 0) {
+      lca = target_path.value.p[0];
+    }
+  }
   assert(lca != NULL);
-  g->lca = lca;
-  
-  // We have the LCA.  Start from the jump's branch forward.
-  ASTNode* jump_branch = jump_path.value.p[jump_index];
-  ASTNode* label_branch = label_path.value.p[label_index];
-  assert(lca->op == AST_OP(compound));
-  
-  // Look in LCA.
-  CompoundStatementASTNode* c = (CompoundStatementASTNode*)lca;
-  Vector vlas = {0};
-  for (size_t i = jump_branch->child_id + 1; i < label_branch->child_id; i++) {
-    ASTNode* stmt = c->statements->value.p[i];
-    if (ContainsVLA(stmt)) {
-      GetVLAs((DeclarationListASTNode*)stmt, &vlas);
-    }
-  }
-  // Now we look down the tree at all blocks parenting the label's
-  // block.  In each one we traverse the statments until we find the
-  // branch for the next label index and look for a VLA.
-  for (size_t i = label_index; i > 0; i--) {
-    ASTNode* block = label_path.value.p[i];
-    label_branch = label_path.value.p[i-1];
-    if (block->op == AST_OP(compound)) {
-      CompoundStatementASTNode* c = (CompoundStatementASTNode*)block;
-      for (size_t j = 0; j < label_branch->child_id; j++) {
-        ASTNode* stmt = c->statements->value.p[j];
-        if (ContainsVLA(stmt)) {
-          GetVLAs((DeclarationListASTNode*)stmt, &vlas);
-        }
-      }
-    }
-  }
-  
-  if (vlas.length != 0) {
-    ReportJumpError(jump, label, &vlas);
+  if (g != NULL) {
+    g->lca = lca;
   }
 
-  VectorDestruct(&vlas);
-  VectorDestruct(&label_path);
+  ASTNode* jump_branch = jump_index >= 0 ? jump_path.value.p[jump_index] : NULL;
+  ASTNode* target_branch =
+      target_index >= 0 ? target_path.value.p[target_index] : NULL;
+
+  Vector bypassed_decls = {0};
+  if (diagnose) {
+    if (lca->op == AST_OP(compound) && jump_branch != NULL &&
+        target_branch != NULL &&
+        jump_branch->child_id < target_branch->child_id) {
+      CollectBypassedDeclarationsInCompound(
+          (CompoundStatementASTNode*)lca, (size_t)jump_branch->child_id + 1,
+          (size_t)target_branch->child_id, &bypassed_decls);
+    }
+
+    int target_path_start =
+        lca->op == AST_OP(compound) ? target_index : target_index + 1;
+    CollectBypassedDeclarationsOnTargetPath(&target_path, target_path_start,
+                                            &bypassed_decls);
+
+    if (bypassed_decls.length != 0) {
+      ReportJumpError(jump, target, &bypassed_decls, jump_kind, target_kind);
+    }
+  }
+
+  VectorDestruct(&bypassed_decls);
+  VectorDestruct(&target_path);
   VectorDestruct(&jump_path);
+}
+
+static void CheckGoto(ASTNode* label, ASTNode* jump, GotoStatementASTNode* g) {
+  bool diagnose = (jump->flags & kASTCompilerGeneratedGoto) == 0;
+  CheckJumpBypassedDeclarations(label, jump, g, "Goto", "Label", diagnose);
 }
 
 

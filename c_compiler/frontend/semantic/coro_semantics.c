@@ -2292,6 +2292,7 @@ static ASTNode* NewStateResumeIf(CoroutineFrame* frame, int state_value,
                            location));
   ASTNode* goto_stmt =
       NewGotoStatementASTNode(NewString(label->name.value), location);
+  goto_stmt->flags |= kASTCompilerGeneratedGoto;
   return NewIfStatementASTNode(condition, goto_stmt, NULL, false, location);
 }
 
