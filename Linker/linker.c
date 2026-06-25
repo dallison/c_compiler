@@ -742,6 +742,9 @@ static void ResolveUndefined(void* entry, void* data) {
   for (size_t i = 0; i < bucket->length; i++) {
     LinkerSymbol* symbol = bucket->value.p[i];
     if (!symbol->defined) {
+      if (LinkerSymbolIsWeak(symbol)) {
+        continue;
+      }
       ARArchive* archive;
       ARFile* file;
       bool found = LinkerFindSymbolInStaticLibraries(linker, symbol->name.value,
@@ -1370,7 +1373,9 @@ static void AddSymbolListToOutput(void* entry, void* data) {
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
     int32_t section_index;
-    if (sym->section == NULL) {
+    if (!sym->defined) {
+      section_index = 0;
+    } else if (sym->section == NULL) {
       // Common symbol. This is in the BSS section.  The index
       // of this is determined from the number of sections
       // in the ELF file.  The BSS section is the last one added

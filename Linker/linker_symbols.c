@@ -36,6 +36,15 @@ void LinkerSymbolDelete(LinkerSymbol* sym) {
   free(sym);
 }
 
+bool LinkerSymbolIsWeak(LinkerSymbol* sym) {
+  return sym != NULL && sym->header != NULL &&
+         ELF_ST_BIND(sym->header->info) == STB(weak);
+}
+
+bool LinkerSymbolIsUndefinedWeak(LinkerSymbol* sym) {
+  return sym != NULL && !sym->defined && LinkerSymbolIsWeak(sym);
+}
+
 //
 // LinkerSymbol table.  This is a hash table of Vectors.  The Vectors
 // contain LinkerSymbol pointers.
@@ -132,6 +141,9 @@ static void CheckUndefined(void* entry, void* data) {
   Vector* bucket = entry;
   for (size_t i = 0; i < bucket->length; i++) {
     LinkerSymbol* symbol = bucket->value.p[i];
+    if (LinkerSymbolIsUndefinedWeak(symbol)) {
+      continue;
+    }
     if (!symbol->defined) {
       LinkerError(symbol->file, "Undefined symbol %s", symbol->name.value);
     }
@@ -215,6 +227,7 @@ static void RedefineSymbol(LinkerSymbol* sym,
                            ELFSymbol* elf_sym) {
   // Are we defining this symbol?
   bool defining_symbol = elf_sym->shndx != 0;
+  bool new_is_weak = ELF_ST_BIND(elf_sym->info) == STB(weak);
   if (defining_symbol) {
     if (sym->defined) {
       if (sym->header->shndx == SHN_COM && elf_sym->shndx == SHN_COM) {
@@ -226,6 +239,22 @@ static void RedefineSymbol(LinkerSymbol* sym,
         }
         return;
       }
+      bool old_is_weak = LinkerSymbolIsWeak(sym);
+      if (old_is_weak && new_is_weak) {
+        return;
+      }
+      if (!old_is_weak && new_is_weak) {
+        return;
+      }
+      if (old_is_weak && !new_is_weak) {
+        sym->section = NULL;
+        AssignSymbolSectionIndex(sym, file, elf_file, elf_sym);
+        sym->header = elf_sym;
+        sym->address = elf_sym->value;
+        sym->size = elf_sym->size;
+        sym->file = file;
+        return;
+      }
       // LinkerSymbol is already defined but we are redefining it.  This is an error.
       // TODO:
       LinkerError(file, "Multiple definition of symbol %s", sym->name.value);
@@ -233,6 +262,7 @@ static void RedefineSymbol(LinkerSymbol* sym,
     }
     
     // Assign the defining section to the symbol.
+    sym->section = NULL;
     AssignSymbolSectionIndex(sym, file, elf_file, elf_sym);
     
     // This is now a defined symbol, so we can set the header to the definition.  Also
@@ -240,6 +270,12 @@ static void RedefineSymbol(LinkerSymbol* sym,
     sym->header = elf_sym;
     sym->address = elf_sym->value;
     sym->defined = true;
+    sym->size = elf_sym->size;
+    sym->file = file;
+  }
+  if (!defining_symbol && !sym->defined && LinkerSymbolIsWeak(sym) &&
+      !new_is_weak) {
+    sym->header = elf_sym;
     sym->size = elf_sym->size;
     sym->file = file;
   }

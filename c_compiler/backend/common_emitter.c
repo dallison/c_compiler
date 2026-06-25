@@ -60,6 +60,17 @@ static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t 
   return TargetSymbolName(var->symbol, buf, len);
 }
 
+static void EmitBinding(FILE* fp, const char* name, bool is_global,
+                        bool is_weak) {
+  if (is_weak) {
+    fprintf(fp, "\t.weak   %s\n", name);
+  } else if (is_global) {
+    fprintf(fp, "\t.global %s\n", name);
+  } else {
+    fprintf(fp, "\t.local  %s\n", name);
+  }
+}
+
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   char buf[256];
   // Pick a data directive that emits exactly pointer_size bytes.  The
@@ -74,11 +85,8 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   EmitP2Align(var->alignment, fp);
   fprintf(fp, "%s:\n", VarName(var, buf, sizeof(buf)));
   fprintf(fp, "\t.type   %s,@object\n", VarName(var, buf, sizeof(buf)));
-  if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", VarName(var, buf, sizeof(buf)));
-  } else {
-    fprintf(fp, "\t.local  %s\n", VarName(var, buf, sizeof(buf)));
-  }
+  EmitBinding(fp, VarName(var, buf, sizeof(buf)), var->is_global,
+              var->is_weak);
   fprintf(fp, "\t.size   %s,%d\n", VarName(var, buf, sizeof(buf)), var->symbol->type->size);
 
   int next_offset = 0;
@@ -110,6 +118,8 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
       case kInitTypeSymbol:
         if (init->value.symbol->flags.is_local) {
           fprintf(fp, "\t.local %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
+        } else if (SymbolHasWeakBinding(init->value.symbol)) {
+          fprintf(fp, "\t.weak %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
         } else {
           fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
         }
@@ -160,10 +170,16 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
 void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
   char buf[256];
   fprintf(fp, "\t.type   %s,@object\n", VarName2(var, buf, sizeof(buf)));
-  if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", VarName2(var, buf, sizeof(buf)));
-  } else {
-    fprintf(fp, "\t.local  %s\n", VarName2(var, buf, sizeof(buf)));
+  EmitBinding(fp, VarName2(var, buf, sizeof(buf)), var->is_global,
+              var->is_weak);
+  if (var->is_weak) {
+    fprintf(fp, "\t.size   %s,%zd\n", VarName2(var, buf, sizeof(buf)),
+            var->size);
+    EmitP2Align((int)var->alignment, fp);
+    fprintf(fp, "%s:\n", VarName2(var, buf, sizeof(buf)));
+    fprintf(fp, "\t.space  %zd\n", var->size);
+    fprintf(fp, "\n");
+    return;
   }
   fprintf(fp, "\t.comm   %s,%zd,%zd\n", VarName2(var, buf, sizeof(buf)), var->size,
           var->alignment);
@@ -268,11 +284,8 @@ void EmitTlsBSSStart(FILE* fp) { fprintf(fp, "\t.section \".tbss\", \"awT\", @no
 void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
   char buf[256];
   fprintf(fp, "\t.type   %s,@object\n", VarName2(var, buf, sizeof(buf)));
-  if (var->is_global) {
-    fprintf(fp, "\t.global %s\n", VarName2(var, buf, sizeof(buf)));
-  } else {
-    fprintf(fp, "\t.local  %s\n", VarName2(var, buf, sizeof(buf)));
-  }
+  EmitBinding(fp, VarName2(var, buf, sizeof(buf)), var->is_global,
+              var->is_weak);
   EmitP2Align((int)var->alignment, fp);
   fprintf(fp, "%s:\n", VarName2(var, buf, sizeof(buf)));
   fprintf(fp, "\t.space   %zd\n", var->size);

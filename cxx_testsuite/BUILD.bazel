@@ -17,6 +17,7 @@ CXX_TEST_DATA = glob([
     "run_compile_tests.sh",
     "run_exec_tests.sh",
     "run_mangling_tests.sh",
+    "run_weak_binding_tests.sh",
 ]
 
 sh_test(
@@ -88,6 +89,30 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "weak_bindings_x86_64",
+    srcs = ["run_weak_binding_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--elfdump",
+        "$(rootpath //:elfdump)",
+        "--libc",
+        "$(rootpath //:libc_x86_64)",
+        "--interpreter",
+        "$(rootpath //:x86_64)",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:elfdump",
+        "//:libc_x86_64",
+        "//:libc_headers",
+        "//:x86_64",
+    ],
+)
+
 test_suite(
     name = "all",
     tests = [
@@ -95,5 +120,6 @@ test_suite(
         ":lexical",
         ":mangling",
         ":syntax",
+        ":weak_bindings_x86_64",
     ],
 )

@@ -38,6 +38,7 @@ typedef struct Syntax {
   Vector all_local_symbols;  // All symbols defined in a function (owned by this
                              // vector).
   Vector local_statics;      // All local statics defined in function.
+  Vector inline_static_member_definitions;  // Inline static data member defs.
   Vector all_symbols;        // Local symbols of all prior declarations, moved
                              // here by SyntaxResetForNewDeclaration so they
                              // outlive the reset; owned by this vector and freed

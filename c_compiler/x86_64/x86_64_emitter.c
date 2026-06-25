@@ -1866,6 +1866,8 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
           TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
       if (StorageIs(sym->symbol->storage, STO(static))) {
         fprintf(fp, "\t.local %s\n", symname);
+      } else if (SymbolHasWeakBinding(sym->symbol)) {
+        fprintf(fp, "\t.weak %s\n", symname);
       } else {
         fprintf(fp, "\t.global %s\n", symname);
       }
@@ -2693,7 +2695,9 @@ static void X86_64PrintExceptionTable(X86_64Emitter* emitter, FILE* fp,
 void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
   fprintf(fp, "\t.text\n");
-  if (emitter->rv->base.is_global) {
+  if (emitter->rv->base.is_weak) {
+    fprintf(fp, "\t.weak %s\n", func_name);
+  } else if (emitter->rv->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
     fprintf(fp, "\t.local  %s\n", func_name);

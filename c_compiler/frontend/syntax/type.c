@@ -21,6 +21,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
+#include "semantics.h"
 #include "compiler.h"
 #include "errors.h"
 #include "debug.h"
@@ -2176,6 +2177,9 @@ static void QueueTemplateMemberFunctionDefinition(Symbol* symbol,
   symbol->flags.is_defined = true;
   if (symbol->type->info.function.is_inline) {
     symbol->flags.is_inline_defn = true;
+    if (!StorageIs(symbol->storage, STO(static))) {
+      symbol->flags.is_weak = true;
+    }
   }
   if (TypeContainsTemplateParameter(symbol->type)) {
     return;
@@ -2356,6 +2360,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     symbol->flags.is_defined = true;
     if (symbol->type->info.function.is_inline) {
       symbol->flags.is_inline_defn = true;
+      if (!StorageIs(symbol->storage, STO(static))) {
+        symbol->flags.is_weak = true;
+      }
     }
     Vector* declarations = NewVector();
     VectorAppend(declarations,
@@ -4637,7 +4644,9 @@ static void ParseFunctionDecl(TypeParser* parser) {
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
   TypeRecord* func = NewFunctionTypeRecord();
-  func->info.function.is_inline = parser->is_inline;
+  func->info.function.is_inline =
+      parser->is_inline ||
+      (CompilerIsCXX() && (parser->is_constexpr || parser->is_consteval));
   func->info.function.is_constexpr = parser->is_constexpr;
   func->info.function.is_consteval = parser->is_consteval;
   if (parser->symbol != NULL) {
@@ -5719,6 +5728,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = symbol;
   var->is_global = false;
+  var->is_weak = false;
   var->size = symbol->type->size;
   var->alignment = TypeRecordAlignment(symbol->type->next);
   VectorInit(&var->initializers);
@@ -5829,6 +5839,7 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = symbol;
   var->is_global = false;
+  var->is_weak = false;
   var->size = symbol->type->size;
   var->alignment = TypeRecordAlignment(symbol->type->next);
   VectorInit(&var->initializers);
@@ -6209,6 +6220,8 @@ static void AddStructMember(TypeParser* parser, Struct* str,
   if (member->is_member_function) {
     RegisterCXXVirtualMember(parser, str, member);
     SymbolSetCXXMangledAsmName(member->symbol);
+  } else if (member->is_static && member->symbol != NULL) {
+    SymbolSetCXXDataAsmName(member->symbol, str);
   }
   VectorAppend(&str->members, member);
   MapKeyValue kv;
@@ -6486,11 +6499,16 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
 
   member_symbol->flags.is_defined = true;
   member_symbol->flags.is_inline_defn = true;
+  if (!StorageIs(member_symbol->storage, STO(static))) {
+    member_symbol->flags.is_weak = true;
+  }
   member_symbol->type->info.function.is_inline = true;
   member_symbol->type->info.function.definition = true;
   member_symbol->type->info.function.is_user_provided = true;
   member_symbol->value.func_defn = member_symbol;
 
+  TypeRecord* old_current_function = compiler->current_function;
+  compiler->current_function = member_symbol->type;
   Vector* body = NewVector();
   bool seen_statement = false;
   while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
@@ -6517,6 +6535,7 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
                                  member_symbol->location);
   SyntaxCloseScope(syntax);
   syntax->context = old_context;
+  compiler->current_function = old_current_function;
   member_symbol->type->info.function.body =
       NewCompoundStatementASTNode(body, parser->lex->current_token_location);
   VectorAppend(&compiler->declaration_asts,
@@ -6630,6 +6649,9 @@ static void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
   }
   member_symbol->flags.is_defined = true;
   member_symbol->flags.is_inline_defn = true;
+  if (!StorageIs(member_symbol->storage, STO(static))) {
+    member_symbol->flags.is_weak = true;
+  }
   member_symbol->value.func_defn = member_symbol;
   member_symbol->type->info.function.is_inline = true;
   member_symbol->type->info.function.definition = true;
@@ -7069,6 +7091,88 @@ static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src )
   }
 }
 
+static ASTNode* ParseCXXStaticDataMemberInitializer(TypeParser* parser,
+                                                    Symbol* symbol) {
+  if (symbol == NULL) {
+    return NULL;
+  }
+  if (LexMatch(parser->lex, TOK(equal))) {
+    parser->syntax->init_storage = symbol->storage;
+    return SyntaxParseInitializer(parser->syntax, symbol, symbol->storage);
+  }
+  if (LexMatch(parser->lex, TOK(lbrace))) {
+    return SyntaxParseBracedInitializer(parser->syntax);
+  }
+  return NULL;
+}
+
+static bool CXXStaticDataMemberAllowsInClassInitializer(Symbol* symbol) {
+  return symbol != NULL && TypeIsConst(symbol->type) &&
+         (TypeIsIntegral(symbol->type) || TypeIsEnum(symbol->type));
+}
+
+static void AnalyzeCXXStaticDataMemberConstantInitializer(TypeParser* parser,
+                                                          Symbol* symbol,
+                                                          ASTNode* initializer) {
+  ASTNode* decl = NewVariableDeclarationASTNode(
+      symbol, initializer, symbol->location);
+  SemanticAnalyzeVariableDefinition(parser->syntax,
+                                    (VariableDeclarationASTNode*)decl);
+  if (!symbol->flags.value_set) {
+    SyntaxError(parser->syntax,
+                "Static data member initializer must be a constant expression");
+  }
+  ASTNodeDelete(decl);
+}
+
+static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
+                                                     Struct* owner,
+                                                     StructMember* member,
+                                                     ASTNode* initializer,
+                                                     bool is_inline_member) {
+  if (!CompilerIsCXX() || parser == NULL || parser->syntax == NULL ||
+      owner == NULL || member == NULL || member->symbol == NULL ||
+      !member->is_static || member->is_member_function ||
+      parser->syntax->parsing_template_declaration) {
+    return;
+  }
+
+  Symbol* symbol = member->symbol;
+  bool implicit_inline = symbol->flags.is_constexpr;
+  if (!is_inline_member && !implicit_inline) {
+    if (initializer != NULL) {
+      if (CXXStaticDataMemberAllowsInClassInitializer(symbol)) {
+        AnalyzeCXXStaticDataMemberConstantInitializer(parser, symbol,
+                                                     initializer);
+        return;
+      }
+      SyntaxError(parser->syntax,
+                  "Static data member initializer requires inline");
+    }
+    return;
+  }
+
+  TypeRecordCalculateSize(symbol->type);
+  symbol->flags.is_defined = true;
+  if (!StorageIs(symbol->storage, STO(static))) {
+    symbol->flags.is_weak = true;
+    SymbolSetCXXDataAsmName(symbol, owner);
+  }
+  if (symbol->flags.is_constexpr && initializer == NULL) {
+    SyntaxError(parser->syntax,
+                "constexpr variable requires an initializer");
+  }
+
+  ASTNode* decl = NewVariableDeclarationASTNode(
+      symbol, initializer, symbol->location);
+  VectorAppend(&parser->syntax->inline_static_member_definitions, decl);
+  if (symbol->flags.is_constexpr || symbol->flags.is_constinit ||
+      (TypeIsConst(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
+    SemanticAnalyzeVariableDefinition(parser->syntax,
+                                      (VariableDeclarationASTNode*)decl);
+  }
+}
+
 
 static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                String* tag_name) {
@@ -7138,16 +7242,26 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       is_member_template = true;
     }
 
+    bool is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
     bool is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
+    parser->is_inline = is_inline_member;
     parser->is_constexpr = is_constexpr_member;
     bool saw_explicit_member = false;
     bool is_explicit_member =
         ParseCXXExplicitSpecifier(parser, &saw_explicit_member);
+    if (!is_inline_member) {
+      is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+      parser->is_inline = is_inline_member;
+    }
     if (!is_constexpr_member) {
       is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
       parser->is_constexpr = is_constexpr_member;
     }
     bool is_virtual_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(virtual));
+    if (!is_inline_member) {
+      is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+      parser->is_inline = is_inline_member;
+    }
     if (ParseClassSpecialMember(parser, str, tag_name, current_access,
                                 is_virtual_member, is_constexpr_member)) {
       AttributeListDestruct(&member_attributes);
@@ -7169,6 +7283,10 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     bool is_static_member = LexMatch(parser->lex, TOK(static));
+    if (!is_inline_member) {
+      is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+      parser->is_inline = is_inline_member;
+    }
     if (!is_constexpr_member) {
       is_constexpr_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(constexpr));
       parser->is_constexpr = is_constexpr_member;
@@ -7257,6 +7375,9 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         StructMember* member = NewStructMember(member_symbol);
         member_symbol->flags.is_constexpr = is_constexpr_member &&
                                             !TypeIsFunction(member_symbol->type);
+        if (member_symbol->flags.is_constexpr) {
+          member_symbol->type->qualifiers |= kQualConst;
+        }
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
         if (member->is_member_function &&
@@ -7352,10 +7473,15 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           } else if (member->is_member_function &&
                      member_symbol->type->info.function.is_deleted) {
             has_inline_body = false;
-          } else {
+          } else if (member->is_member_function) {
             has_inline_body = member->is_member_function &&
                               ParseInlineMemberFunctionBody(parser,
                                                             member_symbol);
+          } else {
+            ASTNode* initializer =
+                ParseCXXStaticDataMemberInitializer(parser, member_symbol);
+            QueueCXXInlineStaticDataMemberDefinition(
+                parser, str, member, initializer, is_inline_member);
           }
           member_decl_had_inline_body |= has_inline_body;
         } else {
@@ -7521,6 +7647,9 @@ static void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
   symbol->flags.is_inline_defn = true;
+  if (!StorageIs(symbol->storage, STO(static))) {
+    symbol->flags.is_weak = true;
+  }
   symbol->location = location;
   symbol->value.func_defn = symbol;
   func->info.function.symbol = symbol;
@@ -7819,6 +7948,9 @@ static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
   if (!deleted) {
     symbol->flags.is_defined = true;
     symbol->flags.is_inline_defn = true;
+    if (!StorageIs(symbol->storage, STO(static))) {
+      symbol->flags.is_weak = true;
+    }
     symbol->value.func_defn = symbol;
   }
   (void)parser;

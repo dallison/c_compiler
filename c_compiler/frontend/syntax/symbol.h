@@ -17,6 +17,7 @@
 #include "source.h"
 
 struct TypeRecord;
+struct Struct;
 struct DIE;
 struct Namespace;
 
@@ -96,6 +97,7 @@ typedef struct Symbol {
     bool is_template_type_parameter: 1; // `typename`/`class` parameter.
     bool is_constexpr: 1;          // C++ constexpr variable.
     bool is_constinit: 1;          // C++ constinit variable.
+    bool is_weak: 1;               // Emits ELF weak binding.
   } flags;
   
   struct {
@@ -134,12 +136,14 @@ Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 void SymbolSetCXXMangledAsmName(Symbol* symbol);
+void SymbolSetCXXDataAsmName(Symbol* symbol, struct Struct* owner);
 
 // Adds attribute and takes ownership of the Attribute.
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 // Returns the attribute with the given (normalized) name, or NULL.
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute);
+bool SymbolHasWeakBinding(Symbol* symbol);
 
 void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp);
 void SymbolPrint(Symbol* sym, FILE* fp);

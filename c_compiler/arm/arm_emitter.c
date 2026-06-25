@@ -1113,6 +1113,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       if (StorageIs(sym->symbol->storage, STO(static))) {
         fprintf(fp, "\t.local %s\n",
                 TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
+      } else if (SymbolHasWeakBinding(sym->symbol)) {
+        fprintf(fp, "\t.weak %s\n",
+                TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
       } else {
         fprintf(fp, "\t.global %s\n",
                 TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
@@ -1583,7 +1586,9 @@ void ARMEmitterDelete(ARMEmitter* emitter) {
 
 void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
-  if (emitter->g->base.is_global) {
+  if (emitter->g->base.is_weak) {
+    fprintf(fp, "\t.weak %s\n", func_name);
+  } else if (emitter->g->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
     fprintf(fp, "\t.local  %s\n", func_name);

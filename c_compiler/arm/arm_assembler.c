@@ -723,7 +723,8 @@ static void AssembleBranch(ARMAssembler* assembler, int cond, bool link) {
     int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
     AssemblerSymbol* symbol = GetOrCreateSymbol(assembler, sym.value);
     int reloc_type = link ? R_ARM_CALL : R_ARM_JUMP24;
-    if (ASM.pic && symbol->binding == SYM_BIND(global)) {
+    if (ASM.pic && (symbol->binding == SYM_BIND(global) ||
+                    symbol->binding == SYM_BIND(weak))) {
       reloc_type = R_ARM_PLT32;
     }
     AssemblerRelocation* reloc = NewAssemblerRelocation(

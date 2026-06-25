@@ -809,6 +809,8 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       TargetSymbol* sym = (TargetSymbol*)inst;
       if (StorageIs(sym->symbol->storage, STO(static))) {
         fprintf(fp, "\t.local %s\n", SymbolName(sym, buf3, sizeof(buf3)));
+      } else if (SymbolHasWeakBinding(sym->symbol)) {
+        fprintf(fp, "\t.weak %s\n", SymbolName(sym, buf3, sizeof(buf3)));
       } else {
         fprintf(fp, "\t.global %s\n", SymbolName(sym, buf3, sizeof(buf3)));
       }
@@ -1170,7 +1172,9 @@ void RVEmitterDelete(RVEmitter* emitter) {
 
 void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
-  if (emitter->rv->base.is_global) {
+  if (emitter->rv->base.is_weak) {
+    fprintf(fp, "\t.weak %s\n", func_name);
+  } else if (emitter->rv->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
     fprintf(fp, "\t.local  %s\n", func_name);

@@ -199,6 +199,7 @@ typedef struct TargetGenerator {
   TargetVirtuals* virtuals;
   String function_name;   // Current function name.
   bool is_global;         // Function is global.
+  bool is_weak;           // Function has weak external binding.
   int num_calls;          // Number of calls in function.
   bool varargs;           // Function uses variable args.
   bool is_void;           // Function returns void.

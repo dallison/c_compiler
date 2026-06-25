@@ -47,6 +47,7 @@ typedef enum {
 typedef enum {
   SYM_BIND(global),
   SYM_BIND(local),
+  SYM_BIND(weak),
 } AssemblerSymbolBinding;
 
 typedef struct AssemblerSymbol {

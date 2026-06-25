@@ -1064,7 +1064,8 @@ static void AssembleUType(RVAssembler* assembler, int opcode, int reg,
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name->value);
 
   int reloc_type = rel_reloc_type;
-  if (assembler->base.pic && sym->binding == SYM_BIND(global)) {
+  if (assembler->base.pic &&
+      (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
     reloc_type = pic_reloc_type;
   }
   AssemblerRelocation* reloc =
@@ -1203,7 +1204,8 @@ static void Assemble_j(RVAssembler* assembler) {
     // For non-PIC we generate a R_RISCV_JAL relocation and a jal instruction.
     // R_RISCV_JAL relocation.
     int reloc_type = R_RISCV_JAL;
-    if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
+    if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
+        assembler->base.pic) {
       reloc_type = R_RISCV_CALL_PLT;
     }
     AssemblerRelocation* reloc = NewAssemblerRelocation(
@@ -1258,7 +1260,8 @@ static void Assemble_call(RVAssembler* assembler) {
   // We use a PLT relocation if we are in PIC mode and the symbol is
   // global.
   int reloc_type = R_RISCV_CALL;
-  if (sym->binding == SYM_BIND(global) && assembler->base.pic) {
+  if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
+      assembler->base.pic) {
     reloc_type = R_RISCV_CALL_PLT;
   }
   AssemblerRelocation* reloc = NewAssemblerRelocation(
@@ -1781,7 +1784,8 @@ static void Assemble_la(RVAssembler* assembler) {
 
     AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
 
-    if (assembler->base.pic && sym->binding == SYM_BIND(global)) {
+    if (assembler->base.pic &&
+        (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
       // Position independent, Load the address from the GOT.
       //   Output relocation R_RISCV_PCREL_LO12_I
       //     ld reg, 0(reg)

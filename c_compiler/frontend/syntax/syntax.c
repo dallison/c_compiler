@@ -954,6 +954,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->switch_count = 0;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
+  VectorInit(&syntax->inline_static_member_definitions);
   VectorInit(&syntax->all_symbols);
   syntax->last_parsed_tag = NULL;
   syntax->parsing_template_declaration = false;
@@ -979,6 +980,7 @@ void SyntaxDestruct(Syntax* syntax) {
   VectorDestructWithContents(&syntax->all_symbols,
                              (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
   VectorDestruct(&syntax->local_statics);
+  VectorDestruct(&syntax->inline_static_member_definitions);
   ASTNodeDelete(syntax->ast);
 }
 
@@ -992,6 +994,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
 
   VectorDestruct(&syntax->all_local_symbols);
   VectorDestruct(&syntax->local_statics);
+  VectorDestruct(&syntax->inline_static_member_definitions);
   ASTNodeDelete(syntax->ast);
   
   syntax->ast = NULL;
@@ -1009,6 +1012,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->current_template_parameters = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
+  VectorInit(&syntax->inline_static_member_definitions);
 }
 
 ASTNode* SyntaxNewPCLabel(SourceLocation location) {
@@ -1164,6 +1168,9 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
     return false;
   }
   if (sym->flags.is_argument) {
+    return true;
+  }
+  if (CompilerIsCXX() && parser->is_inline && !TypeIsFunction(sym->type)) {
     return true;
   }
   return LexLookingAt(parser->lex, TOK(equal)) ||
@@ -1727,6 +1734,9 @@ void SyntaxApplyDeclarationAttributes(Symbol* sym) {
   }
   if (AttributeListHas(&sym->attributes, "noinline")) {
     sym->flags.noinline = true;
+  }
+  if (AttributeListHas(&sym->attributes, "weak")) {
+    sym->flags.is_weak = true;
   }
 
   if (StorageIs(sym->storage, STO(typedef))) {
@@ -2957,6 +2967,12 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
         sym->type->info.function.is_consteval = true;
         sym->type->info.function.is_constexpr = true;
       }
+      if (old_sym->flags.is_weak) {
+        sym->flags.is_weak = true;
+      }
+      if (CompilerIsCXX() && old_sym->type->info.function.is_inline) {
+        sym->type->info.function.is_inline = true;
+      }
     }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;
@@ -2965,8 +2981,19 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     
     sym->flags.is_defined = true;
     sym->type->info.function.definition = true;
+    if (CompilerIsCXX() && sym->type->info.function.is_inline) {
+      sym->flags.is_inline_defn = true;
+      if (!StorageIs(sym->storage, STO(static))) {
+        sym->flags.is_weak = true;
+      }
+      if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
+        old_sym->type->info.function.is_inline = true;
+      }
+    }
     
     // Parse the function body.
+    TypeRecord* old_current_function = compiler->current_function;
+    compiler->current_function = sym->type;
     Vector* body = NewVector();
     if (compiler->debug_output) {
       VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
@@ -2997,6 +3024,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
+    compiler->current_function = old_current_function;
     
     if (compiler->debug_output) {
       VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
@@ -3016,8 +3044,9 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                      syntax->lex->current_token_location);
   } else {
     // Function is a declaration.  If the old symbol was inline, this is
-    // an inline definition.
-    if (old_sym != NULL && old_sym->type->info.function.is_inline) {
+    // an inline definition in C. C++ emits inline definitions directly.
+    if (!CompilerIsCXX() && old_sym != NULL &&
+        old_sym->type->info.function.is_inline) {
       old_sym->flags.is_inline_defn = true;
     }
   }
@@ -3433,6 +3462,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         if (sym->type->info.function.is_deleted) {
           old_sym->type->info.function.is_deleted = true;
         }
+        if (sym->flags.is_weak) {
+          old_sym->flags.is_weak = true;
+        }
       }
     }
     if (TypeIsFunction(sym->type)) {
@@ -3465,7 +3497,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
         return result;
       }
-    } else if (parser->is_inline) {
+    } else if (parser->is_inline && !CompilerIsCXX()) {
       SyntaxError(syntax, "inline can only be applied to functions");
     }
     if (!TypeIsClassTemplatePlaceholder(sym->type) &&
@@ -3490,9 +3522,19 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       SymbolDelete(sym);
       sym = old_sym;
     }
+    bool skip_cxx_function_redeclaration =
+        CompilerIsCXX() && old_sym != NULL && TypeIsFunction(sym->type) &&
+        sym->flags.is_defined && sym->type->info.function.definition;
     if (!TypeIsFunction(sym->type)) {
       sym->flags.is_constexpr = parser->is_constexpr;
       sym->flags.is_constinit = parser->is_constinit;
+      if (CompilerIsCXX() && parser->is_inline) {
+        sym->flags.is_defined = true;
+        if (!StorageIs(sym->storage, STO(static))) {
+          sym->flags.is_weak = true;
+          SymbolSetCXXDataAsmName(sym, NULL);
+        }
+      }
       if (sym->flags.is_constexpr) {
         sym->type->qualifiers |= kQualConst;
       }
@@ -3534,13 +3576,15 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         TypeIsClassTemplatePlaceholder(sym->type)) {
       SyntaxError(syntax, "Class template argument deduction requires an initializer");
     }
-    ASTNode* decl = NewVariableDeclarationASTNode(
-        sym, initializer, syntax->lex->current_token_location);
-    VectorAppend(declarations, decl);
-    if (sym->flags.is_constexpr || sym->flags.is_constinit ||
-        (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
-      SemanticAnalyzeVariableDefinition(syntax,
-                                        (VariableDeclarationASTNode*)decl);
+    if (!skip_cxx_function_redeclaration) {
+      ASTNode* decl = NewVariableDeclarationASTNode(
+          sym, initializer, syntax->lex->current_token_location);
+      VectorAppend(declarations, decl);
+      if (sym->flags.is_constexpr || sym->flags.is_constinit ||
+          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
+        SemanticAnalyzeVariableDefinition(syntax,
+                                          (VariableDeclarationASTNode*)decl);
+      }
     }
 
     if (!LexMatch(syntax->lex, TOK(comma))) {
@@ -4353,11 +4397,14 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     if (declarations->length != 1) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
     }
+    VectorAppendVector(declarations, &syntax->inline_static_member_definitions);
     // result is a DeclarationListASTNode that owns `declarations`; its teardown
     // frees the vector and its contents, so don't free them here.
     AttributeListDestruct(&attributes);
     return result;
   }
+
+  VectorAppendVector(declarations, &syntax->inline_static_member_definitions);
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));
@@ -4735,6 +4782,77 @@ static ASTNode* NewIntAssignment(Symbol* sym, int value,
                             location));
 }
 
+static bool ParsingExternalCXXInlineFunction(void) {
+  TypeRecord* func = compiler->current_function;
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
+      !func->info.function.is_inline || func->info.function.symbol == NULL) {
+    return false;
+  }
+  return !StorageIs(func->info.function.symbol->storage, STO(static));
+}
+
+static void AppendSanitizedAsmComponent(String* out, const char* component) {
+  for (const unsigned char* p = (const unsigned char*)component; *p != '\0';
+       p++) {
+    if (isalnum(*p) || *p == '_') {
+      StringAppendChar(out, (char)*p);
+    } else {
+      StringPrintf(out, "_%02x", *p);
+    }
+  }
+}
+
+static void SetCXXInlineLocalStaticAsmNameFor(Symbol* sym, const char* local_name,
+                                              SourceLocation location,
+                                              const char* suffix) {
+  if (!ParsingExternalCXXInlineFunction() || sym == NULL) {
+    return;
+  }
+
+  Symbol* func_symbol = compiler->current_function->info.function.symbol;
+  const char* func_name = func_symbol->asm_name.length != 0
+                              ? func_symbol->asm_name.value
+                              : func_symbol->name.value;
+  const char* filename;
+  int lineno;
+  int start;
+  int end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+
+  String asm_name = {0};
+  StringInit(&asm_name, "__davecc_inline_static_");
+  AppendSanitizedAsmComponent(&asm_name, func_name);
+  StringAppendChar(&asm_name, '_');
+  AppendSanitizedAsmComponent(&asm_name, local_name);
+  StringPrintf(&asm_name, "_%d_%d", lineno, start);
+  if (suffix != NULL && suffix[0] != '\0') {
+    StringAppendChar(&asm_name, '_');
+    AppendSanitizedAsmComponent(&asm_name, suffix);
+  }
+
+  StringSetString(&sym->asm_name, &asm_name);
+  StringDestruct(&asm_name);
+  sym->flags.is_local = false;
+  sym->flags.is_weak = true;
+}
+
+static void SetCXXInlineLocalStaticAsmName(Symbol* sym, const char* suffix) {
+  if (sym == NULL) {
+    return;
+  }
+  SetCXXInlineLocalStaticAsmNameFor(sym, sym->name.value, sym->location,
+                                    suffix);
+}
+
+static void SetCXXInlineLocalStaticGuardAsmName(Symbol* guard,
+                                                Symbol* guarded) {
+  if (guard == NULL || guarded == NULL) {
+    return;
+  }
+  SetCXXInlineLocalStaticAsmNameFor(guard, guarded->name.value,
+                                    guarded->location, "guard");
+}
+
 static void RegisterCXXLocalStaticDestructor(Symbol* sym, Symbol* guard) {
   ASTNode* destructor = NewCXXDestructorCallIfNeeded(sym);
   if (destructor == NULL) {
@@ -4768,6 +4886,7 @@ static ASTNode* NewCXXLocalStaticGuardedConstructor(Syntax* syntax,
   guard->flags.is_defined = true;
   guard->flags.is_local = true;
   guard->location = location;
+  SetCXXInlineLocalStaticGuardAsmName(guard, sym);
   bool added = SyntaxAddSymbol(syntax, guard);
   assert(added);
   (void)added;
@@ -4937,6 +5056,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(sym);
+    if (StorageIs(storage, STO(static)) && !TypeIsFunction(sym->type)) {
+      SetCXXInlineLocalStaticAsmName(sym, "");
+    }
     
     // Check for __thread violations.
     CheckThreadLocal(syntax, sym);

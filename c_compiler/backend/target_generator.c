@@ -193,6 +193,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   StringInit(&target->function_name,
              TargetSymbolName(func, func_name, sizeof(func_name)));
   target->is_global = !StorageIs(func->storage, STO(static));
+  target->is_weak = SymbolHasWeakBinding(func);
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
   target->is_void = TypeIsVoid(func_type->next) ||

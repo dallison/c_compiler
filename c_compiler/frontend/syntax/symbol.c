@@ -143,6 +143,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_template = false;
   sym->flags.is_template_parameter = false;
   sym->flags.is_template_type_parameter = false;
+  sym->flags.is_weak = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
@@ -478,6 +479,41 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   StringDestruct(&mangled);
 }
 
+void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
+  if (!CompilerIsCXX() || symbol == NULL || symbol->asm_name.length != 0) {
+    return;
+  }
+
+  String mangled;
+  StringInit(&mangled, NULL);
+  if (compiler->prepend_underscore) {
+    StringAppendChar(&mangled, '_');
+  }
+  StringAppend(&mangled, "_Z");
+
+  Namespace* ns = symbol->namespace_;
+  if (ns == NULL && owner != NULL && owner->tag_symbol != NULL) {
+    ns = owner->tag_symbol->namespace_;
+  }
+
+  bool nested = ns != NULL ||
+                (owner != NULL && owner->tag_name != NULL);
+  if (nested) {
+    StringAppendChar(&mangled, 'N');
+    AppendCXXNestedNamespaceComponents(&mangled, ns);
+    if (owner != NULL && owner->tag_name != NULL) {
+      AppendCXXNameComponent(&mangled, owner->tag_name->value);
+    }
+    AppendCXXNameComponent(&mangled, symbol->name.value);
+    StringAppendChar(&mangled, 'E');
+  } else {
+    AppendCXXNameComponent(&mangled, symbol->name.value);
+  }
+
+  StringSetString(&symbol->asm_name, &mangled);
+  StringDestruct(&mangled);
+}
+
 Symbol* SymbolClone(Symbol* sym) {
   Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
   new_sym->flags = sym->flags;
@@ -504,6 +540,10 @@ bool SymbolHasAttribute(Symbol* symbol, const char* attribute) {
 
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute) {
   return AttributeListFind(&symbol->attributes, attribute);
+}
+
+bool SymbolHasWeakBinding(Symbol* symbol) {
+  return symbol != NULL && symbol->flags.is_weak;
 }
 
 static const char* storages[] = {

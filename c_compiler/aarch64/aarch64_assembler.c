@@ -1943,7 +1943,10 @@ static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler, in
   if (!known) {
     if (sym != NULL) {
       int reloc_type = l ? R_AARCH64_CALL26 : R_AARCH64_JUMP26;
-      if (l && sym->binding == SYM_BIND(global) && assembler->base.pic) {
+      if (l &&
+          (sym->binding == SYM_BIND(global) ||
+           sym->binding == SYM_BIND(weak)) &&
+          assembler->base.pic) {
         reloc_type = R_AARCH64_CALL_PLT;
       }
       AssemblerRelocation* reloc = NewAssemblerRelocation(

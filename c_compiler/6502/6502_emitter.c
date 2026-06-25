@@ -845,7 +845,9 @@ void W65C02EmitterDelete(W65C02Emitter* emitter) {
 
 void W65C02PrintFunction(W65C02Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
-  if (emitter->g->base.is_global) {
+  if (emitter->g->base.is_weak) {
+    fprintf(fp, "\t.weak %s\n", func_name);
+  } else if (emitter->g->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
     fprintf(fp, "\t.local  %s\n", func_name);

@@ -48,6 +48,7 @@ DECLARE_DIRECTIVE_FUNC(text);
 DECLARE_DIRECTIVE_FUNC(data);
 DECLARE_DIRECTIVE_FUNC(comm);
 DECLARE_DIRECTIVE_FUNC(local);
+DECLARE_DIRECTIVE_FUNC(weak);
 DECLARE_DIRECTIVE_FUNC(file);
 DECLARE_DIRECTIVE_FUNC(loc);
 DECLARE_DIRECTIVE_FUNC(option);
@@ -90,6 +91,7 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(data);
   DIRECTIVE(comm);
   DIRECTIVE(local);
+  DIRECTIVE(weak);
   DIRECTIVE(file);
   DIRECTIVE(loc);
   DIRECTIVE(option);
@@ -596,6 +598,8 @@ static int32_t SymbolBindingToELFBinding(AssemblerSymbolBinding binding) {
       return STB(global);
     case SYM_BIND(local):
       return STB(local);
+    case SYM_BIND(weak):
+      return STB(weak);
     default:
       assert(false);
       return 0;
@@ -628,7 +632,8 @@ static void AddLocalSymbolToELFFile(void* entry, void* data) {
 static void AddGlobalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   ELFWriterFile* elf = data;
   AssemblerSymbol* sym = (AssemblerSymbol*)node;
-  if (sym->exported && sym->binding == SYM_BIND(global)) {
+  if (sym->exported &&
+      (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
     ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
                        SymbolTypeToELFType(sym->type),
                        SymbolBindingToELFBinding(sym->binding), sym->size,
@@ -903,6 +908,10 @@ static void HandleDirective_global(Assembler* assembler) {
 
 static void HandleDirective_local(Assembler* assembler) {
   SymbolDirective(assembler, SYM_BIND(local));
+}
+
+static void HandleDirective_weak(Assembler* assembler) {
+  SymbolDirective(assembler, SYM_BIND(weak));
 }
 
 static void HandleDirective_comm(Assembler* assembler) {

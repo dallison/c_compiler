@@ -76,6 +76,7 @@ void InitializerDelete(Initializer* init);
 typedef struct {
   Symbol* symbol;
   bool is_global;  // Variable is global (can be seen outside of file).
+  bool is_weak;    // Variable has weak external binding.
   size_t size;
   int32_t alignment;
   Vector initializers;
@@ -89,6 +90,7 @@ void InitializedStaticVariableDelete(InitializedStaticVariable* var);
 typedef struct {
   Symbol* symbol;
   bool is_global;  // Variable is global (can be seen outside of file).
+  bool is_weak;    // Variable has weak external binding.
   size_t size;
   size_t alignment;
   bool is_tls;

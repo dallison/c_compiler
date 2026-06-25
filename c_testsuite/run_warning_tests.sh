@@ -128,10 +128,10 @@ expect_warn frontend 'unused-label'
 expect_warn frontend 'unused-value'
 expect_warn frontend 'declaration-after-statement'
 run_ok_o0 werror_unused_value "$work/frontend.c" -Wunused-value -Werror=unused-value
-expect_warn werror_unused_value 'error\[unused-value\]'
+expect_warn werror_unused_value 'error: \[unused-value\]'
 run_ok wno_error_unused_value "$work/frontend.c" -Wunused-value -Werror -Wno-error=unused-value
 expect_warn wno_error_unused_value 'warning\[unused-value\]'
-expect_no_warn wno_error_unused_value 'error\[unused-value\]'
+expect_no_warn wno_error_unused_value 'error: \[unused-value\]'
 
 cat >"$work/format.c" <<'EOF'
 void logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -209,6 +209,8 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
           TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
       if (StorageIs(sym->symbol->storage, STO(static))) {
         fprintf(fp, "\t.local %s\n", symname);
+      } else if (SymbolHasWeakBinding(sym->symbol)) {
+        fprintf(fp, "\t.weak %s\n", symname);
       } else {
         fprintf(fp, "\t.global %s\n", symname);
       }
@@ -392,7 +394,9 @@ void PCodeEmitterDelete(PCodeEmitter* emitter) {
 
 void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->pcode->base.function_name.value;
-  if (emitter->pcode->base.is_global) {
+  if (emitter->pcode->base.is_weak) {
+    fprintf(fp, "\t.weak %s\n", func_name);
+  } else if (emitter->pcode->base.is_global) {
     fprintf(fp, "\t.global %s\n", func_name);
   } else {
     fprintf(fp, "\t.local  %s\n", func_name);

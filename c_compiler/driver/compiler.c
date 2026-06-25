@@ -404,6 +404,7 @@ static ASTNode* InitCompoundLiteral(ASTNode* node) {
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = sym_node->symbol;
   var->is_global = !StorageIs(sym_node->symbol->storage, STO(static));
+  var->is_weak = SymbolHasWeakBinding(sym_node->symbol);
   VectorInit(&var->initializers);
   var->size = sym_node->symbol->type->size;
   var->is_tls = StorageIs(sym_node->symbol->storage, STO(thread));
@@ -489,6 +490,7 @@ static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = decl->symbol;
   var->is_global = !StorageIs(decl->symbol->storage, STO(static));
+  var->is_weak = SymbolHasWeakBinding(decl->symbol);
   VectorInit(&var->initializers);
   var->size = decl->symbol->type->size;
   var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
@@ -589,11 +591,13 @@ static void AddLocalStatics(Syntax* syntax) {
       UninitializedStaticVariable* var =
           malloc(sizeof(UninitializedStaticVariable));
       var->symbol = decl->symbol;
-      var->is_global = false;
+      var->is_global = !StorageIs(decl->symbol->storage, STO(static));
+      var->is_weak = SymbolHasWeakBinding(decl->symbol);
       var->size = decl->symbol->type->size;
       var->alignment = SymbolEffectiveAlignment(decl->symbol);
       var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-      var->is_local = decl->symbol->flags.is_local;
+      var->is_local =
+          decl->symbol->flags.is_local || SymbolHasWeakBinding(decl->symbol);
       VectorAppend(&compiler->uninitialized_static_variables, var);
     } else {
       BinaryASTNode* init_node = (BinaryASTNode*)decl->initializer;
@@ -846,6 +850,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     malloc(sizeof(UninitializedStaticVariable));
                 var->symbol = decl->symbol;
                 var->is_global = !StorageIs(decl->symbol->storage, STO(static));
+                var->is_weak = SymbolHasWeakBinding(decl->symbol);
                 var->size = decl->symbol->type->size;
                 var->alignment = SymbolEffectiveAlignment(decl->symbol);
                 var->is_tls = StorageIs(decl->symbol->storage, STO(thread));

@@ -485,7 +485,8 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
         EncodeByte(enc, 0);
       }
       int reloc_type = R_X86_64_PC32;
-      if (base->pic && mem->sym->binding == SYM_BIND(global)) {
+      if (base->pic && (mem->sym->binding == SYM_BIND(global) ||
+                        mem->sym->binding == SYM_BIND(weak))) {
         reloc_type = R_X86_64_GOTPCREL;
       }
       // The relocation patches the 4-byte displacement field, which sits 4
