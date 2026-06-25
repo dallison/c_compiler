@@ -78,6 +78,12 @@ int persisted_param_dtor_count;
 int member_coawait_temp_dtor_count;
 int free_coawait_temp_dtor_count;
 int bool_await_suspend_count;
+int transfer_await_suspend_count;
+int transfer_target_result;
+void* transfer_target_handle;
+int final_always_suspend_count;
+int final_always_resume_count;
+void* final_always_suspend_handle;
 unsigned long coroutine_frame_storage[512];
 int coroutine_frame_storage_index;
 
@@ -119,6 +125,21 @@ struct BoolSuspendValue {
     last_frame_handle = handle;
     bool_await_suspend_count = bool_await_suspend_count + 1;
     return should_suspend;
+  }
+  int await_resume(void) {
+    return value;
+  }
+};
+
+struct TransferSuspendValue {
+  int value;
+  bool await_ready(void) {
+    return false;
+  }
+  void* await_suspend(void* handle) {
+    last_frame_handle = handle;
+    transfer_await_suspend_count = transfer_await_suspend_count + 1;
+    return transfer_target_handle;
   }
   int await_resume(void) {
     return value;
@@ -506,6 +527,19 @@ Task coroutine_bool_await_suspend_suspend(void) {
   co_return value + 4;
 }
 
+Task coroutine_transfer_target(void) {
+  SuspendValue awaiter = {211};
+  int value = co_await awaiter;
+  transfer_target_result = value + 5;
+  co_return transfer_target_result;
+}
+
+Task coroutine_transfer_source(void) {
+  TransferSuspendValue awaiter = {307};
+  int value = co_await awaiter;
+  co_return value + 6;
+}
+
 Task coroutine_suspend_twice(void) {
   suspend_twice_start_count = suspend_twice_start_count + 1;
   SuspendValue first = {11};
@@ -545,6 +579,29 @@ Task coroutine_direct_await_aggregate_expression(void) {
 Task coroutine_direct_await_factory_expression(void) {
   int value = co_await make_suspend_value(25);
   co_return value + 4;
+}
+
+Task coroutine_co_await_statement_named(void) {
+  SuspendValue awaiter = {171};
+  co_await awaiter;
+  co_return 17;
+}
+
+Task coroutine_co_await_statement_temporary(void) {
+  co_await DirectSuspendValue{181};
+  co_return 19;
+}
+
+Task coroutine_co_await_assignment_rhs(void) {
+  SuspendValue awaiter = {191};
+  int value = 0;
+  value = co_await awaiter;
+  co_return value + 3;
+}
+
+Task coroutine_co_return_co_await(void) {
+  SuspendValue awaiter = {197};
+  co_return co_await awaiter;
 }
 
 Task coroutine_member_operator_co_await_named(void) {
@@ -701,6 +758,59 @@ struct InitialPromise {
 InitialTask coroutine_initially_suspended(void) {
   initial_suspend_body_count = initial_suspend_body_count + 1;
   co_return 404;
+}
+
+struct FinalSuspendAlways {
+  bool await_ready(void) {
+    return false;
+  }
+  void await_suspend(void* handle) {
+    final_always_suspend_count = final_always_suspend_count + 1;
+    final_always_suspend_handle = handle;
+    last_frame_handle = handle;
+  }
+  void await_resume(void) {
+    final_always_resume_count = final_always_resume_count + 1;
+  }
+};
+
+struct FinalSuspendTask;
+typedef struct FinalSuspendTask FinalSuspendTask;
+struct FinalSuspendPromise;
+
+struct FinalSuspendTask {
+  using promise_type = FinalSuspendPromise;
+  int value;
+  void* handle;
+};
+
+struct FinalSuspendPromise {
+  int value;
+  FinalSuspendTask get_return_object(void) {
+    FinalSuspendTask task = {value, last_frame_handle};
+    return task;
+  }
+
+  SuspendNever initial_suspend(void) {
+    SuspendNever value = {};
+    return value;
+  }
+
+  FinalSuspendAlways final_suspend(void) {
+    FinalSuspendAlways value = {};
+    return value;
+  }
+
+  void return_value(int result) {
+    value = result;
+  }
+
+  void unhandled_exception(void) {
+  }
+};
+
+FinalSuspendTask coroutine_finally_suspended(void) {
+  co_return 515;
 }
 
 struct LifetimeTask;
@@ -1259,6 +1369,45 @@ int main(void) {
     return 36;
   }
 
+  int final_always_suspend_before = final_always_suspend_count;
+  last_frame_handle = 0;
+  FinalSuspendTask finally_suspended = coroutine_finally_suspended();
+  if (finally_suspended.value != 515) {
+    return 165;
+  }
+  if (final_always_suspend_count != final_always_suspend_before + 1) {
+    return 171;
+  }
+  if (final_always_resume_count != 0) {
+    return 172;
+  }
+  if (finally_suspended.handle == 0) {
+    return 168;
+  }
+  if (finally_suspended.handle != final_always_suspend_handle) {
+    return 169;
+  }
+  if (finally_suspended.handle != last_frame_handle) {
+    return 170;
+  }
+  if (frame_state(finally_suspended.handle) != 0 ||
+      !frame_done(finally_suspended.handle)) {
+    return 173;
+  }
+  CoroutineFrame* finally_suspended_frame =
+      (CoroutineFrame*)finally_suspended.handle;
+  if (finally_suspended_frame->resume != 0 ||
+      finally_suspended_frame->destroy == 0) {
+    return 166;
+  }
+  resume_coroutine(finally_suspended.handle);
+  if (last_resume_value != -1 ||
+      final_always_suspend_count != final_always_suspend_before + 1 ||
+      final_always_resume_count != 0) {
+    return 167;
+  }
+  destroy_coroutine(finally_suspended.handle);
+
   LifetimeTask lifetime_started = coroutine_lifetime_suspend();
   if (lifetime_promise_ctor_count != 1 ||
       lifetime_promise_dtor_count != 0 ||
@@ -1722,6 +1871,63 @@ int main(void) {
   }
   destroy_coroutine(direct_await_factory_started.handle);
 
+  Task statement_await_named_started = coroutine_co_await_statement_named();
+  if (statement_await_named_started.value != 0 ||
+      statement_await_named_started.handle == 0 ||
+      frame_state(statement_await_named_started.handle) != 1) {
+    return 174;
+  }
+  resume_coroutine(statement_await_named_started.handle);
+  if (last_resume_value != 17 ||
+      frame_state(statement_await_named_started.handle) != 0 ||
+      !frame_done(statement_await_named_started.handle)) {
+    return 175;
+  }
+  destroy_coroutine(statement_await_named_started.handle);
+
+  Task statement_await_temporary_started =
+      coroutine_co_await_statement_temporary();
+  if (statement_await_temporary_started.value != 0 ||
+      statement_await_temporary_started.handle == 0 ||
+      frame_state(statement_await_temporary_started.handle) != 1) {
+    return 176;
+  }
+  resume_coroutine(statement_await_temporary_started.handle);
+  if (last_resume_value != 19 ||
+      frame_state(statement_await_temporary_started.handle) != 0 ||
+      !frame_done(statement_await_temporary_started.handle)) {
+    return 177;
+  }
+  destroy_coroutine(statement_await_temporary_started.handle);
+
+  Task assignment_await_started = coroutine_co_await_assignment_rhs();
+  if (assignment_await_started.value != 0 ||
+      assignment_await_started.handle == 0 ||
+      frame_state(assignment_await_started.handle) != 1) {
+    return 178;
+  }
+  resume_coroutine(assignment_await_started.handle);
+  if (last_resume_value != 194 ||
+      frame_state(assignment_await_started.handle) != 0 ||
+      !frame_done(assignment_await_started.handle)) {
+    return 179;
+  }
+  destroy_coroutine(assignment_await_started.handle);
+
+  Task coreturn_await_started = coroutine_co_return_co_await();
+  if (coreturn_await_started.value != 0 ||
+      coreturn_await_started.handle == 0 ||
+      frame_state(coreturn_await_started.handle) != 1) {
+    return 180;
+  }
+  resume_coroutine(coreturn_await_started.handle);
+  if (last_resume_value != 197 ||
+      frame_state(coreturn_await_started.handle) != 0 ||
+      !frame_done(coreturn_await_started.handle)) {
+    return 181;
+  }
+  destroy_coroutine(coreturn_await_started.handle);
+
   Task member_operator_named_started =
       coroutine_member_operator_co_await_named();
   if (member_operator_named_started.value != 0 ||
@@ -1996,13 +2202,44 @@ int main(void) {
   }
   destroy_coroutine(direct_await_factory_loop_started.handle);
 
+  Task transfer_target_started = coroutine_transfer_target();
+  if (transfer_target_started.value != 0 ||
+      transfer_target_started.handle == 0 ||
+      frame_state(transfer_target_started.handle) != 1 ||
+      frame_done(transfer_target_started.handle)) {
+    return 161;
+  }
+  transfer_target_handle = transfer_target_started.handle;
+  int transfer_await_suspend_before = transfer_await_suspend_count;
+  Task transfer_source_started = coroutine_transfer_source();
+  if (transfer_source_started.value != 0 ||
+      transfer_source_started.handle == 0 ||
+      frame_state(transfer_source_started.handle) != 1 ||
+      frame_done(transfer_source_started.handle) ||
+      transfer_await_suspend_count != transfer_await_suspend_before + 1) {
+    return 162;
+  }
+  if (frame_state(transfer_target_started.handle) != 0 ||
+      !frame_done(transfer_target_started.handle) ||
+      transfer_target_result != 216) {
+    return 163;
+  }
+  resume_coroutine(transfer_source_started.handle);
+  if (last_resume_value != 313 ||
+      frame_state(transfer_source_started.handle) != 0 ||
+      !frame_done(transfer_source_started.handle)) {
+    return 164;
+  }
+  destroy_coroutine(transfer_target_started.handle);
+  destroy_coroutine(transfer_source_started.handle);
+
   destroy_coroutine(started.handle);
   destroy_coroutine(yielded.handle);
   destroy_coroutine(initially_suspended.handle);
-  if (promise_coroutine_operator_new_count != 51 ||
-      promise_coroutine_operator_delete_count != 51 ||
-      global_coroutine_operator_new_count != 2 ||
-      global_coroutine_operator_delete_count != 2) {
+  if (promise_coroutine_operator_new_count != 57 ||
+      promise_coroutine_operator_delete_count != 57 ||
+      global_coroutine_operator_new_count != 3 ||
+      global_coroutine_operator_delete_count != 3) {
     return 44;
   }
 
