@@ -1453,6 +1453,16 @@ static ASTNode* CastASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
+static void CastASTNodeVisit(ASTNode* node,
+                             void (*func)(ASTNode* node, void*, int,
+                                          VisitorMode),
+                             int child_id, void* data) {
+  CastASTNode* n = (CastASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static bool CastASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   CastASTNode* n = (CastASTNode*)node;
   if (TypeIsVoid(n->cast_type)) {
@@ -1468,7 +1478,8 @@ static void CastASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
 }
 
 static ASTNodeVirtuals cast_vtbl = {CastASTNodeDelete, CastASTNodePrint,
-                                    CastASTNodeReplaceChild, CastASTNodeClone, NULL,
+                                    CastASTNodeReplaceChild, CastASTNodeClone,
+                                    CastASTNodeVisit,
   CastASTNodeUsesValue, CastASTNodeTransform
 };
 

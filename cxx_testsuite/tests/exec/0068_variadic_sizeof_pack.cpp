@@ -49,6 +49,13 @@ struct Tuple<Box<int>, Box<long>, Box<char> > {
   }
 };
 
+template <>
+struct Tuple<int&&, long&&, char&&> {
+  int count(void) {
+    return 31;
+  }
+};
+
 template <class... Ts>
 int expanded_tuple_count(void) {
   Tuple<Ts...> value;
@@ -64,6 +71,18 @@ int aliased_tuple_count(void) {
 template <class... Ts>
 int boxed_tuple_count(void) {
   Tuple<Box<Ts>...> value;
+  return value.count();
+}
+
+template <class... Ts>
+int decltype_tuple_count(Ts... args) {
+  Tuple<decltype(args)...> value;
+  return value.count();
+}
+
+template <class... Ts>
+int decltype_forward_tuple_count(Ts&&... args) {
+  Tuple<decltype(static_cast<Ts&&>(args))...> value;
   return value.count();
 }
 
@@ -262,6 +281,11 @@ int forward_const_ref_sum(const Ts&... args) {
 template <class... Ts>
 int forward_rvalue_ref_sum(Ts&&... args) {
   return sum_three(args...);
+}
+
+template <class... Ts>
+int forward_cast_sum(Ts&&... args) {
+  return sum_three(static_cast<Ts&&>(args)...);
 }
 
 template <class... Ts>
@@ -634,6 +658,9 @@ int main(void) {
   if (forward_rvalue_ref_sum(1, 2L, (char)3) != 6) {
     return 140;
   }
+  if (forward_cast_sum(1, 2L, (char)3) != 6) {
+    return 142;
+  }
   Box<int> box_i;
   Box<long> box_l;
   Box<char> box_c;
@@ -654,6 +681,12 @@ int main(void) {
   }
   if (boxed_tuple_count<int, long, char>() != 30) {
     return 111;
+  }
+  if (decltype_tuple_count(1, 2L, (char)3) != 3) {
+    return 143;
+  }
+  if (decltype_forward_tuple_count(1, 2L, (char)3) != 31) {
+    return 144;
   }
   if (fold_sum_left(1, 2, 3) != 6) {
     return 11;

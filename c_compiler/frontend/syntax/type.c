@@ -1202,6 +1202,7 @@ static TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
   TypeRecord* base = TypeIsReference(expr_type) ? expr_type->next : expr_type;
   TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
   TypeRecordChain(ref, base);
+  ref->type = base->type;
   TypeRecordCalculateSize(ref);
   return ref;
 }
@@ -2983,8 +2984,10 @@ static bool LambdaCapturePackFieldArgumentLength(ASTNode* node, Vector* args,
 }
 
 typedef struct {
+  TemplateFunctionBodyClone* clone;
   Symbol* from;
   Symbol* to;
+  size_t element_index;
 } ReplacePackIdentifierData;
 
 static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
@@ -2993,31 +2996,76 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
   if (node != NULL) {
     node->flags &= ~kASTPackExpansion;
   }
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
+  if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
   ReplacePackIdentifierData* replace = data;
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
-  if (id->symbol == replace->from) {
-    id->symbol = replace->to;
-    ASTNodeSetType(node, replace->to->type);
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol == replace->from) {
+      id->symbol = replace->to;
+      ASTNodeSetType(node, replace->to->type);
+    }
+  }
+  if (node->op != AST_OP(cast) || replace->clone == NULL) {
+    return;
+  }
+  CastASTNode* cast = (CastASTNode*)node;
+  if (!TypeContainsTemplateParameter(cast->cast_type)) {
+    return;
+  }
+  int pack_index = -1;
+  size_t pack_length = 0;
+  TypeRecord* cast_type = NULL;
+  if (FindPackExpansionInType(cast->cast_type, replace->clone->args,
+                              &pack_index, &pack_length)) {
+    if (pack_length > 0 && replace->element_index >= pack_length) {
+      SyntaxError(replace->clone->parser->syntax,
+                  "pack expansion argument packs have different lengths");
+      return;
+    }
+    cast_type = SubstituteTemplateParametersForPackElement(
+        replace->clone->parser, cast->cast_type, replace->clone->args,
+        pack_index, replace->element_index);
+  } else {
+    cast_type = SubstituteTemplateParameters(replace->clone->parser,
+                                             cast->cast_type,
+                                             replace->clone->args);
+  }
+  RebaseTemplateParameterIndices(
+      cast_type, replace->clone->rebase_template_parameter_base);
+  TypeRecordCalculateSize(cast_type);
+  TypeRecordDelete(cast->cast_type);
+  cast->cast_type = cast_type;
+  if (TypeIsReference(cast_type)) {
+    ASTNodeSetType(node, cast_type->next);
+    node->value_category =
+        cast_type->declarator == kDeclRValueReference
+            ? kValueCategoryXvalue
+            : kValueCategoryLvalue;
+  } else {
+    ASTNodeSetType(node, cast_type);
   }
 }
 
-static ASTNode* ClonePackExpansionPattern(ASTNode* pattern, Symbol* from,
-                                          Symbol* to) {
-  ASTNode* clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
+static ASTNode* ClonePackExpansionPattern(TemplateFunctionBodyClone* clone,
+                                          ASTNode* pattern, Symbol* from,
+                                          Symbol* to, size_t element_index) {
+  ASTNode* pattern_clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
   ReplacePackIdentifierData replace = {0};
+  replace.clone = clone;
   replace.from = from;
   replace.to = to;
-  ASTNodeVisit(clone, ReplacePackIdentifierVisitor, 0, &replace);
-  return clone;
+  replace.element_index = element_index;
+  ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &replace);
+  return pattern_clone;
 }
 
 typedef struct {
+  TemplateFunctionBodyClone* clone;
   const char* from_name;
   StructMember* to;
+  size_t element_index;
 } ReplaceLambdaCapturePackFieldData;
 
 static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
@@ -3030,11 +3078,17 @@ static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
   if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
+  ReplaceLambdaCapturePackFieldData* replace = data;
+  if (node->op == AST_OP(cast) && replace->clone != NULL) {
+    ReplacePackIdentifierData cast_replace = {0};
+    cast_replace.clone = replace->clone;
+    cast_replace.element_index = replace->element_index;
+    ReplacePackIdentifierVisitor(node, &cast_replace, child_id, mode);
+  }
   ASTNode* access_node = LambdaCapturePackMemberAccess(node);
   if (access_node != node) {
     return;
   }
-  ReplaceLambdaCapturePackFieldData* replace = data;
   BinaryASTNode* access = (BinaryASTNode*)access_node;
   if (access->right->op == AST_OP(string)) {
     ConstantASTNode* name = (ConstantASTNode*)access->right;
@@ -3063,15 +3117,19 @@ static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
   }
 }
 
-static ASTNode* CloneLambdaCapturePackPattern(ASTNode* pattern,
+static ASTNode* CloneLambdaCapturePackPattern(TemplateFunctionBodyClone* clone,
+                                              ASTNode* pattern,
                                               const char* from_name,
-                                              StructMember* to) {
-  ASTNode* clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
+                                              StructMember* to,
+                                              size_t element_index) {
+  ASTNode* pattern_clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
   ReplaceLambdaCapturePackFieldData replace = {0};
+  replace.clone = clone;
   replace.from_name = from_name;
   replace.to = to;
-  ASTNodeVisit(clone, ReplaceLambdaCapturePackFieldVisitor, 0, &replace);
-  return clone;
+  replace.element_index = element_index;
+  ASTNodeVisit(pattern_clone, ReplaceLambdaCapturePackFieldVisitor, 0, &replace);
+  return pattern_clone;
 }
 
 static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
@@ -3118,7 +3176,8 @@ static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
         for (size_t j = 0; j < replacements->length; j++) {
           Symbol* replacement = replacements->value.p[j];
           ASTNode* expanded_actual =
-              ClonePackExpansionPattern(actual, pack_symbol, replacement);
+              ClonePackExpansionPattern(clone, actual, pack_symbol,
+                                        replacement, j);
           expanded_actual->parent = node;
           expanded_actual->child_id = (int)expanded->length;
           VectorAppend(expanded, expanded_actual);
@@ -3133,7 +3192,8 @@ static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
         for (size_t j = 0; j < capture_replacements->length; j++) {
           StructMember* replacement = capture_replacements->value.p[j];
           ASTNode* expanded_actual =
-              CloneLambdaCapturePackPattern(actual, capture_name, replacement);
+              CloneLambdaCapturePackPattern(clone, actual, capture_name,
+                                            replacement, j);
           expanded_actual->parent = node;
           expanded_actual->child_id = (int)expanded->length;
           VectorAppend(expanded, expanded_actual);
@@ -3151,7 +3211,8 @@ static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
       for (size_t j = 0; j < capture_replacements->length; j++) {
         StructMember* replacement = capture_replacements->value.p[j];
         ASTNode* expanded_actual =
-            CloneLambdaCapturePackPattern(actual, capture_name, replacement);
+            CloneLambdaCapturePackPattern(clone, actual, capture_name,
+                                          replacement, j);
         expanded_actual->parent = node;
         expanded_actual->child_id = (int)expanded->length;
         VectorAppend(expanded, expanded_actual);
@@ -3325,7 +3386,8 @@ static void ExpandClonedBracedInitializerPackElements(
           if (member_name != NULL && replacements != NULL) {
             for (size_t j = 0; j < replacements->length; j++) {
               ASTNode* replacement = ClonePackExpansionPattern(
-                  expr_init->expr, pack_symbol, replacements->value.p[j]);
+                  clone, expr_init->expr, pack_symbol,
+                  replacements->value.p[j], j);
               ASTNode* expanded_init =
                   NewExpressionInitializerASTNode(replacement, location);
               Vector* designators = NewVector();
@@ -3368,7 +3430,8 @@ static void ExpandClonedBracedInitializerPackElements(
         if (replacements != NULL) {
           for (size_t j = 0; j < replacements->length; j++) {
             ASTNode* replacement = ClonePackExpansionPattern(
-                expr_init_node->expr, pack_symbol, replacements->value.p[j]);
+                clone, expr_init_node->expr, pack_symbol,
+                replacements->value.p[j], j);
             ASTNode* expanded_init =
                 NewExpressionInitializerASTNode(replacement, location);
             expanded_init->parent = node;
@@ -3386,8 +3449,8 @@ static void ExpandClonedBracedInitializerPackElements(
         if (capture_replacements != NULL && capture_name != NULL) {
           for (size_t j = 0; j < capture_replacements->length; j++) {
             ASTNode* replacement = CloneLambdaCapturePackPattern(
-                expr_init_node->expr, capture_name,
-                capture_replacements->value.p[j]);
+                clone, expr_init_node->expr, capture_name,
+                capture_replacements->value.p[j], j);
             ASTNode* expanded_init =
                 NewExpressionInitializerASTNode(replacement, location);
             expanded_init->parent = node;
@@ -3482,23 +3545,25 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
                           ? seed
                           : capture_pack
                                 ? CloneLambdaCapturePackPattern(
-                                      pack_node, capture_name,
+                                      clone, pack_node, capture_name,
                                       replacements->value.p[
-                                          replacements->length - 1])
+                                          replacements->length - 1],
+                                      replacements->length - 1)
                                 : ClonePackExpansionPattern(
-                                      pack_node, pack_symbol,
+                                      clone, pack_node, pack_symbol,
                                       replacements->value.p[
-                                          replacements->length - 1]);
+                                          replacements->length - 1],
+                                      replacements->length - 1);
     size_t start = seed != NULL ? replacements->length
                                 : replacements->length - 1;
     for (size_t i = start; i > 0; i--) {
       ASTNode* left = capture_pack
                           ? CloneLambdaCapturePackPattern(
-                                pack_node, capture_name,
-                                replacements->value.p[i - 1])
+                                clone, pack_node, capture_name,
+                                replacements->value.p[i - 1], i - 1)
                           : ClonePackExpansionPattern(
-                                pack_node, pack_symbol,
-                                replacements->value.p[i - 1]);
+                                clone, pack_node, pack_symbol,
+                                replacements->value.p[i - 1], i - 1);
       result = NewBinaryASTNode(node->op, NULL, node->location, left, result);
     }
     if (capture_pack) {
@@ -3511,19 +3576,20 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
                         ? seed
                         : capture_pack
                               ? CloneLambdaCapturePackPattern(
-                                    pack_node, capture_name,
-                                    replacements->value.p[0])
+                                    clone, pack_node, capture_name,
+                                    replacements->value.p[0], 0)
                               : ClonePackExpansionPattern(
-                                    pack_node, pack_symbol,
-                                    replacements->value.p[0]);
+                                    clone, pack_node, pack_symbol,
+                                    replacements->value.p[0], 0);
   size_t start = seed != NULL ? 0 : 1;
   for (size_t i = start; i < replacements->length; i++) {
     ASTNode* right = capture_pack
                          ? CloneLambdaCapturePackPattern(
-                               pack_node, capture_name,
-                               replacements->value.p[i])
-                         : ClonePackExpansionPattern(pack_node, pack_symbol,
-                                                     replacements->value.p[i]);
+                               clone, pack_node, capture_name,
+                               replacements->value.p[i], i)
+                         : ClonePackExpansionPattern(
+                               clone, pack_node, pack_symbol,
+                               replacements->value.p[i], i);
     result = NewBinaryASTNode(node->op, NULL, node->location, result, right);
   }
   if (capture_pack) {

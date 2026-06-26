@@ -36,6 +36,11 @@ struct BoxedTuple {
 };
 
 template <class... Ts>
+struct DecltypeTuple {
+  Tuple<decltype(static_cast<Ts&&>(Ts()))...> tuple;
+};
+
+template <class... Ts>
 int variadic_function(Ts... args) {
   (void)0;
   return 17;
@@ -191,9 +196,28 @@ int forward_rvalue_ref_values(Ts&&... args) {
 }
 
 template <class... Ts>
+int forward_cast_values(Ts&&... args) {
+  return accepts_three(static_cast<Ts&&>(args)...);
+}
+
+template <class... Ts>
 int boxed_parameter_pack_values(Box<Ts>... boxes) {
   (void)0;
   return sizeof...(boxes);
+}
+
+template <class... Ts>
+int decltype_tuple_values(Ts... args) {
+  Tuple<decltype(args)...> value;
+  (void)value;
+  return sizeof...(args);
+}
+
+template <class... Ts>
+int decltype_forward_tuple_values(Ts&&... args) {
+  Tuple<decltype(static_cast<Ts&&>(args))...> value;
+  (void)value;
+  return sizeof...(args);
 }
 
 template <class... Ts>
@@ -510,6 +534,7 @@ void use_variadic_templates(void) {
   WrappedTuple<int, char, long> wrapped;
   FirstAndRest<int, char, long> split;
   BoxedTuple<int, char, long> boxed;
+  DecltypeTuple<int, char, long> decltype_tuple;
   int value = variadic_function(1, 2L, 'c');
   int count = count_types(1, 2L, 'c');
   int value_count = count_values(1, 2L, 'c');
@@ -519,10 +544,14 @@ void use_variadic_templates(void) {
   int forwarded_mapped = forward_mapped_values(1, 2L, 'c');
   int forwarded_const_ref = forward_const_ref_values(1, 2L, 'c');
   int forwarded_rvalue_ref = forward_rvalue_ref_values(1, 2L, 'c');
+  int forwarded_cast = forward_cast_values(1, 2L, 'c');
   Box<int> box_i;
   Box<long> box_l;
   Box<char> box_c;
   int boxed_parameters = boxed_parameter_pack_values(box_i, box_l, box_c);
+  int decltype_parameters = decltype_tuple_values(1, 2L, 'c');
+  int decltype_forward_parameters =
+      decltype_forward_tuple_values(1, 2L, 'c');
   int direct_constructed = direct_construct_values(1, 2L, 'c');
   int direct_constructed_incremented =
       direct_construct_incremented_values(1, 2L, 'c');
@@ -593,6 +622,7 @@ void use_variadic_templates(void) {
   (void)wrapped;
   (void)split;
   (void)boxed;
+  (void)decltype_tuple;
   (void)value;
   (void)count;
   (void)value_count;
@@ -602,7 +632,10 @@ void use_variadic_templates(void) {
   (void)forwarded_mapped;
   (void)forwarded_const_ref;
   (void)forwarded_rvalue_ref;
+  (void)forwarded_cast;
   (void)boxed_parameters;
+  (void)decltype_parameters;
+  (void)decltype_forward_parameters;
   (void)direct_constructed;
   (void)direct_constructed_incremented;
   (void)direct_constructed_mapped;

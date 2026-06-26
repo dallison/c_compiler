@@ -1673,6 +1673,44 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
                             actuals);
 }
 
+static bool CXXExpressionNamesTemplateTypeParameter(ASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  return id->symbol != NULL && id->symbol->flags.is_template_parameter &&
+         id->symbol->flags.is_template_type_parameter &&
+         id->symbol->type != NULL;
+}
+
+static ASTNode* ParseCXXDependentValueInitialization(ASTNode* type_expr,
+                                                     Syntax* syntax,
+                                                     TokenClass followers) {
+  IdentifierASTNode* id = (IdentifierASTNode*)type_expr;
+  SourceLocation location = type_expr->location;
+  TypeRecord* type = TypeRecordCopy(id->symbol->type);
+  ASTNodeDelete(type_expr);
+
+  ASTNode* initializer = NULL;
+  if (LexLookingAt(syntax->lex, TOK(rparen))) {
+    initializer = NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  } else {
+    initializer = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+    if (LexMatch(syntax->lex, TOK(comma))) {
+      SyntaxError(syntax,
+                  "dependent function-style cast supports at most one argument");
+      SyntaxRecover(syntax, TC(closebra));
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+
+  ASTNode* result = NewCastASTNode(type, location, initializer);
+  ((CastASTNode*)result)->kind = kCastStatic;
+  ASTNodeSetType(result, type);
+  return result;
+}
+
 static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                                   TokenClass followers) {
   String* member_name;
@@ -1809,7 +1847,10 @@ static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
     if (LexMatch(syntax->lex, TOK(lsquare))) {
       result = ParseArraySubscript(result, syntax, followers);
     } else if (LexMatch(syntax->lex, TOK(lparen))) {
-      result = ParseFunctionCall(result, syntax, followers);
+      result = CXXExpressionNamesTemplateTypeParameter(result)
+                   ? ParseCXXDependentValueInitialization(result, syntax,
+                                                         followers)
+                   : ParseFunctionCall(result, syntax, followers);
     } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(lbrace))) {
       ASTNode* braced =
           ParseCXXBracedTemporaryExpression(result, syntax, followers);
@@ -3041,7 +3082,7 @@ static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
 
   SyntaxNeedBracket(syntax, TOK(greater), followers);
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
-  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(expr));
+  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(closebra));
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
 
   ASTNode* result = NewCastASTNode(type, location, expr);
