@@ -3722,6 +3722,19 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
 }
 
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
+  if (node->is_pack_size) {
+    if (node->expr == NULL || node->expr->op != AST_OP(identifier)) {
+      SemanticError((ASTNode*)node, "sizeof... requires a template parameter pack");
+    } else {
+      IdentifierASTNode* id = (IdentifierASTNode*)node->expr;
+      if (id->symbol == NULL || !id->symbol->flags.is_template_parameter ||
+          !id->symbol->flags.is_parameter_pack) {
+        SemanticError(node->expr, "sizeof... requires a template parameter pack");
+      }
+    }
+    ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
+    return;
+  }
   if (node->expr != NULL) {
     node->expr = AnalyzeExpression(node->expr);
     if (TypeIsVLA(node->expr->type)) {

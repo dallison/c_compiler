@@ -310,6 +310,9 @@ typedef struct ASTNode {
 #define kASTCoroutineFrameStore (1 << 10)  // Starter-only coroutine frame store.
 #define kASTQualifiedName (1 << 11)  // Identifier was written with :: qualification.
 #define kASTCompilerGeneratedGoto (1 << 12)  // Goto synthesized by lowering.
+#define kASTPackExpansion (1 << 13)  // Expression is followed by `...`.
+#define kASTFoldExpression (1 << 14)  // C++ fold expression placeholder.
+#define kASTFoldPackOnLeft (1 << 15)  // Fold pack operand is the left child.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -468,10 +471,12 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
 typedef struct {
   ConstantASTNode base;
   ASTNode* expr;
+  bool is_pack_size;
 } SizeofASTNode;
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location);
 ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr, SourceLocation location);
+ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location);
 
 // Macro name.
 typedef struct {

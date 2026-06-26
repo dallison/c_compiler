@@ -1192,11 +1192,15 @@ ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
   BinaryASTNode* node = ASTArenaAlloc(sizeof(BinaryASTNode));
   ASTNodeInit(&node->base, op, type, location, &binary_vtbl);
   node->left = left;
-  left->parent = (ASTNode*)node;
-  left->child_id = 0;
+  if (left != NULL) {
+    left->parent = (ASTNode*)node;
+    left->child_id = 0;
+  }
   node->right = right;
-  right->parent = (ASTNode*)node;
-  right->child_id = 1;
+  if (right != NULL) {
+    right->parent = (ASTNode*)node;
+    right->child_id = 1;
+  }
   return (ASTNode*)node;
 }
 
@@ -1593,6 +1597,7 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   SizeofASTNode* to = ASTArenaAlloc(sizeof(SizeofASTNode));
   memcpy(&to->base, &from->base, sizeof(to->base));
   to->expr = ASTNodeClone(from->expr, func, data, &to->base.base);
+  to->is_pack_size = from->is_pack_size;
   return func(&to->base.base, data);
 }
 
@@ -1613,6 +1618,7 @@ ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
   IntConstantASTNodeInit(&node->base, size, type, location);
   node->base.base.virtuals = &sizeof_vtbl;
   node->expr = NULL;
+  node->is_pack_size = false;
   node->base.base.op = AST_OP(sizeof);
   return (ASTNode*)node;
 }
@@ -1625,8 +1631,15 @@ ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
   node->base.base.virtuals = &sizeof_vtbl;
   node->base.base.op = AST_OP(sizeof);
   node->expr = expr;
+  node->is_pack_size = false;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;
+}
+
+ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location) {
+  ASTNode* node = NewSizeofASTNodeWithExpression(expr, location);
+  ((SizeofASTNode*)node)->is_pack_size = true;
+  return node;
 }
 
 static void MacroNameASTNodeDelete(ASTNode* node) {

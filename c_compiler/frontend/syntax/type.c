@@ -1433,6 +1433,11 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       }
       return;
     }
+    return;
+  }
+
+  if (arg->kind == kTemplateParameterType && arg->type == NULL) {
+    return;
   }
 
   TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
@@ -2055,11 +2060,16 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
 
 typedef struct {
   Map symbol_map;
+  Map pack_symbol_map;
   TypeParser* parser;
   Vector* args;
   TypeRecord* to_func;
   int rebase_template_parameter_base;
 } TemplateFunctionBodyClone;
+
+static void DeleteMappedVector(MapKeyValue* kv) {
+  VectorDelete(kv->value.p);
+}
 
 static const char* CXXConstructorNameForRecord(TypeRecord* type) {
   if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
@@ -2211,8 +2221,226 @@ static Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
   return concrete_args;
 }
 
+static bool IsIdentifierPackExpansion(ASTNode* node) {
+  if (node == NULL || (node->flags & kASTPackExpansion) == 0 ||
+      node->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  return id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+}
+
+static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
+                                        ASTNode* node) {
+  if (node->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  Vector* expanded = NewVector();
+  bool changed = false;
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (IsIdentifierPackExpansion(actual)) {
+      IdentifierASTNode* id = (IdentifierASTNode*)actual;
+      Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map,
+                                               id->symbol);
+      if (replacements != NULL) {
+        for (size_t j = 0; j < replacements->length; j++) {
+          Symbol* replacement = replacements->value.p[j];
+          ASTNode* replacement_id =
+              NewIdentifierASTNode(replacement, actual->location);
+          replacement_id->parent = node;
+          replacement_id->child_id = (int)expanded->length + 1;
+          VectorAppend(expanded, replacement_id);
+        }
+        ASTNodeDelete(actual);
+        changed = true;
+        continue;
+      }
+    }
+    actual->parent = node;
+    actual->child_id = (int)expanded->length + 1;
+    VectorAppend(expanded, actual);
+  }
+  if (changed) {
+    VectorDelete(call->children);
+    call->children = expanded;
+  } else {
+    VectorDelete(expanded);
+  }
+}
+
+static bool ExpressionInitializerIsIdentifierPackExpansion(ASTNode* node,
+                                                           Symbol** symbol,
+                                                           SourceLocation* loc) {
+  if (node == NULL || node->op != AST_OP(expr_init)) {
+    return false;
+  }
+  ExpressionInitializerASTNode* init = (ExpressionInitializerASTNode*)node;
+  if (!IsIdentifierPackExpansion(init->expr)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)init->expr;
+  if (symbol != NULL) {
+    *symbol = id->symbol;
+  }
+  if (loc != NULL) {
+    *loc = init->expr->location;
+  }
+  return true;
+}
+
+static void ExpandClonedBracedInitializerPackElements(
+    TemplateFunctionBodyClone* clone, ASTNode* node) {
+  if (node->op != AST_OP(braced_init)) {
+    return;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)node;
+  Vector* expanded = NewVector();
+  bool changed = false;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    Symbol* pack_symbol = NULL;
+    SourceLocation location = initializer != NULL ? initializer->location
+                                                  : node->location;
+    if (ExpressionInitializerIsIdentifierPackExpansion(initializer,
+                                                       &pack_symbol,
+                                                       &location)) {
+      Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map,
+                                               pack_symbol);
+      if (replacements != NULL) {
+        for (size_t j = 0; j < replacements->length; j++) {
+          ASTNode* replacement =
+              NewIdentifierASTNode(replacements->value.p[j], location);
+          ASTNode* expr_init =
+              NewExpressionInitializerASTNode(replacement, location);
+          expr_init->parent = node;
+          expr_init->child_id = (int)expanded->length;
+          VectorAppend(expanded, expr_init);
+        }
+        ASTNodeDelete(initializer);
+        changed = true;
+        continue;
+      }
+    }
+    if (initializer != NULL) {
+      initializer->parent = node;
+      initializer->child_id = (int)expanded->length;
+    }
+    VectorAppend(expanded, initializer);
+  }
+  if (changed) {
+    VectorDelete(braced->initializers);
+    braced->initializers = expanded;
+  } else {
+    VectorDelete(expanded);
+  }
+}
+
+static ASTNode* NewFoldIdentity(ASTOpcode op, SourceLocation location,
+                                TypeParser* parser) {
+  if (op == AST_OP(logand)) {
+    return NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                                 location);
+  }
+  if (op == AST_OP(logor)) {
+    return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                                 location);
+  }
+  SyntaxError(parser->syntax, "Empty fold expression is not supported for this operator");
+  return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               location);
+}
+
+static ASTNode* NewFoldIdentifier(Symbol* symbol, SourceLocation location) {
+  return NewIdentifierASTNode(symbol, location);
+}
+
+static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
+                                           ASTNode* node) {
+  if (node == NULL || (node->flags & kASTFoldExpression) == 0 ||
+      (node->op != AST_OP(mult) && node->op != AST_OP(plus) &&
+       node->op != AST_OP(minus) && node->op != AST_OP(div) &&
+       node->op != AST_OP(mod) && node->op != AST_OP(lshift) &&
+       node->op != AST_OP(rshift) && node->op != AST_OP(and) &&
+       node->op != AST_OP(exor) && node->op != AST_OP(bitor) &&
+       node->op != AST_OP(logand) && node->op != AST_OP(logor))) {
+    return node;
+  }
+
+  BinaryASTNode* fold = (BinaryASTNode*)node;
+  bool pack_on_left = (node->flags & kASTFoldPackOnLeft) != 0;
+  ASTNode* pack_node = pack_on_left ? fold->left : fold->right;
+  ASTNode* seed = pack_on_left ? fold->right : fold->left;
+  if (pack_node == NULL || pack_node->op != AST_OP(identifier)) {
+    return node;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)pack_node;
+  Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map, id->symbol);
+  if (replacements == NULL) {
+    return node;
+  }
+  if (replacements->length == 0) {
+    if (seed != NULL) {
+      return seed;
+    }
+    return NewFoldIdentity(node->op, node->location, clone->parser);
+  }
+
+  if (pack_on_left) {
+    ASTNode* result = seed != NULL
+                          ? seed
+                          : NewFoldIdentifier(
+                                replacements->value.p[replacements->length - 1],
+                                node->location);
+    size_t start = seed != NULL ? replacements->length
+                                : replacements->length - 1;
+    for (size_t i = start; i > 0; i--) {
+      ASTNode* left = NewFoldIdentifier(replacements->value.p[i - 1],
+                                        node->location);
+      result = NewBinaryASTNode(node->op, NULL, node->location, left, result);
+    }
+    return result;
+  }
+
+  ASTNode* result =
+      seed != NULL ? seed : NewFoldIdentifier(replacements->value.p[0],
+                                              node->location);
+  size_t start = seed != NULL ? 0 : 1;
+  for (size_t i = start; i < replacements->length; i++) {
+    ASTNode* right = NewFoldIdentifier(replacements->value.p[i], node->location);
+    result = NewBinaryASTNode(node->op, NULL, node->location, result, right);
+  }
+  return result;
+}
+
 static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
+  if (node->op == AST_OP(sizeof)) {
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    if (sizeof_node->is_pack_size && sizeof_node->expr != NULL &&
+        sizeof_node->expr->op == AST_OP(identifier)) {
+      IdentifierASTNode* id = (IdentifierASTNode*)sizeof_node->expr;
+      int pack_index = id->symbol != NULL ? id->symbol->template_parameter_index
+                                          : -1;
+      if ((pack_index < 0) && id->symbol != NULL) {
+        TypeIsTemplateParameterPlaceholder(id->symbol->type, &pack_index);
+      }
+      if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
+          id->symbol->flags.is_parameter_pack &&
+          pack_index >= 0 && (size_t)pack_index < clone->args->length) {
+        TemplateArgument* arg = clone->args->value.p[pack_index];
+        if (arg != NULL && arg->pack_arguments != NULL) {
+          return NewIntConstantASTNode(
+              (int64_t)arg->pack_arguments->length, NewSizeTypeRecord(),
+              node->location);
+        }
+      }
+    }
+  }
+  if ((node->flags & kASTFoldExpression) != 0) {
+    return ExpandClonedFoldExpression(clone, node);
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->template_arguments != NULL) {
@@ -2223,6 +2451,10 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       id->template_arguments = concrete_args;
+    }
+    if ((node->flags & kASTPackExpansion) != 0 &&
+        id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      return node;
     }
     Symbol* replacement = MapFindPointerKey(&clone->symbol_map, id->symbol);
     if (replacement != NULL) {
@@ -2281,6 +2513,8 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     ASTNodeSetType(node, type);
     TypeRecordDelete(type);
   }
+  ExpandClonedCallPackActuals(clone, node);
+  ExpandClonedBracedInitializerPackElements(clone, node);
   CloneTemplateLocalDeclarationSymbol(clone, node);
   RewriteClonedConstructorMemberCall(clone, node);
   return node;
@@ -2295,23 +2529,52 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   }
   TemplateFunctionBodyClone clone;
   MapInitForPointerKeys(&clone.symbol_map);
+  MapInitForPointerKeys(&clone.pack_symbol_map);
   clone.parser = parser;
   clone.args = args;
   clone.to_func = to;
   clone.rebase_template_parameter_base =
       from->info.function.template_parameter_base;
-  size_t formal_count = from->info.function.prototype.length;
-  if (formal_count > to->info.function.prototype.length) {
-    formal_count = to->info.function.prototype.length;
-  }
-  for (size_t i = 0; i < formal_count; i++) {
+  size_t to_index = 0;
+  for (size_t i = 0; i < from->info.function.prototype.length; i++) {
+    Symbol* from_formal = from->info.function.prototype.value.p[i];
+    if (from_formal == NULL) {
+      continue;
+    }
+    if (from_formal->flags.is_parameter_pack) {
+      Vector* replacements = NewVector();
+      int pack_index = -1;
+      size_t pack_length = 0;
+      if (TypeIsTemplateParameterPlaceholder(from_formal->type, &pack_index) &&
+          pack_index >= 0 && (size_t)pack_index < args->length) {
+        TemplateArgument* pack = args->value.p[pack_index];
+        if (pack != NULL && pack->pack_arguments != NULL) {
+          pack_length = pack->pack_arguments->length;
+        }
+      }
+      for (size_t j = 0;
+           j < pack_length && to_index < to->info.function.prototype.length;
+           j++) {
+        VectorAppend(replacements,
+                     to->info.function.prototype.value.p[to_index++]);
+      }
+      MapKeyValue kv;
+      kv.key.p = from_formal;
+      kv.value.p = replacements;
+      MapInsert(&clone.pack_symbol_map, kv);
+      continue;
+    }
+    if (to_index >= to->info.function.prototype.length) {
+      break;
+    }
     MapKeyValue kv;
-    kv.key.p = from->info.function.prototype.value.p[i];
-    kv.value.p = to->info.function.prototype.value.p[i];
+    kv.key.p = from_formal;
+    kv.value.p = to->info.function.prototype.value.p[to_index++];
     MapInsert(&clone.symbol_map, kv);
   }
   ASTNode* body = ASTNodeClone(from->info.function.body,
                                CloneTemplateFunctionBodyNode, &clone, NULL);
+  MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
   MapDestruct(&clone.symbol_map);
   return body;
 }
@@ -2432,12 +2695,51 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   return func;
 }
 
+static bool TemplateArgumentEqual(TemplateArgument* left,
+                                  TemplateArgument* right) {
+  if (left == NULL || right == NULL || left->kind != right->kind) {
+    return left == right;
+  }
+  if (left->pack_arguments != NULL || right->pack_arguments != NULL) {
+    if (left->pack_arguments == NULL || right->pack_arguments == NULL ||
+        left->pack_arguments->length != right->pack_arguments->length) {
+      return false;
+    }
+    for (size_t i = 0; i < left->pack_arguments->length; i++) {
+      if (!TemplateArgumentEqual(left->pack_arguments->value.p[i],
+                                 right->pack_arguments->value.p[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (left->kind == kTemplateParameterType) {
+    return TypeEqual(left->type, right->type);
+  }
+  return left->int_value == right->int_value &&
+         left->template_parameter_index == right->template_parameter_index;
+}
+
+static bool TemplateArgumentVectorEqual(Vector* left, Vector* right) {
+  if (left == NULL || right == NULL || left->length != right->length) {
+    return left == right;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    if (!TemplateArgumentEqual(left->value.p[i], right->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
-                                                 TypeRecord* type) {
+                                                 TypeRecord* type,
+                                                 Vector* args) {
   for (Symbol* candidate = templ; candidate != NULL;
        candidate = candidate->overload_next) {
     if (!candidate->flags.is_template && candidate->type != NULL &&
-        TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type)) {
+        TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type) &&
+        TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
       return candidate;
     }
   }
@@ -2495,7 +2797,8 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     return templ;
   }
 
-  Symbol* existing = FindFunctionTemplateInstantiation(templ, func);
+  Symbol* existing = FindFunctionTemplateInstantiation(templ, func,
+                                                       completed_args);
   if (existing != NULL) {
     TypeRecordDelete(func);
     VectorDeleteWithContents(completed_args,
@@ -2915,6 +3218,61 @@ static bool FunctionTemplateCanCompleteDeducedArguments(TypeRecord* func,
   return true;
 }
 
+static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
+                                                     Vector* explicit_args,
+                                                     size_t* explicit_arg_count) {
+  Vector* args = NewVector();
+  size_t explicit_index = 0;
+  size_t fixed_explicit_count = 0;
+  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+    TemplateParameter* param =
+        func->info.function.template_parameters.value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      TemplateArgument* pack = NewEmptyPackTemplateArgument(param->kind);
+      while (explicit_args != NULL && explicit_index < explicit_args->length) {
+        TemplateArgument* explicit_arg = explicit_args->value.p[explicit_index++];
+        if (explicit_arg == NULL || explicit_arg->kind != param->kind) {
+          TemplateArgumentDelete(pack);
+          VectorDeleteWithContents(args,
+                                   (VectorElementDestructor)TemplateArgumentDelete,
+                                   /*free_element=*/false);
+          return NULL;
+        }
+        if (explicit_arg->pack_arguments != NULL) {
+          for (size_t j = 0; j < explicit_arg->pack_arguments->length; j++) {
+            VectorAppend(pack->pack_arguments,
+                         TemplateArgumentCopy(
+                             explicit_arg->pack_arguments->value.p[j]));
+          }
+        } else {
+          VectorAppend(pack->pack_arguments, TemplateArgumentCopy(explicit_arg));
+        }
+      }
+      VectorAppend(args, pack);
+      continue;
+    }
+
+    TemplateArgument* explicit_arg =
+        explicit_args != NULL && explicit_index < explicit_args->length
+            ? TemplateArgumentCopy(explicit_args->value.p[explicit_index++])
+            : NULL;
+    if (explicit_arg != NULL) {
+      fixed_explicit_count = i + 1;
+    }
+    VectorAppend(args, explicit_arg);
+  }
+  if (explicit_args != NULL && explicit_index < explicit_args->length) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  if (explicit_arg_count != NULL) {
+    *explicit_arg_count = fixed_explicit_count;
+  }
+  return args;
+}
+
 static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
                                                      Vector* explicit_args,
                                                      Vector* actuals,
@@ -2951,19 +3309,12 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
       (formal_pack_index >= 0 && actuals->length < fixed_formal_count)) {
     return NULL;
   }
-  if (formal_pack_index < 0 && explicit_args != NULL &&
-      explicit_args->length > (size_t)func->info.function.template_parameter_count) {
+  size_t explicit_arg_count = 0;
+  Vector* args =
+      NewFunctionTemplateDeductionArguments(func, explicit_args,
+                                            &explicit_arg_count);
+  if (args == NULL) {
     return NULL;
-  }
-  size_t explicit_arg_count = explicit_args != NULL ? explicit_args->length : 0;
-
-  Vector* args = NewVector();
-  for (int i = 0; i < func->info.function.template_parameter_count; i++) {
-    TemplateArgument* explicit_arg =
-        explicit_args != NULL && (size_t)i < explicit_args->length
-            ? TemplateArgumentCopy(explicit_args->value.p[i])
-            : NULL;
-    VectorAppend(args, explicit_arg);
   }
   for (size_t i = 0; i < actuals->length; i++) {
     Symbol* formal = NULL;

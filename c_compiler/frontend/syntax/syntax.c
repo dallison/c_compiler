@@ -1340,6 +1340,18 @@ static void ParseDesignatedInitializer(Syntax* syntax,
 
 }
 
+static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* expr) {
+  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(ellipsis))) {
+    return;
+  }
+  if (expr->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)expr)->symbol == NULL ||
+      !((IdentifierASTNode*)expr)->symbol->flags.is_parameter_pack) {
+    SyntaxError(syntax, "pack expansion requires a function parameter pack");
+  }
+  expr->flags |= kASTPackExpansion;
+}
+
 // Parse a brace-enclosed initializer.
 static ASTNode* ParseBracedInitializer(Syntax* syntax) {
   Vector* initializers = NewVector();
@@ -1355,6 +1367,7 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
     } else {
       // Not a designated initializer, expression.
       ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
+      MarkCXXPackExpansionIfPresent(syntax, expr);
       VectorAppend(initializers,
                    NewExpressionInitializerASTNode(expr, location));
     }
@@ -4087,6 +4100,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
         SymbolDelete(sym);
       } else {
         arg->type = type;
+        arg->is_pack_expansion = CompilerIsCXX() && LexMatch(lex, TOK(ellipsis));
       }
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;
@@ -4563,6 +4577,7 @@ static Vector* ParseCXXInitializerArgumentList(Syntax* syntax, Token close) {
                           : SyntaxParseSingleExpression(syntax,
                                                         TC(closebra) |
                                                             TC(exprsep));
+    MarkCXXPackExpansionIfPresent(syntax, actual);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;

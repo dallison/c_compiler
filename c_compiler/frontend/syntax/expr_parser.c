@@ -118,6 +118,309 @@ static bool CXXNewConstructorSetHasInitializerList(StructMember* ctor);
 static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
                                                TokenClass followers);
 
+static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* actual) {
+  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(ellipsis))) {
+    return;
+  }
+  if (actual->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)actual)->symbol == NULL ||
+      !((IdentifierASTNode*)actual)->symbol->flags.is_parameter_pack) {
+    SyntaxError(syntax, "pack expansion requires a function parameter pack");
+  }
+  actual->flags |= kASTPackExpansion;
+}
+
+static bool ParseFoldOperator(Syntax* syntax, ASTOpcode* op) {
+  if (LexMatch(syntax->lex, TOK(star))) {
+    *op = AST_OP(mult);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(slash))) {
+    *op = AST_OP(div);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(percent))) {
+    *op = AST_OP(mod);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(plus))) {
+    *op = AST_OP(plus);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(minus))) {
+    *op = AST_OP(minus);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(lessless))) {
+    *op = AST_OP(lshift);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(greatergreater))) {
+    *op = AST_OP(rshift);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(amp))) {
+    *op = AST_OP(and);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(caret))) {
+    *op = AST_OP(exor);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(bar))) {
+    *op = AST_OP(bitor);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(ampamp))) {
+    *op = AST_OP(logand);
+    return true;
+  }
+  if (LexMatch(syntax->lex, TOK(barbar))) {
+    *op = AST_OP(logor);
+    return true;
+  }
+  return false;
+}
+
+static ASTNode* ParseFoldPackIdentifier(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return NULL;
+  }
+  Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+  if (symbol == NULL || !symbol->flags.is_parameter_pack) {
+    return NULL;
+  }
+  ASTNode* id = NewIdentifierASTNode(symbol, syntax->lex->current_token_location);
+  LexNextToken(syntax->lex);
+  return id;
+}
+
+static bool FoldSeedIsPackIdentifier(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  return id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+}
+
+static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool found = false;
+  int paren_depth = 0;
+  int square_depth = 0;
+  int brace_depth = 0;
+
+  while (!LexEof(syntax->lex)) {
+    Token token = syntax->lex->current_token;
+    if (token == TOK(rparen) && paren_depth == 0 &&
+        square_depth == 0 && brace_depth == 0) {
+      break;
+    }
+    if (token == TOK(ellipsis) && paren_depth == 0 &&
+        square_depth == 0 && brace_depth == 0) {
+      found = true;
+      break;
+    }
+    if (token == TOK(lparen)) {
+      paren_depth++;
+    } else if (token == TOK(rparen)) {
+      paren_depth--;
+    } else if (token == TOK(lsquare)) {
+      square_depth++;
+    } else if (token == TOK(rsquare)) {
+      square_depth--;
+    } else if (token == TOK(lbrace)) {
+      brace_depth++;
+    } else if (token == TOK(rbrace)) {
+      brace_depth--;
+    }
+    LexNextToken(syntax->lex);
+  }
+
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return found;
+}
+
+static ASTNode* NewInvalidFoldExpression(Syntax* syntax,
+                                         LexCheckpoint* checkpoint,
+                                         const char* message,
+                                         SourceLocation location,
+                                         TokenClass followers) {
+  LexCheckpointRestore(syntax->lex, checkpoint);
+  SyntaxError(syntax, "%s", message);
+  SyntaxRecover(syntax, TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  return NewIntConstantASTNode(0, type, location);
+}
+
+static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
+                                          TokenClass followers) {
+  if (!CompilerIsCXX()) {
+    return NULL;
+  }
+
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  SourceLocation location = syntax->lex->current_token_location;
+  ASTOpcode op = AST_OP(bad);
+  ASTOpcode second_op = AST_OP(bad);
+  ASTNode* pack = NULL;
+  ASTNode* seed = NULL;
+  bool pack_on_left = false;
+
+  if (LexMatch(syntax->lex, TOK(ellipsis))) {
+    if (!ParseFoldOperator(syntax, &op)) {
+      ASTNode* invalid =
+          NewInvalidFoldExpression(syntax, &checkpoint,
+                                   "fold expression requires an operator",
+                                   location, followers);
+      LexCheckpointDestruct(&checkpoint);
+      return invalid;
+    }
+    if ((pack = ParseFoldPackIdentifier(syntax)) == NULL) {
+      ASTNode* invalid =
+          NewInvalidFoldExpression(syntax, &checkpoint,
+                                   "fold expression requires a parameter pack",
+                                   location, followers);
+      LexCheckpointDestruct(&checkpoint);
+      return invalid;
+    }
+    if (!LexMatch(syntax->lex, TOK(rparen))) {
+      ASTNode* invalid =
+          NewInvalidFoldExpression(syntax, &checkpoint,
+                                   "fold expression syntax error",
+                                   location, followers);
+      LexCheckpointDestruct(&checkpoint);
+      return invalid;
+    }
+  } else {
+    if (!FoldExpressionHasTopLevelEllipsis(syntax)) {
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      LexCheckpointDestruct(&checkpoint);
+      return NULL;
+    }
+
+    seed = ParseCastExpression(syntax, followers | TC(closebra));
+    if (!FoldSeedIsPackIdentifier(seed) && seed != NULL &&
+        ParseFoldOperator(syntax, &op) &&
+        LexMatch(syntax->lex, TOK(ellipsis))) {
+      if (!ParseFoldOperator(syntax, &second_op)) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression requires a second operator",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if (second_op != op) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression operators must match",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if ((pack = ParseFoldPackIdentifier(syntax)) == NULL) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression requires a parameter pack",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if (!LexMatch(syntax->lex, TOK(rparen))) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression syntax error",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      pack_on_left = false;
+    } else {
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      pack = ParseFoldPackIdentifier(syntax);
+      if (pack == NULL) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression requires a parameter pack",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if (!ParseFoldOperator(syntax, &op)) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression requires an operator",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if (!LexMatch(syntax->lex, TOK(ellipsis))) {
+        ASTNode* invalid =
+            NewInvalidFoldExpression(syntax, &checkpoint,
+                                     "fold expression syntax error",
+                                     location, followers);
+        LexCheckpointDestruct(&checkpoint);
+        return invalid;
+      }
+      if (LexMatch(syntax->lex, TOK(rparen))) {
+        pack_on_left = true;
+        seed = NULL;
+      } else {
+        if (!ParseFoldOperator(syntax, &second_op)) {
+          ASTNode* invalid =
+              NewInvalidFoldExpression(syntax, &checkpoint,
+                                       "fold expression requires a second operator",
+                                       location, followers);
+          LexCheckpointDestruct(&checkpoint);
+          return invalid;
+        }
+        if (second_op != op) {
+          ASTNode* invalid =
+              NewInvalidFoldExpression(syntax, &checkpoint,
+                                       "fold expression operators must match",
+                                       location, followers);
+          LexCheckpointDestruct(&checkpoint);
+          return invalid;
+        }
+        seed = ParseCastExpression(syntax, followers | TC(closebra));
+        if (seed == NULL || FoldSeedIsPackIdentifier(seed)) {
+          ASTNode* invalid =
+              NewInvalidFoldExpression(syntax, &checkpoint,
+                                       "fold expression requires a non-pack initializer",
+                                       location, followers);
+          LexCheckpointDestruct(&checkpoint);
+          return invalid;
+        }
+        if (!LexMatch(syntax->lex, TOK(rparen))) {
+          ASTNode* invalid =
+              NewInvalidFoldExpression(syntax, &checkpoint,
+                                       "fold expression syntax error",
+                                       location, followers);
+          LexCheckpointDestruct(&checkpoint);
+          return invalid;
+        }
+        pack_on_left = true;
+      }
+    }
+  }
+
+  ASTNode* fold =
+      pack_on_left ? NewBinaryASTNode(op, NULL, location, pack, seed)
+                   : NewBinaryASTNode(op, NULL, location, seed, pack);
+  fold->flags |= kASTFoldExpression;
+  if (pack_on_left) {
+    fold->flags |= kASTFoldPackOnLeft;
+  }
+  LexCheckpointDestruct(&checkpoint);
+  (void)followers;
+  return fold;
+}
+
 static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   for (Symbol* candidate = symbol; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -1057,6 +1360,10 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
       return NewUnaryASTNode(AST_OP(stmt_expr), NULL,
                              syntax->lex->current_token_location, compound);
     }
+    ASTNode* fold = TryParseCXXFoldExpression(syntax, followers);
+    if (fold != NULL) {
+      return fold;
+    }
     ASTNode* node = SyntaxParseExpression(syntax, followers | TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
     return node;
@@ -1234,6 +1541,7 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
     ASTNode* actual = LexMatch(syntax->lex, TOK(lbrace))
                           ? SyntaxParseBracedInitializer(syntax)
                           : SyntaxParseSingleExpression(syntax, followers);
+    MarkCXXPackExpansionIfPresent(syntax, actual);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
@@ -1506,6 +1814,34 @@ static ASTNode* GetSizeofVLA(TypeRecord* type, SourceLocation location) {
 }
 
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
+    SyntaxNeedBracket(syntax, TOK(lparen), followers);
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected template parameter pack name");
+      SyntaxRecover(syntax, TC(closebra));
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return NewSizeofPackASTNode(
+          NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location),
+          location);
+    }
+    Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+    if (symbol == NULL || !symbol->flags.is_template_parameter ||
+        !symbol->flags.is_parameter_pack) {
+      SyntaxError(syntax, "sizeof... requires a template parameter pack");
+      LexNextToken(syntax->lex);
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return NewSizeofPackASTNode(
+          NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location),
+          location);
+    }
+    ASTNode* id = NewIdentifierASTNode(symbol, syntax->lex->current_token_location);
+    LexNextToken(syntax->lex);
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    return NewSizeofPackASTNode(id, location);
+  }
   bool has_brackets = LexMatch(syntax->lex, TOK(lparen));
   ASTNode* result = NULL;
   bool sizeof_type_name = false;
@@ -1812,6 +2148,7 @@ static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
   Vector* actuals = NewVector();
   while (!LexLookingAt(syntax->lex, close)) {
     ASTNode* actual = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+    MarkCXXPackExpansionIfPresent(syntax, actual);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;

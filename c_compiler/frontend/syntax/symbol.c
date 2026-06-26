@@ -447,6 +447,24 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
   StringAppendChar(out, 'I');
   for (size_t i = 0; i < func->template_arguments->length; i++) {
     TemplateArgument* arg = func->template_arguments->value.p[i];
+    if (arg->pack_arguments != NULL) {
+      for (size_t j = 0; j < arg->pack_arguments->length; j++) {
+        TemplateArgument* element = arg->pack_arguments->value.p[j];
+        if (element->kind == kTemplateParameterType) {
+          AppendCXXTypeEncoding(out, element->type);
+        } else {
+          char value[64];
+          long long int_value = element->int_value;
+          if (int_value < 0) {
+            snprintf(value, sizeof(value), "Lin%lldE", -int_value);
+          } else {
+            snprintf(value, sizeof(value), "Li%lldE", int_value);
+          }
+          StringAppend(out, value);
+        }
+      }
+      continue;
+    }
     if (arg->kind == kTemplateParameterType) {
       AppendCXXTypeEncoding(out, arg->type);
     } else {
