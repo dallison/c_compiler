@@ -80,6 +80,16 @@ int new_construct_sum(Ts... args) {
 }
 
 template <class... Ts>
+DirectPack temporary_construct_sum(Ts... args) {
+  return DirectPack(args...);
+}
+
+template <class... Ts>
+DirectPack braced_temporary_construct_sum(Ts... args) {
+  return DirectPack{args...};
+}
+
+template <class... Ts>
 int fold_sum_left(Ts... args) {
   return (... + args);
 }
@@ -353,8 +363,18 @@ int main(void) {
   if (new_construct_sum(1, 2L, (char)3) != 6) {
     return 42;
   }
-  if (braced_sum(4, 5, 6) != 15) {
+  DirectPack temporary_constructed =
+      temporary_construct_sum(1, 2L, (char)3);
+  if (temporary_constructed.sum() != 6) {
     return 43;
+  }
+  DirectPack braced_temporary_constructed =
+      braced_temporary_construct_sum(1, 2L, (char)3);
+  if (braced_temporary_constructed.sum() != 6) {
+    return 44;
+  }
+  if (braced_sum(4, 5, 6) != 15) {
+    return 45;
   }
   return 0;
 }

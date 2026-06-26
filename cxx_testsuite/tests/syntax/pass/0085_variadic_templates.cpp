@@ -62,6 +62,16 @@ int new_construct_values(Ts... args) {
 }
 
 template <class... Ts>
+DirectPack temporary_construct_values(Ts... args) {
+  return DirectPack(args...);
+}
+
+template <class... Ts>
+DirectPack braced_temporary_construct_values(Ts... args) {
+  return DirectPack{args...};
+}
+
+template <class... Ts>
 int fold_sum_values(Ts... args) {
   return (... + args);
 }
@@ -172,6 +182,9 @@ void use_variadic_templates(void) {
   int forwarded = forward_values(1, 2L, 'c');
   int direct_constructed = direct_construct_values(1, 2L, 'c');
   int new_constructed = new_construct_values(1, 2L, 'c');
+  DirectPack temporary_constructed = temporary_construct_values(1, 2L, 'c');
+  DirectPack braced_temporary_constructed =
+      braced_temporary_construct_values(1, 2L, 'c');
   int folded = fold_sum_values(1, 2, 3);
   bool all = fold_all_values(1, 1, 1);
   int seeded_sum = fold_seeded_sum_values();
@@ -202,6 +215,8 @@ void use_variadic_templates(void) {
   (void)forwarded;
   (void)direct_constructed;
   (void)new_constructed;
+  (void)temporary_constructed;
+  (void)braced_temporary_constructed;
   (void)folded;
   (void)all;
   (void)seeded_sum;

@@ -2250,7 +2250,7 @@ static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
           ASTNode* replacement_id =
               NewIdentifierASTNode(replacement, actual->location);
           replacement_id->parent = node;
-          replacement_id->child_id = (int)expanded->length + 1;
+          replacement_id->child_id = (int)expanded->length;
           VectorAppend(expanded, replacement_id);
         }
         ASTNodeDelete(actual);
@@ -2259,7 +2259,7 @@ static void ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
       }
     }
     actual->parent = node;
-    actual->child_id = (int)expanded->length + 1;
+    actual->child_id = (int)expanded->length;
     VectorAppend(expanded, actual);
   }
   if (changed) {
