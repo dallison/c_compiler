@@ -95,6 +95,7 @@ typedef struct Symbol {
     bool is_template: 1;           // C++ template declaration.
     bool is_template_parameter: 1; // C++ template parameter.
     bool is_template_type_parameter: 1; // `typename`/`class` parameter.
+    bool is_parameter_pack: 1;     // C++ template or function parameter pack.
     bool is_constexpr: 1;          // C++ constexpr variable.
     bool is_constinit: 1;          // C++ constinit variable.
     bool is_weak: 1;               // Emits ELF weak binding.

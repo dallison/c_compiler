@@ -383,6 +383,7 @@ static TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
   TemplateParameter* copy = malloc(sizeof(TemplateParameter));
   StringInit(&copy->name, param->name.value);
   copy->kind = param->kind;
+  copy->is_parameter_pack = param->is_parameter_pack;
   copy->type = param->type != NULL ? TypeRecordCopy(param->type) : NULL;
   copy->default_type =
       param->default_type != NULL ? TypeRecordCopy(param->default_type) : NULL;
@@ -400,9 +401,11 @@ static TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   }
   TemplateArgument* copy = malloc(sizeof(TemplateArgument));
   copy->kind = arg->kind;
+  copy->is_pack_expansion = arg->is_pack_expansion;
   copy->type = arg->type != NULL ? TypeRecordCopy(arg->type) : NULL;
   copy->int_value = arg->int_value;
   copy->template_parameter_index = arg->template_parameter_index;
+  copy->pack_arguments = TemplateArgumentVectorCopy(arg->pack_arguments);
   return copy;
 }
 
@@ -660,6 +663,11 @@ void TemplateArgumentDelete(TemplateArgument* arg) {
     return;
   }
   TypeRecordDelete(arg->type);
+  if (arg->pack_arguments != NULL) {
+    VectorDeleteWithContents(arg->pack_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   free(arg);
 }
 
@@ -1252,6 +1260,13 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
 static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 TypeRecord* type,
                                                 Vector* args);
+static TemplateArgument* NewEmptyPackTemplateArgument(
+    TemplateParameterKind kind);
+static int FindTemplateParameterPackIndex(Vector* template_parameters);
+static void AppendSubstitutedFormalParameter(TypeParser* parser, Vector* out,
+                                             Symbol* formal, Vector* args,
+                                             int rebase_base);
+static void RebaseTemplateParameterIndices(TypeRecord* type, int base);
 static bool StructContainsTemplateParameter(Struct* str);
 static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                             TypeRecord* type,
@@ -1383,6 +1398,93 @@ static void ParseCXXMemberTypedef(TypeParser* parser, Struct* owner,
   parser->storage = old_storage;
 }
 
+static bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
+  if (type == NULL || type->declarator != kDeclPrimitive ||
+      type->template_parameter_index < 0) {
+    return false;
+  }
+  if (index != NULL) {
+    *index = type->template_parameter_index;
+  }
+  return true;
+}
+
+static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
+                                              TemplateArgument* arg,
+                                              Vector* args) {
+  if (arg == NULL) {
+    return;
+  }
+  int index = -1;
+  if (arg->is_pack_expansion) {
+    TemplateArgument* pack = NULL;
+    if (arg->kind == kTemplateParameterType &&
+        TypeIsTemplateParameterPlaceholder(arg->type, &index) &&
+        index >= 0 && (size_t)index < args->length) {
+      pack = args->value.p[index];
+    } else if (arg->kind == kTemplateParameterNonType &&
+               arg->template_parameter_index >= 0 &&
+               (size_t)arg->template_parameter_index < args->length) {
+      pack = args->value.p[arg->template_parameter_index];
+    }
+    if (pack != NULL && pack->pack_arguments != NULL) {
+      for (size_t i = 0; i < pack->pack_arguments->length; i++) {
+        VectorAppend(out, TemplateArgumentCopy(pack->pack_arguments->value.p[i]));
+      }
+      return;
+    }
+  }
+
+  TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
+  concrete->kind = arg->kind;
+  concrete->is_pack_expansion = false;
+  concrete->type = NULL;
+  concrete->int_value = arg->int_value;
+  concrete->template_parameter_index = arg->template_parameter_index;
+  concrete->pack_arguments = NULL;
+  if (arg->kind == kTemplateParameterType && arg->type != NULL) {
+    concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
+    concrete->template_parameter_index = -1;
+  } else if (arg->kind == kTemplateParameterNonType &&
+             arg->template_parameter_index >= 0 &&
+             (size_t)arg->template_parameter_index < args->length) {
+    TemplateArgument* actual = args->value.p[arg->template_parameter_index];
+    if (actual->kind == kTemplateParameterNonType &&
+        actual->pack_arguments == NULL) {
+      concrete->int_value = actual->int_value;
+      concrete->template_parameter_index = actual->template_parameter_index;
+    }
+  }
+  VectorAppend(out, concrete);
+}
+
+static Vector* SubstituteTemplateArgumentVectorForTypes(TypeParser* parser,
+                                                        Vector* template_args,
+                                                        Vector* args) {
+  if (template_args == NULL) {
+    return NULL;
+  }
+  Vector* concrete_args = NewVector();
+  for (size_t i = 0; i < template_args->length; i++) {
+    AppendSubstitutedTemplateArgument(parser, concrete_args,
+                                      template_args->value.p[i], args);
+  }
+  return concrete_args;
+}
+
+static bool FunctionTypeHasParameterPack(TypeRecord* type) {
+  if (type == NULL || !TypeIsFunction(type)) {
+    return false;
+  }
+  for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+    Symbol* formal = type->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 TypeRecord* type,
                                                 Vector* args) {
@@ -1414,29 +1516,9 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     return TypeRecordCalculateSize(subst);
   }
   if (type->template_origin != NULL && type->template_arguments != NULL) {
-    Vector* concrete_args = NewVector();
-    for (size_t i = 0; i < type->template_arguments->length; i++) {
-      TemplateArgument* arg = type->template_arguments->value.p[i];
-      TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
-      concrete->kind = arg->kind;
-      concrete->type = NULL;
-      concrete->int_value = arg->int_value;
-      concrete->template_parameter_index = arg->template_parameter_index;
-      if (arg->kind == kTemplateParameterType && arg->type != NULL) {
-        concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
-        concrete->template_parameter_index = -1;
-      } else if (arg->kind == kTemplateParameterNonType &&
-                 arg->template_parameter_index >= 0 &&
-                 (size_t)arg->template_parameter_index < args->length) {
-        TemplateArgument* actual = args->value.p[arg->template_parameter_index];
-        if (actual->kind == kTemplateParameterNonType) {
-          concrete->int_value = actual->int_value;
-          concrete->template_parameter_index =
-              actual->template_parameter_index;
-        }
-      }
-      VectorAppend(concrete_args, concrete);
-    }
+    Vector* concrete_args =
+        SubstituteTemplateArgumentVectorForTypes(parser,
+                                                type->template_arguments, args);
     TypeRecord* subst =
         InstantiateSimpleClassTemplate(parser, type->template_origin,
                                        concrete_args);
@@ -1495,19 +1577,82 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     }
   }
   if (TypeIsFunction(copy)) {
-    for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
-      Symbol* formal = copy->info.function.prototype.value.p[i];
-      Symbol* original = type->info.function.prototype.value.p[i];
-      if (formal == NULL || original == NULL || original->type == NULL) {
-        continue;
+    if (FunctionTypeHasParameterPack(type)) {
+      VectorDestructWithContents(&copy->info.function.prototype,
+                                 (VectorElementDestructor)SymbolDestruct,
+                                 /*free_element=*/true);
+      VectorInit(&copy->info.function.prototype);
+      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+        Symbol* original = type->info.function.prototype.value.p[i];
+        if (original == NULL || original->type == NULL) {
+          continue;
+        }
+        AppendSubstitutedFormalParameter(parser, &copy->info.function.prototype,
+                                         original, args, 0);
       }
-      TypeRecord* formal_type =
-          SubstituteTemplateParameters(parser, original->type, args);
-      SymbolSetType(formal, formal_type);
-      TypeRecordDelete(formal_type);
+      for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
+        Symbol* formal = copy->info.function.prototype.value.p[i];
+        formal->value.arg_number = (int32_t)i;
+      }
+    } else {
+      for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
+        Symbol* formal = copy->info.function.prototype.value.p[i];
+        Symbol* original = type->info.function.prototype.value.p[i];
+        if (formal == NULL || original == NULL || original->type == NULL) {
+          continue;
+        }
+        TypeRecord* formal_type =
+            SubstituteTemplateParameters(parser, original->type, args);
+        SymbolSetType(formal, formal_type);
+        TypeRecordDelete(formal_type);
+      }
     }
   }
   return TypeRecordCalculateSize(copy);
+}
+
+static void AppendFormalClone(Vector* out, Symbol* formal,
+                              TypeRecord* formal_type,
+                              int rebase_base) {
+  if (formal == NULL || formal_type == NULL) {
+    return;
+  }
+  if (rebase_base > 0) {
+    RebaseTemplateParameterIndices(formal_type, rebase_base);
+  }
+  Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
+  clone->flags = formal->flags;
+  clone->flags.is_argument = true;
+  clone->flags.is_parameter_pack = false;
+  clone->location = formal->location;
+  VectorAppend(out, clone);
+}
+
+static void AppendSubstitutedFormalParameter(TypeParser* parser, Vector* out,
+                                             Symbol* formal, Vector* args,
+                                             int rebase_base) {
+  int index = -1;
+  if (formal != NULL && formal->flags.is_parameter_pack &&
+      TypeIsTemplateParameterPlaceholder(formal->type, &index) &&
+      index >= 0 && (size_t)index < args->length) {
+    TemplateArgument* pack = args->value.p[index];
+    if (pack != NULL && pack->pack_arguments != NULL) {
+      for (size_t i = 0; i < pack->pack_arguments->length; i++) {
+        TemplateArgument* element = pack->pack_arguments->value.p[i];
+        if (element == NULL || element->kind != kTemplateParameterType ||
+            element->type == NULL) {
+          continue;
+        }
+        TypeRecord* formal_type = TypeRecordCopy(element->type);
+        AppendFormalClone(out, formal, formal_type, rebase_base);
+      }
+      return;
+    }
+  }
+
+  TypeRecord* formal_type =
+      SubstituteTemplateParameters(parser, formal->type, args);
+  AppendFormalClone(out, formal, formal_type, rebase_base);
 }
 
 static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
@@ -1656,12 +1801,18 @@ static void CopyFunctionTemplateParameters(TypeRecord* to, TypeRecord* from,
   }
 }
 
+static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+
 static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;
   }
   if (arg->kind == kTemplateParameterNonType &&
       arg->template_parameter_index >= 0) {
+    return true;
+  }
+  if (arg->pack_arguments != NULL &&
+      TemplateArgumentVectorContainsTemplateParameter(arg->pack_arguments)) {
     return true;
   }
   return TypeContainsTemplateParameter(arg->type);
@@ -1716,7 +1867,29 @@ static void AppendTemplateInstantiationName(String* name, Symbol* templ,
     String arg_name;
     StringInit(&arg_name, NULL);
     TemplateArgument* arg = args->value.p[i];
-    if (arg->kind == kTemplateParameterType) {
+    if (arg->pack_arguments != NULL) {
+      StringAppendChar(&arg_name, '[');
+      for (size_t j = 0; j < arg->pack_arguments->length; j++) {
+        if (j != 0) {
+          StringAppend(&arg_name, ",");
+        }
+        String element_name;
+        StringInit(&element_name, NULL);
+        TemplateArgument* element = arg->pack_arguments->value.p[j];
+        if (element->kind == kTemplateParameterType) {
+          TypeRecordToTemplateKeyString(element->type, &element_name);
+        } else if (element->template_parameter_index >= 0) {
+          StringPrintf(&element_name, "$N%d", element->template_parameter_index);
+        } else {
+          char buffer[32];
+          snprintf(buffer, sizeof(buffer), "%lld", element->int_value);
+          StringAppend(&element_name, buffer);
+        }
+        StringAppendString(&arg_name, &element_name);
+        StringDestruct(&element_name);
+      }
+      StringAppendChar(&arg_name, ']');
+    } else if (arg->kind == kTemplateParameterType) {
       TypeRecordToTemplateKeyString(arg->type, &arg_name);
     } else {
       if (arg->template_parameter_index >= 0) {
@@ -1856,7 +2029,14 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.cxx_member_owner != NULL && !is_static_member ? 1 : 0;
   for (size_t i = first_formal; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
-    TypeRecord* formal_type = SubstituteTemplateParameters(parser, formal->type, args);
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      AppendSubstitutedFormalParameter(
+          parser, &func->info.function.prototype, formal, args,
+          from->info.function.template_parameter_base);
+      continue;
+    }
+    TypeRecord* formal_type =
+        SubstituteTemplateParameters(parser, formal->type, args);
     RebaseTemplateParameterIndices(formal_type,
                                    from->info.function.template_parameter_base);
     Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
@@ -2011,32 +2191,6 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
 }
 
-static TemplateArgument* SubstituteTemplateArgument(TypeParser* parser,
-                                                    TemplateArgument* arg,
-                                                    Vector* args) {
-  if (arg == NULL) {
-    return NULL;
-  }
-  TemplateArgument* concrete = malloc(sizeof(TemplateArgument));
-  concrete->kind = arg->kind;
-  concrete->type = NULL;
-  concrete->int_value = arg->int_value;
-  concrete->template_parameter_index = arg->template_parameter_index;
-  if (arg->kind == kTemplateParameterType && arg->type != NULL) {
-    concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
-    concrete->template_parameter_index = -1;
-  } else if (arg->kind == kTemplateParameterNonType &&
-             arg->template_parameter_index >= 0 &&
-             (size_t)arg->template_parameter_index < args->length) {
-    TemplateArgument* actual = args->value.p[arg->template_parameter_index];
-    if (actual != NULL && actual->kind == kTemplateParameterNonType) {
-      concrete->int_value = actual->int_value;
-      concrete->template_parameter_index = actual->template_parameter_index;
-    }
-  }
-  return concrete;
-}
-
 static Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
                                                 Vector* template_args,
                                                 Vector* args,
@@ -2046,10 +2200,13 @@ static Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
   }
   Vector* concrete_args = NewVector();
   for (size_t i = 0; i < template_args->length; i++) {
-    TemplateArgument* concrete =
-        SubstituteTemplateArgument(parser, template_args->value.p[i], args);
-    RebaseTemplateArgumentParameterIndices(concrete, rebase_base);
-    VectorAppend(concrete_args, concrete);
+    size_t start = concrete_args->length;
+    AppendSubstitutedTemplateArgument(parser, concrete_args,
+                                      template_args->value.p[i], args);
+    for (size_t j = start; j < concrete_args->length; j++) {
+      RebaseTemplateArgumentParameterIndices(concrete_args->value.p[j],
+                                             rebase_base);
+    }
   }
   return concrete_args;
 }
@@ -2255,7 +2412,13 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
 
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
-    TypeRecord* formal_type = SubstituteTemplateParameters(parser, formal->type, args);
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      AppendSubstitutedFormalParameter(parser, &func->info.function.prototype,
+                                       formal, args, 0);
+      continue;
+    }
+    TypeRecord* formal_type =
+        SubstituteTemplateParameters(parser, formal->type, args);
     Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
@@ -2379,18 +2542,22 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
 static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = kTemplateParameterType;
+  arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(type);
   arg->int_value = 0;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   return arg;
 }
 
 static TemplateArgument* NewDeducedNonTypeTemplateArgument(long long value) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = kTemplateParameterNonType;
+  arg->is_pack_expansion = false;
   arg->type = NULL;
   arg->int_value = value;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   return arg;
 }
 
@@ -2763,12 +2930,28 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
   if (first_formal_arg > func->info.function.prototype.length) {
     return NULL;
   }
+  int formal_pack_index = -1;
+  for (size_t i = first_formal_arg; i < func->info.function.prototype.length;
+       i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      formal_pack_index = (int)i;
+      break;
+    }
+  }
+  size_t fixed_formal_count =
+      func->info.function.prototype.length - first_formal_arg;
+  if (formal_pack_index >= 0) {
+    fixed_formal_count = (size_t)formal_pack_index - first_formal_arg;
+  }
   if (func->info.function.template_parameter_count <= 0 ||
       func->info.function.unknown_args || func->info.function.varargs ||
-      actuals->length != func->info.function.prototype.length - first_formal_arg) {
+      (formal_pack_index < 0 &&
+       actuals->length != fixed_formal_count) ||
+      (formal_pack_index >= 0 && actuals->length < fixed_formal_count)) {
     return NULL;
   }
-  if (explicit_args != NULL &&
+  if (formal_pack_index < 0 && explicit_args != NULL &&
       explicit_args->length > (size_t)func->info.function.template_parameter_count) {
     return NULL;
   }
@@ -2783,7 +2966,38 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
     VectorAppend(args, explicit_arg);
   }
   for (size_t i = 0; i < actuals->length; i++) {
-    Symbol* formal = func->info.function.prototype.value.p[i + first_formal_arg];
+    Symbol* formal = NULL;
+    if (formal_pack_index >= 0 && i >= fixed_formal_count) {
+      formal = func->info.function.prototype.value.p[formal_pack_index];
+      int pack_type_index = -1;
+      if (formal == NULL ||
+          !TypeIsTemplateParameterPlaceholder(formal->type,
+                                              &pack_type_index) ||
+          pack_type_index < 0 ||
+          (size_t)pack_type_index >= args->length) {
+        VectorDeleteWithContents(args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+        return NULL;
+      }
+      TemplateArgument* pack = args->value.p[pack_type_index];
+      if (pack == NULL) {
+        pack = NewEmptyPackTemplateArgument(kTemplateParameterType);
+        args->value.p[pack_type_index] = pack;
+      }
+      ASTNode* actual = actuals->value.p[i];
+      if (actual == NULL || actual->type == NULL ||
+          pack->kind != kTemplateParameterType) {
+        VectorDeleteWithContents(args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+        return NULL;
+      }
+      VectorAppend(pack->pack_arguments,
+                   NewDeducedTypeTemplateArgument(actual->type));
+      continue;
+    }
+    formal = func->info.function.prototype.value.p[i + first_formal_arg];
     ASTNode* actual = actuals->value.p[i];
     if (formal == NULL || actual == NULL ||
         !(DeduceFunctionTemplateArrayInitializerArgument(
@@ -2796,6 +3010,17 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       return NULL;
+    }
+  }
+  if (formal_pack_index >= 0) {
+    Symbol* formal = func->info.function.prototype.value.p[formal_pack_index];
+    int pack_type_index = -1;
+    if (formal != NULL &&
+        TypeIsTemplateParameterPlaceholder(formal->type, &pack_type_index) &&
+        pack_type_index >= 0 && (size_t)pack_type_index < args->length &&
+        args->value.p[pack_type_index] == NULL) {
+      args->value.p[pack_type_index] =
+          NewEmptyPackTemplateArgument(kTemplateParameterType);
     }
   }
   for (size_t i = 0; i < args->length; i++) {
@@ -3391,9 +3616,11 @@ static StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
 static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = kTemplateParameterType;
+  arg->is_pack_expansion = false;
   arg->type = type;
   arg->int_value = 0;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   return arg;
 }
 
@@ -3401,10 +3628,35 @@ static TemplateArgument* NewDefaultNonTypeTemplateArgument(
     long long int_value, int template_parameter_index) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = kTemplateParameterNonType;
+  arg->is_pack_expansion = false;
   arg->type = NULL;
   arg->int_value = int_value;
   arg->template_parameter_index = template_parameter_index;
+  arg->pack_arguments = NULL;
   return arg;
+}
+
+static TemplateArgument* NewEmptyPackTemplateArgument(
+    TemplateParameterKind kind) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  arg->kind = kind;
+  arg->is_pack_expansion = false;
+  arg->type = NULL;
+  arg->int_value = 0;
+  arg->template_parameter_index = -1;
+  arg->pack_arguments = NewVector();
+  return arg;
+}
+
+static int FindTemplateParameterPackIndex(Vector* template_parameters) {
+  for (size_t i = 0; template_parameters != NULL &&
+                     i < template_parameters->length; i++) {
+    TemplateParameter* param = template_parameters->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return (int)i;
+    }
+  }
+  return -1;
 }
 
 static Vector* CompleteTemplateArguments(TypeParser* parser,
@@ -3418,7 +3670,8 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     }
     return NULL;
   }
-  if (args->length > template_parameters->length) {
+  int pack_index = FindTemplateParameterPackIndex(template_parameters);
+  if (pack_index < 0 && args->length > template_parameters->length) {
     if (emit_error) {
       SyntaxError(parser->syntax, "Too many template arguments");
     }
@@ -3427,6 +3680,48 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
   Vector* completed = NewVector();
   for (size_t i = 0; i < template_parameters->length; i++) {
     TemplateParameter* param = template_parameters->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      TemplateArgument* pack = NewEmptyPackTemplateArgument(param->kind);
+      for (size_t j = i; j < args->length; j++) {
+        TemplateArgument* arg = args->value.p[j];
+        if (arg == NULL || arg->kind != param->kind) {
+          if (emit_error) {
+            SyntaxError(parser->syntax,
+                        param->kind == kTemplateParameterType
+                            ? "Template argument must name a type"
+                            : "Template non-type argument must be an integer constant expression");
+          }
+          TemplateArgumentDelete(pack);
+          VectorDeleteWithContents(completed,
+                                   (VectorElementDestructor)TemplateArgumentDelete,
+                                   /*free_element=*/false);
+          return NULL;
+        }
+        if (arg->pack_arguments != NULL) {
+          for (size_t k = 0; k < arg->pack_arguments->length; k++) {
+            TemplateArgument* element = arg->pack_arguments->value.p[k];
+            if (element == NULL || element->kind != param->kind) {
+              if (emit_error) {
+                SyntaxError(parser->syntax,
+                            param->kind == kTemplateParameterType
+                                ? "Template argument must name a type"
+                                : "Template non-type argument must be an integer constant expression");
+              }
+              TemplateArgumentDelete(pack);
+              VectorDeleteWithContents(
+                  completed, (VectorElementDestructor)TemplateArgumentDelete,
+                  /*free_element=*/false);
+              return NULL;
+            }
+            VectorAppend(pack->pack_arguments, TemplateArgumentCopy(element));
+          }
+        } else {
+          VectorAppend(pack->pack_arguments, TemplateArgumentCopy(arg));
+        }
+      }
+      VectorAppend(completed, pack);
+      continue;
+    }
     TemplateArgument* arg =
         i < args->length ? TemplateArgumentCopy(args->value.p[i]) : NULL;
     if (arg == NULL) {
@@ -3739,9 +4034,11 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
   Vector* args = NewVector();
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = kTemplateParameterType;
+  arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(element_type);
   arg->int_value = 0;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   VectorAppend(args, arg);
   TypeRecord* type = TypeInstantiateClassTemplate(syntax, templ, args);
   VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
@@ -4318,6 +4615,8 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   VectorClear(&parser->stack);
   parser->symbol = NULL;
   parser->base_type = base_type;
+  bool is_parameter_pack = CompilerIsCXX() && LexMatch(parser->lex,
+                                                       TOK(ellipsis));
   TypeParserParsePointer(parser);
 
   // Join all the type records together in reverse order.
@@ -4345,6 +4644,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
     parser->symbol = NewSymbol(SyntaxFakeName(parser->syntax), t, STO(auto));
     parser->symbol->flags.invented = true;
   }
+  parser->symbol->flags.is_parameter_pack = is_parameter_pack;
   if (TypeIsFunction(parser->symbol->type) &&
       parser->declarator_template_arguments != NULL) {
     parser->symbol->type->template_arguments =
@@ -8177,9 +8477,11 @@ static TemplateArgument* NewTemplateParameterPatternArgument(
   }
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   arg->kind = param->kind;
+  arg->is_pack_expansion = param->is_parameter_pack;
   arg->type = NULL;
   arg->int_value = 0;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   if (param->kind == kTemplateParameterType) {
     arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     arg->type->template_parameter_index = param->index;
@@ -9320,6 +9622,9 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
 }
 
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
+  if (t1 == NULL || t2 == NULL) {
+    return t1 == t2;
+  }
   // Prevent knock-on errors due to unknown symbols.
   if ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0) {
     return true;
@@ -9648,6 +9953,9 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
 }
 
 bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
+  if (t1 == NULL || t2 == NULL) {
+    return t1 == t2;
+  }
   if (t1->declarator != t2->declarator) {
     return false;
   }

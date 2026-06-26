@@ -143,6 +143,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_template = false;
   sym->flags.is_template_parameter = false;
   sym->flags.is_template_type_parameter = false;
+  sym->flags.is_parameter_pack = false;
   sym->flags.is_weak = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;

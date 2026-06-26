@@ -1374,9 +1374,11 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = malloc(sizeof(TemplateArgument));
   assert(arg != NULL);
   arg->kind = kTemplateParameterType;
+  arg->is_pack_expansion = false;
   arg->type = TypeRecordCopy(type);
   arg->int_value = 0;
   arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
   return arg;
 }
 
@@ -1412,8 +1414,19 @@ static TypeRecord* ResolveCoroutineTraitsPromiseType(TypeRecord* function_type) 
     }
     VectorAppend(args, NewCoroutineTypeTemplateArgument(formal->type));
   }
-  if (traits->type->info.struct_info == NULL ||
-      args->length > traits->type->info.struct_info->template_parameters.length) {
+  Struct* traits_struct = traits->type->info.struct_info;
+  bool traits_has_pack = false;
+  for (size_t i = 0; traits_struct != NULL &&
+                     i < traits_struct->template_parameters.length; i++) {
+    TemplateParameter* param = traits_struct->template_parameters.value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      traits_has_pack = true;
+      break;
+    }
+  }
+  if (traits_struct == NULL ||
+      (!traits_has_pack &&
+       args->length > traits_struct->template_parameters.length)) {
     VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
     return NULL;

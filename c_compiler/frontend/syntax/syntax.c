@@ -3875,6 +3875,7 @@ static ASTNode* ParseNamespaceDeclaration(Syntax* syntax) {
 
 static TemplateParameter* NewTemplateParameter(const char* name,
                                                TemplateParameterKind kind,
+                                               bool is_parameter_pack,
                                                TypeRecord* type,
                                                TypeRecord* default_type,
                                                bool has_default_int,
@@ -3884,6 +3885,7 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   TemplateParameter* param = malloc(sizeof(TemplateParameter));
   StringInit(&param->name, name);
   param->kind = kind;
+  param->is_parameter_pack = is_parameter_pack;
   param->type = type;
   param->default_type = default_type;
   param->has_default_int = has_default_int;
@@ -3946,6 +3948,7 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
   int index = base + (int)params->length;
   if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
+    bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
     if (!LexLookingAt(lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected template parameter name");
       SyntaxRecover(syntax, TC(closebra));
@@ -3959,6 +3962,7 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     param->flags.invented = true;
     param->flags.is_template_parameter = true;
     param->flags.is_template_type_parameter = true;
+    param->flags.is_parameter_pack = is_parameter_pack;
     param->template_parameter_index = index;
     param->location = lex->current_token_location;
     bool added = SyntaxAddSymbol(syntax, param);
@@ -3971,10 +3975,14 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     LexNextToken(lex);
     TypeRecord* default_type = NULL;
     if (LexMatch(lex, TOK(equal))) {
+      if (is_parameter_pack) {
+        SyntaxError(syntax, "Template parameter pack cannot have a default");
+      }
       default_type = ParseTemplateTypeDefault(syntax);
     }
     VectorAppend(params, NewTemplateParameter(param_name.value,
-                                              kTemplateParameterType, NULL,
+                                              kTemplateParameterType,
+                                              is_parameter_pack, NULL,
                                               default_type, false, 0, -1,
                                               index));
     StringDestruct(&param_name);
@@ -3997,6 +4005,7 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   param->flags.is_template_parameter = true;
   param->flags.is_template_type_parameter = false;
   param->template_parameter_index = index;
+  bool is_parameter_pack = param->flags.is_parameter_pack;
   bool added = SyntaxAddSymbol(syntax, param);
   if (!added) {
     SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
@@ -4006,12 +4015,16 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   long long default_int_value = 0;
   int default_template_parameter_index = -1;
   if (LexMatch(lex, TOK(equal))) {
+    if (is_parameter_pack) {
+      SyntaxError(syntax, "Template parameter pack cannot have a default");
+    }
     has_default_int =
         ParseTemplateNonTypeDefault(syntax, &default_int_value,
                                     &default_template_parameter_index);
   }
   VectorAppend(params, NewTemplateParameter(param->name.value,
                                             kTemplateParameterNonType,
+                                            is_parameter_pack,
                                             param->type, NULL,
                                             has_default_int,
                                             default_int_value,
@@ -4033,6 +4046,13 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
       break;
     }
   }
+  for (size_t i = 0; i < params->length; i++) {
+    TemplateParameter* param = params->value.p[i];
+    if (param != NULL && param->is_parameter_pack && i + 1 < params->length) {
+      SyntaxError(syntax, "Template parameter pack must be last");
+      break;
+    }
+  }
   SyntaxNeedBracket(syntax, TOK(greater), TC(decl));
   return params;
 }
@@ -4050,9 +4070,11 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
     TemplateArgument* arg = malloc(sizeof(TemplateArgument));
     arg->kind = kTemplateParameterType;
+    arg->is_pack_expansion = false;
     arg->type = NULL;
     arg->int_value = 0;
     arg->template_parameter_index = -1;
+    arg->pack_arguments = NULL;
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
@@ -4061,6 +4083,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       TypeParserDestruct(&parser);
       if (sym != NULL) {
         arg->type = TypeRecordCopy(sym->type);
+        arg->is_pack_expansion = sym->flags.is_parameter_pack;
         SymbolDelete(sym);
       } else {
         arg->type = type;
@@ -4091,6 +4114,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       arg->kind = kTemplateParameterNonType;
       arg->int_value = value;
       ASTNodeDelete(expr);
+      arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
     }
     VectorAppend(args, arg);
     if (!LexMatch(lex, TOK(comma))) {
@@ -5376,6 +5400,9 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(comma):
     case TOK(equalequal):
     case TOK(greater):
+      if (CompilerIsCXX() && tok == TOK(greater)) {
+        return TC(exprsep) | TC(closebra);
+      }
       return TC(exprsep);
 
 
@@ -5437,6 +5464,7 @@ TokenClass ClassifyToken(Token tok) {
       return TC(stmt) | TC(exprsep);
 
     case TOK(greatereq):
+    case TOK(spaceship):
     case TOK(less):
     case TOK(lesseq):
     case TOK(ampamp):
@@ -5459,7 +5487,10 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(slasheq):
     case TOK(star):
     case TOK(stareq):
-      return TC(exprsep);
+    if (CompilerIsCXX() && tok == TOK(less)) {
+      return TC(exprsep) | TC(closebra);
+    }
+    return TC(exprsep);
 
     case TOK(lbrace):
       return TC(stmt);

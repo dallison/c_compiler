@@ -73,6 +73,7 @@ typedef enum {
 typedef struct TemplateParameter {
   String name;
   TemplateParameterKind kind;
+  bool is_parameter_pack;
   struct TypeRecord* type;  // NULL for type parameters.
   struct TypeRecord* default_type;  // Optional default for type parameters.
   bool has_default_int;  // Optional default for non-type integer parameters.
@@ -83,9 +84,11 @@ typedef struct TemplateParameter {
 
 typedef struct TemplateArgument {
   TemplateParameterKind kind;
+  bool is_pack_expansion;
   struct TypeRecord* type;  // Non-NULL for type arguments.
   long long int_value;      // Valid for simple non-type integer arguments.
   int template_parameter_index;  // >= 0 when non-type arg is a template param.
+  Vector* pack_arguments;   // TemplateArgument* entries for bound packs.
 } TemplateArgument;
 
 typedef enum {
@@ -715,6 +718,9 @@ inline bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type) {
 }
 
 inline bool TypeIsUnknown(TypeRecord* type) {
+  if (type == NULL) {
+    return true;
+  }
   return (type->type & kTypeUnknown) != 0;
 }
 

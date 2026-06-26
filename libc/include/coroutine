@@ -12,23 +12,7 @@
 
 namespace std {
 
-template <class R,
-          class Arg0 = void,
-          class Arg1 = void,
-          class Arg2 = void,
-          class Arg3 = void,
-          class Arg4 = void,
-          class Arg5 = void,
-          class Arg6 = void,
-          class Arg7 = void,
-          class Arg8 = void,
-          class Arg9 = void,
-          class Arg10 = void,
-          class Arg11 = void,
-          class Arg12 = void,
-          class Arg13 = void,
-          class Arg14 = void,
-          class Arg15 = void>
+template <class R, class... Args>
 struct coroutine_traits {
   using promise_type = typename R::promise_type;
 };
