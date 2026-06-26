@@ -1,5 +1,4 @@
 // RUN: -std=c++20
-// EXPECT: coroutine parameter live across suspension requires a copy or move constructor
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -12,33 +11,22 @@ struct SuspendNever {
   }
 };
 
-struct Awaiter {
-  int value;
-  bool await_ready(void) {
-    return false;
-  }
-  void await_suspend(void* handle) {
-    (void)handle;
-  }
-  int await_resume(void) {
-    return value;
-  }
-};
-
-struct Box {
-  int value;
-  Box(const Box& other) = delete;
-  Box(Box&& other) = delete;
-};
-
-struct Promise;
+struct TraitsPromise;
+struct WrongPromise;
 
 struct Task {
-  using promise_type = Promise;
+  using promise_type = WrongPromise;
   int value;
 };
 
-struct Promise {
+namespace std {
+template <class R, class Arg>
+struct coroutine_traits {
+  using promise_type = TraitsPromise;
+};
+}
+
+struct TraitsPromise {
   int value;
   Task get_return_object(void) {
     Task task = {value};
@@ -59,8 +47,6 @@ struct Promise {
   }
 };
 
-Task rejected_live_class_parameter(Box box) {
-  Awaiter awaiter = {5};
-  int value = co_await awaiter;
-  co_return box.value + value;
+Task coroutine_traits_promise_type(int input) {
+  co_return input + 1;
 }

@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: coroutine parameter live across suspension requires a copy or move constructor
+// EXPECT: coroutine yield_value return type is invalid
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -10,25 +10,6 @@ struct SuspendNever {
   }
   void await_resume(void) {
   }
-};
-
-struct Awaiter {
-  int value;
-  bool await_ready(void) {
-    return false;
-  }
-  void await_suspend(void* handle) {
-    (void)handle;
-  }
-  int await_resume(void) {
-    return value;
-  }
-};
-
-struct Box {
-  int value;
-  Box(const Box& other) = delete;
-  Box(Box&& other) = delete;
 };
 
 struct Promise;
@@ -55,12 +36,14 @@ struct Promise {
   void return_value(int result) {
     value = result;
   }
+  int yield_value(int result) {
+    return result;
+  }
   void unhandled_exception(void) {
   }
 };
 
-Task rejected_live_class_parameter(Box box) {
-  Awaiter awaiter = {5};
-  int value = co_await awaiter;
-  co_return box.value + value;
+Task rejected_yield_value_return(void) {
+  co_yield 1;
+  co_return 2;
 }

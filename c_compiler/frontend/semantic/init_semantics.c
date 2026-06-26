@@ -578,7 +578,7 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       
     case AST_OP(designated_init): {
       DesignatedInitializerASTNode* designated_init = (DesignatedInitializerASTNode*)init_expr;
-      INode* designated_node = inode->parent;
+      INode* designated_node = inode->parent != NULL ? inode->parent : inode;
       LazyInitINode(inode);
       for (size_t i = 0; i < designated_init->designators->length; i++) {
         designated_node = FindDesignator(designated_node, init_expr, designated_init->designators->value.p[i]);
@@ -587,7 +587,9 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
         }
       }
       // Set designated node as parent's current.
-      designated_node->parent->current = designated_node;
+      if (designated_node->parent != NULL) {
+        designated_node->parent->current = designated_node;
+      }
       // A designated initializer may overwrite a value set by an earlier
       // initializer (the last assignment wins), e.g. with overlapping
       // [start ... end] range designators.  Clear any existing value so the

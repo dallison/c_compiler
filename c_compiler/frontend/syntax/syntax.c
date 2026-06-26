@@ -2400,10 +2400,7 @@ static ASTNode* NewCXXVPtrInitializer(TypeRecord* func, CXXVTableInfo* info,
       info->source == NULL || info->symbol == NULL) {
     return NULL;
   }
-  String vptr_name;
-  StringInit(&vptr_name, "__vptr");
-  StructMember* vptr_member = FindStructMember(info->source, &vptr_name);
-  StringDestruct(&vptr_name);
+  StructMember* vptr_member = FindStructMemberByName(info->source, "__vptr");
   if (vptr_member == NULL) {
     return NULL;
   }
@@ -4464,10 +4461,8 @@ static StructMember* FindCXXConstructor(TypeRecord* type) {
   if (constructor_name == NULL) {
     return NULL;
   }
-  String name;
-  StringInit(&name, constructor_name);
-  StructMember* ctor = FindStructMember(type->info.struct_info, &name);
-  StringDestruct(&name);
+  StructMember* ctor =
+      FindStructMemberByName(type->info.struct_info, constructor_name);
   if (ctor == NULL || !ctor->is_member_function ||
       !ctor->symbol->type->info.function.is_constructor) {
     return NULL;
@@ -4729,10 +4724,8 @@ static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
       sym->type->info.struct_info->is_aggregate) {
     return NULL;
   }
-  String name;
-  StringInit(&name, constructor_name);
-  StructMember* ctor = FindStructMember(sym->type->info.struct_info, &name);
-  StringDestruct(&name);
+  StructMember* ctor =
+      FindStructMemberByName(sym->type->info.struct_info, constructor_name);
   if (ctor == NULL || !ctor->is_member_function ||
       !ctor->symbol->type->info.function.is_constructor) {
     return NULL;

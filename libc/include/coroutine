@@ -1,0 +1,97 @@
+//
+//  coroutine
+//  c_compiler
+//
+//  Minimal C++20 coroutine library support for DaveCC.
+//
+
+#ifndef coroutine_h
+#define coroutine_h
+
+#ifdef __DAVECC__
+
+namespace std {
+
+template <class R,
+          class Arg0 = void,
+          class Arg1 = void,
+          class Arg2 = void,
+          class Arg3 = void,
+          class Arg4 = void,
+          class Arg5 = void,
+          class Arg6 = void,
+          class Arg7 = void,
+          class Arg8 = void,
+          class Arg9 = void,
+          class Arg10 = void,
+          class Arg11 = void,
+          class Arg12 = void,
+          class Arg13 = void,
+          class Arg14 = void,
+          class Arg15 = void>
+struct coroutine_traits {
+  using promise_type = typename R::promise_type;
+};
+
+template <class Promise>
+struct coroutine_handle {
+  void* __handle;
+
+  static coroutine_handle from_address(void* address) {
+    coroutine_handle result = {address};
+    return result;
+  }
+
+  static coroutine_handle from_promise(Promise& promise) {
+    char* promise_address = (char*)&promise;
+    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+    coroutine_handle result = {(void*)(promise_address - prefix_size)};
+    return result;
+  }
+
+  void* address(void) const {
+    return __handle;
+  }
+
+  Promise& promise(void) const {
+    char* frame_address = (char*)__handle;
+    unsigned long prefix_size = 2 * sizeof(int) + 2 * sizeof(void*);
+    return *(Promise*)(frame_address + prefix_size);
+  }
+
+  explicit operator bool() const {
+    return __handle != 0;
+  }
+};
+
+struct suspend_never {
+  bool await_ready(void) const {
+    return true;
+  }
+
+  void await_suspend(void* handle) const {
+    (void)handle;
+  }
+
+  void await_resume(void) const {
+  }
+};
+
+struct suspend_always {
+  bool await_ready(void) const {
+    return false;
+  }
+
+  void await_suspend(void* handle) const {
+    (void)handle;
+  }
+
+  void await_resume(void) const {
+  }
+};
+
+}  // namespace std
+
+#endif /* __DAVECC__ */
+
+#endif /* coroutine_h */

@@ -242,6 +242,18 @@ typedef void (*ASTNodeVisitor)(struct ASTNode* node,
                                void* data);
 typedef bool (*ASTNodeUsesValueChecker)(struct ASTNode* node, struct ASTNode* value);
 
+typedef enum {
+  kASTTransformContinue,
+  kASTTransformSkipChildren,
+} ASTNodeTransformAction;
+
+typedef struct ASTNode* (*ASTNodeTransformer)(
+    struct ASTNode* node, void* data, ASTNodeTransformAction* action);
+typedef void (*ASTNodeTransformVisitor)(struct ASTNode* node,
+                                        ASTNodeTransformer func,
+                                        void* data);
+typedef bool (*ASTNodeUpwardVisitor)(struct ASTNode* node, void* data);
+
 // This is a table of pointers to functions that are provided at runtime
 // to implement late-bound functions (a.k.a virtual functions) for an
 // AST node.
@@ -252,6 +264,7 @@ typedef struct {
   ASTNodeCloner cloner;
   ASTNodeVisitor visitor;
   ASTNodeUsesValueChecker uses_value;
+  ASTNodeTransformVisitor transformer;
 } ASTNodeVirtuals;
 
 // Abstract Syntax Tree (AST) node.
@@ -330,6 +343,15 @@ void ASTNodeVisit(ASTNode* node,
                   void (*func)(ASTNode* node, void*, int, VisitorMode),
                   int child_id,
                   void* data);
+void ASTNodeVisitUpwards(ASTNode* node, ASTNodeUpwardVisitor func,
+                         void* data);
+ASTNode* ASTNodeVisitAndTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data);
+ASTNode* ASTNodeVisitAndTransformUpwards(ASTNode* node,
+                                         ASTNodeTransformer func,
+                                         void* data);
+bool ASTNodeIsStatement(ASTNode* node);
+bool ASTNodeChildIsStatement(ASTNode* parent, int child_id);
 
 bool ASTNodeIsIntConstant(ASTNode* node);
 int64_t ASTNodeConstantValue(ASTNode* node);

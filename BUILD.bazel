@@ -8,7 +8,9 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "libc_headers",
-    srcs = glob(["libc/include/**/*.h"]),
+    srcs = glob(["libc/include/**/*.h"]) + [
+        "libc/include/coroutine",
+    ],
     visibility = ["//visibility:public"],
 )
 

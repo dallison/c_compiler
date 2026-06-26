@@ -267,6 +267,7 @@ typedef struct X86_64Generator {
   int num_int_reg_vars;
   int num_fp_reg_vars;
   int struct_return_reg;
+  int struct_return_spill_offset;
   bool not_leaf;
   // Set when the function reads an incoming argument passed on the stack.  Such
   // arguments are addressed relative to the frame pointer, so the prologue must

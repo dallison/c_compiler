@@ -744,6 +744,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->vtable_symbols);
   VectorInit(&s->vbtable_symbols);
   MapInit(&s->symbol_table, CompareStructMember);
+  MapInitForCharPointerKeys(&s->symbol_name_table);
   s->is_union = is_union;
   s->is_class = false;
   s->is_template = false;
@@ -795,6 +796,7 @@ static void StructTeardownMembers(Struct* s) {
                              (VectorElementDestructor)SymbolDestruct,
                              /*free_element=*/true);
   MapDestruct(&s->symbol_table);
+  MapDestruct(&s->symbol_name_table);
 }
 
 void StructDelete(Struct* s) {
@@ -1318,14 +1320,10 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   if (!CompilerIsCXX() || owner == NULL || name == NULL || type == NULL) {
     return;
   }
-  String alias_name;
-  StringInit(&alias_name, name);
-  if (FindStructMember(owner, &alias_name) != NULL) {
+  if (FindStructMemberByName(owner, name) != NULL) {
     SyntaxError(parser->syntax, "Duplicate nested type %s", name);
-    StringDestruct(&alias_name);
     return;
   }
-  StringDestruct(&alias_name);
 
   Symbol* alias = NewSymbol(name, type, STO(typedef));
   alias->location = location;
@@ -5155,6 +5153,35 @@ StructMember* FindStructMember(Struct* str, String* name) {
   return NULL;
 }
 
+static StructMember* FindDirectStructMemberByName(Struct* str,
+                                                  const char* name) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  return MapFindPointerKey(&str->symbol_name_table, (void*)name);
+}
+
+StructMember* FindStructMemberByName(Struct* str, const char* name) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindDirectStructMemberByName(str, name);
+  if (member != NULL) {
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMemberByName(base->type->info.struct_info, name);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
 static CXXAccess CombineInheritedAccess(CXXAccess base_access,
                                         CXXAccess member_access) {
   if (member_access == kAccessPrivate || base_access == kAccessPrivate) {
@@ -5164,6 +5191,41 @@ static CXXAccess CombineInheritedAccess(CXXAccess base_access,
     return kAccessProtected;
   }
   return kAccessPublic;
+}
+
+static StructMember* FindStructMemberWithAccessByNameFromBase(
+    Struct* str, const char* name, CXXAccess inherited, int inherited_offset,
+    CXXAccess* access, Struct** owner, int* byte_offset) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindDirectStructMemberByName(str, name);
+  if (member != NULL) {
+    if (access != NULL) {
+      *access = CombineInheritedAccess(inherited, member->access);
+    }
+    if (owner != NULL) {
+      *owner = str;
+    }
+    if (byte_offset != NULL) {
+      *byte_offset = inherited_offset + member->byte_offset;
+    }
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMemberWithAccessByNameFromBase(
+          base->type->info.struct_info, name,
+          CombineInheritedAccess(inherited, base->access),
+          inherited_offset + base->byte_offset, access, owner, byte_offset);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
 }
 
 static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
@@ -5208,6 +5270,13 @@ StructMember* FindStructMemberWithAccess(Struct* str, String* name,
   return FindStructMemberWithAccessAndOffset(str, name, access, owner, NULL);
 }
 
+StructMember* FindStructMemberWithAccessByName(Struct* str, const char* name,
+                                               CXXAccess* access,
+                                               Struct** owner) {
+  return FindStructMemberWithAccessAndOffsetByName(str, name, access, owner,
+                                                   NULL);
+}
+
 StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
                                                   CXXAccess* access,
                                                   Struct** owner,
@@ -5240,6 +5309,40 @@ StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
   return NULL;
 }
 
+StructMember* FindStructMemberWithAccessAndOffsetByName(
+    Struct* str, const char* name, CXXAccess* access, Struct** owner,
+    int* byte_offset) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindDirectStructMemberByName(str, name);
+  if (member != NULL) {
+    if (access != NULL) {
+      *access = member->access;
+    }
+    if (owner != NULL) {
+      *owner = str;
+    }
+    if (byte_offset != NULL) {
+      *byte_offset = member->byte_offset;
+    }
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      member = FindStructMemberWithAccessByNameFromBase(
+          base->type->info.struct_info, name, base->access, base->byte_offset,
+          access, owner, byte_offset);
+      if (member != NULL) {
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
@@ -5259,6 +5362,18 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
 
 static bool CheckStructMember(Struct* str, String* name) {
   return MapFindPointerKey(&str->symbol_table, name) == NULL;
+}
+
+static void StructInsertMemberIntoTables(Struct* str, StructMember* member) {
+  if (str == NULL || member == NULL || member->symbol == NULL) {
+    return;
+  }
+  MapKeyValue kv;
+  kv.key.p = &member->symbol->name;
+  kv.value.p = member;
+  MapInsert(&str->symbol_table, kv);
+  kv.key.p = member->symbol->name.value;
+  MapInsert(&str->symbol_name_table, kv);
 }
 
 static void AlignNextOffset(Struct* str, TypeRecord* type) {
@@ -5525,10 +5640,7 @@ static void AddCXXVPtrMember(TypeParser* parser, Struct* str) {
   member->byte_offset = 0;
   str->vptr_member = member;
   VectorAppend(&str->members, member);
-  MapKeyValue kv;
-  kv.key.p = &member->symbol->name;
-  kv.value.p = member;
-  MapInsert(&str->symbol_table, kv);
+  StructInsertMemberIntoTables(str, member);
 }
 
 static void AddCXXVBPtrMember(TypeParser* parser, Struct* str) {
@@ -5549,10 +5661,7 @@ static void AddCXXVBPtrMember(TypeParser* parser, Struct* str) {
   UpdateStructSize(str, symbol->type, str->is_union);
   str->vbptr_member = member;
   VectorAppend(&str->members, member);
-  MapKeyValue kv;
-  kv.key.p = &member->symbol->name;
-  kv.value.p = member;
-  MapInsert(&str->symbol_table, kv);
+  StructInsertMemberIntoTables(str, member);
 }
 
 static void LayoutCXXVirtualBaseSpecifiers(Struct* str) {
@@ -6224,10 +6333,7 @@ static void AddStructMember(TypeParser* parser, Struct* str,
     SymbolSetCXXDataAsmName(member->symbol, str);
   }
   VectorAppend(&str->members, member);
-  MapKeyValue kv;
-  kv.key.p = &member->symbol->name;
-  kv.value.p = member;
-  MapInsert(&str->symbol_table, kv);
+  StructInsertMemberIntoTables(str, member);
 }
 
 void StructAddSyntheticMember(Struct* str, StructMember* member) {
@@ -6239,10 +6345,7 @@ void StructAddSyntheticMember(Struct* str, StructMember* member) {
   }
   member->index = str->members.length;
   VectorAppend(&str->members, member);
-  MapKeyValue kv;
-  kv.key.p = &member->symbol->name;
-  kv.value.p = member;
-  MapInsert(&str->symbol_table, kv);
+  StructInsertMemberIntoTables(str, member);
   if (!member->is_static && !member->is_member_function) {
     UpdateStructSize(str, member->symbol->type, str->is_union);
   }
@@ -7077,10 +7180,7 @@ static void CopyAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src )
       dest_member->is_anon = member->is_anon;
       dest_member->byte_offset = dest->next_offset;
 
-      MapKeyValue kv;
-      kv.key.p = &symbol->name;
-      kv.value.p = dest_member;
-      MapInsert(&dest->symbol_table, kv);
+      StructInsertMemberIntoTables(dest, dest_member);
 
       if (!src->is_union) {
         // Members of an anonymous struct are laid out sequentially regardless

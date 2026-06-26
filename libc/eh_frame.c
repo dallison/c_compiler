@@ -55,6 +55,10 @@ int DaveEHFrameNextFDE(uintptr_t* cursor,
                        DaveEHFDE* out) {
   uintptr_t entry_addr = *cursor;
   const uint8_t* entry = (const uint8_t*)entry_addr;
+  while (entry_addr < end && *(const uint8_t*)entry_addr == 0) {
+    entry_addr++;
+  }
+  entry = (const uint8_t*)entry_addr;
   if (entry_addr >= end) {
     *cursor = end;
     return 0;

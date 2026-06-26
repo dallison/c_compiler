@@ -628,6 +628,163 @@ void ASTNodeVisit(ASTNode* node,
   node->virtuals->visitor(node, func, child_id, data);
 }
 
+void ASTNodeVisitUpwards(ASTNode* node, ASTNodeUpwardVisitor func,
+                         void* data) {
+  if (func == NULL) {
+    return;
+  }
+  for (ASTNode* current = node; current != NULL; current = current->parent) {
+    if (!func(current, data)) {
+      return;
+    }
+  }
+}
+
+static ASTNode* ASTNodeTransformCurrent(ASTNode* node, ASTNodeTransformer func,
+                                        void* data) {
+  ASTNodeTransformAction action = kASTTransformContinue;
+  ASTNode* transformed = func(node, data, &action);
+  if (transformed == NULL || transformed != node ||
+      action == kASTTransformSkipChildren) {
+    return transformed;
+  }
+  if (node->virtuals->transformer != NULL) {
+    node->virtuals->transformer(node, func, data);
+  }
+  return node;
+}
+
+ASTNode* ASTNodeVisitAndTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data) {
+  if (node == NULL || func == NULL) {
+    return node;
+  }
+  return ASTNodeTransformCurrent(node, func, data);
+}
+
+ASTNode* ASTNodeVisitAndTransformUpwards(ASTNode* node,
+                                         ASTNodeTransformer func,
+                                         void* data) {
+  if (node == NULL || func == NULL) {
+    return node;
+  }
+  ASTNode* result = node;
+  for (ASTNode* current = node; current != NULL;) {
+    ASTNode* parent = current->parent;
+    int child_id = current->child_id;
+    ASTNodeTransformAction action = kASTTransformContinue;
+    ASTNode* transformed = func(current, data, &action);
+    if (transformed != current) {
+      if (current == result) {
+        result = transformed;
+      }
+      if (parent != NULL) {
+        ASTNodeReplaceChild(parent, child_id, transformed, true);
+      }
+    }
+    if (action == kASTTransformSkipChildren) {
+      return result;
+    }
+    current = transformed != NULL ? transformed->parent : parent;
+  }
+  return result;
+}
+
+bool ASTNodeIsStatement(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(asm):
+    case AST_OP(break):
+    case AST_OP(case):
+    case AST_OP(co_return):
+    case AST_OP(compound):
+    case AST_OP(continue):
+    case AST_OP(decl_list):
+    case AST_OP(do):
+    case AST_OP(expr):
+    case AST_OP(for):
+    case AST_OP(goto):
+    case AST_OP(if):
+    case AST_OP(label):
+    case AST_OP(return):
+    case AST_OP(switch):
+    case AST_OP(throw):
+    case AST_OP(try):
+    case AST_OP(while):
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ASTNodeChildIsStatement(ASTNode* parent, int child_id) {
+  if (parent == NULL) {
+    return false;
+  }
+  switch (parent->op) {
+    case AST_OP(compound):
+      return true;
+    case AST_OP(if):
+      return child_id == 1 || child_id == 2;
+    case AST_OP(while):
+    case AST_OP(do):
+      return child_id == 1;
+    case AST_OP(for):
+      return child_id == 3;
+    case AST_OP(switch):
+      return child_id == 1;
+    case AST_OP(try):
+      return child_id == 0;
+    case AST_OP(catch):
+      return child_id == 0;
+    case AST_OP(case):
+      return child_id == 1;
+    case AST_OP(label):
+      return child_id == 0;
+    default:
+      return false;
+  }
+}
+
+static void ASTNodeTransformChild(ASTNode* parent, int child_id,
+                                  ASTNode* child, ASTNodeTransformer func,
+                                  void* data) {
+  ASTNode* transformed = ASTNodeVisitAndTransform(child, func, data);
+  if (transformed != child) {
+    ASTNodeReplaceChild(parent, child_id, transformed, true);
+  } else {
+    SetParent(child, parent, child_id);
+  }
+}
+
+static void ASTNodeTransformVectorElement(ASTNode* parent, Vector* children,
+                                          size_t index,
+                                          ASTNodeTransformer func,
+                                          void* data) {
+  ASTNode* child = children->value.p[index];
+  ASTNode* transformed = ASTNodeVisitAndTransform(child, func, data);
+  if (transformed == child) {
+    SetParent(child, parent, (int)index);
+    return;
+  }
+  if (transformed == NULL) {
+    ASTNodeDelete(child);
+    VectorDeleteElement(children, index);
+    for (size_t i = index; i < children->length; i++) {
+      ASTNode* remaining = children->value.p[i];
+      if (remaining != NULL) {
+        remaining->child_id = (int)i;
+      }
+    }
+    return;
+  }
+  children->value.p[index] = transformed;
+  SetParent(transformed, parent, (int)index);
+  ASTNodeDelete(child);
+}
+
 ASTNode* ASTNodeMove(ASTNode* node) {
   ASTNodeReplaceChild(node->parent, node->child_id, NULL, false);
   node->parent = NULL;
@@ -930,10 +1087,16 @@ static void UnaryASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void UnaryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data) {
+  UnaryASTNode* n = (UnaryASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->sub, func, data);
+}
 
 static ASTNodeVirtuals unary_vtbl = {UnaryASTNodeDelete, UnaryASTNodePrint,
                                      UnaryASTNodeReplaceChild,
-                                     UnaryASTNodeClone, UnaryASTNodeVisit, ValueAlwaysUsed};
+                                     UnaryASTNodeClone, UnaryASTNodeVisit,
+                                     ValueAlwaysUsed, UnaryASTNodeTransform};
 
 // Unary AST node with a single child.
 ASTNode* NewUnaryASTNode(ASTOpcode op, TypeRecord* type,
@@ -1009,10 +1172,17 @@ static void BinaryASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void BinaryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                   void* data) {
+  BinaryASTNode* n = (BinaryASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->left, func, data);
+  ASTNodeTransformChild(node, 1, n->right, func, data);
+}
+
 static ASTNodeVirtuals binary_vtbl = {BinaryASTNodeDelete, BinaryASTNodePrint,
                                       BinaryASTNodeReplaceChild,
                                       BinaryASTNodeClone, BinaryASTNodeVisit,
-  ValueAlwaysUsed
+  ValueAlwaysUsed, BinaryASTNodeTransform
 };
 
 // Binary AST node, which a left and right child.
@@ -1098,10 +1268,17 @@ static void InlineCallASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void InlineCallASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                       void* data) {
+  InlineCallASTNode* n = (InlineCallASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->inlined, func, data);
+  ASTNodeTransformChild(node, 1, n->ret_value, func, data);
+}
+
 static ASTNodeVirtuals inline_call_vtbl = {
     InlineCallASTNodeDelete, InlineCallASTNodePrint,
     InlineCallASTNodeReplaceChild, InlineCallASTNodeClone,
-    InlineCallASTNodeVisit, ValueAlwaysUsed};
+    InlineCallASTNodeVisit, ValueAlwaysUsed, InlineCallASTNodeTransform};
 
 ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
                               ASTNode* inlined, ASTNode* ret_value) {
@@ -1189,9 +1366,25 @@ static void VectorASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void VectorASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                   void* data) {
+  VectorASTNode* n = (VectorASTNode*)node;
+  ASTNode* transformed = ASTNodeVisitAndTransform(n->left, func, data);
+  if (transformed != n->left) {
+    ASTNode* old = n->left;
+    n->left = transformed;
+    SetParent(transformed, node, 0);
+    ASTNodeDelete(old);
+  }
+  for (size_t i = n->children->length; i > 0; i--) {
+    ASTNodeTransformVectorElement(node, n->children, i - 1, func, data);
+  }
+}
+
 static ASTNodeVirtuals vector_vtbl = {VectorASTNodeDelete, VectorASTNodePrint,
                                       VectorASTNodeReplaceChild,
-                                      VectorASTNodeClone, VectorASTNodeVisit, ValueAlwaysUsed};
+                                      VectorASTNodeClone, VectorASTNodeVisit,
+                                      ValueAlwaysUsed, VectorASTNodeTransform};
 
 ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
                           SourceLocation location, ASTNode* left,
@@ -1264,9 +1457,15 @@ static bool CastASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   return ASTNodeUsesValue(node->parent, node);
 }
 
+static void CastASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                 void* data) {
+  CastASTNode* n = (CastASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals cast_vtbl = {CastASTNodeDelete, CastASTNodePrint,
                                     CastASTNodeReplaceChild, CastASTNodeClone, NULL,
-  CastASTNodeUsesValue
+  CastASTNodeUsesValue, CastASTNodeTransform
 };
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
@@ -1332,9 +1531,15 @@ static bool PtrScaleASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   return ASTNodeUsesValue(node->parent, node);
 }
 
+static void PtrScaleASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                     void* data) {
+  PtrScaleASTNode* n = (PtrScaleASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals ptr_scale_vtbl = {PtrScaleASTNodeDelete, PtrScaleASTNodePrint,
                                     PtrScaleASTNodeReplaceChild, PtrScaleASTNodeClone, NULL,
-  PtrScaleASTNodeUsesValue,
+  PtrScaleASTNodeUsesValue, PtrScaleASTNodeTransform,
 };
 
 ASTNode* NewPtrScaleASTNode(TypeRecord* type, ASTOpcode scale_op, ASTNode* expr,
@@ -1391,9 +1596,16 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   return func(&to->base.base, data);
 }
 
+static void SizeofASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                   void* data) {
+  SizeofASTNode* n = (SizeofASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals sizeof_vtbl = {SizeofASTNodeDelete, SizeofASTNodePrint,
                                       SizeofASTNodeReplaceChild,
-                                      SizeofASTNodeClone, NULL, ValueAlwaysUsed};
+                                      SizeofASTNodeClone, NULL, ValueAlwaysUsed,
+                                      SizeofASTNodeTransform};
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
   SizeofASTNode* node = ASTArenaAlloc(sizeof(SizeofASTNode));
@@ -1540,10 +1752,18 @@ static void ExpressionStatementASTNodeVisit(
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void ExpressionStatementASTNodeTransform(ASTNode* node,
+                                                ASTNodeTransformer func,
+                                                void* data) {
+  ExpressionStatementASTNode* n = (ExpressionStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals expr_stmt_vtbl = {
     ExpressionStatementASTNodeDelete, ExpressionStatementASTNodePrint,
     ExpressionStatementASTNodeReplaceChild, ExpressionStatementASTNodeClone,
-    ExpressionStatementASTNodeVisit, ValueNotUsed};
+    ExpressionStatementASTNodeVisit, ValueNotUsed,
+    ExpressionStatementASTNodeTransform};
 
 ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location) {
   ExpressionStatementASTNode* node = ASTArenaAlloc(sizeof(ExpressionStatementASTNode));
@@ -1636,6 +1856,14 @@ static void IfStatementASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void IfStatementASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                        void* data) {
+  IfStatementASTNode* n = (IfStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->cond, func, data);
+  ASTNodeTransformChild(node, 1, n->if_part, func, data);
+  ASTNodeTransformChild(node, 2, n->else_part, func, data);
+}
+
 static bool IfStatementUsesValue(ASTNode* node, ASTNode* value) {
   IfStatementASTNode* n = (IfStatementASTNode*)node;
   if (value == n->cond) {
@@ -1647,7 +1875,8 @@ static bool IfStatementUsesValue(ASTNode* node, ASTNode* value) {
 static ASTNodeVirtuals if_stmt_vtbl = {
     IfStatementASTNodeDelete, IfStatementASTNodePrint,
     IfStatementASTNodeReplaceChild, IfStatementASTNodeClone,
-    IfStatementASTNodeVisit, IfStatementUsesValue};
+    IfStatementASTNodeVisit, IfStatementUsesValue,
+    IfStatementASTNodeTransform};
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
                                ASTNode* else_part, bool is_constexpr,
@@ -1736,6 +1965,14 @@ static void CombinedStatementASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void CombinedStatementASTNodeTransform(ASTNode* node,
+                                              ASTNodeTransformer func,
+                                              void* data) {
+  CombinedStatementASTNode* n = (CombinedStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->cond, func, data);
+  ASTNodeTransformChild(node, 1, n->stmt, func, data);
+}
+
 static bool CombinedStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   CombinedStatementASTNode* n = (CombinedStatementASTNode*)node;
   return value == n->cond;
@@ -1744,7 +1981,8 @@ static bool CombinedStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
 static ASTNodeVirtuals combined_stmt_vtbl = {
     CombinedStatementASTNodeDelete, CombinedStatementASTNodePrint,
     CombinedStatementASTNodeReplaceChild, CombinedStatementASTNodeClone,
-  CombinedStatementASTNodeVisit, CombinedStatementASTNodeUsesValue};
+  CombinedStatementASTNodeVisit, CombinedStatementASTNodeUsesValue,
+  CombinedStatementASTNodeTransform};
 
 ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
                                      ASTNode* stmt, SourceLocation location) {
@@ -1811,9 +2049,16 @@ static void ThrowASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void ThrowASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data) {
+  ThrowASTNode* n = (ThrowASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals throw_vtbl = {
     ThrowASTNodeDelete, ThrowASTNodePrint, ThrowASTNodeReplaceChild,
-    ThrowASTNodeClone, ThrowASTNodeVisit, ValueNotUsed};
+    ThrowASTNodeClone, ThrowASTNodeVisit, ValueNotUsed,
+    ThrowASTNodeTransform};
 
 ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location) {
   ThrowASTNode* node = ASTArenaAlloc(sizeof(ThrowASTNode));
@@ -1885,10 +2130,22 @@ static void CompoundStatementASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void CompoundStatementASTNodeTransform(ASTNode* node,
+                                              ASTNodeTransformer func,
+                                              void* data) {
+  CompoundStatementASTNode* n = (CompoundStatementASTNode*)node;
+  for (size_t i = n->statements->length; i > 0; i--) {
+    ASTNodeTransformVectorElement(node, n->statements, i - 1, func, data);
+  }
+  n->low_pc = VectorFirst(n->statements);
+  n->high_pc = VectorLast(n->statements);
+}
+
 static ASTNodeVirtuals compound_stmt_vtbl = {
     CompoundStatementASTNodeDelete, CompoundStatementASTNodePrint,
     CompoundStatementASTNodeReplaceChild, CompoundStatementASTNodeClone,
-    CompoundStatementASTNodeVisit, ValueNotUsed};
+    CompoundStatementASTNodeVisit, ValueNotUsed,
+    CompoundStatementASTNodeTransform};
 
 // Compound statement.
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
@@ -1976,9 +2233,16 @@ static void CatchASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void CatchASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data) {
+  CatchASTNode* n = (CatchASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->stmt, func, data);
+}
+
 static ASTNodeVirtuals catch_vtbl = {
     CatchASTNodeDelete, CatchASTNodePrint, CatchASTNodeReplaceChild,
-    CatchASTNodeClone, CatchASTNodeVisit, ValueNotUsed};
+    CatchASTNodeClone, CatchASTNodeVisit, ValueNotUsed,
+    CatchASTNodeTransform};
 
 ASTNode* NewCatchASTNode(Symbol* symbol, bool is_catch_all, ASTNode* stmt,
                          SourceLocation location) {
@@ -2061,9 +2325,21 @@ static void TryASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void TryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                void* data) {
+  TryASTNode* n = (TryASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->try_stmt, func, data);
+  for (size_t i = n->catches->length; i > 0; i--) {
+    ASTNodeTransformVectorElement(node, n->catches, i - 1, func, data);
+  }
+  for (size_t i = 0; i < n->catches->length; i++) {
+    SetParent(n->catches->value.p[i], node, (int)i + 1);
+  }
+}
+
 static ASTNodeVirtuals try_vtbl = {
     TryASTNodeDelete, TryASTNodePrint, TryASTNodeReplaceChild,
-    TryASTNodeClone, TryASTNodeVisit, ValueNotUsed};
+    TryASTNodeClone, TryASTNodeVisit, ValueNotUsed, TryASTNodeTransform};
 
 ASTNode* NewTryASTNode(ASTNode* try_stmt, Vector* catches,
                        SourceLocation location) {
@@ -2174,6 +2450,15 @@ static void ForStatementASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void ForStatementASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                         void* data) {
+  ForStatementASTNode* n = (ForStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->c1, func, data);
+  ASTNodeTransformChild(node, 1, n->c2, func, data);
+  ASTNodeTransformChild(node, 2, n->c3, func, data);
+  ASTNodeTransformChild(node, 3, n->stmt, func, data);
+}
+
 static bool ForStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   ForStatementASTNode* n = (ForStatementASTNode*)node;
   return n->c2 == value;
@@ -2182,7 +2467,8 @@ static bool ForStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
 static ASTNodeVirtuals for_stmt_vtbl = {
     ForStatementASTNodeDelete, ForStatementASTNodePrint,
     ForStatementASTNodeReplaceChild, ForStatementASTNodeClone,
-    ForStatementASTNodeVisit, ForStatementASTNodeUsesValue};
+    ForStatementASTNodeVisit, ForStatementASTNodeUsesValue,
+    ForStatementASTNodeTransform};
 
 ASTNode* NewForStatementASTNode(ASTNode* e1, ASTNode* e2, ASTNode* e3,
                                 ASTNode* stmt, SourceLocation location) {
@@ -2262,10 +2548,18 @@ static void VariableDeclarationASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void VariableDeclarationASTNodeTransform(ASTNode* node,
+                                                ASTNodeTransformer func,
+                                                void* data) {
+  VariableDeclarationASTNode* n = (VariableDeclarationASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->initializer, func, data);
+}
+
 static ASTNodeVirtuals var_decl_vtbl = {
     VariableDeclarationASTNodeDelete, VariableDeclarationASTNodePrint,
     VariableDeclarationASTNodeReplaceChild, VariableDeclarationASTNodeClone,
-    VariableDeclarationASTNodeVisit, ValueAlwaysUsed};
+    VariableDeclarationASTNodeVisit, ValueAlwaysUsed,
+    VariableDeclarationASTNodeTransform};
 
 ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
                                        SourceLocation location) {
@@ -2331,9 +2625,19 @@ static void DeclarationListASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void DeclarationListASTNodeTransform(ASTNode* node,
+                                            ASTNodeTransformer func,
+                                            void* data) {
+  DeclarationListASTNode* n = (DeclarationListASTNode*)node;
+  for (size_t i = n->declarations->length; i > 0; i--) {
+    ASTNodeTransformVectorElement(node, n->declarations, i - 1, func, data);
+  }
+}
+
 static ASTNodeVirtuals decl_list_vtbl = {
     DeclarationListASTNodeDelete, DeclarationListASTNodePrint, NULL,
-    DeclarationListASTNodeClone, DeclarationListASTNodeVisit, ValueNotUsed};
+    DeclarationListASTNodeClone, DeclarationListASTNodeVisit, ValueNotUsed,
+    DeclarationListASTNodeTransform};
 
 // Declaration list.
 ASTNode* NewDeclarationListASTNode(Vector* declarations,
@@ -2392,6 +2696,13 @@ static void CaseLabelASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void CaseLabelASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                      void* data) {
+  CaseLabelASTNode* n = (CaseLabelASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+  ASTNodeTransformChild(node, 1, n->stmt, func, data);
+}
+
 static void CaseLabelASTNodeReplaceChild(ASTNode* parent, int child_id,
                                              ASTNode* child,
                                              bool delete_old_child) {
@@ -2418,7 +2729,7 @@ static void CaseLabelASTNodeReplaceChild(ASTNode* parent, int child_id,
 
 static ASTNodeVirtuals case_label_vtbl = {
     CaseLabelASTNodeDelete, CaseLabelASTNodePrint, CaseLabelASTNodeReplaceChild, CaseLabelASTNodeClone,
-    CaseLabelASTNodeVisit, ValueAlwaysUsed};
+    CaseLabelASTNodeVisit, ValueAlwaysUsed, CaseLabelASTNodeTransform};
 
 ASTNode* NewCaseLabelASTNode(ASTNode* expr, ASTNode* stmt, SourceLocation location) {
   CaseLabelASTNode* node = ASTArenaAlloc(sizeof(CaseLabelASTNode));
@@ -2518,6 +2829,14 @@ static void SwitchStatementASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void SwitchStatementASTNodeTransform(ASTNode* node,
+                                            ASTNodeTransformer func,
+                                            void* data) {
+  SwitchStatementASTNode* n = (SwitchStatementASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+  ASTNodeTransformChild(node, 1, n->stmt, func, data);
+}
+
 static bool SwitchStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
   SwitchStatementASTNode* n = (SwitchStatementASTNode*)node;
   return n->expr == value;
@@ -2526,7 +2845,8 @@ static bool SwitchStatementASTNodeUsesValue(ASTNode* node, ASTNode* value) {
 static ASTNodeVirtuals switch_stmt_vtbl = {
     SwitchStatementASTNodeDelete, SwitchStatementASTNodePrint,
     SwitchStatementASTNodeReplaceChild, SwitchStatementASTNodeClone,
-    SwitchStatementASTNodeVisit, SwitchStatementASTNodeUsesValue};
+    SwitchStatementASTNodeVisit, SwitchStatementASTNodeUsesValue,
+    SwitchStatementASTNodeTransform};
 
 ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
                                    SourceLocation location) {
@@ -2604,8 +2924,16 @@ static void LabelASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void LabelASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                  void* data) {
+  LabelASTNode* n = (LabelASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->stmt, func, data);
+}
+
 static ASTNodeVirtuals label_vtbl = {LabelASTNodeDelete, LabelASTNodePrint,
-                                     LabelASTNodeReplaceChild, LabelASTNodeClone, LabelASTNodeVisit, NULL};
+                                     LabelASTNodeReplaceChild,
+                                     LabelASTNodeClone, LabelASTNodeVisit,
+                                     NULL, LabelASTNodeTransform};
 
 ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLocation location) {
   LabelASTNode* node = ASTArenaAlloc(sizeof(LabelASTNode));
@@ -2781,10 +3109,18 @@ static void ExpressionInitializerASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void ExpressionInitializerASTNodeTransform(ASTNode* node,
+                                                  ASTNodeTransformer func,
+                                                  void* data) {
+  ExpressionInitializerASTNode* n = (ExpressionInitializerASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->expr, func, data);
+}
+
 static ASTNodeVirtuals expr_init_vtbl = {
     ExpressionInitializerASTNodeDelete, ExpressionInitializerASTNodePrint,
     ExpressionInitializerASTNodeReplaceChild, ExpressionInitializerASTNodeClone,
-    ExpressionInitializerASTNodeVisit, ValueAlwaysUsed};
+    ExpressionInitializerASTNodeVisit, ValueAlwaysUsed,
+    ExpressionInitializerASTNodeTransform};
 
 ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
                                          SourceLocation location) {
@@ -2859,10 +3195,19 @@ static void BracedInitializerASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void BracedInitializerASTNodeTransform(ASTNode* node,
+                                              ASTNodeTransformer func,
+                                              void* data) {
+  BracedInitializerASTNode* n = (BracedInitializerASTNode*)node;
+  for (size_t i = n->initializers->length; i > 0; i--) {
+    ASTNodeTransformVectorElement(node, n->initializers, i - 1, func, data);
+  }
+}
+
 static ASTNodeVirtuals braced_init_vtbl = {
     BracedInitializerASTNodeDelete, BracedInitializerASTNodePrint,
     BracedInitializerASTNodeReplaceChild, BracedInitializerASTNodeClone,
-    BracedInitializerASTNodeVisit, NULL};
+    BracedInitializerASTNodeVisit, NULL, BracedInitializerASTNodeTransform};
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,
                                      TypeRecord* type,
@@ -3006,10 +3351,18 @@ static void DesignatedInitializerASTNodeVisit(ASTNode* node,
   func(node, data, child_id, kVisitPostChildren);
 }
 
+static void DesignatedInitializerASTNodeTransform(ASTNode* node,
+                                                  ASTNodeTransformer func,
+                                                  void* data) {
+  DesignatedInitializerASTNode* n = (DesignatedInitializerASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->init, func, data);
+}
+
 static ASTNodeVirtuals designated_init_vtbl = {
     DesignatedInitializerASTNodeDelete, DesignatedInitializerASTNodePrint,
     DesignatedInitializerASTNodeReplaceChild, DesignatedInitializerASTNodeClone,
-    DesignatedInitializerASTNodeVisit, ValueAlwaysUsed};
+    DesignatedInitializerASTNodeVisit, ValueAlwaysUsed,
+    DesignatedInitializerASTNodeTransform};
 
 ASTNode* NewDesignatedInitializerASTNode(Vector* designators, ASTNode* init,
                                          SourceLocation location) {
@@ -3060,10 +3413,12 @@ static void CompoundLiteralASTNodePrint(ASTNode* node, int indents, FILE* fp) {
 static void CompoundLiteralASTNodeReplaceChild(ASTNode* parent, int child_id,
                                     ASTNode* child, bool delete_old_child) {
   CompoundLiteralASTNode* node = (CompoundLiteralASTNode*)parent;
-  ASTNode* old = node->initializer;
-  if (child == 0) {
+  ASTNode* old = NULL;
+  if (child_id == 0) {
+    old = node->sym;
     node->sym = child;
   } else {
+    old = node->initializer;
     node->initializer = child;
   }
   SetParent(child, parent, child_id);
@@ -3083,9 +3438,17 @@ static ASTNode* CompoundLiteralASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
+static void CompoundLiteralASTNodeTransform(ASTNode* node,
+                                            ASTNodeTransformer func,
+                                            void* data) {
+  CompoundLiteralASTNode* n = (CompoundLiteralASTNode*)node;
+  ASTNodeTransformChild(node, 0, n->sym, func, data);
+  ASTNodeTransformChild(node, 1, n->initializer, func, data);
+}
+
 static ASTNodeVirtuals compound_literal_vtbl = {CompoundLiteralASTNodeDelete, CompoundLiteralASTNodePrint,
                                     CompoundLiteralASTNodeReplaceChild, CompoundLiteralASTNodeClone, NULL,
-  NULL
+  NULL, CompoundLiteralASTNodeTransform
 };
 
 ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,

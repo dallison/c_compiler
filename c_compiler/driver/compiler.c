@@ -619,15 +619,17 @@ static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
       sym->type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
-  String name;
+  StructMember* member = NULL;
   if (destructor) {
+    String name;
     StringInit(&name, "~");
     StringAppendString(&name, sym->type->info.struct_info->tag_name);
+    member = FindStructMember(sym->type->info.struct_info, &name);
+    StringDestruct(&name);
   } else {
-    StringInit(&name, sym->type->info.struct_info->tag_name->value);
+    member = FindStructMember(sym->type->info.struct_info,
+                              sym->type->info.struct_info->tag_name);
   }
-  StructMember* member = FindStructMember(sym->type->info.struct_info, &name);
-  StringDestruct(&name);
   if (member == NULL || !member->is_member_function) {
     return NULL;
   }

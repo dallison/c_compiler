@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: await_suspend return type is not supported yet
+// EXPECT: await_suspend must return void, bool, void*, or a coroutine handle
 
 struct SuspendNever {
   bool await_ready(void) {

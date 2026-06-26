@@ -5155,8 +5155,9 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         // structreturn.
         entry->pooled->data.ivalue = ARM_REG_VAR | g->struct_return_reg;
         TargetInstruction* var = IntVariableRegister(g, g->struct_return_reg, entry->value.symbol);
-        Emit(g, NewInstruction2(ARM_OP(mov), var,
-                    IntArgumentRegister(g, 0)));
+        TargetInstruction* mv =
+            Emit(g, NewInstruction1(ARM_OP(mov), IntArgumentRegister(g, 0)));
+        mv->dest = var;
         SetDebugRegisterLocation(entry, g->struct_return_reg);
       } else {
         AlignOffset(entry, var_offset);

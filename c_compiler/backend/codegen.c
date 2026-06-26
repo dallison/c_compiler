@@ -1242,7 +1242,8 @@ void* GenerateFunction(Generator* gen) {
     // If the return value is a struct or union generate a holder.
     if (TypeIsStructOrUnion(gen->func->next)) {
       gen->struct_return_value = GeneratorEmit(gen, NewIR(IR_OP(structreturn)));
-      IRSetType(gen->struct_return_value, gen->func->next);
+      IRSetType(gen->struct_return_value,
+                NewPointerTo(kQualPlain, TypeRecordCopy(gen->func->next)));
     }
  
     TrapFunctionBeforeCodegen(gen);

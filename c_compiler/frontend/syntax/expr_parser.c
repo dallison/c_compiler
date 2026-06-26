@@ -1713,10 +1713,7 @@ static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
     return NULL;
   }
-  String member_name;
-  StringInit(&member_name, name);
-  StructMember* member = FindStructMember(type->info.struct_info, &member_name);
-  StringDestruct(&member_name);
+  StructMember* member = FindStructMemberByName(type->info.struct_info, name);
   if (member == NULL || !member->is_member_function ||
       member->symbol == NULL || !TypeIsFunction(member->symbol->type)) {
     return NULL;
@@ -1773,10 +1770,8 @@ static StructMember* FindCXXConstructorForType(TypeRecord* type) {
       type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
-  String name;
-  StringInit(&name, type->info.struct_info->tag_name->value);
-  StructMember* ctor = FindStructMember(type->info.struct_info, &name);
-  StringDestruct(&name);
+  StructMember* ctor =
+      FindStructMember(type->info.struct_info, type->info.struct_info->tag_name);
   if (ctor == NULL || !ctor->is_member_function ||
       !ctor->symbol->type->info.function.is_constructor) {
     return NULL;

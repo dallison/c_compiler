@@ -221,6 +221,7 @@ struct Struct {
   Vector vtable_symbols;  // CXXVTableInfo* entries for subobject vtables.
   Vector vbtable_symbols;  // CXXVBTableInfo* entries for complete-object tables.
   Map symbol_table;  // Map of String* vs StructMember* (not owned).
+  Map symbol_name_table;  // Map of char* vs StructMember* (not owned).
   int next_offset;   // Byte offset of next member.
   int size;          // Size of struct in bytes.
   int non_virtual_size;  // Size excluding appended virtual base subobjects.
@@ -388,13 +389,20 @@ int SizeofType(Type type);
 int SizeofPointer(void);
 
 StructMember* FindStructMember(Struct* str, String* name);
+StructMember* FindStructMemberByName(Struct* str, const char* name);
 StructMember* FindStructMemberWithAccess(Struct* str, String* name,
                                          CXXAccess* access,
                                          Struct** owner);
+StructMember* FindStructMemberWithAccessByName(Struct* str, const char* name,
+                                               CXXAccess* access,
+                                               Struct** owner);
 StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
                                                   CXXAccess* access,
                                                   Struct** owner,
                                                   int* byte_offset);
+StructMember* FindStructMemberWithAccessAndOffsetByName(
+    Struct* str, const char* name, CXXAccess* access, Struct** owner,
+    int* byte_offset);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 bool StructHasVirtualBases(Struct* str);
 Symbol* StructFindVBTableSymbol(Struct* complete, Struct* source,

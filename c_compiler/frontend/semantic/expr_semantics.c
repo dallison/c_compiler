@@ -290,11 +290,9 @@ static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
   }
   if (CompilerIsCXX() && TypeIsStructOrUnion(node->sub->type) &&
       node->sub->type->info.struct_info != NULL) {
-    String name;
-    StringInit(&name, "operator co_await");
     StructMember* member =
-        FindStructMember(node->sub->type->info.struct_info, &name);
-    StringDestruct(&name);
+        FindStructMemberByName(node->sub->type->info.struct_info,
+                               "operator co_await");
     if (member != NULL && member->is_member_function) {
       ASTNode* receiver = ASTNodeMove(node->sub);
       ASTNode* call = NewOperatorMemberCall(receiver, "operator co_await", NULL,
@@ -306,11 +304,9 @@ static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
   if (CompilerIsCXX() && node->sub != NULL &&
       TypeIsStructOrUnion(node->sub->type) &&
       node->sub->type->info.struct_info != NULL) {
-    String await_ready_name;
-    StringInit(&await_ready_name, "await_ready");
     StructMember* await_ready =
-        FindStructMember(node->sub->type->info.struct_info, &await_ready_name);
-    StringDestruct(&await_ready_name);
+        FindStructMemberByName(node->sub->type->info.struct_info,
+                               "await_ready");
     already_awaiter = await_ready != NULL && await_ready->is_member_function;
   }
   if (CompilerIsCXX() && !already_awaiter && node->sub != NULL &&
@@ -329,16 +325,14 @@ static void AnalyzeCoAwaitExpression(UnaryASTNode* node) {
   StructMember* await_resume = NULL;
   if (TypeIsStructOrUnion(awaitable_type) &&
       awaitable_type->info.struct_info != NULL) {
-    String name;
-    StringInit(&name, "await_ready");
     StructMember* await_ready =
-        FindStructMember(awaitable_type->info.struct_info, &name);
-    StringSet(&name, "await_suspend");
+        FindStructMemberByName(awaitable_type->info.struct_info,
+                               "await_ready");
     StructMember* await_suspend =
-        FindStructMember(awaitable_type->info.struct_info, &name);
-    StringSet(&name, "await_resume");
-    await_resume = FindStructMember(awaitable_type->info.struct_info, &name);
-    StringDestruct(&name);
+        FindStructMemberByName(awaitable_type->info.struct_info,
+                               "await_suspend");
+    await_resume = FindStructMemberByName(awaitable_type->info.struct_info,
+                                          "await_resume");
     if (await_ready == NULL || !await_ready->is_member_function) {
       SemanticError((ASTNode*)node, "awaiter is missing await_ready");
     }
@@ -368,6 +362,36 @@ static void AnalyzeCoYieldExpression(UnaryASTNode* node) {
   if (compiler->current_function == NULL ||
       !compiler->current_function->info.function.is_coroutine) {
     SemanticError((ASTNode*)node, "co_yield used outside a coroutine");
+  }
+  TypeRecord* promise =
+      compiler->current_function != NULL
+          ? compiler->current_function->info.function.coroutine_promise_type
+          : NULL;
+  StructMember* yield_value = NULL;
+  if (TypeIsStructOrUnion(promise) && promise->info.struct_info != NULL) {
+    yield_value = FindStructMemberByName(promise->info.struct_info,
+                                         "yield_value");
+  }
+  TypeRecord* awaiter_type =
+      yield_value != NULL && yield_value->symbol != NULL &&
+              TypeIsFunction(yield_value->symbol->type)
+          ? yield_value->symbol->type->next
+          : NULL;
+  StructMember* await_resume = NULL;
+  if (TypeIsStructOrUnion(awaiter_type) &&
+      awaiter_type->info.struct_info != NULL) {
+    await_resume = FindStructMemberByName(awaiter_type->info.struct_info,
+                                          "await_resume");
+  }
+  if (await_resume != NULL && await_resume->symbol != NULL &&
+      TypeIsFunction(await_resume->symbol->type) &&
+      await_resume->symbol->type->next != NULL) {
+    ASTNodeSetType((ASTNode*)node, await_resume->symbol->type->next);
+    return;
+  }
+  if (yield_value != NULL) {
+    SemanticError((ASTNode*)node,
+                  "coroutine yield_value return type is invalid");
   }
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
@@ -752,18 +776,17 @@ static ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
     return NULL;
   }
 
-  String name;
-  StringInit(&name, op_name);
-  StructMember* member = FindStructMember(node->sub->type->info.struct_info,
-                                          &name);
+  StructMember* member =
+      FindStructMemberByName(node->sub->type->info.struct_info, op_name);
   if (member != NULL && member->is_member_function) {
     ASTNode* receiver = ASTNodeMove(node->sub);
     ASTNode* call = NewOperatorMemberCall(receiver, op_name, NULL,
                                           node->base.location);
-    StringDestruct(&name);
     return ReplaceUnaryWithCall(node, call);
   }
 
+  String name;
+  StringInit(&name, op_name);
   Vector actuals;
   VectorInit(&actuals);
   VectorAppend(&actuals, node->sub);
@@ -814,11 +837,9 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
     return NULL;
   }
 
-  String name;
-  StringInit(&name, op_name);
   bool postfix = IsPostIncDec(node->base.op);
-  StructMember* member = FindStructMember(node->sub->type->info.struct_info,
-                                          &name);
+  StructMember* member =
+      FindStructMemberByName(node->sub->type->info.struct_info, op_name);
   if (member != NULL && member->is_member_function) {
     Vector* actuals = NewVector();
     if (postfix) {
@@ -827,10 +848,11 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
     ASTNode* call =
         NewOperatorMemberCall(ASTNodeMove(node->sub), op_name, actuals,
                               node->base.location);
-    StringDestruct(&name);
     return ReplaceUnaryWithCall(node, call);
   }
 
+  String name;
+  StringInit(&name, op_name);
   Vector lookup_actuals;
   VectorInit(&lookup_actuals);
   VectorAppend(&lookup_actuals, node->sub);
@@ -865,11 +887,9 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     return NULL;
   }
 
-  String name;
-  StringInit(&name, op_name);
   if (TypeIsStructOrUnion(node->left->type)) {
     StructMember* member =
-        FindStructMember(node->left->type->info.struct_info, &name);
+        FindStructMemberByName(node->left->type->info.struct_info, op_name);
     if (member != NULL && member->is_member_function) {
       ASTNode* left = ASTNodeMove(node->left);
       ASTNode* right = ASTNodeMove(node->right);
@@ -884,11 +904,12 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
       ASTNode* call = NewVectorASTNode(AST_OP(call), NULL,
                                        node->base.location, member_access,
                                        actuals);
-      StringDestruct(&name);
       return ReplaceBinaryWithCall(node, call);
     }
   }
 
+  String name;
+  StringInit(&name, op_name);
   Vector lookup_actuals;
   VectorInit(&lookup_actuals);
   VectorAppend(&lookup_actuals, node->left);
@@ -1763,19 +1784,19 @@ static ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
   if (CompilerIsCXX() && TypeIsStructOrUnion(node->left->type)) {
-    String name;
-    StringInit(&name, "operator[]");
     StructMember* member =
-        FindStructMember(node->left->type->info.struct_info, &name);
+        FindStructMemberByName(node->left->type->info.struct_info,
+                               "operator[]");
     if (member != NULL && member->is_member_function) {
       Vector* actuals = NewVector();
       VectorAppend(actuals, ASTNodeMove(node->right));
       ASTNode* call = NewOperatorMemberCall(ASTNodeMove(node->left),
                                             "operator[]", actuals,
                                             node->base.location);
-      StringDestruct(&name);
       return ReplaceBinaryWithCall(node, call);
     }
+    String name;
+    StringInit(&name, "operator[]");
     Vector lookup_actuals;
     VectorInit(&lookup_actuals);
     VectorAppend(&lookup_actuals, node->left);
@@ -3294,12 +3315,9 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
     return NULL;
   }
 
-  String name;
-  StringInit(&name, "operator()");
-  StructMember* member = FindStructMember(node->left->type->info.struct_info,
-                                          &name);
+  StructMember* member =
+      FindStructMemberByName(node->left->type->info.struct_info, "operator()");
   if (member == NULL || !member->is_member_function) {
-    StringDestruct(&name);
     return NULL;
   }
 
@@ -3320,7 +3338,6 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   ASTNode* call =
       NewOperatorMemberCall(receiver, "operator()", actuals,
                             node->base.location);
-  StringDestruct(&name);
   return ReplaceVectorWithCall(node, call);
 }
 
@@ -3546,18 +3563,14 @@ static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
     return NULL;
   }
 
-  String name;
-  StringInit(&name, "operator->");
-  StructMember* member = FindStructMember(receiver->type->info.struct_info,
-                                          &name);
+  StructMember* member =
+      FindStructMemberByName(receiver->type->info.struct_info, "operator->");
   if (member == NULL || !member->is_member_function) {
-    StringDestruct(&name);
     return NULL;
   }
 
   ASTNode* call = NewOperatorMemberCall(ASTNodeMove(receiver), "operator->",
                                         NULL, location);
-  StringDestruct(&name);
   return AnalyzeExpression(call);
 }
 

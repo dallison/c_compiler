@@ -529,6 +529,7 @@ void X86_64GeneratorInit(X86_64Generator* rv, Generator* gen) {
   rv->num_int_reg_vars = 0;
   rv->num_fp_reg_vars = 0;
   rv->struct_return_reg = -1;
+  rv->struct_return_spill_offset = 0;
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->not_leaf = false;
@@ -577,6 +578,7 @@ static void ResolveExceptionRanges(X86_64Generator* rv, Generator* gen) {
     try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
     try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
     catch_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |= TARGET_INST_EXCEPTION_LANDING;
     X86_64ExceptionRange* range = malloc(sizeof(X86_64ExceptionRange));
     range->try_start = try_start;
     range->try_end = try_end;
@@ -4463,6 +4465,14 @@ void X86_64Lower(X86_64Generator* rv, Generator* gen) {
   // register now.
   if (TypeIsStructOrUnion(gen->func->next)) {
     rv->struct_return_reg = rv->num_int_reg_vars++;
+    rv->struct_return_spill_offset =
+        -16 - rv->saved_arg_area_size - 8;
+    rv->saved_arg_area_size += 8;
+    VectorAppend(&rv->saved_regs,
+                 NewSavedArgumentRegister(X86_64_INT_ARG_START,
+                                          X86_64_FP_REG,
+                                          rv->struct_return_spill_offset,
+                                          /*is_fp=*/false, 8));
   }
 
   // Emit the prologue (save) BEFORE lowering variables.  LowerVariables emits

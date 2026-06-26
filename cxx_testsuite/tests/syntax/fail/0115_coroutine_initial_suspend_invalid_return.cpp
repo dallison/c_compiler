@@ -1,5 +1,17 @@
 // RUN: -std=c++20
-// EXPECT: coroutine parameter live across suspension requires a copy or move constructor
+// EXPECT: await_suspend must return void, bool, void*, or a coroutine handle
+
+struct BadSuspendReturn {
+  bool await_ready(void) {
+    return false;
+  }
+  int await_suspend(void* handle) {
+    (void)handle;
+    return 1;
+  }
+  void await_resume(void) {
+  }
+};
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -10,25 +22,6 @@ struct SuspendNever {
   }
   void await_resume(void) {
   }
-};
-
-struct Awaiter {
-  int value;
-  bool await_ready(void) {
-    return false;
-  }
-  void await_suspend(void* handle) {
-    (void)handle;
-  }
-  int await_resume(void) {
-    return value;
-  }
-};
-
-struct Box {
-  int value;
-  Box(const Box& other) = delete;
-  Box(Box&& other) = delete;
 };
 
 struct Promise;
@@ -44,8 +37,8 @@ struct Promise {
     Task task = {value};
     return task;
   }
-  SuspendNever initial_suspend(void) {
-    SuspendNever awaiter = {};
+  BadSuspendReturn initial_suspend(void) {
+    BadSuspendReturn awaiter = {};
     return awaiter;
   }
   SuspendNever final_suspend(void) {
@@ -59,8 +52,6 @@ struct Promise {
   }
 };
 
-Task rejected_live_class_parameter(Box box) {
-  Awaiter awaiter = {5};
-  int value = co_await awaiter;
-  co_return box.value + value;
+Task rejected_initial_suspend_return(void) {
+  co_return 1;
 }

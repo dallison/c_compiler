@@ -53,7 +53,9 @@ typedef struct {
   StructMember* member;
   StructMember* constructed_member;
   bool is_parameter;
+  bool is_catch_parameter;
   bool move_parameter;
+  CompoundStatementASTNode* store_compound;
 } CoroutinePersistedLocal;
 
 typedef struct {
@@ -68,6 +70,8 @@ typedef struct {
   StructMember* promise_constructed;
   StructMember* initial_awaiter;
   StructMember* initial_awaiter_constructed;
+  StructMember* final_awaiter;
+  StructMember* final_awaiter_constructed;
   Vector owned_symbols;
   VariableDeclarationASTNode* decl;
 } CoroutineFrame;
@@ -83,23 +87,44 @@ static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
                                               const char* member_name,
                                               Vector* actuals,
                                               SourceLocation location);
+static StructMember* FindCoroutinePromiseMember(TypeRecord* promise_type,
+                                                const char* name);
 static ASTNode* NewNullPointerConstant(SourceLocation location);
 static ASTNode* NewAwaiterMemberCall(ASTNode* awaiter,
                                      const char* member_name,
                                      SourceLocation location);
+static bool TypeIsCoroutineHandle(TypeRecord* type);
 static ASTNode* NewAwaitResumeStatement(Symbol* awaiter,
                                         SourceLocation location);
 static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
                                            SourceLocation location);
+static TypeRecord* CoAwaitOperandType(ASTNode* co_await);
+static TypeRecord* CoAwaitResultType(ASTNode* co_await);
+static TypeRecord* CoYieldResultType(ASTNode* co_yield);
 static const char* CXXConstructorNameForType(TypeRecord* type);
 static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
                                                    TypeRecord* type);
 static void ResetCompoundStatementParents(CompoundStatementASTNode* compound);
+static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
+                                             ASTNode* stmt,
+                                             size_t at_index);
+static void NormalizeNestedSuspensionsInCompound(
+    CompoundStatementASTNode* compound);
 static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          Symbol* symbol,
                                          StructMember* member,
                                          StructMember* constructed_member,
                                          bool construct_at_start);
+static void AppendCoroutineFrameBodyDestructors(Vector* statements,
+                                                CoroutineFrame* frame,
+                                                SourceLocation location);
+static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
+                                              CoroutineFrame* frame,
+                                              Symbol* promise,
+                                              ASTNode* await_suspend,
+                                              TypeRecord* await_suspend_return,
+                                              TypeRecord* return_type,
+                                              SourceLocation location);
 
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
   (void)data;
@@ -112,11 +137,8 @@ static StructMember* FindAwaiterMember(TypeRecord* awaiter_type,
       awaiter_type->info.struct_info == NULL) {
     return NULL;
   }
-  String member_name;
-  StringInit(&member_name, name);
   StructMember* member =
-      FindStructMember(awaiter_type->info.struct_info, &member_name);
-  StringDestruct(&member_name);
+      FindStructMemberByName(awaiter_type->info.struct_info, name);
   for (StructMember* candidate = member; candidate != NULL;
        candidate = candidate->overload_next) {
     if (candidate->is_member_function) {
@@ -182,8 +204,11 @@ static bool ValidateCoAwaiterType(ASTNode* node, TypeRecord* awaiter_type) {
   }
   if (await_suspend_return != NULL && !TypeIsVoid(await_suspend_return) &&
       !TypeIsBool(await_suspend_return) &&
-      !TypeIsVoidPointer(await_suspend_return)) {
-    SemanticError(node, "await_suspend return type is not supported yet");
+      !TypeIsVoidPointer(await_suspend_return) &&
+      !TypeIsCoroutineHandle(await_suspend_return)) {
+    SemanticError(node,
+                  "await_suspend must return void, bool, void*, or a "
+                  "coroutine handle");
     return false;
   }
   if (FindAwaiterMember(awaiter_type, "await_resume") == NULL) {
@@ -566,6 +591,96 @@ static ASTNode* NewFrameAddress(CoroutineFrame* frame,
   return NewIdentifierASTNode(frame->symbol, location);
 }
 
+static Symbol* AwaitSuspendFirstUserFormal(Symbol* awaiter) {
+  StructMember* await_suspend =
+      awaiter != NULL ? FindAwaiterMember(awaiter->type, "await_suspend") : NULL;
+  if (await_suspend == NULL || await_suspend->symbol == NULL ||
+      await_suspend->symbol->type == NULL ||
+      !TypeIsFunction(await_suspend->symbol->type)) {
+    return NULL;
+  }
+  FunctionInfo* info = &await_suspend->symbol->type->info.function;
+  size_t formal_index = await_suspend->is_member_function ? 1 : 0;
+  if (formal_index >= info->prototype.length) {
+    return NULL;
+  }
+  return info->prototype.value.p[formal_index];
+}
+
+static Symbol* FindCoroutineHandleFromAddress(TypeRecord* handle_type) {
+  if (handle_type == NULL || !TypeIsStructOrUnion(handle_type) ||
+      handle_type->info.struct_info == NULL) {
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMemberByName(handle_type->info.struct_info, "from_address");
+  for (StructMember* candidate = member; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || !candidate->is_static ||
+        candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        candidate->symbol->type->info.function.prototype.length != 1 ||
+        candidate->symbol->type->next == NULL) {
+      continue;
+    }
+    Symbol* formal = candidate->symbol->type->info.function.prototype.value.p[0];
+    if (formal != NULL && TypeIsVoidPointer(formal->type)) {
+      return candidate->symbol;
+    }
+  }
+  return NULL;
+}
+
+static Symbol* FindCoroutineHandleAddress(TypeRecord* handle_type) {
+  if (handle_type == NULL || !TypeIsStructOrUnion(handle_type) ||
+      handle_type->info.struct_info == NULL) {
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMemberByName(handle_type->info.struct_info, "address");
+  for (StructMember* candidate = member; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->is_static ||
+        candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        candidate->symbol->type->next == NULL) {
+      continue;
+    }
+    if (TypeIsVoidPointer(candidate->symbol->type->next)) {
+      return candidate->symbol;
+    }
+  }
+  return NULL;
+}
+
+static bool TypeIsCoroutineHandle(TypeRecord* type) {
+  return FindCoroutineHandleFromAddress(type) != NULL &&
+         FindCoroutineHandleAddress(type) != NULL;
+}
+
+static ASTNode* NewAwaitSuspendHandleArgument(CoroutineFrame* frame,
+                                             Symbol* awaiter,
+                                             SourceLocation location) {
+  Symbol* formal = AwaitSuspendFirstUserFormal(awaiter);
+  TypeRecord* formal_type = formal != NULL ? formal->type : NULL;
+  if (TypeIsReference(formal_type)) {
+    formal_type = formal_type->next;
+  }
+  if (TypeIsStructOrUnion(formal_type)) {
+    Symbol* from_address = FindCoroutineHandleFromAddress(formal_type);
+    if (from_address != NULL) {
+      Vector* actuals = NewVector();
+      VectorAppend(actuals, NewFrameAddress(frame, location));
+      ASTNode* call = NewVectorASTNode(
+          AST_OP(call), TypeRecordCopy(from_address->type->next), location,
+          NewIdentifierASTNode(from_address, location), actuals);
+      ASTNodeSetType(call, TypeRecordCopy(from_address->type->next));
+      return call;
+    }
+  }
+  return NewFrameAddress(frame, location);
+}
+
 static ASTNode* NewFrameMemberAccess(CoroutineFrame* frame,
                                      StructMember* member,
                                      SourceLocation location) {
@@ -634,10 +749,8 @@ static StructMember* FindCXXConstructorForType(TypeRecord* type) {
   if (constructor_name == NULL || type->info.struct_info == NULL) {
     return NULL;
   }
-  String name;
-  StringInit(&name, constructor_name);
-  StructMember* ctor = FindStructMember(type->info.struct_info, &name);
-  StringDestruct(&name);
+  StructMember* ctor =
+      FindStructMemberByName(type->info.struct_info, constructor_name);
   if (ctor == NULL || !ctor->is_member_function ||
       ctor->symbol == NULL || ctor->symbol->type == NULL ||
       !TypeIsFunction(ctor->symbol->type) ||
@@ -776,6 +889,78 @@ static bool ValidateCoroutineFrameOwnedAwaiterConstructible(ASTNode* node,
   return false;
 }
 
+static bool CXXTemporaryConstructionActualsCanBeTaken(ASTNode* expr,
+                                                      TypeRecord* type) {
+  if (expr == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  if (expr->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)expr;
+    return call->left != NULL && TypeIsStructOrUnion(call->left->type) &&
+           call->left->type->info.struct_info == type->info.struct_info;
+  }
+  if (expr->op != AST_OP(comma)) {
+    return false;
+  }
+  BinaryASTNode* comma = (BinaryASTNode*)expr;
+  if (comma->right == NULL || !TypeIsStructOrUnion(comma->right->type) ||
+      comma->right->type->info.struct_info != type->info.struct_info ||
+      comma->left == NULL || comma->left->op != AST_OP(call)) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)comma->left;
+  if (call->left == NULL) {
+    return false;
+  }
+  if (call->left->op == AST_OP(identifier)) {
+    Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+    return callee != NULL && callee->type != NULL &&
+           TypeIsFunction(callee->type) &&
+           callee->type->info.function.is_constructor &&
+           callee->type->info.function.cxx_member_owner ==
+               type->info.struct_info;
+  }
+  if (call->left->op == AST_OP(dot)) {
+    BinaryASTNode* member_access = (BinaryASTNode*)call->left;
+    TypeRecord* receiver_type =
+        member_access->left != NULL ? member_access->left->type : NULL;
+    return TypeIsStructOrUnion(receiver_type) &&
+           receiver_type->info.struct_info == type->info.struct_info;
+  }
+  return false;
+}
+
+static bool SuspensionPointCanDirectConstructFrameAwaiter(
+    SuspensionPoint* point) {
+  return point != NULL && point->kind == kSuspensionCoAwait &&
+         point->awaiter != NULL && point->awaiter->type != NULL &&
+         point->awaiter_init != NULL &&
+         FindCXXConstructorForType(point->awaiter->type) != NULL &&
+         CXXTemporaryConstructionActualsCanBeTaken(point->awaiter_init,
+                                                  point->awaiter->type);
+}
+
+static bool ValidateCoroutineSuspensionPointFrameAwaiterConstructible(
+    SuspensionPoint* point) {
+  if (point == NULL || point->kind != kSuspensionCoAwait ||
+      point->awaiter == NULL) {
+    return true;
+  }
+  TypeRecord* type = point->awaiter->type;
+  if (!CoroutineFrameOwnedTypeNeedsCXXLifetime(type) ||
+      FindCXXCopyConstructorForType(type) != NULL ||
+      (point->awaiter_init != NULL &&
+       FindCXXMoveConstructorForType(type) != NULL) ||
+      SuspensionPointCanDirectConstructFrameAwaiter(point)) {
+    return true;
+  }
+  SemanticError(point->co_await,
+                "coroutine frame-owned awaiter requires a copy or move "
+                "constructor");
+  return false;
+}
+
 static bool CoroutineTypeCanBeCopyConstructed(TypeRecord* type) {
   return !CoroutineFrameOwnedTypeNeedsCXXLifetime(type) ||
          FindCXXCopyConstructorForType(type) != NULL;
@@ -783,6 +968,12 @@ static bool CoroutineTypeCanBeCopyConstructed(TypeRecord* type) {
 
 static bool CoroutineTypeCanBeMoveConstructed(TypeRecord* type) {
   return CoroutineFrameOwnedTypeNeedsCXXLifetime(type) &&
+         FindCXXMoveConstructorForType(type) != NULL;
+}
+
+static bool CoroutineFrameAwaiterShouldMove(TypeRecord* type) {
+  return CoroutineFrameOwnedTypeNeedsCXXLifetime(type) &&
+         FindCXXCopyConstructorForType(type) == NULL &&
          FindCXXMoveConstructorForType(type) != NULL;
 }
 
@@ -796,6 +987,17 @@ static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
   ((CastASTNode*)cast)->kind = kCastStatic;
   cast->value_category = kValueCategoryXvalue;
   return cast;
+}
+
+static ASTNode* NewCoroutineFrameAwaiterInitializer(Symbol* symbol,
+                                                   SourceLocation location) {
+  if (symbol == NULL) {
+    return NULL;
+  }
+  if (CoroutineFrameAwaiterShouldMove(symbol->type)) {
+    return NewCoroutineMoveExpression(symbol, location);
+  }
+  return NewIdentifierASTNode(symbol, location);
 }
 
 static ASTNode* NewCoroutineFrameMemberConstructorCallWithActuals(
@@ -1035,6 +1237,70 @@ static ASTNode* NewCoroutineReturnObjectStatement(Symbol* promise,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static StructMember* FindCoroutineAllocationFailureMember(
+    TypeRecord* promise_type) {
+  StructMember* member =
+      FindCoroutinePromiseMember(promise_type,
+                                 "get_return_object_on_allocation_failure");
+  for (StructMember* candidate = member; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->is_member_function && candidate->is_static &&
+        candidate->symbol != NULL && candidate->symbol->type != NULL &&
+        TypeIsFunction(candidate->symbol->type) &&
+        candidate->symbol->type->info.function.prototype.length == 0 &&
+        candidate->symbol->type->next != NULL) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* NewCoroutineAllocationFailureReturnStatement(
+    StructMember* failure_member,
+    TypeRecord* return_type,
+    SourceLocation location) {
+  ASTNode* return_object = NewVectorASTNode(
+      AST_OP(call), TypeRecordCopy(return_type), location,
+      NewIdentifierASTNode(failure_member->symbol, location), NewVector());
+  Symbol* result =
+      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(return_type));
+  result->flags.is_local = true;
+  result->flags.is_defined = true;
+  result->location = location;
+  Vector* decls = NewVector();
+  VectorAppend(decls,
+               NewVariableDeclarationASTNode(
+                   result, NewExpressionInitializerASTNode(return_object,
+                                                           location),
+                   location));
+  Vector* statements = NewVector();
+  VectorAppend(statements, NewDeclarationListASTNode(decls, location));
+  ASTNode* return_stmt =
+      NewCombinedStatementASTNode(AST_OP(return),
+                                  NewIdentifierASTNode(result, location),
+                                  NULL, location);
+  return_stmt->flags |= kASTCoroutineLoweredReturn;
+  VectorAppend(statements, return_stmt);
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static ASTNode* NewCoroutineAllocationFailureIf(CoroutineFrame* frame,
+                                                StructMember* failure_member,
+                                                TypeRecord* return_type,
+                                                SourceLocation location) {
+  ASTNode* condition =
+      NewBinaryASTNode(AST_OP(equal),
+                       NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                       location,
+                       NewIdentifierASTNode(frame->symbol, location),
+                       NewNullPointerConstant(location));
+  return NewIfStatementASTNode(
+      condition,
+      NewCoroutineAllocationFailureReturnStatement(failure_member, return_type,
+                                                  location),
+      NULL, false, location);
+}
+
 static ASTNode* LowerReadyCoAwaitExpression(UnaryASTNode* co_await) {
   SourceLocation location = co_await->base.location;
   ASTNode* awaiter = ASTNodeMove(co_await->sub);
@@ -1091,10 +1357,8 @@ static TypeRecord* ResolveDirectCoroutinePromiseType(TypeRecord* return_type) {
       return_type->info.struct_info == NULL) {
     return NULL;
   }
-  String name;
-  StringInit(&name, "promise_type");
-  StructMember* member = FindStructMember(return_type->info.struct_info, &name);
-  StringDestruct(&name);
+  StructMember* member =
+      FindStructMemberByName(return_type->info.struct_info, "promise_type");
   if (member == NULL || member->symbol == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef)) ||
       member->symbol->type == NULL) {
@@ -1103,17 +1367,84 @@ static TypeRecord* ResolveDirectCoroutinePromiseType(TypeRecord* return_type) {
   return TypeRecordCalculateSize(TypeRecordCopy(member->symbol->type));
 }
 
+static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  assert(arg != NULL);
+  arg->kind = kTemplateParameterType;
+  arg->type = TypeRecordCopy(type);
+  arg->int_value = 0;
+  arg->template_parameter_index = -1;
+  return arg;
+}
+
+static TypeRecord* ResolveCoroutineTraitsPromiseType(TypeRecord* function_type) {
+  if (!CompilerIsCXX() || function_type == NULL ||
+      !TypeIsFunction(function_type) || function_type->next == NULL) {
+    return NULL;
+  }
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  if (std_ns == NULL) {
+    return NULL;
+  }
+
+  String traits_name;
+  StringInit(&traits_name, "coroutine_traits");
+  Symbol* traits = NamespaceFindSymbol(std_ns, &traits_name);
+  StringDestruct(&traits_name);
+  if (traits == NULL || !traits->flags.is_template ||
+      traits->type == NULL || !TypeIsStructOrUnion(traits->type)) {
+    return NULL;
+  }
+
+  Vector* args = NewVector();
+  VectorAppend(args, NewCoroutineTypeTemplateArgument(function_type->next));
+  FunctionInfo* info = &function_type->info.function;
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = info->prototype.value.p[i];
+    if (formal == NULL || formal->type == NULL) {
+      continue;
+    }
+    VectorAppend(args, NewCoroutineTypeTemplateArgument(formal->type));
+  }
+  if (traits->type->info.struct_info == NULL ||
+      args->length > traits->type->info.struct_info->template_parameters.length) {
+    VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  TypeRecord* traits_type =
+      TypeInstantiateClassTemplate(&compiler->syntax, traits, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  TypeRecord* promise_type = ResolveDirectCoroutinePromiseType(traits_type);
+  TypeRecordDelete(traits_type);
+  return promise_type;
+}
+
+static TypeRecord* ResolveCoroutinePromiseType(TypeRecord* function_type) {
+  TypeRecord* promise = ResolveCoroutineTraitsPromiseType(function_type);
+  if (promise != NULL) {
+    return promise;
+  }
+  return function_type != NULL && TypeIsFunction(function_type)
+             ? ResolveDirectCoroutinePromiseType(function_type->next)
+             : NULL;
+}
+
 static StructMember* FindCoroutinePromiseMember(TypeRecord* promise_type,
                                                 const char* name) {
   if (promise_type == NULL || !TypeIsStructOrUnion(promise_type) ||
       promise_type->info.struct_info == NULL) {
     return NULL;
   }
-  String member_name;
-  StringInit(&member_name, name);
   StructMember* member =
-      FindStructMember(promise_type->info.struct_info, &member_name);
-  StringDestruct(&member_name);
+      FindStructMemberByName(promise_type->info.struct_info, name);
   for (StructMember* candidate = member; candidate != NULL;
        candidate = candidate->overload_next) {
     if (candidate->is_member_function) {
@@ -1141,6 +1472,111 @@ static TypeRecord* CoroutinePromiseMemberReturnType(TypeRecord* promise,
     return NULL;
   }
   return member->symbol->type->next;
+}
+
+static bool ValidateCoroutinePromiseAwaiterReturn(ASTNode* node,
+                                                  TypeRecord* promise,
+                                                  const char* name) {
+  TypeRecord* awaiter_type = CoroutinePromiseMemberReturnType(promise, name);
+  if (awaiter_type == NULL) {
+    SemanticError(node, "coroutine %s return type is invalid", name);
+    return false;
+  }
+  if (!TypeIsStructOrUnion(awaiter_type) ||
+      awaiter_type->info.struct_info == NULL) {
+    SemanticError(node, "coroutine %s return type is invalid", name);
+    return false;
+  }
+  return ValidateCoAwaiterType(node, awaiter_type);
+}
+
+static Symbol* CoroutinePromiseMemberUserFormal(StructMember* member,
+                                                size_t index) {
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !TypeIsFunction(member->symbol->type)) {
+    return NULL;
+  }
+  FunctionInfo* info = &member->symbol->type->info.function;
+  size_t formal_index = member->is_member_function ? index + 1 : index;
+  if (formal_index >= info->prototype.length) {
+    return NULL;
+  }
+  return info->prototype.value.p[formal_index];
+}
+
+static StructMember* FindCoroutinePromiseAwaitTransform(TypeRecord* promise,
+                                                        ASTNode* operand,
+                                                        bool* has_transform) {
+  StructMember* member = FindCoroutinePromiseMember(promise, "await_transform");
+  if (member != NULL && has_transform != NULL) {
+    *has_transform = true;
+  }
+  StructMember* best = NULL;
+  int best_score = -1;
+  bool ambiguous = false;
+  for (StructMember* candidate = member; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        candidate->symbol->type->next == NULL) {
+      continue;
+    }
+    Symbol* formal = CoroutinePromiseMemberUserFormal(candidate, 0);
+    if (formal == NULL ||
+        CoroutinePromiseMemberUserFormal(candidate, 1) != NULL) {
+      continue;
+    }
+    int score = CoAwaitOperatorFormalScore(formal->type, operand,
+                                           operand != NULL ? operand->type
+                                                           : NULL);
+    if (score < 0) {
+      continue;
+    }
+    if (best == NULL || score < best_score) {
+      best = candidate;
+      best_score = score;
+      ambiguous = false;
+    } else if (score == best_score) {
+      ambiguous = true;
+    }
+  }
+  if (ambiguous) {
+    SemanticError(operand, "Ambiguous overload for await_transform");
+    return NULL;
+  }
+  return best;
+}
+
+static bool ApplyPromiseAwaitTransform(UnaryASTNode* co_await,
+                                       Symbol* promise,
+                                       bool* error) {
+  if (!CompilerIsCXX() || co_await == NULL || co_await->sub == NULL ||
+      promise == NULL || promise->type == NULL) {
+    return false;
+  }
+  bool has_transform = false;
+  StructMember* member = FindCoroutinePromiseAwaitTransform(
+      promise->type, co_await->sub, &has_transform);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL || !TypeIsFunction(member->symbol->type) ||
+      member->symbol->type->next == NULL) {
+    if (has_transform) {
+      SemanticError(co_await->sub, "No viable overload for await_transform");
+      if (error != NULL) {
+        *error = true;
+      }
+    }
+    return false;
+  }
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, ASTNodeMove(co_await->sub));
+  ASTNode* transformed = NewCoroutinePromiseMemberCall(
+      promise, "await_transform", actuals, co_await->base.location);
+  ASTNodeSetType(transformed, TypeRecordCopy(member->symbol->type->next));
+  ASTNodeReplaceChild((ASTNode*)co_await, 0, transformed, true);
+  return true;
 }
 
 static bool AwaiterTypeIsAlwaysReady(TypeRecord* awaiter_type) {
@@ -1176,6 +1612,8 @@ static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
 
 static ASTNode* NewFinalSuspendStatement(Symbol* promise,
                                          CoroutineFrame* frame,
+                                         Symbol* final_awaiter,
+                                         TypeRecord* return_type,
                                          SourceLocation location) {
   ASTNode* final_suspend = NewCoroutinePromiseMemberCall(
       promise, "final_suspend", NewVector(), location);
@@ -1187,19 +1625,9 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
       AwaiterTypeIsAlwaysReady(final_awaiter_type)) {
     return NewExpressionStatementASTNode(final_suspend, location);
   }
-
-  Symbol* final_awaiter =
-      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(final_awaiter_type));
-  final_awaiter->flags.is_local = true;
-  final_awaiter->flags.is_defined = true;
-  final_awaiter->location = location;
-
-  Vector* decls = NewVector();
-  VectorAppend(decls,
-               NewVariableDeclarationASTNode(
-                   final_awaiter,
-                   NewExpressionInitializerASTNode(final_suspend, location),
-                   location));
+  if (frame->final_awaiter == NULL || final_awaiter == NULL) {
+    return NewExpressionStatementASTNode(final_suspend, location);
+  }
 
   ASTNode* ready_call =
       NewAwaiterMemberCall(NewIdentifierASTNode(final_awaiter, location),
@@ -1212,17 +1640,29 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
                            0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
                            location));
   Vector* suspend_actuals = NewVector();
-  VectorAppend(suspend_actuals, NewFrameAddress(frame, location));
+  VectorAppend(suspend_actuals,
+               NewAwaitSuspendHandleArgument(frame, final_awaiter, location));
   ASTNode* await_suspend = NewAwaiterMemberCallWithActuals(
       NewIdentifierASTNode(final_awaiter, location), "await_suspend",
       suspend_actuals, location);
+  TypeRecord* await_suspend_return = AwaiterAwaitSuspendReturnType(final_awaiter);
+  if (await_suspend_return != NULL) {
+    ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
+  }
+  Vector* suspend_statements = NewVector();
+  AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
+                                    await_suspend, await_suspend_return,
+                                    return_type, location);
 
   Vector* statements = NewVector();
-  VectorAppend(statements, NewDeclarationListASTNode(decls, location));
+  VectorAppend(statements,
+               NewFrameMemberInitialization(frame, frame->final_awaiter,
+                                            frame->final_awaiter_constructed,
+                                            final_suspend, location));
   VectorAppend(statements,
                NewIfStatementASTNode(
                    not_ready,
-                   NewExpressionStatementASTNode(await_suspend, location),
+                   NewCompoundStatementASTNode(suspend_statements, location),
                    NULL, false, location));
   return NewCompoundStatementASTNode(statements, location);
 }
@@ -1230,6 +1670,7 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
 static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                        Symbol* promise,
                                        CoroutineFrame* frame,
+                                       Symbol* final_awaiter,
                                        TypeRecord* coroutine_return_type) {
   SourceLocation location = co_return->base.location;
   Vector* statements = NewVector();
@@ -1262,7 +1703,9 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                     NewNullPointerConstant(location),
                                     location));
   }
-  VectorAppend(statements, NewFinalSuspendStatement(promise, frame, location));
+  VectorAppend(statements,
+               NewFinalSuspendStatement(promise, frame, final_awaiter,
+                                        coroutine_return_type, location));
 
   ASTNode* return_object =
       NewCoroutineReturnObjectStatement(promise, coroutine_return_type,
@@ -1271,121 +1714,124 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
   return NewCompoundStatementASTNode(statements, location);
 }
 
-static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
-                                      CoroutineFrame* frame,
-                                      TypeRecord* coroutine_return_type);
+static ASTNode* NewCoroutineUnhandledExceptionStatement(
+    Symbol* promise,
+    CoroutineFrame* frame,
+    Symbol* final_awaiter,
+    TypeRecord* coroutine_return_type,
+    SourceLocation location) {
+  Vector* statements = NewVector();
+  AppendCoroutineFrameBodyDestructors(statements, frame, location);
+  VectorAppend(statements,
+               NewExpressionStatementASTNode(
+                   NewCoroutinePromiseMemberCall(promise,
+                                                 "unhandled_exception",
+                                                 NewVector(), location),
+                   location));
+  if (frame != NULL) {
+    VectorAppend(statements,
+                 NewFrameIntAssignment(frame, frame->state, 0, location));
+    VectorAppend(statements,
+                 NewFrameIntAssignment(frame, frame->done, 1, location));
+  }
+  if (frame != NULL && frame->resume != NULL) {
+    VectorAppend(statements,
+                 NewFrameAssignment(frame, frame->resume,
+                                    NewNullPointerConstant(location),
+                                    location));
+  }
+  VectorAppend(statements,
+               NewFinalSuspendStatement(promise, frame, final_awaiter,
+                                        coroutine_return_type, location));
+  VectorAppend(statements,
+               NewCoroutineReturnObjectStatement(promise,
+                                                 coroutine_return_type,
+                                                 location));
+  return NewCompoundStatementASTNode(statements, location);
+}
 
-static void LowerCoReturnChild(ASTNode* parent, int child_id, Symbol* promise,
-                               CoroutineFrame* frame,
-                               TypeRecord* coroutine_return_type) {
-  ASTNode* child = NULL;
-  switch (parent->op) {
-    case AST_OP(if): {
-      IfStatementASTNode* if_node = (IfStatementASTNode*)parent;
-      child = child_id == 1 ? if_node->if_part : if_node->else_part;
-      break;
-    }
-    case AST_OP(while):
-    case AST_OP(do): {
-      child = ((CombinedStatementASTNode*)parent)->stmt;
-      break;
-    }
-    case AST_OP(for): {
-      if (child_id != 3) {
-        return;
-      }
-      child = ((ForStatementASTNode*)parent)->stmt;
-      break;
-    }
-    case AST_OP(switch): {
-      if (child_id != 1) {
-        return;
-      }
-      child = ((SwitchStatementASTNode*)parent)->stmt;
-      break;
-    }
-    case AST_OP(case): {
-      if (child_id != 1) {
-        return;
-      }
-      child = ((CaseLabelASTNode*)parent)->stmt;
-      break;
-    }
-    case AST_OP(label): {
-      if (child_id != 0) {
-        return;
-      }
-      child = ((LabelASTNode*)parent)->stmt;
-      break;
-    }
-    default:
-      return;
+typedef struct {
+  Symbol* promise;
+  CoroutineFrame* frame;
+  Symbol* final_awaiter;
+  TypeRecord* coroutine_return_type;
+} CoroutineStatementLowering;
+
+static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
+                                       ASTNodeTransformAction* action) {
+  (void)action;
+  if (node == NULL || node->op != AST_OP(co_return)) {
+    return node;
   }
-  if (child == NULL) {
-    return;
-  }
-  if (child->op == AST_OP(co_return)) {
-    ASTNodeReplaceChild(parent, child_id,
-                        LowerCoReturnStatement((CombinedStatementASTNode*)child,
-                                               promise, frame,
-                                               coroutine_return_type),
-                        true);
-    return;
-  }
-  LowerCoReturnsInStatement(child, promise, frame, coroutine_return_type);
+  CoroutineStatementLowering* lowering = data;
+  return LowerCoReturnStatement((CombinedStatementASTNode*)node,
+                                lowering->promise, lowering->frame,
+                                lowering->final_awaiter,
+                                lowering->coroutine_return_type);
 }
 
 static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
                                       CoroutineFrame* frame,
+                                      Symbol* final_awaiter,
                                       TypeRecord* coroutine_return_type) {
-  if (node == NULL) {
-    return;
+  CoroutineStatementLowering lowering = {
+      promise, frame, final_awaiter, coroutine_return_type};
+  ASTNodeVisitAndTransform(node, LowerCoReturnTransform, &lowering);
+}
+
+static bool IsThrowExpressionStatement(ASTNode* node) {
+  return node != NULL && node->op == AST_OP(expr) &&
+         ((ExpressionStatementASTNode*)node)->expr != NULL &&
+         ((ExpressionStatementASTNode*)node)->expr->op == AST_OP(throw);
+}
+
+static ASTNode* LowerCoroutineThrowStatement(ASTNode* throw_stmt,
+                                             Symbol* promise,
+                                             CoroutineFrame* frame,
+                                             Symbol* final_awaiter,
+                                             TypeRecord* coroutine_return_type) {
+  return NewCoroutineUnhandledExceptionStatement(
+      promise, frame, final_awaiter, coroutine_return_type,
+      throw_stmt != NULL ? throw_stmt->location : promise->location);
+}
+
+static ASTNode* LowerCoroutineThrowTransform(ASTNode* node, void* data,
+                                             ASTNodeTransformAction* action) {
+  if (node != NULL && node->op == AST_OP(try)) {
+    *action = kASTTransformSkipChildren;
+    return node;
   }
-  switch (node->op) {
-    case AST_OP(compound): {
-      CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
-      for (size_t i = 0; i < compound->statements->length; i++) {
-        ASTNode* stmt = compound->statements->value.p[i];
-        if (stmt != NULL && stmt->op == AST_OP(co_return)) {
-          ASTNode* lowered =
-              LowerCoReturnStatement((CombinedStatementASTNode*)stmt, promise,
-                                     frame, coroutine_return_type);
-          VectorSet(compound->statements, i, lowered);
-          lowered->parent = node;
-          lowered->child_id = (int)i;
-        } else {
-          LowerCoReturnsInStatement(stmt, promise, frame,
-                                    coroutine_return_type);
-        }
-      }
-      return;
-    }
-    case AST_OP(if):
-      LowerCoReturnChild(node, 1, promise, frame, coroutine_return_type);
-      LowerCoReturnChild(node, 2, promise, frame, coroutine_return_type);
-      return;
-    case AST_OP(while):
-    case AST_OP(do):
-    case AST_OP(switch):
-      LowerCoReturnChild(node, 1, promise, frame, coroutine_return_type);
-      return;
-    case AST_OP(for):
-      LowerCoReturnChild(node, 3, promise, frame, coroutine_return_type);
-      return;
-    case AST_OP(case):
-      LowerCoReturnChild(node, 1, promise, frame, coroutine_return_type);
-      return;
-    case AST_OP(label):
-      LowerCoReturnChild(node, 0, promise, frame, coroutine_return_type);
-      return;
-    default:
-      return;
+  if (!IsThrowExpressionStatement(node)) {
+    return node;
   }
+  CoroutineStatementLowering* lowering = data;
+  return LowerCoroutineThrowStatement(node, lowering->promise,
+                                      lowering->frame,
+                                      lowering->final_awaiter,
+                                      lowering->coroutine_return_type);
+}
+
+static void LowerCoroutineThrowsInStatement(ASTNode* node, Symbol* promise,
+                                            CoroutineFrame* frame,
+                                            Symbol* final_awaiter,
+                                            TypeRecord* coroutine_return_type) {
+  CoroutineStatementLowering lowering = {
+      promise, frame, final_awaiter, coroutine_return_type};
+  ASTNodeVisitAndTransform(node, LowerCoroutineThrowTransform, &lowering);
 }
 
 static ASTNode* UnwrapExpressionInitializer(ASTNode* initializer) {
   if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
     return ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer != NULL && initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    if (braced->initializers != NULL && braced->initializers->length == 1) {
+      return UnwrapExpressionInitializer(braced->initializers->value.p[0]);
+    }
+  }
+  if (initializer != NULL && initializer->op == AST_OP(designated_init)) {
+    return ((DesignatedInitializerASTNode*)initializer)->init;
   }
   return initializer;
 }
@@ -1397,29 +1843,936 @@ static ASTNode* VariableInitializerExpression(ASTNode* initializer) {
   return UnwrapExpressionInitializer(initializer);
 }
 
+typedef struct {
+  ASTNode* root;
+  ASTNode* found;
+  int count;
+  bool void_result;
+} SuspendedCoroutineExpressionSearch;
+
+static void FindNestedSuspendingCoAwait(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(co_await)) {
+    return;
+  }
+  SuspendedCoroutineExpressionSearch* search = data;
+  if (node == search->root || CoAwaitIsAlwaysReady(node)) {
+    return;
+  }
+  search->count++;
+  if (search->found == NULL) {
+    search->found = node;
+  }
+  if (TypeIsVoid(node->type)) {
+    search->void_result = true;
+  }
+}
+
+static void FindNestedSuspendingCoYield(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(co_yield)) {
+    return;
+  }
+  SuspendedCoroutineExpressionSearch* search = data;
+  if (node == search->root) {
+    return;
+  }
+  search->count++;
+  if (search->found == NULL) {
+    search->found = node;
+  }
+  if (TypeIsVoid(node->type)) {
+    search->void_result = true;
+  }
+}
+
+typedef struct {
+  ASTNode* root;
+  ASTNode* stop_parent;
+  bool unsafe;
+} CoroutineUnsafeSplitSearch;
+
+static bool FindUnsafeSplitAncestor(ASTNode* node, void* data) {
+  CoroutineUnsafeSplitSearch* search = data;
+  if (node == NULL || node == search->stop_parent) {
+    return false;
+  }
+  if (node->op == AST_OP(logand) || node->op == AST_OP(logor) ||
+      node->op == AST_OP(question) || node->op == AST_OP(colon) ||
+      node->op == AST_OP(comma)) {
+    search->unsafe = true;
+    return false;
+  }
+  return node != search->root;
+}
+
+static bool SuspensionHasUnsafeSplitAncestor(ASTNode* root, ASTNode* suspension) {
+  CoroutineUnsafeSplitSearch search = {
+      .root = root,
+      .stop_parent = root != NULL ? root->parent : NULL,
+  };
+  ASTNodeVisitUpwards(suspension != NULL ? suspension->parent : NULL,
+                      FindUnsafeSplitAncestor, &search);
+  return search.unsafe;
+}
+
+typedef struct {
+  Symbol* result;
+  ASTNode* lowering;
+  SourceLocation location;
+  ASTOpcode op;
+} ShortCircuitSuspensionTransform;
+
+static bool ASTNodeIsShortCircuitExpression(ASTNode* node) {
+  return node != NULL &&
+         (node->op == AST_OP(logand) || node->op == AST_OP(logor) ||
+          node->op == AST_OP(question) || node->op == AST_OP(comma));
+}
+
+static bool ASTContainsSuspendingCoAwait(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  SuspendedCoroutineExpressionSearch search = {NULL, NULL, 0, false};
+  ASTNodeVisit(expr, FindNestedSuspendingCoAwait, 0, &search);
+  return search.count > 0;
+}
+
+static bool ASTContainsSuspendingCoYield(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  SuspendedCoroutineExpressionSearch search = {NULL, NULL, 0, false};
+  ASTNodeVisit(expr, FindNestedSuspendingCoYield, 0, &search);
+  return search.count > 0;
+}
+
+static bool ASTContainsSuspendingCoroutineExpression(ASTNode* expr) {
+  return ASTContainsSuspendingCoAwait(expr) || ASTContainsSuspendingCoYield(expr);
+}
+
+static bool CoroutineShortCircuitTemporaryTypeIsSupported(TypeRecord* type) {
+  return type != NULL && !TypeIsVoid(type) && !TypeIsStructOrUnion(type) &&
+         !TypeIsArray(type) && !TypeIsFunction(type) &&
+         !TypeIsReference(type);
+}
+
+static TypeRecord* CoroutineExpressionTemporaryType(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(co_await)) {
+    return CoAwaitResultType(expr);
+  }
+  if (expr->op == AST_OP(co_yield)) {
+    return CoYieldResultType(expr);
+  }
+  return expr->type;
+}
+
+static TypeRecord* CoroutineShortCircuitTemporaryType(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(logand) || expr->op == AST_OP(logor)) {
+    return NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  }
+  if (expr->op == AST_OP(comma)) {
+    return CoroutineExpressionTemporaryType(((BinaryASTNode*)expr)->right);
+  }
+  if (expr->op == AST_OP(question)) {
+    BinaryASTNode* question = (BinaryASTNode*)expr;
+    BinaryASTNode* colon = (BinaryASTNode*)question->right;
+    TypeRecord* true_type = CoroutineExpressionTemporaryType(colon->left);
+    TypeRecord* false_type = CoroutineExpressionTemporaryType(colon->right);
+    if (true_type != NULL && false_type != NULL &&
+        TypeEqual(true_type, false_type)) {
+      return true_type;
+    }
+  }
+  return expr->type;
+}
+
+static Symbol* NewCoroutineExpressionTemporary(TypeRecord* type,
+                                               SourceLocation location) {
+  TypeRecord* temp_type = TypeRecordCopy(type);
+  temp_type = TypeRecordCalculateSize(temp_type);
+  Symbol* result = SyntaxNewTemporary(&compiler->syntax, temp_type);
+  result->flags.is_local = true;
+  result->flags.is_defined = true;
+  result->location = location;
+  return result;
+}
+
+static ASTNode* NewCoroutineTemporaryDeclaration(Symbol* result, ASTNode* init,
+                                                 SourceLocation location) {
+  Vector* declarations = NewVector();
+  VectorAppend(
+      declarations,
+      NewVariableDeclarationASTNode(
+          result,
+          init != NULL ? NewExpressionInitializerASTNode(init, location) : NULL,
+          location));
+  return NewDeclarationListASTNode(declarations, location);
+}
+
+static ASTNode* NewCoroutineTemporaryAssignment(Symbol* result, ASTNode* value,
+                                                SourceLocation location) {
+  return NewExpressionStatementASTNode(
+      NewBinaryASTNode(AST_OP(assign), TypeRecordCopy(result->type), location,
+                       NewIdentifierASTNode(result, location), value),
+      location);
+}
+
+static ASTNode* NewCoroutineBoolConstant(bool value, SourceLocation location) {
+  return NewIntConstantASTNode(value ? 1 : 0,
+                               NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                               location);
+}
+
+static ASTNode* NewCoroutineSingleStatementCompound(ASTNode* stmt,
+                                                    SourceLocation location) {
+  Vector* statements = NewVector();
+  VectorAppend(statements, stmt);
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+static ASTNode* TakeCoroutineBinaryChild(BinaryASTNode* node, bool right) {
+  ASTNode** child = right ? &node->right : &node->left;
+  ASTNode* result = *child;
+  *child = NULL;
+  if (result != NULL) {
+    result->parent = NULL;
+    result->child_id = -1;
+  }
+  return result;
+}
+
+static ASTNode* NewCoroutineShortCircuitLowering(Symbol* result,
+                                                 ASTNode* expr) {
+  SourceLocation location = expr->location;
+  BinaryASTNode* binary = (BinaryASTNode*)expr;
+  if (expr->op == AST_OP(comma)) {
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewExpressionStatementASTNode(
+                                               TakeCoroutineBinaryChild(binary,
+                                                                        false),
+                                               location));
+    VectorAppend(statements,
+                 NewCoroutineTemporaryAssignment(result,
+                                                 TakeCoroutineBinaryChild(
+                                                     binary, true),
+                                                 location));
+    return NewCompoundStatementASTNode(statements, location);
+  }
+
+  if (expr->op == AST_OP(logand)) {
+    ASTNode* left = TakeCoroutineBinaryChild(binary, false);
+    ASTNode* right = TakeCoroutineBinaryChild(binary, true);
+    ASTNode* then_stmt = NewCoroutineTemporaryAssignment(result, right,
+                                                        location);
+    ASTNode* else_stmt =
+        NewCoroutineTemporaryAssignment(result,
+                                        NewCoroutineBoolConstant(false,
+                                                                 location),
+                                        location);
+    return NewIfStatementASTNode(
+        left, NewCoroutineSingleStatementCompound(then_stmt, location),
+        NewCoroutineSingleStatementCompound(else_stmt, location), false,
+        location);
+  }
+
+  if (expr->op == AST_OP(logor)) {
+    ASTNode* left = TakeCoroutineBinaryChild(binary, false);
+    ASTNode* right = TakeCoroutineBinaryChild(binary, true);
+    ASTNode* then_stmt =
+        NewCoroutineTemporaryAssignment(result,
+                                        NewCoroutineBoolConstant(true,
+                                                                 location),
+                                        location);
+    ASTNode* else_stmt = NewCoroutineTemporaryAssignment(result, right,
+                                                        location);
+    return NewIfStatementASTNode(
+        left, NewCoroutineSingleStatementCompound(then_stmt, location),
+        NewCoroutineSingleStatementCompound(else_stmt, location), false,
+        location);
+  }
+
+  if (expr->op == AST_OP(question)) {
+    ASTNode* cond = TakeCoroutineBinaryChild(binary, false);
+    BinaryASTNode* colon = (BinaryASTNode*)binary->right;
+    ASTNode* true_arm = TakeCoroutineBinaryChild(colon, false);
+    ASTNode* false_arm = TakeCoroutineBinaryChild(colon, true);
+    binary->right = NULL;
+    ASTNode* then_stmt = NewCoroutineTemporaryAssignment(result, true_arm,
+                                                        location);
+    ASTNode* else_stmt = NewCoroutineTemporaryAssignment(result, false_arm,
+                                                        location);
+    return NewIfStatementASTNode(
+        cond, NewCoroutineSingleStatementCompound(then_stmt, location),
+        NewCoroutineSingleStatementCompound(else_stmt, location), false,
+        location);
+  }
+
+  return NULL;
+}
+
+static ASTNode* LowerShortCircuitSuspensionTransform(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  ShortCircuitSuspensionTransform* transform = data;
+  if (node == NULL || transform->result != NULL) {
+    return node;
+  }
+  TypeRecord* temp_type = CoroutineShortCircuitTemporaryType(node);
+  if (!ASTNodeIsShortCircuitExpression(node) ||
+      !CoroutineShortCircuitTemporaryTypeIsSupported(temp_type) ||
+      !ASTContainsSuspendingCoroutineExpression(node)) {
+    return node;
+  }
+  transform->location = node->location;
+  transform->op = node->op;
+  transform->result = NewCoroutineExpressionTemporary(temp_type,
+                                                      node->location);
+  transform->lowering = NewCoroutineShortCircuitLowering(transform->result,
+                                                         node);
+  *action = kASTTransformSkipChildren;
+  return NewIdentifierASTNode(transform->result, node->location);
+}
+
+static bool LowerShortCircuitSuspensionExpression(
+    CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
+  if (compound == NULL || expr == NULL) {
+    return false;
+  }
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
+  ShortCircuitSuspensionTransform transform = {0};
+  ASTNode* transformed = ASTNodeVisitAndTransform(
+      expr, LowerShortCircuitSuspensionTransform, &transform);
+  if (transform.result == NULL || transform.lowering == NULL) {
+    return false;
+  }
+  if (transformed != expr && parent != NULL && child_id >= 0) {
+    ASTNodeReplaceChild(parent, child_id, transformed, true);
+  }
+
+  CoroutineCompoundInsertStatement(
+      compound, NewCoroutineTemporaryDeclaration(transform.result, NULL,
+                                                transform.location),
+      statement_index);
+  CoroutineCompoundInsertStatement(compound, transform.lowering,
+                                   statement_index + 1);
+  ResetCompoundStatementParents(compound);
+  return true;
+}
+
+static ASTNode* NewSuspensionResultTemporaryDeclaration(
+    Symbol* result, ASTNode* suspension, SourceLocation location) {
+  ASTNode* decl_id = NewIdentifierASTNode(result, location);
+  decl_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  ASTNode* designated =
+      NewDesignatedInitializerASTNode(NewVector(), suspension, location);
+  ASTNodeSetType(designated, TypeRecordCopy(result->type));
+  Vector* initializers = NewVector();
+  VectorAppend(initializers, designated);
+  ASTNode* braced = NewBracedInitializerASTNode(
+      initializers, TypeRecordCopy(result->type), location);
+  ASTNode* init =
+      NewBinaryASTNode(AST_OP(init), TypeRecordCopy(result->type), location,
+                       decl_id, braced);
+  Vector* declarations = NewVector();
+  VectorAppend(declarations, NewVariableDeclarationASTNode(result, init,
+                                                           location));
+  return NewDeclarationListASTNode(declarations, location);
+}
+
+static TypeRecord* CoAwaitResultType(ASTNode* co_await) {
+  if (co_await == NULL || co_await->op != AST_OP(co_await)) {
+    return NULL;
+  }
+  if (co_await->type != NULL) {
+    return co_await->type;
+  }
+  TypeRecord* awaiter_type = CoAwaitOperandType(co_await);
+  StructMember* await_resume =
+      FindAwaiterMember(awaiter_type, "await_resume");
+  if (await_resume == NULL || await_resume->symbol == NULL ||
+      await_resume->symbol->type == NULL ||
+      !TypeIsFunction(await_resume->symbol->type)) {
+    return NULL;
+  }
+  return await_resume->symbol->type->next;
+}
+
+static TypeRecord* CoYieldResultType(ASTNode* co_yield) {
+  if (co_yield == NULL || co_yield->op != AST_OP(co_yield)) {
+    return NULL;
+  }
+  if (co_yield->type != NULL) {
+    return co_yield->type;
+  }
+  TypeRecord* promise_type =
+      compiler->current_function != NULL
+          ? compiler->current_function->info.function.coroutine_promise_type
+          : NULL;
+  TypeRecord* awaiter_type =
+      CoroutinePromiseMemberReturnType(promise_type, "yield_value");
+  StructMember* await_resume = FindAwaiterMember(awaiter_type, "await_resume");
+  if (await_resume == NULL || await_resume->symbol == NULL ||
+      await_resume->symbol->type == NULL ||
+      !TypeIsFunction(await_resume->symbol->type)) {
+    return NULL;
+  }
+  return await_resume->symbol->type->next;
+}
+
+static bool SplitSuspendingCoAwaitExpression(CompoundStatementASTNode* compound,
+                                             size_t statement_index,
+                                             ASTNode* expr,
+                                             bool allow_root_co_await) {
+  if (compound == NULL || expr == NULL) {
+    return false;
+  }
+
+  SuspendedCoroutineExpressionSearch search = {expr, NULL, 0, false};
+  if (expr->op == AST_OP(co_await)) {
+    if (!allow_root_co_await || CoAwaitIsAlwaysReady(expr)) {
+      return false;
+    }
+    search.found = expr;
+    search.count = 1;
+    search.void_result = TypeIsVoid(expr->type);
+  } else {
+    ASTNodeVisit(expr, FindNestedSuspendingCoAwait, 0, &search);
+  }
+  TypeRecord* result_type = CoAwaitResultType(search.found);
+  if (search.found == NULL || search.void_result || result_type == NULL ||
+      TypeIsVoid(result_type) ||
+      SuspensionHasUnsafeSplitAncestor(expr, search.found)) {
+    return false;
+  }
+
+  SourceLocation location = search.found->location;
+  TypeRecord* temp_type = TypeRecordCopy(result_type);
+  temp_type = TypeRecordCalculateSize(temp_type);
+  Symbol* result = SyntaxNewTemporary(&compiler->syntax, temp_type);
+  result->flags.is_local = true;
+  result->flags.is_defined = true;
+  result->location = location;
+
+  ASTNode* parent = search.found->parent;
+  int child_id = search.found->child_id;
+  ASTNode* co_await = ASTNodeMove(search.found);
+  ASTNodeReplaceChild(parent, child_id, NewIdentifierASTNode(result, location),
+                      false);
+  CoroutineCompoundInsertStatement(
+      compound,
+      NewSuspensionResultTemporaryDeclaration(result, co_await, location),
+      statement_index);
+  ResetCompoundStatementParents(compound);
+  return true;
+}
+
+static bool SplitNestedSuspendingCoAwaitExpression(
+    CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
+  return SplitSuspendingCoAwaitExpression(compound, statement_index, expr,
+                                          false);
+}
+
+static bool SplitSuspendingCoYieldExpression(CompoundStatementASTNode* compound,
+                                             size_t statement_index,
+                                             ASTNode* expr,
+                                             bool allow_root_co_yield) {
+  if (compound == NULL || expr == NULL) {
+    return false;
+  }
+  SuspendedCoroutineExpressionSearch search = {expr, NULL, 0, false};
+  if (expr->op == AST_OP(co_yield)) {
+    if (!allow_root_co_yield) {
+      return false;
+    }
+    search.found = expr;
+    search.count = 1;
+    search.void_result = TypeIsVoid(expr->type);
+  } else {
+    ASTNodeVisit(expr, FindNestedSuspendingCoYield, 0, &search);
+  }
+  TypeRecord* result_type = CoYieldResultType(search.found);
+  if (search.found == NULL || search.void_result || result_type == NULL ||
+      TypeIsVoid(result_type) ||
+      SuspensionHasUnsafeSplitAncestor(expr, search.found)) {
+    return false;
+  }
+
+  SourceLocation location = search.found->location;
+  TypeRecord* temp_type = TypeRecordCopy(result_type);
+  temp_type = TypeRecordCalculateSize(temp_type);
+  Symbol* result = SyntaxNewTemporary(&compiler->syntax, temp_type);
+  result->flags.is_local = true;
+  result->flags.is_defined = true;
+  result->location = location;
+
+  ASTNode* parent = search.found->parent;
+  int child_id = search.found->child_id;
+  ASTNode* co_yield = ASTNodeMove(search.found);
+  ASTNodeReplaceChild(parent, child_id, NewIdentifierASTNode(result, location),
+                      false);
+  CoroutineCompoundInsertStatement(
+      compound,
+      NewSuspensionResultTemporaryDeclaration(result, co_yield, location),
+      statement_index);
+  ResetCompoundStatementParents(compound);
+  return true;
+}
+
+static bool SplitNestedSuspendingCoYieldExpression(
+    CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
+  return SplitSuspendingCoYieldExpression(compound, statement_index, expr,
+                                          false);
+}
+
+static bool SplitSuspendingCoroutineExpression(CompoundStatementASTNode* compound,
+                                               size_t statement_index,
+                                               ASTNode* expr,
+                                               bool allow_root) {
+  return SplitSuspendingCoAwaitExpression(compound, statement_index, expr,
+                                          allow_root) ||
+         SplitSuspendingCoYieldExpression(compound, statement_index, expr,
+                                          allow_root);
+}
+
+static bool ExpressionHasSingleNonVoidSuspendingCoroutineExpression(
+    ASTNode* expr, bool allow_root) {
+  if (expr == NULL) {
+    return false;
+  }
+  SuspendedCoroutineExpressionSearch search = {expr, NULL, 0, false};
+  if (expr->op == AST_OP(co_await)) {
+    if (!allow_root || CoAwaitIsAlwaysReady(expr)) {
+      return false;
+    }
+    search.found = expr;
+    search.count = 1;
+    search.void_result = TypeIsVoid(expr->type);
+  } else {
+    ASTNodeVisit(expr, FindNestedSuspendingCoAwait, 0, &search);
+  }
+  TypeRecord* result_type = CoAwaitResultType(search.found);
+  if (search.count == 1 && search.found != NULL && !search.void_result &&
+      result_type != NULL && !TypeIsVoid(result_type)) {
+    return true;
+  }
+
+  search = (SuspendedCoroutineExpressionSearch){expr, NULL, 0, false};
+  if (expr->op == AST_OP(co_yield)) {
+    if (!allow_root) {
+      return false;
+    }
+    search.found = expr;
+    search.count = 1;
+    search.void_result = TypeIsVoid(expr->type);
+  } else {
+    ASTNodeVisit(expr, FindNestedSuspendingCoYield, 0, &search);
+  }
+  result_type = CoYieldResultType(search.found);
+  return search.count == 1 && search.found != NULL && !search.void_result &&
+         result_type != NULL && !TypeIsVoid(result_type);
+}
+
+static bool SplitNestedSuspensionInDeclaration(
+    CompoundStatementASTNode* compound, size_t statement_index,
+    DeclarationListASTNode* decl_list) {
+  if (decl_list == NULL || decl_list->declarations == NULL ||
+      decl_list->declarations->length != 1) {
+    return false;
+  }
+  VariableDeclarationASTNode* decl = decl_list->declarations->value.p[0];
+  ASTNode* expr = decl != NULL ? VariableInitializerExpression(decl->initializer)
+                               : NULL;
+  return SplitNestedSuspendingCoAwaitExpression(compound, statement_index,
+                                               expr) ||
+         SplitNestedSuspendingCoYieldExpression(compound, statement_index,
+                                                expr);
+}
+
+static bool SplitNestedSuspensionInStatement(
+    CompoundStatementASTNode* compound, size_t statement_index, ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(decl_list)) {
+    return SplitNestedSuspensionInDeclaration(
+        compound, statement_index, (DeclarationListASTNode*)stmt);
+  }
+  if (stmt->op == AST_OP(expr)) {
+    ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+    if (expr != NULL && expr->op == AST_OP(assign)) {
+      ASTNode* rhs = ((BinaryASTNode*)expr)->right;
+      if (rhs != NULL) {
+        return SplitSuspendingCoAwaitExpression(compound, statement_index, rhs,
+                                                true) ||
+               SplitNestedSuspendingCoYieldExpression(compound, statement_index,
+                                                      rhs);
+      }
+      return false;
+    }
+    return SplitNestedSuspendingCoAwaitExpression(compound, statement_index,
+                                                 expr) ||
+           SplitNestedSuspendingCoYieldExpression(compound, statement_index,
+                                                  expr);
+  }
+  if (stmt->op == AST_OP(co_return)) {
+    ASTNode* expr = ((CombinedStatementASTNode*)stmt)->cond;
+    return SplitNestedSuspendingCoAwaitExpression(compound, statement_index,
+                                                 expr) ||
+           SplitNestedSuspendingCoYieldExpression(compound, statement_index,
+                                                  expr);
+  }
+  if (stmt->op == AST_OP(switch)) {
+    return SplitSuspendingCoroutineExpression(
+        compound, statement_index, ((SwitchStatementASTNode*)stmt)->expr, true);
+  }
+  return false;
+}
+
+static bool LowerShortCircuitSuspensionInStatement(
+    CompoundStatementASTNode* compound, size_t statement_index, ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(decl_list)) {
+    return LowerShortCircuitSuspensionExpression(compound, statement_index,
+                                                 stmt);
+  }
+  if (stmt->op == AST_OP(expr)) {
+    ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+    if (expr != NULL && expr->op == AST_OP(assign)) {
+      return LowerShortCircuitSuspensionExpression(
+          compound, statement_index, ((BinaryASTNode*)expr)->right);
+    }
+    return LowerShortCircuitSuspensionExpression(compound, statement_index,
+                                                expr);
+  }
+  if (stmt->op == AST_OP(co_return)) {
+    return LowerShortCircuitSuspensionExpression(compound, statement_index,
+                                                stmt);
+  }
+  if (stmt->op == AST_OP(if)) {
+    return LowerShortCircuitSuspensionExpression(
+        compound, statement_index, ((IfStatementASTNode*)stmt)->cond);
+  }
+  if (stmt->op == AST_OP(switch)) {
+    return LowerShortCircuitSuspensionExpression(
+        compound, statement_index, ((SwitchStatementASTNode*)stmt)->expr);
+  }
+  return false;
+}
+
+static ASTNode* NewCoroutineTrueCondition(SourceLocation location) {
+  return NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               location);
+}
+
+static ASTNode* NewCoroutineBreakIfFalse(ASTNode* cond,
+                                         SourceLocation location) {
+  ASTNode* not_cond =
+      NewUnaryASTNode(AST_OP(not),
+                      NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                      location, cond);
+  return NewIfStatementASTNode(
+      not_cond, NewASTNode(AST_OP(break), NULL, location), NULL, false,
+      location);
+}
+
+static CompoundStatementASTNode* EnsureCoroutineCompoundLoopBody(
+    ASTNode* loop, int stmt_child_id, ASTNode* stmt, SourceLocation location) {
+  if (stmt != NULL && stmt->op == AST_OP(compound)) {
+    return (CompoundStatementASTNode*)stmt;
+  }
+  Vector* statements = NewVector();
+  if (stmt != NULL) {
+    VectorAppend(statements, ASTNodeMove(stmt));
+  }
+  ASTNode* compound = NewCompoundStatementASTNode(statements, location);
+  ASTNodeReplaceChild(loop, stmt_child_id, compound, false);
+  return (CompoundStatementASTNode*)compound;
+}
+
+typedef struct {
+  String* condition_label;
+  LabelASTNode* label;
+} DoWhileConditionRewrite;
+
+static ASTNode* RewriteDoWhileConditionContinue(ASTNode* node, void* data,
+                                                ASTNodeTransformAction* action) {
+  DoWhileConditionRewrite* rewrite = data;
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->op == AST_OP(while) || node->op == AST_OP(do) ||
+      node->op == AST_OP(for)) {
+    *action = kASTTransformSkipChildren;
+    return node;
+  }
+  if (node->op != AST_OP(continue)) {
+    return node;
+  }
+  ASTNode* goto_stmt =
+      NewGotoStatementASTNode(NewString(rewrite->condition_label->value),
+                              node->location);
+  goto_stmt->flags |= kASTCompilerGeneratedGoto;
+  ((GotoStatementASTNode*)goto_stmt)->label = (ASTNode*)rewrite->label;
+  return goto_stmt;
+}
+
+static bool NormalizeWhileConditionSuspension(ASTNode* stmt) {
+  CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
+  CompoundStatementASTNode* body =
+      EnsureCoroutineCompoundLoopBody(stmt, 1, loop->stmt, stmt->location);
+  SourceLocation location = loop->cond->location;
+  size_t guard_index = 1;
+  if (LowerShortCircuitSuspensionExpression(body, 0, loop->cond)) {
+    guard_index = 2;
+  } else if (ExpressionHasSingleNonVoidSuspendingCoroutineExpression(loop->cond,
+                                                                     true)) {
+    if (!SplitSuspendingCoroutineExpression(body, 0, loop->cond, true)) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
+  ASTNode* guard_cond = ASTNodeMove(loop->cond);
+  ASTNodeReplaceChild(stmt, 0, NewCoroutineTrueCondition(location), false);
+  CoroutineCompoundInsertStatement(
+      body, NewCoroutineBreakIfFalse(guard_cond, location), guard_index);
+  ResetCompoundStatementParents(body);
+  return true;
+}
+
+static bool NormalizeDoConditionSuspension(ASTNode* stmt) {
+  CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
+  bool has_condition_suspension =
+      ASTContainsSuspendingCoroutineExpression(loop->cond);
+  if (!has_condition_suspension) {
+    return false;
+  }
+  CompoundStatementASTNode* body =
+      EnsureCoroutineCompoundLoopBody(stmt, 1, loop->stmt, stmt->location);
+
+  SourceLocation location = loop->cond->location;
+  String label_name;
+  StringInit(&label_name, SyntaxFakeName(&compiler->syntax));
+  ASTNode* empty_label_stmt =
+      NewCompoundStatementASTNode(NewVector(), location);
+  LabelASTNode* condition_label =
+      (LabelASTNode*)NewLabelASTNode(label_name.value, empty_label_stmt,
+                                     false, location);
+  DoWhileConditionRewrite rewrite = {&label_name, condition_label};
+  ASTNodeVisitAndTransform((ASTNode*)body, RewriteDoWhileConditionContinue,
+                           &rewrite);
+
+  size_t condition_index = body->statements->length;
+  CoroutineCompoundInsertStatement(body, (ASTNode*)condition_label,
+                                   condition_index);
+  size_t guard_index = condition_index + 2;
+  if (LowerShortCircuitSuspensionExpression(body, condition_index + 1,
+                                           loop->cond)) {
+    guard_index = condition_index + 3;
+  } else if (ExpressionHasSingleNonVoidSuspendingCoroutineExpression(loop->cond,
+                                                                     true)) {
+    if (!SplitSuspendingCoroutineExpression(body, condition_index + 1,
+                                           loop->cond, true)) {
+      StringDestruct(&label_name);
+      return false;
+    }
+  } else {
+    StringDestruct(&label_name);
+    return false;
+  }
+
+  ASTNode* guard_cond = ASTNodeMove(loop->cond);
+  CoroutineCompoundInsertStatement(
+      body, NewCoroutineBreakIfFalse(guard_cond, location), guard_index);
+  ASTNodeReplaceChild(stmt, 0, NewCoroutineTrueCondition(location), false);
+  StringDestruct(&label_name);
+  ResetCompoundStatementParents(body);
+  return true;
+}
+
+static bool NormalizeForConditionSuspension(ASTNode* stmt) {
+  ForStatementASTNode* loop = (ForStatementASTNode*)stmt;
+  if (loop->c2 == NULL) {
+    return false;
+  }
+  CompoundStatementASTNode* body =
+      EnsureCoroutineCompoundLoopBody(stmt, 3, loop->stmt, stmt->location);
+  SourceLocation location = loop->c2->location;
+  size_t guard_index = 1;
+  if (LowerShortCircuitSuspensionExpression(body, 0, loop->c2)) {
+    guard_index = 2;
+  } else if (ExpressionHasSingleNonVoidSuspendingCoroutineExpression(loop->c2,
+                                                                     true)) {
+    if (!SplitSuspendingCoroutineExpression(body, 0, loop->c2, true)) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
+  ASTNode* guard_cond = ASTNodeMove(loop->c2);
+  CoroutineCompoundInsertStatement(
+      body, NewCoroutineBreakIfFalse(guard_cond, location), guard_index);
+  ResetCompoundStatementParents(body);
+  return true;
+}
+
+static void NormalizeNestedSuspensionsInStatementChild(
+    ASTNode* parent, int child_id, ASTNode* stmt, SourceLocation location) {
+  if (parent == NULL || stmt == NULL) {
+    return;
+  }
+  CompoundStatementASTNode* compound = NULL;
+  if (stmt->op == AST_OP(compound)) {
+    compound = (CompoundStatementASTNode*)stmt;
+  } else {
+    Vector* statements = NewVector();
+    VectorAppend(statements, ASTNodeMove(stmt));
+    ASTNode* compound_node = NewCompoundStatementASTNode(statements, location);
+    ASTNodeReplaceChild(parent, child_id, compound_node, false);
+    compound = (CompoundStatementASTNode*)compound_node;
+  }
+  NormalizeNestedSuspensionsInCompound(compound);
+}
+
+typedef struct {
+  ASTNode* root;
+  Vector children;
+} CoroutineStatementChildCollector;
+
+static ASTNode* CollectNestedStatementChildTransform(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  CoroutineStatementChildCollector* collector = data;
+  if (node == NULL || node == collector->root) {
+    return node;
+  }
+  if (!ASTNodeIsStatement(node)) {
+    return node;
+  }
+  if (!ASTNodeChildIsStatement(node->parent, node->child_id)) {
+    *action = kASTTransformSkipChildren;
+    return node;
+  }
+  if (node->parent != NULL && node->parent->op == AST_OP(compound)) {
+    return node;
+  }
+  VectorAppend(&collector->children, node);
+  *action = kASTTransformSkipChildren;
+  return node;
+}
+
+static void NormalizeNestedSuspensionsInStatementChildren(ASTNode* stmt) {
+  CoroutineStatementChildCollector collector = {
+      .root = stmt,
+  };
+  VectorInit(&collector.children);
+  ASTNodeVisitAndTransform(stmt, CollectNestedStatementChildTransform,
+                           &collector);
+  for (size_t i = 0; i < collector.children.length; i++) {
+    ASTNode* child = collector.children.value.p[i];
+    if (child != NULL && child->parent != NULL) {
+      NormalizeNestedSuspensionsInStatementChild(
+          child->parent, child->child_id, child, child->location);
+    }
+  }
+  VectorDestruct(&collector.children);
+}
+
+static void NormalizeNestedSuspensionsInCompound(
+    CompoundStatementASTNode* compound) {
+  if (compound == NULL || compound->statements == NULL) {
+    return;
+  }
+  ResetCompoundStatementParents(compound);
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    ASTNode* stmt = compound->statements->value.p[i];
+    if (LowerShortCircuitSuspensionInStatement(compound, i, stmt)) {
+      continue;
+    }
+    if (SplitNestedSuspensionInStatement(compound, i, stmt)) {
+      continue;
+    }
+    if (stmt == NULL) {
+      continue;
+    }
+    if (stmt->op == AST_OP(compound)) {
+      NormalizeNestedSuspensionsInCompound(
+          (CompoundStatementASTNode*)stmt);
+      continue;
+    }
+    if (stmt->op == AST_OP(if)) {
+      IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
+      if (SplitSuspendingCoroutineExpression(compound, i, if_stmt->cond,
+                                             true)) {
+        i++;
+        stmt = compound->statements->value.p[i];
+      }
+    }
+    if (stmt->op == AST_OP(while)) {
+      NormalizeWhileConditionSuspension(stmt);
+    } else if (stmt->op == AST_OP(do)) {
+      NormalizeDoConditionSuspension(stmt);
+    } else if (stmt->op == AST_OP(for)) {
+      NormalizeForConditionSuspension(stmt);
+    }
+    NormalizeNestedSuspensionsInStatementChildren(stmt);
+  }
+}
+
 static void ReplaceVariableInitializerExpression(VariableDeclarationASTNode* decl,
                                                  ASTNode* expr) {
   ASTNode* initializer = decl->initializer;
   if (initializer != NULL && initializer->op == AST_OP(init)) {
     BinaryASTNode* init = (BinaryASTNode*)initializer;
     if (init->right != NULL && init->right->op == AST_OP(expr_init)) {
-      ASTNodeReplaceChild(init->right, 0, expr, true);
+      ASTNodeReplaceChild(init->right, 0, expr, false);
+    } else if (init->right != NULL &&
+               init->right->op == AST_OP(braced_init)) {
+      BracedInitializerASTNode* braced =
+          (BracedInitializerASTNode*)init->right;
+      if (braced->initializers != NULL &&
+          braced->initializers->length == 1 &&
+          ((ASTNode*)braced->initializers->value.p[0])->op ==
+              AST_OP(designated_init)) {
+        ASTNode* designated = braced->initializers->value.p[0];
+        ASTNodeReplaceChild(designated, 0, expr, false);
+      } else {
+        ASTNodeReplaceChild(initializer, 1,
+                            NewExpressionInitializerASTNode(
+                                expr, initializer->location),
+                            false);
+      }
     } else {
       ASTNodeReplaceChild(initializer, 1,
                           NewExpressionInitializerASTNode(
                               expr, initializer->location),
-                          true);
+                          false);
     }
     return;
   }
   if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
-    ASTNodeReplaceChild(initializer, 0, expr, true);
+    ASTNodeReplaceChild(initializer, 0, expr, false);
     return;
   }
   ASTNodeReplaceChild((ASTNode*)decl, 0,
                       NewExpressionInitializerASTNode(expr,
                                                       decl->base.location),
-                      true);
+                      false);
 }
 
 static Symbol* CoAwaitIdentifierOperand(ASTNode* co_await) {
@@ -1537,9 +2890,25 @@ static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
   ASTNode* init = NewFrameMemberInitialization(
       frame, point->frame_member, point->frame_constructed_member,
       yield_call, location);
-  VectorSet(point->compound->statements, point->statement_index, init);
-  init->parent = (ASTNode*)point->compound;
-  init->child_id = (int)point->statement_index;
+  bool statement_yield =
+      point->statement != NULL && point->statement->op == AST_OP(expr) &&
+      ((ExpressionStatementASTNode*)point->statement)->expr == point->co_yield;
+  if (statement_yield) {
+    VectorSet(point->compound->statements, point->statement_index, init);
+    init->parent = (ASTNode*)point->compound;
+    init->child_id = (int)point->statement_index;
+    return true;
+  }
+
+  Vector* statements = NewVector();
+  VectorAppend(statements, init);
+  VectorAppend(statements, ASTNodeMove(point->statement));
+  ASTNode* compound = NewCompoundStatementASTNode(statements, location);
+  VectorSet(point->compound->statements, point->statement_index, compound);
+  compound->parent = (ASTNode*)point->compound;
+  compound->child_id = (int)point->statement_index;
+  point->compound = (CompoundStatementASTNode*)compound;
+  point->statement_index = 0;
   return true;
 }
 
@@ -1668,6 +3037,18 @@ static ASTNode* NewCoroutineFrameGuardedDestructor(CoroutineFrame* frame,
       NULL, false, location);
 }
 
+static ASTNode* NewCoroutineFrameMemberGuardedDestructor(
+    CoroutineFrame* frame, StructMember* member,
+    StructMember* constructed_member, SourceLocation location) {
+  FrameOwnedSymbol owned = {
+      .symbol = member != NULL ? member->symbol : NULL,
+      .member = member,
+      .constructed_member = constructed_member,
+      .construct_at_start = false,
+  };
+  return NewCoroutineFrameGuardedDestructor(frame, &owned, location);
+}
+
 static void AppendCoroutineFrameDestructors(Vector* statements,
                                             CoroutineFrame* frame,
                                             SourceLocation location) {
@@ -1678,6 +3059,37 @@ static void AppendCoroutineFrameDestructors(Vector* statements,
     FrameOwnedSymbol* owned = frame->owned_symbols.value.p[i - 1];
     if (owned == NULL || owned->member == NULL ||
         owned->member->symbol == NULL) {
+      continue;
+    }
+    ASTNode* dtor = NewCoroutineFrameGuardedDestructor(frame, owned,
+                                                      location);
+    if (dtor != NULL) {
+      VectorAppend(statements, dtor);
+    }
+  }
+}
+
+static bool CoroutineFrameOwnedSymbolIsBodyLifetime(CoroutineFrame* frame,
+                                                    FrameOwnedSymbol* owned) {
+  if (frame == NULL || owned == NULL) {
+    return false;
+  }
+  return owned->member != frame->promise &&
+         owned->member != frame->initial_awaiter &&
+         owned->member != frame->final_awaiter;
+}
+
+static void AppendCoroutineFrameBodyDestructors(Vector* statements,
+                                                CoroutineFrame* frame,
+                                                SourceLocation location) {
+  if (statements == NULL || frame == NULL) {
+    return;
+  }
+  for (size_t i = frame->owned_symbols.length; i > 0; i--) {
+    FrameOwnedSymbol* owned = frame->owned_symbols.value.p[i - 1];
+    if (owned == NULL || owned->member == NULL ||
+        owned->member->symbol == NULL ||
+        !CoroutineFrameOwnedSymbolIsBodyLifetime(frame, owned)) {
       continue;
     }
     ASTNode* dtor = NewCoroutineFrameGuardedDestructor(frame, owned,
@@ -1810,7 +3222,7 @@ static Symbol* GetCoroutineAllocationFunction(const char* name,
   formal->flags.invented = true;
   VectorAppend(&func->info.function.prototype, formal);
 
-  Symbol* symbol = NewSymbol(name, func, STO(extern));
+  Symbol* symbol = NewSymbol(name, func, STO(static));
   symbol->flags.invented = true;
   symbol->flags.is_defined = false;
   symbol->location = location;
@@ -1842,11 +3254,8 @@ static Symbol* GetCoroutineClassAllocationFunction(TypeRecord* promise_type,
       promise_type->info.struct_info == NULL) {
     return NULL;
   }
-  String member_name;
-  StringInit(&member_name, name);
   StructMember* member =
-      FindStructMember(promise_type->info.struct_info, &member_name);
-  StringDestruct(&member_name);
+      FindStructMemberByName(promise_type->info.struct_info, name);
   if (member == NULL || !member->is_member_function ||
       member->symbol == NULL || !TypeIsFunction(member->symbol->type)) {
     return NULL;
@@ -1934,6 +3343,7 @@ static ASTNode* NewVariableInitExpression(Symbol* symbol, ASTNode* initializer,
 static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
                                         TypeRecord* promise_type,
                                         TypeRecord* initial_awaiter_type,
+                                        TypeRecord* final_awaiter_type,
                                         SuspensionPoints* points,
                                         Vector* persisted_locals,
                                         TypeRecord* yield_awaiter_type,
@@ -1959,6 +3369,14 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
                                      initial_awaiter_type);
     frame.initial_awaiter_constructed =
         AddCoroutineFrameIntMember(str, "__initial_awaiter_constructed");
+  }
+  if (final_awaiter_type != NULL &&
+      !AwaiterTypeIsAlwaysReady(final_awaiter_type)) {
+    frame.final_awaiter =
+        AddCoroutineFrameTypedMember(str, "__final_awaiter",
+                                     final_awaiter_type);
+    frame.final_awaiter_constructed =
+        AddCoroutineFrameIntMember(str, "__final_awaiter_constructed");
   }
   for (size_t i = 0; persisted_locals != NULL &&
                      i < persisted_locals->length; i++) {
@@ -2072,24 +3490,42 @@ static bool IsFrameCopyAssignmentRhs(ASTNode* node, StructMember* member) {
   return IsFrameMemberAccessFor(assign->left, member);
 }
 
-static bool ASTNodeIsAncestorOf(ASTNode* ancestor, ASTNode* node) {
-  for (ASTNode* current = node; current != NULL; current = current->parent) {
-    if (current == ancestor) {
-      return true;
-    }
+typedef struct {
+  ASTNode* target;
+  ASTNode* found;
+} CoroutineUpwardSearch;
+
+static bool FindMatchingAncestor(ASTNode* node, void* data) {
+  CoroutineUpwardSearch* search = data;
+  if (node == search->target) {
+    search->found = node;
+    return false;
   }
-  return false;
+  return true;
+}
+
+static bool ASTNodeIsAncestorOf(ASTNode* ancestor, ASTNode* node) {
+  CoroutineUpwardSearch search = {
+      .target = ancestor,
+  };
+  ASTNodeVisitUpwards(node, FindMatchingAncestor, &search);
+  return search.found != NULL;
+}
+
+static bool FindEnclosingCall(ASTNode* node, void* data) {
+  CoroutineUpwardSearch* search = data;
+  if (node != NULL && node->op == AST_OP(call)) {
+    search->found = node;
+    return false;
+  }
+  return true;
 }
 
 static bool IsFrameConstructionActual(ASTNode* node, StructMember* member) {
-  ASTNode* call_node = NULL;
-  for (ASTNode* ancestor = node != NULL ? node->parent : NULL;
-       ancestor != NULL; ancestor = ancestor->parent) {
-    if (ancestor->op == AST_OP(call)) {
-      call_node = ancestor;
-      break;
-    }
-  }
+  CoroutineUpwardSearch search = {0};
+  ASTNodeVisitUpwards(node != NULL ? node->parent : NULL, FindEnclosingCall,
+                      &search);
+  ASTNode* call_node = search.found;
   if (call_node == NULL) {
     return false;
   }
@@ -2104,15 +3540,28 @@ static bool IsFrameConstructionActual(ASTNode* node, StructMember* member) {
   return IsFrameMemberAccessFor(member_call->left, member);
 }
 
-static bool IsInsideDeclarationOfSymbol(ASTNode* node, Symbol* symbol) {
-  for (ASTNode* ancestor = node != NULL ? node->parent : NULL;
-       ancestor != NULL; ancestor = ancestor->parent) {
-    if (ancestor->op == AST_OP(vardecl) &&
-        ((VariableDeclarationASTNode*)ancestor)->symbol == symbol) {
-      return true;
-    }
+typedef struct {
+  Symbol* symbol;
+  bool found;
+} CoroutineDeclarationAncestorSearch;
+
+static bool FindDeclarationAncestorForSymbol(ASTNode* node, void* data) {
+  CoroutineDeclarationAncestorSearch* search = data;
+  if (node != NULL && node->op == AST_OP(vardecl) &&
+      ((VariableDeclarationASTNode*)node)->symbol == search->symbol) {
+    search->found = true;
+    return false;
   }
-  return false;
+  return true;
+}
+
+static bool IsInsideDeclarationOfSymbol(ASTNode* node, Symbol* symbol) {
+  CoroutineDeclarationAncestorSearch search = {
+      .symbol = symbol,
+  };
+  ASTNodeVisitUpwards(node != NULL ? node->parent : NULL,
+                      FindDeclarationAncestorForSymbol, &search);
+  return search.found;
 }
 
 static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
@@ -2145,44 +3594,22 @@ static void RewriteFrameOwnedSymbols(ASTNode* node, CoroutineFrame* frame) {
   ASTNodeVisit(node, ReplaceFrameOwnedIdentifier, 0, frame);
 }
 
+static ASTNode* RemoveCoroutineFrameStoreTransform(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  (void)action;
+  if (node != NULL && (node->flags & kASTCoroutineFrameStore) != 0) {
+    return NULL;
+  }
+  return node;
+}
+
 static void RemoveCoroutineFrameStores(CompoundStatementASTNode* compound) {
-  if (compound == NULL || compound->statements == NULL) {
+  if (compound == NULL) {
     return;
   }
-  for (size_t i = compound->statements->length; i > 0; i--) {
-    ASTNode* stmt = compound->statements->value.p[i - 1];
-    if (stmt == NULL) {
-      continue;
-    }
-    if ((stmt->flags & kASTCoroutineFrameStore) != 0) {
-      VectorDeleteElement(compound->statements, i - 1);
-      continue;
-    }
-    if (stmt->op == AST_OP(compound)) {
-      RemoveCoroutineFrameStores((CompoundStatementASTNode*)stmt);
-    } else if (stmt->op == AST_OP(if)) {
-      IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
-      if (if_stmt->if_part != NULL &&
-          if_stmt->if_part->op == AST_OP(compound)) {
-        RemoveCoroutineFrameStores((CompoundStatementASTNode*)if_stmt->if_part);
-      }
-      if (if_stmt->else_part != NULL &&
-          if_stmt->else_part->op == AST_OP(compound)) {
-        RemoveCoroutineFrameStores(
-            (CompoundStatementASTNode*)if_stmt->else_part);
-      }
-    } else if (stmt->op == AST_OP(while) || stmt->op == AST_OP(do)) {
-      CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        RemoveCoroutineFrameStores((CompoundStatementASTNode*)loop->stmt);
-      }
-    } else if (stmt->op == AST_OP(for)) {
-      ForStatementASTNode* loop = (ForStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        RemoveCoroutineFrameStores((CompoundStatementASTNode*)loop->stmt);
-      }
-    }
-  }
+  ASTNodeVisitAndTransform((ASTNode*)compound,
+                           RemoveCoroutineFrameStoreTransform, NULL);
   ResetCompoundStatementParents(compound);
 }
 
@@ -2191,7 +3618,9 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
                                           CompoundStatementASTNode* body,
                                           TypeRecord* return_type,
                                           int suspend_count,
+                                          Symbol* promise,
                                           Symbol* initial_awaiter,
+                                          Symbol* final_awaiter,
                                           SourceLocation location) {
   char name[96];
   snprintf(name, sizeof(name), "%s_coroutine_resume",
@@ -2214,14 +3643,26 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
         NewAwaitResumeStatement(initial_awaiter, location));
     ResetCompoundStatementParents(resume_body);
   }
+  Vector* catches = NewVector();
+  VectorAppend(catches,
+               NewCatchASTNode(
+                   NULL, true,
+                   NewCoroutineUnhandledExceptionStatement(
+                       promise, frame, final_awaiter, return_type,
+                       location),
+                   location));
+  ASTNode* try_stmt = NewTryASTNode((ASTNode*)resume_body, catches, location);
+  Vector* wrapped_statements = NewVector();
+  VectorAppend(wrapped_statements, try_stmt);
+  ASTNode* wrapped_body =
+      NewCompoundStatementASTNode(wrapped_statements, location);
   SymbolReplacement replacement = {frame->symbol, frame_param};
-  ASTNodeVisit((ASTNode*)resume_body, ReplaceIdentifierSymbol, 0,
-               &replacement);
+  ASTNodeVisit(wrapped_body, ReplaceIdentifierSymbol, 0, &replacement);
   CoroutineFrame resume_frame = *frame;
   resume_frame.symbol = frame_param;
-  RewriteFrameOwnedSymbols((ASTNode*)resume_body, &resume_frame);
-  func->info.function.body = (ASTNode*)resume_body;
-  Symbol* symbol = NewSymbol(name, func, STO(static));
+  RewriteFrameOwnedSymbols(wrapped_body, &resume_frame);
+  func->info.function.body = wrapped_body;
+  Symbol* symbol = NewSymbol(name, func, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
   symbol->location = location;
@@ -2306,6 +3747,19 @@ static Symbol* NewCoroutineTransferHandleTemporary(SourceLocation location) {
   return handle;
 }
 
+static Symbol* NewCoroutineHandleReturnTemporary(TypeRecord* handle_type,
+                                                 SourceLocation location) {
+  if (handle_type == NULL) {
+    return NULL;
+  }
+  Symbol* handle =
+      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(handle_type));
+  handle->flags.is_local = true;
+  handle->flags.is_defined = true;
+  handle->location = location;
+  return handle;
+}
+
 static ASTNode* NewCoroutineTransferFramePointer(CoroutineFrame* frame,
                                                  Symbol* handle,
                                                  SourceLocation location) {
@@ -2370,6 +3824,41 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
     return;
   }
   if (await_suspend_return != NULL &&
+      TypeIsCoroutineHandle(await_suspend_return)) {
+    Symbol* address_member = FindCoroutineHandleAddress(await_suspend_return);
+    Symbol* handle_object =
+        NewCoroutineHandleReturnTemporary(await_suspend_return, location);
+    if (address_member != NULL && handle_object != NULL) {
+      ASTNode* address_call = NewAwaiterMemberCall(
+          NewIdentifierASTNode(handle_object, location), "address", location);
+      ASTNodeSetType(address_call, TypeRecordCopy(address_member->type->next));
+      Symbol* transfer_handle = NewCoroutineTransferHandleTemporary(location);
+      Vector* transfer_decls = NewVector();
+      VectorAppend(
+          transfer_decls,
+          NewVariableDeclarationASTNode(
+              handle_object,
+              NewExpressionInitializerASTNode(await_suspend, location),
+              location));
+      VectorAppend(
+          transfer_decls,
+          NewVariableDeclarationASTNode(
+              transfer_handle,
+              NewVariableInitExpression(transfer_handle, address_call,
+                                        location),
+              location));
+      VectorAppend(suspend_statements,
+                   NewDeclarationListASTNode(transfer_decls, location));
+      VectorAppend(suspend_statements,
+                   NewCoroutineTransferResumeIf(frame, transfer_handle,
+                                                return_type, location));
+      VectorAppend(suspend_statements,
+                   NewCoroutineReturnObjectStatement(promise, return_type,
+                                                     location));
+      return;
+    }
+  }
+  if (await_suspend_return != NULL &&
       TypeIsVoidPointer(await_suspend_return)) {
     Symbol* transfer_handle = NewCoroutineTransferHandleTemporary(location);
     Vector* transfer_decls = NewVector();
@@ -2416,17 +3905,42 @@ static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* promise,
                NewFrameIntAssignment(frame, frame->state, state_value,
                                      location));
   Vector* suspend_actuals = NewVector();
-  VectorAppend(suspend_actuals, NewFrameAddress(frame, location));
+  VectorAppend(suspend_actuals,
+               NewAwaitSuspendHandleArgument(frame, awaiter, location));
   ASTNode* await_suspend = NewAwaiterMemberCallWithActuals(
       NewIdentifierASTNode(awaiter, location), "await_suspend",
       suspend_actuals, location);
   TypeRecord* await_suspend_return = AwaiterAwaitSuspendReturnType(awaiter);
+  if (await_suspend_return != NULL) {
+    ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
+  }
   AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
                                     await_suspend, await_suspend_return,
                                     return_type, location);
   return NewIfStatementASTNode(
       not_ready, NewCompoundStatementASTNode(suspend_statements, location),
       NULL, false, location);
+}
+
+static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
+                                             ASTNode* stmt,
+                                             size_t at_index);
+
+static void InsertCoroutineAwaiterDestructorAfterUse(
+    SuspensionPoint* point, CoroutineFrame* frame, size_t statement_index,
+    SourceLocation location) {
+  ASTNode* dtor = NewCoroutineFrameMemberGuardedDestructor(
+      frame, point->frame_member, point->frame_constructed_member, location);
+  if (dtor == NULL) {
+    return;
+  }
+  ASTNode* use_stmt = point->compound->statements->value.p[statement_index];
+  if (use_stmt != NULL && use_stmt->op == AST_OP(compound)) {
+    CompoundASTNodeInsertStatement((CompoundStatementASTNode*)use_stmt, dtor,
+                                   1);
+    return;
+  }
+  CoroutineCompoundInsertStatement(point->compound, dtor, statement_index + 1);
 }
 
 static ASTNode* NewAwaitResumeInitializer(Symbol* awaiter,
@@ -2476,11 +3990,15 @@ static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
   VectorAppend(suspend_statements,
                NewFrameIntAssignment(frame, frame->state, 0, location));
   Vector* suspend_actuals = NewVector();
-  VectorAppend(suspend_actuals, NewFrameAddress(frame, location));
+  VectorAppend(suspend_actuals,
+               NewAwaitSuspendHandleArgument(frame, awaiter, location));
   ASTNode* await_suspend = NewAwaiterMemberCallWithActuals(
       NewIdentifierASTNode(awaiter, location), "await_suspend",
       suspend_actuals, location);
   TypeRecord* await_suspend_return = AwaiterAwaitSuspendReturnType(awaiter);
+  if (await_suspend_return != NULL) {
+    ASTNodeSetType(await_suspend, TypeRecordCopy(await_suspend_return));
+  }
   AppendCoroutineAwaitSuspendReturn(suspend_statements, frame, promise,
                                     await_suspend, await_suspend_return,
                                     return_type, location);
@@ -2489,7 +4007,12 @@ static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
       NULL, false, location);
 }
 
-static void ResetStatementParents(ASTNode* node);
+static ASTNode* PreserveASTNodeTransform(ASTNode* node, void* data,
+                                         ASTNodeTransformAction* action) {
+  (void)data;
+  (void)action;
+  return node;
+}
 
 static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
                                              ASTNode* stmt,
@@ -2510,183 +4033,174 @@ static void ResetCompoundStatementParents(CompoundStatementASTNode* compound) {
   if (compound == NULL) {
     return;
   }
-  for (size_t i = 0; i < compound->statements->length; i++) {
-    ASTNode* stmt = compound->statements->value.p[i];
-    if (stmt != NULL) {
-      stmt->parent = (ASTNode*)compound;
-      stmt->child_id = (int)i;
-      ResetStatementParents(stmt);
+  ASTNodeVisitAndTransform((ASTNode*)compound, PreserveASTNodeTransform, NULL);
+}
+
+static bool CoroutineStatementLocation(ASTNode* stmt,
+                                       CompoundStatementASTNode** compound,
+                                       size_t* statement_index) {
+  if (stmt == NULL || stmt->parent == NULL ||
+      stmt->parent->op != AST_OP(compound) || stmt->child_id < 0) {
+    return false;
+  }
+  *compound = (CompoundStatementASTNode*)stmt->parent;
+  *statement_index = (size_t)stmt->child_id;
+  return true;
+}
+
+static SuspensionPoint* NextSuspensionPoint(SuspensionPoints* points) {
+  if (points == NULL || points->count >= points->capacity) {
+    return NULL;
+  }
+  return &points->points[points->count++];
+}
+
+static void AddCoAwaitSuspensionPoint(SuspensionPoints* points,
+                                      ASTNode* stmt,
+                                      ASTNode* co_await) {
+  if (co_await == NULL || co_await->op != AST_OP(co_await) ||
+      CoAwaitIsAlwaysReady(co_await)) {
+    return;
+  }
+  CompoundStatementASTNode* compound = NULL;
+  size_t statement_index = 0;
+  if (!CoroutineStatementLocation(stmt, &compound, &statement_index)) {
+    return;
+  }
+  SuspensionPoint* point = NextSuspensionPoint(points);
+  if (point == NULL) {
+    return;
+  }
+  point->kind = kSuspensionCoAwait;
+  point->co_await = co_await;
+  point->statement = stmt;
+  point->compound = compound;
+  point->statement_index = statement_index;
+}
+
+static void AddCoYieldSuspensionPoint(SuspensionPoints* points,
+                                      ASTNode* stmt,
+                                      ASTNode* co_yield) {
+  if (co_yield == NULL || co_yield->op != AST_OP(co_yield)) {
+    return;
+  }
+  CompoundStatementASTNode* compound = NULL;
+  size_t statement_index = 0;
+  if (!CoroutineStatementLocation(stmt, &compound, &statement_index)) {
+    return;
+  }
+  SuspensionPoint* point = NextSuspensionPoint(points);
+  if (point == NULL) {
+    return;
+  }
+  point->kind = kSuspensionCoYield;
+  point->co_yield = co_yield;
+  point->statement = stmt;
+  point->compound = compound;
+  point->statement_index = statement_index;
+}
+
+static void AddDeclarationCoAwaitSuspensionPoints(
+    SuspensionPoints* points,
+    DeclarationListASTNode* decl_list,
+    CompoundStatementASTNode* compound,
+    size_t statement_index) {
+  for (size_t i = 0; i < decl_list->declarations->length; i++) {
+    VariableDeclarationASTNode* decl = decl_list->declarations->value.p[i];
+    if (decl == NULL) {
+      continue;
     }
+    ASTNode* expr = VariableInitializerExpression(decl->initializer);
+    if (expr == NULL || expr->op != AST_OP(co_await) ||
+        CoAwaitIsAlwaysReady(expr)) {
+      continue;
+    }
+    SuspensionPoint* point = NextSuspensionPoint(points);
+    if (point == NULL) {
+      continue;
+    }
+    point->kind = kSuspensionCoAwait;
+    point->co_await = expr;
+    point->value_decl = decl;
+    point->decl_list = decl_list;
+    point->compound = compound;
+    point->statement_index = statement_index;
   }
 }
 
-static void ResetStatementParents(ASTNode* node) {
-  if (node == NULL) {
-    return;
-  }
-  if (node->op == AST_OP(compound)) {
-    ResetCompoundStatementParents((CompoundStatementASTNode*)node);
-    return;
-  }
-  if (node->op == AST_OP(if)) {
-    IfStatementASTNode* if_stmt = (IfStatementASTNode*)node;
-    if (if_stmt->if_part != NULL) {
-      if_stmt->if_part->parent = node;
-      if_stmt->if_part->child_id = 1;
-      ResetStatementParents(if_stmt->if_part);
+static void AddDeclarationCoYieldSuspensionPoints(
+    SuspensionPoints* points,
+    DeclarationListASTNode* decl_list,
+    CompoundStatementASTNode* compound,
+    size_t statement_index) {
+  for (size_t i = 0; decl_list != NULL && i < decl_list->declarations->length;
+       i++) {
+    VariableDeclarationASTNode* decl = decl_list->declarations->value.p[i];
+    if (decl == NULL) {
+      continue;
     }
-    if (if_stmt->else_part != NULL) {
-      if_stmt->else_part->parent = node;
-      if_stmt->else_part->child_id = 2;
-      ResetStatementParents(if_stmt->else_part);
+    ASTNode* expr = VariableInitializerExpression(decl->initializer);
+    if (expr == NULL || expr->op != AST_OP(co_yield)) {
+      continue;
+    }
+    SuspensionPoint* point = NextSuspensionPoint(points);
+    if (point == NULL) {
+      continue;
+    }
+    point->kind = kSuspensionCoYield;
+    point->co_yield = expr;
+    point->statement = (ASTNode*)decl_list;
+    point->value_decl = decl;
+    point->decl_list = decl_list;
+    point->compound = compound;
+    point->statement_index = statement_index;
+  }
+}
+
+static bool SuspensionPointIsStatementCoYield(SuspensionPoint* point) {
+  return point != NULL && point->kind == kSuspensionCoYield &&
+         point->statement != NULL && point->statement->op == AST_OP(expr) &&
+         ((ExpressionStatementASTNode*)point->statement)->expr ==
+             point->co_yield;
+}
+
+static void CollectSuspensionPointNode(ASTNode* node, void* data,
+                                       int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  SuspensionPoints* points = data;
+  if (node->op == AST_OP(co_return)) {
+    AddCoAwaitSuspensionPoint(points, node,
+                              ((CombinedStatementASTNode*)node)->cond);
+    return;
+  }
+  if (node->op == AST_OP(expr)) {
+    ASTNode* expr = ((ExpressionStatementASTNode*)node)->expr;
+    AddCoYieldSuspensionPoint(points, node, expr);
+    AddCoAwaitSuspensionPoint(points, node, expr);
+    if (expr != NULL && expr->op == AST_OP(assign)) {
+      AddCoYieldSuspensionPoint(points, node, ((BinaryASTNode*)expr)->right);
+      AddCoAwaitSuspensionPoint(points, node, ((BinaryASTNode*)expr)->right);
     }
     return;
   }
-  if (node->op == AST_OP(while) || node->op == AST_OP(do)) {
-    CombinedStatementASTNode* loop = (CombinedStatementASTNode*)node;
-    if (loop->stmt != NULL) {
-      loop->stmt->parent = node;
-      loop->stmt->child_id = 1;
-      ResetStatementParents(loop->stmt);
-    }
-    return;
-  }
-  if (node->op == AST_OP(for)) {
-    ForStatementASTNode* loop = (ForStatementASTNode*)node;
-    if (loop->stmt != NULL) {
-      loop->stmt->parent = node;
-      loop->stmt->child_id = 3;
-      ResetStatementParents(loop->stmt);
+  if (node->op == AST_OP(decl_list)) {
+    CompoundStatementASTNode* compound = NULL;
+    size_t statement_index = 0;
+    if (CoroutineStatementLocation(node, &compound, &statement_index)) {
+      AddDeclarationCoAwaitSuspensionPoints(
+          points, (DeclarationListASTNode*)node, compound, statement_index);
+      AddDeclarationCoYieldSuspensionPoints(
+          points, (DeclarationListASTNode*)node, compound, statement_index);
     }
   }
 }
 
 static void CollectSuspensionPointsInCompound(CompoundStatementASTNode* body,
                                               SuspensionPoints* points) {
-  for (size_t i = 0; i < body->statements->length; i++) {
-    ASTNode* stmt = body->statements->value.p[i];
-    if (stmt == NULL) {
-      continue;
-    }
-    if (stmt->op == AST_OP(co_return)) {
-      ASTNode* expr = ((CombinedStatementASTNode*)stmt)->cond;
-      if (expr != NULL && expr->op == AST_OP(co_await) &&
-          !CoAwaitIsAlwaysReady(expr)) {
-        if (points->count >= points->capacity) {
-          continue;
-        }
-        SuspensionPoint* point = &points->points[points->count++];
-        point->kind = kSuspensionCoAwait;
-        point->co_await = expr;
-        point->statement = stmt;
-        point->compound = body;
-        point->statement_index = i;
-      }
-      continue;
-    }
-    if (stmt->op == AST_OP(expr)) {
-      ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
-      if (expr != NULL && expr->op == AST_OP(co_yield)) {
-        if (points->count >= points->capacity) {
-          continue;
-        }
-        SuspensionPoint* point = &points->points[points->count++];
-        point->kind = kSuspensionCoYield;
-        point->co_yield = expr;
-        point->statement = stmt;
-        point->compound = body;
-        point->statement_index = i;
-      }
-      if (expr != NULL && expr->op == AST_OP(co_await) &&
-          !CoAwaitIsAlwaysReady(expr)) {
-        if (points->count >= points->capacity) {
-          continue;
-        }
-        SuspensionPoint* point = &points->points[points->count++];
-        point->kind = kSuspensionCoAwait;
-        point->co_await = expr;
-        point->statement = stmt;
-        point->compound = body;
-        point->statement_index = i;
-      }
-      if (expr != NULL && expr->op == AST_OP(assign)) {
-        ASTNode* rhs = ((BinaryASTNode*)expr)->right;
-        if (rhs != NULL && rhs->op == AST_OP(co_await) &&
-            !CoAwaitIsAlwaysReady(rhs)) {
-          if (points->count >= points->capacity) {
-            continue;
-          }
-          SuspensionPoint* point = &points->points[points->count++];
-          point->kind = kSuspensionCoAwait;
-          point->co_await = rhs;
-          point->statement = stmt;
-          point->compound = body;
-          point->statement_index = i;
-        }
-      }
-      continue;
-    }
-    if (stmt->op == AST_OP(compound)) {
-      CollectSuspensionPointsInCompound((CompoundStatementASTNode*)stmt,
-                                        points);
-      continue;
-    }
-    if (stmt->op == AST_OP(if)) {
-      IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
-      if (if_stmt->if_part != NULL &&
-          if_stmt->if_part->op == AST_OP(compound)) {
-        CollectSuspensionPointsInCompound(
-            (CompoundStatementASTNode*)if_stmt->if_part, points);
-      }
-      if (if_stmt->else_part != NULL &&
-          if_stmt->else_part->op == AST_OP(compound)) {
-        CollectSuspensionPointsInCompound(
-            (CompoundStatementASTNode*)if_stmt->else_part, points);
-      }
-      continue;
-    }
-    if (stmt->op == AST_OP(while) || stmt->op == AST_OP(do)) {
-      CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        CollectSuspensionPointsInCompound(
-            (CompoundStatementASTNode*)loop->stmt, points);
-      }
-      continue;
-    }
-    if (stmt->op == AST_OP(for)) {
-      ForStatementASTNode* loop = (ForStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        CollectSuspensionPointsInCompound(
-            (CompoundStatementASTNode*)loop->stmt, points);
-      }
-      continue;
-    }
-    if (stmt->op != AST_OP(decl_list)) {
-      continue;
-    }
-    DeclarationListASTNode* decl_list = (DeclarationListASTNode*)stmt;
-    for (size_t j = 0; j < decl_list->declarations->length; j++) {
-      VariableDeclarationASTNode* decl = decl_list->declarations->value.p[j];
-      if (decl == NULL) {
-        continue;
-      }
-      ASTNode* expr = VariableInitializerExpression(decl->initializer);
-      if (expr == NULL || expr->op != AST_OP(co_await) ||
-          CoAwaitIsAlwaysReady(expr)) {
-        continue;
-      }
-      if (points->count >= points->capacity) {
-        continue;
-      }
-      SuspensionPoint* point = &points->points[points->count++];
-      point->kind = kSuspensionCoAwait;
-      point->co_await = expr;
-      point->value_decl = decl;
-      point->decl_list = decl_list;
-      point->compound = body;
-      point->statement_index = i;
-    }
-  }
+  ASTNodeVisit((ASTNode*)body, CollectSuspensionPointNode, 0, points);
 }
 
 typedef struct {
@@ -2715,18 +4229,6 @@ static bool ASTUsesSymbol(ASTNode* node, Symbol* symbol) {
   SymbolUseSearch search = {symbol, false};
   ASTNodeVisit(node, FindSymbolUse, 0, &search);
   return search.found;
-}
-
-static bool SymbolVectorContains(Vector* symbols, Symbol* symbol) {
-  if (symbols == NULL || symbol == NULL) {
-    return false;
-  }
-  for (size_t i = 0; i < symbols->length; i++) {
-    if (symbols->value.p[i] == symbol) {
-      return true;
-    }
-  }
-  return false;
 }
 
 static bool PersistedLocalVectorContains(Vector* locals, Symbol* symbol) {
@@ -2772,13 +4274,27 @@ static bool CoroutineParameterCanBePersisted(Symbol* symbol,
   return CoroutineTypeCanBeCopyConstructed(symbol->type);
 }
 
-static bool CoroutineLocalCanBePersisted(Symbol* symbol) {
+static bool CoroutineLocalCanBePersisted(Symbol* symbol, bool* move_local) {
+  if (move_local != NULL) {
+    *move_local = false;
+  }
   if (CoroutineScalarCanBePersisted(symbol)) {
     return true;
   }
-  return symbol != NULL && symbol->type != NULL &&
-         TypeIsStructOrUnion(symbol->type) &&
-         CoroutineTypeCanBeCopyConstructed(symbol->type);
+  if (symbol == NULL || symbol->type == NULL ||
+      !TypeIsStructOrUnion(symbol->type)) {
+    return false;
+  }
+  if (CoroutineTypeCanBeCopyConstructed(symbol->type)) {
+    return true;
+  }
+  if (CoroutineTypeCanBeMoveConstructed(symbol->type)) {
+    if (move_local != NULL) {
+      *move_local = true;
+    }
+    return true;
+  }
+  return false;
 }
 
 static bool StatementRangeUsesSymbol(CompoundStatementASTNode* body,
@@ -2795,6 +4311,47 @@ static bool StatementRangeUsesSymbol(CompoundStatementASTNode* body,
   return false;
 }
 
+typedef struct {
+  CompoundStatementASTNode* root;
+  Symbol* symbol;
+  bool found;
+} SuspensionUseAfterSearch;
+
+static bool FindSuspensionUseAfterInAncestors(ASTNode* current, void* data) {
+  SuspensionUseAfterSearch* search = data;
+  if (current == NULL || current == (ASTNode*)search->root) {
+    return false;
+  }
+  ASTNode* parent = current->parent;
+  if (parent == NULL) {
+    return false;
+  }
+  if ((parent->op == AST_OP(while) || parent->op == AST_OP(do)) &&
+      ((CombinedStatementASTNode*)parent)->stmt == current &&
+      ASTUsesSymbol(((CombinedStatementASTNode*)parent)->cond,
+                    search->symbol)) {
+    search->found = true;
+    return false;
+  }
+  if (parent->op == AST_OP(for) &&
+      ((ForStatementASTNode*)parent)->stmt == current) {
+    ForStatementASTNode* loop = (ForStatementASTNode*)parent;
+    if (ASTUsesSymbol(loop->c2, search->symbol) ||
+        ASTUsesSymbol(loop->c3, search->symbol)) {
+      search->found = true;
+      return false;
+    }
+  }
+  if (parent->op == AST_OP(compound) &&
+      StatementRangeUsesSymbol((CompoundStatementASTNode*)parent,
+                               (size_t)current->child_id + 1,
+                               search->symbol)) {
+    search->found = true;
+    return false;
+  }
+  return true;
+}
+
 static bool SuspensionPointUsesSymbolAfter(CompoundStatementASTNode* root,
                                            SuspensionPoint* point,
                                            Symbol* symbol) {
@@ -2805,50 +4362,21 @@ static bool SuspensionPointUsesSymbolAfter(CompoundStatementASTNode* root,
                                symbol)) {
     return true;
   }
-  ASTNode* current = (ASTNode*)point->compound;
-  while (current != NULL && current != (ASTNode*)root) {
-    ASTNode* parent = current->parent;
-    if (parent == NULL) {
-      break;
-    }
-    if ((parent->op == AST_OP(while) || parent->op == AST_OP(do)) &&
-        ((CombinedStatementASTNode*)parent)->stmt == current &&
-        ASTUsesSymbol(((CombinedStatementASTNode*)parent)->cond, symbol)) {
-      return true;
-    }
-    if (parent->op == AST_OP(for) &&
-        ((ForStatementASTNode*)parent)->stmt == current) {
-      ForStatementASTNode* loop = (ForStatementASTNode*)parent;
-      if (ASTUsesSymbol(loop->c2, symbol) ||
-          ASTUsesSymbol(loop->c3, symbol)) {
-        return true;
-      }
-    }
-    if (parent->op == AST_OP(compound) &&
-        StatementRangeUsesSymbol((CompoundStatementASTNode*)parent,
-                                 (size_t)current->child_id + 1, symbol)) {
-      return true;
-    }
-    current = parent;
-  }
-  return false;
-}
-
-static void CollectCoroutineAwaiterSymbols(SuspensionPoints* points,
-                                           Vector* awaiters) {
-  VectorInit(awaiters);
-  for (int i = 0; points != NULL && i < points->count; i++) {
-    if (points->points[i].awaiter != NULL &&
-        !SymbolVectorContains(awaiters, points->points[i].awaiter)) {
-      VectorAppend(awaiters, points->points[i].awaiter);
-    }
-  }
+  SuspensionUseAfterSearch search = {
+      .root = root,
+      .symbol = symbol,
+  };
+  ASTNodeVisitUpwards((ASTNode*)point->compound,
+                      FindSuspensionUseAfterInAncestors, &search);
+  return search.found;
 }
 
 static void AddPersistedCoroutineLocal(Vector* persisted_locals,
                                        Symbol* symbol,
                                        bool is_parameter,
-                                       bool move_parameter) {
+                                       bool is_catch_parameter,
+                                       bool move_parameter,
+                                       CompoundStatementASTNode* store_compound) {
   if (PersistedLocalVectorContains(persisted_locals, symbol)) {
     return;
   }
@@ -2858,7 +4386,9 @@ static void AddPersistedCoroutineLocal(Vector* persisted_locals,
   local->member = NULL;
   local->constructed_member = NULL;
   local->is_parameter = is_parameter;
+  local->is_catch_parameter = is_catch_parameter;
   local->move_parameter = move_parameter;
+  local->store_compound = store_compound;
   VectorAppend(persisted_locals, local);
 }
 
@@ -2867,7 +4397,6 @@ static void CollectPersistedCoroutineLocalsBeforeIndex(
     CompoundStatementASTNode* compound,
     size_t limit,
     SuspensionPoint* point,
-    Vector* awaiters,
     Vector* persisted_locals,
     bool* ok) {
   if (compound == NULL || point == NULL || persisted_locals == NULL ||
@@ -2885,49 +4414,126 @@ static void CollectPersistedCoroutineLocalsBeforeIndex(
       VariableDeclarationASTNode* decl =
           decls->declarations->value.p[decl_index];
       Symbol* symbol = decl != NULL ? decl->symbol : NULL;
-      if (SymbolVectorContains(awaiters, symbol)) {
-        continue;
-      }
       if (!SuspensionPointUsesSymbolAfter(root, point, symbol)) {
         continue;
       }
-      if (!CoroutineLocalCanBePersisted(symbol)) {
+      bool move_local = false;
+      if (!CoroutineLocalCanBePersisted(symbol, &move_local)) {
         SemanticError(
             (ASTNode*)decl,
-            "coroutine local live across suspension is not supported yet");
+            "coroutine local live across suspension requires a copy or move "
+            "constructor");
         *ok = false;
         continue;
       }
-      AddPersistedCoroutineLocal(persisted_locals, symbol, false, false);
+      AddPersistedCoroutineLocal(persisted_locals, symbol, false, false,
+                                 move_local, NULL);
     }
   }
+}
+
+typedef struct {
+  CompoundStatementASTNode* root;
+  SuspensionPoint* point;
+  Vector* persisted_locals;
+  bool* ok;
+} PersistedLocalCollectionSearch;
+
+static bool CollectPersistedCoroutineLocalsFromAncestor(ASTNode* current,
+                                                        void* data) {
+  PersistedLocalCollectionSearch* search = data;
+  if (current == NULL || current == (ASTNode*)search->root) {
+    return false;
+  }
+  ASTNode* parent = current->parent;
+  if (parent == NULL) {
+    return false;
+  }
+  if (parent->op == AST_OP(compound)) {
+    CollectPersistedCoroutineLocalsBeforeIndex(
+        search->root, (CompoundStatementASTNode*)parent,
+        (size_t)current->child_id, search->point, search->persisted_locals,
+        search->ok);
+  }
+  return true;
 }
 
 static void CollectPersistedCoroutineLocalsForPoint(
     CompoundStatementASTNode* root,
     SuspensionPoint* point,
-    Vector* awaiters,
     Vector* persisted_locals,
     bool* ok) {
   if (root == NULL || point == NULL || point->compound == NULL) {
     return;
   }
   CollectPersistedCoroutineLocalsBeforeIndex(
-      root, point->compound, point->statement_index, point, awaiters,
-      persisted_locals, ok);
-  ASTNode* current = (ASTNode*)point->compound;
-  while (current != NULL && current != (ASTNode*)root) {
-    ASTNode* parent = current->parent;
-    if (parent == NULL) {
-      break;
-    }
-    if (parent->op == AST_OP(compound)) {
-      CollectPersistedCoroutineLocalsBeforeIndex(
-          root, (CompoundStatementASTNode*)parent, (size_t)current->child_id,
-          point, awaiters, persisted_locals, ok);
-    }
-    current = parent;
+      root, point->compound, point->statement_index, point, persisted_locals,
+      ok);
+  PersistedLocalCollectionSearch search = {
+      .root = root,
+      .point = point,
+      .persisted_locals = persisted_locals,
+      .ok = ok,
+  };
+  ASTNodeVisitUpwards((ASTNode*)point->compound,
+                      CollectPersistedCoroutineLocalsFromAncestor, &search);
+}
+
+static bool CollectPersistedCoroutineCatchParameterFromAncestor(
+    ASTNode* current, void* data) {
+  PersistedLocalCollectionSearch* search = data;
+  if (current == NULL || current == (ASTNode*)search->root) {
+    return false;
   }
+  ASTNode* parent = current->parent;
+  if (parent == NULL) {
+    return false;
+  }
+  if (parent->op != AST_OP(catch)) {
+    return true;
+  }
+  CatchASTNode* catch_stmt = (CatchASTNode*)parent;
+  Symbol* symbol = catch_stmt->symbol;
+  if (symbol == NULL ||
+      !SuspensionPointUsesSymbolAfter(search->root, search->point, symbol)) {
+    return true;
+  }
+  bool move_parameter = false;
+  if (!CoroutineLocalCanBePersisted(symbol, &move_parameter)) {
+    SemanticError(
+        (ASTNode*)catch_stmt,
+        "coroutine catch parameter live across suspension requires a copy or "
+        "move constructor");
+    *search->ok = false;
+    return true;
+  }
+  CompoundStatementASTNode* store_compound =
+      catch_stmt->stmt != NULL && catch_stmt->stmt->op == AST_OP(compound)
+          ? (CompoundStatementASTNode*)catch_stmt->stmt
+          : NULL;
+  AddPersistedCoroutineLocal(search->persisted_locals, symbol, false, true,
+                             move_parameter, store_compound);
+  return true;
+}
+
+static void CollectPersistedCoroutineCatchParametersForPoint(
+    CompoundStatementASTNode* root,
+    SuspensionPoint* point,
+    Vector* persisted_locals,
+    bool* ok) {
+  if (root == NULL || point == NULL || point->compound == NULL ||
+      persisted_locals == NULL || ok == NULL) {
+    return;
+  }
+  PersistedLocalCollectionSearch search = {
+      .root = root,
+      .point = point,
+      .persisted_locals = persisted_locals,
+      .ok = ok,
+  };
+  ASTNodeVisitUpwards(
+      (ASTNode*)point->compound,
+      CollectPersistedCoroutineCatchParameterFromAncestor, &search);
 }
 
 static bool CollectPersistedCoroutineLocals(
@@ -2938,14 +4544,13 @@ static bool CollectPersistedCoroutineLocals(
   if (body == NULL || points == NULL || points->count == 0) {
     return true;
   }
-  Vector awaiters;
-  CollectCoroutineAwaiterSymbols(points, &awaiters);
   bool ok = true;
   for (int i = 0; i < points->count; i++) {
     CollectPersistedCoroutineLocalsForPoint(body, &points->points[i],
-                                            &awaiters, persisted_locals, &ok);
+                                            persisted_locals, &ok);
+    CollectPersistedCoroutineCatchParametersForPoint(
+        body, &points->points[i], persisted_locals, &ok);
   }
-  VectorDestruct(&awaiters);
   return ok;
 }
 
@@ -2968,12 +4573,13 @@ static bool CollectPersistedCoroutineParameters(
     if (!CoroutineParameterCanBePersisted(symbol, &move_parameter)) {
       SemanticError(
           (ASTNode*)body,
-          "coroutine parameter live across suspension is not supported yet");
+          "coroutine parameter live across suspension requires a copy or move "
+          "constructor");
       ok = false;
       continue;
     }
-    AddPersistedCoroutineLocal(persisted_locals, symbol, true,
-                               move_parameter);
+    AddPersistedCoroutineLocal(persisted_locals, symbol, true, false,
+                               move_parameter, NULL);
   }
   return ok;
 }
@@ -3017,6 +4623,39 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
     CompoundStatementASTNode* compound,
     CoroutineFrame* frame,
     Vector* persisted_locals,
+    SuspensionPoints* points);
+
+static void InsertPersistedCoroutineLocalStoresInStatementChildren(
+    ASTNode* stmt,
+    CoroutineFrame* frame,
+    Vector* persisted_locals,
+    SuspensionPoints* points) {
+  CoroutineStatementChildCollector collector = {
+      .root = stmt,
+  };
+  VectorInit(&collector.children);
+  ASTNodeVisitAndTransform(stmt, CollectNestedStatementChildTransform,
+                           &collector);
+  for (size_t i = 0; i < collector.children.length; i++) {
+    ASTNode* child = collector.children.value.p[i];
+    if (child == NULL) {
+      continue;
+    }
+    if (child->op == AST_OP(compound)) {
+      InsertPersistedCoroutineLocalStoresInCompound(
+          (CompoundStatementASTNode*)child, frame, persisted_locals, points);
+    } else {
+      InsertPersistedCoroutineLocalStoresInStatementChildren(
+          child, frame, persisted_locals, points);
+    }
+  }
+  VectorDestruct(&collector.children);
+}
+
+static void InsertPersistedCoroutineLocalStoresInCompound(
+    CompoundStatementASTNode* compound,
+    CoroutineFrame* frame,
+    Vector* persisted_locals,
     SuspensionPoints* points) {
   if (compound == NULL || frame == NULL || persisted_locals == NULL ||
       persisted_locals->length == 0) {
@@ -3029,42 +4668,9 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
           (CompoundStatementASTNode*)stmt, frame, persisted_locals, points);
       continue;
     }
-    if (stmt != NULL && stmt->op == AST_OP(if)) {
-      IfStatementASTNode* if_stmt = (IfStatementASTNode*)stmt;
-      if (if_stmt->if_part != NULL &&
-          if_stmt->if_part->op == AST_OP(compound)) {
-        InsertPersistedCoroutineLocalStoresInCompound(
-            (CompoundStatementASTNode*)if_stmt->if_part, frame,
-            persisted_locals, points);
-      }
-      if (if_stmt->else_part != NULL &&
-          if_stmt->else_part->op == AST_OP(compound)) {
-        InsertPersistedCoroutineLocalStoresInCompound(
-            (CompoundStatementASTNode*)if_stmt->else_part, frame,
-            persisted_locals, points);
-      }
-      continue;
-    }
-    if (stmt != NULL && (stmt->op == AST_OP(while) ||
-                         stmt->op == AST_OP(do))) {
-      CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        InsertPersistedCoroutineLocalStoresInCompound(
-            (CompoundStatementASTNode*)loop->stmt, frame, persisted_locals,
-            points);
-      }
-      continue;
-    }
-    if (stmt != NULL && stmt->op == AST_OP(for)) {
-      ForStatementASTNode* loop = (ForStatementASTNode*)stmt;
-      if (loop->stmt != NULL && loop->stmt->op == AST_OP(compound)) {
-        InsertPersistedCoroutineLocalStoresInCompound(
-            (CompoundStatementASTNode*)loop->stmt, frame, persisted_locals,
-            points);
-      }
-      continue;
-    }
     if (stmt == NULL || stmt->op != AST_OP(decl_list)) {
+      InsertPersistedCoroutineLocalStoresInStatementChildren(
+          stmt, frame, persisted_locals, points);
       continue;
     }
     DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
@@ -3075,11 +4681,16 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
           decls->declarations->value.p[decl_index];
       CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
           persisted_locals, decl != NULL ? decl->symbol : NULL);
-      if (local == NULL || local->member == NULL || local->is_parameter) {
+      if (local == NULL || local->member == NULL || local->is_parameter ||
+          local->is_catch_parameter) {
         continue;
       }
       size_t insert_index = i + 1 + inserted;
-      ASTNode* value = NewIdentifierASTNode(local->symbol, decl->base.location);
+      ASTNode* value = local->move_parameter
+                           ? NewCoroutineMoveExpression(local->symbol,
+                                                        decl->base.location)
+                           : NewIdentifierASTNode(local->symbol,
+                                                  decl->base.location);
       ASTNode* store = TypeIsStructOrUnion(local->symbol->type)
                            ? NewFrameMemberInitialization(
                                  frame, local->member,
@@ -3103,6 +4714,38 @@ static void InsertPersistedCoroutineLocalStores(
     SuspensionPoints* points) {
   InsertPersistedCoroutineLocalStoresInCompound(body, frame, persisted_locals,
                                                points);
+}
+
+static void InsertPersistedCoroutineCatchParameterStores(
+    CoroutineFrame* frame,
+    Vector* persisted_locals,
+    SuspensionPoints* points) {
+  if (frame == NULL || persisted_locals == NULL ||
+      persisted_locals->length == 0) {
+    return;
+  }
+  for (size_t i = 0; i < persisted_locals->length; i++) {
+    CoroutinePersistedLocal* local = persisted_locals->value.p[i];
+    if (local == NULL || local->member == NULL ||
+        !local->is_catch_parameter || local->store_compound == NULL) {
+      continue;
+    }
+    ASTNode* value = local->move_parameter
+                         ? NewCoroutineMoveExpression(local->symbol,
+                                                      local->symbol->location)
+                         : NewIdentifierASTNode(local->symbol,
+                                                local->symbol->location);
+    ASTNode* store = TypeIsStructOrUnion(local->symbol->type)
+                         ? NewFrameMemberInitialization(
+                               frame, local->member,
+                               local->constructed_member, value,
+                               local->symbol->location)
+                         : NewFrameAssignment(frame, local->member, value,
+                                              local->symbol->location);
+    store->flags |= kASTCoroutineFrameStore;
+    CompoundASTNodeInsertStatement(local->store_compound, store, 0);
+    AdjustSuspensionPointIndicesAfterInsert(points, local->store_compound, 0);
+  }
 }
 
 static void InsertPersistedCoroutineParameterStores(
@@ -3141,6 +4784,7 @@ static void InsertPersistedCoroutineParameterStores(
 }
 
 static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* body,
+                                    Symbol* promise,
                                     SuspensionPoint* point) {
   (void)body;
   if (point->kind == kSuspensionCoYield) {
@@ -3166,6 +4810,12 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
     return false;
   }
   Symbol* awaitable_temp = NULL;
+  bool await_transform_error = false;
+  ApplyPromiseAwaitTransform((UnaryASTNode*)point->co_await, promise,
+                             &await_transform_error);
+  if (await_transform_error) {
+    return false;
+  }
   if (!ApplyMemberOperatorCoAwait((UnaryASTNode*)point->co_await,
                                   &awaitable_temp)) {
     ApplyFreeOperatorCoAwait((UnaryASTNode*)point->co_await,
@@ -3201,10 +4851,20 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
   }
   point->awaiter_decl = FindAwaiterDeclarationBefore(point, awaiter);
   if (point->awaiter_decl == NULL) {
-    SemanticError(point->co_await,
-                  "suspending co_await currently requires a prior awaiter "
-                  "declaration");
-    return false;
+    point->awaiter = NewCoroutineAwaiterTemporary(awaiter->type,
+                                                  point->co_await->location);
+    if (point->awaiter == NULL) {
+      SemanticError(point->co_await,
+                    "coroutine co_await operand type is invalid");
+      return false;
+    }
+    point->awaiter_init =
+        NewCoroutineFrameAwaiterInitializer(awaiter,
+                                            point->co_await->location);
+  } else if (CoroutineFrameAwaiterShouldMove(awaiter->type)) {
+    point->awaiter_init =
+        NewCoroutineFrameAwaiterInitializer(awaiter,
+                                            point->co_await->location);
   }
   return true;
 }
@@ -3216,6 +4876,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                            Symbol* promise,
                                            CoroutineFrame* frame,
                                            Symbol* initial_awaiter,
+                                           Symbol* final_awaiter,
                                            TypeRecord* yield_awaiter_type) {
   CompoundStatementASTNode* body =
       (CompoundStatementASTNode*)node->type->info.function.body;
@@ -3243,6 +4904,22 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                  yield_awaiter_type)) {
         free(labels);
         return false;
+      }
+      if (points->points[i].value_decl != NULL) {
+        ReplaceVariableInitializerExpression(
+            points->points[i].value_decl,
+            UnwrapExpressionInitializer(NewAwaitResumeInitializer(
+                points->points[i].awaiter,
+                points->points[i].value_decl->symbol->type, location)));
+      } else if (!SuspensionPointIsStatementCoYield(&points->points[i])) {
+        ASTNode* await_resume =
+            NewAwaiterMemberCall(
+                NewIdentifierASTNode(points->points[i].awaiter, location),
+                "await_resume", location);
+        ASTNodeSetType(await_resume, points->points[i].co_yield->type);
+        ASTNodeReplaceChild(points->points[i].co_yield->parent,
+                            points->points[i].co_yield->child_id,
+                            await_resume, true);
       }
     } else if (points->points[i].value_decl == NULL) {
       ASTNode* await_resume =
@@ -3279,9 +4956,14 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                        point->statement_index + 2);
       CoroutineCompoundInsertStatement(point->compound, reset_state,
                                        point->statement_index + 3);
-      CoroutineCompoundInsertStatement(
-          point->compound, NewAwaitResumeStatement(awaiter, location),
-          point->statement_index + 4);
+      if (SuspensionPointIsStatementCoYield(point)) {
+        CoroutineCompoundInsertStatement(
+            point->compound, NewAwaitResumeStatement(awaiter, location),
+            point->statement_index + 4);
+      }
+      InsertCoroutineAwaiterDestructorAfterUse(point, frame,
+                                               point->statement_index + 4,
+                                               location);
     } else {
       ASTNode* awaiter_init = NULL;
       if (point->awaiter_init != NULL) {
@@ -3317,6 +4999,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                        next_index + 1);
       CoroutineCompoundInsertStatement(point->compound, reset_state,
                                        next_index + 2);
+      InsertCoroutineAwaiterDestructorAfterUse(point, frame, next_index + 3,
+                                               location);
     }
   }
 
@@ -3334,7 +5018,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   RewriteFrameOwnedSymbols((ASTNode*)body, frame);
   Symbol* resume_function =
       NewCoroutineResumeFunction(node, frame, body, return_type,
-                                 scan.suspend_count, initial_awaiter,
+                                 scan.suspend_count, promise,
+                                 initial_awaiter, final_awaiter,
                                  node->location);
   Symbol* destroy_function = NewCoroutineDestroyFunction(frame, node->location);
   if (resume_function != NULL && frame->resume != NULL) {
@@ -3412,6 +5097,12 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   SuspensionPoints points = {0};
   Vector persisted_locals;
   VectorInit(&persisted_locals);
+  Symbol* promise =
+      SyntaxNewTemporary(&compiler->syntax,
+                         TypeRecordCopy(info->coroutine_promise_type));
+  promise->flags.is_local = true;
+  promise->flags.is_defined = true;
+  promise->location = node->location;
   points.capacity = scan.suspend_count;
   if (needs_frame && points.capacity > 0) {
     points.points = calloc((size_t)points.capacity, sizeof(SuspensionPoint));
@@ -3428,7 +5119,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
       return false;
     }
     for (int i = 0; i < points.count; i++) {
-      if (!ValidateSuspensionPoint(node, body, &points.points[i])) {
+      if (!ValidateSuspensionPoint(node, body, promise, &points.points[i])) {
         PersistedCoroutineLocalsDestruct(&persisted_locals);
         free(points.points);
         return false;
@@ -3436,8 +5127,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     }
     for (int i = 0; i < points.count; i++) {
       if (points.points[i].kind == kSuspensionCoAwait &&
-          !ValidateCoroutineFrameOwnedAwaiterConstructible(
-              points.points[i].co_await, points.points[i].awaiter->type)) {
+          !ValidateCoroutineSuspensionPointFrameAwaiterConstructible(
+              &points.points[i])) {
         PersistedCoroutineLocalsDestruct(&persisted_locals);
         free(points.points);
         return false;
@@ -3472,29 +5163,17 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     return false;
   }
 
-  Symbol* promise = NULL;
   VariableDeclarationASTNode* promise_decl = NULL;
   Symbol* initial_awaiter = NULL;
   VariableDeclarationASTNode* initial_awaiter_decl = NULL;
+  Symbol* final_awaiter = NULL;
   CoroutineFrame frame = {0};
   if (!needs_frame) {
-    promise =
-        SyntaxNewTemporary(&compiler->syntax,
-                           TypeRecordCopy(info->coroutine_promise_type));
-    promise->flags.is_local = true;
-    promise->flags.is_defined = true;
-    promise->location = node->location;
     promise_decl = (VariableDeclarationASTNode*)NewVariableDeclarationASTNode(
         promise, NULL, node->location);
   } else {
-    promise =
-        SyntaxNewTemporary(&compiler->syntax,
-                           TypeRecordCopy(info->coroutine_promise_type));
-    promise->flags.is_local = true;
-    promise->flags.is_defined = true;
-    promise->location = node->location;
     frame = NewCoroutineFrame(node->type->next, info->coroutine_promise_type,
-                              initial_awaiter_type, &points,
+                              initial_awaiter_type, final_awaiter_type, &points,
                               &persisted_locals,
                               yield_awaiter_type,
                               node->location);
@@ -3518,6 +5197,17 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                                    frame.initial_awaiter,
                                    frame.initial_awaiter_constructed,
                                    false);
+    }
+    if (frame.final_awaiter != NULL) {
+      final_awaiter =
+          SyntaxNewTemporary(&compiler->syntax,
+                             TypeRecordCopy(final_awaiter_type));
+      final_awaiter->flags.is_local = true;
+      final_awaiter->flags.is_defined = true;
+      final_awaiter->location = node->location;
+      CoroutineFrameAddOwnedSymbol(&frame, final_awaiter,
+                                   frame.final_awaiter,
+                                   frame.final_awaiter_constructed, false);
     }
     for (int i = 0; i < points.count; i++) {
       if (points.points[i].kind == kSuspensionCoAwait) {
@@ -3549,6 +5239,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   if (needs_frame) {
     InsertPersistedCoroutineParameterStores(body, &frame, &persisted_locals,
                                             &points);
+    InsertPersistedCoroutineCatchParameterStores(&frame, &persisted_locals,
+                                                 &points);
     InsertPersistedCoroutineLocalStores(body, &frame, &persisted_locals,
                                         &points);
   }
@@ -3562,15 +5254,30 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
         1);
   }
   LowerCoReturnsInStatement(info->body, promise, needs_frame ? &frame : NULL,
-                            node->type->next);
+                            final_awaiter, node->type->next);
+  LowerCoroutineThrowsInStatement(info->body, promise,
+                                  needs_frame ? &frame : NULL,
+                                  final_awaiter, node->type->next);
   if (needs_frame &&
       !LowerSuspendingCoAwaitFunction(node, scan, &points, node->type->next,
                                       promise, &frame, initial_awaiter,
+                                      final_awaiter,
                                       yield_awaiter_type)) {
     CoroutineFrameOwnedSymbolsDestruct(&frame);
     PersistedCoroutineLocalsDestruct(&persisted_locals);
     free(points.points);
     return false;
+  }
+  if (needs_frame) {
+    StructMember* allocation_failure =
+        FindCoroutineAllocationFailureMember(info->coroutine_promise_type);
+    if (allocation_failure != NULL) {
+      CompoundASTNodeInsertStatement(
+          body,
+          NewCoroutineAllocationFailureIf(&frame, allocation_failure,
+                                          node->type->next, node->location),
+          1);
+    }
   }
   if (needs_frame) {
     CoroutineFrameOwnedSymbolsDestruct(&frame);
@@ -3612,50 +5319,91 @@ static CoroutineScan MarkAndValidateCoroutineFunction(ASTNode* node) {
   return scan;
 }
 
-static void ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
+static bool ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
   if (!scan.is_coroutine || node == NULL || node->type == NULL ||
       !TypeIsFunction(node->type)) {
-    return;
+    return false;
   }
   FunctionInfo* info = &node->type->info.function;
   if (info->coroutine_promise_type == NULL) {
-    info->coroutine_promise_type =
-        ResolveDirectCoroutinePromiseType(node->type->next);
+    info->coroutine_promise_type = ResolveCoroutinePromiseType(node->type);
   }
   if (info->coroutine_promise_type == NULL) {
     SemanticError(node, "coroutine return type must provide promise_type");
-    return;
+    return false;
   }
 
   TypeRecord* promise = info->coroutine_promise_type;
-  RequireCoroutinePromiseMember(node, promise, "get_return_object");
-  RequireCoroutinePromiseMember(node, promise, "initial_suspend");
+  bool ok = true;
+  ok &= RequireCoroutinePromiseMember(node, promise, "get_return_object");
+  if (RequireCoroutinePromiseMember(node, promise, "initial_suspend")) {
+    ok &= ValidateCoroutinePromiseAwaiterReturn(node, promise,
+                                                "initial_suspend");
+  } else {
+    ok = false;
+  }
   if (RequireCoroutinePromiseMember(node, promise, "final_suspend")) {
-    TypeRecord* final_awaiter =
-        CoroutinePromiseMemberReturnType(promise, "final_suspend");
-    if (final_awaiter != NULL &&
-        !ValidateCoAwaiterType(node, final_awaiter)) {
-      scan.is_coroutine = false;
-    }
+    ok &= ValidateCoroutinePromiseAwaiterReturn(node, promise,
+                                                "final_suspend");
+  } else {
+    ok = false;
   }
   if (scan.has_co_yield) {
-    RequireCoroutinePromiseMember(node, promise, "yield_value");
+    if (RequireCoroutinePromiseMember(node, promise, "yield_value")) {
+      ok &= ValidateCoroutinePromiseAwaiterReturn(node, promise, "yield_value");
+    } else {
+      ok = false;
+    }
   }
   if (scan.has_co_return_value) {
-    RequireCoroutinePromiseMember(node, promise, "return_value");
+    ok &= RequireCoroutinePromiseMember(node, promise, "return_value");
   } else if (scan.has_co_return) {
-    RequireCoroutinePromiseMember(node, promise, "return_void");
+    ok &= RequireCoroutinePromiseMember(node, promise, "return_void");
   }
-  RequireCoroutinePromiseMember(node, promise, "unhandled_exception");
+  ok &= RequireCoroutinePromiseMember(node, promise, "unhandled_exception");
+  return ok;
+}
+
+static ASTNode* RecoverInvalidCoroutineExpression(ASTNode* node, void* data,
+                                                  ASTNodeTransformAction* action) {
+  (void)data;
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->op == AST_OP(co_await) || node->op == AST_OP(co_yield)) {
+    *action = kASTTransformSkipChildren;
+    return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt,
+                                                          kQualPlain),
+                                 node->location);
+  }
+  return node;
 }
 
 void SemanticAnalyzeCoroutineFunction(ASTNode* node) {
   CoroutineScan coroutine_scan = MarkAndValidateCoroutineFunction(node);
-  ValidateCoroutinePromise(node, coroutine_scan);
-  if (coroutine_scan.is_coroutine && node != NULL && node->type != NULL &&
+  bool promise_ok = ValidateCoroutinePromise(node, coroutine_scan);
+  CoroutineScan lowering_scan = coroutine_scan;
+  if (!promise_ok && coroutine_scan.is_coroutine && node != NULL &&
+      node->type != NULL && TypeIsFunction(node->type) &&
+      node->type->info.function.body != NULL) {
+    node->type->info.function.body = ASTNodeVisitAndTransform(
+        node->type->info.function.body, RecoverInvalidCoroutineExpression,
+        NULL);
+  }
+  if (promise_ok && coroutine_scan.is_coroutine && node != NULL &&
+      node->type != NULL &&
       TypeIsFunction(node->type) && node->type->info.function.body != NULL) {
     ASTNodeVisit(node->type->info.function.body, LowerReadyCoAwaitNode, 0,
                  NULL);
+    if (node->type->info.function.body->op == AST_OP(compound)) {
+      NormalizeNestedSuspensionsInCompound(
+          (CompoundStatementASTNode*)node->type->info.function.body);
+    }
+    lowering_scan = (CoroutineScan){0};
+    ASTNodeVisit(node->type->info.function.body, ScanCoroutineNode, 0,
+                 &lowering_scan);
+    node->type->info.function.coroutine_suspend_count =
+        lowering_scan.suspend_count;
   }
-  LowerCoroutineFunction(node, coroutine_scan);
+  LowerCoroutineFunction(node, lowering_scan);
 }

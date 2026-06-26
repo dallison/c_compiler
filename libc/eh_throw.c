@@ -57,7 +57,7 @@ static int FindMatchingCatch(uintptr_t pc, const DaveTypeInfo* thrown_typeinfo,
   while (entry < end) {
     const DaveTypeInfo* catch_typeinfo =
         (const DaveTypeInfo*)entry->catch_typeinfo;
-    if (pc >= entry->try_start && pc < entry->try_end &&
+    if (pc >= entry->try_start && pc <= entry->try_end &&
         TypeInfoMatches(thrown_typeinfo, catch_typeinfo)) {
       if (match == NULL ||
           (entry->try_start > match->try_start &&

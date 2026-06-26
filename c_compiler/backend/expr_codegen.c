@@ -2257,8 +2257,13 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     }
 
     case AST_OP(designated_init):
+      result =
+          GenerateExpression(gen, ((DesignatedInitializerASTNode*)node)->init);
+      break;
+
     case AST_OP(expr_init):
-      assert(false);
+      result =
+          GenerateExpression(gen, ((ExpressionInitializerASTNode*)node)->expr);
       break;
 
     case AST_OP(braced_init):

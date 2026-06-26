@@ -1784,6 +1784,9 @@ static void PrintRmov(X86_64Emitter* emitter, TargetInstruction* inst, FILE* fp)
   fprintf(fp, "\n");
 }
 
+static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
+                                                   FILE* fp);
+
 // Main instruction printer.
 static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1801,6 +1804,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
     }
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      ReloadStructReturnRegisterAtLandingPad(emitter, fp);
+    }
     return;
   }
 
@@ -2593,8 +2599,7 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
   // CIE: absolute FDE pointers, code alignment 1, data alignment -8, return
   // address register 16 (RIP). Initial CFA at function entry is rsp+8.
   fprintf(fp, ".Leh_%s_cie:\n", func_name);
-  fprintf(fp, "\t.4byte .Leh_%s_cie_end-.Leh_%s_cie_start\n", func_name,
-          func_name);
+  fprintf(fp, "\t.4byte 18\n");
   fprintf(fp, ".Leh_%s_cie_start:\n", func_name);
   fprintf(fp, "\t.4byte 0\n");
   fprintf(fp, "\t.byte 1\n");
@@ -2606,12 +2611,10 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
   fprintf(fp, "\t.byte 0\n");
   fprintf(fp, "\t.byte 12, 7, 8\n");
   fprintf(fp, "\t.byte 144, 1\n");
-  fprintf(fp, "\t.p2align 3\n");
   fprintf(fp, ".Leh_%s_cie_end:\n", func_name);
 
   fprintf(fp, ".Leh_%s_fde:\n", func_name);
-  fprintf(fp, "\t.4byte .Leh_%s_fde_end-.Leh_%s_fde_start\n", func_name,
-          func_name);
+  fprintf(fp, "\t.4byte %d\n", has_frame ? 38 : 21);
   fprintf(fp, ".Leh_%s_fde_start:\n", func_name);
   fprintf(fp, "\t.4byte .Leh_%s_fde_start-.Leh_%s_cie\n", func_name,
           func_name);
@@ -2628,7 +2631,6 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
             func_name, func_name);
     fprintf(fp, "\t.byte 12, 6, 8\n");
   }
-  fprintf(fp, "\t.p2align 3\n");
   fprintf(fp, ".Leh_%s_fde_end:\n", func_name);
   fprintf(fp, "\t.text\n\n");
 }
@@ -2636,6 +2638,25 @@ static void X86_64PrintEHFrame(X86_64Emitter* emitter, FILE* fp,
 static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
                                      TargetInstruction* label) {
   fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
+                                                   FILE* fp) {
+  if (emitter->rv->struct_return_reg < 0) {
+    return;
+  }
+
+  bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
+                 !emitter->rv->not_leaf;
+  int struct_return_slot = (is_leaf ? X86_64_FIRST_LEAF_INT_REG_VAR
+                                    : X86_64_FIRST_INT_REG_VAR) +
+                           emitter->rv->struct_return_reg;
+  char buf[8];
+  fprintf(fp, "\tmovq %d(%%rbp), ", emitter->rv->struct_return_spill_offset);
+  PrintPercentReg(fp, X86_64RegisterNameFromNum(
+                          struct_return_slot, kX86_64RegTypeInt,
+                          buf, sizeof(buf)));
+  fprintf(fp, "\n");
 }
 
 static void PrintEscapedAsmString(FILE* fp, const char* s) {

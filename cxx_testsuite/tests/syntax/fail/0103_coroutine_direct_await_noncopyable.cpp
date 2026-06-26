@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: coroutine frame-owned awaiter requires a copy constructor
+// EXPECT: coroutine frame-owned awaiter requires a copy or move constructor
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -26,8 +26,6 @@ struct NonCopyAwaiter {
     return value;
   }
 };
-
-NonCopyAwaiter make_noncopy_awaiter(void);
 
 struct Promise;
 
@@ -57,7 +55,8 @@ struct Promise {
   }
 };
 
-Task rejected_direct_noncopy_awaiter(void) {
-  int value = co_await make_noncopy_awaiter();
+Task rejected_named_noncopy_awaiter(void) {
+  NonCopyAwaiter awaiter;
+  int value = co_await awaiter;
   co_return value;
 }

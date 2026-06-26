@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: coroutine local live across suspension is not supported yet
+// EXPECT: coroutine local live across suspension requires a copy or move constructor
 
 struct SuspendNever {
   bool await_ready(void) {
