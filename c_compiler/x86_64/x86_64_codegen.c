@@ -2858,14 +2858,24 @@ static TargetInstruction* LowerSetBitField(X86_64Generator* rv, IRNode* node) {
   return result;
 }
 
-static TargetInstruction* LowerSignExtend(X86_64Generator* rv, IRNode* node) {
+static TargetInstruction* LowerSignExtend(X86_64Generator* rv, Generator* gen,
+                                          IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  bool route_stashed_result = (node->flags & kIRStashedCallResult) != 0;
+  TargetInstruction* dest =
+      route_stashed_result ? GetDestInstruction(rv, gen, node) : NULL;
   if (X86_64IsSignedLoad(value)) {
+    if (dest != NULL) {
+      value = SetDestOrMove(rv, value, dest, X86_64_OP(mv));
+    }
     return SetLoweredNode(node, value);
   }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff > 0) {
+    if (dest != NULL) {
+      value = SetDestOrMove(rv, value, dest, X86_64_OP(mv));
+    }
     return SetLoweredNode(node, value);
   }
   diff = -diff;
@@ -2877,6 +2887,9 @@ static TargetInstruction* LowerSignExtend(X86_64Generator* rv, IRNode* node) {
   TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(X86_64_OP(shl), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(X86_64_OP(sar), lsl, immed));
+  if (dest != NULL) {
+    asr = SetDestOrMove(rv, asr, dest, X86_64_OP(mv));
+  }
 
   SetLoweredNode(node, asr);
   return asr;
@@ -3957,7 +3970,7 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
       return LowerZeroExtend(rv, gen, node);
 
     case IR_OP(signextendi):
-      return LowerSignExtend(rv, node);
+      return LowerSignExtend(rv, gen, node);
 
     case IR_OP(aligni):
        return LowerAlign(rv, node);

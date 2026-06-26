@@ -1601,6 +1601,16 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   return func(&to->base.base, data);
 }
 
+static void SizeofASTNodeVisit(ASTNode* node,
+                               void (*func)(ASTNode* node, void*, int,
+                                            VisitorMode),
+                               int child_id, void* data) {
+  SizeofASTNode* n = (SizeofASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static void SizeofASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
                                    void* data) {
   SizeofASTNode* n = (SizeofASTNode*)node;
@@ -1609,8 +1619,8 @@ static void SizeofASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
 
 static ASTNodeVirtuals sizeof_vtbl = {SizeofASTNodeDelete, SizeofASTNodePrint,
                                       SizeofASTNodeReplaceChild,
-                                      SizeofASTNodeClone, NULL, ValueAlwaysUsed,
-                                      SizeofASTNodeTransform};
+                                      SizeofASTNodeClone, SizeofASTNodeVisit,
+                                      ValueAlwaysUsed, SizeofASTNodeTransform};
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
   SizeofASTNode* node = ASTArenaAlloc(sizeof(SizeofASTNode));

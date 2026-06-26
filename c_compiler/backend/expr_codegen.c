@@ -305,9 +305,13 @@ static IRNode* RemoveUnnecesaryShortening(Generator* gen, IRNode* value,
 }
 
 // Stash the result of a calla node into a temporary.
-static IRNode* StashCallResult(Generator* gen, IRNode* node) {
+static IRNode* StashCallResult(Generator* gen, IRNode* node,
+                               bool route_conversion_to_dest) {
   IRNode* tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
   node->dest = tmp;
+  if (route_conversion_to_dest) {
+    node->flags |= kIRStashedCallResult;
+  }
   // IROpcode op = MoveToTmpOpcode(node->type);
   // IRNode* rmov = GeneratorEmit(gen, NewIR2(op, tmp, node));
   //IRSetType(rmov, node->type);
@@ -353,11 +357,11 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
   }
   IRNode* left = GenerateExpression(gen, lhs);
   if (stash_call_results) {
-    left = StashCallResult(gen, left);
+    left = StashCallResult(gen, left, /*route_conversion_to_dest=*/false);
   }
   IRNode* right = GenerateExpression(gen, rhs);
   if (stash_call_results) {
-    right = StashCallResult(gen, right);
+    right = StashCallResult(gen, right, /*route_conversion_to_dest=*/false);
   }
   ASTNode* opcode_type_node =
       (node->base.op == AST_OP(plus) || node->base.op == AST_OP(minus)) &&
@@ -1254,7 +1258,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     // leave those untouched.
     if (stash_call_results && ContainsCall(arg) &&
         !TypeIsStructOrUnion(arg->type) && !TypeIsArray(arg->type)) {
-      arg_value = StashCallResult(gen, arg_value);
+      arg_value = StashCallResult(gen, arg_value,
+                                  /*route_conversion_to_dest=*/true);
     }
 
     if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {

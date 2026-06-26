@@ -308,6 +308,9 @@ case AST_OP(ast_op): \
 
     case AST_OP(sizeof): {
       SizeofASTNode* snode = (SizeofASTNode*)node;
+      if (snode->is_pack_size) {
+        return false;
+      }
       if (snode->expr != NULL && TypeIsVLA(snode->expr->type)) {
         return false;
       }

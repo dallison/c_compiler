@@ -41,7 +41,10 @@ typedef enum {
 typedef struct {
   Symbol* captured;
   Symbol* field;
+  ASTNode* initializer;
   bool by_reference;
+  bool is_pack_expansion;
+  bool is_init_capture;
 } LambdaCapture;
 
 static ASTNode* ParseAssignmentExpression(Syntax* syntax,
@@ -118,13 +121,34 @@ static bool CXXNewConstructorSetHasInitializerList(StructMember* ctor);
 static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
                                                TokenClass followers);
 
+typedef struct {
+  bool found;
+} CXXPackExpressionSearch;
+
+static void FindCXXParameterPackExpression(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+  }
+}
+
+static bool CXXExpressionContainsParameterPack(ASTNode* node) {
+  CXXPackExpressionSearch search = {0};
+  ASTNodeVisit(node, FindCXXParameterPackExpression, 0, &search);
+  return search.found;
+}
+
 static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* actual) {
   if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(ellipsis))) {
     return;
   }
-  if (actual->op != AST_OP(identifier) ||
-      ((IdentifierASTNode*)actual)->symbol == NULL ||
-      !((IdentifierASTNode*)actual)->symbol->flags.is_parameter_pack) {
+  if (!CXXExpressionContainsParameterPack(actual)) {
     SyntaxError(syntax, "pack expansion requires a function parameter pack");
   }
   actual->flags |= kASTPackExpansion;
@@ -182,25 +206,36 @@ static bool ParseFoldOperator(Syntax* syntax, ASTOpcode* op) {
   return false;
 }
 
-static ASTNode* ParseFoldPackIdentifier(Syntax* syntax) {
-  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-    return NULL;
-  }
-  Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
-  if (symbol == NULL || !symbol->flags.is_parameter_pack) {
-    return NULL;
-  }
-  ASTNode* id = NewIdentifierASTNode(symbol, syntax->lex->current_token_location);
-  LexNextToken(syntax->lex);
-  return id;
-}
+typedef struct {
+  bool found;
+} FoldPackSearch;
 
-static bool FoldSeedIsPackIdentifier(ASTNode* node) {
-  if (node == NULL || node->op != AST_OP(identifier)) {
-    return false;
+static void FindFoldPackIdentifier(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
-  return id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+    ((FoldPackSearch*)data)->found = true;
+  }
+}
+
+static bool FoldExpressionContainsPack(ASTNode* node) {
+  FoldPackSearch search = {0};
+  ASTNodeVisit(node, FindFoldPackIdentifier, 0, &search);
+  return search.found;
+}
+
+static ASTNode* ParseFoldPackExpression(Syntax* syntax, TokenClass followers) {
+  ASTNode* expr = ParseCastExpression(syntax, followers);
+  if (!FoldExpressionContainsPack(expr)) {
+    ASTNodeDelete(expr);
+    return NULL;
+  }
+  return expr;
 }
 
 static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
@@ -280,7 +315,7 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
       LexCheckpointDestruct(&checkpoint);
       return invalid;
     }
-    if ((pack = ParseFoldPackIdentifier(syntax)) == NULL) {
+    if ((pack = ParseFoldPackExpression(syntax, followers | TC(closebra))) == NULL) {
       ASTNode* invalid =
           NewInvalidFoldExpression(syntax, &checkpoint,
                                    "fold expression requires a parameter pack",
@@ -304,7 +339,8 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
     }
 
     seed = ParseCastExpression(syntax, followers | TC(closebra));
-    if (!FoldSeedIsPackIdentifier(seed) && seed != NULL &&
+    bool seed_contains_pack = FoldExpressionContainsPack(seed);
+    if (!seed_contains_pack && seed != NULL &&
         ParseFoldOperator(syntax, &op) &&
         LexMatch(syntax->lex, TOK(ellipsis))) {
       if (!ParseFoldOperator(syntax, &second_op)) {
@@ -323,7 +359,7 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
         LexCheckpointDestruct(&checkpoint);
         return invalid;
       }
-      if ((pack = ParseFoldPackIdentifier(syntax)) == NULL) {
+      if ((pack = ParseFoldPackExpression(syntax, followers | TC(closebra))) == NULL) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression requires a parameter pack",
@@ -341,9 +377,7 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
       }
       pack_on_left = false;
     } else {
-      LexCheckpointRestore(syntax->lex, &checkpoint);
-      pack = ParseFoldPackIdentifier(syntax);
-      if (pack == NULL) {
+      if (!seed_contains_pack) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
                                      "fold expression requires a parameter pack",
@@ -351,6 +385,8 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
         LexCheckpointDestruct(&checkpoint);
         return invalid;
       }
+      pack = seed;
+      seed = NULL;
       if (!ParseFoldOperator(syntax, &op)) {
         ASTNode* invalid =
             NewInvalidFoldExpression(syntax, &checkpoint,
@@ -388,7 +424,7 @@ static ASTNode* TryParseCXXFoldExpression(Syntax* syntax,
           return invalid;
         }
         seed = ParseCastExpression(syntax, followers | TC(closebra));
-        if (seed == NULL || FoldSeedIsPackIdentifier(seed)) {
+        if (seed == NULL || FoldExpressionContainsPack(seed)) {
           ASTNode* invalid =
               NewInvalidFoldExpression(syntax, &checkpoint,
                                        "fold expression requires a non-pack initializer",
@@ -895,11 +931,17 @@ static ASTNode* ParseGenericSelection(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
-static LambdaCapture* NewLambdaCapture(Symbol* captured, bool by_reference) {
+static LambdaCapture* NewLambdaCapture(Symbol* captured, bool by_reference,
+                                       bool is_pack_expansion,
+                                       ASTNode* initializer,
+                                       bool is_init_capture) {
   LambdaCapture* capture = malloc(sizeof(LambdaCapture));
   capture->captured = captured;
   capture->field = NULL;
+  capture->initializer = initializer;
   capture->by_reference = by_reference;
+  capture->is_pack_expansion = is_pack_expansion;
+  capture->is_init_capture = is_init_capture;
   return capture;
 }
 
@@ -907,6 +949,17 @@ static LambdaCapture* FindLambdaCapture(Vector* captures, Symbol* symbol) {
   for (size_t i = 0; i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
     if (capture->captured == symbol) {
+      return capture;
+    }
+  }
+  return NULL;
+}
+
+static LambdaCapture* FindLambdaCaptureName(Vector* captures, String* name) {
+  for (size_t i = 0; i < captures->length; i++) {
+    LambdaCapture* capture = captures->value.p[i];
+    if (capture->captured != NULL &&
+        StringEqualString(&capture->captured->name, name)) {
       return capture;
     }
   }
@@ -968,14 +1021,52 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
     }
     String name;
     StringInit(&name, syntax->lex->spelling.value);
+    SourceLocation name_location = syntax->lex->current_token_location;
     Symbol* symbol = SyntaxFindSymbol(syntax, &name);
+    LexNextToken(syntax->lex);
+    if (LexMatch(syntax->lex, TOK(equal))) {
+      ASTNode* initializer =
+          ParseAssignmentExpression(syntax, followers | TC(exprsep) |
+                                                TC(closebra));
+      MarkCXXPackExpansionIfPresent(syntax, initializer);
+      bool is_pack_expansion =
+          initializer != NULL && (initializer->flags & kASTPackExpansion) != 0;
+      TypeRecord* capture_type =
+          initializer != NULL && initializer->type != NULL
+              ? TypeRecordCopy(initializer->type)
+              : NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      Symbol* init_capture =
+          NewSymbol(name.value, capture_type, STO(auto));
+      init_capture->flags.is_defined = true;
+      init_capture->flags.is_local = true;
+      init_capture->flags.is_parameter_pack = is_pack_expansion;
+      init_capture->location = name_location;
+      if (FindLambdaCaptureName(captures, &name) == NULL) {
+        VectorAppend(captures,
+                     NewLambdaCapture(init_capture, by_reference,
+                                      is_pack_expansion, initializer,
+                                      /*is_init_capture=*/true));
+      }
+      StringDestruct(&name);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
+    }
+    bool is_pack_expansion = LexMatch(syntax->lex, TOK(ellipsis));
     if (symbol == NULL) {
       SyntaxError(syntax, "Unknown lambda capture %s", name.value);
-    } else if (FindLambdaCapture(captures, symbol) == NULL) {
-      VectorAppend(captures, NewLambdaCapture(symbol, by_reference));
+    } else if (is_pack_expansion && !symbol->flags.is_parameter_pack) {
+      SyntaxError(syntax,
+                  "lambda capture pack expansion requires a function parameter pack");
+    } else if (FindLambdaCapture(captures, symbol) == NULL &&
+               FindLambdaCaptureName(captures, &name) == NULL) {
+      VectorAppend(captures,
+                   NewLambdaCapture(symbol, by_reference, is_pack_expansion,
+                                    /*initializer=*/NULL,
+                                    /*is_init_capture=*/false));
     }
     StringDestruct(&name);
-    LexNextToken(syntax->lex);
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
@@ -1169,7 +1260,10 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
   }
   bool by_reference =
       scan->capture_default == kLambdaCaptureDefaultReference;
-  VectorAppend(scan->captures, NewLambdaCapture(id->symbol, by_reference));
+  VectorAppend(scan->captures, NewLambdaCapture(id->symbol, by_reference,
+                                                /*is_pack_expansion=*/false,
+                                                /*initializer=*/NULL,
+                                                /*is_init_capture=*/false));
 }
 
 static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture) {
@@ -1191,6 +1285,7 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
                               LambdaCaptureFieldType(capture), STO(implicit));
     field->flags.invented = true;
     field->flags.is_defined = true;
+    field->flags.is_parameter_pack = capture->is_pack_expansion;
     field->location = location;
     StructMember* member = NewStructMember(field);
     member->access = kAccessPrivate;
@@ -1202,9 +1297,14 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
 
 static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture,
                                             SourceLocation location) {
-  ASTNode* value = NewIdentifierASTNode(capture->captured, location);
+  ASTNode* value = capture->is_init_capture
+                       ? capture->initializer
+                       : NewIdentifierASTNode(capture->captured, location);
   if (capture->by_reference) {
     value = NewUnaryASTNode(AST_OP(address), NULL, location, value);
+  }
+  if (capture->is_pack_expansion) {
+    value->flags |= kASTPackExpansion;
   }
   Vector* designators = NewVector();
   VectorAppend(designators, NewStructDesignator(NewString(capture->field->name.value)));
@@ -1221,7 +1321,16 @@ static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
   ASTNode* access =
       NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node, member);
   if (capture->by_reference) {
-    return NewUnaryASTNode(AST_OP(contents), NULL, location, access);
+    ASTNode* contents = NewUnaryASTNode(AST_OP(contents), NULL, location,
+                                        access);
+    if (capture->is_pack_expansion) {
+      contents->flags |= kASTPackExpansion;
+      access->flags |= kASTPackExpansion;
+    }
+    return contents;
+  }
+  if (capture->is_pack_expansion) {
+    access->flags |= kASTPackExpansion;
   }
   return access;
 }
@@ -1230,6 +1339,16 @@ typedef struct {
   Vector* captures;
   Symbol* this_symbol;
 } LambdaRewrite;
+
+static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures) {
+  for (size_t i = 0; captures != NULL && i < captures->length; i++) {
+    LambdaCapture* capture = captures->value.p[i];
+    if (capture != NULL && capture->is_init_capture &&
+        capture->captured != NULL) {
+      InsertLocalSymbol(syntax->local_symbol_stack, capture->captured);
+    }
+  }
+}
 
 static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
                                          ASTNode* replacement) {
@@ -1272,11 +1391,12 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
 }
 
 static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
-                                TokenClass followers) {
+                                Vector* captures, TokenClass followers) {
   ParserContext old_context = syntax->context;
   syntax->context = kParsingBlockScope;
   SyntaxOpenScope(syntax);
   AddLambdaFunctionScopeSymbols(syntax, call_operator->type);
+  AddLambdaInitCaptureScopeSymbols(syntax, captures);
   ASTNode* body = SyntaxParseStatement(syntax, followers);
   SyntaxCloseScope(syntax);
   syntax->context = old_context;
@@ -1315,7 +1435,7 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       NewLambdaCallOperator(syntax, closure_type,
                             NewTypeRecordWithSize(kTypeInt, kQualPlain),
                             /*is_mutable=*/false, location);
-  ParseLambdaBody(syntax, call_operator, followers);
+  ParseLambdaBody(syntax, call_operator, &captures, followers);
   if (capture_default != kLambdaCaptureDefaultNone) {
     LambdaCaptureScan scan = {&captures, call_operator->type, capture_default};
     ASTNodeVisit(call_operator->type->info.function.body,
@@ -1818,7 +1938,7 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
     SyntaxNeedBracket(syntax, TOK(lparen), followers);
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-      SyntaxError(syntax, "Expected template parameter pack name");
+      SyntaxError(syntax, "Expected parameter pack name");
       SyntaxRecover(syntax, TC(closebra));
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
       return NewSizeofPackASTNode(
@@ -1827,9 +1947,8 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
           location);
     }
     Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
-    if (symbol == NULL || !symbol->flags.is_template_parameter ||
-        !symbol->flags.is_parameter_pack) {
-      SyntaxError(syntax, "sizeof... requires a template parameter pack");
+    if (symbol == NULL || !symbol->flags.is_parameter_pack) {
+      SyntaxError(syntax, "sizeof... requires a parameter pack");
       LexNextToken(syntax->lex);
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
       return NewSizeofPackASTNode(

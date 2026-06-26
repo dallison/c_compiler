@@ -769,6 +769,43 @@ static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
 }
 
 
+typedef struct {
+  bool found;
+} UnexpandedPackSearch;
+
+static void FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
+                                             int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  UnexpandedPackSearch* search = data;
+  if ((node->flags & kASTPackExpansion) != 0) {
+    search->found = true;
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      search->found = true;
+    }
+    return;
+  }
+  if (node->op == AST_OP(structmember)) {
+    StructMemberASTNode* member = (StructMemberASTNode*)node;
+    if (member->member != NULL && member->member->symbol != NULL &&
+        member->member->symbol->flags.is_parameter_pack) {
+      search->found = true;
+    }
+  }
+}
+
+static bool FunctionBodyContainsUnexpandedPack(ASTNode* body) {
+  UnexpandedPackSearch search = {0};
+  ASTNodeVisit(body, FindUnexpandedPackInFunctionBody, 0, &search);
+  return search.found;
+}
+
 static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
@@ -796,9 +833,14 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           if (compiler->print_front_end) {
             SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
           }
+          bool dependent_function_body =
+              TypeContainsTemplateParameter(decl->base.type) ||
+              FunctionBodyContainsUnexpandedPack(
+                  decl->base.type->info.function.body);
 
           // Any semantic errors?
           if (NumErrors() == 0 &&
+              !dependent_function_body &&
               (!decl->base.type->info.function.is_inline ||
                decl->symbol->flags.is_inline_defn)) {
             if (compiler->debug_output) {

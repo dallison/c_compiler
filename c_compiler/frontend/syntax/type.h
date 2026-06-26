@@ -159,7 +159,16 @@ typedef struct CXXBaseSpecifier {
   CXXAccess access;
   int byte_offset;
   bool is_virtual;
+  bool is_pack_expansion;
 } CXXBaseSpecifier;
+
+typedef struct CXXMemberUsingDeclaration {
+  struct TypeRecord* base_type;  // Nested-name-specifier base.
+  String member_name;
+  CXXAccess access;
+  SourceLocation location;
+  bool is_pack_expansion;
+} CXXMemberUsingDeclaration;
 
 typedef struct CXXVirtualBaseInfo {
   struct TypeRecord* type;  // Virtual base class type.
@@ -204,6 +213,7 @@ typedef struct StructMember {
   bool is_anon;     // This is an anonymous member.
   bool is_static;   // C++ static data/function member.
   bool is_member_function;
+  bool is_using_declaration;  // Imported by a C++ member using declaration.
   CXXAccess access;
   struct StructMember* overload_next;  // Next C++ member overload by name.
 } StructMember;
@@ -214,6 +224,7 @@ struct Struct {
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
   Symbol* tag_symbol;  // Owning tag symbol, if named.
   Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
+  Vector member_using_declarations;  // CXXMemberUsingDeclaration* entries.
   Vector virtual_bases;  // Vector of CXXVirtualBaseInfo* (owns entries).
   Vector members;    // Vector of StructMember* (owns StructMembers)
   Vector virtual_members;  // Vector of StructMember* (not owned), by slot.
@@ -325,6 +336,7 @@ typedef struct {
   bool is_constexpr;
   bool is_consteval;
   bool is_constinit;
+  bool declarator_is_parameter_pack;
   enum ParserContext context;
   Struct* cxx_member_owner;
   StructMember* cxx_member_definition;
@@ -358,6 +370,7 @@ void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
+bool TypeContainsTemplateParameter(TypeRecord* type);
 void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
 Vector* TemplateArgumentVectorCopy(Vector* args);

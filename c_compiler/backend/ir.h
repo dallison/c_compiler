@@ -283,6 +283,7 @@ typedef struct IRNode {
 #define kIRJumpTableBranch (1 << 6)  // Jump table bra.
 #define kIRFakeUnsigned (1 << 7)  // This type is not really unsigned.
 #define kIRFromCall (1 << 8)  // Struct arg is from a call.
+#define kIRStashedCallResult (1 << 9)  // Scalar call arg result is stashed.
 
 void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);

@@ -1340,13 +1340,34 @@ static void ParseDesignatedInitializer(Syntax* syntax,
 
 }
 
+typedef struct {
+  bool found;
+} CXXPackExpressionSearch;
+
+static void FindCXXParameterPackExpression(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+  }
+}
+
+static bool CXXExpressionContainsParameterPack(ASTNode* node) {
+  CXXPackExpressionSearch search = {0};
+  ASTNodeVisit(node, FindCXXParameterPackExpression, 0, &search);
+  return search.found;
+}
+
 static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* expr) {
   if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(ellipsis))) {
     return;
   }
-  if (expr->op != AST_OP(identifier) ||
-      ((IdentifierASTNode*)expr)->symbol == NULL ||
-      !((IdentifierASTNode*)expr)->symbol->flags.is_parameter_pack) {
+  if (!CXXExpressionContainsParameterPack(expr)) {
     SyntaxError(syntax, "pack expansion requires a function parameter pack");
   }
   expr->flags |= kASTPackExpansion;

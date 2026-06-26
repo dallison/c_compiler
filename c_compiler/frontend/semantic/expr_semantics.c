@@ -2733,10 +2733,48 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   return -1;
 }
 
+static bool CallActualIsPackExpansion(ASTNode* actual) {
+  if (actual == NULL) {
+    return false;
+  }
+  if ((actual->flags & kASTPackExpansion) != 0) {
+    return true;
+  }
+  if (actual->op == AST_OP(contents)) {
+    return CallActualIsPackExpansion(((UnaryASTNode*)actual)->sub);
+  }
+  if (actual->op != AST_OP(dot) && actual->op != AST_OP(arrow)) {
+    return false;
+  }
+  BinaryASTNode* member_access = (BinaryASTNode*)actual;
+  if (member_access->right == NULL ||
+      member_access->right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMemberASTNode* member = (StructMemberASTNode*)member_access->right;
+  return member->member != NULL && member->member->symbol != NULL &&
+         member->member->symbol->flags.is_parameter_pack;
+}
+
+static bool CallHasPackExpansionActual(VectorASTNode* node) {
+  if (node == NULL || node->children == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < node->children->length; i++) {
+    if (CallActualIsPackExpansion(node->children->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
                              size_t first_formal_arg) {
   if (!TypeIsFunction(func) || func->info.function.unknown_args) {
     return -1;
+  }
+  if (CallHasPackExpansionActual(node)) {
+    return 0;
   }
   size_t num_actual_args = node->children->length;
   size_t num_formal_args = func->info.function.prototype.length;
@@ -3356,10 +3394,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     return construction;
   }
   LowerMemberFunctionCall(node);
+  bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template &&
-        !id->symbol->flags.is_overloaded && TypeIsFunction(id->symbol->type)) {
+        !id->symbol->flags.is_overloaded && TypeIsFunction(id->symbol->type) &&
+        !has_pack_expansion_actual) {
       Symbol* instantiated =
           TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
               &compiler->syntax, id->symbol, id->template_arguments,
@@ -3374,7 +3414,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);
-    if (id->symbol != NULL && id->symbol->flags.is_template) {
+    if (id->symbol != NULL && id->symbol->flags.is_template &&
+        !has_pack_expansion_actual) {
       if (TypeIsFunction(id->symbol->type) &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
               id->symbol, id->template_arguments, node->children, 0)) {
@@ -3417,7 +3458,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   bool call_ok = true;
   // We are calling a function.  Let's check the arguments.
   size_t num_formal_args = subtype->info.function.prototype.length;
-  if (!subtype->info.function.unknown_args) {
+  if (!subtype->info.function.unknown_args && !has_pack_expansion_actual) {
     if (num_actual_args < num_formal_args) {
       SemanticError((ASTNode*)node,
                     "Too few arguments supplied to varargs function call; need "
@@ -3723,14 +3764,15 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
 
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   if (node->is_pack_size) {
-    if (node->expr == NULL || node->expr->op != AST_OP(identifier)) {
-      SemanticError((ASTNode*)node, "sizeof... requires a template parameter pack");
-    } else {
+    bool valid_pack = (node->expr != NULL &&
+                       (node->expr->flags & kASTPackExpansion) != 0);
+    if (node->expr != NULL && node->expr->op == AST_OP(identifier)) {
       IdentifierASTNode* id = (IdentifierASTNode*)node->expr;
-      if (id->symbol == NULL || !id->symbol->flags.is_template_parameter ||
-          !id->symbol->flags.is_parameter_pack) {
-        SemanticError(node->expr, "sizeof... requires a template parameter pack");
-      }
+      valid_pack =
+          id->symbol != NULL && id->symbol->flags.is_parameter_pack;
+    }
+    if (!valid_pack) {
+      SemanticError((ASTNode*)node, "sizeof... requires a parameter pack");
     }
     ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
     return;

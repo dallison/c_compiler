@@ -622,18 +622,25 @@ void IRPrint(IRNode* inst, FILE* fp) {
     fprintf(fp, " {");
     const char* sep = "";
     static const char* kFlagNames[] = {
-      "vardef",
-      "varuse",
-      "tailcall",
-      "returnjump",
-      "rvocall",
-      "nrvomarker",
-      "jumptablebranch",
-      "fromcall",
+        "vardef",
+        "varuse",
+        "tailcall",
+        "returnjump",
+        "rvocall",
+        "nrvomarker",
+        "jumptablebranch",
+        "fakeunsigned",
+        "fromcall",
+        "stashedcallresult",
     };
-    for (int i = 0; i < 32; i++) {
-      if ((inst->flags & (1 << i)) != 0) {
-        fprintf(fp,"%s%s", sep, kFlagNames[i]);
+    size_t flag_name_count = sizeof(kFlagNames) / sizeof(kFlagNames[0]);
+    for (size_t i = 0; i < 32; i++) {
+      if ((inst->flags & (1u << i)) != 0) {
+        if (i < flag_name_count) {
+          fprintf(fp, "%s%s", sep, kFlagNames[i]);
+        } else {
+          fprintf(fp, "%sflag%zu", sep, i);
+        }
         sep = ",";
       }
     }
