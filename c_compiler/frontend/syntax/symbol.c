@@ -13,12 +13,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ast.h"
 #include "dstring.h"
 #include "compiler.h"
 #include "symbol_table.h"
 
 bool StorageIs(Storage storage, Storage value) {
   return (storage & value) != 0;
+}
+
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
 }
 
 // Normalizes an attribute name by stripping a surrounding "__" pair, so that
@@ -149,6 +155,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->stack_offset = 0;
   sym->alias_target = NULL;
   sym->overload_next = NULL;
+  sym->default_argument = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -171,6 +178,7 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->name);
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
+  ASTNodeDelete(symbol->default_argument);
   AttributeListDestruct(&symbol->attributes);
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
@@ -541,6 +549,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->stack_offset = sym->stack_offset;
   new_sym->alias_target = sym->alias_target;
   new_sym->overload_next = NULL;
+  new_sym->default_argument =
+      ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;

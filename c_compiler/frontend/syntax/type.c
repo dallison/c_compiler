@@ -28,6 +28,8 @@
 
 static int next_type_id = 0;
 
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
+
 //
 // TypeRecord arena allocator.
 //
@@ -449,6 +451,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       clone->alignment = formal->alignment;
       clone->namespace_ = formal->namespace_;
       clone->value = formal->value;
+      clone->default_argument =
+          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
       VectorAppend(&r->info.function.prototype, clone);
     }
     VectorInit(&r->info.function.template_parameters);
@@ -2079,6 +2083,8 @@ static void AppendFormalClone(Vector* out, Symbol* formal,
   clone->flags.is_argument = true;
   clone->flags.is_parameter_pack = false;
   clone->location = formal->location;
+  clone->default_argument =
+      ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
   VectorAppend(out, clone);
 }
 
@@ -2638,6 +2644,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
     clone->location = formal->location;
+    clone->default_argument =
+        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
     VectorAppend(&func->info.function.prototype, clone);
   }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
@@ -3899,6 +3907,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
     clone->location = formal->location;
+    clone->default_argument =
+        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
     VectorAppend(&func->info.function.prototype, clone);
   }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
@@ -4537,6 +4547,20 @@ static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
   return args;
 }
 
+static size_t RequiredFixedFunctionTemplateFormals(TypeRecord* func,
+                                                   size_t first_formal_arg,
+                                                   size_t fixed_formal_count) {
+  size_t required = 0;
+  for (size_t i = 0; i < fixed_formal_count; i++) {
+    Symbol* formal =
+        func->info.function.prototype.value.p[i + first_formal_arg];
+    if (formal != NULL && formal->default_argument == NULL) {
+      required = i + 1;
+    }
+  }
+  return required;
+}
+
 static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
                                                      Vector* explicit_args,
                                                      Vector* actuals,
@@ -4566,11 +4590,14 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
   if (formal_pack_index >= 0) {
     fixed_formal_count = (size_t)formal_pack_index - first_formal_arg;
   }
+  size_t required_formal_count = RequiredFixedFunctionTemplateFormals(
+      func, first_formal_arg, fixed_formal_count);
   if (func->info.function.template_parameter_count <= 0 ||
       func->info.function.unknown_args || func->info.function.varargs ||
       (formal_pack_index < 0 &&
-       actuals->length != fixed_formal_count) ||
-      (formal_pack_index >= 0 && actuals->length < fixed_formal_count)) {
+       (actuals->length < required_formal_count ||
+        actuals->length > fixed_formal_count)) ||
+      (formal_pack_index >= 0 && actuals->length < required_formal_count)) {
     return NULL;
   }
   size_t explicit_arg_count = 0;
@@ -6625,9 +6652,11 @@ typedef enum  {
   kStyleNew
 } PrototypeStyle;
 
-static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecord* func,
+static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
+                                             TypeRecord* func,
                                              PrototypeStyle style,
-                                             int arg_number) {
+                                             int arg_number,
+                                             bool* seen_default_argument) {
   if (proto_parser->found_void ||
         SyntaxLookingAtType(proto_parser->syntax)) {
     TypeRecord* type = TypeParserParseType(proto_parser, true);
@@ -6642,6 +6671,19 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser, TypeRecor
     Symbol* formal = TypeParserParseDeclarator(proto_parser, type);
     assert(formal != NULL);
     ParseFormalArgument(proto_parser, func, formal, arg_number);
+    if (CompilerIsCXX() && LexMatch(proto_parser->lex, TOK(equal))) {
+      if (formal->flags.is_parameter_pack) {
+        SyntaxError(proto_parser->syntax,
+                    "function parameter pack cannot have a default argument");
+      }
+      formal->default_argument =
+          SyntaxParseSingleExpression(proto_parser->syntax,
+                                      TC(closebra) | TC(exprsep));
+      *seen_default_argument = true;
+    } else if (*seen_default_argument && !formal->flags.is_parameter_pack) {
+      SyntaxError(proto_parser->syntax,
+                  "parameter after default argument must have a default argument");
+    }
   } else {
     // Possible old-style function decl, identifiers only.
     if (LexLookingAt(proto_parser->lex, TOK(identifier))) {
@@ -6673,6 +6715,7 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   FunctionInfo* info = &func->info.function;
   PrototypeStyle style = kStyleUnknown;
   int arg_number = 0;
+  bool seen_default_argument = false;
   
   info->old_style = false;
 
@@ -6706,7 +6749,8 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
     
     // Parse the formal argument's type, if it has one.
     // Otherwise it's a possible old-style function.
-    style = ParseFunctionParameter(proto_parser, func, style, arg_number);
+    style = ParseFunctionParameter(proto_parser, func, style, arg_number,
+                                   &seen_default_argument);
     arg_number++;
     if (!LexMatch(proto_parser->lex, TOK(comma))) {
       break;
@@ -10430,6 +10474,8 @@ static Symbol* NewCXXDeductionGuideSymbol(Struct* str, Symbol* tag,
       clone->flags = formal->flags;
       clone->flags.is_argument = true;
       clone->location = formal->location;
+      clone->default_argument =
+          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
       clone->value.arg_number = (int32_t)guide_type->info.function.prototype.length;
       VectorAppend(&guide_type->info.function.prototype, clone);
     }

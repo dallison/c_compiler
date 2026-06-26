@@ -20,6 +20,7 @@ struct TypeRecord;
 struct Struct;
 struct DIE;
 struct Namespace;
+struct ASTNode;
 
 // Storage for symbol (where it is located in memory).
 #define STO(x) kStorage_##x
@@ -123,6 +124,7 @@ typedef struct Symbol {
   int32_t stack_offset;     // Stack offset if local.
   struct Symbol* alias_target;  // Target for a C++ using-declaration alias.
   struct Symbol* overload_next;  // Next C++ overload with the same source name.
+  struct ASTNode* default_argument;  // C++ default function argument, if any.
   struct DIE* die;
 } Symbol;
 

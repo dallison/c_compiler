@@ -2336,6 +2336,34 @@ static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
   return node;
 }
 
+static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
+  if (call == NULL || call->children == NULL || func == NULL ||
+      !TypeIsFunction(func)) {
+    return true;
+  }
+  size_t num_actual_args = call->children->length;
+  size_t num_formal_args = func->info.function.prototype.length;
+  if (num_actual_args >= num_formal_args) {
+    return true;
+  }
+  for (size_t i = num_actual_args; i < num_formal_args; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal == NULL || formal->default_argument == NULL) {
+      return false;
+    }
+  }
+  for (size_t i = num_actual_args; i < num_formal_args; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    ASTNode* default_arg =
+        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+    default_arg = AnalyzeExpression(default_arg);
+    default_arg->parent = (ASTNode*)call;
+    default_arg->child_id = (int)i + 1;
+    VectorAppend(call->children, default_arg);
+  }
+  return true;
+}
+
 static ASTNode* CloneReceiverForVirtualLookup(ASTNode* receiver) {
   if (receiver->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)receiver;
@@ -2768,6 +2796,23 @@ static bool CallHasPackExpansionActual(VectorASTNode* node) {
   return false;
 }
 
+static size_t FunctionRequiredArgumentCount(TypeRecord* func,
+                                            size_t first_formal_arg) {
+  size_t required = 0;
+  if (func == NULL || !TypeIsFunction(func) ||
+      first_formal_arg > func->info.function.prototype.length) {
+    return required;
+  }
+  for (size_t i = first_formal_arg; i < func->info.function.prototype.length;
+       i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->default_argument == NULL) {
+      required = i - first_formal_arg + 1;
+    }
+  }
+  return required;
+}
+
 static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
                              size_t first_formal_arg) {
   if (!TypeIsFunction(func) || func->info.function.unknown_args) {
@@ -2782,16 +2827,21 @@ static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
     return -1;
   }
   size_t num_user_formal_args = num_formal_args - first_formal_arg;
-  if (num_actual_args < num_user_formal_args) {
+  size_t required_args =
+      FunctionRequiredArgumentCount(func, first_formal_arg);
+  if (num_actual_args < required_args) {
     return -1;
   }
   if (!func->info.function.varargs &&
-      num_actual_args != num_user_formal_args) {
+      num_actual_args > num_user_formal_args) {
     return -1;
   }
 
   int score = 0;
-  for (size_t i = 0; i < num_user_formal_args; i++) {
+  size_t num_checked_args =
+      num_actual_args < num_user_formal_args ? num_actual_args
+                                             : num_user_formal_args;
+  for (size_t i = 0; i < num_checked_args; i++) {
     ASTNode* actual = (ASTNode*)node->children->value.p[i];
     Symbol* formal =
         (Symbol*)func->info.function.prototype.value.p[i + first_formal_arg];
@@ -3459,6 +3509,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // We are calling a function.  Let's check the arguments.
   size_t num_formal_args = subtype->info.function.prototype.length;
   if (!subtype->info.function.unknown_args && !has_pack_expansion_actual) {
+    if (AppendDefaultCallArguments(node, subtype)) {
+      num_actual_args = node->children->length;
+    }
     if (num_actual_args < num_formal_args) {
       SemanticError((ASTNode*)node,
                     "Too few arguments supplied to varargs function call; need "

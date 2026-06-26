@@ -1228,6 +1228,42 @@ static ASTNode* CloneInitializer(ASTNode* init) {
   return ASTNodeClone(init, IdentityCloneNode, NULL, NULL);
 }
 
+static ASTNode* CloneCXXDefaultArgument(ASTNode* arg) {
+  return ASTNodeClone(arg, IdentityCloneNode, NULL, NULL);
+}
+
+static void MergeCXXDefaultArguments(Syntax* syntax, Symbol* old_sym,
+                                     Symbol* new_sym) {
+  if (!CompilerIsCXX() || old_sym == NULL || new_sym == NULL ||
+      old_sym->type == NULL || new_sym->type == NULL ||
+      !TypeIsFunction(old_sym->type) || !TypeIsFunction(new_sym->type) ||
+      old_sym->type->info.function.prototype.length !=
+          new_sym->type->info.function.prototype.length) {
+    return;
+  }
+  for (size_t i = 0; i < old_sym->type->info.function.prototype.length; i++) {
+    Symbol* old_formal = old_sym->type->info.function.prototype.value.p[i];
+    Symbol* new_formal = new_sym->type->info.function.prototype.value.p[i];
+    if (old_formal == NULL || new_formal == NULL) {
+      continue;
+    }
+    if (old_formal->default_argument != NULL &&
+        new_formal->default_argument != NULL) {
+      SyntaxError(syntax, "default argument already specified");
+      continue;
+    }
+    if (old_formal->default_argument == NULL &&
+        new_formal->default_argument != NULL) {
+      old_formal->default_argument =
+          CloneCXXDefaultArgument(new_formal->default_argument);
+    } else if (old_formal->default_argument != NULL &&
+               new_formal->default_argument == NULL) {
+      new_formal->default_argument =
+          CloneCXXDefaultArgument(old_formal->default_argument);
+    }
+  }
+}
+
 // Clone a designator list, substituting a single array index at position
 // range_pos (used to expand a [start ... end] range designator).
 static Vector* CloneDesignators(Vector* src, int range_pos, int index_value) {
@@ -3403,6 +3439,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
           ReportNote(filename, lineno, "Previously declared here");
         } else {
+          MergeCXXDefaultArguments(syntax, old_sym, sym);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);
@@ -3734,6 +3771,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
     TypeErrorDetails(syntax->lex->current_token_location,
                      sym->type, old_sym->type);
   } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    MergeCXXDefaultArguments(syntax, old_sym, sym);
     old_sym->flags.is_defined = true;
   }
 
@@ -5046,6 +5084,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
            DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
            ReportNote(filename, lineno, "Previously declared here");
         } else {
+          MergeCXXDefaultArguments(syntax, old_sym, sym);
           // Symbol declaration is the same type as the definition, make sure
           // the linkage matches.
           Storage old_storage = old_sym->storage & ~STO(extern);
