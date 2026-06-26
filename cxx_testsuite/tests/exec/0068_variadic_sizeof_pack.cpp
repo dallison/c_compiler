@@ -56,6 +56,18 @@ struct DirectPack {
 };
 
 template <class... Ts>
+struct MemberInitPack {
+  DirectPack value;
+
+  MemberInitPack(Ts... args) : value(args...) {
+  }
+
+  int sum(void) {
+    return value.sum();
+  }
+};
+
+template <class... Ts>
 int forward_no_args(Ts... args) {
   return no_args(args...);
 }
@@ -87,6 +99,12 @@ DirectPack temporary_construct_sum(Ts... args) {
 template <class... Ts>
 DirectPack braced_temporary_construct_sum(Ts... args) {
   return DirectPack{args...};
+}
+
+template <class... Ts>
+int member_initializer_sum(Ts... args) {
+  MemberInitPack<Ts...> value(args...);
+  return value.sum();
 }
 
 template <class... Ts>
@@ -373,8 +391,11 @@ int main(void) {
   if (braced_temporary_constructed.sum() != 6) {
     return 44;
   }
-  if (braced_sum(4, 5, 6) != 15) {
+  if (member_initializer_sum(1, 2L, (char)3) != 6) {
     return 45;
+  }
+  if (braced_sum(4, 5, 6) != 15) {
+    return 46;
   }
   return 0;
 }

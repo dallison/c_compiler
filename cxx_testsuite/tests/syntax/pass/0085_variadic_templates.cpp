@@ -43,6 +43,16 @@ struct DirectPack {
 };
 
 template <class... Ts>
+struct MemberInitPack {
+  DirectPack value;
+
+  MemberInitPack(Ts... args) : value(args...) {
+  }
+
+  int sum(void);
+};
+
+template <class... Ts>
 int forward_values(Ts... args) {
   return accepts_three(args...);
 }
@@ -69,6 +79,12 @@ DirectPack temporary_construct_values(Ts... args) {
 template <class... Ts>
 DirectPack braced_temporary_construct_values(Ts... args) {
   return DirectPack{args...};
+}
+
+template <class... Ts>
+int member_initializer_values(Ts... args) {
+  MemberInitPack<Ts...> value(args...);
+  return value.sum();
 }
 
 template <class... Ts>
@@ -185,6 +201,7 @@ void use_variadic_templates(void) {
   DirectPack temporary_constructed = temporary_construct_values(1, 2L, 'c');
   DirectPack braced_temporary_constructed =
       braced_temporary_construct_values(1, 2L, 'c');
+  int member_initialized = member_initializer_values(1, 2L, 'c');
   int folded = fold_sum_values(1, 2, 3);
   bool all = fold_all_values(1, 1, 1);
   int seeded_sum = fold_seeded_sum_values();
@@ -217,6 +234,7 @@ void use_variadic_templates(void) {
   (void)new_constructed;
   (void)temporary_constructed;
   (void)braced_temporary_constructed;
+  (void)member_initialized;
   (void)folded;
   (void)all;
   (void)seeded_sum;
