@@ -8,8 +8,6 @@
 #ifndef coroutine_h
 #define coroutine_h
 
-#ifdef __DAVECC__
-
 namespace std {
 
 template <class R, class... Args>
@@ -75,7 +73,5 @@ struct suspend_always {
 };
 
 }  // namespace std
-
-#endif /* __DAVECC__ */
 
 #endif /* coroutine_h */

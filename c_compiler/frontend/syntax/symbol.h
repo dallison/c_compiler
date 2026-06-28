@@ -111,6 +111,7 @@ typedef struct Symbol {
   Vector attributes;          // Attributes (owns Attribute*).
   int alignment;              // __attribute__((aligned(N))) override; 0 = natural.
   int template_parameter_index;  // Index for template parameter symbols.
+  int dependent_value_template_parameter_index;  // Deferred non-type arg value.
   SourceLocation location;
   
   // Symbol value, one of these.

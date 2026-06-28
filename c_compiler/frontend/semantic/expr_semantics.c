@@ -1342,6 +1342,9 @@ static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   return AnalyzeExpression(materialized);
 }
 
+static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
+                                                   TypeRecord* formal_type);
+
 // Is the node assignable?  That means, is it non-const and
 // has an address.
 static bool IsAssignable(ASTNode* node, bool is_init) {
@@ -1575,9 +1578,22 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
         }
         bool cxx_return_elision_initializer =
             CompilerIsCXX() && e->expr->op == AST_OP(call) &&
+            e->expr->value_category != kValueCategoryXvalue &&
             !constructor_call &&
             TypeIsStructOrUnion(id_node->base.type) &&
             TypeEqual(e->expr->type, id_node->base.type);
+        if (!cxx_return_elision_initializer &&
+            e->expr->value_category == kValueCategoryXvalue &&
+            TypeIsStructOrUnion(id_node->base.type) &&
+            TypeIsStructOrUnion(e->expr->type) &&
+            TypeEqualIgnoringQualifiers(e->expr->type, id_node->base.type)) {
+          ASTNode* materialized =
+              MaterializeCXXByValueClassArgument(e->expr, id_node->base.type);
+          if (materialized != e->expr) {
+            ASTNodeReplaceChild((ASTNode*)e, 0, materialized, false);
+            e->expr = materialized;
+          }
+        }
         if (!cxx_return_elision_initializer) {
           NormalConversion(e->expr, id_node->base.type);
         }
@@ -2316,12 +2332,16 @@ static void CheckDeletedFunctionUse(Symbol* function, ASTNode* use) {
       !function->type->info.function.is_deleted) {
     return;
   }
+  String function_name;
+  StringInit(&function_name, NULL);
+  SymbolFunctionDiagnosticName(function, &function_name);
   if (function->type->info.function.is_implicitly_deleted) {
     SemanticError(use, "Use of implicitly deleted function %s",
-                  function->name.value);
+                  function_name.value);
   } else {
-    SemanticError(use, "Use of deleted function %s", function->name.value);
+    SemanticError(use, "Use of deleted function %s", function_name.value);
   }
+  StringDestruct(&function_name);
 }
 
 static bool CurrentFunctionIsCXXCtorOrDtor(void) {
@@ -2334,6 +2354,39 @@ static bool CurrentFunctionIsCXXCtorOrDtor(void) {
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
   (void)data;
   return node;
+}
+
+static bool FunctionIsSourceLocationCurrent(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.symbol == NULL ||
+      !StringEqual(&func->info.function.symbol->name, "current")) {
+    return false;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  return owner != NULL && owner->tag_name != NULL &&
+         StringEqual(owner->tag_name, "source_location");
+}
+
+static ASTNode* NewSourceLocationDefaultArgument(Symbol* formal,
+                                                 SourceLocation location) {
+  if (formal == NULL) {
+    return NULL;
+  }
+  ASTOpcode opcode = AST_OP(bad);
+  if (StringEqual(&formal->name, "line")) {
+    opcode = AST_OP(builtin_source_line);
+  } else if (StringEqual(&formal->name, "column")) {
+    opcode = AST_OP(builtin_source_column);
+  } else if (StringEqual(&formal->name, "file")) {
+    opcode = AST_OP(builtin_source_file);
+  } else if (StringEqual(&formal->name, "function")) {
+    opcode = AST_OP(builtin_source_pretty_function);
+  }
+  if (opcode == AST_OP(bad)) {
+    return NULL;
+  }
+  return NewVectorASTNode(opcode, NULL, location,
+                          NewRawIdentifierASTNode(NULL, location), NewVector());
 }
 
 static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
@@ -2355,7 +2408,15 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
   for (size_t i = num_actual_args; i < num_formal_args; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     ASTNode* default_arg =
-        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+        FunctionIsSourceLocationCurrent(func)
+            ? NewSourceLocationDefaultArgument(formal, call->base.location)
+            : NULL;
+    if (default_arg == NULL) {
+      default_arg =
+          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+    }
+    default_arg->flags |= kASTDefaultArgument;
+    default_arg->location = call->base.location;
     default_arg = AnalyzeExpression(default_arg);
     default_arg->parent = (ASTNode*)call;
     default_arg->child_id = (int)i + 1;
@@ -2442,7 +2503,9 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   StructMemberASTNode* member_node =
       (StructMemberASTNode*)member_access->right;
   StructMember* member = member_node->member;
-  if (!member->is_member_function) {
+  if (!member->is_member_function &&
+      (member->symbol == NULL || member->symbol->type == NULL ||
+       !TypeIsFunction(member->symbol->type))) {
     return false;
   }
 
@@ -2488,9 +2551,13 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
         !member->symbol->type->info.function.is_constructor &&
         !member->symbol->type->info.function.is_destructor &&
         MemberReceiverIsConst(member_access)) {
+      String function_name;
+      StringInit(&function_name, NULL);
+      SymbolFunctionDiagnosticSuffix(member->symbol, &function_name);
       SemanticError((ASTNode*)member_access,
-                    "Cannot call non-const member function %s on const object",
-                    member->symbol->name.value);
+                    "Cannot call non-const member function %s on const object%s",
+                    member->symbol->name.value, function_name.value);
+      StringDestruct(&function_name);
     }
     receiver = ASTNodeMove(member_access->left);
     if (member_access->base.op == AST_OP(dot)) {
@@ -2713,6 +2780,15 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   }
   if (TypeEqualIgnoringSign(actual, target)) {
     return 1;
+  }
+  if (TypeIsEnum(actual) && TypeIsEnum(target)) {
+    return actual->info.enum_info == target->info.enum_info ? 0 : -1;
+  }
+  if (TypeIsIntegral(actual) && TypeIsEnum(target)) {
+    return 2;
+  }
+  if (TypeIsEnum(actual) && TypeIsIntegral(target)) {
+    return 2;
   }
   if (TypeIsIntegral(actual) && TypeIsIntegral(target)) {
     return 2;
@@ -3036,14 +3112,29 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
 
   if (best == NULL) {
     if (diagnose_no_match) {
+      String function_name;
+      StringInit(&function_name, NULL);
+      Symbol* first_candidate =
+          candidates->length > 0 ? candidates->value.p[0] : NULL;
+      if (first_candidate != NULL) {
+        SymbolFunctionDiagnosticName(first_candidate, &function_name);
+      } else {
+        StringAppendString(&function_name, name);
+      }
       SemanticError(diagnostic_node, "No matching overload for %s",
-                    name->value);
+                    function_name.value);
+      StringDestruct(&function_name);
     }
     return NULL;
   }
   if (ambiguous) {
     if (diagnose_ambiguous) {
-      SemanticError(diagnostic_node, "Ambiguous overload for %s", name->value);
+      String function_name;
+      StringInit(&function_name, NULL);
+      SymbolFunctionDiagnosticName(best, &function_name);
+      SemanticError(diagnostic_node, "Ambiguous overload for %s",
+                    function_name.value);
+      StringDestruct(&function_name);
     }
     return best;
   }
@@ -3223,19 +3314,31 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
 
   if (best == NULL) {
     if (receiver_const_rejected) {
+      String function_name;
+      StringInit(&function_name, NULL);
+      SymbolFunctionDiagnosticSuffix(first->symbol, &function_name);
       SemanticError((ASTNode*)member_access,
-                    "Cannot call non-const member function %s on const object",
-                    first->symbol->name.value);
+                    "Cannot call non-const member function %s on const object%s",
+                    first->symbol->name.value, function_name.value);
+      StringDestruct(&function_name);
     } else if (first->overload_next != NULL ||
                first->symbol->type->info.function.is_constructor) {
+      String function_name;
+      StringInit(&function_name, NULL);
+      SymbolFunctionDiagnosticName(first->symbol, &function_name);
       SemanticError((ASTNode*)node, "No matching overload for %s",
-                    first->symbol->name.value);
+                    function_name.value);
+      StringDestruct(&function_name);
     }
     return first;
   }
   if (ambiguous) {
+    String function_name;
+    StringInit(&function_name, NULL);
+    SymbolFunctionDiagnosticName(first->symbol, &function_name);
     SemanticError((ASTNode*)node, "Ambiguous overload for %s",
-                  first->symbol->name.value);
+                  function_name.value);
+    StringDestruct(&function_name);
     return best;
   }
   return best;
@@ -3304,9 +3407,20 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (!TypeIsClassTemplatePlaceholder(construction_type) &&
       node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
-    placeholder_type = TypeClassTemplatePlaceholderFromSymbol(id->symbol);
-    if (placeholder_type != NULL) {
-      construction_type = placeholder_type;
+    /* For a plain class template the callee type carries no template
+     * arguments. For an alias template (`using Alias = Foo<T>;`) the callee
+     * type is the aliased `Foo<T>` and already has template arguments, but it
+     * still needs the alias placeholder origin so CTAD deduces and instantiates
+     * the underlying class template. Derive the placeholder from the symbol in
+     * both cases. */
+    bool is_alias_template =
+        id->symbol != NULL && id->symbol->flags.is_template &&
+        StorageIs(id->symbol->storage, STO(typedef));
+    if (construction_type->template_arguments == NULL || is_alias_template) {
+      placeholder_type = TypeClassTemplatePlaceholderFromSymbol(id->symbol);
+      if (placeholder_type != NULL) {
+        construction_type = placeholder_type;
+      }
     }
   }
   TypeRecord* deduced_type = NULL;
@@ -3397,6 +3511,69 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   return analyzed;
 }
 
+static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
+                                                   TypeRecord* formal_type) {
+  if (!CompilerIsCXX() || actual == NULL || formal_type == NULL ||
+      !TypeIsStructOrUnion(formal_type) ||
+      !TypeIsStructOrUnion(actual->type) ||
+      !TypeEqualIgnoringQualifiers(actual->type, formal_type) ||
+      formal_type->info.struct_info == NULL ||
+      formal_type->info.struct_info->tag_name == NULL ||
+      formal_type->info.struct_info->is_aggregate) {
+    return actual;
+  }
+
+  String* constructor_name = formal_type->info.struct_info->tag_name;
+  StructMember* constructor =
+      FindStructMember(formal_type->info.struct_info, constructor_name);
+  if (constructor == NULL || !constructor->is_member_function ||
+      constructor->symbol == NULL || constructor->symbol->type == NULL ||
+      !constructor->symbol->type->info.function.is_constructor) {
+    return actual;
+  }
+  bool has_nontrivial_unary_constructor = false;
+  for (StructMember* candidate = constructor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        !candidate->symbol->type->info.function.is_constructor) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (info->varargs ||
+        (info->prototype.length >= 2 && !info->is_trivial_special_member)) {
+      has_nontrivial_unary_constructor = true;
+      break;
+    }
+  }
+  if (!has_nontrivial_unary_constructor) {
+    return actual;
+  }
+
+  SourceLocation location = actual->location;
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, formal_type);
+  temp->location = location;
+  ASTNode* receiver = NewIdentifierASTNode(temp, location);
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(constructor_name->value), NULL,
+                               location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, ASTNodeMove(actual));
+  ASTNode* constructor_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  ASTNode* result = NewIdentifierASTNode(temp, location);
+  ASTNode* comma =
+      NewBinaryASTNode(AST_OP(comma), formal_type, location, constructor_call,
+                       result);
+  ASTNode* analyzed = AnalyzeExpression(comma);
+  analyzed->value_category = kValueCategoryPrvalue;
+  return analyzed;
+}
+
 static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL ||
       !TypeIsStructOrUnion(node->left->type)) {
@@ -3429,27 +3606,69 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   return ReplaceVectorWithCall(node, call);
 }
 
+static bool FunctionTemplateHasDefinition(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  Symbol* definition =
+      symbol->value.func_defn != NULL ? symbol->value.func_defn : symbol;
+  return definition != NULL && definition->type != NULL &&
+         TypeIsFunction(definition->type) &&
+         definition->type->info.function.body != NULL;
+}
+
+static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(arg->type)) {
+    return true;
+  }
+  for (size_t i = 0; arg->pack_arguments != NULL &&
+                     i < arg->pack_arguments->length; i++) {
+    if (TemplateArgumentContainsTemplateParameter(
+            arg->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    if (TemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
+  for (size_t i = 0; call != NULL && i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual != NULL && TypeContainsTemplateParameter(actual->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
-  ASTNode* overloaded_call = TryAnalyzeOverloadedCallOperator(node);
-  if (overloaded_call != NULL) {
-    return overloaded_call;
-  }
-  ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
-  if (construction != NULL) {
-    return construction;
-  }
-  LowerMemberFunctionCall(node);
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template &&
         !id->symbol->flags.is_overloaded && TypeIsFunction(id->symbol->type) &&
-        !has_pack_expansion_actual) {
+        !has_pack_expansion_actual &&
+        !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&
+        !CallActualsContainTemplateParameter(node) &&
+        FunctionTemplateHasDefinition(id->symbol)) {
       Symbol* instantiated =
           TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
               &compiler->syntax, id->symbol, id->template_arguments,
@@ -3460,6 +3679,43 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       }
     }
   }
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    ResolveOverloadedFunctionCall(node);
+  }
+  LowerMemberFunctionCall(node);
+  /* A callee that names a class or alias template (e.g. `AliasHolder(11)`) is a
+   * CTAD functional construction, not a dependent functor call. Its type
+   * legitimately contains the template's own parameters; whether the call is
+   * dependent is determined by the actual arguments. When the actuals are
+   * concrete, route it to functional construction instead of deferring. */
+  bool is_concrete_ctad_construction = false;
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* callee_id = (IdentifierASTNode*)node->left;
+    if (callee_id->symbol != NULL && callee_id->symbol->flags.is_template &&
+        callee_id->symbol->type != NULL &&
+        TypeIsStructOrUnion(callee_id->symbol->type) &&
+        !has_pack_expansion_actual &&
+        !CallActualsContainTemplateParameter(node)) {
+      is_concrete_ctad_construction = true;
+    }
+  }
+  if (CompilerIsCXX() && node->left != NULL && node->left->type != NULL &&
+      !is_concrete_ctad_construction &&
+      TypeContainsTemplateParameter(node->left->type)) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    return (ASTNode*)node;
+  }
+  ASTNode* overloaded_call = TryAnalyzeOverloadedCallOperator(node);
+  if (overloaded_call != NULL) {
+    return overloaded_call;
+  }
+  ASTNode* construction = AnalyzeCXXFunctionalClassConstruction(node);
+  if (construction != NULL) {
+    return construction;
+  }
+  LowerMemberFunctionCall(node);
   ResolveOverloadedFunctionCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
@@ -3572,6 +3828,14 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         }
         actual->flags |= kASTNeedAddress;
       } else {
+        if (actual->value_category == kValueCategoryXvalue) {
+          ASTNode* materialized =
+              MaterializeCXXByValueClassArgument(actual, formal->type);
+          if (materialized != actual) {
+            ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
+            actual = materialized;
+          }
+        }
         if (!polymorphic_special_this) {
           NormalConversion(actual, formal->type);
         }
@@ -3981,6 +4245,97 @@ static void AnalyzeVarargsBuiltin2(VectorASTNode* args) {
   ASTNodeSetType(&args->base, type_node->type);  // Type is type of second arg.
 }
 
+static TypeRecord* AtomicPointerPointee(VectorASTNode* node) {
+  if (node->children->length == 0) {
+    return NULL;
+  }
+  ASTNode* ptr = node->children->value.p[0];
+  if (ptr == NULL || !TypeIsPointer(ptr->type) || ptr->type->next == NULL ||
+      TypeIsVoid(ptr->type->next)) {
+    SemanticError((ASTNode*)node,
+                  "atomic builtin requires pointer to object type");
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  return ptr->type->next;
+}
+
+static void AnalyzeAtomicBuiltinChildren(VectorASTNode* node) {
+  for (size_t i = 0; i < node->children->length; i++) {
+    node->children->value.p[i] =
+        AnalyzeExpression((ASTNode*)node->children->value.p[i]);
+  }
+}
+
+static void AnalyzeAtomicLoadBuiltin(VectorASTNode* node) {
+  AnalyzeAtomicBuiltinChildren(node);
+  TypeRecord* value_type = AtomicPointerPointee(node);
+  ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
+}
+
+static void AnalyzeAtomicStoreBuiltin(VectorASTNode* node) {
+  AnalyzeAtomicBuiltinChildren(node);
+  TypeRecord* value_type = AtomicPointerPointee(node);
+  if (node->children->length > 1) {
+    NormalConversion(node->children->value.p[1], value_type);
+  }
+  ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+}
+
+static void AnalyzeAtomicFetchBuiltin(VectorASTNode* node, bool returns_new) {
+  (void)returns_new;
+  AnalyzeAtomicBuiltinChildren(node);
+  TypeRecord* value_type = AtomicPointerPointee(node);
+  if (!TypeIsIntegral(value_type) && !TypeIsPointer(value_type)) {
+    SemanticError((ASTNode*)node,
+                  "atomic arithmetic builtin requires integral or pointer type");
+  }
+  if (node->children->length > 1) {
+    NormalConversion(node->children->value.p[1], value_type);
+  }
+  ASTNodeSetType(&node->base, TypeRecordCopy(value_type));
+}
+
+static void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
+                                                bool expected_is_pointer,
+                                                bool returns_bool) {
+  AnalyzeAtomicBuiltinChildren(node);
+  TypeRecord* value_type = AtomicPointerPointee(node);
+  if (node->children->length > 1) {
+    ASTNode* expected = node->children->value.p[1];
+    if (expected_is_pointer) {
+      if (expected == NULL || !TypeIsPointer(expected->type) ||
+          expected->type->next == NULL ||
+          !TypeEqual(expected->type->next, value_type)) {
+        SemanticError(expected != NULL ? expected : (ASTNode*)node,
+                      "atomic compare exchange expected argument has incompatible type");
+      }
+    } else {
+      NormalConversion(expected, value_type);
+    }
+  }
+  if (node->children->length > 2) {
+    NormalConversion(node->children->value.p[2], value_type);
+  }
+  ASTNodeSetType(&node->base,
+                 returns_bool ? NewTypeRecordWithSize(kTypeBool, kQualPlain)
+                              : TypeRecordCopy(value_type));
+}
+
+static TypeRecord* NewConstCharPointerType(void) {
+  TypeRecord* char_type = NewTypeRecordWithSize(kTypeChar, kQualConst);
+  TypeRecord* pointer_type = NewPointerTo(kQualPlain, char_type);
+  return TypeRecordCalculateSize(pointer_type);
+}
+
+static void AnalyzeSourceStringBuiltin(VectorASTNode* node) {
+  ASTNodeSetType(&node->base, NewConstCharPointerType());
+}
+
+static void AnalyzeSourceIntegerBuiltin(VectorASTNode* node) {
+  ASTNodeSetType(&node->base,
+                 NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain));
+}
+
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
@@ -4184,6 +4539,52 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     
     case AST_OP(builtin_va_arg):
       AnalyzeVarargsBuiltin2(vector_node);
+      break;
+
+    case AST_OP(builtin_atomic_load):
+      AnalyzeAtomicLoadBuiltin(vector_node);
+      break;
+
+    case AST_OP(builtin_atomic_store):
+      AnalyzeAtomicStoreBuiltin(vector_node);
+      break;
+
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+      AnalyzeAtomicFetchBuiltin(vector_node, false);
+      break;
+
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+      AnalyzeAtomicFetchBuiltin(vector_node, true);
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+      AnalyzeAtomicCompareExchangeBuiltin(vector_node, false, true);
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_val):
+      AnalyzeAtomicCompareExchangeBuiltin(vector_node, false, false);
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_n):
+      AnalyzeAtomicCompareExchangeBuiltin(vector_node, true, true);
+      break;
+
+    case AST_OP(builtin_atomic_fence):
+      AnalyzeAtomicBuiltinChildren(vector_node);
+      ASTNodeSetType(node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+      break;
+
+    case AST_OP(builtin_source_file):
+    case AST_OP(builtin_source_function):
+    case AST_OP(builtin_source_pretty_function):
+      AnalyzeSourceStringBuiltin(vector_node);
+      break;
+
+    case AST_OP(builtin_source_line):
+    case AST_OP(builtin_source_column):
+      AnalyzeSourceIntegerBuiltin(vector_node);
       break;
 
     case AST_OP(stmt_expr): {

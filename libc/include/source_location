@@ -1,0 +1,59 @@
+//
+//  source_location
+//  c_compiler
+//
+//  C++20 source_location library support for DaveCC.
+//
+
+#ifndef source_location_h
+#define source_location_h
+
+#include <cstdint>
+
+#define __cpp_lib_source_location 201907L
+
+namespace std {
+
+struct source_location {
+  uint_least32_t __line;
+  uint_least32_t __column;
+  const char* __file;
+  const char* __function;
+
+  static consteval source_location current(
+      uint_least32_t line = __builtin_LINE(),
+      uint_least32_t column = __builtin_COLUMN(),
+      const char* file = __builtin_FILE(),
+      const char* function = __builtin_PRETTY_FUNCTION()) noexcept {
+    return source_location(line, column, file, function);
+  }
+
+  constexpr source_location(void) noexcept
+      : __line(0), __column(0), __file(""), __function("") {
+  }
+
+  constexpr source_location(uint_least32_t line, uint_least32_t column,
+                            const char* file, const char* function) noexcept
+      : __line(line), __column(column), __file(file), __function(function) {
+  }
+
+  constexpr uint_least32_t line(void) const noexcept {
+    return __line;
+  }
+
+  constexpr uint_least32_t column(void) const noexcept {
+    return __column;
+  }
+
+  constexpr const char* file_name(void) const noexcept {
+    return __file;
+  }
+
+  constexpr const char* function_name(void) const noexcept {
+    return __function;
+  }
+};
+
+}  // namespace std
+
+#endif /* source_location_h */

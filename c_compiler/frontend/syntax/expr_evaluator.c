@@ -15,6 +15,117 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
                                               ASTNode* node,
                                               double* result);
 
+static SourceLocation BuiltinSourceLocation(ASTNode* node) {
+  ASTNode* current = node;
+  while (current != NULL && (current->flags & kASTDefaultArgument) != 0 &&
+         current->parent != NULL) {
+    current = current->parent;
+  }
+  return current != NULL ? current->location : SOURCE_LOCATION_MISSING;
+}
+
+static Symbol* EvaluatorCallSymbol(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL) {
+    return NULL;
+  }
+  if (call->left->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)call->left)->symbol;
+  }
+  if (call->left->op == AST_OP(dot) || call->left->op == AST_OP(arrow)) {
+    BinaryASTNode* access = (BinaryASTNode*)call->left;
+    if (access->right != NULL && access->right->op == AST_OP(structmember)) {
+      StructMember* member = ((StructMemberASTNode*)access->right)->member;
+      return member != NULL ? member->symbol : NULL;
+    }
+  }
+  return NULL;
+}
+
+static bool FunctionOwnerIsSourceLocation(TypeRecord* func) {
+  Struct* owner = func != NULL ? func->info.function.cxx_member_owner : NULL;
+  return owner != NULL && owner->tag_name != NULL &&
+         StringEqual(owner->tag_name, "source_location");
+}
+
+static Symbol* SourceLocationReceiverCallSymbol(ASTNode* receiver) {
+  if (receiver == NULL) {
+    return NULL;
+  }
+  if (receiver->op == AST_OP(address)) {
+    return SourceLocationReceiverCallSymbol(((UnaryASTNode*)receiver)->sub);
+  }
+  if (receiver->op == AST_OP(comma)) {
+    BinaryASTNode* comma = (BinaryASTNode*)receiver;
+    Symbol* right = SourceLocationReceiverCallSymbol(comma->right);
+    return right != NULL ? right : SourceLocationReceiverCallSymbol(comma->left);
+  }
+  return EvaluatorCallSymbol(receiver);
+}
+
+static bool EvaluateSourceLocationAccessor(ASTNode* node, int64_t* result) {
+  if (node == NULL || node->op != AST_OP(call) || result == NULL) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  ASTNode* receiver = NULL;
+  Symbol* accessor_symbol = NULL;
+  if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+    accessor_symbol = ((IdentifierASTNode*)call->left)->symbol;
+    if (call->children != NULL && call->children->length > 0) {
+      receiver = call->children->value.p[0];
+      if (receiver != NULL && receiver->op == AST_OP(address)) {
+        receiver = ((UnaryASTNode*)receiver)->sub;
+      }
+    }
+  } else if (call->left != NULL &&
+             (call->left->op == AST_OP(dot) ||
+              call->left->op == AST_OP(arrow))) {
+    BinaryASTNode* access = (BinaryASTNode*)call->left;
+    receiver = access->left;
+    if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+      return false;
+    }
+    StructMember* accessor = ((StructMemberASTNode*)access->right)->member;
+    accessor_symbol = accessor != NULL ? accessor->symbol : NULL;
+  }
+  if (accessor_symbol == NULL || accessor_symbol->type == NULL ||
+      !TypeIsFunction(accessor_symbol->type) ||
+      !FunctionOwnerIsSourceLocation(accessor_symbol->type)) {
+    return false;
+  }
+  bool want_line = StringEqual(&accessor_symbol->name, "line");
+  bool want_column = StringEqual(&accessor_symbol->name, "column");
+  if (!want_line && !want_column) {
+    return false;
+  }
+
+  Symbol* receiver_symbol = SourceLocationReceiverCallSymbol(receiver);
+  if (receiver_symbol == NULL || receiver_symbol->type == NULL ||
+      !TypeIsFunction(receiver_symbol->type) ||
+      !FunctionOwnerIsSourceLocation(receiver_symbol->type)) {
+    return false;
+  }
+  if (StringEqual(&receiver_symbol->name, "current")) {
+    int fileno = 0;
+    int lineno = 0;
+    int colno = 0;
+    SourceLocationNumbers(BuiltinSourceLocation(receiver), &fileno, &lineno,
+                          &colno);
+    (void)fileno;
+    *result = want_line ? lineno : colno + 1;
+    return true;
+  }
+  if (receiver_symbol->type->info.function.is_constructor) {
+    *result = 0;
+    return true;
+  }
+  return false;
+}
+
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                int64_t* result) {
@@ -37,6 +148,29 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
   int64_t right;
 
   switch (node->op) {
+    case AST_OP(builtin_source_line): {
+      int fileno = 0;
+      int lineno = 0;
+      int colno = 0;
+      SourceLocationNumbers(BuiltinSourceLocation(node), &fileno, &lineno,
+                            &colno);
+      (void)fileno;
+      (void)colno;
+      *result = lineno;
+      return true;
+    }
+    case AST_OP(builtin_source_column): {
+      int fileno = 0;
+      int lineno = 0;
+      int colno = 0;
+      SourceLocationNumbers(BuiltinSourceLocation(node), &fileno, &lineno,
+                            &colno);
+      (void)fileno;
+      (void)lineno;
+      *result = colno + 1;
+      return true;
+    }
+
     case AST_OP(assign):
     case AST_OP(pluseq):
     case AST_OP(minuseq):
@@ -106,6 +240,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
     }
 
     case AST_OP(call): {
+      if (EvaluateSourceLocationAccessor(node, result)) {
+        return true;
+      }
       return ConstexprEvaluateCallAsInteger(ctx, node, result);
     }
 

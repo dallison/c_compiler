@@ -972,6 +972,85 @@ static bool StoreConstexprPCodeObjectPointer(PCodeVM* vm,
   return true;
 }
 
+static SourceLocation PCodeBuiltinSourceLocation(ASTNode* node) {
+  ASTNode* current = node;
+  while (current != NULL && (current->flags & kASTDefaultArgument) != 0 &&
+         current->parent != NULL) {
+    current = current->parent;
+  }
+  return current != NULL ? current->location : SOURCE_LOCATION_MISSING;
+}
+
+static bool PCodeSourceBuiltinStringValue(ASTNode* arg, String* value) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->op == AST_OP(builtin_source_file)) {
+    const char* filename = NULL;
+    int lineno = 0;
+    int start = 0;
+    int end = 0;
+    DecodeSourceLocation(PCodeBuiltinSourceLocation(arg), &filename, &lineno,
+                         &start, &end);
+    (void)lineno;
+    (void)start;
+    (void)end;
+    StringInit(value, filename != NULL ? filename : "<unknown>");
+    return true;
+  }
+  if (arg->op == AST_OP(builtin_source_function)) {
+    const char* function_name = "";
+    if (compiler->current_function != NULL &&
+        compiler->current_function->info.function.symbol != NULL) {
+      function_name =
+          compiler->current_function->info.function.symbol->name.value;
+    }
+    StringInit(value, function_name);
+    return true;
+  }
+  if (arg->op == AST_OP(builtin_source_pretty_function)) {
+    StringInit(value, NULL);
+    TypeRecordFunctionPrettyName(compiler->current_function, value);
+    if (value->value == NULL) {
+      StringSet(value, "");
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool StoreConstexprPCodeSourceStringArgument(PCodeVM* vm,
+                                                   unsigned char** sp,
+                                                   ASTNode* arg,
+                                                   Vector* allocations,
+                                                   const char** reason) {
+  String value;
+  if (!PCodeSourceBuiltinStringValue(arg, &value)) {
+    return false;
+  }
+  size_t size = value.length + 1;
+  char* memory = malloc(size);
+  if (memory == NULL) {
+    StringDestruct(&value);
+    *reason = "could not allocate constexpr source string argument";
+    return false;
+  }
+  memcpy(memory, value.value, size);
+  StringDestruct(&value);
+  if (!PCodeVMRegisterMemoryRegion(vm, memory, size, false)) {
+    free(memory);
+    *reason = "could not register constexpr source string argument";
+    return false;
+  }
+  // The returned constexpr object may store this pointer, so keep it alive for
+  // the remainder of compilation rather than tying it to this VM invocation.
+  (void)allocations;
+  *sp -= sizeof(uint64_t);
+  uint64_t address = (uint64_t)(uintptr_t)memory;
+  memcpy(*sp, &address, sizeof(address));
+  return true;
+}
+
 static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
                                         PCodeVM* vm,
                                         unsigned char** sp,
@@ -987,6 +1066,11 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
   if (TypeIsPointerOrArray(type) &&
       StoreConstexprPCodeObjectPointer(vm, sp, type, arg, allocations,
                                        address_regions, reason)) {
+    return true;
+  }
+  if (TypeIsPointer(type) &&
+      StoreConstexprPCodeSourceStringArgument(vm, sp, arg, allocations,
+                                             reason)) {
     return true;
   }
   *sp -= size;
@@ -1108,16 +1192,15 @@ static bool PrepareConstexprPCodeConstructorStack(ConstEvalContext* ctx,
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)call_node;
-  size_t actual_count = call->children != NULL ? call->children->length : 0;
-  if (call->children == NULL || actual_count == 0 ||
-      actual_count != func->info.function.prototype.length) {
+  size_t explicit_count = call->children != NULL ? call->children->length : 0;
+  if (explicit_count + 1 != func->info.function.prototype.length) {
     *reason = "constexpr pcode constructor argument count mismatch";
     return false;
   }
 
   unsigned char* sp = (unsigned char*)vm->stack + vm->stack_size;
-  for (size_t i = actual_count; i > 1; i--) {
-    Symbol* formal = func->info.function.prototype.value.p[i - 1];
+  for (size_t i = explicit_count; i > 0; i--) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
     ASTNode* arg = call->children->value.p[i - 1];
     if (formal == NULL ||
         !StoreConstexprPCodeArgument(ctx, vm, &sp, formal->type, arg,
@@ -1518,6 +1601,18 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
     case AST_OP(builtin_va_end):
     case AST_OP(builtin_va_copy):
       ValidationReject(state, "varargs builtins are not constexpr eligible");
+      return;
+    case AST_OP(builtin_atomic_load):
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n):
+    case AST_OP(builtin_atomic_fence):
+      ValidationReject(state, "atomic builtins are not constexpr eligible");
       return;
     case AST_OP(call): {
       if (PCodeConstexprCallSymbol(node) == NULL) {
@@ -2085,6 +2180,40 @@ static ConstexprValue* PCodeConstexprSlotForOffset(TypeRecord* type,
   return offset == 0 ? PCodeConstexprObjectSlot(object, 0) : NULL;
 }
 
+static bool PCodeEvaluatePointerInitializer(ASTNode* expr, int64_t* result) {
+  if (expr == NULL || result == NULL) {
+    return false;
+  }
+  if (expr->op == AST_OP(string)) {
+    ConstantASTNode* string = (ConstantASTNode*)expr;
+    if (string->value.string == NULL) {
+      return false;
+    }
+    *result = (int64_t)(uintptr_t)string->value.string->value;
+    return true;
+  }
+  String source_string;
+  if (PCodeSourceBuiltinStringValue(expr, &source_string)) {
+    size_t size = source_string.length + 1;
+    char* memory = malloc(size);
+    if (memory == NULL) {
+      StringDestruct(&source_string);
+      return false;
+    }
+    memcpy(memory, source_string.value, size);
+    StringDestruct(&source_string);
+    *result = (int64_t)(uintptr_t)memory;
+    return true;
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok = expr->op == AST_OP(call)
+                ? ConstexprPCodeEvaluateCallAsInteger(&ctx, expr, result)
+                : EvaluateIntegerExpressionInContext(&ctx, expr, result);
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
 static bool PCodeEvaluateScalarInitializer(TypeRecord* type, ASTNode* initializer,
                                            ConstexprValue* result) {
   ASTNode* expr = ConstexprInitializerExpression(initializer);
@@ -2112,12 +2241,17 @@ static bool PCodeEvaluateScalarInitializer(TypeRecord* type, ASTNode* initialize
   }
   if (TypeIsIntegral(type) || TypeIsPointer(type)) {
     int64_t ivalue;
-    ConstEvalContext ctx;
-    ConstEvalContextInit(&ctx);
-    bool ok = expr->op == AST_OP(call)
-                  ? ConstexprPCodeEvaluateCallAsInteger(&ctx, expr, &ivalue)
-                  : EvaluateIntegerExpressionInContext(&ctx, expr, &ivalue);
-    ConstEvalContextDestruct(&ctx);
+    bool ok = TypeIsPointer(type)
+                  ? PCodeEvaluatePointerInitializer(expr, &ivalue)
+                  : false;
+    if (!ok) {
+      ConstEvalContext ctx;
+      ConstEvalContextInit(&ctx);
+      ok = expr->op == AST_OP(call)
+               ? ConstexprPCodeEvaluateCallAsInteger(&ctx, expr, &ivalue)
+               : EvaluateIntegerExpressionInContext(&ctx, expr, &ivalue);
+      ConstEvalContextDestruct(&ctx);
+    }
     if (!ok) {
       return false;
     }

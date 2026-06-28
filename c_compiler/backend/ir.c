@@ -211,6 +211,17 @@ static struct {
     {IR_OP(builtin_va_arg), "builtin_va_arg"},
     {IR_OP(builtin_va_end), "builtin_va_end"},
     {IR_OP(builtin_va_copy), "builtin_va_copy"},
+
+    {IR_OP(atomic_load), "atomic_load"},
+    {IR_OP(atomic_store), "atomic_store"},
+    {IR_OP(atomic_fetch_add), "atomic_fetch_add"},
+    {IR_OP(atomic_fetch_sub), "atomic_fetch_sub"},
+    {IR_OP(atomic_add_fetch), "atomic_add_fetch"},
+    {IR_OP(atomic_sub_fetch), "atomic_sub_fetch"},
+    {IR_OP(atomic_compare_exchange_bool), "atomic_compare_exchange_bool"},
+    {IR_OP(atomic_compare_exchange_val), "atomic_compare_exchange_val"},
+    {IR_OP(atomic_compare_exchange_n), "atomic_compare_exchange_n"},
+    {IR_OP(atomic_fence), "atomic_fence"},
   
   {IR_OP(inc8), "inc8"},
   {IR_OP(inc16), "inc16"},
@@ -471,6 +482,9 @@ static IROpcode ConstantOpcode(TypeRecord* type) {
   if (type == NULL) {
     // Allow default of integer.
     return IntConstOpcode(NULL);
+  }
+  if (TypeIsNullPointer(type)) {
+    return IR_OP(consta);
   }
   if (TypeIsIntegral(type)) {
     return IntConstOpcode(type);
@@ -858,6 +872,14 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(phi):
     case IR_OP(calla):
     case IR_OP(builtin_va_arg):
+    case IR_OP(atomic_load):
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch):
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n):
 
     case IR_OP(cmpeqi):
     case IR_OP(cmpnei):
@@ -961,6 +983,16 @@ bool IRIsStore(IRNode* node) {
     case IR_OP(builtin_va_end):
     case IR_OP(builtin_va_arg):
     case IR_OP(builtin_va_copy):
+    case IR_OP(atomic_load):
+    case IR_OP(atomic_store):
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch):
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n):
+    case IR_OP(atomic_fence):
     case IR_OP(memzero):
     case IR_OP(memcpy):
     case IR_OP(inc8):

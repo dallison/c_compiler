@@ -46,6 +46,16 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
     case AST_OP(builtin_va_arg):
     case AST_OP(builtin_va_end):
     case AST_OP(builtin_va_copy):
+    case AST_OP(builtin_atomic_load):
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n):
+    case AST_OP(builtin_atomic_fence):
       return true;
     case AST_OP(comma): {
       BinaryASTNode* n = (BinaryASTNode*)node;
@@ -818,6 +828,89 @@ static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
          !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
 }
 
+static bool IsEligibleCXXImplicitMoveReturnValue(ASTNode* return_value) {
+  if (!CompilerIsCXX() || return_value == NULL ||
+      return_value->op != AST_OP(identifier) ||
+      compiler->current_function == NULL ||
+      TypeIsReference(compiler->current_function->next) ||
+      !TypeIsStructOrUnion(compiler->current_function->next) ||
+      !TypeEqual(return_value->type, compiler->current_function->next)) {
+    return false;
+  }
+  Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
+  return sym != NULL && (sym->flags.is_local || sym->flags.is_argument) &&
+         !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
+}
+
+static bool IsCXXFunctionArgumentReturnValue(ASTNode* return_value) {
+  return return_value != NULL && return_value->op == AST_OP(identifier) &&
+         ((IdentifierASTNode*)return_value)->symbol != NULL &&
+         ((IdentifierASTNode*)return_value)->symbol->flags.is_argument;
+}
+
+static ASTNode* MaterializeCXXReturnByMove(ASTNode* return_value) {
+  if (!CompilerIsCXX() || return_value == NULL ||
+      compiler->current_function == NULL ||
+      compiler->current_function->info.function.is_constexpr ||
+      !TypeIsStructOrUnion(compiler->current_function->next) ||
+      compiler->current_function->next->info.struct_info == NULL ||
+      compiler->current_function->next->info.struct_info->tag_name == NULL ||
+      compiler->current_function->next->info.struct_info->is_aggregate) {
+    return return_value;
+  }
+
+  TypeRecord* return_type = compiler->current_function->next;
+  String* constructor_name = return_type->info.struct_info->tag_name;
+  StructMember* constructor =
+      FindStructMember(return_type->info.struct_info, constructor_name);
+  if (constructor == NULL || !constructor->is_member_function ||
+      constructor->symbol == NULL || constructor->symbol->type == NULL ||
+      !constructor->symbol->type->info.function.is_constructor) {
+    return return_value;
+  }
+  bool has_nontrivial_unary_constructor = false;
+  for (StructMember* candidate = constructor; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->is_member_function || candidate->symbol == NULL ||
+        candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type) ||
+        !candidate->symbol->type->info.function.is_constructor) {
+      continue;
+    }
+    FunctionInfo* info = &candidate->symbol->type->info.function;
+    if (info->varargs ||
+        (info->prototype.length >= 2 && !info->is_trivial_special_member)) {
+      has_nontrivial_unary_constructor = true;
+      break;
+    }
+  }
+  if (!has_nontrivial_unary_constructor) {
+    return return_value;
+  }
+
+  SourceLocation location = return_value->location;
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, return_type);
+  temp->location = location;
+  ASTNode* receiver = NewIdentifierASTNode(temp, location);
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(constructor_name->value), NULL,
+                               location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, ASTNodeMove(return_value));
+  ASTNode* constructor_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  ASTNode* result = NewIdentifierASTNode(temp, location);
+  ASTNode* comma =
+      NewBinaryASTNode(AST_OP(comma), return_type, location, constructor_call,
+                       result);
+  ASTNode* analyzed = AnalyzeExpression(comma);
+  analyzed->value_category = kValueCategoryPrvalue;
+  return analyzed;
+}
+
 static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   if (compiler->current_function != NULL &&
       compiler->current_function->info.function.is_coroutine &&
@@ -844,6 +937,20 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
              !TypeEqual(return_value->type, compiler->current_function->next)) {
     SemanticError(return_value, "Inconsistent auto function return type");
     return;
+  }
+
+  if (IsEligibleCXXImplicitMoveReturnValue(return_value)) {
+    ASTValueCategory original_category = return_value->value_category;
+    return_value->value_category = kValueCategoryXvalue;
+    if (IsCXXFunctionArgumentReturnValue(return_value)) {
+      ASTNode* materialized = MaterializeCXXReturnByMove(return_value);
+      if (materialized != return_value) {
+        ASTNodeReplaceChild((ASTNode*)node, 0, materialized, false);
+        return_value = materialized;
+      } else {
+        return_value->value_category = original_category;
+      }
+    }
   }
 
   bool cxx_return_elision = IsEligibleCXXReturnElisionValue(return_value);

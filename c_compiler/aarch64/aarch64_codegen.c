@@ -4210,6 +4210,19 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
 
     case IR_OP(builtin_va_copy):
       return LowerBuiltinVaCopy(g, node);
+
+    case IR_OP(atomic_load):
+    case IR_OP(atomic_store):
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch):
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n):
+    case IR_OP(atomic_fence):
+      assert(false);
+      return NULL;
       
     case IR_OP(decsp):
     case IR_OP(savesp):

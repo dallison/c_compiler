@@ -25,11 +25,29 @@ static struct Intrinsic {
   ASTOpcode opcode;
   int num_args;
 } intrinsics[] = {
-    {"__builtin_va_start", AST_OP(builtin_va_start), 2},
+    {"__atomic_add_fetch", AST_OP(builtin_atomic_add_fetch), 3},
+    {"__atomic_compare_exchange_n", AST_OP(builtin_atomic_compare_exchange_n), 6},
+    {"__atomic_fetch_add", AST_OP(builtin_atomic_fetch_add), 3},
+    {"__atomic_fetch_sub", AST_OP(builtin_atomic_fetch_sub), 3},
+    {"__atomic_load_n", AST_OP(builtin_atomic_load), 2},
+    {"__atomic_store_n", AST_OP(builtin_atomic_store), 3},
+    {"__atomic_sub_fetch", AST_OP(builtin_atomic_sub_fetch), 3},
+    {"__builtin_COLUMN", AST_OP(builtin_source_column), 0},
+    {"__builtin_FILE", AST_OP(builtin_source_file), 0},
+    {"__builtin_FUNCTION", AST_OP(builtin_source_function), 0},
+    {"__builtin_LINE", AST_OP(builtin_source_line), 0},
+    {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
     {"__builtin_va_arg", AST_OP(builtin_va_arg), 2},
-    {"__builtin_va_end", AST_OP(builtin_va_end), 1},
     {"__builtin_va_copy", AST_OP(builtin_va_copy), 2},
-    {NULL, 0, 0},
+    {"__builtin_va_end", AST_OP(builtin_va_end), 1},
+    {"__builtin_va_start", AST_OP(builtin_va_start), 2},
+    {"__sync_add_and_fetch", AST_OP(builtin_atomic_add_fetch), 2},
+    {"__sync_bool_compare_and_swap", AST_OP(builtin_atomic_compare_exchange_bool), 3},
+    {"__sync_fetch_and_add", AST_OP(builtin_atomic_fetch_add), 2},
+    {"__sync_fetch_and_sub", AST_OP(builtin_atomic_fetch_sub), 2},
+    {"__sync_sub_and_fetch", AST_OP(builtin_atomic_sub_fetch), 2},
+    {"__sync_synchronize", AST_OP(builtin_atomic_fence), 0},
+    {"__sync_val_compare_and_swap", AST_OP(builtin_atomic_compare_exchange_val), 3},
 };
 
 typedef enum {
@@ -50,14 +68,16 @@ typedef struct {
 static ASTNode* ParseAssignmentExpression(Syntax* syntax,
                                           TokenClass followers);
 
-// Returns -1 for not intrinsic.
-static int GetIntrinsicIndex(const char* name) {
-  for (int i = 0; intrinsics[i].name != NULL; i++) {
-    if (strcmp(name, intrinsics[i].name) == 0) {
-      return i;
-    }
-  }
-  return -1;
+static int CompareIntrinsicName(const void* key, const void* element) {
+  const char* name = key;
+  const struct Intrinsic* intrinsic = element;
+  return strcmp(name, intrinsic->name);
+}
+
+static const struct Intrinsic* GetIntrinsic(const char* name) {
+  return bsearch(name, intrinsics,
+                 sizeof(intrinsics) / sizeof(intrinsics[0]),
+                 sizeof(intrinsics[0]), CompareIntrinsicName);
 }
 
 static Symbol* FindThisSymbol(Syntax* syntax) {
@@ -85,7 +105,7 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
   StructMember* member =
       FindStructMember(this_symbol->type->next->info.struct_info, &member_name);
-  if (member == NULL || member->is_static || member->is_member_function) {
+  if (member == NULL || member->is_static) {
     StringDestruct(&member_name);
     return NULL;
   }
@@ -558,37 +578,43 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // Register it so it is found on later references (and owned/freed by a
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
-    } else if (LexLookingAt(lex, TOK(lparen))) {
-      if (!CompilerIsCXX() &&
-          GetIntrinsicIndex(FullyQualifiedIdentifierLast(&name)) == -1) {
-        // Calling an unknown function is a warning.
-        SyntaxWarning(syntax, "implicit-function-declaration",
-                      "Calling undeclared function %s",
-                      FullyQualifiedIdentifierLast(&name));
-      }
-      
-      // Declare the function so we don't get more warnings for the same
-      // function.
-      TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-      TypeRecord* func_type = NewFunctionTypeRecord();
-      func_type->info.function.unknown_args = true;
-      TypeRecordChain(func_type, type);
-      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), func_type, STO(implicit));
-      symbol->flags.is_forward_declared = true;
-      // Declare it so repeated calls find this symbol (no duplicate warnings)
-      // and so it is owned/freed by a symbol table rather than leaked.
-      SyntaxAddSymbol(syntax, symbol);
     } else {
       ASTNode* member_access = NewMemberAccessFromThis(syntax, &name);
       if (member_access != NULL) {
         FullyQualifiedIdentifierDestruct(&name);
         return member_access;
       }
-      SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
-      TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-      symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
-      symbol->flags.invented = true;
-      SyntaxAddSymbol(syntax, symbol);
+      if (LexLookingAt(lex, TOK(lparen))) {
+        if (!CompilerIsCXX() &&
+            GetIntrinsic(FullyQualifiedIdentifierLast(&name)) == NULL) {
+          // Calling an unknown function is a warning.
+          SyntaxWarning(syntax, "implicit-function-declaration",
+                        "Calling undeclared function %s",
+                        FullyQualifiedIdentifierLast(&name));
+        }
+
+        // Declare the function so we don't get more warnings for the same
+        // function.
+        TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                                 kQualPlain);
+        TypeRecord* func_type = NewFunctionTypeRecord();
+        func_type->info.function.unknown_args = true;
+        TypeRecordChain(func_type, type);
+        symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), func_type,
+                           STO(implicit));
+        symbol->flags.is_forward_declared = true;
+        // Declare it so repeated calls find this symbol (no duplicate warnings)
+        // and so it is owned/freed by a symbol table rather than leaked.
+        SyntaxAddSymbol(syntax, symbol);
+      } else {
+        SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
+        TypeRecord* type =
+            NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+        symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type,
+                           STO(implicit));
+        symbol->flags.invented = true;
+        SyntaxAddSymbol(syntax, symbol);
+      }
     }
   }
   Vector* template_arguments = NULL;
@@ -1360,7 +1386,17 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
        parent->op == AST_OP(builtin_va_start) ||
        parent->op == AST_OP(builtin_va_arg) ||
        parent->op == AST_OP(builtin_va_end) ||
-       parent->op == AST_OP(builtin_va_copy)) &&
+       parent->op == AST_OP(builtin_va_copy) ||
+       parent->op == AST_OP(builtin_atomic_load) ||
+       parent->op == AST_OP(builtin_atomic_store) ||
+       parent->op == AST_OP(builtin_atomic_fetch_add) ||
+       parent->op == AST_OP(builtin_atomic_fetch_sub) ||
+       parent->op == AST_OP(builtin_atomic_add_fetch) ||
+       parent->op == AST_OP(builtin_atomic_sub_fetch) ||
+       parent->op == AST_OP(builtin_atomic_compare_exchange_bool) ||
+       parent->op == AST_OP(builtin_atomic_compare_exchange_val) ||
+       parent->op == AST_OP(builtin_atomic_compare_exchange_n) ||
+       parent->op == AST_OP(builtin_atomic_fence)) &&
       child_id > 0) {
     VectorASTNode* vector = (VectorASTNode*)parent;
     ASTNode* old = vector->children->value.p[child_id - 1];
@@ -1570,8 +1606,8 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
     IdentifierASTNode* id_node = (IdentifierASTNode*)left;
     const char* name = id_node->symbol->name.value;
 
-    int intrinsic_index = GetIntrinsicIndex(name);
-    if (intrinsic_index == -1) {
+    const struct Intrinsic* intrinsic = GetIntrinsic(name);
+    if (intrinsic == NULL) {
       return NULL;
     }
 
@@ -1579,7 +1615,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
     while (!LexLookingAt(syntax->lex, TOK(rparen))) {
       ASTNode* actual;
       // Special case: __builtin_va_arg has a type as its second arg.
-      if (intrinsics[intrinsic_index].opcode == AST_OP(builtin_va_arg) &&
+      if (intrinsic->opcode == AST_OP(builtin_va_arg) &&
           actuals->length == 1) {
         TypeParser parser;
         TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingBlockScope);
@@ -1599,13 +1635,13 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
       }
     }
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
-    if (actuals->length != intrinsics[intrinsic_index].num_args) {
+    if (actuals->length != (size_t)intrinsic->num_args) {
       SyntaxError(
           syntax,
-          "Wrong number of args for varargs builtin; expected %d, got %zd",
-          intrinsics[intrinsic_index].num_args, actuals->length);
+          "Wrong number of args for builtin; expected %d, got %zd",
+          intrinsic->num_args, actuals->length);
     }
-    return NewVectorASTNode(intrinsics[intrinsic_index].opcode, NULL,
+    return NewVectorASTNode(intrinsic->opcode, NULL,
                             syntax->lex->current_token_location, left, actuals);
   }
   return NULL;
@@ -2791,6 +2827,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
         : NewAssign(NewUnaryASTNode(AST_OP(contents), allocated_type, location,
                                     NewIdentifierASTNode(temp, location)),
                     scalar_initializer, allocated_type, location);
+    if (ctor_actuals == NULL && TypeContainsTemplateParameter(allocated_type)) {
+      init->flags |= kASTDependentNewInitializer;
+    }
     result = NewBinaryASTNode(
         AST_OP(comma), result_type, location, assign,
         NewBinaryASTNode(AST_OP(comma), result_type, location, init,
@@ -2802,16 +2841,23 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
-static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
-  SourceLocation location = syntax->lex->current_token_location;
-  LexNextToken(syntax->lex);  // delete
-  bool is_array_delete = false;
-  if (LexMatch(syntax->lex, TOK(lsquare))) {
-    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
-    is_array_delete = true;
-  }
-  ASTNode* expr = ParseCastExpression(syntax, followers);
+ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
+                                          bool is_array_delete,
+                                          SourceLocation location) {
   TypeRecord* pointer_type = expr->type;
+  if (pointer_type != NULL && TypeContainsTemplateParameter(pointer_type)) {
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, expr);
+    ASTNode* node = NewCallASTNode(
+        is_array_delete ? GetImplicitCXXOperatorDeleteArray(location)
+                        : GetImplicitCXXOperatorDelete(location),
+        location, actuals);
+    node->flags |= kASTDependentDelete;
+    if (is_array_delete) {
+      node->flags |= kASTDependentArrayDelete;
+    }
+    return node;
+  }
   if (is_array_delete) {
     if (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)) {
       Vector* actuals = NewVector();
@@ -2896,6 +2942,19 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
       assign, NewBinaryASTNode(AST_OP(comma),
                                NewTypeRecordWithSize(kTypeVoid, kQualPlain),
                                location, destructor, deallocate));
+}
+
+static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // delete
+  bool is_array_delete = false;
+  if (LexMatch(syntax->lex, TOK(lsquare))) {
+    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+    is_array_delete = true;
+  }
+  ASTNode* expr = ParseCastExpression(syntax, followers);
+  return NewCXXDeleteExpressionForPointer(syntax, expr, is_array_delete,
+                                          location);
 }
 
 static ASTNode* ParseCXXThrowExpression(Syntax* syntax, TokenClass followers) {

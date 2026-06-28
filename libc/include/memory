@@ -1,0 +1,275 @@
+//
+//  memory
+//  c_compiler
+//
+//  Minimal C++20 memory library support for DaveCC.
+//
+
+#ifndef memory_h
+#define memory_h
+
+#include <utility>
+
+namespace std {
+
+template <class T>
+struct default_delete;
+
+template <class T>
+struct default_delete {
+  constexpr default_delete(void) noexcept {
+  }
+
+  void operator()(T* ptr) const {
+    delete ptr;
+  }
+};
+
+template <class T>
+struct default_delete<T[]> {
+  constexpr default_delete(void) noexcept {
+  }
+
+  void operator()(T* ptr) const {
+    delete[] ptr;
+  }
+};
+
+template <class T, class Deleter = default_delete<T> >
+struct unique_ptr {
+  using pointer = T*;
+  using element_type = T;
+  using deleter_type = Deleter;
+
+  T* __ptr;
+  Deleter __deleter;
+
+  constexpr unique_ptr(void) noexcept : __ptr(0) {
+  }
+
+  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr(0) {
+  }
+
+  explicit unique_ptr(T* ptr) noexcept : __ptr(ptr) {
+  }
+
+  unique_ptr(T* ptr, Deleter deleter) noexcept
+      : __ptr(ptr), __deleter(deleter) {
+  }
+
+  unique_ptr(T* ptr, Deleter& deleter) noexcept
+      : __ptr(ptr), __deleter(deleter) {
+  }
+
+  unique_ptr(const unique_ptr& other) = delete;
+
+  unique_ptr(unique_ptr&& other) noexcept : __ptr(other.release()) {
+    __deleter = std::move(other.__deleter);
+  }
+
+  ~unique_ptr(void) {
+    if (__ptr != 0) {
+      __deleter(__ptr);
+      __ptr = 0;
+    }
+  }
+
+  unique_ptr& operator=(const unique_ptr& other) = delete;
+
+  unique_ptr& operator=(unique_ptr&& other) noexcept {
+    if (this != &other) {
+      T* old = __ptr;
+      __ptr = other.release();
+      if (old != 0) {
+        __deleter(old);
+      }
+      __deleter = std::move(other.__deleter);
+    }
+    return *this;
+  }
+
+  unique_ptr& operator=(decltype(nullptr)) noexcept {
+    T* old = __ptr;
+    __ptr = 0;
+    if (old != 0) {
+      __deleter(old);
+    }
+    return *this;
+  }
+
+  T& operator*(void) const {
+    return *__ptr;
+  }
+
+  T* operator->(void) const noexcept {
+    return __ptr;
+  }
+
+  T* get(void) const noexcept {
+    return __ptr;
+  }
+
+  Deleter& get_deleter(void) noexcept {
+    return __deleter;
+  }
+
+  T* release(void) noexcept {
+    T* ptr = __ptr;
+    __ptr = 0;
+    return ptr;
+  }
+
+  void reset(T* ptr = 0) noexcept {
+    T* old = __ptr;
+    __ptr = ptr;
+    if (old != 0) {
+      __deleter(old);
+    }
+  }
+
+  void swap(unique_ptr& other) noexcept {
+    T* ptr = __ptr;
+    __ptr = other.__ptr;
+    other.__ptr = ptr;
+    Deleter deleter = std::move(__deleter);
+    __deleter = std::move(other.__deleter);
+    other.__deleter = std::move(deleter);
+  }
+
+};
+
+template <class T, class Deleter>
+struct unique_ptr<T[], Deleter> {
+  using pointer = T*;
+  using element_type = T;
+  using deleter_type = Deleter;
+
+  T* __ptr;
+  Deleter __deleter;
+
+  constexpr unique_ptr(void) noexcept : __ptr(0) {
+  }
+
+  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr(0) {
+  }
+
+  explicit unique_ptr(T* ptr) noexcept : __ptr(ptr) {
+  }
+
+  unique_ptr(T* ptr, Deleter deleter) noexcept
+      : __ptr(ptr), __deleter(deleter) {
+  }
+
+  unique_ptr(T* ptr, Deleter& deleter) noexcept
+      : __ptr(ptr), __deleter(deleter) {
+  }
+
+  unique_ptr(const unique_ptr& other) = delete;
+
+  unique_ptr(unique_ptr&& other) noexcept : __ptr(other.release()) {
+    __deleter = std::move(other.__deleter);
+  }
+
+  ~unique_ptr(void) {
+    if (__ptr != 0) {
+      __deleter(__ptr);
+      __ptr = 0;
+    }
+  }
+
+  unique_ptr& operator=(const unique_ptr& other) = delete;
+
+  unique_ptr& operator=(unique_ptr&& other) noexcept {
+    if (this != &other) {
+      T* old = __ptr;
+      __ptr = other.release();
+      if (old != 0) {
+        __deleter(old);
+      }
+      __deleter = std::move(other.__deleter);
+    }
+    return *this;
+  }
+
+  unique_ptr& operator=(decltype(nullptr)) noexcept {
+    T* old = __ptr;
+    __ptr = 0;
+    if (old != 0) {
+      __deleter(old);
+    }
+    return *this;
+  }
+
+  T& operator[](unsigned long index) const {
+    return __ptr[index];
+  }
+
+  T* get(void) const noexcept {
+    return __ptr;
+  }
+
+  Deleter& get_deleter(void) noexcept {
+    return __deleter;
+  }
+
+  T* release(void) noexcept {
+    T* ptr = __ptr;
+    __ptr = 0;
+    return ptr;
+  }
+
+  void reset(T* ptr = 0) noexcept {
+    T* old = __ptr;
+    __ptr = ptr;
+    if (old != 0) {
+      __deleter(old);
+    }
+  }
+
+  void swap(unique_ptr& other) noexcept {
+    T* ptr = __ptr;
+    __ptr = other.__ptr;
+    other.__ptr = ptr;
+    Deleter deleter = std::move(__deleter);
+    __deleter = std::move(other.__deleter);
+    other.__deleter = std::move(deleter);
+  }
+
+};
+
+template <class T, class Deleter>
+bool operator==(const unique_ptr<T, Deleter>& ptr, decltype(nullptr)) noexcept {
+  return ptr.get() == 0;
+}
+
+template <class T, class Deleter>
+bool operator==(decltype(nullptr), const unique_ptr<T, Deleter>& ptr) noexcept {
+  return ptr.get() == 0;
+}
+
+template <class T, class Deleter>
+bool operator!=(const unique_ptr<T, Deleter>& ptr, decltype(nullptr)) noexcept {
+  return ptr.get() != 0;
+}
+
+template <class T, class Deleter>
+bool operator!=(decltype(nullptr), const unique_ptr<T, Deleter>& ptr) noexcept {
+  return ptr.get() != 0;
+}
+
+template <class T, class... Args>
+static inline unique_ptr<T> make_unique(Args&&... args) {
+  unique_ptr<T> result;
+  result.reset(new T(std::forward<Args>(args)...));
+  return result;
+}
+
+template <class T, class Deleter>
+static inline void swap(unique_ptr<T, Deleter>& left,
+                        unique_ptr<T, Deleter>& right) noexcept {
+  left.swap(right);
+}
+
+}  // namespace std
+
+#endif /* memory_h */

@@ -146,6 +146,16 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
     case AST_OP(builtin_va_arg):
     case AST_OP(builtin_va_end):
     case AST_OP(builtin_va_copy):
+    case AST_OP(builtin_atomic_load):
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n):
+    case AST_OP(builtin_atomic_fence):
       return true;
     case AST_OP(label): {
       LabelASTNode* label = (LabelASTNode*)node;
@@ -239,6 +249,12 @@ void SemanticCheckScalarType(ASTNode* node) {
 // We don't do this for arguments because it's common for arguments
 // to be unused deliberately.
 static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
+  String function_name;
+  StringInit(&function_name, NULL);
+  if (node != NULL && node->type != NULL && TypeIsFunction(node->type)) {
+    SymbolFunctionDiagnosticName(node->type->info.function.symbol,
+                                 &function_name);
+  }
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
     if (symbol->flags.used || symbol->flags.is_temp || symbol->flags.invented ||
@@ -249,14 +265,15 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
       SemanticSymbolWarning(symbol, "unused-parameter",
                     "Parameter '%s' is not used in function '%s'",
                     symbol->name.value,
-                      node->type->info.function.symbol->name.value);
+                      function_name.value);
     } else {
       SemanticSymbolWarning(symbol, "unused-variable",
                     "Local variable '%s' is not used in function '%s'",
                     symbol->name.value,
-                      node->type->info.function.symbol->name.value);
+                      function_name.value);
     }
   }
+  StringDestruct(&function_name);
 }
 
 static void CheckVLAArgs(Syntax* syntax, ASTNode* node) {

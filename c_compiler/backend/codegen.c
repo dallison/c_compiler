@@ -292,6 +292,18 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
       CheckForVarDef(write, v->children->value.p[0]);
       break;
     }
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n): {
+      VectorASTNode* v = (VectorASTNode*)node;
+      CheckForVarDef(write, v->children->value.p[0]);
+      break;
+    }
     case AST_OP(return): {
       CombinedStatementASTNode* r = (CombinedStatementASTNode*)node;
       CheckForVarDef(write, r->cond);

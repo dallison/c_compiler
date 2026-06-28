@@ -1,0 +1,51 @@
+//
+//  utility
+//  c_compiler
+//
+//  Minimal C++20 utility library support for DaveCC.
+//
+
+#ifndef utility_h
+#define utility_h
+
+#include <type_traits>
+
+namespace std {
+
+template <class T>
+static inline constexpr remove_reference_t<T>&& move(T&& value) noexcept {
+  return static_cast<remove_reference_t<T>&&>(value);
+}
+
+template <class T>
+static inline constexpr T&& forward(remove_reference_t<T>& value) noexcept {
+  return static_cast<T&&>(value);
+}
+
+template <class T>
+static inline constexpr T&& forward(remove_reference_t<T>&& value) noexcept {
+  return static_cast<T&&>(value);
+}
+
+template <class T>
+static inline constexpr T&& move_if_noexcept(T& value) noexcept {
+  return std::move(value);
+}
+
+template <class T, class U = T>
+static inline T exchange(T& object, U&& new_value) {
+  T old_value = std::move(object);
+  object = std::forward<U>(new_value);
+  return old_value;
+}
+
+template <class T>
+static inline void swap(T& left, T& right) {
+  T tmp = std::move(left);
+  left = std::move(right);
+  right = std::move(tmp);
+}
+
+}  // namespace std
+
+#endif /* utility_h */

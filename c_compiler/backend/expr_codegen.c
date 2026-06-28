@@ -156,11 +156,11 @@ static struct {
     {NULL, IR_OP(nop), IR_OP(nop), IR_OP(nop)},
 };
 
-static IROpcode GetLoadOpcode(ASTNode* node) {
+static IROpcode GetLoadOpcodeForType(TypeRecord* type) {
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
-    if (int_type_sizes[i].type_func(node->type)) {
+    if (int_type_sizes[i].type_func(type)) {
       size = int_type_sizes[i].size_func();
       break;
     }
@@ -170,7 +170,7 @@ static IROpcode GetLoadOpcode(ASTNode* node) {
   if (size > 0) {
     for (size_t i = 0; int_opcodes[i].size != 0; i++) {
       if (int_opcodes[i].size == size) {
-        if (TypeIsUnsigned(node->type)) {
+        if (TypeIsUnsigned(type)) {
           return int_opcodes[i].unsigned_load;
         } else {
           return int_opcodes[i].signed_load;
@@ -181,8 +181,8 @@ static IROpcode GetLoadOpcode(ASTNode* node) {
   
   // Not integral, call type inference funcs.
   for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
-    if (load_store_ops[i].type_func(node->type)) {
-      if (TypeIsUnsigned(node->type)) {
+    if (load_store_ops[i].type_func(type)) {
+      if (TypeIsUnsigned(type)) {
         return load_store_ops[i].unsigned_load;
       } else {
         return load_store_ops[i].signed_load;
@@ -191,6 +191,10 @@ static IROpcode GetLoadOpcode(ASTNode* node) {
   }
   assert(false);
   return IR_OP(nop);
+}
+
+static IROpcode GetLoadOpcode(ASTNode* node) {
+  return GetLoadOpcodeForType(node->type);
 }
 
 static int BitSizeToByteSize(int bit_size) {
@@ -221,11 +225,11 @@ static COMPILER_UNUSED IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_siz
   return IR_OP(nop);
 }
 
-static IROpcode GetStoreOpcode(ASTNode* node) {
+static IROpcode GetStoreOpcodeForType(TypeRecord* type) {
   // Get size of integral type from compiler object.
   int size = 0;
   for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
-    if (int_type_sizes[i].type_func(node->type)) {
+    if (int_type_sizes[i].type_func(type)) {
       size = int_type_sizes[i].size_func();
       break;
     }
@@ -241,12 +245,16 @@ static IROpcode GetStoreOpcode(ASTNode* node) {
   }
 
   for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
-    if (load_store_ops[i].type_func(node->type)) {
+    if (load_store_ops[i].type_func(type)) {
       return load_store_ops[i].store;
     }
   }
   assert(false);
   return IR_OP(nop);
+}
+
+static IROpcode GetStoreOpcode(ASTNode* node) {
+  return GetStoreOpcodeForType(node->type);
 }
 
 // String literals are global to the compiler.  Each one has a
@@ -258,6 +266,89 @@ static IRNode* GenerateLiteral(Generator* gen, ConstantASTNode* node) {
   return IRSetType(GeneratorEmit(
       gen, NewIR1(IR_OP(literalref),
                   GeneratorGetIntConstant(gen, node->base.type, literal_id))), node->base.type);
+}
+
+static SourceLocation BuiltinSourceLocation(VectorASTNode* node) {
+  ASTNode* current = &node->base;
+  while ((current->flags & kASTDefaultArgument) != 0 &&
+         current->parent != NULL) {
+    current = current->parent;
+  }
+  return current->location;
+}
+
+static IRNode* GenerateBuiltinSourceString(Generator* gen, VectorASTNode* node,
+                                           const char* value) {
+  String string;
+  StringInit(&string, value);
+  int literal_id = CompilerAddStringLiteral(&string, false);
+  StringDestruct(&string);
+  return IRSetType(GeneratorEmit(
+      gen, NewIR1(IR_OP(literalref),
+                  GeneratorGetIntConstant(gen, node->base.type, literal_id))),
+                   node->base.type);
+}
+
+static TypeRecord* BuiltinCurrentFunction(Generator* gen) {
+  if (gen != NULL && gen->func != NULL) {
+    return gen->func;
+  }
+  return compiler->current_function;
+}
+
+static IRNode* GenerateBuiltinSourceFile(Generator* gen, VectorASTNode* node) {
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(BuiltinSourceLocation(node), &filename, &lineno, &start,
+                       &end);
+  (void)lineno;
+  (void)start;
+  (void)end;
+  return GenerateBuiltinSourceString(gen, node,
+                                     filename != NULL ? filename : "<unknown>");
+}
+
+static IRNode* GenerateBuiltinSourceFunction(Generator* gen,
+                                             VectorASTNode* node) {
+  const char* function_name = "";
+  TypeRecord* func = BuiltinCurrentFunction(gen);
+  if (func != NULL && func->info.function.symbol != NULL) {
+    function_name = func->info.function.symbol->name.value;
+  }
+  return GenerateBuiltinSourceString(gen, node, function_name);
+}
+
+static IRNode* GenerateBuiltinSourcePrettyFunction(Generator* gen,
+                                                   VectorASTNode* node) {
+  String name;
+  StringInit(&name, NULL);
+  TypeRecordFunctionPrettyName(BuiltinCurrentFunction(gen), &name);
+  IRNode* result =
+      GenerateBuiltinSourceString(gen, node, name.value != NULL ? name.value : "");
+  StringDestruct(&name);
+  return result;
+}
+
+static IRNode* GenerateBuiltinSourceLine(Generator* gen, VectorASTNode* node) {
+  int fileno = 0;
+  int lineno = 0;
+  int colno = 0;
+  SourceLocationNumbers(BuiltinSourceLocation(node), &fileno, &lineno, &colno);
+  (void)fileno;
+  return GeneratorGetIntConstant(gen, node->base.type, lineno);
+}
+
+static IRNode* GenerateBuiltinSourceColumn(Generator* gen,
+                                           VectorASTNode* node) {
+  int fileno = 0;
+  int lineno = 0;
+  int colno = 0;
+  SourceLocationNumbers(BuiltinSourceLocation(node), &fileno, &lineno, &colno);
+  (void)fileno;
+  (void)lineno;
+  return GeneratorGetIntConstant(gen, node->base.type, colno + 1);
 }
 
 static struct {
@@ -1192,6 +1283,18 @@ static void PushArg(Generator* gen, IRNode* call,
   VectorAppend(callargs, GeneratorEmit(gen, push));
 }
 
+static IRNode* FreshCallAddress(Generator* gen, IRNode* address) {
+  if (address == NULL) {
+    return address;
+  }
+  if (address->opcode != IR_OP(addressof) || address->inputs.length == 0) {
+    return address;
+  }
+  IRNode* fresh =
+      GeneratorEmit(gen, NewIR1(IR_OP(addressof), address->inputs.value.p[0]));
+  return IRSetType(fresh, address->type);
+}
+
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   // Address to call.
   IRNode* func = GenerateExpression(gen, node->left);
@@ -1234,10 +1337,16 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   for (ssize_t i = node->children->length-1; i >= 0; i--) {
     size_t argnum = returns_struct ? i + 1 : i;
     ASTNode* arg = (ASTNode*)node->children->value.p[i];
-    IRNode* arg_value = cxx_constructor_call && i == 0 &&
-                                gen->current_struct_address != NULL
-                            ? gen->current_struct_address
-                            : GenerateExpression(gen, arg);
+    IRNode* arg_value = NULL;
+    if (cxx_constructor_call && i == 0 &&
+        gen->current_struct_address != NULL) {
+      arg_value = FreshCallAddress(gen, gen->current_struct_address);
+    } else {
+      IRNode* old_struct_address = gen->current_struct_address;
+      gen->current_struct_address = NULL;
+      arg_value = GenerateExpression(gen, arg);
+      gen->current_struct_address = old_struct_address;
+    }
     if (cxx_constructor_call && i == 0 &&
         arg_value == gen->current_struct_address &&
         TypeIsStructOrUnion(arg_value->type)) {
@@ -1310,7 +1419,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         PushArg(gen, call, ref, 0, &args_right_to_left);
       } else {
         // We have a destination address, add it to the args.
-        PushArg(gen, call, gen->current_struct_address, 0, &args_right_to_left);
+        PushArg(gen, call, FreshCallAddress(gen, gen->current_struct_address),
+                0, &args_right_to_left);
       }
     }
   }
@@ -1322,15 +1432,30 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   VectorDestruct(&args_right_to_left);
   
   // Emit call instruction.
-  call = IRSetType(GeneratorEmit(gen, call), node->base.type);
+  TypeRecord* call_result_type =
+      returns_reference ? NewPointerTo(kQualPlain, node->base.type)
+                        : node->base.type;
+  call = IRSetType(GeneratorEmit(gen, call), call_result_type);
   if (returns_struct) {
     // We are returning a struct.  The result in whatever was passed
     // as the first arguments to the call (the second input to the
     // calla instruction).
     // However this is going to be an IR_OP(addressof) and the function
     // is returning the struct itself.
-    IRNode* ret = call->inputs.value.p[1];
-    assert(ret->opcode == IR_OP(pusharg));
+    IRNode* ret = NULL;
+    for (size_t i = 1; i < call->inputs.length; i++) {
+      IRNode* input = call->inputs.value.p[i];
+      if (input == NULL || input->opcode != IR_OP(pusharg) ||
+          input->inputs.length < 2 || !IRIsConst(input->inputs.value.p[1])) {
+        continue;
+      }
+      IRConstant* arg_num = (IRConstant*)input->inputs.value.p[1];
+      if (arg_num->value.ivalue == 0) {
+        ret = input;
+        break;
+      }
+    }
+    assert(ret != NULL && ret->opcode == IR_OP(pusharg));
     // This will be a pusharg so dereference its first operand to get
     // the value being pushed,
     ret = ret->inputs.value.p[0];
@@ -1338,6 +1463,14 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       ret = ret->inputs.value.p[0];
     }
     return ret;
+  }
+  if (returns_reference &&
+      (node->base.flags & kASTNeedAddress) == 0 &&
+      !TypeIsStructOrUnion(node->base.type) &&
+      !TypeIsArray(node->base.type) &&
+      !TypeIsFunction(node->base.type)) {
+    IROpcode load = GetLoadOpcodeForType(node->base.type);
+    return IRSetType(GeneratorEmit(gen, NewIR1(load, call)), node->base.type);
   }
   return call;
 }
@@ -1732,6 +1865,66 @@ static IRNode* GenerateBuiltinVaCopy(Generator* gen, VectorASTNode* node) {
   return IRSetType(result, node->base.type);
 }
 
+static IRNode* GenerateBuiltinAtomic(Generator* gen, VectorASTNode* node,
+                                     IROpcode opcode) {
+  IRNode* result = NewIR(opcode);
+  for (size_t i = 0; i < node->children->length; i++) {
+    IRNode* child = GenerateExpression(gen, node->children->value.p[i]);
+    IRAddInput(result, child, i == 0);
+  }
+  result = GeneratorEmit(gen, result);
+  CheckForVarDef(result, &node->base);
+  return IRSetType(result, node->base.type);
+}
+
+static IRNode* GenerateBuiltinAtomicCompareExchange(Generator* gen,
+                                                    VectorASTNode* node,
+                                                    bool expected_is_pointer,
+                                                    bool returns_bool) {
+  ASTNode* ptr_arg = node->children->value.p[0];
+  TypeRecord* value_type = ptr_arg->type->next;
+  IROpcode load_op = GetLoadOpcodeForType(value_type);
+  IROpcode store_op = GetStoreOpcodeForType(value_type);
+
+  IRNode* ptr = GenerateExpression(gen, ptr_arg);
+  IRNode* old_value = IRSetType(GeneratorEmit(gen, NewIR1(load_op, ptr)),
+                                value_type);
+
+  IRNode* expected_value;
+  IRNode* expected_ptr = NULL;
+  if (expected_is_pointer) {
+    expected_ptr = GenerateExpression(gen, node->children->value.p[1]);
+    expected_value = IRSetType(
+        GeneratorEmit(gen, NewIR1(load_op, expected_ptr)), value_type);
+  } else {
+    expected_value = GenerateExpression(gen, node->children->value.p[1]);
+  }
+  IRNode* desired = GenerateExpression(gen, node->children->value.p[2]);
+
+  IROpcode cmp_op = FindIROpcodeForType(value_type, AST_OP(equal));
+  IRNode* matches = IRSetType(
+      GeneratorEmit(gen, NewIR2(cmp_op, old_value, expected_value)),
+      NewTypeRecordWithSize(kTypeBool, kQualPlain));
+
+  IRNode* success_label = NewIR(IR_OP(label));
+  IRNode* end_label = NewIR(IR_OP(label));
+  GeneratorEmit(gen, NewIR2(IR_OP(btrue), matches, success_label));
+
+  if (expected_is_pointer) {
+    IRNode* update_expected =
+        GeneratorEmit(gen, NewIR2(store_op, expected_ptr, old_value));
+    (void)update_expected;
+  }
+  GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+
+  GeneratorEmit(gen, success_label);
+  IRNode* store_desired = GeneratorEmit(gen, NewIR2(store_op, ptr, desired));
+  (void)store_desired;
+  GeneratorEmit(gen, end_label);
+
+  return IRSetType(returns_bool ? matches : old_value, node->base.type);
+}
+
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) {
   int diff = node->type->size - input->type->size;  // Difference in bytes.
    if (diff == 0) {
@@ -2112,6 +2305,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       // would drop that and cause a spurious load of the array contents.
       cast_node->expr->flags |= cast_node->base.flags;
       result = GenerateExpression(gen, cast_node->expr);
+      if (TypeIsReference(cast_node->cast_type)) {
+        IRSetType(result, node->type);
+        break;
+      }
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
       IRSetType(result, node->type);
       break;
@@ -2287,6 +2484,69 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
     case AST_OP(builtin_va_copy):
       result = GenerateBuiltinVaCopy(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_atomic_load):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_load));
+      break;
+
+    case AST_OP(builtin_atomic_store):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_store));
+      break;
+
+    case AST_OP(builtin_atomic_fetch_add):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_fetch_add));
+      break;
+
+    case AST_OP(builtin_atomic_fetch_sub):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_fetch_sub));
+      break;
+
+    case AST_OP(builtin_atomic_add_fetch):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_add_fetch));
+      break;
+
+    case AST_OP(builtin_atomic_sub_fetch):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_sub_fetch));
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+      result =
+          GenerateBuiltinAtomicCompareExchange(gen, vector_node, false, true);
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_val):
+      result =
+          GenerateBuiltinAtomicCompareExchange(gen, vector_node, false, false);
+      break;
+
+    case AST_OP(builtin_atomic_compare_exchange_n):
+      result =
+          GenerateBuiltinAtomicCompareExchange(gen, vector_node, true, true);
+      break;
+
+    case AST_OP(builtin_atomic_fence):
+      result = GenerateBuiltinAtomic(gen, vector_node, IR_OP(atomic_fence));
+      break;
+
+    case AST_OP(builtin_source_file):
+      result = GenerateBuiltinSourceFile(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_source_line):
+      result = GenerateBuiltinSourceLine(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_source_column):
+      result = GenerateBuiltinSourceColumn(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_source_function):
+      result = GenerateBuiltinSourceFunction(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_source_pretty_function):
+      result = GenerateBuiltinSourcePrettyFunction(gen, vector_node);
       break;
 
     case AST_OP(asm):

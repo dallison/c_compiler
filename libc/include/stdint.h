@@ -24,6 +24,14 @@ typedef unsigned long long uint64_t;
 typedef unsigned int uintptr_t;
 typedef int intptr_t;
 typedef int64_t intmax_t;
+typedef int8_t int_least8_t;
+typedef int16_t int_least16_t;
+typedef int32_t int_least32_t;
+typedef int64_t int_least64_t;
+typedef uint8_t uint_least8_t;
+typedef uint16_t uint_least16_t;
+typedef uint32_t uint_least32_t;
+typedef uint64_t uint_least64_t;
 #elif defined(__LP64__)
 // LP64 (e.g. x86-64): long is 64 bits.
 typedef char int8_t;
@@ -37,6 +45,14 @@ typedef unsigned long uint64_t;
 typedef unsigned long uintptr_t;
 typedef long intptr_t;
 typedef int64_t intmax_t;
+typedef int8_t int_least8_t;
+typedef int16_t int_least16_t;
+typedef int32_t int_least32_t;
+typedef int64_t int_least64_t;
+typedef uint8_t uint_least8_t;
+typedef uint16_t uint_least16_t;
+typedef uint32_t uint_least32_t;
+typedef uint64_t uint_least64_t;
 #else
 // ILP32 (e.g. 32-bit ARM): long is 32 bits, so 64-bit needs long long.
 typedef char int8_t;
@@ -50,6 +66,14 @@ typedef unsigned long long uint64_t;
 typedef unsigned int uintptr_t;
 typedef int intptr_t;
 typedef int64_t intmax_t;
+typedef int8_t int_least8_t;
+typedef int16_t int_least16_t;
+typedef int32_t int_least32_t;
+typedef int64_t int_least64_t;
+typedef uint8_t uint_least8_t;
+typedef uint16_t uint_least16_t;
+typedef uint32_t uint_least32_t;
+typedef uint64_t uint_least64_t;
 #endif
 
 

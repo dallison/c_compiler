@@ -265,6 +265,36 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_va_end";
     case AST_OP(builtin_va_copy):
       return "builtin_va_copy";
+    case AST_OP(builtin_atomic_load):
+      return "builtin_atomic_load";
+    case AST_OP(builtin_atomic_store):
+      return "builtin_atomic_store";
+    case AST_OP(builtin_atomic_fetch_add):
+      return "builtin_atomic_fetch_add";
+    case AST_OP(builtin_atomic_fetch_sub):
+      return "builtin_atomic_fetch_sub";
+    case AST_OP(builtin_atomic_add_fetch):
+      return "builtin_atomic_add_fetch";
+    case AST_OP(builtin_atomic_sub_fetch):
+      return "builtin_atomic_sub_fetch";
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+      return "builtin_atomic_compare_exchange_bool";
+    case AST_OP(builtin_atomic_compare_exchange_val):
+      return "builtin_atomic_compare_exchange_val";
+    case AST_OP(builtin_atomic_compare_exchange_n):
+      return "builtin_atomic_compare_exchange_n";
+    case AST_OP(builtin_atomic_fence):
+      return "builtin_atomic_fence";
+    case AST_OP(builtin_source_file):
+      return "builtin_source_file";
+    case AST_OP(builtin_source_line):
+      return "builtin_source_line";
+    case AST_OP(builtin_source_column):
+      return "builtin_source_column";
+    case AST_OP(builtin_source_function):
+      return "builtin_source_function";
+    case AST_OP(builtin_source_pretty_function):
+      return "builtin_source_pretty_function";
 
     case AST_OP(cast):
       return "cast";

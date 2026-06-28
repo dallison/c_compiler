@@ -928,7 +928,8 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
       // This will skip forward to the next non-space or non-comment
       // but will not change the current token.
       LexSkipSpacesAndComments(lex);
-      if (lex->line.value[lex->pos] == ':') {
+      if (lex->line.value[lex->pos] == ':' &&
+          lex->line.value[lex->pos + 1] != ':') {
         String label_name;
         StringInit(&label_name, lex->spelling.value);
         LexNextToken(lex);  // Consume label name.

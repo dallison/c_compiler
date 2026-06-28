@@ -13,6 +13,8 @@
 #include "compiler.h"
 #include "semantics.h"
 
+/* Result of walking a function body to decide whether it is a coroutine
+ * (contains co_await/co_yield/co_return) and to count its suspension points. */
 typedef struct {
   bool is_coroutine;
   int suspend_count;
@@ -21,6 +23,10 @@ typedef struct {
   bool has_co_yield;
 } CoroutineScan;
 
+/* A single suspension point (one co_await or co_yield) discovered in the body,
+ * together with the synthesized declarations/temporaries used to lower it: the
+ * awaiter object, its initializer, the frame slot it is stored in, and the
+ * statement/compound it lives in so it can be spliced into the state machine. */
 typedef struct {
   enum {
     kSuspensionCoAwait,
@@ -42,12 +48,18 @@ typedef struct {
   bool multiple;
 } SuspensionPoint;
 
+/* Growable collection of the suspension points found in a coroutine body. */
 typedef struct {
   SuspensionPoint* points;
   int count;
   int capacity;
 } SuspensionPoints;
 
+/* A local variable (or parameter) whose lifetime crosses a suspension point and
+ * must therefore be promoted from the stack into the heap-allocated coroutine
+ * frame. Records the frame slot, whether it came from a parameter (and so needs
+ * copy/move-construction at frame setup), and the compound where its store
+ * statement is emitted. */
 typedef struct {
   Symbol* symbol;
   StructMember* member;
@@ -58,6 +70,10 @@ typedef struct {
   CompoundStatementASTNode* store_compound;
 } CoroutinePersistedLocal;
 
+/* The heap-allocated coroutine frame: the synthesized struct that holds the
+ * resume/destroy state, the promise object, the initial/final awaiters, and all
+ * persisted locals. `*_constructed` members are flags tracking whether the
+ * corresponding object has been constructed yet (for correct teardown). */
 typedef struct {
   Symbol* symbol;
   TypeRecord* type;
@@ -76,6 +92,9 @@ typedef struct {
   VariableDeclarationASTNode* decl;
 } CoroutineFrame;
 
+/* An object owned by the coroutine frame (promise, awaiters, persisted locals)
+ * that has C++ lifetime: it has a frame slot, an optional "constructed" flag
+ * slot, and a note on whether it should be constructed eagerly at frame start. */
 typedef struct {
   Symbol* symbol;
   StructMember* member;
@@ -126,11 +145,14 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                               TypeRecord* return_type,
                                               SourceLocation location);
 
+/* Clone callback that returns the node unchanged (shallow sharing). */
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
   (void)data;
   return node;
 }
 
+/* Look up a member function named `name` on an awaiter struct (e.g.
+ * await_ready/await_suspend/await_resume), skipping non-function members. */
 static StructMember* FindAwaiterMember(TypeRecord* awaiter_type,
                                        const char* name) {
   if (awaiter_type == NULL || !TypeIsStructOrUnion(awaiter_type) ||
@@ -148,6 +170,8 @@ static StructMember* FindAwaiterMember(TypeRecord* awaiter_type,
   return NULL;
 }
 
+/* True if a function body is exactly `{ return <non-zero constant>; }`. Used to
+ * detect awaiters that are statically always-ready (await_ready returns true). */
 static bool FunctionBodyIsReturnTrue(ASTNode* body) {
   if (body == NULL || body->op != AST_OP(compound)) {
     return false;
@@ -165,6 +189,8 @@ static bool FunctionBodyIsReturnTrue(ASTNode* body) {
          ((ConstantASTNode*)value)->value.ivalue != 0;
 }
 
+/* True if this co_await's awaiter has a trivially-true await_ready, meaning the
+ * suspension can be elided and the co_await lowered to just await_resume(). */
 static bool CoAwaitIsAlwaysReady(ASTNode* node) {
   if (node == NULL || node->op != AST_OP(co_await)) {
     return false;
@@ -178,10 +204,14 @@ static bool CoAwaitIsAlwaysReady(ASTNode* node) {
          FunctionBodyIsReturnTrue(await_ready->symbol->type->info.function.body);
 }
 
+/* Find a member `operator co_await` on `type`, if present. */
 static StructMember* FindMemberOperatorCoAwait(TypeRecord* type) {
   return FindAwaiterMember(type, "operator co_await");
 }
 
+/* Verify a type satisfies the Awaiter interface (await_ready/await_suspend/
+ * await_resume present, with await_suspend returning a permitted type),
+ * emitting a semantic error and returning false otherwise. */
 static bool ValidateCoAwaiterType(ASTNode* node, TypeRecord* awaiter_type) {
   if (!TypeIsStructOrUnion(awaiter_type) ||
       awaiter_type->info.struct_info == NULL) {
@@ -218,6 +248,9 @@ static bool ValidateCoAwaiterType(ASTNode* node, TypeRecord* awaiter_type) {
   return true;
 }
 
+/* Determine the struct type to use for member lookup on a co_await operand,
+ * handling the cases where the operand is a compound literal or a call whose
+ * type is carried on its callee rather than the node itself. */
 static TypeRecord* CoAwaitOperandMemberLookupType(ASTNode* operand) {
   if (operand == NULL) {
     return NULL;
@@ -238,6 +271,11 @@ static TypeRecord* CoAwaitOperandMemberLookupType(ASTNode* operand) {
   return NULL;
 }
 
+/* If the co_await operand's type provides a member `operator co_await`, rewrite
+ * the operand so the awaiter is the result of calling it. When the operand is a
+ * prvalue temporary, materialize it into a named temporary first (constructing
+ * it, then calling the operator via a comma expression) so the awaiter binds to
+ * a stable object. Returns true if a rewrite happened. */
 static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
                                        Symbol** awaitable_temp_out) {
   if (!CompilerIsCXX() || co_await == NULL || co_await->sub == NULL) {
@@ -253,6 +291,8 @@ static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
   Vector* constructor_actuals =
       TakeCXXTemporaryConstructionActuals(co_await->sub, operand_type);
   if (constructor_actuals != NULL) {
+    /* Operand is a temporary: bind it to a named temp, construct it, then
+     * (temp.ctor(...), temp.operator co_await()) yields the awaiter. */
     TypeRecord* temp_type = TypeRecordCopy(operand_type);
     temp_type = TypeRecordCalculateSize(temp_type);
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
@@ -287,6 +327,7 @@ static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
     ASTNodeReplaceChild((ASTNode*)co_await, 0, comma, true);
     return true;
   }
+  /* Operand is already an lvalue: call operator co_await on it directly. */
   ASTNode* receiver = ASTNodeMove(co_await->sub);
   ASTNode* call =
       NewAwaiterMemberCall(receiver, "operator co_await",
@@ -296,6 +337,8 @@ static bool ApplyMemberOperatorCoAwait(UnaryASTNode* co_await,
   return true;
 }
 
+/* True if the co_await operand is an lvalue (affects rvalue-ref overload
+ * selection for a free operator co_await). */
 static bool CoAwaitOperandIsLValue(ASTNode* operand) {
   return operand != NULL &&
          (operand->value_category == kValueCategoryLvalue ||
@@ -303,6 +346,7 @@ static bool CoAwaitOperandIsLValue(ASTNode* operand) {
            !TypeIsFunction(operand->type)));
 }
 
+/* Linear membership test used to de-duplicate namespaces/candidates below. */
 static bool CoroVectorContainsPointer(Vector* vec, void* value) {
   for (size_t i = 0; i < vec->length; i++) {
     if (vec->value.p[i] == value) {
@@ -312,6 +356,8 @@ static bool CoroVectorContainsPointer(Vector* vec, void* value) {
   return false;
 }
 
+/* Resolve a chain of `using`-declaration aliases to the underlying symbol
+ * (depth-capped to avoid cycles). */
 static Symbol* CoroFollowUsingAlias(Symbol* symbol) {
   int depth = 0;
   while (symbol != NULL && symbol->flags.is_using_alias &&
@@ -322,6 +368,8 @@ static Symbol* CoroFollowUsingAlias(Symbol* symbol) {
   return symbol;
 }
 
+/* Add `ns` and all its enclosing namespaces (up to global) to the set used for
+ * argument-dependent lookup of operator co_await. */
 static void CoroADLAddNamespace(Vector* namespaces, Namespace* ns) {
   while (ns != NULL) {
     if (!CoroVectorContainsPointer(namespaces, ns)) {
@@ -334,6 +382,7 @@ static void CoroADLAddNamespace(Vector* namespaces, Namespace* ns) {
   }
 }
 
+/* Strip references/pointers/arrays to reach the underlying type for ADL. */
 static TypeRecord* CoroADLCanonicalType(TypeRecord* type) {
   while (type != NULL &&
          (TypeIsReference(type) || TypeIsPointer(type) || TypeIsArray(type))) {
@@ -342,6 +391,8 @@ static TypeRecord* CoroADLCanonicalType(TypeRecord* type) {
   return type;
 }
 
+/* Collect the associated namespaces for `type` (its own namespace plus those of
+ * base classes and template arguments) for argument-dependent lookup. */
 static void CoroADLCollectNamespacesForType(TypeRecord* type,
                                             Vector* namespaces, int depth) {
   if (type == NULL || depth > 8) {
@@ -381,6 +432,8 @@ static void CoroADLCollectNamespacesForType(TypeRecord* type,
   }
 }
 
+/* Append every function in an overload chain (following using-aliases) to the
+ * candidate set, skipping non-functions and duplicates. */
 static void CoroADLAddFunctionOverloadCandidates(Vector* candidates,
                                                  Symbol* first) {
   first = CoroFollowUsingAlias(first);
@@ -395,6 +448,7 @@ static void CoroADLAddFunctionOverloadCandidates(Vector* candidates,
   }
 }
 
+/* Look up `name` in namespace `ns` (or global) and add its overloads. */
 static void CoroADLAddNamedFunctionCandidates(String* name, Namespace* ns,
                                               Vector* candidates) {
   Symbol* found = (ns == NULL || ns == compiler->global_namespace)
@@ -403,6 +457,7 @@ static void CoroADLAddNamedFunctionCandidates(String* name, Namespace* ns,
   CoroADLAddFunctionOverloadCandidates(candidates, found);
 }
 
+/* Gather `name` overloads from all namespaces associated with `type` (ADL). */
 static void CoroADLAddCandidatesForType(String* name, TypeRecord* type,
                                         Vector* candidates) {
   Vector namespaces;
@@ -414,6 +469,10 @@ static void CoroADLAddCandidatesForType(String* name, TypeRecord* type,
   VectorDestruct(&namespaces);
 }
 
+/* Rank how well a free operator co_await's single parameter `formal` matches the
+ * operand (lower is better; -1 means non-viable). Encodes the reference-binding
+ * preferences: exact value match beats reference binding, const/rvalue rules are
+ * applied so the best overload can be chosen. */
 static int CoAwaitOperatorFormalScore(TypeRecord* formal, ASTNode* operand,
                                       TypeRecord* operand_type) {
   if (formal == NULL || operand == NULL || operand_type == NULL) {
@@ -443,6 +502,8 @@ static int CoAwaitOperatorFormalScore(TypeRecord* formal, ASTNode* operand,
   return 5;
 }
 
+/* Find the best non-member `operator co_await` for `operand` via ADL + global
+ * lookup, scoring each viable single-parameter overload and reporting ambiguity. */
 static Symbol* FindFreeOperatorCoAwait(ASTNode* operand,
                                        TypeRecord* operand_type) {
   if (!CompilerIsCXX() || operand == NULL || operand_type == NULL) {
@@ -489,6 +550,8 @@ static Symbol* FindFreeOperatorCoAwait(ASTNode* operand,
   return best;
 }
 
+/* True if the free operator co_await takes its argument by rvalue reference, in
+ * which case the operand must be moved into the call. */
 static bool FreeOperatorCoAwaitTakesRValueReference(Symbol* function) {
   if (function == NULL || function->type == NULL ||
       !TypeIsFunction(function->type) ||
@@ -500,6 +563,10 @@ static bool FreeOperatorCoAwaitTakesRValueReference(Symbol* function) {
          formal->type->declarator == kDeclRValueReference;
 }
 
+/* Like ApplyMemberOperatorCoAwait but for a non-member operator co_await: rewrite
+ * the operand to the result of calling the chosen free function, materializing a
+ * temporary (and moving it in if the parameter is an rvalue reference) when the
+ * operand is a prvalue. Returns true if a rewrite happened. */
 static bool ApplyFreeOperatorCoAwait(UnaryASTNode* co_await,
                                      Symbol** awaitable_temp_out) {
   if (!CompilerIsCXX() || co_await == NULL || co_await->sub == NULL) {
@@ -514,6 +581,8 @@ static bool ApplyFreeOperatorCoAwait(UnaryASTNode* co_await,
   Vector* constructor_actuals =
       TakeCXXTemporaryConstructionActuals(co_await->sub, operand_type);
   if (constructor_actuals != NULL) {
+    /* Operand is a temporary: bind to a named temp, then
+     * (temp.ctor(...), operator co_await(temp-or-move(temp))). */
     TypeRecord* temp_type = TypeRecordCopy(operand_type);
     temp_type = TypeRecordCalculateSize(temp_type);
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
@@ -568,6 +637,7 @@ static bool ApplyFreeOperatorCoAwait(UnaryASTNode* co_await,
   return true;
 }
 
+/* Build an AST call node `awaiter.member_name(actuals...)`. */
 static ASTNode* NewAwaiterMemberCallWithActuals(ASTNode* awaiter,
                                                 const char* member_name,
                                                 Vector* actuals,
@@ -579,6 +649,7 @@ static ASTNode* NewAwaiterMemberCallWithActuals(ASTNode* awaiter,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
+/* Build an AST call node `awaiter.member_name()` with no arguments. */
 static ASTNode* NewAwaiterMemberCall(ASTNode* awaiter,
                                      const char* member_name,
                                      SourceLocation location) {
@@ -586,11 +657,14 @@ static ASTNode* NewAwaiterMemberCall(ASTNode* awaiter,
                                          location);
 }
 
+/* Reference the coroutine frame pointer (the `frame->symbol` local). */
 static ASTNode* NewFrameAddress(CoroutineFrame* frame,
                                 SourceLocation location) {
   return NewIdentifierASTNode(frame->symbol, location);
 }
 
+/* Return the first user-visible parameter of an awaiter's await_suspend (i.e.
+ * the coroutine-handle parameter), skipping the implicit `this`. */
 static Symbol* AwaitSuspendFirstUserFormal(Symbol* awaiter) {
   StructMember* await_suspend =
       awaiter != NULL ? FindAwaiterMember(awaiter->type, "await_suspend") : NULL;
@@ -607,6 +681,8 @@ static Symbol* AwaitSuspendFirstUserFormal(Symbol* awaiter) {
   return info->prototype.value.p[formal_index];
 }
 
+/* Find a coroutine handle's static `from_address(void*)` factory member, used to
+ * reconstruct a typed handle from the raw frame pointer. */
 static Symbol* FindCoroutineHandleFromAddress(TypeRecord* handle_type) {
   if (handle_type == NULL || !TypeIsStructOrUnion(handle_type) ||
       handle_type->info.struct_info == NULL) {
@@ -631,6 +707,8 @@ static Symbol* FindCoroutineHandleFromAddress(TypeRecord* handle_type) {
   return NULL;
 }
 
+/* Find a coroutine handle's `address()` member returning the raw void* frame
+ * pointer (the inverse of from_address). */
 static Symbol* FindCoroutineHandleAddress(TypeRecord* handle_type) {
   if (handle_type == NULL || !TypeIsStructOrUnion(handle_type) ||
       handle_type->info.struct_info == NULL) {
@@ -653,11 +731,16 @@ static Symbol* FindCoroutineHandleAddress(TypeRecord* handle_type) {
   return NULL;
 }
 
+/* Duck-typed check: a type is a coroutine handle if it has both from_address and
+ * address members. */
 static bool TypeIsCoroutineHandle(TypeRecord* type) {
   return FindCoroutineHandleFromAddress(type) != NULL &&
          FindCoroutineHandleAddress(type) != NULL;
 }
 
+/* Build the argument passed to await_suspend: if its parameter is a coroutine
+ * handle type, wrap the frame pointer in handle::from_address(frame); otherwise
+ * pass the raw frame pointer. */
 static ASTNode* NewAwaitSuspendHandleArgument(CoroutineFrame* frame,
                                              Symbol* awaiter,
                                              SourceLocation location) {
@@ -681,6 +764,7 @@ static ASTNode* NewAwaitSuspendHandleArgument(CoroutineFrame* frame,
   return NewFrameAddress(frame, location);
 }
 
+/* Build an lvalue access `frame->member` to a slot in the coroutine frame. */
 static ASTNode* NewFrameMemberAccess(CoroutineFrame* frame,
                                      StructMember* member,
                                      SourceLocation location) {
@@ -694,6 +778,8 @@ static ASTNode* NewFrameMemberAccess(CoroutineFrame* frame,
   return access;
 }
 
+/* Build a statement `frame->member = <int value>;` (e.g. setting the state or a
+ * "constructed" flag). */
 static ASTNode* NewFrameIntAssignment(CoroutineFrame* frame,
                                       StructMember* member,
                                       int64_t value,
@@ -708,6 +794,7 @@ static ASTNode* NewFrameIntAssignment(CoroutineFrame* frame,
       location);
 }
 
+/* Build a statement `frame->member = <value expr>;`. */
 static ASTNode* NewFrameAssignment(CoroutineFrame* frame,
                                    StructMember* member,
                                    ASTNode* value,
@@ -718,6 +805,8 @@ static ASTNode* NewFrameAssignment(CoroutineFrame* frame,
       location);
 }
 
+/* The constructor name for a class type is its tag name (constructors are stored
+ * as members named after the class). Returns NULL for non-class types. */
 static const char* CXXConstructorNameForType(TypeRecord* type) {
   if (!CompilerIsCXX() || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL ||
@@ -727,6 +816,8 @@ static const char* CXXConstructorNameForType(TypeRecord* type) {
   return type->info.struct_info->tag_name->value;
 }
 
+/* For classes with virtual bases, constructors/destructors take a leading
+ * is-complete-object flag; prepend that implicit `1` argument to `actuals`. */
 static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
                                              SourceLocation location) {
   if (actuals == NULL || !TypeIsStructOrUnion(type) ||
@@ -744,6 +835,7 @@ static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
   }
 }
 
+/* Find the (head of the) constructor overload set for a class type. */
 static StructMember* FindCXXConstructorForType(TypeRecord* type) {
   const char* constructor_name = CXXConstructorNameForType(type);
   if (constructor_name == NULL || type->info.struct_info == NULL) {
@@ -760,6 +852,8 @@ static StructMember* FindCXXConstructorForType(TypeRecord* type) {
   return ctor;
 }
 
+/* True if a constructor overload is the default constructor (no user parameters
+ * beyond the implicit object/complete-object args) and not deleted. */
 static bool CXXConstructorCandidateIsDefault(StructMember* candidate,
                                              TypeRecord* type) {
   if (candidate == NULL || candidate->symbol == NULL ||
@@ -779,6 +873,7 @@ static bool CXXConstructorCandidateIsDefault(StructMember* candidate,
   return info->prototype.length == expected;
 }
 
+/* Find a usable default constructor among a class's constructor overloads. */
 static StructMember* FindCXXDefaultConstructorForType(TypeRecord* type) {
   StructMember* ctor = FindCXXConstructorForType(type);
   for (StructMember* candidate = ctor; candidate != NULL;
@@ -790,6 +885,9 @@ static StructMember* FindCXXDefaultConstructorForType(TypeRecord* type) {
   return NULL;
 }
 
+/* True if a constructor overload is the copy (move==false) or move (move==true)
+ * constructor: a single source parameter that is an lvalue/rvalue reference to
+ * the same class type. */
 static bool CXXConstructorCandidateIsCopyOrMove(StructMember* candidate,
                                                 TypeRecord* type,
                                                 bool move) {
@@ -817,16 +915,19 @@ static bool CXXConstructorCandidateIsCopyOrMove(StructMember* candidate,
          (source->type->declarator == kDeclRValueReference) == move;
 }
 
+/* True if a constructor overload is the copy constructor. */
 static bool CXXConstructorCandidateIsCopy(StructMember* candidate,
                                           TypeRecord* type) {
   return CXXConstructorCandidateIsCopyOrMove(candidate, type, false);
 }
 
+/* True if a constructor overload is the move constructor. */
 static bool CXXConstructorCandidateIsMove(StructMember* candidate,
                                           TypeRecord* type) {
   return CXXConstructorCandidateIsCopyOrMove(candidate, type, true);
 }
 
+/* Find the copy constructor among a class's constructor overloads, if any. */
 static StructMember* FindCXXCopyConstructorForType(TypeRecord* type) {
   StructMember* ctor = FindCXXConstructorForType(type);
   for (StructMember* candidate = ctor; candidate != NULL;
@@ -838,6 +939,7 @@ static StructMember* FindCXXCopyConstructorForType(TypeRecord* type) {
   return NULL;
 }
 
+/* Find the move constructor among a class's constructor overloads, if any. */
 static StructMember* FindCXXMoveConstructorForType(TypeRecord* type) {
   StructMember* ctor = FindCXXConstructorForType(type);
   for (StructMember* candidate = ctor; candidate != NULL;
@@ -849,6 +951,7 @@ static StructMember* FindCXXMoveConstructorForType(TypeRecord* type) {
   return NULL;
 }
 
+/* Find the destructor (`~Tag`) member of a class type, if declared. */
 static StructMember* FindCXXDestructorForType(TypeRecord* type) {
   if (!CompilerIsCXX() || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL ||
@@ -869,6 +972,9 @@ static StructMember* FindCXXDestructorForType(TypeRecord* type) {
   return destructor;
 }
 
+/* True if a frame-owned object of this type has non-trivial C++ lifetime (a user
+ * constructor or destructor), so the frame must explicitly construct/destroy it
+ * rather than treating it as plain memory. */
 static bool CoroutineFrameOwnedTypeNeedsCXXLifetime(TypeRecord* type) {
   if (!CompilerIsCXX() || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL) {
@@ -878,6 +984,8 @@ static bool CoroutineFrameOwnedTypeNeedsCXXLifetime(TypeRecord* type) {
          FindCXXDestructorForType(type) != NULL;
 }
 
+/* Ensure a frame-owned awaiter that needs C++ lifetime is copy-constructible;
+ * emit an error otherwise. */
 static bool ValidateCoroutineFrameOwnedAwaiterConstructible(ASTNode* node,
                                                             TypeRecord* type) {
   if (!CoroutineFrameOwnedTypeNeedsCXXLifetime(type) ||
@@ -889,6 +997,10 @@ static bool ValidateCoroutineFrameOwnedAwaiterConstructible(ASTNode* node,
   return false;
 }
 
+/* True if `expr` is a temporary construction of `type` (a constructor call, or a
+ * `(ctor(...), object)` comma) whose constructor arguments can be lifted out and
+ * re-applied to construct a frame slot directly. Mirror of
+ * TakeCXXTemporaryConstructionActuals without mutating the AST. */
 static bool CXXTemporaryConstructionActualsCanBeTaken(ASTNode* expr,
                                                       TypeRecord* type) {
   if (expr == NULL || !TypeIsStructOrUnion(type) ||
@@ -931,6 +1043,9 @@ static bool CXXTemporaryConstructionActualsCanBeTaken(ASTNode* expr,
   return false;
 }
 
+/* True if the awaiter at this suspension point can be constructed in place in its
+ * frame slot from the original initializer's constructor arguments (avoiding a
+ * separate temporary + copy/move). */
 static bool SuspensionPointCanDirectConstructFrameAwaiter(
     SuspensionPoint* point) {
   return point != NULL && point->kind == kSuspensionCoAwait &&
@@ -941,6 +1056,9 @@ static bool SuspensionPointCanDirectConstructFrameAwaiter(
                                                   point->awaiter->type);
 }
 
+/* Ensure the awaiter at a suspension point can be placed in the frame: either it
+ * has trivial lifetime, or it is copy/move-constructible, or it can be directly
+ * constructed in place. Emit an error otherwise. */
 static bool ValidateCoroutineSuspensionPointFrameAwaiterConstructible(
     SuspensionPoint* point) {
   if (point == NULL || point->kind != kSuspensionCoAwait ||
@@ -961,22 +1079,27 @@ static bool ValidateCoroutineSuspensionPointFrameAwaiterConstructible(
   return false;
 }
 
+/* True if a type can be copy-constructed (trivial, or has a copy constructor). */
 static bool CoroutineTypeCanBeCopyConstructed(TypeRecord* type) {
   return !CoroutineFrameOwnedTypeNeedsCXXLifetime(type) ||
          FindCXXCopyConstructorForType(type) != NULL;
 }
 
+/* True if a non-trivial type has a move constructor. */
 static bool CoroutineTypeCanBeMoveConstructed(TypeRecord* type) {
   return CoroutineFrameOwnedTypeNeedsCXXLifetime(type) &&
          FindCXXMoveConstructorForType(type) != NULL;
 }
 
+/* True if storing into the frame should move rather than copy: the type is
+ * non-trivial, has no copy constructor, but does have a move constructor. */
 static bool CoroutineFrameAwaiterShouldMove(TypeRecord* type) {
   return CoroutineFrameOwnedTypeNeedsCXXLifetime(type) &&
          FindCXXCopyConstructorForType(type) == NULL &&
          FindCXXMoveConstructorForType(type) != NULL;
 }
 
+/* Build `static_cast<T&&>(symbol)`: an xvalue expression that moves `symbol`. */
 static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
                                            SourceLocation location) {
   TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, true);
@@ -989,6 +1112,8 @@ static ASTNode* NewCoroutineMoveExpression(Symbol* symbol,
   return cast;
 }
 
+/* Produce the initializer expression used to store `symbol` into its frame slot:
+ * a move when the type is move-only, otherwise a plain reference (copy). */
 static ASTNode* NewCoroutineFrameAwaiterInitializer(Symbol* symbol,
                                                    SourceLocation location) {
   if (symbol == NULL) {
@@ -1000,6 +1125,9 @@ static ASTNode* NewCoroutineFrameAwaiterInitializer(Symbol* symbol,
   return NewIdentifierASTNode(symbol, location);
 }
 
+/* Build a statement that constructs a frame member in place:
+ * `frame->member.Ctor(actuals...);`. Returns NULL if the type has no
+ * constructor. */
 static ASTNode* NewCoroutineFrameMemberConstructorCallWithActuals(
     CoroutineFrame* frame, StructMember* member, Vector* actuals,
     SourceLocation location) {
@@ -1021,6 +1149,8 @@ static ASTNode* NewCoroutineFrameMemberConstructorCallWithActuals(
       location);
 }
 
+/* Build a default-construction statement for a frame member, or NULL if the type
+ * has no default constructor. */
 static ASTNode* NewCoroutineFrameMemberDefaultConstructorCall(
     CoroutineFrame* frame, StructMember* member, SourceLocation location) {
   TypeRecord* type = member != NULL && member->symbol != NULL
@@ -1033,6 +1163,9 @@ static ASTNode* NewCoroutineFrameMemberDefaultConstructorCall(
       frame, member, NewVector(), location);
 }
 
+/* Initialize a frame member from `value`: construct it (if the type has a
+ * constructor), else assign it, else default-construct it; then set its
+ * "constructed" flag slot if present. Returns a single statement or a compound. */
 static ASTNode* NewFrameMemberInitialization(CoroutineFrame* frame,
                                              StructMember* member,
                                              StructMember* constructed_member,
@@ -1065,6 +1198,8 @@ static ASTNode* NewFrameMemberInitialization(CoroutineFrame* frame,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Initialize a frame member by direct in-place construction from `actuals`, then
+ * set its "constructed" flag slot if present. */
 static ASTNode* NewFrameMemberConstructorInitialization(
     CoroutineFrame* frame, StructMember* member,
     StructMember* constructed_member, Vector* actuals,
@@ -1086,6 +1221,10 @@ static ASTNode* NewFrameMemberConstructorInitialization(
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Steal the constructor arguments out of a temporary-construction expression of
+ * `type` (a constructor call, or `(ctor(...), object)` comma), leaving the call
+ * argument-less, and return them so they can construct a frame slot directly.
+ * Returns NULL if `expr` is not such a construction. */
 static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
                                                    TypeRecord* type) {
   if (expr == NULL || !TypeIsStructOrUnion(type) ||
@@ -1151,6 +1290,8 @@ static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
   return actuals;
 }
 
+/* Build a statement `frame->member.~Tag();` to destroy a frame member, or NULL if
+ * the type has no destructor. */
 static ASTNode* NewCoroutineFrameMemberDestructorCall(
     CoroutineFrame* frame, StructMember* member, SourceLocation location) {
   TypeRecord* type = member != NULL && member->symbol != NULL
@@ -1176,6 +1317,8 @@ static ASTNode* NewCoroutineFrameMemberDestructorCall(
       location);
 }
 
+/* Build a statement `symbol.~Tag();` to destroy a (non-frame) local, or NULL if
+ * the type has no destructor. */
 static ASTNode* NewCoroutineLocalDestructorCall(Symbol* symbol,
                                                SourceLocation location) {
   TypeRecord* type = symbol != NULL ? symbol->type : NULL;
@@ -1199,6 +1342,8 @@ static ASTNode* NewCoroutineLocalDestructorCall(Symbol* symbol,
       location);
 }
 
+/* Build `&function` typed as `pointer_type` (used to fill in the frame's resume/
+ * destroy function-pointer slots). */
 static ASTNode* NewFunctionAddress(Symbol* function,
                                    TypeRecord* pointer_type,
                                    SourceLocation location) {
@@ -1210,6 +1355,9 @@ static ASTNode* NewFunctionAddress(Symbol* function,
   return address;
 }
 
+/* Build the ramp function's return: declare a temporary initialized from
+ * `promise.get_return_object()` and return it (marked as a lowered coroutine
+ * return so later passes don't re-lower it). */
 static ASTNode* NewCoroutineReturnObjectStatement(Symbol* promise,
                                                   TypeRecord* return_type,
                                                   SourceLocation location) {
@@ -1237,6 +1385,8 @@ static ASTNode* NewCoroutineReturnObjectStatement(Symbol* promise,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Find the promise's static `get_return_object_on_allocation_failure()` member,
+ * if defined (enables the nothrow allocation path). */
 static StructMember* FindCoroutineAllocationFailureMember(
     TypeRecord* promise_type) {
   StructMember* member =
@@ -1255,6 +1405,8 @@ static StructMember* FindCoroutineAllocationFailureMember(
   return NULL;
 }
 
+/* Build the early return used when frame allocation fails: declare a temporary
+ * initialized from the promise's on-allocation-failure factory and return it. */
 static ASTNode* NewCoroutineAllocationFailureReturnStatement(
     StructMember* failure_member,
     TypeRecord* return_type,
@@ -1284,6 +1436,8 @@ static ASTNode* NewCoroutineAllocationFailureReturnStatement(
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Build `if (frame == nullptr) return on-allocation-failure-object;` to guard the
+ * coroutine body when the frame allocation returned null. */
 static ASTNode* NewCoroutineAllocationFailureIf(CoroutineFrame* frame,
                                                 StructMember* failure_member,
                                                 TypeRecord* return_type,
@@ -1301,6 +1455,7 @@ static ASTNode* NewCoroutineAllocationFailureIf(CoroutineFrame* frame,
       NULL, false, location);
 }
 
+/* Lower an always-ready co_await to just `awaiter.await_resume()` (no suspend). */
 static ASTNode* LowerReadyCoAwaitExpression(UnaryASTNode* co_await) {
   SourceLocation location = co_await->base.location;
   ASTNode* awaiter = ASTNodeMove(co_await->sub);
@@ -1310,6 +1465,8 @@ static ASTNode* LowerReadyCoAwaitExpression(UnaryASTNode* co_await) {
   return await_resume;
 }
 
+/* AST visitor that replaces every always-ready co_await with its await_resume
+ * call in place. */
 static void LowerReadyCoAwaitNode(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)data;
@@ -1323,6 +1480,8 @@ static void LowerReadyCoAwaitNode(ASTNode* node, void* data, int child_id,
                       true);
 }
 
+/* AST visitor that records coroutine-defining keywords (co_return/co_await/
+ * co_yield) and counts the suspension points into the CoroutineScan in `data`. */
 static void ScanCoroutineNode(ASTNode* node, void* data, int child_id,
                               VisitorMode mode) {
   (void)child_id;
@@ -1352,6 +1511,8 @@ static void ScanCoroutineNode(ASTNode* node, void* data, int child_id,
   }
 }
 
+/* Resolve the promise type as the nested `return_type::promise_type` typedef, if
+ * the coroutine's return type defines one directly. */
 static TypeRecord* ResolveDirectCoroutinePromiseType(TypeRecord* return_type) {
   if (return_type == NULL || !TypeIsStructOrUnion(return_type) ||
       return_type->info.struct_info == NULL) {
@@ -1367,6 +1528,8 @@ static TypeRecord* ResolveDirectCoroutinePromiseType(TypeRecord* return_type) {
   return TypeRecordCalculateSize(TypeRecordCopy(member->symbol->type));
 }
 
+/* Wrap a type as a template type-argument (used to instantiate
+ * std::coroutine_traits<Return, Args...>). */
 static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   if (type == NULL) {
     return NULL;
@@ -1382,6 +1545,11 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   return arg;
 }
 
+/* Resolve the promise type via std::coroutine_traits: instantiate
+ * coroutine_traits<ReturnType, ParamTypes...> and read its ::promise_type. This
+ * is the standard customization point and takes priority over the direct
+ * return-type::promise_type lookup. Returns NULL if std::coroutine_traits is not
+ * available or doesn't apply. */
 static TypeRecord* ResolveCoroutineTraitsPromiseType(TypeRecord* function_type) {
   if (!CompilerIsCXX() || function_type == NULL ||
       !TypeIsFunction(function_type) || function_type->next == NULL) {
@@ -1440,6 +1608,8 @@ static TypeRecord* ResolveCoroutineTraitsPromiseType(TypeRecord* function_type) 
   return promise_type;
 }
 
+/* Resolve a coroutine's promise type: prefer std::coroutine_traits, then fall
+ * back to the return type's own nested promise_type. */
 static TypeRecord* ResolveCoroutinePromiseType(TypeRecord* function_type) {
   TypeRecord* promise = ResolveCoroutineTraitsPromiseType(function_type);
   if (promise != NULL) {
@@ -1450,6 +1620,8 @@ static TypeRecord* ResolveCoroutinePromiseType(TypeRecord* function_type) {
              : NULL;
 }
 
+/* Look up a member function `name` on the promise type (e.g. initial_suspend,
+ * return_value, unhandled_exception), skipping non-functions. */
 static StructMember* FindCoroutinePromiseMember(TypeRecord* promise_type,
                                                 const char* name) {
   if (promise_type == NULL || !TypeIsStructOrUnion(promise_type) ||
@@ -1467,6 +1639,7 @@ static StructMember* FindCoroutinePromiseMember(TypeRecord* promise_type,
   return NULL;
 }
 
+/* Require a promise member to exist, emitting an error if it is missing. */
 static bool RequireCoroutinePromiseMember(ASTNode* node, TypeRecord* promise,
                                           const char* name) {
   if (FindCoroutinePromiseMember(promise, name) != NULL) {
@@ -1476,6 +1649,7 @@ static bool RequireCoroutinePromiseMember(ASTNode* node, TypeRecord* promise,
   return false;
 }
 
+/* Return type of a promise member function `name`, or NULL if absent. */
 static TypeRecord* CoroutinePromiseMemberReturnType(TypeRecord* promise,
                                                     const char* name) {
   StructMember* member = FindCoroutinePromiseMember(promise, name);
@@ -1487,6 +1661,8 @@ static TypeRecord* CoroutinePromiseMemberReturnType(TypeRecord* promise,
   return member->symbol->type->next;
 }
 
+/* Validate that a promise member `name` (initial_suspend/final_suspend) returns a
+ * valid awaiter type. */
 static bool ValidateCoroutinePromiseAwaiterReturn(ASTNode* node,
                                                   TypeRecord* promise,
                                                   const char* name) {
@@ -1503,6 +1679,8 @@ static bool ValidateCoroutinePromiseAwaiterReturn(ASTNode* node,
   return ValidateCoAwaiterType(node, awaiter_type);
 }
 
+/* Return the `index`-th user parameter of a promise member function, skipping
+ * the implicit `this` for non-static members. */
 static Symbol* CoroutinePromiseMemberUserFormal(StructMember* member,
                                                 size_t index) {
   if (member == NULL || member->symbol == NULL ||
@@ -1518,6 +1696,10 @@ static Symbol* CoroutinePromiseMemberUserFormal(StructMember* member,
   return info->prototype.value.p[formal_index];
 }
 
+/* Select the best single-parameter `promise.await_transform` overload for the
+ * co_await operand. Sets *has_transform if any await_transform exists (so the
+ * caller can distinguish "no transform" from "no viable transform"), and reports
+ * ambiguity. */
 static StructMember* FindCoroutinePromiseAwaitTransform(TypeRecord* promise,
                                                         ASTNode* operand,
                                                         bool* has_transform) {
@@ -1562,6 +1744,9 @@ static StructMember* FindCoroutinePromiseAwaitTransform(TypeRecord* promise,
   return best;
 }
 
+/* If the promise defines await_transform, rewrite the co_await operand to
+ * `promise.await_transform(operand)`. Sets *error and returns false if a
+ * transform exists but none is viable. */
 static bool ApplyPromiseAwaitTransform(UnaryASTNode* co_await,
                                        Symbol* promise,
                                        bool* error) {
@@ -1592,6 +1777,8 @@ static bool ApplyPromiseAwaitTransform(UnaryASTNode* co_await,
   return true;
 }
 
+/* True if an awaiter type's await_ready is statically always-true (used to elide
+ * suspension for initial/final suspends like suspend_never). */
 static bool AwaiterTypeIsAlwaysReady(TypeRecord* awaiter_type) {
   StructMember* await_ready = FindAwaiterMember(awaiter_type, "await_ready");
   return await_ready != NULL && await_ready->symbol != NULL &&
@@ -1600,6 +1787,8 @@ static bool AwaiterTypeIsAlwaysReady(TypeRecord* awaiter_type) {
          FunctionBodyIsReturnTrue(await_ready->symbol->type->info.function.body);
 }
 
+/* Return type of an awaiter's await_suspend (void/bool/handle), which determines
+ * how the suspend is lowered. */
 static TypeRecord* AwaiterAwaitSuspendReturnType(Symbol* awaiter) {
   StructMember* await_suspend =
       awaiter != NULL ? FindAwaiterMember(awaiter->type, "await_suspend") : NULL;
@@ -1611,6 +1800,7 @@ static TypeRecord* AwaiterAwaitSuspendReturnType(Symbol* awaiter) {
   return await_suspend->symbol->type->next;
 }
 
+/* Build a call to a promise member function: `promise.member_name(actuals...)`. */
 static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
                                               const char* member_name,
                                               Vector* actuals,
@@ -1623,6 +1813,9 @@ static ASTNode* NewCoroutinePromiseMemberCall(Symbol* promise,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
+/* Build the final-suspend sequence: evaluate `promise.final_suspend()`, and
+ * unless the awaiter is always-ready, store it in the frame's final-awaiter slot
+ * and emit `if (!awaiter.await_ready()) { await_suspend(...); return; }`. */
 static ASTNode* NewFinalSuspendStatement(Symbol* promise,
                                          CoroutineFrame* frame,
                                          Symbol* final_awaiter,
@@ -1680,6 +1873,9 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Lower a `co_return [expr]` into: call promise.return_value(expr) (or
+ * return_void()), mark the frame done, null the resume pointer, run the final
+ * suspend, and produce the return object. */
 static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                        Symbol* promise,
                                        CoroutineFrame* frame,
@@ -1727,6 +1923,9 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Build the handler body for an escaping exception: destroy frame-owned objects,
+ * call promise.unhandled_exception(), mark the frame done, run final suspend, and
+ * return the return object. */
 static ASTNode* NewCoroutineUnhandledExceptionStatement(
     Symbol* promise,
     CoroutineFrame* frame,
@@ -1763,6 +1962,8 @@ static ASTNode* NewCoroutineUnhandledExceptionStatement(
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Context carried through the co_return/throw lowering transforms: the objects
+ * needed to build promise calls and final-suspend code. */
 typedef struct {
   Symbol* promise;
   CoroutineFrame* frame;
@@ -1770,6 +1971,8 @@ typedef struct {
   TypeRecord* coroutine_return_type;
 } CoroutineStatementLowering;
 
+/* Transform callback: rewrite each co_return statement via
+ * LowerCoReturnStatement. */
 static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
                                        ASTNodeTransformAction* action) {
   (void)action;
@@ -1783,6 +1986,8 @@ static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
                                 lowering->coroutine_return_type);
 }
 
+/* Lower all co_return statements within `node` to their promise/final-suspend
+ * sequences. */
 static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
                                       CoroutineFrame* frame,
                                       Symbol* final_awaiter,
@@ -1792,12 +1997,16 @@ static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
   ASTNodeVisitAndTransform(node, LowerCoReturnTransform, &lowering);
 }
 
+/* True if a statement is a bare `throw ...;` expression statement. */
 static bool IsThrowExpressionStatement(ASTNode* node) {
   return node != NULL && node->op == AST_OP(expr) &&
          ((ExpressionStatementASTNode*)node)->expr != NULL &&
          ((ExpressionStatementASTNode*)node)->expr->op == AST_OP(throw);
 }
 
+/* Replace a top-level `throw;` (one not caught inside the body) with the
+ * unhandled-exception sequence, since an uncaught throw in a coroutine routes
+ * through promise.unhandled_exception(). */
 static ASTNode* LowerCoroutineThrowStatement(ASTNode* throw_stmt,
                                              Symbol* promise,
                                              CoroutineFrame* frame,
@@ -1808,6 +2017,8 @@ static ASTNode* LowerCoroutineThrowStatement(ASTNode* throw_stmt,
       throw_stmt != NULL ? throw_stmt->location : promise->location);
 }
 
+/* Transform callback for top-level throws. Skips into try statements (their
+ * throws are handled by the body's own catch clauses, not the coroutine). */
 static ASTNode* LowerCoroutineThrowTransform(ASTNode* node, void* data,
                                              ASTNodeTransformAction* action) {
   if (node != NULL && node->op == AST_OP(try)) {
@@ -1824,6 +2035,7 @@ static ASTNode* LowerCoroutineThrowTransform(ASTNode* node, void* data,
                                       lowering->coroutine_return_type);
 }
 
+/* Lower all uncaught top-level throw statements within `node`. */
 static void LowerCoroutineThrowsInStatement(ASTNode* node, Symbol* promise,
                                             CoroutineFrame* frame,
                                             Symbol* final_awaiter,
@@ -1833,6 +2045,8 @@ static void LowerCoroutineThrowsInStatement(ASTNode* node, Symbol* promise,
   ASTNodeVisitAndTransform(node, LowerCoroutineThrowTransform, &lowering);
 }
 
+/* Peel initializer wrappers (expression/braced/designated) down to the single
+ * underlying initializing expression. */
 static ASTNode* UnwrapExpressionInitializer(ASTNode* initializer) {
   if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
     return ((ExpressionInitializerASTNode*)initializer)->expr;
@@ -1849,6 +2063,8 @@ static ASTNode* UnwrapExpressionInitializer(ASTNode* initializer) {
   return initializer;
 }
 
+/* Extract the initializing expression from a variable declaration's initializer
+ * node (handling the `name = init` wrapper). */
 static ASTNode* VariableInitializerExpression(ASTNode* initializer) {
   if (initializer != NULL && initializer->op == AST_OP(init)) {
     initializer = ((BinaryASTNode*)initializer)->right;
@@ -1856,6 +2072,9 @@ static ASTNode* VariableInitializerExpression(ASTNode* initializer) {
   return UnwrapExpressionInitializer(initializer);
 }
 
+/* State for searching a subtree for nested suspending co_await/co_yield (other
+ * than `root` itself): the first one found, how many, and whether any yields a
+ * void result. */
 typedef struct {
   ASTNode* root;
   ASTNode* found;
@@ -1863,6 +2082,8 @@ typedef struct {
   bool void_result;
 } SuspendedCoroutineExpressionSearch;
 
+/* Visitor that records nested suspending co_await expressions (skipping the
+ * search root and always-ready awaits). */
 static void FindNestedSuspendingCoAwait(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
@@ -1883,6 +2104,7 @@ static void FindNestedSuspendingCoAwait(ASTNode* node, void* data,
   }
 }
 
+/* Visitor that records nested co_yield expressions (skipping the search root). */
 static void FindNestedSuspendingCoYield(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
@@ -1903,12 +2125,17 @@ static void FindNestedSuspendingCoYield(ASTNode* node, void* data,
   }
 }
 
+/* State for checking whether a suspension sits under an operator with
+ * conditional/sequenced evaluation (&&, ||, ?:, comma) between it and `root`. */
 typedef struct {
   ASTNode* root;
   ASTNode* stop_parent;
   bool unsafe;
 } CoroutineUnsafeSplitSearch;
 
+/* Upward visitor: flags `unsafe` if an ancestor is a short-circuit/sequencing
+ * operator, meaning the suspension can't be naively hoisted out of the
+ * expression without changing evaluation order. */
 static bool FindUnsafeSplitAncestor(ASTNode* node, void* data) {
   CoroutineUnsafeSplitSearch* search = data;
   if (node == NULL || node == search->stop_parent) {
@@ -1923,6 +2150,8 @@ static bool FindUnsafeSplitAncestor(ASTNode* node, void* data) {
   return node != search->root;
 }
 
+/* True if `suspension` is nested under a short-circuit/sequencing operator within
+ * the expression rooted at `root`. */
 static bool SuspensionHasUnsafeSplitAncestor(ASTNode* root, ASTNode* suspension) {
   CoroutineUnsafeSplitSearch search = {
       .root = root,
@@ -1933,6 +2162,9 @@ static bool SuspensionHasUnsafeSplitAncestor(ASTNode* root, ASTNode* suspension)
   return search.unsafe;
 }
 
+/* Context for rewriting a short-circuit/conditional expression that contains a
+ * suspension into a temporary-backed form whose arms can be split across the
+ * suspension. */
 typedef struct {
   Symbol* result;
   ASTNode* lowering;
@@ -1940,12 +2172,14 @@ typedef struct {
   ASTOpcode op;
 } ShortCircuitSuspensionTransform;
 
+/* True for operators with conditional/sequenced evaluation (&&, ||, ?:, comma). */
 static bool ASTNodeIsShortCircuitExpression(ASTNode* node) {
   return node != NULL &&
          (node->op == AST_OP(logand) || node->op == AST_OP(logor) ||
           node->op == AST_OP(question) || node->op == AST_OP(comma));
 }
 
+/* True if `expr` contains a suspending co_await anywhere within it. */
 static bool ASTContainsSuspendingCoAwait(ASTNode* expr) {
   if (expr == NULL) {
     return false;
@@ -1955,6 +2189,7 @@ static bool ASTContainsSuspendingCoAwait(ASTNode* expr) {
   return search.count > 0;
 }
 
+/* True if `expr` contains a co_yield anywhere within it. */
 static bool ASTContainsSuspendingCoYield(ASTNode* expr) {
   if (expr == NULL) {
     return false;
@@ -1964,16 +2199,21 @@ static bool ASTContainsSuspendingCoYield(ASTNode* expr) {
   return search.count > 0;
 }
 
+/* True if `expr` contains any suspending coroutine subexpression. */
 static bool ASTContainsSuspendingCoroutineExpression(ASTNode* expr) {
   return ASTContainsSuspendingCoAwait(expr) || ASTContainsSuspendingCoYield(expr);
 }
 
+/* True if a scalar temporary of `type` can be used to hold a short-circuit
+ * sub-result (excludes void/class/array/function/reference types). */
 static bool CoroutineShortCircuitTemporaryTypeIsSupported(TypeRecord* type) {
   return type != NULL && !TypeIsVoid(type) && !TypeIsStructOrUnion(type) &&
          !TypeIsArray(type) && !TypeIsFunction(type) &&
          !TypeIsReference(type);
 }
 
+/* The type of the value an expression produces, accounting for co_await/co_yield
+ * result types rather than the node's own type. */
 static TypeRecord* CoroutineExpressionTemporaryType(ASTNode* expr) {
   if (expr == NULL) {
     return NULL;
@@ -1987,6 +2227,8 @@ static TypeRecord* CoroutineExpressionTemporaryType(ASTNode* expr) {
   return expr->type;
 }
 
+/* The result type of a short-circuit/conditional expression (bool for &&/||, the
+ * common arm type for ?:, the right operand type for comma). */
 static TypeRecord* CoroutineShortCircuitTemporaryType(ASTNode* expr) {
   if (expr == NULL) {
     return NULL;
@@ -2010,6 +2252,8 @@ static TypeRecord* CoroutineShortCircuitTemporaryType(ASTNode* expr) {
   return expr->type;
 }
 
+/* Create a fresh local temporary symbol of `type` (used to hold suspension or
+ * short-circuit sub-results that must persist across statements). */
 static Symbol* NewCoroutineExpressionTemporary(TypeRecord* type,
                                                SourceLocation location) {
   TypeRecord* temp_type = TypeRecordCopy(type);
@@ -2021,6 +2265,8 @@ static Symbol* NewCoroutineExpressionTemporary(TypeRecord* type,
   return result;
 }
 
+/* Build a declaration-list statement declaring `result` with optional
+ * initializer `init`. */
 static ASTNode* NewCoroutineTemporaryDeclaration(Symbol* result, ASTNode* init,
                                                  SourceLocation location) {
   Vector* declarations = NewVector();
@@ -2033,6 +2279,7 @@ static ASTNode* NewCoroutineTemporaryDeclaration(Symbol* result, ASTNode* init,
   return NewDeclarationListASTNode(declarations, location);
 }
 
+/* Build a statement `result = value;`. */
 static ASTNode* NewCoroutineTemporaryAssignment(Symbol* result, ASTNode* value,
                                                 SourceLocation location) {
   return NewExpressionStatementASTNode(
@@ -2041,12 +2288,14 @@ static ASTNode* NewCoroutineTemporaryAssignment(Symbol* result, ASTNode* value,
       location);
 }
 
+/* Build a bool literal node. */
 static ASTNode* NewCoroutineBoolConstant(bool value, SourceLocation location) {
   return NewIntConstantASTNode(value ? 1 : 0,
                                NewTypeRecordWithSize(kTypeBool, kQualPlain),
                                location);
 }
 
+/* Wrap a single statement in a `{ stmt }` compound. */
 static ASTNode* NewCoroutineSingleStatementCompound(ASTNode* stmt,
                                                     SourceLocation location) {
   Vector* statements = NewVector();
@@ -2054,6 +2303,8 @@ static ASTNode* NewCoroutineSingleStatementCompound(ASTNode* stmt,
   return NewCompoundStatementASTNode(statements, location);
 }
 
+/* Detach and return a binary node's left/right child, clearing the parent link
+ * so it can be re-parented elsewhere. */
 static ASTNode* TakeCoroutineBinaryChild(BinaryASTNode* node, bool right) {
   ASTNode** child = right ? &node->right : &node->left;
   ASTNode* result = *child;
@@ -2065,6 +2316,10 @@ static ASTNode* TakeCoroutineBinaryChild(BinaryASTNode* node, bool right) {
   return result;
 }
 
+/* Rewrite a short-circuit/conditional expression `expr` into statement form that
+ * assigns its result into `result`, preserving evaluation order so an embedded
+ * suspension can later be split out: comma -> sequence, && / || / ?: -> if/else
+ * that assigns the appropriate arm. */
 static ASTNode* NewCoroutineShortCircuitLowering(Symbol* result,
                                                  ASTNode* expr) {
   SourceLocation location = expr->location;
@@ -2135,6 +2390,9 @@ static ASTNode* NewCoroutineShortCircuitLowering(Symbol* result,
   return NULL;
 }
 
+/* Transform callback: when it finds the first short-circuit expression that both
+ * supports a scalar temporary and contains a suspension, replace it with a
+ * reference to a new temporary and remember the statement form to insert. */
 static ASTNode* LowerShortCircuitSuspensionTransform(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   ShortCircuitSuspensionTransform* transform = data;
@@ -2157,6 +2415,10 @@ static ASTNode* LowerShortCircuitSuspensionTransform(
   return NewIdentifierASTNode(transform->result, node->location);
 }
 
+/* Hoist a suspension-containing short-circuit expression out of `expr`: replace
+ * it with a temporary, then insert the temporary's declaration and the
+ * if/else/sequence lowering before the current statement. Returns true if a
+ * rewrite happened. */
 static bool LowerShortCircuitSuspensionExpression(
     CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
   if (compound == NULL || expr == NULL) {
@@ -2184,6 +2446,9 @@ static bool LowerShortCircuitSuspensionExpression(
   return true;
 }
 
+/* Build `T result{ = suspension };` declaring the temporary that will hold a
+ * suspension's await_resume()/yield result, using a braced/designated
+ * initializer so the suspension is the initializing expression. */
 static ASTNode* NewSuspensionResultTemporaryDeclaration(
     Symbol* result, ASTNode* suspension, SourceLocation location) {
   ASTNode* decl_id = NewIdentifierASTNode(result, location);
@@ -2204,6 +2469,8 @@ static ASTNode* NewSuspensionResultTemporaryDeclaration(
   return NewDeclarationListASTNode(declarations, location);
 }
 
+/* The type produced by a co_await: its node type if known, else the awaiter's
+ * await_resume() return type. */
 static TypeRecord* CoAwaitResultType(ASTNode* co_await) {
   if (co_await == NULL || co_await->op != AST_OP(co_await)) {
     return NULL;
@@ -2222,6 +2489,8 @@ static TypeRecord* CoAwaitResultType(ASTNode* co_await) {
   return await_resume->symbol->type->next;
 }
 
+/* The type produced by a co_yield: its node type if known, else the
+ * await_resume() return type of the awaiter from promise.yield_value(). */
 static TypeRecord* CoYieldResultType(ASTNode* co_yield) {
   if (co_yield == NULL || co_yield->op != AST_OP(co_yield)) {
     return NULL;
@@ -2244,6 +2513,11 @@ static TypeRecord* CoYieldResultType(ASTNode* co_yield) {
   return await_resume->symbol->type->next;
 }
 
+/* Pull a non-void suspending co_await out of `expr`: replace it with a temporary,
+ * and insert `T tmp{ = co_await ...};` before the statement so the value is
+ * available after resumption. `allow_root_co_await` permits treating `expr`
+ * itself as the suspension. Bails if the await sits under a sequencing operator
+ * where splitting would change evaluation order. */
 static bool SplitSuspendingCoAwaitExpression(CompoundStatementASTNode* compound,
                                              size_t statement_index,
                                              ASTNode* expr,
@@ -2291,12 +2565,14 @@ static bool SplitSuspendingCoAwaitExpression(CompoundStatementASTNode* compound,
   return true;
 }
 
+/* Split only a co_await that is nested inside `expr` (not `expr` itself). */
 static bool SplitNestedSuspendingCoAwaitExpression(
     CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
   return SplitSuspendingCoAwaitExpression(compound, statement_index, expr,
                                           false);
 }
 
+/* Same as SplitSuspendingCoAwaitExpression but for co_yield. */
 static bool SplitSuspendingCoYieldExpression(CompoundStatementASTNode* compound,
                                              size_t statement_index,
                                              ASTNode* expr,
@@ -2343,12 +2619,14 @@ static bool SplitSuspendingCoYieldExpression(CompoundStatementASTNode* compound,
   return true;
 }
 
+/* Split only a co_yield that is nested inside `expr` (not `expr` itself). */
 static bool SplitNestedSuspendingCoYieldExpression(
     CompoundStatementASTNode* compound, size_t statement_index, ASTNode* expr) {
   return SplitSuspendingCoYieldExpression(compound, statement_index, expr,
                                           false);
 }
 
+/* Split a single suspending co_await or co_yield out of `expr`. */
 static bool SplitSuspendingCoroutineExpression(CompoundStatementASTNode* compound,
                                                size_t statement_index,
                                                ASTNode* expr,
@@ -2359,6 +2637,8 @@ static bool SplitSuspendingCoroutineExpression(CompoundStatementASTNode* compoun
                                           allow_root);
 }
 
+/* True if `expr` contains exactly one suspending co_await/co_yield whose result
+ * is non-void (the case that can be cleanly factored into a single temporary). */
 static bool ExpressionHasSingleNonVoidSuspendingCoroutineExpression(
     ASTNode* expr, bool allow_root) {
   if (expr == NULL) {
@@ -2397,6 +2677,7 @@ static bool ExpressionHasSingleNonVoidSuspendingCoroutineExpression(
          result_type != NULL && !TypeIsVoid(result_type);
 }
 
+/* Split a nested suspension out of a single-variable declaration's initializer. */
 static bool SplitNestedSuspensionInDeclaration(
     CompoundStatementASTNode* compound, size_t statement_index,
     DeclarationListASTNode* decl_list) {
@@ -2413,6 +2694,8 @@ static bool SplitNestedSuspensionInDeclaration(
                                                 expr);
 }
 
+/* Split a nested suspension out of a statement's relevant subexpression
+ * (declaration initializer, assignment RHS, co_return value, switch selector). */
 static bool SplitNestedSuspensionInStatement(
     CompoundStatementASTNode* compound, size_t statement_index, ASTNode* stmt) {
   if (stmt == NULL) {
@@ -2453,6 +2736,8 @@ static bool SplitNestedSuspensionInStatement(
   return false;
 }
 
+/* Apply short-circuit-suspension lowering to a statement's relevant
+ * subexpression (declaration, assignment RHS, co_return, if/switch condition). */
 static bool LowerShortCircuitSuspensionInStatement(
     CompoundStatementASTNode* compound, size_t statement_index, ASTNode* stmt) {
   if (stmt == NULL) {
@@ -2486,11 +2771,15 @@ static bool LowerShortCircuitSuspensionInStatement(
   return false;
 }
 
+/* Build the constant `1` used to replace a loop condition after the real
+ * condition has been moved into the loop body as a guard. */
 static ASTNode* NewCoroutineTrueCondition(SourceLocation location) {
   return NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                location);
 }
 
+/* Build `if (!cond) break;`, the guard used inside a loop body after a
+ * suspending loop condition is hoisted into the body. */
 static ASTNode* NewCoroutineBreakIfFalse(ASTNode* cond,
                                          SourceLocation location) {
   ASTNode* not_cond =
@@ -2502,6 +2791,8 @@ static ASTNode* NewCoroutineBreakIfFalse(ASTNode* cond,
       location);
 }
 
+/* Ensure a loop body is a compound statement (wrapping a single statement in
+ * braces if needed) so guard/suspension statements can be inserted into it. */
 static CompoundStatementASTNode* EnsureCoroutineCompoundLoopBody(
     ASTNode* loop, int stmt_child_id, ASTNode* stmt, SourceLocation location) {
   if (stmt != NULL && stmt->op == AST_OP(compound)) {
@@ -2516,11 +2807,16 @@ static CompoundStatementASTNode* EnsureCoroutineCompoundLoopBody(
   return (CompoundStatementASTNode*)compound;
 }
 
+/* Context for redirecting `continue` in a do/while body to the synthesized label
+ * placed before the (hoisted) loop condition. */
 typedef struct {
   String* condition_label;
   LabelASTNode* label;
 } DoWhileConditionRewrite;
 
+/* Transform callback: rewrite `continue` in a do/while body into a goto to the
+ * condition label (so continue still evaluates the condition), without
+ * descending into nested loops which own their own continue target. */
 static ASTNode* RewriteDoWhileConditionContinue(ASTNode* node, void* data,
                                                 ASTNodeTransformAction* action) {
   DoWhileConditionRewrite* rewrite = data;
@@ -2543,6 +2839,9 @@ static ASTNode* RewriteDoWhileConditionContinue(ASTNode* node, void* data,
   return goto_stmt;
 }
 
+/* Rewrite `while (cond-with-suspension) body` into `while (1) { <cond eval>;
+ * if (!cond) break; body }` so the suspension in the condition occurs in
+ * statement position where it can be split. */
 static bool NormalizeWhileConditionSuspension(ASTNode* stmt) {
   CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
   CompoundStatementASTNode* body =
@@ -2568,6 +2867,9 @@ static bool NormalizeWhileConditionSuspension(ASTNode* stmt) {
   return true;
 }
 
+/* Like NormalizeWhileConditionSuspension but for do/while: append a continue
+ * label and the condition evaluation at the end of the body, redirect `continue`
+ * to that label, and turn the loop condition into a `break` guard. */
 static bool NormalizeDoConditionSuspension(ASTNode* stmt) {
   CombinedStatementASTNode* loop = (CombinedStatementASTNode*)stmt;
   bool has_condition_suspension =
@@ -2618,6 +2920,8 @@ static bool NormalizeDoConditionSuspension(ASTNode* stmt) {
   return true;
 }
 
+/* Like NormalizeWhileConditionSuspension but for the `for` loop's middle
+ * (condition) expression. */
 static bool NormalizeForConditionSuspension(ASTNode* stmt) {
   ForStatementASTNode* loop = (ForStatementASTNode*)stmt;
   if (loop->c2 == NULL) {
@@ -2645,6 +2949,8 @@ static bool NormalizeForConditionSuspension(ASTNode* stmt) {
   return true;
 }
 
+/* Normalize suspensions inside a sub-statement, wrapping it in a compound first
+ * so newly split statements have somewhere to live. */
 static void NormalizeNestedSuspensionsInStatementChild(
     ASTNode* parent, int child_id, ASTNode* stmt, SourceLocation location) {
   if (parent == NULL || stmt == NULL) {
@@ -2663,11 +2969,16 @@ static void NormalizeNestedSuspensionsInStatementChild(
   NormalizeNestedSuspensionsInCompound(compound);
 }
 
+/* Collector for the immediate sub-statements of a statement (the children that
+ * are themselves statements but not already inside a compound). */
 typedef struct {
   ASTNode* root;
   Vector children;
 } CoroutineStatementChildCollector;
 
+/* Transform callback that gathers the nearest statement children of `root`,
+ * skipping into expressions and stopping at compounds (which are normalized
+ * separately). */
 static ASTNode* CollectNestedStatementChildTransform(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   CoroutineStatementChildCollector* collector = data;
@@ -2689,6 +3000,8 @@ static ASTNode* CollectNestedStatementChildTransform(
   return node;
 }
 
+/* Recurse into each statement child of `stmt`, normalizing nested suspensions
+ * there (e.g. the then/else of an if, the body of a loop). */
 static void NormalizeNestedSuspensionsInStatementChildren(ASTNode* stmt) {
   CoroutineStatementChildCollector collector = {
       .root = stmt,
@@ -2706,6 +3019,11 @@ static void NormalizeNestedSuspensionsInStatementChildren(ASTNode* stmt) {
   VectorDestruct(&collector.children);
 }
 
+/* Core normalization pass over a compound: for each statement, hoist embedded
+ * suspensions out of subexpressions and conditions into standalone statements,
+ * rewrite loops whose conditions suspend, and recurse into nested blocks. This
+ * leaves every suspension at statement granularity so the state machine can be
+ * built around them. */
 static void NormalizeNestedSuspensionsInCompound(
     CompoundStatementASTNode* compound) {
   if (compound == NULL || compound->statements == NULL) {
@@ -2747,6 +3065,9 @@ static void NormalizeNestedSuspensionsInCompound(
   }
 }
 
+/* Replace the initializing expression of a variable declaration in place,
+ * navigating the various initializer wrapper shapes (init/expr_init/braced/
+ * designated) to substitute `expr`. */
 static void ReplaceVariableInitializerExpression(VariableDeclarationASTNode* decl,
                                                  ASTNode* expr) {
   ASTNode* initializer = decl->initializer;
@@ -2788,6 +3109,8 @@ static void ReplaceVariableInitializerExpression(VariableDeclarationASTNode* dec
                       false);
 }
 
+/* If a co_await's operand is a plain identifier, return its symbol (used to reuse
+ * an existing local as the awaiter rather than creating a temporary). */
 static Symbol* CoAwaitIdentifierOperand(ASTNode* co_await) {
   if (co_await == NULL || co_await->op != AST_OP(co_await)) {
     return NULL;
@@ -2799,6 +3122,9 @@ static Symbol* CoAwaitIdentifierOperand(ASTNode* co_await) {
   return ((IdentifierASTNode*)operand)->symbol;
 }
 
+/* Determine the awaiter type of a co_await's operand, digging through comma,
+ * inline-call, call (member result or function return), and compound-literal
+ * forms when the node itself has no type yet. */
 static TypeRecord* CoAwaitOperandType(ASTNode* co_await) {
   if (co_await == NULL || co_await->op != AST_OP(co_await)) {
     return NULL;
@@ -2840,6 +3166,7 @@ static TypeRecord* CoAwaitOperandType(ASTNode* co_await) {
   return NULL;
 }
 
+/* Create a local temporary symbol to hold an awaiter object of `type`. */
 static Symbol* NewCoroutineAwaiterTemporary(TypeRecord* type,
                                             SourceLocation location) {
   if (type == NULL) {
@@ -2855,6 +3182,8 @@ static Symbol* NewCoroutineAwaiterTemporary(TypeRecord* type,
   return awaiter;
 }
 
+/* Find the declaration of `awaiter` among the statements preceding the suspension
+ * point in its compound (so the awaiter's init can be redirected into the frame). */
 static VariableDeclarationASTNode* FindAwaiterDeclarationBefore(
     SuspensionPoint* point, Symbol* awaiter) {
   if (point == NULL || point->compound == NULL || awaiter == NULL) {
@@ -2876,6 +3205,10 @@ static VariableDeclarationASTNode* FindAwaiterDeclarationBefore(
   return NULL;
 }
 
+/* Lower a co_yield at a suspension point: create the awaiter from
+ * `promise.yield_value(operand)`, register it as a frame-owned object, and
+ * initialize its frame slot in place of (or before) the original statement. The
+ * subsequent suspend machinery is emitted later like a co_await. */
 static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
                                   CoroutineFrame* frame,
                                   TypeRecord* yield_awaiter_type) {
@@ -2925,6 +3258,8 @@ static bool LowerCoYieldStatement(SuspensionPoint* point, Symbol* promise,
   return true;
 }
 
+/* Add a synthetic `int` member to the frame struct (state/done/constructed
+ * flags). */
 static StructMember* AddCoroutineFrameIntMember(Struct* str,
                                                 const char* name) {
   Symbol* symbol = NewSymbol(name,
@@ -2935,6 +3270,8 @@ static StructMember* AddCoroutineFrameIntMember(Struct* str,
   return member;
 }
 
+/* Add a synthetic member of a given type to the frame struct (promise, awaiter,
+ * persisted-local, or function-pointer slots). */
 static StructMember* AddCoroutineFrameTypedMember(Struct* str,
                                                   const char* name,
                                                   TypeRecord* type) {
@@ -2946,6 +3283,8 @@ static StructMember* AddCoroutineFrameTypedMember(Struct* str,
   return member;
 }
 
+/* Register a symbol whose object lives in the frame (so it can be constructed and
+ * later destroyed in the right order). */
 static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          Symbol* symbol,
                                          StructMember* member,
@@ -2963,6 +3302,7 @@ static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
   VectorAppend(&frame->owned_symbols, owned);
 }
 
+/* Return the frame slot associated with a frame-owned symbol, or NULL. */
 static StructMember* CoroutineFrameMemberForSymbol(CoroutineFrame* frame,
                                                    Symbol* symbol) {
   if (frame == NULL || symbol == NULL) {
@@ -2977,6 +3317,7 @@ static StructMember* CoroutineFrameMemberForSymbol(CoroutineFrame* frame,
   return NULL;
 }
 
+/* Free the bookkeeping list of frame-owned symbols. */
 static void CoroutineFrameOwnedSymbolsDestruct(CoroutineFrame* frame) {
   if (frame == NULL) {
     return;
@@ -2987,6 +3328,9 @@ static void CoroutineFrameOwnedSymbolsDestruct(CoroutineFrame* frame) {
   VectorDestruct(&frame->owned_symbols);
 }
 
+/* At the start of the resume function, initialize the frame's state to 0, clear
+ * every owned object's "constructed" flag, and eagerly construct the objects
+ * marked construct-at-start (e.g. the promise). */
 static void InsertCoroutineFrameStarterInitializers(
     CompoundStatementASTNode* body,
     CoroutineFrame* frame,
@@ -3020,6 +3364,9 @@ static void InsertCoroutineFrameStarterInitializers(
   }
 }
 
+/* Build the destructor call for a frame-owned object, guarded by its
+ * "constructed" flag when present: `if (constructed) { obj.~T(); constructed=0; }`
+ * so partially-constructed frames tear down correctly. */
 static ASTNode* NewCoroutineFrameGuardedDestructor(CoroutineFrame* frame,
                                                    FrameOwnedSymbol* owned,
                                                    SourceLocation location) {
@@ -3050,6 +3397,8 @@ static ASTNode* NewCoroutineFrameGuardedDestructor(CoroutineFrame* frame,
       NULL, false, location);
 }
 
+/* Guarded destructor for a frame member that isn't tracked in owned_symbols
+ * (builds a throwaway FrameOwnedSymbol descriptor). */
 static ASTNode* NewCoroutineFrameMemberGuardedDestructor(
     CoroutineFrame* frame, StructMember* member,
     StructMember* constructed_member, SourceLocation location) {
@@ -3062,6 +3411,8 @@ static ASTNode* NewCoroutineFrameMemberGuardedDestructor(
   return NewCoroutineFrameGuardedDestructor(frame, &owned, location);
 }
 
+/* Append guarded destructor calls for all frame-owned objects in reverse
+ * construction order (used by the destroy function for full teardown). */
 static void AppendCoroutineFrameDestructors(Vector* statements,
                                             CoroutineFrame* frame,
                                             SourceLocation location) {
@@ -3082,6 +3433,8 @@ static void AppendCoroutineFrameDestructors(Vector* statements,
   }
 }
 
+/* True if a frame-owned object has body lifetime (i.e. is not the promise or the
+ * initial/final awaiters, which outlive the body and are destroyed separately). */
 static bool CoroutineFrameOwnedSymbolIsBodyLifetime(CoroutineFrame* frame,
                                                     FrameOwnedSymbol* owned) {
   if (frame == NULL || owned == NULL) {
@@ -3092,6 +3445,8 @@ static bool CoroutineFrameOwnedSymbolIsBodyLifetime(CoroutineFrame* frame,
          owned->member != frame->final_awaiter;
 }
 
+/* Append guarded destructors for only the body-lifetime frame objects, in
+ * reverse construction order (used when the body completes or throws). */
 static void AppendCoroutineFrameBodyDestructors(Vector* statements,
                                                 CoroutineFrame* frame,
                                                 SourceLocation location) {
@@ -3113,10 +3468,13 @@ static void AppendCoroutineFrameBodyDestructors(Vector* statements,
   }
 }
 
+/* Build the `FrameType*` pointer type. */
 static TypeRecord* NewCoroutineFramePointerType(TypeRecord* frame_type) {
   return NewPointerTo(kQualPlain, TypeRecordCopy(frame_type));
 }
 
+/* Build the implicit `__frame` pointer parameter shared by the resume and
+ * destroy functions. */
 static Symbol* NewCoroutineFrameParameter(TypeRecord* frame_type,
                                           SourceLocation location) {
   Symbol* symbol =
@@ -3130,6 +3488,7 @@ static Symbol* NewCoroutineFrameParameter(TypeRecord* frame_type,
   return symbol;
 }
 
+/* Build the function-pointer type for the resume slot: `Ret (*)(FrameType*)`. */
 static TypeRecord* NewCoroutineResumePointerType(TypeRecord* return_type,
                                                  TypeRecord* frame_type,
                                                  SourceLocation location) {
@@ -3140,6 +3499,8 @@ static TypeRecord* NewCoroutineResumePointerType(TypeRecord* return_type,
   return NewPointerTo(kQualPlain, func);
 }
 
+/* Build the resume function's type `Ret(FrameType*)` (a definition, not a
+ * pointer), returning its frame parameter so the body can reference the frame. */
 static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* return_type,
                                                   TypeRecord* frame_type,
                                                   Symbol** frame_param_out,
@@ -3155,6 +3516,7 @@ static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* return_type,
   return func;
 }
 
+/* Build the function-pointer type for the destroy slot: `void (*)(FrameType*)`. */
 static TypeRecord* NewCoroutineDestroyPointerType(TypeRecord* frame_type,
                                                   SourceLocation location) {
   TypeRecord* func = NewFunctionTypeRecord();
@@ -3164,6 +3526,8 @@ static TypeRecord* NewCoroutineDestroyPointerType(TypeRecord* frame_type,
   return NewPointerTo(kQualPlain, func);
 }
 
+/* Build the destroy function's type `void(FrameType*)` (a definition), returning
+ * its frame parameter. */
 static TypeRecord* NewCoroutineDestroyFunctionType(TypeRecord* frame_type,
                                                    Symbol** frame_param_out,
                                                    SourceLocation location) {
@@ -3178,6 +3542,7 @@ static TypeRecord* NewCoroutineDestroyFunctionType(TypeRecord* frame_type,
   return func;
 }
 
+/* Add the frame's `__resume` function-pointer slot. */
 static StructMember* AddCoroutineFrameResumeMember(Struct* str,
                                                    TypeRecord* return_type,
                                                    TypeRecord* frame_type,
@@ -3192,6 +3557,7 @@ static StructMember* AddCoroutineFrameResumeMember(Struct* str,
   return member;
 }
 
+/* Add the frame's `__destroy` function-pointer slot. */
 static StructMember* AddCoroutineFrameDestroyMember(Struct* str,
                                                     TypeRecord* frame_type,
                                                     SourceLocation location) {
@@ -3204,6 +3570,8 @@ static StructMember* AddCoroutineFrameDestroyMember(Struct* str,
   return member;
 }
 
+/* Find an overload in a chain with the given parameter count (used to pick the
+ * right operator new/delete). */
 static Symbol* FindCoroutineAllocationFunctionByArgCount(Symbol* first,
                                                          size_t arg_count) {
   for (Symbol* symbol = first; symbol != NULL; symbol = symbol->overload_next) {
@@ -3215,6 +3583,9 @@ static Symbol* FindCoroutineAllocationFunctionByArgCount(Symbol* first,
   return NULL;
 }
 
+/* Find, or synthesize and globally declare, a single-argument global allocation
+ * function `name` (the global ::operator new / ::operator delete used to obtain
+ * and release the coroutine frame). */
 static Symbol* GetCoroutineAllocationFunction(const char* name,
                                               TypeRecord* return_type,
                                               TypeRecord* arg_type,
@@ -3260,6 +3631,8 @@ static Symbol* GetCoroutineAllocationFunction(const char* name,
   return symbol;
 }
 
+/* Look up a promise class's own `operator new`/`operator delete` member (the
+ * class-scoped allocation override), if one with `arg_count` parameters exists. */
 static Symbol* GetCoroutineClassAllocationFunction(TypeRecord* promise_type,
                                                    const char* name,
                                                    size_t arg_count) {
@@ -3276,6 +3649,8 @@ static Symbol* GetCoroutineClassAllocationFunction(TypeRecord* promise_type,
   return FindCoroutineAllocationFunctionByArgCount(member->symbol, arg_count);
 }
 
+/* Resolve the operator new used for frame allocation: the promise's class
+ * override if present, else the global ::operator new(size_t). */
 static Symbol* GetCoroutineOperatorNew(TypeRecord* promise_type,
                                        SourceLocation location) {
   Symbol* member = GetCoroutineClassAllocationFunction(
@@ -3289,6 +3664,8 @@ static Symbol* GetCoroutineOperatorNew(TypeRecord* promise_type,
                                         NewSizeTypeRecord(), location);
 }
 
+/* Resolve the operator delete used for frame deallocation: the promise's class
+ * override if present, else the global ::operator delete(void*). */
 static Symbol* GetCoroutineOperatorDelete(TypeRecord* promise_type,
                                           SourceLocation location) {
   Symbol* member = GetCoroutineClassAllocationFunction(
@@ -3303,6 +3680,8 @@ static Symbol* GetCoroutineOperatorDelete(TypeRecord* promise_type,
                                         location);
 }
 
+/* Build `(FrameType*)operator new(sizeof(FrameType))`: the expression that
+ * allocates and types the coroutine frame in the ramp function. */
 static ASTNode* NewCoroutineFrameAllocation(TypeRecord* frame_type,
                                             TypeRecord* frame_pointer_type,
                                             TypeRecord* promise_type,
@@ -3325,6 +3704,7 @@ static ASTNode* NewCoroutineFrameAllocation(TypeRecord* frame_type,
   return cast;
 }
 
+/* Build `operator delete((void*)frame);` to release the coroutine frame. */
 static ASTNode* NewCoroutineFrameDeallocation(CoroutineFrame* frame,
                                               SourceLocation location) {
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
@@ -3344,6 +3724,7 @@ static ASTNode* NewCoroutineFrameDeallocation(CoroutineFrame* frame,
   return NewExpressionStatementASTNode(call, location);
 }
 
+/* Build a `symbol = initializer` declaration-initializer expression. */
 static ASTNode* NewVariableInitExpression(Symbol* symbol, ASTNode* initializer,
                                           SourceLocation location) {
   ASTNode* decl_id = NewIdentifierASTNode(symbol, location);
@@ -3353,6 +3734,13 @@ static ASTNode* NewVariableInitExpression(Symbol* symbol, ASTNode* initializer,
                                                           location));
 }
 
+/* Construct the coroutine frame: synthesize the frame struct with slots for
+ * state/done, the resume/destroy function pointers, the promise, the
+ * initial/final awaiters, each persisted local, and each suspension point's
+ * awaiter (plus "constructed" flags for objects with C++ lifetime). Registers
+ * the struct as a tag, allocates the frame-pointer temporary, and builds its
+ * `frame = (FrameType*)operator new(...)` declaration. Returns the populated
+ * CoroutineFrame. */
 static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
                                         TypeRecord* promise_type,
                                         TypeRecord* initial_awaiter_type,
@@ -3454,6 +3842,8 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* return_type,
   return frame;
 }
 
+/* Enqueue a synthesized coroutine function (resume/destroy) for later codegen by
+ * adding it to the compiler's pending-instantiation and declaration lists. */
 static void QueueCoroutineGeneratedFunction(Symbol* symbol) {
   Vector* declarations = NewVector();
   VectorAppend(declarations,
@@ -3463,11 +3853,15 @@ static void QueueCoroutineGeneratedFunction(Symbol* symbol) {
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
 }
 
+/* Old/new symbol pair for rewriting identifier references during lowering. */
 typedef struct {
   Symbol* old_symbol;
   Symbol* new_symbol;
 } SymbolReplacement;
 
+/* Visitor that retargets identifier nodes referring to `old_symbol` to
+ * `new_symbol` (e.g. remapping the original function parameter to the resume
+ * function's frame parameter). */
 static void ReplaceIdentifierSymbol(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
@@ -3483,6 +3877,7 @@ static void ReplaceIdentifierSymbol(ASTNode* node, void* data, int child_id,
   }
 }
 
+/* True if `node` is exactly `frame->member` for the given frame slot. */
 static bool IsFrameMemberAccessFor(ASTNode* node, StructMember* member) {
   if (node == NULL || node->op != AST_OP(arrow) || member == NULL) {
     return false;
@@ -3494,6 +3889,8 @@ static bool IsFrameMemberAccessFor(ASTNode* node, StructMember* member) {
   return ((StructMemberASTNode*)access->right)->member == member;
 }
 
+/* True if `node` is the RHS of an assignment whose LHS is `frame->member` (i.e.
+ * a self-copy that should be left alone when promoting locals into the frame). */
 static bool IsFrameCopyAssignmentRhs(ASTNode* node, StructMember* member) {
   if (node == NULL || node->parent == NULL || node->child_id != 1 ||
       node->parent->op != AST_OP(assign)) {
@@ -3503,11 +3900,13 @@ static bool IsFrameCopyAssignmentRhs(ASTNode* node, StructMember* member) {
   return IsFrameMemberAccessFor(assign->left, member);
 }
 
+/* Scratch state for upward (parent-chain) AST searches. */
 typedef struct {
   ASTNode* target;
   ASTNode* found;
 } CoroutineUpwardSearch;
 
+/* Upward visitor: stops when it reaches the target ancestor node. */
 static bool FindMatchingAncestor(ASTNode* node, void* data) {
   CoroutineUpwardSearch* search = data;
   if (node == search->target) {
@@ -3517,6 +3916,7 @@ static bool FindMatchingAncestor(ASTNode* node, void* data) {
   return true;
 }
 
+/* True if `ancestor` is on the parent chain of `node`. */
 static bool ASTNodeIsAncestorOf(ASTNode* ancestor, ASTNode* node) {
   CoroutineUpwardSearch search = {
       .target = ancestor,
@@ -3525,6 +3925,7 @@ static bool ASTNodeIsAncestorOf(ASTNode* ancestor, ASTNode* node) {
   return search.found != NULL;
 }
 
+/* Upward visitor: stops at the nearest enclosing call node. */
 static bool FindEnclosingCall(ASTNode* node, void* data) {
   CoroutineUpwardSearch* search = data;
   if (node != NULL && node->op == AST_OP(call)) {
@@ -3534,6 +3935,9 @@ static bool FindEnclosingCall(ASTNode* node, void* data) {
   return true;
 }
 
+/* True if `node` is an argument to a `frame->member.ctor(...)` construction call
+ * (not part of the callee/receiver), so that identifier-to-frame rewriting can
+ * skip the receiver itself. */
 static bool IsFrameConstructionActual(ASTNode* node, StructMember* member) {
   CoroutineUpwardSearch search = {0};
   ASTNodeVisitUpwards(node != NULL ? node->parent : NULL, FindEnclosingCall,
@@ -3553,11 +3957,14 @@ static bool IsFrameConstructionActual(ASTNode* node, StructMember* member) {
   return IsFrameMemberAccessFor(member_call->left, member);
 }
 
+/* Scratch state for finding a symbol's own declaration node above a reference. */
 typedef struct {
   Symbol* symbol;
   bool found;
 } CoroutineDeclarationAncestorSearch;
 
+/* Upward visitor: detects whether an ancestor is the variable declaration of the
+ * searched-for symbol. */
 static bool FindDeclarationAncestorForSymbol(ASTNode* node, void* data) {
   CoroutineDeclarationAncestorSearch* search = data;
   if (node != NULL && node->op == AST_OP(vardecl) &&
@@ -3568,6 +3975,8 @@ static bool FindDeclarationAncestorForSymbol(ASTNode* node, void* data) {
   return true;
 }
 
+/* True if `node` sits inside the declaration of `symbol` (so its declaring
+ * identifier isn't rewritten to a frame access). */
 static bool IsInsideDeclarationOfSymbol(ASTNode* node, Symbol* symbol) {
   CoroutineDeclarationAncestorSearch search = {
       .symbol = symbol,
@@ -3577,6 +3986,9 @@ static bool IsInsideDeclarationOfSymbol(ASTNode* node, Symbol* symbol) {
   return search.found;
 }
 
+/* Visitor that rewrites references to frame-owned locals into `frame->slot`
+ * accesses, skipping the declaration itself, self-copy assignment RHSs, and
+ * in-place construction arguments to avoid clobbering construction semantics. */
 static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
@@ -3600,6 +4012,8 @@ static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
   ASTNodeReplaceChild(node->parent, node->child_id, access, true);
 }
 
+/* Rewrite all references to frame-owned locals within `node` into frame
+ * accesses. */
 static void RewriteFrameOwnedSymbols(ASTNode* node, CoroutineFrame* frame) {
   if (node == NULL || frame == NULL || frame->owned_symbols.length == 0) {
     return;
@@ -3607,6 +4021,9 @@ static void RewriteFrameOwnedSymbols(ASTNode* node, CoroutineFrame* frame) {
   ASTNodeVisit(node, ReplaceFrameOwnedIdentifier, 0, frame);
 }
 
+/* Transform callback: drop statements flagged as frame-parameter stores (the
+ * ramp-only copies of incoming arguments into the frame), which must not run
+ * again inside the resume function. */
 static ASTNode* RemoveCoroutineFrameStoreTransform(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)data;
@@ -3617,6 +4034,7 @@ static ASTNode* RemoveCoroutineFrameStoreTransform(
   return node;
 }
 
+/* Remove all frame-store statements from a (cloned) body. */
 static void RemoveCoroutineFrameStores(CompoundStatementASTNode* compound) {
   if (compound == NULL) {
     return;
@@ -3626,6 +4044,12 @@ static void RemoveCoroutineFrameStores(CompoundStatementASTNode* compound) {
   ResetCompoundStatementParents(compound);
 }
 
+/* Build the coroutine resume function `Ret resume(FrameType*)`: clone the
+ * normalized body, drop the frame-allocation declaration and ramp-only frame
+ * stores, splice in the initial-suspend await_resume, wrap the body in a
+ * try/catch that routes uncaught exceptions to unhandled_exception, retarget the
+ * original frame symbol and owned locals to the frame parameter, and register
+ * and queue the function for codegen. Returns the new function symbol. */
 static Symbol* NewCoroutineResumeFunction(ASTNode* node,
                                           CoroutineFrame* frame,
                                           CompoundStatementASTNode* body,
@@ -3689,11 +4113,15 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
   return symbol;
 }
 
+/* Build a null pointer constant (integer 0). */
 static ASTNode* NewNullPointerConstant(SourceLocation location) {
   return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                location);
 }
 
+/* Build the coroutine destroy function `void destroy(FrameType*)`: mark the
+ * frame done, null the resume/destroy pointers, run all frame-object destructors
+ * in reverse order, and free the frame. Registers and queues it for codegen. */
 static Symbol* NewCoroutineDestroyFunction(CoroutineFrame* frame,
                                            SourceLocation location) {
   char name[96];
@@ -3734,6 +4162,8 @@ static Symbol* NewCoroutineDestroyFunction(CoroutineFrame* frame,
   return symbol;
 }
 
+/* Build `if (frame->__state == state_value) goto label;`, one arm of the resume
+ * dispatch that jumps to the code following the matching suspension point. */
 static ASTNode* NewStateResumeIf(CoroutineFrame* frame, int state_value,
                                  LabelASTNode* label,
                                  SourceLocation location) {
@@ -3750,6 +4180,8 @@ static ASTNode* NewStateResumeIf(CoroutineFrame* frame, int state_value,
   return NewIfStatementASTNode(condition, goto_stmt, NULL, false, location);
 }
 
+/* Create a `void*` temporary that holds the raw frame address of a coroutine to
+ * which control is being symmetrically transferred. */
 static Symbol* NewCoroutineTransferHandleTemporary(SourceLocation location) {
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   TypeRecord* void_pointer = NewPointerTo(kQualPlain, void_type);
@@ -3760,6 +4192,8 @@ static Symbol* NewCoroutineTransferHandleTemporary(SourceLocation location) {
   return handle;
 }
 
+/* Create a temporary to hold the coroutine_handle returned by await_suspend (the
+ * next coroutine to resume). */
 static Symbol* NewCoroutineHandleReturnTemporary(TypeRecord* handle_type,
                                                  SourceLocation location) {
   if (handle_type == NULL) {
@@ -3773,6 +4207,7 @@ static Symbol* NewCoroutineHandleReturnTemporary(TypeRecord* handle_type,
   return handle;
 }
 
+/* Cast a stored `void*` transfer handle back to the typed `FrameType*`. */
 static ASTNode* NewCoroutineTransferFramePointer(CoroutineFrame* frame,
                                                  Symbol* handle,
                                                  SourceLocation location) {
@@ -3783,6 +4218,7 @@ static ASTNode* NewCoroutineTransferFramePointer(CoroutineFrame* frame,
   return cast;
 }
 
+/* Access `((FrameType*)handle)->member` for the coroutine being transferred to. */
 static ASTNode* NewCoroutineTransferFrameMemberAccess(CoroutineFrame* frame,
                                                       Symbol* handle,
                                                       StructMember* member,
@@ -3798,6 +4234,9 @@ static ASTNode* NewCoroutineTransferFrameMemberAccess(CoroutineFrame* frame,
   return access;
 }
 
+/* Build `if (next->__resume != null) next->__resume(next);`, the symmetric
+ * transfer that drives the next coroutine to its next suspension before this
+ * frame's resume function returns. */
 static ASTNode* NewCoroutineTransferResumeIf(CoroutineFrame* frame,
                                              Symbol* handle,
                                              TypeRecord* return_type,
@@ -3820,6 +4259,13 @@ static ASTNode* NewCoroutineTransferResumeIf(CoroutineFrame* frame,
       NULL, false, location);
 }
 
+/* Emit the statements that run after calling await_suspend, dispatching on its
+ * return type:
+ *   - bool: if it returns true, return the coroutine's return object (suspend);
+ *           otherwise fall through (resume immediately).
+ *   - coroutine_handle / void*: symmetric transfer to the returned handle, then
+ *           return the return object.
+ *   - void: just return the return object (unconditional suspend). */
 static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                               CoroutineFrame* frame,
                                               Symbol* promise,
@@ -3899,6 +4345,9 @@ static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                                  location));
 }
 
+/* Build the per-suspension-point suspend block: `if (!awaiter.await_ready()) {
+ * frame->__state = N; <await_suspend dispatch>; }`, where the dispatch suspends
+ * (returns) or continues based on await_suspend's result. */
 static ASTNode* NewSuspendIf(CoroutineFrame* frame, Symbol* promise,
                              Symbol* awaiter,
                              int state_value, TypeRecord* return_type,
@@ -3939,6 +4388,9 @@ static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
                                              ASTNode* stmt,
                                              size_t at_index);
 
+/* Insert a guarded destructor for a suspension point's awaiter right after the
+ * statement that consumes its await_resume result, so the awaiter is destroyed
+ * once it is no longer needed. */
 static void InsertCoroutineAwaiterDestructorAfterUse(
     SuspensionPoint* point, CoroutineFrame* frame, size_t statement_index,
     SourceLocation location) {
@@ -3956,6 +4408,8 @@ static void InsertCoroutineAwaiterDestructorAfterUse(
   CoroutineCompoundInsertStatement(point->compound, dtor, statement_index + 1);
 }
 
+/* Build an initializer expression `awaiter.await_resume()` of `result_type` (used
+ * to initialize the temporary that holds a co_await/co_yield's result). */
 static ASTNode* NewAwaitResumeInitializer(Symbol* awaiter,
                                           TypeRecord* result_type,
                                           SourceLocation location) {
@@ -3966,6 +4420,7 @@ static ASTNode* NewAwaitResumeInitializer(Symbol* awaiter,
   return NewExpressionInitializerASTNode(await_resume, location);
 }
 
+/* Build a statement `awaiter.await_resume();` for a void-result suspension. */
 static ASTNode* NewAwaitResumeStatement(Symbol* awaiter,
                                         SourceLocation location) {
   return NewExpressionStatementASTNode(
@@ -3974,6 +4429,7 @@ static ASTNode* NewAwaitResumeStatement(Symbol* awaiter,
       location);
 }
 
+/* Initialize the frame's initial-awaiter slot from `promise.initial_suspend()`. */
 static ASTNode* NewInitialSuspendInitialization(CoroutineFrame* frame,
                                                 Symbol* promise,
                                                 SourceLocation location) {
@@ -3986,6 +4442,8 @@ static ASTNode* NewInitialSuspendInitialization(CoroutineFrame* frame,
       initial_suspend, location);
 }
 
+/* Build the initial-suspend block, analogous to NewSuspendIf but for the initial
+ * awaiter (state 0): `if (!awaiter.await_ready()) { <await_suspend dispatch> }`. */
 static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
                                     Symbol* awaiter, TypeRecord* return_type,
                                     SourceLocation location) {
@@ -4020,6 +4478,8 @@ static ASTNode* NewInitialSuspendIf(CoroutineFrame* frame, Symbol* promise,
       NULL, false, location);
 }
 
+/* No-op transform used only for its side effect of re-walking the tree (so
+ * parent/child_id links get refreshed). */
 static ASTNode* PreserveASTNodeTransform(ASTNode* node, void* data,
                                          ASTNodeTransformAction* action) {
   (void)data;
@@ -4027,6 +4487,8 @@ static ASTNode* PreserveASTNodeTransform(ASTNode* node, void* data,
   return node;
 }
 
+/* Insert `stmt` into `compound` at `at_index` (appending if the index is past
+ * the end), fixing up parent links. */
 static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
                                              ASTNode* stmt,
                                              size_t at_index) {
@@ -4042,6 +4504,7 @@ static void CoroutineCompoundInsertStatement(CompoundStatementASTNode* compound,
   CompoundASTNodeInsertStatement(compound, stmt, at_index);
 }
 
+/* Refresh parent and child_id links across a compound after structural edits. */
 static void ResetCompoundStatementParents(CompoundStatementASTNode* compound) {
   if (compound == NULL) {
     return;
@@ -4049,6 +4512,8 @@ static void ResetCompoundStatementParents(CompoundStatementASTNode* compound) {
   ASTNodeVisitAndTransform((ASTNode*)compound, PreserveASTNodeTransform, NULL);
 }
 
+/* Locate the compound and index where `stmt` lives (only if it is a direct
+ * statement child of a compound). */
 static bool CoroutineStatementLocation(ASTNode* stmt,
                                        CompoundStatementASTNode** compound,
                                        size_t* statement_index) {
@@ -4061,6 +4526,8 @@ static bool CoroutineStatementLocation(ASTNode* stmt,
   return true;
 }
 
+/* Reserve and return the next slot in the suspension-points array, or NULL when
+ * full. */
 static SuspensionPoint* NextSuspensionPoint(SuspensionPoints* points) {
   if (points == NULL || points->count >= points->capacity) {
     return NULL;
@@ -4068,6 +4535,8 @@ static SuspensionPoint* NextSuspensionPoint(SuspensionPoints* points) {
   return &points->points[points->count++];
 }
 
+/* Record a suspension point for a (non-always-ready) co_await found directly in a
+ * statement. */
 static void AddCoAwaitSuspensionPoint(SuspensionPoints* points,
                                       ASTNode* stmt,
                                       ASTNode* co_await) {
@@ -4091,6 +4560,7 @@ static void AddCoAwaitSuspensionPoint(SuspensionPoints* points,
   point->statement_index = statement_index;
 }
 
+/* Record a suspension point for a co_yield found directly in a statement. */
 static void AddCoYieldSuspensionPoint(SuspensionPoints* points,
                                       ASTNode* stmt,
                                       ASTNode* co_yield) {
@@ -4113,6 +4583,8 @@ static void AddCoYieldSuspensionPoint(SuspensionPoints* points,
   point->statement_index = statement_index;
 }
 
+/* Record suspension points for co_await initializers in a declaration list (e.g.
+ * `auto x = co_await ...;`), tracking the declared variable for each. */
 static void AddDeclarationCoAwaitSuspensionPoints(
     SuspensionPoints* points,
     DeclarationListASTNode* decl_list,
@@ -4141,6 +4613,7 @@ static void AddDeclarationCoAwaitSuspensionPoints(
   }
 }
 
+/* Record suspension points for co_yield initializers in a declaration list. */
 static void AddDeclarationCoYieldSuspensionPoints(
     SuspensionPoints* points,
     DeclarationListASTNode* decl_list,
@@ -4170,6 +4643,8 @@ static void AddDeclarationCoYieldSuspensionPoints(
   }
 }
 
+/* True if a suspension point is a bare `co_yield expr;` expression statement (no
+ * surrounding assignment/declaration consuming its result). */
 static bool SuspensionPointIsStatementCoYield(SuspensionPoint* point) {
   return point != NULL && point->kind == kSuspensionCoYield &&
          point->statement != NULL && point->statement->op == AST_OP(expr) &&
@@ -4177,6 +4652,9 @@ static bool SuspensionPointIsStatementCoYield(SuspensionPoint* point) {
              point->co_yield;
 }
 
+/* Visitor that records every statement-level suspension point in the (already
+ * normalized) body: co_return operands, expression-statement co_await/co_yield,
+ * assignment RHSs, and declaration initializers. */
 static void CollectSuspensionPointNode(ASTNode* node, void* data,
                                        int child_id, VisitorMode mode) {
   (void)child_id;
@@ -4211,16 +4689,20 @@ static void CollectSuspensionPointNode(ASTNode* node, void* data,
   }
 }
 
+/* Collect all suspension points in a coroutine body into `points`. */
 static void CollectSuspensionPointsInCompound(CompoundStatementASTNode* body,
                                               SuspensionPoints* points) {
   ASTNodeVisit((ASTNode*)body, CollectSuspensionPointNode, 0, points);
 }
 
+/* Scratch state for detecting whether a symbol is referenced in a subtree. */
 typedef struct {
   Symbol* symbol;
   bool found;
 } SymbolUseSearch;
 
+/* Visitor that flags `found` when a non-declaration reference to the target
+ * symbol is seen. */
 static void FindSymbolUse(ASTNode* node, void* data, int child_id,
                           VisitorMode mode) {
   (void)child_id;
@@ -4235,6 +4717,7 @@ static void FindSymbolUse(ASTNode* node, void* data, int child_id,
   }
 }
 
+/* True if `node` references `symbol` anywhere (outside its own declaration). */
 static bool ASTUsesSymbol(ASTNode* node, Symbol* symbol) {
   if (node == NULL || symbol == NULL) {
     return false;
@@ -4244,6 +4727,7 @@ static bool ASTUsesSymbol(ASTNode* node, Symbol* symbol) {
   return search.found;
 }
 
+/* True if `symbol` is already in the list of locals to persist into the frame. */
 static bool PersistedLocalVectorContains(Vector* locals, Symbol* symbol) {
   if (locals == NULL || symbol == NULL) {
     return false;
@@ -4257,6 +4741,8 @@ static bool PersistedLocalVectorContains(Vector* locals, Symbol* symbol) {
   return false;
 }
 
+/* True if a symbol holds a plain scalar value that can be trivially copied into
+ * and out of a frame slot. */
 static bool CoroutineScalarCanBePersisted(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL ||
       TypeIsStructOrUnion(symbol->type) || TypeIsArray(symbol->type) ||
@@ -4266,6 +4752,9 @@ static bool CoroutineScalarCanBePersisted(Symbol* symbol) {
   return true;
 }
 
+/* True if a parameter can be persisted into the frame; for class types, prefer
+ * moving (sets *move_parameter) when a move constructor exists, else require a
+ * copy constructor. */
 static bool CoroutineParameterCanBePersisted(Symbol* symbol,
                                              bool* move_parameter) {
   if (move_parameter != NULL) {
@@ -4287,6 +4776,8 @@ static bool CoroutineParameterCanBePersisted(Symbol* symbol,
   return CoroutineTypeCanBeCopyConstructed(symbol->type);
 }
 
+/* True if a local can be persisted into the frame; for class types, prefer
+ * copy, falling back to move (sets *move_local). */
 static bool CoroutineLocalCanBePersisted(Symbol* symbol, bool* move_local) {
   if (move_local != NULL) {
     *move_local = false;
@@ -4310,6 +4801,7 @@ static bool CoroutineLocalCanBePersisted(Symbol* symbol, bool* move_local) {
   return false;
 }
 
+/* True if any statement at or after `first_index` in `body` uses `symbol`. */
 static bool StatementRangeUsesSymbol(CompoundStatementASTNode* body,
                                      size_t first_index,
                                      Symbol* symbol) {
@@ -4324,12 +4816,18 @@ static bool StatementRangeUsesSymbol(CompoundStatementASTNode* body,
   return false;
 }
 
+/* Scratch state for checking whether a symbol is used after a suspension point,
+ * including via enclosing-loop conditions/updates and later sibling statements. */
 typedef struct {
   CompoundStatementASTNode* root;
   Symbol* symbol;
   bool found;
 } SuspensionUseAfterSearch;
 
+/* Upward visitor: detects a use of the symbol that would execute after the
+ * suspension — a loop condition/increment of an enclosing while/do/for, or a
+ * later statement in an enclosing compound — meaning the symbol's value must
+ * survive the suspension and so be persisted in the frame. */
 static bool FindSuspensionUseAfterInAncestors(ASTNode* current, void* data) {
   SuspensionUseAfterSearch* search = data;
   if (current == NULL || current == (ASTNode*)search->root) {
@@ -4365,6 +4863,9 @@ static bool FindSuspensionUseAfterInAncestors(ASTNode* current, void* data) {
   return true;
 }
 
+/* True if `symbol` is read after the given suspension point (in later statements
+ * of the same compound or in enclosing loop conditions/updates and blocks),
+ * which is the condition for needing to persist it into the frame. */
 static bool SuspensionPointUsesSymbolAfter(CompoundStatementASTNode* root,
                                            SuspensionPoint* point,
                                            Symbol* symbol) {
@@ -4384,6 +4885,8 @@ static bool SuspensionPointUsesSymbolAfter(CompoundStatementASTNode* root,
   return search.found;
 }
 
+/* Add a symbol to the persisted-locals list (deduplicated), recording how it
+ * should be stored into the frame. */
 static void AddPersistedCoroutineLocal(Vector* persisted_locals,
                                        Symbol* symbol,
                                        bool is_parameter,
@@ -4405,6 +4908,9 @@ static void AddPersistedCoroutineLocal(Vector* persisted_locals,
   VectorAppend(persisted_locals, local);
 }
 
+/* Examine declarations in `compound` before `limit` and, for any local that is
+ * used after `point`, mark it for frame persistence (erroring if its type can be
+ * neither copied nor moved). Clears *ok on error. */
 static void CollectPersistedCoroutineLocalsBeforeIndex(
     CompoundStatementASTNode* root,
     CompoundStatementASTNode* compound,
@@ -4445,6 +4951,8 @@ static void CollectPersistedCoroutineLocalsBeforeIndex(
   }
 }
 
+/* Context for collecting persisted locals/catch-parameters while walking up the
+ * ancestors of a suspension point. */
 typedef struct {
   CompoundStatementASTNode* root;
   SuspensionPoint* point;
@@ -4452,6 +4960,8 @@ typedef struct {
   bool* ok;
 } PersistedLocalCollectionSearch;
 
+/* Upward visitor: at each enclosing compound, persist any locals declared before
+ * the path that are live across the suspension. */
 static bool CollectPersistedCoroutineLocalsFromAncestor(ASTNode* current,
                                                         void* data) {
   PersistedLocalCollectionSearch* search = data;
@@ -4471,6 +4981,8 @@ static bool CollectPersistedCoroutineLocalsFromAncestor(ASTNode* current,
   return true;
 }
 
+/* Collect all locals that must be persisted for a single suspension point: those
+ * declared earlier in the same compound and those in enclosing compounds. */
 static void CollectPersistedCoroutineLocalsForPoint(
     CompoundStatementASTNode* root,
     SuspensionPoint* point,
@@ -4492,6 +5004,8 @@ static void CollectPersistedCoroutineLocalsForPoint(
                       CollectPersistedCoroutineLocalsFromAncestor, &search);
 }
 
+/* Upward visitor: persist an enclosing catch clause's exception parameter if it
+ * is used after the suspension (it would otherwise be lost across resumption). */
 static bool CollectPersistedCoroutineCatchParameterFromAncestor(
     ASTNode* current, void* data) {
   PersistedLocalCollectionSearch* search = data;
@@ -4529,6 +5043,7 @@ static bool CollectPersistedCoroutineCatchParameterFromAncestor(
   return true;
 }
 
+/* Collect catch-clause parameters that must be persisted for a suspension point. */
 static void CollectPersistedCoroutineCatchParametersForPoint(
     CompoundStatementASTNode* root,
     SuspensionPoint* point,
@@ -4549,6 +5064,9 @@ static void CollectPersistedCoroutineCatchParametersForPoint(
       CollectPersistedCoroutineCatchParameterFromAncestor, &search);
 }
 
+/* Build the full set of locals and catch-parameters that live across any
+ * suspension point and so must be promoted into the frame. Returns false if any
+ * such object cannot be copied or moved. */
 static bool CollectPersistedCoroutineLocals(
     CompoundStatementASTNode* body,
     SuspensionPoints* points,
@@ -4567,6 +5085,9 @@ static bool CollectPersistedCoroutineLocals(
   return ok;
 }
 
+/* Persist every function parameter that the body references (parameters always
+ * outlive the ramp and so are copied/moved into the frame). Returns false if a
+ * parameter type can be neither copied nor moved. */
 static bool CollectPersistedCoroutineParameters(
     FunctionInfo* info,
     CompoundStatementASTNode* body,
@@ -4597,6 +5118,7 @@ static bool CollectPersistedCoroutineParameters(
   return ok;
 }
 
+/* Free the persisted-locals bookkeeping list. */
 static void PersistedCoroutineLocalsDestruct(Vector* persisted_locals) {
   if (persisted_locals == NULL) {
     return;
@@ -4607,6 +5129,7 @@ static void PersistedCoroutineLocalsDestruct(Vector* persisted_locals) {
   VectorDestruct(persisted_locals);
 }
 
+/* Look up a persisted-local record by its symbol. */
 static CoroutinePersistedLocal* FindPersistedCoroutineLocal(Vector* locals,
                                                             Symbol* symbol) {
   if (locals == NULL || symbol == NULL) {
@@ -4621,6 +5144,9 @@ static CoroutinePersistedLocal* FindPersistedCoroutineLocal(Vector* locals,
   return NULL;
 }
 
+/* After inserting a statement at `insert_index`, shift the recorded statement
+ * indices of any suspension points in the same compound that come at or after
+ * it, keeping their positions accurate. */
 static void AdjustSuspensionPointIndicesAfterInsert(SuspensionPoints* points,
                                                     CompoundStatementASTNode* compound,
                                                     size_t insert_index) {
@@ -4638,6 +5164,8 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
     Vector* persisted_locals,
     SuspensionPoints* points);
 
+/* Recurse into a statement's sub-statements to insert persisted-local store
+ * statements within nested blocks. */
 static void InsertPersistedCoroutineLocalStoresInStatementChildren(
     ASTNode* stmt,
     CoroutineFrame* frame,
@@ -4665,6 +5193,11 @@ static void InsertPersistedCoroutineLocalStoresInStatementChildren(
   VectorDestruct(&collector.children);
 }
 
+/* After each declaration of a persisted (non-parameter) local, insert a store
+ * that copies/moves the local's value into its frame slot, so subsequent
+ * statements (and code after resumption) see the frame copy. Keeps suspension
+ * point indices in sync as statements are inserted, and recurses into nested
+ * blocks. */
 static void InsertPersistedCoroutineLocalStoresInCompound(
     CompoundStatementASTNode* compound,
     CoroutineFrame* frame,
@@ -4720,6 +5253,7 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
   }
 }
 
+/* Entry point: insert frame stores for all persisted locals in the body. */
 static void InsertPersistedCoroutineLocalStores(
     CompoundStatementASTNode* body,
     CoroutineFrame* frame,
@@ -4729,6 +5263,8 @@ static void InsertPersistedCoroutineLocalStores(
                                                points);
 }
 
+/* For persisted catch-clause parameters, insert a frame store at the top of the
+ * catch body (flagged as a frame store so it doesn't re-run in the resume fn). */
 static void InsertPersistedCoroutineCatchParameterStores(
     CoroutineFrame* frame,
     Vector* persisted_locals,
@@ -4761,6 +5297,9 @@ static void InsertPersistedCoroutineCatchParameterStores(
   }
 }
 
+/* At the top of the ramp body, store each persisted parameter into its frame
+ * slot (copying or moving as decided), flagged as a frame store so the resume
+ * function strips it out. */
 static void InsertPersistedCoroutineParameterStores(
     CompoundStatementASTNode* body,
     CoroutineFrame* frame,
@@ -4796,6 +5335,12 @@ static void InsertPersistedCoroutineParameterStores(
   }
 }
 
+/* Validate and prepare one suspension point. For co_await, this applies
+ * await_transform and member/free operator co_await to obtain the real awaiter,
+ * checks the awaiter satisfies the interface, and decides where the awaiter
+ * object comes from: an existing local declaration, a fresh frame temporary, or
+ * a moved copy. Records the awaiter, its initializer, and any awaitable
+ * temporary back into `point`. Returns false on a semantic error. */
 static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* body,
                                     Symbol* promise,
                                     SuspensionPoint* point) {
@@ -4882,6 +5427,20 @@ static bool ValidateSuspensionPoint(ASTNode* node, CompoundStatementASTNode* bod
   return true;
 }
 
+/* Build the coroutine state machine in the (ramp) function body. Phases:
+ *   1. Allocate a resume label per suspension point, lower each co_yield, and
+ *      replace each co_await/co_yield expression with its await_resume() result
+ *      (or redirect the declared variable's initializer to it).
+ *   2. Walking points in reverse so indices stay valid, splice in for each
+ *      point: the awaiter's frame initialization, the `if (!await_ready) {
+ *      state=N; suspend... }` block, the resume label, a state reset, and the
+ *      awaiter destructor after its use.
+ *   3. At the body top, emit the resume dispatch `if (state==N) goto labelN;`
+ *      chain, then wire up the frame's done flag, resume/destroy function
+ *      pointers (generating those functions), and the initial-suspend handling.
+ *   4. Remove the original (now-relocated) suspension statements and prepend the
+ *      frame starter initializers.
+ * Returns false on allocation failure. */
 static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
                                            CoroutineScan scan,
                                            SuspensionPoints* points,
@@ -4894,6 +5453,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   CompoundStatementASTNode* body =
       (CompoundStatementASTNode*)node->type->info.function.body;
 
+  /* Phase 1: per-point resume labels + replace suspension expressions with their
+   * await_resume() results. */
   LabelASTNode** labels = NULL;
   if (points->count > 0) {
     labels = calloc((size_t)points->count, sizeof(LabelASTNode*));
@@ -4952,6 +5513,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
     }
   }
 
+  /* Phase 2: splice the awaiter init, suspend block, resume label, and destructor
+   * around each point (reverse order keeps earlier indices valid). */
   for (int i = points->count - 1; i >= 0; i--) {
     SuspensionPoint* point = &points->points[i];
     SourceLocation location = point->kind == kSuspensionCoYield
@@ -5017,6 +5580,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
     }
   }
 
+  /* Phase 3: prepend the resume dispatch (`if (state==N) goto labelN;`). */
   for (int i = points->count - 1; i >= 0; i--) {
     SourceLocation location = points->points[i].kind == kSuspensionCoYield
                                   ? points->points[i].co_yield->location
@@ -5069,6 +5633,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
         initial_index++);
     RewriteFrameOwnedSymbols((ASTNode*)body, frame);
   }
+  /* Phase 4: drop the now-relocated original suspension statements (each sat at
+   * index 1 after the dispatch chain was prepended) and add frame starters. */
   for (int i = 0; i < points->count; i++) {
     VectorDeleteElement(body->statements, 1);
   }
@@ -5078,6 +5644,15 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   return true;
 }
 
+/* Top-level coroutine lowering driver. Decides whether a heap frame is needed
+ * (any real suspension at body/initial/final), allocates the promise, gathers
+ * suspension points and the locals/parameters that must outlive them, validates
+ * that all frame-owned objects can be constructed, builds the frame, registers
+ * its owned objects, prepends frame/promise declarations and parameter stores,
+ * lowers co_return/throw into promise calls + final suspend, and finally builds
+ * the suspend/resume state machine via LowerSuspendingCoAwaitFunction (plus the
+ * allocation-failure guard). For the trivial no-suspend case it just inserts the
+ * initial_suspend call and co_return lowering. Returns false on error. */
 static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   if (!scan.is_coroutine || node == NULL || node->type == NULL ||
       !TypeIsFunction(node->type)) {
@@ -5300,6 +5875,9 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   return true;
 }
 
+/* Scan a function body for coroutine keywords; if it is a coroutine, mark the
+ * FunctionInfo and reject illegal coroutine forms (constexpr/consteval, ctor/
+ * dtor, main, varargs, deduced return type). Returns the scan result. */
 static CoroutineScan MarkAndValidateCoroutineFunction(ASTNode* node) {
   CoroutineScan scan = {0};
   if (node == NULL || node->type == NULL || !TypeIsFunction(node->type) ||
@@ -5332,6 +5910,10 @@ static CoroutineScan MarkAndValidateCoroutineFunction(ASTNode* node) {
   return scan;
 }
 
+/* Resolve the promise type and verify it provides all required members for this
+ * coroutine: get_return_object, valid initial/final_suspend awaiters,
+ * yield_value (if co_yield is used), return_value/return_void (matching the
+ * co_return form), and unhandled_exception. Returns true only if all present. */
 static bool ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
   if (!scan.is_coroutine || node == NULL || node->type == NULL ||
       !TypeIsFunction(node->type)) {
@@ -5377,6 +5959,9 @@ static bool ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
   return ok;
 }
 
+/* Error-recovery transform: when the promise is invalid, replace co_await/
+ * co_yield expressions with `0` so analysis can continue without crashing on a
+ * malformed coroutine. */
 static ASTNode* RecoverInvalidCoroutineExpression(ASTNode* node, void* data,
                                                   ASTNodeTransformAction* action) {
   (void)data;
@@ -5392,6 +5977,11 @@ static ASTNode* RecoverInvalidCoroutineExpression(ASTNode* node, void* data,
   return node;
 }
 
+/* Public entry point: analyze and lower a (possibly) coroutine function. Detects
+ * and validates the coroutine, validates the promise type, lowers always-ready
+ * co_awaits, normalizes nested suspensions to statement granularity, re-scans to
+ * recount suspensions, and runs the full frame/state-machine lowering. On an
+ * invalid promise it performs error recovery instead. */
 void SemanticAnalyzeCoroutineFunction(ASTNode* node) {
   CoroutineScan coroutine_scan = MarkAndValidateCoroutineFunction(node);
   bool promise_ok = ValidateCoroutinePromise(node, coroutine_scan);

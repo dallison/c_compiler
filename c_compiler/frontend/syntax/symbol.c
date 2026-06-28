@@ -164,6 +164,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   VectorInit(&sym->attributes);
   sym->alignment = 0;
   sym->template_parameter_index = -1;
+  sym->dependent_value_template_parameter_index = -1;
   SymbolSetType(sym, type);
   sym->die = NULL;
 }
@@ -554,6 +555,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;
+  new_sym->dependent_value_template_parameter_index =
+      sym->dependent_value_template_parameter_index;
   new_sym->namespace_ = sym->namespace_;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep

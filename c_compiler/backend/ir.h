@@ -214,6 +214,18 @@ typedef enum {
   IR_OP(builtin_va_end),    // va_end(op0)
   IR_OP(builtin_va_copy),   // va_copy(op0, op1)
 
+  // Atomic builtins.
+  IR_OP(atomic_load),                  // atomic_load(ptr, order)
+  IR_OP(atomic_store),                 // atomic_store(ptr, value, order)
+  IR_OP(atomic_fetch_add),             // atomic_fetch_add(ptr, value, order)
+  IR_OP(atomic_fetch_sub),             // atomic_fetch_sub(ptr, value, order)
+  IR_OP(atomic_add_fetch),             // atomic_add_fetch(ptr, value, order)
+  IR_OP(atomic_sub_fetch),             // atomic_sub_fetch(ptr, value, order)
+  IR_OP(atomic_compare_exchange_bool), // atomic_cmpxchg_bool(ptr, old, new)
+  IR_OP(atomic_compare_exchange_val),  // atomic_cmpxchg_val(ptr, old, new)
+  IR_OP(atomic_compare_exchange_n),    // atomic_cmpxchg_n(ptr, expected*, new, weak, succ, fail)
+  IR_OP(atomic_fence),                 // atomic_fence()
+
   // Increment and decrement.  First input is the operand, second is
   // a constant for the increment or decrement.
   IR_OP(inc8),

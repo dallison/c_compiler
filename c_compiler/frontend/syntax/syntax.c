@@ -283,7 +283,12 @@ static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
   }
   Symbol* templ = FindFunctionTemplateOverload(first_overload);
   if (templ == NULL) {
-    SyntaxError(syntax, "%s is not a function template", sym->name.value);
+    String suffix;
+    StringInit(&suffix, NULL);
+    SymbolFunctionDiagnosticSuffix(sym, &suffix);
+    SyntaxError(syntax, "%s is not a function template%s",
+                sym->name.value, suffix.value);
+    StringDestruct(&suffix);
     return;
   }
   sym->type->info.function.template_origin = templ;
@@ -298,7 +303,12 @@ static void MarkMemberFunctionTemplateSpecialization(
   }
   Symbol* templ = FindMemberFunctionTemplateOverload(first_overload);
   if (templ == NULL) {
-    SyntaxError(syntax, "%s is not a function template", sym->name.value);
+    String suffix;
+    StringInit(&suffix, NULL);
+    SymbolFunctionDiagnosticSuffix(sym, &suffix);
+    SyntaxError(syntax, "%s is not a function template%s",
+                sym->name.value, suffix.value);
+    StringDestruct(&suffix);
     return;
   }
   sym->type->info.function.template_origin = templ;
@@ -778,7 +788,8 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
       if (member != NULL &&
           (member->is_static ||
            (member->symbol != NULL &&
-            StorageIs(member->symbol->storage, STO(typedef))))) {
+            (StorageIs(member->symbol->storage, STO(typedef)) ||
+             member->symbol->flags.value_set)))) {
         symbol = member->symbol;
       }
     }
@@ -840,7 +851,31 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   }
 
   if (component_count == 1 && !name->absolute) {
-    Symbol* symbol = SyntaxFindSymbol(syntax, name->components.value.p[0]);
+    Symbol* symbol =
+        FollowAlias(SyntaxFindSymbol(syntax, name->components.value.p[0]));
+    if (allow_dependent_template_args && symbol != NULL &&
+        StorageIs(symbol->storage, STO(typedef)) && symbol->type != NULL &&
+        symbol->type->template_origin != NULL &&
+        symbol->type->dependent_member_name != NULL) {
+      TypeRecord* owner =
+          TypeInstantiateClassTemplate(syntax, symbol->type->template_origin,
+                                       symbol->type->template_arguments);
+      Symbol* nested = NULL;
+      if (owner != NULL && TypeIsStructOrUnion(owner) &&
+          owner->info.struct_info != NULL) {
+        StructMember* member =
+            FindStructMember(owner->info.struct_info,
+                             symbol->type->dependent_member_name);
+        if (member != NULL && member->symbol != NULL &&
+            StorageIs(member->symbol->storage, STO(typedef))) {
+          nested = member->symbol;
+        }
+      }
+      TypeRecordDelete(owner);
+      if (nested != NULL) {
+        return nested;
+      }
+    }
     if (template_args != NULL &&
         (allow_dependent_template_args ||
          !TemplateArgumentVectorIsDependent(template_args)) &&
@@ -870,7 +905,8 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
     if (member != NULL &&
         (member->is_static ||
          (member->symbol != NULL &&
-          StorageIs(member->symbol->storage, STO(typedef))))) {
+          (StorageIs(member->symbol->storage, STO(typedef)) ||
+           member->symbol->flags.value_set)))) {
       return FollowAlias(member->symbol);
     }
   }
@@ -896,6 +932,7 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   Symbol* symbol = ns == compiler->global_namespace
       ? FindGlobalSymbol(last)
       : NamespaceFindSymbol(ns, last);
+  symbol = FollowAlias(symbol);
   if (template_args != NULL &&
       (allow_dependent_template_args ||
        !TemplateArgumentVectorIsDependent(template_args)) &&
@@ -3411,14 +3448,22 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             // This might be a declaration, only if there is no initializer
             if (LexLookingAt(parser->lex, TOK(equal))) {
               // This is 'extern int foo = xxx', a definition
+              String symbol_name;
+              StringInit(&symbol_name, NULL);
+              SymbolFunctionDiagnosticName(sym, &symbol_name);
               SyntaxError(syntax, "Duplicate definition of symbol %s",
-                          sym->name.value);
+                          symbol_name.value);
+              StringDestruct(&symbol_name);
             }
           } else {
             if (IsDefinition(parser, old_sym, storage)) {
               // This is a declaration of a previously known definition.
+              String symbol_name;
+              StringInit(&symbol_name, NULL);
+              SymbolFunctionDiagnosticName(sym, &symbol_name);
               SyntaxError(syntax, "Duplicate definition of symbol %s",
-                          sym->name.value);
+                          symbol_name.value);
+              StringDestruct(&symbol_name);
             }
           }
         } else {
@@ -3430,8 +3475,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           }
         }
         if (!TypeEqual(sym->type, old_sym->type)) {
-          SyntaxError(syntax, "Symbol %s redeclared with different type",
-                      sym->name.value);
+          String suffix;
+          StringInit(&suffix, NULL);
+          SymbolFunctionDiagnosticSuffix(sym, &suffix);
+          SyntaxError(syntax, "Symbol %s redeclared with different type%s",
+                      sym->name.value, suffix.value);
+          StringDestruct(&suffix);
           TypeErrorDetails(syntax->lex->current_token_location,
                            sym->type, old_sym->type);
           const char* filename;
@@ -3764,10 +3813,19 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   }
 
   if (old_sym->flags.is_defined && LexLookingAt(syntax->lex, TOK(lbrace))) {
-    SyntaxError(syntax, "Duplicate definition of symbol %s", sym->name.value);
+    String symbol_name;
+    StringInit(&symbol_name, NULL);
+    SymbolFunctionDiagnosticName(sym, &symbol_name);
+    SyntaxError(syntax, "Duplicate definition of symbol %s",
+                symbol_name.value);
+    StringDestruct(&symbol_name);
   } else if (!TypeEqual(sym->type, old_sym->type)) {
-    SyntaxError(syntax, "Symbol %s redeclared with different type",
-                sym->name.value);
+    String suffix;
+    StringInit(&suffix, NULL);
+    SymbolFunctionDiagnosticSuffix(sym, &suffix);
+    SyntaxError(syntax, "Symbol %s redeclared with different type%s",
+                sym->name.value, suffix.value);
+    StringDestruct(&suffix);
     TypeErrorDetails(syntax->lex->current_token_location,
                      sym->type, old_sym->type);
   } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
@@ -4160,6 +4218,20 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       } else {
         arg->type = type;
         arg->is_pack_expansion = CompilerIsCXX() && LexMatch(lex, TOK(ellipsis));
+      }
+      if (CompilerIsCXX() &&
+          (LexLookingAt(lex, TOK(amp)) ||
+           LexLookingAt(lex, TOK(ampamp)))) {
+        bool rvalue = LexMatch(lex, TOK(ampamp));
+        if (!rvalue) {
+          LexMatch(lex, TOK(amp));
+        }
+        TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
+        TypeRecordChain(ref, arg->type);
+        ref->type = arg->type->type;
+        TypeRecordCalculateSize(ref);
+        TypeRecordDelete(arg->type);
+        arg->type = ref;
       }
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;
@@ -5059,8 +5131,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           } else {
             if (IsDefinition(parser, old_sym, storage)) {
               // This is a declaration of a previously known definition.
+              String symbol_name;
+              StringInit(&symbol_name, NULL);
+              SymbolFunctionDiagnosticName(sym, &symbol_name);
               SyntaxError(syntax, "Duplicate definition of local symbol %s",
-                          sym->name.value);
+                          symbol_name.value);
+              StringDestruct(&symbol_name);
               ok = false;
             }
           }
@@ -5075,8 +5151,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         }
 
         if (!TypeEqual(sym->type, old_sym->type)) {
-          SyntaxError(syntax, "Symbol %s redeclared with different type",
-                      sym->name.value);
+          String suffix;
+          StringInit(&suffix, NULL);
+          SymbolFunctionDiagnosticSuffix(sym, &suffix);
+          SyntaxError(syntax, "Symbol %s redeclared with different type%s",
+                      sym->name.value, suffix.value);
+          StringDestruct(&suffix);
           TypeErrorDetails(syntax->lex->current_token_location,
                                     sym->type, old_sym->type);
            const char* filename;
@@ -5375,6 +5455,24 @@ bool SyntaxLookingAtType(Syntax* syntax) {
   }
 }
 
+static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
+  if (!CompilerIsCXX() || !SyntaxCurrentTokenStartsQualifiedName(syntax)) {
+    return false;
+  }
+
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                     TC(openbra) | TC(stmt));
+  bool result = name.is_qualified && LexLookingAt(syntax->lex, TOK(lparen));
+  FullyQualifiedIdentifierDestruct(&name);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
 bool SyntaxLookingAtDeclaration(Syntax* syntax) {
   if (SyntaxLookingAtCXXAttribute(syntax)) {
     LexCheckpoint checkpoint;
@@ -5387,6 +5485,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     return result;
+  }
+  if (CXXQualifiedNameLooksLikeCallExpression(syntax)) {
+    return false;
   }
   switch (syntax->lex->current_token) {
     case TOK(extern):

@@ -2258,6 +2258,101 @@ static TargetInstruction* LowerStore(X86_64Generator* rv, IRNode* node) {
   return SetLoweredNode(node, Store(rv, addr_node, src, opcode));
 }
 
+static X86_64Opcode AtomicLoadOpcode(TypeRecord* type) {
+  if (TypeIsChar(type)) {
+    return TypeIsUnsigned(type) ? X86_64_OP(loadb_z) : X86_64_OP(loadb);
+  }
+  if (TypeIsShort(type)) {
+    return TypeIsUnsigned(type) ? X86_64_OP(loadw_z) : X86_64_OP(loadw);
+  }
+  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+    return X86_64_OP(loadq);
+  }
+  if (TypeIsFloat(type)) {
+    return X86_64_OP(loadss);
+  }
+  if (TypeIsDouble(type)) {
+    return X86_64_OP(loadsd);
+  }
+  return X86_64_OP(loadl);
+}
+
+static X86_64Opcode AtomicStoreOpcode(TypeRecord* type) {
+  if (TypeIsChar(type)) {
+    return X86_64_OP(storeb);
+  }
+  if (TypeIsShort(type)) {
+    return X86_64_OP(storew);
+  }
+  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+    return X86_64_OP(storeq);
+  }
+  if (TypeIsFloat(type)) {
+    return X86_64_OP(storess);
+  }
+  if (TypeIsDouble(type)) {
+    return X86_64_OP(storesd);
+  }
+  return X86_64_OP(storel);
+}
+
+static TargetInstruction* LowerAtomicLoad(X86_64Generator* rv, Generator* gen,
+                                          IRNode* node) {
+  TargetInstruction* result =
+      Load(rv, node->inputs.value.p[0], AtomicLoadOpcode(node->type));
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(rv, result, dest,
+                           MoveOpcodeForLoad(AtomicLoadOpcode(node->type)));
+  }
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerAtomicStore(X86_64Generator* rv, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  IRNode* src_node = node->inputs.value.p[1];
+  TargetInstruction* src = Materialize(rv, src_node);
+  return SetLoweredNode(node, Store(rv, addr_node, src,
+                                    AtomicStoreOpcode(src_node->type)));
+}
+
+static TargetInstruction* LowerAtomicFetchAddSub(X86_64Generator* rv,
+                                                 Generator* gen, IRNode* node,
+                                                 bool add, bool return_new) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  IRNode* value_node = node->inputs.value.p[1];
+  TargetInstruction* old_value =
+      Load(rv, addr_node, AtomicLoadOpcode(node->type));
+  TargetInstruction* value = Materialize(rv, value_node);
+  TargetInstruction* new_value = Emit(
+      rv, NewInstruction2((TypeIsLongLong(node->type) ||
+                           TypeIsPointerOrArray(node->type))
+                              ? (add ? X86_64_OP(add) : X86_64_OP(sub))
+                              : (add ? X86_64_OP(addl) : X86_64_OP(subl)),
+                          old_value, value));
+  Store(rv, addr_node, new_value, AtomicStoreOpcode(node->type));
+  TargetInstruction* result = return_new ? new_value : old_value;
+  TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(rv, result, dest, MoveOpcodeForLoad(AtomicLoadOpcode(node->type)));
+  }
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerAtomicCompareExchange(X86_64Generator* rv,
+                                                     Generator* gen,
+                                                     IRNode* node,
+                                                     bool expected_is_pointer,
+                                                     bool returns_bool) {
+  (void)rv;
+  (void)gen;
+  (void)node;
+  (void)expected_is_pointer;
+  (void)returns_bool;
+  assert(false);
+  return NULL;
+}
+
 static struct BranchInfo {
   IROpcode cmp;     // IR comparison opcode.
   bool btrue;       // IR branch was btrue.
@@ -3314,6 +3409,19 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
       case kArgLocationRegister: {
         // Argument is in a register.
         TargetInstruction* arg = Materialize(rv, arg_node);
+        if (arg_node->opcode == IR_OP(pusharg) && arg_node->inputs.length > 0) {
+          IRNode* pushed = arg_node->inputs.value.p[0];
+          if (pushed != NULL && pushed->opcode == IR_OP(structreturn)) {
+            TargetInstruction* struct_return = GetLoweredNode(pushed);
+            if (struct_return == NULL) {
+              struct_return = Materialize(rv, pushed);
+            }
+            TargetInstruction* move =
+                Emit(rv, NewInstruction1(X86_64_OP(mv), struct_return));
+            move->dest = arg_location->location.reg;
+            break;
+          }
+        }
         if (TypeIsStructOrUnion(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
@@ -3992,6 +4100,36 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
 
     case IR_OP(builtin_va_copy):
       return LowerBuiltinVaCopy(rv, node);
+
+    case IR_OP(atomic_load):
+      return LowerAtomicLoad(rv, gen, node);
+
+    case IR_OP(atomic_store):
+      return LowerAtomicStore(rv, node);
+
+    case IR_OP(atomic_fetch_add):
+      return LowerAtomicFetchAddSub(rv, gen, node, true, false);
+
+    case IR_OP(atomic_fetch_sub):
+      return LowerAtomicFetchAddSub(rv, gen, node, false, false);
+
+    case IR_OP(atomic_add_fetch):
+      return LowerAtomicFetchAddSub(rv, gen, node, true, true);
+
+    case IR_OP(atomic_sub_fetch):
+      return LowerAtomicFetchAddSub(rv, gen, node, false, true);
+
+    case IR_OP(atomic_compare_exchange_bool):
+      return LowerAtomicCompareExchange(rv, gen, node, false, true);
+
+    case IR_OP(atomic_compare_exchange_val):
+      return LowerAtomicCompareExchange(rv, gen, node, false, false);
+
+    case IR_OP(atomic_compare_exchange_n):
+      return LowerAtomicCompareExchange(rv, gen, node, true, true);
+
+    case IR_OP(atomic_fence):
+      return SetLoweredNode(node, GetIntConstant(rv, node, kTargetType32Bit, 0));
       
     case IR_OP(decsp):
     case IR_OP(savesp):

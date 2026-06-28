@@ -106,6 +106,21 @@ typedef enum {
   AST_OP(builtin_va_arg),
   AST_OP(builtin_va_end),
   AST_OP(builtin_va_copy),
+  AST_OP(builtin_atomic_load),
+  AST_OP(builtin_atomic_store),
+  AST_OP(builtin_atomic_fetch_add),
+  AST_OP(builtin_atomic_fetch_sub),
+  AST_OP(builtin_atomic_add_fetch),
+  AST_OP(builtin_atomic_sub_fetch),
+  AST_OP(builtin_atomic_compare_exchange_bool),
+  AST_OP(builtin_atomic_compare_exchange_val),
+  AST_OP(builtin_atomic_compare_exchange_n),
+  AST_OP(builtin_atomic_fence),
+  AST_OP(builtin_source_file),
+  AST_OP(builtin_source_line),
+  AST_OP(builtin_source_column),
+  AST_OP(builtin_source_function),
+  AST_OP(builtin_source_pretty_function),
 
   AST_OP(cast),   // Cast AST node token.
   AST_OP(label),  // Label AST node.
@@ -313,6 +328,11 @@ typedef struct ASTNode {
 #define kASTPackExpansion (1 << 13)  // Expression is followed by `...`.
 #define kASTFoldExpression (1 << 14)  // C++ fold expression placeholder.
 #define kASTFoldPackOnLeft (1 << 15)  // Fold pack operand is the left child.
+#define kASTDefaultArgument (1 << 16)  // Expression cloned from a default arg.
+#define kASTDependentDelete (1 << 17)  // Delete expression parsed before type substitution.
+#define kASTDependentArrayDelete (1 << 18)  // Dependent delete[] expression.
+#define kASTDependentFunctorCall (1 << 19)  // Dependent object call expression.
+#define kASTDependentNewInitializer (1 << 20)  // new T(expr) parsed before T substitution.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

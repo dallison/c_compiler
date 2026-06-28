@@ -13,5 +13,8 @@
 
 ASTNode* SyntaxParseExpression(Syntax* syntax, TokenClass followers);
 ASTNode* SyntaxParseSingleExpression(Syntax* syntax, TokenClass followers);
+ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
+                                          bool is_array_delete,
+                                          SourceLocation location);
 
 #endif /* expr_parser_h */

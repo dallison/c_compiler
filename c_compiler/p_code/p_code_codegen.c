@@ -1337,6 +1337,87 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, Store(pcode, addr_node, src, opcode));
 }
 
+static PCodeOpcode AtomicLoadOpcode(TypeRecord* type) {
+  if (TypeIsChar(type)) {
+    return TypeIsUnsigned(type) ? P_OP(ldub) : P_OP(ldb);
+  }
+  if (TypeIsShort(type)) {
+    return TypeIsUnsigned(type) ? P_OP(lduh) : P_OP(ldh);
+  }
+  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+    return P_OP(ldx);
+  }
+  if (TypeIsFloat(type)) {
+    return P_OP(ldf);
+  }
+  if (TypeIsDouble(type)) {
+    return P_OP(ldd);
+  }
+  return TypeIsUnsigned(type) ? P_OP(lduw) : P_OP(ldw);
+}
+
+static PCodeOpcode AtomicStoreOpcode(TypeRecord* type) {
+  if (TypeIsChar(type)) {
+    return P_OP(stb);
+  }
+  if (TypeIsShort(type)) {
+    return P_OP(sth);
+  }
+  if (TypeIsLongLong(type) || TypeIsPointerOrArray(type)) {
+    return P_OP(stx);
+  }
+  if (TypeIsFloat(type)) {
+    return P_OP(stf);
+  }
+  if (TypeIsDouble(type)) {
+    return P_OP(std);
+  }
+  return P_OP(stw);
+}
+
+static TargetInstruction* LowerAtomicLoad(PCodeGenerator* pcode, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TargetInstruction* load = Load(pcode, addr_node, AtomicLoadOpcode(node->type));
+  ApplyDestInstruction(pcode, node, load);
+  return SetLoweredNode(node, load);
+}
+
+static TargetInstruction* LowerAtomicStore(PCodeGenerator* pcode, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  IRNode* src_node = node->inputs.value.p[1];
+  TargetInstruction* src = Materialize(pcode, src_node);
+  return SetLoweredNode(node, Store(pcode, addr_node, src,
+                                    AtomicStoreOpcode(src_node->type)));
+}
+
+static TargetInstruction* LowerAtomicFetchAddSub(PCodeGenerator* pcode,
+                                                 IRNode* node, bool add,
+                                                 bool return_new) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  IRNode* value_node = node->inputs.value.p[1];
+  TargetInstruction* old_value =
+      Load(pcode, addr_node, AtomicLoadOpcode(node->type));
+  TargetInstruction* value = Materialize(pcode, value_node);
+  TargetInstruction* new_value =
+      Emit(pcode, NewInstruction2(add ? P_OP(add) : P_OP(sub), old_value, value));
+  Store(pcode, addr_node, new_value, AtomicStoreOpcode(node->type));
+  TargetInstruction* result = return_new ? new_value : old_value;
+  ApplyDestInstruction(pcode, node, result);
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerAtomicCompareExchange(PCodeGenerator* pcode,
+                                                     IRNode* node,
+                                                     bool expected_is_pointer,
+                                                     bool returns_bool) {
+  (void)pcode;
+  (void)node;
+  (void)expected_is_pointer;
+  (void)returns_bool;
+  assert(false);
+  return NULL;
+}
+
 static struct {
   bool (*type_func)(TypeRecord*);
   PCodeOpcode opcode;
@@ -1352,6 +1433,7 @@ static struct {
     {TypeIsDouble, P_OP(pushd), 8},
     {TypeIsLongDouble, P_OP(pushd), 8},
     {TypeIsPointerOrArray, P_OP(pushx), 8},
+    {TypeIsNullPointer, P_OP(pushx), 8},
     {TypeIsFunction, P_OP(pushx), 8},
     {TypeIsReference, P_OP(pushx), 8},
     {TypeIsStructOrUnion, P_OP(pushx), 8},
@@ -2278,6 +2360,36 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
 
     case IR_OP(builtin_va_copy):
       return LowerBuiltinVaCopy(pcode, node);
+
+    case IR_OP(atomic_load):
+      return LowerAtomicLoad(pcode, node);
+
+    case IR_OP(atomic_store):
+      return LowerAtomicStore(pcode, node);
+
+    case IR_OP(atomic_fetch_add):
+      return LowerAtomicFetchAddSub(pcode, node, true, false);
+
+    case IR_OP(atomic_fetch_sub):
+      return LowerAtomicFetchAddSub(pcode, node, false, false);
+
+    case IR_OP(atomic_add_fetch):
+      return LowerAtomicFetchAddSub(pcode, node, true, true);
+
+    case IR_OP(atomic_sub_fetch):
+      return LowerAtomicFetchAddSub(pcode, node, false, true);
+
+    case IR_OP(atomic_compare_exchange_bool):
+      return LowerAtomicCompareExchange(pcode, node, false, true);
+
+    case IR_OP(atomic_compare_exchange_val):
+      return LowerAtomicCompareExchange(pcode, node, false, false);
+
+    case IR_OP(atomic_compare_exchange_n):
+      return LowerAtomicCompareExchange(pcode, node, true, true);
+
+    case IR_OP(atomic_fence):
+      return SetLoweredNode(node, GetIntConstant(pcode, node, kTargetType32Bit, 0));
       
     case IR_OP(decsp):
     case IR_OP(savesp):

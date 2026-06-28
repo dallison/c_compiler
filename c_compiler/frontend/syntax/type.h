@@ -91,6 +91,12 @@ typedef struct TemplateArgument {
   Vector* pack_arguments;   // TemplateArgument* entries for bound packs.
 } TemplateArgument;
 
+typedef struct ClassTemplatePartialSpecialization {
+  Symbol* tag_symbol;       // Parsed specialization body tag (not owned).
+  Vector template_parameters;  // TemplateParameter* entries owned.
+  Vector pattern_arguments;    // TemplateArgument* entries owned.
+} ClassTemplatePartialSpecialization;
+
 typedef enum {
   kCXXSpecialMemberNone,
   kCXXSpecialMemberDefaultConstructor,
@@ -246,6 +252,7 @@ struct Struct {
   bool is_aggregate; // True if this is a C++ aggregate class.
   bool cxx_special_members_complete;  // C++ special members declared.
   Vector template_parameters;  // TemplateParameter* entries.
+  Vector partial_specializations;  // ClassTemplatePartialSpecialization*.
   Vector deduction_guides;  // Symbol* function-like C++ deduction guides.
   int template_parameter_count;  // Number of parameters for simple templates.
   bool packed;       // __attribute__((packed)): no inter-member padding.
@@ -339,6 +346,8 @@ typedef struct {
   bool declarator_is_parameter_pack;
   enum ParserContext context;
   Struct* cxx_member_owner;
+  Struct* template_substitution_source;
+  Struct* template_substitution_target;
   StructMember* cxx_member_definition;
   Vector* declarator_template_arguments;
 } TypeParser;
@@ -427,6 +436,10 @@ Symbol* StructFindVTableSymbol(Struct* complete, Struct* source,
                                int source_offset);
 
 void TypeRecordToString(TypeRecord* type, String* result);
+void TypeRecordFunctionPrettyName(TypeRecord* func, String* result);
+void SymbolFunctionPrettyName(Symbol* symbol, String* result);
+void SymbolFunctionDiagnosticSuffix(Symbol* symbol, String* result);
+void SymbolFunctionDiagnosticName(Symbol* symbol, String* result);
 
 //
 // TypeParser

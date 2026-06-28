@@ -45,6 +45,7 @@ sh_test(
     ],
     data = CXX_TEST_DATA + [
         "//:davecc",
+        "//:libc_headers",
     ],
 )
 
