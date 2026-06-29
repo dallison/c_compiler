@@ -1607,9 +1607,13 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
     return ParseGenericSelection(syntax, followers);
   }
 
-  // Check for identifier.
+  // Check for identifier.  In C++ an unqualified operator-function-id (e.g.
+  // `operator+`) is also a valid primary expression naming a free operator
+  // function, so route a leading `operator` keyword through the same identifier
+  // path (SyntaxParseFullyQualifiedIdentifier already parses the operator name).
   if (LexLookingAt(lex, TOK(identifier)) ||
-      LexLookingAt(lex, TOK(coloncolon))) {
+      LexLookingAt(lex, TOK(coloncolon)) ||
+      (CompilerIsCXX() && LexLookingAt(lex, TOK(operator)))) {
     return ParseIdentifier(syntax, followers);
   }
 
