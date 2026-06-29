@@ -11824,6 +11824,35 @@ static TypeRecord* ParseCXXConversionType(TypeParser* parser) {
   return result;
 }
 
+bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(operator))) {
+    return false;
+  }
+  // Distinguish a conversion-function-id (`operator <type-id>`) from an
+  // operator-function-id (`operator+`, `operator()`, `operator[]`, ...) by
+  // peeking at the token following `operator`: only a conversion names a type.
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool is_conversion = SyntaxLookingAtType(syntax);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+
+  if (!is_conversion) {
+    return SyntaxParseOperatorFunctionName(syntax, name);
+  }
+
+  // `operator <type-id>`: reuse the declaration-time conversion-type parser and
+  // name builder so the produced lookup key matches the registered member name.
+  LexNextToken(syntax->lex);  // consume `operator`
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* type = ParseCXXConversionType(&parser);
+  ConversionOperatorName(type, name);
+  TypeParserDestruct(&parser);
+  return true;
+}
+
 static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
                                               Struct* owner,
                                               TypeRecord* return_type,

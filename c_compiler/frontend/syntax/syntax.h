@@ -104,6 +104,14 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
 bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
+// Parses an operator-function-id (operator+, operator(), operator[], ...) or a
+// conversion-function-id (operator <type-id>) used as the member name in an
+// explicit member access such as `x.operator+` or `p->operator int`.  The lexer
+// must be positioned at the `operator` keyword.  On success `name` (which the
+// function initializes) holds the registered member name, matching the names
+// produced at declaration time.  Returns false (leaving `name` untouched) if not
+// positioned at `operator`.
+bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
 void SyntaxParseStaticAssert(Syntax* syntax);
 // Parses a C++ 'friend' declaration appearing inside the body of class
 // 'befriending'.  Handles friend class declarations ('friend class X;' and

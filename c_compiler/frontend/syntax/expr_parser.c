@@ -1829,6 +1829,19 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
+  } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(operator))) {
+    // Explicit operator / conversion call, e.g. `x.operator+(y)`,
+    // `x.operator()(y)`, `p->operator int()`.  Build the same member name the
+    // operator/conversion function was registered under so the access resolves
+    // to it.
+    String op_name;
+    if (SyntaxParseMemberOperatorName(syntax, &op_name)) {
+      member_name = NewString(op_name.value);
+      StringDestruct(&op_name);
+    } else {
+      SyntaxError(syntax, "Expected operator or conversion name");
+      member_name = NewString(SyntaxFakeName(syntax));
+    }
   } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(tilde))) {
     if (LexLookingAt(syntax->lex, TOK(identifier))) {
       member_name = NewString("~");
