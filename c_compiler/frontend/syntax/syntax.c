@@ -1085,6 +1085,13 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
   }
   bool ok = InsertLocalSymbol(syntax->local_symbol_stack, symbol);
   if (ok) {
+    // Remember that this name was introduced at block scope.  Per
+    // [basic.lookup.argdep], if ordinary lookup for a function call finds a
+    // block-scope function declaration, argument-dependent lookup is
+    // suppressed.  (The ADL gate additionally filters out the invented
+    // placeholder symbols synthesized for calls to as-yet-undeclared functions
+    // that are meant to be found by ADL.)
+    symbol->flags.is_block_scope = true;
     VectorAppend(&syntax->all_local_symbols, symbol);
   }
   return ok;

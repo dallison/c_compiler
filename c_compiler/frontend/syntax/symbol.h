@@ -81,6 +81,7 @@ typedef struct Symbol {
     bool is_tentative_decl: 1;     // Tentative declaration.
     bool is_forward_declared: 1;   // Symbol is forward declared.
     bool is_local: 1;              // Local symbol.
+    bool is_block_scope: 1;        // Declared at block (local) scope.
     bool is_argument: 1;           // Defined in function prototype.
     bool is_temp: 1;               // Temporary (invented).
     bool address_taken: 1;         // The address has been taken in the program.

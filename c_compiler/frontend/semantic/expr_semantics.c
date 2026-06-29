@@ -3829,8 +3829,29 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   VectorInit(&candidates);
   AddFunctionOverloadCandidates(&candidates, id->symbol);
   size_t ordinary_count = candidates.length;
+  // [basic.lookup.argdep]/3: argument-dependent lookup produces no candidates
+  // when ordinary unqualified lookup for the call name finds
+  //   * a declaration that is neither a function nor a function template
+  //     (e.g. a local variable, parameter, or type that shadows a namespace
+  //     function), or
+  //   * a block-scope function declaration that is not a using-declaration.
+  // In those cases only the ordinary-lookup result is considered.  A
+  // using-declaration that introduces a function does not suppress ADL; that
+  // falls out naturally because we follow the alias to the underlying
+  // (namespace-scope) function, which is not flagged block scope.  The invented
+  // placeholder symbols created for calls to as-yet-undeclared functions carry
+  // an unknown argument list and are precisely the names meant to be found
+  // through ADL, so they must not trigger suppression.
+  Symbol* ordinary = FollowUsingAliasForADL(id->symbol);
+  bool ordinary_is_function = ordinary != NULL && ordinary->type != NULL &&
+                              TypeIsFunction(ordinary->type);
+  bool ordinary_suppresses_adl =
+      !ordinary_is_function ||
+      (ordinary->flags.is_block_scope &&
+       !ordinary->type->info.function.unknown_args);
   bool allow_adl = CompilerIsCXX() &&
                    (node->left->flags & kASTQualifiedName) == 0 &&
+                   !ordinary_suppresses_adl &&
                    !FunctionNameSkipsADL(&id->symbol->name);
   if (allow_adl) {
     AddADLFunctionCandidates(&id->symbol->name, node->children, &candidates);
