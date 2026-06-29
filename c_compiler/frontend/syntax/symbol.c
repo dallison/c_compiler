@@ -430,6 +430,10 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
   }
 }
 
+void AppendCXXMangledTypeName(String* out, TypeRecord* type) {
+  AppendCXXTypeEncoding(out, type);
+}
+
 static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
   TypeRecord* func = symbol->type;
   bool has_implicit_this =

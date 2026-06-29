@@ -16,6 +16,7 @@ filegroup(
         "libc/include/memory",
         "libc/include/source_location",
         "libc/include/type_traits",
+        "libc/include/typeinfo",
         "libc/include/utility",
     ],
     visibility = ["//visibility:public"],
@@ -119,6 +120,7 @@ LIBC_SRCS = [
     "libc/cdiv.c",
     "libc/ctype.c",
     "libc/cxx_new.c",
+    "libc/cxx_rtti.c",
     "libc/eh_frame.c",
     "libc/eh_throw.c",
     "libc/exit.c",
@@ -361,6 +363,7 @@ cc_library(
         "c_compiler/frontend/semantic/expr_semantics.c",
         "c_compiler/optimization/gvn.c",
         "c_compiler/frontend/semantic/init_semantics.c",
+        "c_compiler/frontend/semantic/rtti.c",
         "c_compiler/backend/ir.c",
         "c_compiler/frontend/lexical/lex.c",
         "c_compiler/optimization/optimizer.c",
@@ -898,6 +901,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1020,6 +1024,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
   "libc/eh_frame.c"
   "libc/eh_throw.c"
   "libc/exit.c"
@@ -1142,6 +1147,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1258,6 +1264,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1376,6 +1383,7 @@ libc_srcs=(
   "libc/cdiv.c"
   "libc/ctype.c"
   "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"

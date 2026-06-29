@@ -141,6 +141,9 @@ Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 void SymbolSetCXXMangledAsmName(Symbol* symbol);
+// Appends the Itanium-style mangled encoding of `type` to `out`.  Used to form
+// canonical, stable keys/symbol names for RTTI type_info objects.
+void AppendCXXMangledTypeName(String* out, struct TypeRecord* type);
 void SymbolSetCXXDataAsmName(Symbol* symbol, struct Struct* owner);
 
 // Adds attribute and takes ownership of the Attribute.

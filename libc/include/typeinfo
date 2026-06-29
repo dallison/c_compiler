@@ -1,0 +1,60 @@
+//
+//  typeinfo
+//  c_compiler
+//
+//  Minimal C++ RTTI support header for DaveCC.
+//
+//  std::type_info objects are emitted by the compiler (see rtti.c) with the
+//  exact field layout declared here; this class only provides accessors over
+//  that layout, so it must stay a non-polymorphic, standard-layout type whose
+//  first member is __name.  Equality is by object identity, which holds because
+//  the compiler emits one weak type_info per type.
+//
+//  Simplifications relative to the standard:
+//   * type_info has no virtual members (the standard's virtual destructor would
+//     introduce a vptr and shift the layout the compiler emits).
+//   * bad_cast / bad_typeid are minimal standalone classes (not derived from
+//     std::exception, which DaveCC does not yet provide).
+//
+
+#ifndef typeinfo_h
+#define typeinfo_h
+
+namespace std {
+
+class type_info {
+ private:
+  // Layout must match the object emitted by the compiler.
+  const char* __name;
+  const void* __bases;
+  long __base_count;
+
+  // Not copyable.
+  type_info(const type_info&);
+  type_info& operator=(const type_info&);
+
+ public:
+  const char* name() const { return __name; }
+
+  bool operator==(const type_info& other) const { return this == &other; }
+  bool operator!=(const type_info& other) const { return this != &other; }
+
+  bool before(const type_info& other) const { return this < &other; }
+  unsigned long hash_code() const { return (unsigned long)(const void*)this; }
+};
+
+class bad_cast {
+ public:
+  bad_cast() {}
+  const char* what() const { return "std::bad_cast"; }
+};
+
+class bad_typeid {
+ public:
+  bad_typeid() {}
+  const char* what() const { return "std::bad_typeid"; }
+};
+
+}  // namespace std
+
+#endif /* typeinfo_h */

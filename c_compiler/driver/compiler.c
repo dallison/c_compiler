@@ -1062,6 +1062,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_global_destructor_calls);
   VectorInit(&compiler->cxx_this_adjustor_thunks);
+  MapInitForCharPointerKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->pending_template_instantiations);
@@ -1446,6 +1447,10 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
   return true;
 }
 
+static void FreeRttiTypeInfoKey(MapKeyValue* kv) {
+  free(kv->key.p);
+}
+
 void CompilerDestruct(Compiler* compiler) {
   ConstexprPCodeClearImageCache();
 
@@ -1516,6 +1521,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->cxx_global_destructor_calls);
   VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
                              /*free_element=*/true);
+  MapDestructWithContents(&compiler->rtti_typeinfo_map, FreeRttiTypeInfoKey);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {
     LiteralDelete(compiler->literals.value.p[i]);

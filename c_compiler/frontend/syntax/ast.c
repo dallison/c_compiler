@@ -238,6 +238,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return ">>=";
     case AST_OP(sizeof):
       return "sizeof";
+    case AST_OP(typeid):
+      return "typeid";
     case AST_OP(div):
       return "/";
     case AST_OP(diveq):
@@ -1512,6 +1514,7 @@ static ASTNode* CastASTNodeClone(const ASTNode* node,
   to->cast_type = from->cast_type;
   to->expr = ASTNodeClone(from->expr, func, data, &to->base);
   to->kind = from->kind;
+  to->dynamic_runtime = from->dynamic_runtime;
   TypeRecordIncRef(to->cast_type);
   return func(&to->base, data);
 }
@@ -1554,6 +1557,7 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
   TypeRecordIncRef(type);
   node->expr = expr;
   node->kind = kCastCStyle;
+  node->dynamic_runtime = false;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;
 }
@@ -1724,6 +1728,91 @@ ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location) {
   ASTNode* node = NewSizeofASTNodeWithExpression(expr, location);
   ((SizeofASTNode*)node)->is_pack_size = true;
   return node;
+}
+
+// typeid AST Node
+
+static void TypeidASTNodeDelete(ASTNode* node) {
+  TypeidASTNode* tnode = (TypeidASTNode*)node;
+  if (tnode->expr != NULL) {
+    ASTNodeDelete(tnode->expr);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void TypeidASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  TypeidASTNode* tnode = (TypeidASTNode*)node;
+  fprintf(fp, "typeid ");
+  if (tnode->expr != NULL) {
+    ASTNodePrint(tnode->expr, indents + 2, fp);
+  }
+}
+
+static void TypeidASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                      ASTNode* child, bool delete_old_child) {
+  TypeidASTNode* node = (TypeidASTNode*)parent;
+  ASTNode* old = node->expr;
+  node->expr = child;
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* TypeidASTNodeClone(const ASTNode* node,
+                                   ASTNode* (*func)(ASTNode* node, void*),
+                                   void* data) {
+  TypeidASTNode* from = (TypeidASTNode*)node;
+  TypeidASTNode* to = ASTArenaAlloc(sizeof(TypeidASTNode));
+  memcpy(&to->base, &from->base, sizeof(to->base));
+  to->expr = from->expr != NULL ? ASTNodeClone(from->expr, func, data, &to->base)
+                                : NULL;
+  to->operand_type = from->operand_type;
+  return func(&to->base, data);
+}
+
+static void TypeidASTNodeVisit(ASTNode* node,
+                               void (*func)(ASTNode* node, void*, int,
+                                            VisitorMode),
+                               int child_id, void* data) {
+  TypeidASTNode* n = (TypeidASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  if (n->expr != NULL) {
+    ASTNodeVisit(n->expr, func, 0, data);
+  }
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void TypeidASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
+                                   void* data) {
+  TypeidASTNode* n = (TypeidASTNode*)node;
+  if (n->expr != NULL) {
+    ASTNodeTransformChild(node, 0, n->expr, func, data);
+  }
+}
+
+static ASTNodeVirtuals typeid_vtbl = {TypeidASTNodeDelete, TypeidASTNodePrint,
+                                      TypeidASTNodeReplaceChild,
+                                      TypeidASTNodeClone, TypeidASTNodeVisit,
+                                      ValueAlwaysUsed, TypeidASTNodeTransform};
+
+ASTNode* NewTypeidASTNodeWithType(TypeRecord* type, SourceLocation location) {
+  TypeidASTNode* node = ASTArenaAlloc(sizeof(TypeidASTNode));
+  ASTNodeInit(&node->base, AST_OP(typeid), NULL, location, &typeid_vtbl);
+  node->expr = NULL;
+  node->operand_type = type;
+  return (ASTNode*)node;
+}
+
+ASTNode* NewTypeidASTNodeWithExpression(ASTNode* expr, SourceLocation location) {
+  TypeidASTNode* node = ASTArenaAlloc(sizeof(TypeidASTNode));
+  ASTNodeInit(&node->base, AST_OP(typeid), NULL, location, &typeid_vtbl);
+  node->expr = expr;
+  node->operand_type = NULL;
+  if (expr != NULL) {
+    expr->parent = (ASTNode*)node;
+  }
+  return (ASTNode*)node;
 }
 
 static void MacroNameASTNodeDelete(ASTNode* node) {

@@ -16,6 +16,7 @@
 #include "compiler.h"
 #include "errors.h"
 #include "symbol_table.h"
+#include "rtti.h"
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -4622,6 +4623,100 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
 
+// Finds the std::<name> class type, or NULL if it is not declared (e.g. the
+// relevant standard header has not been included).
+static TypeRecord* FindStdClassType(const char* name) {
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  if (std_ns == NULL) {
+    return NULL;
+  }
+  String class_name;
+  StringInit(&class_name, name);
+  Symbol* sym = NamespaceFindSymbol(std_ns, &class_name);
+  StringDestruct(&class_name);
+  if (sym == NULL || sym->type == NULL || !TypeIsStructOrUnion(sym->type)) {
+    return NULL;
+  }
+  return sym->type;
+}
+
+static bool TypeIsPolymorphicClass(TypeRecord* type) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         FindStructMemberByName(type->info.struct_info, "__vptr") != NULL;
+}
+
+// Lowers a typeid operator into the underlying std::type_info access.  The
+// static form yields the address of the type's emitted type_info object; the
+// polymorphic form (a glvalue of polymorphic class type) reads the most-derived
+// type_info out of the object's vtable header at runtime.  Returns a fully
+// analyzed replacement expression.
+static ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
+  SourceLocation location = node->base.location;
+  TypeRecord* type_info_type = FindStdClassType("type_info");
+  if (type_info_type == NULL) {
+    SemanticError((ASTNode*)node,
+                  "typeid requires <typeinfo> to be included");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    node->base.flags |= kASTAnalyzed;
+    return (ASTNode*)node;
+  }
+
+  bool polymorphic = false;
+  TypeRecord* static_type = node->operand_type;
+  ASTNode* operand = node->expr;
+  if (operand != NULL) {
+    operand = AnalyzeExpression(operand);
+    node->expr = operand;
+    static_type = operand->type;
+    bool glvalue = operand->value_category == kValueCategoryLvalue ||
+                   operand->value_category == kValueCategoryXvalue;
+    if (glvalue && TypeIsPolymorphicClass(static_type)) {
+      polymorphic = true;
+    }
+  }
+  if (static_type != NULL && TypeIsReference(static_type)) {
+    static_type = static_type->next;
+  }
+
+  TypeRecord* type_info_ptr = NewPointerTo(kQualPlain, type_info_type);
+
+  ASTNode* result;
+  if (polymorphic) {
+    // *(const type_info*)( (&operand)->__vptr[-1] )
+    ASTNode* address =
+        NewUnaryASTNode(AST_OP(address), NULL, location, operand);
+    ASTNode* vptr = NewBinaryASTNode(
+        AST_OP(arrow), NULL, location, address,
+        NewStringConstantASTNode(NewString("__vptr"), NULL, location));
+    ASTNode* slot = NewBinaryASTNode(
+        AST_OP(subscript), NULL, location, vptr,
+        NewIntConstantASTNode(-1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                              location));
+    ASTNode* as_ptr = NewCastASTNode(type_info_ptr, location, slot);
+    result = NewUnaryASTNode(AST_OP(contents), NULL, location, as_ptr);
+  } else {
+    Symbol* type_info_symbol = RttiGetTypeInfoSymbol(static_type);
+    if (type_info_symbol == NULL) {
+      SemanticError((ASTNode*)node,
+                    "cannot form typeid for this type");
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      node->base.flags |= kASTAnalyzed;
+      return (ASTNode*)node;
+    }
+    // *(const type_info*)&__davecc_ti_<type>
+    ASTNode* id = NewIdentifierASTNode(type_info_symbol, location);
+    ASTNode* address = NewUnaryASTNode(AST_OP(address), NULL, location, id);
+    ASTNode* as_ptr = NewCastASTNode(type_info_ptr, location, address);
+    result = NewUnaryASTNode(AST_OP(contents), NULL, location, as_ptr);
+  }
+  return AnalyzeExpression(result);
+}
+
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL || left->declarator != right->declarator) {
     return false;
@@ -4660,28 +4755,73 @@ static void ValidateCXXConstCast(CastASTNode* node) {
   }
 }
 
-static void ValidateCXXDynamicCast(CastASTNode* node) {
+// Analyzes a dynamic_cast.  Identity and upcast (to an unambiguous public base)
+// are resolved statically as before.  Polymorphic downcasts and sidecasts are
+// marked for a run-time check lowered during codegen.  Handles both the pointer
+// form (null on failure) and the reference form (throws std::bad_cast).
+static void AnalyzeDynamicCast(CastASTNode* node) {
   TypeRecord* to = node->cast_type;
   TypeRecord* from = node->expr->type;
-  if (to == NULL || from == NULL || !TypeIsPointer(to) ||
-      !TypeIsPointer(from) || to->next == NULL || from->next == NULL ||
-      !TypeIsStructOrUnion(to->next) || !TypeIsStructOrUnion(from->next)) {
+  bool to_ref = TypeIsReference(to);
+  TypeRecord* to_class = (to_ref || TypeIsPointer(to)) ? to->next : NULL;
+  TypeRecord* from_class = to_ref ? from
+                                  : (TypeIsPointer(from) ? from->next : NULL);
+
+  if (to_class == NULL || from_class == NULL ||
+      !TypeIsStructOrUnion(to_class) || !TypeIsStructOrUnion(from_class)) {
     SemanticError((ASTNode*)node,
-                  "dynamic_cast requires pointer to class type");
+                  "dynamic_cast requires pointer or reference to class type");
+    ASTNodeSetType((ASTNode*)node, to);
     return;
   }
-  if (!TypeEqual(to->next, from->next) &&
-      !TypeIsDerivedFrom(from->next, to->next)) {
+
+  bool identity = TypeEqual(to_class, from_class);
+  bool upcast = !identity && TypeIsDerivedFrom(from_class, to_class);
+
+  if (identity || upcast) {
+    // Statically resolvable (no run-time check needed).
+    node->dynamic_runtime = false;
+    if (to_ref) {
+      if (!TypeEqualIgnoringQualifiers(from_class, to_class)) {
+        SemanticConvertType(node->expr, to_class, kConvertCast);
+      }
+      ASTNodeSetType((ASTNode*)node, to_class);
+      node->base.value_category = to->declarator == kDeclRValueReference
+                                      ? kValueCategoryXvalue
+                                      : kValueCategoryLvalue;
+    } else {
+      SemanticConvertType(node->expr, to, kConvertCast);
+      ASTNodeSetType((ASTNode*)node, to);
+    }
+    return;
+  }
+
+  // Downcast / sidecast: requires a polymorphic source.
+  if (!TypeIsPolymorphicClass(from_class)) {
     SemanticError((ASTNode*)node,
-                  "dynamic_cast is only supported for public base pointer casts");
+                  "dynamic_cast of a non-polymorphic type");
+    ASTNodeSetType((ASTNode*)node, to);
+    return;
+  }
+
+  node->dynamic_runtime = true;
+  if (to_ref) {
+    ASTNodeSetType((ASTNode*)node, to_class);
+    node->base.value_category = to->declarator == kDeclRValueReference
+                                    ? kValueCategoryXvalue
+                                    : kValueCategoryLvalue;
+  } else {
+    ASTNodeSetType((ASTNode*)node, to);
   }
 }
 
 static void AnalyzeCastExpression(CastASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   if (node->kind == kCastDynamic) {
-    ValidateCXXDynamicCast(node);
-  } else if (node->kind == kCastConst) {
+    AnalyzeDynamicCast(node);
+    return;
+  }
+  if (node->kind == kCastConst) {
     ValidateCXXConstCast(node);
   }
   if (TypeIsReference(node->cast_type)) {
@@ -4981,6 +5121,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(sizeof):
       AnalyzeSizeofExpression((SizeofASTNode*)node);
       break;
+
+    case AST_OP(typeid):
+      return AnalyzeTypeidExpression((TypeidASTNode*)node);
 
     case AST_OP(cast):
       AnalyzeCastExpression((CastASTNode*)node);

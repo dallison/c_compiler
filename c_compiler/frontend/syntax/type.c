@@ -25,6 +25,7 @@
 #include "compiler.h"
 #include "errors.h"
 #include "debug.h"
+#include "rtti.h"
 
 static int next_type_id = 0;
 
@@ -824,6 +825,7 @@ Struct* NewStruct(bool is_union) {
   s->is_template = false;
   s->is_aggregate = CompilerIsCXX();
   s->cxx_special_members_complete = false;
+  s->vtables_registered = false;
   s->template_parameter_count = 0;
   s->next_offset = 0;
   s->current_offset = 0;
@@ -10355,8 +10357,12 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
     snprintf(offset_suffix, sizeof(offset_suffix), "%d", source_offset);
     StringAppend(&name, offset_suffix);
   }
+  // The vtable carries two RTTI header entries (offset_to_top and a pointer to
+  // the complete object's type_info) immediately before the function pointers.
+  // __vptr still points at the first function pointer (entry index 2) so that
+  // virtual_index-based dispatch is unchanged.
   Symbol* symbol = NewSymbol(name.value,
-                             NewCXXVTableType(source->virtual_members.length),
+                             NewCXXVTableType(source->virtual_members.length + 2),
                              STO(static));
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
@@ -10376,6 +10382,43 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
   VectorInit(&var->initializers);
   var->is_tls = false;
   var->is_local = false;
+
+  int ptr_size = SizeofPointer();
+  // Header entry 0: offset_to_top -- the byte distance from this subobject's
+  // vptr back to the most-derived object (0 for the primary table).
+  Initializer* ott = malloc(sizeof(Initializer));
+  ott->offset = 0;
+  switch (ptr_size) {
+    case 8:
+      ott->type = kInitTypeLong;
+      ott->value._long = (uint64_t)(int64_t)(-source_offset);
+      break;
+    case 2:
+      ott->type = kInitTypeHalf;
+      ott->value.half = (uint16_t)(-source_offset);
+      break;
+    default:
+      ott->type = kInitTypeWord;
+      ott->value.word = (uint32_t)(-source_offset);
+      break;
+  }
+  VectorAppend(&var->initializers, ott);
+  // Header entry 1: pointer to the complete object's type_info.
+  TypeRecord* complete_type = NewTypeRecord(kTypeStruct, kQualPlain);
+  complete_type->info.struct_info = complete;
+  TypeRecordCalculateSize(complete_type);
+  Symbol* type_info = RttiGetTypeInfoSymbol(complete_type);
+  Initializer* ti = malloc(sizeof(Initializer));
+  ti->offset = (int32_t)ptr_size;
+  if (type_info != NULL) {
+    ti->type = kInitTypeSymbol;
+    ti->value.symbol = type_info;
+  } else {
+    ti->type = (ptr_size == 8) ? kInitTypeLong : kInitTypeWord;
+    ti->value._long = 0;
+  }
+  VectorAppend(&var->initializers, ti);
+
   for (size_t i = 0; i < source->virtual_members.length; i++) {
     StructMember* member = source->virtual_members.value.p[i];
     member = FindCXXFinalOverrider(complete, member);
@@ -10383,7 +10426,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
       continue;
     }
     Initializer* init = malloc(sizeof(Initializer));
-    init->offset = (int32_t)(i * SizeofPointer());
+    init->offset = (int32_t)((i + 2) * SizeofPointer());
     if (member->symbol->type->info.function.is_pure_virtual) {
       if (SizeofPointer() == 8) {
         init->type = kInitTypeLong;
@@ -13568,6 +13611,10 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   LayoutCXXVirtualBaseSpecifiers(str);
   RegisterCXXVTable(parser, str);
   RegisterCXXVBTables(parser, str);
+  // The class's vtables now exist, so any constructor preambles built earlier
+  // during member parsing can have their deferred __vptr initializers emitted.
+  str->vtables_registered = true;
+  SyntaxFlushPendingVPtrInitializers(str);
   
   // Round the size of the struct up to its own alignment (the maximum
   // alignment of its members, or an explicit aligned(N)), as required by the

@@ -177,5 +177,8 @@ void SyntaxParseCXXConstructorInitializerList(
 void SyntaxInsertCXXConstructorPreamble(
     Syntax* syntax, TypeRecord* func, Vector* body,
     CXXConstructorInitList* init_list, SourceLocation location);
+// Emits the __vptr initializers that were deferred (see the preamble) for
+// constructors of `owner`, now that its vtables have been registered.
+void SyntaxFlushPendingVPtrInitializers(struct Struct* owner);
 
 #endif /* syntax_h */

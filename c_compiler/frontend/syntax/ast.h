@@ -90,6 +90,7 @@ typedef enum {
   AST_OP(rshift),
   AST_OP(rshifteq),
   AST_OP(sizeof),
+  AST_OP(typeid),
   AST_OP(div),
   AST_OP(diveq),
   AST_OP(mult),
@@ -488,6 +489,9 @@ typedef struct {
   TypeRecord* cast_type;
   ASTNode* expr;
   CastKind kind;
+  // dynamic_cast that needs a run-time check (polymorphic downcast/sidecast),
+  // lowered to a __davecc_dynamic_cast[_ref] call during codegen.
+  bool dynamic_runtime;
 } CastASTNode;
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
@@ -503,6 +507,18 @@ typedef struct {
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location);
 ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr, SourceLocation location);
 ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location);
+
+// typeid operator.  Carries either a type operand (typeid(type-id)) or an
+// expression operand (typeid(expr)).  Semantic analysis rewrites this node into
+// the underlying type_info access, so it never reaches codegen.
+typedef struct {
+  ASTNode base;
+  ASTNode* expr;            // Expression operand, or NULL for the type form.
+  TypeRecord* operand_type; // Type operand for the type form, else NULL.
+} TypeidASTNode;
+
+ASTNode* NewTypeidASTNodeWithType(TypeRecord* type, SourceLocation location);
+ASTNode* NewTypeidASTNodeWithExpression(ASTNode* expr, SourceLocation location);
 
 // Macro name.
 typedef struct {

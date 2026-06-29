@@ -2508,6 +2508,20 @@ static ASTNode* NewCXXVPtrReceiver(TypeRecord* func, Struct* source,
   return adjusted;
 }
 
+// A constructor's __vptr initialization that could not be emitted when its
+// preamble was built (because the class's vtables had not been registered yet),
+// to be inserted into `body` at `index` once SyntaxFlushPendingVPtrInitializers
+// runs for `owner`.
+typedef struct {
+  Struct* owner;
+  TypeRecord* func;
+  size_t index;
+  SourceLocation location;
+} PendingVPtrInit;
+
+static Vector pending_vptr_inits;
+static bool pending_vptr_inits_initialized = false;
+
 static ASTNode* NewCXXVPtrInitializer(TypeRecord* func, CXXVTableInfo* info,
                                       SourceLocation location) {
   if (func == NULL || !TypeIsFunction(func) ||
@@ -2528,7 +2542,15 @@ static ASTNode* NewCXXVPtrInitializer(TypeRecord* func, CXXVTableInfo* info,
       NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver,
                        NewStringConstantASTNode(NewString("__vptr"), NULL,
                                                 location));
-  ASTNode* value = NewIdentifierASTNode(info->symbol, location);
+  // The vtable begins with two RTTI header entries (offset_to_top and
+  // &type_info); __vptr must point at the first function pointer, i.e. two
+  // entries past the start of the table.
+  ASTNode* value =
+      NewBinaryASTNode(AST_OP(plus), NULL, location,
+                       NewIdentifierASTNode(info->symbol, location),
+                       NewIntConstantASTNode(
+                           2, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                           location));
   return NewExpressionStatementASTNode(
       NewBinaryASTNode(AST_OP(assign), vptr_member->symbol->type,
                        location, target, value),
@@ -2936,13 +2958,32 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     VectorInsertOrAppend(body, insert_at, call);
     insert_at++;
   }
-  Vector* vptr_initializers = NewVector();
-  AppendCXXVPtrInitializers(func, vptr_initializers, location);
-  for (size_t i = 0; i < vptr_initializers->length; i++) {
-    VectorInsertOrAppend(body, insert_at, vptr_initializers->value.p[i]);
-    insert_at++;
+  if (owner->vtables_registered) {
+    Vector* vptr_initializers = NewVector();
+    AppendCXXVPtrInitializers(func, vptr_initializers, location);
+    for (size_t i = 0; i < vptr_initializers->length; i++) {
+      VectorInsertOrAppend(body, insert_at, vptr_initializers->value.p[i]);
+      insert_at++;
+    }
+    VectorDelete(vptr_initializers);
+  } else {
+    // The class is still being parsed, so its vtables (and the symbols the
+    // __vptr initializers must reference) do not exist yet.  Defer the
+    // insertion; SyntaxFlushPendingVPtrInitializers fills it in at `insert_at`
+    // -- right after the base-class initializers -- once the vtables are
+    // registered.  Member initializers and the user body, inserted after this
+    // point, sit at higher indices and remain correctly ordered.
+    if (!pending_vptr_inits_initialized) {
+      VectorInit(&pending_vptr_inits);
+      pending_vptr_inits_initialized = true;
+    }
+    PendingVPtrInit* pending = malloc(sizeof(PendingVPtrInit));
+    pending->owner = owner;
+    pending->func = func;
+    pending->index = insert_at;
+    pending->location = location;
+    VectorAppend(&pending_vptr_inits, pending);
   }
-  VectorDelete(vptr_initializers);
   Vector* complete_restores = NewVector();
   AppendCXXVBPtrInitializers(func, complete_restores, location);
   InsertCXXCompleteObjectGuardedStatements(func, body, &insert_at,
@@ -2964,6 +3005,46 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     VectorInsertOrAppend(body, insert_at, stmt);
     insert_at++;
   }
+}
+
+void SyntaxFlushPendingVPtrInitializers(Struct* owner) {
+  if (!pending_vptr_inits_initialized || owner == NULL) {
+    return;
+  }
+  size_t out = 0;
+  for (size_t i = 0; i < pending_vptr_inits.length; i++) {
+    PendingVPtrInit* pending = pending_vptr_inits.value.p[i];
+    if (pending->owner != owner) {
+      // Keep entries for other (e.g. enclosing) classes still being parsed.
+      pending_vptr_inits.value.p[out++] = pending;
+      continue;
+    }
+    ASTNode* body = pending->func->info.function.body;
+    if (body != NULL && body->op == AST_OP(compound)) {
+      CompoundStatementASTNode* compound = (CompoundStatementASTNode*)body;
+      Vector* vptr_initializers = NewVector();
+      AppendCXXVPtrInitializers(pending->func, vptr_initializers,
+                                pending->location);
+      // VectorInsertOrAppend handles index == length (e.g. an empty body whose
+      // only statements are the deferred __vptr stores), which the strict
+      // VectorInsertBefore inside CompoundASTNodeInsertStatement does not.
+      size_t at = pending->index;
+      for (size_t j = 0; j < vptr_initializers->length; j++) {
+        ASTNode* stmt = vptr_initializers->value.p[j];
+        VectorInsertOrAppend(compound->statements, at, stmt);
+        stmt->parent = &compound->base;
+        at++;
+      }
+      if (vptr_initializers->length > 0) {
+        for (size_t k = 0; k < compound->statements->length; k++) {
+          ((ASTNode*)compound->statements->value.p[k])->child_id = (int)k;
+        }
+      }
+      VectorDelete(vptr_initializers);
+    }
+    free(pending);
+  }
+  pending_vptr_inits.length = out;
 }
 
 static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,

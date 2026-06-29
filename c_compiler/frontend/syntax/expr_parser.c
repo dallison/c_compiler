@@ -2190,6 +2190,35 @@ done:
   return result;
 }
 
+// Parses a typeid operator: `typeid ( type-id )` or `typeid ( expression )`.
+// Disambiguates via SyntaxLookingAtType, mirroring the sizeof type/expression
+// split.  The resulting node is rewritten into a type_info access during
+// semantic analysis.
+static ASTNode* ParseTypeid(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  SyntaxNeedBracket(syntax, TOK(lparen), followers);
+  ASTNode* result;
+  if (SyntaxLookingAtType(syntax)) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    if (sym != NULL && sym->type != NULL) {
+      // Retain the declarator's type (sym is intentionally not deleted, like
+      // the cast-expression type-name path).
+      type = sym->type;
+    }
+    TypeParserDestruct(&parser);
+    result = NewTypeidASTNodeWithType(type, location);
+  } else {
+    ASTNode* expr = SyntaxParseExpression(syntax, followers | TC(closebra));
+    result = NewTypeidASTNodeWithExpression(expr, location);
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  return result;
+}
+
 static Symbol* FindCXXAllocationFunctionByArgCount(Symbol* first,
                                                    size_t arg_count);
 
@@ -3180,6 +3209,13 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (LexMatch(syntax->lex, TOK(sizeof))) {
     return ParseSizeof(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(typeid))) {
+    // typeid(...) is a postfix-expression, so allow trailing postfix operators
+    // such as the `.name()` member call.
+    ASTNode* result = ParseTypeid(syntax, followers);
+    return ParsePostfixOperators(syntax, result, followers);
   }
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(new))) {

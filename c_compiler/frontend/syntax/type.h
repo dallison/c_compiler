@@ -255,6 +255,10 @@ struct Struct {
   bool is_template;  // True if this is a C++ class template.
   bool is_aggregate; // True if this is a C++ aggregate class.
   bool cxx_special_members_complete;  // C++ special members declared.
+  // True once RegisterCXXVTable has run for this class (i.e. vtable_symbols is
+  // populated).  Constructor preambles built before this point defer their
+  // __vptr initializers, since the vtables they reference do not exist yet.
+  bool vtables_registered;
   Vector template_parameters;  // TemplateParameter* entries.
   Vector partial_specializations;  // ClassTemplatePartialSpecialization*.
   Vector deduction_guides;  // Symbol* function-like C++ deduction guides.

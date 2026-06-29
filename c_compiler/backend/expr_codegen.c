@@ -10,6 +10,7 @@
 #include <assert.h>
 #include "compiler.h"
 #include "symbol_table.h"
+#include "rtti.h"
 
 // Table to translate an AST node and type into an IR operation.
 static struct {
@@ -1547,6 +1548,55 @@ static Symbol* GetDaveCCThrowFunction(SourceLocation location) {
   return symbol;
 }
 
+static Symbol* GetDaveCCDynamicCastFunction(bool is_reference,
+                                            SourceLocation location) {
+  const char* func_name =
+      is_reference ? "__davecc_dynamic_cast_ref" : "__davecc_dynamic_cast";
+  String name;
+  StringInit(&name, func_name);
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_ptr);
+  symbol = NewSymbol(func_name, func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+// Lowers a polymorphic dynamic_cast (downcast/sidecast) into a call to the RTTI
+// runtime.  The pointer form yields the runtime result directly (null on
+// failure); the reference form calls the throwing variant.
+static IRNode* GenerateDynamicCast(Generator* gen, CastASTNode* node) {
+  bool is_reference = TypeIsReference(node->cast_type);
+  TypeRecord* dest_class =
+      is_reference ? node->cast_type->next : node->cast_type->next;
+  IRNode* source = GenerateExpression(gen, node->expr);
+
+  Symbol* type_info_symbol = RttiGetTypeInfoSymbol(dest_class);
+  Symbol* func_symbol =
+      GetDaveCCDynamicCastFunction(is_reference, node->base.location);
+  IRNode* func = GeneratorGetVariable(gen, func_symbol);
+  IRNode* type_info = GeneratorGetVariable(gen, type_info_symbol);
+
+  IRNode* call = NewIR1(IR_OP(calla), func);
+  Vector args = {0};
+  PushArg(gen, call, type_info, 1, &args);
+  PushArg(gen, call, source, 0, &args);
+  for (ssize_t i = args.length - 1; i >= 0; i--) {
+    IRAddInput(call, GeneratorEmit(gen, args.value.p[i]), false);
+  }
+  VectorDestruct(&args);
+  return IRSetType(GeneratorEmit(gen, call), node->base.type);
+}
+
 static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
                                           SourceLocation location) {
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
@@ -2353,6 +2403,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     }
 
     case AST_OP(cast):
+      if (cast_node->kind == kCastDynamic && cast_node->dynamic_runtime) {
+        result = GenerateDynamicCast(gen, cast_node);
+        break;
+      }
       // Propagate flags down to child.  Use OR rather than assignment so that
       // flags the operand already carries are preserved.  In particular an
       // array/function/struct operand has kASTNeedAddress set during semantic
