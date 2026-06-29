@@ -669,14 +669,14 @@ static bool VectorContainsPointer(Vector* vec, void* value) {
 }
 
 static void ADLAddNamespace(Vector* namespaces, Namespace* ns) {
-  while (ns != NULL) {
-    if (!VectorContainsPointer(namespaces, ns)) {
-      VectorAppend(namespaces, ns);
-    }
-    if (ns == compiler->global_namespace) {
-      break;
-    }
-    ns = ns->parent;
+  // [basic.lookup.argdep]: the associated namespace of a class/enum is its
+  // *innermost* enclosing namespace only - not every enclosing namespace up to
+  // the global scope.  (Functions in the global namespace are still found, but
+  // through ordinary unqualified lookup rather than ADL.)  Adding the whole
+  // chain of ancestors would incorrectly make namespace-scope functions in an
+  // enclosing namespace visible by ADL and could change overload resolution.
+  if (ns != NULL && !VectorContainsPointer(namespaces, ns)) {
+    VectorAppend(namespaces, ns);
   }
 }
 
