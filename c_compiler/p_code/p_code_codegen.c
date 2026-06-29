@@ -1731,7 +1731,11 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
       pcode, NewInstruction1(P_OP(movc),
                              GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
   TargetInstruction* last = zero;
-  int64_t size = var->symbol->type->size;
+  // Prefer the backing symbol's size, but fall back to the memzero node's type
+  // when the destination is a symbol-less slot (e.g. an sret return location).
+  int64_t size = (IRIsVariable(addr_node) && var->symbol != NULL)
+                     ? var->symbol->type->size
+                     : (node->type != NULL ? node->type->size : 0);
   for (int64_t i = 0; i < size; i++) {
     last = Emit(pcode, NewInstruction3(P_OP(stb), zero, addr,
                                        GetIntConstant(pcode, NULL,

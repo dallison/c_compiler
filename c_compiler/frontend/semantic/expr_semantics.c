@@ -3954,6 +3954,21 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       FindStructMember(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||
       !constructor->symbol->type->info.function.is_constructor) {
+    // The target class has no constructor (e.g. it is an aggregate).  Per
+    // [expr.type.conv], a functional cast with a single parenthesized argument
+    // `T(arg)` is equivalent to the explicit type conversion `(T)arg`.  Route it
+    // through a C-style cast so that a user-defined conversion operator on the
+    // argument (and the other standard conversions) are considered, matching the
+    // behavior of the equivalent `(T)arg`.
+    if (node->children->length == 1) {
+      ASTNode* arg = ASTNodeMove(node->children->value.p[0]);
+      ASTNode* cast = NewCastASTNode(type, location, arg);
+      ASTNode* parent = node->base.parent;
+      if (parent != NULL) {
+        ASTNodeReplaceChild(parent, node->base.child_id, cast, true);
+      }
+      return AnalyzeExpression(cast);
+    }
     return NULL;
   }
   bool has_non_invented_constructor = false;

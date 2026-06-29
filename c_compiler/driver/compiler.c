@@ -1071,6 +1071,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   SetInit(&compiler->no_error_warnings, CompareWarning);
   VectorInit(&compiler->diagnostic_stack);
   compiler->diagnostic_suppression_depth = 0;
+  compiler->diagnostic_error_trap_depth = 0;
+  compiler->diagnostic_error_trapped = false;
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;

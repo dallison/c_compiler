@@ -245,6 +245,11 @@ typedef struct {
   // Stack of saved warning states for #pragma diagnostic push/pop.
   Vector diagnostic_stack;
   int diagnostic_suppression_depth;
+  // Tentative-parse error trap: while the depth is non-zero, errors are
+  // swallowed (neither printed nor counted) and `diagnostic_error_trapped` is
+  // set, so a speculative parse can be rolled back without user-visible output.
+  int diagnostic_error_trap_depth;
+  bool diagnostic_error_trapped;
   // Current #pragma pack(n) member alignment cap (0 = no packing in effect).
   int pack_alignment;
   // Stack of saved pack values for #pragma pack(push[,n]) / pack(pop).

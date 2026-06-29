@@ -272,6 +272,24 @@ bool DiagnosticsSuppressed(void) {
   return compiler->diagnostic_suppression_depth > 0;
 }
 
+bool DiagnosticErrorTrapBegin(void) {
+  bool saved = compiler->diagnostic_error_trapped;
+  compiler->diagnostic_error_trap_depth++;
+  compiler->diagnostic_error_trapped = false;
+  return saved;
+}
+
+void DiagnosticErrorTrapEnd(bool saved) {
+  if (compiler->diagnostic_error_trap_depth > 0) {
+    compiler->diagnostic_error_trap_depth--;
+  }
+  compiler->diagnostic_error_trapped = saved;
+}
+
+bool DiagnosticErrorTrapped(void) {
+  return compiler->diagnostic_error_trapped;
+}
+
 void DiagnosticPush(void) {
   VectorAppend(&compiler->diagnostic_stack, DiagnosticSnapshotState());
 }
@@ -356,6 +374,12 @@ static bool IsWarningError(const char* warning) {
 
 void VReportError(const char* filename, int lineno, const char* error,
                   va_list arg) {
+  if (compiler->diagnostic_error_trap_depth > 0) {
+    // A speculative parse is in progress; record that an error occurred but do
+    // not print or count it.  The caller decides whether to roll back.
+    compiler->diagnostic_error_trapped = true;
+    return;
+  }
   if (DiagnosticsSuppressed()) {
     return;
   }

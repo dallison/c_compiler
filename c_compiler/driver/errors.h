@@ -83,6 +83,16 @@ void DiagnosticSuppressBegin(void);
 void DiagnosticSuppressEnd(void);
 bool DiagnosticsSuppressed(void);
 
+// Tentative-parse error trap.  While a trap is active, reported errors are
+// swallowed (neither printed nor counted toward num_errors) and recorded via a
+// sticky flag.  Use to speculatively parse a construct and roll it back on
+// failure without emitting diagnostics.  Traps nest; each Begin clears the flag
+// for the new region, and End restores the enclosing region's flag.  The
+// returned value from Begin must be passed to the matching End.
+bool DiagnosticErrorTrapBegin(void);
+void DiagnosticErrorTrapEnd(bool saved);
+bool DiagnosticErrorTrapped(void);
+
 // #pragma diagnostic {ignored,warning,error} "-W<name>" actions.
 void DiagnosticIgnore(const char* warning);
 void DiagnosticWarn(const char* warning);

@@ -11,13 +11,17 @@
 //  `signed char` so the representation does not depend on a backend correctly
 //  sign-extending sub-word loads.)
 //
+//  Implicit conversions between the categories follow the standard
+//  (strong_ordering -> weak_ordering -> partial_ordering).
+//
 //  Simplifications relative to the standard:
 //   * The comparison-against-literal-0 operators accept any `int` rather than
-//     only the literal 0.
-//   * The categories keep aggregate semantics so the named constants can be
-//     defined as `static constexpr` members.
-//   * Implicit conversions between categories (strong -> weak -> partial) are
-//     not provided.
+//     only the literal 0.  (Restricting them to the literal 0 needs a type that
+//     is constructible only from a null pointer constant; the front end does
+//     not yet model that conversion sequence.)
+//   * The categories keep aggregate semantics with a public `_v` so the named
+//     constants can be defined as `static constexpr` members, rather than
+//     namespace-scope `inline constexpr` objects with a private representation.
 //
 
 #ifndef compare_h
@@ -49,6 +53,9 @@ class weak_ordering {
  public:
   int _v;
 
+  // Implicit conversion to the weaker category (weak -> partial).
+  constexpr operator partial_ordering() const { return partial_ordering{_v}; }
+
   constexpr bool operator==(weak_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(weak_ordering o) const { return _v != o._v; }
 
@@ -67,6 +74,10 @@ class weak_ordering {
 class strong_ordering {
  public:
   int _v;
+
+  // Implicit conversions to the weaker categories (strong -> weak -> partial).
+  constexpr operator weak_ordering() const { return weak_ordering{_v}; }
+  constexpr operator partial_ordering() const { return partial_ordering{_v}; }
 
   constexpr bool operator==(strong_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(strong_ordering o) const { return _v != o._v; }

@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
@@ -3244,17 +3245,80 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
     if (SyntaxLookingAtType(syntax) ||
         LexLookingAt(syntax->lex, TOK(attribute)) ||
         SyntaxLookingAtCXXAttribute(syntax)) {
+      // The leading '(' is followed by something that begins a type, so this is
+      // potentially a cast or compound literal `( type-name ) ...`.  It can,
+      // however, also be a parenthesized functional-cast expression such as
+      // `(T(args))`, where `T(args)` is not a type-id (e.g. the arguments are
+      // values rather than parameter declarations).  Tentatively parse the
+      // type-name; if it does not form a well-formed `( type-name )` (i.e. the
+      // type-name is not immediately followed by ')', or the parse hits an
+      // error), backtrack and reparse the parenthesized construct as an
+      // expression.  Valid casts always succeed here, so their behavior is
+      // unchanged; only inputs that previously failed as casts are rerouted.
+      LexCheckpoint checkpoint;
+      LexCheckpointSave(syntax->lex, &checkpoint);
       TypeParser parser;
-      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
-      TypeRecord* type = TypeParserParseType(&parser, false);
-      Symbol* sym = NULL;
-      if (type == NULL) {
-        SyntaxError(syntax, "Invalid type name");
-        type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-      } else {
-        sym = TypeParserParseDeclarator(&parser, type);
-        type = sym->type;
+      volatile bool parse_completed = false;
+      volatile bool is_type_name = false;
+      TypeRecord* volatile type = NULL;
+      Symbol* volatile sym = NULL;
+      // Trap any diagnostics emitted while speculatively parsing the type-name
+      // so a backtrack stays silent.  `abort_on_error` makes a SyntaxError
+      // longjmp out immediately (so we stop at the first one), while the trap
+      // additionally catches LexErrors (e.g. "Missing close parenthesis"), which
+      // do not honor `abort_on_error`.
+      volatile bool saved_trap = DiagnosticErrorTrapBegin();
+      bool prev_abort_on_error = abort_on_error;
+      // Save the global abort target: parsing the type-name can recurse through
+      // the expression parser (e.g. an array bound) and set up its own trial,
+      // which would otherwise clobber our jmp_buf.
+      jmp_buf saved_abort_state;
+      memcpy(saved_abort_state, error_abort_state, sizeof(error_abort_state));
+      abort_on_error = true;
+      if (setjmp(error_abort_state) == 0) {
+        TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                       syntax->context);
+        type = TypeParserParseType(&parser, false);
+        if (type != NULL) {
+          sym = TypeParserParseDeclarator(&parser, type);
+          type = sym->type;
+          // A well-formed cast / compound-literal type-name is an abstract
+          // declarator ending exactly at the closing ')'.  Two shapes of the
+          // parenthesized functional cast `(T(arg))` slip past a naive check and
+          // must be rejected so we backtrack to expression parsing:
+          //   * a value argument is (mis)parsed as a *named* declarator, e.g.
+          //     `(Fahrenheit(c))` -> "Fahrenheit c"; a real type-name names
+          //     nothing, so require the declarator to be abstract (invented),
+          //   * a type argument is (mis)parsed as a *function* type, e.g.
+          //     `(weak_ordering(strong_ordering::x))`; a bare function type is
+          //     never a valid cast target, so reject it (function pointers,
+          //     which are valid, are not function types).
+          is_type_name = LexLookingAt(syntax->lex, TOK(rparen)) &&
+                         sym != NULL && sym->flags.invented &&
+                         !TypeIsFunction(type);
+        }
+        parse_completed = true;
       }
+      abort_on_error = prev_abort_on_error;
+      memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
+      bool trapped = DiagnosticErrorTrapped();
+      DiagnosticErrorTrapEnd(saved_trap);
+      if (!parse_completed || trapped || !is_type_name) {
+        // Not a well-formed `( type-name )`; abandon the trial parse (its
+        // TypeParser is only released when it completed cleanly, since a
+        // longjmp leaves it in a partial state) and reparse as an expression.
+        if (parse_completed) {
+          if (sym != NULL) {
+            SymbolDelete(sym);
+          }
+          TypeParserDestruct(&parser);
+        }
+        LexCheckpointRestore(syntax->lex, &checkpoint);
+        LexCheckpointDestruct(&checkpoint);
+        syntax->found_open_paren = true;
+        return ParsePostfixExpression(syntax, followers);
+      }
+      LexCheckpointDestruct(&checkpoint);
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
       // If the (type-name) is followed by an initializer list we have
       // a compound literal.  This is actually a postfix expression so we

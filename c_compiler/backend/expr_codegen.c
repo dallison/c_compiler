@@ -1095,6 +1095,11 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type)) {
     if (!CanElideMemzero(init)) {
       IRNode* memzero = GeneratorEmit(gen, NewIR1(IR_OP(memzero), dest));
+      // The memzero spans the whole object being initialized.  Record its type
+      // explicitly: the destination may be a pointer-typed slot (e.g. an sret
+      // return location) with no backing symbol, so the size cannot always be
+      // recovered from the destination operand during lowering.
+      IRSetType(memzero, node->base.type);
       CheckForVarDef(memzero, &node->base);
     }
   }
@@ -1119,6 +1124,9 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type)) {
     if (!CanElideMemzero(init)) {
       IRNode* memzero = GeneratorEmit(gen, NewIR1(IR_OP(memzero), dest));
+      // See GenerateInitialization: record the zeroed object's type so the size
+      // is available even when the destination is a symbol-less pointer slot.
+      IRSetType(memzero, node->base.type);
       CheckForVarDef(memzero, &node->base);
     }
   }

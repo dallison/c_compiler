@@ -3163,8 +3163,13 @@ static TargetInstruction* LowerMemzero(X86_64Generator* rv, IRNode* node) {
     }
   }
   dest_node->data.ptr = dest_addr;
+  // Prefer the backing symbol's size, but fall back to the memzero node's type
+  // when the destination is a symbol-less slot (e.g. an sret return location).
+  int64_t zero_size = (IRIsVariable(addr_node) && var->symbol != NULL)
+                          ? var->symbol->type->size
+                          : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* result =
-      Memzero(rv, dest_addr, var->symbol->type->size, offset_value);
+      Memzero(rv, dest_addr, zero_size, offset_value);
 
   SetLoweredNode(node, result);
   return result;

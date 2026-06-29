@@ -444,6 +444,7 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
                                                       ConstexprObject* object);
 static Symbol* ConstexprCallSymbol(ASTNode* node);
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
+static ASTNode* ConstexprAggregateInitializerExpression(ASTNode* initializer);
 static ConstexprStatementResult EvaluateConstexprStatement(
     ConstEvalContext* ctx, ASTNode* stmt, TypeRecord* return_type,
     ConstexprValue* result);
@@ -1074,7 +1075,19 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                          TypeRecord* type,
                                          ASTNode* initializer,
                                          ConstexprValue* result) {
-  initializer = ConstexprInitializerExpression(initializer);
+  // For aggregate targets, peel transparent initializer wrappers (including a
+  // compound literal `T{...}` produced for `return T{...};`) while preserving a
+  // braced initializer.  ConstexprInitializerExpression would otherwise collapse
+  // a single-element brace `{x}` into `x`, which loses the aggregate structure
+  // for a one-member struct or one-element array.
+  if (type != NULL && (TypeIsFixedArray(type) || TypeIsStructOrUnion(type))) {
+    ASTNode* aggregate = ConstexprAggregateInitializerExpression(initializer);
+    initializer = (aggregate != NULL && aggregate->op == AST_OP(braced_init))
+                      ? aggregate
+                      : ConstexprInitializerExpression(initializer);
+  } else {
+    initializer = ConstexprInitializerExpression(initializer);
+  }
   if (initializer == NULL || type == NULL) {
     return false;
   }
@@ -1174,6 +1187,32 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                           ConstexprValue* result) {
   if (node == NULL) {
     return false;
+  }
+  if (node->op == AST_OP(call)) {
+    // A constexpr function, operator, or conversion that returns a class or
+    // array by value produces an object we can subsequently access members of
+    // (e.g. `make().field` or `widen(x) < 0`, where `< 0` is a member operator
+    // whose receiver is the by-value result of `widen`).
+    ConstexprValue value;
+    if (!EvaluateConstexprCall(ctx, node, &value) || !value.is_object ||
+        value.object == NULL) {
+      return false;
+    }
+    *result = value;
+    return true;
+  }
+  if (node->op == AST_OP(compound_literal)) {
+    // A materialized aggregate temporary, e.g. the `S{...}` receiver of a member
+    // call.  Build its object from the compound literal's braced initializer.
+    if (node->type == NULL ||
+        (!TypeIsStructOrUnion(node->type) && !TypeIsFixedArray(node->type))) {
+      return false;
+    }
+    if (!EvaluateConstexprInitializer(ctx, node->type, node, result) ||
+        !result->is_object || result->object == NULL) {
+      return false;
+    }
+    return true;
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -1694,6 +1733,29 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
   return true;
 }
 
+// Peel transparent initializer wrappers without collapsing a braced
+// initializer, so that aggregate (array / struct) structure is preserved even
+// for single-element initializers.  In particular a compound literal `T{...}`
+// is reduced to its braced initializer.
+static ASTNode* ConstexprAggregateInitializerExpression(ASTNode* initializer) {
+  while (initializer != NULL) {
+    switch (initializer->op) {
+      case AST_OP(init):
+        initializer = ((BinaryASTNode*)initializer)->right;
+        break;
+      case AST_OP(expr_init):
+        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+        break;
+      case AST_OP(compound_literal):
+        initializer = ((CompoundLiteralASTNode*)initializer)->initializer;
+        break;
+      default:
+        return initializer;
+    }
+  }
+  return NULL;
+}
+
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer) {
   while (initializer != NULL) {
     switch (initializer->op) {
@@ -2170,12 +2232,48 @@ static bool EvaluateConstexprFunctionBody(ConstEvalContext* ctx, TypeRecord* fun
   return stmt_result == kConstexprStmtReturn;
 }
 
+// Resolve a non-static member function call of the form `obj.f(args)` or
+// `obj->f(args)` (including operator and conversion functions, which are
+// member calls under the hood).  On success the receiver expression is
+// returned through `*receiver` so the caller can bind it to the implicit
+// `this` parameter.  Constructors are intentionally excluded: those have a
+// dedicated evaluation path.
+static Symbol* ConstexprMemberCallSymbol(ASTNode* node, ASTNode** receiver) {
+  if (node == NULL || node->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL ||
+      (call->left->op != AST_OP(dot) && call->left->op != AST_OP(arrow))) {
+    return NULL;
+  }
+  BinaryASTNode* member_access = (BinaryASTNode*)call->left;
+  if (member_access->left == NULL || member_access->right == NULL ||
+      member_access->right->op != AST_OP(structmember)) {
+    return NULL;
+  }
+  StructMember* member = ((StructMemberASTNode*)member_access->right)->member;
+  if (member == NULL || !member->is_member_function || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
+      member->symbol->type->info.function.is_constructor) {
+    return NULL;
+  }
+  *receiver = member_access->left;
+  return member->symbol;
+}
+
 bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
                                   ConstexprValue* result) {
   if (ctx->call_depth > 32) {
     return false;
   }
+  ASTNode* receiver = NULL;
   Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
+  if (callee == NULL) {
+    callee =
+        ConstexprFunctionDefinition(ConstexprMemberCallSymbol(node, &receiver));
+  }
   if (callee == NULL || callee->type == NULL || !TypeIsFunction(callee->type)) {
     return false;
   }
@@ -2192,7 +2290,14 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   VectorASTNode* call = (VectorASTNode*)node;
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
-  bool ok = BindConstexprActuals(ctx, callee, call->children) &&
+  // A member call binds the receiver to the implicit `this` parameter and the
+  // explicit arguments to the remaining parameters; an ordinary call binds the
+  // arguments positionally.  BindConstexprConstructorActuals implements exactly
+  // the former (it is not constructor specific despite its name).
+  bool ok = (receiver != NULL
+                 ? BindConstexprConstructorActuals(ctx, callee, receiver,
+                                                   call->children)
+                 : BindConstexprActuals(ctx, callee, call->children)) &&
             EvaluateConstexprFunctionBody(ctx, func, result);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
