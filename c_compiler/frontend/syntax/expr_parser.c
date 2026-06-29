@@ -1941,20 +1941,13 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
 //   assignment-expression
 //   argument-expression-list , assignment-expression
 
-static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
-  // A compound literal looks exactly like a cast except it is followed
-  // by an initializer (in braces).  We've already consumed the ( type-name )
-  // and determined it's not a cast, so we can parse the
-  if (syntax->compound_literal_type != NULL && LexLookingAt(syntax->lex, TOK(lbrace))) {
-    TypeRecord* type = syntax->compound_literal_type;
-    syntax->compound_literal_type = NULL;
-    return ParseCompoundLiteral(syntax, type);
-  }
-  ASTNode* result = ParsePrimaryExpression(syntax, followers);
-  if (syntax->lex->assembler_mode) {
-    // No postfix expressions in assembler mode.
-    return result;
-  }
+// Parse the trailing postfix operators ([], (), {}, ++, --, ., ->) of a
+// postfix-expression, given an already-parsed primary `result`.  Shared by the
+// ordinary postfix-expression parser and by named-cast parsing (a named cast
+// such as `static_cast<T>(x)` is itself a postfix-expression and may be
+// directly followed by `.member`, `[i]`, etc.).
+static ASTNode* ParsePostfixOperators(Syntax* syntax, ASTNode* result,
+                                      TokenClass followers) {
   while (!LexEof(syntax->lex)) {
     if (LexMatch(syntax->lex, TOK(lsquare))) {
       result = ParseArraySubscript(result, syntax, followers);
@@ -1987,6 +1980,23 @@ static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
     }
   }
   return result;
+}
+
+static ASTNode* ParsePostfixExpression(Syntax* syntax, TokenClass followers) {
+  // A compound literal looks exactly like a cast except it is followed
+  // by an initializer (in braces).  We've already consumed the ( type-name )
+  // and determined it's not a cast, so we can parse the
+  if (syntax->compound_literal_type != NULL && LexLookingAt(syntax->lex, TOK(lbrace))) {
+    TypeRecord* type = syntax->compound_literal_type;
+    syntax->compound_literal_type = NULL;
+    return ParseCompoundLiteral(syntax, type);
+  }
+  ASTNode* result = ParsePrimaryExpression(syntax, followers);
+  if (syntax->lex->assembler_mode) {
+    // No postfix expressions in assembler mode.
+    return result;
+  }
+  return ParsePostfixOperators(syntax, result, followers);
 }
 
 
@@ -3225,7 +3235,9 @@ static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
   if (sym != NULL) {
     SymbolDelete(sym);
   }
-  return result;
+  // A named cast is a postfix-expression, so it may be directly followed by
+  // postfix operators, e.g. `static_cast<T>(x).member` or `static_cast<T>(p)->m`.
+  return ParsePostfixOperators(syntax, result, followers);
 }
 
 // Parse cast expression with syntax:

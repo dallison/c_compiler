@@ -853,13 +853,21 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
-  if (TypeEqualIgnoringSign(from->type, to)) {
-    // Use the 'to' type as the node type.
-    ASTNodeSetType(from, to);
+  // A user-defined conversion operator must be honored before any "compatible
+  // layout" shortcut: two distinct class types can be equal-ignoring-sign (the
+  // sign bits are meaningless for aggregates, so any two structs/unions compare
+  // equal there), and reinterpreting one as the other would silently bypass a
+  // value-changing conversion operator (e.g. Celsius -> Fahrenheit).  Only fall
+  // back to the reinterpret when no conversion operator applies, which keeps the
+  // existing behavior for derived-to-base value conversions and for distinct
+  // re-instantiations of the same class template.
+  if (TryConvertWithConversionOperator(from, to, ctx)) {
     return;
   }
 
-  if (TryConvertWithConversionOperator(from, to, ctx)) {
+  if (TypeEqualIgnoringSign(from->type, to)) {
+    // Use the 'to' type as the node type.
+    ASTNodeSetType(from, to);
     return;
   }
 

@@ -1214,6 +1214,18 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     }
     return true;
   }
+  if (node->op == AST_OP(cast)) {
+    // A cast to a class/array type is transparent for object access: any
+    // user-defined conversion has already been spliced onto the operand (which
+    // therefore already has the target object type), e.g. `(W)s` becomes a cast
+    // wrapping the `s.operator W()` call.  Read the object off the operand.
+    if (node->type == NULL ||
+        (!TypeIsStructOrUnion(node->type) && !TypeIsFixedArray(node->type))) {
+      return false;
+    }
+    return EvaluateConstexprObjectAccess(ctx, ((CastASTNode*)node)->expr,
+                                         result);
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
