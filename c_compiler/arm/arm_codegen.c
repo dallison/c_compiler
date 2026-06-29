@@ -2494,6 +2494,78 @@ static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
   return SetLoweredNode(node, result);
 }
 
+// Compute a single 0/1 relation for a three-way comparison: emit the compare
+// (cmp / fcmp, or the 64-bit subs/sbcs sequence for wide ints) followed by a
+// cset of `narrow_cond`.  `wide_opcode` selects the matching ordering opcode
+// for the wide-int path.
+static TargetInstruction* ThreeWayRelation(ARMGenerator* g, IRNode* lhs,
+                                           IRNode* rhs, TypeRecord* op_type,
+                                           IROpcode wide_opcode,
+                                           ARMOpcode narrow_cond, bool is_fp,
+                                           int result_size) {
+  if (!is_fp && TypeIsWideInt(op_type)) {
+    ARMOpcode cond = WideCompareSetFlags(g, lhs, rhs, wide_opcode,
+                                         TypeIsUnsigned(op_type), false);
+    TargetInstruction* set = SetInstructionSize(
+        NewInstruction1(ARM_OP(cset), Condition(g, cond, result_size)),
+        result_size);
+    set->flags |= kARMComparisonGenerated;
+    return Emit(g, set);
+  }
+  int compare_size = op_type->size > 4 ? kSize64Bit : kSize32Bit;
+  Emit(g, SetInstructionSize(
+              NewInstruction2(is_fp ? ARM_OP(fcmp) : ARM_OP(cmp),
+                              Materialize(g, lhs), Materialize(g, rhs)),
+              compare_size));
+  TargetInstruction* set = SetInstructionSize(
+      NewInstruction1(ARM_OP(cset), Condition(g, narrow_cond, result_size)),
+      result_size);
+  set->flags |= kARMComparisonGenerated;
+  return Emit(g, set);
+}
+
+// Lower a three-way comparison to an integer -1/0/1 (and 2 = unordered for
+// floating point).  We materialize the "less" and "greater" relations as 0/1
+// booleans and subtract them; for floating point we additionally detect the
+// unordered case via the V flag (cset vs) and add 2.
+static TargetInstruction* LowerThreeWay(ARMGenerator* g, IRNode* node) {
+  IRNode* lhs = node->inputs.value.p[0];
+  IRNode* rhs = node->inputs.value.p[1];
+  TypeRecord* op_type = lhs->type;
+  bool is_fp = node->opcode == IR_OP(cmp3wayf) || node->opcode == IR_OP(cmp3wayd);
+  bool is_unsigned =
+      node->opcode == IR_OP(cmp3wayu) || node->opcode == IR_OP(cmp3waya);
+  int result_size = node->type->size > 4 ? kSize64Bit : kSize32Bit;
+
+  // For floating point use `mi` (N set) for less and `gt` for greater so that
+  // an unordered result (NaN) makes neither true; integers use the usual
+  // signed/unsigned ordering conditions.
+  ARMOpcode lt_cond = is_fp ? ARM_OP(mi) : (is_unsigned ? ARM_OP(lo) : ARM_OP(lt));
+  ARMOpcode gt_cond = is_fp ? ARM_OP(gt) : (is_unsigned ? ARM_OP(hi) : ARM_OP(gt));
+
+  TargetInstruction* gt = ThreeWayRelation(g, lhs, rhs, op_type, IR_OP(cmpgti),
+                                           gt_cond, is_fp, result_size);
+  TargetInstruction* lt = ThreeWayRelation(g, lhs, rhs, op_type, IR_OP(cmplti),
+                                           lt_cond, is_fp, result_size);
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(NewInstruction2(ARM_OP(sub), gt, lt), result_size));
+  if (is_fp) {
+    TargetInstruction* unord = ThreeWayRelation(
+        g, lhs, rhs, op_type, IR_OP(cmpgti), ARM_OP(vs), is_fp, result_size);
+    TargetInstruction* twice = Emit(
+        g, SetInstructionSize(NewInstruction2(ARM_OP(add), unord, unord),
+                              result_size));
+    result = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(add), result,
+                                                        twice),
+                                        result_size));
+  }
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+  }
+  return SetLoweredNode(node, result);
+}
+
 static void GetAddressAndOffsetFrom(ARMGenerator* g,
                                  TargetInstruction* addr,
                                  int offset,
@@ -4747,6 +4819,13 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
       return LowerComparison(g, node);
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3waya):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+      return LowerThreeWay(g, node);
 
     case IR_OP(btrue):
     case IR_OP(bfalse):

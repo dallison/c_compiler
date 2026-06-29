@@ -558,6 +558,29 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
       case PCODE_OP(cmpged):
         iregs[DEST(inst)] = dregs[SRC1(inst)] >= dregs[SRC2(inst)];
         break;
+      case PCODE_OP(cmp3way):
+        iregs[DEST(inst)] = (iregs[SRC1(inst)] < iregs[SRC2(inst)])   ? -1
+                            : (iregs[SRC1(inst)] > iregs[SRC2(inst)]) ? 1
+                                                                      : 0;
+        break;
+      case PCODE_OP(cmp3wayu):
+        iregs[DEST(inst)] =
+            ((uint64_t)iregs[SRC1(inst)] < (uint64_t)iregs[SRC2(inst)])   ? -1
+            : ((uint64_t)iregs[SRC1(inst)] > (uint64_t)iregs[SRC2(inst)]) ? 1
+                                                                         : 0;
+        break;
+      case PCODE_OP(cmp3wayf):
+        iregs[DEST(inst)] = (fregs[SRC1(inst)] < fregs[SRC2(inst)])    ? -1
+                            : (fregs[SRC1(inst)] > fregs[SRC2(inst)])  ? 1
+                            : (fregs[SRC1(inst)] == fregs[SRC2(inst)]) ? 0
+                                                                       : 2;
+        break;
+      case PCODE_OP(cmp3wayd):
+        iregs[DEST(inst)] = (dregs[SRC1(inst)] < dregs[SRC2(inst)])    ? -1
+                            : (dregs[SRC1(inst)] > dregs[SRC2(inst)])  ? 1
+                            : (dregs[SRC1(inst)] == dregs[SRC2(inst)]) ? 0
+                                                                       : 2;
+        break;
       case PCODE_OP(decsp):
         iregs[PCODE_SP_REG] -= inst & 0xffffff;
         break;

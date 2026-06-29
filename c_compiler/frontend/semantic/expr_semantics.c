@@ -571,6 +571,8 @@ static const char* BinaryOperatorFunctionName(ASTOpcode op) {
       return "operator>";
     case AST_OP(greatereq):
       return "operator>=";
+    case AST_OP(spaceship):
+      return "operator<=>";
     default:
       return NULL;
   }
@@ -1147,6 +1149,45 @@ static bool IsZeroIntegerConstant(ASTNode* node) {
          ((ConstantASTNode*)node)->value.ivalue == 0;
 }
 
+// C++20 rewritten comparison candidates ([over.match.oper]): when a relational
+// or `!=` operator has a class operand with no directly-usable overload, rewrite
+// it in terms of `operator<=>` / `operator==`:
+//   a @ b   (@ in < > <= >=)  ->  (a <=> b) @ 0
+//   a != b                    ->  !(a == b)
+// `==` itself is left to operator== (no <=> rewrite), matching the standard.
+// (Reversed candidates such as `0 @ (b <=> a)` are not synthesized; symmetric
+// member/free `operator<=>` and `operator==` cover the common cases.)
+static ASTNode* TryRewriteComparisonOperator(BinaryASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL || node->right == NULL) {
+    return NULL;
+  }
+  if (!TypeIsStructOrUnion(node->left->type) &&
+      !TypeIsStructOrUnion(node->right->type)) {
+    return NULL;
+  }
+  ASTOpcode op = node->base.op;
+  SourceLocation loc = node->base.location;
+
+  if (op == AST_OP(noteq)) {
+    ASTNode* left = ASTNodeMove(node->left);
+    ASTNode* right = ASTNodeMove(node->right);
+    ASTNode* eq = NewBinaryASTNode(AST_OP(equal), NULL, loc, left, right);
+    ASTNode* negated = NewUnaryASTNode(AST_OP(not), NULL, loc, eq);
+    return ReplaceBinaryWithCall(node, negated);
+  }
+  if (op == AST_OP(less) || op == AST_OP(greater) || op == AST_OP(lesseq) ||
+      op == AST_OP(greatereq)) {
+    ASTNode* left = ASTNodeMove(node->left);
+    ASTNode* right = ASTNodeMove(node->right);
+    ASTNode* cmp = NewBinaryASTNode(AST_OP(spaceship), NULL, loc, left, right);
+    ASTNode* zero = NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), loc);
+    ASTNode* rewritten = NewBinaryASTNode(op, NULL, loc, cmp, zero);
+    return ReplaceBinaryWithCall(node, rewritten);
+  }
+  return NULL;
+}
+
 static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
@@ -1154,6 +1195,10 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
   if (overloaded != NULL) {
     return overloaded;
+  }
+  ASTNode* rewritten = TryRewriteComparisonOperator(node);
+  if (rewritten != NULL) {
+    return rewritten;
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
@@ -1167,6 +1212,45 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
 
   // Comparison operators produce boolean values.
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  return (ASTNode*)node;
+}
+
+// C++20 three-way comparison `a <=> b`.  For class operands this resolves a
+// user-declared/defaulted operator<=>; for scalar operands it yields a value of
+// the appropriate comparison-category type from <compare>.
+static ASTNode* AnalyzeThreeWayComparison(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+  ASTNodeSetType((ASTNode*)node, node->left->type);
+  ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
+  if (overloaded != NULL) {
+    return overloaded;
+  }
+  SemanticCheckScalarType(node->left);
+  SemanticCheckScalarType(node->right);
+  // Apply the usual arithmetic / pointer conversions so both operands end up
+  // with a common type that the cmp3way IR op can compare directly.
+  InsertNumericConversions(node, true);
+  // Built-in operands compare with strong ordering, except floating-point
+  // operands (which may be unordered) that compare with partial ordering.
+  const char* category_name = "strong_ordering";
+  if (TypeIsFloatingPoint(node->left->type) ||
+      TypeIsFloatingPoint(node->right->type)) {
+    category_name = "partial_ordering";
+  }
+  TypeRecord* category_type = TypeFindCXXComparisonCategory(category_name);
+  if (category_type == NULL) {
+    SemanticError((ASTNode*)node,
+                  "include <compare> to use the three-way comparison operator");
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
+  }
+  // The canonical tag type stores its size in struct_info; codegen reads
+  // TypeRecord::size directly (e.g. when laying out the result temporary), so
+  // hand the node a copy with the size materialized.
+  ASTNodeSetType((ASTNode*)node,
+                 TypeRecordCalculateSize(TypeRecordCopy(category_type)));
   return (ASTNode*)node;
 }
 
@@ -4822,6 +4906,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(equal):
     case AST_OP(noteq):
       node = AnalyzeComparisonOperator(binary_node);
+      break;
+
+    case AST_OP(spaceship):
+      node = AnalyzeThreeWayComparison(binary_node);
       break;
 
     case AST_OP(question):

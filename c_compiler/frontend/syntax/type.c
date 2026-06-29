@@ -7864,6 +7864,30 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
   return type;
 }
 
+/* Public: look up a C++20 comparison-category type (e.g. "strong_ordering")
+ * declared in namespace std.  Returns the struct TypeRecord, or NULL if the
+ * type is not visible (typically because <compare> was not included). */
+TypeRecord* TypeFindCXXComparisonCategory(const char* category_name) {
+  if (!CompilerIsCXX() || compiler == NULL || category_name == NULL) {
+    return NULL;
+  }
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  if (std_ns == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, category_name);
+  Symbol* tag = NamespaceFindTag(std_ns, &name);
+  StringDestruct(&name);
+  if (tag == NULL || tag->type == NULL || !TypeIsStructOrUnion(tag->type)) {
+    return NULL;
+  }
+  return tag->type;
+}
+
 /* Public entry point: instantiate function template `templ` with `args`. */
 Symbol* TypeInstantiateFunctionTemplate(Syntax* syntax, Symbol* templ,
                                         Vector* args) {
@@ -11185,6 +11209,8 @@ static void AppendCXXMemberwiseAssignments(TypeRecord* func, Vector* body,
                                            SourceLocation location);
 static void AppendCXXAssignmentReturnThis(TypeRecord* func, Vector* body,
                                           SourceLocation location);
+static ASTNode* NewCXXSourceMemberReceiver(Symbol* source, StructMember* member,
+                                           SourceLocation location);
 
 static bool CXXReferenceTargetsStruct(TypeRecord* ref, Struct* owner) {
   return TypeIsReference(ref) && ref->next != NULL &&
@@ -11268,6 +11294,175 @@ static void CXXFinalizeSpecialMemberMetadata(Symbol* symbol, Struct* owner,
   }
 }
 
+static bool CXXFunctionIsThreeWayComparison(TypeRecord* func) {
+  return func != NULL && TypeIsFunction(func) &&
+         func->info.function.symbol != NULL &&
+         strcmp(func->info.function.symbol->name.value, "operator<=>") == 0;
+}
+
+static bool CXXFunctionIsEqualityComparison(TypeRecord* func) {
+  return func != NULL && TypeIsFunction(func) &&
+         func->info.function.symbol != NULL &&
+         strcmp(func->info.function.symbol->name.value, "operator==") == 0;
+}
+
+// Synthesize the body of a defaulted `operator==`: return the conjunction of
+// memberwise `==` comparisons (`true` for an empty class).
+static void AppendCXXEqualityComparison(Symbol* member_symbol, Vector* body,
+                                        SourceLocation location) {
+  TypeRecord* func = member_symbol->type;
+  Struct* owner = func->info.function.cxx_member_owner;
+  Symbol* source = CXXSourceObjectParameter(func);
+  if (owner == NULL || source == NULL) {
+    return;
+  }
+  ASTNode* result = NULL;
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    ASTNode* lhs = NewCXXMemberReceiver(func, member, location);
+    ASTNode* rhs = NewCXXSourceMemberReceiver(source, member, location);
+    ASTNode* eq = NewBinaryASTNode(AST_OP(equal), NULL, location, lhs, rhs);
+    result = result == NULL
+                 ? eq
+                 : NewBinaryASTNode(AST_OP(logand), NULL, location, result, eq);
+  }
+  if (result == NULL) {
+    result = NewIntConstantASTNode(
+        1, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  VectorAppend(body,
+               NewCombinedStatementASTNode(AST_OP(return), result, NULL,
+                                           location));
+}
+
+// Locate a named static constant (e.g. `less`) of a comparison-category type.
+static Symbol* CXXComparisonCategoryConstant(TypeRecord* category,
+                                             const char* name) {
+  if (category == NULL || category->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = category->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* m = str->members.value.p[i];
+    if (m != NULL && m->symbol != NULL && m->is_static &&
+        strcmp(m->symbol->name.value, name) == 0) {
+      return m->symbol;
+    }
+  }
+  return NULL;
+}
+
+// Build `return <category>::<name>;`, or NULL if the constant is missing.
+static ASTNode* NewCXXReturnCategoryConstant(TypeRecord* category,
+                                             const char* name,
+                                             SourceLocation location) {
+  Symbol* constant = CXXComparisonCategoryConstant(category, name);
+  if (constant == NULL) {
+    return NULL;
+  }
+  ASTNode* value = NewIdentifierASTNode(constant, location);
+  return NewCombinedStatementASTNode(AST_OP(return), value, NULL, location);
+}
+
+// Only partial_ordering carries an `unordered` result.
+static bool CXXCategoryIsPartial(TypeRecord* category) {
+  return CXXComparisonCategoryConstant(category, "unordered") != NULL;
+}
+
+// Deduce the return category for a defaulted `auto operator<=>`: partial if any
+// data member is floating point, otherwise strong.  (weak_ordering is never
+// deduced - a documented simplification.)
+static TypeRecord* CXXDeduceComparisonCategory(Struct* owner) {
+  bool has_floating = false;
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* m = owner->members.value.p[i];
+    if (m == NULL || m->symbol == NULL || m->is_static ||
+        m->is_member_function) {
+      continue;
+    }
+    if (TypeIsFloatingPoint(m->symbol->type)) {
+      has_floating = true;
+    }
+  }
+  return TypeFindCXXComparisonCategory(has_floating ? "partial_ordering"
+                                                    : "strong_ordering");
+}
+
+// Synthesize the body of a defaulted `operator<=>`: compare each non-static
+// data member in declaration order and return the first non-equivalent result,
+// otherwise `equivalent`/`equal`.  Each member subobject is compared with
+// `<=>` (built-in or overloaded) and the comparison's sign is mapped onto the
+// function's return category, so heterogeneous member categories still yield a
+// value of the single deduced/declared category.
+static void AppendCXXThreeWayComparisons(TypeParser* parser,
+                                         Symbol* member_symbol, Vector* body,
+                                         SourceLocation location) {
+  TypeRecord* func = member_symbol->type;
+  Struct* owner = func->info.function.cxx_member_owner;
+  Symbol* source = CXXSourceObjectParameter(func);
+  if (owner == NULL || source == NULL) {
+    return;
+  }
+  TypeRecord* category = func->next;
+  if (category == NULL || (category->type & kTypeAuto) != 0) {
+    TypeRecord* deduced = CXXDeduceComparisonCategory(owner);
+    if (deduced == NULL) {
+      SyntaxError(parser->syntax,
+                  "Defaulted 'operator<=>' requires <compare> to be included");
+      return;
+    }
+    category = TypeRecordCalculateSize(TypeRecordCopy(deduced));
+    func->next = category;
+  }
+  bool is_partial = CXXCategoryIsPartial(category);
+
+  struct {
+    ASTOpcode op;
+    const char* constant;
+  } arms[3] = {
+      {AST_OP(less), "less"},
+      {AST_OP(greater), "greater"},
+      {AST_OP(noteq), "unordered"},
+  };
+  int arm_count = is_partial ? 3 : 2;
+
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function) {
+      continue;
+    }
+    for (int a = 0; a < arm_count; a++) {
+      ASTNode* ret =
+          NewCXXReturnCategoryConstant(category, arms[a].constant, location);
+      if (ret == NULL) {
+        continue;
+      }
+      ASTNode* lhs = NewCXXMemberReceiver(func, member, location);
+      ASTNode* rhs = NewCXXSourceMemberReceiver(source, member, location);
+      ASTNode* cmp =
+          NewBinaryASTNode(AST_OP(spaceship), NULL, location, lhs, rhs);
+      ASTNode* zero = NewIntConstantASTNode(
+          0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+      ASTNode* cond = NewBinaryASTNode(arms[a].op, NULL, location, cmp, zero);
+      VectorAppend(body,
+                   NewIfStatementASTNode(cond, ret, NULL, false, location));
+    }
+  }
+  ASTNode* equal = NewCXXReturnCategoryConstant(
+      category, is_partial ? "equivalent" : "equal", location);
+  if (equal == NULL) {
+    equal = NewCXXReturnCategoryConstant(category, "equivalent", location);
+  }
+  if (equal != NULL) {
+    VectorAppend(body, equal);
+  }
+}
+
 static void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
                                                   Symbol* member_symbol) {
   if (parser == NULL || member_symbol == NULL || member_symbol->type == NULL ||
@@ -11283,6 +11478,26 @@ static void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
   member_symbol->value.func_defn = member_symbol;
   member_symbol->type->info.function.is_inline = true;
   member_symbol->type->info.function.definition = true;
+
+  if (CXXFunctionIsThreeWayComparison(member_symbol->type) ||
+      CXXFunctionIsEqualityComparison(member_symbol->type)) {
+    Vector* comparison_body = NewVector();
+    if (CXXFunctionIsThreeWayComparison(member_symbol->type)) {
+      AppendCXXThreeWayComparisons(parser, member_symbol, comparison_body,
+                                   member_symbol->location);
+    } else {
+      AppendCXXEqualityComparison(member_symbol, comparison_body,
+                                  member_symbol->location);
+    }
+    member_symbol->type->info.function.body =
+        NewCompoundStatementASTNode(comparison_body, member_symbol->location);
+    VectorAppend(&compiler->declaration_asts,
+                 member_symbol->type->info.function.body);
+    if (!parser->syntax->parsing_template_declaration) {
+      QueueInlineMemberFunctionDefinition(member_symbol);
+    }
+    return;
+  }
 
   Vector* body = NewVector();
   CXXConstructorInitList cxx_initializers;
@@ -12620,6 +12835,68 @@ static void AddCXXSyntheticMemberFunction(TypeParser* parser, Struct* str,
   }
 }
 
+// True if the class has a member function named `name` (following overload
+// chains).  When `defaulted_only`, only an explicitly defaulted one counts.
+static bool CXXStructHasMemberFunctionNamed(Struct* str, const char* name,
+                                            bool defaulted_only) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* m = str->members.value.p[i]; m != NULL;
+         m = m->overload_next) {
+      if (!m->is_member_function || m->symbol == NULL ||
+          m->symbol->type == NULL ||
+          strcmp(m->symbol->name.value, name) != 0) {
+        continue;
+      }
+      if (!defaulted_only || m->symbol->type->info.function.is_defaulted) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// [class.compare.default]: a class that explicitly defaults `operator<=>` and
+// does not declare `operator==` gets an implicitly defaulted `operator==`.
+static void AddImplicitCXXEqualityOperator(TypeParser* parser, Struct* str,
+                                           Symbol* tag) {
+  if (!CompilerIsCXX() || str == NULL || tag == NULL ||
+      !CXXStructHasMemberFunctionNamed(str, "operator<=>", true) ||
+      CXXStructHasMemberFunctionNamed(str, "operator==", false)) {
+    return;
+  }
+  SourceLocation location = tag->location;
+  TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_constexpr = true;
+  func->info.function.is_inline = true;
+  func->info.function.is_defaulted = true;
+  func->info.function.is_implicitly_declared = true;
+  func->info.function.is_const_member = true;
+  func->info.function.is_constexpr_eligible = true;
+  func->info.function.is_noexcept_eligible = true;
+  TypeRecordChain(func, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  TypeRecordAddCXXThisParameter(func, str, location);
+  AppendCXXSyntheticFormal(
+      func, NewCXXSyntheticFormal(
+                "__other", NewCXXClassReferenceType(str, true, false),
+                location));
+
+  Symbol* symbol = NewSymbol("operator==", func, STO(implicit));
+  symbol->flags.invented = true;
+  symbol->location = location;
+  symbol->namespace_ = tag->namespace_;
+  func->info.function.symbol = symbol;
+  symbol->flags.is_defined = true;
+  symbol->flags.is_inline_defn = true;
+  if (!StorageIs(symbol->storage, STO(static))) {
+    symbol->flags.is_weak = true;
+  }
+  symbol->value.func_defn = symbol;
+  AddCXXSyntheticMemberFunction(parser, str, symbol);
+}
+
 static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
                                             Symbol* tag,
                                             const char* name,
@@ -12694,6 +12971,7 @@ static void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
           str, kCXXSpecialMemberMoveAssignment);
   bool user_declared_copy_or_move = CXXStructHasUserDeclaredCopyOrMove(str);
   bool user_declared_destructor = CXXStructHasUserDeclaredDestructor(str);
+  AddImplicitCXXEqualityOperator(parser, str, tag);
   if (str->is_aggregate) {
     bool deleted_assignment =
         CXXStructHasUnassignableMember(str) ||

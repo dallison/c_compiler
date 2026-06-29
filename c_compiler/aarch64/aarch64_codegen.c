@@ -2160,6 +2160,69 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
   return SetLoweredNode(node, result);
 }
 
+// Emit one compare (cmp / fcmp) and a cset of `cond`, yielding a 0/1 value.
+static TargetInstruction* ThreeWayRelation(AARCH64Generator* g, IRNode* lhs,
+                                           IRNode* rhs, TypeRecord* op_type,
+                                           AARCH64Opcode cond, bool is_fp,
+                                           int compare_size, int result_size) {
+  Emit(g, SetInstructionSize(
+              NewInstruction2(is_fp ? AARCH64_OP(fcmp) : AARCH64_OP(cmp),
+                              Materialize(g, lhs), Materialize(g, rhs)),
+              compare_size));
+  TargetInstruction* set = SetInstructionSize(
+      NewInstruction1(AARCH64_OP(cset), Condition(g, cond, result_size)),
+      result_size);
+  set->flags |= kAARCH64ComparisonGenerated;
+  return Emit(g, set);
+}
+
+// Lower a three-way comparison to an integer -1/0/1 (and 2 = unordered for
+// floating point).  Compute the "less" and "greater" relations as 0/1 booleans
+// and subtract; for floating point also detect the unordered case (V flag,
+// cset vs) and add 2.
+static TargetInstruction* LowerThreeWay(AARCH64Generator* g, IRNode* node) {
+  IRNode* lhs = node->inputs.value.p[0];
+  IRNode* rhs = node->inputs.value.p[1];
+  TypeRecord* op_type = lhs->type;
+  bool is_fp =
+      node->opcode == IR_OP(cmp3wayf) || node->opcode == IR_OP(cmp3wayd);
+  bool is_unsigned =
+      node->opcode == IR_OP(cmp3wayu) || node->opcode == IR_OP(cmp3waya);
+  int compare_size = op_type->size > 4 ? kSize64Bit : kSize32Bit;
+  int result_size = node->type->size > 4 ? kSize64Bit : kSize32Bit;
+
+  // Floating point uses `mi` (N set) for less and `gt` for greater so an
+  // unordered (NaN) result makes neither true; integers use the usual
+  // signed/unsigned ordering conditions.
+  AARCH64Opcode lt_cond =
+      is_fp ? AARCH64_OP(mi) : (is_unsigned ? AARCH64_OP(lo) : AARCH64_OP(lt));
+  AARCH64Opcode gt_cond =
+      is_fp ? AARCH64_OP(gt) : (is_unsigned ? AARCH64_OP(hi) : AARCH64_OP(gt));
+
+  TargetInstruction* gt = ThreeWayRelation(g, lhs, rhs, op_type, gt_cond, is_fp,
+                                           compare_size, result_size);
+  TargetInstruction* lt = ThreeWayRelation(g, lhs, rhs, op_type, lt_cond, is_fp,
+                                           compare_size, result_size);
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(NewInstruction2(AARCH64_OP(sub), gt, lt),
+                            result_size));
+  if (is_fp) {
+    TargetInstruction* unord = ThreeWayRelation(
+        g, lhs, rhs, op_type, AARCH64_OP(vs), is_fp, compare_size, result_size);
+    TargetInstruction* twice = Emit(
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(add), unord, unord),
+                              result_size));
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction2(AARCH64_OP(add), result, twice),
+                         result_size));
+  }
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (dest != NULL) {
+    result = SetDestOrMove(g, result, dest, AARCH64_OP(mov));
+  }
+  return SetLoweredNode(node, result);
+}
+
 static void GetAddressAndOffsetFrom(AARCH64Generator* g,
                                  TargetInstruction* addr,
                                  int offset,
@@ -4129,6 +4192,13 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
       return LowerComparison(g, node);
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3waya):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+      return LowerThreeWay(g, node);
 
     case IR_OP(btrue):
     case IR_OP(bfalse):

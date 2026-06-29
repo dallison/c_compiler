@@ -201,6 +201,116 @@ sh_test(
 )
 
 sh_test(
+    name = "exec_spaceship_x86_64",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "x86_64",
+        "--libc",
+        "$(rootpath //:libc_x86_64)",
+        "--interpreter",
+        "$(rootpath //:x86_64)",
+        "--tests-dir",
+        "tests/exec_spaceship",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:libc_x86_64",
+        "//:libc_headers",
+        "//:x86_64",
+    ],
+)
+
+sh_test(
+    name = "exec_spaceship_riscv",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "riscv",
+        "--libc",
+        "$(rootpath //:libc_riscv)",
+        "--interpreter",
+        "$(rootpath //:riscv)",
+        "--tests-dir",
+        "tests/exec_spaceship",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:libc_riscv",
+        "//:libc_headers",
+        "//:riscv",
+    ],
+)
+
+sh_test(
+    name = "exec_spaceship_aarch64",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "aarch64",
+        "--libc",
+        "$(rootpath //:libc_aarch64)",
+        "--interpreter",
+        "$(rootpath //:aarch64)",
+        "--tests-dir",
+        "tests/exec_spaceship",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:libc_aarch64",
+        "//:libc_headers",
+        "//:aarch64",
+    ],
+)
+
+sh_test(
+    name = "exec_spaceship_arm",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "arm",
+        "--libc",
+        "$(rootpath //:libc_arm)",
+        "--interpreter",
+        "$(rootpath //:arm)",
+        "--tests-dir",
+        "tests/exec_spaceship",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:libc_arm",
+        "//:libc_headers",
+        "//:arm",
+    ],
+)
+
+sh_test(
     name = "weak_bindings_x86_64",
     srcs = ["run_weak_binding_tests.sh"],
     args = [
@@ -309,6 +419,10 @@ test_suite(
         ":exec_coroutines_arm",
         ":exec_coroutines_riscv",
         ":exec_coroutines_x86_64",
+        ":exec_spaceship_aarch64",
+        ":exec_spaceship_arm",
+        ":exec_spaceship_riscv",
+        ":exec_spaceship_x86_64",
         ":exec_x86_64",
         ":lexical",
         ":mangling",

@@ -10,6 +10,7 @@ filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]) + [
         "libc/include/atomic",
+        "libc/include/compare",
         "libc/include/cstdint",
         "libc/include/coroutine",
         "libc/include/memory",

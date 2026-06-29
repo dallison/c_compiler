@@ -2207,6 +2207,39 @@ static TargetInstruction* LowerComparison(RVGenerator* rv, IRNode* node) {
   return NULL;
 }
 
+// Lower a three-way comparison to an integer -1/0/1 (and 2 = unordered for
+// floating point).  We build the "less" and "greater" relations as 0/1 values
+// (slt/sltu for integers, flt for floats) and subtract them.  For floating
+// point we also detect the unordered case: RISC-V flt yields 0 for either NaN
+// operand, so we add 2 when feq(a,a) & feq(b,b) is false.
+static TargetInstruction* LowerThreeWay(RVGenerator* rv, IRNode* node) {
+  assert(node->inputs.length == 2);
+  IRNode* a = node->inputs.value.p[0];
+  IRNode* b = node->inputs.value.p[1];
+  bool is_float = node->opcode == IR_OP(cmp3wayf);
+  bool is_double = node->opcode == IR_OP(cmp3wayd);
+  if (is_float || is_double) {
+    RVOpcode flt = is_double ? RV_OP(flt_d) : RV_OP(flt_s);
+    RVOpcode feq = is_double ? RV_OP(feq_d) : RV_OP(feq_s);
+    TargetInstruction* ma = Materialize(rv, a);
+    TargetInstruction* mb = Materialize(rv, b);
+    TargetInstruction* lt = Emit(rv, NewInstruction2(flt, ma, mb));   // a < b
+    TargetInstruction* gt = Emit(rv, NewInstruction2(flt, mb, ma));   // b < a
+    TargetInstruction* diff = Emit(rv, NewInstruction2(RV_OP(sub), gt, lt));
+    TargetInstruction* aord = Emit(rv, NewInstruction2(feq, ma, ma));
+    TargetInstruction* bord = Emit(rv, NewInstruction2(feq, mb, mb));
+    TargetInstruction* both = Emit(rv, NewInstruction2(RV_OP(and), aord, bord));
+    TargetInstruction* unord = Emit(rv, NewInstruction1(RV_OP(seqz), both));
+    TargetInstruction* twice = Emit(rv, NewInstruction2(RV_OP(add), unord, unord));
+    return SetLoweredNode(node, Emit(rv, NewInstruction2(RV_OP(add), diff,
+                                                         twice)));
+  }
+  // Integer / pointer: result = (b < a) - (a < b) == (a>b) - (a<b).
+  TargetInstruction* lt = CompareLessThanInt(rv, node, a, b);
+  TargetInstruction* gt = CompareLessThanInt(rv, node, b, a);
+  return SetLoweredNode(node, Emit(rv, NewInstruction2(RV_OP(sub), gt, lt)));
+}
+
 static void GetAddressAndOffsetFrom(RVGenerator* rv,
                                  TargetInstruction* addr,
                                  int offset,
@@ -3865,6 +3898,13 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
       return FinishWithDest(rv, node, LowerComparison(rv, node), RV_OP(mv));
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3waya):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+      return FinishWithDest(rv, node, LowerThreeWay(rv, node), RV_OP(mv));
 
     case IR_OP(btrue):
     case IR_OP(bfalse):

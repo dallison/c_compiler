@@ -149,6 +149,12 @@ static struct {
     {IR_OP(cmpgta), "cmpgta"},
     {IR_OP(cmpgea), "cmpgea"},
 
+    {IR_OP(cmp3wayi), "cmp3wayi"},
+    {IR_OP(cmp3wayu), "cmp3wayu"},
+    {IR_OP(cmp3wayf), "cmp3wayf"},
+    {IR_OP(cmp3wayd), "cmp3wayd"},
+    {IR_OP(cmp3waya), "cmp3waya"},
+
     // Relative branches.
     {IR_OP(btrue), "btrue"},
     {IR_OP(bfalse), "bfalse"},
@@ -908,6 +914,12 @@ bool IRIsExpression(IRNode* inst) {
     case IR_OP(cmplea):
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+    case IR_OP(cmp3waya):
 
     case IR_OP(literalref):
     case IR_OP(addressof):

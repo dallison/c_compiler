@@ -193,6 +193,15 @@ const char* PCodeOpcodeName(int op) {
     case P_OP(cmpged):
       return "cmpged";
 
+    case P_OP(cmp3way):
+      return "cmp3way";
+    case P_OP(cmp3wayu):
+      return "cmp3wayu";
+    case P_OP(cmp3wayf):
+      return "cmp3wayf";
+    case P_OP(cmp3wayd):
+      return "cmp3wayd";
+
     // Relative branches.
     case P_OP(bnz):
       return "bnz";
@@ -883,6 +892,17 @@ static PCodeOpcode IR2PCode(IROpcode op, bool is_unsigned) {
     case IR_OP(cmpgea):
       return P_OP(cmpge);
 
+    case IR_OP(cmp3wayi):
+      return P_OP(cmp3way);
+    case IR_OP(cmp3wayu):
+      return P_OP(cmp3wayu);
+    case IR_OP(cmp3waya):
+      return P_OP(cmp3wayu);
+    case IR_OP(cmp3wayf):
+      return P_OP(cmp3wayf);
+    case IR_OP(cmp3wayd):
+      return P_OP(cmp3wayd);
+
     case IR_OP(i2f):
       return is_unsigned ? P_OP(ui2f) : P_OP(i2f);
     case IR_OP(i2d):
@@ -1097,7 +1117,16 @@ static TargetInstruction* LowerExpression(PCodeGenerator* pcode, IRNode* node) {
   if (node->data.ptr != NULL) {
     return node->data.ptr;
   }
-  PCodeOpcode opcode = IR2PCode(node->opcode, TypeIsUnsigned(node->type));
+  // For comparisons the result type is `bool` (which is unsigned), so the
+  // signed/unsigned choice must come from the operand type instead, matching
+  // how the other backends decide (e.g. x86_64's ComparisonIsUnsigned).
+  bool is_unsigned = TypeIsUnsigned(node->type);
+  if (IRIsComparison(node) && node->inputs.length > 0) {
+    IRNode* operand = node->inputs.value.p[0];
+    is_unsigned = operand != NULL && operand->type != NULL &&
+                  TypeIsUnsigned(operand->type);
+  }
+  PCodeOpcode opcode = IR2PCode(node->opcode, is_unsigned);
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = ReduceExpressionStrength(pcode, node, opcode);
 
@@ -2274,6 +2303,12 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(cmplea):
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+    case IR_OP(cmp3waya):
 
     case IR_OP(i2f):
     case IR_OP(i2d):

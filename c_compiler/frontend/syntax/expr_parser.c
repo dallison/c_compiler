@@ -3359,17 +3359,30 @@ static ASTNode* ParseShiftExpression(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
+// C++20 three-way comparison binds tighter than the relational operators and
+// looser than the shift operators.
+static ASTNode* ParseCompareExpression(Syntax* syntax, TokenClass followers) {
+  ASTNode* result = ParseShiftExpression(syntax, followers);
+  while (LexMatch(syntax->lex, TOK(spaceship))) {
+    ASTNode* right = ParseShiftExpression(syntax, followers);
+    result =
+        NewBinaryASTNode(AST_OP(spaceship), NULL,
+                         syntax->lex->current_token_location, result, right);
+  }
+  return result;
+}
+
 static ASTNode* ParseRelationalExpression(Syntax* syntax,
                                           TokenClass followers) {
-  ASTNode* result = ParseShiftExpression(syntax, followers);
+  ASTNode* result = ParseCompareExpression(syntax, followers);
   for (;;) {
     if (LexMatch(syntax->lex, TOK(less))) {
-      ASTNode* right = ParseShiftExpression(syntax, followers);
+      ASTNode* right = ParseCompareExpression(syntax, followers);
       result =
           NewBinaryASTNode(AST_OP(less), NULL,
                            syntax->lex->current_token_location, result, right);
     } else if (LexMatch(syntax->lex, TOK(lesseq))) {
-      ASTNode* right = ParseShiftExpression(syntax, followers);
+      ASTNode* right = ParseCompareExpression(syntax, followers);
       result =
           NewBinaryASTNode(AST_OP(lesseq), NULL,
                            syntax->lex->current_token_location, result, right);
@@ -3377,12 +3390,12 @@ static ASTNode* ParseRelationalExpression(Syntax* syntax,
                LexLookingAt(syntax->lex, TOK(greater))) {
       break;
     } else if (LexMatch(syntax->lex, TOK(greater))) {
-      ASTNode* right = ParseShiftExpression(syntax, followers);
+      ASTNode* right = ParseCompareExpression(syntax, followers);
       result =
           NewBinaryASTNode(AST_OP(greater), NULL,
                            syntax->lex->current_token_location, result, right);
     } else if (LexMatch(syntax->lex, TOK(greatereq))) {
-      ASTNode* right = ParseShiftExpression(syntax, followers);
+      ASTNode* right = ParseCompareExpression(syntax, followers);
       result =
           NewBinaryASTNode(AST_OP(greatereq), NULL,
                            syntax->lex->current_token_location, result, right);

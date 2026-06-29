@@ -2038,6 +2038,46 @@ static TargetInstruction* LowerComparison(X86_64Generator* rv, IRNode* node) {
   return NULL;
 }
 
+// Lower a three-way comparison (operator<=> on scalars) to an integer result
+// of -1/0/1 (and 2 = unordered for floating point).  For any operand pair we
+// compute p = (a < b) and q = (b < a) as 0/1 booleans, then form
+//   (q - p) + ((p & q) << 1).
+// For totally-ordered operands p & q is always 0, so the result is the usual
+// (a > b) - (a < b) == -1/0/1.  For floating point, ucomiSS/SD sets CF for both
+// the less-than and (reversed) greater-than test when the operands are
+// unordered (a NaN is involved), making p & q == 1 and contributing the +2.
+static TargetInstruction* LowerThreeWay(X86_64Generator* rv, IRNode* node) {
+  assert(node->inputs.length == 2);
+  IRNode* a = node->inputs.value.p[0];
+  IRNode* b = node->inputs.value.p[1];
+  bool is_float = node->opcode == IR_OP(cmp3wayf);
+  bool is_double = node->opcode == IR_OP(cmp3wayd);
+  bool is_fp = is_float || is_double;
+  // Signed integers use setl; unsigned ints, pointers and floats (via ucomi's
+  // CF) all use setb.
+  X86_64Opcode setcc =
+      node->opcode == IR_OP(cmp3wayi) ? X86_64_OP(setl) : X86_64_OP(setb);
+  TargetInstruction* ma = Materialize(rv, a);
+  TargetInstruction* mb = Materialize(rv, b);
+  TargetInstruction* lt = NewInstruction2(setcc, ma, mb);  // a < b
+  TargetInstruction* gt = NewInstruction2(setcc, mb, ma);  // b < a
+  if (is_fp) {
+    lt->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
+    gt->flags |= is_double ? X86_64_FCMP_SD : X86_64_FCMP_SS;
+  }
+  lt = Emit(rv, lt);
+  gt = Emit(rv, gt);
+  TargetInstruction* diff = Emit(rv, NewInstruction2(X86_64_OP(sub), gt, lt));
+  if (!is_fp) {
+    return SetLoweredNode(node, diff);
+  }
+  TargetInstruction* both = Emit(rv, NewInstruction2(X86_64_OP(and), lt, gt));
+  TargetInstruction* twice =
+      Emit(rv, NewInstruction2(X86_64_OP(add), both, both));
+  return SetLoweredNode(node, Emit(rv, NewInstruction2(X86_64_OP(add), diff,
+                                                       twice)));
+}
+
 static void GetAddressAndOffsetFrom(X86_64Generator* rv,
                                  TargetInstruction* addr,
                                  int offset,
@@ -4032,6 +4072,13 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(cmpgtd):
     case IR_OP(cmpged):
       return LowerComparison(rv, node);
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3waya):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+      return RouteResultToDest(rv, gen, node, LowerThreeWay(rv, node));
 
     case IR_OP(btrue):
     case IR_OP(bfalse):

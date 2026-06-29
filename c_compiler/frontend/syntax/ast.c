@@ -181,6 +181,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "<";
     case AST_OP(lesseq):
       return "<=";
+    case AST_OP(spaceship):
+      return "<=>";
     case AST_OP(logand):
       return "&&";
     case AST_OP(logor):

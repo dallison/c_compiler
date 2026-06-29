@@ -63,6 +63,7 @@ typedef enum {
   AST_OP(catch),
   AST_OP(less),
   AST_OP(lesseq),
+  AST_OP(spaceship),
   AST_OP(logand),
   AST_OP(logor),
   AST_OP(call),

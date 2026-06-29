@@ -493,6 +493,7 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
     case TOK(bangeq):
     case TOK(less):
     case TOK(lesseq):
+    case TOK(spaceship):
     case TOK(greater):
     case TOK(greatereq):
     case TOK(arrow):
@@ -4808,6 +4809,10 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
       SyntaxError(syntax, "Cannot mix function definition with declaration");
     }
     VectorAppendVector(declarations, &syntax->inline_static_member_definitions);
+    // Ownership of the queued inline static data member definitions now belongs
+    // to `declarations`; clear the queue so later declarations don't re-emit
+    // (and double-free) them.
+    VectorClear(&syntax->inline_static_member_definitions);
     // result is a DeclarationListASTNode that owns `declarations`; its teardown
     // frees the vector and its contents, so don't free them here.
     AttributeListDestruct(&attributes);
@@ -4815,6 +4820,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   }
 
   VectorAppendVector(declarations, &syntax->inline_static_member_definitions);
+  VectorClear(&syntax->inline_static_member_definitions);
 
   // The declaration is followed by a semicolon.
   SyntaxNeedSemicolon(syntax, TC(type));

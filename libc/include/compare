@@ -1,0 +1,89 @@
+//
+//  compare
+//  c_compiler
+//
+//  Minimal C++20 three-way comparison (<=>) support for DaveCC.
+//
+//  The comparison-category types are modelled as aggregates wrapping a single
+//  `int _v` (less = -1, equivalent/equal = 0, greater = 1, unordered = 2).  The
+//  compiler's built-in `<=>` produces values of these types directly by storing
+//  that value into `_v`.  (An `int` is used rather than the conventional
+//  `signed char` so the representation does not depend on a backend correctly
+//  sign-extending sub-word loads.)
+//
+//  Simplifications relative to the standard:
+//   * The comparison-against-literal-0 operators accept any `int` rather than
+//     only the literal 0.
+//   * The categories keep aggregate semantics so the named constants can be
+//     defined as `static constexpr` members.
+//   * Implicit conversions between categories (strong -> weak -> partial) are
+//     not provided.
+//
+
+#ifndef compare_h
+#define compare_h
+
+namespace std {
+
+class partial_ordering {
+ public:
+  int _v;
+
+  constexpr bool operator==(partial_ordering o) const { return _v == o._v; }
+  constexpr bool operator!=(partial_ordering o) const { return _v != o._v; }
+
+  constexpr bool operator==(int) const { return _v == 0; }
+  constexpr bool operator!=(int) const { return _v != 0; }
+  constexpr bool operator<(int) const { return _v < 0; }
+  constexpr bool operator>(int) const { return _v == 1; }
+  constexpr bool operator<=(int) const { return _v <= 0; }
+  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+
+  static constexpr partial_ordering less = {(signed char)-1};
+  static constexpr partial_ordering equivalent = {(signed char)0};
+  static constexpr partial_ordering greater = {(signed char)1};
+  static constexpr partial_ordering unordered = {(signed char)2};
+};
+
+class weak_ordering {
+ public:
+  int _v;
+
+  constexpr bool operator==(weak_ordering o) const { return _v == o._v; }
+  constexpr bool operator!=(weak_ordering o) const { return _v != o._v; }
+
+  constexpr bool operator==(int) const { return _v == 0; }
+  constexpr bool operator!=(int) const { return _v != 0; }
+  constexpr bool operator<(int) const { return _v < 0; }
+  constexpr bool operator>(int) const { return _v == 1; }
+  constexpr bool operator<=(int) const { return _v <= 0; }
+  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+
+  static constexpr weak_ordering less = {(signed char)-1};
+  static constexpr weak_ordering equivalent = {(signed char)0};
+  static constexpr weak_ordering greater = {(signed char)1};
+};
+
+class strong_ordering {
+ public:
+  int _v;
+
+  constexpr bool operator==(strong_ordering o) const { return _v == o._v; }
+  constexpr bool operator!=(strong_ordering o) const { return _v != o._v; }
+
+  constexpr bool operator==(int) const { return _v == 0; }
+  constexpr bool operator!=(int) const { return _v != 0; }
+  constexpr bool operator<(int) const { return _v < 0; }
+  constexpr bool operator>(int) const { return _v == 1; }
+  constexpr bool operator<=(int) const { return _v <= 0; }
+  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+
+  static constexpr strong_ordering less = {(signed char)-1};
+  static constexpr strong_ordering equal = {(signed char)0};
+  static constexpr strong_ordering equivalent = {(signed char)0};
+  static constexpr strong_ordering greater = {(signed char)1};
+};
+
+}  // namespace std
+
+#endif /* compare_h */

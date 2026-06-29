@@ -176,6 +176,12 @@ typedef enum {
   P_OP(cmpgtd),    // > double.
   P_OP(cmpged),    // >= double.
 
+  // C++20 three-way comparison: result is -1 / 0 / 1 (2 = unordered floats).
+  P_OP(cmp3way),    // signed int three-way.
+  P_OP(cmp3wayu),   // unsigned int three-way.
+  P_OP(cmp3wayf),   // float three-way (2 = unordered).
+  P_OP(cmp3wayd),   // double three-way (2 = unordered).
+
   // Relative branches.
   P_OP(bnz),       // Branch if non-zero.
   P_OP(bz),        // Branch if zero

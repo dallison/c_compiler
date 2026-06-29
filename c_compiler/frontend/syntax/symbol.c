@@ -255,6 +255,7 @@ static const char* CXXOperatorEncoding(const char* name) {
       {"operator<<", "ls"},
       {"operator<<=", "lS"},
       {"operator<=", "le"},
+      {"operator<=>", "ss"},
       {"operator=", "aS"},
       {"operator==", "eq"},
       {"operator>", "gt"},

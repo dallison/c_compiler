@@ -107,6 +107,10 @@ DECLARE_INST_FUNC(cmpltd);
 DECLARE_INST_FUNC(cmpled);
 DECLARE_INST_FUNC(cmpgtd);
 DECLARE_INST_FUNC(cmpged);
+DECLARE_INST_FUNC(cmp3way);
+DECLARE_INST_FUNC(cmp3wayu);
+DECLARE_INST_FUNC(cmp3wayf);
+DECLARE_INST_FUNC(cmp3wayd);
 DECLARE_INST_FUNC(bnz);
 DECLARE_INST_FUNC(bz);
 DECLARE_INST_FUNC(bra);
@@ -225,6 +229,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(cmpled);
   INST(cmpgtd);
   INST(cmpged);
+  INST(cmp3way);
+  INST(cmp3wayu);
+  INST(cmp3wayf);
+  INST(cmp3wayd);
   INST(bnz);
   INST(bz);
   INST(bra);
@@ -601,6 +609,10 @@ ASSEMBLE_DOUBLE_CMP(cmpltd);
 ASSEMBLE_DOUBLE_CMP(cmpled);
 ASSEMBLE_DOUBLE_CMP(cmpgtd);
 ASSEMBLE_DOUBLE_CMP(cmpged);
+ASSEMBLE_INT_CMP(cmp3way);
+ASSEMBLE_INT_CMP(cmp3wayu);
+ASSEMBLE_FLOAT_CMP(cmp3wayf);
+ASSEMBLE_DOUBLE_CMP(cmp3wayd);
 
 static void AssembleConversion(PCodeAssembler* assembler, int opcode,
                                char from_type, const char* from_type_name,

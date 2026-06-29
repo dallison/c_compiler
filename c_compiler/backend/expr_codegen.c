@@ -463,6 +463,49 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
   return IRSetType(GeneratorEmit(gen, NewIR2(opcode, left, right)), node->base.type);
 }
 
+// Pick the cmp3way IR opcode for the (converted, common) operand type.
+static IROpcode ThreeWayIROpcode(TypeRecord* type) {
+  if (TypeIsFloat(type)) {
+    return IR_OP(cmp3wayf);
+  }
+  if (TypeIsDouble(type) || TypeIsLongDouble(type)) {
+    return IR_OP(cmp3wayd);
+  }
+  if (TypeIsPointerOrArray(type)) {
+    return IR_OP(cmp3waya);
+  }
+  if (TypeIsUnsigned(type)) {
+    return IR_OP(cmp3wayu);
+  }
+  return IR_OP(cmp3wayi);
+}
+
+// Lower a built-in scalar `a <=> b`.  The cmp3way op yields a signed integer
+// -1/0/1 (and 2 = unordered for floats); that value is stored into the `int _v`
+// member (offset 0) of a fresh comparison-category temporary, mirroring the way
+// struct-by-value results are materialized.
+static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
+  IRNode* left = GenerateExpression(gen, node->left);
+  IRNode* right = GenerateExpression(gen, node->right);
+  TypeRecord* operand_type = node->right->type;
+  IROpcode opcode = ThreeWayIROpcode(operand_type);
+  IRNode* cmp = GeneratorEmit(gen, NewIR2(opcode, left, right));
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  IRSetType(cmp, int_type);
+
+  Symbol* tmp = SyntaxNewTemporary(gen->syntax, node->base.type);
+  IRNode* var = GeneratorGetVariable(gen, tmp);
+  IRNode* addr = GeneratorEmit(gen, NewIR1(IR_OP(addressof), var));
+  IRSetType(addr, NewPointerTo(kQualPlain, node->base.type));
+  // Store into the category's `int _v` member (offset 0).  The store width must
+  // match the target's int size (e.g. 16-bit on the 6502).
+  IROpcode store_op = int_type->size >= 4   ? IR_OP(store32)
+                      : int_type->size == 2 ? IR_OP(store16)
+                                            : IR_OP(store8);
+  GeneratorEmit(gen, NewIR2(store_op, addr, cmp));
+  return var;
+}
+
 static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
   IRNode* sub = GenerateExpression(gen, node->sub);
   if (node->base.op == AST_OP(uplus)) {
@@ -2217,6 +2260,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(equal):
     case AST_OP(noteq):
       result = GenerateBinaryExpression(gen, binary_node);
+      break;
+
+    case AST_OP(spaceship):
+      result = GenerateThreeWayComparison(gen, binary_node);
       break;
 
     // Conversions.

@@ -149,6 +149,14 @@ typedef enum {
   IR_OP(cmpgta),  // op0 > op1 (addresses)
   IR_OP(cmpgea),  // op0 >= op1 (addresses)
 
+  // C++20 three-way comparison.  Result is a signed integer: -1 (op0 < op1),
+  // 0 (op0 == op1), 1 (op0 > op1), and for floating point 2 (unordered).
+  IR_OP(cmp3wayi),  // signed integer three-way
+  IR_OP(cmp3wayu),  // unsigned integer three-way
+  IR_OP(cmp3wayf),  // float three-way (2 = unordered)
+  IR_OP(cmp3wayd),  // double three-way (2 = unordered)
+  IR_OP(cmp3waya),  // address three-way (unsigned)
+
   // Relative branches.
   IR_OP(btrue),   // If op0 goto op1
   IR_OP(bfalse),  // If !op0 goto op1

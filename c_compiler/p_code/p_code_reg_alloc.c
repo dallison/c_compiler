@@ -126,6 +126,7 @@ static PCodeRegisterType RegisterTypeFromTmpUsers(TargetInstruction* inst) {
         case P_OP(cmplef):
         case P_OP(cmpgtf):
         case P_OP(cmpgef):
+        case P_OP(cmp3wayf):
           return kPCodeRegTypeFloat;
 
         case P_OP(movd):
@@ -144,6 +145,7 @@ static PCodeRegisterType RegisterTypeFromTmpUsers(TargetInstruction* inst) {
         case P_OP(cmpled):
         case P_OP(cmpgtd):
         case P_OP(cmpged):
+        case P_OP(cmp3wayd):
           return kPCodeRegTypeDouble;
 
         default:
@@ -212,6 +214,10 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case P_OP(cmpled):
     case P_OP(cmpgtd):
     case P_OP(cmpged):
+    case P_OP(cmp3way):
+    case P_OP(cmp3wayu):
+    case P_OP(cmp3wayf):
+    case P_OP(cmp3wayd):
     case P_OP(f2i):
     case P_OP(d2i):
     case P_OP(f2ui):

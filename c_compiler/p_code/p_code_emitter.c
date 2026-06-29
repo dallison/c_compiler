@@ -271,8 +271,9 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
 
   // General case for instruction printing.
 
-  // Print opcode.
-  fprintf(fp, "\t%-8s", PCodeOpcodeName(inst->opcode));
+  // Print opcode.  The trailing space guarantees a separator even when the
+  // mnemonic fills the whole field (e.g. the 8-character cmp3way* opcodes).
+  fprintf(fp, "\t%-8s ", PCodeOpcodeName(inst->opcode));
 
   // Print operands.
   switch ((PCodeOpcode)inst->opcode) {

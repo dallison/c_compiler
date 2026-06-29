@@ -517,6 +517,7 @@ bool TypeIsCXXInitializerList(TypeRecord* type);
 TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
 TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,
                                               TypeRecord* element_type);
+TypeRecord* TypeFindCXXComparisonCategory(const char* category_name);
 
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class);
 Symbol* TypeParserParseEnum(TypeParser* parser);

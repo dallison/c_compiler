@@ -90,6 +90,10 @@ typedef enum {
   PCODE_OP(d2ui) = 72,
   PCODE_OP(rcall) = 73,
   PCODE_OP(esc) = 74,
+  PCODE_OP(cmp3way) = 75,
+  PCODE_OP(cmp3wayu) = 76,
+  PCODE_OP(cmp3wayf) = 77,
+  PCODE_OP(cmp3wayd) = 78,
 
   // 64 bit instructions.
   PCODE_OP(ldw) = 0,

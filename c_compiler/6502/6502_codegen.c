@@ -7014,6 +7014,84 @@ static void LowerCast(W65C02Generator* g, IRNode* node) {
   SetLoweredNode(node, expr);
 }
 
+// Multi-byte unsigned subtract value1 - value2.  Afterwards the carry is set
+// iff value1 >= value2 (unsigned) and clear iff value1 < value2.
+static void CompareUnsignedSubtract(W65C02Generator* g,
+                                    TargetInstruction* value1,
+                                    TargetInstruction* value2, int size) {
+  sec(g);
+  for (int i = 0; i < size; i++) {
+    SetIndexReg(g, value1, value2, i);
+    lda(g, value1, i);
+    sbc(g, value2, i);
+  }
+}
+
+// Lower a three-way comparison (operator<=>) to a sign-extended integer
+// -1/0/1 in the destination.  The 6502 has no floating-point support, so float
+// operands fall through to the signed-integer path (matching the rest of the
+// comparison lowering, which treats float bits as a signed integer).
+static void LowerThreeWay(W65C02Generator* g, IRNode* node) {
+  IRNode* lhs = node->inputs.value.p[0];
+  IRNode* rhs = node->inputs.value.p[1];
+  int size = Sizeof(lhs->type);
+  bool is_unsigned =
+      node->opcode == IR_OP(cmp3wayu) || node->opcode == IR_OP(cmp3waya);
+  TargetInstruction* dest = GetDestAddress(g, node, false);
+  AddReloadPoint(g, dest);
+  TargetInstruction* a = GetAddress(g, lhs, true);
+  TargetInstruction* b = GetAddress(g, rhs, true);
+  AddReloadPoint(g, a);
+  AddReloadPoint(g, b);
+
+  TargetInstruction* skip_less =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  TargetInstruction* skip_greater =
+      NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  // X accumulates the result (-1/0/1).  It survives the compares, which only
+  // touch the accumulator and the flags.  Note that if a < b then a > b is
+  // false, so the second test never overwrites the -1.
+  ldxi(g, 0);
+  if (is_unsigned) {
+    CompareUnsignedSubtract(g, a, b, size);
+    EmitResolvedBranch(g, W65C02_OP(bcs), skip_less);  // a >= b -> not less
+  } else {
+    CompareSignedSubtract(g, a, b, size);
+    EmitResolvedBranch(g, W65C02_OP(bpl), skip_less);  // a >= b -> not less
+  }
+  ldxi(g, 0xFF);  // a < b  -> -1
+  Emit(g, skip_less);
+  if (is_unsigned) {
+    CompareUnsignedSubtract(g, b, a, size);
+    EmitResolvedBranch(g, W65C02_OP(bcs), skip_greater);  // b >= a -> not greater
+  } else {
+    CompareSignedSubtract(g, b, a, size);
+    EmitResolvedBranch(g, W65C02_OP(bpl), skip_greater);
+  }
+  ldxi(g, 1);  // a > b  -> 1
+  Emit(g, skip_greater);
+
+  // Store the result byte (X), sign-extended to the destination's full width.
+  int dest_size = Sizeof(node->type);
+  txa(g);
+  SetIndexReg(g, dest, dest, 0);
+  sta(g, dest, 0);
+  if (dest_size > 1) {
+    andi(g, 0x80);
+    TargetInstruction* non_negative =
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    EmitResolvedBranch(g, W65C02_OP(beq), non_negative);
+    ldai(g, 0xFF);
+    Emit(g, non_negative);
+    for (int i = 1; i < dest_size; i++) {
+      SetIndexReg(g, dest, dest, i);
+      sta(g, dest, i);
+    }
+  }
+  dest->flags |= k6502ComparisonGenerated;
+  SetLoweredNode(node, dest);
+}
+
 static void LowerComparison(W65C02Generator* g, IRNode* node) {
   // Check if any the outputs of the node are not branches.  If all
   // the uses are branches we defer the generation of the comparison
@@ -7456,6 +7534,13 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
       return LowerComparison(g, node);
+
+    case IR_OP(cmp3wayi):
+    case IR_OP(cmp3wayu):
+    case IR_OP(cmp3waya):
+    case IR_OP(cmp3wayf):
+    case IR_OP(cmp3wayd):
+      return LowerThreeWay(g, node);
 
     case IR_OP(btrue):
     case IR_OP(bfalse):
