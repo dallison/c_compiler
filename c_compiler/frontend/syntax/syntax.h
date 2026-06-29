@@ -105,6 +105,16 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 void SyntaxParseStaticAssert(Syntax* syntax);
+// Parses a C++ 'friend' declaration appearing inside the body of class
+// 'befriending'.  Handles friend class declarations ('friend class X;' and
+// 'friend X;') as well as friend function declarations and inline friend
+// function definitions, recording the granted friendships on 'befriending'.
+void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending);
+// Registers a fully-substituted instantiated friend function in namespace 'ns'
+// (merging overloads), returning the symbol that persists in scope.  Used when
+// instantiating a class template's deferred friend functions.
+Symbol* SyntaxRegisterInstantiatedFriendFunction(Syntax* syntax, Namespace* ns,
+                                                 Symbol* sym);
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers);
 Vector* SyntaxParseTemplateParameterList(Syntax* syntax);
 Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base);

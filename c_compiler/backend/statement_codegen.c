@@ -277,6 +277,113 @@ static void RecordExceptionKeepLabel(Generator* gen, IRNode* label) {
   VectorAppend(&gen->exception_keep_labels, label);
 }
 
+// Look up (or lazily declare) the runtime entry point that implements
+// std::terminate.  It never returns, so callers don't emit any follow-on code.
+static Symbol* GetDaveCCTerminateFunction(SourceLocation location) {
+  String name;
+  StringInit(&name, "__davecc_terminate");
+  Symbol* symbol = FindGlobalSymbol(&name);
+  StringDestruct(&name);
+  if (symbol != NULL) {
+    symbol->flags.noreturn = true;
+    return symbol;
+  }
+
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  symbol = NewSymbol("__davecc_terminate", func_type, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->flags.noreturn = true;
+  symbol->location = location;
+  SyntaxAddSymbol(&compiler->syntax, symbol);
+  return symbol;
+}
+
+// Visitor that flags whether a subtree can raise an exception: only a `throw`
+// or a call (which may itself throw) can do so.  Used to decide whether a
+// noexcept function needs a runtime terminate guard at all.
+static void NoexceptMightThrowVisitor(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  bool* might_throw = data;
+  if (*might_throw) {
+    return;
+  }
+  if (node->op == AST_OP(throw) || ASTIsCallNode(node)) {
+    *might_throw = true;
+  }
+}
+
+static bool FunctionBodyMightThrow(ASTNode* body) {
+  bool might_throw = false;
+  ASTNodeVisit(body, NoexceptMightThrowVisitor, 0, &might_throw);
+  return might_throw;
+}
+
+// A noexcept function needs the terminate guard only when exceptions are
+// enabled and its body can actually raise one; a body with no throw or call
+// can never violate the specification, so no guard is emitted for it.
+static bool FunctionNeedsNoexceptGuard(Generator* gen) {
+  TypeRecord* func = gen->func;
+  if (gen->for_constant_evaluation || !CompilerIsCXX() ||
+      !CompilerExceptionsEnabled() || func == NULL || !TypeIsFunction(func) ||
+      !func->info.function.is_noexcept) {
+    return false;
+  }
+  return FunctionBodyMightThrow(func->info.function.body);
+}
+
+// The terminate guard implements [except.spec]: an exception that escapes a
+// noexcept function must call std::terminate.  It is modelled as a function-
+// wide catch-all exception range whose landing pad calls the terminate runtime.
+// During unwinding the runtime selects the innermost matching range, so a
+// local try/catch that handles the exception still takes precedence; only an
+// exception that would truly leave the function reaches this catch-all.
+//
+// GenerateNoexceptGuardEnter emits the label that opens the guarded region (the
+// whole function body) and decides whether a guard is needed at all.
+void GenerateNoexceptGuardEnter(Generator* gen, NoexceptTerminateGuard* guard) {
+  guard->active = FunctionNeedsNoexceptGuard(gen);
+  guard->try_start = NULL;
+  guard->try_end = NULL;
+  if (!guard->active) {
+    return;
+  }
+  guard->try_start = GeneratorEmit(gen, NewIR(IR_OP(label)));
+}
+
+// Closes the guarded region after the function body has been generated.
+void GenerateNoexceptGuardLeave(Generator* gen, NoexceptTerminateGuard* guard) {
+  if (!guard->active) {
+    return;
+  }
+  guard->try_end = GeneratorEmit(gen, NewIR(IR_OP(label)));
+}
+
+// Emits the terminate landing pad (placed after the normal return path so it is
+// reached only via the unwinder) and records the function-wide catch-all range.
+void GenerateNoexceptGuardTerminate(Generator* gen,
+                                    NoexceptTerminateGuard* guard) {
+  if (!guard->active) {
+    return;
+  }
+  SourceLocation location = gen->func->info.function.symbol->location;
+  IRNode* landing_pad = GeneratorEmit(gen, NewIR(IR_OP(label)));
+  Symbol* terminate = GetDaveCCTerminateFunction(location);
+  GenerateNoArgRuntimeCall(gen, terminate);
+  // __davecc_terminate never returns, but the block still needs a terminator so
+  // the CFG builder does not treat it as falling through to a (nonexistent)
+  // successor.  These instructions are unreachable.
+  GeneratorEmit(gen, NewIR(IR_OP(leave)));
+  GeneratorEmit(gen, NewIR(IR_OP(ret)));
+  RecordExceptionRange(gen, guard->try_start, guard->try_end, landing_pad,
+                       /*catch_typeinfo=*/NULL);
+}
+
 static bool IsDestructorStatement(ASTNode* stmt) {
   if (stmt == NULL || stmt->op != AST_OP(expr)) {
     return false;

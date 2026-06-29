@@ -106,6 +106,14 @@ intptr_t __davecc_current_exception_int(void) {
   return current_exception_object;
 }
 
+// Default std::terminate: the standard's default terminate handler calls
+// abort().  Reached when an exception escapes a noexcept function (the compiler
+// routes such escapes to a per-function landing pad that calls this) or when
+// any other terminating condition occurs.
+void __davecc_terminate(void) {
+  abort();
+}
+
 void __davecc_throw(intptr_t exception_object, const DaveTypeInfo* typeinfo) {
   current_exception_object = exception_object;
   current_exception_typeinfo = typeinfo;

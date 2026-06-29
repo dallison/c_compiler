@@ -333,6 +333,7 @@ typedef struct ASTNode {
 #define kASTDependentArrayDelete (1 << 18)  // Dependent delete[] expression.
 #define kASTDependentFunctorCall (1 << 19)  // Dependent object call expression.
 #define kASTDependentNewInitializer (1 << 20)  // new T(expr) parsed before T substitution.
+#define kASTOverloadDiagnosed (1 << 21)  // Overload-failure diagnostics already emitted for this call.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -378,6 +379,10 @@ bool ASTNodeChildIsStatement(ASTNode* parent, int child_id);
 
 bool ASTNodeIsIntConstant(ASTNode* node);
 int64_t ASTNodeConstantValue(ASTNode* node);
+
+// True for call-like nodes (ordinary/inline calls and the variadic/atomic
+// builtins) whose arguments live in a child vector starting at child_id 1.
+bool ASTIsCallNode(ASTNode* node);
 
 // A unary AST node with a single child.
 typedef struct {

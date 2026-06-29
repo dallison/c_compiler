@@ -843,6 +843,37 @@ int64_t ASTNodeConstantValue(ASTNode* node) {
   }
 }
 
+// True for "call-like" nodes: an ordinary or inline call and the variadic /
+// atomic builtins.  These are all VectorASTNodes whose callee/target occupies
+// child slot 0 and whose argument list is stored in the child vector starting
+// at child_id 1, so callers indexing the argument vector must subtract one.
+bool ASTIsCallNode(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(call):
+    case AST_OP(inline_call):
+    case AST_OP(builtin_va_start):
+    case AST_OP(builtin_va_arg):
+    case AST_OP(builtin_va_end):
+    case AST_OP(builtin_va_copy):
+    case AST_OP(builtin_atomic_load):
+    case AST_OP(builtin_atomic_store):
+    case AST_OP(builtin_atomic_fetch_add):
+    case AST_OP(builtin_atomic_fetch_sub):
+    case AST_OP(builtin_atomic_add_fetch):
+    case AST_OP(builtin_atomic_sub_fetch):
+    case AST_OP(builtin_atomic_compare_exchange_bool):
+    case AST_OP(builtin_atomic_compare_exchange_val):
+    case AST_OP(builtin_atomic_compare_exchange_n):
+    case AST_OP(builtin_atomic_fence):
+      return true;
+    default:
+      return false;
+  }
+}
+
 static void IdentifierASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   Indent(indents, fp);
   IdentifierASTNode* inode = (IdentifierASTNode*)node;

@@ -3158,6 +3158,250 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
   return NULL;
 }
 
+static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
+                                      bool* is_inline, bool* is_constexpr,
+                                      bool* is_consteval, bool* is_constinit,
+                                      bool* is_explicit, TypeRecord** type,
+                                      Vector* attributes,
+                                      ParserContext context);
+
+// Records a parsed friend function symbol, queuing it for code generation when
+// it carries an inline body.  `definition` is the AST returned by
+// DeclareOrDefineFunction (non-NULL for an inline definition), `sym` the parsed
+// declarator symbol and `befriending` the class granting friendship.
+static void RecordFriendFunction(Syntax* syntax, Struct* befriending,
+                                 Symbol* sym, Symbol* in_scope_symbol,
+                                 ASTNode* definition) {
+  (void)syntax;
+  // Match on the symbol that actually persists in the enclosing scope so the
+  // friend record stays valid; access checks compare by name and signature so
+  // either the merged declaration or the fresh symbol works.
+  Symbol* friend_symbol = in_scope_symbol != NULL ? in_scope_symbol : sym;
+  StructAddFriendFunction(befriending, friend_symbol);
+  if (definition != NULL) {
+    // Inline friend definitions belong to the enclosing namespace; queue them
+    // alongside the other deferred definitions so codegen emits the body.
+    VectorAppend(&compiler->pending_template_instantiations, definition);
+  }
+}
+
+// Friend declared inside a class template: defer it.  We keep the parsed
+// symbol (with its inline body, if any) on the template so each specialization
+// can substitute the signature/body and register a concrete friend; we do NOT
+// inject the dependent declaration into the enclosing namespace (which would
+// otherwise create a spurious overload) nor emit any body now.
+static void SyntaxDeferTemplateFriendFunction(Syntax* syntax,
+                                              Struct* befriending, Symbol* sym) {
+  sym->namespace_ = syntax->current_namespace;
+  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+  if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    // Parse and retain the inline body on sym->type; intentionally do not queue
+    // the returned definition for emission - that happens per instantiation.
+    Vector* friend_decls = NewVector();
+    ASTNode* definition =
+        DeclareOrDefineFunction(syntax, friend_decls, sym, NULL);
+    if (definition == NULL) {
+      VectorDelete(friend_decls);
+    } else {
+      // Retain as a teardown root so the template body outlives parsing.
+      VectorAppend(&compiler->declaration_asts, definition);
+    }
+  } else {
+    SyntaxNeedSemicolon(syntax, TC(decl));
+  }
+  StructAddFriendFunction(befriending, sym);
+}
+
+// Registers a fully-substituted instantiated friend function `sym` in namespace
+// `ns` (merging with existing overloads), returning the symbol that persists in
+// scope (an existing matching declaration/definition if present, otherwise
+// `sym`).  Used when instantiating a class template's friends.
+Symbol* SyntaxRegisterInstantiatedFriendFunction(Syntax* syntax, Namespace* ns,
+                                                 Symbol* sym) {
+  Namespace* saved = syntax->current_namespace;
+  syntax->current_namespace =
+      ns != NULL ? ns : (compiler != NULL ? compiler->global_namespace : NULL);
+  Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
+  Symbol* in_scope = NULL;
+  if (CanOverloadFunctions(old_sym, sym)) {
+    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+    if (matching_overload != NULL) {
+      in_scope = matching_overload;
+    } else {
+      AppendOverload(old_sym, sym);
+      in_scope = sym;
+    }
+  } else if (old_sym != NULL && !TypeEqual(old_sym->type, sym->type)) {
+    in_scope = NULL;
+  }
+  if (in_scope == NULL) {
+    if (InsertFileScopeSymbol(syntax, sym)) {
+      in_scope = sym;
+    } else {
+      in_scope = sym;
+    }
+  }
+  syntax->current_namespace = saved;
+  return in_scope;
+}
+
+void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
+  LexMatch(syntax->lex, TOK(friend));
+
+  // A friend declaration introduces its name (a forward-declared friend class
+  // tag, or the friend function) into the nearest enclosing namespace scope,
+  // not into the class being defined.  Suspend the enclosing class's tag scope
+  // so any newly created tag is routed to the namespace and unifies with a
+  // later definition.
+  LocalSymbolTable* saved_tag_stack = syntax->local_tag_stack;
+  syntax->local_tag_stack = NULL;
+
+  Vector attributes = {0};
+  VectorInit(&attributes);
+  Storage storage = STO(implicit);
+  bool is_inline = false;
+  bool is_constexpr = false;
+  bool is_consteval = false;
+  bool is_constinit = false;
+  bool is_explicit = false;
+  TypeRecord* type = NULL;
+  ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
+                            &is_consteval, &is_constinit, &is_explicit, &type,
+                            &attributes, kParsingFileScope);
+
+  TypeRecordIncRef(type);
+
+  // 'friend class X;' / 'friend struct X;' / 'friend X;' — a type-specifier
+  // with no declarator names a class to befriend.
+  if (LexLookingAt(syntax->lex, TOK(semicolon))) {
+    if (type != NULL && TypeIsStructOrUnion(type) &&
+        type->info.struct_info != NULL) {
+      StructAddFriendClass(befriending, type->info.struct_info);
+    } else {
+      SyntaxError(syntax,
+                  "friend declaration does not name a class or a function");
+    }
+    LexMatch(syntax->lex, TOK(semicolon));
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
+  }
+
+  // Otherwise this is a friend function declaration or inline definition.  It
+  // belongs to the nearest enclosing namespace scope, not to the class, so we
+  // declare it there and merge with any existing overloads exactly as a normal
+  // namespace-scope function declaration would.
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, storage, kParsingFileScope);
+  parser.is_inline = is_inline;
+  parser.is_constexpr = is_constexpr;
+  parser.is_consteval = is_consteval;
+  parser.is_constinit = is_constinit;
+  // Let the friend's signature name the class currently being defined via its
+  // own template-id (e.g. 'friend f(const Box<T>&)' inside 'template Box').
+  // This only affects type resolution; the friend is still declared at the
+  // enclosing namespace scope, not as a member of the class.
+  parser.cxx_member_owner = befriending;
+  SyntaxOpenScope(syntax);
+
+  Symbol* sym = TypeParserParseDeclarator(&parser, type);
+  if (sym == NULL || !TypeIsFunction(sym->type)) {
+    if (sym == NULL) {
+      SyntaxError(syntax, "expected a friend function declaration");
+    } else {
+      SyntaxError(syntax, "a friend declaration must name a function or class");
+    }
+    SyntaxRecover(syntax, TC(semicolon));
+    LexMatch(syntax->lex, TOK(semicolon));
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
+  }
+
+  sym->type->info.function.is_explicit = false;
+
+  // 'friend void A::f();' names an existing member function of another class.
+  // It refers to that member rather than introducing a namespace-scope function,
+  // so record the friendship against the existing member and do not redeclare
+  // or define it here.
+  if (parser.cxx_member_definition != NULL &&
+      parser.cxx_member_definition->symbol != NULL) {
+    StructAddFriendFunction(befriending, parser.cxx_member_definition->symbol);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
+  }
+
+  // A friend declared inside a class template is dependent: defer its
+  // registration and code emission until each specialization is instantiated,
+  // where the signature (and any inline body) is substituted with the template
+  // arguments.  Friend *classes* are handled separately above and are unchanged.
+  if (syntax->parsing_template_declaration) {
+    SyntaxDeferTemplateFriendFunction(syntax, befriending, sym);
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
+  }
+
+  Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
+  bool overload_was_appended = false;
+  if (CanOverloadFunctions(old_sym, sym)) {
+    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+    if (matching_overload != NULL) {
+      old_sym = matching_overload;
+    } else {
+      AppendOverload(old_sym, sym);
+      old_sym = NULL;
+      overload_was_appended = true;
+    }
+  } else if (old_sym != NULL && !TypeEqual(old_sym->type, sym->type)) {
+    // A non-overloadable clash with an existing non-function symbol.
+    old_sym = NULL;
+  }
+
+  Symbol* in_scope_symbol = old_sym;
+  if (old_sym == NULL && !overload_was_appended) {
+    if (InsertFileScopeSymbol(syntax, sym)) {
+      in_scope_symbol = sym;
+    }
+  } else if (overload_was_appended) {
+    in_scope_symbol = sym;
+  }
+
+  SymbolSetCXXMangledAsmName(sym);
+  if (old_sym != NULL && old_sym->asm_name.length == 0) {
+    SymbolSetCXXMangledAsmName(old_sym);
+  }
+
+  ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
+  Vector* friend_decls = NewVector();
+  ASTNode* definition =
+      DeclareOrDefineFunction(syntax, friend_decls, sym, old_sym);
+  RecordFriendFunction(syntax, befriending, sym, in_scope_symbol, definition);
+  if (definition == NULL) {
+    // Declaration only: DeclareOrDefineFunction did not adopt the vector.
+    VectorDelete(friend_decls);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+  }
+
+  SyntaxCloseScope(syntax);
+  TypeParserDestruct(&parser);
+  TypeRecordDelete(type);
+  AttributeListDestruct(&attributes);
+  syntax->local_tag_stack = saved_tag_stack;
+}
+
 static bool IsPowerOf2OrZero(int32_t v) {
   return (v & (v - 1)) == 0;
 }

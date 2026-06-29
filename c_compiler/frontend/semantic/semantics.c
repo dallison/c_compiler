@@ -100,6 +100,28 @@ void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
   va_end(ap);
 }
 
+void SemanticNote(ASTNode* node, const char* format, ...) {
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
+  va_list ap;
+  va_start(ap, format);
+  VReportNote(filename, lineno, format, ap);
+  va_end(ap);
+}
+
+void SemanticNoteAtLocation(SourceLocation location, const char* format, ...) {
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  va_list ap;
+  va_start(ap, format);
+  VReportNote(filename, lineno, format, ap);
+  va_end(ap);
+}
+
 static bool SymbolIsCompilerGenerated(Symbol* symbol) {
   if (symbol == NULL) {
     return false;

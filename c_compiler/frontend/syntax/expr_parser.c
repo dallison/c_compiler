@@ -50,19 +50,24 @@ static struct Intrinsic {
     {"__sync_val_compare_and_swap", AST_OP(builtin_atomic_compare_exchange_val), 3},
 };
 
+// The lambda's default capture mode: none ([]), by-value ([=]) or by-reference
+// ([&]).  It governs how identifiers used in the body but not named explicitly
+// are implicitly captured.
 typedef enum {
   kLambdaCaptureDefaultNone,
   kLambdaCaptureDefaultValue,
   kLambdaCaptureDefaultReference,
 } LambdaCaptureDefault;
 
+// One captured entity of a lambda.  Each capture becomes a member of the
+// synthesized closure class.
 typedef struct {
-  Symbol* captured;
-  Symbol* field;
-  ASTNode* initializer;
-  bool by_reference;
-  bool is_pack_expansion;
-  bool is_init_capture;
+  Symbol* captured;          // Enclosing variable (or init-capture local) being captured.
+  Symbol* field;             // Closure-class member created for the capture.
+  ASTNode* initializer;      // Initializer expression for an init-capture, else NULL.
+  bool by_reference;         // Captured by reference (stored as a pointer field).
+  bool is_pack_expansion;    // Capture expands a parameter pack (e.g. [...xs]).
+  bool is_init_capture;      // Init-capture ([x = expr]) introducing a new name.
 } LambdaCapture;
 
 static ASTNode* ParseAssignmentExpression(Syntax* syntax,
@@ -957,6 +962,8 @@ static ASTNode* ParseGenericSelection(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
+// Allocate a LambdaCapture; the closure-class `field` is filled in later by
+// AddLambdaCaptureFields.
 static LambdaCapture* NewLambdaCapture(Symbol* captured, bool by_reference,
                                        bool is_pack_expansion,
                                        ASTNode* initializer,
@@ -971,6 +978,7 @@ static LambdaCapture* NewLambdaCapture(Symbol* captured, bool by_reference,
   return capture;
 }
 
+// Find an existing capture of `symbol`, or NULL if it is not yet captured.
 static LambdaCapture* FindLambdaCapture(Vector* captures, Symbol* symbol) {
   for (size_t i = 0; i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
@@ -981,6 +989,8 @@ static LambdaCapture* FindLambdaCapture(Vector* captures, Symbol* symbol) {
   return NULL;
 }
 
+// Find an existing capture whose captured name matches `name` (used to reject
+// duplicate captures, including init-captures that introduce a fresh symbol).
 static LambdaCapture* FindLambdaCaptureName(Vector* captures, String* name) {
   for (size_t i = 0; i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
@@ -992,6 +1002,8 @@ static LambdaCapture* FindLambdaCaptureName(Vector* captures, String* name) {
   return NULL;
 }
 
+// True when `symbol` is one of the lambda's own parameters (including the
+// synthesized `this`), which must never be treated as a captured variable.
 static bool LambdaFunctionOwnsSymbol(TypeRecord* func, Symbol* symbol) {
   if (func == NULL || symbol == NULL) {
     return false;
@@ -1004,6 +1016,9 @@ static bool LambdaFunctionOwnsSymbol(TypeRecord* func, Symbol* symbol) {
   return false;
 }
 
+// True when `symbol` is eligible for implicit capture: a local automatic
+// variable of the enclosing scope.  Lambda parameters, invented temporaries,
+// functions, statics/externs/typedefs and globals are all excluded.
 static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
   if (symbol == NULL || LambdaFunctionOwnsSymbol(lambda_func, symbol) ||
       symbol->flags.invented || TypeIsFunction(symbol->type) ||
@@ -1014,6 +1029,10 @@ static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
   return global != symbol;
 }
 
+// Parse the `[...]` capture list, populating `captures` and reporting the
+// default capture mode.  Handles the leading default ([=] / [&]), explicit
+// by-value and by-reference captures, init-captures ([x = expr]) and pack
+// expansions ([...xs]).
 static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
                                    LambdaCaptureDefault* capture_default,
                                    TokenClass followers) {
@@ -1051,6 +1070,8 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
     Symbol* symbol = SyntaxFindSymbol(syntax, &name);
     LexNextToken(syntax->lex);
     if (LexMatch(syntax->lex, TOK(equal))) {
+      // Init-capture `[name = expr]`: introduce a brand-new local whose type is
+      // deduced from the initializer (defaulting to int when unknown).
       ASTNode* initializer =
           ParseAssignmentExpression(syntax, followers | TC(exprsep) |
                                                 TC(closebra));
@@ -1100,6 +1121,8 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
   SyntaxNeedBracket(syntax, TOK(rsquare), followers);
 }
 
+// Queue the closure's operator() for instantiation/codegen alongside template
+// instantiations, so its body is emitted after the enclosing context is parsed.
 static void QueueLambdaCallOperatorDefinition(Symbol* symbol) {
   Vector* declarations = NewVector();
   VectorAppend(declarations,
@@ -1108,6 +1131,7 @@ static void QueueLambdaCallOperatorDefinition(Symbol* symbol) {
                NewDeclarationListASTNode(declarations, symbol->location));
 }
 
+// Bring the lambda's parameters into the body's local scope before parsing it.
 static void AddLambdaFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   Vector* formals = &func->info.function.prototype;
   for (size_t i = 0; i < formals->length; i++) {
@@ -1116,6 +1140,8 @@ static void AddLambdaFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   }
 }
 
+// Parse the optional `(params)` of a lambda into `func`'s prototype.  An
+// omitted parameter list is allowed and leaves the prototype empty.
 static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
                                      TokenClass followers) {
   if (!LexMatch(syntax->lex, TOK(lparen))) {
@@ -1144,12 +1170,17 @@ static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
 }
 
-static void SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
+// Parse a lambda's optional noexcept-specifier.  Returns true when the lambda
+// is known non-throwing (a plain `noexcept`).  A conditional `noexcept(expr)`
+// operand is skipped without evaluation and conservatively reported as not
+// guaranteed non-throwing, so noexcept enforcement never produces a false
+// positive for a lambda whose operand we did not evaluate.
+static bool SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
   if (!LexMatch(syntax->lex, TOK(noexcept))) {
-    return;
+    return false;
   }
   if (!LexMatch(syntax->lex, TOK(lparen))) {
-    return;
+    return true;
   }
   int depth = 1;
   while (depth > 0 && !LexEof(syntax->lex)) {
@@ -1163,15 +1194,22 @@ static void SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
   if (depth != 0) {
     SyntaxRecover(syntax, followers);
   }
+  return false;
 }
 
+// Parse the specifiers that follow a lambda's parameter list (`mutable`,
+// `constexpr`, `noexcept`) in any order, then an optional `-> type` trailing
+// return type.  Returns the trailing return type if present, otherwise
+// `default_type`, and reports each specifier through its out-parameter.
 static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
                                                       bool* is_mutable,
                                                       bool* is_constexpr,
+                                                      bool* is_noexcept,
                                                       TypeRecord* default_type,
                                                       TokenClass followers) {
   *is_mutable = false;
   *is_constexpr = false;
+  *is_noexcept = false;
   bool keep_parsing = true;
   while (keep_parsing) {
     if (LexMatch(syntax->lex, TOK(mutable))) {
@@ -1179,7 +1217,7 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
     } else if (LexMatch(syntax->lex, TOK(constexpr))) {
       *is_constexpr = true;
     } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {
-      SkipNoexceptSpecifier(syntax, followers);
+      *is_noexcept = SkipNoexceptSpecifier(syntax, followers);
     } else {
       keep_parsing = false;
     }
@@ -1202,6 +1240,10 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
   return return_type;
 }
 
+// Create the synthesized, uniquely-named closure class for a lambda and
+// register it as a tag.  Capture fields are added later; for now it carries a
+// single private placeholder member so it has non-zero size before captures are
+// known.  Returns the tag symbol and outputs its struct type in `closure_type`.
 static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
                                    TypeRecord** closure_type) {
   String tag_name;
@@ -1234,6 +1276,10 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
   return tag;
 }
 
+// Build the closure class's `operator()` from the lambda's parameter list,
+// specifiers and return type, and add it as a public member function.  Unless
+// the lambda is `mutable`, the operator is const-qualified.  The implicit
+// `this` parameter is what later lets the body reach capture fields.
 static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
                                      TypeRecord* return_type, bool is_mutable,
                                      SourceLocation location) {
@@ -1241,11 +1287,13 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   TypeRecord* func = NewFunctionTypeRecord();
   ParseLambdaParameterList(syntax, func, TC(closebra));
   bool is_constexpr = false;
+  bool is_noexcept = false;
   return_type = ParseLambdaSpecifiersAndReturnType(syntax, &is_mutable,
-                                                   &is_constexpr,
+                                                   &is_constexpr, &is_noexcept,
                                                    return_type, TC(closebra));
   func->info.function.is_const_member = !is_mutable;
   func->info.function.is_constexpr = is_constexpr;
+  func->info.function.is_noexcept = is_noexcept;
   TypeRecordChain(func, return_type);
   TypeRecordAddCXXThisParameter(func, closure, location);
 
@@ -1265,12 +1313,16 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   return op;
 }
 
+// State threaded through CollectDefaultLambdaCaptures while scanning the body
+// for identifiers that the default capture mode must implicitly capture.
 typedef struct {
   Vector* captures;
   TypeRecord* lambda_func;
   LambdaCaptureDefault capture_default;
 } LambdaCaptureScan;
 
+// Visitor: for a `[=]`/`[&]` lambda, append a capture for each enclosing-scope
+// identifier referenced in the body that is not already captured.
 static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
@@ -1292,6 +1344,8 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
                                                 /*is_init_capture=*/false));
 }
 
+// The closure-member type for a capture: a pointer to the captured object for
+// by-reference captures, otherwise a copy of the captured (referent) type.
 static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture) {
   TypeRecord* captured_type = TypeIsReference(capture->captured->type)
                                   ? capture->captured->type->next
@@ -1302,6 +1356,8 @@ static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture) {
   return TypeRecordCopy(captured_type);
 }
 
+// Add one private member to the closure class for each capture and record it on
+// the capture, then recompute the closure's size now that all fields are known.
 static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
                                    SourceLocation location) {
   Struct* closure = closure_type->info.struct_info;
@@ -1321,6 +1377,9 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
   closure_type->size = closure->size;
 }
 
+// Build the designated initializer (`.field = value`) for one capture used when
+// constructing the closure object: the captured value (or its address, for
+// by-reference captures), or the init-capture's initializer expression.
 static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture,
                                             SourceLocation location) {
   ASTNode* value = capture->is_init_capture
@@ -1338,6 +1397,9 @@ static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture,
       designators, NewExpressionInitializerASTNode(value, location), location);
 }
 
+// Build the expression that reads a capture from inside the body: `this->field`
+// for by-value captures, dereferenced (`*this->field`) for by-reference
+// captures whose field is a pointer.  This replaces uses of the original name.
 static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
                                        LambdaCapture* capture,
                                        SourceLocation location) {
@@ -1361,11 +1423,15 @@ static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
   return access;
 }
 
+// State threaded through RewriteLambdaCaptureUses: the captures to look up and
+// the closure's `this` parameter through which their fields are reached.
 typedef struct {
   Vector* captures;
   Symbol* this_symbol;
 } LambdaRewrite;
 
+// Make init-capture locals visible while parsing the body, since their names do
+// not exist in the enclosing scope.
 static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures) {
   for (size_t i = 0; captures != NULL && i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
@@ -1376,28 +1442,18 @@ static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures) {
   }
 }
 
+// Replace child `child_id` of `parent` with `replacement` while rewriting a
+// lambda body's capture uses.  For call-like nodes the arguments live in a
+// child vector indexed from zero while child_id 0 is the callee, so an argument
+// at child_id N maps to vector slot N-1; patch that slot directly.  All other
+// node shapes go through the generic child-replacement helper.
 static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
                                          ASTNode* replacement) {
   if (parent == NULL) {
     ASTNodeDelete(replacement);
     return;
   }
-  if ((parent->op == AST_OP(call) || parent->op == AST_OP(inline_call) ||
-       parent->op == AST_OP(builtin_va_start) ||
-       parent->op == AST_OP(builtin_va_arg) ||
-       parent->op == AST_OP(builtin_va_end) ||
-       parent->op == AST_OP(builtin_va_copy) ||
-       parent->op == AST_OP(builtin_atomic_load) ||
-       parent->op == AST_OP(builtin_atomic_store) ||
-       parent->op == AST_OP(builtin_atomic_fetch_add) ||
-       parent->op == AST_OP(builtin_atomic_fetch_sub) ||
-       parent->op == AST_OP(builtin_atomic_add_fetch) ||
-       parent->op == AST_OP(builtin_atomic_sub_fetch) ||
-       parent->op == AST_OP(builtin_atomic_compare_exchange_bool) ||
-       parent->op == AST_OP(builtin_atomic_compare_exchange_val) ||
-       parent->op == AST_OP(builtin_atomic_compare_exchange_n) ||
-       parent->op == AST_OP(builtin_atomic_fence)) &&
-      child_id > 0) {
+  if (ASTIsCallNode(parent) && child_id > 0) {
     VectorASTNode* vector = (VectorASTNode*)parent;
     ASTNode* old = vector->children->value.p[child_id - 1];
     VectorSet(vector->children, (size_t)child_id - 1, replacement);
@@ -1409,6 +1465,9 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
   ASTNodeReplaceChild(parent, child_id, replacement, true);
 }
 
+// Visitor: rewrite each identifier in the body that names a captured entity
+// into the corresponding `this->field` access, so the body reads captures from
+// the closure object rather than the (now out-of-scope) enclosing variables.
 static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
                                      int child_id, VisitorMode mode) {
   if (mode != kVisitPreChildren || node == NULL ||
@@ -1426,6 +1485,9 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
   ReplaceChildForLambdaCapture(node->parent, child_id, replacement);
 }
 
+// Parse the lambda's compound-statement body as the closure operator()'s body,
+// in a fresh block scope holding the parameters and any init-capture locals,
+// then queue the operator for later definition.
 static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
                                 Vector* captures, TokenClass followers) {
   ParserContext old_context = syntax->context;
@@ -1442,6 +1504,8 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
   return body;
 }
 
+// Build the braced initializer that constructs the closure object, one
+// designated `.field = value` initializer per capture.
 static ASTNode* NewLambdaClosureInitializer(TypeRecord* closure_type,
                                             Vector* captures,
                                             SourceLocation location) {
@@ -1453,6 +1517,17 @@ static ASTNode* NewLambdaClosureInitializer(TypeRecord* closure_type,
   return NewBracedInitializerASTNode(initializers, closure_type, location);
 }
 
+// Parse a C++ lambda `[captures](params) specifiers -> ret { body }` and lower
+// it to an anonymous closure class.  The steps are:
+//   1. parse the capture list and default capture mode;
+//   2. synthesize the closure class and its operator();
+//   3. parse the body (so identifier uses are resolved against the enclosing
+//      scope) and, for a default capture mode, scan it for implicit captures;
+//   4. add a closure field per capture and rewrite capture uses in the body to
+//      `this->field` accesses;
+//   5. produce a compound literal that constructs a temporary closure object,
+//      brace-initialized from the captured values.
+// Returns NULL when the next token does not begin a lambda.
 static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
                                          TokenClass followers) {
   if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(lsquare))) {

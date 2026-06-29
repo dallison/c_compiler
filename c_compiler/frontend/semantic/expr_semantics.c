@@ -2626,6 +2626,47 @@ static const char* CXXAccessName(CXXAccess access) {
   return "unknown";
 }
 
+// Returns true when the function currently being analyzed has been granted
+// friendship by class `owner` (via a 'friend class' or 'friend function'
+// declaration), and may therefore access its private and protected members.
+static bool CurrentFunctionIsFriendOf(Struct* owner) {
+  if (owner == NULL) {
+    return false;
+  }
+  TypeRecord* current = compiler->current_function;
+  if (current == NULL || !TypeIsFunction(current)) {
+    return false;
+  }
+  // 'friend class C;': any member function of C is a friend.
+  Struct* current_owner = current->info.function.cxx_member_owner;
+  if (current_owner != NULL) {
+    for (size_t i = 0; i < owner->friend_classes.length; i++) {
+      if (owner->friend_classes.value.p[i] == current_owner) {
+        return true;
+      }
+    }
+  }
+  // 'friend <function>;': match the befriended declaration either by symbol
+  // identity or, since a friend declaration and the later definition may be
+  // separate symbols, by name and signature.
+  Symbol* current_symbol = current->info.function.symbol;
+  for (size_t i = 0; i < owner->friend_functions.length; i++) {
+    Symbol* friend_symbol = owner->friend_functions.value.p[i];
+    if (friend_symbol == NULL) {
+      continue;
+    }
+    if (friend_symbol == current_symbol) {
+      return true;
+    }
+    if (current_symbol != NULL &&
+        StringEqualString(&friend_symbol->name, &current_symbol->name) &&
+        TypeEqual(friend_symbol->type, current_symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
                                            Struct* owner,
                                            CXXAccess original_access,
@@ -2640,6 +2681,10 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   Struct* current_owner =
       compiler->current_function->info.function.cxx_member_owner;
   if (current_owner == owner) {
+    return true;
+  }
+  if (CurrentFunctionIsFriendOf(owner) ||
+      (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context))) {
     return true;
   }
   if (original_access == kAccessPrivate) {
@@ -2774,9 +2819,88 @@ static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   return 2;
 }
 
+// Advance to the next non-static data member at or after index *i, returning it
+// (and leaving *i at its position) or NULL when none remain.  Member functions
+// and static members do not contribute to an object's layout and are skipped.
+static StructMember* NextDataMember(Struct* s, size_t* i) {
+  for (; *i < s->members.length; (*i)++) {
+    StructMember* m = s->members.value.p[*i];
+    if (m != NULL && m->symbol != NULL && !m->is_static &&
+        !m->is_member_function) {
+      return m;
+    }
+  }
+  return NULL;
+}
+
+// Two distinct class TypeRecords can still denote the same type when the
+// compiler has produced separate struct records for one specialization (e.g.
+// unique_ptr<T[]>, whose records can differ even in member-function count).
+// They are treated as equivalent when they have the same data-member layout:
+// the same non-static data members, in order, with recursively equivalent
+// types.  Member functions are ignored.  Classes with no data members are not
+// matched here so unrelated empty structs are still rejected.
+static bool ClassTypesLayoutEquivalent(TypeRecord* a, TypeRecord* b) {
+  if (!TypeIsStructOrUnion(a) || !TypeIsStructOrUnion(b) ||
+      a->info.struct_info == NULL || b->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* sa = a->info.struct_info;
+  Struct* sb = b->info.struct_info;
+  if (sa == sb) {
+    return true;
+  }
+  if (sa->is_union != sb->is_union) {
+    return false;
+  }
+  size_t ia = 0;
+  size_t ib = 0;
+  bool matched_any = false;
+  for (;;) {
+    StructMember* ma = NextDataMember(sa, &ia);
+    StructMember* mb = NextDataMember(sb, &ib);
+    if (ma == NULL || mb == NULL) {
+      if (ma != mb) {
+        return false;
+      }
+      break;
+    }
+    if (!StringEqualString(&ma->symbol->name, &mb->symbol->name)) {
+      return false;
+    }
+    TypeRecord* ta = ma->symbol->type;
+    TypeRecord* tb = mb->symbol->type;
+    if (!TypeEqual(ta, tb) &&
+        !(TypeIsStructOrUnion(ta) && TypeIsStructOrUnion(tb) &&
+          ClassTypesLayoutEquivalent(ta, tb))) {
+      return false;
+    }
+    matched_any = true;
+    ia++;
+    ib++;
+  }
+  return matched_any;
+}
+
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   if (TypeEqual(actual, target) || TypeEqualIgnoringQualifiers(actual, target)) {
     return 0;
+  }
+  if (TypeIsStructOrUnion(actual) || TypeIsStructOrUnion(target)) {
+    // Two distinct class types convert only via a derived-to-base relationship
+    // or as separate records for the same specialization.  Unrelated classes
+    // (the common operator-overload mistake, e.g. `a + b` for unrelated `a` and
+    // `b`) are rejected here instead of being treated as differing only in sign
+    // by the scalar comparison below.
+    if (TypeIsStructOrUnion(actual) && TypeIsStructOrUnion(target)) {
+      if (TypeIsDerivedFrom(actual, target)) {
+        return 2;
+      }
+      if (ClassTypesLayoutEquivalent(actual, target)) {
+        return 0;
+      }
+    }
+    return -1;
   }
   if (TypeEqualIgnoringSign(actual, target)) {
     return 1;
@@ -3043,6 +3167,191 @@ static int OverloadCallScore(Symbol* candidate, VectorASTNode* node) {
   return FunctionCallScore(candidate->type, node, 0);
 }
 
+// Appends a human-readable spelling of `type` to `result` for diagnostics.
+static void AppendReadableType(TypeRecord* type, String* result) {
+  if (type == NULL) {
+    StringAppend(result, "<unknown>");
+    return;
+  }
+  TypeRecordToString(type, result);
+}
+
+// Returns true if `candidate` is a function template (either an uninstantiated
+// template or a specialization produced by instantiating one).
+static bool SymbolIsTemplateFunction(Symbol* candidate) {
+  if (candidate == NULL) {
+    return false;
+  }
+  if (candidate->flags.is_template) {
+    return true;
+  }
+  return candidate->type != NULL && TypeIsFunction(candidate->type) &&
+         candidate->type->info.function.template_origin != NULL;
+}
+
+// Fills `reason` with an explanation of why the function type `func` is not a
+// viable candidate for the call `node`, where `first_formal_arg` is the index of
+// the first formal parameter matched against an explicit argument (1 for a
+// non-static member function, whose leading parameter is the implicit object).
+// The checks mirror FunctionCallScore so the explanation matches the rejection.
+// Returns true if a concrete reason was produced.
+static bool DescribeFunctionNonViability(TypeRecord* func, VectorASTNode* node,
+                                         size_t first_formal_arg,
+                                         String* reason) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.unknown_args) {
+    return false;
+  }
+  size_t num_actual = node->children->length;
+  size_t num_formal = func->info.function.prototype.length;
+  if (first_formal_arg > num_formal) {
+    return false;
+  }
+  size_t num_user_formal = num_formal - first_formal_arg;
+  size_t required = FunctionRequiredArgumentCount(func, first_formal_arg);
+
+  if (num_actual < required) {
+    if (required == num_user_formal) {
+      StringPrintf(reason, "requires %zu argument%s, but %zu %s provided",
+                   num_user_formal, num_user_formal == 1 ? "" : "s", num_actual,
+                   num_actual == 1 ? "was" : "were");
+    } else {
+      StringPrintf(reason,
+                   "requires at least %zu argument%s, but %zu %s provided",
+                   required, required == 1 ? "" : "s", num_actual,
+                   num_actual == 1 ? "was" : "were");
+    }
+    return true;
+  }
+  if (!func->info.function.varargs && num_actual > num_user_formal) {
+    StringPrintf(reason, "requires %zu argument%s, but %zu %s provided",
+                 num_user_formal, num_user_formal == 1 ? "" : "s", num_actual,
+                 num_actual == 1 ? "was" : "were");
+    return true;
+  }
+
+  size_t num_checked =
+      num_actual < num_user_formal ? num_actual : num_user_formal;
+  for (size_t i = 0; i < num_checked; i++) {
+    ASTNode* actual = (ASTNode*)node->children->value.p[i];
+    Symbol* formal =
+        (Symbol*)func->info.function.prototype.value.p[i + first_formal_arg];
+    if (OverloadConversionRank(actual, formal->type) >= 0) {
+      continue;
+    }
+    String from;
+    StringInit(&from, NULL);
+    String to;
+    StringInit(&to, NULL);
+    AppendReadableType(actual != NULL ? actual->type : NULL, &from);
+    AppendReadableType(formal->type, &to);
+    StringPrintf(reason, "no known conversion from '%s' to '%s' for argument %zu",
+                 from.value, to.value, i + 1);
+    StringDestruct(&from);
+    StringDestruct(&to);
+    return true;
+  }
+  return false;
+}
+
+// For a compiler-synthesized special member (one the user never wrote), returns
+// a short description such as "implicit copy constructor".  Returns NULL for an
+// ordinary user-declared function so the caller falls back to the signature.
+static const char* ImplicitSpecialMemberDescription(Symbol* candidate) {
+  if (candidate == NULL || candidate->type == NULL ||
+      !TypeIsFunction(candidate->type) ||
+      !candidate->type->info.function.is_implicitly_declared) {
+    return NULL;
+  }
+  if (candidate->type->info.function.is_constructor) {
+    Vector* proto = &candidate->type->info.function.prototype;
+    // prototype[0] is the implicit object parameter; the source operand of a
+    // copy/move constructor, if any, is prototype[1].
+    if (proto->length >= 2) {
+      Symbol* source = proto->value.p[1];
+      if (source != NULL && source->type != NULL &&
+          TypeIsReference(source->type)) {
+        return source->type->declarator == kDeclRValueReference
+                   ? "implicit move constructor"
+                   : "implicit copy constructor";
+      }
+    }
+    return "implicit default constructor";
+  }
+  if (candidate->type->info.function.is_destructor) {
+    return "implicit destructor";
+  }
+  return "implicitly-declared special member";
+}
+
+// Emits a "candidate ... not viable" note pointing at `candidate`'s declaration.
+// `reason` (may be empty) explains why it was rejected; an empty reason produces
+// a bare "candidate" note used for the equally-ranked candidates of an
+// ambiguous call.  Compiler-synthesized members have no meaningful source
+// location, so they are described in prose without one.
+static void EmitCandidateNote(Symbol* candidate, const char* reason) {
+  if (candidate == NULL) {
+    return;
+  }
+  bool has_reason = reason != NULL && reason[0] != '\0';
+  const char* implicit_desc = ImplicitSpecialMemberDescription(candidate);
+  if (implicit_desc != NULL) {
+    if (has_reason) {
+      ReportNote(NULL, 0, "candidate (%s) not viable: %s", implicit_desc,
+                 reason);
+    } else {
+      ReportNote(NULL, 0, "candidate (%s)", implicit_desc);
+    }
+    return;
+  }
+  String signature;
+  StringInit(&signature, NULL);
+  SymbolFunctionPrettyName(candidate, &signature);
+  if (has_reason) {
+    SemanticNoteAtLocation(candidate->location, "candidate '%s' not viable: %s",
+                           signature.value, reason);
+  } else {
+    SemanticNoteAtLocation(candidate->location, "candidate '%s'",
+                           signature.value);
+  }
+  StringDestruct(&signature);
+}
+
+// Emits one note per overload in `candidates` after a failed free-function /
+// operator resolution.  When `ambiguous` is false (no viable candidate) each
+// note explains the rejection; when true, the equally-best candidates (those
+// whose score ties `best_score`) are listed as the competing matches.
+static void EmitFreeCandidateNotes(Vector* candidates, VectorASTNode* call,
+                                   bool ambiguous, int best_score) {
+  for (size_t i = 0; i < candidates->length; i++) {
+    Symbol* candidate = candidates->value.p[i];
+    if (candidate == NULL) {
+      continue;
+    }
+    bool is_template = SymbolIsTemplateFunction(candidate);
+    if (ambiguous) {
+      // The competing matches are the candidates whose conversion score ties the
+      // winner.  Template candidates were resolved to specializations that are
+      // not represented in this vector, so they are left out rather than
+      // mislabeled.
+      if (!is_template && OverloadCallScore(candidate, call) == best_score) {
+        EmitCandidateNote(candidate, NULL);
+      }
+      continue;
+    }
+    if (is_template) {
+      EmitCandidateNote(candidate,
+                        "could not deduce template arguments for this call");
+      continue;
+    }
+    String reason;
+    StringInit(&reason, NULL);
+    DescribeFunctionNonViability(candidate->type, call, 0, &reason);
+    EmitCandidateNote(candidate, reason.value);
+    StringDestruct(&reason);
+  }
+}
+
 static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
                                               Vector* actuals,
                                               Vector* explicit_args,
@@ -3110,8 +3419,11 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
     }
   }
 
+  bool already_diagnosed =
+      diagnostic_node != NULL &&
+      (diagnostic_node->flags & kASTOverloadDiagnosed) != 0;
   if (best == NULL) {
-    if (diagnose_no_match) {
+    if (diagnose_no_match && !already_diagnosed) {
       String function_name;
       StringInit(&function_name, NULL);
       Symbol* first_candidate =
@@ -3124,17 +3436,25 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
       SemanticError(diagnostic_node, "No matching overload for %s",
                     function_name.value);
       StringDestruct(&function_name);
+      VectorASTNode call = {0};
+      call.children = actuals;
+      EmitFreeCandidateNotes(candidates, &call, /*ambiguous=*/false, -1);
+      diagnostic_node->flags |= kASTOverloadDiagnosed;
     }
     return NULL;
   }
   if (ambiguous) {
-    if (diagnose_ambiguous) {
+    if (diagnose_ambiguous && !already_diagnosed) {
       String function_name;
       StringInit(&function_name, NULL);
       SymbolFunctionDiagnosticName(best, &function_name);
       SemanticError(diagnostic_node, "Ambiguous overload for %s",
                     function_name.value);
       StringDestruct(&function_name);
+      VectorASTNode call = {0};
+      call.children = actuals;
+      EmitFreeCandidateNotes(candidates, &call, /*ambiguous=*/true, best_score);
+      diagnostic_node->flags |= kASTOverloadDiagnosed;
     }
     return best;
   }
@@ -3196,6 +3516,53 @@ static int MemberOverloadCallScore(StructMember* candidate,
     score++;
   }
   return score;
+}
+
+// Emits one note per member-function overload after a failed member-call /
+// member-operator resolution.  When `ambiguous` is false each note explains why
+// the candidate was rejected (argument mismatch, or a const object passed to a
+// non-const method); when true, the equally-best candidates are listed.
+static void EmitMemberCandidateNotes(StructMember* first, VectorASTNode* node,
+                                     BinaryASTNode* member_access,
+                                     bool ambiguous, int best_score) {
+  bool receiver_const = MemberReceiverIsConst(member_access);
+  for (StructMember* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL) {
+      continue;
+    }
+    bool is_template = SymbolIsTemplateFunction(candidate->symbol);
+    if (ambiguous) {
+      if (!is_template &&
+          MemberOverloadCallScore(candidate, node, member_access, true) ==
+              best_score) {
+        EmitCandidateNote(candidate->symbol, NULL);
+      }
+      continue;
+    }
+    if (is_template) {
+      EmitCandidateNote(candidate->symbol,
+                        "could not deduce template arguments for this call");
+      continue;
+    }
+    // A non-static method rejected only because the object is const (it would
+    // be viable on a non-const object) gets a dedicated explanation.
+    if (receiver_const && !candidate->is_static &&
+        MemberOverloadCallScore(candidate, node, member_access, true) < 0 &&
+        MemberOverloadCallScore(candidate, node, member_access, false) >= 0) {
+      EmitCandidateNote(candidate->symbol,
+                        "'this' argument has a const-qualified type, but the "
+                        "method is not declared const");
+      continue;
+    }
+    size_t first_formal_arg = candidate->is_static ? 0 : 1;
+    String reason;
+    StringInit(&reason, NULL);
+    DescribeFunctionNonViability(candidate->symbol->type, node, first_formal_arg,
+                                 &reason);
+    EmitCandidateNote(candidate->symbol, reason.value);
+    StringDestruct(&reason);
+  }
 }
 
 static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
@@ -3312,7 +3679,12 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     }
   }
 
+  bool already_diagnosed =
+      ((ASTNode*)node)->flags & kASTOverloadDiagnosed;
   if (best == NULL) {
+    if (already_diagnosed) {
+      return first;
+    }
     if (receiver_const_rejected) {
       String function_name;
       StringInit(&function_name, NULL);
@@ -3321,6 +3693,9 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                     "Cannot call non-const member function %s on const object%s",
                     first->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
+      EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/false,
+                               -1);
+      ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     } else if (first->overload_next != NULL ||
                first->symbol->type->info.function.is_constructor) {
       String function_name;
@@ -3329,16 +3704,25 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       SemanticError((ASTNode*)node, "No matching overload for %s",
                     function_name.value);
       StringDestruct(&function_name);
+      EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/false,
+                               -1);
+      ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     }
     return first;
   }
   if (ambiguous) {
+    if (already_diagnosed) {
+      return best;
+    }
     String function_name;
     StringInit(&function_name, NULL);
     SymbolFunctionDiagnosticName(first->symbol, &function_name);
     SemanticError((ASTNode*)node, "Ambiguous overload for %s",
                   function_name.value);
     StringDestruct(&function_name);
+    EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/true,
+                             best_score);
+    ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     return best;
   }
   return best;
@@ -3574,6 +3958,12 @@ static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
   return analyzed;
 }
 
+// Handle calling an object that has an `operator()` member, i.e. a lambda's
+// closure object or any other functor: `obj(args)` is rewritten into the member
+// call `obj.operator()(args)`.  The receiver and argument nodes are detached
+// from the original call (leaving NULL holes the caller no longer owns) and
+// re-parented under the new member call.  Returns NULL when the callee is not a
+// class/union with a callable `operator()`, leaving `node` untouched.
 static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL ||
       !TypeIsStructOrUnion(node->left->type)) {
@@ -3586,6 +3976,7 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
     return NULL;
   }
 
+  // Move the actuals out of the original call node into the member call.
   Vector* actuals = NewVector();
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* actual = node->children->value.p[i];
@@ -3699,6 +4090,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       is_concrete_ctad_construction = true;
     }
   }
+  // A call whose callee type still depends on template parameters (e.g. a
+  // functor or lambda received as a template parameter) cannot be resolved
+  // until instantiation.  Flag it and give it a placeholder type so it is
+  // re-analyzed once the template arguments are known.
   if (CompilerIsCXX() && node->left != NULL && node->left->type != NULL &&
       !is_concrete_ctad_construction &&
       TypeContainsTemplateParameter(node->left->type)) {
@@ -3707,6 +4102,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
   }
+  // A call on a concrete class object may be invoking its `operator()` (a
+  // lambda's closure or other functor); rewrite it to the member call.
   ASTNode* overloaded_call = TryAnalyzeOverloadedCallOperator(node);
   if (overloaded_call != NULL) {
     return overloaded_call;
@@ -4030,7 +4427,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       TemplateArgumentVectorCopy(explicit_template_arguments);
   ASTNodeDelete(old_right);
   TypeRecord* member_type = member->symbol->type;
-  if (!member->is_static && !member->is_member_function &&
+  if (!member->is_static && !member->is_member_function && !member->is_mutable &&
       MemberReceiverIsConst(node)) {
     member_type = TypeRecordCopy(member_type);
     member_type->qualifiers |= kQualConst;
@@ -4205,6 +4602,11 @@ static void AnalyzeLogicalOperator(BinaryASTNode* node) {
 }
 
 static void AnalyzeThrowExpression(ThrowASTNode* node) {
+  if (!CompilerExceptionsEnabled()) {
+    SemanticError((ASTNode*)node,
+                  "cannot use 'throw' with exception handling disabled "
+                  "(-fno-exceptions)");
+  }
   if (node->expr == NULL) {
     if (!SemanticInCatchHandler()) {
       SemanticError((ASTNode*)node,
@@ -4216,6 +4618,9 @@ static void AnalyzeThrowExpression(ThrowASTNode* node) {
       SemanticError(node->expr, "Cannot throw expression of this type");
     }
   }
+  // A throw in a 'noexcept' function is well-formed: per [except.spec], if the
+  // exception escapes the function at runtime std::terminate is called.  That
+  // runtime guard is inserted during codegen, so nothing is enforced here.
   ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 

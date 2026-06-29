@@ -72,6 +72,11 @@ typedef struct Generator {
   Vector basic_blocks;      // Basic Blocks (indexed by block id).
   BasicBlock* entry_block;  // Entry block.
   BasicBlock* exit_block;   // Exit block.
+
+  // True when generating IR for compile-time constant evaluation (the constexpr
+  // p-code interpreter) rather than a real target.  Runtime-only constructs
+  // such as the noexcept terminate guard are suppressed in this mode.
+  bool for_constant_evaluation;
 } Generator;
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func);

@@ -26,6 +26,8 @@ typedef enum {
   kOptionDefineMacro,        // Define a macro.
   kOptionUndefineMacro,      // Undefine a macro.
   kOptionPic,                // Position Independent Code.
+  kOptionExceptions,         // -fexceptions: enable C++ exceptions.
+  kOptionNoExceptions,       // -fno-exceptions: disable C++ exceptions.
   kOptionWarning,            // Disable warning.
   kOptionWerror,             // All warnings are errors.
   kOptionWall,               // Enable all warnings.

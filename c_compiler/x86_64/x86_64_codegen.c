@@ -4071,8 +4071,26 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(memcpy):
       return LowerMemcpy(rv, node);
 
-    case IR_OP(cast):
-        return SetLoweredNode(node, Materialize(rv, node->inputs.value.p[0]));
+    case IR_OP(cast): {
+      // A cast is otherwise a no-op pass-through of its input value, but it may
+      // carry a destination (the "-> $n" annotation) when it is a ?:/&&/||
+      // merge target or, crucially, the stashed result of a call evaluated
+      // alongside a sibling call (kIRStashedCallResult).  In that case the
+      // value must actually be moved into the destination register, exactly as
+      // LowerExpression routes its conversions; otherwise the stash register is
+      // never written and is read uninitialized (the value collapses to 0).
+      TargetInstruction* inst = Materialize(rv, node->inputs.value.p[0]);
+      TargetInstruction* dest = GetDestInstruction(rv, gen, node);
+      if (dest != NULL && inst != NULL) {
+        X86_64Opcode mov_opcode = X86_64_OP(mv);
+        if (TypeIsFloatingPoint(node->type)) {
+          mov_opcode =
+              node->type->size > 4 ? X86_64_OP(fmv_d) : X86_64_OP(fmv_s);
+        }
+        inst = SetDestOrMove(rv, inst, dest, mov_opcode);
+      }
+      return SetLoweredNode(node, inst);
+    }
 
     case IR_OP(zeroextendi):
       return LowerZeroExtend(rv, gen, node);

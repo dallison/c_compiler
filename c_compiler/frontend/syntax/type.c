@@ -613,6 +613,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_trivial_special_member = false;
   t->info.function.is_constexpr_eligible = false;
   t->info.function.is_noexcept_eligible = true;
+  t->info.function.is_noexcept = false;
   t->info.function.is_auto_return_deduced = false;
   t->info.function.is_deduction_guide = false;
   t->info.function.is_coroutine = false;
@@ -651,6 +652,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   mem->cxx_vcall_offset = 0;
   mem->is_anon = false;
   mem->is_static = false;
+  mem->is_mutable = false;
   mem->is_member_function = false;
   mem->is_using_declaration = false;
   mem->access = kAccessPublic;
@@ -800,6 +802,8 @@ Struct* NewStruct(bool is_union) {
   s->refs = 1;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);
+  VectorInit(&s->friend_classes);
+  VectorInit(&s->friend_functions);
   VectorInit(&s->member_using_declarations);
   VectorInit(&s->virtual_bases);
   VectorInit(&s->members);
@@ -847,6 +851,10 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->bases,
                              (VectorElementDestructor)CXXBaseSpecifierDelete,
                              /*free_element=*/false);
+  // Friend lists hold borrowed references (the structs and function symbols are
+  // owned elsewhere), so just release the backing storage.
+  VectorDestruct(&s->friend_classes);
+  VectorDestruct(&s->friend_functions);
   VectorDestructWithContents(
       &s->member_using_declarations,
       (VectorElementDestructor)CXXMemberUsingDeclarationDelete,
@@ -880,6 +888,30 @@ static void StructTeardownMembers(Struct* s) {
 void StructDelete(Struct* s) {
   StructTeardownMembers(s);
   free(s);
+}
+
+void StructAddFriendClass(Struct* str, Struct* friend_class) {
+  if (str == NULL || friend_class == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->friend_classes.length; i++) {
+    if (str->friend_classes.value.p[i] == friend_class) {
+      return;
+    }
+  }
+  VectorAppend(&str->friend_classes, friend_class);
+}
+
+void StructAddFriendFunction(Struct* str, Symbol* friend_function) {
+  if (str == NULL || friend_function == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->friend_functions.length; i++) {
+    if (str->friend_functions.value.p[i] == friend_function) {
+      return;
+    }
+  }
+  VectorAppend(&str->friend_functions, friend_function);
 }
 
 Symbol* NewEnumConstant(const char* name, int value) {
@@ -1840,6 +1872,7 @@ static StructMember* CloneCXXMemberUsingMember(StructMember* member,
   clone->cxx_vcall_offset = member->cxx_vcall_offset;
   clone->is_anon = member->is_anon;
   clone->is_static = member->is_static;
+  clone->is_mutable = member->is_mutable;
   clone->is_member_function = member->is_member_function;
   clone->is_using_declaration = true;
   clone->access = access;
@@ -2671,6 +2704,12 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   str->packed = from->packed;
   str->explicit_alignment = from->explicit_alignment;
   str->pack = from->pack;
+  for (size_t i = 0; i < from->friend_classes.length; i++) {
+    StructAddFriendClass(str, from->friend_classes.value.p[i]);
+  }
+  for (size_t i = 0; i < from->friend_functions.length; i++) {
+    StructAddFriendFunction(str, from->friend_functions.value.p[i]);
+  }
   copy->info.struct_info = str;
   copy->size = 0;
 
@@ -2713,6 +2752,7 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           instantiated->access = member->access;
           instantiated->is_anon = member->is_anon;
           instantiated->is_static = member->is_static;
+          instantiated->is_mutable = member->is_mutable;
           instantiated->is_member_function = member->is_member_function;
           instantiated->is_using_declaration = member->is_using_declaration;
           instantiated->bit_size = member->bit_size;
@@ -2749,6 +2789,7 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
+    instantiated->is_mutable = member->is_mutable;
     instantiated->is_member_function = member->is_member_function;
     instantiated->is_using_declaration = member->is_using_declaration;
     instantiated->bit_size = member->bit_size;
@@ -3081,6 +3122,7 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.is_constexpr_eligible;
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
+  func->info.function.is_noexcept = from->info.function.is_noexcept;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
   func->info.function.is_coroutine = from->info.function.is_coroutine;
@@ -5122,6 +5164,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.is_constexpr_eligible;
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
+  func->info.function.is_noexcept = from->info.function.is_noexcept;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
   func->info.function.is_deduction_guide =
@@ -7434,6 +7477,71 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   return completed;
 }
 
+/* Instantiate the deferred friend functions a class template declared, mapping
+ * each onto a concrete free function in the template's namespace.  The friend's
+ * signature (and inline body, if any) is substituted with the instantiation
+ * arguments; the resulting function is registered for overload resolution/ADL,
+ * recorded as a friend of `str`, and queued for emission when it carries a body
+ * (deduplicated against earlier specializations and existing declarations). */
+static void InstantiateTemplateFriendFunctions(TypeParser* parser, Struct* str,
+                                               Struct* source_struct,
+                                               Vector* args) {
+  for (size_t i = 0; i < source_struct->friend_functions.length; i++) {
+    Symbol* ftpl = source_struct->friend_functions.value.p[i];
+    if (ftpl == NULL || ftpl->type == NULL || !TypeIsFunction(ftpl->type)) {
+      if (ftpl != NULL) {
+        StructAddFriendFunction(str, ftpl);
+      }
+      continue;
+    }
+
+    Struct* saved_source = parser->template_substitution_source;
+    Struct* saved_target = parser->template_substitution_target;
+    parser->template_substitution_source = source_struct;
+    parser->template_substitution_target = str;
+
+    TypeRecord* func = InstantiateMemberFunctionType(
+        parser, /*owner=*/NULL, /*is_static_member=*/true, ftpl->type, args,
+        ftpl->location);
+    func->info.function.cxx_member_owner = NULL;
+
+    Symbol* sym = NewSymbol(ftpl->name.value, func, ftpl->storage);
+    sym->location = ftpl->location;
+    sym->namespace_ = ftpl->namespace_;
+    func->info.function.symbol = sym;
+    SymbolSetCXXMangledAsmName(sym);
+
+    Symbol* in_scope = SyntaxRegisterInstantiatedFriendFunction(
+        parser->syntax, ftpl->namespace_, sym);
+    StructAddFriendFunction(str, in_scope != NULL ? in_scope : sym);
+
+    bool is_new_symbol = (in_scope == sym);
+    if (is_new_symbol && ftpl->type->info.function.body != NULL &&
+        !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
+      sym->type->info.function.body = CloneTemplateFunctionBody(
+          parser, ftpl->type, sym->type, args);
+      sym->type->info.function.definition = true;
+      sym->flags.is_defined = true;
+      if (sym->type->info.function.is_inline) {
+        sym->flags.is_inline_defn = true;
+        if (!StorageIs(sym->storage, STO(static))) {
+          sym->flags.is_weak = true;
+        }
+      }
+      Vector* declarations = NewVector();
+      VectorAppend(declarations,
+                   NewVariableDeclarationASTNode(sym, NULL, sym->location));
+      VectorAppend(&compiler->pending_template_instantiations,
+                   NewDeclarationListASTNode(declarations, sym->location));
+      VectorAppend(&compiler->declaration_asts,
+                   sym->type->info.function.body);
+    }
+
+    parser->template_substitution_source = saved_source;
+    parser->template_substitution_target = saved_target;
+  }
+}
+
 /* Instantiate a class template `templ` with arguments `args`, returning the
  * concrete struct/union type (memoized by instantiation name so each unique
  * argument set is built once). Steps: handle alias templates; complete default
@@ -7516,6 +7624,13 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
   str->packed = source_struct->packed;
   str->explicit_alignment = source_struct->explicit_alignment;
   str->pack = source_struct->pack;
+  // Carry friend classes from the template to each instantiation verbatim;
+  // friend *functions* are instantiated per specialization below, after the
+  // members are in place, so their dependent signatures and inline bodies can
+  // be substituted with the template arguments.
+  for (size_t i = 0; i < source_struct->friend_classes.length; i++) {
+    StructAddFriendClass(str, source_struct->friend_classes.value.p[i]);
+  }
   TypeRecord* type = NewTypeRecord(source_struct->is_union ? kTypeUnion
                                                            : kTypeStruct,
                                   kQualPlain);
@@ -7631,6 +7746,7 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
+    instantiated->is_mutable = member->is_mutable;
     instantiated->is_member_function = member->is_member_function;
     instantiated->is_using_declaration = member->is_using_declaration;
     instantiated->bit_size = member->bit_size;
@@ -7656,6 +7772,7 @@ static TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
   AddImplicitCXXDeductionGuides(str, tag);
+  InstantiateTemplateFriendFunctions(parser, str, source_struct, source_args);
   StringDestruct(&instantiated_name);
   if (partial_args != NULL) {
     VectorDeleteWithContents(partial_args,
@@ -8920,33 +9037,61 @@ static void ParseFunctionPrototype(TypeParser* proto_parser, TypeRecord* func) {
   }
 }
 
-static void SkipBalancedParenthesizedTokens(TypeParser* parser) {
-  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(exprsep));
-  int depth = 1;
-  while (depth > 0 && !LexEof(parser->lex)) {
-    if (LexMatch(parser->lex, TOK(lparen))) {
-      depth++;
-    } else if (LexMatch(parser->lex, TOK(rparen))) {
-      depth--;
-    } else {
-      LexNextToken(parser->lex);
-    }
-  }
-}
-
-static void ParseCXXExceptionSpecifier(TypeParser* parser) {
+// Parse an optional C++ exception specification (`noexcept`, `noexcept(expr)`,
+// `throw()` or `throw(types)`) and record whether the function is guaranteed
+// non-throwing on `func`.  `noexcept` with no operand and the deprecated empty
+// `throw()` mean non-throwing; `noexcept(expr)` evaluates `expr` as a constant
+// boolean; a dynamic `throw(types)` specification is treated as throwing.
+static void ParseCXXExceptionSpecifier(TypeParser* parser, TypeRecord* func) {
   if (!CompilerIsCXX()) {
     return;
   }
   if (LexMatch(parser->lex, TOK(noexcept))) {
-    if (LexLookingAt(parser->lex, TOK(lparen))) {
-      SkipBalancedParenthesizedTokens(parser);
+    bool is_noexcept = true;
+    if (LexMatch(parser->lex, TOK(lparen))) {
+      ASTNode* expr =
+          SyntaxParseSingleExpression(parser->syntax, TC(exprsep));
+      expr = AnalyzeExpression(expr);
+      int64_t value = 1;
+      if (!EvaluateIntegerExpression(expr, &value)) {
+        // A dependent noexcept(expr) in a template can only be resolved at
+        // instantiation time; conservatively treat it as possibly-throwing
+        // rather than erroring or enforcing here.
+        if (parser->syntax->parsing_template_declaration) {
+          value = 0;
+        } else {
+          SyntaxError(parser->syntax,
+                      "noexcept specifier is not a constant expression");
+        }
+      }
+      ASTNodeDelete(expr);
+      SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
+      is_noexcept = value != 0;
+    }
+    if (func != NULL) {
+      func->info.function.is_noexcept = is_noexcept;
     }
     return;
   }
   if (LexMatch(parser->lex, TOK(throw))) {
     if (LexLookingAt(parser->lex, TOK(lparen))) {
-      SkipBalancedParenthesizedTokens(parser);
+      // `throw()` is the deprecated non-throwing spec; `throw(types)` is a
+      // dynamic specification that permits throwing the listed types.
+      LexNextToken(parser->lex);  // Consume '('.
+      bool is_empty = LexLookingAt(parser->lex, TOK(rparen));
+      int depth = 1;
+      while (depth > 0 && !LexEof(parser->lex)) {
+        if (LexMatch(parser->lex, TOK(lparen))) {
+          depth++;
+        } else if (LexMatch(parser->lex, TOK(rparen))) {
+          depth--;
+        } else {
+          LexNextToken(parser->lex);
+        }
+      }
+      if (func != NULL) {
+        func->info.function.is_noexcept = is_empty;
+      }
     } else {
       SyntaxError(parser->syntax, "Expected exception specification");
     }
@@ -8977,6 +9122,10 @@ static TypeRecord* ParseCXXTrailingReturnType(TypeParser* parser) {
 static void ParseFunctionDecl(TypeParser* parser) {
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
+  // Propagate the enclosing class so a parameter type can name the class
+  // currently being defined, including via its own template-id (e.g. a member
+  // or friend declared as 'f(const Box<T>&)' inside 'template<class T> Box').
+  proto_parser.cxx_member_owner = parser->cxx_member_owner;
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.is_inline =
       parser->is_inline ||
@@ -8990,7 +9139,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
-  ParseCXXExceptionSpecifier(parser);
+  ParseCXXExceptionSpecifier(parser, func);
   if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
       LexMatch(parser->lex, TOK(arrow))) {
     TypeRecord* trailing_return = ParseCXXTrailingReturnType(parser);
@@ -9407,7 +9556,7 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(const))) {
     SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
   }
-  ParseCXXExceptionSpecifier(parser);
+  ParseCXXExceptionSpecifier(parser, func);
   ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
   TypeRecordAddCXXThisParameter(func, parser->cxx_member_owner, location);
@@ -11339,7 +11488,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   if (LexMatch(parser->lex, TOK(const))) {
     SyntaxError(parser->syntax, "Constructors and destructors cannot be const");
   }
-  ParseCXXExceptionSpecifier(parser);
+  ParseCXXExceptionSpecifier(parser, func);
   ParseCXXVirtSpecifiers(parser, func);
   ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
@@ -11696,6 +11845,11 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       LexNextToken(parser->lex);
       SyntaxNeedBracket(parser->syntax, TOK(colon), TC(decl));
       continue;
+    } else if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(friend))) {
+      // Friend declarations grant access but do not introduce a member; they
+      // are parsed in the enclosing namespace scope by the syntax layer.
+      SyntaxParseFriendDeclaration(parser->syntax, str);
+      continue;
     }
 
     Vector member_attributes = {0};
@@ -11798,6 +11952,14 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
 
     bool is_static_member = LexMatch(parser->lex, TOK(static));
+    // 'mutable' is a storage-class specifier on a data member.  Accept it in
+    // either order with respect to 'static' so the (ill-formed) combination is
+    // still reported by the conflict check rather than as a parse error.
+    bool is_mutable_member =
+        CompilerIsCXX() && LexMatch(parser->lex, TOK(mutable));
+    if (is_mutable_member && !is_static_member) {
+      is_static_member = LexMatch(parser->lex, TOK(static));
+    }
     if (!is_inline_member) {
       is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
       parser->is_inline = is_inline_member;
@@ -11912,6 +12074,26 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         if (member->is_member_function &&
             SymbolIsCXXAllocationFunction(member_symbol)) {
           member->is_static = true;
+        }
+        member->is_mutable = is_mutable_member;
+        if (is_mutable_member) {
+          if (member->is_static) {
+            SyntaxError(parser->syntax,
+                        "member cannot be declared both 'mutable' and 'static'");
+            member->is_mutable = false;
+          } else if (member->is_member_function) {
+            SyntaxError(parser->syntax,
+                        "'mutable' can only be applied to data members");
+            member->is_mutable = false;
+          } else if (TypeIsConst(member_symbol->type)) {
+            SyntaxError(parser->syntax,
+                        "'mutable' cannot be applied to a const member");
+            member->is_mutable = false;
+          } else if (TypeIsReference(member_symbol->type)) {
+            SyntaxError(parser->syntax,
+                        "'mutable' cannot be applied to a reference member");
+            member->is_mutable = false;
+          }
         }
         member->access = current_access;
         if (member->is_member_function) {
@@ -13007,6 +13189,12 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     str = tag->type->info.struct_info;
     if (str != NULL && str->tag_symbol == NULL) {
       str->tag_symbol = tag;
+    }
+    // The definition's class-key determines default member access, even when a
+    // prior forward declaration (e.g. 'friend class X;' or 'class X;') used a
+    // different key than the defining 'struct'/'class'.
+    if (str != NULL) {
+      str->is_class = is_class;
     }
   } else {
     // Tag doesn't exist in the, create one.

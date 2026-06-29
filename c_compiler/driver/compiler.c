@@ -46,6 +46,8 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-U", kCompilerOptionString, kOptionUndefineMacro, true, "Undefine a macro"},
     {"-fPIC", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
     {"-fpic", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
+    {"-fexceptions", kCompilerOptionBool, kOptionExceptions, false, "Enable C++ exception handling (default)"},
+    {"-fno-exceptions", kCompilerOptionBool, kOptionNoExceptions, false, "Disable C++ exception handling"},
     // All -W* flags are matched by this single prefix entry and interpreted in
     // InitComplexOptions: -W<name>/-Wno-<name> enable/disable, -Wall, -Werror,
     // -Wno-error, and the per-warning -Werror=<name>/-Wno-error=<name>.
@@ -88,6 +90,10 @@ bool CompilerIsCXX(void) {
 
 bool CompilerCXXAtLeast(LanguageStandard standard) {
   return CompilerIsCXX() && compiler->language_standard >= standard;
+}
+
+bool CompilerExceptionsEnabled(void) {
+  return compiler != NULL && compiler->exceptions_enabled;
 }
 
 // Add new targets here.
@@ -1237,6 +1243,18 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   if (target->static_linkage_only && compiler->pic) {
     fprintf(stderr, "-fPIC is not supported on this target");
     exit(1);
+  }
+
+  // Exceptions are enabled by default; -fexceptions / -fno-exceptions toggle
+  // the state with last-one-wins semantics.
+  compiler->exceptions_enabled = true;
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt->opt == kOptionExceptions) {
+      compiler->exceptions_enabled = true;
+    } else if (opt->opt == kOptionNoExceptions) {
+      compiler->exceptions_enabled = false;
+    }
   }
   compiler->tls_model = compiler->pic ? TLS(global_dynamic) : TLS(local_exec);
 

@@ -140,6 +140,7 @@ typedef struct {
   bool is_trivial_special_member;  // C++ trivial special member.
   bool is_constexpr_eligible;  // C++ constexpr-suitable special member.
   bool is_noexcept_eligible;   // C++ nothrow special member.
+  bool is_noexcept;            // C++ declared non-throwing (noexcept/throw()).
   bool is_auto_return_deduced;  // C++ auto return type has been deduced.
   bool is_deduction_guide;  // C++ class template deduction guide.
   bool is_coroutine;  // C++ coroutine function.
@@ -218,6 +219,7 @@ typedef struct StructMember {
   int cxx_vcall_offset;  // Subobject offset whose vptr owns this virtual slot.
   bool is_anon;     // This is an anonymous member.
   bool is_static;   // C++ static data/function member.
+  bool is_mutable;  // C++ 'mutable' data member (modifiable on a const object).
   bool is_member_function;
   bool is_using_declaration;  // Imported by a C++ member using declaration.
   CXXAccess access;
@@ -230,6 +232,8 @@ struct Struct {
   String* tag_name;  // Tag name (not owned by this, owned by Symbol)
   Symbol* tag_symbol;  // Owning tag symbol, if named.
   Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
+  Vector friend_classes;    // Vector of Struct* granted friendship (not owned).
+  Vector friend_functions;  // Vector of Symbol* granted friendship (not owned).
   Vector member_using_declarations;  // CXXMemberUsingDeclaration* entries.
   Vector virtual_bases;  // Vector of CXXVirtualBaseInfo* (owns entries).
   Vector members;    // Vector of StructMember* (owns StructMembers)
@@ -401,6 +405,13 @@ void StructAddSyntheticMember(Struct* str, StructMember* member);
 Struct* NewStruct(bool is_union);
 void StructDelete(Struct* s);
 void StructMemberDelete(StructMember* member);
+
+// Records a C++ 'friend class X;' relationship: members of friend_class may
+// access the private and protected members of str.  Duplicates are ignored.
+void StructAddFriendClass(Struct* str, Struct* friend_class);
+// Records a C++ 'friend <function>;' relationship: the named function may
+// access the private and protected members of str.  Duplicates are ignored.
+void StructAddFriendFunction(Struct* str, Symbol* friend_function);
 bool StructMemberIsBitField(StructMember* member);
 
 Symbol* NewEnumConstant(const char* name, int value);

@@ -625,12 +625,16 @@ static void BuildSingleDesignator(INode* inode, IKind kind,
           CXXBaseSpecifier* base =
               type->info.struct_info->bases.value.p[inode->index];
           VectorAppend(designators, NewCXXBaseDesignator(base));
-        } else {
+        } else if (type->info.struct_info != NULL &&
+                   inode->index < type->info.struct_info->members.length) {
           StructMember* member =
               type->info.struct_info->members.value.p[inode->index];
           VectorAppend(designators,
                        NewStructMemberDesignator(member));
         }
+        // Otherwise there is no member to designate (e.g. a whole-object copy
+        // into an empty struct); leave the designator list empty so the object
+        // is initialized directly rather than dereferencing a missing member.
       }
       break;
 

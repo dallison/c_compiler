@@ -167,6 +167,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->exception_keep_labels);
   VectorInit(&gen->exception_typeinfos);
   VectorInit(&gen->basic_blocks);
+  gen->for_constant_evaluation = false;
 
   IRResetNodeId();
 }
@@ -1263,8 +1264,15 @@ void* GenerateFunction(Generator* gen) {
     // Generate size expression for all VLAs in the prototype.
     GenerateVLASizeExpressions(gen, &gen->func->info.function.prototype);
 
+    // A noexcept function gets a function-wide guard so that any exception
+    // escaping it calls std::terminate, as required by [except.spec].
+    NoexceptTerminateGuard noexcept_guard;
+    GenerateNoexceptGuardEnter(gen, &noexcept_guard);
+
     GenerateStatement(gen, &body->base);
-    
+
+    GenerateNoexceptGuardLeave(gen, &noexcept_guard);
+
     if (gen->return_label == NULL) {
       if (strcmp(gen->func->info.function.symbol->name.value, "main") == 0) {
         // main: add a resulti 0.
@@ -1279,6 +1287,9 @@ void* GenerateFunction(Generator* gen) {
       IRNode* return_label = GeneratorGetReturnLabel(gen);
       GeneratorEmit(gen, NewIR1(IR_OP(bra), return_label));
     }
+
+    // Placed after the return path so it is only entered via the unwinder.
+    GenerateNoexceptGuardTerminate(gen, &noexcept_guard);
   }
 
   if (compiler->print_back_end || compiler->ir_output_file != stdout) {

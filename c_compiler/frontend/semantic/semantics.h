@@ -20,6 +20,12 @@ void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format,
 void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
                       va_list ap);
 
+// Emits a "note:" diagnostic.  Notes carry no severity of their own and are used
+// to elaborate on the immediately preceding error or warning (for example, to
+// list the candidates considered during a failed overload resolution).
+void SemanticNote(ASTNode* node, const char* format, ...);
+void SemanticNoteAtLocation(SourceLocation location, const char* format, ...);
+
 void SemanticCheckScalarType(ASTNode* node);
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node);
 bool SemanticNodeIsCompilerGenerated(ASTNode* node);

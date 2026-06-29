@@ -333,6 +333,9 @@ static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
   }
   Generator gen;
   GeneratorInit(&gen, &compiler->syntax, func);
+  // This IR is only interpreted for constant evaluation, so suppress runtime-
+  // only constructs like the noexcept terminate guard.
+  gen.for_constant_evaluation = true;
 
   CompilerTarget* saved_target = compiler->target;
   CompilerTarget* pcode_target = NewPCodeTarget();

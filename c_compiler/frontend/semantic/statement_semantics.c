@@ -1336,6 +1336,11 @@ static void AnalyzeCatchStatement(CatchASTNode* node) {
 }
 
 static void AnalyzeTryStatement(TryASTNode* node) {
+  if (!CompilerExceptionsEnabled()) {
+    SemanticError((ASTNode*)node,
+                  "cannot use 'try' with exception handling disabled "
+                  "(-fno-exceptions)");
+  }
   AnalyzeStatement(node->try_stmt);
   bool seen_catch_all = false;
   for (size_t i = 0; i < node->catches->length; i++) {

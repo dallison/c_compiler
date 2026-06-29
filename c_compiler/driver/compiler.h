@@ -329,6 +329,7 @@ typedef struct {
   bool debug_output;
   bool optimize;
   bool pic;
+  bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool print_front_end;
   bool print_back_end;
   bool print_preprocessor;
@@ -367,6 +368,7 @@ bool OptLevel2(void);
 bool OptLevel3(void);
 bool CompilerIsCXX(void);
 bool CompilerCXXAtLeast(LanguageStandard standard);
+bool CompilerExceptionsEnabled(void);
 
 int CharSize(void);
 int IntSize(void);
