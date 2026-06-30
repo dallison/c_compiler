@@ -11768,7 +11768,7 @@ static bool CXXClassNameMatchesUnqualifiedTemplateName(String* class_name,
 static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
                                     String* class_name, CXXAccess access,
                                     bool is_virtual, bool is_constexpr,
-                                    bool is_consteval) {
+                                    bool is_consteval, bool is_explicit) {
   if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
   }
@@ -11813,6 +11813,8 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   func->info.function.is_inline = true;
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
+  // Only a constructor may be declared explicit; a destructor never converts.
+  func->info.function.is_explicit = is_explicit && !is_destructor;
   if (is_virtual && !is_destructor) {
     SyntaxError(parser->syntax, "Constructors cannot be virtual");
   }
@@ -12296,7 +12298,7 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
     if (ParseClassSpecialMember(parser, str, tag_name, current_access,
                                 is_virtual_member, is_constexpr_member,
-                                is_consteval_member)) {
+                                is_consteval_member, is_explicit_member)) {
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
         SyntaxError(parser->syntax, "Special member templates are not supported yet");

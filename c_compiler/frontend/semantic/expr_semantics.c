@@ -42,6 +42,22 @@ static bool ASTNodeIsGLValue(ASTNode* node) {
 }
 
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target);
+static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type);
+
+// A user-defined conversion (via a converting constructor) involves a standard
+// conversion of the argument to the constructor's parameter.  While ranking
+// that inner standard conversion we must not recursively consider yet another
+// user-defined conversion (at most one is permitted), so this guard suppresses
+// the user-defined-conversion search in OverloadConversionRank.
+static bool g_suppress_user_defined_conversion_rank = false;
+
+// Finds the unique non-explicit (unless allow_explicit) converting constructor
+// of class type `to` that can be invoked with the single argument `from` using
+// only standard conversions, or NULL if there is none or the choice is
+// ambiguous.
+static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
+                                                        ASTNode* from,
+                                                        bool allow_explicit);
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
@@ -3054,7 +3070,144 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
     return 25;
   }
+  // As a last resort consider a user-defined conversion through a converting
+  // constructor of a class target.  This ranks worse than any standard
+  // conversion sequence above, matching the standard's ordering.
+  if (CompilerIsCXX() && !g_suppress_user_defined_conversion_rank &&
+      TypeIsStructOrUnion(target) &&
+      FindConvertingConstructorCandidate(target, actual,
+                                         /*allow_explicit=*/false) != NULL) {
+    return 100;
+  }
   return -1;
+}
+
+static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
+                                                        ASTNode* from,
+                                                        bool allow_explicit) {
+  if (!CompilerIsCXX() || to == NULL || from == NULL || from->type == NULL ||
+      !TypeIsStructOrUnion(to) || to->info.struct_info == NULL ||
+      to->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  // A source of the same class (or a derived class) is handled by copy/move
+  // construction and derived-to-base conversions, not by a converting
+  // constructor, so leave those to the existing machinery.
+  if (TypeIsStructOrUnion(from->type) &&
+      (TypeEqualIgnoringQualifiers(from->type, to) ||
+       TypeIsDerivedFrom(from->type, to))) {
+    return NULL;
+  }
+  Struct* str = to->info.struct_info;
+  StructMember* ctor = FindStructMember(str, str->tag_name);
+  StructMember* best = NULL;
+  int best_rank = -1;
+  bool ambiguous = false;
+  for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
+    if (!c->is_member_function || c->symbol == NULL ||
+        c->symbol->type == NULL || !TypeIsFunction(c->symbol->type)) {
+      continue;
+    }
+    FunctionInfo* fi = &c->symbol->type->info.function;
+    if (!fi->is_constructor || fi->is_deleted) {
+      continue;
+    }
+    if (fi->is_explicit && !allow_explicit) {
+      continue;
+    }
+    // Skip compiler-synthesized special members (copy/move/default): they are
+    // not converting constructors.
+    if (c->symbol->flags.invented) {
+      continue;
+    }
+    // prototype[0] is the implicit object parameter; a converting constructor
+    // takes exactly one further argument (any remaining parameters must be
+    // defaulted).
+    size_t nparams = fi->prototype.length;
+    if (nparams < 2) {
+      continue;
+    }
+    bool rest_defaulted = true;
+    for (size_t i = 2; i < nparams; i++) {
+      Symbol* pi = fi->prototype.value.p[i];
+      if (pi == NULL || pi->default_argument == NULL) {
+        rest_defaulted = false;
+        break;
+      }
+    }
+    if (!rest_defaulted) {
+      continue;
+    }
+    Symbol* param = fi->prototype.value.p[1];
+    if (param == NULL || param->type == NULL) {
+      continue;
+    }
+    bool saved = g_suppress_user_defined_conversion_rank;
+    g_suppress_user_defined_conversion_rank = true;
+    int rank = OverloadConversionRank(from, param->type);
+    g_suppress_user_defined_conversion_rank = saved;
+    if (rank < 0) {
+      continue;
+    }
+    if (best == NULL || rank < best_rank) {
+      best = c;
+      best_rank = rank;
+      ambiguous = false;
+    } else if (rank == best_rank) {
+      ambiguous = true;
+    }
+  }
+  return ambiguous ? NULL : best;
+}
+
+// Converts `from` to the class type `to` by constructing a temporary through a
+// viable converting constructor (`to(from)`), splicing the resulting
+// prvalue temporary in place of `from`.  Returns true if such a conversion was
+// performed.  `ctx == kConvertCast` additionally allows explicit constructors
+// (matching the explicit-conversion semantics of a cast).
+bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
+                                         ConversionContext ctx) {
+  if (!CompilerIsCXX() || from == NULL || to == NULL ||
+      !TypeIsStructOrUnion(to)) {
+    return false;
+  }
+  StructMember* ctor = FindConvertingConstructorCandidate(
+      to, from, /*allow_explicit=*/ctx == kConvertCast);
+  if (ctor == NULL) {
+    return false;
+  }
+  Struct* str = to->info.struct_info;
+  SourceLocation location = from->location;
+  TypeRecord* type = TypeRecordCopy(to);
+  TypeRecordCalculateSize(type);
+
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  ASTNode* arg = ASTNodeMove(from);
+
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+  temp->location = location;
+  ASTNode* receiver = NewIdentifierASTNode(temp, location);
+  ASTNode* member = NewStringConstantASTNode(NewString(str->tag_name->value),
+                                             NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, arg);
+  ASTNode* constructor_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  ASTNode* result = NewIdentifierASTNode(temp, location);
+  ASTNode* comma = NewBinaryASTNode(AST_OP(comma), type, location,
+                                    constructor_call, result);
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, comma, true);
+  }
+  ASTNode* analyzed = AnalyzeExpression(comma);
+  analyzed->value_category = kValueCategoryPrvalue;
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, analyzed, false);
+  }
+  return true;
 }
 
 static bool CallActualIsPackExpansion(ASTNode* actual) {

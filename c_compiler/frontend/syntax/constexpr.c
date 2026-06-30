@@ -439,6 +439,10 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
                                              ASTNode* node);
 static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
                                             ASTNode* node);
+static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
+                                                         TypeRecord* type,
+                                                         ASTNode* initializer,
+                                                         ConstexprValue* result);
 static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
                                                       ASTNode* node,
                                                       ConstexprObject* object);
@@ -674,6 +678,28 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
                                             TypeRecord* type,
                                             ConstexprValue* result) {
   if (node->base.op == AST_OP(comma)) {
+    // Recognize the materialized-temporary idiom `(temp.Ctor(args), temp)` (or
+    // the reverse) used for class-type prvalue temporaries (e.g. a converting
+    // constructor or functional cast).  The constructor mutates `temp` through
+    // its `this` binding, so the temporary must be created and bound before the
+    // constructor runs; delegate to the object-initializer evaluator which does
+    // exactly that.  (The generic comma path below would instead evaluate the
+    // constructor call with `temp` still unbound and fail.)
+    IdentifierASTNode* temporary = NULL;
+    if (node->left != NULL && node->left->op == AST_OP(call) &&
+        node->right != NULL && node->right->op == AST_OP(identifier)) {
+      temporary = (IdentifierASTNode*)node->right;
+    } else if (node->left != NULL && node->left->op == AST_OP(identifier) &&
+               node->right != NULL && node->right->op == AST_OP(call)) {
+      temporary = (IdentifierASTNode*)node->left;
+    }
+    if (temporary != NULL && temporary->symbol != NULL &&
+        temporary->symbol->type != NULL &&
+        (TypeIsStructOrUnion(temporary->symbol->type) ||
+         TypeIsFixedArray(temporary->symbol->type))) {
+      return EvaluateConstexprObjectExpressionInitializer(
+          ctx, temporary->symbol->type, (ASTNode*)node, result);
+    }
     ConstexprValue ignored;
     if (node->left != NULL && node->left->type != NULL &&
         !TypeIsVoid(node->left->type) &&

@@ -865,6 +865,14 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
+  // A class target may also be reached by an implicit user-defined conversion
+  // through a converting constructor (e.g. `S s = 5;` or passing `5` where an
+  // `S` is expected).  Try this before the layout-compatible reinterpret below
+  // so a real constructor is honored.
+  if (TryConvertWithConvertingConstructor(from, to, ctx)) {
+    return;
+  }
+
   if (TypeEqualIgnoringSign(from->type, to)) {
     // Use the 'to' type as the node type.
     ASTNodeSetType(from, to);

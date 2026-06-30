@@ -15,4 +15,10 @@
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
 bool IsConstantExpression(ASTNode* node);
 
+// Attempts to convert `from` to the class type `to` by constructing a temporary
+// through a viable converting constructor, splicing the result in place of
+// `from`.  Returns true if the conversion was performed.
+bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
+                                         ConversionContext ctx);
+
 #endif /* expr_semantics_h */
