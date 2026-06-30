@@ -1125,6 +1125,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;
+  compiler->constexpr_codegen_recover = false;
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
   compiler->current_include_path_index = 0;

@@ -1252,6 +1252,61 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     return EvaluateConstexprObjectAccess(ctx, ((CastASTNode*)node)->expr,
                                          result);
   }
+  if (node->op == AST_OP(spaceship)) {
+    // The built-in three-way comparison of scalar operands yields a comparison
+    // category temporary (strong_ordering / partial_ordering, etc.).  Codegen
+    // stores the ordering value straight into the single `_v` member; mirror
+    // that here so that e.g. `(a <=> b) < 0` and `std::is_lt(a <=> b)` are
+    // constant expressions.  Encoding: less = -1, equal = 0, greater = 1,
+    // unordered = 2 (see <compare>).
+    BinaryASTNode* cmp = (BinaryASTNode*)node;
+    if (node->type == NULL || !TypeIsStructOrUnion(node->type) ||
+        cmp->left == NULL || cmp->right == NULL) {
+      return false;
+    }
+    int64_t v;
+    if (TypeIsFloatingPoint(cmp->left->type) ||
+        TypeIsFloatingPoint(cmp->right->type)) {
+      double a, b;
+      if (!EvaluateFloatingPointExpressionInContext(ctx, cmp->left, &a) ||
+          !EvaluateFloatingPointExpressionInContext(ctx, cmp->right, &b)) {
+        return false;
+      }
+      v = a < b ? -1 : a > b ? 1 : a == b ? 0 : 2;
+    } else {
+      int64_t a, b;
+      if (!EvaluateIntegerExpressionInContext(ctx, cmp->left, &a) ||
+          !EvaluateIntegerExpressionInContext(ctx, cmp->right, &b)) {
+        return false;
+      }
+      if (TypeIsUnsigned(cmp->left->type) || TypeIsUnsigned(cmp->right->type)) {
+        uint64_t ua = (uint64_t)a;
+        uint64_t ub = (uint64_t)b;
+        v = ua < ub ? -1 : ua > ub ? 1 : 0;
+      } else {
+        v = a < b ? -1 : a > b ? 1 : 0;
+      }
+    }
+    ConstexprObject* object =
+        NewConstexprObject(ctx, node->type, ConstexprObjectSlotCount(node->type));
+    ConstexprValue* slot = ConstexprObjectSlot(object, 0);
+    if (slot == NULL) {
+      return false;
+    }
+    slot->is_object = false;
+    slot->is_address = false;
+    slot->is_floating = false;
+    slot->ivalue = v;
+    slot->fvalue = 0;
+    slot->object = NULL;
+    result->is_object = true;
+    result->is_address = false;
+    result->is_floating = false;
+    result->ivalue = 0;
+    result->fvalue = 0;
+    result->object = object;
+    return true;
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
@@ -1267,7 +1322,21 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       result->object = id->symbol->value.other;
       return result->object != NULL;
     }
-    if (binding == NULL || binding->object == NULL) {
+    if (binding == NULL) {
+      return false;
+    }
+    ConstexprObject* bound_object = binding->object;
+    if (bound_object == NULL && binding->is_address) {
+      // A reference parameter bound to an lvalue object (e.g. the `const S&`
+      // source operand of a defaulted comparison whose argument is itself a
+      // subobject).  Follow the reference to the object it designates.
+      if (binding->address_slot != NULL && binding->address_slot->is_object) {
+        bound_object = binding->address_slot->object;
+      } else if (binding->address_binding != NULL) {
+        bound_object = binding->address_binding->object;
+      }
+    }
+    if (bound_object == NULL) {
       return false;
     }
     result->is_object = true;
@@ -1275,7 +1344,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     result->is_floating = false;
     result->ivalue = 0;
     result->fvalue = 0;
-    result->object = binding->object;
+    result->object = bound_object;
     return true;
   }
   if (node->op == AST_OP(subscript)) {
@@ -1483,6 +1552,20 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
   }
   if (EvaluateConstexprObjectLValue(ctx, node, &slot, true)) {
     *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    return true;
+  }
+  // A reference parameter can bind to a class/array prvalue that has been
+  // materialized into a temporary (e.g. the `const S&` source operand of a
+  // defaulted `operator<=>` called as `S{...} <=> S{...}`).  Such a temporary is
+  // not an addressable lvalue binding/slot, so evaluate it to an object and let
+  // the reference alias that object directly; subsequent member accesses read it
+  // through the pushed binding.
+  ConstexprValue object_value;
+  if (node != NULL && node->type != NULL &&
+      (TypeIsStructOrUnion(node->type) || TypeIsFixedArray(node->type)) &&
+      EvaluateConstexprObjectAccess(ctx, node, &object_value) &&
+      object_value.is_object && object_value.object != NULL) {
+    *result = object_value;
     return true;
   }
   return EvaluateConstexprAddressValue(ctx, node, result);

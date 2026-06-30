@@ -343,7 +343,24 @@ static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
   TypeRecord* saved_current_function = compiler->current_function;
   compiler->current_function = func;
 
-  PCodeGenerator* pcode = GenerateFunction(&gen);
+  // Constant evaluation is speculative and may reach a callee whose inline body
+  // has not yet been semantically analyzed (untyped nodes).  Lowering such a
+  // body would otherwise hit an assertion deep in code generation; instead we
+  // arm a recovery point so those paths longjmp back here and we fail the fold
+  // gracefully.  Save/restore the previous state to support nested compilation.
+  bool saved_recover = compiler->constexpr_codegen_recover;
+  jmp_buf saved_abort;
+  memcpy(saved_abort, compiler->constexpr_codegen_abort, sizeof(jmp_buf));
+  compiler->constexpr_codegen_recover = true;
+  PCodeGenerator* pcode = NULL;
+  if (setjmp(compiler->constexpr_codegen_abort) == 0) {
+    pcode = GenerateFunction(&gen);
+  } else {
+    pcode = NULL;  // recovered from an otherwise-fatal code generation path
+  }
+  compiler->constexpr_codegen_recover = saved_recover;
+  memcpy(compiler->constexpr_codegen_abort, saved_abort, sizeof(jmp_buf));
+
   if (pcode == NULL) {
     compiler->current_function = saved_current_function;
     compiler->target = saved_target;

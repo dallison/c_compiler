@@ -510,6 +510,16 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
     if (LexLookingAt(syntax->lex, TOK(less))) {
       int depth = 0;
       do {
+        // A `;` or brace can never appear at the top level of a
+        // template-argument list, so this `<` is a less-than operator rather
+        // than a template-id.  Stopping here also keeps the lookahead from
+        // running to the end of an #include'd file, which on EOF frees the
+        // current source out from under the checkpoint we restore below.
+        if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
+            LexLookingAt(syntax->lex, TOK(lbrace)) ||
+            LexLookingAt(syntax->lex, TOK(rbrace))) {
+          break;
+        }
         if (LexLookingAt(syntax->lex, TOK(less))) {
           depth++;
         } else if (LexLookingAt(syntax->lex, TOK(greater))) {
@@ -1949,7 +1959,22 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);
     int depth = 0;
+    // True once we see a token that cannot appear at the top level of a
+    // template-argument list, which means this `<` is a less-than operator
+    // rather than the start of a template-id.
+    bool not_a_template_id = false;
     do {
+      // A `;` or a `{`/`}` brace never appears at the top level of a
+      // template-argument list.  Bailing out here is not just an optimization:
+      // it stops the lookahead before it can run to the end of an #include'd
+      // file, which (on EOF) frees the current source out from under the
+      // checkpoint we are about to restore -- a use-after-free.
+      if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
+          LexLookingAt(syntax->lex, TOK(lbrace)) ||
+          LexLookingAt(syntax->lex, TOK(rbrace))) {
+        not_a_template_id = true;
+        break;
+      }
       if (LexLookingAt(syntax->lex, TOK(less))) {
         depth++;
       } else if (LexLookingAt(syntax->lex, TOK(greater))) {
@@ -1959,8 +1984,8 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       }
       LexNextToken(syntax->lex);
     } while (depth > 0 && !LexEof(syntax->lex));
-    has_template_arguments =
-        depth == 0 && LexLookingAt(syntax->lex, TOK(lparen));
+    has_template_arguments = !not_a_template_id && depth == 0 &&
+                             LexLookingAt(syntax->lex, TOK(lparen));
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     // We resolved the `<` as a template-argument list on a type-dependent

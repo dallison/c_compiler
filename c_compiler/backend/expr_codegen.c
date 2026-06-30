@@ -190,6 +190,12 @@ static IROpcode GetLoadOpcodeForType(TypeRecord* type) {
       }
     }
   }
+  // During speculative constant evaluation `type` may be NULL because the
+  // callee's inline body has not been analyzed yet.  Bail out of the fold
+  // instead of aborting; see Compiler::constexpr_codegen_recover.
+  if (compiler->constexpr_codegen_recover) {
+    longjmp(compiler->constexpr_codegen_abort, 1);
+  }
   assert(false);
   return IR_OP(nop);
 }

@@ -11601,6 +11601,12 @@ static void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
 
   if (CXXFunctionIsThreeWayComparison(member_symbol->type) ||
       CXXFunctionIsEqualityComparison(member_symbol->type)) {
+    // A defaulted comparison operator is implicitly constexpr when it satisfies
+    // the requirements for a constexpr function ([class.compare.default]).  Mark
+    // it so its synthesized body can participate in constant evaluation; if a
+    // member subobject's comparison turns out not to be constant, the evaluator
+    // simply fails the fold.
+    member_symbol->type->info.function.is_constexpr = true;
     Vector* comparison_body = NewVector();
     if (CXXFunctionIsThreeWayComparison(member_symbol->type)) {
       AppendCXXThreeWayComparisons(parser, member_symbol, comparison_body,

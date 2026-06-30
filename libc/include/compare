@@ -2,7 +2,7 @@
 //  compare
 //  c_compiler
 //
-//  Minimal C++20 three-way comparison (<=>) support for DaveCC.
+//  C++20 three-way comparison (<=>) support for DaveCC.
 //
 //  The comparison-category types wrap a single `int _v`
 //  (less = -1, equivalent/equal = 0, greater = 1, unordered = 2).  The
@@ -55,6 +55,19 @@ class partial_ordering {
   constexpr bool operator>(__detail::__unspec*) const { return _v == 1; }
   constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
   constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
+
+  // Reversed forms with the literal 0 on the left (`0 < cat`), as required by
+  // the standard.  `0 @ cat` has the meaning of `cat (reverse @) 0`.  These are
+  // only defined on partial_ordering: weak_ordering and strong_ordering convert
+  // to it, so `0 @ weak`/`0 @ strong` resolve here too.  (Per-category reversed
+  // overloads would all be viable through those conversions and make `0 @ cat`
+  // ambiguous.)
+  friend constexpr bool operator==(__detail::__unspec*, partial_ordering o) { return o._v == 0; }
+  friend constexpr bool operator!=(__detail::__unspec*, partial_ordering o) { return o._v != 0; }
+  friend constexpr bool operator<(__detail::__unspec*, partial_ordering o) { return o._v == 1; }
+  friend constexpr bool operator>(__detail::__unspec*, partial_ordering o) { return o._v < 0; }
+  friend constexpr bool operator<=(__detail::__unspec*, partial_ordering o) { return o._v == 0 || o._v == 1; }
+  friend constexpr bool operator>=(__detail::__unspec*, partial_ordering o) { return o._v <= 0; }
 
   static constexpr partial_ordering less{-1};
   static constexpr partial_ordering equivalent{0};
@@ -110,6 +123,16 @@ class strong_ordering {
   static constexpr strong_ordering equivalent{0};
   static constexpr strong_ordering greater{1};
 };
+
+// Named comparison functions.  Every category converts implicitly to
+// partial_ordering, so a single overload taking partial_ordering accepts all
+// three.
+constexpr bool is_eq(partial_ordering cmp) { return cmp == 0; }
+constexpr bool is_neq(partial_ordering cmp) { return cmp != 0; }
+constexpr bool is_lt(partial_ordering cmp) { return cmp < 0; }
+constexpr bool is_gt(partial_ordering cmp) { return cmp > 0; }
+constexpr bool is_lteq(partial_ordering cmp) { return cmp <= 0; }
+constexpr bool is_gteq(partial_ordering cmp) { return cmp >= 0; }
 
 }  // namespace std
 

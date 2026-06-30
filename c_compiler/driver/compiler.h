@@ -9,6 +9,7 @@
 #ifndef compiler_h
 #define compiler_h
 
+#include <setjmp.h>
 #include <stdlib.h>
 #include "assembler.h"
 #include "buffer.h"
@@ -360,6 +361,18 @@ typedef struct {
   FILE* ir_output_file;
   FILE* ast_output_file;
   int opt_level;
+
+  // Recovery point for soft failures while lowering a function to pcode for
+  // constant evaluation.  Constant evaluation is speculative: it may try to
+  // fold a call whose callee's inline body has not yet been semantically
+  // analyzed (and so still has untyped nodes).  When `constexpr_codegen_recover`
+  // is set, code-generation paths that would otherwise assert on such a node
+  // longjmp to `constexpr_codegen_abort` instead, so the fold fails gracefully
+  // and the caller falls back to the AST interpreter / a runtime expression.
+  // Outside constant evaluation the flag is clear and those asserts still fire
+  // on genuine compiler bugs.
+  jmp_buf constexpr_codegen_abort;
+  bool constexpr_codegen_recover;
 } Compiler;
 
 // Globals to avoid passing these around.
