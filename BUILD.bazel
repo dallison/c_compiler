@@ -15,6 +15,7 @@ filegroup(
         "libc/include/coroutine",
         "libc/include/memory",
         "libc/include/source_location",
+        "libc/include/string",
         "libc/include/type_traits",
         "libc/include/typeinfo",
         "libc/include/utility",
@@ -122,6 +123,7 @@ LIBC_SRCS = [
     "libc/cxx_new.c",
     "libc/cxx_rtti.c",
     "libc/eh_frame.c",
+    "libc/eh_terminate.c",
     "libc/eh_throw.c",
     "libc/exit.c",
     "libc/fabs.c",
@@ -902,6 +904,7 @@ libc_srcs=(
   "libc/ctype.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/eh_terminate.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1026,6 +1029,7 @@ libc_srcs=(
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_frame.c"
+  "libc/eh_terminate.c"
   "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1148,6 +1152,7 @@ libc_srcs=(
   "libc/ctype.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1265,6 +1270,7 @@ libc_srcs=(
   "libc/ctype.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1384,6 +1390,7 @@ libc_srcs=(
   "libc/ctype.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"

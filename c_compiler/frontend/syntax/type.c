@@ -1423,6 +1423,10 @@ static struct {
     {TOK(enum), kTypeEnum},         {TOK(void), kTypeVoid},
     {TOK(bool), kTypeBool},         {TOK(signed), kTypeSigned},
     {TOK(unsigned), kTypeUnsigned}, {TOK(auto), kTypeAuto},
+    // In C++ `wchar_t` is a distinct keyword, but this implementation defines
+    // it to its underlying integer type (matching `__WCHAR_TYPE__` and the C
+    // `typedef int wchar_t`), so a `wchar_t` type-specifier behaves like `int`.
+    {TOK(wchar_t), kTypeInt},
     {TOK(bad), kTypeImplicit},
 };
 
@@ -1644,6 +1648,14 @@ static void AddCXXUnscopedEnumConstantMembers(TypeParser* parser,
     member->access = access;
     member->is_static = true;
     AddStructMember(parser, owner, member);
+
+    // Make the constant visible by unqualified name within the class body so
+    // later member declarations (e.g. array bounds) and inline member bodies
+    // can use it, matching C++ class scope rules.
+    Symbol* scope_constant = SymbolClone(constant);
+    if (!SyntaxAddSymbol(parser->syntax, scope_constant)) {
+      SymbolDelete(scope_constant);
+    }
   }
 }
 
@@ -1664,6 +1676,17 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   StructMember* member = NewStructMember(alias);
   member->access = access;
   AddStructMember(parser, owner, member);
+
+  // Also make the alias visible by unqualified name within the class body so
+  // later member declarations and inline member bodies can use it as a type.
+  // The class-body symbol scope opened in ParseStructBody owns the lookup; the
+  // injected symbol is tracked in all_local_symbols and freed at end of
+  // compilation, so closing that scope does not free it.
+  Symbol* scope_alias = NewSymbol(name, type, STO(typedef));
+  scope_alias->location = location;
+  if (!SyntaxAddSymbol(parser->syntax, scope_alias)) {
+    SymbolDelete(scope_alias);
+  }
 }
 
 static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
@@ -3201,6 +3224,13 @@ typedef struct {
   Vector* args;
   TypeRecord* to_func;
   int rebase_template_parameter_base;
+  // The generic template's owning class and the instantiated owning class, used
+  // to rewrite uses of the injected-class-name (e.g. a functional-cast
+  // `ClassName(args)` constructing a temporary of the current specialization)
+  // from the primary template to this instantiation.  NULL for non-member
+  // function templates.
+  struct Struct* from_owner;
+  struct Struct* to_owner;
 } TemplateFunctionBodyClone;
 
 static void DeleteMappedVector(MapKeyValue* kv) {
@@ -3321,6 +3351,49 @@ static void RewriteTemplateBodyIdentifiers(ASTNode* node, Map* symbol_map) {
  * its type against the instantiation args, create a replacement symbol, record
  * the original->clone mapping, and point the declaration (and its initializer's
  * identifiers) at the new symbol. */
+/* The owning C++ class of a member function type, whether static (recorded in
+ * cxx_member_owner) or non-static (reached through the implicit `this`
+ * parameter's pointee).  Returns NULL for non-member functions. */
+static struct Struct* CloneFunctionMemberOwner(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return NULL;
+  }
+  FunctionInfo* info = &func->info.function;
+  if (info->cxx_member_owner != NULL) {
+    return info->cxx_member_owner;
+  }
+  if (info->prototype.length > 0) {
+    Symbol* this_sym = info->prototype.value.p[0];
+    if (this_sym != NULL && this_sym->type != NULL &&
+        StringEqual(&this_sym->name, "this") && this_sym->type->next != NULL &&
+        TypeIsStructOrUnion(this_sym->type->next) &&
+        this_sym->type->next->info.struct_info != NULL) {
+      return this_sym->type->next->info.struct_info;
+    }
+  }
+  return NULL;
+}
+
+// True if any node in `type`'s declarator chain (the type itself, or a
+// pointed-to / referenced / element type) is the class `str`.  Used to detect
+// uses of the injected-class-name -- e.g. `static_cast<ClassName&&>(...)` or a
+// local `ClassName tmp(...)` -- whose type names the *generic* primary-template
+// struct directly and so contains no template *parameter*; such types must
+// still be remapped to the current instantiation during member-body cloning,
+// otherwise a cast to the generic self-type forces a spurious temporary built
+// with the generic (unemitted) copy constructor.
+static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info == str) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone,
                                                 ASTNode* node) {
   if (node->op != AST_OP(vardecl)) {
@@ -3691,7 +3764,12 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
     return;
   }
   CastASTNode* cast = (CastASTNode*)node;
-  if (!TypeContainsTemplateParameter(cast->cast_type)) {
+  if (!TypeContainsTemplateParameter(cast->cast_type) &&
+      !(replace->clone->from_owner != NULL &&
+        replace->clone->to_owner != NULL &&
+        replace->clone->from_owner != replace->clone->to_owner &&
+        TypeChainReferencesStruct(cast->cast_type,
+                                  replace->clone->from_owner))) {
     return;
   }
   int pack_index = -1;
@@ -4550,6 +4628,28 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                               node->location);
     }
   }
+  // Injected-class-name as a functional-cast callee: `ClassName(args)` inside a
+  // member body of the primary template must construct a temporary of *this*
+  // instantiation, not the generic template.  We only rewrite the call's callee
+  // identifier (not other uses of the name, e.g. as a type in a cast or a
+  // declared object's type, which must stay pure type references); otherwise the
+  // tag would be misused as runtime storage.  Children are cloned before this
+  // callback runs, so `call->left` is already the cloned callee here.
+  if (node->op == AST_OP(call) && clone->from_owner != NULL &&
+      clone->to_owner != NULL && clone->from_owner != clone->to_owner &&
+      clone->to_owner->tag_symbol != NULL &&
+      clone->to_owner->tag_symbol->type != NULL) {
+    VectorASTNode* call = (VectorASTNode*)node;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      IdentifierASTNode* callee = (IdentifierASTNode*)call->left;
+      if (callee->symbol != NULL && callee->symbol->type != NULL &&
+          TypeIsStructOrUnion(callee->symbol->type) &&
+          callee->symbol->type->info.struct_info == clone->from_owner) {
+        callee->symbol = clone->to_owner->tag_symbol;
+        ASTNodeSetType(call->left, clone->to_owner->tag_symbol->type);
+      }
+    }
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     // Dependent qualified value name like `T::member`: substitute the scope
@@ -4680,7 +4780,10 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   bool node_type_substituted = false;
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
-    if (TypeContainsTemplateParameter(cast->cast_type)) {
+    if (TypeContainsTemplateParameter(cast->cast_type) ||
+        (clone->from_owner != NULL && clone->to_owner != NULL &&
+         clone->from_owner != clone->to_owner &&
+         TypeChainReferencesStruct(cast->cast_type, clone->from_owner))) {
       TypeRecord* cast_type =
           SubstituteTemplateParameters(clone->parser, cast->cast_type,
                                        clone->args);
@@ -5043,6 +5146,8 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   clone.to_func = to;
   clone.rebase_template_parameter_base =
       from->info.function.template_parameter_base;
+  clone.from_owner = CloneFunctionMemberOwner(from);
+  clone.to_owner = CloneFunctionMemberOwner(to);
   size_t to_index = 0;
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* from_formal = from->info.function.prototype.value.p[i];
@@ -5081,6 +5186,20 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
     kv.value.p = to->info.function.prototype.value.p[to_index++];
     MapInsert(&clone.symbol_map, kv);
   }
+  // Make self-type references inside the body (the injected-class-name used as a
+  // local variable's type, a `static_cast<T&&>` target, etc.) resolve to *this*
+  // instantiation rather than the generic primary template.  The deferred body
+  // clone runs long after InstantiateTemplateMemberFunction restored these, so
+  // re-establish the source->target struct mapping that
+  // SubstituteTemplateParameters consults; otherwise such types stay generic and
+  // member calls (e.g. the move ctor/assignment used by `swap`) target an
+  // unemitted, generic-mangled symbol.
+  Struct* saved_substitution_source = parser->template_substitution_source;
+  Struct* saved_substitution_target = parser->template_substitution_target;
+  if (clone.from_owner != NULL && clone.to_owner != NULL) {
+    parser->template_substitution_source = clone.from_owner;
+    parser->template_substitution_target = clone.to_owner;
+  }
   ASTNode* body = ASTNodeClone(from->info.function.body,
                                CloneTemplateFunctionBodyNode, &clone, NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
@@ -5092,6 +5211,8 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, NULL);
+  parser->template_substitution_source = saved_substitution_source;
+  parser->template_substitution_target = saved_substitution_target;
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
   MapDestruct(&clone.symbol_map);
   return body;
@@ -12564,6 +12685,23 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           AddStructMember(parser, str, member);
         }
 
+        // Make a static member function visible by unqualified name within the
+        // class body so a sibling member (e.g. a static method calling another
+        // static method) can reference it without the Class:: qualifier, as
+        // C++ class-scope lookup requires.  Only the first overload needs to be
+        // injected: overload resolution recovers the full set from the owning
+        // struct via the function's cxx_member_owner.  Non-static members are
+        // intentionally excluded so unqualified uses still route through the
+        // implicit `this->` member access.
+        if (member != NULL && member->is_static && member->is_member_function &&
+            member->symbol != NULL) {
+          Symbol* scope_fn = SymbolClone(member->symbol);
+          scope_fn->overload_next = NULL;
+          if (!SyntaxAddSymbol(parser->syntax, scope_fn)) {
+            SymbolDelete(scope_fn);
+          }
+        }
+
         // Check for bitfield.
         if (member == NULL) {
           // Already diagnosed as a duplicate.
@@ -12591,8 +12729,31 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           } else {
             ASTNode* initializer =
                 ParseCXXStaticDataMemberInitializer(parser, member_symbol);
-            QueueCXXInlineStaticDataMemberDefinition(
-                parser, str, member, initializer, is_inline_member);
+            // A const integral/enum static data member with an in-class
+            // initializer yields a constant usable by unqualified name in the
+            // rest of the class body (array bounds, default arguments, etc.).
+            // Inside a template the regular queue defers this, but such
+            // initializers are typically non-dependent, so evaluate them now to
+            // make the constant available; otherwise use the normal path.
+            if (parser->syntax->parsing_template_declaration &&
+                !is_inline_member && initializer != NULL &&
+                CXXStaticDataMemberAllowsInClassInitializer(member_symbol)) {
+              AnalyzeCXXStaticDataMemberConstantInitializer(parser, member_symbol,
+                                                            initializer);
+            } else {
+              QueueCXXInlineStaticDataMemberDefinition(
+                  parser, str, member, initializer, is_inline_member);
+            }
+            // Inject a value-carrying clone into the class scope so the
+            // constant resolves by unqualified name.  The clone lives in
+            // all_local_symbols and is freed at end of compilation, separate
+            // from the struct's own member symbol.
+            if (member_symbol->flags.value_set) {
+              Symbol* scope_constant = SymbolClone(member_symbol);
+              if (!SyntaxAddSymbol(parser->syntax, scope_constant)) {
+                SymbolDelete(scope_constant);
+              }
+            }
           }
           member_decl_had_inline_body |= has_inline_body;
         } else {
@@ -13694,15 +13855,28 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   LayoutCXXBaseSpecifiers(str);
 
   LocalSymbolTable* class_tag_scope = NULL;
+  LocalSymbolTable* class_symbol_scope = NULL;
   if (CompilerIsCXX()) {
     class_tag_scope = NewLocalSymbolTable();
     class_tag_scope->prev = parser->syntax->local_tag_stack;
     parser->syntax->local_tag_stack = class_tag_scope;
+    // Open a symbol scope for the class body so that member type aliases
+    // (`using`/`typedef`) become visible as type-names to subsequent member
+    // declarations and inline member function bodies, as required by C++ class
+    // scope rules.
+    class_symbol_scope = NewLocalSymbolTable();
+    class_symbol_scope->prev = parser->syntax->local_symbol_stack;
+    parser->syntax->local_symbol_stack = class_symbol_scope;
   }
   Struct* saved_member_owner = parser->cxx_member_owner;
   parser->cxx_member_owner = str;
   ParseStructMembers(parser, str, is_union, tag_name);
   parser->cxx_member_owner = saved_member_owner;
+  if (class_symbol_scope != NULL) {
+    assert(parser->syntax->local_symbol_stack == class_symbol_scope);
+    parser->syntax->local_symbol_stack = class_symbol_scope->prev;
+    LocalSymbolTableDelete(class_symbol_scope);
+  }
   ComputeCXXAggregateStatus(str);
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
@@ -14439,6 +14613,14 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   if (a->prototype.length != b->prototype.length) {
     return false;
   }
+  // The trailing const on a C++ member function is part of its signature: a
+  // non-const and a const member function with otherwise identical parameters
+  // are distinct overloads.  This matters for dependent return types (e.g.
+  // `T&` vs `const T&`) where the return type comparison cannot tell them
+  // apart, leaving the const qualifier as the only distinguishing feature.
+  if (a->is_const_member != b->is_const_member) {
+    return false;
+  }
   for (size_t i = 0; i < a->prototype.length; i++) {
     Symbol* s1 = a->prototype.value.p[i];
     Symbol* s2 = b->prototype.value.p[i];
@@ -14458,8 +14640,13 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   }
   // Prevent knock-on errors due to unknown symbols, but only after the
   // declarator shape matches.  A pointer to a dependent type is not the same
-  // signature as a reference to another dependent type.
-  if ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0) {
+  // signature as a reference to another dependent type.  Function types are
+  // excluded: their full signature (parameter types plus the member `const`
+  // qualifier) must still be compared so that e.g. `T& f()` and
+  // `const T& f() const` remain distinct overloads even when the dependent
+  // return type collapses to unknown.
+  if (t1->declarator != kDeclFunction &&
+      ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0)) {
     return true;
   }
   switch (t1->declarator) {

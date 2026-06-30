@@ -1,0 +1,531 @@
+//
+//  string
+//  c_compiler
+//
+//  C++20 std::string (basic_string) support for DaveCC.
+//
+//  The storage model mirrors DaveCC's own `String` class: a small inline
+//  buffer avoids a heap allocation for short strings, and longer strings spill
+//  into malloc'd memory that grows geometrically.  `__data` always points at
+//  either the inline buffer or the heap block, the content is always NUL
+//  terminated at `__data[__size]`, and `__cap` counts the total number of
+//  elements available including the slot for that terminator.
+//
+
+#ifndef __davecc_string__
+#define __davecc_string__
+
+#include <compare>
+#include <stdlib.h>
+#include <string.h>
+
+namespace std {
+
+// Minimal char_traits.  Only the char specialization is provided; that is all
+// std::string needs and it keeps the surface tied to tested C string routines.
+template <class CharT>
+struct char_traits;
+
+template <>
+struct char_traits<char> {
+  using char_type = char;
+  using int_type = int;
+  using pos_type = long;
+  using off_type = long;
+
+  static constexpr void assign(char_type& a, const char_type& b) noexcept {
+    a = b;
+  }
+  static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
+  static constexpr bool lt(char_type a, char_type b) noexcept {
+    return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
+  }
+
+  static size_t length(const char_type* s) { return strlen(s); }
+
+  static int compare(const char_type* a, const char_type* b, size_t n) {
+    if (n == 0) {
+      return 0;
+    }
+    return memcmp(a, b, n);
+  }
+
+  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
+    if (n != 0) {
+      memcpy(dst, src, n);
+    }
+    return dst;
+  }
+
+  static char_type* move(char_type* dst, const char_type* src, size_t n) {
+    if (n != 0) {
+      memmove(dst, src, n);
+    }
+    return dst;
+  }
+
+  static char_type* assign(char_type* dst, size_t n, char_type c) {
+    if (n != 0) {
+      memset(dst, static_cast<unsigned char>(c), n);
+    }
+    return dst;
+  }
+
+  static const char_type* find(const char_type* s, size_t n,
+                               const char_type& c) {
+    for (size_t i = 0; i < n; i++) {
+      if (s[i] == c) {
+        return s + i;
+      }
+    }
+    return nullptr;
+  }
+
+  static constexpr char_type to_char_type(int_type c) noexcept {
+    return static_cast<char_type>(c);
+  }
+  static constexpr int_type to_int_type(char_type c) noexcept {
+    return static_cast<unsigned char>(c);
+  }
+  static constexpr bool eq_int_type(int_type a, int_type b) noexcept {
+    return a == b;
+  }
+  static constexpr int_type eof() noexcept { return -1; }
+  static constexpr int_type not_eof(int_type c) noexcept {
+    return c == eof() ? 0 : c;
+  }
+};
+
+template <class CharT, class Traits = char_traits<CharT> >
+class basic_string {
+ public:
+  using traits_type = Traits;
+  using value_type = CharT;
+  using size_type = size_t;
+  using difference_type = long;
+  using reference = CharT&;
+  using const_reference = const CharT&;
+  using pointer = CharT*;
+  using const_pointer = const CharT*;
+  using iterator = CharT*;
+  using const_iterator = const CharT*;
+
+  static const size_type npos = static_cast<size_type>(-1);
+
+ private:
+  static const size_type __sso_capacity = 16;
+
+  CharT __buf[__sso_capacity];
+  CharT* __data;
+  size_type __size;
+  size_type __cap;  // Total element slots, including the NUL terminator slot.
+
+  bool __is_small() const noexcept { return __data == __buf; }
+
+  void __set_empty() noexcept {
+    __data = __buf;
+    __size = 0;
+    __cap = __sso_capacity;
+    __buf[0] = CharT();
+  }
+
+  // Ensure room for at least `need` characters plus a terminator, preserving
+  // the current contents.  Grows geometrically to keep append amortized O(1).
+  void __reserve_for(size_type need) {
+    if (need + 1 <= __cap) {
+      return;
+    }
+    size_type newcap = __cap + __cap / 2;
+    if (newcap < need + 1) {
+      newcap = need + 1;
+    }
+    CharT* fresh = static_cast<CharT*>(malloc(newcap * sizeof(CharT)));
+    if (__size != 0) {
+      traits_type::copy(fresh, __data, __size);
+    }
+    fresh[__size] = CharT();
+    if (!__is_small()) {
+      free(__data);
+    }
+    __data = fresh;
+    __cap = newcap;
+  }
+
+  // Replace the whole contents with `n` characters copied from `src` (which may
+  // alias nothing inside this object).
+  void __assign_raw(const CharT* src, size_type n) {
+    __reserve_for(n);
+    if (n != 0) {
+      traits_type::copy(__data, src, n);
+    }
+    __size = n;
+    __data[n] = CharT();
+  }
+
+ public:
+  basic_string() noexcept { __set_empty(); }
+
+  basic_string(const CharT* s) {
+    __set_empty();
+    __assign_raw(s, traits_type::length(s));
+  }
+
+  basic_string(const CharT* s, size_type n) {
+    __set_empty();
+    __assign_raw(s, n);
+  }
+
+  basic_string(size_type n, CharT c) {
+    __set_empty();
+    __reserve_for(n);
+    if (n != 0) {
+      traits_type::assign(__data, n, c);
+    }
+    __size = n;
+    __data[n] = CharT();
+  }
+
+  basic_string(const basic_string& other) {
+    __set_empty();
+    __assign_raw(other.__data, other.__size);
+  }
+
+  basic_string(const basic_string& other, size_type pos, size_type n = npos) {
+    __set_empty();
+    if (pos > other.__size) {
+      pos = other.__size;
+    }
+    size_type avail = other.__size - pos;
+    if (n > avail) {
+      n = avail;
+    }
+    __assign_raw(other.__data + pos, n);
+  }
+
+  basic_string(basic_string&& other) noexcept {
+    if (other.__is_small()) {
+      __data = __buf;
+      __cap = __sso_capacity;
+      __size = other.__size;
+      traits_type::copy(__buf, other.__buf, other.__size + 1);
+    } else {
+      __data = other.__data;
+      __cap = other.__cap;
+      __size = other.__size;
+    }
+    other.__set_empty();
+  }
+
+  ~basic_string() {
+    if (!__is_small()) {
+      free(__data);
+    }
+  }
+
+  basic_string& operator=(const basic_string& other) {
+    if (this != &other) {
+      __assign_raw(other.__data, other.__size);
+    }
+    return *this;
+  }
+
+  basic_string& operator=(basic_string&& other) noexcept {
+    if (this != &other) {
+      if (!__is_small()) {
+        free(__data);
+      }
+      if (other.__is_small()) {
+        __data = __buf;
+        __cap = __sso_capacity;
+        __size = other.__size;
+        traits_type::copy(__buf, other.__buf, other.__size + 1);
+      } else {
+        __data = other.__data;
+        __cap = other.__cap;
+        __size = other.__size;
+      }
+      other.__set_empty();
+    }
+    return *this;
+  }
+
+  basic_string& operator=(const CharT* s) {
+    __assign_raw(s, traits_type::length(s));
+    return *this;
+  }
+
+  basic_string& operator=(CharT c) {
+    __reserve_for(1);
+    __data[0] = c;
+    __data[1] = CharT();
+    __size = 1;
+    return *this;
+  }
+
+  // Element access.
+  reference operator[](size_type pos) { return __data[pos]; }
+  const_reference operator[](size_type pos) const { return __data[pos]; }
+  reference at(size_type pos) { return __data[pos]; }
+  const_reference at(size_type pos) const { return __data[pos]; }
+  reference front() { return __data[0]; }
+  const_reference front() const { return __data[0]; }
+  reference back() { return __data[__size - 1]; }
+  const_reference back() const { return __data[__size - 1]; }
+  CharT* data() noexcept { return __data; }
+  const CharT* data() const noexcept { return __data; }
+  const CharT* c_str() const noexcept { return __data; }
+
+  // Iterators.
+  iterator begin() noexcept { return __data; }
+  const_iterator begin() const noexcept { return __data; }
+  const_iterator cbegin() const noexcept { return __data; }
+  iterator end() noexcept { return __data + __size; }
+  const_iterator end() const noexcept { return __data + __size; }
+  const_iterator cend() const noexcept { return __data + __size; }
+
+  // Capacity.
+  size_type size() const noexcept { return __size; }
+  size_type length() const noexcept { return __size; }
+  bool empty() const noexcept { return __size == 0; }
+  size_type capacity() const noexcept { return __cap - 1; }
+  size_type max_size() const noexcept { return npos - 1; }
+
+  void reserve(size_type new_cap) {
+    if (new_cap > capacity()) {
+      __reserve_for(new_cap);
+    }
+  }
+
+  void shrink_to_fit() {}
+
+  void clear() noexcept {
+    __size = 0;
+    __data[0] = CharT();
+  }
+
+  void resize(size_type count, CharT c) {
+    if (count > __size) {
+      __reserve_for(count);
+      traits_type::assign(__data + __size, count - __size, c);
+    }
+    __size = count;
+    __data[__size] = CharT();
+  }
+
+  void resize(size_type count) { resize(count, CharT()); }
+
+  // Modifiers.
+  basic_string& append(const CharT* s, size_type n) {
+    __reserve_for(__size + n);
+    if (n != 0) {
+      traits_type::copy(__data + __size, s, n);
+    }
+    __size += n;
+    __data[__size] = CharT();
+    return *this;
+  }
+
+  basic_string& append(const CharT* s) {
+    return append(s, traits_type::length(s));
+  }
+
+  basic_string& append(const basic_string& s) {
+    return append(s.__data, s.__size);
+  }
+
+  basic_string& append(size_type n, CharT c) {
+    __reserve_for(__size + n);
+    if (n != 0) {
+      traits_type::assign(__data + __size, n, c);
+    }
+    __size += n;
+    __data[__size] = CharT();
+    return *this;
+  }
+
+  void push_back(CharT c) {
+    __reserve_for(__size + 1);
+    __data[__size] = c;
+    __size++;
+    __data[__size] = CharT();
+  }
+
+  void pop_back() {
+    __size--;
+    __data[__size] = CharT();
+  }
+
+  basic_string& operator+=(const basic_string& s) { return append(s); }
+  basic_string& operator+=(const CharT* s) { return append(s); }
+  basic_string& operator+=(CharT c) {
+    push_back(c);
+    return *this;
+  }
+
+  void swap(basic_string& other) noexcept {
+    basic_string tmp(static_cast<basic_string&&>(*this));
+    *this = static_cast<basic_string&&>(other);
+    other = static_cast<basic_string&&>(tmp);
+  }
+
+  // Substrings and search.
+  basic_string substr(size_type pos = 0, size_type n = npos) const {
+    return basic_string(*this, pos, n);
+  }
+
+  int compare(const basic_string& other) const {
+    size_type lhs = __size;
+    size_type rhs = other.__size;
+    size_type n = lhs < rhs ? lhs : rhs;
+    int r = traits_type::compare(__data, other.__data, n);
+    if (r != 0) {
+      return r;
+    }
+    if (lhs < rhs) {
+      return -1;
+    }
+    if (lhs > rhs) {
+      return 1;
+    }
+    return 0;
+  }
+
+  int compare(const CharT* s) const {
+    size_type rhs = traits_type::length(s);
+    size_type n = __size < rhs ? __size : rhs;
+    int r = traits_type::compare(__data, s, n);
+    if (r != 0) {
+      return r;
+    }
+    if (__size < rhs) {
+      return -1;
+    }
+    if (__size > rhs) {
+      return 1;
+    }
+    return 0;
+  }
+
+  size_type find(const CharT* s, size_type pos, size_type n) const {
+    if (n == 0) {
+      return pos <= __size ? pos : npos;
+    }
+    if (pos > __size || __size - pos < n) {
+      return npos;
+    }
+    size_type last = __size - n;
+    for (size_type i = pos; i <= last; i++) {
+      if (traits_type::compare(__data + i, s, n) == 0) {
+        return i;
+      }
+    }
+    return npos;
+  }
+
+  size_type find(const basic_string& s, size_type pos = 0) const {
+    return find(s.__data, pos, s.__size);
+  }
+
+  size_type find(const CharT* s, size_type pos = 0) const {
+    return find(s, pos, traits_type::length(s));
+  }
+
+  size_type find(CharT c, size_type pos = 0) const {
+    for (size_type i = pos; i < __size; i++) {
+      if (traits_type::eq(__data[i], c)) {
+        return i;
+      }
+    }
+    return npos;
+  }
+
+  size_type rfind(CharT c, size_type pos = npos) const {
+    if (__size == 0) {
+      return npos;
+    }
+    size_type i = pos < __size ? pos : __size - 1;
+    while (true) {
+      if (traits_type::eq(__data[i], c)) {
+        return i;
+      }
+      if (i == 0) {
+        return npos;
+      }
+      i--;
+    }
+  }
+};
+
+using string = basic_string<char>;
+
+// Non-member concatenation.
+template <class CharT, class Traits>
+basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
+                                      const basic_string<CharT, Traits>& b) {
+  basic_string<CharT, Traits> result(a);
+  result.append(b);
+  return result;
+}
+
+template <class CharT, class Traits>
+basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
+                                      const CharT* b) {
+  basic_string<CharT, Traits> result(a);
+  result.append(b);
+  return result;
+}
+
+template <class CharT, class Traits>
+basic_string<CharT, Traits> operator+(const CharT* a,
+                                      const basic_string<CharT, Traits>& b) {
+  basic_string<CharT, Traits> result(a);
+  result.append(b);
+  return result;
+}
+
+template <class CharT, class Traits>
+basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
+                                      CharT b) {
+  basic_string<CharT, Traits> result(a);
+  result.push_back(b);
+  return result;
+}
+
+// Comparisons.
+template <class CharT, class Traits>
+bool operator==(const basic_string<CharT, Traits>& a,
+                const basic_string<CharT, Traits>& b) {
+  return a.compare(b) == 0;
+}
+
+template <class CharT, class Traits>
+bool operator==(const basic_string<CharT, Traits>& a, const CharT* b) {
+  return a.compare(b) == 0;
+}
+
+template <class CharT, class Traits>
+std::strong_ordering operator<=>(const basic_string<CharT, Traits>& a,
+                                 const basic_string<CharT, Traits>& b) {
+  int r = a.compare(b);
+  return r < 0 ? std::strong_ordering::less
+               : r > 0 ? std::strong_ordering::greater
+                       : std::strong_ordering::equal;
+}
+
+template <class CharT, class Traits>
+std::strong_ordering operator<=>(const basic_string<CharT, Traits>& a,
+                                 const CharT* b) {
+  int r = a.compare(b);
+  return r < 0 ? std::strong_ordering::less
+               : r > 0 ? std::strong_ordering::greater
+                       : std::strong_ordering::equal;
+}
+
+template <class CharT, class Traits>
+void swap(basic_string<CharT, Traits>& a, basic_string<CharT, Traits>& b) {
+  a.swap(b);
+}
+
+}  // namespace std
+
+#endif /* __davecc_string__ */

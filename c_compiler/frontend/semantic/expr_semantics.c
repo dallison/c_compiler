@@ -757,6 +757,42 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
 
 static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
   first = FollowUsingAliasForADL(first);
+  // Static member functions link their overloads through the StructMember chain
+  // rather than the symbol-level overload_next chain that ordinary
+  // (namespace-scope) functions use.  When a qualified name resolves to a static
+  // member function (e.g. `Class::f(...)` or `traits_type::assign(...)`), only
+  // the single member the lookup returned is reachable via overload_next, so
+  // gather the rest of the overload set from the owning struct's member list.
+  //
+  // This must be limited to *static* members.  Non-static member functions are
+  // resolved through ResolveMemberFunctionOverload, which applies the
+  // receiver-const tie-breaker; gathering their overloads here and rescoring via
+  // the ordinary (penalty-free) path would make const/non-const pairs ambiguous.
+  // A non-static member carries an implicit `this` as its first parameter, so a
+  // member function with an owner but no leading `this` is the static case.
+  bool first_is_static_member =
+      first != NULL && first->type != NULL && TypeIsFunction(first->type) &&
+      first->type->info.function.cxx_member_owner != NULL &&
+      (first->type->info.function.prototype.length == 0 ||
+       !StringEqual(
+           &((Symbol*)first->type->info.function.prototype.value.p[0])->name,
+           "this"));
+  if (first_is_static_member && first->overload_next == NULL) {
+    Struct* owner = first->type->info.function.cxx_member_owner;
+    StructMember* head = FindStructMember(owner, &first->name);
+    if (head != NULL) {
+      for (StructMember* m = head; m != NULL; m = m->overload_next) {
+        if (m->symbol != NULL && m->symbol->type != NULL &&
+            TypeIsFunction(m->symbol->type) &&
+            !VectorContainsPointer(candidates, m->symbol)) {
+          VectorAppend(candidates, m->symbol);
+        }
+      }
+      if (candidates->length > 0) {
+        return;
+      }
+    }
+  }
   for (Symbol* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
     Symbol* effective = FollowUsingAliasForADL(candidate);
@@ -3176,6 +3212,15 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
       !TypeIsStructOrUnion(to)) {
     return false;
   }
+  // [over.best.ics]/4: an implicit conversion sequence contains at most one
+  // user-defined conversion.  While we are already materializing one converting
+  // constructor, a nested argument conversion must not invoke another, otherwise
+  // resolving the constructor call can pick a constructor whose own parameter
+  // requires the very same user-defined conversion, recursing without bound
+  // (e.g. a copy constructor `T(const T&)` selected for a non-`T` argument).
+  if (g_suppress_user_defined_conversion_rank) {
+    return false;
+  }
   StructMember* ctor = FindConvertingConstructorCandidate(
       to, from, /*allow_explicit=*/ctx == kConvertCast);
   if (ctor == NULL) {
@@ -3207,7 +3252,15 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
   if (parent != NULL) {
     ASTNodeReplaceChild(parent, child_id, comma, true);
   }
+  // Analyze the synthesized constructor call with user-defined conversions
+  // suppressed: the argument must reach the chosen constructor's parameter by a
+  // standard conversion only (the one user-defined conversion in this sequence
+  // is the constructor itself), which prevents unbounded re-entry through
+  // another converting constructor.
+  bool saved_suppress = g_suppress_user_defined_conversion_rank;
+  g_suppress_user_defined_conversion_rank = true;
   ASTNode* analyzed = AnalyzeExpression(comma);
+  g_suppress_user_defined_conversion_rank = saved_suppress;
   analyzed->value_category = kValueCategoryPrvalue;
   if (parent != NULL) {
     ASTNodeReplaceChild(parent, child_id, analyzed, false);

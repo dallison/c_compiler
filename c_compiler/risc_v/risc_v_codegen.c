@@ -1941,6 +1941,21 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     }
   }
 
+  // RISC-V has distinct signed/unsigned divide and remainder instructions, but
+  // IR2RV only sees the IR opcode (not the operand type) and so defaults to the
+  // signed forms.  Promote to the unsigned forms when the result type is
+  // unsigned.  Without this, an unsigned operation such as ULLONG_MAX / 10 would
+  // be lowered to the signed (-1) / 10 == 0, corrupting e.g. printf's decimal
+  // conversion of large values.  (The strength-reduced power-of-2 cases handled
+  // in the switch above are already type-aware and have set `inst`, so they are
+  // unaffected.)
+  if (TypeIsUnsigned(node->type)) {
+    if (opcode == RV_OP(div)) {
+      opcode = RV_OP(divu);
+    } else if (opcode == RV_OP(rem)) {
+      opcode = RV_OP(remu);
+    }
+  }
   if (inst == NULL) {
     inst = (TargetInstruction*)NewInstruction(opcode);
     for (size_t i = 0; i < node->inputs.length; i++) {
@@ -2564,8 +2579,26 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
       op2 = tmp;
     }
 
+    // The IR uses the signed integer compare opcodes (cmpl*i) for *both* signed
+    // and unsigned integer operands, leaving the backend to pick the correct
+    // instruction from the operand type -- exactly as the sltu/slt selection
+    // does when a comparison result is materialized into a register.  Promote
+    // the signed relational branch to its unsigned form when the operands are
+    // unsigned, otherwise e.g. `(size_type)-1 < n` would be judged as the
+    // signed `-1 < n` and taken, corrupting unsigned-size loops (rfind, substr,
+    // ...).  Equality branches (beq/bne) are sign-agnostic and unchanged.
+    RVOpcode branch_opcode = branch_info->branch;
+    if ((op1 != NULL && TypeIsUnsigned(op1->type)) ||
+        (op2 != NULL && TypeIsUnsigned(op2->type))) {
+      if (branch_opcode == RV_OP(blt)) {
+        branch_opcode = RV_OP(bltu);
+      } else if (branch_opcode == RV_OP(bge)) {
+        branch_opcode = RV_OP(bgeu);
+      }
+    }
+
     TargetInstruction* inst =
-        Emit(rv, NewInstruction2(branch_info->branch, Materialize(rv, op1),
+        Emit(rv, NewInstruction2(branch_opcode, Materialize(rv, op1),
                                  Materialize(rv, op2)));
 
     TargetInstruction* target = target_node->data.ptr;

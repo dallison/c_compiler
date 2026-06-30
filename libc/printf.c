@@ -229,10 +229,13 @@ STATIC char* ConvertDecimalLongLong(unsigned long long v, char* buf,
     return p;
   }
   while (v != 0) {
-    lldiv_t qr = lldiv(v, 10);
-    char ch = qr.rem + '0';
+    // Use unsigned division/modulo directly.  lldiv() operates on *signed*
+    // long long, so for values with the high bit set (e.g. ULLONG_MAX) it would
+    // treat the operand as negative and produce a negative remainder, emitting
+    // the digit '0' + (-1) == '/' instead of the correct decimal digits.
+    char ch = (char)(v % 10) + '0';
     *p-- = ch;
-    v = qr.quot;
+    v = v / 10;
   }
   // p is one less than the first char.
   return p + 1;

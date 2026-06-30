@@ -200,6 +200,9 @@ static bool CXXSymbolShouldMangle(Symbol* symbol) {
       !TypeIsFunction(symbol->type)) {
     return false;
   }
+  if (symbol->flags.is_c_linkage) {
+    return false;
+  }
   if (symbol->asm_name.length != 0) {
     return false;
   }
@@ -513,7 +516,8 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
 }
 
 void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
-  if (!CompilerIsCXX() || symbol == NULL || symbol->asm_name.length != 0) {
+  if (!CompilerIsCXX() || symbol == NULL || symbol->asm_name.length != 0 ||
+      symbol->flags.is_c_linkage) {
     return;
   }
 

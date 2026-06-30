@@ -112,6 +112,12 @@ static ReservedWord reserved_words[] = {
 // C++ reserved words and alternative operator spellings.  This table is sorted
 // alphabetically by spelling and is only used when a C++ -std= mode is active.
 static CXXReservedWord cxx_reserved_words[] = {
+  // `restrict` is not a C++ keyword, but GCC and Clang accept it (and the
+  // `__restrict`/`__restrict__` spellings) as an extension so that C headers
+  // using it can be included from C++.  These sort before "alignas" because
+  // '_' precedes 'a'.
+  {"__restrict", TOK(restrict), kLanguageStandardCXX98},
+  {"__restrict__", TOK(restrict), kLanguageStandardCXX98},
   {"alignas", TOK(alignas), kLanguageStandardCXX11},
   {"alignof", TOK(alignof), kLanguageStandardCXX11},
   {"and", TOK(ampamp), kLanguageStandardCXX98},
@@ -178,6 +184,7 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"register", TOK(register), kLanguageStandardCXX98},
   {"reinterpret_cast", TOK(reinterpret_cast), kLanguageStandardCXX98},
   {"requires", TOK(requires), kLanguageStandardCXX20},
+  {"restrict", TOK(restrict), kLanguageStandardCXX98},
   {"return", TOK(return), kLanguageStandardCXX98},
   {"short", TOK(short), kLanguageStandardCXX98},
   {"signed", TOK(signed), kLanguageStandardCXX98},

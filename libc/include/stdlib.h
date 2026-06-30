@@ -11,6 +11,10 @@
 #define stdlib_h
 #ifdef __DAVECC__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define NULL ((void*)0)
 
 #ifndef __SIZE_T
@@ -56,7 +60,7 @@ typedef struct __lldiv_t {
 #define __LLDIV_T
 #endif
 
-#ifndef __WCHAR_T
+#if !defined(__WCHAR_T) && !defined(__cplusplus)
 typedef int wchar_t;
 #define __WCHAR_T
 #endif
@@ -119,6 +123,10 @@ size_t mbstowcs(wchar_t * restrict pwcs,
 size_t wcstombs(char * restrict s,
 const wchar_t * restrict pwcs, size_t n);
 char* realpath(const char* path, char* resolved_path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __DAVECC__ */
 #endif /* stdlib_h */

@@ -101,6 +101,7 @@ typedef struct Symbol {
     bool is_constexpr: 1;          // C++ constexpr variable.
     bool is_constinit: 1;          // C++ constinit variable.
     bool is_weak: 1;               // Emits ELF weak binding.
+    bool is_c_linkage: 1;          // Declared with C language linkage (extern "C").
   } flags;
   
   struct {

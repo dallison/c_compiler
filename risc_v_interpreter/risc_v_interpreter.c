@@ -383,13 +383,15 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
               iregs[rd] = iregs[rs1] / iregs[rs2];
               break;
             case RV_F3(divu):
-              iregs[rd] = iregs[rs1] / iregs[rs2];
+              iregs[rd] =
+                  (int64_t)((uint64_t)iregs[rs1] / (uint64_t)iregs[rs2]);
               break;
             case RV_F3(rem):
               iregs[rd] = iregs[rs1] % iregs[rs2];
               break;
             case RV_F3(remu):
-              iregs[rd] = iregs[rs1] % iregs[rs2];
+              iregs[rd] =
+                  (int64_t)((uint64_t)iregs[rs1] % (uint64_t)iregs[rs2]);
               break;
           }
           break;

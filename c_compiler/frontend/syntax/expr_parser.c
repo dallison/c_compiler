@@ -566,9 +566,17 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   }
   String* scope = name->components.value.p[0];
   Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope);
-  if (scope_symbol == NULL || !scope_symbol->flags.is_template_type_parameter ||
-      scope_symbol->type == NULL ||
+  // The scope must name a type that is (or aliases) a template type parameter:
+  // either the parameter itself, or a typedef/using-alias to it such as
+  // `using traits_type = Traits;`.  In both cases the symbol's type carries the
+  // template parameter index, which is what the template-body cloner uses to
+  // substitute the concrete argument at instantiation time.
+  if (scope_symbol == NULL || scope_symbol->type == NULL ||
       scope_symbol->type->template_parameter_index < 0) {
+    return NULL;
+  }
+  if (!scope_symbol->flags.is_template_type_parameter &&
+      !StorageIs(scope_symbol->storage, STO(typedef))) {
     return NULL;
   }
   String* member = name->components.value.p[1];

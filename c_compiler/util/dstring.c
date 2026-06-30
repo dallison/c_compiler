@@ -397,6 +397,11 @@ bool StringContainsString(String* str, const char* s) {
 
 void StringEscape(String* in, String* out) {
   LazyInit(in);
+  // Ensure `out` has a valid (empty) buffer even when nothing is appended, so an
+  // empty input yields "" rather than a NULL `value`.  A NULL value formatted
+  // with %s renders as "(null)", which corrupted empty string literals emitted
+  // via `.asciz "%s"`.
+  LazyInit(out);
   for (size_t i = 0; i < in->length; i++) {
     char ch = in->value[i];
     if (ch < ' ' || ch >= 127) {

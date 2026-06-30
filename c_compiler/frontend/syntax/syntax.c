@@ -1001,6 +1001,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->context = kParsingFileScope;
+  syntax->extern_c_depth = 0;
 }
 
 
@@ -3606,7 +3607,18 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                  CurrentIdentifierFollowedByScopeOperator(syntax)) &&
                SyntaxLookingAtType(syntax) &&
                (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
+      // Guard against a type specifier that consumes no input (e.g. a stray
+      // `::` that cannot begin a new specifier): if the lexer does not
+      // advance, stop rather than spinning forever.
+      size_t prev_pos = syntax->lex->pos;
+      Token prev_token = syntax->lex->current_token;
       type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
+      if (syntax->lex->pos == prev_pos &&
+          syntax->lex->current_token == prev_token) {
+        *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+        TypeParserDestruct(&parser);
+        return;
+      }
     } else if (LexLookingAt(syntax->lex, TOK(attribute)) ||
                SyntaxLookingAtCXXAttribute(syntax)) {
       if (LexMatch(syntax->lex, TOK(attribute))) {
@@ -3707,6 +3719,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     Symbol* old_sym = NULL;
     bool overload_was_appended = false;
     if (sym != NULL) {
+      // A declaration appearing inside an `extern "C"` linkage specification
+      // has C language linkage, so its name is not mangled.
+      if (syntax->extern_c_depth > 0) {
+        sym->flags.is_c_linkage = true;
+      }
       // `constexpr` on an object implies `const` on its type.  Apply it before
       // matching against any previous declaration so that an out-of-class
       // definition (`constexpr T C::x;`) compares equal to the in-class
@@ -3925,6 +3942,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     }
     if (TypeIsFunction(sym->type)) {
+      if (old_sym != NULL && sym->flags.is_c_linkage) {
+        old_sym->flags.is_c_linkage = true;
+      }
       SymbolSetCXXMangledAsmName(sym);
       if (old_sym != NULL && old_sym->asm_name.length == 0) {
         SymbolSetCXXMangledAsmName(old_sym);
@@ -4808,6 +4828,71 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
 }
 
 
+// If we are looking at a C++ linkage specification (`extern "C"` or
+// `extern "C++"`, optionally with a brace-enclosed declaration sequence),
+// parse it and return the resulting declaration(s).  Returns NULL (leaving the
+// lexer untouched) when the current tokens are not a linkage specification, so
+// the caller can treat a bare `extern` as an ordinary storage-class specifier.
+static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(extern))) {
+    return NULL;
+  }
+
+  // Peek past `extern` to see whether a string-literal linkage name follows.
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // extern
+  if (!LexLookingAt(syntax->lex, TOK(string))) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+
+  String linkage;
+  StringInit(&linkage, "");
+  while (LexLookingAt(syntax->lex, TOK(string))) {
+    StringAppend(&linkage, syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+  }
+  bool is_c = StringEqual(&linkage, "C");
+  if (!is_c && !StringEqual(&linkage, "C++")) {
+    SyntaxError(syntax, "Unknown linkage specification \"%s\"", linkage.value);
+  }
+  StringDestruct(&linkage);
+
+  // C linkage suppresses name mangling for the enclosed declarations; C++
+  // linkage is the default, so it only needs to parse the declarations.
+  bool apply_c_linkage = is_c;
+
+  if (LexMatch(syntax->lex, TOK(lbrace))) {
+    Vector* declarations = NewVector();
+    if (apply_c_linkage) {
+      syntax->extern_c_depth++;
+    }
+    while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
+      ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+      AppendDeclarationsFromNode(declarations, node);
+    }
+    if (apply_c_linkage) {
+      syntax->extern_c_depth--;
+    }
+    SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebrace) | TC(decl));
+    return NewDeclarationListASTNode(declarations, location);
+  }
+
+  // Single-declaration form: `extern "C" <declaration>`.
+  if (apply_c_linkage) {
+    syntax->extern_c_depth++;
+  }
+  ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+  if (apply_c_linkage) {
+    syntax->extern_c_depth--;
+  }
+  return node;
+}
+
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
@@ -4829,6 +4914,12 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   }
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
+  }
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(extern))) {
+    ASTNode* linkage = ParseCXXLinkageSpecification(syntax);
+    if (linkage != NULL) {
+      return linkage;
+    }
   }
   if (CurrentLineLooksLikeSpecialMemberDefinition(syntax)) {
     return ParseCXXSpecialMemberDefinition(syntax);
@@ -5442,6 +5533,76 @@ static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
   return init;
 }
 
+// True if `type` is a class with a user-declared copy or move constructor.  Such
+// a class manages its own copy semantics (e.g. owns a resource), so a member-wise
+// byte copy of one of its objects is wrong; copy-initialization must run the
+// constructor.  Classes without one are trivially/implicitly copyable, where the
+// member-wise `init` path (which also handles user-defined conversion operators)
+// is both correct and necessary -- e.g. the comparison categories convert via
+// `operator T()` and would otherwise hit their private value constructor.
+static bool CXXTypeHasUserDeclaredCopyOrMoveConstructor(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  for (StructMember* c = FindCXXConstructor(type); c != NULL;
+       c = c->overload_next) {
+    if (c->is_member_function && c->symbol != NULL && c->symbol->type != NULL &&
+        TypeIsFunction(c->symbol->type) &&
+        c->symbol->type->info.function.is_user_declared &&
+        (c->symbol->type->info.function.cxx_special_member_kind ==
+             kCXXSpecialMemberCopyConstructor ||
+         c->symbol->type->info.function.cxx_special_member_kind ==
+             kCXXSpecialMemberMoveConstructor)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Copy-initialization of a class object from a single expression, `T b = expr;`.
+// Like direct-initialization `T b(expr);`, this must select and invoke a
+// constructor (copy, move, or converting) rather than degrading to a shallow
+// member-wise `init`.  A member-wise init merely copies the bytes of the source
+// object, which for a class managing a resource (e.g. a string's heap pointer)
+// aliases that resource instead of running the user-defined copy constructor and
+// leads to double-frees / dangling pointers.
+//
+// This rewrite is limited to classes with a user-declared copy/move constructor:
+// only those need a constructor invocation here.  Trivially-copyable classes are
+// left to the member-wise `init` path, which also performs user-defined
+// conversions (constructing one type from another via `operator T()`); rewriting
+// those into a constructor call would bypass the conversion operator and select
+// a possibly-inaccessible value constructor instead.
+//
+// `initializer` is the node produced by SyntaxParseInitializer after the braced
+// list-constructor rewrite; only a plain expression initializer (`expr_init`)
+// for a non-aggregate class type with at least one constructor is rewritten.
+static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym,
+                                                     ASTNode* initializer) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      initializer == NULL || initializer->op != AST_OP(expr_init) ||
+      !TypeIsStructOrUnion(sym->type) || sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->is_aggregate) {
+    return initializer;
+  }
+  if (FindCXXConstructor(sym->type) == NULL ||
+      !CXXTypeHasUserDeclaredCopyOrMoveConstructor(sym->type)) {
+    return initializer;
+  }
+  ExpressionInitializerASTNode* expr_init =
+      (ExpressionInitializerASTNode*)initializer;
+  ASTNode* expr = expr_init->expr;
+  if (expr == NULL) {
+    return initializer;
+  }
+  // Hand the operand to the constructor call and detach it from the wrapper so
+  // the discarded `expr_init` node does not co-own it.
+  expr_init->expr = NULL;
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, expr);
+  return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
+}
+
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -5622,6 +5783,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             syntax, sym, initializer);
         initializer =
             NewCXXCopyListConstructorInitializer(syntax, sym, initializer);
+        initializer =
+            NewCXXCopyInitConstructorInitializer(syntax, sym, initializer);
         if (initializer == NULL || initializer->op != AST_OP(call)) {
           initializer = NewVariableInitExpression(syntax, sym, initializer);
         }
@@ -5773,6 +5936,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(volatile):
     case TOK(restrict):
     case TOK(void):
+    case TOK(wchar_t):
     case TOK(consteval):
     case TOK(constexpr):
     case TOK(constinit):
@@ -5804,7 +5968,16 @@ bool SyntaxLookingAtType(Syntax* syntax) {
 }
 
 static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
-  if (!CompilerIsCXX() || !SyntaxCurrentTokenStartsQualifiedName(syntax)) {
+  // Recognize any qualified-name start: a leading `::`, a name that a
+  // namespace/template prefix makes look qualified, or a plain `ident::`
+  // sequence (e.g. a dependent `T::member` where `T` is a template
+  // parameter or a concrete `Class::member`).  Without the plain `ident::`
+  // case, a dependent qualified call used as an expression statement would
+  // be misclassified as a declaration and send the declaration parser into
+  // an infinite loop.
+  if (!CompilerIsCXX() ||
+      !(SyntaxCurrentTokenStartsQualifiedName(syntax) ||
+        CurrentIdentifierFollowedByScopeOperator(syntax))) {
     return false;
   }
 

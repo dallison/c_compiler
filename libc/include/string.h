@@ -10,6 +10,10 @@
 #define string_h
 #ifdef __DAVECC__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef __SIZE_T
 #if defined(__W65C02__)
 typedef unsigned int size_t;
@@ -60,6 +64,10 @@ char *strtok(char * restrict s1, const char * restrict s2);
 void *memset(void *s, int c, size_t n);
 char *strerror(int errnum);
 size_t strlen(const char *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __DAVECC__ */
 #endif /* string_h */

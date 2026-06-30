@@ -141,6 +141,30 @@ static void PredefineMacros(Preprocessor* p) {
 
   PreprocessorDefineMacro(p, "__DAVECC__", "1");
 
+  // C++ mode advertises its standard via __cplusplus so headers can guard
+  // C++-specific constructs (and protect C-only ones such as the `wchar_t`
+  // typedef) the same way they do under GCC/Clang.
+  if (CompilerIsCXX()) {
+    const char* cplusplus = "199711L";  // C++98/03.
+    switch (compiler->language_standard) {
+      case kLanguageStandardCXX11:
+        cplusplus = "201103L";
+        break;
+      case kLanguageStandardCXX14:
+        cplusplus = "201402L";
+        break;
+      case kLanguageStandardCXX17:
+        cplusplus = "201703L";
+        break;
+      case kLanguageStandardCXX20:
+        cplusplus = "202002L";
+        break;
+      default:
+        break;
+    }
+    PreprocessorDefineMacro(p, "__cplusplus", cplusplus);
+  }
+
   // Date and time are defined as coming from the 'asctime' function.
   // We are using 'ctime' because it's a wrapper for asctime.  We extract
   // the strings produced by it into the __DATE__ and __TIME__ macros.
