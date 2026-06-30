@@ -4,12 +4,15 @@
 //
 //  Minimal C++20 three-way comparison (<=>) support for DaveCC.
 //
-//  The comparison-category types are modelled as aggregates wrapping a single
-//  `int _v` (less = -1, equivalent/equal = 0, greater = 1, unordered = 2).  The
-//  compiler's built-in `<=>` produces values of these types directly by storing
-//  that value into `_v`.  (An `int` is used rather than the conventional
-//  `signed char` so the representation does not depend on a backend correctly
-//  sign-extending sub-word loads.)
+//  The comparison-category types wrap a single `int _v`
+//  (less = -1, equivalent/equal = 0, greater = 1, unordered = 2).  The
+//  representation is private and the named values are constructed through a
+//  private constructor, as in the standard.  The compiler's built-in `<=>`
+//  produces values of these types by storing that value into `_v` directly at
+//  the IR level, which does not depend on the member being accessible.  (An
+//  `int` is used rather than the conventional `signed char` so the
+//  representation does not depend on a backend correctly sign-extending
+//  sub-word loads.)
 //
 //  Comparison against the literal 0 is modelled with an unspecified pointer
 //  parameter: the null pointer constant `0` converts to it, but an arbitrary
@@ -18,13 +21,6 @@
 //
 //  Implicit conversions between the categories follow the standard
 //  (strong_ordering -> weak_ordering -> partial_ordering).
-//
-//  Simplification relative to the standard:
-//   * The categories keep aggregate semantics with a public `_v` so the named
-//     constants can be defined as `static constexpr` members, rather than
-//     namespace-scope `inline constexpr` objects with a private representation.
-//     (A private representation needs a user-declared constructor, which the
-//     back end currently mis-compiles for static class constants.)
 //
 
 #ifndef compare_h
@@ -40,10 +36,16 @@ namespace __detail {
 struct __unspec;
 }  // namespace __detail
 
-class partial_ordering {
- public:
-  int _v;
+class weak_ordering;
+class strong_ordering;
 
+class partial_ordering {
+  int _v;
+  constexpr explicit partial_ordering(int v) : _v(v) {}
+  friend class weak_ordering;
+  friend class strong_ordering;
+
+ public:
   constexpr bool operator==(partial_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(partial_ordering o) const { return _v != o._v; }
 
@@ -54,16 +56,18 @@ class partial_ordering {
   constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
   constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
-  static constexpr partial_ordering less = {(signed char)-1};
-  static constexpr partial_ordering equivalent = {(signed char)0};
-  static constexpr partial_ordering greater = {(signed char)1};
-  static constexpr partial_ordering unordered = {(signed char)2};
+  static constexpr partial_ordering less{-1};
+  static constexpr partial_ordering equivalent{0};
+  static constexpr partial_ordering greater{1};
+  static constexpr partial_ordering unordered{2};
 };
 
 class weak_ordering {
- public:
   int _v;
+  constexpr explicit weak_ordering(int v) : _v(v) {}
+  friend class strong_ordering;
 
+ public:
   // Implicit conversion to the weaker category (weak -> partial).
   constexpr operator partial_ordering() const { return partial_ordering{_v}; }
 
@@ -77,15 +81,16 @@ class weak_ordering {
   constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
   constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
-  static constexpr weak_ordering less = {(signed char)-1};
-  static constexpr weak_ordering equivalent = {(signed char)0};
-  static constexpr weak_ordering greater = {(signed char)1};
+  static constexpr weak_ordering less{-1};
+  static constexpr weak_ordering equivalent{0};
+  static constexpr weak_ordering greater{1};
 };
 
 class strong_ordering {
- public:
   int _v;
+  constexpr explicit strong_ordering(int v) : _v(v) {}
 
+ public:
   // Implicit conversions to the weaker categories (strong -> weak -> partial).
   constexpr operator weak_ordering() const { return weak_ordering{_v}; }
   constexpr operator partial_ordering() const { return partial_ordering{_v}; }
@@ -100,10 +105,10 @@ class strong_ordering {
   constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
   constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
-  static constexpr strong_ordering less = {(signed char)-1};
-  static constexpr strong_ordering equal = {(signed char)0};
-  static constexpr strong_ordering equivalent = {(signed char)0};
-  static constexpr strong_ordering greater = {(signed char)1};
+  static constexpr strong_ordering less{-1};
+  static constexpr strong_ordering equal{0};
+  static constexpr strong_ordering equivalent{0};
+  static constexpr strong_ordering greater{1};
 };
 
 }  // namespace std

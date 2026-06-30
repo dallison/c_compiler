@@ -2786,12 +2786,17 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (effective_access == kAccessPublic) {
     return true;
   }
-  if (compiler->current_function == NULL ||
-      !TypeIsFunction(compiler->current_function)) {
+  Struct* current_owner = NULL;
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    current_owner = compiler->current_function->info.function.cxx_member_owner;
+  } else if (compiler->current_class_access_context != NULL) {
+    // A static data member initializer is in the scope of its class and may
+    // name the class's private and protected members.
+    current_owner = compiler->current_class_access_context;
+  } else {
     return false;
   }
-  Struct* current_owner =
-      compiler->current_function->info.function.cxx_member_owner;
   if (current_owner == owner) {
     return true;
   }
@@ -4115,6 +4120,24 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   TypeRecordCalculateSize(type);
   SourceLocation location = node->base.location;
   String* constructor_name = type->info.struct_info->tag_name;
+  // For a single-argument functional cast `T(arg)` (equivalent to the explicit
+  // conversion `(T)arg`), if `arg` is a class object that supplies a
+  // user-defined conversion operator yielding T, perform that conversion via
+  // the C-style cast path (which considers conversion operators) instead of
+  // trying to construct T from `arg`.  This is required when T cannot be built
+  // from `arg` directly -- e.g. the comparison categories, whose value
+  // constructor is private and whose cross-category conversions go through
+  // `operator T()`.
+  if (node->children->length == 1 &&
+      ClassHasConversionOperatorTo(node->children->value.p[0], type)) {
+    ASTNode* arg = ASTNodeMove(node->children->value.p[0]);
+    ASTNode* cast = NewCastASTNode(type, location, arg);
+    ASTNode* parent = node->base.parent;
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, node->base.child_id, cast, true);
+    }
+    return AnalyzeExpression(cast);
+  }
   StructMember* constructor =
       FindStructMember(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||

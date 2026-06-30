@@ -287,6 +287,11 @@ typedef struct {
   
   size_t current_include_path_index;
   TypeRecord* current_function;
+  // While analyzing a class's own static data member initializer (which is not
+  // inside any member function), this names the enclosing class so member
+  // access control treats the initializer as if it were inside a member of that
+  // class.  NULL when not analyzing such an initializer.
+  struct Struct* current_class_access_context;
   TlsModel tls_model;
 
   // Back-end, specific to a target.

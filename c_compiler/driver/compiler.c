@@ -1092,6 +1092,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
   compiler->current_include_path_index = 0;
+  compiler->current_function = NULL;
+  compiler->current_class_access_context = NULL;
   compiler->global_namespace = NULL;
   
   char dirname[4096];

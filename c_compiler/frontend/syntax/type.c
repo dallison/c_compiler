@@ -12183,8 +12183,13 @@ static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
   VectorAppend(&parser->syntax->inline_static_member_definitions, decl);
   if (symbol->flags.is_constexpr || symbol->flags.is_constinit ||
       (TypeIsConst(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
+    // The initializer is in the scope of `owner` and may use its private
+    // members (e.g. a private constructor of a comparison category).
+    Struct* saved_access = compiler->current_class_access_context;
+    compiler->current_class_access_context = owner;
     SemanticAnalyzeVariableDefinition(parser->syntax,
                                       (VariableDeclarationASTNode*)decl);
+    compiler->current_class_access_context = saved_access;
   }
 }
 
