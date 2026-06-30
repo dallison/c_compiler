@@ -533,6 +533,47 @@ done:
   return needs_template_ids;
 }
 
+// A qualified name like `T::member` whose leading nested-name-specifier is a
+// template type parameter is a dependent name: it cannot be resolved until the
+// template is instantiated.  Builds a placeholder identifier carrying the
+// template-parameter scope (as a placeholder type) and the trailing member
+// name (in dependent_member_name), flagged so the template-body cloner can
+// resolve it against the concrete type argument.  Returns NULL when `name` is
+// not such a dependent qualified value name.
+static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
+                                                  FullyQualifiedIdentifier* name,
+                                                  SourceLocation location) {
+  if (!CompilerIsCXX() || !name->is_qualified || name->absolute ||
+      name->components.length != 2) {
+    return NULL;
+  }
+  // No component may carry template arguments (e.g. `T::tmpl<...>`); that needs
+  // the richer dependent-template-id handling, which this does not cover.
+  for (size_t i = 0; i < name->template_arguments.length; i++) {
+    if (name->template_arguments.value.p[i] != NULL) {
+      return NULL;
+    }
+  }
+  String* scope = name->components.value.p[0];
+  Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope);
+  if (scope_symbol == NULL || !scope_symbol->flags.is_template_type_parameter ||
+      scope_symbol->type == NULL ||
+      scope_symbol->type->template_parameter_index < 0) {
+    return NULL;
+  }
+  String* member = name->components.value.p[1];
+  TypeRecord* dependent_type = TypeRecordCopy(scope_symbol->type);
+  if (dependent_type->dependent_member_name != NULL) {
+    StringDelete(dependent_type->dependent_member_name);
+  }
+  dependent_type->dependent_member_name = NewString(member->value);
+  Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
+  placeholder->flags.invented = true;
+  ASTNode* node = NewIdentifierASTNode(placeholder, location);
+  node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  return node;
+}
+
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
@@ -570,6 +611,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
   if (symbol == NULL) {
     if (name.is_qualified) {
+      ASTNode* dependent = BuildDependentQualifiedValueName(
+          syntax, &name, lex->current_token_location);
+      if (dependent != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return dependent;
+      }
       SyntaxError(syntax, "No such symbol \"%s\"", name.spelling.value);
       TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type, STO(implicit));
@@ -1827,13 +1874,44 @@ static ASTNode* ParseCXXDependentValueInitialization(ASTNode* type_expr,
   return result;
 }
 
+// Whether the object expression of a member access is type-dependent (i.e.
+// involves a template parameter), in which case a member named with a trailing
+// template-argument list needs the `template` disambiguator under the standard.
+static bool MemberAccessObjectIsDependent(ASTNode* object) {
+  if (object == NULL) {
+    return false;
+  }
+  if (object->type != NULL && TypeContainsTemplateParameter(object->type)) {
+    return true;
+  }
+  switch (object->op) {
+    case AST_OP(identifier): {
+      IdentifierASTNode* id = (IdentifierASTNode*)object;
+      return id->symbol != NULL && id->symbol->type != NULL &&
+             TypeContainsTemplateParameter(id->symbol->type);
+    }
+    case AST_OP(dot):
+    case AST_OP(arrow):
+      return MemberAccessObjectIsDependent(((BinaryASTNode*)object)->left);
+    default:
+      return false;
+  }
+}
+
 static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                                   TokenClass followers) {
   String* member_name;
+  // Optional 'template' disambiguator in dependent member access, e.g.
+  // `g.template onMessage<R>(...)` or `p->template get<0>()`.  When present the
+  // member name must be a template-id, so its `<...>` is parsed as a template
+  // argument list rather than a less-than comparison.
+  bool saw_template_keyword =
+      CompilerIsCXX() && LexMatch(syntax->lex, TOK(template));
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
-  } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(operator))) {
+  } else if (!saw_template_keyword && CompilerIsCXX() &&
+             LexLookingAt(syntax->lex, TOK(operator))) {
     // Explicit operator / conversion call, e.g. `x.operator+(y)`,
     // `x.operator()(y)`, `p->operator int()`.  Build the same member name the
     // operator/conversion function was registered under so the access resolves
@@ -1846,7 +1924,8 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       SyntaxError(syntax, "Expected operator or conversion name");
       member_name = NewString(SyntaxFakeName(syntax));
     }
-  } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(tilde))) {
+  } else if (!saw_template_keyword && CompilerIsCXX() &&
+             LexMatch(syntax->lex, TOK(tilde))) {
     if (LexLookingAt(syntax->lex, TOK(identifier))) {
       member_name = NewString("~");
       StringAppend(member_name, syntax->lex->spelling.value);
@@ -1856,11 +1935,17 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       member_name = NewString(SyntaxFakeName(syntax));
     }
   } else {
-    SyntaxError(syntax, "Expected struct or union member name");
+    SyntaxError(syntax, saw_template_keyword
+                            ? "Expected template member name after 'template'"
+                            : "Expected struct or union member name");
     member_name = NewString(SyntaxFakeName(syntax));
   }
   bool has_template_arguments = false;
-  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(less))) {
+  if (saw_template_keyword) {
+    // The 'template' keyword guarantees a template-id, so a following '<'
+    // unambiguously opens the template argument list.
+    has_template_arguments = LexLookingAt(syntax->lex, TOK(less));
+  } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(less))) {
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);
     int depth = 0;
@@ -1878,6 +1963,17 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
         depth == 0 && LexLookingAt(syntax->lex, TOK(lparen));
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
+    // We resolved the `<` as a template-argument list on a type-dependent
+    // object without the `template` disambiguator.  This is well-formed here
+    // only thanks to a lookahead heuristic; the standard requires the keyword,
+    // and other compilers reject it, so steer the user toward portable code.
+    if (has_template_arguments && MemberAccessObjectIsDependent(left)) {
+      SyntaxWarning(syntax, "missing-template-keyword",
+                    "use 'template' keyword to treat '%s' as a dependent "
+                    "template name (e.g. '%stemplate %s<...>')",
+                    member_name->value,
+                    op == AST_OP(arrow) ? "ptr->" : "obj.", member_name->value);
+    }
   }
   Vector* template_arguments =
       has_template_arguments
@@ -2163,6 +2259,16 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
         // The size of a VLA is its size expression.
         result = GetSizeofVLA(sym->type,
                               syntax->lex->current_token_location);
+        SymbolDelete(sym);
+        TypeParserDestruct(&parser);
+        goto done;
+      }
+      if (CompilerIsCXX() && TypeContainsTemplateParameter(sym->type)) {
+        // The size depends on a template parameter, so it cannot be computed
+        // until the enclosing template is instantiated.  Retain the operand
+        // type so it can be substituted and re-measured then.
+        result = NewSizeofASTNodeWithType(
+            sym->type, syntax->lex->current_token_location);
         SymbolDelete(sym);
         TypeParserDestruct(&parser);
         goto done;

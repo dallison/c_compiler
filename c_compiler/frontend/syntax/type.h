@@ -252,6 +252,7 @@ struct Struct {
   int alignment;     // Alignment of struct (max alignment of its members).
   bool is_union;     // True if this is a union.
   bool is_class;     // True if this is a C++ class.
+  bool is_final;     // True if declared with the C++ 'final' class specifier.
   bool is_template;  // True if this is a C++ class template.
   bool is_aggregate; // True if this is a C++ aggregate class.
   bool cxx_special_members_complete;  // C++ special members declared.

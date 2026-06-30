@@ -60,6 +60,17 @@ static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
                                     SourceLocation location);
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
+  // A dependent qualified value name (`T::member`) that still carries its flag
+  // here was never resolved during template instantiation, meaning the named
+  // member does not exist in the substituted scope type.
+  if ((node->base.flags & kASTDependentQualifiedName) != 0 &&
+      node->symbol != NULL && node->symbol->type != NULL &&
+      node->symbol->type->dependent_member_name != NULL) {
+    SemanticError(&node->base, "no member named '%s' in the dependent scope",
+                  node->symbol->type->dependent_member_name->value);
+    ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return &node->base;
+  }
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
     // Symbol has now been used.
     node->symbol->flags.used = true;
@@ -4619,6 +4630,12 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
     } else {
       node->base.value.ivalue = node->expr->type->size;
     }
+  } else if (node->type_operand != NULL &&
+             !TypeContainsTemplateParameter(node->type_operand)) {
+    // A `sizeof(type-id)` whose operand has become concrete (e.g. after
+    // template instantiation): re-measure the now-complete type.
+    TypeRecordCalculateSize(node->type_operand);
+    node->base.value.ivalue = node->type_operand->size;
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }

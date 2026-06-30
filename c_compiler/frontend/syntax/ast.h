@@ -336,6 +336,7 @@ typedef struct ASTNode {
 #define kASTDependentFunctorCall (1 << 19)  // Dependent object call expression.
 #define kASTDependentNewInitializer (1 << 20)  // new T(expr) parsed before T substitution.
 #define kASTOverloadDiagnosed (1 << 21)  // Overload-failure diagnostics already emitted for this call.
+#define kASTDependentQualifiedName (1 << 22)  // Qualified value name through a dependent (template-parameter) scope.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -501,11 +502,17 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
 typedef struct {
   ConstantASTNode base;
   ASTNode* expr;
+  // For `sizeof(type-id)` where the type is dependent on a template parameter,
+  // the (refcounted) operand type is retained so its size can be recomputed
+  // once the template is instantiated.  NULL for the expression form and for
+  // non-dependent type operands (whose size is baked into base.value).
+  TypeRecord* type_operand;
   bool is_pack_size;
 } SizeofASTNode;
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location);
 ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr, SourceLocation location);
+ASTNode* NewSizeofASTNodeWithType(TypeRecord* type, SourceLocation location);
 ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location);
 
 // typeid operator.  Carries either a type operand (typeid(type-id)) or an

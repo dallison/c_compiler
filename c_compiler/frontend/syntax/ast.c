@@ -1644,6 +1644,9 @@ void SizeofASTNodeDelete(ASTNode* node) {
   if (snode->expr != NULL) {
     ASTNodeDelete(snode->expr);
   }
+  if (snode->type_operand != NULL) {
+    TypeRecordDelete(snode->type_operand);
+  }
   ASTNodeBaseDelete(node);
 }
 
@@ -1675,6 +1678,10 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   SizeofASTNode* to = ASTArenaAlloc(sizeof(SizeofASTNode));
   memcpy(&to->base, &from->base, sizeof(to->base));
   to->expr = ASTNodeClone(from->expr, func, data, &to->base.base);
+  to->type_operand = from->type_operand;
+  if (to->type_operand != NULL) {
+    TypeRecordIncRef(to->type_operand);
+  }
   to->is_pack_size = from->is_pack_size;
   return func(&to->base.base, data);
 }
@@ -1706,6 +1713,24 @@ ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location) {
   IntConstantASTNodeInit(&node->base, size, type, location);
   node->base.base.virtuals = &sizeof_vtbl;
   node->expr = NULL;
+  node->type_operand = NULL;
+  node->is_pack_size = false;
+  node->base.base.op = AST_OP(sizeof);
+  return (ASTNode*)node;
+}
+
+ASTNode* NewSizeofASTNodeWithType(TypeRecord* type, SourceLocation location) {
+  SizeofASTNode* node = ASTArenaAlloc(sizeof(SizeofASTNode));
+  TypeRecord* result_type =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualConst);
+  IntConstantASTNodeInit(&node->base, type != NULL ? type->size : 0,
+                         result_type, location);
+  node->base.base.virtuals = &sizeof_vtbl;
+  node->expr = NULL;
+  node->type_operand = type;
+  if (type != NULL) {
+    TypeRecordIncRef(type);
+  }
   node->is_pack_size = false;
   node->base.base.op = AST_OP(sizeof);
   return (ASTNode*)node;
@@ -1719,6 +1744,7 @@ ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
   node->base.base.virtuals = &sizeof_vtbl;
   node->base.base.op = AST_OP(sizeof);
   node->expr = expr;
+  node->type_operand = NULL;
   node->is_pack_size = false;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;

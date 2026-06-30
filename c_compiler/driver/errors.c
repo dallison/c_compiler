@@ -113,6 +113,7 @@ static const WarningInfo kWarnings[] = {
     {"unknown-warning-option", NULL, true, false, true, 0},
     {"preprocessor", NULL, false, false, true, 0},
     {"pointer-types", NULL, false, false, false, 0},
+    {"missing-template-keyword", NULL, true, true, true, kWarningGroupWall},
 };
 
 static const WarningInfo* FindWarning(const char* name) {

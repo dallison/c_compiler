@@ -822,6 +822,7 @@ Struct* NewStruct(bool is_union) {
   MapInitForCharPointerKeys(&s->symbol_name_table);
   s->is_union = is_union;
   s->is_class = false;
+  s->is_final = false;
   s->is_template = false;
   s->is_aggregate = CompilerIsCXX();
   s->cxx_special_members_complete = false;
@@ -4521,6 +4522,19 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                      node->location);
       }
     }
+    // `sizeof(dependent-type)`: substitute the retained operand type and
+    // recompute the size for this instantiation.
+    if (sizeof_node->type_operand != NULL &&
+        TypeContainsTemplateParameter(sizeof_node->type_operand)) {
+      TypeRecord* concrete = SubstituteTemplateParameters(
+          clone->parser, sizeof_node->type_operand, clone->args);
+      RebaseTemplateParameterIndices(concrete,
+                                     clone->rebase_template_parameter_base);
+      TypeRecordCalculateSize(concrete);
+      TypeRecordDelete(sizeof_node->type_operand);
+      sizeof_node->type_operand = concrete;
+      sizeof_node->base.value.ivalue = concrete->size;
+    }
   }
   if ((node->flags & kASTFoldExpression) != 0) {
     return ExpandClonedFoldExpression(clone, node);
@@ -4538,6 +4552,38 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
+    // Dependent qualified value name like `T::member`: substitute the scope
+    // placeholder to its concrete class, then resolve the named static member.
+    if ((node->flags & kASTDependentQualifiedName) != 0 && id->symbol != NULL &&
+        id->symbol->type != NULL &&
+        id->symbol->type->dependent_member_name != NULL &&
+        id->symbol->type->template_parameter_index >= 0) {
+      TypeRecord* scope = TypeRecordCopy(id->symbol->type);
+      StringDelete(scope->dependent_member_name);
+      scope->dependent_member_name = NULL;
+      TypeRecord* concrete =
+          SubstituteTemplateParameters(clone->parser, scope, clone->args);
+      RebaseTemplateParameterIndices(concrete,
+                                     clone->rebase_template_parameter_base);
+      TypeRecordDelete(scope);
+      if (concrete != NULL && TypeIsStructOrUnion(concrete) &&
+          concrete->info.struct_info != NULL) {
+        StructMember* member = FindStructMember(
+            concrete->info.struct_info, id->symbol->type->dependent_member_name);
+        if (member != NULL && member->symbol != NULL &&
+            (member->is_static ||
+             StorageIs(member->symbol->storage, STO(typedef)) ||
+             member->symbol->flags.value_set)) {
+          id->symbol = member->symbol;
+          ASTNodeSetType(node, member->symbol->type);
+          node->flags &= ~kASTDependentQualifiedName;
+          node->value_category = kValueCategoryLvalue;
+          TypeRecordDelete(concrete);
+          return node;
+        }
+      }
+      TypeRecordDelete(concrete);
+    }
     bool template_args_contain_pack = false;
     if (id->template_arguments != NULL) {
       int pack_index = -1;
@@ -9953,6 +9999,29 @@ static CXXAccess ParseBaseAccess(TypeParser* parser, bool is_class) {
   return is_class ? kAccessPrivate : kAccessPublic;
 }
 
+// Parses an optional C++ class-virt-specifier ('final') that may appear after
+// the class-head-name.  Because 'final' is only a contextual keyword, it is
+// treated as the specifier only when it is immediately followed by '{' or ':'
+// (a class definition or base-clause); otherwise it is left for the caller to
+// interpret as an ordinary identifier (e.g. a declarator named 'final').
+static bool ParseCXXClassFinalSpecifier(TypeParser* parser) {
+  if (!CompilerIsCXX() || !LexLookingAt(parser->lex, TOK(identifier)) ||
+      !StringEqual(&parser->lex->spelling, "final")) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  if (LexLookingAt(parser->lex, TOK(lbrace)) ||
+      LexLookingAt(parser->lex, TOK(colon))) {
+    LexCheckpointDestruct(&checkpoint);
+    return true;
+  }
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return false;
+}
+
 static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
                                    bool is_union, bool is_class) {
   if (!CompilerIsCXX() || is_union || !LexMatch(parser->lex, TOK(colon))) {
@@ -9987,6 +10056,14 @@ static void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       SyntaxError(parser->syntax, "base class must be a class or struct type");
       TypeRecordDelete(base_type);
       continue;
+    }
+    if (!is_template_parameter_base && base_type->info.struct_info->is_final) {
+      const char* base_name =
+          base_type->info.struct_info->tag_name != NULL
+              ? base_type->info.struct_info->tag_name->value
+              : "<anonymous>";
+      SyntaxError(parser->syntax, "cannot derive from final base class %s",
+                  base_name);
     }
     if (!is_template_parameter_base) {
       TypeRecordCalculateSize(base_type);
@@ -13745,6 +13822,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
   bool using_specialization_namespace = false;
   bool is_full_specialization = false;
   bool is_partial_specialization = false;
+  bool is_final = false;
   StringInit(&specialization_name, NULL);
   FullyQualifiedIdentifierInit(&qualified_tag);
 
@@ -13779,6 +13857,8 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     StringSetString(&tag_name, &parser->lex->spelling);
     LexNextToken(parser->lex);
   }
+  SyntaxParseCXXAttributes(parser->syntax, &attributes);
+  is_final = ParseCXXClassFinalSpecifier(parser);
   SyntaxParseCXXAttributes(parser->syntax, &attributes);
   is_full_specialization =
       parser->syntax->parsing_template_specialization &&
@@ -13828,6 +13908,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     }
     tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes,
                           &bases);
+    if (is_final && tag != NULL && tag->type != NULL &&
+        tag->type->info.struct_info != NULL) {
+      tag->type->info.struct_info->is_final = true;
+    }
     if (is_partial_specialization && tag != NULL &&
         completed_specialization_args != NULL) {
       AddClassTemplatePartialSpecialization(parser, specialization_template,
