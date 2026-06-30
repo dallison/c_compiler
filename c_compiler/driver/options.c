@@ -121,7 +121,9 @@ Vector* ParseOptionSet(CompilerOptionDefinition* compiler_options,
     int start = i;
     CompilerOptionString* s = strings->value.p[i];
     bool option_ok = false;
-    if (s->name.value[0] == '-') {
+    // A lone "-" is not an option: it is the input-file name meaning standard
+    // input, so treat it as a positional argument.
+    if (s->name.value[0] == '-' && s->name.length != 1) {
       option_ok = ParseOption(compiler_options, strings, &i, options);
     } else {
       CompilerOptionValue* o = calloc(sizeof(CompilerOptionValue), 1);

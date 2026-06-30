@@ -1180,9 +1180,24 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   preprocessor->lex = lex;
 }
 
-// Initialize a lexical analyzer from a file.
+// Initialize a lexical analyzer from a file.  The special filename "-" means
+// read the translation unit from standard input.
 bool LexInitFromFile(Lex* lex, const char* filename,
                      Preprocessor* preprocessor) {
+  if (strcmp(filename, "-") == 0) {
+    // stdin is not seekable, but the lexer relies on save/restore checkpoints
+    // (which seek the source), so slurp all of standard input into a string
+    // source, which is seekable by index.
+    String* code = NewString(NULL);
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) {
+      StringAppendSegment(code, buf, n);
+    }
+    lex->source = NewSourceFromString("<stdin>", code);
+    InitCommon(lex, preprocessor);
+    return true;
+  }
   FILE* in = fopen(filename, "r");
   if (in == NULL) {
     fprintf(stderr, "No such file %s\n", filename);

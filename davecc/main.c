@@ -30,7 +30,17 @@ static int ParseArg(int i, int argc, char** argv,
                     Vector* linker_args,
                     Vector* object_files,
                     Vector* asm_files, Vector* args_from_file,
-                    bool* run_compiler, bool* compile_only) {
+                    bool* run_compiler, bool* compile_only,
+                    bool* read_stdin, int* num_inputs) {
+  if (strcmp(argv[i], "-") == 0) {
+    // A lone "-" means: read the translation unit from standard input.  It is
+    // only valid as the sole input file (enforced by the caller).
+    VectorAppend(compiler_args, argv[i]);
+    *run_compiler = true;
+    *read_stdin = true;
+    (*num_inputs)++;
+    return i + 1;
+  }
   if (argv[i][0] == '-') {
     // Option.
     String* option = NewString(argv[i]);
@@ -182,7 +192,8 @@ static int ParseArg(int i, int argc, char** argv,
         j = ParseArg(j,
                      new_argc, new_argv, compiler_args,
                      linker_args, object_files, asm_files,
-                     args_from_file, run_compiler, compile_only);
+                     args_from_file, run_compiler, compile_only,
+                     read_stdin, num_inputs);
       }
       free(new_argv);
     }
@@ -195,10 +206,13 @@ static int ParseArg(int i, int argc, char** argv,
         StringEndsWith(&arg, ".cxx")) {
       VectorAppend(compiler_args, argv[i]);
       *run_compiler = true;
+      (*num_inputs)++;
     } else if (StringEndsWith(&arg, ".s")) {
       VectorAppend(asm_files, NewString(argv[i]));
+      (*num_inputs)++;
     } else if (StringEndsWith(&arg, ".o")) {
       VectorAppend(linker_args, argv[i]);
+      (*num_inputs)++;
     } else {
       // Unknown extension, add to linker args.
       VectorAppend(linker_args, argv[i]);
@@ -232,6 +246,8 @@ int main(int argc, char * argv[]) {
   
   bool compile_only = false;
   bool run_compiler = false;
+  bool read_stdin = false;
+  int num_inputs = 0;
   
   int i = 1;
   bool help = false;
@@ -241,12 +257,19 @@ int main(int argc, char * argv[]) {
       break;
     }
     i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
-                 &asm_files, &args_from_file, &run_compiler, &compile_only);
+                 &asm_files, &args_from_file, &run_compiler, &compile_only,
+                 &read_stdin, &num_inputs);
   }
   
   if (help) {
     PrintCompilerHelp();
     exit(0);
+  }
+
+  if (read_stdin && num_inputs > 1) {
+    fprintf(stderr,
+            "'-' (standard input) must be the only input file\n");
+    exit(1);
   }
   // Parse compiler options for C and asm files.
   Vector compiler_options;

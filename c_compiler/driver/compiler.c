@@ -1054,7 +1054,10 @@ TlsModel ParseTlsModelName(String* tls_model) {
 }
 
 static void InitBasic(Compiler* compiler, const char* filename) {
-  StringInit(&compiler->infile, filename);
+  // The input filename "-" means standard input; use a plain base name for
+  // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
+  // for command-line options (a leading '-') by later tools like the linker.
+  StringInit(&compiler->infile, strcmp(filename, "-") == 0 ? "stdin" : filename);
   VectorInit(&compiler->functions);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
