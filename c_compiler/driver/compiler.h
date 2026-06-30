@@ -310,7 +310,7 @@ typedef struct {
   Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
   Vector cxx_this_adjustor_thunks;  // CXXThisAdjustorThunk* entries.
 
-  // De-duplication map for RTTI std::type_info objects: char* mangled key ->
+  // De-duplication map for RTTI std::type_info objects: String* mangled key ->
   // Symbol* naming the emitted type_info.  Keys are owned by the map.
   Map rtti_typeinfo_map;
 

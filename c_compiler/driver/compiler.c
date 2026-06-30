@@ -1062,7 +1062,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_global_destructor_calls);
   VectorInit(&compiler->cxx_this_adjustor_thunks);
-  MapInitForCharPointerKeys(&compiler->rtti_typeinfo_map);
+  MapInitForStringKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->pending_template_instantiations);
@@ -1448,7 +1448,7 @@ static bool CompilerInitCommon(Compiler* compiler, const char* filename,
 }
 
 static void FreeRttiTypeInfoKey(MapKeyValue* kv) {
-  free(kv->key.p);
+  StringDelete((String*)kv->key.p);
 }
 
 void CompilerDestruct(Compiler* compiler) {

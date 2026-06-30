@@ -25,27 +25,22 @@
 #include "syntax.h"
 #include "type.h"
 
-// Builds the canonical, sanitized mangled key for `type` (cv-qualifiers at the
-// top level are ignored so e.g. `const Foo` and `Foo` share one type_info).
-// Returns a freshly malloc'd C string the caller owns.
-static char* RttiMangledKey(TypeRecord* type) {
+// Builds the canonical, sanitized mangled key for `type` into `out` (which the
+// caller initializes and destructs).  Top-level cv-qualifiers are ignored so
+// e.g. `const Foo` and `Foo` share one type_info.
+static void RttiMangledKey(TypeRecord* type, String* out) {
   Qualifiers saved = type->qualifiers;
   type->qualifiers &= ~(kQualConst | kQualVolatile);
-  String key;
-  StringInit(&key, "");
-  AppendCXXMangledTypeName(&key, type);
+  AppendCXXMangledTypeName(out, type);
   type->qualifiers = saved;
-  for (size_t i = 0; i < key.length; i++) {
-    char ch = key.value[i];
+  for (size_t i = 0; i < out->length; i++) {
+    char ch = out->value[i];
     bool valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
                  (ch >= '0' && ch <= '9') || ch == '_';
     if (!valid) {
-      key.value[i] = '_';
+      out->value[i] = '_';
     }
   }
-  char* result = strdup(key.value);
-  StringDestruct(&key);
-  return result;
 }
 
 // Initializer width for a pointer-sized integer (offset_to_top, base offsets
@@ -133,11 +128,13 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
   if (type == NULL) {
     return NULL;
   }
-  char* key = RttiMangledKey(type);
+  String key;
+  StringInit(&key, "");
+  RttiMangledKey(type, &key);
   Symbol* existing =
-      MapFind(&compiler->rtti_typeinfo_map, (MapKeyType){.p = key});
+      MapFindPointerKey(&compiler->rtti_typeinfo_map, &key);
   if (existing != NULL) {
-    free(key);
+    StringDestruct(&key);
     return existing;
   }
 
@@ -147,7 +144,7 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
   // bases so that cyclic / diamond base graphs terminate.
   String ti_name;
   StringInit(&ti_name, "__davecc_ti_");
-  StringAppend(&ti_name, key);
+  StringAppend(&ti_name, key.value);
 
   TypeRecord* char_type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
   TypeRecord* ti_storage =
@@ -161,12 +158,12 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
   SyntaxAddSymbol(&compiler->syntax, ti_symbol);
   StringDestruct(&ti_name);
 
-  // strdup again for the map key so it owns an independent allocation.
-  char* map_key = strdup(key);
+  // The map owns an independent copy of the key String.
+  String* map_key = NewString(key.value);
   MapInsert(&compiler->rtti_typeinfo_map,
             (MapKeyValue){.key.p = map_key, .value.p = ti_symbol});
 
-  Symbol* name_symbol = EmitTypeNameString(key);
+  Symbol* name_symbol = EmitTypeNameString(key.value);
 
   // Direct base classes (non-virtual only; virtual bases are deferred).
   Symbol* base_info_symbol = NULL;
@@ -193,7 +190,7 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
     if (base_count > 0) {
       String bi_name;
       StringInit(&bi_name, "__davecc_tib_");
-      StringAppend(&bi_name, key);
+      StringAppend(&bi_name, key.value);
       base_info_symbol = EmitWeakStatic(
           bi_name.value, (size_t)(base_count * 2 * ptr_size), &base_inits);
       StringDestruct(&bi_name);
@@ -223,6 +220,6 @@ Symbol* RttiGetTypeInfoSymbol(TypeRecord* type) {
   var->initializers = ti_inits;
   VectorAppend(&compiler->initialized_static_variables, var);
 
-  free(key);
+  StringDestruct(&key);
   return ti_symbol;
 }
