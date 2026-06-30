@@ -11,23 +11,34 @@
 //  `signed char` so the representation does not depend on a backend correctly
 //  sign-extending sub-word loads.)
 //
+//  Comparison against the literal 0 is modelled with an unspecified pointer
+//  parameter: the null pointer constant `0` converts to it, but an arbitrary
+//  `int` does not, matching the standard requirement that only the literal 0 be
+//  accepted.
+//
 //  Implicit conversions between the categories follow the standard
 //  (strong_ordering -> weak_ordering -> partial_ordering).
 //
-//  Simplifications relative to the standard:
-//   * The comparison-against-literal-0 operators accept any `int` rather than
-//     only the literal 0.  (Restricting them to the literal 0 needs a type that
-//     is constructible only from a null pointer constant; the front end does
-//     not yet model that conversion sequence.)
+//  Simplification relative to the standard:
 //   * The categories keep aggregate semantics with a public `_v` so the named
 //     constants can be defined as `static constexpr` members, rather than
 //     namespace-scope `inline constexpr` objects with a private representation.
+//     (A private representation needs a user-declared constructor, which the
+//     back end currently mis-compiles for static class constants.)
 //
 
 #ifndef compare_h
 #define compare_h
 
 namespace std {
+
+namespace __detail {
+// Incomplete type used only to form an "unspecified" pointer parameter for the
+// comparison-against-literal-0 operators.  Only a null pointer constant (the
+// literal 0 or nullptr) is convertible to it, so `cat < 0` is well-formed while
+// `cat < n` for an arbitrary `int n` is rejected.
+struct __unspec;
+}  // namespace __detail
 
 class partial_ordering {
  public:
@@ -36,12 +47,12 @@ class partial_ordering {
   constexpr bool operator==(partial_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(partial_ordering o) const { return _v != o._v; }
 
-  constexpr bool operator==(int) const { return _v == 0; }
-  constexpr bool operator!=(int) const { return _v != 0; }
-  constexpr bool operator<(int) const { return _v < 0; }
-  constexpr bool operator>(int) const { return _v == 1; }
-  constexpr bool operator<=(int) const { return _v <= 0; }
-  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+  constexpr bool operator==(__detail::__unspec*) const { return _v == 0; }
+  constexpr bool operator!=(__detail::__unspec*) const { return _v != 0; }
+  constexpr bool operator<(__detail::__unspec*) const { return _v < 0; }
+  constexpr bool operator>(__detail::__unspec*) const { return _v == 1; }
+  constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
+  constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
   static constexpr partial_ordering less = {(signed char)-1};
   static constexpr partial_ordering equivalent = {(signed char)0};
@@ -59,12 +70,12 @@ class weak_ordering {
   constexpr bool operator==(weak_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(weak_ordering o) const { return _v != o._v; }
 
-  constexpr bool operator==(int) const { return _v == 0; }
-  constexpr bool operator!=(int) const { return _v != 0; }
-  constexpr bool operator<(int) const { return _v < 0; }
-  constexpr bool operator>(int) const { return _v == 1; }
-  constexpr bool operator<=(int) const { return _v <= 0; }
-  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+  constexpr bool operator==(__detail::__unspec*) const { return _v == 0; }
+  constexpr bool operator!=(__detail::__unspec*) const { return _v != 0; }
+  constexpr bool operator<(__detail::__unspec*) const { return _v < 0; }
+  constexpr bool operator>(__detail::__unspec*) const { return _v == 1; }
+  constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
+  constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
   static constexpr weak_ordering less = {(signed char)-1};
   static constexpr weak_ordering equivalent = {(signed char)0};
@@ -82,12 +93,12 @@ class strong_ordering {
   constexpr bool operator==(strong_ordering o) const { return _v == o._v; }
   constexpr bool operator!=(strong_ordering o) const { return _v != o._v; }
 
-  constexpr bool operator==(int) const { return _v == 0; }
-  constexpr bool operator!=(int) const { return _v != 0; }
-  constexpr bool operator<(int) const { return _v < 0; }
-  constexpr bool operator>(int) const { return _v == 1; }
-  constexpr bool operator<=(int) const { return _v <= 0; }
-  constexpr bool operator>=(int) const { return _v == 0 || _v == 1; }
+  constexpr bool operator==(__detail::__unspec*) const { return _v == 0; }
+  constexpr bool operator!=(__detail::__unspec*) const { return _v != 0; }
+  constexpr bool operator<(__detail::__unspec*) const { return _v < 0; }
+  constexpr bool operator>(__detail::__unspec*) const { return _v == 1; }
+  constexpr bool operator<=(__detail::__unspec*) const { return _v <= 0; }
+  constexpr bool operator>=(__detail::__unspec*) const { return _v == 0 || _v == 1; }
 
   static constexpr strong_ordering less = {(signed char)-1};
   static constexpr strong_ordering equal = {(signed char)0};
