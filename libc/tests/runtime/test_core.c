@@ -82,10 +82,13 @@ int TestEHFrame(void) {
   if (!(range.start < range.end)) {
     return 2;
   }
-  if (*(const unsigned int*)range.start != 28) {
+  // The CIE has a "zR" augmentation: a 4-byte length of 18 followed by 18
+  // bytes of content, so the CIE occupies 22 bytes and the first FDE's length
+  // field starts at offset 22.
+  if (*(const unsigned int*)range.start != 18) {
     return 8;
   }
-  if (*(const unsigned int*)(range.start + 32) == 0) {
+  if (*(const unsigned int*)(range.start + 22) == 0) {
     return 9;
   }
   count = DaveEHFrameCountFDEs();
