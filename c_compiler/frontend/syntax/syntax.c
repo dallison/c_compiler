@@ -5917,6 +5917,44 @@ void SyntaxRecover(Syntax* syntax, TokenClass tc) {
   }
 }
 
+// Determines whether the qualified-name at the current position actually names
+// a type.  The shallow `starts-a-qualified-name` test treats every `a::b` as a
+// potential type, which misclassifies a qualified *value* such as
+// `std::nothrow` as a type and, e.g., breaks `new (std::nothrow) T`.  Resolve
+// the name: if it denotes a class/enum tag or a typedef it is a type; if it
+// denotes a variable/function it is not.  When the name cannot be resolved
+// (a dependent name, an incomplete template-id, etc.) fall back to the
+// conservative "could be a type" answer so dependent code keeps parsing.
+static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                     TC(openbra) | TC(stmt));
+  bool decided = false;
+  bool is_type = false;
+  if (name.is_qualified) {
+    if (SyntaxFindQualifiedTag(syntax, &name) != NULL) {
+      decided = true;
+      is_type = true;
+    } else {
+      Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+      if (symbol != NULL) {
+        decided = true;
+        is_type = StorageIs(symbol->storage, STO(typedef));
+      }
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  if (decided) {
+    return is_type;
+  }
+  return SyntaxCurrentTokenStartsQualifiedName(syntax);
+}
+
 bool SyntaxLookingAtType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(char):
@@ -5953,7 +5991,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         if (CompilerIsCXX() && SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
           return true;
         }
-        return SyntaxCurrentTokenStartsQualifiedName(syntax);
+        return SyntaxQualifiedNameLooksLikeType(syntax);
       }
       if (StorageIs(sym->storage , STO(typedef))) {
         return true;
@@ -5961,7 +5999,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       return false;
     }
     case TOK(coloncolon):
-      return SyntaxCurrentTokenStartsQualifiedName(syntax);
+      return SyntaxQualifiedNameLooksLikeType(syntax);
     default:
       return false;
   }

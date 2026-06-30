@@ -349,16 +349,44 @@ static void AppendCXXName(String* out, Symbol* symbol) {
     return;
   }
 
+  // A member function of a class that lives in a namespace must carry that
+  // namespace in its mangled name.  Compiler-synthesised special members set
+  // symbol->namespace_ directly, but user-declared members only record their
+  // owning class, so fall back to the class tag symbol's namespace (as
+  // SymbolSetCXXDataAsmName does for static data members).
+  Namespace* ns = symbol->namespace_;
+  if (ns == NULL && owner != NULL && owner->tag_symbol != NULL) {
+    ns = owner->tag_symbol->namespace_;
+  }
+
   StringAppendChar(out, 'N');
   if (symbol->type->info.function.is_const_member) {
     StringAppendChar(out, 'K');
   }
-  AppendCXXNestedNamespaceComponents(out, symbol->namespace_);
+  AppendCXXNestedNamespaceComponents(out, ns);
   if (owner != NULL && owner->tag_name != NULL) {
     AppendCXXNameComponent(out, owner->tag_name->value);
   }
   AppendCXXUnqualifiedName(out, symbol);
   StringAppendChar(out, 'E');
+}
+
+// Mangles a class/union/enum type name.  A type that lives in a namespace must
+// use the Itanium nested-name form (`N <namespace-components> <tag> E`) so that,
+// e.g., a parameter of type `std::nothrow_t` encodes as `N3std9nothrow_tE`
+// rather than the unqualified `9nothrow_t`.  Types at global scope keep the
+// bare `<length><name>` component.
+static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
+                                    String* tag_name) {
+  Namespace* ns = tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
+  if (ns != NULL) {
+    StringAppendChar(out, 'N');
+    AppendCXXNestedNamespaceComponents(out, ns);
+    AppendCXXNameComponent(out, tag_name->value);
+    StringAppendChar(out, 'E');
+  } else {
+    AppendCXXNameComponent(out, tag_name->value);
+  }
 }
 
 static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
@@ -424,10 +452,12 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, 'e');
   } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
              type->info.struct_info->tag_name != NULL) {
-    AppendCXXNameComponent(out, type->info.struct_info->tag_name->value);
+    AppendCXXTaggedTypeName(out, type->info.struct_info->tag_symbol,
+                            type->info.struct_info->tag_name);
   } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
              type->info.enum_info->tag_name != NULL) {
-    AppendCXXNameComponent(out, type->info.enum_info->tag_name->value);
+    AppendCXXTaggedTypeName(out, type->info.enum_info->tag_symbol,
+                            type->info.enum_info->tag_name);
   } else {
     StringAppendChar(out, 'v');
   }

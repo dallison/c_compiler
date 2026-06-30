@@ -16,6 +16,7 @@
 #define __davecc_string__
 
 #include <compare>
+#include <memory>
 #include <stdlib.h>
 #include <string.h>
 
@@ -139,13 +140,14 @@ class basic_string {
     if (newcap < need + 1) {
       newcap = need + 1;
     }
-    CharT* fresh = static_cast<CharT*>(malloc(newcap * sizeof(CharT)));
+    allocator<CharT> alloc;
+    CharT* fresh = alloc.allocate(newcap);
     if (__size != 0) {
       traits_type::copy(fresh, __data, __size);
     }
     fresh[__size] = CharT();
     if (!__is_small()) {
-      free(__data);
+      alloc.deallocate(__data, __cap);
     }
     __data = fresh;
     __cap = newcap;
@@ -218,7 +220,8 @@ class basic_string {
 
   ~basic_string() {
     if (!__is_small()) {
-      free(__data);
+      allocator<CharT> alloc;
+      alloc.deallocate(__data, __cap);
     }
   }
 
@@ -232,7 +235,8 @@ class basic_string {
   basic_string& operator=(basic_string&& other) noexcept {
     if (this != &other) {
       if (!__is_small()) {
-        free(__data);
+        allocator<CharT> alloc;
+        alloc.deallocate(__data, __cap);
       }
       if (other.__is_small()) {
         __data = __buf;

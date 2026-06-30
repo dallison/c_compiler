@@ -14,6 +14,7 @@ filegroup(
         "libc/include/cstdint",
         "libc/include/coroutine",
         "libc/include/memory",
+        "libc/include/new",
         "libc/include/source_location",
         "libc/include/string",
         "libc/include/type_traits",

@@ -637,8 +637,13 @@ TypeRecord* NewFunctionTypeRecord() {
 }
 
 TypeRecord* NewSizeTypeRecord() {
+  // size_t must match the headers' typedef (`unsigned long` on LP64 targets,
+  // `unsigned int` on 32-bit) so that an explicitly declared `operator new`
+  // / `operator delete` (e.g. from <new>) mangles identically to the implicit
+  // allocation function the compiler synthesises for `new`/`delete`
+  // expressions.  On LP64 this yields the Itanium ABI names `_Znwm` / `_Znam`.
   if (compiler->pointer_size == 8) {
-    return NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+    return NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
   }
   return NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain);
 }

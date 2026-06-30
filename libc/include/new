@@ -1,0 +1,94 @@
+//
+//  new
+//  c_compiler
+//
+//  Minimal C++ dynamic memory header for DaveCC.  Declares the global
+//  allocation and deallocation functions so they can be called directly
+//  (e.g. `::operator new(n)` / `::operator delete(p)`), and provides the
+//  placement / nothrow forms plus the standard support types.
+//
+
+#ifndef new_h
+#define new_h
+
+#include <stddef.h>  // size_t
+
+namespace std {
+
+// Tag type selecting the non-throwing overloads of operator new.
+struct nothrow_t {
+};
+
+// const namespace-scope object has internal linkage: each translation unit
+// gets its own copy, so no out-of-line definition is required.  Aggregate
+// (`{}`) initialization keeps it a compile-time constant.
+const nothrow_t nothrow = {};
+
+typedef void (*new_handler)();
+new_handler set_new_handler(new_handler handler) noexcept;
+new_handler get_new_handler() noexcept;
+
+struct bad_alloc {
+  bad_alloc() noexcept {
+  }
+
+  const char* what() const noexcept {
+    return "std::bad_alloc";
+  }
+};
+
+}  // namespace std
+
+// Single-object and array allocation / deallocation.  The throwing forms are
+// provided by the C++ runtime (libc/cxx_new.c) and mangle to the Itanium ABI
+// names _Znwm/_Znam/_ZdlPv/_ZdaPv on LP64 targets.
+void* operator new(size_t size);
+void* operator new[](size_t size);
+void operator delete(void* ptr) noexcept;
+void operator delete[](void* ptr) noexcept;
+
+// Sized deallocation: forwards to the plain deallocator.
+inline void operator delete(void* ptr, size_t) noexcept {
+  ::operator delete(ptr);
+}
+
+inline void operator delete[](void* ptr, size_t) noexcept {
+  ::operator delete[](ptr);
+}
+
+// Non-throwing allocation / deallocation.  The DaveCC runtime allocator never
+// throws, so these simply forward to the ordinary forms.
+inline void* operator new(size_t size, const std::nothrow_t&) noexcept {
+  return ::operator new(size);
+}
+
+inline void* operator new[](size_t size, const std::nothrow_t&) noexcept {
+  return ::operator new[](size);
+}
+
+inline void operator delete(void* ptr, const std::nothrow_t&) noexcept {
+  ::operator delete(ptr);
+}
+
+inline void operator delete[](void* ptr, const std::nothrow_t&) noexcept {
+  ::operator delete[](ptr);
+}
+
+// Placement new / delete.  These never allocate; they are defined inline so
+// the compiler can fold them away.  The matching placement deletes are no-ops,
+// invoked only when a placement-new constructor throws.
+inline void* operator new(size_t, void* ptr) noexcept {
+  return ptr;
+}
+
+inline void* operator new[](size_t, void* ptr) noexcept {
+  return ptr;
+}
+
+inline void operator delete(void*, void*) noexcept {
+}
+
+inline void operator delete[](void*, void*) noexcept {
+}
+
+#endif /* new_h */

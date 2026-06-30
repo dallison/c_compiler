@@ -35,7 +35,7 @@ typedef long ptrdiff_t;
 
 #define NULL ((void*)0)
 
-#ifndef __WCHAR_T
+#if !defined(__WCHAR_T) && !defined(__cplusplus)
 typedef int wchar_t;
 #define __WCHAR_T
 #endif

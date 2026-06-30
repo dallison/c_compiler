@@ -8,8 +8,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-void* __davecc_operator_new(size_t size) asm("_Znwy");
-void* __davecc_operator_new_array(size_t size) asm("_Znay");
+void* __davecc_operator_new(size_t size) asm("_Znwm");
+void* __davecc_operator_new_array(size_t size) asm("_Znam");
 void* __davecc_operator_new32(unsigned int size) asm("_Znwj");
 void* __davecc_operator_new_array32(unsigned int size) asm("_Znaj");
 void __davecc_operator_delete(void* ptr) asm("_ZdlPv");
@@ -45,4 +45,26 @@ void __davecc_operator_delete_array(void* ptr) {
   if (ptr != NULL) {
     free(ptr);
   }
+}
+
+// std::new_handler is `void (*)()`; std::set_new_handler / std::get_new_handler
+// manage the single process-wide handler.  The asm names are the Itanium
+// manglings DaveCC emits for these std-namespace functions.
+typedef void (*__davecc_new_handler)(void);
+
+static __davecc_new_handler __davecc_current_new_handler = NULL;
+
+__davecc_new_handler __davecc_set_new_handler(__davecc_new_handler handler)
+    asm("_ZN3std15set_new_handlerEPFvE");
+__davecc_new_handler __davecc_get_new_handler(void)
+    asm("_ZN3std15get_new_handlerEv");
+
+__davecc_new_handler __davecc_set_new_handler(__davecc_new_handler handler) {
+  __davecc_new_handler previous = __davecc_current_new_handler;
+  __davecc_current_new_handler = handler;
+  return previous;
+}
+
+__davecc_new_handler __davecc_get_new_handler(void) {
+  return __davecc_current_new_handler;
 }

@@ -75,6 +75,11 @@ static struct {
     {AST_OP(greater), TypeIsPointerOrArray, IR_OP(cmpgta)},
     {AST_OP(greatereq), TypeIsPointerOrArray, IR_OP(cmpgea)},
 
+    // A function designator used as an operand decays to its address, so a
+    // comparison against it (e.g. `fp == some_function`) compares pointers.
+    {AST_OP(equal), TypeIsFunction, IR_OP(cmpeqa), true},
+    {AST_OP(noteq), TypeIsFunction, IR_OP(cmpnea), true},
+
     {AST_OP(not), TypeIsIntegral, IR_OP(noti)},
     {AST_OP(not), TypeIsPointer, IR_OP(nota)},
     {AST_OP(onescomp), TypeIsIntegral, IR_OP(onescomp)},
