@@ -649,6 +649,15 @@ static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
   if (!destructor && !func->info.function.is_constructor) {
     return NULL;
   }
+  // A trivial, implicitly-declared special member performs no work, so a global
+  // object never needs a constructor or destructor call for it.  (Such a member
+  // is still synthesized as a findable class member once the class has any
+  // user-declared special member, so this guard prevents emitting a spurious
+  // call that would otherwise be injected into `main`.)
+  if (func->info.function.is_implicitly_declared &&
+      func->info.function.is_trivial_special_member) {
+    return NULL;
+  }
   return member;
 }
 
