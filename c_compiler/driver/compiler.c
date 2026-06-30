@@ -969,6 +969,40 @@ static void CompilePendingTemplateInstantiations(Syntax* syntax) {
   }
 }
 
+// Evaluates and code generates in-class `static constexpr`/`constinit` data
+// members whose own type is the enclosing class and whose evaluation the parser
+// therefore deferred (the class was incomplete at the point of definition).
+// Run after the class's inline member-function bodies (including its
+// constructors) have been semantically analyzed by
+// CompilePendingTemplateInstantiations, so constant-evaluating the member's
+// constructor succeeds.  The initializer is in the scope of the member's class,
+// so access control treats it as if written inside that class (the value
+// constructor may be private).
+static void CompileDeferredCXXStaticMembers(Syntax* syntax) {
+  Vector* deferred = &compiler->cxx_deferred_static_member_definitions;
+  while (deferred->length != 0) {
+    VariableDeclarationASTNode* decl = deferred->value.p[0];
+    VectorDeleteElement(deferred, 0);
+    if (decl == NULL || decl->symbol == NULL) {
+      continue;
+    }
+    struct Struct* owner =
+        TypeIsStructOrUnion(decl->symbol->type)
+            ? decl->symbol->type->info.struct_info
+            : NULL;
+    struct Struct* saved_access = compiler->current_class_access_context;
+    compiler->current_class_access_context = owner;
+    SemanticAnalyzeVariableDefinition(syntax, decl);
+    compiler->current_class_access_context = saved_access;
+
+    Vector* declarations = NewVector();
+    VectorAppend(declarations, decl);
+    SyntaxResetForNewDeclaration(syntax);
+    CompileDeclarationNode(
+        syntax, NewDeclarationListASTNode(declarations, decl->base.location));
+  }
+}
+
 static void CompileDeclaration(Syntax* syntax) {
   // Capture the diagnostic state active at the start of this declaration.
   // Parsing reads a lookahead token that can process a following
@@ -980,6 +1014,7 @@ static void CompileDeclaration(Syntax* syntax) {
   DiagnosticSwapState(diag_state);
   CompileDeclarationNode(syntax, node);
   CompilePendingTemplateInstantiations(syntax);
+  CompileDeferredCXXStaticMembers(syntax);
   // Restore the post-parse diagnostic state so the next declaration starts from
   // where the lexer left off.
   DiagnosticSwapState(diag_state);
@@ -1070,6 +1105,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->functions);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
+  VectorInit(&compiler->cxx_deferred_static_member_definitions);
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_global_destructor_calls);
@@ -1530,6 +1566,7 @@ void CompilerDestruct(Compiler* compiler) {
   }
   VectorDestruct(&compiler->uninitialized_static_variables);
 
+  VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
   VectorDestruct(&compiler->cxx_global_destructor_calls);

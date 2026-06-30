@@ -3707,6 +3707,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     Symbol* old_sym = NULL;
     bool overload_was_appended = false;
     if (sym != NULL) {
+      // `constexpr` on an object implies `const` on its type.  Apply it before
+      // matching against any previous declaration so that an out-of-class
+      // definition (`constexpr T C::x;`) compares equal to the in-class
+      // `static constexpr` member, whose type is already const-qualified.
+      if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
+        sym->type->qualifiers |= kQualConst;
+      }
       if (syntax->parsing_template_declaration && TypeIsFunction(sym->type)) {
         sym->flags.is_template = true;
         sym->type->info.function.template_parameter_count =
@@ -4017,7 +4024,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
     }
     if ((sym->flags.is_constexpr || sym->flags.is_constinit) &&
-        initializer == NULL) {
+        initializer == NULL && parser->cxx_member_definition == NULL) {
+      // An out-of-class definition of a static data member
+      // (`constexpr T C::x;`) needs no initializer: the required initializer is
+      // supplied by the in-class `static constexpr` declaration.
       SyntaxError(syntax, sym->flags.is_constinit
                               ? "constinit variable requires an initializer"
                               : "constexpr variable requires an initializer");

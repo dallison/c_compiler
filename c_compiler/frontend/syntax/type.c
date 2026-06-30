@@ -12180,17 +12180,35 @@ static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
 
   ASTNode* decl = NewVariableDeclarationASTNode(
       symbol, initializer, symbol->location);
-  VectorAppend(&parser->syntax->inline_static_member_definitions, decl);
-  if (symbol->flags.is_constexpr || symbol->flags.is_constinit ||
-      (TypeIsConst(symbol->type) && !TypeIsStructOrUnion(symbol->type))) {
-    // The initializer is in the scope of `owner` and may use its private
-    // members (e.g. a private constructor of a comparison category).
-    Struct* saved_access = compiler->current_class_access_context;
-    compiler->current_class_access_context = owner;
-    SemanticAnalyzeVariableDefinition(parser->syntax,
-                                      (VariableDeclarationASTNode*)decl);
-    compiler->current_class_access_context = saved_access;
+  bool const_eval_candidate =
+      symbol->flags.is_constexpr || symbol->flags.is_constinit ||
+      (TypeIsConst(symbol->type) && !TypeIsStructOrUnion(symbol->type));
+  // A static data member whose own type is the enclosing class cannot be
+  // evaluated here: the class is still incomplete (we are mid-definition) and
+  // its constructors' inline bodies have not yet been semantically analyzed, so
+  // constant-evaluating the initializer would fail.  Defer such a member to a
+  // separate queue that is evaluated and code generated only once the whole
+  // class -- including its inline member-function bodies -- is complete (see
+  // CompileDeferredCXXStaticMembers).  Its value is a class object, so it is
+  // never needed as a constant within the class body itself.  Keeping it out of
+  // inline_static_member_definitions also prevents it from being code generated
+  // (as a still-unevaluated dynamic initializer) before that point.
+  if (const_eval_candidate && TypeIsStructOrUnion(symbol->type) &&
+      symbol->type->info.struct_info == owner) {
+    VectorAppend(&compiler->cxx_deferred_static_member_definitions, decl);
+    return;
   }
+  VectorAppend(&parser->syntax->inline_static_member_definitions, decl);
+  if (!const_eval_candidate) {
+    return;
+  }
+  // The initializer is in the scope of `owner` and may use its private
+  // members (e.g. a private constructor of a comparison category).
+  Struct* saved_access = compiler->current_class_access_context;
+  compiler->current_class_access_context = owner;
+  SemanticAnalyzeVariableDefinition(parser->syntax,
+                                    (VariableDeclarationASTNode*)decl);
+  compiler->current_class_access_context = saved_access;
 }
 
 

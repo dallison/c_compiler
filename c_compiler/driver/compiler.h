@@ -308,6 +308,13 @@ typedef struct {
   // (UninitializedStaticVariable*)
   Vector uninitialized_static_variables;
 
+  // In-class `static constexpr`/`constinit` data members whose own type is the
+  // (then-incomplete) enclosing class, so their constant evaluation was deferred
+  // by the parser until the whole translation unit is parsed and the class --
+  // including its constructors' inline bodies -- is complete.  Elements are
+  // VariableDeclarationASTNode* owned by the declaration ASTs.
+  Vector cxx_deferred_static_member_definitions;
+
   // Namespace-scope C++ objects that need dynamic construction/destruction.
   // Elements are Symbol* owned by the normal symbol tables.
   Vector cxx_global_constructors;
