@@ -1542,6 +1542,7 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   arg->int_value = 0;
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
+  arg->dependent_expr = NULL;
   return arg;
 }
 

@@ -1,0 +1,55 @@
+//
+//  initializer_list
+//  c_compiler
+//
+//  C++20 std::initializer_list support for DaveCC.
+//
+//  The compiler has built-in knowledge of `std::initializer_list<E>`: a
+//  braced-init-list bound to one lowers to an *aggregate* initialization of
+//  this type from a compiler-synthesized backing array pointer followed by the
+//  element count.  The type must therefore remain an aggregate (public data
+//  members, no user-declared constructors) whose first data member is a
+//  `const E*` and whose second is the element count.  Member names are not
+//  significant, but their order and types are.
+//
+
+#ifndef __davecc_initializer_list__
+#define __davecc_initializer_list__
+
+#include <stddef.h>  // size_t
+
+namespace std {
+
+template <class E>
+struct initializer_list {
+  using value_type = E;
+  using reference = const E&;
+  using const_reference = const E&;
+  using size_type = size_t;
+  using iterator = const E*;
+  using const_iterator = const E*;
+
+  // Layout is fixed by the compiler: the backing-array pointer must come
+  // first, the length second.  Default member initializers keep a
+  // default-constructed initializer_list empty while preserving aggregate-ness.
+  const E* __data_ = nullptr;
+  size_type __len_ = 0;
+
+  constexpr size_type size() const noexcept { return __len_; }
+  constexpr const E* begin() const noexcept { return __data_; }
+  constexpr const E* end() const noexcept { return __data_ + __len_; }
+};
+
+template <class E>
+constexpr const E* begin(initializer_list<E> il) noexcept {
+  return il.begin();
+}
+
+template <class E>
+constexpr const E* end(initializer_list<E> il) noexcept {
+  return il.end();
+}
+
+}  // namespace std
+
+#endif /* __davecc_initializer_list__ */

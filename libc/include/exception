@@ -1,0 +1,41 @@
+//
+//  exception
+//  c_compiler
+//
+//  C++20 <exception> support for DaveCC: the std::exception base class and the
+//  terminate handling hooks.
+//
+
+#ifndef __davecc_exception__
+#define __davecc_exception__
+
+namespace std {
+
+// Base class for all standard library exceptions.  what() is virtual so a
+// handler catching a base reference observes the most-derived message.
+class exception {
+ public:
+  exception() noexcept {}
+  exception(const exception&) noexcept {}
+  exception& operator=(const exception&) noexcept { return *this; }
+  virtual ~exception() {}
+  virtual const char* what() const noexcept { return "std::exception"; }
+};
+
+// Thrown when an exception-specification is violated / a bad exception is
+// rethrown.  Rarely used here, but part of the standard surface.
+class bad_exception : public exception {
+ public:
+  bad_exception() noexcept {}
+  const char* what() const noexcept override { return "std::bad_exception"; }
+};
+
+typedef void (*terminate_handler)();
+
+terminate_handler set_terminate(terminate_handler handler) noexcept;
+terminate_handler get_terminate() noexcept;
+[[noreturn]] void terminate() noexcept;
+
+}  // namespace std
+
+#endif /* __davecc_exception__ */

@@ -105,12 +105,115 @@ struct conditional<false, T, F> {
 template <bool B, class T, class F>
 using conditional_t = typename conditional<B, T, F>::type;
 
+template <bool B, class T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+
+template <class T>
+struct remove_const {
+  using type = T;
+};
+
+template <class T>
+struct remove_const<const T> {
+  using type = T;
+};
+
+template <class T>
+using remove_const_t = typename remove_const<T>::type;
+
+template <class T>
+struct remove_volatile {
+  using type = T;
+};
+
+template <class T>
+struct remove_volatile<volatile T> {
+  using type = T;
+};
+
+template <class T>
+using remove_volatile_t = typename remove_volatile<T>::type;
+
+template <class T>
+struct remove_cv {
+  using type = remove_const_t<remove_volatile_t<T> >;
+};
+
+template <class T>
+using remove_cv_t = typename remove_cv<T>::type;
+
+// is_integral: true for the standard integer types (and bool / character
+// types).  Each recognized type is given an explicit full specialization that
+// derives directly from true_type; cv-qualified variants are enumerated too so
+// `const int` etc. are recognized without relying on a dependent base class.
+template <class T>
+struct is_integral : false_type {
+};
+
+#define __DAVECC_INTEGRAL(T)                          \
+  template <>                                         \
+  struct is_integral<T> : true_type {};              \
+  template <>                                         \
+  struct is_integral<const T> : true_type {};        \
+  template <>                                         \
+  struct is_integral<volatile T> : true_type {};     \
+  template <>                                         \
+  struct is_integral<const volatile T> : true_type {}
+
+__DAVECC_INTEGRAL(bool);
+__DAVECC_INTEGRAL(char);
+__DAVECC_INTEGRAL(signed char);
+__DAVECC_INTEGRAL(unsigned char);
+__DAVECC_INTEGRAL(short);
+__DAVECC_INTEGRAL(unsigned short);
+__DAVECC_INTEGRAL(int);
+__DAVECC_INTEGRAL(unsigned int);
+__DAVECC_INTEGRAL(long);
+__DAVECC_INTEGRAL(unsigned long);
+__DAVECC_INTEGRAL(long long);
+__DAVECC_INTEGRAL(unsigned long long);
+
+#undef __DAVECC_INTEGRAL
+
 template <class T>
 struct is_nothrow_move_constructible : true_type {
 };
 
 template <class T>
 struct is_copy_constructible : true_type {
+};
+
+template <class T>
+struct is_trivially_destructible : false_type {
+};
+
+#define __DAVECC_TRIVIALLY_DESTRUCTIBLE(T)                  \
+  template <>                                               \
+  struct is_trivially_destructible<T> : true_type {};       \
+  template <>                                               \
+  struct is_trivially_destructible<const T> : true_type {}; \
+  template <>                                               \
+  struct is_trivially_destructible<volatile T> : true_type {}; \
+  template <>                                               \
+  struct is_trivially_destructible<const volatile T> : true_type {}
+
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(bool);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(char);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(signed char);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned char);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(short);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned short);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(int);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned int);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(long);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned long);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(long long);
+__DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned long long);
+
+#undef __DAVECC_TRIVIALLY_DESTRUCTIBLE
+
+template <class T>
+struct is_trivially_destructible<T*> : true_type {
 };
 
 }  // namespace std

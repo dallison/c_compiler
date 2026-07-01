@@ -1,0 +1,267 @@
+//
+//  iterator
+//  c_compiler
+//
+//  Minimal C++20 <iterator> support for DaveCC: the iterator category tags,
+//  iterator_traits (with the raw-pointer specialization), reverse_iterator,
+//  and the distance/advance/next/prev helpers.  This is enough to give the
+//  contiguous containers (std::string, std::vector) their reverse iterators
+//  and to drive range-based construction and insertion.
+//
+//  Category dispatch is done by selecting an overload on a *null pointer* to
+//  the category tag (`(Cat*)0`) rather than on a value-initialized tag object.
+//  Both are standard-conforming implementation details, but the pointer form
+//  avoids needing to value-construct an empty class in dependent context.
+//
+
+#ifndef __davecc_iterator__
+#define __davecc_iterator__
+
+#include <stddef.h>  // size_t, ptrdiff_t
+#include <type_traits>
+
+namespace std {
+
+// Iterator category tags.  The inheritance chain lets tag dispatch pick the
+// most refined overload (a random-access iterator also satisfies the
+// bidirectional / forward / input requirements).
+struct output_iterator_tag {};
+struct input_iterator_tag {};
+struct forward_iterator_tag : input_iterator_tag {};
+struct bidirectional_iterator_tag : forward_iterator_tag {};
+struct random_access_iterator_tag : bidirectional_iterator_tag {};
+struct contiguous_iterator_tag : random_access_iterator_tag {};
+
+// Primary iterator_traits: read the member typedefs of a class iterator.
+template <class Iter>
+struct iterator_traits {
+  using difference_type = typename Iter::difference_type;
+  using value_type = typename Iter::value_type;
+  using pointer = typename Iter::pointer;
+  using reference = typename Iter::reference;
+  using iterator_category = typename Iter::iterator_category;
+};
+
+// Raw pointers are contiguous (hence random-access) iterators.  A single
+// specialization on `T*` covers `const U*` too (with T = const U); value_type
+// strips cv-qualification, matching the standard.
+template <class T>
+struct iterator_traits<T*> {
+  using difference_type = ptrdiff_t;
+  using value_type = remove_cv_t<T>;
+  using pointer = T*;
+  using reference = T&;
+  using iterator_category = random_access_iterator_tag;
+};
+
+// distance: O(1) for random-access iterators, O(n) otherwise.
+template <class It>
+constexpr typename iterator_traits<It>::difference_type __distance(
+    It first, It last, input_iterator_tag*) {
+  typename iterator_traits<It>::difference_type n = 0;
+  for (; first != last; ++first) {
+    ++n;
+  }
+  return n;
+}
+
+template <class It>
+constexpr typename iterator_traits<It>::difference_type __distance(
+    It first, It last, random_access_iterator_tag*) {
+  return last - first;
+}
+
+template <class It>
+constexpr typename iterator_traits<It>::difference_type distance(It first,
+                                                                 It last) {
+  return __distance(first, last,
+                    (typename iterator_traits<It>::iterator_category*)0);
+}
+
+// advance: O(1) for random-access iterators, O(n) otherwise.
+template <class It, class Distance>
+constexpr void __advance(It& it, Distance n, input_iterator_tag*) {
+  for (; n > 0; --n) {
+    ++it;
+  }
+}
+
+template <class It, class Distance>
+constexpr void __advance(It& it, Distance n, bidirectional_iterator_tag*) {
+  if (n >= 0) {
+    for (; n > 0; --n) {
+      ++it;
+    }
+  } else {
+    for (; n < 0; ++n) {
+      --it;
+    }
+  }
+}
+
+template <class It, class Distance>
+constexpr void __advance(It& it, Distance n, random_access_iterator_tag*) {
+  it += static_cast<typename iterator_traits<It>::difference_type>(n);
+}
+
+template <class It, class Distance>
+constexpr void advance(It& it, Distance n) {
+  __advance(it, n, (typename iterator_traits<It>::iterator_category*)0);
+}
+
+template <class It>
+constexpr It next(It it,
+                  typename iterator_traits<It>::difference_type n = 1) {
+  std::advance(it, n);
+  return it;
+}
+
+template <class It>
+constexpr It prev(It it,
+                  typename iterator_traits<It>::difference_type n = 1) {
+  std::advance(it, -n);
+  return it;
+}
+
+// reverse_iterator adapts an iterator so that traversal runs backwards.  It
+// stores the "one past" base iterator: dereferencing yields the element before
+// it, matching the standard's rbegin()/rend() semantics.
+template <class Iter>
+class reverse_iterator {
+ protected:
+  Iter current;
+
+ public:
+  using iterator_type = Iter;
+  using difference_type = typename iterator_traits<Iter>::difference_type;
+  using reference = typename iterator_traits<Iter>::reference;
+  using pointer = typename iterator_traits<Iter>::pointer;
+  using value_type = typename iterator_traits<Iter>::value_type;
+  using iterator_category = typename iterator_traits<Iter>::iterator_category;
+
+  constexpr reverse_iterator() : current(Iter()) {}
+  constexpr explicit reverse_iterator(Iter x) : current(x) {}
+
+  template <class U>
+  constexpr reverse_iterator(const reverse_iterator<U>& other)
+      : current(other.base()) {}
+
+  template <class U>
+  constexpr reverse_iterator& operator=(const reverse_iterator<U>& other) {
+    current = other.base();
+    return *this;
+  }
+
+  constexpr Iter base() const { return current; }
+
+  constexpr reference operator*() const {
+    Iter tmp = current;
+    return *--tmp;
+  }
+
+  // The pointed-to element is a real lvalue for the pointer / contiguous
+  // iterators this adapter is used with, so its address is the pointer.
+  constexpr pointer operator->() const { return &(operator*()); }
+
+  constexpr reverse_iterator& operator++() {
+    --current;
+    return *this;
+  }
+
+  constexpr reverse_iterator operator++(int) {
+    reverse_iterator tmp = *this;
+    --current;
+    return tmp;
+  }
+
+  constexpr reverse_iterator& operator--() {
+    ++current;
+    return *this;
+  }
+
+  constexpr reverse_iterator operator--(int) {
+    reverse_iterator tmp = *this;
+    ++current;
+    return tmp;
+  }
+
+  constexpr reverse_iterator operator+(difference_type n) const {
+    return reverse_iterator(current - n);
+  }
+
+  constexpr reverse_iterator& operator+=(difference_type n) {
+    current -= n;
+    return *this;
+  }
+
+  constexpr reverse_iterator operator-(difference_type n) const {
+    return reverse_iterator(current + n);
+  }
+
+  constexpr reverse_iterator& operator-=(difference_type n) {
+    current += n;
+    return *this;
+  }
+
+  constexpr reference operator[](difference_type n) const {
+    return *(*this + n);
+  }
+};
+
+template <class I1, class I2>
+constexpr bool operator==(const reverse_iterator<I1>& a,
+                          const reverse_iterator<I2>& b) {
+  return a.base() == b.base();
+}
+
+template <class I1, class I2>
+constexpr bool operator!=(const reverse_iterator<I1>& a,
+                          const reverse_iterator<I2>& b) {
+  return a.base() != b.base();
+}
+
+template <class I1, class I2>
+constexpr bool operator<(const reverse_iterator<I1>& a,
+                         const reverse_iterator<I2>& b) {
+  return a.base() > b.base();
+}
+
+template <class I1, class I2>
+constexpr bool operator<=(const reverse_iterator<I1>& a,
+                          const reverse_iterator<I2>& b) {
+  return a.base() >= b.base();
+}
+
+template <class I1, class I2>
+constexpr bool operator>(const reverse_iterator<I1>& a,
+                         const reverse_iterator<I2>& b) {
+  return a.base() < b.base();
+}
+
+template <class I1, class I2>
+constexpr bool operator>=(const reverse_iterator<I1>& a,
+                          const reverse_iterator<I2>& b) {
+  return a.base() <= b.base();
+}
+
+template <class I1, class I2>
+constexpr typename reverse_iterator<I1>::difference_type operator-(
+    const reverse_iterator<I1>& a, const reverse_iterator<I2>& b) {
+  return b.base() - a.base();
+}
+
+template <class Iter>
+constexpr reverse_iterator<Iter> operator+(
+    typename reverse_iterator<Iter>::difference_type n,
+    const reverse_iterator<Iter>& it) {
+  return reverse_iterator<Iter>(it.base() - n);
+}
+
+template <class Iter>
+constexpr reverse_iterator<Iter> make_reverse_iterator(Iter it) {
+  return reverse_iterator<Iter>(it);
+}
+
+}  // namespace std
+
+#endif /* __davecc_iterator__ */

@@ -109,6 +109,37 @@ static void SanitizeTypeInfoSymbolName(String* name) {
   }
 }
 
+// Flattens the public, non-virtual base graph of an exception class into
+// `out` (EHTypeInfoBase* entries), recording each base's exception type name
+// and its byte offset from the most-derived object.  Because exceptions are
+// thrown with their static type, these offsets are exact for adjusting the
+// exception object pointer when a handler names a base class.  Virtual and
+// non-public bases are skipped: a handler only matches an accessible base, and
+// virtual-base offsets are not modelled here (matching RTTI's limitations).
+static void CollectExceptionBaseTypes(TypeRecord* type, int64_t base_offset,
+                                      Vector* out) {
+  type = CXXExceptionCanonicalType(type);
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL || base->is_virtual ||
+        base->access != kAccessPublic) {
+      continue;
+    }
+    int64_t offset = base_offset + base->byte_offset;
+    EHTypeInfoBase* entry = malloc(sizeof(EHTypeInfoBase));
+    StringInit(&entry->base_name, "");
+    CXXExceptionTypeName(base->type, &entry->base_name);
+    entry->offset = offset;
+    VectorAppend(out, entry);
+    CollectExceptionBaseTypes(base->type, offset, out);
+  }
+}
+
 EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   String type_name = {0};
   CXXExceptionTypeName(type, &type_name);
@@ -123,6 +154,8 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   EHTypeInfo* info = malloc(sizeof(EHTypeInfo));
   StringInit(&info->type_name, type_name.value);
   StringDestruct(&type_name);
+  VectorInit(&info->bases);
+  CollectExceptionBaseTypes(type, 0, &info->bases);
   StringInit(&info->symbol_name, "__davecc_typeinfo_");
   if (gen->func != NULL && gen->func->info.function.symbol != NULL) {
     StringAppendString(&info->symbol_name,

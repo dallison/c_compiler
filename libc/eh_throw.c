@@ -9,7 +9,21 @@ typedef struct {
   uintptr_t catch_typeinfo;
 } DaveExceptionTableEntry;
 
-typedef char DaveTypeInfo;
+// Layout must match the objects emitted by the compiler (see
+// X86_64PrintTypeInfoRecords in c_compiler/x86_64/x86_64_emitter.c).  `bases`
+// is a flattened list of the exception type's public, non-virtual base
+// subobjects with their byte offsets from the most-derived object, so a handler
+// naming a base class matches and the exception pointer can be adjusted.
+typedef struct DaveTypeInfoBase {
+  const char* name;
+  long offset;
+} DaveTypeInfoBase;
+
+typedef struct DaveTypeInfo {
+  const char* name;
+  long base_count;
+  const DaveTypeInfoBase* bases;
+} DaveTypeInfo;
 
 static intptr_t current_exception_object;
 static const DaveTypeInfo* current_exception_typeinfo;
@@ -35,34 +49,52 @@ static int StringEqual(const char* a, const char* b) {
   return *a == *b;
 }
 
+// Decides whether a handler naming `caught` matches a thrown object whose static
+// type is `caught`.  A null `caught` is `catch (...)`.  On a match through a base
+// class, `*offset` receives the byte offset of that base subobject so the caller
+// can adjust the exception object pointer; it is 0 for an exact match.
 static int TypeInfoMatches(const DaveTypeInfo* thrown,
-                           const DaveTypeInfo* caught) {
+                           const DaveTypeInfo* caught, long* offset) {
+  *offset = 0;
   if (caught == 0) {
     return 1;
   }
   if (thrown == 0) {
     return 0;
   }
-  return thrown == caught || StringEqual((const char*)thrown, (const char*)caught);
+  if (thrown == caught || StringEqual(thrown->name, caught->name)) {
+    return 1;
+  }
+  for (long i = 0; i < thrown->base_count; i++) {
+    const DaveTypeInfoBase* base = &thrown->bases[i];
+    if (base->name == caught->name || StringEqual(base->name, caught->name)) {
+      *offset = base->offset;
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int FindMatchingCatch(uintptr_t pc, const DaveTypeInfo* thrown_typeinfo,
-                             uintptr_t* catch_label) {
+                             uintptr_t* catch_label, long* catch_offset) {
   DaveExceptionTableEntry* entry =
       (DaveExceptionTableEntry*)__davecc_except_table_start;
   DaveExceptionTableEntry* end =
       (DaveExceptionTableEntry*)__davecc_except_table_end;
   DaveExceptionTableEntry* match = NULL;
+  long match_offset = 0;
 
   while (entry < end) {
     const DaveTypeInfo* catch_typeinfo =
         (const DaveTypeInfo*)entry->catch_typeinfo;
+    long offset = 0;
     if (pc >= entry->try_start && pc <= entry->try_end &&
-        TypeInfoMatches(thrown_typeinfo, catch_typeinfo)) {
+        TypeInfoMatches(thrown_typeinfo, catch_typeinfo, &offset)) {
       if (match == NULL ||
           (entry->try_start > match->try_start &&
            entry->try_end <= match->try_end)) {
         match = entry;
+        match_offset = offset;
       }
     }
     entry++;
@@ -71,6 +103,7 @@ static int FindMatchingCatch(uintptr_t pc, const DaveTypeInfo* thrown_typeinfo,
     return 0;
   }
   *catch_label = match->catch_label;
+  *catch_offset = match_offset;
   return 1;
 }
 
@@ -116,10 +149,14 @@ void __davecc_throw(intptr_t exception_object, const DaveTypeInfo* typeinfo) {
   DaveEHFrameRegisters regs;
   DaveEHFrameWalkResult walk;
   uintptr_t catch_label;
+  long catch_offset;
 
   __davecc_capture_regs(&regs);
   while (regs.pc != 0) {
-    if (FindMatchingCatch(regs.pc, current_exception_typeinfo, &catch_label)) {
+    if (FindMatchingCatch(regs.pc, current_exception_typeinfo, &catch_label,
+                          &catch_offset)) {
+      // Adjust to the caught base subobject before the handler binds it.
+      current_exception_object += catch_offset;
       __davecc_jump_to_landing_pad(catch_label, regs.rsp, regs.rbp);
     }
     if (!DaveEHFrameWalkFrame(&regs, &walk)) {

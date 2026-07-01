@@ -43,6 +43,9 @@ static bool ASTNodeIsGLValue(ASTNode* node) {
 
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target);
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type);
+static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
+                             size_t first_formal_arg);
+static bool MemberReceiverIsConst(BinaryASTNode* node);
 
 // A user-defined conversion (via a converting constructor) involves a standard
 // conversion of the argument to the constructor's parameter.  While ranking
@@ -463,6 +466,13 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
                                     "Illegal pointer types "
                                     "'%s' and '%s'");
 
+      } else if (TypeIsNullPointer(nonptr->type)) {
+        // A `nullptr` operand has type std::nullptr_t, which has no arithmetic
+        // IR opcode of its own.  Convert it to the pointer operand's type so
+        // the operation is generated as an ordinary pointer comparison instead
+        // of tripping the backend's opcode lookup.  (A plain `0` operand keeps
+        // its int type and is handled by the integral path, as before.)
+        NormalConversion(nonptr, ptr->type);
       }
       ASTNodeSetType((ASTNode*)node, ptr->type);
     }
@@ -943,6 +953,75 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
   return NULL;
 }
 
+// Returns true if the left operand's class has at least one member operator
+// `op_name` that is viable for the binary call `left.op(right)`.  A member
+// operator that is a template is treated as viable conservatively (deducing it
+// here would be a premature side effect); this preserves the historical
+// preference for a member operator while still letting a non-viable *non*-
+// template member operator (e.g. reverse_iterator's `operator-(difference_type)`)
+// yield to a free operator (e.g. `operator-(reverse_iterator, reverse_iterator)`).
+static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name) {
+  ASTNode* left = node->left;
+  if (!TypeIsStructOrUnion(left->type) ||
+      left->type->info.struct_info == NULL) {
+    return false;
+  }
+  StructMember* first =
+      FindStructMemberByName(left->type->info.struct_info, op_name);
+  if (first == NULL || !first->is_member_function) {
+    return false;
+  }
+  Vector children;
+  VectorInit(&children);
+  VectorAppend(&children, node->right);
+  VectorASTNode call = {0};
+  call.children = &children;
+  bool receiver_const = MemberReceiverIsConst(node);
+  bool viable = false;
+  for (StructMember* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+        !TypeIsFunction(candidate->symbol->type)) {
+      continue;
+    }
+    if (candidate->symbol->flags.is_template) {
+      viable = true;
+      break;
+    }
+    int score = FunctionCallScore(candidate->symbol->type, &call,
+                                  /*first_formal_arg=*/1);
+    if (score < 0) {
+      continue;
+    }
+    if (receiver_const &&
+        !candidate->symbol->type->info.function.is_const_member &&
+        !candidate->symbol->type->info.function.is_constructor &&
+        !candidate->symbol->type->info.function.is_destructor) {
+      continue;
+    }
+    viable = true;
+    break;
+  }
+  VectorDestruct(&children);
+  return viable;
+}
+
+static ASTNode* BuildMemberOperatorCall(BinaryASTNode* node,
+                                        const char* op_name) {
+  ASTNode* left = ASTNodeMove(node->left);
+  ASTNode* right = ASTNodeMove(node->right);
+  ASTNode* member_name =
+      NewStringConstantASTNode(NewString(op_name), NULL, node->base.location);
+  ASTNode* member_access = NewBinaryASTNode(AST_OP(dot), NULL,
+                                            node->base.location, left,
+                                            member_name);
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, right);
+  ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, node->base.location,
+                                   member_access, actuals);
+  return ReplaceBinaryWithCall(node, call);
+}
+
 static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   const char* op_name = BinaryOperatorFunctionName(node->base.op);
   if (!CompilerIsCXX() || op_name == NULL) {
@@ -953,25 +1032,20 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     return NULL;
   }
 
-  if (TypeIsStructOrUnion(node->left->type)) {
+  bool member_present = false;
+  if (TypeIsStructOrUnion(node->left->type) &&
+      node->left->type->info.struct_info != NULL) {
     StructMember* member =
         FindStructMemberByName(node->left->type->info.struct_info, op_name);
-    if (member != NULL && member->is_member_function) {
-      ASTNode* left = ASTNodeMove(node->left);
-      ASTNode* right = ASTNodeMove(node->right);
-      ASTNode* member_name =
-          NewStringConstantASTNode(NewString(op_name), NULL,
-                                   node->base.location);
-      ASTNode* member_access = NewBinaryASTNode(AST_OP(dot), NULL,
-                                                node->base.location, left,
-                                                member_name);
-      Vector* actuals = NewVector();
-      VectorAppend(actuals, right);
-      ASTNode* call = NewVectorASTNode(AST_OP(call), NULL,
-                                       node->base.location, member_access,
-                                       actuals);
-      return ReplaceBinaryWithCall(node, call);
-    }
+    member_present = member != NULL && member->is_member_function;
+  }
+
+  // A member operator wins only when it is actually viable for these operands.
+  // Otherwise the non-member (free) operator candidates -- which a member
+  // operator of the same name must not hide -- get their turn.  This mirrors
+  // [over.match.oper]: member and non-member candidates compete together.
+  if (member_present && BinaryMemberOperatorViable(node, op_name)) {
+    return BuildMemberOperatorCall(node, op_name);
   }
 
   String name;
@@ -996,6 +1070,13 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     return ReplaceBinaryWithCall(node, call);
   }
   StringDestruct(&name);
+
+  // No viable free operator either.  If a (non-viable) member operator exists,
+  // fall back to building the member call so the existing member-overload
+  // machinery can emit a precise diagnostic.
+  if (member_present) {
+    return BuildMemberOperatorCall(node, op_name);
+  }
   return NULL;
 }
 
@@ -1421,7 +1502,14 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   if (TypeIsVoid(colon->left->type) || TypeIsVoid(colon->right->type)) {
-    if (!TypeIsVoid(colon->left->type) || !TypeIsVoid(colon->right->type)) {
+    // In C++ [expr.cond], if exactly one arm has void type -- and neither is a
+    // throw-expression (handled above) -- the conditional is ill-formed.  In C,
+    // GCC accepts a mixed void/non-void conditional as an extension and gives
+    // the whole expression type void (this arises, for instance, when one arm
+    // is a statement expression whose last statement is not an expression), so
+    // we mirror that and do not diagnose.
+    if (CompilerIsCXX() &&
+        (!TypeIsVoid(colon->left->type) || !TypeIsVoid(colon->right->type))) {
       SemanticError((ASTNode*)node,
                     "Conditional operator with void expression requires both arms to be void");
     }
@@ -3783,6 +3871,33 @@ static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
   return best;
 }
 
+/* Public entry used when instantiating a cloned template body: a call whose
+ * callee names an *overloaded* function template must undergo full overload
+ * resolution once the arguments are concrete, not be bound to whichever single
+ * overload the identifier happened to reference during the first (dependent)
+ * pass.  Gathers the whole overload set reachable from `callee` (plus ADL over
+ * the now-concrete actuals), resolves it, and returns the best concrete
+ * instantiation, or NULL when none is viable. */
+Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
+                                                 Vector* explicit_args,
+                                                 Vector* actuals) {
+  if (!CompilerIsCXX() || callee == NULL || actuals == NULL) {
+    return NULL;
+  }
+  Vector candidates;
+  VectorInit(&candidates);
+  AddFunctionOverloadCandidates(&candidates, callee);
+  AddADLFunctionCandidates(&callee->name, actuals, &candidates);
+  ASTNode* diagnostic_node =
+      actuals->length > 0 ? actuals->value.p[0] : NULL;
+  Symbol* best = ResolveFunctionCandidateVector(
+      &callee->name, &candidates, actuals, explicit_args,
+      /*diagnose_no_match=*/false, /*diagnose_ambiguous=*/false,
+      diagnostic_node);
+  VectorDestruct(&candidates);
+  return best;
+}
+
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
                                                  VectorASTNode* node,
                                                  Vector* explicit_args) {
@@ -4433,7 +4548,124 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
   return false;
 }
 
+// Handles an explicit destructor or pseudo-destructor call written through a
+// member-access callee: `obj.~T()`, `p->~T()`, or `p->~int()`.  This is needed
+// for generic code (e.g. containers destroying their elements) where the named
+// type may resolve to a class or to a scalar, and where the spelled name (such
+// as a template parameter `~T`) does not textually match the class's own
+// destructor name.
+//
+//   * If the object is a class type with a materialized (user-declared or
+//     synthesized non-trivial) destructor, the spelled name is rewritten to the
+//     object type's real destructor name and NULL is returned so the ordinary
+//     member-call path resolves and invokes it.
+//   * Otherwise -- a scalar type, or a class whose destructor is trivial and
+//     therefore not materialized as a member -- the call is a well-formed no-op
+//     of type void that still evaluates the object expression for its side
+//     effects, and that replacement expression is returned.
+//
+// Returns NULL when this is not an explicit destructor call, or when the object
+// type is still dependent (so analysis is deferred to instantiation).
+static ASTNode* TryAnalyzeCXXExplicitDestructorCall(VectorASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL ||
+      (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
+    return NULL;
+  }
+  if (node->children != NULL && node->children->length != 0) {
+    // A destructor call takes no explicit arguments.
+    return NULL;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node->left;
+  if (access->right == NULL || access->right->op != AST_OP(string)) {
+    return NULL;
+  }
+  String* spelled = ((ConstantASTNode*)access->right)->value.string;
+  if (spelled == NULL || spelled->length == 0 || spelled->value[0] != '~') {
+    return NULL;
+  }
+
+  // Learn the (possibly concrete) type of the object being destroyed.
+  access->left = AnalyzeExpression(access->left);
+  if (access->left != NULL) {
+    access->left->parent = (ASTNode*)access;
+    access->left->child_id = 0;
+  }
+  TypeRecord* object_type = access->left != NULL ? access->left->type : NULL;
+  if (access->base.op == AST_OP(arrow)) {
+    if (!TypeIsPointer(object_type)) {
+      // Not a raw pointer (e.g. dependent, or an overloaded operator->); let
+      // the ordinary member-reference path handle or diagnose it.
+      return NULL;
+    }
+    object_type = object_type->next;
+  }
+  if (object_type == NULL || TypeContainsTemplateParameter(object_type)) {
+    // Dependent: defer to instantiation, where the type becomes concrete.
+    return NULL;
+  }
+
+  if (TypeIsStructOrUnion(object_type) &&
+      object_type->info.struct_info != NULL &&
+      object_type->info.struct_info->tag_name != NULL) {
+    Struct* struct_info = object_type->info.struct_info;
+    // If the spelled name already names a destructor reachable from the object
+    // -- its own destructor (`p->~Der()`) or an inherited base-subobject
+    // destructor (`derived_ptr->~Base()`, as generated for base cleanup) --
+    // leave it entirely to the ordinary member-call path.  Only names that do
+    // NOT resolve (e.g. an unsubstituted template parameter `~T`) are rewritten.
+    CXXAccess spelled_access = kAccessPublic;
+    Struct* spelled_owner = NULL;
+    int spelled_offset = 0;
+    StructMember* spelled_member = FindStructMemberWithAccessAndOffset(
+        struct_info, spelled, &spelled_access, &spelled_owner, &spelled_offset);
+    if (spelled_member != NULL && spelled_member->is_member_function &&
+        spelled_member->symbol != NULL &&
+        TypeIsFunction(spelled_member->symbol->type) &&
+        spelled_member->symbol->type->info.function.is_destructor) {
+      return NULL;
+    }
+    String destructor_name;
+    StringInit(&destructor_name, "~");
+    StringAppendString(&destructor_name, struct_info->tag_name);
+    StructMember* destructor = FindStructMember(struct_info, &destructor_name);
+    if (destructor != NULL && destructor->is_member_function &&
+        destructor->symbol != NULL &&
+        TypeIsFunction(destructor->symbol->type) &&
+        destructor->symbol->type->info.function.is_destructor) {
+      // Rewrite the unresolved spelled name (e.g. "~T") to the object type's
+      // real destructor name so the ordinary member-call path resolves it.
+      if (!StringEqualString(spelled, &destructor_name)) {
+        ConstantASTNode* name_node = (ConstantASTNode*)access->right;
+        StringDelete(name_node->value.string);
+        name_node->value.string = NewString(destructor_name.value);
+      }
+      StringDestruct(&destructor_name);
+      return NULL;
+    }
+    StringDestruct(&destructor_name);
+    // Class with a trivial (unmaterialized) destructor: fall through to no-op.
+  }
+
+  // Scalar pseudo-destructor, or trivial-destructor class: evaluate the object
+  // expression for its side effects and yield void.
+  ASTNode* object_expr = access->left;
+  access->left = NULL;
+  if (object_expr != NULL) {
+    object_expr->parent = NULL;
+    object_expr->child_id = 0;
+  }
+  ASTNode* discard =
+      NewCastASTNode(NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+                     node->base.location, object_expr);
+  ((CastASTNode*)discard)->kind = kCastStatic;
+  return ReplaceVectorWithCall(node, discard);
+}
+
 static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
+  ASTNode* destructor_call = TryAnalyzeCXXExplicitDestructorCall(node);
+  if (destructor_call != NULL) {
+    return destructor_call;
+  }
   node->left = AnalyzeExpression(node->left);
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {

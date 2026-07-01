@@ -101,6 +101,13 @@ static IROpcode FindIROpcodeForType(TypeRecord* type, ASTOpcode op) {
       }
     }
   }
+  // During speculative constant evaluation `type` may be NULL (or an otherwise
+  // unhandled type) because the callee's body has not been semantically
+  // analyzed yet.  Bail out of the fold gracefully rather than aborting; see
+  // Compiler::constexpr_codegen_recover.
+  if (compiler->constexpr_codegen_recover) {
+    longjmp(compiler->constexpr_codegen_abort, 1);
+  }
   assert(false);
   return IR_OP(nop);
 }
@@ -725,17 +732,19 @@ static IRNode* GenerateVariableReference(Generator* gen,
     return result;
   }
   IRNode* result;
-  if ((node->base.flags & kASTNeedAddress) != 0) {
-    // Need the address of the node, not the value.
+  if ((node->base.flags & kASTNeedAddress) != 0 ||
+      TypeIsStructOrUnion(node->base.type)) {
+    // Need the address of the node, not the value.  A whole struct/union is
+    // likewise handled by its address: the raw variable/argument node is
+    // returned directly and never loaded here.  Do NOT mark it as a var-use --
+    // it is the variable node itself, not a load, and a non-load var reference
+    // breaks SSA renaming.  Consumers that copy the whole aggregate (a
+    // struct-by-value call argument, a struct return, etc.) attach the var-use
+    // to the load-like node (`structarg`, ...) they build around it.
     result = var_ref;
   } else {
-    if (TypeIsStructOrUnion(node->base.type)) {
-      result = var_ref;
-    } else {
-      IROpcode load = GetLoadOpcode(&node->base);
-      result = GeneratorEmit(
-          gen, NewIR1(load, var_ref));
-    }
+    IROpcode load = GetLoadOpcode(&node->base);
+    result = GeneratorEmit(gen, NewIR1(load, var_ref));
     IRSetVarUse(result, node->symbol);
   }
   if ((node->base.flags & kASTNrvoMarker) != 0) {
@@ -1094,6 +1103,17 @@ static bool CanElideMemzero(BracedInitializerASTNode* node) {
 // Initialization.  Semantic analysis converts the initializer to a
 // braced initializer containing only designated initalizers.
 static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
+  if (node->right->op != AST_OP(braced_init)) {
+    // During speculative constant evaluation the callee's (e.g. freshly
+    // instantiated constexpr template) body may not have been semantically
+    // analyzed yet, so its initializers were never lowered to braced-init
+    // form.  Bail out of the fold gracefully rather than aborting; the
+    // function is later analyzed and code-generated through the normal path.
+    // See Compiler::constexpr_codegen_recover.
+    if (compiler->constexpr_codegen_recover) {
+      longjmp(compiler->constexpr_codegen_abort, 1);
+    }
+  }
   assert(node->right->op == AST_OP(braced_init));
 
   // Get destination address.

@@ -668,6 +668,89 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   return node;
 }
 
+// True if any template argument in `args` mentions a template parameter, making
+// the argument list (and thus a class template specialization using it) dependent.
+static bool TemplateArgumentListIsDependent(Vector* args) {
+  if (args == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* a = args->value.p[i];
+    if (a == NULL) {
+      continue;
+    }
+    if (a->kind == kTemplateParameterType &&
+        TypeContainsTemplateParameter(a->type)) {
+      return true;
+    }
+    if (a->kind == kTemplateParameterNonType && a->template_parameter_index >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A qualified value name like `Trait<Deps...>::member` whose nested-name-specifier
+// is a *dependent* class template specialization (its template arguments mention a
+// template parameter) is a value-dependent name: the specialization chosen (primary
+// vs. an explicit/partial specialization) is not known until the enclosing template
+// is instantiated, so its `::member` must not be resolved (and folded) now.  Build a
+// placeholder identifier carrying the dependent scope (template_origin +
+// template_arguments) and the trailing member name (dependent_member_name), flagged
+// so the template-body cloner resolves it against the substituted arguments.  Returns
+// NULL when `name` is not such a dependent template-scope value name.
+static ASTNode* BuildDependentTemplateScopeValueName(
+    Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  if (!CompilerIsCXX() || !name->is_qualified ||
+      syntax->current_template_parameter_count <= 0 ||
+      name->components.length < 2 ||
+      name->template_arguments.length != name->components.length) {
+    return NULL;
+  }
+  size_t member_index = name->components.length - 1;
+  size_t base_index = name->components.length - 2;
+  // The member component itself must not carry template arguments (`x::f<...>`
+  // needs the richer dependent-template-id handling, which this does not cover).
+  if (name->template_arguments.value.p[member_index] != NULL) {
+    return NULL;
+  }
+  Vector* scope_args = name->template_arguments.value.p[base_index];
+  if (!TemplateArgumentListIsDependent(scope_args)) {
+    return NULL;
+  }
+  // Resolve the class template that names the scope (components[0..base_index]).
+  FullyQualifiedIdentifier prefix;
+  FullyQualifiedIdentifierInit(&prefix);
+  prefix.absolute = name->absolute;
+  prefix.is_qualified = prefix.absolute || base_index > 0;
+  for (size_t i = 0; i <= base_index; i++) {
+    String* component = name->components.value.p[i];
+    if (prefix.spelling.length != 0 || prefix.absolute) {
+      StringAppend(&prefix.spelling, "::");
+    }
+    StringAppendString(&prefix.spelling, component);
+    VectorAppend(&prefix.components, NewString(component->value));
+    VectorAppend(&prefix.template_arguments,
+                 TemplateArgumentVectorCopy(name->template_arguments.value.p[i]));
+  }
+  Symbol* base = SyntaxFindQualifiedSymbol(syntax, &prefix);
+  FullyQualifiedIdentifierDestruct(&prefix);
+  if (base == NULL || !base->flags.is_template || base->type == NULL ||
+      !TypeIsStructOrUnion(base->type)) {
+    return NULL;
+  }
+  String* member = name->components.value.p[member_index];
+  TypeRecord* dependent_type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  dependent_type->template_origin = base;
+  dependent_type->template_arguments = TemplateArgumentVectorCopy(scope_args);
+  dependent_type->dependent_member_name = NewString(member->value);
+  Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
+  placeholder->flags.invented = true;
+  ASTNode* node = NewIdentifierASTNode(placeholder, location);
+  node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  return node;
+}
+
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
@@ -701,6 +784,19 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     return result;
   }
   
+  // A value name qualified by a dependent class-template specialization
+  // (`Trait<T>::member`) must stay dependent: resolving it now would silently
+  // select the primary template and fold the wrong value.  Detect and defer it
+  // before the ordinary lookup, which would otherwise instantiate the primary.
+  if (name.is_qualified) {
+    ASTNode* dependent_scope = BuildDependentTemplateScopeValueName(
+        syntax, &name, lex->current_token_location);
+    if (dependent_scope != NULL) {
+      FullyQualifiedIdentifierDestruct(&name);
+      return dependent_scope;
+    }
+  }
+
   // Find the symbol by searching all symbol tables.  It must exist.
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
   if (symbol == NULL) {
@@ -2645,8 +2741,11 @@ static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
 static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
                                         bool is_array,
                                         size_t arg_count,
-                                        SourceLocation location) {
-  Symbol* member = GetCXXClassAllocationFunction(
+                                        SourceLocation location,
+                                        bool global_scope) {
+  // `::new` names only the global allocation function, bypassing any
+  // class-scoped operator new.
+  Symbol* member = global_scope ? NULL : GetCXXClassAllocationFunction(
       type, is_array ? "operator new[]" : "operator new", arg_count);
   if (member != NULL) {
     return member;
@@ -2670,8 +2769,11 @@ static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
 
 static Symbol* GetCXXOperatorDeleteForType(TypeRecord* type,
                                            bool is_array,
-                                           SourceLocation location) {
-  Symbol* member = GetCXXClassAllocationFunction(
+                                           SourceLocation location,
+                                           bool global_scope) {
+  // `::delete` names only the global deallocation function, bypassing any
+  // class-scoped operator delete.
+  Symbol* member = global_scope ? NULL : GetCXXClassAllocationFunction(
       type, is_array ? "operator delete[]" : "operator delete", 1);
   if (member != NULL) {
     return member;
@@ -3040,7 +3142,32 @@ static Vector* ParseCXXNewDeductionInitializerArguments(Syntax* syntax,
   return ParseCXXNewInitializerArguments(syntax, open, followers);
 }
 
-static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
+// Build a `(type){ exprs... }` compound literal used to initialize a freshly
+// `new`-allocated object that has no constructor (a scalar aggregate wrapper or
+// a class aggregate).  With no expressions this performs value-initialization
+// (zero-initialization); with expressions it performs aggregate initialization.
+// `exprs`, when non-NULL, is consumed (its elements are re-wrapped and the
+// vector is deleted).
+static ASTNode* NewCXXNewCompoundLiteralInitializer(Syntax* syntax,
+                                                    TypeRecord* type,
+                                                    Vector* exprs,
+                                                    SourceLocation location) {
+  Symbol* storage = SyntaxNewTemporary(syntax, type);
+  Vector* elements = NewVector();
+  if (exprs != NULL) {
+    for (size_t i = 0; i < exprs->length; i++) {
+      VectorAppend(elements, NewExpressionInitializerASTNode(
+                                 exprs->value.p[i], location));
+    }
+    VectorDelete(exprs);
+  }
+  ASTNode* braced = NewBracedInitializerASTNode(elements, NULL, location);
+  return NewCompoundLiteralASTNode(NewIdentifierASTNode(storage, location),
+                                   location, braced);
+}
+
+static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
+                                      bool global_scope) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // new
 
@@ -3099,6 +3226,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
   }
 
   ASTNode* scalar_initializer = NULL;
+  bool value_init = false;
   if (initializer_open == TOK(lsquare)) {
     LexNextToken(syntax->lex);
     array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
@@ -3108,10 +3236,36 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
     if (FindCXXConstructorForType(allocated_type) == NULL) {
       Vector* initializers =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+      bool dependent = TypeContainsTemplateParameter(allocated_type);
       if (initializers->length == 1) {
+        // `new T(x)` / `new T{x}`: direct/copy-initialization of a scalar (or a
+        // same-typed class object).  For a dependent T this assignment is kept
+        // and may be rewritten to `receiver.T(x)` once T resolves to a class.
         scalar_initializer = initializers->value.p[0];
         VectorDestruct(initializers);
+      } else if (initializers->length == 0) {
+        // `new T()` / `new T{}`: value-initialization.  A scalar (or dependent
+        // T, which is resolved during instantiation) is zero-initialized with a
+        // plain assignment; a concrete aggregate is zero-initialized with an
+        // empty compound literal so its members and padding are cleared.
+        value_init = true;
+        if (dependent || (!TypeIsStructOrUnion(allocated_type) &&
+                          !TypeIsArray(allocated_type))) {
+          scalar_initializer = NewIntLiteral(0, location);
+        } else {
+          scalar_initializer = NewCXXNewCompoundLiteralInitializer(
+              syntax, allocated_type, NULL, location);
+        }
+        VectorDelete(initializers);
+      } else if (!dependent && (TypeIsStructOrUnion(allocated_type) ||
+                                TypeIsArray(allocated_type))) {
+        // `new T{a, b, ...}` (or the C++20 parenthesized aggregate form
+        // `new T(a, b, ...)`): aggregate-initialize the object.
+        scalar_initializer = NewCXXNewCompoundLiteralInitializer(
+            syntax, allocated_type, initializers, location);
       } else {
+        // A scalar type (or an unresolved dependent type) cannot take more than
+        // one new-initializer expression.
         SyntaxError(syntax, "new initializer for non-class type requires one expression");
         VectorDelete(initializers);
       }
@@ -3150,7 +3304,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
       NewCallASTNode(GetCXXOperatorNewForType(allocated_type,
                                               array_size != NULL,
                                               actuals->length,
-                                              location),
+                                              location, global_scope),
                      location, actuals);
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
@@ -3218,6 +3372,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
                     scalar_initializer, allocated_type, location);
     if (ctor_actuals == NULL && TypeContainsTemplateParameter(allocated_type)) {
       init->flags |= kASTDependentNewInitializer;
+      if (value_init) {
+        init->flags |= kASTDependentNewValueInit;
+      }
     }
     result = NewBinaryASTNode(
         AST_OP(comma), result_type, location, assign,
@@ -3232,7 +3389,8 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers) {
 
 ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                           bool is_array_delete,
-                                          SourceLocation location) {
+                                          SourceLocation location,
+                                          bool global_scope) {
   TypeRecord* pointer_type = expr->type;
   if (pointer_type != NULL && TypeContainsTemplateParameter(pointer_type)) {
     Vector* actuals = NewVector();
@@ -3296,7 +3454,8 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
     VectorAppend(statements,
                  NewExpressionStatement(
                      NewCallASTNode(GetCXXOperatorDeleteForType(
-                                        pointer_type->next, true, location),
+                                        pointer_type->next, true, location,
+                                        global_scope),
                                     location, actuals),
                      location));
     return NewUnaryASTNode(
@@ -3310,7 +3469,7 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
     TypeRecord* object_type =
         TypeIsPointerOrArray(pointer_type) ? pointer_type->next : NULL;
     return NewCallASTNode(GetCXXOperatorDeleteForType(object_type, false,
-                                                     location),
+                                                     location, global_scope),
                           location, actuals);
   }
 
@@ -3324,7 +3483,7 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
   VectorAppend(actuals, NewIdentifierASTNode(temp, location));
   ASTNode* deallocate =
       NewCallASTNode(GetCXXOperatorDeleteForType(pointer_type->next, false,
-                                                 location),
+                                                 location, global_scope),
                      location, actuals);
   return NewBinaryASTNode(
       AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
@@ -3333,7 +3492,8 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                location, destructor, deallocate));
 }
 
-static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
+static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers,
+                                         bool global_scope) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // delete
   bool is_array_delete = false;
@@ -3343,7 +3503,7 @@ static ASTNode* ParseCXXDeleteExpression(Syntax* syntax, TokenClass followers) {
   }
   ASTNode* expr = ParseCastExpression(syntax, followers);
   return NewCXXDeleteExpressionForPointer(syntax, expr, is_array_delete,
-                                          location);
+                                          location, global_scope);
 }
 
 static ASTNode* ParseCXXThrowExpression(Syntax* syntax, TokenClass followers) {
@@ -3476,11 +3636,30 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
   }
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(new))) {
-    return ParseCXXNewExpression(syntax, followers);
+    return ParseCXXNewExpression(syntax, followers, /*global_scope=*/false);
   }
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(delete))) {
-    return ParseCXXDeleteExpression(syntax, followers);
+    return ParseCXXDeleteExpression(syntax, followers, /*global_scope=*/false);
+  }
+
+  // `::new` / `::delete` explicitly name the global allocation/deallocation
+  // functions, bypassing any class-scoped operator new/delete.  The leading
+  // `::` would otherwise be parsed as a qualified-name prefix, so peek past it.
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    LexNextToken(syntax->lex);  // consume ::
+    if (LexLookingAt(syntax->lex, TOK(new))) {
+      LexCheckpointDestruct(&checkpoint);
+      return ParseCXXNewExpression(syntax, followers, /*global_scope=*/true);
+    }
+    if (LexLookingAt(syntax->lex, TOK(delete))) {
+      LexCheckpointDestruct(&checkpoint);
+      return ParseCXXDeleteExpression(syntax, followers, /*global_scope=*/true);
+    }
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
   }
 
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(throw))) {

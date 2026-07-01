@@ -1090,7 +1090,16 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   VectorAppend(&relocations, reloc);
   bool known_values = left->is_label && left->type == SYM_TYPE(none) &&
       assembler->current_section == left->section && !assembler->absolute;
-  
+  // The section base address cancels out of an expression only when its
+  // additive and subtractive same-section terms balance (e.g. a `label2 -
+  // label1` difference).  Such a value is position-independent and can be
+  // resolved here with no relocation.  A lone `label` (or otherwise unbalanced
+  // expression) is section-base-relative, so it MUST keep its relocation for
+  // the linker to patch in the final address; folding it to the assembly-time
+  // section offset would leave a bogus small value at run time.
+  int additive_terms = 1;
+  int subtractive_terms = 0;
+
   while (LexLookingAt(&assembler->lex, TOK(plus)) ||
          LexLookingAt(&assembler->lex, TOK(minus))) {
     Token tok = assembler->lex.current_token;
@@ -1114,10 +1123,15 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
                             (int32_t)AssemblerCurrentAddress(assembler), 0);
     known_values &= right->is_label && left->type == SYM_TYPE(none) &&
         assembler->current_section == right->section;
+    if (tok == TOK(plus)) {
+      additive_terms++;
+    } else {
+      subtractive_terms++;
+    }
     VectorAppend(&relocations, reloc);
   }
   int64_t value = 0;
-  if (known_values) {
+  if (known_values && additive_terms == subtractive_terms) {
     value = left->value;
     for (size_t i = 1; i < relocations.length; i++) {
       AssemblerRelocation* reloc = relocations.value.p[i];

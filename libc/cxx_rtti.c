@@ -76,10 +76,20 @@ void* __davecc_dynamic_cast(void* p, const __davecc_type_info* dst) {
 
 #if defined(__x86_64__)
 // EH is only wired up on x86_64; elsewhere a failed reference cast terminates.
-void __davecc_throw(intptr_t exception_object, const char* typeinfo);
+// This DaveTypeInfo layout must match libc/eh_throw.c and the compiler's
+// exception type_info emission.
+typedef struct __davecc_eh_type_info {
+  const char* name;
+  long base_count;
+  const void* bases;
+} __davecc_eh_type_info;
+void __davecc_throw(intptr_t exception_object,
+                    const __davecc_eh_type_info* typeinfo);
 static char __davecc_bad_cast_object;
 // Must match the compiler's exception type name for std::bad_cast.
 static const char __davecc_bad_cast_name[] = "struct bad_cast";
+static const __davecc_eh_type_info __davecc_bad_cast_typeinfo = {
+    __davecc_bad_cast_name, 0, 0};
 #endif
 
 // Reference form of dynamic_cast: like the pointer form but throws
@@ -88,7 +98,8 @@ void* __davecc_dynamic_cast_ref(void* p, const __davecc_type_info* dst) {
   void* result = __davecc_dynamic_cast(p, dst);
   if (result == 0) {
 #if defined(__x86_64__)
-    __davecc_throw((intptr_t)&__davecc_bad_cast_object, __davecc_bad_cast_name);
+    __davecc_throw((intptr_t)&__davecc_bad_cast_object,
+                   &__davecc_bad_cast_typeinfo);
 #else
     abort();
 #endif

@@ -2056,9 +2056,8 @@ static ASTNode* NewCXXVirtualBaseSpecialMemberCall(Syntax* syntax,
                                      location);
 }
 
-static void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
-                                        Vector* body,
-                                        SourceLocation location) {
+void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
+                                  Vector* body, SourceLocation location) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
       func->info.function.cxx_member_owner == NULL) {
     return;
@@ -4554,6 +4553,24 @@ Vector* SyntaxParseTemplateParameterList(Syntax* syntax) {
   return SyntaxParseTemplateParameterListWithBase(syntax, 0);
 }
 
+static void DependentQualifiedNameVisitor(ASTNode* node, void* data,
+                                          int child_id, VisitorMode mode) {
+  (void)child_id;
+  (void)mode;
+  if (node != NULL && (node->flags & kASTDependentQualifiedName) != 0) {
+    *(bool*)data = true;
+  }
+}
+
+// True if `node` reads a value through a dependent class-template scope
+// (`Trait<T>::value`), making the whole expression value-dependent: it must be
+// kept unevaluated and folded per-instantiation, not constant-folded now.
+static bool ExpressionContainsDependentQualifiedName(ASTNode* node) {
+  bool found = false;
+  ASTNodeVisit(node, DependentQualifiedNameVisitor, 0, &found);
+  return found;
+}
+
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
   if (!LexMatch(lex, TOK(less))) {
@@ -4568,6 +4585,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     arg->int_value = 0;
     arg->template_parameter_index = -1;
     arg->pack_arguments = NULL;
+    arg->dependent_expr = NULL;
     if (SyntaxLookingAtType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
@@ -4602,27 +4620,35 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       ASTNode* expr = SyntaxParseSingleExpression(syntax,
                                                   TC(closebra) | TC(exprsep));
       syntax->parsing_template_argument = old_parsing_template_argument;
-      expr = AnalyzeExpression(expr);
-      int64_t value = 0;
-      if (!EvaluateIntegerExpression(expr, &value)) {
-        if (syntax->parsing_template_declaration &&
-            expr->op == AST_OP(identifier)) {
-          IdentifierASTNode* id = (IdentifierASTNode*)expr;
-          if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
-              !id->symbol->flags.is_template_type_parameter) {
-            arg->template_parameter_index =
-                id->symbol->template_parameter_index;
+      arg->kind = kTemplateParameterNonType;
+      if (ExpressionContainsDependentQualifiedName(expr)) {
+        // A value-dependent trait condition such as `!is_integral<It>::value`:
+        // resolving it now would fold the primary template's value.  Keep the
+        // expression and re-fold it once the parameters become concrete.
+        arg->dependent_expr = expr;
+        arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
+      } else {
+        expr = AnalyzeExpression(expr);
+        int64_t value = 0;
+        if (!EvaluateIntegerExpression(expr, &value)) {
+          if (syntax->parsing_template_declaration &&
+              expr->op == AST_OP(identifier)) {
+            IdentifierASTNode* id = (IdentifierASTNode*)expr;
+            if (id->symbol != NULL && id->symbol->flags.is_template_parameter &&
+                !id->symbol->flags.is_template_type_parameter) {
+              arg->template_parameter_index =
+                  id->symbol->template_parameter_index;
+            }
+          }
+          if (arg->template_parameter_index < 0) {
+            SyntaxError(syntax,
+                        "Template non-type argument must be an integer constant expression");
           }
         }
-        if (arg->template_parameter_index < 0) {
-          SyntaxError(syntax,
-                      "Template non-type argument must be an integer constant expression");
-        }
+        arg->int_value = value;
+        ASTNodeDelete(expr);
+        arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
       }
-      arg->kind = kTemplateParameterNonType;
-      arg->int_value = value;
-      ASTNodeDelete(expr);
-      arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
     }
     VectorAppend(args, arg);
     if (!LexMatch(lex, TOK(comma))) {
@@ -5998,8 +6024,21 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       }
       return false;
     }
-    case TOK(coloncolon):
+    case TOK(coloncolon): {
+      // `::new` and `::delete` are expressions naming the global allocation
+      // functions, never the start of a declaration's type.
+      LexCheckpoint checkpoint;
+      LexCheckpointSave(syntax->lex, &checkpoint);
+      LexNextToken(syntax->lex);
+      bool new_or_delete = LexLookingAt(syntax->lex, TOK(new)) ||
+                           LexLookingAt(syntax->lex, TOK(delete));
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      LexCheckpointDestruct(&checkpoint);
+      if (new_or_delete) {
+        return false;
+      }
       return SyntaxQualifiedNameLooksLikeType(syntax);
+    }
     default:
       return false;
   }

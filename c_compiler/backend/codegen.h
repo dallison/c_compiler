@@ -41,9 +41,18 @@ typedef struct {
   struct EHTypeInfo* catch_typeinfo;
 } ExceptionHandlerRange;
 
+// A (transitive, non-virtual, public) base subobject of an exception type,
+// recorded so the runtime can match a handler naming a base class and adjust
+// the exception object pointer to that base subobject.
+typedef struct EHTypeInfoBase {
+  String base_name;  // Same name format as EHTypeInfo::type_name.
+  int64_t offset;    // Byte offset of the base subobject from the object start.
+} EHTypeInfoBase;
+
 typedef struct EHTypeInfo {
   String symbol_name;
   String type_name;
+  Vector bases;  // EHTypeInfoBase* entries (flattened public base graph).
 } EHTypeInfo;
 
 // Main IR code generator.

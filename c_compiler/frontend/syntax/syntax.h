@@ -178,6 +178,12 @@ void SyntaxParseCXXConstructorInitializerList(
 void SyntaxInsertCXXConstructorPreamble(
     Syntax* syntax, TypeRecord* func, Vector* body,
     CXXConstructorInitList* init_list, SourceLocation location);
+// Appends the base-class subobject destructor calls that must run at the end of
+// a destructor body (after the class's own members are destroyed).  Shared with
+// the inline / implicitly-defined destructor paths in type.c so those bodies
+// destroy their base subobjects too.
+void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
+                                  Vector* body, SourceLocation location);
 // Emits the __vptr initializers that were deferred (see the preamble) for
 // constructors of `owner`, now that its vtables have been registered.
 void SyntaxFlushPendingVPtrInitializers(struct Struct* owner);

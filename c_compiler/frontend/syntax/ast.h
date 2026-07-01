@@ -337,6 +337,7 @@ typedef struct ASTNode {
 #define kASTDependentNewInitializer (1 << 20)  // new T(expr) parsed before T substitution.
 #define kASTOverloadDiagnosed (1 << 21)  // Overload-failure diagnostics already emitted for this call.
 #define kASTDependentQualifiedName (1 << 22)  // Qualified value name through a dependent (template-parameter) scope.
+#define kASTDependentNewValueInit (1 << 23)  // new T() value-init parsed before T substitution.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

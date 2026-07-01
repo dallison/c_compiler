@@ -89,6 +89,12 @@ typedef struct TemplateArgument {
   long long int_value;      // Valid for simple non-type integer arguments.
   int template_parameter_index;  // >= 0 when non-type arg is a template param.
   Vector* pack_arguments;   // TemplateArgument* entries for bound packs.
+  // A value-dependent non-type argument expression (e.g. `!is_integral<It>::value`)
+  // kept unevaluated at parse time.  It is re-cloned, substituted, and folded to a
+  // concrete `int_value` when the referenced template parameters become concrete
+  // (see NewSubstitutedTemplateArgument).  Arena-owned (never individually freed);
+  // NULL for ordinary, already-evaluated arguments.
+  struct ASTNode* dependent_expr;
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {
@@ -359,6 +365,13 @@ typedef struct {
   Struct* template_substitution_target;
   StructMember* cxx_member_definition;
   Vector* declarator_template_arguments;
+  // Set when substituting template arguments into a type produces a hard
+  // substitution failure in the immediate context (e.g. a dependent member
+  // typedef like `enable_if<false, T>::type` that does not exist).  Callers
+  // performing SFINAE-sensitive instantiation clear this before substitution
+  // and, if it becomes set, discard the (ill-formed) instantiation instead of
+  // emitting a diagnostic.
+  bool template_substitution_failed;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
