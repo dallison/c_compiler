@@ -4106,6 +4106,8 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   CheckDeletedFunctionUse(best, (ASTNode*)node);
 }
 
+static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+
 static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL ||
       !TypeIsStructOrUnion(node->left->type) ||
@@ -4114,9 +4116,34 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     return NULL;
   }
 
+  // An explicit template-id used as a functional cast (`A<int>(...)`) names the
+  // concrete specialization directly; instantiate it from those arguments
+  // rather than attempting class template argument deduction from the
+  // constructor call.  When the construction appears inside another template,
+  // the body cloner substitutes the arguments to concrete types before this
+  // runs, so this handles the dependent case (e.g. `allocator<CharT>()`) too.
+  TypeRecord* explicit_type = NULL;
+  if (node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL && id->symbol->flags.is_template &&
+        id->symbol->type != NULL && TypeIsStructOrUnion(id->symbol->type) &&
+        id->symbol->type->template_arguments == NULL &&
+        id->symbol->type->info.struct_info != NULL &&
+        id->symbol->type->info.struct_info->is_template &&
+        id->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments)) {
+      explicit_type = TypeInstantiateClassTemplate(&compiler->syntax,
+                                                   id->symbol,
+                                                   id->template_arguments);
+    }
+  }
+
   TypeRecord* placeholder_type = NULL;
-  TypeRecord* construction_type = node->left->type;
-  if (!TypeIsClassTemplatePlaceholder(construction_type) &&
+  TypeRecord* construction_type =
+      explicit_type != NULL ? explicit_type : node->left->type;
+  if (explicit_type == NULL &&
+      !TypeIsClassTemplatePlaceholder(construction_type) &&
       node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     /* For a plain class template the callee type carries no template
@@ -4135,8 +4162,8 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       }
     }
   }
-  TypeRecord* deduced_type = NULL;
-  if (TypeIsClassTemplatePlaceholder(construction_type)) {
+  TypeRecord* deduced_type = explicit_type;
+  if (explicit_type == NULL && TypeIsClassTemplatePlaceholder(construction_type)) {
     bool alias_rejected = false;
     Symbol* class_template =
         TypeClassTemplatePlaceholderOrigin(construction_type);

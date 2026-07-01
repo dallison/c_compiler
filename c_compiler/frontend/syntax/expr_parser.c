@@ -125,6 +125,45 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
                           syntax->lex->current_token_location, left, right);
 }
 
+// Resolve an unqualified name that refers to a `static` data member of the
+// enclosing class.  Non-static members are reached through the implicit `this`
+// (see NewMemberAccessFromThis); a static member has no `this`, and inside a
+// static member function there is no `this` at all, so look the name up in the
+// class that owns the member function currently being parsed and reference the
+// member's (global-linkage) symbol directly.
+static ASTNode* NewStaticMemberReference(Syntax* syntax,
+                                         FullyQualifiedIdentifier* name) {
+  if (!CompilerIsCXX() || name->is_qualified) {
+    return NULL;
+  }
+  Struct* owner = NULL;
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (owner == NULL) {
+    Symbol* this_symbol = FindThisSymbol(syntax);
+    if (this_symbol != NULL && this_symbol->type != NULL &&
+        TypeIsStructOrUnionPointer(this_symbol->type) &&
+        this_symbol->type->next != NULL) {
+      owner = this_symbol->type->next->info.struct_info;
+    }
+  }
+  if (owner == NULL) {
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+  StructMember* member = FindStructMember(owner, &member_name);
+  StringDestruct(&member_name);
+  if (member == NULL || !member->is_static || member->is_member_function ||
+      member->symbol == NULL) {
+    return NULL;
+  }
+  return NewIdentifierASTNode(member->symbol,
+                              syntax->lex->current_token_location);
+}
+
 static ASTNode* ParseThisExpression(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);
@@ -655,6 +694,11 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         FullyQualifiedIdentifierDestruct(&name);
         return member_access;
       }
+      ASTNode* static_member = NewStaticMemberReference(syntax, &name);
+      if (static_member != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return static_member;
+      }
       if (LexLookingAt(lex, TOK(lparen))) {
         if (!CompilerIsCXX() &&
             GetIntrinsic(FullyQualifiedIdentifierLast(&name)) == NULL) {
@@ -703,6 +747,20 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     if (args != NULL) {
       if (TypeIsFunction(symbol->type) ||
           SymbolHasFunctionTemplateOverload(symbol)) {
+        template_arguments = args;
+        args = NULL;
+      } else if (symbol->flags.is_template && symbol->type != NULL &&
+                 TypeIsStructOrUnion(symbol->type) &&
+                 symbol->type->template_arguments == NULL &&
+                 symbol->type->info.struct_info != NULL &&
+                 symbol->type->info.struct_info->is_template) {
+        // A class template-id used as an expression, e.g. the functional cast
+        // `A<int>(...)`.  Retain the explicit arguments on the identifier node;
+        // functional-construction analysis instantiates the specialization from
+        // them (and the template-body cloner substitutes them first when the
+        // construction appears inside another template).  Alias templates are
+        // excluded here: their type carries the aliased `<...>` arguments, so
+        // they still route through the placeholder/CTAD path.
         template_arguments = args;
         args = NULL;
       }
