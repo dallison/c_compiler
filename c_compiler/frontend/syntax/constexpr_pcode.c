@@ -44,6 +44,17 @@ typedef struct {
   uint64_t entry_offset;
 } ConstexprPCodeImageCacheEntry;
 
+// Per-function memoization of the lowered pcode *assembly* (not yet assembled
+// into a placed image).  Lowering a function body to pcode (GenerateFunction:
+// IR + SSA + optimization + pcode codegen) is the expensive step and is
+// context-independent, so it is cached once per function and reused whenever the
+// function appears in another root's closure or is called directly.
+typedef struct {
+  TypeRecord* func;
+  String assembly;    // lowered pcode assembly text for this function alone
+  Vector referenced;  // TypeRecord* callees referenced by the function body
+} ConstexprPCodeAssemblyCacheEntry;
+
 typedef struct ConstexprPCodeFreeBlock {
   size_t length;
   struct ConstexprPCodeFreeBlock* next;
@@ -94,6 +105,9 @@ static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
 
 static Vector pcode_image_cache;
 static bool pcode_image_cache_initialized = false;
+
+static Vector pcode_assembly_cache;
+static bool pcode_assembly_cache_initialized = false;
 
 #define CONSTEXPR_PCODE_HEAP_SIZE (1024 * 1024)
 
@@ -215,19 +229,66 @@ static void ConstexprPCodeCacheImage(TypeRecord* func,
   VectorAppend(&pcode_image_cache, entry);
 }
 
-void ConstexprPCodeClearImageCache(void) {
-  if (!pcode_image_cache_initialized) {
-    return;
+static ConstexprPCodeAssemblyCacheEntry* ConstexprPCodeFindCachedAssembly(
+    TypeRecord* func) {
+  if (!pcode_assembly_cache_initialized) {
+    return NULL;
   }
-  for (size_t i = 0; i < pcode_image_cache.length; i++) {
-    ConstexprPCodeImageCacheEntry* entry = pcode_image_cache.value.p[i];
-    if (entry != NULL) {
-      free(entry->text);
-      free(entry);
+  for (size_t i = 0; i < pcode_assembly_cache.length; i++) {
+    ConstexprPCodeAssemblyCacheEntry* entry = pcode_assembly_cache.value.p[i];
+    if (entry != NULL && entry->func == func) {
+      return entry;
     }
   }
-  VectorDestruct(&pcode_image_cache);
-  pcode_image_cache_initialized = false;
+  return NULL;
+}
+
+static void ConstexprPCodeCacheAssembly(TypeRecord* func, String* assembly,
+                                        Vector* referenced) {
+  if (!pcode_assembly_cache_initialized) {
+    VectorInit(&pcode_assembly_cache);
+    pcode_assembly_cache_initialized = true;
+  }
+  ConstexprPCodeAssemblyCacheEntry* entry =
+      malloc(sizeof(ConstexprPCodeAssemblyCacheEntry));
+  if (entry == NULL) {
+    return;
+  }
+  entry->func = func;
+  StringInit(&entry->assembly, "");
+  StringAppendString(&entry->assembly, assembly);
+  VectorInit(&entry->referenced);
+  for (size_t i = 0; i < referenced->length; i++) {
+    VectorAppend(&entry->referenced, referenced->value.p[i]);
+  }
+  VectorAppend(&pcode_assembly_cache, entry);
+}
+
+void ConstexprPCodeClearImageCache(void) {
+  if (pcode_image_cache_initialized) {
+    for (size_t i = 0; i < pcode_image_cache.length; i++) {
+      ConstexprPCodeImageCacheEntry* entry = pcode_image_cache.value.p[i];
+      if (entry != NULL) {
+        free(entry->text);
+        free(entry);
+      }
+    }
+    VectorDestruct(&pcode_image_cache);
+    pcode_image_cache_initialized = false;
+  }
+  if (pcode_assembly_cache_initialized) {
+    for (size_t i = 0; i < pcode_assembly_cache.length; i++) {
+      ConstexprPCodeAssemblyCacheEntry* entry =
+          pcode_assembly_cache.value.p[i];
+      if (entry != NULL) {
+        StringDestruct(&entry->assembly);
+        VectorDestruct(&entry->referenced);
+        free(entry);
+      }
+    }
+    VectorDestruct(&pcode_assembly_cache);
+    pcode_assembly_cache_initialized = false;
+  }
 }
 
 static int StringFileWrite(void* cookie, const char* data, int length) {
@@ -617,6 +678,33 @@ static bool AssemblePCodeImage(String* assembly, const char* entry_name,
   return true;
 }
 
+// Wraps CompileFunctionToPCodeAssembly with per-function memoization.  The
+// lowering of a single function body is context-independent, so it is performed
+// at most once and reused across every root closure that references the
+// function (and across direct calls).  On a hit the cached assembly text and
+// referenced-callee list are copied into the caller-owned outputs so the closure
+// walk in CompileConstexprFunctionImage proceeds exactly as with a fresh
+// lowering.
+static bool CompileFunctionToPCodeAssemblyCached(TypeRecord* func,
+                                                 String* assembly,
+                                                 Vector* referenced,
+                                                 const char** reason) {
+  ConstexprPCodeAssemblyCacheEntry* cached =
+      ConstexprPCodeFindCachedAssembly(func);
+  if (cached != NULL) {
+    StringAppendString(assembly, &cached->assembly);
+    for (size_t i = 0; i < cached->referenced.length; i++) {
+      VectorAppend(referenced, cached->referenced.value.p[i]);
+    }
+    return true;
+  }
+  if (!CompileFunctionToPCodeAssembly(func, assembly, referenced, reason)) {
+    return false;
+  }
+  ConstexprPCodeCacheAssembly(func, assembly, referenced);
+  return true;
+}
+
 static bool CompileConstexprFunctionImage(TypeRecord* func,
                                           ConstexprPCodeImage* image,
                                           const char** reason) {
@@ -648,7 +736,8 @@ static bool CompileConstexprFunctionImage(TypeRecord* func,
     StringInit(&part, "");
     Vector referenced;
     VectorInit(&referenced);
-    ok = CompileFunctionToPCodeAssembly(current, &part, &referenced, reason);
+    ok = CompileFunctionToPCodeAssemblyCached(current, &part, &referenced,
+                                              reason);
     if (ok) {
       StringAppendString(&assembly, &part);
       for (size_t j = 0; j < referenced.length; j++) {
