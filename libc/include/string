@@ -97,11 +97,13 @@ struct char_traits<char> {
   }
 };
 
-template <class CharT, class Traits = char_traits<CharT> >
+template <class CharT, class Traits = char_traits<CharT>,
+          class Allocator = allocator<CharT> >
 class basic_string {
  public:
   using traits_type = Traits;
   using value_type = CharT;
+  using allocator_type = Allocator;
   using size_type = size_t;
   using difference_type = long;
   using reference = CharT&;
@@ -120,6 +122,7 @@ class basic_string {
   CharT* __data;
   size_type __size;
   size_type __cap;  // Total element slots, including the NUL terminator slot.
+  allocator_type __alloc;  // Stateless for std::allocator; stored for the API.
 
   bool __is_small() const noexcept { return __data == __buf; }
 
@@ -140,14 +143,13 @@ class basic_string {
     if (newcap < need + 1) {
       newcap = need + 1;
     }
-    allocator<CharT> alloc;
-    CharT* fresh = alloc.allocate(newcap);
+    CharT* fresh = __alloc.allocate(newcap);
     if (__size != 0) {
       traits_type::copy(fresh, __data, __size);
     }
     fresh[__size] = CharT();
     if (!__is_small()) {
-      alloc.deallocate(__data, __cap);
+      __alloc.deallocate(__data, __cap);
     }
     __data = fresh;
     __cap = newcap;
@@ -187,7 +189,7 @@ class basic_string {
     __data[n] = CharT();
   }
 
-  basic_string(const basic_string& other) {
+  basic_string(const basic_string& other) : __alloc(other.__alloc) {
     __set_empty();
     __assign_raw(other.__data, other.__size);
   }
@@ -204,7 +206,7 @@ class basic_string {
     __assign_raw(other.__data + pos, n);
   }
 
-  basic_string(basic_string&& other) noexcept {
+  basic_string(basic_string&& other) noexcept : __alloc(other.__alloc) {
     if (other.__is_small()) {
       __data = __buf;
       __cap = __sso_capacity;
@@ -218,10 +220,36 @@ class basic_string {
     other.__set_empty();
   }
 
+  // Allocator-extended constructors.  std::allocator is stateless, so the
+  // stored allocator never alters behavior, but exposing these keeps the type
+  // allocator-aware and matches the standard's overload set.
+  explicit basic_string(const Allocator& a) noexcept : __alloc(a) {
+    __set_empty();
+  }
+
+  basic_string(size_type n, CharT c, const Allocator& a) : __alloc(a) {
+    __set_empty();
+    __reserve_for(n);
+    if (n != 0) {
+      traits_type::assign(__data, n, c);
+    }
+    __size = n;
+    __data[n] = CharT();
+  }
+
+  basic_string(const CharT* s, const Allocator& a) : __alloc(a) {
+    __set_empty();
+    __assign_raw(s, traits_type::length(s));
+  }
+
+  basic_string(const basic_string& other, const Allocator& a) : __alloc(a) {
+    __set_empty();
+    __assign_raw(other.__data, other.__size);
+  }
+
   ~basic_string() {
     if (!__is_small()) {
-      allocator<CharT> alloc;
-      alloc.deallocate(__data, __cap);
+      __alloc.deallocate(__data, __cap);
     }
   }
 
@@ -235,8 +263,7 @@ class basic_string {
   basic_string& operator=(basic_string&& other) noexcept {
     if (this != &other) {
       if (!__is_small()) {
-        allocator<CharT> alloc;
-        alloc.deallocate(__data, __cap);
+        __alloc.deallocate(__data, __cap);
       }
       if (other.__is_small()) {
         __data = __buf;
@@ -265,6 +292,8 @@ class basic_string {
     __size = 1;
     return *this;
   }
+
+  allocator_type get_allocator() const noexcept { return __alloc; }
 
   // Element access.
   reference operator[](size_type pos) { return __data[pos]; }
@@ -463,70 +492,74 @@ class basic_string {
 using string = basic_string<char>;
 
 // Non-member concatenation.
-template <class CharT, class Traits>
-basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
-                                      const basic_string<CharT, Traits>& b) {
-  basic_string<CharT, Traits> result(a);
+template <class CharT, class Traits, class Allocator>
+basic_string<CharT, Traits, Allocator> operator+(
+    const basic_string<CharT, Traits, Allocator>& a,
+    const basic_string<CharT, Traits, Allocator>& b) {
+  basic_string<CharT, Traits, Allocator> result(a);
   result.append(b);
   return result;
 }
 
-template <class CharT, class Traits>
-basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
-                                      const CharT* b) {
-  basic_string<CharT, Traits> result(a);
+template <class CharT, class Traits, class Allocator>
+basic_string<CharT, Traits, Allocator> operator+(
+    const basic_string<CharT, Traits, Allocator>& a, const CharT* b) {
+  basic_string<CharT, Traits, Allocator> result(a);
   result.append(b);
   return result;
 }
 
-template <class CharT, class Traits>
-basic_string<CharT, Traits> operator+(const CharT* a,
-                                      const basic_string<CharT, Traits>& b) {
-  basic_string<CharT, Traits> result(a);
+template <class CharT, class Traits, class Allocator>
+basic_string<CharT, Traits, Allocator> operator+(
+    const CharT* a, const basic_string<CharT, Traits, Allocator>& b) {
+  basic_string<CharT, Traits, Allocator> result(a);
   result.append(b);
   return result;
 }
 
-template <class CharT, class Traits>
-basic_string<CharT, Traits> operator+(const basic_string<CharT, Traits>& a,
-                                      CharT b) {
-  basic_string<CharT, Traits> result(a);
+template <class CharT, class Traits, class Allocator>
+basic_string<CharT, Traits, Allocator> operator+(
+    const basic_string<CharT, Traits, Allocator>& a, CharT b) {
+  basic_string<CharT, Traits, Allocator> result(a);
   result.push_back(b);
   return result;
 }
 
 // Comparisons.
-template <class CharT, class Traits>
-bool operator==(const basic_string<CharT, Traits>& a,
-                const basic_string<CharT, Traits>& b) {
+template <class CharT, class Traits, class Allocator>
+bool operator==(const basic_string<CharT, Traits, Allocator>& a,
+                const basic_string<CharT, Traits, Allocator>& b) {
   return a.compare(b) == 0;
 }
 
-template <class CharT, class Traits>
-bool operator==(const basic_string<CharT, Traits>& a, const CharT* b) {
+template <class CharT, class Traits, class Allocator>
+bool operator==(const basic_string<CharT, Traits, Allocator>& a,
+                const CharT* b) {
   return a.compare(b) == 0;
 }
 
-template <class CharT, class Traits>
-std::strong_ordering operator<=>(const basic_string<CharT, Traits>& a,
-                                 const basic_string<CharT, Traits>& b) {
+template <class CharT, class Traits, class Allocator>
+std::strong_ordering operator<=>(
+    const basic_string<CharT, Traits, Allocator>& a,
+    const basic_string<CharT, Traits, Allocator>& b) {
   int r = a.compare(b);
   return r < 0 ? std::strong_ordering::less
                : r > 0 ? std::strong_ordering::greater
                        : std::strong_ordering::equal;
 }
 
-template <class CharT, class Traits>
-std::strong_ordering operator<=>(const basic_string<CharT, Traits>& a,
-                                 const CharT* b) {
+template <class CharT, class Traits, class Allocator>
+std::strong_ordering operator<=>(
+    const basic_string<CharT, Traits, Allocator>& a, const CharT* b) {
   int r = a.compare(b);
   return r < 0 ? std::strong_ordering::less
                : r > 0 ? std::strong_ordering::greater
                        : std::strong_ordering::equal;
 }
 
-template <class CharT, class Traits>
-void swap(basic_string<CharT, Traits>& a, basic_string<CharT, Traits>& b) {
+template <class CharT, class Traits, class Allocator>
+void swap(basic_string<CharT, Traits, Allocator>& a,
+          basic_string<CharT, Traits, Allocator>& b) {
   a.swap(b);
 }
 

@@ -14665,15 +14665,35 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   if (t1->declarator != t2->declarator) {
     return false;
   }
-  // Prevent knock-on errors due to unknown symbols, but only after the
-  // declarator shape matches.  A pointer to a dependent type is not the same
-  // signature as a reference to another dependent type.  Function types are
-  // excluded: their full signature (parameter types plus the member `const`
-  // qualifier) must still be compared so that e.g. `T& f()` and
-  // `const T& f() const` remain distinct overloads even when the dependent
-  // return type collapses to unknown.
-  if (t1->declarator != kDeclFunction &&
+  // Dependent (unknown) leaves need care.  Only a leaf primitive carries a
+  // template parameter's positional identity, so pointer/reference/array
+  // wrappers fall through to the structural comparison below and recurse into
+  // `next` (their declarator shapes already matched); function types likewise
+  // compare their full signature via FunctionPrototypesEqual.  At a dependent
+  // leaf, distinct template parameters (`T` vs `U`), a parameter versus a
+  // concrete type, and a parameter versus a dependent member type (`T` vs
+  // `T::type`) are all different signatures and must stay distinct so that
+  // overloads like `f(const T&)` and `f(const U&)` do not collide.  Only when
+  // neither leaf is a positionally-identified parameter do we keep the lenient
+  // "unknown matches anything" behavior, so that an earlier error involving a
+  // genuinely unresolved symbol does not cascade into a spurious overload
+  // clash.
+  if (t1->declarator == kDeclPrimitive &&
       ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0)) {
+    bool t1_param = t1->template_parameter_index >= 0;
+    bool t2_param = t2->template_parameter_index >= 0;
+    if (t1_param || t2_param) {
+      if (t1_param != t2_param ||
+          t1->template_parameter_index != t2->template_parameter_index) {
+        return false;
+      }
+      String* m1 = t1->dependent_member_name;
+      String* m2 = t2->dependent_member_name;
+      if ((m1 == NULL) != (m2 == NULL)) {
+        return false;
+      }
+      return m1 == NULL || StringEqualString(m1, m2);
+    }
     return true;
   }
   switch (t1->declarator) {
