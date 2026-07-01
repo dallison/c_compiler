@@ -188,12 +188,14 @@ static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
   if (owner == NULL || owner->tag_name == NULL || owner->tag_symbol == NULL) {
     return NULL;
   }
+  // The caller only reaches this helper when the resolved symbol is the
+  // not-yet-a-template injected-class-name, which happens only while a class
+  // template's own body is being parsed.  `owner` is therefore always the
+  // primary template, whose tag name is the bare class name; instantiated tags
+  // (e.g. `Box<int>`) are produced by cloning and never re-parsed through here,
+  // so an exact match against the bare tag name is what we want.
   const char* last = FullyQualifiedIdentifierLast(name);
-  // The tag name is either the bare class name or carries a `<...>` suffix; a
-  // self-reference matches the base name.
-  size_t base_length = strcspn(owner->tag_name->value, "<");
-  if (strlen(last) == base_length &&
-      strncmp(last, owner->tag_name->value, base_length) == 0) {
+  if (strcmp(last, owner->tag_name->value) == 0) {
     return owner->tag_symbol;
   }
   return NULL;
