@@ -8295,9 +8295,31 @@ static bool CurrentClassNameMatchesTypeName(Struct* owner, String* name) {
          strncmp(name->value, owner->tag_name->value, base_length) == 0;
 }
 
+// The class whose members are currently being parsed.  While a class body is
+// parsed the owner lives on the TypeParser, but a member function *body* parses
+// its local declarations through freshly-initialized TypeParsers that do not
+// carry it; recover it from the member function then in flight (which does, via
+// cxx_member_owner) so a self-type reference inside the body still resolves.
+static Struct* CurrentClassBeingParsed(TypeParser* parser) {
+  if (parser != NULL && parser->cxx_member_owner != NULL) {
+    return parser->cxx_member_owner;
+  }
+  // Only consult the current function while genuinely parsing statements inside
+  // a function body (block scope): `compiler->current_function` is not cleared
+  // between top-level declarations, so at file scope it may still point at the
+  // last member function parsed, which would spuriously match a namespace-scope
+  // use of that class's name (e.g. in an alias `using A = ThatClass<...>;`).
+  if (parser != NULL && parser->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    return compiler->current_function->info.function.cxx_member_owner;
+  }
+  return NULL;
+}
+
 static TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser,
                                                  String* name) {
-  Struct* owner = parser != NULL ? parser->cxx_member_owner : NULL;
+  Struct* owner = CurrentClassBeingParsed(parser);
   if (!CurrentClassNameMatchesTypeName(owner, name) ||
       owner->tag_symbol == NULL || owner->tag_symbol->type == NULL ||
       !TypeIsStructOrUnion(owner->tag_symbol->type)) {

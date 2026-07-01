@@ -164,6 +164,41 @@ static ASTNode* NewStaticMemberReference(Syntax* syntax,
                               syntax->lex->current_token_location);
 }
 
+// When an unqualified `name` is a reference to the enclosing class's own name
+// (the injected-class-name) while that class's member body is being parsed,
+// returns the class's tag symbol; otherwise NULL.  A class template is not yet
+// marked as a template while its own body is parsed (that happens after the
+// closing brace), so an explicit self-type template-id such as `Box<T>` used
+// inside `Box`'s members cannot go through the ordinary class-template symbol
+// path.  Routing it through the tag symbol -- which *does* become a template --
+// lets the retained arguments be substituted during member-body cloning and the
+// resulting specialization be instantiated like any other `A<...>` functional
+// cast.
+static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
+                                         FullyQualifiedIdentifier* name) {
+  if (!CompilerIsCXX() || name->is_qualified ||
+      syntax->context != kParsingBlockScope) {
+    return NULL;
+  }
+  Struct* owner = NULL;
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (owner == NULL || owner->tag_name == NULL || owner->tag_symbol == NULL) {
+    return NULL;
+  }
+  const char* last = FullyQualifiedIdentifierLast(name);
+  // The tag name is either the bare class name or carries a `<...>` suffix; a
+  // self-reference matches the base name.
+  size_t base_length = strcspn(owner->tag_name->value, "<");
+  if (strlen(last) == base_length &&
+      strncmp(last, owner->tag_name->value, base_length) == 0) {
+    return owner->tag_symbol;
+  }
+  return NULL;
+}
+
 static ASTNode* ParseThisExpression(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);
@@ -739,6 +774,29 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
     template_arguments = TemplateArgumentVectorCopy(parsed_args);
+  }
+  // An explicit self-type template-id (`Box<T>`) inside the class's own member
+  // body: the class is not marked as a template until its body is fully parsed,
+  // so the resolved `symbol` is the injected-class-name (not a template).  Route
+  // it through the class tag symbol and retain the arguments, mirroring an
+  // ordinary `A<...>` functional cast.  The guard requires `symbol` to actually
+  // denote the current class's own type (the injected-class-name), so a
+  // shadowing value named like the class -- e.g. a local `Foo` followed by a
+  // `<` less-than operator -- is left alone.
+  if (template_arguments == NULL && symbol != NULL &&
+      !symbol->flags.is_template && StorageIs(symbol->storage, STO(typedef)) &&
+      symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
+      LexLookingAt(lex, TOK(less))) {
+    Symbol* self_tag = CurrentClassSelfTagSymbol(syntax, &name);
+    if (self_tag != NULL && self_tag->type != NULL &&
+        TypeIsStructOrUnion(self_tag->type) &&
+        self_tag->type->info.struct_info == symbol->type->info.struct_info) {
+      Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
+      if (args != NULL) {
+        template_arguments = args;
+        symbol = self_tag;
+      }
+    }
   }
   if (template_arguments == NULL && symbol != NULL &&
       (symbol->flags.is_template || SymbolHasFunctionTemplateOverload(symbol)) &&
