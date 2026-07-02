@@ -126,6 +126,58 @@ static bool EvaluateSourceLocationAccessor(ASTNode* node, int64_t* result) {
   return false;
 }
 
+static int64_t NormalizeIntegerValueForType(int64_t value, TypeRecord* type) {
+  if (type == NULL || !TypeIsIntegral(type)) {
+    return value;
+  }
+  int bits = (int)type->size * 8;
+  if (bits <= 0 || bits >= 64) {
+    return value;
+  }
+  uint64_t mask = (1ULL << bits) - 1ULL;
+  uint64_t normalized = (uint64_t)value & mask;
+  if (!TypeIsUnsigned(type) && (normalized & (1ULL << (bits - 1))) != 0) {
+    normalized |= ~mask;
+  }
+  return (int64_t)normalized;
+}
+
+static int64_t NormalizeIntegerValueForNode(int64_t value, ASTNode* node) {
+  return NormalizeIntegerValueForType(value, node != NULL ? node->type : NULL);
+}
+
+static bool TypeIsUnsignedIntegral(TypeRecord* type) {
+  return type != NULL && TypeIsIntegral(type) && TypeIsUnsigned(type) &&
+         !TypeIsBool(type);
+}
+
+static TypeRecord* BinaryUnsignedIntegerConversionType(
+    BinaryASTNode* binary_node) {
+  TypeRecord* left_type = binary_node->left != NULL ? binary_node->left->type
+                                                    : NULL;
+  TypeRecord* right_type = binary_node->right != NULL ? binary_node->right->type
+                                                      : NULL;
+  bool left_unsigned = TypeIsUnsignedIntegral(left_type);
+  bool right_unsigned = TypeIsUnsignedIntegral(right_type);
+  if (left_unsigned && right_unsigned) {
+    return left_type->size >= right_type->size ? left_type : right_type;
+  }
+  if (left_unsigned) {
+    return left_type;
+  }
+  if (right_unsigned) {
+    return right_type;
+  }
+  return NULL;
+}
+
+static bool BinaryOperandsUseFloatingPoint(BinaryASTNode* binary_node) {
+  return (binary_node->left != NULL &&
+          TypeIsFloatingPoint(binary_node->left->type)) ||
+         (binary_node->right != NULL &&
+          TypeIsFloatingPoint(binary_node->right->type));
+}
+
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                int64_t* result) {
@@ -255,7 +307,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
     case AST_OP(ast_op): \
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) && \
           EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) { \
-        *result = left op right; \
+        *result = NormalizeIntegerValueForNode(left op right, node); \
         return true; \
       } \
       break;
@@ -271,7 +323,17 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         if (right == 0) {
           return false;
         }
-        *result = left / right;
+        TypeRecord* unsigned_type =
+            BinaryUnsignedIntegerConversionType(binary_node);
+        if (unsigned_type != NULL) {
+          uint64_t uleft =
+              (uint64_t)NormalizeIntegerValueForType(left, unsigned_type);
+          uint64_t uright =
+              (uint64_t)NormalizeIntegerValueForType(right, unsigned_type);
+          *result = (int64_t)(uleft / uright);
+        } else {
+          *result = left / right;
+        }
         return true;
       }
       break;
@@ -282,7 +344,17 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         if (right == 0) {
           return false;
         }
-        *result = left % right;
+        TypeRecord* unsigned_type =
+            BinaryUnsignedIntegerConversionType(binary_node);
+        if (unsigned_type != NULL) {
+          uint64_t uleft =
+              (uint64_t)NormalizeIntegerValueForType(left, unsigned_type);
+          uint64_t uright =
+              (uint64_t)NormalizeIntegerValueForType(right, unsigned_type);
+          *result = (int64_t)(uleft % uright);
+        } else {
+          *result = left % right;
+        }
         return true;
       }
       break;
@@ -299,18 +371,95 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       break;
 
-      EVAL_BINARY_OP(less, <)
-      EVAL_BINARY_OP(lesseq, <=)
-      EVAL_BINARY_OP(greater, >)
-      EVAL_BINARY_OP(greatereq, >=)
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+      if (BinaryOperandsUseFloatingPoint(binary_node)) {
+        double fleft;
+        double fright;
+        if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left,
+                                                     &fleft) &&
+            EvaluateFloatingPointExpressionInContext(ctx, binary_node->right,
+                                                     &fright)) {
+          if (node->op == AST_OP(less)) {
+            *result = fleft < fright;
+          } else if (node->op == AST_OP(lesseq)) {
+            *result = fleft <= fright;
+          } else if (node->op == AST_OP(greater)) {
+            *result = fleft > fright;
+          } else {
+            *result = fleft >= fright;
+          }
+          return true;
+        }
+        break;
+      }
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
+          EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
+        TypeRecord* unsigned_type =
+            BinaryUnsignedIntegerConversionType(binary_node);
+        if (unsigned_type != NULL) {
+          uint64_t uleft =
+              (uint64_t)NormalizeIntegerValueForType(left, unsigned_type);
+          uint64_t uright =
+              (uint64_t)NormalizeIntegerValueForType(right, unsigned_type);
+          if (node->op == AST_OP(less)) {
+            *result = uleft < uright;
+          } else if (node->op == AST_OP(lesseq)) {
+            *result = uleft <= uright;
+          } else if (node->op == AST_OP(greater)) {
+            *result = uleft > uright;
+          } else {
+            *result = uleft >= uright;
+          }
+        } else {
+          if (node->op == AST_OP(less)) {
+            *result = left < right;
+          } else if (node->op == AST_OP(lesseq)) {
+            *result = left <= right;
+          } else if (node->op == AST_OP(greater)) {
+            *result = left > right;
+          } else {
+            *result = left >= right;
+          }
+        }
+        return true;
+      }
+      break;
+
     case AST_OP(equal):
     case AST_OP(noteq):
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
         return true;
       }
+      if (BinaryOperandsUseFloatingPoint(binary_node)) {
+        double fleft;
+        double fright;
+        if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left,
+                                                     &fleft) &&
+            EvaluateFloatingPointExpressionInContext(ctx, binary_node->right,
+                                                     &fright)) {
+          *result = node->op == AST_OP(equal) ? fleft == fright
+                                              : fleft != fright;
+          return true;
+        }
+        break;
+      }
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
           EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
-        *result = node->op == AST_OP(equal) ? left == right : left != right;
+        TypeRecord* unsigned_type =
+            BinaryUnsignedIntegerConversionType(binary_node);
+        if (unsigned_type != NULL) {
+          uint64_t uleft =
+              (uint64_t)NormalizeIntegerValueForType(left, unsigned_type);
+          uint64_t uright =
+              (uint64_t)NormalizeIntegerValueForType(right, unsigned_type);
+          *result = node->op == AST_OP(equal) ? uleft == uright
+                                              : uleft != uright;
+        } else {
+          *result = node->op == AST_OP(equal) ? left == right : left != right;
+        }
         return true;
       }
       break;
@@ -321,7 +470,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
 #define EVAL_UNARY_OP(ast_op, op) \
 case AST_OP(ast_op): \
       if (EvaluateIntegerExpressionInContext(ctx, unary_node->sub, &left)) { \
-        *result = op left; \
+        *result = NormalizeIntegerValueForNode(op left, node); \
         return true; \
       } \
       break;
@@ -338,18 +487,54 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(c2b, (_Bool))
 
     case AST_OP(logand):
-      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
-        if (left != 0) {
-          if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
-                                                 &right)) {
-            *result = right != 0;
+      if (BinaryOperandsUseFloatingPoint(binary_node)) {
+        double fleft;
+        double fright;
+        if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left,
+                                                     &fleft)) {
+          if (fleft == 0) {
+            *result = 0;
             return true;
           }
+          if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right,
+                                                       &fright)) {
+            *result = fright != 0;
+            return true;
+          }
+        }
+        break;
+      }
+      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
+        if (left == 0) {
+          *result = 0;
+          return true;
+        }
+        if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
+                                               &right)) {
+          *result = right != 0;
+          return true;
         }
       }
       break;
 
     case AST_OP(logor):
+      if (BinaryOperandsUseFloatingPoint(binary_node)) {
+        double fleft;
+        double fright;
+        if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left,
+                                                     &fleft)) {
+          if (fleft != 0) {
+            *result = 1;
+            return true;
+          }
+          if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right,
+                                                       &fright)) {
+            *result = fright != 0;
+            return true;
+          }
+        }
+        break;
+      }
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
         if (left == 0) {
           if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
@@ -384,7 +569,7 @@ case AST_OP(ast_op): \
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
-        *result = left;
+        *result = NormalizeIntegerValueForType(left, c->cast_type);
         return true;
       }
       break;
@@ -632,11 +817,13 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
 
     case AST_OP(logand):
       if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
-        if (left != 0) {
-          if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
-            *result = right != 0;
-            return true;
-          }
+        if (left == 0) {
+          *result = 0;
+          return true;
+        }
+        if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
+          *result = right != 0;
+          return true;
         }
       }
       break;

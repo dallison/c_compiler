@@ -1,0 +1,766 @@
+//
+//  vector
+//  c_compiler
+//
+//  C++20 std::vector support for DaveCC.
+//
+//  Storage is a single contiguous allocation obtained from the allocator.  The
+//  range [__data_, __data_ + __size_) contains live T objects; the remainder up
+//  to __cap_ is raw storage.  Element lifetime is managed with placement new and
+//  explicit destruction so non-trivial element types work correctly.
+//
+
+#ifndef __davecc_vector__
+#define __davecc_vector__
+
+#include <compare>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <new>
+#include <stddef.h>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __vector_detail {
+
+static inline void __throw_out_of_range() {
+  throw out_of_range((const char*)"vector::at");
+}
+
+static inline void __throw_length_error() {
+  throw length_error((const char*)"vector::reserve");
+}
+
+}  // namespace __vector_detail
+
+template <class T, class Allocator = allocator<T> >
+class vector {
+ public:
+  using value_type = T;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using iterator = T*;
+  using const_iterator = const T*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  pointer __data_;
+  size_type __size_;
+  size_type __cap_;
+  allocator_type __alloc_;
+
+  static size_type __recommend(size_type current, size_type needed) {
+    size_type next = current == 0 ? 1 : current * 2;
+    if (next < needed) {
+      next = needed;
+    }
+    return next;
+  }
+
+  static void __destroy_one_impl(pointer, true_type*) noexcept {
+  }
+
+  static void __destroy_one_impl(pointer p, false_type*) noexcept {
+    p->~T();
+  }
+
+  static void __destroy_one(pointer p) noexcept {
+    __destroy_one_impl(p, (typename is_trivially_destructible<T>::type*)0);
+  }
+
+  void __destroy_range_impl(pointer, pointer, true_type*) noexcept {
+  }
+
+  void __destroy_range_impl(pointer first, pointer last, false_type*) noexcept {
+    while (last != first) {
+      --last;
+      __destroy_one(last);
+    }
+  }
+
+  void __destroy_range(pointer first, pointer last) noexcept {
+    __destroy_range_impl(first, last,
+                         (typename is_trivially_destructible<T>::type*)0);
+  }
+
+  size_type __index_of(const_iterator pos) const noexcept {
+    return __data_ == nullptr ? 0 : static_cast<size_type>(pos - __data_);
+  }
+
+  void __destroy_all() noexcept {
+    if (__size_ != 0) {
+      __destroy_range(__data_, __data_ + __size_);
+    }
+    __size_ = 0;
+  }
+
+  void __deallocate_storage() noexcept {
+    if (__data_ != nullptr) {
+      __alloc_.deallocate(__data_, __cap_);
+    }
+    __data_ = nullptr;
+    __cap_ = 0;
+  }
+
+  void __reset_empty() noexcept {
+    __data_ = nullptr;
+    __size_ = 0;
+    __cap_ = 0;
+  }
+
+  void __construct_fill(pointer dst, size_type count, const T& value) {
+    size_type i = 0;
+    try {
+      for (; i < count; i++) {
+        new (dst + i) T(value);
+      }
+    } catch (...) {
+      __destroy_range(dst, dst + i);
+      throw;
+    }
+  }
+
+  void __construct_default(pointer dst, size_type count) {
+    size_type i = 0;
+    try {
+      for (; i < count; i++) {
+        new (dst + i) T();
+      }
+    } catch (...) {
+      __destroy_range(dst, dst + i);
+      throw;
+    }
+  }
+
+  template <class It>
+  void __construct_range(pointer dst, It first, It last) {
+    size_type i = 0;
+    try {
+      for (; first != last; ++first, ++i) {
+        new (dst + i) T(*first);
+      }
+    } catch (...) {
+      __destroy_range(dst, dst + i);
+      throw;
+    }
+  }
+
+  void __construct_move(pointer dst, pointer first, pointer last) {
+    size_type i = 0;
+    try {
+      for (; first != last; ++first, ++i) {
+        new (dst + i) T(std::move(*first));
+      }
+    } catch (...) {
+      __destroy_range(dst, dst + i);
+      throw;
+    }
+  }
+
+  void __construct_copy(pointer dst, const_pointer first, const_pointer last) {
+    size_type i = 0;
+    try {
+      for (; first != last; ++first, ++i) {
+        new (dst + i) T(*first);
+      }
+    } catch (...) {
+      __destroy_range(dst, dst + i);
+      throw;
+    }
+  }
+
+  void __reserve_exact(size_type new_cap) {
+    if (new_cap <= __cap_) {
+      return;
+    }
+    pointer fresh = __alloc_.allocate(new_cap);
+    try {
+      if (__size_ != 0) {
+        __construct_move(fresh, __data_, __data_ + __size_);
+      }
+    } catch (...) {
+      __alloc_.deallocate(fresh, new_cap);
+      throw;
+    }
+    if (__size_ != 0) {
+      __destroy_range(__data_, __data_ + __size_);
+    }
+    __deallocate_storage();
+    __data_ = fresh;
+    __cap_ = new_cap;
+  }
+
+  void __grow_for(size_type needed) {
+    if (needed > __cap_) {
+      __reserve_exact(__recommend(__cap_, needed));
+    }
+  }
+
+  void __assign_fill(size_type count, const T& value) {
+    __destroy_all();
+    if (count > __cap_) {
+      __deallocate_storage();
+      __data_ = __alloc_.allocate(count);
+      __cap_ = count;
+    }
+    __construct_fill(__data_, count, value);
+    __size_ = count;
+  }
+
+  template <class It>
+  void __assign_range(It first, It last) {
+    __destroy_all();
+    for (; first != last; ++first) {
+      __grow_for(__size_ + 1);
+      new (__data_ + __size_) T(*first);
+      __size_++;
+    }
+  }
+
+  iterator __insert_copies(iterator pos, const_pointer first,
+                           const_pointer last, size_type count) {
+    size_type index = __index_of(pos);
+    if (count == 0) {
+      return __data_ + index;
+    }
+    size_type new_size = __size_ + count;
+    size_type new_cap = __recommend(__cap_, new_size);
+    pointer fresh = __alloc_.allocate(new_cap);
+    pointer out = fresh;
+    try {
+      for (size_type i = 0; i < index; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+      for (; first != last; ++first, out++) {
+        new (out) T(*first);
+      }
+      for (size_type i = index; i < __size_; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+    } catch (...) {
+      __destroy_range(fresh, out);
+      __alloc_.deallocate(fresh, new_cap);
+      throw;
+    }
+    __destroy_all();
+    __deallocate_storage();
+    __data_ = fresh;
+    __size_ = new_size;
+    __cap_ = new_cap;
+    return __data_ + index;
+  }
+
+  iterator __insert_fill(iterator pos, size_type count, const T& value) {
+    size_type index = __index_of(pos);
+    if (count == 0) {
+      return __data_ + index;
+    }
+    size_type new_size = __size_ + count;
+    size_type new_cap = __recommend(__cap_, new_size);
+    pointer fresh = __alloc_.allocate(new_cap);
+    pointer out = fresh;
+    try {
+      for (size_type i = 0; i < index; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+      for (size_type i = 0; i < count; i++, out++) {
+        new (out) T(value);
+      }
+      for (size_type i = index; i < __size_; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+    } catch (...) {
+      __destroy_range(fresh, out);
+      __alloc_.deallocate(fresh, new_cap);
+      throw;
+    }
+    __destroy_all();
+    __deallocate_storage();
+    __data_ = fresh;
+    __size_ = new_size;
+    __cap_ = new_cap;
+    return __data_ + index;
+  }
+
+  iterator __insert_move(iterator pos, T&& value) {
+    size_type index = __index_of(pos);
+    size_type new_size = __size_ + 1;
+    size_type new_cap = __recommend(__cap_, new_size);
+    pointer fresh = __alloc_.allocate(new_cap);
+    pointer out = fresh;
+    try {
+      for (size_type i = 0; i < index; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+      new (out) T(std::move(value));
+      out++;
+      for (size_type i = index; i < __size_; i++, out++) {
+        new (out) T(__data_[i]);
+      }
+    } catch (...) {
+      __destroy_range(fresh, out);
+      __alloc_.deallocate(fresh, new_cap);
+      throw;
+    }
+    __destroy_all();
+    __deallocate_storage();
+    __data_ = fresh;
+    __size_ = new_size;
+    __cap_ = new_cap;
+    return __data_ + index;
+  }
+
+ public:
+  vector() noexcept { __reset_empty(); }
+
+  explicit vector(const Allocator& alloc) noexcept : __alloc_(alloc) {
+    __reset_empty();
+  }
+
+  explicit vector(size_type count, const Allocator& alloc = Allocator())
+      : __alloc_(alloc) {
+    __reset_empty();
+    if (count != 0) {
+      __data_ = __alloc_.allocate(count);
+      __cap_ = count;
+      __construct_default(__data_, count);
+      __size_ = count;
+    }
+  }
+
+  vector(size_type count, const T& value,
+         const Allocator& alloc = Allocator()) : __alloc_(alloc) {
+    __reset_empty();
+    if (count != 0) {
+      __data_ = __alloc_.allocate(count);
+      __cap_ = count;
+      __construct_fill(__data_, count, value);
+      __size_ = count;
+    }
+  }
+
+  template <class It>
+  vector(It first, It last,
+         typename enable_if<!is_integral<It>::value, int>::type = 0)
+      : __data_(nullptr), __size_(0), __cap_(0) {
+    __assign_range(first, last);
+  }
+
+  template <class It>
+  vector(It first, It last, const Allocator& alloc,
+         typename enable_if<!is_integral<It>::value, int>::type = 0)
+      : __alloc_(alloc) {
+    __reset_empty();
+    __assign_range(first, last);
+  }
+
+  vector(initializer_list<T> init, const Allocator& alloc = Allocator())
+      : __alloc_(alloc) {
+    __reset_empty();
+    if (init.size() != 0) {
+      __data_ = __alloc_.allocate(init.size());
+      __cap_ = init.size();
+      __construct_range(__data_, init.begin(), init.end());
+      __size_ = init.size();
+    }
+  }
+
+  vector(const vector& other) : __alloc_(other.__alloc_) {
+    __reset_empty();
+    if (other.__size_ != 0) {
+      __data_ = __alloc_.allocate(other.__size_);
+      __cap_ = other.__size_;
+      __construct_copy(__data_, other.__data_, other.__data_ + other.__size_);
+      __size_ = other.__size_;
+    }
+  }
+
+  vector(const vector& other, const Allocator& alloc) : __alloc_(alloc) {
+    __reset_empty();
+    if (other.__size_ != 0) {
+      __data_ = __alloc_.allocate(other.__size_);
+      __cap_ = other.__size_;
+      __construct_copy(__data_, other.__data_, other.__data_ + other.__size_);
+      __size_ = other.__size_;
+    }
+  }
+
+  vector(vector&& other) noexcept : __alloc_(other.__alloc_) {
+    __data_ = other.__data_;
+    __size_ = other.__size_;
+    __cap_ = other.__cap_;
+    other.__reset_empty();
+  }
+
+  vector(vector&& other, const Allocator& alloc) : __alloc_(alloc) {
+    __reset_empty();
+    if (__alloc_ == other.__alloc_) {
+      __data_ = other.__data_;
+      __size_ = other.__size_;
+      __cap_ = other.__cap_;
+      other.__reset_empty();
+    } else {
+      __reserve_exact(other.__size_);
+      __construct_move(__data_, other.__data_, other.__data_ + other.__size_);
+      __size_ = other.__size_;
+    }
+  }
+
+  ~vector() {
+    __destroy_all();
+    __deallocate_storage();
+  }
+
+  vector& operator=(const vector& other) {
+    if (this != &other) {
+      __assign_range(other.begin(), other.end());
+    }
+    return *this;
+  }
+
+  vector& operator=(vector&& other) noexcept {
+    if (this != &other) {
+      __destroy_all();
+      __deallocate_storage();
+      __alloc_ = other.__alloc_;
+      __data_ = other.__data_;
+      __size_ = other.__size_;
+      __cap_ = other.__cap_;
+      other.__reset_empty();
+    }
+    return *this;
+  }
+
+  vector& operator=(initializer_list<T> init) {
+    __assign_range(init.begin(), init.end());
+    return *this;
+  }
+
+  void assign(size_type count, const T& value) { __assign_fill(count, value); }
+
+  template <class It>
+  void assign(It first, It last,
+              typename enable_if<!is_integral<It>::value, int>::type = 0) {
+    __assign_range(first, last);
+  }
+
+  void assign(initializer_list<T> init) {
+    __assign_range(init.begin(), init.end());
+  }
+
+  allocator_type get_allocator() const noexcept { return __alloc_; }
+
+  reference at(size_type pos) {
+    if (pos >= __size_) {
+      __vector_detail::__throw_out_of_range();
+    }
+    return __data_[pos];
+  }
+
+  const_reference at(size_type pos) const {
+    if (pos >= __size_) {
+      __vector_detail::__throw_out_of_range();
+    }
+    return __data_[pos];
+  }
+
+  reference operator[](size_type pos) { return __data_[pos]; }
+  const_reference operator[](size_type pos) const { return __data_[pos]; }
+  reference front() { return __data_[0]; }
+  const_reference front() const { return __data_[0]; }
+  reference back() { return __data_[__size_ - 1]; }
+  const_reference back() const { return __data_[__size_ - 1]; }
+  pointer data() noexcept { return __data_; }
+  const_pointer data() const noexcept { return __data_; }
+
+  iterator begin() noexcept { return __data_; }
+  const_iterator begin() const noexcept { return __data_; }
+  const_iterator cbegin() const noexcept { return __data_; }
+  iterator end() noexcept { return __data_ + __size_; }
+  const_iterator end() const noexcept { return __data_ + __size_; }
+  const_iterator cend() const noexcept { return __data_ + __size_; }
+  reverse_iterator rbegin() noexcept {
+    return reverse_iterator(__data_ + __size_);
+  }
+  const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(__data_ + __size_);
+  }
+  const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(__data_ + __size_);
+  }
+  reverse_iterator rend() noexcept {
+    return reverse_iterator(__data_);
+  }
+  const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(__data_);
+  }
+  const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(__data_);
+  }
+
+  bool empty() const noexcept { return __size_ == 0; }
+  size_type size() const noexcept { return __size_; }
+  size_type max_size() const noexcept { return __alloc_.max_size(); }
+  size_type capacity() const noexcept { return __cap_; }
+
+  void reserve(size_type new_cap) {
+    if (new_cap > max_size()) {
+      __vector_detail::__throw_length_error();
+    }
+    __reserve_exact(new_cap);
+  }
+
+  void shrink_to_fit() {
+    if (__size_ == __cap_) {
+      return;
+    }
+    if (__size_ == 0) {
+      __destroy_all();
+      __deallocate_storage();
+      return;
+    }
+    pointer fresh = __alloc_.allocate(__size_);
+    try {
+      __construct_move(fresh, __data_, __data_ + __size_);
+    } catch (...) {
+      __alloc_.deallocate(fresh, __size_);
+      throw;
+    }
+    __destroy_all();
+    __deallocate_storage();
+    __data_ = fresh;
+    __cap_ = __size_;
+  }
+
+  void clear() noexcept {
+    __destroy_all();
+  }
+
+  void resize(size_type count) {
+    if (count < __size_) {
+      __destroy_range(__data_ + count, __data_ + __size_);
+      __size_ = count;
+    } else if (count > __size_) {
+      __grow_for(count);
+      __construct_default(__data_ + __size_, count - __size_);
+      __size_ = count;
+    }
+  }
+
+  void resize(size_type count, const T& value) {
+    if (count < __size_) {
+      __destroy_range(__data_ + count, __data_ + __size_);
+      __size_ = count;
+    } else if (count > __size_) {
+      __grow_for(count);
+      __construct_fill(__data_ + __size_, count - __size_, value);
+      __size_ = count;
+    }
+  }
+
+  iterator insert(const_iterator pos, const T& value) {
+    return __insert_fill(const_cast<iterator>(pos), 1, value);
+  }
+
+  iterator insert(const_iterator pos, T&& value) {
+    return __insert_move(const_cast<iterator>(pos), std::move(value));
+  }
+
+  iterator insert(const_iterator pos, size_type count, const T& value) {
+    size_type index = __index_of(pos);
+    if (count == 0) {
+      return __data_ + index;
+    }
+    return __insert_fill(__data_ + index, count, value);
+  }
+
+  template <class It>
+  iterator insert(const_iterator pos, It first, It last,
+                  typename enable_if<!is_integral<It>::value, int>::type = 0) {
+    size_type index = __index_of(pos);
+    vector tmp(first, last);
+    return __insert_copies(__data_ + index, tmp.__data_,
+                           tmp.__data_ + tmp.__size_, tmp.__size_);
+  }
+
+  iterator insert(const_iterator pos, initializer_list<T> init) {
+    size_type index = __index_of(pos);
+    return __insert_copies(__data_ + index, init.begin(), init.end(),
+                           init.size());
+  }
+
+  iterator emplace(const_iterator pos) {
+    T tmp;
+    return __insert_move(const_cast<iterator>(pos), std::move(tmp));
+  }
+
+  template <class A0>
+  iterator emplace(const_iterator pos, A0&& a0) {
+    T tmp(a0);
+    return __insert_move(const_cast<iterator>(pos), std::move(tmp));
+  }
+
+  iterator erase(const_iterator pos) {
+    size_type index = __index_of(pos);
+    for (size_type i = index; i + 1 < __size_; i++) {
+      __data_[i] = std::move(__data_[i + 1]);
+    }
+    __size_--;
+    __destroy_one(__data_ + __size_);
+    return __data_ + index;
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    size_type index = __index_of(first);
+    size_type count = static_cast<size_type>(last - first);
+    if (count == 0) {
+      return __data_ + index;
+    }
+    for (size_type i = index; i + count < __size_; i++) {
+      __data_[i] = std::move(__data_[i + count]);
+    }
+    __destroy_range(__data_ + (__size_ - count), __data_ + __size_);
+    __size_ -= count;
+    return __data_ + index;
+  }
+
+  void push_back(const T& value) {
+    __grow_for(__size_ + 1);
+    new (__data_ + __size_) T(value);
+    __size_++;
+  }
+
+  void push_back(T&& value) {
+    __grow_for(__size_ + 1);
+    new (__data_ + __size_) T(std::move(value));
+    __size_++;
+  }
+
+  reference emplace_back() {
+    __grow_for(__size_ + 1);
+    new (__data_ + __size_) T();
+    __size_++;
+    return back();
+  }
+
+  template <class A0>
+  reference emplace_back(A0&& a0) {
+    __grow_for(__size_ + 1);
+    new (__data_ + __size_) T(a0);
+    __size_++;
+    return back();
+  }
+
+  void pop_back() {
+    __size_--;
+    __destroy_one(__data_ + __size_);
+  }
+
+  void swap(vector& other) noexcept {
+    pointer data = __data_;
+    size_type size = __size_;
+    size_type cap = __cap_;
+    allocator_type alloc = __alloc_;
+    __data_ = other.__data_;
+    __size_ = other.__size_;
+    __cap_ = other.__cap_;
+    __alloc_ = other.__alloc_;
+    other.__data_ = data;
+    other.__size_ = size;
+    other.__cap_ = cap;
+    other.__alloc_ = alloc;
+  }
+};
+
+template <class T, class Allocator>
+bool operator==(const vector<T, Allocator>& a,
+                const vector<T, Allocator>& b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); i++) {
+    if (!(a[i] == b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class T, class Allocator>
+bool operator!=(const vector<T, Allocator>& a,
+                const vector<T, Allocator>& b) {
+  return !(a == b);
+}
+
+template <class T, class Allocator>
+bool operator<(const vector<T, Allocator>& a,
+               const vector<T, Allocator>& b) {
+  size_t n = a.size() < b.size() ? a.size() : b.size();
+  for (size_t i = 0; i < n; i++) {
+    if (a[i] < b[i]) {
+      return true;
+    }
+    if (b[i] < a[i]) {
+      return false;
+    }
+  }
+  return a.size() < b.size();
+}
+
+template <class T, class Allocator>
+bool operator>(const vector<T, Allocator>& a,
+               const vector<T, Allocator>& b) {
+  return b < a;
+}
+
+template <class T, class Allocator>
+bool operator<=(const vector<T, Allocator>& a,
+                const vector<T, Allocator>& b) {
+  return !(b < a);
+}
+
+template <class T, class Allocator>
+bool operator>=(const vector<T, Allocator>& a,
+                const vector<T, Allocator>& b) {
+  return !(a < b);
+}
+
+template <class T, class Allocator>
+strong_ordering operator<=>(const vector<T, Allocator>& a,
+                            const vector<T, Allocator>& b) {
+  size_t n = a.size() < b.size() ? a.size() : b.size();
+  for (size_t i = 0; i < n; i++) {
+    if (a[i] < b[i]) {
+      return strong_ordering::less;
+    }
+    if (b[i] < a[i]) {
+      return strong_ordering::greater;
+    }
+  }
+  if (a.size() < b.size()) {
+    return strong_ordering::less;
+  }
+  if (a.size() > b.size()) {
+    return strong_ordering::greater;
+  }
+  return strong_ordering::equal;
+}
+
+template <class T, class Allocator>
+void swap(vector<T, Allocator>& a, vector<T, Allocator>& b) noexcept {
+  a.swap(b);
+}
+
+}  // namespace std
+
+#endif /* __davecc_vector__ */

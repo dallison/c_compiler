@@ -3475,8 +3475,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
 
   ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type);
   Vector* friend_decls = NewVector();
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_class_access_context = befriending;
   ASTNode* definition =
       DeclareOrDefineFunction(syntax, friend_decls, sym, old_sym);
+  compiler->current_class_access_context = saved_access_context;
   RecordFriendFunction(syntax, befriending, sym, in_scope_symbol, definition);
   if (definition == NULL) {
     // Declaration only: DeclareOrDefineFunction did not adopt the vector.

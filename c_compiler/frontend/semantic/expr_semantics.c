@@ -2862,6 +2862,26 @@ static const char* CXXAccessName(CXXAccess access) {
   return "unknown";
 }
 
+static Struct* CurrentFunctionMemberOwner(void) {
+  TypeRecord* current = compiler->current_function;
+  if (current == NULL || !TypeIsFunction(current)) {
+    return NULL;
+  }
+  if (current->info.function.cxx_member_owner != NULL) {
+    return current->info.function.cxx_member_owner;
+  }
+  if (current->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Symbol* this_sym = current->info.function.prototype.value.p[0];
+  if (this_sym == NULL || this_sym->type == NULL ||
+      !StringEqual(&this_sym->name, "this") || this_sym->type->next == NULL ||
+      !TypeIsStructOrUnion(this_sym->type->next)) {
+    return NULL;
+  }
+  return this_sym->type->next->info.struct_info;
+}
+
 // Returns true when the function currently being analyzed has been granted
 // friendship by class `owner` (via a 'friend class' or 'friend function'
 // declaration), and may therefore access its private and protected members.
@@ -2874,7 +2894,7 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
     return false;
   }
   // 'friend class C;': any member function of C is a friend.
-  Struct* current_owner = current->info.function.cxx_member_owner;
+  Struct* current_owner = CurrentFunctionMemberOwner();
   if (current_owner != NULL) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
       if (owner->friend_classes.value.p[i] == current_owner) {
@@ -2892,6 +2912,13 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
       continue;
     }
     if (friend_symbol == current_symbol) {
+      return true;
+    }
+    if (current_symbol != NULL &&
+        friend_symbol->asm_name.length != 0 &&
+        current_symbol->asm_name.length != 0 &&
+        StringEqualString(&friend_symbol->asm_name,
+                          &current_symbol->asm_name)) {
       return true;
     }
     if (current_symbol != NULL &&
@@ -2913,19 +2940,24 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   Struct* current_owner = NULL;
   if (compiler->current_function != NULL &&
       TypeIsFunction(compiler->current_function)) {
-    current_owner = compiler->current_function->info.function.cxx_member_owner;
-  } else if (compiler->current_class_access_context != NULL) {
-    // A static data member initializer is in the scope of its class and may
-    // name the class's private and protected members.
-    current_owner = compiler->current_class_access_context;
-  } else {
-    return false;
+    current_owner = CurrentFunctionMemberOwner();
   }
-  if (current_owner == owner) {
-    return true;
+  if (current_owner == NULL &&
+      compiler->current_class_access_context != NULL) {
+    // A static data member initializer is in the scope of its class and may
+    // name the class's private and protected members. Template body cloning also
+    // re-analyzes member expressions before current_function has a recoverable
+    // owner, but still within the instantiated class context.
+    current_owner = compiler->current_class_access_context;
   }
   if (CurrentFunctionIsFriendOf(owner) ||
       (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context))) {
+    return true;
+  }
+  if (current_owner == NULL) {
+    return false;
+  }
+  if (current_owner == owner) {
     return true;
   }
   if (original_access == kAccessPrivate) {
