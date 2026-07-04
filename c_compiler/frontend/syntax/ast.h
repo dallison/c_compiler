@@ -90,6 +90,7 @@ typedef enum {
   AST_OP(rshift),
   AST_OP(rshifteq),
   AST_OP(sizeof),
+  AST_OP(alignof),
   AST_OP(typeid),
   AST_OP(div),
   AST_OP(diveq),
@@ -515,6 +516,11 @@ ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location);
 ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr, SourceLocation location);
 ASTNode* NewSizeofASTNodeWithType(TypeRecord* type, SourceLocation location);
 ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location);
+ASTNode* NewAlignofASTNodeWithKnownAlignment(int alignment,
+                                             SourceLocation location);
+ASTNode* NewAlignofASTNodeWithExpression(ASTNode* expr,
+                                         SourceLocation location);
+ASTNode* NewAlignofASTNodeWithType(TypeRecord* type, SourceLocation location);
 
 // typeid operator.  Carries either a type operand (typeid(type-id)) or an
 // expression operand (typeid(expr)).  Semantic analysis rewrites this node into

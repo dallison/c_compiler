@@ -104,7 +104,7 @@ STATIC FreeBlockHeader* ExpandHeap(void) { return NULL; }
 
 STATIC size_t TakeStartOfFreeBlock(FreeBlockHeader* block, size_t num_bytes,
                                    size_t full_length, FreeBlockHeader* prev) {
-  assert(block->length > full_length);
+  assert(block->length >= full_length);
   
   size_t rem = block->length - full_length;
   if (rem >= sizeof(FreeBlockHeader)) {

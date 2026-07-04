@@ -1448,8 +1448,13 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     // call before it reaches its own argument register.  Struct/array
     // arguments are passed by address (and struct returns land in memory), so
     // leave those untouched.
+    bool aggregate_actual =
+        TypeIsStructOrUnion(arg->type) || TypeIsArray(arg->type);
+    bool stashable_reference_actual =
+        reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
+        !TypeIsArray(arg_value->type);
     if (stash_call_results && ContainsCall(arg) &&
-        !TypeIsStructOrUnion(arg->type) && !TypeIsArray(arg->type)) {
+        (!aggregate_actual || stashable_reference_actual)) {
       arg_value = StashCallResult(gen, arg_value,
                                   /*route_conversion_to_dest=*/true);
     }
@@ -2552,7 +2557,9 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
 
     case AST_OP(sizeof):
-      if (TypeIsVLA(sizeof_node->expr->type)) {
+    case AST_OP(alignof):
+      if (node->op == AST_OP(sizeof) && sizeof_node->expr != NULL &&
+          TypeIsVLA(sizeof_node->expr->type)) {
         result = sizeof_node->expr->type->info.array.size.vla.codegen_info;
         assert(result != NULL);
       } else {

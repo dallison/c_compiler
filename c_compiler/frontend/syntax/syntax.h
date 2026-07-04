@@ -170,6 +170,7 @@ ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax);
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs);
 bool SyntaxLookingAtCXXAttribute(Syntax* syntax);
 bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs);
+bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs);
 void SyntaxApplyDeclarationAttributes(Symbol* sym);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);

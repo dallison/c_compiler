@@ -9,6 +9,7 @@
 #define memory_h
 
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace std {
@@ -24,6 +25,10 @@ struct allocator {
   using const_pointer = const T*;
   using reference = T&;
   using const_reference = const T&;
+  using propagate_on_container_copy_assignment = false_type;
+  using propagate_on_container_move_assignment = false_type;
+  using propagate_on_container_swap = false_type;
+  using is_always_equal = true_type;
 
   constexpr allocator() noexcept {
   }
@@ -39,8 +44,159 @@ struct allocator {
     ::operator delete(static_cast<void*>(ptr));
   }
 
+  void construct(T* ptr, const T& value) {
+    new (ptr) T(value);
+  }
+
+  void construct(T* ptr, T&& value) {
+    new (ptr) T(static_cast<T&&>(value));
+  }
+
+  template <class U, class... Args>
+  void construct(U* ptr, Args&&... args) {
+    new (ptr) U(std::forward<Args>(args)...);
+  }
+
+  template <class U>
+  void destroy(U* ptr) {
+    ptr->~U();
+  }
+
   size_type max_size() const noexcept {
     return static_cast<size_type>(-1) / sizeof(T);
+  }
+};
+
+template <class T>
+struct __alloc_void {
+  using type = void;
+};
+
+template <class T>
+using __void_t = typename __alloc_void<T>::type;
+
+template <class T>
+static bool __alloc_traits_bool(T* value) {
+  return false;
+}
+
+template <>
+static bool __alloc_traits_bool<true_type>(true_type* value) {
+  return true;
+}
+
+template <class Alloc, class Void = void>
+struct __alloc_traits_copy_propagate {
+  using type = false_type;
+};
+
+template <class Alloc>
+struct __alloc_traits_copy_propagate<
+    Alloc, __void_t<typename Alloc::propagate_on_container_copy_assignment> > {
+  using type = typename Alloc::propagate_on_container_copy_assignment;
+};
+
+template <class Alloc, class Void = void>
+struct __alloc_traits_move_propagate {
+  using type = false_type;
+};
+
+template <class Alloc>
+struct __alloc_traits_move_propagate<
+    Alloc, __void_t<typename Alloc::propagate_on_container_move_assignment> > {
+  using type = typename Alloc::propagate_on_container_move_assignment;
+};
+
+template <class Alloc, class Void = void>
+struct __alloc_traits_swap_propagate {
+  using type = false_type;
+};
+
+template <class Alloc>
+struct __alloc_traits_swap_propagate<
+    Alloc, __void_t<typename Alloc::propagate_on_container_swap> > {
+  using type = typename Alloc::propagate_on_container_swap;
+};
+
+template <class Alloc, class Void = void>
+struct __alloc_traits_always_equal {
+  using type = false_type;
+};
+
+template <class Alloc>
+struct __alloc_traits_always_equal<
+    Alloc, __void_t<typename Alloc::is_always_equal> > {
+  using type = typename Alloc::is_always_equal;
+};
+
+template <class Alloc>
+struct allocator_traits {
+  using allocator_type = Alloc;
+  using value_type = typename Alloc::value_type;
+  using size_type = typename Alloc::size_type;
+  using difference_type = typename Alloc::difference_type;
+  using pointer = typename Alloc::pointer;
+  using const_pointer = typename Alloc::const_pointer;
+  using propagate_on_container_copy_assignment =
+      typename __alloc_traits_copy_propagate<Alloc>::type;
+  using propagate_on_container_move_assignment =
+      typename __alloc_traits_move_propagate<Alloc>::type;
+  using propagate_on_container_swap =
+      typename __alloc_traits_swap_propagate<Alloc>::type;
+  using is_always_equal = typename __alloc_traits_always_equal<Alloc>::type;
+
+  static bool __propagate_on_container_copy_assignment() {
+    return __alloc_traits_bool((propagate_on_container_copy_assignment*)0);
+  }
+
+  static bool __propagate_on_container_move_assignment() {
+    return __alloc_traits_bool((propagate_on_container_move_assignment*)0);
+  }
+
+  static bool __propagate_on_container_swap() {
+    return __alloc_traits_bool((propagate_on_container_swap*)0);
+  }
+
+  static bool __is_always_equal() {
+    return __alloc_traits_bool((is_always_equal*)0);
+  }
+
+  static pointer allocate(Alloc& alloc, size_type n) {
+    return alloc.allocate(n);
+  }
+
+  static void deallocate(Alloc& alloc, pointer ptr, size_type n) {
+    alloc.deallocate(ptr, n);
+  }
+
+  static void construct(Alloc& alloc, pointer ptr) {
+    alloc.construct(ptr);
+  }
+
+  static void construct(Alloc& alloc, pointer ptr, const value_type& value) {
+    alloc.construct(ptr, value);
+  }
+
+  static void construct(Alloc& alloc, pointer ptr, value_type&& value) {
+    alloc.construct(ptr, static_cast<value_type&&>(value));
+  }
+
+  template <class T, class... Args>
+  static void construct(Alloc& alloc, T* ptr, Args&&... args) {
+    alloc.construct(ptr, std::forward<Args>(args)...);
+  }
+
+  template <class T>
+  static void destroy(Alloc& alloc, T* ptr) {
+    alloc.destroy(ptr);
+  }
+
+  static size_type max_size(const Alloc& alloc) noexcept {
+    return alloc.max_size();
+  }
+
+  static Alloc select_on_container_copy_construction(const Alloc& alloc) {
+    return alloc;
   }
 };
 

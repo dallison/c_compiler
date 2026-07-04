@@ -897,6 +897,29 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
       ? SyntaxFindQualifiedPrefixSymbolImpl(
             syntax, name, component_count - 1, allow_dependent_template_args)
       : NULL;
+  if (allow_dependent_template_args && parent != NULL &&
+      StorageIs(parent->storage, STO(typedef)) && parent->type != NULL &&
+      parent->type->template_origin != NULL &&
+      parent->type->dependent_member_name != NULL) {
+    TypeRecord* owner =
+        TypeInstantiateClassTemplate(syntax, parent->type->template_origin,
+                                     parent->type->template_arguments);
+    Symbol* nested = NULL;
+    if (owner != NULL && TypeIsStructOrUnion(owner) &&
+        owner->info.struct_info != NULL) {
+      StructMember* member =
+          FindStructMember(owner->info.struct_info,
+                           parent->type->dependent_member_name);
+      if (member != NULL && member->symbol != NULL &&
+          StorageIs(member->symbol->storage, STO(typedef))) {
+        nested = member->symbol;
+      }
+    }
+    TypeRecordDelete(owner);
+    if (nested != NULL) {
+      parent = nested;
+    }
+  }
   if (parent != NULL && parent->type != NULL &&
       TypeIsStructOrUnion(parent->type) &&
       parent->type->info.struct_info != NULL) {
@@ -1832,6 +1855,64 @@ bool SyntaxParseCXXAttributes(Syntax* syntax, Vector* attrs) {
     StringDestruct(&using_name);
   }
   return any;
+}
+
+static bool IsPowerOf2OrZero(int32_t v);
+
+static void AppendAlignedAttribute(Vector* attrs, int alignment) {
+  if (alignment <= 0) {
+    return;
+  }
+  Attribute* attr = NewAttribute("aligned");
+  String arg;
+  StringInit(&arg, NULL);
+  StringPrintf(&arg, "%d", alignment);
+  AttributeAddArg(attr, arg.value, arg.length);
+  StringDestruct(&arg);
+  VectorAppend(attrs, attr);
+}
+
+bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
+  if (!CompilerIsCXX() || !LexMatch(syntax->lex, TOK(alignas))) {
+    return false;
+  }
+
+  SyntaxNeedBracket(syntax, TOK(lparen), TC(decl) | TC(closebra));
+  int64_t value = 0;
+  if (SyntaxLookingAtType(syntax)) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    if (sym == NULL || sym->type == NULL) {
+      SyntaxError(syntax, "alignas type-id is invalid");
+    } else if (TypeContainsTemplateParameter(sym->type)) {
+      SyntaxError(syntax, "dependent alignas type-id is not supported");
+    } else {
+      TypeRecordCalculateSize(sym->type);
+      value = TypeRecordAlignment(sym->type);
+    }
+    SymbolDelete(sym);
+    TypeParserDestruct(&parser);
+  } else {
+    ASTNode* expr = SyntaxParseExpression(syntax, TC(closebra));
+    expr = AnalyzeExpression(expr);
+    bool ok = EvaluateIntegerExpression(expr, &value);
+    if (!ok) {
+      SyntaxError(syntax, "alignas specifier must be a constant expression");
+    }
+    ASTNodeDelete(expr);
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
+
+  if (value < 0 || value > 2147483647 ||
+      !IsPowerOf2OrZero((int32_t)value)) {
+    SyntaxError(syntax, "alignas specifier must name a power-of-two alignment");
+    return true;
+  }
+  AppendAlignedAttribute(attrs, (int)value);
+  return true;
 }
 
 // Interprets attributes that have just been attached to a declared symbol and
@@ -3621,6 +3702,8 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
         TypeParserDestruct(&parser);
         return;
       }
+    } else if (SyntaxParseCXXAlignas(syntax, attributes)) {
+      continue;
     } else if (LexLookingAt(syntax->lex, TOK(attribute)) ||
                SyntaxLookingAtCXXAttribute(syntax)) {
       if (LexMatch(syntax->lex, TOK(attribute))) {
@@ -3893,12 +3976,16 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
 
     // Parse common __attribute__ / C++ attribute syntax.
-    while (LexLookingAt(syntax->lex, TOK(attribute)) ||
-           SyntaxLookingAtCXXAttribute(syntax)) {
+    while (true) {
+      if (SyntaxParseCXXAlignas(syntax, attributes)) {
+        continue;
+      }
       if (LexMatch(syntax->lex, TOK(attribute))) {
         SyntaxParseAttribute(syntax, attributes);
-      } else {
+      } else if (SyntaxLookingAtCXXAttribute(syntax)) {
         SyntaxParseCXXAttributes(syntax, attributes);
+      } else {
+        break;
       }
     }
     
@@ -6159,6 +6246,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(false):
     case TOK(true):
     case TOK(sizeof):
+    case TOK(alignof):
     case TOK(tilde):
     case TOK(co_await):
     case TOK(co_yield):

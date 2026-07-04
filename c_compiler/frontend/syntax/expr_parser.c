@@ -619,13 +619,14 @@ done:
   return needs_template_ids;
 }
 
-// A qualified name like `T::member` whose leading nested-name-specifier is a
-// template type parameter is a dependent name: it cannot be resolved until the
-// template is instantiated.  Builds a placeholder identifier carrying the
-// template-parameter scope (as a placeholder type) and the trailing member
-// name (in dependent_member_name), flagged so the template-body cloner can
-// resolve it against the concrete type argument.  Returns NULL when `name` is
-// not such a dependent qualified value name.
+static bool TemplateArgumentListIsDependent(Vector* args);
+
+// A qualified name like `T::member` or `Alias<T>::member` whose leading
+// nested-name-specifier is dependent cannot be resolved until the template is
+// instantiated.  Builds a placeholder identifier carrying the dependent scope
+// and the trailing member name (in dependent_member_name), flagged so the
+// template-body cloner can resolve it against the concrete type argument.
+// Returns NULL when `name` is not such a dependent qualified value name.
 static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
                                                   FullyQualifiedIdentifier* name,
                                                   SourceLocation location) {
@@ -642,17 +643,22 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   }
   String* scope = name->components.value.p[0];
   Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope);
-  // The scope must name a type that is (or aliases) a template type parameter:
-  // either the parameter itself, or a typedef/using-alias to it such as
-  // `using traits_type = Traits;`.  In both cases the symbol's type carries the
-  // template parameter index, which is what the template-body cloner uses to
-  // substitute the concrete argument at instantiation time.
-  if (scope_symbol == NULL || scope_symbol->type == NULL ||
-      scope_symbol->type->template_parameter_index < 0) {
+  // The scope must name a dependent type: either a template type parameter (or
+  // alias to one), or an alias to a dependent class-template specialization such
+  // as `using traits_type = allocator_traits<Alloc>;`.
+  if (scope_symbol == NULL || scope_symbol->type == NULL) {
     return NULL;
   }
   if (!scope_symbol->flags.is_template_type_parameter &&
       !StorageIs(scope_symbol->storage, STO(typedef))) {
+    return NULL;
+  }
+  bool dependent_scope = scope_symbol->type->template_parameter_index >= 0 ||
+                         (scope_symbol->type->dependent_member_name == NULL &&
+                          scope_symbol->type->template_origin != NULL &&
+                          TemplateArgumentListIsDependent(
+                              scope_symbol->type->template_arguments));
+  if (!dependent_scope) {
     return NULL;
   }
   String* member = name->components.value.p[1];
@@ -790,6 +796,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   // before the ordinary lookup, which would otherwise instantiate the primary.
   if (name.is_qualified) {
     ASTNode* dependent_scope = BuildDependentTemplateScopeValueName(
+        syntax, &name, lex->current_token_location);
+    if (dependent_scope != NULL) {
+      FullyQualifiedIdentifierDestruct(&name);
+      return dependent_scope;
+    }
+    dependent_scope = BuildDependentQualifiedValueName(
         syntax, &name, lex->current_token_location);
     if (dependent_scope != NULL) {
       FullyQualifiedIdentifierDestruct(&name);
@@ -2543,6 +2555,56 @@ done:
   return result;
 }
 
+static ASTNode* ParseAlignof(Syntax* syntax, TokenClass followers) {
+  bool has_brackets = LexMatch(syntax->lex, TOK(lparen));
+  ASTNode* result = NULL;
+  bool alignof_type_name = false;
+  if (SyntaxLookingAtType(syntax)) {
+    if (!has_brackets) {
+      SyntaxError(syntax,
+                  "Parentheses expected around type name "
+                  " in alignof operator");
+    }
+    alignof_type_name = true;
+  }
+  if (alignof_type_name) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    int alignment = -1;
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    if (sym != NULL) {
+      if (CompilerIsCXX() && TypeContainsTemplateParameter(sym->type)) {
+        result = NewAlignofASTNodeWithType(
+            sym->type, syntax->lex->current_token_location);
+        SymbolDelete(sym);
+        TypeParserDestruct(&parser);
+        goto done;
+      }
+      TypeRecordCalculateSize(sym->type);
+      alignment = TypeRecordAlignment(sym->type);
+      SymbolDelete(sym);
+    }
+    TypeParserDestruct(&parser);
+    assert(alignment != -1);
+    result = NewAlignofASTNodeWithKnownAlignment(
+        alignment, syntax->lex->current_token_location);
+  } else {
+    if (has_brackets) {
+      syntax->found_open_paren = true;
+      has_brackets = false;
+    }
+    ASTNode* expr = ParseUnaryExpression(syntax, followers);
+    result = NewAlignofASTNodeWithExpression(
+        expr, syntax->lex->current_token_location);
+  }
+done:
+  if (has_brackets) {
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  }
+  return result;
+}
+
 // Parses a typeid operator: `typeid ( type-id )` or `typeid ( expression )`.
 // Disambiguates via SyntaxLookingAtType, mirroring the sizeof type/expression
 // split.  The resulting node is rewritten into a type_info access during
@@ -3626,6 +3688,10 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
 
   if (LexMatch(syntax->lex, TOK(sizeof))) {
     return ParseSizeof(syntax, followers);
+  }
+
+  if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(alignof))) {
+    return ParseAlignof(syntax, followers);
   }
 
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(typeid))) {

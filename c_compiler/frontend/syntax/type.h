@@ -495,6 +495,8 @@ void TypeParserParsePointer(TypeParser* parser);
 void TypeParserParseFuncOrArray(TypeParser* parser);
 Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
                                         Vector* args);
+void TypeEnsureTemplateMemberFunctionDefinition(struct Syntax* syntax,
+                                                Symbol* symbol);
 Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,
                                            Vector* actuals);
 Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
@@ -510,6 +512,7 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
 bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     Symbol* templ, Vector* explicit_args, Vector* actuals,
     size_t first_formal_arg);
+bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right);
 Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     Vector* actuals,
                                                     size_t first_formal_arg);

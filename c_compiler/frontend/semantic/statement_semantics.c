@@ -74,8 +74,106 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
   }
 }
 
+static bool VectorContainsPointer(Vector* vector, void* ptr) {
+  for (size_t i = 0; vector != NULL && i < vector->length; i++) {
+    if (vector->value.p[i] == ptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXTemporaryNeedsDestructor(Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || !sym->flags.is_temp ||
+      sym->type == NULL || !TypeIsStructOrUnion(sym->type) ||
+      sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->tag_name == NULL) {
+    return false;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(sym->type->info.struct_info, &destructor_name);
+  StringDestruct(&destructor_name);
+  return destructor != NULL && destructor->is_member_function &&
+         destructor->symbol != NULL && destructor->symbol->type != NULL &&
+         destructor->symbol->type->info.function.is_destructor &&
+         !(destructor->symbol->type->info.function.is_implicitly_declared &&
+           destructor->symbol->type->info.function.is_trivial_special_member);
+}
+
+static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  Symbol* sym = NULL;
+  if (node->op == AST_OP(identifier)) {
+    sym = ((IdentifierASTNode*)node)->symbol;
+  } else if (node->op == AST_OP(compound_literal)) {
+    CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
+    if (literal->sym != NULL && literal->sym->op == AST_OP(identifier)) {
+      sym = ((IdentifierASTNode*)literal->sym)->symbol;
+    }
+  } else {
+    return;
+  }
+  Vector* temps = data;
+  if (CXXTemporaryNeedsDestructor(sym) && !VectorContainsPointer(temps, sym)) {
+    VectorAppend(temps, sym);
+  }
+}
+
+static ASTNode* NewCXXTemporaryDestructorCall(Symbol* sym,
+                                             SourceLocation location) {
+  if (!CXXTemporaryNeedsDestructor(sym)) {
+    return NULL;
+  }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  ASTNode* receiver = NewIdentifierASTNode(sym, location);
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(destructor_name.value), NULL,
+                               location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector());
+  return AnalyzeExpression(call);
+}
+
+static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
+  if (!CompilerIsCXX() || expr == NULL ||
+      (compiler->current_function != NULL &&
+       (compiler->current_function->info.function.is_coroutine ||
+        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+    return expr;
+  }
+  Vector temps;
+  VectorInit(&temps);
+  ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &temps);
+  for (size_t i = temps.length; i > 0; i--) {
+    Symbol* sym = temps.value.p[i - 1];
+    ASTNode* destructor =
+        NewCXXTemporaryDestructorCall(sym, expr->location);
+    if (destructor == NULL) {
+      continue;
+    }
+    expr = NewBinaryASTNode(AST_OP(comma), destructor->type,
+                            expr->location, expr, destructor);
+    expr->flags |= kASTAnalyzed;
+  }
+  VectorDestruct(&temps);
+  return expr;
+}
+
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
+  node->expr = AppendCXXFullExpressionTemporaryDestructors(node->expr);
 
   // warn_unused_result: a discarded call to a function so annotated.
   ASTNode* expr = node->expr;

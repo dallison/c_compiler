@@ -238,6 +238,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return ">>=";
     case AST_OP(sizeof):
       return "sizeof";
+    case AST_OP(alignof):
+      return "alignof";
     case AST_OP(typeid):
       return "typeid";
     case AST_OP(div):
@@ -829,6 +831,7 @@ bool ASTNodeIsIntConstant(ASTNode* node) {
   switch (node->op) {
     case AST_OP(number):
     case AST_OP(sizeof):
+    case AST_OP(alignof):
       return true;
     default:
       return false;
@@ -840,6 +843,7 @@ int64_t ASTNodeConstantValue(ASTNode* node) {
     case AST_OP(number):
       return ((ConstantASTNode*)node)->value.ivalue;
     case AST_OP(sizeof):
+    case AST_OP(alignof):
       return ((SizeofASTNode*)node)->base.value.ivalue;
     default:
       assert(false);
@@ -1005,8 +1009,9 @@ static void ConstantASTNodePrint(ASTNode* node, int indents, FILE* fp) {
     case AST_OP(label):
       fprintf(fp,"label %s\n", cnode->value.string->value);
       break;
-    case AST_OP(sizeof): {
-      fprintf(fp,"sizeof\n");
+    case AST_OP(sizeof):
+    case AST_OP(alignof): {
+      fprintf(fp,"%s\n", node->op == AST_OP(sizeof) ? "sizeof" : "alignof");
       SizeofASTNode* s = (SizeofASTNode*)node;
       ASTNodePrint(s->expr, indents + 2, fp);
       break;
@@ -1652,7 +1657,7 @@ void SizeofASTNodeDelete(ASTNode* node) {
 
 void SizeofASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   SizeofASTNode* snode = (SizeofASTNode*)node;
-  fprintf(fp,"sizeof ");
+  fprintf(fp, "%s ", node->op == AST_OP(sizeof) ? "sizeof" : "alignof");
   if (snode->expr != NULL) {
     ASTNodePrint(snode->expr, indents + 2, fp);
   } else {
@@ -1753,6 +1758,26 @@ ASTNode* NewSizeofASTNodeWithExpression(ASTNode* expr,
 ASTNode* NewSizeofPackASTNode(ASTNode* expr, SourceLocation location) {
   ASTNode* node = NewSizeofASTNodeWithExpression(expr, location);
   ((SizeofASTNode*)node)->is_pack_size = true;
+  return node;
+}
+
+ASTNode* NewAlignofASTNodeWithKnownAlignment(int alignment,
+                                             SourceLocation location) {
+  ASTNode* node = NewSizeofASTNodeWithKnownSize(alignment, location);
+  node->op = AST_OP(alignof);
+  return node;
+}
+
+ASTNode* NewAlignofASTNodeWithType(TypeRecord* type, SourceLocation location) {
+  ASTNode* node = NewSizeofASTNodeWithType(type, location);
+  node->op = AST_OP(alignof);
+  return node;
+}
+
+ASTNode* NewAlignofASTNodeWithExpression(ASTNode* expr,
+                                         SourceLocation location) {
+  ASTNode* node = NewSizeofASTNodeWithExpression(expr, location);
+  node->op = AST_OP(alignof);
   return node;
 }
 

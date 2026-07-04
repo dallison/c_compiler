@@ -135,6 +135,25 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
 
   if (TypeIsStructOrUnion(node->base.type) || TypeIsArray(node->base.type) ||
       TypeIsFunction(node->base.type)) {
+    if (CompilerIsCXX() && TypeIsFunction(node->base.type)) {
+      bool has_implicit_this =
+          node->symbol->type->info.function.prototype.length > 0 &&
+          node->symbol->type->info.function.prototype.value.p[0] != NULL &&
+          StringEqual(&((Symbol*)node->symbol->type->info.function.prototype
+                            .value.p[0])
+                           ->name,
+                      "this");
+      // Do not eagerly instantiate a member of an overload set here: the
+      // correct overload is only known after overload resolution, which
+      // instantiates the selected candidate itself. Instantiating an
+      // arbitrary (e.g. first) overload can materialize an unused member of
+      // a class template and trigger spurious errors (e.g. default-
+      // constructing a non-default-constructible type).
+      if (!has_implicit_this && !node->symbol->flags.is_overloaded) {
+        TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax,
+                                                   node->symbol);
+      }
+    }
     node->base.flags |= kASTNeedAddress;
   } else {
     // If this is a declaration, don't try to fold it.
@@ -2564,8 +2583,11 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
 
 static void CheckDeletedFunctionUse(Symbol* function, ASTNode* use) {
   if (!CompilerIsCXX() || function == NULL || function->type == NULL ||
-      !TypeIsFunction(function->type) ||
-      !function->type->info.function.is_deleted) {
+      !TypeIsFunction(function->type)) {
+    return;
+  }
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, function);
+  if (!function->type->info.function.is_deleted) {
     return;
   }
   String function_name;
@@ -3938,7 +3960,11 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
     return candidate;
   }
   if (candidate->type->info.function.template_origin != NULL) {
-    return NULL;
+    return explicit_args != NULL &&
+                   TypeTemplateArgumentVectorEqual(
+                       candidate->type->template_arguments, explicit_args)
+               ? candidate
+               : NULL;
   }
   if (!candidate->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
@@ -4790,6 +4816,10 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left == NULL) {
     return &node->base;
   }
+  if (CompilerIsCXX() && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, id->symbol);
+  }
 
   // Set node type by dereferencing the function.  We've already checked that
   // the left type is a function or a pointer to a function.  The 'next' field
@@ -5109,6 +5139,11 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
   // Tell downstream that we need the address of this node, not its
   // contents.
   node->sub->flags |= kASTNeedAddress;
+  if (CompilerIsCXX() && node->sub->op == AST_OP(identifier) &&
+      TypeIsFunction(node->sub->type)) {
+    TypeEnsureTemplateMemberFunctionDefinition(
+        &compiler->syntax, ((IdentifierASTNode*)node->sub)->symbol);
+  }
 }
 
 // Contents-of operator.  If the operand is a pointer the result type
@@ -5129,6 +5164,7 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
 }
 
 static void AnalyzeSizeofExpression(SizeofASTNode* node) {
+  bool is_alignof = node->base.base.op == AST_OP(alignof);
   if (node->is_pack_size) {
     bool valid_pack = (node->expr != NULL &&
                        (node->expr->flags & kASTPackExpansion) != 0);
@@ -5148,14 +5184,18 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
     if (TypeIsVLA(node->expr->type)) {
       // sizeof(vla) is calculated at runtime.
     } else {
-      node->base.value.ivalue = node->expr->type->size;
+      node->base.value.ivalue =
+          is_alignof ? TypeRecordAlignment(node->expr->type)
+                     : node->expr->type->size;
     }
   } else if (node->type_operand != NULL &&
              !TypeContainsTemplateParameter(node->type_operand)) {
-    // A `sizeof(type-id)` whose operand has become concrete (e.g. after
-    // template instantiation): re-measure the now-complete type.
+    // A `sizeof(type-id)` / `alignof(type-id)` whose operand has become
+    // concrete (e.g. after template instantiation): re-measure now.
     TypeRecordCalculateSize(node->type_operand);
-    node->base.value.ivalue = node->type_operand->size;
+    node->base.value.ivalue =
+        is_alignof ? TypeRecordAlignment(node->type_operand)
+                   : node->type_operand->size;
   }
   ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
 }
@@ -5426,6 +5466,10 @@ static void SetNeedAddress(ASTNode* node) {
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* idnode = (IdentifierASTNode*)node;
     idnode->symbol->flags.address_taken = true;
+    if (CompilerIsCXX() && TypeIsFunction(node->type)) {
+      TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax,
+                                                 idnode->symbol);
+    }
   }
 }
 
@@ -5656,6 +5700,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(sizeof):
+    case AST_OP(alignof):
       AnalyzeSizeofExpression((SizeofASTNode*)node);
       break;
 

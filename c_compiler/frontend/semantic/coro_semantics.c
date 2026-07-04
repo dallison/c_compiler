@@ -3514,6 +3514,7 @@ static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* return_type,
     *frame_param_out = frame_param;
   }
   func->info.function.definition = true;
+  func->info.function.coroutine_frame_type = TypeRecordCopy(frame_type);
   return func;
 }
 
@@ -3540,6 +3541,7 @@ static TypeRecord* NewCoroutineDestroyFunctionType(TypeRecord* frame_type,
     *frame_param_out = frame_param;
   }
   func->info.function.definition = true;
+  func->info.function.coroutine_frame_type = TypeRecordCopy(frame_type);
   return func;
 }
 

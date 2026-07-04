@@ -628,7 +628,8 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(d2ll, (long long))
       EVAL_UNARY_OP(ld2ll, (long long))
 
-    case AST_OP(sizeof): {
+    case AST_OP(sizeof):
+    case AST_OP(alignof): {
       SizeofASTNode* snode = (SizeofASTNode*)node;
       if (snode->is_pack_size) {
         return false;
