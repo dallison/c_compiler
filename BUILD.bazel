@@ -18,6 +18,7 @@ filegroup(
         "libc/include/iterator",
         "libc/include/memory",
         "libc/include/new",
+        "libc/include/optional",
         "libc/include/source_location",
         "libc/include/stdexcept",
         "libc/include/string",

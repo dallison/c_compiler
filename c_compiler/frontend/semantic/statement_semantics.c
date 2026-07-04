@@ -879,8 +879,21 @@ static void AnalyzeTailRecursion(CombinedStatementASTNode* node, VectorASTNode* 
   AnalyzeStatement(result);
 }
 
+static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
+                                                TypeRecord* right) {
+  TypeRecord* left_copy = TypeRecordCopy(left);
+  TypeRecord* right_copy = TypeRecordCopy(right);
+  left_copy->qualifiers &= ~(kQualConst | kQualVolatile);
+  right_copy->qualifiers &= ~(kQualConst | kQualVolatile);
+  bool equal = TypeEqual(left_copy, right_copy);
+  TypeRecordDelete(left_copy);
+  TypeRecordDelete(right_copy);
+  return equal;
+}
+
 static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   TypeRecord* old_return = compiler->current_function->next;
+  deduced->qualifiers &= ~(kQualConst | kQualVolatile);
   TypeRecordIncRef(deduced);
   compiler->current_function->next = deduced;
   compiler->current_function->info.function.is_auto_return_deduced = true;
@@ -1032,7 +1045,8 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     }
   } else if (return_value != NULL &&
              compiler->current_function->info.function.is_auto_return_deduced &&
-             !TypeEqual(return_value->type, compiler->current_function->next)) {
+             !TypeEqualIgnoringTopLevelQualifiers(
+                 return_value->type, compiler->current_function->next)) {
     SemanticError(return_value, "Inconsistent auto function return type");
     return;
   }

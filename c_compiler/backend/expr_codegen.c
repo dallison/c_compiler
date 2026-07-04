@@ -1193,7 +1193,25 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
                  GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
     }
   } else {
+    Symbol* dest_tmp = NULL;
+    IRNode* dest_tmp_var = NULL;
+    bool dest_was_spilled = false;
+    if (node->right->op == AST_OP(call) && !IRIsVariable(dest)) {
+      dest_tmp =
+          SyntaxNewTemporary(gen->syntax,
+                             NewPointerTo(kQualPlain, node->left->type));
+      dest_tmp_var = GeneratorGetVariable(gen, dest_tmp);
+      IRNode* save_dest = GeneratorEmit(gen, NewIR2(IR_OP(storea),
+                                                    dest_tmp_var, dest));
+      IRSetVarDef(save_dest, dest_tmp);
+    }
     value = GenerateExpression(gen, node->right);
+    if (dest_tmp_var != NULL) {
+      dest = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), dest_tmp_var)),
+                       dest->type);
+      IRSetVarUse(dest, dest_tmp);
+      dest_was_spilled = true;
+    }
     if (IsBitfieldReference(node->left)) {
       // Assigning to a bitfield.  The dest will be the address of the word
       // containing the bitfield.  We need to mask out the bitfield (set the
@@ -1201,7 +1219,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       IROpcode load_op = GetLoadOpcode(node->left);
       IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
 
-      CheckForVarUse(load, node->left);
+      if (!dest_was_spilled) {
+        CheckForVarUse(load, node->left);
+      }
 
       value = CalculateNewBitfieldValue(gen, load, value,
                                         (BinaryASTNode*)node->left);
@@ -1211,6 +1231,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     IROpcode store = GetStoreOpcode((ASTNode*)node);
     assignment = GeneratorEmit(gen, NewIR2(store, dest,
                                        RemoveUnnecesaryShortening(gen, value, store)));
+    if (dest_was_spilled) {
+      return value;
+    }
   }
 
   CheckForVarDef(assignment, node->left);

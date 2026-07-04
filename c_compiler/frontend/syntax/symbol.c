@@ -363,6 +363,12 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   if (symbol->type->info.function.is_const_member) {
     StringAppendChar(out, 'K');
   }
+  if (symbol->type->info.function.ref_qualifier == kCXXRefQualifierLValue) {
+    StringAppendChar(out, 'R');
+  } else if (symbol->type->info.function.ref_qualifier ==
+             kCXXRefQualifierRValue) {
+    StringAppendChar(out, 'O');
+  }
   AppendCXXNestedNamespaceComponents(out, ns);
   if (owner != NULL && owner->tag_name != NULL) {
     AppendCXXNameComponent(out, owner->tag_name->value);

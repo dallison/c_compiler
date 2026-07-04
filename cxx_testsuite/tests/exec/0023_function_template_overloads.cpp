@@ -52,11 +52,29 @@ int sfinae_member_type(int value) {
   return value + 600;
 }
 
+template <typename T>
+struct Holder {
+  T value;
+};
+
+template <typename T>
+int choose_template(T& value) {
+  (void)value;
+  return 700;
+}
+
+template <typename T>
+int choose_template(Holder<T>& value) {
+  (void)value;
+  return 800;
+}
+
 int main(void) {
   char small = 3;
   int* int_pointer = nullptr;
   char* char_pointer = nullptr;
   HasNestedType nested_type = {7};
+  Holder<int> holder = {9};
   int concrete_select = select(int_pointer);
   int template_select = select(char_pointer);
   int template_select_again = select(char_pointer);
@@ -69,9 +87,10 @@ int main(void) {
   int sfinae_member_type_fallback = sfinae_member_type(5);
   typename HasNestedType::type sfinae_member_type_template =
       sfinae_member_type(nested_type);
+  int specialized_template = choose_template(holder);
   return concrete_select + template_select + template_select_again +
          explicit_template_select + concrete_echo + template_echo +
          explicit_template_echo + sfinae_fallback + sfinae_undeduced_fallback +
-         sfinae_member_type_fallback + sfinae_member_type_template.value -
-         2570;
+         sfinae_member_type_fallback + sfinae_member_type_template.value +
+         specialized_template - 3370;
 }

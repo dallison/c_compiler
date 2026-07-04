@@ -599,6 +599,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_constructor = false;
   t->info.function.is_destructor = false;
   t->info.function.is_const_member = false;
+  t->info.function.ref_qualifier = kCXXRefQualifierNone;
   t->info.function.is_explicit = false;
   t->info.function.is_explicit_conversion = false;
   t->info.function.is_virtual = false;
@@ -1261,6 +1262,11 @@ void TypeRecordFunctionPrettyName(TypeRecord* func, String* result) {
   AppendFunctionParameterList(func, result);
   if (func->info.function.is_const_member) {
     StringAppend(result, " const");
+  }
+  if (func->info.function.ref_qualifier == kCXXRefQualifierLValue) {
+    StringAppend(result, " &");
+  } else if (func->info.function.ref_qualifier == kCXXRefQualifierRValue) {
+    StringAppend(result, " &&");
   }
 }
 
@@ -2830,6 +2836,25 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   copy->info.struct_info = str;
   copy->size = 0;
 
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* template_base = from->bases.value.p[i];
+    TypeRecord* base_type =
+        SubstituteTemplateParameters(parser, template_base->type, args);
+    if (!TypeIsStructOrUnion(base_type)) {
+      SyntaxError(parser->syntax, "base class must be a class or struct type");
+      TypeRecordDelete(base_type);
+      continue;
+    }
+    TypeRecordCalculateSize(base_type);
+    VectorAppend(&str->bases,
+                 NewCXXBaseSpecifier(base_type, template_base->access,
+                                     template_base->is_virtual));
+    TypeRecordDelete(base_type);
+  }
+  CollectCXXVirtualBases(str);
+  CopyCXXBaseVirtualMembers(str);
+  LayoutCXXBaseSpecifiers(str);
+
   Vector deferred_member_functions;
   VectorInit(&deferred_member_functions);
   for (size_t i = 0; i < from->members.length; i++) {
@@ -3065,8 +3090,13 @@ static void CopyFunctionTemplateParameters(TypeRecord* to, TypeRecord* from,
                              /*free_element=*/false);
   VectorInit(&to->info.function.template_parameters);
   for (size_t i = 0; i < from->info.function.template_parameters.length; i++) {
+    TemplateParameter* original =
+        from->info.function.template_parameters.value.p[i];
+    if (original == NULL) {
+      continue;
+    }
     TemplateParameter* param =
-        TemplateParameterCopy(from->info.function.template_parameters.value.p[i]);
+        TemplateParameterCopy(original);
     RebaseTemplateParameterIndices(param->type, rebase_base);
     RebaseTemplateParameterIndices(param->default_type, rebase_base);
     if (param->default_template_parameter_index >= rebase_base) {
@@ -3314,6 +3344,7 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_constructor = from->info.function.is_constructor;
   func->info.function.is_destructor = from->info.function.is_destructor;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
@@ -4942,6 +4973,37 @@ static ASTNode* RewriteClonedDependentNewInitializer(
   }
 
   if (!is_class) {
+    if (assign->right != NULL && assign->right->op == AST_OP(braced_init)) {
+      BracedInitializerASTNode* braced =
+          (BracedInitializerASTNode*)assign->right;
+      bool dependent_initializer = false;
+      for (size_t i = 0; i < braced->initializers->length; i++) {
+        ASTNode* init = braced->initializers->value.p[i];
+        if (init != NULL &&
+            ((init->flags & kASTPackExpansion) != 0 ||
+             DependentExpressionContainsTemplateParameter(init))) {
+          dependent_initializer = true;
+          break;
+        }
+      }
+      if (dependent_initializer) {
+        return node;
+      }
+      if (braced->initializers->length > 1) {
+        SyntaxError(clone->parser->syntax,
+                    "too many initializers for scalar new-expression");
+        return node;
+      }
+      ASTNode* replacement = braced->initializers->length == 1
+          ? ASTNodeMove(braced->initializers->value.p[0])
+          : NewIntConstantASTNode(0, TypeRecordCopy(node->type),
+                                  node->location);
+      replacement->parent = node;
+      replacement->child_id = 1;
+      ASTNodeDelete(assign->right);
+      assign->right = replacement;
+      return node;
+    }
     // `new T(expr)` where T resolved to a scalar keeps its scalar assignment.
     // When the initializer is a parameter-pack expansion (e.g. the allocator's
     // `new (ptr) U(std::forward<Args>(args)...)` with U deduced to a scalar),
@@ -4986,9 +5048,17 @@ static ASTNode* RewriteClonedDependentNewInitializer(
     return node;
   }
   ASTNode* receiver = ASTNodeMove(assign->left);
-  ASTNode* actual = ASTNodeMove(assign->right);
   Vector* actuals = NewVector();
-  VectorAppend(actuals, actual);
+  if (assign->right != NULL && assign->right->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)assign->right;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      VectorAppend(actuals, ASTNodeMove(braced->initializers->value.p[i]));
+    }
+    ASTNodeDelete(assign->right);
+  } else {
+    VectorAppend(actuals, ASTNodeMove(assign->right));
+  }
   return NewClonedDependentConstructorCall(node->type, receiver, actuals,
                                            node->location);
 }
@@ -5902,6 +5972,7 @@ static void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
 void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL ||
       !TypeIsFunction(symbol->type) ||
+      symbol->flags.is_template ||
       symbol->type->info.function.cxx_member_owner == NULL ||
       symbol->type->info.function.body != NULL ||
       symbol->value.func_defn == NULL ||
@@ -5951,6 +6022,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_constexpr = from->info.function.is_constexpr;
   func->info.function.is_consteval = from->info.function.is_consteval;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   // Preserve constructor/destructor-ness so an instantiated constructor
   // template is still recognized as a constructor (its call is void-typed and
   // must not be treated as a copy-initialization of the object).
@@ -6241,7 +6313,11 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
     case kDeclFunction:
       if (!TemplateTypePatternEqual(left->next, right->next) ||
           left->info.function.prototype.length !=
-              right->info.function.prototype.length) {
+              right->info.function.prototype.length ||
+          left->info.function.is_const_member !=
+              right->info.function.is_const_member ||
+          left->info.function.ref_qualifier !=
+              right->info.function.ref_qualifier) {
         return false;
       }
       for (size_t i = 0; i < left->info.function.prototype.length; i++) {
@@ -6304,6 +6380,21 @@ static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
     if (!candidate->flags.is_template && candidate->type != NULL &&
         TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type) &&
         TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+static Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
+                                                          const char* asm_name) {
+  if (asm_name == NULL || *asm_name == '\0') {
+    return NULL;
+  }
+  for (Symbol* candidate = templ; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->flags.is_template && candidate->asm_name.value != NULL &&
+        strcmp(candidate->asm_name.value, asm_name) == 0) {
       return candidate;
     }
   }
@@ -6407,7 +6498,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   bool saved_substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = false;
   TypeRecord* func =
-      InstantiateFunctionTemplateType(parser, template_definition->type,
+      InstantiateFunctionTemplateType(parser, templ->type,
                                       completed_args);
   bool substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = saved_substitution_failed;
@@ -6448,6 +6539,24 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   func->info.function.template_origin = templ;
   func->template_arguments = TemplateArgumentVectorCopy(completed_args);
   SymbolSetCXXMangledAsmName(symbol);
+  existing = FindFunctionTemplateInstantiationByAsmName(templ,
+                                                       symbol->asm_name.value);
+  if (existing != NULL) {
+    SymbolDelete(symbol);
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return existing;
+  }
+  if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+    symbol->type->info.function.definition = true;
+    symbol->flags.is_defined = true;
+    AppendFunctionTemplateInstantiation(templ, symbol);
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return symbol;
+  }
   VectorDestruct(&symbol->attributes);
   AttributeListClone(&symbol->attributes, &templ->attributes);
   if (template_definition->type->info.function.body != NULL) {
@@ -6648,6 +6757,15 @@ static bool DeduceFunctionTemplatePackCallArgument(
     Vector* args, size_t explicit_arg_count, int pack_index, TypeRecord* formal,
     ASTNode* actual) {
   if (formal == NULL || actual == NULL || actual->type == NULL) {
+    return false;
+  }
+  TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
+  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init)) {
+    return false;
+  }
+  if (actual->op == AST_OP(braced_init) &&
+      !TypeIsCXXInitializerList(target) &&
+      (target == NULL || target->declarator != kDeclArray)) {
     return false;
   }
   int placeholder_index = -1;
@@ -6982,6 +7100,15 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
   if (formal == NULL || actual == NULL || actual->type == NULL) {
     return false;
   }
+  TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
+  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init)) {
+    return false;
+  }
+  if (actual->op == AST_OP(braced_init) &&
+      !TypeIsCXXInitializerList(target) &&
+      (target == NULL || target->declarator != kDeclArray)) {
+    return false;
+  }
   /* [temp.deduct.call]: if the parameter type P contains no template
    * parameters, no deduction is performed from this argument.  The pairing
    * trivially succeeds; whether the argument is convertible to P is decided
@@ -7205,10 +7332,13 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
       !TypeIsFunction(templ->type)) {
     return NULL;
   }
-  TypeRecord* func = templ->value.func_defn != NULL &&
-                             templ->value.func_defn->type != NULL
-                         ? templ->value.func_defn->type
-                         : templ->type;
+  TypeRecord* func =
+      templ->type->template_arguments != NULL &&
+              templ->type->info.function.cxx_member_owner != NULL
+          ? templ->type
+          : templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
+                ? templ->value.func_defn->type
+                : templ->type;
   if (first_formal_arg > func->info.function.prototype.length) {
     return NULL;
   }
@@ -8884,13 +9014,35 @@ static bool CXXSymbolIsStdInitializerListTemplate(Symbol* symbol) {
          strcmp(symbol->namespace_->qualified_name.value, "std") == 0;
 }
 
+static bool CXXSymbolNamesStdInitializerList(Symbol* symbol) {
+  if (symbol == NULL) {
+    return false;
+  }
+  const char* name = symbol->name.value;
+  if (name == NULL ||
+      (strcmp(name, "initializer_list") != 0 &&
+       strncmp(name, "initializer_list<", 17) != 0)) {
+    return false;
+  }
+  return symbol->namespace_ == NULL ||
+         strcmp(symbol->namespace_->qualified_name.value, "std") == 0;
+}
+
 bool TypeIsCXXInitializerList(TypeRecord* type) {
-  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
-      type->info.struct_info == NULL ||
+  if (!CompilerIsCXX() || type == NULL) {
+    return false;
+  }
+  if (CXXSymbolIsStdInitializerListTemplate(type->template_origin)) {
+    return true;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
       type->info.struct_info->tag_symbol == NULL) {
     return false;
   }
   Symbol* tag = type->info.struct_info->tag_symbol;
+  if (CXXSymbolNamesStdInitializerList(tag)) {
+    return true;
+  }
   if (CXXSymbolIsStdInitializerListTemplate(tag->type != NULL
                                                 ? tag->type->template_origin
                                                 : NULL)) {
@@ -10248,6 +10400,19 @@ static TypeRecord* ParseCXXTrailingReturnType(TypeParser* parser) {
   return return_type;
 }
 
+static CXXRefQualifier ParseCXXRefQualifier(TypeParser* parser) {
+  if (!CompilerIsCXX()) {
+    return kCXXRefQualifierNone;
+  }
+  if (LexMatch(parser->lex, TOK(ampamp))) {
+    return kCXXRefQualifierRValue;
+  }
+  if (LexMatch(parser->lex, TOK(amp))) {
+    return kCXXRefQualifierLValue;
+  }
+  return kCXXRefQualifierNone;
+}
+
 static void ParseFunctionDecl(TypeParser* parser) {
   TypeParser proto_parser;
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto), kParsingPrototype);
@@ -10268,6 +10433,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  func->info.function.ref_qualifier = ParseCXXRefQualifier(parser);
   ParseCXXExceptionSpecifier(parser, func);
   if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
       LexMatch(parser->lex, TOK(arrow))) {
@@ -10408,8 +10574,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   if (parser->context == kParsingBlockScope) {
     return true;
   }
-  if (parser->context != kParsingFileScope ||
-      (!parser->is_constexpr && !parser->is_constinit)) {
+  if (parser->context != kParsingFileScope) {
     return false;
   }
   LexCheckpoint checkpoint;
@@ -11875,7 +12040,8 @@ static void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union
 static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b) {
   if (!TypeIsFunction(a) || !TypeIsFunction(b) ||
       !TypeEqual(a->next, b->next) ||
-      a->info.function.is_const_member != b->info.function.is_const_member) {
+      a->info.function.is_const_member != b->info.function.is_const_member ||
+      a->info.function.ref_qualifier != b->info.function.ref_qualifier) {
     return false;
   }
   size_t a_first = a->info.function.cxx_member_owner != NULL ? 1 : 0;
@@ -13130,6 +13296,8 @@ static Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
   func->info.function.is_virtual = is_virtual;
   TypeRecordChain(func, return_type);
   func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  func->info.function.ref_qualifier = ParseCXXRefQualifier(parser);
+  ParseCXXExceptionSpecifier(parser, func);
   TypeRecordAddCXXThisParameter(func, owner, location);
 
   String member_name;
@@ -15676,6 +15844,9 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   // `T&` vs `const T&`) where the return type comparison cannot tell them
   // apart, leaving the const qualifier as the only distinguishing feature.
   if (a->is_const_member != b->is_const_member) {
+    return false;
+  }
+  if (a->ref_qualifier != b->ref_qualifier) {
     return false;
   }
   for (size_t i = 0; i < a->prototype.length; i++) {

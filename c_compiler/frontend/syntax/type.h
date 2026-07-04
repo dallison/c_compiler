@@ -113,6 +113,12 @@ typedef enum {
   kCXXSpecialMemberMoveAssignment,
 } CXXSpecialMemberKind;
 
+typedef enum {
+  kCXXRefQualifierNone,
+  kCXXRefQualifierLValue,
+  kCXXRefQualifierRValue,
+} CXXRefQualifier;
+
 // Function info.
 typedef struct {
   Symbol* symbol;       // Symbol for function (or NULL).
@@ -128,6 +134,7 @@ typedef struct {
   bool is_constructor;  // Called before main.
   bool is_destructor;   // Called after exit.
   bool is_const_member; // C++ member function has trailing const qualifier.
+  CXXRefQualifier ref_qualifier;  // C++ member function trailing & / &&.
   bool is_explicit;     // C++ explicit constructor/conversion/deduction guide.
   bool is_explicit_conversion;  // C++ explicit conversion operator.
   bool is_virtual;      // C++ virtual member function.

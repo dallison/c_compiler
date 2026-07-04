@@ -1,0 +1,491 @@
+//
+//  optional
+//  c_compiler
+//
+//  Minimal C++20 std::optional support for DaveCC.
+//
+
+#ifndef optional_h
+#define optional_h
+
+#include <compare>
+#include <exception>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+struct nullopt_t {
+  explicit constexpr nullopt_t(int) {}
+};
+
+const nullopt_t nullopt(0);
+
+struct in_place_t {
+  explicit in_place_t() = default;
+};
+
+const in_place_t in_place{};
+
+class bad_optional_access : public exception {
+ public:
+  bad_optional_access() noexcept {}
+
+  const char* what() const noexcept override {
+    return "bad optional access";
+  }
+};
+
+template <class T>
+class optional {
+  static_assert(is_object<T>::value, "optional<T> requires an object type");
+  static_assert(!is_same<remove_cv_t<T>, nullopt_t>::value,
+                "optional<T> cannot contain nullopt_t");
+  static_assert(!is_same<remove_cv_t<T>, in_place_t>::value,
+                "optional<T> cannot contain in_place_t");
+
+  union __storage_type {
+    char __dummy_;
+    T __value_;
+  };
+
+  __storage_type __storage_;
+  bool __engaged_;
+
+  T* __ptr() noexcept {
+    return &__storage_.__value_;
+  }
+
+  const T* __ptr() const noexcept {
+    return &__storage_.__value_;
+  }
+
+  void __construct_copy(const T& value) {
+    new (__ptr()) T(value);
+    __engaged_ = true;
+  }
+
+  void __construct_move(T&& value) {
+    new (__ptr()) T(std::move(value));
+    __engaged_ = true;
+  }
+
+ public:
+  using value_type = T;
+
+  optional() noexcept : __engaged_(false) {}
+
+  optional(nullopt_t) noexcept : __engaged_(false) {}
+
+  optional(const T& value) : __engaged_(false) {
+    __construct_copy(value);
+  }
+
+  optional(T&& value) : __engaged_(false) {
+    __construct_move(std::move(value));
+  }
+
+  template <class... Args>
+  explicit optional(in_place_t, Args&&... args) : __engaged_(false) {
+    new (__ptr()) T(std::forward<Args>(args)...);
+    __engaged_ = true;
+  }
+
+  template <class U, class... Args>
+  explicit optional(in_place_t, initializer_list<U> init, Args&&... args)
+      : __engaged_(false) {
+    emplace(init, std::forward<Args>(args)...);
+  }
+
+  optional(const optional& other) : __engaged_(false) {
+    if (other.__engaged_) {
+      __construct_copy(*other);
+    }
+  }
+
+  optional(optional&& other) : __engaged_(false) {
+    if (other.__engaged_) {
+      __construct_move(std::move(*other));
+    }
+  }
+
+  ~optional() {
+    reset();
+  }
+
+  optional& operator=(nullopt_t) noexcept {
+    reset();
+    return *this;
+  }
+
+  optional& operator=(const optional& other) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__engaged_ && other.__engaged_) {
+      **this = *other;
+    } else if (__engaged_) {
+      reset();
+    } else if (other.__engaged_) {
+      __construct_copy(*other);
+    }
+    return *this;
+  }
+
+  optional& operator=(optional&& other) {
+    if (this == &other) {
+      return *this;
+    }
+    if (__engaged_ && other.__engaged_) {
+      **this = std::move(*other);
+    } else if (__engaged_) {
+      reset();
+    } else if (other.__engaged_) {
+      __construct_move(std::move(*other));
+    }
+    return *this;
+  }
+
+  optional& operator=(const T& value) {
+    if (__engaged_) {
+      **this = value;
+    } else {
+      __construct_copy(value);
+    }
+    return *this;
+  }
+
+  optional& operator=(T&& value) {
+    if (__engaged_) {
+      **this = std::move(value);
+    } else {
+      __construct_move(std::move(value));
+    }
+    return *this;
+  }
+
+  const T* operator->() const noexcept {
+    return __ptr();
+  }
+
+  T* operator->() noexcept {
+    return __ptr();
+  }
+
+  const T& operator*() const& noexcept {
+    return *__ptr();
+  }
+
+  T& operator*() & noexcept {
+    return *__ptr();
+  }
+
+  const T&& operator*() const&& noexcept {
+    return std::move(*__ptr());
+  }
+
+  T&& operator*() && noexcept {
+    return std::move(*__ptr());
+  }
+
+  explicit operator bool() const noexcept {
+    return __engaged_;
+  }
+
+  bool has_value() const noexcept {
+    return __engaged_;
+  }
+
+  T& value() & {
+    if (!__engaged_) {
+      throw bad_optional_access();
+    }
+    return *__ptr();
+  }
+
+  const T& value() const& {
+    if (!__engaged_) {
+      throw bad_optional_access();
+    }
+    return *__ptr();
+  }
+
+  T&& value() && {
+    if (!__engaged_) {
+      throw bad_optional_access();
+    }
+    return std::move(*__ptr());
+  }
+
+  const T&& value() const&& {
+    if (!__engaged_) {
+      throw bad_optional_access();
+    }
+    return std::move(*__ptr());
+  }
+
+  template <class U>
+  T value_or(U&& default_value) const& {
+    return __engaged_ ? **this : static_cast<T>(std::forward<U>(default_value));
+  }
+
+  template <class U>
+  T value_or(U&& default_value) && {
+    return __engaged_ ? std::move(**this)
+                      : static_cast<T>(std::forward<U>(default_value));
+  }
+
+  void reset() noexcept {
+    if (__engaged_) {
+      __ptr()->~T();
+      __engaged_ = false;
+    }
+  }
+
+  template <class... Args>
+  T& emplace(Args&&... args) {
+    reset();
+    new (__ptr()) T(std::forward<Args>(args)...);
+    __engaged_ = true;
+    return **this;
+  }
+
+  template <class U, class... Args>
+  T& emplace(initializer_list<U> init, Args&&... args) {
+    reset();
+    new (__ptr()) T(init, std::forward<Args>(args)...);
+    __engaged_ = true;
+    return **this;
+  }
+
+  void swap(optional& other) {
+    if (__engaged_ && other.__engaged_) {
+      std::swap(**this, *other);
+    } else if (__engaged_) {
+      other.__construct_move(std::move(**this));
+      reset();
+    } else if (other.__engaged_) {
+      __construct_move(std::move(*other));
+      other.reset();
+    }
+  }
+};
+
+template <class T>
+void swap(optional<T>& left, optional<T>& right) {
+  left.swap(right);
+}
+
+template <class T>
+optional<remove_cvref_t<T> > make_optional(T&& value) {
+  return optional<remove_cvref_t<T> >(std::forward<T>(value));
+}
+
+template <class T, class... Args>
+optional<T> make_optional(Args&&... args) {
+  return optional<T>(in_place, std::forward<Args>(args)...);
+}
+
+template <class T, class U, class... Args>
+optional<T> make_optional(initializer_list<U> init, Args&&... args) {
+  return optional<T>(in_place, init, std::forward<Args>(args)...);
+}
+
+template <class T>
+bool operator==(const optional<T>& left, const optional<T>& right) {
+  if (left.has_value() != right.has_value()) {
+    return false;
+  }
+  return !left.has_value() || *left == *right;
+}
+
+template <class T>
+bool operator!=(const optional<T>& left, const optional<T>& right) {
+  return !(left == right);
+}
+
+template <class T>
+bool operator<(const optional<T>& left, const optional<T>& right) {
+  if (!right.has_value()) {
+    return false;
+  }
+  if (!left.has_value()) {
+    return true;
+  }
+  return *left < *right;
+}
+
+template <class T>
+bool operator>(const optional<T>& left, const optional<T>& right) {
+  return right < left;
+}
+
+template <class T>
+bool operator<=(const optional<T>& left, const optional<T>& right) {
+  return !(right < left);
+}
+
+template <class T>
+bool operator>=(const optional<T>& left, const optional<T>& right) {
+  return !(left < right);
+}
+
+template <class T>
+auto operator<=>(const optional<T>& left, const optional<T>& right) {
+  if (left.has_value() && right.has_value()) {
+    return *left <=> *right;
+  }
+  if (left.has_value()) {
+    return strong_ordering::greater;
+  }
+  if (right.has_value()) {
+    return strong_ordering::less;
+  }
+  return strong_ordering::equal;
+}
+
+template <class T>
+bool operator==(const optional<T>& value, nullopt_t) noexcept {
+  return !value.has_value();
+}
+
+template <class T>
+bool operator==(nullopt_t, const optional<T>& value) noexcept {
+  return !value.has_value();
+}
+
+template <class T>
+bool operator!=(const optional<T>& value, nullopt_t) noexcept {
+  return value.has_value();
+}
+
+template <class T>
+bool operator!=(nullopt_t, const optional<T>& value) noexcept {
+  return value.has_value();
+}
+
+template <class T>
+bool operator<(const optional<T>&, nullopt_t) noexcept {
+  return false;
+}
+
+template <class T>
+bool operator<(nullopt_t, const optional<T>& value) noexcept {
+  return value.has_value();
+}
+
+template <class T>
+bool operator>(const optional<T>& value, nullopt_t) noexcept {
+  return value.has_value();
+}
+
+template <class T>
+bool operator>(nullopt_t, const optional<T>&) noexcept {
+  return false;
+}
+
+template <class T>
+bool operator<=(const optional<T>& value, nullopt_t) noexcept {
+  return !value.has_value();
+}
+
+template <class T>
+bool operator<=(nullopt_t, const optional<T>&) noexcept {
+  return true;
+}
+
+template <class T>
+bool operator>=(const optional<T>&, nullopt_t) noexcept {
+  return true;
+}
+
+template <class T>
+bool operator>=(nullopt_t, const optional<T>& value) noexcept {
+  return !value.has_value();
+}
+
+template <class T>
+strong_ordering operator<=>(const optional<T>& value, nullopt_t) noexcept {
+  return value.has_value() ? strong_ordering::greater : strong_ordering::equal;
+}
+
+template <class T>
+strong_ordering operator<=>(nullopt_t, const optional<T>& value) noexcept {
+  return value.has_value() ? strong_ordering::less : strong_ordering::equal;
+}
+
+template <class T>
+bool operator==(const optional<T>& left, const T& right) {
+  return left.has_value() && *left == right;
+}
+
+template <class T>
+bool operator==(const T& left, const optional<T>& right) {
+  return right == left;
+}
+
+template <class T>
+bool operator!=(const optional<T>& left, const T& right) {
+  return !(left == right);
+}
+
+template <class T>
+bool operator!=(const T& left, const optional<T>& right) {
+  return !(right == left);
+}
+
+template <class T>
+bool operator<(const optional<T>& left, const T& right) {
+  return !left.has_value() || *left < right;
+}
+
+template <class T>
+bool operator<(const T& left, const optional<T>& right) {
+  return right.has_value() && left < *right;
+}
+
+template <class T>
+bool operator>(const optional<T>& left, const T& right) {
+  return right < left;
+}
+
+template <class T>
+bool operator>(const T& left, const optional<T>& right) {
+  return right < left;
+}
+
+template <class T>
+bool operator<=(const optional<T>& left, const T& right) {
+  return !(right < left);
+}
+
+template <class T>
+bool operator<=(const T& left, const optional<T>& right) {
+  return !(right < left);
+}
+
+template <class T>
+bool operator>=(const optional<T>& left, const T& right) {
+  return !(left < right);
+}
+
+template <class T>
+bool operator>=(const T& left, const optional<T>& right) {
+  return !(left < right);
+}
+
+template <class T>
+auto operator<=>(const optional<T>& left, const T& right) {
+  return left.has_value() ? *left <=> right : strong_ordering::less;
+}
+
+template <class T>
+auto operator<=>(const T& left, const optional<T>& right) {
+  return right.has_value() ? left <=> *right : strong_ordering::greater;
+}
+
+}  // namespace std
+
+#endif /* optional_h */

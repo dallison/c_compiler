@@ -702,6 +702,12 @@ static void RegisterCXXGlobalObject(Symbol* sym) {
   }
 }
 
+static void RegisterCXXGlobalDestructor(Symbol* sym) {
+  if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
+    VectorAppend(&compiler->cxx_global_destructors, sym);
+  }
+}
+
 static void InjectCXXGlobalLifetimeCalls(Symbol* sym) {
   if (!CompilerIsCXX() || !StringEqual(&sym->name, "main") ||
       sym->type->info.function.body == NULL) {
@@ -709,6 +715,10 @@ static void InjectCXXGlobalLifetimeCalls(Symbol* sym) {
   }
   CompoundStatementASTNode* body =
       (CompoundStatementASTNode*)sym->type->info.function.body;
+  for (size_t i = compiler->cxx_global_constructor_calls.length; i > 0; i--) {
+    ASTNode* constructor = compiler->cxx_global_constructor_calls.value.p[i - 1];
+    CompoundASTNodeInsertStatement(body, constructor, 0);
+  }
   for (size_t i = compiler->cxx_global_constructors.length; i > 0; i--) {
     Symbol* object = compiler->cxx_global_constructors.value.p[i - 1];
     CompoundASTNodeInsertStatement(
@@ -926,6 +936,29 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   }
                   ASTNodeSetType((ASTNode*)decl, decl->symbol->type);
                 }
+                if (CompilerIsCXX() && TypeIsStructOrUnion(decl->symbol->type) &&
+                    decl->initializer != NULL &&
+                    decl->initializer->op == AST_OP(call)) {
+                  UninitializedStaticVariable* var =
+                      malloc(sizeof(UninitializedStaticVariable));
+                  var->symbol = decl->symbol;
+                  var->is_global =
+                      !StorageIs(decl->symbol->storage, STO(static));
+                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                  var->size = decl->symbol->type->size;
+                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                  var->is_local = decl->symbol->flags.is_local;
+                  VectorAppend(&compiler->uninitialized_static_variables, var);
+
+                  ASTNode* constructor = decl->initializer;
+                  decl->initializer = NULL;
+                  VectorAppend(&compiler->cxx_global_constructor_calls,
+                               NewExpressionStatementASTNode(
+                                   constructor, constructor->location));
+                  RegisterCXXGlobalDestructor(decl->symbol);
+                  continue;
+                }
                 ASTNode* initializer = ConstexprObjectInitializerForSymbol(
                     decl->symbol, decl->initializer->location);
                 if (initializer == NULL) {
@@ -1108,6 +1141,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
+  VectorInit(&compiler->cxx_global_constructor_calls);
   VectorInit(&compiler->cxx_global_destructor_calls);
   VectorInit(&compiler->cxx_this_adjustor_thunks);
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
@@ -1570,6 +1604,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
+  VectorDestruct(&compiler->cxx_global_constructor_calls);
   VectorDestruct(&compiler->cxx_global_destructor_calls);
   VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
                              /*free_element=*/true);
@@ -1689,7 +1724,8 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
     if (!var->is_tls &&
-        (var->symbol->flags.is_tentative_decl || var->is_local)) {
+        (var->symbol->flags.is_tentative_decl || var->is_local ||
+         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
       compiler->target->emit_bss_space(var, asm_file);
     }
     contains_tls_vars |= var->is_tls;

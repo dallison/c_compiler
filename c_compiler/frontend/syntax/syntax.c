@@ -320,7 +320,8 @@ static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
                                             FunctionInfo* right) {
   if (left->prototype.length != right->prototype.length ||
       left->varargs != right->varargs ||
-      left->is_const_member != right->is_const_member) {
+      left->is_const_member != right->is_const_member ||
+      left->ref_qualifier != right->ref_qualifier) {
     return false;
   }
   for (size_t i = 0; i < left->prototype.length; i++) {
@@ -1250,11 +1251,41 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax);
 static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
 
+static void StaticAssertDependencyVisitor(ASTNode* node, void* data,
+                                          int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  bool* dependent = data;
+  if ((node->flags & kASTDependentQualifiedName) != 0 ||
+      TypeContainsTemplateParameter(node->type)) {
+    *dependent = true;
+  }
+}
+
 void SyntaxParseStaticAssert(Syntax* syntax) {
   LexNextToken(syntax->lex);  // static_assert
   SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
 
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
+  bool dependent = false;
+  if (syntax->current_template_parameter_count > 0) {
+    ASTNodeVisit(expr, StaticAssertDependencyVisitor, 0, &dependent);
+  }
+  if (dependent) {
+    if (LexMatch(syntax->lex, TOK(comma))) {
+      if (LexLookingAt(syntax->lex, TOK(string))) {
+        LexNextToken(syntax->lex);
+      } else {
+        SyntaxError(syntax, "static_assert message must be a string literal");
+      }
+    }
+    SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
+    SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
+    ASTNodeDelete(expr);
+    return;
+  }
   expr = AnalyzeExpression(expr);
   int64_t value = 0;
   if (!EvaluateIntegerExpression(expr, &value)) {

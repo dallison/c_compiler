@@ -46,6 +46,8 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type);
 static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
                              size_t first_formal_arg);
 static bool MemberReceiverIsConst(BinaryASTNode* node);
+static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
+                                              BinaryASTNode* member_access);
 
 // A user-defined conversion (via a converting constructor) involves a standard
 // conversion of the argument to the constructor's parameter.  While ranking
@@ -77,6 +79,18 @@ static ASTNode* NewOperatorMemberCall(ASTNode* receiver, const char* op_name,
 static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
                                     Vector* remaining_actuals,
                                     SourceLocation location);
+
+static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      !TypeFunctionReturnContainsAuto(func) ||
+      func->info.function.body == NULL) {
+    return;
+  }
+  TypeRecord* saved_function = compiler->current_function;
+  compiler->current_function = func;
+  AnalyzeStatement(func->info.function.body);
+  compiler->current_function = saved_function;
+}
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // A dependent qualified value name (`T::member`) that still carries its flag
@@ -1018,6 +1032,9 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
         !candidate->symbol->type->info.function.is_destructor) {
       continue;
     }
+    if (!MemberReceiverMatchesRefQualifier(candidate->symbol->type, node)) {
+      continue;
+    }
     viable = true;
     break;
   }
@@ -1425,6 +1442,8 @@ typedef enum {
   kConditionalFunctionArmFunctionPointer,
 } ConditionalFunctionArmKind;
 
+static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
 static ConditionalFunctionArmKind GetConditionalFunctionArmKind(
     ASTNode* arm, TypeRecord** function_type) {
   *function_type = NULL;
@@ -1547,6 +1566,17 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = colon->left->value_category;
     node->base.value_category = colon->left->value_category;
+    return;
+  }
+  if (CompilerIsCXX() &&
+      TypeIsStructOrUnion(colon->left->type) &&
+      TypeIsStructOrUnion(colon->right->type) &&
+      TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type)) {
+    TypeRecord* result_type = TypeRecordCopy(colon->left->type);
+    result_type->qualifiers = kQualPlain;
+    ASTNodeSetType((ASTNode*)colon, result_type);
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    TypeRecordDelete(result_type);
     return;
   }
   InsertNumericConversions(colon, false);
@@ -2817,6 +2847,12 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
                     member->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
     }
+    if (!MemberReceiverMatchesRefQualifier(member->symbol->type, member_access)) {
+      SemanticError((ASTNode*)member_access,
+                    "Cannot call ref-qualified member function %s on this "
+                    "object value category",
+                    member->symbol->name.value);
+    }
     receiver = ASTNodeMove(member_access->left);
     if (member_access->base.op == AST_OP(dot)) {
       receiver = NewAnalyzedBuiltinAddressOf(receiver, receiver->location);
@@ -3000,6 +3036,29 @@ static bool MemberReceiverIsConst(BinaryASTNode* node) {
            TypeIsConst(node->left->type->next);
   }
   return TypeIsConst(node->left->type);
+}
+
+static bool MemberReceiverIsLValue(BinaryASTNode* node) {
+  if (node->base.op == AST_OP(arrow)) {
+    return true;
+  }
+  return node->left != NULL && node->left->value_category == kValueCategoryLvalue;
+}
+
+static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
+                                              BinaryASTNode* member_access) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return true;
+  }
+  switch (func->info.function.ref_qualifier) {
+    case kCXXRefQualifierNone:
+      return true;
+    case kCXXRefQualifierLValue:
+      return MemberReceiverIsLValue(member_access);
+    case kCXXRefQualifierRValue:
+      return !MemberReceiverIsLValue(member_access);
+  }
+  return true;
 }
 
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
@@ -3801,6 +3860,8 @@ static void EmitFreeCandidateNotes(Vector* candidates, VectorASTNode* call,
   }
 }
 
+static int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);
+
 static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
                                               Vector* actuals,
                                               Vector* explicit_args,
@@ -3862,7 +3923,16 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
           ambiguous = false;
         } else if (best != effective &&
                    best_is_template == effective_is_template) {
-          ambiguous = true;
+          int template_order =
+              CompareFunctionTemplateSpecificity(effective, best);
+          if (template_order > 0) {
+            best = effective;
+            ambiguous = false;
+          } else if (template_order < 0) {
+            ambiguous = false;
+          } else {
+            ambiguous = true;
+          }
         }
       }
     }
@@ -3969,12 +4039,97 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   if (!candidate->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
   }
+  Vector* prototype = &candidate->type->info.function.prototype;
+  for (size_t i = 0; node->children != NULL && i < node->children->length &&
+                     i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    ASTNode* actual = node->children->value.p[i];
+    if (formal != NULL && actual != NULL &&
+        TypeIsCXXInitializerList(formal->type) &&
+        actual->op != AST_OP(braced_init)) {
+      return NULL;
+    }
+    if (formal != NULL && actual != NULL &&
+        !TypeContainsTemplateParameter(formal->type) &&
+        OverloadConversionRank(actual, formal->type) < 0) {
+      return NULL;
+    }
+  }
   DiagnosticSuppressBegin();
   Symbol* instantiated =
       TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
           &compiler->syntax, candidate, explicit_args, node->children);
   DiagnosticSuppressEnd();
   return instantiated == candidate ? NULL : instantiated;
+}
+
+static int FunctionTemplatePatternTypeSpecificity(TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  int score = 0;
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->template_parameter_index >= 0) {
+      continue;
+    }
+    if (TypeIsReference(t) || TypeIsPointer(t) || TypeIsArray(t)) {
+      score += 1;
+    } else {
+      score += 2;
+    }
+    if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
+        t->template_arguments != NULL) {
+      score += 4;
+      for (size_t i = 0; i < t->template_arguments->length; i++) {
+        TemplateArgument* arg = t->template_arguments->value.p[i];
+        if (arg != NULL && arg->kind == kTemplateParameterType) {
+          score += FunctionTemplatePatternTypeSpecificity(arg->type);
+        }
+      }
+    }
+  }
+  return score;
+}
+
+static int FunctionTemplatePatternSpecificity(Symbol* instantiated) {
+  if (instantiated == NULL || instantiated->type == NULL ||
+      !TypeIsFunction(instantiated->type)) {
+    return 0;
+  }
+  Symbol* origin = instantiated->type->info.function.template_origin;
+  if (origin == NULL || origin->type == NULL || !TypeIsFunction(origin->type)) {
+    return 0;
+  }
+  int score = 0;
+  Vector* prototype = &origin->type->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    if (formal != NULL) {
+      score += FunctionTemplatePatternTypeSpecificity(formal->type);
+    }
+  }
+  return score;
+}
+
+static int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right) {
+  bool left_is_template = left != NULL && left->type != NULL &&
+                          TypeIsFunction(left->type) &&
+                          left->type->info.function.template_origin != NULL;
+  bool right_is_template = right != NULL && right->type != NULL &&
+                           TypeIsFunction(right->type) &&
+                           right->type->info.function.template_origin != NULL;
+  if (!left_is_template || !right_is_template) {
+    return 0;
+  }
+  int left_score = FunctionTemplatePatternSpecificity(left);
+  int right_score = FunctionTemplatePatternSpecificity(right);
+  if (left_score > right_score) {
+    return 1;
+  }
+  if (right_score > left_score) {
+    return -1;
+  }
+  return 0;
 }
 
 static int MemberOverloadCallScore(StructMember* candidate,
@@ -3987,6 +4142,11 @@ static int MemberOverloadCallScore(StructMember* candidate,
       !candidate->symbol->type->info.function.is_constructor &&
       !candidate->symbol->type->info.function.is_destructor &&
       MemberReceiverIsConst(member_access)) {
+    return -1;
+  }
+  if (!candidate->is_static &&
+      !MemberReceiverMatchesRefQualifier(candidate->symbol->type,
+                                         member_access)) {
     return -1;
   }
   int score = FunctionCallScore(candidate->symbol->type, node, first_formal_arg);
@@ -4060,6 +4220,20 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
     return explicit_args == NULL ? candidate : NULL;
   }
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
+  Vector* prototype = &candidate->symbol->type->info.function.prototype;
+  for (size_t i = 0; node->children != NULL && i < node->children->length &&
+                     i + first_formal_arg < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i + first_formal_arg];
+    ASTNode* actual = node->children->value.p[i];
+    TypeRecord* target =
+        formal != NULL && TypeIsReference(formal->type) ? formal->type->next
+                                                        : formal->type;
+    if (formal != NULL && actual != NULL &&
+        TypeIsCXXInitializerList(target) &&
+        actual->op != AST_OP(braced_init)) {
+      return NULL;
+    }
+  }
   DiagnosticSuppressBegin();
   Symbol* instantiated =
       TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
@@ -4828,6 +5002,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (TypeIsPointer(node->left->type)) {
     subtype = subtype->next;
   }
+  EnsureAutoReturnTypeDeduced(subtype);
 
   TypeRecord* return_type = subtype->next;
   if (TypeIsReference(return_type)) {

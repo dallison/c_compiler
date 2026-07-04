@@ -320,6 +320,7 @@ typedef struct {
   // Elements are Symbol* owned by the normal symbol tables.
   Vector cxx_global_constructors;
   Vector cxx_global_destructors;
+  Vector cxx_global_constructor_calls;  // ASTNode*, owned by function bodies.
   Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
   Vector cxx_this_adjustor_thunks;  // CXXThisAdjustorThunk* entries.
 

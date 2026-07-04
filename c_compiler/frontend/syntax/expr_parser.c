@@ -86,6 +86,10 @@ static const struct Intrinsic* GetIntrinsic(const char* name) {
                  sizeof(intrinsics[0]), CompareIntrinsicName);
 }
 
+static bool IsBuiltinCallName(const char* name) {
+  return GetIntrinsic(name) != NULL || strcmp(name, "__builtin_expect") == 0;
+}
+
 static Symbol* FindThisSymbol(Syntax* syntax) {
   String this_name;
   StringInit(&this_name, "this");
@@ -95,7 +99,8 @@ static Symbol* FindThisSymbol(Syntax* syntax) {
 }
 
 static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
-                                        FullyQualifiedIdentifier* name) {
+                                        FullyQualifiedIdentifier* name,
+                                        bool allow_unresolved_member) {
   if (name->is_qualified) {
     return NULL;
   }
@@ -111,7 +116,11 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
   StructMember* member =
       FindStructMember(this_symbol->type->next->info.struct_info, &member_name);
-  if (member == NULL || member->is_static) {
+  if (member != NULL && member->is_static) {
+    StringDestruct(&member_name);
+    return NULL;
+  }
+  if (member == NULL && !allow_unresolved_member) {
     StringDestruct(&member_name);
     return NULL;
   }
@@ -834,7 +843,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else {
-      ASTNode* member_access = NewMemberAccessFromThis(syntax, &name);
+      ASTNode* member_access =
+          NewMemberAccessFromThis(syntax, &name,
+                                  /*allow_unresolved_member=*/false);
       if (member_access != NULL) {
         FullyQualifiedIdentifierDestruct(&name);
         return member_access;
@@ -845,6 +856,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         return static_member;
       }
       if (LexLookingAt(lex, TOK(lparen))) {
+        if (!IsBuiltinCallName(FullyQualifiedIdentifierLast(&name))) {
+          ASTNode* deferred_member_access =
+              NewMemberAccessFromThis(syntax, &name,
+                                      /*allow_unresolved_member=*/true);
+          if (deferred_member_access != NULL) {
+            FullyQualifiedIdentifierDestruct(&name);
+            return deferred_member_access;
+          }
+        }
         if (!CompilerIsCXX() &&
             GetIntrinsic(FullyQualifiedIdentifierLast(&name)) == NULL) {
           // Calling an unknown function is a warning.
@@ -3319,15 +3339,17 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
               syntax, allocated_type, NULL, location);
         }
         VectorDelete(initializers);
-      } else if (!dependent && (TypeIsStructOrUnion(allocated_type) ||
-                                TypeIsArray(allocated_type))) {
+      } else if (dependent) {
+        scalar_initializer =
+            NewBracedInitializerASTNode(initializers, NULL, location);
+      } else if (TypeIsStructOrUnion(allocated_type) ||
+                 TypeIsArray(allocated_type)) {
         // `new T{a, b, ...}` (or the C++20 parenthesized aggregate form
         // `new T(a, b, ...)`): aggregate-initialize the object.
         scalar_initializer = NewCXXNewCompoundLiteralInitializer(
             syntax, allocated_type, initializers, location);
       } else {
-        // A scalar type (or an unresolved dependent type) cannot take more than
-        // one new-initializer expression.
+        // A scalar type cannot take more than one new-initializer expression.
         SyntaxError(syntax, "new initializer for non-class type requires one expression");
         VectorDelete(initializers);
       }
