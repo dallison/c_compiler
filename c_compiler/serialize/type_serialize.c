@@ -1,0 +1,1363 @@
+//
+//  type_serialize.c
+//  c_compiler
+//
+//  Serialization of the type graph: TypeRecord, Struct, StructMember, Enum, and
+//  their inline sub-objects (ArrayInfo, FunctionInfo, TemplateArgument,
+//  TemplateParameter, CXXBaseSpecifier).  Cross-references between pooled
+//  objects are written as integer handles (see serialize.h).
+//
+//  Field numbers are documented here and mirrored by `// @wire N` comments in
+//  type.h.  Codegen-only / transient fields (refs counts, codegen_info, DIEs,
+//  symbol-table maps) are intentionally omitted; they are recomputed on load.
+//
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "ast.h"
+#include "serialize_common.h"
+#include "type.h"
+
+//
+// TypeRecord field numbers.
+//
+enum {
+  kType_id = 1,
+  kType_type = 2,
+  kType_qualifiers = 3,
+  kType_declarator = 4,
+  kType_size = 5,
+  kType_template_parameter_index = 6,
+  kType_dependent_member_name = 7,
+  kType_template_origin = 8,
+  kType_template_arguments = 9,
+  kType_next = 10,
+  kType_array = 11,
+  kType_function = 12,
+  kType_struct_info = 13,
+  kType_enum_info = 14,
+};
+
+static const WireFieldDesc kTypeFields[] = {
+    {kType_id, "id"},
+    {kType_type, "type"},
+    {kType_qualifiers, "qualifiers"},
+    {kType_declarator, "declarator"},
+    {kType_size, "size"},
+    {kType_template_parameter_index, "template_parameter_index"},
+    {kType_dependent_member_name, "dependent_member_name"},
+    {kType_template_origin, "template_origin"},
+    {kType_template_arguments, "template_arguments"},
+    {kType_next, "next"},
+    {kType_array, "array"},
+    {kType_function, "function"},
+    {kType_struct_info, "struct_info"},
+    {kType_enum_info, "enum_info"},
+};
+
+//
+// TemplateArgument (inline sub-message) field numbers.
+//
+enum {
+  kTArg_kind = 1,
+  kTArg_is_pack_expansion = 2,
+  kTArg_type = 3,
+  kTArg_int_value = 4,
+  kTArg_template_parameter_index = 5,
+  kTArg_pack_arguments = 6,
+  kTArg_dependent_expr = 7,
+};
+
+//
+// TemplateParameter (inline sub-message) field numbers.
+//
+enum {
+  kTParam_name = 1,
+  kTParam_kind = 2,
+  kTParam_is_parameter_pack = 3,
+  kTParam_type = 4,
+  kTParam_default_type = 5,
+  kTParam_has_default_int = 6,
+  kTParam_default_int_value = 7,
+  kTParam_default_template_parameter_index = 8,
+  kTParam_index = 9,
+};
+
+//
+// ArrayInfo (inline sub-message) field numbers.
+//
+enum {
+  kArr_is_flexible = 1,
+  kArr_is_static = 2,
+  kArr_is_vla = 3,
+  kArr_is_placeholder_vla = 4,
+  kArr_template_parameter_index = 5,
+  kArr_fixed = 6,
+  kArr_vla_size = 7,
+};
+
+//
+// FunctionInfo (inline sub-message) field numbers.
+//
+enum {
+  kFn_symbol = 1,
+  kFn_prototype = 2,
+  kFn_varargs = 3,
+  kFn_body = 4,
+  kFn_unknown_args = 5,
+  kFn_definition = 6,
+  kFn_old_style = 7,
+  kFn_is_inline = 8,
+  kFn_is_constexpr = 9,
+  kFn_is_consteval = 10,
+  kFn_is_constructor = 11,
+  kFn_is_destructor = 12,
+  kFn_is_const_member = 13,
+  kFn_ref_qualifier = 14,
+  kFn_is_explicit = 15,
+  kFn_is_explicit_conversion = 16,
+  kFn_is_virtual = 17,
+  kFn_is_override = 18,
+  kFn_is_final = 19,
+  kFn_is_pure_virtual = 20,
+  kFn_is_defaulted = 21,
+  kFn_is_deleted = 22,
+  kFn_cxx_special_member_kind = 23,
+  kFn_is_user_declared = 24,
+  kFn_is_user_provided = 25,
+  kFn_is_explicitly_defaulted = 26,
+  kFn_is_explicitly_deleted = 27,
+  kFn_is_implicitly_declared = 28,
+  kFn_is_implicitly_deleted = 29,
+  kFn_is_trivial_special_member = 30,
+  kFn_is_constexpr_eligible = 31,
+  kFn_is_noexcept_eligible = 32,
+  kFn_is_noexcept = 33,
+  kFn_is_auto_return_deduced = 34,
+  kFn_is_deduction_guide = 35,
+  kFn_is_coroutine = 36,
+  kFn_coroutine_promise_type = 37,
+  kFn_coroutine_frame_type = 38,
+  kFn_coroutine_suspend_count = 39,
+  kFn_virtual_index = 40,
+  kFn_cxx_member_owner = 41,
+  kFn_template_origin = 42,
+  kFn_template_parameter_count = 43,
+  kFn_template_parameter_base = 44,
+  kFn_template_parameters = 45,
+};
+
+//
+// CXXBaseSpecifier (inline sub-message) field numbers.
+//
+enum {
+  kBase_type = 1,
+  kBase_access = 2,
+  kBase_byte_offset = 3,
+  kBase_is_virtual = 4,
+  kBase_is_pack_expansion = 5,
+};
+
+//
+// Enum field numbers.
+//
+enum {
+  kEnum_tag_name = 1,
+  kEnum_tag_symbol = 2,
+  kEnum_constants = 3,
+  kEnum_next_value = 4,
+  kEnum_is_scoped = 5,
+  kEnum_has_fixed_underlying = 6,
+  kEnum_fixed_underlying_type = 7,
+  kEnum_fixed_underlying_size = 8,
+};
+
+static const WireFieldDesc kEnumFields[] = {
+    {kEnum_tag_name, "tag_name"},
+    {kEnum_tag_symbol, "tag_symbol"},
+    {kEnum_constants, "constants"},
+    {kEnum_next_value, "next_value"},
+    {kEnum_is_scoped, "is_scoped"},
+    {kEnum_has_fixed_underlying, "has_fixed_underlying"},
+    {kEnum_fixed_underlying_type, "fixed_underlying_type"},
+    {kEnum_fixed_underlying_size, "fixed_underlying_size"},
+};
+
+//
+// StructMember field numbers.
+//
+enum {
+  kMem_symbol = 1,
+  kMem_default_initializer = 2,
+  kMem_byte_offset = 3,
+  kMem_bit_offset = 4,
+  kMem_bit_size = 5,
+  kMem_index = 6,
+  kMem_cxx_vcall_offset = 7,
+  kMem_is_anon = 8,
+  kMem_is_static = 9,
+  kMem_is_mutable = 10,
+  kMem_is_member_function = 11,
+  kMem_is_using_declaration = 12,
+  kMem_access = 13,
+  kMem_overload_next = 14,
+};
+
+static const WireFieldDesc kMemberFields[] = {
+    {kMem_symbol, "symbol"},
+    {kMem_default_initializer, "default_initializer"},
+    {kMem_byte_offset, "byte_offset"},
+    {kMem_bit_offset, "bit_offset"},
+    {kMem_bit_size, "bit_size"},
+    {kMem_index, "index"},
+    {kMem_cxx_vcall_offset, "cxx_vcall_offset"},
+    {kMem_is_anon, "is_anon"},
+    {kMem_is_static, "is_static"},
+    {kMem_is_mutable, "is_mutable"},
+    {kMem_is_member_function, "is_member_function"},
+    {kMem_is_using_declaration, "is_using_declaration"},
+    {kMem_access, "access"},
+    {kMem_overload_next, "overload_next"},
+};
+
+//
+// Struct field numbers.
+//
+enum {
+  kStruct_tag_name = 1,
+  kStruct_tag_symbol = 2,
+  kStruct_bases = 3,
+  kStruct_members = 4,
+  kStruct_next_offset = 5,
+  kStruct_size = 6,
+  kStruct_non_virtual_size = 7,
+  kStruct_alignment = 8,
+  kStruct_is_union = 9,
+  kStruct_is_class = 10,
+  kStruct_is_final = 11,
+  kStruct_is_template = 12,
+  kStruct_is_aggregate = 13,
+  kStruct_cxx_special_members_complete = 14,
+  kStruct_template_parameters = 15,
+  kStruct_template_parameter_count = 16,
+  kStruct_packed = 17,
+  kStruct_is_abstract = 18,
+  kStruct_explicit_alignment = 19,
+  kStruct_pack = 20,
+  kStruct_next_bit_pos = 21,
+  kStruct_current_offset = 22,
+  kStruct_vptr_member = 23,
+  kStruct_vtable_symbol = 24,
+  kStruct_vbptr_member = 25,
+  kStruct_vbtable_symbol = 26,
+  kStruct_virtual_members = 27,
+  kStruct_friend_classes = 28,
+  kStruct_friend_functions = 29,
+};
+
+static const WireFieldDesc kStructFields[] = {
+    {kStruct_tag_name, "tag_name"},
+    {kStruct_tag_symbol, "tag_symbol"},
+    {kStruct_bases, "bases"},
+    {kStruct_members, "members"},
+    {kStruct_next_offset, "next_offset"},
+    {kStruct_size, "size"},
+    {kStruct_non_virtual_size, "non_virtual_size"},
+    {kStruct_alignment, "alignment"},
+    {kStruct_is_union, "is_union"},
+    {kStruct_is_class, "is_class"},
+    {kStruct_is_final, "is_final"},
+    {kStruct_is_template, "is_template"},
+    {kStruct_is_aggregate, "is_aggregate"},
+    {kStruct_cxx_special_members_complete, "cxx_special_members_complete"},
+    {kStruct_template_parameters, "template_parameters"},
+    {kStruct_template_parameter_count, "template_parameter_count"},
+    {kStruct_packed, "packed"},
+    {kStruct_is_abstract, "is_abstract"},
+    {kStruct_explicit_alignment, "explicit_alignment"},
+    {kStruct_pack, "pack"},
+    {kStruct_next_bit_pos, "next_bit_pos"},
+    {kStruct_current_offset, "current_offset"},
+    {kStruct_vptr_member, "vptr_member"},
+    {kStruct_vtable_symbol, "vtable_symbol"},
+    {kStruct_vbptr_member, "vbptr_member"},
+    {kStruct_vbtable_symbol, "vbtable_symbol"},
+    {kStruct_virtual_members, "virtual_members"},
+    {kStruct_friend_classes, "friend_classes"},
+    {kStruct_friend_functions, "friend_functions"},
+};
+
+// ---------------------------------------------------------------------------
+// TemplateParameter (inline).
+// ---------------------------------------------------------------------------
+static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
+                                   TemplateParameter* p) {
+  SWriteStringVal(ctx, out, kTParam_name, &p->name);
+  WireWriteInt32(out, kTParam_kind, (int32_t)p->kind);
+  WireWriteBool(out, kTParam_is_parameter_pack, p->is_parameter_pack);
+  SWriteRef(ctx, out, kTParam_type, kSerialKindType, p->type);
+  SWriteRef(ctx, out, kTParam_default_type, kSerialKindType, p->default_type);
+  WireWriteBool(out, kTParam_has_default_int, p->has_default_int);
+  WireWriteInt64(out, kTParam_default_int_value, p->default_int_value);
+  WireWriteInt32(out, kTParam_default_template_parameter_index,
+                 p->default_template_parameter_index);
+  WireWriteInt32(out, kTParam_index, p->index);
+}
+
+static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
+                                                WireBuffer* in) {
+  TemplateParameter* p = (TemplateParameter*)calloc(1, sizeof(*p));
+  StringInit(&p->name, NULL);
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kTParam_name:
+        SReadStringVal(ctx, in, &p->name);
+        break;
+      case kTParam_kind: {
+        int32_t v;
+        WireReadInt32(in, &v);
+        p->kind = (TemplateParameterKind)v;
+        break;
+      }
+      case kTParam_is_parameter_pack:
+        WireReadBool(in, &p->is_parameter_pack);
+        break;
+      case kTParam_type:
+        p->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kTParam_default_type:
+        p->default_type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kTParam_has_default_int:
+        WireReadBool(in, &p->has_default_int);
+        break;
+      case kTParam_default_int_value:
+        WireReadInt64(in, &p->default_int_value);
+        break;
+      case kTParam_default_template_parameter_index:
+        WireReadInt32(in, &p->default_template_parameter_index);
+        break;
+      case kTParam_index:
+        WireReadInt32(in, &p->index);
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+  return p;
+}
+
+// A vector<TemplateParameter*> written as a length-delimited blob:
+// [count][ each: length-delimited sub-message ].  `v` is an embedded Vector.
+// Exposed (non-static) so symbol_serialize.c can (de)serialize variable
+// template parameter lists.
+void SerialWriteTemplateParameterVector(SerializeContext* ctx, WireBuffer* buf,
+                                        int field, Vector* v) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 16);
+  size_t length = v == NULL ? 0 : v->length;
+  WireWriteRawVarint(&tmp, (uint64_t)length);
+  for (size_t i = 0; i < length; i++) {
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 16);
+    WriteTemplateParameter(ctx, &elem, (TemplateParameter*)VectorGet(v, i));
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(buf, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+void SerialReadTemplateParameterVector(DeserializeContext* ctx, WireBuffer* in,
+                                       Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      return;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    VectorAppend(out, ReadTemplateParameter(ctx, &er));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TemplateArgument (inline, recursive through pack_arguments).
+// ---------------------------------------------------------------------------
+static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
+                                  TemplateArgument* a);
+static void WriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
+                                        int field, Vector* v);
+static Vector* ReadTemplateArgumentVector(DeserializeContext* ctx,
+                                          WireBuffer* in);
+
+static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
+                                  TemplateArgument* a) {
+  WireWriteInt32(out, kTArg_kind, (int32_t)a->kind);
+  WireWriteBool(out, kTArg_is_pack_expansion, a->is_pack_expansion);
+  SWriteRef(ctx, out, kTArg_type, kSerialKindType, a->type);
+  WireWriteInt64(out, kTArg_int_value, a->int_value);
+  WireWriteInt32(out, kTArg_template_parameter_index,
+                 a->template_parameter_index);
+  if (a->pack_arguments != NULL) {
+    WriteTemplateArgumentVector(ctx, out, kTArg_pack_arguments,
+                                a->pack_arguments);
+  }
+  SWriteRef(ctx, out, kTArg_dependent_expr, kSerialKindAST, a->dependent_expr);
+}
+
+static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
+                                              WireBuffer* in) {
+  TemplateArgument* a = (TemplateArgument*)calloc(1, sizeof(*a));
+  a->template_parameter_index = -1;
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kTArg_kind: {
+        int32_t v;
+        WireReadInt32(in, &v);
+        a->kind = (TemplateParameterKind)v;
+        break;
+      }
+      case kTArg_is_pack_expansion:
+        WireReadBool(in, &a->is_pack_expansion);
+        break;
+      case kTArg_type:
+        a->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kTArg_int_value:
+        WireReadInt64(in, &a->int_value);
+        break;
+      case kTArg_template_parameter_index:
+        WireReadInt32(in, &a->template_parameter_index);
+        break;
+      case kTArg_pack_arguments:
+        a->pack_arguments = ReadTemplateArgumentVector(ctx, in);
+        break;
+      case kTArg_dependent_expr:
+        a->dependent_expr = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+  return a;
+}
+
+static void WriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
+                                        int field, Vector* v) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 16);
+  size_t length = v == NULL ? 0 : v->length;
+  WireWriteRawVarint(&tmp, (uint64_t)length);
+  for (size_t i = 0; i < length; i++) {
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 16);
+    WriteTemplateArgument(ctx, &elem, (TemplateArgument*)VectorGet(v, i));
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(buf, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+static Vector* ReadTemplateArgumentVector(DeserializeContext* ctx,
+                                          WireBuffer* in) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return NULL;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return NULL;
+  }
+  Vector* out = NewVector();
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      break;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    VectorAppend(out, ReadTemplateArgument(ctx, &er));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// ArrayInfo (inline).
+// ---------------------------------------------------------------------------
+static void WriteArrayInfo(SerializeContext* ctx, WireBuffer* out,
+                           ArrayInfo* a) {
+  WireWriteBool(out, kArr_is_flexible, a->is_flexible);
+  WireWriteBool(out, kArr_is_static, a->is_static);
+  WireWriteBool(out, kArr_is_vla, a->is_vla);
+  WireWriteBool(out, kArr_is_placeholder_vla, a->is_placeholder_vla);
+  WireWriteInt32(out, kArr_template_parameter_index,
+                 a->template_parameter_index);
+  if (a->is_vla) {
+    SWriteRef(ctx, out, kArr_vla_size, kSerialKindAST, a->size.vla.size);
+  } else {
+    WireWriteInt32(out, kArr_fixed, a->size.fixed);
+  }
+}
+
+static void ReadArrayInfo(DeserializeContext* ctx, WireBuffer* in,
+                          ArrayInfo* a) {
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    bool b;
+    switch (field) {
+      case kArr_is_flexible:
+        WireReadBool(in, &b);
+        a->is_flexible = b;
+        break;
+      case kArr_is_static:
+        WireReadBool(in, &b);
+        a->is_static = b;
+        break;
+      case kArr_is_vla:
+        WireReadBool(in, &b);
+        a->is_vla = b;
+        break;
+      case kArr_is_placeholder_vla:
+        WireReadBool(in, &b);
+        a->is_placeholder_vla = b;
+        break;
+      case kArr_template_parameter_index:
+        WireReadInt32(in, &a->template_parameter_index);
+        break;
+      case kArr_fixed:
+        WireReadInt32(in, &a->size.fixed);
+        break;
+      case kArr_vla_size:
+        a->size.vla.size = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FunctionInfo (inline).
+// ---------------------------------------------------------------------------
+static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
+                              FunctionInfo* f) {
+  SWriteRef(ctx, out, kFn_symbol, kSerialKindSymbol, f->symbol);
+  SWriteRefVector(ctx, out, kFn_prototype, kSerialKindSymbol, &f->prototype);
+  WireWriteBool(out, kFn_varargs, f->varargs);
+  SWriteRef(ctx, out, kFn_body, kSerialKindAST, f->body);
+  WireWriteBool(out, kFn_unknown_args, f->unknown_args);
+  WireWriteBool(out, kFn_definition, f->definition);
+  WireWriteBool(out, kFn_old_style, f->old_style);
+  WireWriteBool(out, kFn_is_inline, f->is_inline);
+  WireWriteBool(out, kFn_is_constexpr, f->is_constexpr);
+  WireWriteBool(out, kFn_is_consteval, f->is_consteval);
+  WireWriteBool(out, kFn_is_constructor, f->is_constructor);
+  WireWriteBool(out, kFn_is_destructor, f->is_destructor);
+  WireWriteBool(out, kFn_is_const_member, f->is_const_member);
+  WireWriteInt32(out, kFn_ref_qualifier, (int32_t)f->ref_qualifier);
+  WireWriteBool(out, kFn_is_explicit, f->is_explicit);
+  WireWriteBool(out, kFn_is_explicit_conversion, f->is_explicit_conversion);
+  WireWriteBool(out, kFn_is_virtual, f->is_virtual);
+  WireWriteBool(out, kFn_is_override, f->is_override);
+  WireWriteBool(out, kFn_is_final, f->is_final);
+  WireWriteBool(out, kFn_is_pure_virtual, f->is_pure_virtual);
+  WireWriteBool(out, kFn_is_defaulted, f->is_defaulted);
+  WireWriteBool(out, kFn_is_deleted, f->is_deleted);
+  WireWriteInt32(out, kFn_cxx_special_member_kind,
+                 (int32_t)f->cxx_special_member_kind);
+  WireWriteBool(out, kFn_is_user_declared, f->is_user_declared);
+  WireWriteBool(out, kFn_is_user_provided, f->is_user_provided);
+  WireWriteBool(out, kFn_is_explicitly_defaulted, f->is_explicitly_defaulted);
+  WireWriteBool(out, kFn_is_explicitly_deleted, f->is_explicitly_deleted);
+  WireWriteBool(out, kFn_is_implicitly_declared, f->is_implicitly_declared);
+  WireWriteBool(out, kFn_is_implicitly_deleted, f->is_implicitly_deleted);
+  WireWriteBool(out, kFn_is_trivial_special_member,
+                f->is_trivial_special_member);
+  WireWriteBool(out, kFn_is_constexpr_eligible, f->is_constexpr_eligible);
+  WireWriteBool(out, kFn_is_noexcept_eligible, f->is_noexcept_eligible);
+  WireWriteBool(out, kFn_is_noexcept, f->is_noexcept);
+  WireWriteBool(out, kFn_is_auto_return_deduced, f->is_auto_return_deduced);
+  WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
+  WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
+  SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
+            f->coroutine_promise_type);
+  SWriteRef(ctx, out, kFn_coroutine_frame_type, kSerialKindType,
+            f->coroutine_frame_type);
+  WireWriteInt32(out, kFn_coroutine_suspend_count, f->coroutine_suspend_count);
+  WireWriteInt32(out, kFn_virtual_index, f->virtual_index);
+  SWriteRef(ctx, out, kFn_cxx_member_owner, kSerialKindStruct,
+            f->cxx_member_owner);
+  SWriteRef(ctx, out, kFn_template_origin, kSerialKindSymbol,
+            f->template_origin);
+  WireWriteInt32(out, kFn_template_parameter_count,
+                 f->template_parameter_count);
+  WireWriteInt32(out, kFn_template_parameter_base, f->template_parameter_base);
+  SerialWriteTemplateParameterVector(ctx, out, kFn_template_parameters,
+                                     &f->template_parameters);
+}
+
+static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
+                             FunctionInfo* f) {
+  VectorInit(&f->prototype);
+  VectorInit(&f->template_parameters);
+  f->virtual_index = -1;
+  while (!WireBufferEof(in) && !WireBufferHasError(in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(in, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kFn_symbol:
+        f->symbol = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kFn_prototype:
+        SReadRefVector(ctx, in, kSerialKindSymbol, &f->prototype);
+        break;
+      case kFn_varargs:
+        WireReadBool(in, &f->varargs);
+        break;
+      case kFn_body:
+        f->body = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      case kFn_unknown_args:
+        WireReadBool(in, &f->unknown_args);
+        break;
+      case kFn_definition:
+        WireReadBool(in, &f->definition);
+        break;
+      case kFn_old_style:
+        WireReadBool(in, &f->old_style);
+        break;
+      case kFn_is_inline:
+        WireReadBool(in, &f->is_inline);
+        break;
+      case kFn_is_constexpr:
+        WireReadBool(in, &f->is_constexpr);
+        break;
+      case kFn_is_consteval:
+        WireReadBool(in, &f->is_consteval);
+        break;
+      case kFn_is_constructor:
+        WireReadBool(in, &f->is_constructor);
+        break;
+      case kFn_is_destructor:
+        WireReadBool(in, &f->is_destructor);
+        break;
+      case kFn_is_const_member:
+        WireReadBool(in, &f->is_const_member);
+        break;
+      case kFn_ref_qualifier: {
+        int32_t v;
+        WireReadInt32(in, &v);
+        f->ref_qualifier = (CXXRefQualifier)v;
+        break;
+      }
+      case kFn_is_explicit:
+        WireReadBool(in, &f->is_explicit);
+        break;
+      case kFn_is_explicit_conversion:
+        WireReadBool(in, &f->is_explicit_conversion);
+        break;
+      case kFn_is_virtual:
+        WireReadBool(in, &f->is_virtual);
+        break;
+      case kFn_is_override:
+        WireReadBool(in, &f->is_override);
+        break;
+      case kFn_is_final:
+        WireReadBool(in, &f->is_final);
+        break;
+      case kFn_is_pure_virtual:
+        WireReadBool(in, &f->is_pure_virtual);
+        break;
+      case kFn_is_defaulted:
+        WireReadBool(in, &f->is_defaulted);
+        break;
+      case kFn_is_deleted:
+        WireReadBool(in, &f->is_deleted);
+        break;
+      case kFn_cxx_special_member_kind: {
+        int32_t v;
+        WireReadInt32(in, &v);
+        f->cxx_special_member_kind = (CXXSpecialMemberKind)v;
+        break;
+      }
+      case kFn_is_user_declared:
+        WireReadBool(in, &f->is_user_declared);
+        break;
+      case kFn_is_user_provided:
+        WireReadBool(in, &f->is_user_provided);
+        break;
+      case kFn_is_explicitly_defaulted:
+        WireReadBool(in, &f->is_explicitly_defaulted);
+        break;
+      case kFn_is_explicitly_deleted:
+        WireReadBool(in, &f->is_explicitly_deleted);
+        break;
+      case kFn_is_implicitly_declared:
+        WireReadBool(in, &f->is_implicitly_declared);
+        break;
+      case kFn_is_implicitly_deleted:
+        WireReadBool(in, &f->is_implicitly_deleted);
+        break;
+      case kFn_is_trivial_special_member:
+        WireReadBool(in, &f->is_trivial_special_member);
+        break;
+      case kFn_is_constexpr_eligible:
+        WireReadBool(in, &f->is_constexpr_eligible);
+        break;
+      case kFn_is_noexcept_eligible:
+        WireReadBool(in, &f->is_noexcept_eligible);
+        break;
+      case kFn_is_noexcept:
+        WireReadBool(in, &f->is_noexcept);
+        break;
+      case kFn_is_auto_return_deduced:
+        WireReadBool(in, &f->is_auto_return_deduced);
+        break;
+      case kFn_is_deduction_guide:
+        WireReadBool(in, &f->is_deduction_guide);
+        break;
+      case kFn_is_coroutine:
+        WireReadBool(in, &f->is_coroutine);
+        break;
+      case kFn_coroutine_promise_type:
+        f->coroutine_promise_type =
+            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kFn_coroutine_frame_type:
+        f->coroutine_frame_type =
+            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        break;
+      case kFn_coroutine_suspend_count:
+        WireReadInt32(in, &f->coroutine_suspend_count);
+        break;
+      case kFn_virtual_index:
+        WireReadInt32(in, &f->virtual_index);
+        break;
+      case kFn_cxx_member_owner:
+        f->cxx_member_owner = (Struct*)SReadRef(ctx, in, kSerialKindStruct);
+        break;
+      case kFn_template_origin:
+        f->template_origin = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        break;
+      case kFn_template_parameter_count:
+        WireReadInt32(in, &f->template_parameter_count);
+        break;
+      case kFn_template_parameter_base:
+        WireReadInt32(in, &f->template_parameter_base);
+        break;
+      case kFn_template_parameters:
+        SerialReadTemplateParameterVector(ctx, in, &f->template_parameters);
+        break;
+      default:
+        WireSkip(in, wt);
+        break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CXXBaseSpecifier vector (inline).
+// ---------------------------------------------------------------------------
+static void WriteBaseVector(SerializeContext* ctx, WireBuffer* buf, int field,
+                            Vector* v) {
+  WireBuffer tmp;
+  WireBufferInitOwned(&tmp, 16);
+  size_t length = v == NULL ? 0 : v->length;
+  WireWriteRawVarint(&tmp, (uint64_t)length);
+  for (size_t i = 0; i < length; i++) {
+    CXXBaseSpecifier* b = (CXXBaseSpecifier*)VectorGet(v, i);
+    WireBuffer elem;
+    WireBufferInitOwned(&elem, 16);
+    SWriteRef(ctx, &elem, kBase_type, kSerialKindType, b->type);
+    WireWriteInt32(&elem, kBase_access, (int32_t)b->access);
+    WireWriteInt32(&elem, kBase_byte_offset, b->byte_offset);
+    WireWriteBool(&elem, kBase_is_virtual, b->is_virtual);
+    WireWriteBool(&elem, kBase_is_pack_expansion, b->is_pack_expansion);
+    WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
+    WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
+    WireBufferDestruct(&elem);
+  }
+  WireWriteBytes(buf, field, WireBufferData(&tmp), WireBufferSize(&tmp));
+  WireBufferDestruct(&tmp);
+}
+
+static void ReadBaseVector(DeserializeContext* ctx, WireBuffer* in,
+                           Vector* out) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return;
+  }
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  uint64_t count;
+  if (!WireReadRawVarint(&sub, &count)) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    const void* elem;
+    size_t elen;
+    if (!WireReadBytes(&sub, &elem, &elen)) {
+      return;
+    }
+    WireBuffer er;
+    WireBufferInitReader(&er, elem, elen);
+    CXXBaseSpecifier* b = (CXXBaseSpecifier*)calloc(1, sizeof(*b));
+    while (!WireBufferEof(&er) && !WireBufferHasError(&er)) {
+      int field;
+      WireType wt;
+      if (!WireReadTag(&er, &field, &wt)) {
+        break;
+      }
+      switch (field) {
+        case kBase_type:
+          b->type = (TypeRecord*)SReadRef(ctx, &er, kSerialKindType);
+          break;
+        case kBase_access: {
+          int32_t v;
+          WireReadInt32(&er, &v);
+          b->access = (CXXAccess)v;
+          break;
+        }
+        case kBase_byte_offset:
+          WireReadInt32(&er, &b->byte_offset);
+          break;
+        case kBase_is_virtual:
+          WireReadBool(&er, &b->is_virtual);
+          break;
+        case kBase_is_pack_expansion:
+          WireReadBool(&er, &b->is_pack_expansion);
+          break;
+        default:
+          WireSkip(&er, wt);
+          break;
+      }
+    }
+    VectorAppend(out, b);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TypeRecord.
+// ---------------------------------------------------------------------------
+static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
+  TypeRecord* t = (TypeRecord*)obj;
+  WireWriteInt32(buf, kType_id, t->id);
+  WireWriteInt32(buf, kType_type, (int32_t)t->type);
+  WireWriteInt32(buf, kType_qualifiers, (int32_t)t->qualifiers);
+  WireWriteInt32(buf, kType_declarator, (int32_t)t->declarator);
+  WireWriteInt32(buf, kType_size, t->size);
+  WireWriteInt32(buf, kType_template_parameter_index,
+                 t->template_parameter_index);
+  SWriteStringPtr(ctx, buf, kType_dependent_member_name,
+                  t->dependent_member_name);
+  SWriteRef(ctx, buf, kType_template_origin, kSerialKindSymbol,
+            t->template_origin);
+  if (t->template_arguments != NULL) {
+    WriteTemplateArgumentVector(ctx, buf, kType_template_arguments,
+                                t->template_arguments);
+  }
+  SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
+
+  if (t->declarator == kDeclArray) {
+    WireBuffer sub;
+    WireBufferInitOwned(&sub, 16);
+    WriteArrayInfo(ctx, &sub, &t->info.array);
+    WireWriteBytes(buf, kType_array, WireBufferData(&sub), WireBufferSize(&sub));
+    WireBufferDestruct(&sub);
+  } else if (t->declarator == kDeclFunction) {
+    WireBuffer sub;
+    WireBufferInitOwned(&sub, 32);
+    WriteFunctionInfo(ctx, &sub, &t->info.function);
+    WireWriteBytes(buf, kType_function, WireBufferData(&sub),
+                   WireBufferSize(&sub));
+    WireBufferDestruct(&sub);
+  } else if ((t->type & (kTypeStruct | kTypeUnion)) != 0) {
+    SWriteRef(ctx, buf, kType_struct_info, kSerialKindStruct,
+              t->info.struct_info);
+  } else if ((t->type & kTypeEnum) != 0) {
+    SWriteRef(ctx, buf, kType_enum_info, kSerialKindEnum, t->info.enum_info);
+  }
+  return !WireBufferHasError(buf);
+}
+
+static void* AllocType(DeserializeContext* ctx, const void* blob, size_t len) {
+  (void)ctx;
+  (void)blob;
+  (void)len;
+  return NewTypeRecord(0, kQualPlain);
+}
+
+static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
+  TypeRecord* t = (TypeRecord*)obj;
+  while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(buf, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kType_id:
+        WireReadInt32(buf, &t->id);
+        break;
+      case kType_type: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        t->type = (Type)v;
+        break;
+      }
+      case kType_qualifiers: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        t->qualifiers = (Qualifiers)v;
+        break;
+      }
+      case kType_declarator: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        t->declarator = (Declarator)v;
+        break;
+      }
+      case kType_size:
+        WireReadInt32(buf, &t->size);
+        break;
+      case kType_template_parameter_index:
+        WireReadInt32(buf, &t->template_parameter_index);
+        break;
+      case kType_dependent_member_name:
+        t->dependent_member_name = SReadStringPtr(ctx, buf);
+        break;
+      case kType_template_origin:
+        t->template_origin = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kType_template_arguments:
+        t->template_arguments = ReadTemplateArgumentVector(ctx, buf);
+        break;
+      case kType_next:
+        t->next = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);
+        break;
+      case kType_array: {
+        const void* data;
+        size_t dlen;
+        if (WireReadBytes(buf, &data, &dlen)) {
+          WireBuffer sub;
+          WireBufferInitReader(&sub, data, dlen);
+          ReadArrayInfo(ctx, &sub, &t->info.array);
+        }
+        break;
+      }
+      case kType_function: {
+        const void* data;
+        size_t dlen;
+        if (WireReadBytes(buf, &data, &dlen)) {
+          WireBuffer sub;
+          WireBufferInitReader(&sub, data, dlen);
+          ReadFunctionInfo(ctx, &sub, &t->info.function);
+        }
+        break;
+      }
+      case kType_struct_info:
+        t->info.struct_info = (Struct*)SReadRef(ctx, buf, kSerialKindStruct);
+        break;
+      case kType_enum_info:
+        t->info.enum_info = (Enum*)SReadRef(ctx, buf, kSerialKindEnum);
+        break;
+      default:
+        WireSkip(buf, wt);
+        break;
+    }
+  }
+  return !WireBufferHasError(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Enum.
+// ---------------------------------------------------------------------------
+static bool WriteEnum(SerializeContext* ctx, WireBuffer* buf, void* obj) {
+  Enum* e = (Enum*)obj;
+  SWriteStringPtr(ctx, buf, kEnum_tag_name, e->tag_name);
+  SWriteRef(ctx, buf, kEnum_tag_symbol, kSerialKindSymbol, e->tag_symbol);
+  SWriteRefVector(ctx, buf, kEnum_constants, kSerialKindSymbol, &e->constants);
+  WireWriteInt32(buf, kEnum_next_value, e->next_value);
+  WireWriteBool(buf, kEnum_is_scoped, e->is_scoped);
+  WireWriteBool(buf, kEnum_has_fixed_underlying, e->has_fixed_underlying);
+  WireWriteInt32(buf, kEnum_fixed_underlying_type,
+                 (int32_t)e->fixed_underlying_type);
+  WireWriteInt32(buf, kEnum_fixed_underlying_size, e->fixed_underlying_size);
+  return !WireBufferHasError(buf);
+}
+
+static void* AllocEnum(DeserializeContext* ctx, const void* blob, size_t len) {
+  (void)ctx;
+  (void)blob;
+  (void)len;
+  return NewEnum();
+}
+
+static bool ReadEnum(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
+  Enum* e = (Enum*)obj;
+  while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(buf, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kEnum_tag_name:
+        e->tag_name = SReadStringPtr(ctx, buf);
+        break;
+      case kEnum_tag_symbol:
+        e->tag_symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kEnum_constants:
+        SReadRefVector(ctx, buf, kSerialKindSymbol, &e->constants);
+        break;
+      case kEnum_next_value:
+        WireReadInt32(buf, &e->next_value);
+        break;
+      case kEnum_is_scoped:
+        WireReadBool(buf, &e->is_scoped);
+        break;
+      case kEnum_has_fixed_underlying:
+        WireReadBool(buf, &e->has_fixed_underlying);
+        break;
+      case kEnum_fixed_underlying_type: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        e->fixed_underlying_type = (Type)v;
+        break;
+      }
+      case kEnum_fixed_underlying_size:
+        WireReadInt32(buf, &e->fixed_underlying_size);
+        break;
+      default:
+        WireSkip(buf, wt);
+        break;
+    }
+  }
+  return !WireBufferHasError(buf);
+}
+
+// ---------------------------------------------------------------------------
+// StructMember.
+// ---------------------------------------------------------------------------
+static bool WriteMember(SerializeContext* ctx, WireBuffer* buf, void* obj) {
+  StructMember* m = (StructMember*)obj;
+  SWriteRef(ctx, buf, kMem_symbol, kSerialKindSymbol, m->symbol);
+  SWriteRef(ctx, buf, kMem_default_initializer, kSerialKindAST,
+            m->default_initializer);
+  WireWriteInt32(buf, kMem_byte_offset, m->byte_offset);
+  WireWriteInt32(buf, kMem_bit_offset, m->bit_offset);
+  WireWriteInt32(buf, kMem_bit_size, m->bit_size);
+  WireWriteInt64(buf, kMem_index, (int64_t)m->index);
+  WireWriteInt32(buf, kMem_cxx_vcall_offset, m->cxx_vcall_offset);
+  WireWriteBool(buf, kMem_is_anon, m->is_anon);
+  WireWriteBool(buf, kMem_is_static, m->is_static);
+  WireWriteBool(buf, kMem_is_mutable, m->is_mutable);
+  WireWriteBool(buf, kMem_is_member_function, m->is_member_function);
+  WireWriteBool(buf, kMem_is_using_declaration, m->is_using_declaration);
+  WireWriteInt32(buf, kMem_access, (int32_t)m->access);
+  SWriteRef(ctx, buf, kMem_overload_next, kSerialKindStructMember,
+            m->overload_next);
+  return !WireBufferHasError(buf);
+}
+
+static void* AllocMember(DeserializeContext* ctx, const void* blob,
+                         size_t len) {
+  (void)ctx;
+  (void)blob;
+  (void)len;
+  return NewStructMember(NULL);
+}
+
+static bool ReadMember(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
+  StructMember* m = (StructMember*)obj;
+  while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(buf, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kMem_symbol:
+        m->symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kMem_default_initializer:
+        m->default_initializer = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        break;
+      case kMem_byte_offset:
+        WireReadInt32(buf, &m->byte_offset);
+        break;
+      case kMem_bit_offset:
+        WireReadInt32(buf, &m->bit_offset);
+        break;
+      case kMem_bit_size:
+        WireReadInt32(buf, &m->bit_size);
+        break;
+      case kMem_index: {
+        int64_t v;
+        WireReadInt64(buf, &v);
+        m->index = (size_t)v;
+        break;
+      }
+      case kMem_cxx_vcall_offset:
+        WireReadInt32(buf, &m->cxx_vcall_offset);
+        break;
+      case kMem_is_anon:
+        WireReadBool(buf, &m->is_anon);
+        break;
+      case kMem_is_static:
+        WireReadBool(buf, &m->is_static);
+        break;
+      case kMem_is_mutable:
+        WireReadBool(buf, &m->is_mutable);
+        break;
+      case kMem_is_member_function:
+        WireReadBool(buf, &m->is_member_function);
+        break;
+      case kMem_is_using_declaration:
+        WireReadBool(buf, &m->is_using_declaration);
+        break;
+      case kMem_access: {
+        int32_t v;
+        WireReadInt32(buf, &v);
+        m->access = (CXXAccess)v;
+        break;
+      }
+      case kMem_overload_next:
+        m->overload_next =
+            (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        break;
+      default:
+        WireSkip(buf, wt);
+        break;
+    }
+  }
+  return !WireBufferHasError(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Struct.
+// ---------------------------------------------------------------------------
+static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
+  Struct* s = (Struct*)obj;
+  SWriteStringPtr(ctx, buf, kStruct_tag_name, s->tag_name);
+  SWriteRef(ctx, buf, kStruct_tag_symbol, kSerialKindSymbol, s->tag_symbol);
+  WriteBaseVector(ctx, buf, kStruct_bases, &s->bases);
+  SWriteRefVector(ctx, buf, kStruct_members, kSerialKindStructMember,
+                  &s->members);
+  WireWriteInt32(buf, kStruct_next_offset, s->next_offset);
+  WireWriteInt32(buf, kStruct_size, s->size);
+  WireWriteInt32(buf, kStruct_non_virtual_size, s->non_virtual_size);
+  WireWriteInt32(buf, kStruct_alignment, s->alignment);
+  WireWriteBool(buf, kStruct_is_union, s->is_union);
+  WireWriteBool(buf, kStruct_is_class, s->is_class);
+  WireWriteBool(buf, kStruct_is_final, s->is_final);
+  WireWriteBool(buf, kStruct_is_template, s->is_template);
+  WireWriteBool(buf, kStruct_is_aggregate, s->is_aggregate);
+  WireWriteBool(buf, kStruct_cxx_special_members_complete,
+                s->cxx_special_members_complete);
+  SerialWriteTemplateParameterVector(ctx, buf, kStruct_template_parameters,
+                                     &s->template_parameters);
+  WireWriteInt32(buf, kStruct_template_parameter_count,
+                 s->template_parameter_count);
+  WireWriteBool(buf, kStruct_packed, s->packed);
+  WireWriteBool(buf, kStruct_is_abstract, s->is_abstract);
+  WireWriteInt32(buf, kStruct_explicit_alignment, s->explicit_alignment);
+  WireWriteInt32(buf, kStruct_pack, s->pack);
+  WireWriteInt32(buf, kStruct_next_bit_pos, s->next_bit_pos);
+  WireWriteInt32(buf, kStruct_current_offset, s->current_offset);
+  SWriteRef(ctx, buf, kStruct_vptr_member, kSerialKindStructMember,
+            s->vptr_member);
+  SWriteRef(ctx, buf, kStruct_vtable_symbol, kSerialKindSymbol,
+            s->vtable_symbol);
+  SWriteRef(ctx, buf, kStruct_vbptr_member, kSerialKindStructMember,
+            s->vbptr_member);
+  SWriteRef(ctx, buf, kStruct_vbtable_symbol, kSerialKindSymbol,
+            s->vbtable_symbol);
+  SWriteRefVector(ctx, buf, kStruct_virtual_members, kSerialKindStructMember,
+                  &s->virtual_members);
+  SWriteRefVector(ctx, buf, kStruct_friend_classes, kSerialKindStruct,
+                  &s->friend_classes);
+  SWriteRefVector(ctx, buf, kStruct_friend_functions, kSerialKindSymbol,
+                  &s->friend_functions);
+  return !WireBufferHasError(buf);
+}
+
+static void* AllocStruct(DeserializeContext* ctx, const void* blob,
+                         size_t len) {
+  (void)ctx;
+  (void)blob;
+  (void)len;
+  return NewStruct(false);
+}
+
+static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
+  Struct* s = (Struct*)obj;
+  while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(buf, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kStruct_tag_name:
+        s->tag_name = SReadStringPtr(ctx, buf);
+        break;
+      case kStruct_tag_symbol:
+        s->tag_symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kStruct_bases:
+        ReadBaseVector(ctx, buf, &s->bases);
+        break;
+      case kStruct_members:
+        SReadRefVector(ctx, buf, kSerialKindStructMember, &s->members);
+        break;
+      case kStruct_next_offset:
+        WireReadInt32(buf, &s->next_offset);
+        break;
+      case kStruct_size:
+        WireReadInt32(buf, &s->size);
+        break;
+      case kStruct_non_virtual_size:
+        WireReadInt32(buf, &s->non_virtual_size);
+        break;
+      case kStruct_alignment:
+        WireReadInt32(buf, &s->alignment);
+        break;
+      case kStruct_is_union:
+        WireReadBool(buf, &s->is_union);
+        break;
+      case kStruct_is_class:
+        WireReadBool(buf, &s->is_class);
+        break;
+      case kStruct_is_final:
+        WireReadBool(buf, &s->is_final);
+        break;
+      case kStruct_is_template:
+        WireReadBool(buf, &s->is_template);
+        break;
+      case kStruct_is_aggregate:
+        WireReadBool(buf, &s->is_aggregate);
+        break;
+      case kStruct_cxx_special_members_complete:
+        WireReadBool(buf, &s->cxx_special_members_complete);
+        break;
+      case kStruct_template_parameters:
+        SerialReadTemplateParameterVector(ctx, buf, &s->template_parameters);
+        break;
+      case kStruct_template_parameter_count:
+        WireReadInt32(buf, &s->template_parameter_count);
+        break;
+      case kStruct_packed:
+        WireReadBool(buf, &s->packed);
+        break;
+      case kStruct_is_abstract:
+        WireReadBool(buf, &s->is_abstract);
+        break;
+      case kStruct_explicit_alignment:
+        WireReadInt32(buf, &s->explicit_alignment);
+        break;
+      case kStruct_pack:
+        WireReadInt32(buf, &s->pack);
+        break;
+      case kStruct_next_bit_pos:
+        WireReadInt32(buf, &s->next_bit_pos);
+        break;
+      case kStruct_current_offset:
+        WireReadInt32(buf, &s->current_offset);
+        break;
+      case kStruct_vptr_member:
+        s->vptr_member =
+            (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        break;
+      case kStruct_vtable_symbol:
+        s->vtable_symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kStruct_vbptr_member:
+        s->vbptr_member =
+            (StructMember*)SReadRef(ctx, buf, kSerialKindStructMember);
+        break;
+      case kStruct_vbtable_symbol:
+        s->vbtable_symbol = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
+      case kStruct_virtual_members:
+        SReadRefVector(ctx, buf, kSerialKindStructMember, &s->virtual_members);
+        break;
+      case kStruct_friend_classes:
+        SReadRefVector(ctx, buf, kSerialKindStruct, &s->friend_classes);
+        break;
+      case kStruct_friend_functions:
+        SReadRefVector(ctx, buf, kSerialKindSymbol, &s->friend_functions);
+        break;
+      default:
+        WireSkip(buf, wt);
+        break;
+    }
+  }
+  return !WireBufferHasError(buf);
+}
+
+void SerializeRegisterTypeKinds(void) {
+  static const SerialKindVtable type_vt = {WriteType, AllocType, ReadType,
+                                           "Type"};
+  static const SerialKindVtable enum_vt = {WriteEnum, AllocEnum, ReadEnum,
+                                           "Enum"};
+  static const SerialKindVtable member_vt = {WriteMember, AllocMember,
+                                             ReadMember, "StructMember"};
+  static const SerialKindVtable struct_vt = {WriteStruct, AllocStruct,
+                                             ReadStruct, "Struct"};
+  SerializeRegisterKind(kSerialKindType, &type_vt);
+  SerializeRegisterKind(kSerialKindEnum, &enum_vt);
+  SerializeRegisterKind(kSerialKindStructMember, &member_vt);
+  SerializeRegisterKind(kSerialKindStruct, &struct_vt);
+  SerializeRegisterFields(kSerialKindType, kTypeFields,
+                          sizeof(kTypeFields) / sizeof(kTypeFields[0]));
+  SerializeRegisterFields(kSerialKindEnum, kEnumFields,
+                          sizeof(kEnumFields) / sizeof(kEnumFields[0]));
+  SerializeRegisterFields(kSerialKindStructMember, kMemberFields,
+                          sizeof(kMemberFields) / sizeof(kMemberFields[0]));
+  SerializeRegisterFields(kSerialKindStruct, kStructFields,
+                          sizeof(kStructFields) / sizeof(kStructFields[0]));
+}

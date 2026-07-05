@@ -267,6 +267,11 @@ typedef struct {
   HashTable global_tag_table;
   struct Namespace* global_namespace;
 
+  // C++20 module named by this translation unit, if any.  Set when parsing a
+  // `module foo;` or `export module foo;` declaration; empty otherwise.
+  String module_name;
+  bool is_module_interface;  // True once `export module foo;` was seen.
+
   int pointer_size;  // Size of a pointer.
   int short_size;  // Size of native short int.
   int int_size;  // Size of native int.
@@ -387,6 +392,23 @@ bool CompilerInitForAssembler(const char* filename, Vector* options);
 
 void CompilerDestruct(Compiler* compiler);
 void CompilerDelete(Compiler* compiler);
+
+// Runs the front end (preprocess/parse/semantic) for the current translation
+// unit without code generation, leaving the symbol/type/AST graph populated.
+// Returns true on success (no errors).  Used by the hidden -Xemit-module hook.
+bool CompileFrontEndOnly(Compiler* compiler);
+
+// C++20 module import hook.  The parser cannot depend on the serialize library
+// (which depends on the compiler), so the driver registers a handler that
+// locates and installs a module's interface when the parser encounters an
+// `import foo;` directive.  `ctx` is opaque state owned by the driver.
+typedef bool (*ModuleImportHandler)(void* ctx, const char* module_name);
+void SetModuleImportHandler(ModuleImportHandler fn, void* ctx);
+
+// Invoked by the parser for `import foo;`.  Dispatches to the registered
+// handler; returns false (and reports nothing) if no handler is installed or
+// the import fails, so the caller can emit a diagnostic.
+bool CompilerImportModule(const char* module_name);
 
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,

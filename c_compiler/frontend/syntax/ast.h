@@ -303,17 +303,20 @@ typedef enum {
   kValueCategoryXvalue,
 } ASTValueCategory;
 
+// Module-serialization field numbers (see c_compiler/serialize/ast_serialize.c):
+// base ASTNode fields occupy the reserved range 1..15 (field 2 is a synthetic
+// ASTNodeShape discriminator with no struct member); subtype fields start at 16.
 typedef struct ASTNode {
-  ASTOpcode op;             // Opcode.
-  int id;                   // Node id (for debugging).
-  int flags;                // Flags
-  TypeRecord* type;         // Node type (mostly set by semantic analyzer)
-  ASTValueCategory value_category;  // C++ expression value category.
-  struct ASTNode* parent;   // Parent node (if any).
-  int child_id;             // Which child am I in the parent node?
-  SourceLocation location;  // Location in input.
+  ASTOpcode op;             // Opcode.                          // @wire 1
+  int id;                   // Node id (for debugging).         // @wire 3
+  int flags;                // Flags                            // @wire 4
+  TypeRecord* type;         // Node type (set by semantics)     // @wire 5
+  ASTValueCategory value_category;  // C++ value category.      // @wire 6
+  struct ASTNode* parent;   // Parent node (if any).            // @wire 7
+  int child_id;             // Which child am I in the parent?  // @wire 8
+  SourceLocation location;  // Location in input.               // @wire 9
   ASTNodeVirtuals*
-      virtuals;  // Virtual table (statically allocated, do not free).
+      virtuals;  // Virtual table (statically allocated, do not free). @wire -
 } ASTNode;
 
 struct ConstraintExpr;
@@ -359,6 +362,53 @@ void ASTArenaRelease(void);
 // which simply frees the memory passed.
 ASTNode* NewASTNode(ASTOpcode op, TypeRecord* type, SourceLocation location);
 
+// The concrete struct "shape" of an AST node.  Determined by its virtual table
+// (not solely by its opcode, since e.g. a folded sizeof shares the constant
+// vtable).  Used by the module serializer to (de)allocate the correct concrete
+// node type; see ASTNodeGetShape / ASTNodeAllocForShape.
+typedef enum {
+  kASTShapeBase,
+  kASTShapeUnary,
+  kASTShapeBinary,
+  kASTShapeInlineCall,
+  kASTShapeVector,
+  kASTShapeIdentifier,
+  kASTShapeStructMember,
+  kASTShapeConstant,
+  kASTShapeCast,
+  kASTShapeSizeof,
+  kASTShapeTypeid,
+  kASTShapeMacro,
+  kASTShapeExprStmt,
+  kASTShapeIf,
+  kASTShapeCombined,
+  kASTShapeThrow,
+  kASTShapeCompound,
+  kASTShapeCatch,
+  kASTShapeTry,
+  kASTShapeFor,
+  kASTShapeVarDecl,
+  kASTShapeDeclList,
+  kASTShapeCaseLabel,
+  kASTShapeSwitch,
+  kASTShapeLabel,
+  kASTShapeAsm,
+  kASTShapeGoto,
+  kASTShapePtrScale,
+  kASTShapeExprInit,
+  kASTShapeBracedInit,
+  kASTShapeDesignatedInit,
+  kASTShapeCompoundLiteral,
+} ASTNodeShape;
+
+// Returns the concrete shape of a node by inspecting its virtual table.
+ASTNodeShape ASTNodeGetShape(const ASTNode* node);
+
+// Allocates a zeroed node of the given shape from the AST arena, installs the
+// matching virtual table and opcode, and returns it with a NULL type and zero
+// location.  Remaining fields are filled in by the caller (the module loader).
+ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op);
+
 // Deletes an AST node based on its runtime type.  It calls the deleter
 // function pointer in the node.
 void ASTNodeDelete(ASTNode* node);
@@ -396,7 +446,7 @@ bool ASTIsCallNode(ASTNode* node);
 // A unary AST node with a single child.
 typedef struct {
   ASTNode base;
-  struct ASTNode* sub;
+  struct ASTNode* sub;   // @wire 16
 } UnaryASTNode;
 
 ASTNode* NewUnaryASTNode(ASTOpcode op, TypeRecord* type,
@@ -405,8 +455,8 @@ ASTNode* NewUnaryASTNode(ASTOpcode op, TypeRecord* type,
 // A binary AST node with left and right children.
 typedef struct {
   ASTNode base;
-  struct ASTNode* left;
-  struct ASTNode* right;
+  struct ASTNode* left;    // @wire 16
+  struct ASTNode* right;   // @wire 17
 } BinaryASTNode;
 
 ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
@@ -415,8 +465,8 @@ ASTNode* NewBinaryASTNode(ASTOpcode op, TypeRecord* type,
 
 typedef struct {
   ASTNode base;
-  struct ASTNode* inlined;
-  struct ASTNode* ret_value;
+  struct ASTNode* inlined;     // @wire 16
+  struct ASTNode* ret_value;   // @wire 17
 } InlineCallASTNode;
 
 ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
@@ -425,8 +475,8 @@ ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
 // An AST node with a left node and vector of children.
 typedef struct {
   ASTNode base;
-  ASTNode* left;
-  Vector* children;
+  ASTNode* left;       // @wire 16
+  Vector* children;    // @wire 17
 } VectorASTNode;
 
 ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
@@ -445,8 +495,8 @@ ASTNode* NewRequiresExpressionASTNode(struct ConstraintExpr* constraint,
 // when the node is deleted.
 typedef struct {
   ASTNode base;
-  Symbol* symbol;
-  Vector* template_arguments;
+  Symbol* symbol;              // @wire 16
+  Vector* template_arguments;  // @wire - (not serialized; re-derived)
 } IdentifierASTNode;
 
 ASTNode* NewIdentifierASTNode(Symbol* symbol, SourceLocation location);
@@ -454,10 +504,10 @@ ASTNode* NewRawIdentifierASTNode(void* symbol, SourceLocation location);
 
 typedef struct {
   ASTNode base;
-  StructMember* member;
-  CXXAccess access;
-  int byte_offset;
-  Vector* template_arguments;
+  StructMember* member;        // @wire 16
+  CXXAccess access;            // @wire 17
+  int byte_offset;             // @wire 18
+  Vector* template_arguments;  // @wire - (not serialized; re-derived)
 } StructMemberASTNode;
 
 ASTNode* NewStructMemberASTNode(StructMember* member, SourceLocation location);
@@ -468,12 +518,12 @@ bool IsBitfieldReference(ASTNode* node);
 // the union (says which member is valid).
 typedef struct {
   ASTNode base;
-  union {
-    int64_t ivalue;
-    double fvalue;
-    String* string;
+  union {                      // Discriminated by base.op:
+    int64_t ivalue;            // @wire 16 (number, charconst)
+    double fvalue;             // @wire 17 (fnumber)
+    String* string;            // @wire 18 (string, string_wide)
   } value;
-  Vector* template_arguments;
+  Vector* template_arguments;  // @wire - (not serialized; re-derived)
 } ConstantASTNode;
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
@@ -501,12 +551,12 @@ typedef enum {
 
 typedef struct {
   ASTNode base;
-  TypeRecord* cast_type;
-  ASTNode* expr;
-  CastKind kind;
+  TypeRecord* cast_type;   // @wire 16
+  ASTNode* expr;           // @wire 17
+  CastKind kind;           // @wire 18
   // dynamic_cast that needs a run-time check (polymorphic downcast/sidecast),
   // lowered to a __davecc_dynamic_cast[_ref] call during codegen.
-  bool dynamic_runtime;
+  bool dynamic_runtime;    // @wire 19
 } CastASTNode;
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
@@ -514,14 +564,14 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
 
 // Sizeof operation.
 typedef struct {
-  ConstantASTNode base;
-  ASTNode* expr;
+  ConstantASTNode base;  // base.value.ivalue serialized at @wire 16
+  ASTNode* expr;           // @wire 20
   // For `sizeof(type-id)` where the type is dependent on a template parameter,
   // the (refcounted) operand type is retained so its size can be recomputed
   // once the template is instantiated.  NULL for the expression form and for
   // non-dependent type operands (whose size is baked into base.value).
-  TypeRecord* type_operand;
-  bool is_pack_size;
+  TypeRecord* type_operand;  // @wire 21
+  bool is_pack_size;         // @wire 22
 } SizeofASTNode;
 
 ASTNode* NewSizeofASTNodeWithKnownSize(int size, SourceLocation location);
@@ -539,8 +589,8 @@ ASTNode* NewAlignofASTNodeWithType(TypeRecord* type, SourceLocation location);
 // the underlying type_info access, so it never reaches codegen.
 typedef struct {
   ASTNode base;
-  ASTNode* expr;            // Expression operand, or NULL for the type form.
-  TypeRecord* operand_type; // Type operand for the type form, else NULL.
+  ASTNode* expr;            // Expression operand, else NULL.   // @wire 16
+  TypeRecord* operand_type; // Type operand form, else NULL.    // @wire 17
 } TypeidASTNode;
 
 ASTNode* NewTypeidASTNodeWithType(TypeRecord* type, SourceLocation location);
@@ -549,7 +599,7 @@ ASTNode* NewTypeidASTNodeWithExpression(ASTNode* expr, SourceLocation location);
 // Macro name.
 typedef struct {
   ASTNode base;
-  String macro_name;
+  String macro_name;   // @wire 16
 } MacroNameASTNode;
 
 ASTNode* NewMacroNameASTNode(String* macro_name, SourceLocation location);
@@ -557,7 +607,7 @@ ASTNode* NewMacroNameASTNode(String* macro_name, SourceLocation location);
 // Expression statement.
 typedef struct {
   ASTNode base;
-  ASTNode* expr;
+  ASTNode* expr;   // @wire 16
 } ExpressionStatementASTNode;
 
 ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location);
@@ -574,10 +624,10 @@ ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
 // If statement with condition, if and else parts.  The else part is optional.
 typedef struct {
   ASTNode base;
-  ASTNode* cond;
-  ASTNode* if_part;
-  ASTNode* else_part;
-  bool is_constexpr;
+  ASTNode* cond;        // @wire 16
+  ASTNode* if_part;     // @wire 17
+  ASTNode* else_part;   // @wire 18
+  bool is_constexpr;    // @wire 19
 } IfStatementASTNode;
 
 ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
@@ -588,8 +638,8 @@ ASTNode* NewIfStatementASTNode(ASTNode* cond, ASTNode* if_part,
 // These all contain a condition and a statement.
 typedef struct {
   ASTNode base;
-  ASTNode* cond;
-  ASTNode* stmt;
+  ASTNode* cond;   // @wire 16
+  ASTNode* stmt;   // @wire 17
 } CombinedStatementASTNode;
 
 ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
@@ -597,7 +647,7 @@ ASTNode* NewCombinedStatementASTNode(ASTOpcode tok, ASTNode* cond,
 
 typedef struct {
   ASTNode base;
-  ASTNode* expr;
+  ASTNode* expr;   // @wire 16
 } ThrowASTNode;
 
 ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location);
@@ -605,9 +655,9 @@ ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location);
 // Compound statment, containing a vector of statements.
 typedef struct {
   ASTNode base;
-  Vector* statements;
-  struct LabelASTNode* low_pc;
-  struct LabelASTNode* high_pc;
+  Vector* statements;            // @wire 16
+  struct LabelASTNode* low_pc;   // @wire 17
+  struct LabelASTNode* high_pc;  // @wire 18
 } CompoundStatementASTNode;
 
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
@@ -617,9 +667,9 @@ void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
 
 typedef struct {
   ASTNode base;
-  Symbol* symbol;  // NULL for catch (...).
-  ASTNode* stmt;
-  bool is_catch_all;
+  Symbol* symbol;      // NULL for catch (...).   // @wire 16
+  ASTNode* stmt;       // @wire 17
+  bool is_catch_all;   // @wire 18
 } CatchASTNode;
 
 ASTNode* NewCatchASTNode(Symbol* symbol, bool is_catch_all, ASTNode* stmt,
@@ -627,8 +677,8 @@ ASTNode* NewCatchASTNode(Symbol* symbol, bool is_catch_all, ASTNode* stmt,
 
 typedef struct {
   ASTNode base;
-  ASTNode* try_stmt;
-  Vector* catches;  // CatchASTNode*
+  ASTNode* try_stmt;   // @wire 16
+  Vector* catches;     // CatchASTNode*   // @wire 17
 } TryASTNode;
 
 ASTNode* NewTryASTNode(ASTNode* try_stmt, Vector* catches,
@@ -637,10 +687,10 @@ ASTNode* NewTryASTNode(ASTNode* try_stmt, Vector* catches,
 // For statement.  All expressions (e1, e2 and e3) are optional.
 typedef struct {
   ASTNode base;
-  ASTNode* c1;
-  ASTNode* c2;
-  ASTNode* c3;
-  ASTNode* stmt;
+  ASTNode* c1;     // @wire 16
+  ASTNode* c2;     // @wire 17
+  ASTNode* c3;     // @wire 18
+  ASTNode* stmt;   // @wire 19
 } ForStatementASTNode;
 
 ASTNode* NewForStatementASTNode(ASTNode* c1, ASTNode* c2, ASTNode* c3,
@@ -649,9 +699,9 @@ ASTNode* NewForStatementASTNode(ASTNode* c1, ASTNode* c2, ASTNode* c3,
 // Variable declaration, optionally initializing the symbol.
 typedef struct {
   ASTNode base;
-  Symbol* symbol;
-  ASTNode* initializer;  // Assignment expression to initialize variable.
-  void* saved_sp;        // Used by codegen to store saved SP for VLA.
+  Symbol* symbol;        // @wire 16
+  ASTNode* initializer;  // Assignment expression to init variable.  // @wire 17
+  void* saved_sp;        // Codegen SP for VLA.   // @wire - (not serialized)
 } VariableDeclarationASTNode;
 
 ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
@@ -660,7 +710,7 @@ ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
 // Declaration list, containing a vector of variable declarations.
 typedef struct {
   ASTNode base;
-  Vector* declarations;
+  Vector* declarations;   // @wire 16
 } DeclarationListASTNode;
 
 ASTNode* NewDeclarationListASTNode(Vector* declarations,
@@ -670,27 +720,28 @@ ASTNode* NewDeclarationListASTNode(Vector* declarations,
 // If the 'expr' is NULL this is used as a default label.
 typedef struct {
   ASTNode base;
-  ASTNode* expr;
-  ASTNode* stmt;
-  int64_t value;
-  struct IRNode* label;
+  ASTNode* expr;         // @wire 16
+  ASTNode* stmt;         // @wire 17
+  int64_t value;         // @wire 18
+  struct IRNode* label;  // @wire - (codegen only, not serialized)
 } CaseLabelASTNode;
 
 ASTNode* NewCaseLabelASTNode(ASTNode* expr, ASTNode* stmt, SourceLocation location);
 
-// Switch statement.
+// Switch statement.  Fields below default_node are codegen analytics, not
+// serialized (they are recomputed).
 typedef struct {
   ASTNode base;
-  ASTNode* expr;
-  ASTNode* stmt;
-  Vector cases;
-  CaseLabelASTNode* default_node;
-  float density;
-  int64_t min_case_value;
-  int64_t max_case_value;
-  bool all_cases_covered;   // True if there is no need for a default.
-  int max_case_width;       // Max byte width of all case constants.
-  bool all_cases_positive;  // All case values are positive.
+  ASTNode* expr;                  // @wire 16
+  ASTNode* stmt;                  // @wire 17
+  Vector cases;                   // @wire 18
+  CaseLabelASTNode* default_node; // @wire 19
+  float density;            // @wire - (not serialized)
+  int64_t min_case_value;   // @wire - (not serialized)
+  int64_t max_case_value;   // @wire - (not serialized)
+  bool all_cases_covered;   // @wire - (not serialized)
+  int max_case_width;       // @wire - (not serialized)
+  bool all_cases_positive;  // @wire - (not serialized)
 } SwitchStatementASTNode;
 
 ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
@@ -699,21 +750,23 @@ ASTNode* NewSwitchStatementASTNode(ASTNode* expr, ASTNode* stmt,
 // Label.
 typedef struct LabelASTNode {
   ASTNode base;
-  ASTNode* stmt;
-  String name;
-  struct IRNode* label;
-  bool named;     // Use label name in assembly output.
+  ASTNode* stmt;         // @wire 16
+  String name;           // @wire 17
+  struct IRNode* label;  // @wire - (codegen only, not serialized)
+  bool named;            // Use label name in asm output.   // @wire 18
 } LabelASTNode;
 
 ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLocation location);
 
+// Serialized as an inline sub-message (see WriteAsmOperandVector); the field
+// numbers below are local to that sub-message.
 typedef struct {
-  String constraint;
-  String name;
-  ASTNode* expr;
-  bool is_output;
-  bool is_readwrite;
-  bool is_early_clobber;
+  String constraint;      // @wire 1
+  String name;            // @wire 2
+  ASTNode* expr;          // @wire 3
+  bool is_output;         // @wire 4
+  bool is_readwrite;      // @wire 5
+  bool is_early_clobber;  // @wire 6
 } AsmOperand;
 
 AsmOperand* NewAsmOperand(const char* constraint, const char* name,
@@ -725,14 +778,14 @@ AsmOperand* AsmOperandClone(AsmOperand* operand,
 
 typedef struct {
   ASTNode base;
-  String* text;
-  bool is_volatile;
-  bool is_goto;
-  Vector outputs;   // AsmOperand*
-  Vector inputs;    // AsmOperand*
-  Vector clobbers;  // String*
-  Vector labels;    // String*
-  Vector label_nodes;  // LabelASTNode*, non-owning.
+  String* text;        // @wire 16
+  bool is_volatile;    // @wire 17
+  bool is_goto;        // @wire 18
+  Vector outputs;      // AsmOperand*   // @wire 19
+  Vector inputs;       // AsmOperand*   // @wire 20
+  Vector clobbers;     // String*       // @wire 21
+  Vector labels;       // String*       // @wire 22
+  Vector label_nodes;  // LabelASTNode*, non-owning.   // @wire 23
 } AsmASTNode;
 
 ASTNode* NewAsmASTNode(String* text, bool is_volatile, SourceLocation location);
@@ -740,9 +793,9 @@ ASTNode* NewAsmASTNode(String* text, bool is_volatile, SourceLocation location);
 // Goto.
 typedef struct {
   ASTNode base;
-  String* label_name;
-  ASTNode* label;  // Not owned, set by semantic analysis.
-  ASTNode* lca;    // Not owned, Lowest Common Ancestor with label.
+  String* label_name;  // @wire 16
+  ASTNode* label;  // Not owned, set by semantics.   // @wire 17
+  ASTNode* lca;    // Not owned, LCA with label.      // @wire 18
 } GotoStatementASTNode;
 
 ASTNode* NewGotoStatementASTNode(String* label_name, SourceLocation location);
@@ -750,9 +803,9 @@ ASTNode* NewGotoStatementASTNode(String* label_name, SourceLocation location);
 // AST node for scaling a pointer by the size of its type.
 typedef struct {
   ASTNode base;
-  TypeRecord* ref_type;
-  ASTOpcode scale_op;     // Either AST_OP(mult) or AST_OP(div)
-  ASTNode* expr;
+  TypeRecord* ref_type;   // @wire 16
+  ASTOpcode scale_op;     // AST_OP(mult) or AST_OP(div)   // @wire 17
+  ASTNode* expr;          // @wire 18
 } PtrScaleASTNode;
 
 ASTNode* NewPtrScaleASTNode(TypeRecord* type, ASTOpcode scale_op, ASTNode* expr,
@@ -766,7 +819,7 @@ ASTNode* NewPtrScaleASTNode(TypeRecord* type, ASTOpcode scale_op, ASTNode* expr,
 // Initialization of a single expression.
 typedef struct {
   ASTNode base;
-  ASTNode* expr;
+  ASTNode* expr;   // @wire 16
 } ExpressionInitializerASTNode;
 
 ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
@@ -775,7 +828,7 @@ ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
 // Initialization using a braced enclosed list of expressions.
 typedef struct {
   ASTNode base;
-  Vector* initializers;
+  Vector* initializers;   // @wire 16
 } BracedInitializerASTNode;
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,
@@ -790,17 +843,19 @@ typedef enum {
   kDesignatorBase,
 } DesignatorType;
 
+// Serialized as an inline sub-message (see WriteDesignatorVector); field
+// numbers below are local to that sub-message.
 typedef struct {
-  DesignatorType designator_type;
-  TypeRecord* type;
-  int array_index_end;  // For GCC range designators [start ... end]; == index
+  DesignatorType designator_type;  // @wire 1
+  TypeRecord* type;                // @wire 2
+  int array_index_end;  // GCC range [start ... end]; == index // @wire 3
                         // when not a range.
-  bool is_resolved_member;
-  union {
-    int array_index;
-    String* struct_member_name;   // Before semantic analysis.
-    StructMember* struct_member;  // After semantic analysis.
-    CXXBaseSpecifier* base;
+  bool is_resolved_member;         // @wire 4
+  union {                          // Discriminated by designator_type:
+    int array_index;              // @wire 5 (kDesignatorArray)
+    String* struct_member_name;   // @wire 6 (kDesignatorStruct, unresolved)
+    StructMember* struct_member;  // @wire 7 (kDesignatorStruct, resolved)
+    CXXBaseSpecifier* base;       // @wire - (kDesignatorBase, not serialized)
   } value;
 } Designator;
 
@@ -811,8 +866,8 @@ Designator* NewCXXBaseDesignator(CXXBaseSpecifier* base);
 
 typedef struct {
   ASTNode base;
-  Vector* designators;
-  ASTNode* init;
+  Vector* designators;   // @wire 16
+  ASTNode* init;         // @wire 17
 } DesignatedInitializerASTNode;
 
 ASTNode* NewDesignatedInitializerASTNode(Vector* designators, ASTNode* init,
@@ -821,8 +876,8 @@ ASTNode* NewDesignatedInitializerASTNode(Vector* designators, ASTNode* init,
 // Compound literal.
 typedef struct {
   ASTNode base;       // base.type is the literal type.
-  ASTNode* sym;
-  ASTNode* initializer;
+  ASTNode* sym;          // @wire 16
+  ASTNode* initializer;  // @wire 17
 } CompoundLiteralASTNode;
 
 ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,

@@ -20,6 +20,11 @@
 #include "arm_assembler.h"
 #include "compiler.h"
 #include "linker_main.h"
+#include "module_archive.h"
+#include "module_install.h"
+#include "options.h"
+#include "source.h"
+#include "symbol_table.h"
 
 Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(Assembler* assembler);
@@ -203,7 +208,9 @@ static int ParseArg(int i, int argc, char** argv,
     if (StringEndsWith(&arg, ".c") ||
         StringEndsWith(&arg, ".cc") ||
         StringEndsWith(&arg, ".cpp") ||
-        StringEndsWith(&arg, ".cxx")) {
+        StringEndsWith(&arg, ".cxx") ||
+        StringEndsWith(&arg, ".cppm") ||
+        StringEndsWith(&arg, ".ixx")) {
       VectorAppend(compiler_args, argv[i]);
       *run_compiler = true;
       (*num_inputs)++;
@@ -230,6 +237,175 @@ static bool BoolOptionValue(Vector* options, int opt, bool def) {
     }
   }
   return def;
+}
+
+// Collects exported symbols from a global-symbol-table bucket (a BinaryTree of
+// SymbolNodes) into the Vector passed as `data`.
+static void CollectExportedFromNode(BinaryTreeNode* node, int depth,
+                                    void* data) {
+  (void)depth;
+  Symbol* sym = ((SymbolNode*)node)->symbol;
+  if (sym != NULL && sym->flags.is_exported) {
+    VectorAppend((Vector*)data, sym);
+  }
+}
+
+static void CollectExportedFromBucket(void* entry, void* data) {
+  BinaryTreeTraverse((BinaryTree*)entry, CollectExportedFromNode, data);
+}
+
+// Hidden -Xemit-module hook: compile the front end of `input` and serialize the
+// resulting module interface (the global namespace tree plus exported
+// file-scope symbols) to a module archive at `module_path`.  Returns true on
+// success.
+static bool EmitModule(const char* input, Vector* options, Vector* target_opts,
+                       const char* module_path) {
+  ClearAllFiles();
+  compiler = malloc(sizeof(Compiler));
+  if (!CompilerInitFromFile(compiler, input, options, target_opts)) {
+    fprintf(stderr, "Cannot open file %s\n", input);
+    return false;
+  }
+  bool ok = CompileFrontEndOnly(compiler);
+  if (ok) {
+    Vector ns_roots;
+    VectorInit(&ns_roots);
+    VectorAppend(&ns_roots, compiler->global_namespace);
+
+    // File-scope C/C++ symbols live in the global hash table (not the
+    // namespace tree), so gather the exported ones explicitly.
+    Vector root_syms;
+    VectorInit(&root_syms);
+    HashTableTraverse(&compiler->global_symbol_table, CollectExportedFromBucket,
+                      &root_syms);
+
+    // Prefer the module name declared by `[export] module foo;`; otherwise
+    // fall back to the input filename.
+    const char* module_name = compiler->module_name.length > 0
+                                  ? compiler->module_name.value
+                                  : input;
+    ModuleWriteRequest req = {
+        .module_name = module_name,
+        .target_triple =
+            compiler->target_name != NULL ? compiler->target_name->value : "",
+        .compiler_version = "davecc",
+        .flags = 0,
+        .root_symbols = &root_syms,
+        .root_namespaces = &ns_roots,
+    };
+    ok = ModuleWrite(module_path, &req);
+    if (!ok) {
+      fprintf(stderr, "Failed to write module %s\n", module_path);
+    }
+    VectorDestruct(&root_syms);
+    VectorDestruct(&ns_roots);
+  } else {
+    fprintf(stderr, "Front end failed for %s\n", input);
+  }
+  CompilerDelete(compiler);
+  compiler = NULL;
+  ClearAllFiles();
+  return ok;
+}
+
+// Hidden -Xload-module hook: load and verify a module archive, printing a short
+// summary.  Requires a compiler global for the deserialized objects' arenas.
+static bool LoadModule(const char* module_path, Vector* options) {
+  ClearAllFiles();
+  compiler = malloc(sizeof(Compiler));
+  if (!CompilerInitFromString(compiler, module_path, "", options)) {
+    return false;
+  }
+  CreateGlobalSymbolTables();
+
+  LoadedModule loaded;
+  bool ok = ModuleLoad(module_path, &loaded);
+  if (ok) {
+    printf("module %s: format v%u, target %s, %zu root symbol(s), "
+           "%zu root namespace(s)\n",
+           loaded.module_name.value, loaded.format_version,
+           loaded.target_triple.value, loaded.root_symbols.length,
+           loaded.root_namespaces.length);
+    LoadedModuleDestruct(&loaded);
+  } else {
+    fprintf(stderr, "Failed to load module %s\n", module_path);
+  }
+  CompilerDelete(compiler);
+  compiler = NULL;
+  ClearAllFiles();
+  return ok;
+}
+
+// C++20 module import support for normal compilation.  The compiler front end
+// invokes the registered handler (via CompilerImportModule) when it parses an
+// `import foo;` directive; we resolve `<foo>.dcm` across the prebuilt-module
+// search paths, load it, and install its exported names into the active
+// compiler's symbol tables.
+typedef struct {
+  Vector search_paths;  // const char* directories (borrowed from options).
+  Vector loaded;        // LoadedModule* loaded during compilation (owned).
+} DriverImportState;
+
+static bool FileExists(const char* path) {
+  FILE* f = fopen(path, "r");
+  if (f == NULL) {
+    return false;
+  }
+  fclose(f);
+  return true;
+}
+
+static bool DriverImportModule(void* ctx, const char* module_name) {
+  DriverImportState* state = (DriverImportState*)ctx;
+  char path[4096];
+  const char* found = NULL;
+  for (size_t i = 0; i < state->search_paths.length && found == NULL; i++) {
+    const char* dir = (const char*)VectorGet(&state->search_paths, i);
+    snprintf(path, sizeof(path), "%s/%s.dcm", dir, module_name);
+    if (FileExists(path)) {
+      found = path;
+    }
+  }
+  if (found == NULL) {
+    // Fall back to the current directory.
+    snprintf(path, sizeof(path), "%s.dcm", module_name);
+    if (FileExists(path)) {
+      found = path;
+    }
+  }
+  if (found == NULL) {
+    return false;
+  }
+
+  LoadedModule* m = calloc(1, sizeof(LoadedModule));
+  if (!ModuleLoad(found, m)) {
+    free(m);
+    return false;
+  }
+  bool ok = ModuleInstallLoaded(m);
+  VectorAppend(&state->loaded, m);  // Keep alive for the rest of the compile.
+  return ok;
+}
+
+static void DriverImportStateInit(DriverImportState* state, Vector* options) {
+  VectorInit(&state->search_paths);
+  VectorInit(&state->loaded);
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt->opt == kOptionPrebuiltModulePath) {
+      VectorAppend(&state->search_paths, opt->value.svalue.value);
+    }
+  }
+}
+
+static void DriverImportStateDestruct(DriverImportState* state) {
+  for (size_t i = 0; i < state->loaded.length; i++) {
+    LoadedModule* m = (LoadedModule*)VectorGet(&state->loaded, i);
+    LoadedModuleDestruct(m);
+    free(m);
+  }
+  VectorDestruct(&state->loaded);
+  VectorDestruct(&state->search_paths);
 }
 
 int main(int argc, char * argv[]) {
@@ -275,14 +451,43 @@ int main(int argc, char * argv[]) {
   Vector compiler_options;
   VectorInit(&compiler_options);
   Vector* target_opts = NULL;
-  if (run_compiler || asm_files.length > 0) {
+  // Parse compiler options whenever any were supplied (compiler_args always
+  // holds argv[0]); this also covers standalone module hooks like
+  // -Xload-module that have no C input file.
+  if (run_compiler || asm_files.length > 0 || compiler_args.length > 1) {
     target_opts = ParseOptions((int)compiler_args.length,
                  (char**)compiler_args.value.p,
                  &compiler_options);
   }
   
+  // Hidden C++20-module hooks.  -Xemit-module compiles the front end and writes
+  // a module instead of an object file; -Xload-module loads and verifies one.
+  String* emit_module = OptionStringValue(kOptionEmitModule, &compiler_options);
+  String* load_module = OptionStringValue(kOptionLoadModule, &compiler_options);
+  if (emit_module != NULL) {
+    bool ok = true;
+    for (size_t i = 0; i < compiler_options.length; i++) {
+      CompilerOptionValue* opt = compiler_options.value.p[i];
+      if (opt->opt == kOptionInputFile) {
+        ok = EmitModule(opt->value.svalue.value, &compiler_options, target_opts,
+                        emit_module->value) &&
+             ok;
+      }
+    }
+    exit(ok ? 0 : 1);
+  }
+  if (load_module != NULL) {
+    exit(LoadModule(load_module->value, &compiler_options) ? 0 : 1);
+  }
+
   // Any C files to compile?
+  DriverImportState import_state;
   if (run_compiler) {
+    // Register the module import hook so `import foo;` resolves and installs a
+    // prebuilt module during parsing.
+    DriverImportStateInit(&import_state, &compiler_options);
+    SetModuleImportHandler(DriverImportModule, &import_state);
+
     for (size_t i = 0; i < compiler_options.length; i++) {
       CompilerOptionValue* opt = compiler_options.value.p[i];
       if (opt->opt == kOptionInputFile) {
@@ -298,6 +503,9 @@ int main(int argc, char * argv[]) {
         }
       }
     }
+
+    SetModuleImportHandler(NULL, NULL);
+    DriverImportStateDestruct(&import_state);
   }
   
   if (asm_files.length > 0) {

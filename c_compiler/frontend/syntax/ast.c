@@ -3814,3 +3814,223 @@ ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,
   return (ASTNode*)node;
 }
 
+ASTNodeShape ASTNodeGetShape(const ASTNode* node) {
+  ASTNodeVirtuals* v = node->virtuals;
+  if (v == &unary_vtbl) return kASTShapeUnary;
+  if (v == &binary_vtbl) return kASTShapeBinary;
+  if (v == &inline_call_vtbl) return kASTShapeInlineCall;
+  if (v == &vector_vtbl) return kASTShapeVector;
+  if (v == &identifier_vtbl) return kASTShapeIdentifier;
+  if (v == &struct_member_vtbl) return kASTShapeStructMember;
+  if (v == &constant_vtbl) return kASTShapeConstant;
+  if (v == &cast_vtbl) return kASTShapeCast;
+  if (v == &sizeof_vtbl) return kASTShapeSizeof;
+  if (v == &typeid_vtbl) return kASTShapeTypeid;
+  if (v == &macro_vtbl) return kASTShapeMacro;
+  if (v == &expr_stmt_vtbl) return kASTShapeExprStmt;
+  if (v == &if_stmt_vtbl) return kASTShapeIf;
+  if (v == &combined_stmt_vtbl) return kASTShapeCombined;
+  if (v == &throw_vtbl) return kASTShapeThrow;
+  if (v == &compound_stmt_vtbl) return kASTShapeCompound;
+  if (v == &catch_vtbl) return kASTShapeCatch;
+  if (v == &try_vtbl) return kASTShapeTry;
+  if (v == &for_stmt_vtbl) return kASTShapeFor;
+  if (v == &var_decl_vtbl) return kASTShapeVarDecl;
+  if (v == &decl_list_vtbl) return kASTShapeDeclList;
+  if (v == &case_label_vtbl) return kASTShapeCaseLabel;
+  if (v == &switch_stmt_vtbl) return kASTShapeSwitch;
+  if (v == &label_vtbl) return kASTShapeLabel;
+  if (v == &asm_vtbl) return kASTShapeAsm;
+  if (v == &goto_vtbl) return kASTShapeGoto;
+  if (v == &ptr_scale_vtbl) return kASTShapePtrScale;
+  if (v == &expr_init_vtbl) return kASTShapeExprInit;
+  if (v == &braced_init_vtbl) return kASTShapeBracedInit;
+  if (v == &designated_init_vtbl) return kASTShapeDesignatedInit;
+  if (v == &compound_literal_vtbl) return kASTShapeCompoundLiteral;
+  return kASTShapeBase;
+}
+
+ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
+  switch (shape) {
+    case kASTShapeUnary: {
+      UnaryASTNode* n = ASTArenaAlloc(sizeof(UnaryASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &unary_vtbl);
+      return &n->base;
+    }
+    case kASTShapeBinary: {
+      BinaryASTNode* n = ASTArenaAlloc(sizeof(BinaryASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &binary_vtbl);
+      return &n->base;
+    }
+    case kASTShapeInlineCall: {
+      InlineCallASTNode* n = ASTArenaAlloc(sizeof(InlineCallASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &inline_call_vtbl);
+      return &n->base;
+    }
+    case kASTShapeVector: {
+      VectorASTNode* n = ASTArenaAlloc(sizeof(VectorASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &vector_vtbl);
+      return &n->base;
+    }
+    case kASTShapeIdentifier: {
+      IdentifierASTNode* n = ASTArenaAlloc(sizeof(IdentifierASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &identifier_vtbl);
+      return &n->base;
+    }
+    case kASTShapeStructMember: {
+      StructMemberASTNode* n = ASTArenaAlloc(sizeof(StructMemberASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &struct_member_vtbl);
+      return &n->base;
+    }
+    case kASTShapeConstant: {
+      ConstantASTNode* n = ASTArenaAlloc(sizeof(ConstantASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &constant_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCast: {
+      CastASTNode* n = ASTArenaAlloc(sizeof(CastASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &cast_vtbl);
+      return &n->base;
+    }
+    case kASTShapeSizeof: {
+      SizeofASTNode* n = ASTArenaAlloc(sizeof(SizeofASTNode));
+      ASTNodeInit(&n->base.base, op, NULL, 0, &sizeof_vtbl);
+      return &n->base.base;
+    }
+    case kASTShapeTypeid: {
+      TypeidASTNode* n = ASTArenaAlloc(sizeof(TypeidASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &typeid_vtbl);
+      return &n->base;
+    }
+    case kASTShapeMacro: {
+      MacroNameASTNode* n = ASTArenaAlloc(sizeof(MacroNameASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &macro_vtbl);
+      StringInit(&n->macro_name, NULL);
+      return &n->base;
+    }
+    case kASTShapeExprStmt: {
+      ExpressionStatementASTNode* n =
+          ASTArenaAlloc(sizeof(ExpressionStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &expr_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeIf: {
+      IfStatementASTNode* n = ASTArenaAlloc(sizeof(IfStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &if_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCombined: {
+      CombinedStatementASTNode* n =
+          ASTArenaAlloc(sizeof(CombinedStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &combined_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeThrow: {
+      ThrowASTNode* n = ASTArenaAlloc(sizeof(ThrowASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &throw_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCompound: {
+      CompoundStatementASTNode* n =
+          ASTArenaAlloc(sizeof(CompoundStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &compound_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCatch: {
+      CatchASTNode* n = ASTArenaAlloc(sizeof(CatchASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &catch_vtbl);
+      return &n->base;
+    }
+    case kASTShapeTry: {
+      TryASTNode* n = ASTArenaAlloc(sizeof(TryASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &try_vtbl);
+      return &n->base;
+    }
+    case kASTShapeFor: {
+      ForStatementASTNode* n = ASTArenaAlloc(sizeof(ForStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &for_stmt_vtbl);
+      return &n->base;
+    }
+    case kASTShapeVarDecl: {
+      VariableDeclarationASTNode* n =
+          ASTArenaAlloc(sizeof(VariableDeclarationASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &var_decl_vtbl);
+      return &n->base;
+    }
+    case kASTShapeDeclList: {
+      DeclarationListASTNode* n =
+          ASTArenaAlloc(sizeof(DeclarationListASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &decl_list_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCaseLabel: {
+      CaseLabelASTNode* n = ASTArenaAlloc(sizeof(CaseLabelASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &case_label_vtbl);
+      return &n->base;
+    }
+    case kASTShapeSwitch: {
+      SwitchStatementASTNode* n =
+          ASTArenaAlloc(sizeof(SwitchStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &switch_stmt_vtbl);
+      VectorInit(&n->cases);
+      return &n->base;
+    }
+    case kASTShapeLabel: {
+      LabelASTNode* n = ASTArenaAlloc(sizeof(LabelASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &label_vtbl);
+      StringInit(&n->name, NULL);
+      return &n->base;
+    }
+    case kASTShapeAsm: {
+      AsmASTNode* n = ASTArenaAlloc(sizeof(AsmASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &asm_vtbl);
+      VectorInit(&n->outputs);
+      VectorInit(&n->inputs);
+      VectorInit(&n->clobbers);
+      VectorInit(&n->labels);
+      VectorInit(&n->label_nodes);
+      return &n->base;
+    }
+    case kASTShapeGoto: {
+      GotoStatementASTNode* n = ASTArenaAlloc(sizeof(GotoStatementASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &goto_vtbl);
+      return &n->base;
+    }
+    case kASTShapePtrScale: {
+      PtrScaleASTNode* n = ASTArenaAlloc(sizeof(PtrScaleASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &ptr_scale_vtbl);
+      return &n->base;
+    }
+    case kASTShapeExprInit: {
+      ExpressionInitializerASTNode* n =
+          ASTArenaAlloc(sizeof(ExpressionInitializerASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &expr_init_vtbl);
+      return &n->base;
+    }
+    case kASTShapeBracedInit: {
+      BracedInitializerASTNode* n =
+          ASTArenaAlloc(sizeof(BracedInitializerASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &braced_init_vtbl);
+      return &n->base;
+    }
+    case kASTShapeDesignatedInit: {
+      DesignatedInitializerASTNode* n =
+          ASTArenaAlloc(sizeof(DesignatedInitializerASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &designated_init_vtbl);
+      return &n->base;
+    }
+    case kASTShapeCompoundLiteral: {
+      CompoundLiteralASTNode* n =
+          ASTArenaAlloc(sizeof(CompoundLiteralASTNode));
+      ASTNodeInit(&n->base, op, NULL, 0, &compound_literal_vtbl);
+      return &n->base;
+    }
+    case kASTShapeBase:
+    default: {
+      ASTNode* n = ASTArenaAlloc(sizeof(ASTNode));
+      ASTNodeInit(n, op, NULL, 0, &base_vtbl);
+      return n;
+    }
+  }
+}
+

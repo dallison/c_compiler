@@ -64,6 +64,10 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false, "Keep assembly file"},
     {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false, "Save IR to .ir file"},
     {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false, "Save AST to .ast file"},
+    // Hidden C++20-module hooks: emit/load a post-semantic module (.dcm) file.
+    {"-Xemit-module", kCompilerOptionString, kOptionEmitModule, false, "(hidden) Emit a module (.dcm) file"},
+    {"-Xload-module", kCompilerOptionString, kOptionLoadModule, false, "(hidden) Load and verify a module (.dcm) file"},
+    {"-fprebuilt-module-path", kCompilerOptionString, kOptionPrebuiltModulePath, false, "Search dir for prebuilt .dcm modules"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -94,6 +98,23 @@ bool CompilerCXXAtLeast(LanguageStandard standard) {
 
 bool CompilerExceptionsEnabled(void) {
   return compiler != NULL && compiler->exceptions_enabled;
+}
+
+// C++20 module import hook, registered by the driver (see SetModuleImportHandler
+// in compiler.h for why this indirection exists).
+static ModuleImportHandler g_module_import_handler = NULL;
+static void* g_module_import_handler_ctx = NULL;
+
+void SetModuleImportHandler(ModuleImportHandler fn, void* ctx) {
+  g_module_import_handler = fn;
+  g_module_import_handler_ctx = ctx;
+}
+
+bool CompilerImportModule(const char* module_name) {
+  if (g_module_import_handler == NULL) {
+    return false;
+  }
+  return g_module_import_handler(g_module_import_handler_ctx, module_name);
 }
 
 // Add new targets here.
@@ -1135,6 +1156,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
   // for command-line options (a leading '-') by later tools like the linker.
   StringInit(&compiler->infile, strcmp(filename, "-") == 0 ? "stdin" : filename);
+  StringInit(&compiler->module_name, "");
+  compiler->is_module_interface = false;
   VectorInit(&compiler->functions);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
@@ -1578,6 +1601,7 @@ void CompilerDestruct(Compiler* compiler) {
   HashTableDestruct(&compiler->global_tag_table);
 
   StringDestruct(&compiler->infile);
+  StringDestruct(&compiler->module_name);
 
   for (size_t i = 0; i < compiler->functions.length; i++) {
     compiler->target->cleanup(compiler->functions.value.p[i]);
@@ -1834,6 +1858,24 @@ static void CheckUnusedStaticFunctions(void) {
 
 // Compile a source file, returning name of object file allocated from
 // the heap.  Compiler has already been initialized.
+// Runs preprocessing, parsing and semantic analysis for the current translation
+// unit, leaving the compiler's symbol/type/AST graph populated but NOT running
+// code generation.  Returns true if the front end completed without errors.
+// Used by the hidden -Xemit-module driver hook (and by module tooling) to obtain
+// the post-semantic interface without producing an object file.
+bool CompileFrontEndOnly(Compiler* compiler) {
+  CreateGlobalSymbolTables();
+  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
+
+  LexNextToken(&compiler->lex);
+  while (!LexEof(&compiler->lex)) {
+    SyntaxResetForNewDeclaration(&compiler->syntax);
+    CompileDeclaration(&compiler->syntax);
+  }
+  CheckUnusedStaticFunctions();
+  return NumErrors() == 0;
+}
+
 static String* Compile(Compiler* compiler, Vector* options) {
   // Create global symbol tables and predefine internal types.
   CreateGlobalSymbolTables();

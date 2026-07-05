@@ -71,32 +71,36 @@ typedef enum {
   kTemplateParameterNonType,
 } TemplateParameterKind;
 
+// Serialized as an inline sub-message (see type_serialize.c); the field
+// numbers below are local to that sub-message.
 typedef struct TemplateParameter {
-  String name;
-  TemplateParameterKind kind;
-  bool is_parameter_pack;
-  struct TypeRecord* type;  // NULL for type parameters.
-  struct TypeRecord* default_type;  // Optional default for type parameters.
-  bool has_default_int;  // Optional default for non-type integer parameters.
-  long long default_int_value;
-  int default_template_parameter_index;  // >= 0 when default names a parameter.
-  struct ConstraintExpr* associated_constraint;  // Optional C++20 constraint.
-  int index;
+  String name;                      // @wire 1
+  TemplateParameterKind kind;       // @wire 2
+  bool is_parameter_pack;           // @wire 3
+  struct TypeRecord* type;          // NULL for type params.       // @wire 4
+  struct TypeRecord* default_type;  // Optional type-param default. // @wire 5
+  bool has_default_int;  // Optional non-type integer default.      // @wire 6
+  long long default_int_value;                                     // @wire 7
+  int default_template_parameter_index;  // >=0 if default names a param. // @wire 8
+  struct ConstraintExpr* associated_constraint;  // Optional C++20 constraint. // @wire 10
+  int index;                        // @wire 9
 } TemplateParameter;
 
+// Serialized as an inline sub-message (see type_serialize.c); the field
+// numbers below are local to that sub-message.
 typedef struct TemplateArgument {
-  TemplateParameterKind kind;
-  bool is_pack_expansion;
-  struct TypeRecord* type;  // Non-NULL for type arguments.
-  long long int_value;      // Valid for simple non-type integer arguments.
-  int template_parameter_index;  // >= 0 when non-type arg is a template param.
-  Vector* pack_arguments;   // TemplateArgument* entries for bound packs.
+  TemplateParameterKind kind;    // @wire 1
+  bool is_pack_expansion;        // @wire 2
+  struct TypeRecord* type;  // Non-NULL for type arguments.        // @wire 3
+  long long int_value;      // Valid for simple non-type int args. // @wire 4
+  int template_parameter_index;  // >=0 when non-type arg is a param. // @wire 5
+  Vector* pack_arguments;   // TemplateArgument* for bound packs.   // @wire 6
   // A value-dependent non-type argument expression (e.g. `!is_integral<It>::value`)
   // kept unevaluated at parse time.  It is re-cloned, substituted, and folded to a
   // concrete `int_value` when the referenced template parameters become concrete
   // (see NewSubstitutedTemplateArgument).  Arena-owned (never individually freed);
   // NULL for ordinary, already-evaluated arguments.
-  struct ASTNode* dependent_expr;
+  struct ASTNode* dependent_expr;   // @wire 7
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {
@@ -121,55 +125,56 @@ typedef enum {
   kCXXRefQualifierRValue,
 } CXXRefQualifier;
 
-// Function info.
+// Function info.  Serialized as an inline sub-message of TypeRecord (see
+// type_serialize.c); the field numbers below are local to that sub-message.
 typedef struct {
-  Symbol* symbol;       // Symbol for function (or NULL).
-  Vector prototype;     // Formal arguments (owned Symbol*).
-  bool varargs;         // True if varargs function.
-  struct ASTNode* body; // Body AST.
-  bool unknown_args;    // Old-style or invented function.
-  bool definition;      // Function is a definition.
-  bool old_style;       // Old-style arguments.
-  bool is_inline;       // This is an inline function.
-  bool is_constexpr;    // C++ constexpr function.
-  bool is_consteval;    // C++ consteval immediate function.
-  bool is_constructor;  // Called before main.
-  bool is_destructor;   // Called after exit.
-  bool is_const_member; // C++ member function has trailing const qualifier.
-  CXXRefQualifier ref_qualifier;  // C++ member function trailing & / &&.
-  bool is_explicit;     // C++ explicit constructor/conversion/deduction guide.
-  bool is_explicit_conversion;  // C++ explicit conversion operator.
-  bool is_virtual;      // C++ virtual member function.
-  bool is_override;     // C++ override virt-specifier.
-  bool is_final;        // C++ final virt-specifier.
-  bool is_pure_virtual; // C++ pure virtual function (`= 0`).
-  bool is_defaulted;    // C++ explicitly defaulted function (`= default`).
-  bool is_deleted;      // C++ deleted function (`= delete`).
-  CXXSpecialMemberKind cxx_special_member_kind;  // C++ special member kind.
-  bool is_user_declared;      // C++ user-declared function.
-  bool is_user_provided;      // C++ user-provided function body.
-  bool is_explicitly_defaulted;  // C++ explicitly defaulted function.
-  bool is_explicitly_deleted;    // C++ explicitly deleted function.
-  bool is_implicitly_declared;   // C++ implicitly declared function.
-  bool is_implicitly_deleted;    // C++ implicitly deleted function.
-  bool is_trivial_special_member;  // C++ trivial special member.
-  bool is_constexpr_eligible;  // C++ constexpr-suitable special member.
-  bool is_noexcept_eligible;   // C++ nothrow special member.
-  bool is_noexcept;            // C++ declared non-throwing (noexcept/throw()).
-  bool is_auto_return_deduced;  // C++ auto return type has been deduced.
-  bool is_deduction_guide;  // C++ class template deduction guide.
-  bool is_coroutine;  // C++ coroutine function.
-  struct TypeRecord* coroutine_promise_type;  // Deduced promise_type, if any.
-  struct TypeRecord* coroutine_frame_type;  // Lowered coroutine frame, if any.
-  int coroutine_suspend_count;  // Number of suspension points in the body.
-  int virtual_index;    // Vtable slot, or -1 for non-virtual functions.
-  Struct* cxx_member_owner;  // Owning class for C++ member functions.
-  Symbol* template_origin;  // Primary function template for instantiations.
-  int template_parameter_count;  // C++ function template arity.
-  int template_parameter_base;  // Parameter index base for nested templates.
-  Vector template_parameters;  // TemplateParameter* entries for defaults.
-  Vector template_instantiations;  // Symbol* cache, not overload candidates.
-  struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause.
+  Symbol* symbol;       // Symbol for function (or NULL).           // @wire 1
+  Vector prototype;     // Formal arguments (owned Symbol*).        // @wire 2
+  bool varargs;         // True if varargs function.                // @wire 3
+  struct ASTNode* body; // Body AST.                                // @wire 4
+  bool unknown_args;    // Old-style or invented function.          // @wire 5
+  bool definition;      // Function is a definition.                // @wire 6
+  bool old_style;       // Old-style arguments.                     // @wire 7
+  bool is_inline;       // This is an inline function.              // @wire 8
+  bool is_constexpr;    // C++ constexpr function.                  // @wire 9
+  bool is_consteval;    // C++ consteval immediate function.        // @wire 10
+  bool is_constructor;  // Called before main.                      // @wire 11
+  bool is_destructor;   // Called after exit.                       // @wire 12
+  bool is_const_member; // C++ trailing const qualifier.            // @wire 13
+  CXXRefQualifier ref_qualifier;  // C++ trailing & / &&.           // @wire 14
+  bool is_explicit;     // C++ explicit ctor/conv/deduction guide.  // @wire 15
+  bool is_explicit_conversion;  // C++ explicit conversion op.      // @wire 16
+  bool is_virtual;      // C++ virtual member function.             // @wire 17
+  bool is_override;     // C++ override virt-specifier.             // @wire 18
+  bool is_final;        // C++ final virt-specifier.                // @wire 19
+  bool is_pure_virtual; // C++ pure virtual function (`= 0`).       // @wire 20
+  bool is_defaulted;    // C++ explicitly defaulted (`= default`).  // @wire 21
+  bool is_deleted;      // C++ deleted function (`= delete`).       // @wire 22
+  CXXSpecialMemberKind cxx_special_member_kind;  // Special kind.   // @wire 23
+  bool is_user_declared;      // C++ user-declared function.        // @wire 24
+  bool is_user_provided;      // C++ user-provided function body.   // @wire 25
+  bool is_explicitly_defaulted;  // C++ explicitly defaulted.       // @wire 26
+  bool is_explicitly_deleted;    // C++ explicitly deleted.         // @wire 27
+  bool is_implicitly_declared;   // C++ implicitly declared.        // @wire 28
+  bool is_implicitly_deleted;    // C++ implicitly deleted.         // @wire 29
+  bool is_trivial_special_member;  // C++ trivial special member.   // @wire 30
+  bool is_constexpr_eligible;  // C++ constexpr-suitable.           // @wire 31
+  bool is_noexcept_eligible;   // C++ nothrow special member.       // @wire 32
+  bool is_noexcept;            // C++ declared non-throwing.        // @wire 33
+  bool is_auto_return_deduced;  // C++ auto return deduced.         // @wire 34
+  bool is_deduction_guide;  // C++ class template deduction guide.  // @wire 35
+  bool is_coroutine;  // C++ coroutine function.                    // @wire 36
+  struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
+  struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
+  int coroutine_suspend_count;  // Suspension points in body.       // @wire 39
+  int virtual_index;    // Vtable slot, or -1 if non-virtual.       // @wire 40
+  Struct* cxx_member_owner;  // Owning class for member functions.  // @wire 41
+  Symbol* template_origin;  // Primary template for instantiations. // @wire 42
+  int template_parameter_count;  // C++ function template arity.    // @wire 43
+  int template_parameter_base;  // Param index base for nesting.    // @wire 44
+  Vector template_parameters;  // TemplateParameter* for defaults.  // @wire 45
+  Vector template_instantiations;  // Symbol* cache, not overload candidates. // @wire 46
+  struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
 } FunctionInfo;
 
 typedef enum {
@@ -178,12 +183,14 @@ typedef enum {
   kAccessPrivate,
 } CXXAccess;
 
+// Serialized as an inline sub-message (see type_serialize.c); field numbers
+// below are local to that sub-message.
 typedef struct CXXBaseSpecifier {
-  struct TypeRecord* type;  // Base class type.
-  CXXAccess access;
-  int byte_offset;
-  bool is_virtual;
-  bool is_pack_expansion;
+  struct TypeRecord* type;  // Base class type.   // @wire 1
+  CXXAccess access;         // @wire 2
+  int byte_offset;          // @wire 3
+  bool is_virtual;          // @wire 4
+  bool is_pack_expansion;   // @wire 5
 } CXXBaseSpecifier;
 
 typedef struct CXXMemberUsingDeclaration {
@@ -226,67 +233,71 @@ typedef struct CXXVTableInfo {
 } CXXVTableInfo;
 
 // A struct or union member.  Behaves like a Symbol with extra information.
+// Module-serialization field numbers (see type_serialize.c).
 typedef struct StructMember {
-  Symbol* symbol;   // Embedded Symbol.
-  struct ASTNode* default_initializer;  // C++ default member initializer.
-  int byte_offset;  // Byte offset into struct.
-  int bit_offset;   // Bit offset into word.
-  int bit_size;     // Bitfield size in bits.
-  size_t index;     // Index into members vector.
-  int cxx_vcall_offset;  // Subobject offset whose vptr owns this virtual slot.
-  bool is_anon;     // This is an anonymous member.
-  bool is_static;   // C++ static data/function member.
-  bool is_mutable;  // C++ 'mutable' data member (modifiable on a const object).
-  bool is_member_function;
-  bool is_using_declaration;  // Imported by a C++ member using declaration.
-  CXXAccess access;
-  struct StructMember* overload_next;  // Next C++ member overload by name.
+  Symbol* symbol;   // Embedded Symbol.                            // @wire 1
+  struct ASTNode* default_initializer;  // C++ default member init. // @wire 2
+  int byte_offset;  // Byte offset into struct.                    // @wire 3
+  int bit_offset;   // Bit offset into word.                       // @wire 4
+  int bit_size;     // Bitfield size in bits.                      // @wire 5
+  size_t index;     // Index into members vector.                  // @wire 6
+  int cxx_vcall_offset;  // Subobject offset owning this vslot.     // @wire 7
+  bool is_anon;     // This is an anonymous member.                // @wire 8
+  bool is_static;   // C++ static data/function member.            // @wire 9
+  bool is_mutable;  // C++ 'mutable' data member.                  // @wire 10
+  bool is_member_function;                                         // @wire 11
+  bool is_using_declaration;  // Imported by member using-decl.    // @wire 12
+  CXXAccess access;                                                // @wire 13
+  struct StructMember* overload_next;  // Next member overload.    // @wire 14
 } StructMember;
 
-// A struct or union type.
+// A struct or union type.  Module-serialization field numbers (see
+// type_serialize.c).  refs is recomputed on load; the derived member maps,
+// vtable/vbtable info, using-declarations, partial specializations and
+// deduction guides carry no wire number (rebuilt or deferred).
 struct Struct {
-  int refs;
-  String* tag_name;  // Tag name (not owned by this, owned by Symbol)
-  Symbol* tag_symbol;  // Owning tag symbol, if named.
-  Vector bases;      // Vector of CXXBaseSpecifier* (owns entries).
-  Vector friend_classes;    // Vector of Struct* granted friendship (not owned).
-  Vector friend_functions;  // Vector of Symbol* granted friendship (not owned).
-  Vector member_using_declarations;  // CXXMemberUsingDeclaration* entries.
-  Vector virtual_bases;  // Vector of CXXVirtualBaseInfo* (owns entries).
-  Vector members;    // Vector of StructMember* (owns StructMembers)
-  Vector virtual_members;  // Vector of StructMember* (not owned), by slot.
-  StructMember* vptr_member;  // Hidden C++ vptr field, if owned by this class.
-  Symbol* vtable_symbol;      // Hidden C++ vtable static symbol.
-  StructMember* vbptr_member;  // Hidden C++ virtual-base offset table pointer.
-  Symbol* vbtable_symbol;      // Hidden C++ virtual-base offset table.
-  Vector vtable_symbols;  // CXXVTableInfo* entries for subobject vtables.
-  Vector vbtable_symbols;  // CXXVBTableInfo* entries for complete-object tables.
-  Map symbol_table;  // Map of String* vs StructMember* (not owned).
-  Map symbol_name_table;  // Map of char* vs StructMember* (not owned).
-  int next_offset;   // Byte offset of next member.
-  int size;          // Size of struct in bytes.
-  int non_virtual_size;  // Size excluding appended virtual base subobjects.
-  int alignment;     // Alignment of struct (max alignment of its members).
-  bool is_union;     // True if this is a union.
-  bool is_class;     // True if this is a C++ class.
-  bool is_final;     // True if declared with the C++ 'final' class specifier.
-  bool is_template;  // True if this is a C++ class template.
-  bool is_aggregate; // True if this is a C++ aggregate class.
-  bool cxx_special_members_complete;  // C++ special members declared.
+  int refs;          // @wire - (refcount, recomputed)
+  String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
+  Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
+  Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3
+  Vector friend_classes;    // Struct* granted friendship.        // @wire 28
+  Vector friend_functions;  // Symbol* granted friendship.        // @wire 29
+  Vector member_using_declarations;  // @wire - (not serialized)
+  Vector virtual_bases;  // @wire - (recomputed on layout)
+  Vector members;    // StructMember* (owns members).             // @wire 4
+  Vector virtual_members;  // StructMember* by slot (not owned).  // @wire 27
+  StructMember* vptr_member;  // Hidden C++ vptr field.           // @wire 23
+  Symbol* vtable_symbol;      // Hidden C++ vtable static symbol.  // @wire 24
+  StructMember* vbptr_member;  // Hidden virtual-base tbl ptr.    // @wire 25
+  Symbol* vbtable_symbol;      // Hidden virtual-base table.       // @wire 26
+  Vector vtable_symbols;  // @wire - (recomputed)
+  Vector vbtable_symbols;  // @wire - (recomputed)
+  Map symbol_table;  // @wire - (rebuilt from members)
+  Map symbol_name_table;  // @wire - (rebuilt from members)
+  int next_offset;   // Byte offset of next member.               // @wire 5
+  int size;          // Size of struct in bytes.                  // @wire 6
+  int non_virtual_size;  // Size excluding virtual base subobjs.   // @wire 7
+  int alignment;     // Alignment (max member alignment).         // @wire 8
+  bool is_union;     // True if this is a union.                  // @wire 9
+  bool is_class;     // True if this is a C++ class.              // @wire 10
+  bool is_final;     // True if declared 'final'.                 // @wire 11
+  bool is_template;  // True if this is a C++ class template.     // @wire 12
+  bool is_aggregate; // True if this is a C++ aggregate class.    // @wire 13
+  bool cxx_special_members_complete;  // Special members declared. // @wire 14
   // True once RegisterCXXVTable has run for this class (i.e. vtable_symbols is
   // populated).  Constructor preambles built before this point defer their
   // __vptr initializers, since the vtables they reference do not exist yet.
-  bool vtables_registered;
-  Vector template_parameters;  // TemplateParameter* entries.
-  Vector partial_specializations;  // ClassTemplatePartialSpecialization*.
-  Vector deduction_guides;  // Symbol* function-like C++ deduction guides.
-  int template_parameter_count;  // Number of parameters for simple templates.
-  bool packed;       // __attribute__((packed)): no inter-member padding.
-  bool is_abstract;  // C++ class has at least one unimplemented pure virtual.
-  int explicit_alignment;  // __attribute__((aligned(N))) minimum; 0 = none.
-  int pack;          // #pragma pack(n) member alignment cap; 0 = no cap.
-  int next_bit_pos;  // Next bit position for bit fields.
-  int current_offset;
+  bool vtables_registered;  // @wire - (recomputed)
+  Vector template_parameters;  // TemplateParameter* entries.     // @wire 15
+  Vector partial_specializations;  // @wire - (deferred)
+  Vector deduction_guides;  // @wire - (deferred)
+  int template_parameter_count;  // Simple template arity.        // @wire 16
+  bool packed;       // packed: no inter-member padding.          // @wire 17
+  bool is_abstract;  // Has an unimplemented pure virtual.        // @wire 18
+  int explicit_alignment;  // aligned(N) minimum; 0 = none.        // @wire 19
+  int pack;          // #pragma pack(n) cap; 0 = no cap.          // @wire 20
+  int next_bit_pos;  // Next bit position for bit fields.         // @wire 21
+  int current_offset;  // @wire 22
 };
 
 // Applies layout-affecting attributes (packed, aligned) from an Attribute
@@ -298,32 +309,35 @@ void StructApplyLayoutAttributes(struct Struct* str, Vector* attrs);
 // no layout attribute or its type is not a struct/union.
 void TypeApplyStructAttributesFromSymbol(Symbol* sym);
 
-// An enum type.
+// An enum type.  Module-serialization field numbers (see type_serialize.c);
+// refs is recomputed on load.
 typedef struct {
-  int refs;
-  String* tag_name;  // Tag name (owned by Symbol).
-  Symbol* tag_symbol;  // Owning tag symbol, if named.
-  Vector constants;  // Vector of Symbol* (not owned).
-  int next_value;    // Value to give to next constant.
-  bool is_scoped;    // C++ scoped enum: enum class / enum struct.
-  bool has_fixed_underlying;
-  Type fixed_underlying_type;
-  int fixed_underlying_size;
+  int refs;          // @wire - (refcount, recomputed)
+  String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
+  Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
+  Vector constants;  // Symbol* constants (not owned).            // @wire 3
+  int next_value;    // Value to give to next constant.           // @wire 4
+  bool is_scoped;    // C++ scoped enum (enum class/struct).      // @wire 5
+  bool has_fixed_underlying;                                      // @wire 6
+  Type fixed_underlying_type;                                     // @wire 7
+  int fixed_underlying_size;                                      // @wire 8
 } Enum;
 
+// Serialized as an inline sub-message of TypeRecord (see type_serialize.c);
+// field numbers below are local to that sub-message.
 typedef struct {
   union {
     struct {
-      struct ASTNode* size;   // Variable Length Array size.
-      void* codegen_info;     // Information for code generator.
+      struct ASTNode* size;   // VLA size expression.       // @wire 7
+      void* codegen_info;     // @wire - (codegen only)
     } vla;
-    int fixed;             // Fixed array size.
+    int fixed;             // Fixed array size.             // @wire 6
   } size;
-  bool is_flexible:1;           // Is a flexible array (inside struct).
-  bool is_static:1;             // In call, actual and formal must match.
-  bool is_vla:1;                // This is a variable length array.
-  bool is_placeholder_vla:1;    // [*] used in function prototype.
-  int template_parameter_index;  // >= 0 when fixed bound is a non-type param.
+  bool is_flexible:1;           // Flexible array (in struct).   // @wire 1
+  bool is_static:1;             // Actual/formal must match.     // @wire 2
+  bool is_vla:1;                // Variable length array.        // @wire 3
+  bool is_placeholder_vla:1;    // [*] in function prototype.    // @wire 4
+  int template_parameter_index;  // >=0 if bound is non-type param. // @wire 5
 } ArrayInfo;
 
 
@@ -331,23 +345,25 @@ typedef struct {
 // Each of these structs is chained into a full type by the 'next'
 // pointer.  We keep a count of the number of things pointing to
 // each record so we can delete them when the count goes to zero.
+// Module-serialization field numbers (see type_serialize.c).  refs is
+// recomputed on load.  The info union is discriminated by declarator.
 typedef struct TypeRecord {
-  int id;     // Unique id for debugging.
-  int refs;  // Reference count.
-  Type type;
-  Qualifiers qualifiers;
-  Declarator declarator;
-  int size;
-  int template_parameter_index;  // >= 0 for template parameter placeholder types.
-  String* dependent_member_name;  // For dependent qualified types like T::type.
-  Symbol* template_origin;       // Primary class template for dependent template-ids.
-  Vector* template_arguments;    // TemplateArgument* entries owned by this type.
-  struct TypeRecord* next;
-  union {
-    ArrayInfo array;
-    FunctionInfo function;
-    Struct* struct_info;
-    Enum* enum_info;
+  int id;     // Unique id for debugging.                         // @wire 1
+  int refs;  // Reference count.                                  // @wire - (recomputed)
+  Type type;                                                      // @wire 2
+  Qualifiers qualifiers;                                          // @wire 3
+  Declarator declarator;                                          // @wire 4
+  int size;                                                       // @wire 5
+  int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
+  String* dependent_member_name;  // For T::type-like types.       // @wire 7
+  Symbol* template_origin;       // Primary template for template-ids. // @wire 8
+  Vector* template_arguments;    // TemplateArgument* (owned).      // @wire 9
+  struct TypeRecord* next;                                        // @wire 10
+  union {                        // Discriminated by declarator/type:
+    ArrayInfo array;             // @wire 11 (kDeclArray)
+    FunctionInfo function;       // @wire 12 (kDeclFunction)
+    Struct* struct_info;         // @wire 13 (kTypeStruct/kTypeUnion)
+    Enum* enum_info;             // @wire 14 (kTypeEnum)
   } info;
 } TypeRecord;
 
