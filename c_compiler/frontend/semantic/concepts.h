@@ -139,12 +139,17 @@ void ConstraintExprDelete(ConstraintExpr* constraint);
 void RequirementDelete(Requirement* requirement);
 void RequiresExprDelete(RequiresExpr* expr);
 void ConceptDelete(Concept* concept);
+ConstraintExpr* ConceptsCloneConstraint(ConstraintExpr* constraint);
+bool ConceptsConstraintContainsTemplateParameter(ConstraintExpr* constraint);
 
 // Evaluates a concept-id expression represented by an identifier node.  This is
 // the semantic bridge used by constant-expression contexts such as
 // `static_assert(C<T>)`.
 bool ConceptsEvaluateInteger(struct ASTNode* node, int64_t* result);
 bool ConceptsEvaluateConstraint(ConstraintExpr* constraint, int64_t* result);
+bool ConceptsEvaluateConstraintWithArguments(ConstraintExpr* constraint,
+                                             Vector* arguments,
+                                             int64_t* result);
 bool ConceptsFunctionTemplateConstraintsSatisfied(struct Symbol* templ,
                                                  Vector* arguments);
 bool ConceptsFunctionTemplateHasAssociatedConstraint(struct Symbol* templ);

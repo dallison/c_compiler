@@ -3171,6 +3171,10 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     if (TypeIsUnknown(t) && t->template_parameter_index >= 0) {
       return true;
     }
+    if (t->dependent_member_name != NULL &&
+        (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
+      return true;
+    }
     if (t->declarator == kDeclArray &&
         t->info.array.template_parameter_index >= 0) {
       return true;
@@ -5021,6 +5025,20 @@ static bool ASTNodeWithinPackExpansion(ASTNode* node) {
  * Returns the (possibly replacement) node for this position. */
 static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   TemplateFunctionBodyClone* clone = data;
+  if (node->op == AST_OP(requires_expr)) {
+    RequiresExpressionASTNode* requires_node =
+        (RequiresExpressionASTNode*)node;
+    SourceLocation location = node->location;
+    int64_t value = 0;
+    bool ok = ConceptsEvaluateConstraintWithArguments(
+        requires_node->constraint, clone->args, &value);
+    ConstraintExprDelete(requires_node->constraint);
+    requires_node->constraint = NULL;
+    ASTNodeDelete(node);
+    return NewIntConstantASTNode(ok && value != 0 ? 1 : 0,
+                                 NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                                 location);
+  }
   if (node->op == AST_OP(structmember) && clone->from_owner != NULL &&
       clone->to_owner != NULL && clone->from_owner != clone->to_owner) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)node;

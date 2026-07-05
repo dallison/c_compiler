@@ -2086,6 +2086,9 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
       LexLookingAt(lex, TOK(requires))) {
     SourceLocation location = lex->current_token_location;
     ConstraintExpr* constraint = ConceptsParseRequiresExpression(syntax);
+    if (ConceptsConstraintContainsTemplateParameter(constraint)) {
+      return NewRequiresExpressionASTNode(constraint, location);
+    }
     int64_t value = 0;
     bool ok = constraint != NULL &&
               ConceptsEvaluateConstraint(constraint, &value);

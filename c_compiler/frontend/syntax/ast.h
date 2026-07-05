@@ -137,6 +137,7 @@ typedef enum {
   AST_OP(ptr_scale),
   AST_OP(compound_literal),
   AST_OP(stmt_expr),  // GCC statement expression ({ ... }).
+  AST_OP(requires_expr),  // C++20 requires-expression.
 
   // Type conversions.
   // Integer to...
@@ -313,6 +314,8 @@ typedef struct ASTNode {
       virtuals;  // Virtual table (statically allocated, do not free).
 } ASTNode;
 
+struct ConstraintExpr;
+
 // Flags for ASTNode.
 #define kASTNeedAddress (1 << 0)     // Need address, not value.
 #define kASTStaticInit (1 << 1)      // Static variable init.
@@ -427,6 +430,14 @@ typedef struct {
 ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
                           SourceLocation location, ASTNode* left,
                           Vector* children);
+
+typedef struct {
+  ASTNode base;
+  struct ConstraintExpr* constraint;
+} RequiresExpressionASTNode;
+
+ASTNode* NewRequiresExpressionASTNode(struct ConstraintExpr* constraint,
+                                      SourceLocation location);
 
 // An identifier node containing a symbol pointer.  The symbol is not deleted
 // when the node is deleted.

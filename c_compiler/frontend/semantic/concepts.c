@@ -201,6 +201,199 @@ void ConceptDelete(Concept* concept) {
   free(concept);
 }
 
+static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static Requirement* RequirementClone(Requirement* requirement);
+static RequiresExpr* RequiresExprClone(RequiresExpr* expr);
+
+ConstraintExpr* ConceptsCloneConstraint(ConstraintExpr* constraint) {
+  if (constraint == NULL) {
+    return NULL;
+  }
+  switch (constraint->kind) {
+    case kConstraintAtomic:
+      return NewAtomicConstraint(
+          ASTNodeClone(constraint->as.atomic.expr, IdentityCloneNode, NULL,
+                       NULL),
+          constraint->location);
+    case kConstraintConjunction:
+      return NewConjunctionConstraint(
+          ConceptsCloneConstraint(constraint->as.binary.left),
+          ConceptsCloneConstraint(constraint->as.binary.right),
+          constraint->location);
+    case kConstraintDisjunction:
+      return NewDisjunctionConstraint(
+          ConceptsCloneConstraint(constraint->as.binary.left),
+          ConceptsCloneConstraint(constraint->as.binary.right),
+          constraint->location);
+    case kConstraintConceptId:
+      return NewConceptIdConstraint(
+          constraint->as.concept_id.concept_symbol,
+          TemplateArgumentVectorCopy(constraint->as.concept_id.arguments),
+          constraint->location);
+    case kConstraintRequires:
+      return NewRequiresConstraint(
+          RequiresExprClone(constraint->as.requires_.requires_expr),
+          constraint->location);
+  }
+  return NULL;
+}
+
+static Requirement* RequirementClone(Requirement* requirement) {
+  if (requirement == NULL) {
+    return NULL;
+  }
+  switch (requirement->kind) {
+    case kRequirementSimple:
+      return NewSimpleRequirement(
+          ASTNodeClone(requirement->expr, IdentityCloneNode, NULL, NULL),
+          requirement->location);
+    case kRequirementType:
+      return NewTypeRequirement(TypeRecordCopy(requirement->type),
+                                requirement->location);
+    case kRequirementCompound:
+      return NewCompoundRequirement(
+          ASTNodeClone(requirement->expr, IdentityCloneNode, NULL, NULL),
+          requirement->is_noexcept,
+          ConceptsCloneConstraint(requirement->return_type_constraint),
+          requirement->location);
+    case kRequirementNested:
+      return NewNestedRequirement(ConceptsCloneConstraint(requirement->nested),
+                                  requirement->location);
+  }
+  return NULL;
+}
+
+static RequiresExpr* RequiresExprClone(RequiresExpr* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  Vector* parameters = NewVector();
+  for (size_t i = 0; expr->parameters != NULL &&
+                     i < expr->parameters->length; i++) {
+    VectorAppend(parameters, expr->parameters->value.p[i]);
+  }
+  Vector* requirements = NewVector();
+  for (size_t i = 0; expr->requirements != NULL &&
+                     i < expr->requirements->length; i++) {
+    VectorAppend(requirements,
+                 RequirementClone(expr->requirements->value.p[i]));
+  }
+  return NewRequiresExpr(parameters, requirements, expr->location);
+}
+
+static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(arg->type)) {
+    return true;
+  }
+  for (size_t i = 0; arg->pack_arguments != NULL &&
+                     i < arg->pack_arguments->length; i++) {
+    if (TemplateArgumentContainsTemplateParameter(
+            arg->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    if (TemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ExpressionContainsTemplateParameterVisitor(ASTNode* node,
+                                                       void* data,
+                                                       int child_id,
+                                                       VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren || *(bool*)data) {
+    return;
+  }
+  if (TypeContainsTemplateParameter(node->type)) {
+    *(bool*)data = true;
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL &&
+        (id->symbol->template_parameter_index >= 0 ||
+         TypeContainsTemplateParameter(id->symbol->type) ||
+         TemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments))) {
+      *(bool*)data = true;
+    }
+  }
+}
+
+static bool ExpressionContainsTemplateParameter(ASTNode* expr) {
+  bool contains = false;
+  ASTNodeVisit(expr, ExpressionContainsTemplateParameterVisitor, 0,
+               &contains);
+  return contains;
+}
+
+static bool RequirementContainsTemplateParameter(Requirement* requirement);
+
+bool ConceptsConstraintContainsTemplateParameter(ConstraintExpr* constraint) {
+  if (constraint == NULL) {
+    return false;
+  }
+  switch (constraint->kind) {
+    case kConstraintAtomic:
+      return ExpressionContainsTemplateParameter(constraint->as.atomic.expr);
+    case kConstraintConjunction:
+    case kConstraintDisjunction:
+      return ConceptsConstraintContainsTemplateParameter(
+                 constraint->as.binary.left) ||
+             ConceptsConstraintContainsTemplateParameter(
+                 constraint->as.binary.right);
+    case kConstraintConceptId:
+      return TemplateArgumentVectorContainsTemplateParameter(
+          constraint->as.concept_id.arguments);
+    case kConstraintRequires: {
+      RequiresExpr* expr = constraint->as.requires_.requires_expr;
+      for (size_t i = 0; expr != NULL && expr->requirements != NULL &&
+                         i < expr->requirements->length; i++) {
+        if (RequirementContainsTemplateParameter(
+                expr->requirements->value.p[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+static bool RequirementContainsTemplateParameter(Requirement* requirement) {
+  if (requirement == NULL) {
+    return false;
+  }
+  switch (requirement->kind) {
+    case kRequirementSimple:
+    case kRequirementCompound:
+      return ExpressionContainsTemplateParameter(requirement->expr) ||
+             ConceptsConstraintContainsTemplateParameter(
+                 requirement->return_type_constraint);
+    case kRequirementType:
+      return TypeContainsTemplateParameter(requirement->type);
+    case kRequirementNested:
+      return ConceptsConstraintContainsTemplateParameter(requirement->nested);
+  }
+  return false;
+}
+
 static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
                                              Vector* arguments,
                                              SourceLocation location,
@@ -611,7 +804,16 @@ bool ConceptsEvaluateInteger(ASTNode* node, int64_t* result) {
 }
 
 bool ConceptsEvaluateConstraint(ConstraintExpr* constraint, int64_t* result) {
+  if (ConceptsConstraintContainsTemplateParameter(constraint)) {
+    return false;
+  }
   return EvaluateConstraintInteger(constraint, NULL, result);
+}
+
+bool ConceptsEvaluateConstraintWithArguments(ConstraintExpr* constraint,
+                                             Vector* arguments,
+                                             int64_t* result) {
+  return EvaluateConstraintInteger(constraint, arguments, result);
 }
 
 bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,

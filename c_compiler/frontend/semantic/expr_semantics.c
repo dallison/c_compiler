@@ -5762,6 +5762,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(string):
     case AST_OP(string_wide):
     case AST_OP(macro):
+    case AST_OP(requires_expr):
       // These leaf nodes already have a type.
       break;
 

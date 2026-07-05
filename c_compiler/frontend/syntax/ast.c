@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include "concepts.h"
 #include "errors.h"
 #include "symbol.h"
 #include "compiler.h"
@@ -1468,6 +1469,48 @@ ASTNode* NewVectorASTNode(ASTOpcode op, TypeRecord* type,
     child->parent = (ASTNode*)node;
     child->child_id = (int)i;
   }
+  return (ASTNode*)node;
+}
+
+static void RequiresExpressionASTNodePrint(ASTNode* node, int indents,
+                                           FILE* fp) {
+  Indent(indents, fp);
+  fprintf(fp, "requires-expression\n");
+  ASTNodeBasePrint(node, indents + 2, fp);
+}
+
+static void RequiresExpressionASTNodeDelete(ASTNode* node) {
+  RequiresExpressionASTNode* requires_node =
+      (RequiresExpressionASTNode*)node;
+  ConstraintExprDelete(requires_node->constraint);
+  requires_node->constraint = NULL;
+  ASTNodeBaseDelete(node);
+}
+
+static ASTNode* RequiresExpressionASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*),
+    void* data) {
+  const RequiresExpressionASTNode* from =
+      (const RequiresExpressionASTNode*)node;
+  RequiresExpressionASTNode* to =
+      ASTArenaAlloc(sizeof(RequiresExpressionASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->constraint = ConceptsCloneConstraint(from->constraint);
+  return func(&to->base, data);
+}
+
+static ASTNodeVirtuals requires_expr_vtbl = {
+    RequiresExpressionASTNodeDelete, RequiresExpressionASTNodePrint,
+    NULL, RequiresExpressionASTNodeClone, NULL, NULL};
+
+ASTNode* NewRequiresExpressionASTNode(ConstraintExpr* constraint,
+                                      SourceLocation location) {
+  RequiresExpressionASTNode* node =
+      ASTArenaAlloc(sizeof(RequiresExpressionASTNode));
+  ASTNodeInit(&node->base, AST_OP(requires_expr),
+              NewTypeRecordWithSize(kTypeBool, kQualPlain), location,
+              &requires_expr_vtbl);
+  node->constraint = constraint;
   return (ASTNode*)node;
 }
 
