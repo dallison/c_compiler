@@ -138,6 +138,7 @@ typedef enum {
   AST_OP(compound_literal),
   AST_OP(stmt_expr),  // GCC statement expression ({ ... }).
   AST_OP(requires_expr),  // C++20 requires-expression.
+  AST_OP(static_assert),  // C++11 static_assert declaration.
 
   // Type conversions.
   // Integer to...
@@ -554,6 +555,15 @@ typedef struct {
 } ExpressionStatementASTNode;
 
 ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location);
+
+typedef struct {
+  ASTNode base;
+  ASTNode* expr;
+  String message;
+} StaticAssertASTNode;
+
+ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
+                                SourceLocation location);
 
 // If statement with condition, if and else parts.  The else part is optional.
 typedef struct {

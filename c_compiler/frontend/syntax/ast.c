@@ -2028,6 +2028,78 @@ ASTNode* NewExpressionStatementASTNode(ASTNode* expr, SourceLocation location) {
   return (ASTNode*)node;
 }
 
+static void StaticAssertASTNodeDelete(ASTNode* node) {
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+  ASTNodeDelete(assert_node->expr);
+  StringDestruct(&assert_node->message);
+  ASTNodeBaseDelete(node);
+}
+
+static void StaticAssertASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "static_assert: %s\n", assert_node->message.value);
+  ASTNodePrint(assert_node->expr, indents + 2, fp);
+  ASTNodeBasePrint(node, indents + 2, fp);
+}
+
+static void StaticAssertASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                            ASTNode* child,
+                                            bool delete_old_child) {
+  assert(child_id == 0);
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)parent;
+  ASTNode* old = assert_node->expr;
+  assert_node->expr = child;
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* StaticAssertASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  const StaticAssertASTNode* from = (const StaticAssertASTNode*)node;
+  StaticAssertASTNode* to = ASTArenaAlloc(sizeof(StaticAssertASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  StringInit(&to->message, from->message.value);
+  to->base.flags &= ~kASTAnalyzed;
+  return func(&to->base, data);
+}
+
+static void StaticAssertASTNodeVisit(
+    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+    int child_id, void* data) {
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(assert_node->expr, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void StaticAssertASTNodeTransform(ASTNode* node,
+                                         ASTNodeTransformer func,
+                                         void* data) {
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+  ASTNodeTransformChild(node, 0, assert_node->expr, func, data);
+}
+
+static ASTNodeVirtuals static_assert_vtbl = {
+    StaticAssertASTNodeDelete, StaticAssertASTNodePrint,
+    StaticAssertASTNodeReplaceChild, StaticAssertASTNodeClone,
+    StaticAssertASTNodeVisit, ValueNotUsed, StaticAssertASTNodeTransform};
+
+ASTNode* NewStaticAssertASTNode(ASTNode* expr, String* message,
+                                SourceLocation location) {
+  StaticAssertASTNode* node = ASTArenaAlloc(sizeof(StaticAssertASTNode));
+  ASTNodeInit(&node->base, AST_OP(static_assert), NULL, location,
+              &static_assert_vtbl);
+  node->expr = expr;
+  SetParent(expr, (ASTNode*)node, 0);
+  StringInit(&node->message,
+             message != NULL ? message->value : "static assertion failed");
+  return (ASTNode*)node;
+}
+
 static void IfStatementASTNodeDelete(ASTNode* node) {
   IfStatementASTNode* enode = (IfStatementASTNode*)node;
   if (enode->cond != NULL) {

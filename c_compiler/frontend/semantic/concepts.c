@@ -799,6 +799,9 @@ bool ConceptsEvaluateInteger(ASTNode* node, int64_t* result) {
       id->symbol->concept_definition == NULL) {
     return false;
   }
+  if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+    return false;
+  }
   return EvaluateConceptDefinitionInteger(id->symbol, id->template_arguments,
                                           node->location, result);
 }

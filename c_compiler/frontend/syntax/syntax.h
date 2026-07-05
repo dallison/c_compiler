@@ -116,7 +116,7 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 // produced at declaration time.  Returns false (leaving `name` untouched) if not
 // positioned at `operator`.
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
-void SyntaxParseStaticAssert(Syntax* syntax);
+ASTNode* SyntaxParseStaticAssert(Syntax* syntax);
 // Parses a C++ 'friend' declaration appearing inside the body of class
 // 'befriending'.  Handles friend class declarations ('friend class X;' and
 // 'friend X;') as well as friend function declarations and inline friend

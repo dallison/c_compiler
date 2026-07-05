@@ -97,6 +97,19 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   }
 }
 
+static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
+  node->expr = AnalyzeExpression(node->expr);
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(node->expr, &value)) {
+    SemanticError((ASTNode*)node,
+                  "static_assert expression is not an integer constant expression");
+    return;
+  }
+  if (value == 0) {
+    SemanticError((ASTNode*)node, "%s", node->message.value);
+  }
+}
+
 static bool AsmOutputHasAddress(ASTNode* node) {
   if (node == NULL || TypeIsConst(node->type) || TypeIsFunction(node->type) ||
       TypeIsArray(node->type)) {
@@ -1388,6 +1401,9 @@ void AnalyzeStatement(ASTNode* node) {
       break;
     case AST_OP(expr):
       AnalyzeExpressionStatement((ExpressionStatementASTNode*)node);
+      break;
+    case AST_OP(static_assert):
+      AnalyzeStaticAssert((StaticAssertASTNode*)node);
       break;
     case AST_OP(compound):
       AnalyzeCompoundStatement((CompoundStatementASTNode*)node);

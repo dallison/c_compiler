@@ -13505,7 +13505,8 @@ static void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
     if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(static_assert))) {
-      SyntaxParseStaticAssert(parser->syntax);
+      ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
+      ASTNodeDelete(node);
       continue;
     } else if (LexLookingAt(parser->lex, TOK(public))) {
       current_access = kAccessPublic;

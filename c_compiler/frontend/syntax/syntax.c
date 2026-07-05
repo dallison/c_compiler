@@ -1292,16 +1292,74 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax);
 static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
 
-void SyntaxParseStaticAssert(Syntax* syntax) {
+static bool StaticAssertTemplateArgumentContainsTemplateParameter(
+    TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(arg->type)) {
+    return true;
+  }
+  for (size_t i = 0; arg->pack_arguments != NULL &&
+                     i < arg->pack_arguments->length; i++) {
+    if (StaticAssertTemplateArgumentContainsTemplateParameter(
+            arg->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
+    Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    if (StaticAssertTemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ExpressionDependencyVisitor(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL || mode != kVisitPreChildren || *(bool*)data) {
+    return;
+  }
+  if (TypeContainsTemplateParameter(node->type)) {
+    *(bool*)data = true;
+    return;
+  }
+  if (node->op == AST_OP(requires_expr)) {
+    *(bool*)data = true;
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL &&
+        (id->symbol->template_parameter_index >= 0 ||
+         TypeContainsTemplateParameter(id->symbol->type) ||
+         StaticAssertTemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments))) {
+      *(bool*)data = true;
+    }
+  }
+}
+
+static bool ExpressionIsTemplateDependent(ASTNode* expr) {
+  bool dependent = false;
+  ASTNodeVisit(expr, ExpressionDependencyVisitor, 0, &dependent);
+  return dependent;
+}
+
+ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // static_assert
   SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
 
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
   expr = AnalyzeExpression(expr);
-  int64_t value = 0;
-  if (!EvaluateIntegerExpression(expr, &value)) {
-    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
-  }
 
   String message = {0};
   StringInit(&message, "static assertion failed");
@@ -1316,11 +1374,22 @@ void SyntaxParseStaticAssert(Syntax* syntax) {
   SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
 
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    if (ExpressionIsTemplateDependent(expr)) {
+      ASTNode* node = NewStaticAssertASTNode(expr, &message, location);
+      StringDestruct(&message);
+      return node;
+    }
+    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+  }
+
   if (value == 0) {
     SyntaxError(syntax, "%s", message.value);
   }
   StringDestruct(&message);
   ASTNodeDelete(expr);
+  return NULL;
 }
 
 // Identity transform used when deep-cloning an AST node.
@@ -5164,7 +5233,8 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
     SourceLocation location = syntax->lex->current_token_location;
-    SyntaxParseStaticAssert(syntax);
+    ASTNode* node = SyntaxParseStaticAssert(syntax);
+    ASTNodeDelete(node);
     return EmptyDeclarationList(location);
   }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
@@ -6102,9 +6172,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 // local symbol stack).
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
-    SourceLocation location = syntax->lex->current_token_location;
-    SyntaxParseStaticAssert(syntax);
-    return EmptyDeclarationList(location);
+    return SyntaxParseStaticAssert(syntax);
   }
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
