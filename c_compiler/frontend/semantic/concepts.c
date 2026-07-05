@@ -774,8 +774,14 @@ static void ReportConstraintFailure(ConstraintExpr* constraint,
       int64_t value = 0;
       if (!EvaluateConstraintInteger(constraint->as.binary.left, arguments,
                                      &value) || value == 0) {
+        SemanticNoteAtLocation(
+            constraint->location,
+            "because the left operand of this conjunction constraint was not satisfied");
         ReportConstraintFailure(constraint->as.binary.left, arguments);
       } else {
+        SemanticNoteAtLocation(
+            constraint->location,
+            "because the right operand of this conjunction constraint was not satisfied");
         ReportConstraintFailure(constraint->as.binary.right, arguments);
       }
       return;
