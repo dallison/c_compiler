@@ -951,6 +951,13 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         // they still route through the placeholder/CTAD path.
         template_arguments = args;
         args = NULL;
+      } else if (symbol->flags.is_template &&
+                 symbol->variable_template != NULL) {
+        // A variable template-id used as a value, e.g. `variant_size_v<T>`.
+        // Retain the explicit arguments; the identifier is instantiated and
+        // constant-folded during semantic analysis.
+        template_arguments = args;
+        args = NULL;
       }
       if (args != NULL) {
         VectorDestructWithContents(args,

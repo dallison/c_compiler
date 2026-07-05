@@ -525,6 +525,17 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
+// Instantiate a variable template's initializer with concrete template
+// arguments and constant-fold it to an integer.  Returns true on success.
+bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,
+                                             Symbol* var_template, Vector* args,
+                                             int64_t* out);
+// Instantiate the type of a variable template (e.g. `in_place_index<1>` ->
+// `in_place_index_t<1>`) with concrete template arguments.  Used for variable
+// templates whose value is a class-type tag object.  Returns NULL on failure.
+TypeRecord* TypeInstantiateVariableTemplateType(struct Syntax* syntax,
+                                                Symbol* var_template,
+                                                Vector* args);
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
 void TypeEnsureCXXDeductionGuides(Symbol* class_template);
 TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,

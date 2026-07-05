@@ -340,10 +340,16 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
     return false;
   }
   if (TypeIsStructOrUnion(left) || TypeIsStructOrUnion(right)) {
-    return TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
-           left->type == right->type &&
-           left->qualifiers == right->qualifiers &&
-           left->info.struct_info == right->info.struct_info;
+    if (!TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right) ||
+        left->type != right->type || left->qualifiers != right->qualifiers) {
+      return false;
+    }
+    if (left->template_origin != NULL || right->template_origin != NULL) {
+      return left->template_origin == right->template_origin &&
+             TypeTemplateArgumentVectorEqual(left->template_arguments,
+                                             right->template_arguments);
+    }
+    return left->info.struct_info == right->info.struct_info;
   }
   switch (left->declarator) {
     case kDeclArray:
@@ -4180,8 +4186,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
       VectorAppend(declarations, decl);
-      if (sym->flags.is_constexpr || sym->flags.is_constinit ||
-          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
+      // A variable template's initializer is value-dependent on its template
+      // parameters; it is analyzed and folded per use (see
+      // MarkTemplateDeclaration / TypeInstantiateVariableTemplateConstant),
+      // never eagerly at the point of definition.
+      if (!syntax->parsing_template_declaration &&
+          (sym->flags.is_constexpr || sym->flags.is_constinit ||
+           (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)))) {
         SemanticAnalyzeVariableDefinition(syntax,
                                           (VariableDeclarationASTNode*)decl);
       }
@@ -4659,13 +4670,6 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
       break;
     }
   }
-  for (size_t i = 0; i < params->length; i++) {
-    TemplateParameter* param = params->value.p[i];
-    if (param != NULL && param->is_parameter_pack && i + 1 < params->length) {
-      SyntaxError(syntax, "Template parameter pack must be last");
-      break;
-    }
-  }
   SyntaxNeedBracket(syntax, TOK(greater), TC(decl));
   return params;
 }
@@ -4674,11 +4678,31 @@ Vector* SyntaxParseTemplateParameterList(Syntax* syntax) {
   return SyntaxParseTemplateParameterListWithBase(syntax, 0);
 }
 
-static void DependentQualifiedNameVisitor(ASTNode* node, void* data,
-                                          int child_id, VisitorMode mode) {
+static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
   (void)child_id;
   (void)mode;
-  if (node != NULL && (node->flags & kASTDependentQualifiedName) != 0) {
+  if (node == NULL) {
+    return;
+  }
+  if ((node->flags & kASTDependentQualifiedName) != 0 ||
+      TypeContainsTemplateParameter(node->type)) {
+    *(bool*)data = true;
+    return;
+  }
+  if (node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol == NULL) {
+    return;
+  }
+  if ((id->symbol->flags.is_template_parameter &&
+       id->symbol->template_parameter_index >= 0) ||
+      id->symbol->dependent_value_template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(id->symbol->type) ||
+      TemplateArgumentVectorIsDependent(id->template_arguments)) {
     *(bool*)data = true;
   }
 }
@@ -4686,10 +4710,80 @@ static void DependentQualifiedNameVisitor(ASTNode* node, void* data,
 // True if `node` reads a value through a dependent class-template scope
 // (`Trait<T>::value`), making the whole expression value-dependent: it must be
 // kept unevaluated and folded per-instantiation, not constant-folded now.
-static bool ExpressionContainsDependentQualifiedName(ASTNode* node) {
+static bool ExpressionContainsDependentTemplateParameter(ASTNode* node) {
   bool found = false;
-  ASTNodeVisit(node, DependentQualifiedNameVisitor, 0, &found);
+  ASTNodeVisit(node, DependentTemplateExpressionVisitor, 0, &found);
   return found;
+}
+
+static bool ExpressionIsNonTypeTemplateParameter(ASTNode* node,
+                                                 int* parameter_index) {
+  if (parameter_index != NULL) {
+    *parameter_index = -1;
+  }
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol == NULL || !id->symbol->flags.is_template_parameter ||
+      id->symbol->flags.is_template_type_parameter ||
+      id->symbol->template_parameter_index < 0) {
+    return false;
+  }
+  if (parameter_index != NULL) {
+    *parameter_index = id->symbol->template_parameter_index;
+  }
+  return true;
+}
+
+// Decide whether the template argument at the current position is a type-id
+// (as opposed to a non-type / value expression).  This refines
+// SyntaxLookingAtType for the one case that must be classified differently in a
+// template-argument context: a *dependent qualified-id* that is not introduced
+// by `typename`.  Per [temp.res] such a name does not denote a type, so
+// `Trait<T, Types...>::value` is a value argument even though the shallow
+// lookahead in SyntaxLookingAtType treats every `a::b` as a potential type.  (A
+// leading `typename` is already handled: SyntaxLookingAtType returns true on
+// the `typename` token, and a bare dependent name -- a type parameter `T` or a
+// class-template-id `C<T>` -- stays a type because it is not qualified.)
+static bool SyntaxTemplateArgumentLooksLikeType(Syntax* syntax) {
+  if (!SyntaxLookingAtType(syntax)) {
+    return false;
+  }
+  Token tok = syntax->lex->current_token;
+  if (tok != TOK(identifier) && tok != TOK(coloncolon)) {
+    return true;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                     TC(closebra) | TC(exprsep));
+  bool is_qualified = name.is_qualified;
+  bool resolved = false;
+  bool resolved_type = false;
+  if (is_qualified) {
+    if (SyntaxFindQualifiedTag(syntax, &name) != NULL) {
+      resolved = true;
+      resolved_type = true;
+    } else {
+      Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+      if (symbol != NULL) {
+        resolved = true;
+        resolved_type = StorageIs(symbol->storage, STO(typedef));
+      }
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  if (is_qualified) {
+    // A resolvable qualified name is a type only when it names a tag/typedef; an
+    // unresolvable (dependent) qualified name without `typename` is a non-type.
+    return resolved && resolved_type;
+  }
+  return true;
 }
 
 Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
@@ -4707,7 +4801,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     arg->template_parameter_index = -1;
     arg->pack_arguments = NULL;
     arg->dependent_expr = NULL;
-    if (SyntaxLookingAtType(syntax)) {
+    if (SyntaxTemplateArgumentLooksLikeType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
       TypeRecord* type = TypeParserParseType(&parser, true);
@@ -4742,13 +4836,19 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
                                                   TC(closebra) | TC(exprsep));
       syntax->parsing_template_argument = old_parsing_template_argument;
       arg->kind = kTemplateParameterNonType;
-      if (ExpressionContainsDependentQualifiedName(expr)) {
+      int direct_template_parameter_index = -1;
+      if (!ExpressionIsNonTypeTemplateParameter(
+              expr, &direct_template_parameter_index) &&
+          ExpressionContainsDependentTemplateParameter(expr)) {
         // A value-dependent trait condition such as `!is_integral<It>::value`:
         // resolving it now would fold the primary template's value.  Keep the
         // expression and re-fold it once the parameters become concrete.
         arg->dependent_expr = expr;
         arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
       } else {
+        if (direct_template_parameter_index >= 0) {
+          arg->template_parameter_index = direct_template_parameter_index;
+        }
         expr = AnalyzeExpression(expr);
         int64_t value = 0;
         if (!EvaluateIntegerExpression(expr, &value)) {
@@ -4856,6 +4956,24 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
           if (var->symbol->type->info.function.template_parameters.length == 0) {
             MoveCurrentTemplateParametersToFunction(syntax, var->symbol->type);
           }
+        } else if (var->symbol->variable_template == NULL) {
+          // A C++ variable template: capture its (unanalyzed) initializer and
+          // template parameters for per-use instantiation.  The initializer is
+          // transferred off the declaration node so the template itself emits
+          // no definition; only concrete instantiations produce values.
+          VariableTemplate* vt = malloc(sizeof(VariableTemplate));
+          vt->initializer = var->initializer;
+          var->initializer = NULL;
+          VectorInit(&vt->parameters);
+          if (syntax->current_template_parameters != NULL) {
+            for (size_t p = 0;
+                 p < syntax->current_template_parameters->length; p++) {
+              VectorAppend(&vt->parameters,
+                           syntax->current_template_parameters->value.p[p]);
+            }
+            syntax->current_template_parameters->length = 0;
+          }
+          var->symbol->variable_template = vt;
         }
         marked_symbol = true;
       }

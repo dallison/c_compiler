@@ -156,6 +156,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->alias_target = NULL;
   sym->overload_next = NULL;
   sym->default_argument = NULL;
+  sym->variable_template = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -180,6 +181,15 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
   ASTNodeDelete(symbol->default_argument);
+  if (symbol->variable_template != NULL) {
+    ASTNodeDelete(symbol->variable_template->initializer);
+    VectorDestructWithContents(
+        &symbol->variable_template->parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    free(symbol->variable_template);
+    symbol->variable_template = NULL;
+  }
   AttributeListDestruct(&symbol->attributes);
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);

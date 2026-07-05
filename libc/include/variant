@@ -1,0 +1,971 @@
+//
+//  variant
+//  c_compiler
+//
+//  Minimal C++20 std::variant support for DaveCC.
+//
+
+#ifndef variant_h
+#define variant_h
+
+#include <compare>
+#include <exception>
+#include <initializer_list>
+#include <new>
+#include <stddef.h>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class... Types>
+class variant;
+
+struct monostate {
+};
+
+constexpr bool operator==(monostate, monostate) noexcept {
+  return true;
+}
+
+constexpr bool operator!=(monostate, monostate) noexcept {
+  return false;
+}
+
+constexpr bool operator<(monostate, monostate) noexcept {
+  return false;
+}
+
+constexpr bool operator>(monostate, monostate) noexcept {
+  return false;
+}
+
+constexpr bool operator<=(monostate, monostate) noexcept {
+  return true;
+}
+
+constexpr bool operator>=(monostate, monostate) noexcept {
+  return true;
+}
+
+constexpr strong_ordering operator<=>(monostate, monostate) noexcept {
+  return strong_ordering::equal;
+}
+
+class bad_variant_access : public exception {
+ public:
+  bad_variant_access() noexcept {}
+
+  const char* what() const noexcept override {
+    return "bad variant access";
+  }
+};
+
+constexpr size_t variant_npos = static_cast<size_t>(-1);
+
+template <class T>
+struct variant_size;
+
+template <class... Types>
+struct variant_size<variant<Types...> >
+    : integral_constant<size_t, sizeof...(Types)> {
+};
+
+template <class T>
+struct variant_size<const T> : variant_size<T> {
+};
+
+template <class T>
+struct variant_size<volatile T> : variant_size<T> {
+};
+
+template <class T>
+struct variant_size<const volatile T> : variant_size<T> {
+};
+
+template <class T>
+constexpr size_t variant_size_v = variant_size<T>::value;
+
+template <size_t I, class T>
+struct variant_alternative;
+
+namespace __variant_detail {
+
+template <size_t I, class... Types>
+struct __type_at;
+
+template <class T, class... Rest>
+struct __type_at<0, T, Rest...> {
+  using type = T;
+};
+
+template <size_t I, class T, class... Rest>
+struct __type_at<I, T, Rest...> {
+  using type = typename __type_at<I - 1, Rest...>::type;
+};
+
+template <class T, class... Types>
+struct __index_of;
+
+template <class T, class... Rest>
+struct __index_of<T, T, Rest...> : integral_constant<size_t, 0> {
+};
+
+template <class T, class First, class... Rest>
+struct __index_of<T, First, Rest...>
+    : integral_constant<size_t, 1 + __index_of<T, Rest...>::value> {
+};
+
+template <class T>
+struct __index_of<T> {
+};
+
+template <size_t I, class... Types>
+union __storage;
+
+template <size_t I, class T>
+union __storage<I, T> {
+  char __dummy_;
+  T __value_;
+
+  __storage() : __dummy_(0) {}
+  ~__storage() {}
+
+  template <size_t Target>
+  typename __type_at<Target - I, T>::type* __ptr() {
+    return &__value_;
+  }
+
+  template <size_t Target>
+  const typename __type_at<Target - I, T>::type* __ptr() const {
+    return &__value_;
+  }
+
+  template <size_t Target, class... Args>
+  void __construct(Args&&... args) {
+    new (this->template __ptr<Target>())
+        typename __type_at<Target - I, T>::type(std::forward<Args>(args)...);
+  }
+
+  template <size_t Target, class U, class... Args>
+  void __construct_list(initializer_list<U> init, Args&&... args) {
+    new (this->template __ptr<Target>())
+        typename __type_at<Target - I, T>::type(
+            init, std::forward<Args>(args)...);
+  }
+
+  void __destroy(size_t index) {
+    if (index == I) {
+      __value_.~T();
+    }
+  }
+
+  void __copy_construct(const __storage& other, size_t index) {
+    if (index == I) {
+      new (&__value_) T(other.__value_);
+    }
+  }
+
+  void __move_construct(__storage& other, size_t index) {
+    if (index == I) {
+      new (&__value_) T(std::move(other.__value_));
+    }
+  }
+
+  void __copy_assign(const __storage& other, size_t index) {
+    if (index == I) {
+      __value_ = other.__value_;
+    }
+  }
+
+  void __move_assign(__storage& other, size_t index) {
+    if (index == I) {
+      __value_ = std::move(other.__value_);
+    }
+  }
+
+  void __swap_same(__storage& other, size_t index) {
+    if (index == I) {
+      std::swap(__value_, other.__value_);
+    }
+  }
+
+  bool __equals(const __storage& other, size_t index) const {
+    return index == I && __value_ == other.__value_;
+  }
+
+  bool __less(const __storage& other, size_t index) const {
+    return index == I && __value_ < other.__value_;
+  }
+
+  auto __compare(const __storage& other, size_t index) const {
+    if (index == I) {
+      return __value_ <=> other.__value_;
+    }
+    return strong_ordering::equal;
+  }
+
+};
+
+template <size_t I, class T, class... Rest>
+union __storage<I, T, Rest...> {
+  char __dummy_;
+  T __value_;
+  __storage<I + 1, Rest...> __rest_;
+
+  __storage() : __dummy_(0) {}
+  ~__storage() {}
+
+  template <size_t Target>
+  typename __type_at<Target - I, T, Rest...>::type* __ptr() {
+    if constexpr (Target == I) {
+      return &__value_;
+    } else {
+      return __rest_.template __ptr<Target>();
+    }
+  }
+
+  template <size_t Target>
+  const typename __type_at<Target - I, T, Rest...>::type* __ptr() const {
+    if constexpr (Target == I) {
+      return &__value_;
+    } else {
+      return __rest_.template __ptr<Target>();
+    }
+  }
+
+  template <size_t Target, class... Args>
+  void __construct(Args&&... args) {
+    new (this->template __ptr<Target>())
+        typename __type_at<Target - I, T, Rest...>::type(
+            std::forward<Args>(args)...);
+  }
+
+  template <size_t Target, class U, class... Args>
+  void __construct_list(initializer_list<U> init, Args&&... args) {
+    new (this->template __ptr<Target>())
+        typename __type_at<Target - I, T, Rest...>::type(
+            init, std::forward<Args>(args)...);
+  }
+
+  void __destroy(size_t index) {
+    if (index == I) {
+      __value_.~T();
+    } else {
+      __rest_.__destroy(index);
+    }
+  }
+
+  void __copy_construct(const __storage& other, size_t index) {
+    if (index == I) {
+      new (&__value_) T(other.__value_);
+    } else {
+      __rest_.__copy_construct(other.__rest_, index);
+    }
+  }
+
+  void __move_construct(__storage& other, size_t index) {
+    if (index == I) {
+      new (&__value_) T(std::move(other.__value_));
+    } else {
+      __rest_.__move_construct(other.__rest_, index);
+    }
+  }
+
+  void __copy_assign(const __storage& other, size_t index) {
+    if (index == I) {
+      __value_ = other.__value_;
+    } else {
+      __rest_.__copy_assign(other.__rest_, index);
+    }
+  }
+
+  void __move_assign(__storage& other, size_t index) {
+    if (index == I) {
+      __value_ = std::move(other.__value_);
+    } else {
+      __rest_.__move_assign(other.__rest_, index);
+    }
+  }
+
+  void __swap_same(__storage& other, size_t index) {
+    if (index == I) {
+      std::swap(__value_, other.__value_);
+    } else {
+      __rest_.__swap_same(other.__rest_, index);
+    }
+  }
+
+  bool __equals(const __storage& other, size_t index) const {
+    if (index == I) {
+      return __value_ == other.__value_;
+    }
+    return __rest_.__equals(other.__rest_, index);
+  }
+
+  bool __less(const __storage& other, size_t index) const {
+    if (index == I) {
+      return __value_ < other.__value_;
+    }
+    return __rest_.__less(other.__rest_, index);
+  }
+
+  auto __compare(const __storage& other, size_t index) const {
+    if (index == I) {
+      return __value_ <=> other.__value_;
+    }
+    return __rest_.__compare(other.__rest_, index);
+  }
+
+};
+
+template <size_t Target, size_t I, class T>
+typename __type_at<Target - I, T>::type* __ptr(__storage<I, T>& storage) {
+  return &storage.__value_;
+}
+
+template <size_t Target, size_t I, class T>
+const typename __type_at<Target - I, T>::type* __ptr(
+    const __storage<I, T>& storage) {
+  return &storage.__value_;
+}
+
+template <size_t Target, size_t I, class T, class... Rest>
+typename __type_at<Target - I, T, Rest...>::type* __ptr(
+    __storage<I, T, Rest...>& storage) {
+  if constexpr (Target == I) {
+    return &storage.__value_;
+  } else {
+    return __ptr<Target>(storage.__rest_);
+  }
+}
+
+template <size_t Target, size_t I, class T, class... Rest>
+const typename __type_at<Target - I, T, Rest...>::type* __ptr(
+    const __storage<I, T, Rest...>& storage) {
+  if constexpr (Target == I) {
+    return &storage.__value_;
+  } else {
+    return __ptr<Target>(storage.__rest_);
+  }
+}
+
+template <size_t Target, size_t I, class T, class... Rest, class... Args>
+void __construct(__storage<I, T, Rest...>& storage, Args&&... args) {
+  new (__ptr<Target>(storage))
+      typename __type_at<Target - I, T, Rest...>::type(
+          std::forward<Args>(args)...);
+}
+
+template <size_t Target, size_t I, class T, class... Rest, class U,
+          class... Args>
+void __construct_list(__storage<I, T, Rest...>& storage,
+                      initializer_list<U> init, Args&&... args) {
+  new (__ptr<Target>(storage))
+      typename __type_at<Target - I, T, Rest...>::type(
+          init, std::forward<Args>(args)...);
+}
+
+template <size_t I, class T>
+void __destroy(__storage<I, T>& storage, size_t index) {
+  if (index == I) {
+    storage.__value_.~T();
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __destroy(__storage<I, T, Rest...>& storage, size_t index) {
+  if (index == I) {
+    storage.__value_.~T();
+  } else {
+    __destroy(storage.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+void __copy_construct(__storage<I, T>& dest, const __storage<I, T>& src,
+                      size_t index) {
+  if (index == I) {
+    new (&dest.__value_) T(src.__value_);
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __copy_construct(__storage<I, T, Rest...>& dest,
+                      const __storage<I, T, Rest...>& src, size_t index) {
+  if (index == I) {
+    new (&dest.__value_) T(src.__value_);
+  } else {
+    __copy_construct(dest.__rest_, src.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+void __move_construct(__storage<I, T>& dest, __storage<I, T>& src,
+                      size_t index) {
+  if (index == I) {
+    new (&dest.__value_) T(std::move(src.__value_));
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __move_construct(__storage<I, T, Rest...>& dest,
+                      __storage<I, T, Rest...>& src, size_t index) {
+  if (index == I) {
+    new (&dest.__value_) T(std::move(src.__value_));
+  } else {
+    __move_construct(dest.__rest_, src.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+void __copy_assign(__storage<I, T>& dest, const __storage<I, T>& src,
+                   size_t index) {
+  if (index == I) {
+    dest.__value_ = src.__value_;
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __copy_assign(__storage<I, T, Rest...>& dest,
+                   const __storage<I, T, Rest...>& src, size_t index) {
+  if (index == I) {
+    dest.__value_ = src.__value_;
+  } else {
+    __copy_assign(dest.__rest_, src.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+void __move_assign(__storage<I, T>& dest, __storage<I, T>& src, size_t index) {
+  if (index == I) {
+    dest.__value_ = std::move(src.__value_);
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __move_assign(__storage<I, T, Rest...>& dest,
+                   __storage<I, T, Rest...>& src, size_t index) {
+  if (index == I) {
+    dest.__value_ = std::move(src.__value_);
+  } else {
+    __move_assign(dest.__rest_, src.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+void __swap_same(__storage<I, T>& left, __storage<I, T>& right,
+                 size_t index) {
+  if (index == I) {
+    std::swap(left.__value_, right.__value_);
+  }
+}
+
+template <size_t I, class T, class... Rest>
+void __swap_same(__storage<I, T, Rest...>& left,
+                 __storage<I, T, Rest...>& right, size_t index) {
+  if (index == I) {
+    std::swap(left.__value_, right.__value_);
+  } else {
+    __swap_same(left.__rest_, right.__rest_, index);
+  }
+}
+
+template <size_t I, class T>
+bool __equals(const __storage<I, T>& left, const __storage<I, T>& right,
+              size_t index) {
+  return index == I && left.__value_ == right.__value_;
+}
+
+template <size_t I, class T, class... Rest>
+bool __equals(const __storage<I, T, Rest...>& left,
+              const __storage<I, T, Rest...>& right, size_t index) {
+  if (index == I) {
+    return left.__value_ == right.__value_;
+  }
+  return __equals(left.__rest_, right.__rest_, index);
+}
+
+template <size_t I, class T>
+bool __less(const __storage<I, T>& left, const __storage<I, T>& right,
+            size_t index) {
+  return index == I && left.__value_ < right.__value_;
+}
+
+template <size_t I, class T, class... Rest>
+bool __less(const __storage<I, T, Rest...>& left,
+            const __storage<I, T, Rest...>& right, size_t index) {
+  if (index == I) {
+    return left.__value_ < right.__value_;
+  }
+  return __less(left.__rest_, right.__rest_, index);
+}
+
+template <size_t I, class T>
+auto __compare(const __storage<I, T>& left, const __storage<I, T>& right,
+               size_t index) {
+  if (index == I) {
+    return left.__value_ <=> right.__value_;
+  }
+  return strong_ordering::equal;
+}
+
+template <size_t I, class T, class... Rest>
+auto __compare(const __storage<I, T, Rest...>& left,
+               const __storage<I, T, Rest...>& right, size_t index) {
+  if (index == I) {
+    return left.__value_ <=> right.__value_;
+  }
+  return __compare(left.__rest_, right.__rest_, index);
+}
+
+template <size_t I, class T, class Visitor>
+auto __visit_one(Visitor&& visitor, __storage<I, T>& storage, size_t index) {
+  return std::forward<Visitor>(visitor)(storage.__value_);
+}
+
+template <size_t I, class T, class... Rest, class Visitor>
+auto __visit_one(Visitor&& visitor, __storage<I, T, Rest...>& storage,
+                 size_t index) {
+  if (index == I) {
+    return std::forward<Visitor>(visitor)(storage.__value_);
+  }
+  return __visit_one(std::forward<Visitor>(visitor), storage.__rest_, index);
+}
+
+template <size_t I, class T, class Visitor>
+auto __visit_one(Visitor&& visitor, const __storage<I, T>& storage,
+                 size_t index) {
+  return std::forward<Visitor>(visitor)(storage.__value_);
+}
+
+template <size_t I, class T, class... Rest, class Visitor>
+auto __visit_one(Visitor&& visitor, const __storage<I, T, Rest...>& storage,
+                 size_t index) {
+  if (index == I) {
+    return std::forward<Visitor>(visitor)(storage.__value_);
+  }
+  return __visit_one(std::forward<Visitor>(visitor), storage.__rest_, index);
+}
+
+}  // namespace __variant_detail
+
+template <size_t I, class... Types>
+struct variant_alternative<I, variant<Types...> > {
+  using type = typename __variant_detail::__type_at<I, Types...>::type;
+};
+
+template <size_t I, class T>
+struct variant_alternative<I, const T> {
+  using type = const typename variant_alternative<I, T>::type;
+};
+
+template <size_t I, class T>
+struct variant_alternative<I, volatile T> {
+  using type = volatile typename variant_alternative<I, T>::type;
+};
+
+template <size_t I, class T>
+struct variant_alternative<I, const volatile T> {
+  using type = const volatile typename variant_alternative<I, T>::type;
+};
+
+template <size_t I, class T>
+using variant_alternative_t = typename variant_alternative<I, T>::type;
+
+template <class... Types>
+class variant {
+  static_assert(sizeof...(Types) > 0,
+                "variant must contain at least one alternative");
+
+  __variant_detail::__storage<0, Types...> __storage_;
+  size_t __index_;
+
+  template <size_t I, class... Args>
+  void __construct(Args&&... args) {
+    __storage_.template __construct<I>(std::forward<Args>(args)...);
+    __index_ = I;
+  }
+
+  template <size_t I, class U, class... Args>
+  void __construct_list(initializer_list<U> init, Args&&... args) {
+    __storage_.template __construct_list<I>(
+        init, std::forward<Args>(args)...);
+    __index_ = I;
+  }
+
+ public:
+  variant() : __index_(variant_npos) {
+    this->template __construct<0>();
+  }
+
+  variant(const variant& other) : __index_(variant_npos) {
+    if (!other.valueless_by_exception()) {
+      __storage_.__copy_construct(other.__storage_, other.__index_);
+      __index_ = other.__index_;
+    }
+  }
+
+  variant(variant&& other) : __index_(variant_npos) {
+    if (!other.valueless_by_exception()) {
+      __storage_.__move_construct(other.__storage_, other.__index_);
+      __index_ = other.__index_;
+    }
+  }
+
+  template <class T>
+  variant(T&& value) : __index_(variant_npos) {
+    this->template __construct<
+        __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>(
+        std::forward<T>(value));
+  }
+
+  template <size_t I, class... Args>
+  explicit variant(in_place_index_t<I>, Args&&... args)
+      : __index_(variant_npos) {
+    this->template __construct<I>(std::forward<Args>(args)...);
+  }
+
+  template <size_t I, class U, class... Args>
+  explicit variant(in_place_index_t<I>, initializer_list<U> init,
+                   Args&&... args)
+      : __index_(variant_npos) {
+    this->template __construct_list<I>(init, std::forward<Args>(args)...);
+  }
+
+  template <class T, class... Args>
+  explicit variant(in_place_type_t<T>, Args&&... args)
+      : __index_(variant_npos) {
+    this->template __construct<__variant_detail::__index_of<T, Types...>::value>(
+        std::forward<Args>(args)...);
+  }
+
+  template <class T, class U, class... Args>
+  explicit variant(in_place_type_t<T>, initializer_list<U> init,
+                   Args&&... args)
+      : __index_(variant_npos) {
+    this->template __construct_list<
+        __variant_detail::__index_of<T, Types...>::value>(
+        init, std::forward<Args>(args)...);
+  }
+
+  ~variant() {
+    if (!valueless_by_exception()) {
+      __storage_.__destroy(__index_);
+    }
+  }
+
+  variant& operator=(const variant& other) {
+    if (this == &other) {
+      return *this;
+    }
+    if (other.valueless_by_exception()) {
+      if (!valueless_by_exception()) {
+        __storage_.__destroy(__index_);
+        __index_ = variant_npos;
+      }
+      return *this;
+    }
+    if (__index_ == other.__index_) {
+      __storage_.__copy_assign(other.__storage_, __index_);
+    } else {
+      if (!valueless_by_exception()) {
+        __storage_.__destroy(__index_);
+      }
+      __storage_.__copy_construct(other.__storage_, other.__index_);
+      __index_ = other.__index_;
+    }
+    return *this;
+  }
+
+  variant& operator=(variant&& other) {
+    if (this == &other) {
+      return *this;
+    }
+    if (other.valueless_by_exception()) {
+      if (!valueless_by_exception()) {
+        __storage_.__destroy(__index_);
+        __index_ = variant_npos;
+      }
+      return *this;
+    }
+    if (__index_ == other.__index_) {
+      __storage_.__move_assign(other.__storage_, __index_);
+    } else {
+      if (!valueless_by_exception()) {
+        __storage_.__destroy(__index_);
+      }
+      __storage_.__move_construct(other.__storage_, other.__index_);
+      __index_ = other.__index_;
+    }
+    return *this;
+  }
+
+  template <class T>
+  variant& operator=(T&& value) {
+    if (__index_ ==
+        __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value) {
+      *__storage_.template __ptr<
+          __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>() =
+          std::forward<T>(value);
+    } else {
+      this->template emplace<
+          __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>(
+          std::forward<T>(value));
+    }
+    return *this;
+  }
+
+  size_t index() const noexcept {
+    return __index_;
+  }
+
+  bool valueless_by_exception() const noexcept {
+    return __index_ == variant_npos;
+  }
+
+  template <size_t I, class... Args>
+  variant_alternative_t<I, variant>& emplace(Args&&... args) {
+    if (!valueless_by_exception()) {
+      __storage_.__destroy(__index_);
+      __index_ = variant_npos;
+    }
+    this->template __construct<I>(std::forward<Args>(args)...);
+    return *__storage_.template __ptr<I>();
+  }
+
+  template <size_t I, class U, class... Args>
+  variant_alternative_t<I, variant>& emplace(initializer_list<U> init,
+                                            Args&&... args) {
+    if (!valueless_by_exception()) {
+      __storage_.__destroy(__index_);
+      __index_ = variant_npos;
+    }
+    this->template __construct_list<I>(init, std::forward<Args>(args)...);
+    return *__storage_.template __ptr<I>();
+  }
+
+  template <class T, class... Args>
+  T& emplace(Args&&... args) {
+    return this->template emplace<
+        __variant_detail::__index_of<T, Types...>::value>(
+        std::forward<Args>(args)...);
+  }
+
+  template <class T, class U, class... Args>
+  T& emplace(initializer_list<U> init, Args&&... args) {
+    return this->template emplace<
+        __variant_detail::__index_of<T, Types...>::value>(
+        init, std::forward<Args>(args)...);
+  }
+
+  void swap(variant& other) {
+    if (this == &other) {
+      return;
+    }
+    if (valueless_by_exception() && other.valueless_by_exception()) {
+      return;
+    }
+    if (__index_ == other.__index_) {
+      __storage_.__swap_same(other.__storage_, __index_);
+      return;
+    }
+    variant tmp(std::move(other));
+    other = std::move(*this);
+    *this = std::move(tmp);
+  }
+
+  template <size_t I>
+  variant_alternative_t<I, variant>* __get_if_index() noexcept {
+    if (__index_ != I) {
+      return nullptr;
+    }
+    return __storage_.template __ptr<I>();
+  }
+
+  template <size_t I>
+  const variant_alternative_t<I, variant>* __get_if_index() const noexcept {
+    if (__index_ != I) {
+      return nullptr;
+    }
+    return __storage_.template __ptr<I>();
+  }
+
+  bool __equals_same_index(const variant& other) const {
+    return __storage_.__equals(other.__storage_, __index_);
+  }
+
+  bool __less_same_index(const variant& other) const {
+    return __storage_.__less(other.__storage_, __index_);
+  }
+
+  auto __compare_same_index(const variant& other) const {
+    return __storage_.__compare(other.__storage_, __index_);
+  }
+};
+
+template <class T, class... Types>
+bool holds_alternative(const variant<Types...>& value) noexcept {
+  return value.index() == __variant_detail::__index_of<T, Types...>::value;
+}
+
+template <size_t I, class... Types>
+variant_alternative_t<I, variant<Types...> >& get(variant<Types...>& value) {
+  if (value.index() != I) {
+    throw bad_variant_access();
+  }
+  return *value.template __get_if_index<I>();
+}
+
+template <size_t I, class... Types>
+const variant_alternative_t<I, variant<Types...> >& get(
+    const variant<Types...>& value) {
+  if (value.index() != I) {
+    throw bad_variant_access();
+  }
+  return *value.template __get_if_index<I>();
+}
+
+template <size_t I, class... Types>
+variant_alternative_t<I, variant<Types...> >&& get(variant<Types...>&& value) {
+  if (value.index() != I) {
+    throw bad_variant_access();
+  }
+  return std::move(*value.template __get_if_index<I>());
+}
+
+template <size_t I, class... Types>
+const variant_alternative_t<I, variant<Types...> >&& get(
+    const variant<Types...>&& value) {
+  if (value.index() != I) {
+    throw bad_variant_access();
+  }
+  return std::move(*value.template __get_if_index<I>());
+}
+
+template <class T, class... Types>
+T& get(variant<Types...>& value) {
+  return get<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class T, class... Types>
+const T& get(const variant<Types...>& value) {
+  return get<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class T, class... Types>
+T&& get(variant<Types...>&& value) {
+  return get<__variant_detail::__index_of<T, Types...>::value>(
+      std::move(value));
+}
+
+template <class T, class... Types>
+const T&& get(const variant<Types...>&& value) {
+  return get<__variant_detail::__index_of<T, Types...>::value>(
+      std::move(value));
+}
+
+template <size_t I, class... Types>
+variant_alternative_t<I, variant<Types...> >* get_if(
+    variant<Types...>* value) noexcept {
+  if (value == nullptr) {
+    return nullptr;
+  }
+  return value->template __get_if_index<I>();
+}
+
+template <size_t I, class... Types>
+const variant_alternative_t<I, variant<Types...> >* get_if(
+    const variant<Types...>* value) noexcept {
+  if (value == nullptr) {
+    return nullptr;
+  }
+  return value->template __get_if_index<I>();
+}
+
+template <class T, class... Types>
+T* get_if(variant<Types...>* value) noexcept {
+  return get_if<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class T, class... Types>
+const T* get_if(const variant<Types...>* value) noexcept {
+  return get_if<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class... Types>
+void swap(variant<Types...>& left, variant<Types...>& right) {
+  left.swap(right);
+}
+
+template <class... Types>
+bool operator==(const variant<Types...>& left,
+                const variant<Types...>& right) {
+  if (left.index() != right.index()) {
+    return false;
+  }
+  if (left.valueless_by_exception()) {
+    return true;
+  }
+  return left.__equals_same_index(right);
+}
+
+template <class... Types>
+bool operator!=(const variant<Types...>& left,
+                const variant<Types...>& right) {
+  return !(left == right);
+}
+
+template <class... Types>
+bool operator<(const variant<Types...>& left, const variant<Types...>& right) {
+  if (right.valueless_by_exception()) {
+    return false;
+  }
+  if (left.valueless_by_exception()) {
+    return true;
+  }
+  if (left.index() != right.index()) {
+    return left.index() < right.index();
+  }
+  return left.__less_same_index(right);
+}
+
+template <class... Types>
+bool operator>(const variant<Types...>& left, const variant<Types...>& right) {
+  return right < left;
+}
+
+template <class... Types>
+bool operator<=(const variant<Types...>& left, const variant<Types...>& right) {
+  return !(right < left);
+}
+
+template <class... Types>
+bool operator>=(const variant<Types...>& left, const variant<Types...>& right) {
+  return !(left < right);
+}
+
+template <class... Types>
+auto operator<=>(const variant<Types...>& left,
+                 const variant<Types...>& right) {
+  if (left.valueless_by_exception() && right.valueless_by_exception()) {
+    return strong_ordering::equal;
+  }
+  if (left.valueless_by_exception()) {
+    return strong_ordering::less;
+  }
+  if (right.valueless_by_exception()) {
+    return strong_ordering::greater;
+  }
+  if (left.index() < right.index()) {
+    return strong_ordering::less;
+  }
+  if (left.index() > right.index()) {
+    return strong_ordering::greater;
+  }
+  return left.__compare_same_index(right);
+}
+
+}  // namespace std
+
+#endif /* variant_h */

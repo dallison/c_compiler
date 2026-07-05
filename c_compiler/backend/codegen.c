@@ -158,8 +158,14 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   CollectExceptionBaseTypes(type, 0, &info->bases);
   StringInit(&info->symbol_name, "__davecc_typeinfo_");
   if (gen->func != NULL && gen->func->info.function.symbol != NULL) {
-    StringAppendString(&info->symbol_name,
-                       &gen->func->info.function.symbol->name);
+    // Use the mangled assembler name (not the source name) so that distinct
+    // instantiations of a same-named function template (e.g. std::get<0> for
+    // different variant types) get distinct, non-colliding typeinfo labels.
+    Symbol* func_symbol = gen->func->info.function.symbol;
+    String* func_key = func_symbol->asm_name.length > 0
+                           ? &func_symbol->asm_name
+                           : &func_symbol->name;
+    StringAppendString(&info->symbol_name, func_key);
     StringAppendChar(&info->symbol_name, '_');
   }
   StringPrintf(&info->symbol_name, "%zu_", gen->exception_typeinfos.length);

@@ -37,6 +37,15 @@ typedef enum {
 
 bool StorageIs(Storage storage, Storage value);
 
+// A C++ variable template (`template <class T> constexpr U name = <init>;`).
+// The initializer is kept unanalyzed at parse time and re-cloned, substituted,
+// and folded per use with concrete template arguments (see
+// TypeInstantiateVariableTemplateConstant).
+typedef struct VariableTemplate {
+  struct ASTNode* initializer;  // Unanalyzed initializer expression (owned).
+  Vector parameters;            // TemplateParameter* entries (owned).
+} VariableTemplate;
+
 // A parsed __attribute__((...)) clause: a name with optional argument tokens.
 // e.g. "aligned(16)"          -> name "aligned", args ["16"]
 //      "format(printf, 1, 2)" -> name "format",  args ["printf", "1", "2"]
@@ -128,6 +137,7 @@ typedef struct Symbol {
   struct Symbol* alias_target;  // Target for a C++ using-declaration alias.
   struct Symbol* overload_next;  // Next C++ overload with the same source name.
   struct ASTNode* default_argument;  // C++ default function argument, if any.
+  struct VariableTemplate* variable_template;  // C++ variable template body.
   struct DIE* die;
 } Symbol;
 

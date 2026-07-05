@@ -92,6 +92,8 @@ static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
   compiler->current_function = saved_function;
 }
 
+static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // A dependent qualified value name (`T::member`) that still carries its flag
   // here was never resolved during template instantiation, meaning the named
@@ -104,6 +106,51 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return &node->base;
   }
+  // A variable template-id used as a value (`variant_size_v<T>`): instantiate
+  // its initializer with the explicit arguments and fold to a constant.  When
+  // the arguments are still dependent (used inside another template), leave the
+  // node untouched so it is re-analyzed after substitution.
+  if (CompilerIsCXX() && node->symbol != NULL &&
+      node->symbol->variable_template != NULL &&
+      node->template_arguments != NULL &&
+      (node->base.flags & kASTIsDeclaration) == 0 &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          node->template_arguments)) {
+    int64_t value = 0;
+    if (TypeInstantiateVariableTemplateConstant(&compiler->syntax, node->symbol,
+                                                node->template_arguments,
+                                                &value)) {
+      ASTNode* const_node =
+          NewIntConstantASTNode(value, node->symbol->type, node->base.location);
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+                          true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
+    }
+    // A variable template whose instantiation is a class-type tag object (e.g.
+    // `std::in_place_index<1>` of type `in_place_index_t<1>`) rather than a
+    // folded constant.  Materialize a value-initialized temporary of the
+    // concrete type so overload resolution and template argument deduction see
+    // the correct `in_place_index_t<1>` type.
+    TypeRecord* concrete = TypeInstantiateVariableTemplateType(
+        &compiler->syntax, node->symbol, node->template_arguments);
+    if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
+      SourceLocation location = node->base.location;
+      Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
+      temp->location = location;
+      ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+      temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+      ASTNode* initializer =
+          NewBracedInitializerASTNode(NewVector(), NULL, location);
+      ASTNode* literal =
+          NewCompoundLiteralASTNode(temp_id, location, initializer);
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, literal, true);
+      ASTNode* analyzed = AnalyzeExpression(literal);
+      analyzed->value_category = kValueCategoryPrvalue;
+      return analyzed;
+    }
+  }
+
   if (node->base.parent == NULL || node->base.parent->op != AST_OP(init)) {
     // Symbol has now been used.
     node->symbol->flags.used = true;
@@ -1923,13 +1970,15 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
   // to the constant so we can use it as a constant in further expressions.
-  if (TypeIsConst(id_node->symbol->type) ||
-      id_node->symbol->flags.is_constexpr ||
-      id_node->symbol->flags.is_constinit) {
+  if (!id_node->symbol->flags.is_template &&
+      (TypeIsConst(id_node->symbol->type) ||
+       id_node->symbol->flags.is_constexpr ||
+       id_node->symbol->flags.is_constinit)) {
     EvaluateConstantForSymbol(id_node->symbol, init);
   }
   if ((id_node->symbol->flags.is_constexpr ||
        id_node->symbol->flags.is_constinit) &&
+      !id_node->symbol->flags.is_template &&
       !id_node->symbol->flags.value_set) {
     SemanticError(init,
                   id_node->symbol->flags.is_constinit
@@ -3307,7 +3356,22 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   }
   int base_rank = OverloadBaseConversionRank(actual->type, target);
   if (base_rank >= 0) {
-    return base_rank * 10 + 5;
+    // [over.ics.rank]: when two standard conversion sequences are otherwise
+    // indistinguishable, the one that is not a qualification conversion is
+    // better.  Binding a `T*` argument to a `const T*` parameter differs from an
+    // exact `T*` parameter only by adding pointee cv-qualifiers; give it a small
+    // penalty so the exact `T*` overload wins instead of being ambiguous (e.g.
+    // `get_if<0>(variant<...>*)` between the `variant<Types...>*` and
+    // `const variant<Types...>*` overloads).  The penalty is a sub-tier +1 so it
+    // never outweighs a genuine conversion in another argument.
+    int qualification_penalty =
+        (TypeIsPointer(actual->type) || TypeIsArray(actual->type)) &&
+                (TypeIsPointer(target) || TypeIsArray(target)) &&
+                !TypeEqual(actual->type, target) &&
+                TypeEqualIgnoringQualifiers(actual->type, target)
+            ? 1
+            : 0;
+    return base_rank * 10 + 5 + qualification_penalty;
   }
   if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
     return 25;
@@ -4584,6 +4648,26 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       }
       return AnalyzeExpression(cast);
     }
+    if (node->children->length == 0) {
+      // `T()` value-initialization of an aggregate class with no constructor
+      // (e.g. an empty struct like std::monostate).  Zero-initialize a
+      // temporary via an empty compound literal `(T){}`, matching `T{}`.
+      Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+      temp->location = location;
+      ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+      temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+      ASTNode* initializer =
+          NewBracedInitializerASTNode(NewVector(), NULL, location);
+      ASTNode* literal =
+          NewCompoundLiteralASTNode(temp_id, location, initializer);
+      ASTNode* parent = node->base.parent;
+      if (parent != NULL) {
+        ASTNodeReplaceChild(parent, node->base.child_id, literal, true);
+      }
+      ASTNode* analyzed = AnalyzeExpression(literal);
+      analyzed->value_category = kValueCategoryPrvalue;
+      return analyzed;
+    }
     return NULL;
   }
   bool has_non_invented_constructor = false;
@@ -4743,12 +4827,47 @@ static bool FunctionTemplateHasDefinition(Symbol* symbol) {
          definition->type->info.function.body != NULL;
 }
 
+// Visitor that flags when an expression references a template parameter, either
+// directly (a bare parameter identifier) or through a parameter-dependent type
+// or template argument.  Used to detect value-dependent non-type template
+// arguments carried as unevaluated expressions.
+static void ExprContainsTemplateParameterVisitor(ASTNode* n, void* data,
+                                                  int child_id,
+                                                  VisitorMode mode) {
+  (void)child_id;
+  (void)mode;
+  if (n == NULL || n->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)n;
+  if (id->symbol == NULL) {
+    return;
+  }
+  if ((id->symbol->flags.is_template_parameter &&
+       id->symbol->template_parameter_index >= 0) ||
+      id->symbol->dependent_value_template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(id->symbol->type) ||
+      TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+    *(bool*)data = true;
+  }
+}
+
+static bool ExpressionContainsTemplateParameter(ASTNode* expr) {
+  bool found = false;
+  ASTNodeVisit(expr, ExprContainsTemplateParameterVisitor, 0, &found);
+  return found;
+}
+
 static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;
   }
   if (arg->template_parameter_index >= 0 ||
       TypeContainsTemplateParameter(arg->type)) {
+    return true;
+  }
+  if (arg->dependent_expr != NULL &&
+      ExpressionContainsTemplateParameter(arg->dependent_expr)) {
     return true;
   }
   for (size_t i = 0; arg->pack_arguments != NULL &&
@@ -4778,6 +4897,60 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
     }
   }
   return false;
+}
+
+// True when `node` is a call through a member-function access whose overload
+// cannot yet be resolved because it is still value/type-dependent: either the
+// explicit template arguments or an actual argument mention a template
+// parameter.  This arises when partially instantiating an enclosing member
+// template (its own parameters remain generic while the class arguments are
+// baked in), e.g. `this->emplace<index_of<remove_cvref_t<T>, Types...>::value>(
+// forward<T>(value))` inside a variant's `operator=`.  Such a call must be
+// deferred (left unresolved) until the enclosing member template is
+// instantiated with concrete arguments, rather than run through overload
+// resolution now (which would fail to deduce and diagnose a spurious error).
+static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL ||
+      (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
+    return false;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node->left;
+  if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
+  if (member_node->member == NULL || !member_node->member->is_member_function) {
+    return false;
+  }
+  if (TemplateArgumentVectorContainsTemplateParameter(
+          member_node->template_arguments)) {
+    return true;
+  }
+  return CallActualsContainTemplateParameter(node);
+}
+
+/* True when a member-function-template call names its member template with
+ * explicit template arguments that are still template-dependent (e.g.
+ * `rest.template ctor<Target>(...)` where `Target` is an unresolved parameter
+ * of the enclosing member template). Such a call cannot be resolved to a
+ * concrete member overload no matter what its actuals look like -- even when an
+ * actual is a pack expansion -- so it must be deferred until the member
+ * template is instantiated with concrete arguments. */
+static bool IsMemberTemplateCallWithDependentExplicitArgs(VectorASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL ||
+      (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
+    return false;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node->left;
+  if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
+  if (member_node->member == NULL || !member_node->member->is_member_function) {
+    return false;
+  }
+  return TemplateArgumentVectorContainsTemplateParameter(
+      member_node->template_arguments);
 }
 
 // Handles an explicit destructor or pseudo-destructor call written through a
@@ -4899,11 +5072,35 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     return destructor_call;
   }
   node->left = AnalyzeExpression(node->left);
+  // A member-function-template call named with dependent explicit template
+  // arguments (e.g. `rest.template ctor<Target>(std::forward<Args>(args)...)`
+  // inside a member template whose parameter `Target` is not yet concrete)
+  // cannot be resolved to a member overload no matter what its actuals are.
+  // Defer it *before* analyzing the actuals: the actuals may be pack-expansion
+  // patterns over the member template's own packs, and analyzing them here
+  // would prematurely concretize those patterns against the enclosing class's
+  // arguments.
+  if (IsMemberTemplateCallWithDependentExplicitArgs(node)) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    return (ASTNode*)node;
+  }
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
+  // A member-function-template call whose explicit template arguments or actuals
+  // are still template-dependent cannot be resolved yet; defer it so it is
+  // re-analyzed once the enclosing template is instantiated with concrete
+  // arguments.
+  if (!has_pack_expansion_actual && IsDependentMemberTemplateCall(node)) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    return (ASTNode*)node;
+  }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template &&

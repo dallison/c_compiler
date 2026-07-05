@@ -25,6 +25,7 @@ filegroup(
         "libc/include/type_traits",
         "libc/include/typeinfo",
         "libc/include/utility",
+        "libc/include/variant",
         "libc/include/vector",
     ],
     visibility = ["//visibility:public"],
