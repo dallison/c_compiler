@@ -163,6 +163,11 @@ static void PredefineMacros(Preprocessor* p) {
         break;
     }
     PreprocessorDefineMacro(p, "__cplusplus", cplusplus);
+
+    // C++20 feature-test macros for language features implemented by DaveCC.
+    if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+      PreprocessorDefineMacro(p, "__cpp_concepts", "202002L");
+    }
   }
 
   // Date and time are defined as coming from the 'asctime' function.

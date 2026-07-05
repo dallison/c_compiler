@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
+#include "concepts.h"
 #include "dstring.h"
 #include "compiler.h"
 #include "symbol_table.h"
@@ -151,6 +152,8 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_template_type_parameter = false;
   sym->flags.is_parameter_pack = false;
   sym->flags.is_weak = false;
+  sym->flags.is_concept = false;
+  sym->concept_definition = NULL;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
@@ -190,6 +193,7 @@ void SymbolDestruct(Symbol* symbol) {
     free(symbol->variable_template);
     symbol->variable_template = NULL;
   }
+  ConceptDelete(symbol->concept_definition);
   AttributeListDestruct(&symbol->attributes);
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
@@ -600,6 +604,7 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
 Symbol* SymbolClone(Symbol* sym) {
   Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
   new_sym->flags = sym->flags;
+  new_sym->concept_definition = NULL;
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;

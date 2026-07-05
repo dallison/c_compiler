@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <string.h>
+#include "concepts.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
@@ -345,7 +346,12 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
       return false;
     }
     if (left->template_origin != NULL || right->template_origin != NULL) {
-      return left->template_origin == right->template_origin &&
+      if (left->template_origin == right->template_origin &&
+          TypeTemplateArgumentVectorEqual(left->template_arguments,
+                                          right->template_arguments)) {
+        return true;
+      }
+      return left->info.struct_info == right->info.struct_info &&
              TypeTemplateArgumentVectorEqual(left->template_arguments,
                                              right->template_arguments);
     }
@@ -374,6 +380,31 @@ static bool OverloadFunctionTypesEqual(TypeRecord* left, TypeRecord* right) {
          OverloadTypesEqual(left, right);
 }
 
+static bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right) {
+  if (TypeIsFunction(left) || TypeIsFunction(right)) {
+    return OverloadFunctionTypesEqual(left, right);
+  }
+  return TypeEqual(left, right);
+}
+
+static bool SameSignatureTemplateConstraintsAreEquivalent(Symbol* overload,
+                                                          TypeRecord* type) {
+  if (overload == NULL || overload->type == NULL || type == NULL ||
+      !overload->flags.is_template || !TypeIsFunction(overload->type) ||
+      !TypeIsFunction(type) || type->info.function.template_parameter_count <= 0) {
+    return true;
+  }
+  bool overload_constrained =
+      ConceptsFunctionTemplateHasAssociatedConstraint(overload);
+  bool type_constrained = type->info.function.associated_constraint != NULL;
+  if (!overload_constrained && !type_constrained) {
+    return true;
+  }
+  Symbol scratch = {0};
+  scratch.type = type;
+  return ConceptsFunctionTemplateConstraintsEquivalent(overload, &scratch);
+}
+
 static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
@@ -383,7 +414,8 @@ static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
     if (overload_is_template != type_is_template) {
       continue;
     }
-    if (OverloadFunctionTypesEqual(overload->type, type)) {
+    if (OverloadFunctionTypesEqual(overload->type, type) &&
+        SameSignatureTemplateConstraintsAreEquivalent(overload, type)) {
       return overload;
     }
   }
@@ -406,6 +438,46 @@ static void AppendOverload(Symbol* first, Symbol* overload) {
   overload->flags.is_overloaded = true;
   SetOverloadAsmName(first, first);
   SetOverloadAsmName(first, overload);
+}
+
+static bool SymbolLooksLikeFunctionTemplate(Symbol* symbol) {
+  return symbol != NULL && symbol->type != NULL &&
+         TypeIsFunction(symbol->type) &&
+         (symbol->flags.is_template ||
+          symbol->type->info.function.template_parameter_count > 0 ||
+          symbol->type->info.function.template_parameters.length > 0);
+}
+
+static bool TryAppendSameSignatureConstrainedTemplateOverload(
+    Symbol* first, Symbol* overload, ConstraintExpr* pending_constraint) {
+  if (first == NULL || overload == NULL ||
+      !SymbolLooksLikeFunctionTemplate(overload)) {
+    return false;
+  }
+  ConstraintExpr* saved_constraint =
+      overload->type->info.function.associated_constraint;
+  if (saved_constraint == NULL && pending_constraint != NULL) {
+    overload->type->info.function.associated_constraint = pending_constraint;
+  }
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!SymbolLooksLikeFunctionTemplate(candidate) ||
+        !OverloadFunctionTypesEqual(candidate->type, overload->type)) {
+      continue;
+    }
+    bool candidate_constrained =
+        ConceptsFunctionTemplateHasAssociatedConstraint(candidate);
+    bool overload_constrained =
+        ConceptsFunctionTemplateHasAssociatedConstraint(overload);
+    if ((candidate_constrained || overload_constrained) &&
+        !ConceptsFunctionTemplateConstraintsEquivalent(candidate, overload)) {
+      overload->type->info.function.associated_constraint = saved_constraint;
+      AppendOverload(first, overload);
+      return true;
+    }
+  }
+  overload->type->info.function.associated_constraint = saved_constraint;
+  return false;
 }
 
 static Symbol* FollowAlias(Symbol* symbol) {
@@ -1030,6 +1102,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_argument = false;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
+  syntax->current_template_requires_clause = NULL;
   syntax->context = kParsingFileScope;
   syntax->extern_c_depth = 0;
 }
@@ -1050,6 +1123,8 @@ void SyntaxDestruct(Syntax* syntax) {
                              (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
   VectorDestruct(&syntax->local_statics);
   VectorDestruct(&syntax->inline_static_member_definitions);
+  ConstraintExprDelete(syntax->current_template_requires_clause);
+  syntax->current_template_requires_clause = NULL;
   ASTNodeDelete(syntax->ast);
 }
 
@@ -1079,6 +1154,8 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->parsing_template_argument = false;
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
+  ConstraintExprDelete(syntax->current_template_requires_clause);
+  syntax->current_template_requires_clause = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->inline_static_member_definitions);
@@ -1257,46 +1334,76 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax);
 static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
 
-static void StaticAssertDependencyVisitor(ASTNode* node, void* data,
-                                          int child_id, VisitorMode mode) {
+static bool StaticAssertTemplateArgumentContainsTemplateParameter(
+    TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(arg->type)) {
+    return true;
+  }
+  for (size_t i = 0; arg->pack_arguments != NULL &&
+                     i < arg->pack_arguments->length; i++) {
+    if (StaticAssertTemplateArgumentContainsTemplateParameter(
+            arg->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
+    Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    if (StaticAssertTemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ExpressionDependencyVisitor(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL) {
+  if (node == NULL || mode != kVisitPreChildren || *(bool*)data) {
     return;
   }
-  bool* dependent = data;
+  if (TypeContainsTemplateParameter(node->type)) {
+    *(bool*)data = true;
+    return;
+  }
   if ((node->flags & kASTDependentQualifiedName) != 0 ||
-      TypeContainsTemplateParameter(node->type)) {
-    *dependent = true;
+      node->op == AST_OP(requires_expr)) {
+    *(bool*)data = true;
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL &&
+        (id->symbol->template_parameter_index >= 0 ||
+         TypeContainsTemplateParameter(id->symbol->type) ||
+         StaticAssertTemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments))) {
+      *(bool*)data = true;
+    }
   }
 }
 
-void SyntaxParseStaticAssert(Syntax* syntax) {
+static bool ExpressionIsTemplateDependent(ASTNode* expr) {
+  bool dependent = false;
+  ASTNodeVisit(expr, ExpressionDependencyVisitor, 0, &dependent);
+  return dependent;
+}
+
+ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // static_assert
   SyntaxNeedBracket(syntax, TOK(lparen), TC(openbra));
 
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(exprsep));
-  bool dependent = false;
-  if (syntax->current_template_parameter_count > 0) {
-    ASTNodeVisit(expr, StaticAssertDependencyVisitor, 0, &dependent);
-  }
-  if (dependent) {
-    if (LexMatch(syntax->lex, TOK(comma))) {
-      if (LexLookingAt(syntax->lex, TOK(string))) {
-        LexNextToken(syntax->lex);
-      } else {
-        SyntaxError(syntax, "static_assert message must be a string literal");
-      }
-    }
-    SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
-    SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
-    ASTNodeDelete(expr);
-    return;
-  }
-  expr = AnalyzeExpression(expr);
-  int64_t value = 0;
-  if (!EvaluateIntegerExpression(expr, &value)) {
-    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
-  }
+  bool dependent = syntax->current_template_parameter_count > 0 &&
+                   ExpressionIsTemplateDependent(expr);
 
   String message = {0};
   StringInit(&message, "static assertion failed");
@@ -1311,11 +1418,30 @@ void SyntaxParseStaticAssert(Syntax* syntax) {
   SyntaxNeedBracket(syntax, TOK(rparen), TC(closebra));
   SyntaxNeedBracket(syntax, TOK(semicolon), TC(semicolon));
 
+  if (dependent) {
+    ASTNode* node = NewStaticAssertASTNode(expr, &message, location);
+    StringDestruct(&message);
+    return node;
+  }
+
+  expr = AnalyzeExpression(expr);
+
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    if (ExpressionIsTemplateDependent(expr)) {
+      ASTNode* node = NewStaticAssertASTNode(expr, &message, location);
+      StringDestruct(&message);
+      return node;
+    }
+    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+  }
+
   if (value == 0) {
     SyntaxError(syntax, "%s", message.value);
   }
   StringDestruct(&message);
   ASTNodeDelete(expr);
+  return NULL;
 }
 
 // Identity transform used when deep-cloning an AST node.
@@ -3438,7 +3564,8 @@ Symbol* SyntaxRegisterInstantiatedFriendFunction(Syntax* syntax, Namespace* ns,
       AppendOverload(old_sym, sym);
       in_scope = sym;
     }
-  } else if (old_sym != NULL && !TypeEqual(old_sym->type, sym->type)) {
+  } else if (old_sym != NULL &&
+             !RedeclarationTypesEqual(old_sym->type, sym->type)) {
     in_scope = NULL;
   }
   if (in_scope == NULL) {
@@ -3572,7 +3699,8 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
       old_sym = NULL;
       overload_was_appended = true;
     }
-  } else if (old_sym != NULL && !TypeEqual(old_sym->type, sym->type)) {
+  } else if (old_sym != NULL &&
+             !RedeclarationTypesEqual(old_sym->type, sym->type)) {
     // A non-overloadable clash with an existing non-function symbol.
     old_sym = NULL;
   }
@@ -3767,6 +3895,8 @@ static int CurrentTemplateParameterListLength(Syntax* syntax);
 static int CurrentTemplateParameterBase(Syntax* syntax);
 static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
                                                     TypeRecord* func);
+static void AddFunctionAssociatedConstraint(TypeRecord* func,
+                                            ConstraintExpr* constraint);
 
 static Symbol* CXXClassTemplateOrigin(TypeRecord* type) {
   Symbol* placeholder_origin = TypeClassTemplatePlaceholderOrigin(type);
@@ -3853,6 +3983,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
         sym->type->qualifiers |= kQualConst;
       }
+      if (TypeIsFunction(sym->type) &&
+          sym->type->info.function.template_parameters.length > 0 &&
+          !sym->flags.is_template) {
+        sym->flags.is_template = true;
+        sym->type->info.function.template_parameter_count =
+            (int)sym->type->info.function.template_parameters.length;
+        sym->type->info.function.template_parameter_base = 0;
+      }
       if (syntax->parsing_template_declaration && TypeIsFunction(sym->type)) {
         sym->flags.is_template = true;
         sym->type->info.function.template_parameter_count =
@@ -3900,13 +4038,19 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       if (parser->cxx_member_definition == NULL &&
           CanOverloadFunctions(old_sym, sym)) {
-        Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
-        if (matching_overload != NULL) {
-          old_sym = matching_overload;
+        if (TryAppendSameSignatureConstrainedTemplateOverload(
+                old_sym, sym, syntax->current_template_requires_clause)) {
+          old_sym = NULL;
+          overload_was_appended = true;
         } else {
+          Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+          if (matching_overload != NULL) {
+            old_sym = matching_overload;
+          } else {
           AppendOverload(old_sym, sym);
           old_sym = NULL;
           overload_was_appended = true;
+          }
         }
       }
       if (parser->cxx_member_definition != NULL &&
@@ -3953,7 +4097,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             old_sym->flags.is_tentative_decl = true;
           }
         }
-        if (!TypeEqual(sym->type, old_sym->type)) {
+        if (!RedeclarationTypesEqual(sym->type, old_sym->type)) {
           String suffix;
           StringInit(&suffix, NULL);
           SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -4313,7 +4457,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
     SyntaxError(syntax, "Duplicate definition of symbol %s",
                 symbol_name.value);
     StringDestruct(&symbol_name);
-  } else if (!TypeEqual(sym->type, old_sym->type)) {
+  } else if (!RedeclarationTypesEqual(sym->type, old_sym->type)) {
     String suffix;
     StringInit(&suffix, NULL);
     SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -4516,6 +4660,7 @@ static TemplateParameter* NewTemplateParameter(const char* name,
   param->default_int_value = default_int_value;
   param->default_template_parameter_index =
       default_template_parameter_index;
+  param->associated_constraint = NULL;
   if (type != NULL) {
     TypeRecordIncRef(type);
   }
@@ -4568,9 +4713,114 @@ static TypeRecord* ParseTemplateTypeDefault(Syntax* syntax) {
   return type;
 }
 
+static TemplateArgument* NewTemplateParameterTypeArgument(int index,
+                                                         TypeRecord* type) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  arg->kind = kTemplateParameterType;
+  arg->is_pack_expansion = false;
+  arg->type = TypeRecordCopy(type);
+  arg->int_value = 0;
+  arg->template_parameter_index = index;
+  arg->pack_arguments = NULL;
+  arg->dependent_expr = NULL;
+  return arg;
+}
+
+static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
+                                                 Vector* params, int base) {
+  Lex* lex = syntax->lex;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      !LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+
+  String concept_name;
+  StringInit(&concept_name, lex->spelling.value);
+  Symbol* concept_symbol = SyntaxFindSymbol(syntax, &concept_name);
+  if (concept_symbol == NULL || !concept_symbol->flags.is_concept) {
+    StringDestruct(&concept_name);
+    return false;
+  }
+
+  SourceLocation constraint_location = lex->current_token_location;
+  LexNextToken(lex);
+  Vector* concept_arguments = NULL;
+  if (LexLookingAt(lex, TOK(less))) {
+    concept_arguments = SyntaxParseTemplateArgumentList(syntax, TC(closebra));
+  } else {
+    concept_arguments = NewVector();
+  }
+  if (concept_arguments == NULL) {
+    concept_arguments = NewVector();
+  }
+
+  int index = base + (int)params->length;
+  bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
+  if (!LexLookingAt(lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected constrained template parameter name");
+    VectorDeleteWithContents(concept_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    StringDestruct(&concept_name);
+    SyntaxRecover(syntax, TC(closebra));
+    return true;
+  }
+
+  TypeRecord* placeholder =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  placeholder->template_parameter_index = index;
+  Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
+  param->flags.invented = true;
+  param->flags.is_template_parameter = true;
+  param->flags.is_template_type_parameter = true;
+  param->flags.is_parameter_pack = is_parameter_pack;
+  param->template_parameter_index = index;
+  param->location = lex->current_token_location;
+  bool added = SyntaxAddSymbol(syntax, param);
+  if (!added) {
+    SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
+    SymbolDelete(param);
+  }
+
+  String param_name;
+  StringInit(&param_name, lex->spelling.value);
+  LexNextToken(lex);
+  TemplateArgument* constrained_arg =
+      NewTemplateParameterTypeArgument(index, placeholder);
+  if (concept_arguments->length == 0) {
+    VectorAppend(concept_arguments, constrained_arg);
+  } else {
+    VectorInsertBefore(concept_arguments, 0, constrained_arg);
+  }
+  TypeRecord* default_type = NULL;
+  if (LexMatch(lex, TOK(equal))) {
+    if (is_parameter_pack) {
+      SyntaxError(syntax, "Template parameter pack cannot have a default");
+    }
+    default_type = ParseTemplateTypeDefault(syntax);
+  }
+
+  TemplateParameter* template_param =
+      NewTemplateParameter(param_name.value, kTemplateParameterType,
+                           is_parameter_pack, NULL, default_type, false, 0,
+                           -1, index);
+  template_param->associated_constraint =
+      NewConceptIdConstraint(concept_symbol, concept_arguments,
+                             constraint_location);
+  VectorAppend(params, template_param);
+  StringDestruct(&param_name);
+  StringDestruct(&concept_name);
+  TypeRecordDelete(default_type);
+  TypeRecordDelete(placeholder);
+  return true;
+}
+
 static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
   int index = base + (int)params->length;
+  if (ParseConstrainedTemplateTypeParameter(syntax, params, base)) {
+    return true;
+  }
   if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
     bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
     if (!LexLookingAt(lex, TOK(identifier))) {
@@ -4933,6 +5183,36 @@ static void MoveCurrentTemplateParametersToStruct(Syntax* syntax, Struct* str) {
   syntax->current_template_parameters->length = 0;
 }
 
+static void AddFunctionAssociatedConstraint(TypeRecord* func,
+                                            ConstraintExpr* constraint) {
+  if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* current = func->info.function.associated_constraint;
+  if (current == NULL) {
+    func->info.function.associated_constraint = constraint;
+    return;
+  }
+  func->info.function.associated_constraint =
+      NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static void MoveTemplateParameterConstraintsToFunction(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+    TemplateParameter* param =
+        func->info.function.template_parameters.value.p[i];
+    if (param == NULL || param->associated_constraint == NULL) {
+      continue;
+    }
+    ConstraintExpr* constraint = param->associated_constraint;
+    param->associated_constraint = NULL;
+    AddFunctionAssociatedConstraint(func, constraint);
+  }
+}
+
 static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
   if (node == NULL || node->op != AST_OP(decl_list)) {
     return;
@@ -4955,6 +5235,12 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
           }
           if (var->symbol->type->info.function.template_parameters.length == 0) {
             MoveCurrentTemplateParametersToFunction(syntax, var->symbol->type);
+          }
+          MoveTemplateParameterConstraintsToFunction(var->symbol->type);
+          if (syntax->current_template_requires_clause != NULL) {
+            AddFunctionAssociatedConstraint(
+                var->symbol->type, syntax->current_template_requires_clause);
+            syntax->current_template_requires_clause = NULL;
           }
         } else if (var->symbol->variable_template == NULL) {
           // A C++ variable template: capture its (unanalyzed) initializer and
@@ -4983,6 +5269,15 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
       syntax->last_parsed_tag->type != NULL &&
       TypeIsStructOrUnion(syntax->last_parsed_tag->type) &&
       syntax->last_parsed_tag->type->info.struct_info != NULL) {
+    for (size_t i = 0; syntax->current_template_parameters != NULL &&
+                       i < syntax->current_template_parameters->length; i++) {
+      TemplateParameter* param = syntax->current_template_parameters->value.p[i];
+      if (param != NULL && param->is_parameter_pack &&
+          i + 1 < syntax->current_template_parameters->length) {
+        SyntaxError(syntax, "Template parameter pack must be last");
+        break;
+      }
+    }
     syntax->last_parsed_tag->flags.is_template = true;
     syntax->last_parsed_tag->type->info.struct_info->is_template = true;
     syntax->last_parsed_tag->type->info.struct_info->template_parameter_count =
@@ -5064,6 +5359,8 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   syntax->local_tag_stack = template_tag_scope->prev;
   int old_template_parameter_count = syntax->current_template_parameter_count;
   Vector* old_template_parameters = syntax->current_template_parameters;
+  ConstraintExpr* old_requires_clause =
+      syntax->current_template_requires_clause;
   syntax->current_template_parameters =
       SyntaxParseTemplateParameterListWithBase(
           syntax, old_template_parameter_count);
@@ -5076,7 +5373,12 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   bool is_specialization = syntax->current_template_parameters->length == 0;
   syntax->parsing_template_declaration = !is_specialization;
   syntax->parsing_template_specialization = is_specialization;
-  ASTNode* declaration = SyntaxParseExternalDeclaration(syntax);
+  syntax->current_template_requires_clause =
+      ConceptsParseRequiresClause(syntax);
+  ASTNode* declaration = ConceptsParseDefinition(syntax, location);
+  if (declaration == NULL) {
+    declaration = SyntaxParseExternalDeclaration(syntax);
+  }
   syntax->parsing_template_declaration = old_parsing_template;
   syntax->parsing_template_specialization = old_parsing_specialization;
   syntax->local_tag_stack = template_tag_scope;
@@ -5087,8 +5389,10 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   VectorDestructWithContents(syntax->current_template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
+  ConstraintExprDelete(syntax->current_template_requires_clause);
   syntax->current_template_parameter_count = old_template_parameter_count;
   syntax->current_template_parameters = old_template_parameters;
+  syntax->current_template_requires_clause = old_requires_clause;
   return declaration != NULL ? declaration : EmptyDeclarationList(location);
 }
 
@@ -5168,7 +5472,8 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
     SourceLocation location = syntax->lex->current_token_location;
-    SyntaxParseStaticAssert(syntax);
+    ASTNode* node = SyntaxParseStaticAssert(syntax);
+    ASTNodeDelete(node);
     return EmptyDeclarationList(location);
   }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
@@ -5924,7 +6229,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           }
         }
 
-        if (!TypeEqual(sym->type, old_sym->type)) {
+        if (!RedeclarationTypesEqual(sym->type, old_sym->type)) {
           String suffix;
           StringInit(&suffix, NULL);
           SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -6106,9 +6411,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 // local symbol stack).
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
-    SourceLocation location = syntax->lex->current_token_location;
-    SyntaxParseStaticAssert(syntax);
-    return EmptyDeclarationList(location);
+    return SyntaxParseStaticAssert(syntax);
   }
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);

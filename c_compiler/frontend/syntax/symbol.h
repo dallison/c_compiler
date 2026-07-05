@@ -21,6 +21,7 @@ struct Struct;
 struct DIE;
 struct Namespace;
 struct ASTNode;
+struct Concept;
 
 // Storage for symbol (where it is located in memory).
 #define STO(x) kStorage_##x
@@ -111,6 +112,7 @@ typedef struct Symbol {
     bool is_constinit: 1;          // C++ constinit variable.
     bool is_weak: 1;               // Emits ELF weak binding.
     bool is_c_linkage: 1;          // Declared with C language linkage (extern "C").
+    bool is_concept: 1;            // C++20 concept definition (see concept_definition).
   } flags;
   
   struct {
@@ -138,6 +140,7 @@ typedef struct Symbol {
   struct Symbol* overload_next;  // Next C++ overload with the same source name.
   struct ASTNode* default_argument;  // C++ default function argument, if any.
   struct VariableTemplate* variable_template;  // C++ variable template body.
+  struct Concept* concept_definition;  // C++20 concept body when flags.is_concept.
   struct DIE* die;
 } Symbol;
 

@@ -327,7 +327,7 @@ bool operator>=(const optional<T>& left, const optional<T>& right) {
 }
 
 template <class T>
-auto operator<=>(const optional<T>& left, const optional<T>& right) {
+strong_ordering operator<=>(const optional<T>& left, const optional<T>& right) {
   if (left.has_value() && right.has_value()) {
     return *left <=> *right;
   }

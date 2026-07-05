@@ -16,6 +16,7 @@
 #include "parser_context.h"
 
 struct ASTNode;
+struct ConstraintExpr;
 
 // Basic type (int, long, etc.)
 typedef enum {
@@ -79,6 +80,7 @@ typedef struct TemplateParameter {
   bool has_default_int;  // Optional default for non-type integer parameters.
   long long default_int_value;
   int default_template_parameter_index;  // >= 0 when default names a parameter.
+  struct ConstraintExpr* associated_constraint;  // Optional C++20 constraint.
   int index;
 } TemplateParameter;
 
@@ -166,6 +168,8 @@ typedef struct {
   int template_parameter_count;  // C++ function template arity.
   int template_parameter_base;  // Parameter index base for nested templates.
   Vector template_parameters;  // TemplateParameter* entries for defaults.
+  Vector template_instantiations;  // Symbol* cache, not overload candidates.
+  struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause.
 } FunctionInfo;
 
 typedef enum {
@@ -411,7 +415,18 @@ int TypeRecordAlignment(TypeRecord* record);
 bool TypeContainsTemplateParameter(TypeRecord* type);
 void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
+TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
 Vector* TemplateArgumentVectorCopy(Vector* args);
+struct ASTNode* TypeSubstituteTemplateExpression(struct Syntax* syntax,
+                                                struct ASTNode* expr,
+                                                Vector* args,
+                                                SourceLocation location);
+TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
+                                       TypeRecord* type,
+                                       Vector* args);
+Vector* TypeSubstituteTemplateArgumentVector(struct Syntax* syntax,
+                                             Vector* template_args,
+                                             Vector* args);
 
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
@@ -520,6 +535,11 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     Symbol* templ, Vector* explicit_args, Vector* actuals,
     size_t first_formal_arg);
 bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right);
+Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
+                                            Symbol* templ,
+                                            Vector* explicit_args,
+                                            Vector* actuals,
+                                            size_t first_formal_arg);
 Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     Vector* actuals,
                                                     size_t first_formal_arg);

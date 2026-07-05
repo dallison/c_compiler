@@ -1649,6 +1649,9 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
   case AST_OP(asm):
     GenerateAsm(gen, (AsmASTNode*)node);
     break;
+  case AST_OP(static_assert):
+    // Checked during semantic analysis; no runtime code is emitted.
+    break;
   default:
     assert(false);
   }

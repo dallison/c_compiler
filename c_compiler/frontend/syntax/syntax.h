@@ -19,6 +19,8 @@
 #include "vector.h"
 #include "parser_context.h"
 
+struct ConstraintExpr;
+
 extern jmp_buf error_abort_state;       // Where to abort to.
 extern bool abort_on_error;
 
@@ -49,6 +51,7 @@ typedef struct Syntax {
   bool parsing_template_argument;  // Parsing expression inside template args.
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
+  struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -113,7 +116,7 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 // produced at declaration time.  Returns false (leaving `name` untouched) if not
 // positioned at `operator`.
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
-void SyntaxParseStaticAssert(Syntax* syntax);
+ASTNode* SyntaxParseStaticAssert(Syntax* syntax);
 // Parses a C++ 'friend' declaration appearing inside the body of class
 // 'befriending'.  Handles friend class declarations ('friend class X;' and
 // 'friend X;') as well as friend function declarations and inline friend
