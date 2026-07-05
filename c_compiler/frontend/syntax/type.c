@@ -14,6 +14,7 @@
 #include <inttypes.h>
 
 #include <assert.h>
+#include "concepts.h"
 #include "dstring.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
@@ -283,6 +284,11 @@ void TypeRecordDelete(TypeRecord* record) {
       VectorDestructWithContents(&record->info.function.template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);
+      VectorDestructWithContents(&record->info.function.template_instantiations,
+                                 (VectorElementDestructor)SymbolDelete,
+                                 /*free_element=*/false);
+      ConstraintExprDelete(record->info.function.associated_constraint);
+      record->info.function.associated_constraint = NULL;
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
@@ -396,6 +402,8 @@ static TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
   copy->default_int_value = param->default_int_value;
   copy->default_template_parameter_index =
       param->default_template_parameter_index;
+  // Constraint cloning is introduced with full associated-constraint semantics.
+  copy->associated_constraint = NULL;
   copy->index = param->index;
   return copy;
 }
@@ -417,6 +425,15 @@ static TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   // re-evaluation, so the pointer may be shared across copies.
   copy->dependent_expr = arg->dependent_expr;
   return copy;
+}
+
+TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->template_parameter_index = -1;
+  arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
+  return arg;
 }
 
 /* Deep-copy a vector of template arguments (NULL-safe). */
@@ -470,6 +487,10 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
                    TemplateParameterCopy(
                        record->info.function.template_parameters.value.p[i]));
     }
+    VectorInit(&r->info.function.template_instantiations);
+    // Constraint cloning is introduced with full associated-constraint
+    // semantics; avoid sharing ownership across function type copies.
+    r->info.function.associated_constraint = NULL;
     TypeRecordIncRef(r->info.function.coroutine_promise_type);
     TypeRecordIncRef(r->info.function.coroutine_frame_type);
   }
@@ -636,6 +657,8 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.body = NULL;
   VectorInit(&t->info.function.prototype);
   VectorInit(&t->info.function.template_parameters);
+  VectorInit(&t->info.function.template_instantiations);
+  t->info.function.associated_constraint = NULL;
   return t;
 }
 
@@ -677,6 +700,7 @@ void TemplateParameterDelete(TemplateParameter* param) {
   StringDestruct(&param->name);
   TypeRecordDelete(param->type);
   TypeRecordDelete(param->default_type);
+  ConstraintExprDelete(param->associated_constraint);
   free(param);
 }
 
@@ -3424,6 +3448,10 @@ static void DeleteMappedVector(MapKeyValue* kv) {
 }
 
 static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data);
+static Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
+                                                Vector* template_args,
+                                                Vector* args,
+                                                int rebase_base);
 
 /* Re-evaluate a value-dependent non-type template-argument expression (stored
  * unevaluated at parse time, e.g. `!is_integral<It>::value`) against the concrete
@@ -3462,6 +3490,73 @@ static bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
   DiagnosticSuppressEnd();
   ASTNodeDelete(cloned);
   return ok;
+}
+
+ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
+                                          Vector* args,
+                                          SourceLocation location) {
+  if (syntax == NULL || expr == NULL) {
+    return NULL;
+  }
+  if (args == NULL) {
+    return ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TemplateFunctionBodyClone clone;
+  MapInitForPointerKeys(&clone.symbol_map);
+  MapInitForPointerKeys(&clone.pack_symbol_map);
+  clone.parser = &parser;
+  clone.args = args;
+  clone.to_func = NULL;
+  clone.rebase_template_parameter_base = 0;
+  clone.from_owner = NULL;
+  clone.to_owner = NULL;
+  ASTNode* cloned = ASTNodeClone(expr, CloneTemplateFunctionBodyNode,
+                                 &clone, NULL);
+  MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
+  MapDestruct(&clone.symbol_map);
+  TypeParserDestruct(&parser);
+  if (cloned != NULL) {
+    cloned->location = location;
+  }
+  return cloned;
+}
+
+TypeRecord* TypeSubstituteTemplateType(Syntax* syntax, TypeRecord* type,
+                                       Vector* args) {
+  if (type == NULL) {
+    return NULL;
+  }
+  if (syntax == NULL || args == NULL) {
+    return TypeRecordCopy(type);
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* result = SubstituteTemplateParameters(&parser, type, args);
+  TypeParserDestruct(&parser);
+  return result;
+}
+
+Vector* TypeSubstituteTemplateArgumentVector(Syntax* syntax,
+                                             Vector* template_args,
+                                             Vector* args) {
+  if (template_args == NULL) {
+    return NULL;
+  }
+  if (args == NULL) {
+    return TemplateArgumentVectorCopy(template_args);
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Vector* result =
+      SubstituteTemplateArgumentVector(&parser, template_args, args, 0);
+  TypeParserDestruct(&parser);
+  return result;
 }
 
 /* Return the constructor name (== the class tag name) for a struct type, or
@@ -6109,9 +6204,24 @@ static bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right) {
 static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
                                                  TypeRecord* type,
                                                  Vector* args) {
-  for (Symbol* candidate = templ; candidate != NULL;
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type)) {
+    return NULL;
+  }
+  for (Symbol* candidate = templ->overload_next; candidate != NULL;
        candidate = candidate->overload_next) {
     if (!candidate->flags.is_template && candidate->type != NULL &&
+        TypeIsFunction(candidate->type) &&
+        candidate->type->info.function.template_origin == templ &&
+        TypeEqual(candidate->type, type) &&
+        TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+      return candidate;
+    }
+  }
+  Vector* cache = &templ->type->info.function.template_instantiations;
+  for (size_t i = 0; i < cache->length; i++) {
+    Symbol* candidate = cache->value.p[i];
+    if (candidate != NULL && !candidate->flags.is_template &&
+        candidate->type != NULL &&
         TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type) &&
         TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
       return candidate;
@@ -6124,13 +6234,14 @@ static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
  * can be found later (and marks both ends as overloaded). */
 static void AppendFunctionTemplateInstantiation(Symbol* templ,
                                                 Symbol* instantiated) {
-  Symbol* tail = templ;
-  while (tail->overload_next != NULL) {
-    tail = tail->overload_next;
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type) ||
+      instantiated == NULL) {
+    return;
   }
-  tail->overload_next = instantiated;
-  templ->flags.is_overloaded = true;
-  instantiated->flags.is_overloaded = true;
+  instantiated->overload_next = NULL;
+  instantiated->flags.is_overloaded = false;
+  VectorAppend(&templ->type->info.function.template_instantiations,
+               instantiated);
 }
 
 /* True if a template argument is still dependent and therefore the
@@ -7145,8 +7256,28 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   if (args == NULL) {
     return templ;
   }
-  Symbol* symbol = TypeInstantiateFunctionTemplate(syntax, templ, args);
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+                                        /*emit_error=*/true);
+  TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL) {
+    return templ;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return templ;
+  }
+  Symbol* symbol =
+      TypeInstantiateFunctionTemplate(syntax, templ, completed_args);
+  VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
   return symbol;
@@ -7163,10 +7294,102 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   if (args == NULL) {
     return false;
   }
+  TypeParser parser;
+  TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                 STO(implicit), compiler->syntax.context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+                                        /*emit_error=*/false);
+  TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
-  return true;
+  if (completed_args == NULL) {
+    return false;
+  }
+  bool ok = ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args);
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return ok;
+}
+
+/* Public: build a non-emitting concrete candidate for overload resolution.
+ * This performs deduction, constraint checking, default completion, and
+ * signature substitution, but it does not clone a body or enqueue codegen. */
+Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
+                                            Vector* explicit_args,
+                                            Vector* actuals,
+                                            size_t first_formal_arg) {
+  Vector* args =
+      DeduceSimpleFunctionTemplateArguments(templ, explicit_args, actuals,
+                                            first_formal_arg);
+  if (args == NULL) {
+    return NULL;
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+                                        /*emit_error=*/false);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameterForInstantiation(
+          completed_args)) {
+    if (completed_args != NULL) {
+      VectorDeleteWithContents(
+          completed_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
+
+  Symbol* template_definition = templ;
+  if ((template_definition->type == NULL ||
+       template_definition->type->info.function.body == NULL) &&
+      templ->value.func_defn != NULL &&
+      templ->value.func_defn->type != NULL) {
+    template_definition = templ->value.func_defn;
+  }
+  bool saved_substitution_failed = parser.template_substitution_failed;
+  parser.template_substitution_failed = false;
+  TypeRecord* func = InstantiateFunctionTemplateType(&parser,
+                                                     template_definition->type,
+                                                     completed_args);
+  bool substitution_failed = parser.template_substitution_failed;
+  parser.template_substitution_failed = saved_substitution_failed;
+  if (substitution_failed || TypeContainsTemplateParameter(func)) {
+    TypeRecordDelete(func);
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
+
+  Symbol* symbol = NewSymbol(templ->name.value, func, templ->storage);
+  symbol->location = templ->location;
+  symbol->namespace_ = templ->namespace_;
+  func->info.function.symbol = symbol;
+  func->info.function.template_origin = templ;
+  func->template_arguments = TemplateArgumentVectorCopy(completed_args);
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  TypeParserDestruct(&parser);
+  return symbol;
 }
 
 /* Public: deduce (but do not instantiate) a function template's argument vector
@@ -8752,6 +8975,9 @@ TypeRecord* TypeFindCXXComparisonCategory(const char* category_name) {
 /* Public entry point: instantiate function template `templ` with `args`. */
 Symbol* TypeInstantiateFunctionTemplate(Syntax* syntax, Symbol* templ,
                                         Vector* args) {
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, args)) {
+    return templ;
+  }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
@@ -9819,6 +10045,137 @@ static void ParseFormalArgument(TypeParser* proto_parser,
   }
 }
 
+static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
+                                                                 TypeRecord* type) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
+  arg->template_parameter_index = index;
+  return arg;
+}
+
+static TemplateParameter* NewAbbreviatedTypeTemplateParameter(TypeParser* parser,
+                                                             int index) {
+  TemplateParameter* param = malloc(sizeof(TemplateParameter));
+  memset(param, 0, sizeof(*param));
+  StringInit(&param->name, SyntaxFakeName(parser->syntax));
+  param->kind = kTemplateParameterType;
+  param->index = index;
+  return param;
+}
+
+static void AddFunctionAssociatedConstraint(TypeRecord* func,
+                                            ConstraintExpr* constraint) {
+  if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* current = func->info.function.associated_constraint;
+  if (current == NULL) {
+    func->info.function.associated_constraint = constraint;
+    return;
+  }
+  func->info.function.associated_constraint =
+      NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static void ParseCXXTrailingRequiresClause(TypeParser* parser,
+                                           TypeRecord* func) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      !LexLookingAt(parser->lex, TOK(requires))) {
+    return;
+  }
+  SyntaxOpenScope(parser->syntax);
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->name.length > 0) {
+      InsertLocalSymbol(parser->syntax->local_symbol_stack, formal);
+    }
+  }
+  ConstraintExpr* constraint = ConceptsParseRequiresClause(parser->syntax);
+  SyntaxCloseScope(parser->syntax);
+  AddFunctionAssociatedConstraint(func, constraint);
+}
+
+static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
+                                              TypeRecord* func,
+                                              int arg_number) {
+  Syntax* syntax = proto_parser->syntax;
+  Lex* lex = proto_parser->lex;
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    return false;
+  }
+
+  Symbol* concept_symbol = NULL;
+  SourceLocation constraint_location = lex->current_token_location;
+  Vector* concept_arguments = NULL;
+  if (LexLookingAt(lex, TOK(identifier))) {
+    String concept_name;
+    StringInit(&concept_name, lex->spelling.value);
+    Symbol* found = SyntaxFindSymbol(syntax, &concept_name);
+    StringDestruct(&concept_name);
+    if (found != NULL && found->flags.is_concept) {
+      LexCheckpoint checkpoint;
+      LexCheckpointSave(lex, &checkpoint);
+      LexNextToken(lex);
+      if (LexLookingAt(lex, TOK(less))) {
+        concept_arguments =
+            SyntaxParseTemplateArgumentList(syntax, TC(closebra));
+      } else {
+        concept_arguments = NewVector();
+      }
+      if (LexLookingAt(lex, TOK(auto))) {
+        concept_symbol = found;
+      } else {
+        if (concept_arguments != NULL) {
+          VectorDeleteWithContents(
+              concept_arguments, (VectorElementDestructor)TemplateArgumentDelete,
+              /*free_element=*/false);
+          concept_arguments = NULL;
+        }
+        LexCheckpointRestore(lex, &checkpoint);
+      }
+      LexCheckpointDestruct(&checkpoint);
+    }
+  }
+
+  if (concept_symbol == NULL && !LexLookingAt(lex, TOK(auto))) {
+    return false;
+  }
+  LexNextToken(lex);  // auto
+
+  int index = syntax->current_template_parameter_count +
+              (int)func->info.function.template_parameters.length;
+  TypeRecord* placeholder =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  placeholder->template_parameter_index = index;
+  Symbol* formal = TypeParserParseDeclarator(proto_parser, placeholder);
+  assert(formal != NULL);
+  ParseFormalArgument(proto_parser, func, formal, arg_number);
+
+  VectorAppend(&func->info.function.template_parameters,
+               NewAbbreviatedTypeTemplateParameter(proto_parser, index));
+  if (concept_symbol != NULL) {
+    if (concept_arguments == NULL) {
+      concept_arguments = NewVector();
+    }
+    TemplateArgument* constrained_arg =
+        NewTemplateParameterTypeArgumentForType(index, placeholder);
+    if (concept_arguments->length == 0) {
+      VectorAppend(concept_arguments, constrained_arg);
+    } else {
+      VectorInsertBefore(concept_arguments, 0, constrained_arg);
+    }
+    AddFunctionAssociatedConstraint(
+        func, NewConceptIdConstraint(concept_symbol, concept_arguments,
+                                     constraint_location));
+  }
+  func->info.function.template_parameter_count =
+      (int)func->info.function.template_parameters.length;
+  TypeRecordDelete(placeholder);
+  return true;
+}
+
 
 // Prototype style.  C still allows old-style K&R code.
 typedef enum  {
@@ -9832,7 +10189,15 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
                                              PrototypeStyle style,
                                              int arg_number,
                                              bool* seen_default_argument) {
-  if (proto_parser->found_void ||
+  if (ParseAbbreviatedFunctionParameter(proto_parser, func, arg_number)) {
+    if (style == kStyleUnknown) {
+      style = kStyleNew;
+    }
+    if (style == kStyleOld) {
+      SyntaxError(proto_parser->syntax,
+                  "Cannot mix function prototype with old-style function args");
+    }
+  } else if (proto_parser->found_void ||
         SyntaxLookingAtType(proto_parser->syntax)) {
     TypeRecord* type = TypeParserParseType(proto_parser, true);
     if (style == kStyleUnknown) {
@@ -10052,6 +10417,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
     TypeRecord* trailing_return = ParseCXXTrailingReturnType(parser);
     TypeRecordChain(func, trailing_return);
   }
+  ParseCXXTrailingRequiresClause(parser, func);
   if (parser->cxx_member_definition != NULL &&
       !parser->cxx_member_definition->is_static) {
     TypeRecordAddCXXThisParameter(

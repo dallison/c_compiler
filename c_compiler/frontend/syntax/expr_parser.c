@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include "concepts.h"
 #include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
@@ -905,6 +906,9 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           SymbolHasFunctionTemplateOverload(symbol)) {
         template_arguments = args;
         args = NULL;
+      } else if (symbol->flags.is_concept) {
+        template_arguments = args;
+        args = NULL;
       } else if (symbol->flags.is_template && symbol->type != NULL &&
                  TypeIsStructOrUnion(symbol->type) &&
                  symbol->type->template_arguments == NULL &&
@@ -1420,6 +1424,145 @@ static void AddLambdaFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   }
 }
 
+static bool LambdaFormalNameAvailable(Vector* formals, String* name) {
+  if (name->length == 0) {
+    return true;
+  }
+  for (size_t i = 0; i < formals->length; i++) {
+    Symbol* formal = formals->value.p[i];
+    if (formal != NULL && StringEqualString(&formal->name, name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static TemplateArgument* NewLambdaTemplateParameterTypeArgument(int index,
+                                                               TypeRecord* type) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
+  arg->template_parameter_index = index;
+  return arg;
+}
+
+static TemplateParameter* NewLambdaTemplateParameter(Syntax* syntax,
+                                                     int index) {
+  TemplateParameter* param = malloc(sizeof(TemplateParameter));
+  memset(param, 0, sizeof(*param));
+  StringInit(&param->name, SyntaxFakeName(syntax));
+  param->kind = kTemplateParameterType;
+  param->index = index;
+  return param;
+}
+
+static void AddLambdaFunctionAssociatedConstraint(TypeRecord* func,
+                                                  ConstraintExpr* constraint) {
+  if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* current = func->info.function.associated_constraint;
+  if (current == NULL) {
+    func->info.function.associated_constraint = constraint;
+    return;
+  }
+  func->info.function.associated_constraint =
+      NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
+                                            int arg_number,
+                                            TokenClass followers) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    return false;
+  }
+
+  Symbol* concept_symbol = NULL;
+  SourceLocation constraint_location = syntax->lex->current_token_location;
+  Vector* concept_arguments = NULL;
+  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+    String concept_name;
+    StringInit(&concept_name, syntax->lex->spelling.value);
+    Symbol* found = SyntaxFindSymbol(syntax, &concept_name);
+    StringDestruct(&concept_name);
+    if (found != NULL && found->flags.is_concept) {
+      LexCheckpoint checkpoint;
+      LexCheckpointSave(syntax->lex, &checkpoint);
+      LexNextToken(syntax->lex);
+      if (LexLookingAt(syntax->lex, TOK(less))) {
+        concept_arguments = SyntaxParseTemplateArgumentList(syntax, followers);
+      } else {
+        concept_arguments = NewVector();
+      }
+      if (LexLookingAt(syntax->lex, TOK(auto))) {
+        concept_symbol = found;
+      } else {
+        VectorDeleteWithContents(
+            concept_arguments, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        concept_arguments = NULL;
+        LexCheckpointRestore(syntax->lex, &checkpoint);
+      }
+      LexCheckpointDestruct(&checkpoint);
+    }
+  }
+
+  if (concept_symbol == NULL && !LexLookingAt(syntax->lex, TOK(auto))) {
+    return false;
+  }
+  LexNextToken(syntax->lex);  // auto
+
+  int index = syntax->current_template_parameter_count +
+              (int)func->info.function.template_parameters.length;
+  TypeRecord* placeholder =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  placeholder->template_parameter_index = index;
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
+  Symbol* formal = TypeParserParseDeclarator(&parser, placeholder);
+  TypeParserDestruct(&parser);
+  assert(formal != NULL);
+  if (!LambdaFormalNameAvailable(&func->info.function.prototype,
+                                 &formal->name)) {
+    SyntaxError(syntax, "Duplicate function argument '%s'",
+                formal->name.value);
+    SymbolDelete(formal);
+    TypeRecordDelete(placeholder);
+    if (concept_arguments != NULL) {
+      VectorDeleteWithContents(concept_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return true;
+  }
+  formal->flags.is_defined = true;
+  formal->flags.is_argument = true;
+  formal->value.arg_number = arg_number;
+  VectorAppend(&func->info.function.prototype, formal);
+  VectorAppend(&func->info.function.template_parameters,
+               NewLambdaTemplateParameter(syntax, index));
+  if (concept_symbol != NULL) {
+    if (concept_arguments == NULL) {
+      concept_arguments = NewVector();
+    }
+    TemplateArgument* constrained_arg =
+        NewLambdaTemplateParameterTypeArgument(index, placeholder);
+    if (concept_arguments->length == 0) {
+      VectorAppend(concept_arguments, constrained_arg);
+    } else {
+      VectorInsertBefore(concept_arguments, 0, constrained_arg);
+    }
+    AddLambdaFunctionAssociatedConstraint(
+        func, NewConceptIdConstraint(concept_symbol, concept_arguments,
+                                     constraint_location));
+  }
+  func->info.function.template_parameter_count =
+      (int)func->info.function.template_parameters.length;
+  TypeRecordDelete(placeholder);
+  return true;
+}
+
 // Parse the optional `(params)` of a lambda into `func`'s prototype.  An
 // omitted parameter list is allowed and leaves the prototype empty.
 static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
@@ -1429,25 +1572,42 @@ static void ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
   }
   int arg_number = 0;
   while (!LexLookingAt(syntax->lex, TOK(rparen)) && !LexEof(syntax->lex)) {
-    TypeParser parser;
-    TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
-    TypeRecord* type = TypeParserParseType(&parser, true);
-    Symbol* formal = TypeParserParseDeclarator(&parser, type);
-    TypeParserDestruct(&parser);
-    if (formal != NULL) {
-      if (TypeContainsAuto(formal->type)) {
-        SymbolSetType(formal, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    if (ParseLambdaAbbreviatedParameter(syntax, func, arg_number, followers)) {
+      arg_number++;
+    } else {
+      TypeParser parser;
+      TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
+      TypeRecord* type = TypeParserParseType(&parser, true);
+      Symbol* formal = TypeParserParseDeclarator(&parser, type);
+      TypeParserDestruct(&parser);
+      if (formal != NULL) {
+        if (TypeContainsAuto(formal->type)) {
+          SymbolSetType(formal, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+        }
+        formal->flags.is_defined = true;
+        formal->flags.is_argument = true;
+        formal->value.arg_number = arg_number++;
+        VectorAppend(&func->info.function.prototype, formal);
       }
-      formal->flags.is_defined = true;
-      formal->flags.is_argument = true;
-      formal->value.arg_number = arg_number++;
-      VectorAppend(&func->info.function.prototype, formal);
     }
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;
     }
   }
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
+}
+
+static void ParseLambdaTrailingRequiresClause(Syntax* syntax,
+                                              TypeRecord* func) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      !LexLookingAt(syntax->lex, TOK(requires))) {
+    return;
+  }
+  SyntaxOpenScope(syntax);
+  AddLambdaFunctionScopeSymbols(syntax, func);
+  ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
+  SyntaxCloseScope(syntax);
+  AddLambdaFunctionAssociatedConstraint(func, constraint);
 }
 
 // Parse a lambda's optional noexcept-specifier.  Returns true when the lambda
@@ -1478,10 +1638,11 @@ static bool SkipNoexceptSpecifier(Syntax* syntax, TokenClass followers) {
 }
 
 // Parse the specifiers that follow a lambda's parameter list (`mutable`,
-// `constexpr`, `noexcept`) in any order, then an optional `-> type` trailing
-// return type.  Returns the trailing return type if present, otherwise
-// `default_type`, and reports each specifier through its out-parameter.
+// `constexpr`, `noexcept`) in any order, then optional trailing return type and
+// trailing requires-clause.  Returns the trailing return type if present,
+// otherwise `default_type`, and reports each specifier through its out-parameter.
 static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
+                                                      TypeRecord* func,
                                                       bool* is_mutable,
                                                       bool* is_constexpr,
                                                       bool* is_noexcept,
@@ -1503,20 +1664,21 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
     }
   }
 
-  if (!LexMatch(syntax->lex, TOK(arrow))) {
-    return default_type;
+  TypeRecord* return_type = default_type;
+  if (LexMatch(syntax->lex, TOK(arrow))) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
+    return_type = TypeParserParseType(&parser, true);
+    Symbol* declarator = TypeParserParseDeclarator(&parser, return_type);
+    if (declarator != NULL) {
+      TypeRecord* parsed_type = TypeRecordCopy(declarator->type);
+      SymbolDelete(declarator);
+      TypeRecordDelete(return_type);
+      return_type = parsed_type;
+    }
+    TypeParserDestruct(&parser);
   }
-  TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
-  TypeRecord* return_type = TypeParserParseType(&parser, true);
-  Symbol* declarator = TypeParserParseDeclarator(&parser, return_type);
-  if (declarator != NULL) {
-    TypeRecord* parsed_type = TypeRecordCopy(declarator->type);
-    SymbolDelete(declarator);
-    TypeRecordDelete(return_type);
-    return_type = parsed_type;
-  }
-  TypeParserDestruct(&parser);
+  ParseLambdaTrailingRequiresClause(syntax, func);
   return return_type;
 }
 
@@ -1568,7 +1730,7 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   ParseLambdaParameterList(syntax, func, TC(closebra));
   bool is_constexpr = false;
   bool is_noexcept = false;
-  return_type = ParseLambdaSpecifiersAndReturnType(syntax, &is_mutable,
+  return_type = ParseLambdaSpecifiersAndReturnType(syntax, func, &is_mutable,
                                                    &is_constexpr, &is_noexcept,
                                                    return_type, TC(closebra));
   func->info.function.is_const_member = !is_mutable;
@@ -1581,6 +1743,11 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   op->location = location;
   op->flags.is_defined = true;
   op->flags.is_inline_defn = true;
+  if (func->info.function.template_parameters.length > 0) {
+    op->flags.is_template = true;
+    func->info.function.template_parameter_count =
+        (int)func->info.function.template_parameters.length;
+  }
   op->value.func_defn = op;
   func->info.function.symbol = op;
   func->info.function.is_inline = true;

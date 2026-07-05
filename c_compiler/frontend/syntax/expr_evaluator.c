@@ -8,6 +8,7 @@
 
 #include "expr_evaluator.h"
 #include "assembler.h"
+#include "concepts.h"
 #include "constexpr.h"
 #include "type.h"
 
@@ -258,6 +259,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
     case AST_OP(contents):
       return ConstexprEvaluatePointerDereferenceAsInteger(ctx, node, result);
     case AST_OP(identifier): {
+      if (ConceptsEvaluateInteger(node, result)) {
+        return true;
+      }
       if (ConstexprBindingAsInteger(ctx, id_node->symbol, result)) {
         return true;
       }

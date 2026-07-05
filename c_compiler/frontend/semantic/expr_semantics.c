@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <string.h>
+#include "concepts.h"
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "statement_semantics.h"
@@ -67,7 +68,11 @@ static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
                                           bool diagnose_ambiguous);
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
                                                  VectorASTNode* node,
-                                                 Vector* explicit_args);
+                                                 Vector* explicit_args,
+                                                 Vector* temporary_candidates);
+static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected);
+static StructMember* InstantiateSelectedMemberTemplateCandidate(
+    StructMember* selected);
 static int OperatorCoAwaitCallScore(Symbol* candidate, VectorASTNode* node);
 static Symbol* ResolveFreeOperatorCoAwaitForActual(ASTNode* actual,
                                                    bool diagnose_ambiguous);
@@ -3616,6 +3621,26 @@ static bool SymbolIsTemplateFunction(Symbol* candidate) {
          candidate->type->info.function.template_origin != NULL;
 }
 
+static Symbol* TemplateOriginForConstraintOrdering(Symbol* candidate) {
+  if (candidate == NULL) {
+    return NULL;
+  }
+  if (candidate->flags.is_template) {
+    return candidate;
+  }
+  if (candidate->type != NULL && TypeIsFunction(candidate->type)) {
+    return candidate->type->info.function.template_origin;
+  }
+  return NULL;
+}
+
+static int ConstraintTieBreak(Symbol* best, Symbol* candidate) {
+  Symbol* best_origin = TemplateOriginForConstraintOrdering(best);
+  Symbol* candidate_origin = TemplateOriginForConstraintOrdering(candidate);
+  return ConceptsCompareFunctionTemplateConstraints(candidate_origin,
+                                                   best_origin);
+}
+
 // Fills `reason` with an explanation of why the function type `func` is not a
 // viable candidate for the call `node`, where `first_formal_arg` is the index of
 // the first formal parameter matched against an explicit argument (1 for a
@@ -3779,6 +3804,20 @@ static void EmitFreeCandidateNotes(Vector* candidates, VectorASTNode* call,
   }
 }
 
+static void DeleteTemporaryFunctionTemplateCandidates(Vector* candidates,
+                                                      Symbol* keep) {
+  if (candidates == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < candidates->length; i++) {
+    Symbol* candidate = candidates->value.p[i];
+    if (candidate != NULL && candidate != keep) {
+      SymbolDelete(candidate);
+    }
+  }
+  VectorDestruct(candidates);
+}
+
 static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
                                               Vector* actuals,
                                               Vector* explicit_args,
@@ -3790,6 +3829,8 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
   Symbol* best = NULL;
   int best_score = -1;
   bool ambiguous = false;
+  Vector temporary_candidates;
+  VectorInit(&temporary_candidates);
   if (explicit_args == NULL) {
     for (size_t i = 0; i < candidates->length; i++) {
       Symbol* candidate = candidates->value.p[i];
@@ -3816,7 +3857,8 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
     for (size_t i = 0; i < candidates->length; i++) {
       Symbol* candidate = candidates->value.p[i];
       Symbol* effective =
-          FunctionTemplateOverloadCandidate(candidate, &call, explicit_args);
+          FunctionTemplateOverloadCandidate(candidate, &call, explicit_args,
+                                            &temporary_candidates);
       if (effective == NULL) {
         continue;
       }
@@ -3838,6 +3880,14 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
         if (best_is_template && !effective_is_template) {
           best = effective;
           ambiguous = false;
+        } else if (best_is_template && effective_is_template) {
+          int constraint_tie_break = ConstraintTieBreak(best, effective);
+          if (constraint_tie_break > 0) {
+            best = effective;
+            ambiguous = false;
+          } else if (constraint_tie_break == 0 && best != effective) {
+            ambiguous = true;
+          }
         } else if (best != effective &&
                    best_is_template == effective_is_template) {
           ambiguous = true;
@@ -3868,6 +3918,7 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
       EmitFreeCandidateNotes(candidates, &call, /*ambiguous=*/false, -1);
       diagnostic_node->flags |= kASTOverloadDiagnosed;
     }
+    DeleteTemporaryFunctionTemplateCandidates(&temporary_candidates, NULL);
     return NULL;
   }
   if (ambiguous) {
@@ -3883,9 +3934,13 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
       EmitFreeCandidateNotes(candidates, &call, /*ambiguous=*/true, best_score);
       diagnostic_node->flags |= kASTOverloadDiagnosed;
     }
+    DeleteTemporaryFunctionTemplateCandidates(&temporary_candidates, best);
     return best;
   }
-  return best;
+  Symbol* resolved = InstantiateSelectedFunctionTemplateCandidate(best);
+  DeleteTemporaryFunctionTemplateCandidates(
+      &temporary_candidates, resolved == best ? best : NULL);
+  return resolved;
 }
 
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
@@ -3900,7 +3955,7 @@ static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
       name, &candidates, actuals, NULL,
       /*diagnose_no_match=*/false, diagnose_ambiguous, diagnostic_node);
   VectorDestruct(&candidates);
-  return best;
+  return InstantiateSelectedFunctionTemplateCandidate(best);
 }
 
 /* Public entry used when instantiating a cloned template body: a call whose
@@ -3927,12 +3982,13 @@ Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
       /*diagnose_no_match=*/false, /*diagnose_ambiguous=*/false,
       diagnostic_node);
   VectorDestruct(&candidates);
-  return best;
+  return InstantiateSelectedFunctionTemplateCandidate(best);
 }
 
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
                                                  VectorASTNode* node,
-                                                 Vector* explicit_args) {
+                                                 Vector* explicit_args,
+                                                 Vector* temporary_candidates) {
   if (candidate == NULL || candidate->type == NULL ||
       !TypeIsFunction(candidate->type)) {
     return candidate;
@@ -3944,11 +4000,52 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
     return explicit_args == NULL ? candidate : NULL;
   }
   DiagnosticSuppressBegin();
-  Symbol* instantiated =
-      TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
-          &compiler->syntax, candidate, explicit_args, node->children);
+  Symbol* instantiated = TypeCreateFunctionTemplateCandidate(
+      &compiler->syntax, candidate, explicit_args, node->children, 0);
   DiagnosticSuppressEnd();
-  return instantiated == candidate ? NULL : instantiated;
+  if (instantiated != NULL && temporary_candidates != NULL) {
+    VectorAppend(temporary_candidates, instantiated);
+  }
+  return instantiated;
+}
+
+static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
+  if (selected == NULL || selected->type == NULL ||
+      !TypeIsFunction(selected->type) ||
+      selected->type->info.function.template_origin == NULL ||
+      selected->type->template_arguments == NULL) {
+    return selected;
+  }
+  Symbol* instantiated = TypeInstantiateFunctionTemplate(
+      &compiler->syntax, selected->type->info.function.template_origin,
+      selected->type->template_arguments);
+  return instantiated != NULL ? instantiated : selected;
+}
+
+static void ReportUnsatisfiedFunctionTemplateConstraints(VectorASTNode* node,
+                                                         Symbol* templ,
+                                                         Vector* explicit_args,
+                                                         size_t first_formal_arg) {
+  String function_name;
+  StringInit(&function_name, NULL);
+  SymbolFunctionDiagnosticName(templ, &function_name);
+  SemanticError((ASTNode*)node, "constraints not satisfied for function template %s",
+                function_name.value);
+  StringDestruct(&function_name);
+  if (templ != NULL && TypeIsFunction(templ->type)) {
+    Vector* args =
+        TypeDeduceFunctionTemplateArgumentsFromCall(templ, node->children,
+                                                    first_formal_arg);
+    if (args == NULL && explicit_args != NULL) {
+      args = TemplateArgumentVectorCopy(explicit_args);
+    }
+    ConceptsReportFunctionTemplateConstraintFailure(templ, args);
+    if (args != NULL) {
+      VectorDeleteWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+  }
 }
 
 static int MemberOverloadCallScore(StructMember* candidate,
@@ -4021,7 +4118,8 @@ static void EmitMemberCandidateNotes(StructMember* first, VectorASTNode* node,
 
 static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
                                                      VectorASTNode* node,
-                                                     Vector* explicit_args) {
+                                                     Vector* explicit_args,
+                                                     Vector* temporary_members) {
   if (candidate == NULL || candidate->symbol == NULL ||
       candidate->symbol->type == NULL ||
       !TypeIsFunction(candidate->symbol->type)) {
@@ -4035,18 +4133,57 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
   }
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
   DiagnosticSuppressBegin();
-  Symbol* instantiated =
-      TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
-          &compiler->syntax, candidate->symbol, explicit_args, node->children,
-          first_formal_arg);
+  Symbol* instantiated = TypeCreateFunctionTemplateCandidate(
+      &compiler->syntax, candidate->symbol, explicit_args, node->children,
+      first_formal_arg);
   DiagnosticSuppressEnd();
-  if (instantiated == candidate->symbol) {
+  if (instantiated == NULL) {
     return NULL;
   }
   StructMember* member = NewStructMember(instantiated);
   member->is_member_function = true;
   member->is_static = candidate->is_static;
   member->access = candidate->access;
+  if (temporary_members != NULL) {
+    VectorAppend(temporary_members, member);
+  }
+  return member;
+}
+
+static void DeleteTemporaryMemberTemplateCandidates(Vector* members,
+                                                    StructMember* keep) {
+  if (members == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < members->length; i++) {
+    StructMember* member = members->value.p[i];
+    if (member != NULL && member != keep) {
+      StructMemberDelete(member);
+    }
+  }
+  VectorDestruct(members);
+}
+
+static StructMember* InstantiateSelectedMemberTemplateCandidate(
+    StructMember* selected) {
+  if (selected == NULL || selected->symbol == NULL ||
+      selected->symbol->type == NULL ||
+      !TypeIsFunction(selected->symbol->type) ||
+      selected->symbol->type->info.function.template_origin == NULL ||
+      selected->symbol->type->template_arguments == NULL) {
+    return selected;
+  }
+  Symbol* instantiated = TypeInstantiateFunctionTemplate(
+      &compiler->syntax,
+      selected->symbol->type->info.function.template_origin,
+      selected->symbol->type->template_arguments);
+  if (instantiated == NULL) {
+    return selected;
+  }
+  StructMember* member = NewStructMember(instantiated);
+  member->is_member_function = true;
+  member->is_static = selected->is_static;
+  member->access = selected->access;
   return member;
 }
 
@@ -4058,6 +4195,8 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
   bool ambiguous = false;
   bool receiver_const = MemberReceiverIsConst(member_access);
   bool receiver_const_rejected = false;
+  Vector temporary_members;
+  VectorInit(&temporary_members);
   Vector* explicit_args = NULL;
   if (member_access->right != NULL &&
       member_access->right->op == AST_OP(structmember)) {
@@ -4097,7 +4236,8 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     for (StructMember* candidate = first; candidate != NULL;
          candidate = candidate->overload_next) {
       StructMember* effective =
-          MemberTemplateOverloadCandidate(candidate, node, explicit_args);
+          MemberTemplateOverloadCandidate(candidate, node, explicit_args,
+                                          &temporary_members);
       if (effective == NULL) {
         continue;
       }
@@ -4137,9 +4277,38 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       ((ASTNode*)node)->flags & kASTOverloadDiagnosed;
   if (best == NULL) {
     if (already_diagnosed) {
+      DeleteTemporaryMemberTemplateCandidates(&temporary_members, NULL);
       return first;
     }
-    if (receiver_const_rejected) {
+    StructMember* constraint_rejected = NULL;
+    for (StructMember* candidate = first; candidate != NULL;
+         candidate = candidate->overload_next) {
+      if (candidate->symbol == NULL ||
+          !ConceptsFunctionTemplateHasAssociatedConstraint(candidate->symbol)) {
+        continue;
+      }
+      size_t first_formal_arg = candidate->is_static ? 0 : 1;
+      Vector* args = TypeDeduceFunctionTemplateArgumentsFromCall(
+          candidate->symbol, node->children, first_formal_arg);
+      bool rejected = args != NULL &&
+                      !ConceptsFunctionTemplateConstraintsSatisfied(
+                          candidate->symbol, args);
+      if (args != NULL) {
+        VectorDeleteWithContents(
+            args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      if (rejected) {
+        constraint_rejected = candidate;
+        break;
+      }
+    }
+    if (constraint_rejected != NULL) {
+      size_t first_formal_arg = constraint_rejected->is_static ? 0 : 1;
+      ReportUnsatisfiedFunctionTemplateConstraints(
+          node, constraint_rejected->symbol, explicit_args, first_formal_arg);
+      ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
+    } else if (receiver_const_rejected) {
       String function_name;
       StringInit(&function_name, NULL);
       SymbolFunctionDiagnosticSuffix(first->symbol, &function_name);
@@ -4162,10 +4331,12 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                                -1);
       ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     }
+    DeleteTemporaryMemberTemplateCandidates(&temporary_members, NULL);
     return first;
   }
   if (ambiguous) {
     if (already_diagnosed) {
+      DeleteTemporaryMemberTemplateCandidates(&temporary_members, best);
       return best;
     }
     String function_name;
@@ -4177,9 +4348,13 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/true,
                              best_score);
     ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
+    DeleteTemporaryMemberTemplateCandidates(&temporary_members, best);
     return best;
   }
-  return best;
+  StructMember* resolved = InstantiateSelectedMemberTemplateCandidate(best);
+  DeleteTemporaryMemberTemplateCandidates(
+      &temporary_members, resolved == best ? best : NULL);
+  return resolved;
 }
 
 static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
@@ -4248,6 +4423,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
     return;
   }
 
+  best = InstantiateSelectedFunctionTemplateCandidate(best);
   id->symbol = best;
   ASTNodeSetType(node->left, best->type);
   CheckDeletedFunctionUse(best, (ASTNode*)node);
@@ -4707,7 +4883,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     if (id->symbol != NULL && id->symbol->flags.is_template &&
-        !id->symbol->flags.is_overloaded && TypeIsFunction(id->symbol->type) &&
+        !id->symbol->flags.is_overloaded &&
+        id->symbol->overload_next == NULL &&
+        TypeIsFunction(id->symbol->type) &&
         !has_pack_expansion_actual &&
         !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&
         !CallActualsContainTemplateParameter(node) &&
@@ -4719,6 +4897,18 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (instantiated != id->symbol) {
         id->symbol = instantiated;
         ASTNodeSetType(node->left, instantiated->type);
+      } else if (!TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+                     id->symbol, id->template_arguments, node->children, 0)) {
+        if (ConceptsFunctionTemplateHasAssociatedConstraint(id->symbol)) {
+          ReportUnsatisfiedFunctionTemplateConstraints(node, id->symbol,
+                                                       id->template_arguments,
+                                                       0);
+        } else {
+          SemanticError((ASTNode*)node, "Template argument deduction failed");
+        }
+        ASTNodeSetType((ASTNode*)node,
+                       NewTypeRecordWithSize(kTypeInt, kQualPlain));
+        return (ASTNode*)node;
       }
     }
   }
