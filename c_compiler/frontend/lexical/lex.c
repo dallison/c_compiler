@@ -163,11 +163,13 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"friend", TOK(friend), kLanguageStandardCXX98},
   {"goto", TOK(goto), kLanguageStandardCXX98},
   {"if", TOK(if), kLanguageStandardCXX98},
-  {"import", TOK(import), kLanguageStandardCXX20},
+  // NOTE: `import` and `module` are intentionally NOT reserved words.  In C++20
+  // they are context-sensitive and only act as keywords at the start of a
+  // module-directive; elsewhere they are ordinary identifiers.  The parser
+  // recognizes them by spelling (see ParseModule*/ParseImport* in syntax.c).
   {"inline", TOK(inline), kLanguageStandardCXX98},
   {"int", TOK(int), kLanguageStandardCXX98},
   {"long", TOK(long), kLanguageStandardCXX98},
-  {"module", TOK(module), kLanguageStandardCXX20},
   {"mutable", TOK(mutable), kLanguageStandardCXX98},
   {"namespace", TOK(namespace), kLanguageStandardCXX98},
   {"new", TOK(new), kLanguageStandardCXX98},

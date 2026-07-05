@@ -202,6 +202,9 @@ static Symbol* FindFileScopeSymbol(Syntax* syntax, String* name) {
 }
 
 static bool InsertFileScopeSymbol(Syntax* syntax, Symbol* symbol) {
+  if (syntax->export_depth > 0) {
+    symbol->flags.is_exported = true;
+  }
   if (InNamedNamespace(syntax)) {
     return NamespaceInsertSymbol(syntax->current_namespace, symbol);
   }
@@ -5042,10 +5045,145 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
 
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
+// ---------------------------------------------------------------------------
+// C++20 modules (MVP: named interface units, export declarations, import).
+//
+// `module` and `import` are context-sensitive: they lex as ordinary
+// identifiers (see cxx_reserved_words in lex.c) and only act as keywords when
+// they begin a module directive at the start of an external declaration.
+// `export` is a real keyword (TOK(export)).
+// ---------------------------------------------------------------------------
+
+// True if the current token is an identifier spelled `spelling`, in C++20 mode.
+static bool SyntaxAtContextualKeyword(Syntax* syntax, const char* spelling) {
+  return CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+         LexLookingAt(syntax->lex, TOK(identifier)) &&
+         StringEqual(&syntax->lex->spelling, spelling);
+}
+
+// True if we're at a contextual `module`/`import` keyword that actually begins
+// a module directive (followed by a name), as opposed to an identifier that
+// merely happens to be spelled "module"/"import".
+static bool SyntaxAtModuleDirective(Syntax* syntax, const char* spelling) {
+  if (!SyntaxAtContextualKeyword(syntax, spelling)) {
+    return false;
+  }
+  LexCheckpoint cp;
+  LexCheckpointSave(syntax->lex, &cp);
+  LexNextToken(syntax->lex);
+  bool followed_by_name = LexLookingAt(syntax->lex, TOK(identifier));
+  LexCheckpointRestore(syntax->lex, &cp);
+  LexCheckpointDestruct(&cp);
+  return followed_by_name;
+}
+
+// Parse a (possibly dotted) module name like `foo` or `foo.bar` into `out`
+// (which this initializes).  Partitions (`foo:part`) are not yet supported.
+static bool ParseModuleName(Syntax* syntax, String* out) {
+  StringInit(out, "");
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected module name");
+    return false;
+  }
+  StringAppend(out, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  while (LexMatch(syntax->lex, TOK(dot))) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected identifier after '.' in module name");
+      return false;
+    }
+    StringAppendChar(out, '.');
+    StringAppend(out, syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+  }
+  return true;
+}
+
+// Parse `module NAME ;` (implementation unit) or, when `exported`, the
+// `module NAME ;` tail of `export module NAME ;` (interface unit).  The
+// contextual `module` keyword is the current token.
+static ASTNode* ParseModuleDeclaration(Syntax* syntax, bool exported) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // consume contextual `module`
+  String name;
+  if (ParseModuleName(syntax, &name)) {
+    if (compiler->module_name.length != 0) {
+      SyntaxError(syntax,
+                  "Multiple module declarations in one translation unit");
+    } else {
+      StringSetString(&compiler->module_name, &name);
+      compiler->is_module_interface = exported;
+    }
+  }
+  StringDestruct(&name);
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
+// Parse `import NAME ;`, triggering the driver's module import hook.  The
+// contextual `import` keyword is the current token.
+static ASTNode* ParseImportDeclaration(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // consume contextual `import`
+  String name;
+  if (ParseModuleName(syntax, &name)) {
+    if (!CompilerImportModule(name.value)) {
+      SyntaxError(syntax, "Cannot import module '%s'", name.value);
+    }
+  }
+  StringDestruct(&name);
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
+// Parse an `export` region: `export module ...`, `export import ...`,
+// `export { declaration-seq }`, or `export declaration`.  The `export` keyword
+// is the current token.
+static ASTNode* ParseExportDeclaration(Syntax* syntax) {
+  SourceLocation location = syntax->lex->current_token_location;
+  LexNextToken(syntax->lex);  // consume `export`
+
+  if (SyntaxAtContextualKeyword(syntax, "module")) {
+    return ParseModuleDeclaration(syntax, /*exported=*/true);
+  }
+  if (SyntaxAtContextualKeyword(syntax, "import")) {
+    SyntaxError(syntax, "'export import' is not yet supported");
+    return ParseImportDeclaration(syntax);
+  }
+
+  syntax->export_depth++;
+  ASTNode* result;
+  if (LexMatch(syntax->lex, TOK(lbrace))) {
+    Vector* declarations = NewVector();
+    while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
+      ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+      AppendDeclarationsFromNode(declarations, node);
+    }
+    SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebrace) | TC(decl));
+    result = NewDeclarationListASTNode(declarations, location);
+  } else {
+    result = SyntaxParseExternalDeclaration(syntax);
+  }
+  syntax->export_depth--;
+  return result;
+}
+
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   syntax->context = kParsingFileScope;
   if (syntax->current_namespace == NULL) {
     syntax->current_namespace = compiler->global_namespace;
+  }
+
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+    if (LexLookingAt(syntax->lex, TOK(export))) {
+      return ParseExportDeclaration(syntax);
+    }
+    if (SyntaxAtModuleDirective(syntax, "module")) {
+      return ParseModuleDeclaration(syntax, /*exported=*/false);
+    }
+    if (SyntaxAtModuleDirective(syntax, "import")) {
+      return ParseImportDeclaration(syntax);
+    }
   }
 
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {

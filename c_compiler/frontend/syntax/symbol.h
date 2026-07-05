@@ -43,9 +43,11 @@ bool StorageIs(Storage storage, Storage value);
 //      "packed"               -> name "packed",  args []
 // The name is normalized by stripping a surrounding "__" pair so that
 // "__packed__" and "packed" compare equal (as GCC does).
+// Serialized as an inline sub-message (see WriteAttributeVector); the field
+// numbers below are local to that sub-message.
 typedef struct Attribute {
-  String name;   // Normalized attribute name.
-  Vector args;   // Vector of String* argument tokens (owns String*).
+  String name;   // Normalized attribute name.               // @wire 1
+  Vector args;   // Vector of String* argument tokens.       // @wire 2
 } Attribute;
 
 Attribute* NewAttribute(const char* name);
@@ -69,66 +71,70 @@ void AttributeListDestruct(Vector* attrs);          // Frees contained Attribute
 void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
 
 // A symbol.  This is a variable, function or type used in a program.
+// Module-serialization field numbers (see
+// c_compiler/serialize/symbol_serialize.c).  Transient/codegen fields
+// (usage_info, die) are recomputed on load and carry no wire number.
 typedef struct Symbol {
-  String name;                // Symbol name.
-  String asm_name;            // Optional assembler-visible name.
-  struct Namespace* namespace_;  // C++ namespace owning the symbol, if any.
-  int id;
-  struct TypeRecord* type;    // Type.
-  Storage storage;            // Storage (static, typedef, etc.)
+  String name;                // Symbol name.                     // @wire 1
+  String asm_name;            // Optional asm-visible name.       // @wire 2
+  struct Namespace* namespace_;  // Owning C++ namespace, if any. // @wire 3
+  int id;                                                         // @wire 4
+  struct TypeRecord* type;    // Type.                            // @wire 5
+  Storage storage;            // Storage (static, typedef, etc.)  // @wire 6
   struct {
-    bool is_defined: 1;            // Symbol is defined.
-    bool is_tentative_decl: 1;     // Tentative declaration.
-    bool is_forward_declared: 1;   // Symbol is forward declared.
-    bool is_local: 1;              // Local symbol.
-    bool is_block_scope: 1;        // Declared at block (local) scope.
-    bool is_argument: 1;           // Defined in function prototype.
-    bool is_temp: 1;               // Temporary (invented).
-    bool address_taken: 1;         // The address has been taken in the program.
-    bool used: 1;                  // The symbol has been used.
-    bool invented: 1;
-    bool is_inline_defn: 1;        // Is an inline function definition.
-    bool value_set : 1;            // Value has been set (for const).
-    bool noreturn: 1;              // __attribute__((noreturn)) / _Noreturn.
-    bool always_inline: 1;         // __attribute__((always_inline)).
-    bool noinline: 1;              // __attribute__((noinline)).
-    bool is_using_alias: 1;        // C++ using-declaration alias.
-    bool is_overloaded: 1;         // Has C++ overload alternatives.
-    bool is_template: 1;           // C++ template declaration.
-    bool is_template_parameter: 1; // C++ template parameter.
-    bool is_template_type_parameter: 1; // `typename`/`class` parameter.
-    bool is_parameter_pack: 1;     // C++ template or function parameter pack.
-    bool is_constexpr: 1;          // C++ constexpr variable.
-    bool is_constinit: 1;          // C++ constinit variable.
-    bool is_weak: 1;               // Emits ELF weak binding.
-    bool is_c_linkage: 1;          // Declared with C language linkage (extern "C").
+    bool is_defined: 1;            // Symbol is defined.              // @wire 7
+    bool is_tentative_decl: 1;     // Tentative declaration.          // @wire 8
+    bool is_forward_declared: 1;   // Symbol is forward declared.     // @wire 9
+    bool is_local: 1;              // Local symbol.                   // @wire 10
+    bool is_block_scope: 1;        // Declared at block scope.        // @wire 11
+    bool is_argument: 1;           // Defined in function prototype.  // @wire 12
+    bool is_temp: 1;               // Temporary (invented).           // @wire 13
+    bool address_taken: 1;         // Address has been taken.         // @wire 14
+    bool used: 1;                  // The symbol has been used.       // @wire 15
+    bool invented: 1;                                                 // @wire 16
+    bool is_inline_defn: 1;        // Is an inline function defn.     // @wire 17
+    bool value_set : 1;            // Value has been set (const).     // @wire 18
+    bool noreturn: 1;              // noreturn / _Noreturn.            // @wire 19
+    bool always_inline: 1;         // __attribute__((always_inline)). // @wire 20
+    bool noinline: 1;              // __attribute__((noinline)).      // @wire 21
+    bool is_using_alias: 1;        // C++ using-declaration alias.    // @wire 22
+    bool is_overloaded: 1;         // Has C++ overload alternatives.  // @wire 23
+    bool is_template: 1;           // C++ template declaration.       // @wire 24
+    bool is_template_parameter: 1; // C++ template parameter.         // @wire 25
+    bool is_template_type_parameter: 1; // typename/class parameter.  // @wire 26
+    bool is_parameter_pack: 1;     // Template/function param pack.   // @wire 27
+    bool is_constexpr: 1;          // C++ constexpr variable.         // @wire 28
+    bool is_constinit: 1;          // C++ constinit variable.         // @wire 29
+    bool is_weak: 1;               // Emits ELF weak binding.         // @wire 30
+    bool is_c_linkage: 1;          // C language linkage (extern "C").// @wire 31
+    bool is_exported: 1;           // C++20 module export.            // @wire 41
   } flags;
   
   struct {
     int used_as_arg;              // Times used as function arg.
     int used_in_loop;             // Times used in loop.
     int reads;                    // Number of reads.
-  } usage_info;
+  } usage_info;                   // @wire - (transient, not serialized)
   
-  Vector attributes;          // Attributes (owns Attribute*).
-  int alignment;              // __attribute__((aligned(N))) override; 0 = natural.
-  int template_parameter_index;  // Index for template parameter symbols.
-  int dependent_value_template_parameter_index;  // Deferred non-type arg value.
-  SourceLocation location;
+  Vector attributes;          // Attributes (owns Attribute*).    // @wire 42
+  int alignment;              // aligned(N) override; 0 = natural. // @wire 32
+  int template_parameter_index;  // Template parameter index.      // @wire 33
+  int dependent_value_template_parameter_index;  // Deferred value. // @wire 34
+  SourceLocation location;                                         // @wire 35
   
-  // Symbol value, one of these.
+  // Symbol value, one of these.  Serialized as the raw 64-bit slot.
   union {
-    int64_t ivalue;         // Integer value for constants.
-    double fvalue;          // Double value for constants.
-    int32_t arg_number;     // Argument number in prototype.
-    void* other;            // Something else.
-    struct Symbol* func_defn;      // Defintion of this func declaration.
+    int64_t ivalue;         // Integer value for constants.      // @wire 36
+    double fvalue;          // Double value for constants.       // (via 36)
+    int32_t arg_number;     // Argument number in prototype.     // (via 36)
+    void* other;            // Something else.                   // @wire -
+    struct Symbol* func_defn;      // Defn of this func decl.     // @wire -
   } value;
-  int32_t stack_offset;     // Stack offset if local.
-  struct Symbol* alias_target;  // Target for a C++ using-declaration alias.
-  struct Symbol* overload_next;  // Next C++ overload with the same source name.
-  struct ASTNode* default_argument;  // C++ default function argument, if any.
-  struct DIE* die;
+  int32_t stack_offset;     // Stack offset if local.            // @wire 37
+  struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
+  struct Symbol* overload_next; // Next overload, same name.     // @wire 39
+  struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
+  struct DIE* die;          // @wire - (debug info, not serialized)
 } Symbol;
 
 

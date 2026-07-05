@@ -99,6 +99,7 @@ COMMON_INCLUDES = [
     "c_compiler/optimization",
     "c_compiler/assembler",
     "c_compiler/util",
+    "c_compiler/serialize",
     "c_compiler/driver",
     "c_compiler/disassembler",
     "c_compiler/6502",
@@ -265,6 +266,75 @@ cc_library(
         ":elf",
         ":utils",
     ],
+)
+
+cc_library(
+    name = "wireformat",
+    srcs = [
+        "c_compiler/serialize/wireformat.c",
+    ],
+    hdrs = [
+        "c_compiler/serialize/wireformat.h",
+    ],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+)
+
+cc_test(
+    name = "wireformat_test",
+    srcs = ["tests/wireformat_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":wireformat"],
+)
+
+cc_library(
+    name = "serialize",
+    srcs = [
+        "c_compiler/serialize/ast_serialize.c",
+        "c_compiler/serialize/module_archive.c",
+        "c_compiler/serialize/module_install.c",
+        "c_compiler/serialize/serialize.c",
+        "c_compiler/serialize/serialize_common.c",
+        "c_compiler/serialize/symbol_serialize.c",
+        "c_compiler/serialize/type_serialize.c",
+    ],
+    hdrs = glob([
+        "c_compiler/serialize/*.h",
+        "c_compiler/**/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":ar_lib",
+        ":compiler",
+        ":utils",
+        ":wireformat",
+    ],
+)
+
+cc_test(
+    name = "serialize_test",
+    srcs = ["tests/serialize_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":serialize"],
+)
+
+cc_test(
+    name = "module_archive_test",
+    srcs = ["tests/module_archive_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":serialize"],
+)
+
+cc_test(
+    name = "module_install_test",
+    srcs = ["tests/module_install_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":serialize"],
 )
 
 cc_library(
@@ -719,6 +789,7 @@ cc_binary(
         ":elf",
         ":linker",
         ":loader",
+        ":serialize",
         ":utils",
     ],
 )
@@ -744,6 +815,7 @@ cc_binary(
         ":elf",
         ":linker",
         ":loader",
+        ":serialize",
         ":utils",
     ],
 )

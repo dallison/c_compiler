@@ -53,6 +53,7 @@ typedef struct Syntax {
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
   int extern_c_depth;        // Nesting depth of `extern "C"` linkage specs.
+  int export_depth;          // Nesting depth of C++20 `export` regions.
 } Syntax;
 
 typedef struct FullyQualifiedIdentifier {

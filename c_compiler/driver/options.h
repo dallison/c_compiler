@@ -41,6 +41,9 @@ typedef enum {
   kOptionKeepAsmFile,        // Keep asm file after assembling.
   kOptionSaveIR,             // Save IR in file.
   kOptionSaveAST,            // Save AST in file.
+  kOptionEmitModule,         // (hidden) Emit a C++20 module (.dcm) file.
+  kOptionLoadModule,         // (hidden) Load+verify a C++20 module (.dcm) file.
+  kOptionPrebuiltModulePath, // Directory to search for prebuilt .dcm modules.
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

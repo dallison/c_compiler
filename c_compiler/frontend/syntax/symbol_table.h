@@ -35,15 +35,18 @@ typedef struct LocalSymbolTable {
 
 // C++ namespace scope.  Namespace scopes form a tree rooted at the translation
 // unit; the root represents global scope and does not own global C symbols.
+// Module-serialization field numbers (see
+// c_compiler/serialize/symbol_serialize.c).  The symbol_table/tag_table trees
+// are flattened to symbol-handle lists on the wire (@wire 7 / @wire 8).
 typedef struct Namespace {
-  String name;
-  String qualified_name;
-  bool is_anonymous;
-  BinaryTree symbol_table;
-  BinaryTree tag_table;
-  Vector children;  // Namespace* children, owned by this namespace.
-  struct Namespace* parent;
-  struct Namespace* anonymous_child;
+  String name;                          // @wire 1
+  String qualified_name;                // @wire 2
+  bool is_anonymous;                    // @wire 3
+  BinaryTree symbol_table;              // flattened -> @wire 7 (symbols)
+  BinaryTree tag_table;                 // flattened -> @wire 8 (tags)
+  Vector children;  // Namespace*, owned by this namespace.   // @wire 4
+  struct Namespace* parent;             // @wire 5
+  struct Namespace* anonymous_child;    // @wire 6
 } Namespace;
 
 // Create the global symbol tables.
