@@ -2082,6 +2082,19 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
                                  location);
   }
 
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      LexLookingAt(lex, TOK(requires))) {
+    SourceLocation location = lex->current_token_location;
+    ConstraintExpr* constraint = ConceptsParseRequiresExpression(syntax);
+    int64_t value = 0;
+    bool ok = constraint != NULL &&
+              ConceptsEvaluateConstraint(constraint, &value);
+    ConstraintExprDelete(constraint);
+    return NewIntConstantASTNode(ok && value != 0 ? 1 : 0,
+                                 NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                                 location);
+  }
+
   ASTNode* lambda = ParseCXXLambdaExpression(syntax, followers);
   if (lambda != NULL) {
     return lambda;

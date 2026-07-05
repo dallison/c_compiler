@@ -144,6 +144,7 @@ void ConceptDelete(Concept* concept);
 // the semantic bridge used by constant-expression contexts such as
 // `static_assert(C<T>)`.
 bool ConceptsEvaluateInteger(struct ASTNode* node, int64_t* result);
+bool ConceptsEvaluateConstraint(ConstraintExpr* constraint, int64_t* result);
 bool ConceptsFunctionTemplateConstraintsSatisfied(struct Symbol* templ,
                                                  Vector* arguments);
 bool ConceptsFunctionTemplateHasAssociatedConstraint(struct Symbol* templ);
@@ -154,6 +155,7 @@ int ConceptsCompareFunctionTemplateConstraints(struct Symbol* left,
 void ConceptsReportFunctionTemplateConstraintFailure(struct Symbol* templ,
                                                      Vector* arguments);
 ConstraintExpr* ConceptsParseRequiresClause(struct Syntax* syntax);
+ConstraintExpr* ConceptsParseRequiresExpression(struct Syntax* syntax);
 
 // Parses a C++20 concept definition after `template<...>` has already been
 // consumed and the lexer is looking at `concept`.  Returns an empty declaration

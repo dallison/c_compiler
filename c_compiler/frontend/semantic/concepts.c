@@ -610,6 +610,10 @@ bool ConceptsEvaluateInteger(ASTNode* node, int64_t* result) {
                                           node->location, result);
 }
 
+bool ConceptsEvaluateConstraint(ConstraintExpr* constraint, int64_t* result) {
+  return EvaluateConstraintInteger(constraint, NULL, result);
+}
+
 bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
                                                  Vector* arguments) {
   if (!ConceptsFunctionTemplateHasAssociatedConstraint(templ)) {
@@ -1149,6 +1153,14 @@ ConstraintExpr* ConceptsParseRequiresClause(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // requires
   return ParseConceptConstraint(syntax, location);
+}
+
+ConstraintExpr* ConceptsParseRequiresExpression(Syntax* syntax) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) ||
+      !LexLookingAt(syntax->lex, TOK(requires))) {
+    return NULL;
+  }
+  return ParseRequiresExpressionConstraint(syntax);
 }
 
 ASTNode* ConceptsParseDefinition(Syntax* syntax,
