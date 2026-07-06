@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "ast.h"
+#include "constraint_serialize.h"
 #include "serialize_common.h"
 #include "type.h"
 
@@ -82,6 +83,7 @@ enum {
   kTParam_default_int_value = 7,
   kTParam_default_template_parameter_index = 8,
   kTParam_index = 9,
+  kTParam_associated_constraint = 10,
 };
 
 //
@@ -146,6 +148,8 @@ enum {
   kFn_template_parameter_count = 43,
   kFn_template_parameter_base = 44,
   kFn_template_parameters = 45,
+  kFn_template_instantiations = 46,
+  kFn_associated_constraint = 47,
 };
 
 //
@@ -303,6 +307,8 @@ static void WriteTemplateParameter(SerializeContext* ctx, WireBuffer* out,
   WireWriteInt32(out, kTParam_default_template_parameter_index,
                  p->default_template_parameter_index);
   WireWriteInt32(out, kTParam_index, p->index);
+  SerialWriteConstraint(ctx, out, kTParam_associated_constraint,
+                        p->associated_constraint);
 }
 
 static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
@@ -345,6 +351,9 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
         break;
       case kTParam_index:
         WireReadInt32(in, &p->index);
+        break;
+      case kTParam_associated_constraint:
+        p->associated_constraint = SerialReadConstraint(ctx, in);
         break;
       default:
         WireSkip(in, wt);
@@ -514,6 +523,18 @@ static Vector* ReadTemplateArgumentVector(DeserializeContext* ctx,
   return out;
 }
 
+// Public wrappers so constraint_serialize.c can (de)serialize the
+// TemplateArgument* vectors held by concept-id constraints.
+void SerialWriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
+                                       int field, Vector* v) {
+  WriteTemplateArgumentVector(ctx, buf, field, v);
+}
+
+Vector* SerialReadTemplateArgumentVector(DeserializeContext* ctx,
+                                         WireBuffer* in) {
+  return ReadTemplateArgumentVector(ctx, in);
+}
+
 // ---------------------------------------------------------------------------
 // ArrayInfo (inline).
 // ---------------------------------------------------------------------------
@@ -632,12 +653,17 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteInt32(out, kFn_template_parameter_base, f->template_parameter_base);
   SerialWriteTemplateParameterVector(ctx, out, kFn_template_parameters,
                                      &f->template_parameters);
+  SWriteRefVector(ctx, out, kFn_template_instantiations, kSerialKindSymbol,
+                  &f->template_instantiations);
+  SerialWriteConstraint(ctx, out, kFn_associated_constraint,
+                        f->associated_constraint);
 }
 
 static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
                              FunctionInfo* f) {
   VectorInit(&f->prototype);
   VectorInit(&f->template_parameters);
+  VectorInit(&f->template_instantiations);
   f->virtual_index = -1;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {
     int field;
@@ -788,6 +814,12 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_template_parameters:
         SerialReadTemplateParameterVector(ctx, in, &f->template_parameters);
+        break;
+      case kFn_template_instantiations:
+        SReadRefVector(ctx, in, kSerialKindSymbol, &f->template_instantiations);
+        break;
+      case kFn_associated_constraint:
+        f->associated_constraint = SerialReadConstraint(ctx, in);
         break;
       default:
         WireSkip(in, wt);

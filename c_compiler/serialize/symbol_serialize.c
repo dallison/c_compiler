@@ -18,6 +18,8 @@
 #include <stdlib.h>
 
 #include "ast.h"
+#include "concepts.h"
+#include "constraint_serialize.h"
 #include "serialize_common.h"
 #include "symbol.h"
 #include "symbol_table.h"
@@ -71,6 +73,9 @@ enum {
   kSym_default_argument = 40,
   kSym_attributes = 42,
   kSym_is_exported = 41,
+  kSym_is_concept = 43,
+  kSym_variable_template = 44,
+  kSym_concept_definition = 45,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -117,6 +122,9 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_overload_next, "overload_next"},
     {kSym_default_argument, "default_argument"},
     {kSym_attributes, "attributes"},
+    {kSym_is_concept, "is_concept"},
+    {kSym_variable_template, "variable_template"},
+    {kSym_concept_definition, "concept_definition"},
 };
 
 //
@@ -219,6 +227,60 @@ static void ReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
 }
 
 // ---------------------------------------------------------------------------
+// VariableTemplate (inline sub-message).
+// ---------------------------------------------------------------------------
+enum {
+  kVt_initializer = 1,  // ASTNode ref (unanalyzed initializer expression).
+  kVt_parameters = 2,   // TemplateParameter vector.
+};
+
+static void WriteVariableTemplate(SerializeContext* ctx, WireBuffer* buf,
+                                  int field, VariableTemplate* vt) {
+  WireBuffer sub;
+  WireBufferInitOwned(&sub, 32);
+  SWriteRef(ctx, &sub, kVt_initializer, kSerialKindAST, vt->initializer);
+  SerialWriteTemplateParameterVector(ctx, &sub, kVt_parameters,
+                                     &vt->parameters);
+  WireWriteBytes(buf, field, WireBufferData(&sub), WireBufferSize(&sub));
+  WireBufferDestruct(&sub);
+}
+
+static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
+                                              WireBuffer* in) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return NULL;
+  }
+  // Allocated exactly as the parser does (see syntax.c), so SymbolDestruct
+  // frees it correctly.
+  VariableTemplate* vt = (VariableTemplate*)malloc(sizeof(VariableTemplate));
+  vt->initializer = NULL;
+  VectorInit(&vt->parameters);
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  while (!WireBufferEof(&sub) && !WireBufferHasError(&sub)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(&sub, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kVt_initializer:
+        vt->initializer = (ASTNode*)SReadRef(ctx, &sub, kSerialKindAST);
+        break;
+      case kVt_parameters:
+        SerialReadTemplateParameterVector(ctx, &sub, &vt->parameters);
+        break;
+      default:
+        WireSkip(&sub, wt);
+        break;
+    }
+  }
+  return vt;
+}
+
+// ---------------------------------------------------------------------------
 // Symbol.
 // ---------------------------------------------------------------------------
 static void WriteBoolField(WireBuffer* buf, int field, bool value) {
@@ -262,6 +324,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_is_weak, s->flags.is_weak);
   WriteBoolField(buf, kSym_is_c_linkage, s->flags.is_c_linkage);
   WriteBoolField(buf, kSym_is_exported, s->flags.is_exported);
+  WriteBoolField(buf, kSym_is_concept, s->flags.is_concept);
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -276,6 +339,11 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SWriteRef(ctx, buf, kSym_default_argument, kSerialKindAST,
             s->default_argument);
   WriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
+  if (s->variable_template != NULL) {
+    WriteVariableTemplate(ctx, buf, kSym_variable_template,
+                          s->variable_template);
+  }
+  SerialWriteConcept(ctx, buf, kSym_concept_definition, s->concept_definition);
   return !WireBufferHasError(buf);
 }
 
@@ -422,6 +490,10 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         WireReadBool(buf, &b);
         s->flags.is_exported = b;
         break;
+      case kSym_is_concept:
+        WireReadBool(buf, &b);
+        s->flags.is_concept = b;
+        break;
       case kSym_alignment:
         WireReadInt32(buf, &s->alignment);
         break;
@@ -454,6 +526,12 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kSym_attributes:
         ReadAttributeVector(ctx, buf, &s->attributes);
+        break;
+      case kSym_variable_template:
+        s->variable_template = ReadVariableTemplate(ctx, buf);
+        break;
+      case kSym_concept_definition:
+        s->concept_definition = SerialReadConcept(ctx, buf);
         break;
       default:
         WireSkip(buf, wt);

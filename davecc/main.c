@@ -96,6 +96,20 @@ static int ParseArg(int i, int argc, char** argv,
       // Get next arg into compiler_args too.
       VectorAppend(compiler_args, argv[i+1]);
         i++;
+    } else if (StringEqual(option, "-Xemit-module") ||
+               StringEqual(option, "-Xload-module")) {
+      // These hidden C++20-module hooks are followed by a module (.dcm) path.
+      // The path does not carry a recognized source extension, so route both
+      // the flag and its value into compiler_args explicitly; otherwise the
+      // path token falls through to the linker and the option ends up
+      // swallowing the following source file as its value.
+      if (i == argc-1) {
+        fprintf(stderr, "%s needs a module path\n", option->value);
+        exit(1);
+      }
+      VectorAppend(compiler_args, argv[i]);
+      VectorAppend(compiler_args, argv[i+1]);
+      i++;
     } else if (StringEqual(option, "-rpath")) {
       // -rpath option is followed by an include dir
       if (i == argc-1) {

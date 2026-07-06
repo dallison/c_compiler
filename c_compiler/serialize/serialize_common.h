@@ -69,4 +69,13 @@ void SerialWriteTemplateParameterVector(SerializeContext* ctx, WireBuffer* buf,
 void SerialReadTemplateParameterVector(DeserializeContext* ctx, WireBuffer* buf,
                                        Vector* out);
 
+// TemplateArgument vector (de)serialization, implemented in type_serialize.c
+// and shared with constraint_serialize.c (concept-id arguments).  The write
+// side takes a `Vector*` of TemplateArgument*; the read side allocates and
+// returns a fresh heap Vector* (NULL on failure/absence).
+void SerialWriteTemplateArgumentVector(SerializeContext* ctx, WireBuffer* buf,
+                                       int field, Vector* v);
+Vector* SerialReadTemplateArgumentVector(DeserializeContext* ctx,
+                                         WireBuffer* in);
+
 #endif /* serialize_common_h */

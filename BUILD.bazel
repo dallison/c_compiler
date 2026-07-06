@@ -293,6 +293,7 @@ cc_library(
     name = "serialize",
     srcs = [
         "c_compiler/serialize/ast_serialize.c",
+        "c_compiler/serialize/constraint_serialize.c",
         "c_compiler/serialize/module_archive.c",
         "c_compiler/serialize/module_install.c",
         "c_compiler/serialize/serialize.c",

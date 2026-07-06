@@ -17,6 +17,7 @@
 
 #include "ast.h"
 #include "compiler.h"
+#include "concepts.h"
 #include "options.h"
 #include "module_archive.h"
 #include "symbol.h"
@@ -126,6 +127,76 @@ static Symbol* BuildFunction(TypeRecord* int_type) {
   add->flags.is_inline_defn = true;
   func_type->info.function.symbol = add;
   return add;
+}
+
+static TemplateParameter* MakeTypeParam(const char* name, int index) {
+  TemplateParameter* p = (TemplateParameter*)calloc(1, sizeof(*p));
+  StringInit(&p->name, name);
+  p->kind = kTemplateParameterType;
+  p->index = index;
+  p->default_template_parameter_index = -1;
+  return p;
+}
+
+// A C++20 concept: `template<typename T> concept Integral = <expr>;`.
+static Symbol* BuildConceptSymbol(TypeRecord* int_type) {
+  Vector* params = NewVector();
+  VectorAppend(params, MakeTypeParam("T", 0));
+  ConstraintExpr* body =
+      NewAtomicConstraint(NewIntConstantASTNode(1, int_type, 0), 0);
+  Concept* concept = NewConcept("Integral", params, body, 0);
+
+  Symbol* sym = NewSymbol("Integral", NULL, STO(implicit));
+  sym->namespace_ = compiler->global_namespace;
+  sym->flags.is_concept = true;
+  sym->concept_definition = concept;
+  return sym;
+}
+
+// A C++ variable template: `template<typename T> constexpr int pi_v = 7;`.
+static Symbol* BuildVariableTemplate(TypeRecord* int_type) {
+  Symbol* sym = NewSymbol("pi_v", int_type, STO(static));
+  sym->namespace_ = compiler->global_namespace;
+  sym->flags.is_template = true;
+
+  VariableTemplate* vt = (VariableTemplate*)malloc(sizeof(VariableTemplate));
+  vt->initializer = NewIntConstantASTNode(7, int_type, 0);
+  VectorInit(&vt->parameters);
+  VectorAppend(&vt->parameters, MakeTypeParam("T", 0));
+  sym->variable_template = vt;
+  return sym;
+}
+
+// A constrained function template whose requires-clause is a concept-id
+// referencing `concept_sym`, whose template parameter carries its own atomic
+// constraint, and whose instantiation cache holds one entry.
+static Symbol* BuildConstrainedFunction(TypeRecord* int_type,
+                                        Symbol* concept_sym) {
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, int_type);
+  FunctionInfo* fn = &func_type->info.function;
+
+  TemplateParameter* tp = MakeTypeParam("T", 0);
+  tp->associated_constraint =
+      NewAtomicConstraint(NewIntConstantASTNode(1, int_type, 0), 0);
+  VectorAppend(&fn->template_parameters, tp);
+  fn->template_parameter_count = 1;
+
+  Vector* args = NewVector();
+  TemplateArgument* arg = (TemplateArgument*)calloc(1, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->type = int_type;
+  arg->template_parameter_index = 0;
+  VectorAppend(args, arg);
+  fn->associated_constraint = NewConceptIdConstraint(concept_sym, args, 0);
+
+  Symbol* sym = NewSymbol("constrained_fn", func_type, STO(implicit));
+  sym->namespace_ = compiler->global_namespace;
+  fn->symbol = sym;
+
+  // Cache entry (a Symbol reference, shared with the concept root here).
+  VectorAppend(&fn->template_instantiations, concept_sym);
+  return sym;
 }
 
 // --- Assertions -------------------------------------------------------------
@@ -240,6 +311,89 @@ static void CheckFunction(Symbol* add) {
   }
 }
 
+static void CheckConceptSymbol(Symbol* sym) {
+  CHECK(sym != NULL);
+  if (sym == NULL) return;
+  CHECK(StringEqual(&sym->name, "Integral"));
+  CHECK(sym->flags.is_concept);
+  Concept* concept = sym->concept_definition;
+  CHECK(concept != NULL);
+  if (concept == NULL) return;
+  CHECK(StringEqual(&concept->name, "Integral"));
+  CHECK(concept->template_parameters != NULL &&
+        concept->template_parameters->length == 1);
+  if (concept->template_parameters != NULL &&
+      concept->template_parameters->length == 1) {
+    TemplateParameter* p =
+        (TemplateParameter*)VectorGet(concept->template_parameters, 0);
+    CHECK(StringEqual(&p->name, "T"));
+    CHECK(p->kind == kTemplateParameterType);
+  }
+  CHECK(concept->constraint != NULL &&
+        concept->constraint->kind == kConstraintAtomic);
+  if (concept->constraint != NULL &&
+      concept->constraint->kind == kConstraintAtomic) {
+    CHECK(concept->constraint->as.atomic.expr != NULL);
+  }
+}
+
+static void CheckVariableTemplate(Symbol* sym) {
+  CHECK(sym != NULL);
+  if (sym == NULL) return;
+  CHECK(StringEqual(&sym->name, "pi_v"));
+  CHECK(sym->flags.is_template);
+  VariableTemplate* vt = sym->variable_template;
+  CHECK(vt != NULL);
+  if (vt == NULL) return;
+  CHECK(vt->initializer != NULL &&
+        vt->initializer->op == AST_OP(number));
+  CHECK(vt->parameters.length == 1);
+  if (vt->parameters.length == 1) {
+    TemplateParameter* p = (TemplateParameter*)VectorGet(&vt->parameters, 0);
+    CHECK(StringEqual(&p->name, "T"));
+  }
+}
+
+static void CheckConstrainedFunction(Symbol* sym, Symbol* concept_sym) {
+  CHECK(sym != NULL);
+  if (sym == NULL) return;
+  CHECK(StringEqual(&sym->name, "constrained_fn"));
+  CHECK(sym->type != NULL && sym->type->declarator == kDeclFunction);
+  if (sym->type == NULL) return;
+  FunctionInfo* fn = &sym->type->info.function;
+
+  // Template parameter with its own atomic constraint.
+  CHECK(fn->template_parameters.length == 1);
+  if (fn->template_parameters.length == 1) {
+    TemplateParameter* p =
+        (TemplateParameter*)VectorGet(&fn->template_parameters, 0);
+    CHECK(p->associated_constraint != NULL &&
+          p->associated_constraint->kind == kConstraintAtomic);
+  }
+
+  // Requires-clause: a concept-id referencing the shared concept symbol.
+  CHECK(fn->associated_constraint != NULL &&
+        fn->associated_constraint->kind == kConstraintConceptId);
+  if (fn->associated_constraint != NULL &&
+      fn->associated_constraint->kind == kConstraintConceptId) {
+    CHECK(fn->associated_constraint->as.concept_id.concept_symbol ==
+          concept_sym);
+    Vector* args = fn->associated_constraint->as.concept_id.arguments;
+    CHECK(args != NULL && args->length == 1);
+    if (args != NULL && args->length == 1) {
+      TemplateArgument* a = (TemplateArgument*)VectorGet(args, 0);
+      CHECK(a->kind == kTemplateParameterType);
+      CHECK(a->template_parameter_index == 0);
+    }
+  }
+
+  // Instantiation cache entry shared with the concept root.
+  CHECK(fn->template_instantiations.length == 1);
+  if (fn->template_instantiations.length == 1) {
+    CHECK((Symbol*)VectorGet(&fn->template_instantiations, 0) == concept_sym);
+  }
+}
+
 int main(void) {
   Vector options;
   VectorInit(&options);
@@ -257,12 +411,17 @@ int main(void) {
   TypeRecord* const_int = NewTypeRecord(kTypeInt, kQualConst);
   const_int->size = 4;
 
+  Symbol* concept_sym = BuildConceptSymbol(int_type);
+
   Vector roots;
   VectorInit(&roots);
   VectorAppend(&roots, BuildVariable(const_int));
   VectorAppend(&roots, BuildStructVariable(int_type));
   VectorAppend(&roots, BuildEnumVariable());
   VectorAppend(&roots, BuildFunction(int_type));
+  VectorAppend(&roots, concept_sym);
+  VectorAppend(&roots, BuildVariableTemplate(int_type));
+  VectorAppend(&roots, BuildConstrainedFunction(int_type, concept_sym));
 
   char path[4096];
   MakeTempPath(path, sizeof(path));
@@ -282,15 +441,20 @@ int main(void) {
     CHECK(loaded.format_version == MODULE_FORMAT_VERSION);
     CHECK(StringEqual(&loaded.module_name, "roundtrip_module"));
     CHECK(StringEqual(&loaded.target_triple, "x86_64-unknown-none"));
-    CHECK(loaded.root_symbols.length == 4);
-    if (loaded.root_symbols.length == 4) {
+    CHECK(loaded.root_symbols.length == 7);
+    if (loaded.root_symbols.length == 7) {
       CheckVariable((Symbol*)VectorGet(&loaded.root_symbols, 0));
       CheckStructVariable((Symbol*)VectorGet(&loaded.root_symbols, 1));
       CheckEnumVariable((Symbol*)VectorGet(&loaded.root_symbols, 2));
       CheckFunction((Symbol*)VectorGet(&loaded.root_symbols, 3));
+      Symbol* loaded_concept = (Symbol*)VectorGet(&loaded.root_symbols, 4);
+      CheckConceptSymbol(loaded_concept);
+      CheckVariableTemplate((Symbol*)VectorGet(&loaded.root_symbols, 5));
+      CheckConstrainedFunction((Symbol*)VectorGet(&loaded.root_symbols, 6),
+                               loaded_concept);
     }
     // Shared namespace round-trips to a single shared object.
-    if (loaded.root_symbols.length == 4) {
+    if (loaded.root_symbols.length == 7) {
       Symbol* a = (Symbol*)VectorGet(&loaded.root_symbols, 0);
       Symbol* p = (Symbol*)VectorGet(&loaded.root_symbols, 1);
       CHECK(a->namespace_ != NULL && a->namespace_ == p->namespace_);
