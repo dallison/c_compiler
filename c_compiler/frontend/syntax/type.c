@@ -3207,6 +3207,22 @@ static void DependentExpressionContainsParameterVisitor(ASTNode* node,
   if (id->symbol == NULL) {
     return;
   }
+  // A qualified-id whose nested-name-specifier is *not* dependent
+  // (`kASTQualifiedName` present, `kASTDependentQualifiedName` cleared) names a
+  // member of a concrete type. Per [temp.dep.constexpr] such a name is not
+  // value-dependent even when the underlying member symbol inherently carries a
+  // dependent value (e.g. `integral_constant<T, v>::value`, whose enumerator is
+  // defined in terms of the parameter `v`): once the qualifier is concrete the
+  // value is fixed, or the access is simply ill-formed and must be diagnosed --
+  // it must not be treated as "still dependent" and deferred forever. Only the
+  // name's own explicit template arguments can keep it dependent.
+  if ((node->flags & kASTQualifiedName) != 0 &&
+      (node->flags & kASTDependentQualifiedName) == 0) {
+    if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+      *(bool*)data = true;
+    }
+    return;
+  }
   if ((id->symbol->flags.is_template_parameter &&
        id->symbol->template_parameter_index >= 0) ||
       id->symbol->dependent_value_template_parameter_index >= 0 ||
