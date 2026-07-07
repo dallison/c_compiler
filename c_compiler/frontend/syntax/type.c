@@ -3207,22 +3207,6 @@ static void DependentExpressionContainsParameterVisitor(ASTNode* node,
   if (id->symbol == NULL) {
     return;
   }
-  // A qualified-id whose nested-name-specifier is *not* dependent
-  // (`kASTQualifiedName` present, `kASTDependentQualifiedName` cleared) names a
-  // member of a concrete type. Per [temp.dep.constexpr] such a name is not
-  // value-dependent even when the underlying member symbol inherently carries a
-  // dependent value (e.g. `integral_constant<T, v>::value`, whose enumerator is
-  // defined in terms of the parameter `v`): once the qualifier is concrete the
-  // value is fixed, or the access is simply ill-formed and must be diagnosed --
-  // it must not be treated as "still dependent" and deferred forever. Only the
-  // name's own explicit template arguments can keep it dependent.
-  if ((node->flags & kASTQualifiedName) != 0 &&
-      (node->flags & kASTDependentQualifiedName) == 0) {
-    if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
-      *(bool*)data = true;
-    }
-    return;
-  }
   if ((id->symbol->flags.is_template_parameter &&
        id->symbol->template_parameter_index >= 0) ||
       id->symbol->dependent_value_template_parameter_index >= 0 ||
@@ -6825,8 +6809,36 @@ static bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right) {
   return true;
 }
 
+/* True when a cached instantiation `candidate` corresponds to the freshly
+ * requested instantiation `type` with the same template `args`. The template
+ * arguments already uniquely identify an instantiation, but the cheap identity
+ * check compares the whole function type. That fails for a function with a
+ * deduced (`auto`) return: the return type is filled in lazily by analyzing the
+ * body *after* the instantiation is cached, so a later request for the same
+ * instantiation arrives with an as-yet-undeduced `auto` return and would not
+ * TypeEqual the cached, now-deduced instantiation. Accept a match that differs
+ * only in an auto-deduced return; otherwise a duplicate instantiation is
+ * created whose body is never cloned (its asm name is already pending), leaving
+ * its return type unresolved. */
+static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
+                                                 TypeRecord* type,
+                                                 Vector* args) {
+  if (candidate == NULL || candidate->flags.is_template ||
+      candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+      !TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+    return false;
+  }
+  if (TypeEqual(candidate->type, type)) {
+    return true;
+  }
+  return TypeIsFunction(type) &&
+         (candidate->type->info.function.is_auto_return_deduced ||
+          TypeContainsAuto(candidate->type->next) ||
+          TypeContainsAuto(type->next));
+}
+
 /* Search a function template's instantiation overload chain for one whose type
- * and template arguments match exactly (cache lookup), or NULL. */
+ * and template arguments match (cache lookup), or NULL. */
 static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
                                                  TypeRecord* type,
                                                  Vector* args) {
@@ -6835,21 +6847,16 @@ static Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
   }
   for (Symbol* candidate = templ->overload_next; candidate != NULL;
        candidate = candidate->overload_next) {
-    if (!candidate->flags.is_template && candidate->type != NULL &&
-        TypeIsFunction(candidate->type) &&
+    if (candidate->type != NULL &&
         candidate->type->info.function.template_origin == templ &&
-        TypeEqual(candidate->type, type) &&
-        TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+        FunctionTemplateInstantiationMatches(candidate, type, args)) {
       return candidate;
     }
   }
   Vector* cache = &templ->type->info.function.template_instantiations;
   for (size_t i = 0; i < cache->length; i++) {
     Symbol* candidate = cache->value.p[i];
-    if (candidate != NULL && !candidate->flags.is_template &&
-        candidate->type != NULL &&
-        TypeIsFunction(candidate->type) && TypeEqual(candidate->type, type) &&
-        TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+    if (FunctionTemplateInstantiationMatches(candidate, type, args)) {
       return candidate;
     }
   }
