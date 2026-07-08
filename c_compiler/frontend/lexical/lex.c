@@ -1650,8 +1650,14 @@ void LexReadLine(Lex* lex) {
 
 // Skips spaces in the input.
 void LexSkipSpacesAndComments(Lex* lex) {
-  while (!SourceEof(lex->source)) {
-    while (!SourceEof(lex->source) && lex->pos < lex->line.length) {
+  // SourceEof() (feof) can already report true once the final line has been
+  // read into lex->line while that line still holds unconsumed content: this
+  // happens for a source file with no trailing newline.  Space/comment skipping
+  // must therefore be driven by the buffered line position (pos < line.length),
+  // not by SourceEof; the SourceEof checks below only decide whether another
+  // line may be read.
+  while (!SourceEof(lex->source) || lex->pos < lex->line.length) {
+    while (lex->pos < lex->line.length) {
       char ch = lex->line.value[lex->pos];
 
       // Check for a comment.
