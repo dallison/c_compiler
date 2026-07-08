@@ -4944,9 +4944,106 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
   return true;
 }
 
+// Parses a template template parameter (`template <parameter-list> class C`).
+// The construct is consumed cleanly and `C` is introduced as a type-parameter
+// placeholder so later references resolve, but full support -- using `C<...>`
+// as a template-id and binding a class-template argument -- is not implemented
+// yet, so a clear diagnostic is reported instead of the parser crashing.
+static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
+                                           int base) {
+  Lex* lex = syntax->lex;
+  int index = base + (int)params->length;
+  SourceLocation location = lex->current_token_location;
+  LexNextToken(lex);  // template
+
+  // Skip the inner template-parameter-list by balancing angle brackets.  A full
+  // parse is avoided because it is discarded anyway and because the inner list
+  // legitimately contains unnamed parameters (`template <class> class C`) that
+  // the ordinary parameter parser would reject with a misleading diagnostic.
+  if (LexLookingAt(lex, TOK(less))) {
+    int depth = 0;
+    while (!LexEof(lex)) {
+      Token t = lex->current_token;
+      if (t == TOK(less)) {
+        depth++;
+      } else if (t == TOK(lessless)) {
+        depth += 2;
+      } else if (t == TOK(greater)) {
+        depth--;
+      } else if (t == TOK(greatergreater) || t == TOK(greatergreatereq)) {
+        depth -= 2;
+      } else if (t == TOK(greatereq)) {
+        depth -= 1;
+      }
+      LexNextToken(lex);
+      if (depth <= 0) {
+        break;
+      }
+    }
+  } else {
+    SyntaxError(syntax, "Expected '<' in template template parameter");
+  }
+
+  if (!LexMatch(lex, TOK(class)) && !LexMatch(lex, TOK(typename))) {
+    SyntaxError(syntax,
+                "Expected 'class' or 'typename' in template template parameter");
+    SyntaxRecover(syntax, TC(closebra));
+    return false;
+  }
+  bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
+
+  String param_name;
+  StringInit(&param_name, "");
+  if (LexLookingAt(lex, TOK(identifier))) {
+    StringSet(&param_name, lex->spelling.value);
+    LexNextToken(lex);
+  }
+
+  SyntaxError(syntax, "template template parameters are not yet supported");
+
+  // Register the name as a type-parameter placeholder so downstream references
+  // resolve and index bookkeeping stays consistent.  The TU already carries an
+  // error, so no code is generated regardless.
+  if (param_name.length > 0) {
+    TypeRecord* placeholder =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    placeholder->template_parameter_index = index;
+    Symbol* param = NewSymbol(param_name.value, placeholder, STO(typedef));
+    param->flags.invented = true;
+    param->flags.is_template_parameter = true;
+    param->flags.is_template_type_parameter = true;
+    param->flags.is_parameter_pack = is_parameter_pack;
+    param->template_parameter_index = index;
+    param->location = location;
+    if (!SyntaxAddSymbol(syntax, param)) {
+      SymbolDelete(param);
+    }
+  }
+
+  // Consume an optional default template argument in this error-recovery path.
+  if (LexMatch(lex, TOK(equal))) {
+    while (!LexEof(lex) && !LexLookingAt(lex, TOK(comma)) &&
+           !LexLookingAt(lex, TOK(greater)) &&
+           !LexLookingAt(lex, TOK(greatergreater)) &&
+           !LexLookingAt(lex, TOK(greatergreatereq))) {
+      LexNextToken(lex);
+    }
+  }
+
+  VectorAppend(params,
+               NewTemplateParameter(param_name.value, kTemplateParameterType,
+                                    is_parameter_pack, NULL, NULL, false, 0, -1,
+                                    index));
+  StringDestruct(&param_name);
+  return true;
+}
+
 static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   Lex* lex = syntax->lex;
   int index = base + (int)params->length;
+  if (LexLookingAt(lex, TOK(template))) {
+    return ParseTemplateTemplateParameter(syntax, params, base);
+  }
   if (ParseConstrainedTemplateTypeParameter(syntax, params, base)) {
     return true;
   }
