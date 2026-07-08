@@ -381,10 +381,17 @@ static struct {
 };
 
 static IROpcode MoveToTmpOpcode(TypeRecord* type) {
-  for (size_t i = 0; mov_opcodes[i].type_func != NULL; i++) {
+  for (size_t i = 0; type != NULL && mov_opcodes[i].type_func != NULL; i++) {
     if (mov_opcodes[i].type_func(type)) {
       return mov_opcodes[i].opcode;
     }
+  }
+  // A NULL/unclassifiable type only reaches here during speculative constant
+  // evaluation of a not-yet-fully-analyzed body (e.g. a forward-declared
+  // mutually-recursive constexpr callee); recover instead of aborting.  See
+  // Compiler::constexpr_codegen_recover.
+  if (compiler->constexpr_codegen_recover) {
+    longjmp(compiler->constexpr_codegen_abort, 1);
   }
   assert(false);
   return IR_OP(nop);
@@ -2731,6 +2738,15 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
   }
 
+  // During speculative constant evaluation an expression may lower to a
+  // result with no type because the enclosing (constexpr) function body is not
+  // yet fully analyzed -- e.g. a recursive call reached while that same body's
+  // conditional operator is still mid-analysis, so its common type has not been
+  // computed.  Recover gracefully instead of aborting; see
+  // Compiler::constexpr_codegen_recover.
+  if (result->type == NULL && compiler->constexpr_codegen_recover) {
+    longjmp(compiler->constexpr_codegen_abort, 1);
+  }
   assert(result->type != NULL);
   return result;
 }
