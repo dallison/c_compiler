@@ -128,6 +128,15 @@ bool LexMatchIdentifier(Lex* lex, String* spelling);
 
 bool LexLookingAt(Lex* lex, Token tok);
 
+// Consumes exactly one closing '>' when a template-argument or
+// template-parameter list is being closed.  Because the lexer greedily merges
+// consecutive '>' / '=' characters, the current token may be `>>`, `>>=` or
+// `>=`; this splits off a single '>' and re-interprets the remainder as the
+// next token (`>>` -> `>`, `>>=` -> `>=`, `>=` -> `=`).  Returns true if a '>'
+// was consumed, or false (leaving the token untouched) if the current token
+// does not begin with '>'.  See C++11 CWG N1757.
+bool LexConsumeClosingAngle(Lex* lex);
+
 // Returns the byte length of a valid UTF-8/ASCII identifier character at `pos`,
 // or zero if the byte sequence is not valid at that identifier position.
 size_t LexIdentifierCharByteCount(const char* text, size_t pos, size_t length,

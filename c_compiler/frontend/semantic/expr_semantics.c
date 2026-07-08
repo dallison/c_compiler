@@ -1389,14 +1389,65 @@ static bool IsZeroIntegerConstant(ASTNode* node) {
          ((ConstantASTNode*)node)->value.ivalue == 0;
 }
 
+// Returns true if `op_name` is a viable binary operator for the ordered operand
+// pair `(left, right)`: either a member operator on `left`'s class callable with
+// `right`, or a free operator found by ordinary lookup / ADL over `(left,
+// right)`.  Used to decide the orientation of a C++20 rewritten comparison
+// without committing to (and possibly mis-diagnosing) a non-viable rewrite.
+static bool BinaryOperatorViableForOperands(ASTNode* left, ASTNode* right,
+                                            const char* op_name) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(left->type) && left->type->info.struct_info != NULL) {
+    StructMember* first =
+        FindStructMemberByName(left->type->info.struct_info, op_name);
+    if (first != NULL && first->is_member_function) {
+      Vector children;
+      VectorInit(&children);
+      VectorAppend(&children, right);
+      VectorASTNode call = {0};
+      call.children = &children;
+      bool viable = false;
+      for (StructMember* candidate = first; candidate != NULL;
+           candidate = candidate->overload_next) {
+        if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+            !TypeIsFunction(candidate->symbol->type)) {
+          continue;
+        }
+        if (candidate->symbol->flags.is_template ||
+            FunctionCallScore(candidate->symbol->type, &call,
+                              /*first_formal_arg=*/1) >= 0) {
+          viable = true;
+          break;
+        }
+      }
+      VectorDestruct(&children);
+      if (viable) {
+        return true;
+      }
+    }
+  }
+  String name;
+  StringInit(&name, op_name);
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, left);
+  VectorAppend(&actuals, right);
+  Symbol* function =
+      ResolveFreeFunctionWithADL(&name, &actuals, /*diagnose_ambiguous=*/false);
+  VectorDestruct(&actuals);
+  StringDestruct(&name);
+  return function != NULL && TypeIsFunction(function->type);
+}
+
 // C++20 rewritten comparison candidates ([over.match.oper]): when a relational
 // or `!=` operator has a class operand with no directly-usable overload, rewrite
 // it in terms of `operator<=>` / `operator==`:
-//   a @ b   (@ in < > <= >=)  ->  (a <=> b) @ 0
-//   a != b                    ->  !(a == b)
-// `==` itself is left to operator== (no <=> rewrite), matching the standard.
-// (Reversed candidates such as `0 @ (b <=> a)` are not synthesized; symmetric
-// member/free `operator<=>` and `operator==` cover the common cases.)
+//   a @ b   (@ in < > <= >=)  ->  (a <=> b) @ 0   or   0 @ (b <=> a) reversed
+//   a != b                    ->  !(a == b)       (the `==` may reverse below)
+// `==` itself is left to operator== (see TryReversedComparisonOperator for the
+// reversed `b == a` candidate), matching the standard.
 static ASTNode* TryRewriteComparisonOperator(BinaryASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL || node->right == NULL) {
     return NULL;
@@ -1417,15 +1468,60 @@ static ASTNode* TryRewriteComparisonOperator(BinaryASTNode* node) {
   }
   if (op == AST_OP(less) || op == AST_OP(greater) || op == AST_OP(lesseq) ||
       op == AST_OP(greatereq)) {
+    // Prefer the as-written rewrite `(a <=> b) @ 0`.  Only when that spaceship
+    // is not viable but the reversed one is, synthesize `0 @ (b <=> a)`.
+    bool forward_viable =
+        BinaryOperatorViableForOperands(node->left, node->right, "operator<=>");
+    bool reverse_viable =
+        !forward_viable &&
+        BinaryOperatorViableForOperands(node->right, node->left, "operator<=>");
     ASTNode* left = ASTNodeMove(node->left);
     ASTNode* right = ASTNodeMove(node->right);
-    ASTNode* cmp = NewBinaryASTNode(AST_OP(spaceship), NULL, loc, left, right);
     ASTNode* zero = NewIntConstantASTNode(
         0, NewTypeRecordWithSize(kTypeInt, kQualPlain), loc);
-    ASTNode* rewritten = NewBinaryASTNode(op, NULL, loc, cmp, zero);
+    ASTNode* rewritten;
+    if (reverse_viable) {
+      ASTNode* cmp =
+          NewBinaryASTNode(AST_OP(spaceship), NULL, loc, right, left);
+      rewritten = NewBinaryASTNode(op, NULL, loc, zero, cmp);
+    } else {
+      ASTNode* cmp =
+          NewBinaryASTNode(AST_OP(spaceship), NULL, loc, left, right);
+      rewritten = NewBinaryASTNode(op, NULL, loc, cmp, zero);
+    }
     return ReplaceBinaryWithCall(node, rewritten);
   }
   return NULL;
+}
+
+// C++20 reversed `==` candidate ([over.match.oper]): when `a == b` has no viable
+// as-written `operator==`, try the reversed `b == a` (member on `b`'s class or a
+// free operator matching the swapped operands).  The reversed node is flagged so
+// it is not itself reversed again.  Reversed `!=` is handled by the `==` rewrite
+// above whose inner `a == b` reaches this same path.
+static ASTNode* TryReversedComparisonOperator(BinaryASTNode* node) {
+  if (!CompilerIsCXX() || node->left == NULL || node->right == NULL) {
+    return NULL;
+  }
+  if ((node->base.flags & kASTReversedComparison) != 0) {
+    return NULL;
+  }
+  if (node->base.op != AST_OP(equal)) {
+    return NULL;
+  }
+  if (!TypeIsStructOrUnion(node->left->type) &&
+      !TypeIsStructOrUnion(node->right->type)) {
+    return NULL;
+  }
+  if (!BinaryOperatorViableForOperands(node->right, node->left, "operator==")) {
+    return NULL;
+  }
+  SourceLocation loc = node->base.location;
+  ASTNode* left = ASTNodeMove(node->left);
+  ASTNode* right = ASTNodeMove(node->right);
+  ASTNode* reversed = NewBinaryASTNode(AST_OP(equal), NULL, loc, right, left);
+  reversed->flags |= kASTReversedComparison;
+  return ReplaceBinaryWithCall(node, reversed);
 }
 
 static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
@@ -1439,6 +1535,10 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNode* rewritten = TryRewriteComparisonOperator(node);
   if (rewritten != NULL) {
     return rewritten;
+  }
+  ASTNode* reversed = TryReversedComparisonOperator(node);
+  if (reversed != NULL) {
+    return reversed;
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
@@ -2713,7 +2813,8 @@ static bool FunctionIsSourceLocationCurrent(TypeRecord* func) {
   }
   Struct* owner = func->info.function.cxx_member_owner;
   return owner != NULL && owner->tag_name != NULL &&
-         StringEqual(owner->tag_name, "source_location");
+         StringEqual(owner->tag_name, "source_location") &&
+         SymbolIsInStdNamespace(owner->tag_symbol);
 }
 
 static ASTNode* NewSourceLocationDefaultArgument(Symbol* formal,
@@ -4404,9 +4505,16 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
     TypeRecord* target =
         formal != NULL && TypeIsReference(formal->type) ? formal->type->next
                                                         : formal->type;
-    if (formal != NULL && actual != NULL &&
+    // An `initializer_list<U>` parameter is satisfied either by a braced-init
+    // argument (`{1, 2, 3}`) or by an argument that is already an
+    // `initializer_list<V>` (e.g. forwarding a bound `init` parameter through a
+    // second member template); reject only arguments that are neither.
+    if (formal != NULL && actual != NULL && actual->type != NULL &&
         TypeIsCXXInitializerList(target) &&
-        actual->op != AST_OP(braced_init)) {
+        actual->op != AST_OP(braced_init) &&
+        !TypeIsCXXInitializerList(TypeIsReference(actual->type)
+                                      ? actual->type->next
+                                      : actual->type)) {
       return NULL;
     }
   }
@@ -5383,6 +5491,17 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   num_actual_args = node->children->length;
+  if (getenv("DBG_CALL") && node->left != NULL && node->left->type != NULL) {
+    TypeRecord* lt = node->left->type;
+    fprintf(stderr,
+            "DBG_CALL non-func callee op=%d decl=%d unknown=%d tpi=%d "
+            "containsTP=%d next_decl=%d next_tpi=%d next_unknown=%d\n",
+            (int)node->left->op, (int)lt->declarator, (int)TypeIsUnknown(lt),
+            lt->template_parameter_index, (int)TypeContainsTemplateParameter(lt),
+            lt->next ? (int)lt->next->declarator : -1,
+            lt->next ? lt->next->template_parameter_index : -99,
+            lt->next ? (int)TypeIsUnknown(lt->next) : -1);
+  }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));

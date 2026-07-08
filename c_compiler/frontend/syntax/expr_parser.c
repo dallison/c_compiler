@@ -1076,7 +1076,11 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   
   TypeRecord* array =
     NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
-  TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
+  // In C++ a narrow string literal has type `const char[N]`; in C it is a
+  // non-const `char[N]` (modifying it is undefined behavior, but the type is
+  // not const-qualified).
+  TypeRecord* type = NewTypeRecordWithSize(
+      kTypeChar, CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, type);
   TypeRecordCalculateSize(array);
   return NewStringConstantASTNode(contents, array,
@@ -1483,6 +1487,7 @@ static TemplateArgument* NewLambdaTemplateParameterTypeArgument(int index,
   arg->kind = kTemplateParameterType;
   arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
   arg->template_parameter_index = index;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -1517,6 +1522,23 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
     return false;
   }
 
+  // Leading cv-qualifiers of a `const auto&` / `volatile auto` parameter are
+  // consumed speculatively and rewound if no placeholder follows.
+  LexCheckpoint cv_checkpoint;
+  LexCheckpointSave(syntax->lex, &cv_checkpoint);
+  int placeholder_qualifiers = kQualPlain;
+  while (true) {
+    if (LexLookingAt(syntax->lex, TOK(const))) {
+      placeholder_qualifiers |= kQualConst;
+      LexNextToken(syntax->lex);
+    } else if (LexLookingAt(syntax->lex, TOK(volatile))) {
+      placeholder_qualifiers |= kQualVolatile;
+      LexNextToken(syntax->lex);
+    } else {
+      break;
+    }
+  }
+
   Symbol* concept_symbol = NULL;
   SourceLocation constraint_location = syntax->lex->current_token_location;
   Vector* concept_arguments = NULL;
@@ -1548,14 +1570,17 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   }
 
   if (concept_symbol == NULL && !LexLookingAt(syntax->lex, TOK(auto))) {
+    LexCheckpointRestore(syntax->lex, &cv_checkpoint);
+    LexCheckpointDestruct(&cv_checkpoint);
     return false;
   }
+  LexCheckpointDestruct(&cv_checkpoint);
   LexNextToken(syntax->lex);  // auto
 
   int index = syntax->current_template_parameter_count +
               (int)func->info.function.template_parameters.length;
   TypeRecord* placeholder =
-      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers);
   placeholder->template_parameter_index = index;
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
@@ -1763,9 +1788,19 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
 // `this` parameter is what later lets the body reach capture fields.
 static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
                                      TypeRecord* return_type, bool is_mutable,
+                                     Vector* explicit_template_params,
                                      SourceLocation location) {
   Struct* closure = closure_type->info.struct_info;
   TypeRecord* func = NewFunctionTypeRecord();
+  // A C++20 explicit template-parameter-list (`[]<class T>(...)`) precedes the
+  // parameters; its parameters lead the operator()'s template parameters so
+  // any abbreviated `auto` parameters that follow are numbered after them.
+  if (explicit_template_params != NULL) {
+    for (size_t i = 0; i < explicit_template_params->length; i++) {
+      VectorAppend(&func->info.function.template_parameters,
+                   explicit_template_params->value.p[i]);
+    }
+  }
   ParseLambdaParameterList(syntax, func, TC(closebra));
   bool is_constexpr = false;
   bool is_noexcept = false;
@@ -2028,11 +2063,33 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
 
   TypeRecord* closure_type = NULL;
   NewLambdaClosureTag(syntax, location, &closure_type);
+
+  // C++20 generic lambda with an explicit template-parameter-list:
+  // `[captures]<template-params>(params)...`.  The parameters must be in scope
+  // for the parameter list, trailing return type, requires-clause and body, so
+  // open a scope spanning all of them and close it after the body is parsed.
+  Vector* explicit_template_params = NULL;
+  bool opened_template_scope = false;
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      LexLookingAt(syntax->lex, TOK(less))) {
+    SyntaxOpenScope(syntax);
+    opened_template_scope = true;
+    explicit_template_params = SyntaxParseTemplateParameterListWithBase(
+        syntax, syntax->current_template_parameter_count);
+  }
+
   Symbol* call_operator =
       NewLambdaCallOperator(syntax, closure_type,
                             NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                            /*is_mutable=*/false, location);
+                            /*is_mutable=*/false, explicit_template_params,
+                            location);
   ParseLambdaBody(syntax, call_operator, &captures, followers);
+  if (opened_template_scope) {
+    // The TemplateParameter objects were transferred into the operator()'s
+    // template-parameter list; free only the vector container here.
+    VectorDelete(explicit_template_params);
+    SyntaxCloseScope(syntax);
+  }
   if (capture_default != kLambdaCaptureDefaultNone) {
     LambdaCaptureScan scan = {&captures, call_operator->type, capture_default};
     ASTNodeVisit(call_operator->type->info.function.body,
@@ -2069,20 +2126,28 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   // expression.
   if (syntax->found_open_paren || LexMatch(lex, TOK(lparen))) {
     syntax->found_open_paren = false;
+    // A parenthesized sub-expression is a fresh top level: any '>' / '>>'
+    // inside it is a relational/shift operator, not a template-list closer, so
+    // suppress the template-argument context until the matching ')'.
+    bool saved_parsing_template_argument = syntax->parsing_template_argument;
+    syntax->parsing_template_argument = false;
     // GCC statement expression: ( { statements } ).  The value is that of the
     // last statement if it is an expression statement.
     if (LexLookingAt(lex, TOK(lbrace))) {
       ASTNode* compound = SyntaxParseStatement(syntax, followers | TC(closebra));
       SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      syntax->parsing_template_argument = saved_parsing_template_argument;
       return NewUnaryASTNode(AST_OP(stmt_expr), NULL,
                              syntax->lex->current_token_location, compound);
     }
     ASTNode* fold = TryParseCXXFoldExpression(syntax, followers);
     if (fold != NULL) {
+      syntax->parsing_template_argument = saved_parsing_template_argument;
       return fold;
     }
     ASTNode* node = SyntaxParseExpression(syntax, followers | TC(closebra));
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
+    syntax->parsing_template_argument = saved_parsing_template_argument;
     return node;
   }
 
@@ -3992,7 +4057,7 @@ static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
   }
   TypeParserDestruct(&parser);
 
-  SyntaxNeedBracket(syntax, TOK(greater), followers);
+  SyntaxNeedTemplateClose(syntax, followers);
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
   ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(closebra));
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
@@ -4190,7 +4255,12 @@ static ASTNode* ParseShiftExpression(Syntax* syntax, TokenClass followers) {
       result =
           NewBinaryASTNode(AST_OP(lshift), NULL,
                            syntax->lex->current_token_location, result, right);
-    } else if (LexMatch(syntax->lex, TOK(greatergreater))) {
+    } else if (!syntax->parsing_template_argument &&
+               LexMatch(syntax->lex, TOK(greatergreater))) {
+      // Inside a template-argument list a top-level `>>` closes two nested
+      // template-ids rather than acting as a right-shift; leave it for the
+      // list's closer (see SyntaxNeedTemplateClose).  A `>>` that is genuinely
+      // a shift must be parenthesized, which resets parsing_template_argument.
       ASTNode* right = ParseAdditiveExpression(syntax, followers);
       result =
           NewBinaryASTNode(AST_OP(rshift), NULL,
@@ -4230,7 +4300,12 @@ static ASTNode* ParseRelationalExpression(Syntax* syntax,
           NewBinaryASTNode(AST_OP(lesseq), NULL,
                            syntax->lex->current_token_location, result, right);
     } else if (syntax->parsing_template_argument &&
-               LexLookingAt(syntax->lex, TOK(greater))) {
+               (LexLookingAt(syntax->lex, TOK(greater)) ||
+                LexLookingAt(syntax->lex, TOK(greatergreater)) ||
+                LexLookingAt(syntax->lex, TOK(greatergreatereq)) ||
+                LexLookingAt(syntax->lex, TOK(greatereq)))) {
+      // A top-level '>' (possibly merged into >>, >>= or >=) ends the current
+      // template argument; hand it back to the list's closer.
       break;
     } else if (LexMatch(syntax->lex, TOK(greater))) {
       ASTNode* right = ParseCompareExpression(syntax, followers);

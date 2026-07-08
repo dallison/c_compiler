@@ -205,6 +205,16 @@ union __storage<I, T> {
     return strong_ordering::equal;
   }
 
+  template <class Visitor>
+  auto __visit(Visitor&& vis, size_t index) {
+    return vis(__value_);
+  }
+
+  template <class Visitor>
+  auto __visit(Visitor&& vis, size_t index) const {
+    return vis(__value_);
+  }
+
 };
 
 template <size_t I, class T, class... Rest>
@@ -315,6 +325,22 @@ union __storage<I, T, Rest...> {
       return __value_ <=> other.__value_;
     }
     return __rest_.__compare(other.__rest_, index);
+  }
+
+  template <class Visitor>
+  auto __visit(Visitor&& vis, size_t index) {
+    if (index == I) {
+      return vis(__value_);
+    }
+    return __rest_.__visit(vis, index);
+  }
+
+  template <class Visitor>
+  auto __visit(Visitor&& vis, size_t index) const {
+    if (index == I) {
+      return vis(__value_);
+    }
+    return __rest_.__visit(vis, index);
   }
 
 };
@@ -519,35 +545,6 @@ auto __compare(const __storage<I, T, Rest...>& left,
   return __compare(left.__rest_, right.__rest_, index);
 }
 
-template <size_t I, class T, class Visitor>
-auto __visit_one(Visitor&& visitor, __storage<I, T>& storage, size_t index) {
-  return std::forward<Visitor>(visitor)(storage.__value_);
-}
-
-template <size_t I, class T, class... Rest, class Visitor>
-auto __visit_one(Visitor&& visitor, __storage<I, T, Rest...>& storage,
-                 size_t index) {
-  if (index == I) {
-    return std::forward<Visitor>(visitor)(storage.__value_);
-  }
-  return __visit_one(std::forward<Visitor>(visitor), storage.__rest_, index);
-}
-
-template <size_t I, class T, class Visitor>
-auto __visit_one(Visitor&& visitor, const __storage<I, T>& storage,
-                 size_t index) {
-  return std::forward<Visitor>(visitor)(storage.__value_);
-}
-
-template <size_t I, class T, class... Rest, class Visitor>
-auto __visit_one(Visitor&& visitor, const __storage<I, T, Rest...>& storage,
-                 size_t index) {
-  if (index == I) {
-    return std::forward<Visitor>(visitor)(storage.__value_);
-  }
-  return __visit_one(std::forward<Visitor>(visitor), storage.__rest_, index);
-}
-
 }  // namespace __variant_detail
 
 template <size_t I, class... Types>
@@ -616,7 +613,7 @@ class variant {
   template <class T>
   variant(T&& value) : __index_(variant_npos) {
     this->template __construct<
-        __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>(
+        __variant_detail::__index_of<decay_t<T>, Types...>::value>(
         std::forward<T>(value));
   }
 
@@ -704,13 +701,13 @@ class variant {
   template <class T>
   variant& operator=(T&& value) {
     if (__index_ ==
-        __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value) {
+        __variant_detail::__index_of<decay_t<T>, Types...>::value) {
       *__storage_.template __ptr<
-          __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>() =
+          __variant_detail::__index_of<decay_t<T>, Types...>::value>() =
           std::forward<T>(value);
     } else {
       this->template emplace<
-          __variant_detail::__index_of<remove_cvref_t<T>, Types...>::value>(
+          __variant_detail::__index_of<decay_t<T>, Types...>::value>(
           std::forward<T>(value));
     }
     return *this;
@@ -802,6 +799,16 @@ class variant {
   auto __compare_same_index(const variant& other) const {
     return __storage_.__compare(other.__storage_, __index_);
   }
+
+  template <class Visitor>
+  auto __visit_impl(Visitor&& vis) {
+    return __storage_.__visit(vis, __index_);
+  }
+
+  template <class Visitor>
+  auto __visit_impl(Visitor&& vis) const {
+    return __storage_.__visit(vis, __index_);
+  }
 };
 
 template <class T, class... Types>
@@ -891,6 +898,21 @@ T* get_if(variant<Types...>* value) noexcept {
 template <class T, class... Types>
 const T* get_if(const variant<Types...>* value) noexcept {
   return get_if<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class Visitor, class... Types>
+auto visit(Visitor&& vis, variant<Types...>& var) {
+  return var.__visit_impl(std::forward<Visitor>(vis));
+}
+
+template <class Visitor, class... Types>
+auto visit(Visitor&& vis, const variant<Types...>& var) {
+  return var.__visit_impl(std::forward<Visitor>(vis));
+}
+
+template <class Visitor, class... Types>
+auto visit(Visitor&& vis, variant<Types...>&& var) {
+  return var.__visit_impl(std::forward<Visitor>(vis));
 }
 
 template <class... Types>

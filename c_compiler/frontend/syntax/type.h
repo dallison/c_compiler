@@ -101,6 +101,12 @@ typedef struct TemplateArgument {
   // (see NewSubstitutedTemplateArgument).  Arena-owned (never individually freed);
   // NULL for ordinary, already-evaluated arguments.
   struct ASTNode* dependent_expr;   // @wire 7
+  // Source location of the argument as written in the template *definition*.
+  // Substitution reuses (and copies) this node long after the lexer has moved
+  // on, so diagnostics raised during substitution (e.g. an ill-formed pack
+  // expansion) must report here rather than at the unrelated instantiation
+  // point.  SOURCE_LOCATION_MISSING when unknown (synthesized arguments).
+  SourceLocation location;   // @wire 8
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {
@@ -175,6 +181,7 @@ typedef struct {
   Vector template_parameters;  // TemplateParameter* for defaults.  // @wire 45
   Vector template_instantiations;  // Symbol* cache, not overload candidates. // @wire 46
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
+  struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
 } FunctionInfo;
 
 typedef enum {
@@ -429,6 +436,11 @@ void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
 int TypeRecordAlignment(TypeRecord* record);
 bool TypeContainsTemplateParameter(TypeRecord* type);
+
+// True if `symbol` is declared directly in namespace std.  Used to gate builtin
+// recognition of standard-library types (e.g. std::source_location) so that a
+// user type of the same name in another namespace is not mistaken for it.
+bool SymbolIsInStdNamespace(Symbol* symbol);
 void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);

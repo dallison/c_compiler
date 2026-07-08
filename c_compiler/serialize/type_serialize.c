@@ -68,6 +68,7 @@ enum {
   kTArg_template_parameter_index = 5,
   kTArg_pack_arguments = 6,
   kTArg_dependent_expr = 7,
+  kTArg_location = 8,
 };
 
 //
@@ -150,6 +151,7 @@ enum {
   kFn_template_parameters = 45,
   kFn_template_instantiations = 46,
   kFn_associated_constraint = 47,
+  kFn_explicit_condition = 48,
 };
 
 //
@@ -433,12 +435,14 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
                                 a->pack_arguments);
   }
   SWriteRef(ctx, out, kTArg_dependent_expr, kSerialKindAST, a->dependent_expr);
+  WireWriteUint64(out, kTArg_location, (uint64_t)a->location);
 }
 
 static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
                                               WireBuffer* in) {
   TemplateArgument* a = (TemplateArgument*)calloc(1, sizeof(*a));
   a->template_parameter_index = -1;
+  a->location = SOURCE_LOCATION_MISSING;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {
     int field;
     WireType wt;
@@ -470,6 +474,12 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
       case kTArg_dependent_expr:
         a->dependent_expr = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
+      case kTArg_location: {
+        uint64_t loc = 0;
+        WireReadUint64(in, &loc);
+        a->location = (SourceLocation)loc;
+        break;
+      }
       default:
         WireSkip(in, wt);
         break;
@@ -604,6 +614,8 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   SWriteRefVector(ctx, out, kFn_prototype, kSerialKindSymbol, &f->prototype);
   WireWriteBool(out, kFn_varargs, f->varargs);
   SWriteRef(ctx, out, kFn_body, kSerialKindAST, f->body);
+  SWriteRef(ctx, out, kFn_explicit_condition, kSerialKindAST,
+            f->explicit_condition);
   WireWriteBool(out, kFn_unknown_args, f->unknown_args);
   WireWriteBool(out, kFn_definition, f->definition);
   WireWriteBool(out, kFn_old_style, f->old_style);
@@ -683,6 +695,9 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_body:
         f->body = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        break;
+      case kFn_explicit_condition:
+        f->explicit_condition = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kFn_unknown_args:
         WireReadBool(in, &f->unknown_args);

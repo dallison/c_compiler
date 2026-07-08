@@ -1106,6 +1106,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->current_template_parameter_count = 0;
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
+  syntax->pending_explicit_condition = NULL;
   syntax->context = kParsingFileScope;
   syntax->extern_c_depth = 0;
 }
@@ -1159,6 +1160,10 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->current_template_parameters = NULL;
   ConstraintExprDelete(syntax->current_template_requires_clause);
   syntax->current_template_requires_clause = NULL;
+  // Drop any deferred explicit(bool) condition that was parsed but not attached
+  // to a function (e.g. after error recovery) so it cannot bleed into the next
+  // declaration.  The node itself is arena-owned, so only the handle is cleared.
+  syntax->pending_explicit_condition = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->inline_static_member_definitions);
@@ -1259,6 +1264,24 @@ void SyntaxError(Syntax* syntax, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   VLexError(syntax->lex, format, ap);
+  va_end(ap);
+}
+
+/* Report an error at a specific, previously recorded source location rather
+ * than the lexer's current position.  Used when a diagnostic is discovered long
+ * after the offending token was consumed (e.g. during template substitution),
+ * so the error must point back at where the construct was actually written. */
+void SyntaxErrorAtLocation(Syntax* syntax, SourceLocation location,
+                           const char* format, ...) {
+  if (abort_on_error) {
+    longjmp(error_abort_state, 1);
+  }
+  const char* filename;
+  int lineno, start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  va_list ap;
+  va_start(ap, format);
+  VReportError(filename, lineno, format, ap);
   va_end(ap);
 }
 
@@ -1381,6 +1404,16 @@ static void ExpressionDependencyVisitor(ASTNode* node, void* data,
     *(bool*)data = true;
     return;
   }
+  if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    // `sizeof(T)` / `alignof(T)` on a dependent type is value-dependent even
+    // though the node's own type is size_t; the operand type is retained only
+    // when dependent (see SizeofASTNode::type_operand).
+    SizeofASTNode* s = (SizeofASTNode*)node;
+    if (TypeContainsTemplateParameter(s->type_operand)) {
+      *(bool*)data = true;
+      return;
+    }
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL &&
@@ -1393,7 +1426,7 @@ static void ExpressionDependencyVisitor(ASTNode* node, void* data,
   }
 }
 
-static bool ExpressionIsTemplateDependent(ASTNode* expr) {
+bool ExpressionIsTemplateDependent(ASTNode* expr) {
   bool dependent = false;
   ASTNodeVisit(expr, ExpressionDependencyVisitor, 0, &dependent);
   return dependent;
@@ -3776,6 +3809,17 @@ static bool ParseCXXExplicitDeclarationSpecifier(Syntax* syntax,
   }
   ASTNode* expr =
       SyntaxParseExpression(syntax, TC(closebra) | TC(exprsep));
+  // A value-dependent condition (e.g. `explicit(sizeof(T) > 4)`) is detected on
+  // the parsed (pre-analysis) tree, before constant-folding could collapse it
+  // to the placeholder's size.  The unanalyzed condition is stashed on the
+  // function's FunctionInfo and re-folded per instantiation (see
+  // InstantiateMemberFunctionType); mirrors static_assert deferral.
+  if (syntax->parsing_template_declaration &&
+      ExpressionIsTemplateDependent(expr)) {
+    SyntaxNeedBracket(syntax, TOK(rparen), TC(decl));
+    syntax->pending_explicit_condition = expr;
+    return true;
+  }
   expr = AnalyzeExpression(expr);
   int64_t value = 0;
   bool ok = EvaluateIntegerExpression(expr, &value);
@@ -3973,6 +4017,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     // The old_sym refers to a previous declaration if found.
     Symbol* old_sym = NULL;
     bool overload_was_appended = false;
+    // True once we discover this declarator is an out-of-class definition of a
+    // static data member that was already defined in-class (a C++17 inline /
+    // constexpr static data member).  Such an out-of-class `T C::m;` is a
+    // deprecated non-defining redeclaration and must not emit a second symbol.
+    bool redundant_static_member_redefinition = false;
     if (sym != NULL) {
       // A declaration appearing inside an `extern "C"` linkage specification
       // has C language linkage, so its name is not mangled.
@@ -4003,6 +4052,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       if (TypeIsFunction(sym->type)) {
         sym->type->info.function.is_explicit = is_explicit;
+        if (syntax->pending_explicit_condition != NULL) {
+          sym->type->info.function.explicit_condition =
+              syntax->pending_explicit_condition;
+          syntax->pending_explicit_condition = NULL;
+        }
       }
       if (TryParseCXXDeductionGuide(syntax, sym)) {
         TypeParserReset(parser);
@@ -4064,6 +4118,15 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           parser->cxx_member_definition = matching_member;
           old_sym = matching_member->symbol;
         }
+      }
+      // Capture whether the in-class declaration already defined this static
+      // data member (only inline / constexpr members are defined in-class).
+      // This must be read before the block below can set `is_defined`, so that
+      // a genuine out-of-class definition of a non-inline member is not skipped.
+      if (CompilerIsCXX() && parser->cxx_member_definition != NULL &&
+          old_sym != NULL && !TypeIsFunction(old_sym->type) &&
+          old_sym->flags.is_defined) {
+        redundant_static_member_redefinition = true;
       }
       if (old_sym != NULL) {
         // We have this symbol already.  If it's a declaration then it's
@@ -4329,7 +4392,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         TypeIsClassTemplatePlaceholder(sym->type)) {
       SyntaxError(syntax, "Class template argument deduction requires an initializer");
     }
-    if (!skip_cxx_function_redeclaration) {
+    // A `T C::m;` out-of-class redeclaration of an already-in-class-defined
+    // inline/constexpr static data member (no initializer of its own) is not a
+    // definition: emitting it would duplicate the symbol produced by the
+    // in-class initializer.  Drop it from code generation.
+    bool skip_redundant_static_member_definition =
+        redundant_static_member_redefinition && initializer == NULL;
+    if (!skip_cxx_function_redeclaration &&
+        !skip_redundant_static_member_definition) {
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
       VectorAppend(declarations, decl);
@@ -4526,9 +4596,64 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   return EmptyDeclarationList(location);
 }
 
+// Resolves a using-enum-declarator (a possibly-qualified enum name or a
+// typedef naming an enum) to its Enum info, or NULL if it is not an enum.
+static Enum* ResolveUsingEnum(Syntax* syntax, FullyQualifiedIdentifier* name) {
+  Symbol* tag = SyntaxFindQualifiedTag(syntax, name);
+  if (tag != NULL && tag->type != NULL && TypeIsEnum(tag->type)) {
+    return tag->type->info.enum_info;
+  }
+  // A typedef / alias-declaration can name an enumeration.
+  Symbol* sym = SyntaxFindQualifiedSymbol(syntax, name);
+  if (sym != NULL && sym->type != NULL && TypeIsEnum(sym->type)) {
+    return sym->type->info.enum_info;
+  }
+  return NULL;
+}
+
+// C++20 `using enum E;`: introduce every enumerator of E into the current scope
+// as if by an individual using-declaration.  For scoped enums this is the only
+// way to name the enumerators unqualified; for unscoped enums it re-introduces
+// the (already visible) enumerators.  Class-scope `using enum` (making the
+// enumerators members) is not yet handled.
+static ASTNode* ParseUsingEnumDeclaration(Syntax* syntax,
+                                          SourceLocation location) {
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name)) {
+    SyntaxError(syntax, "Expected enumeration name after 'using enum'");
+    FullyQualifiedIdentifierDestruct(&name);
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    return EmptyDeclarationList(location);
+  }
+
+  Enum* e = ResolveUsingEnum(syntax, &name);
+  if (e == NULL) {
+    SyntaxError(syntax, "'%s' is not an enumeration type", name.spelling.value);
+  } else {
+    for (size_t i = 0; i < e->constants.length; i++) {
+      Symbol* constant = e->constants.value.p[i];
+      if (constant == NULL) {
+        continue;
+      }
+      AddUsingAlias(syntax,
+                    NewUsingAliasSymbol(constant->name.value, constant, location),
+                    /*is_tag=*/false);
+    }
+  }
+
+  FullyQualifiedIdentifierDestruct(&name);
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
 static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // using
+
+  if (LexMatch(syntax->lex, TOK(enum))) {
+    return ParseUsingEnumDeclaration(syntax, location);
+  }
 
   if (LexMatch(syntax->lex, TOK(namespace))) {
     FullyQualifiedIdentifier ns_name;
@@ -4726,6 +4851,7 @@ static TemplateArgument* NewTemplateParameterTypeArgument(int index,
   arg->template_parameter_index = index;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -4923,7 +5049,7 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
       break;
     }
   }
-  SyntaxNeedBracket(syntax, TOK(greater), TC(decl));
+  SyntaxNeedTemplateClose(syntax, TC(decl));
   return params;
 }
 
@@ -5054,6 +5180,9 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     arg->template_parameter_index = -1;
     arg->pack_arguments = NULL;
     arg->dependent_expr = NULL;
+    // Record where this argument is written so a diagnostic raised while it is
+    // substituted (possibly in a far-removed instantiation) points back here.
+    arg->location = lex->current_token_location;
     if (SyntaxTemplateArgumentLooksLikeType(syntax)) {
       TypeParser parser;
       TypeParserInit(&parser, lex, syntax, STO(implicit), syntax->context);
@@ -5129,7 +5258,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       break;
     }
   }
-  SyntaxNeedBracket(syntax, TOK(greater), followers);
+  SyntaxNeedTemplateClose(syntax, followers);
   return args;
 }
 
@@ -6609,6 +6738,13 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers) {
   if (!LexMatch(syntax->lex, bracket)) {
     SyntaxError(syntax, "Missing %s", TokenName(bracket));
+    SyntaxRecover(syntax, followers);
+  }
+}
+
+void SyntaxNeedTemplateClose(Syntax* syntax, TokenClass followers) {
+  if (!LexConsumeClosingAngle(syntax->lex)) {
+    SyntaxError(syntax, "Missing >");
     SyntaxRecover(syntax, followers);
   }
 }

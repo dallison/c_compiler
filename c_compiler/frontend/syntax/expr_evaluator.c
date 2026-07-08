@@ -49,7 +49,8 @@ static Symbol* EvaluatorCallSymbol(ASTNode* node) {
 static bool FunctionOwnerIsSourceLocation(TypeRecord* func) {
   Struct* owner = func != NULL ? func->info.function.cxx_member_owner : NULL;
   return owner != NULL && owner->tag_name != NULL &&
-         StringEqual(owner->tag_name, "source_location");
+         StringEqual(owner->tag_name, "source_location") &&
+         SymbolIsInStdNamespace(owner->tag_symbol);
 }
 
 static Symbol* SourceLocationReceiverCallSymbol(ASTNode* receiver) {

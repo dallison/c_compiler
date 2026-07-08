@@ -346,6 +346,7 @@ struct ConstraintExpr;
 #define kASTOverloadDiagnosed (1 << 21)  // Overload-failure diagnostics already emitted for this call.
 #define kASTDependentQualifiedName (1 << 22)  // Qualified value name through a dependent (template-parameter) scope.
 #define kASTDependentNewValueInit (1 << 23)  // new T() value-init parsed before T substitution.
+#define kASTReversedComparison (1 << 24)  // C++20 reversed comparison candidate; do not reverse again.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

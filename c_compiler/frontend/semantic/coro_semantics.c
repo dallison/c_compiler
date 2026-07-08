@@ -1543,6 +1543,7 @@ static TemplateArgument* NewCoroutineTypeTemplateArgument(TypeRecord* type) {
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 

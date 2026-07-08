@@ -1572,6 +1572,32 @@ bool LexMatchIdentifier(Lex* lex, String* string) {
 
 bool LexLookingAt(Lex* lex, Token tok) { return lex->current_token == tok; }
 
+bool LexConsumeClosingAngle(Lex* lex) {
+  switch (lex->current_token) {
+    case TOK(greater):
+      // A plain '>' is fully consumed like any other token.
+      LexNextToken(lex);
+      return true;
+    case TOK(greatergreater):
+      // Consume the first '>' of `>>`; the trailing '>' remains as the current
+      // token to close the enclosing list.  The buffer position already sits
+      // past both characters, so no re-lexing is needed.
+      lex->current_token = TOK(greater);
+      return true;
+    case TOK(greatergreatereq):
+      // `>>=` -> consume one '>', leaving `>=`.
+      lex->current_token = TOK(greatereq);
+      return true;
+    case TOK(greatereq):
+      // `>=` -> consume the '>', leaving '='.  This only arises as the residue
+      // of splitting `>>=`; a genuine `>=` never closes a template list.
+      lex->current_token = TOK(equal);
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Reads another line from the input.
 void LexReadLine(Lex* lex) {
   StringClear(&lex->line);

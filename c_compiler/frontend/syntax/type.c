@@ -27,6 +27,7 @@
 #include "errors.h"
 #include "debug.h"
 #include "rtti.h"
+#include "set.h"
 
 static int next_type_id = 0;
 
@@ -424,6 +425,7 @@ static TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   // The dependent expression is arena-owned and only read (cloned) at
   // re-evaluation, so the pointer may be shared across copies.
   copy->dependent_expr = arg->dependent_expr;
+  copy->location = arg->location;
   return copy;
 }
 
@@ -433,6 +435,7 @@ TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
   arg->kind = kTemplateParameterType;
   arg->template_parameter_index = -1;
   arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -660,6 +663,7 @@ TypeRecord* NewFunctionTypeRecord() {
   VectorInit(&t->info.function.template_parameters);
   VectorInit(&t->info.function.template_instantiations);
   t->info.function.associated_constraint = NULL;
+  t->info.function.explicit_condition = NULL;
   return t;
 }
 
@@ -2228,6 +2232,7 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   concrete->template_parameter_index = arg->template_parameter_index;
   concrete->pack_arguments = NULL;
   concrete->dependent_expr = NULL;
+  concrete->location = arg->location;
   // A value-dependent non-type argument (e.g. an `enable_if` SFINAE condition):
   // try to fold it now that some parameters are concrete.  If it folds, the
   // argument becomes an ordinary integer; otherwise keep the expression so a
@@ -2313,6 +2318,69 @@ static void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args) {
   symbol->dependent_value_template_parameter_index = -1;
 }
 
+/* Diagnose an ill-formed pack expansion (a `...` whose pattern contains no
+ * expandable parameter pack, e.g. `decltype(T())...` where `T` is not a pack).
+ *
+ * The offending pattern comes from the template *definition* and is
+ * re-substituted for every member that mentions it and every time a member is
+ * (re)analyzed; a type alias multiplies this further, since each use expands the
+ * alias into a fresh copy of the pattern node.  A naive `SyntaxError` therefore
+ * fires many times for a single source construct.  Recover by reporting at most
+ * once per distinct diagnosis site: we key on both the pattern node's identity
+ * (catches re-substitution of the same node) and the reported source location
+ * (catches distinct copies produced at the same instantiation point).  A node /
+ * location is only remembered once its diagnostic actually reaches the user
+ * (i.e. it was not swallowed by a speculative SFINAE trap or a suppression
+ * scope), so a genuine later error is still reported. */
+static void ReportPackExpansionRequiresPack(TypeParser* parser,
+                                            TemplateArgument* arg) {
+  static Set reported_nodes;
+  static Set reported_locations;
+  static bool reported_init = false;
+  if (!reported_init) {
+    SetInitForPointers(&reported_nodes);
+    SetInitForIntegers(&reported_locations);
+    reported_init = true;
+  }
+  // Prefer the location recorded on the pattern node (where the construct was
+  // written); fall back to the lexer's current position only when it is
+  // unavailable (e.g. a synthesized argument).
+  const char* filename;
+  int lineno, start, end;
+  DecodeSourceLocation(arg->location, &filename, &lineno, &start, &end);
+  bool have_recorded_location =
+      arg->location != SOURCE_LOCATION_MISSING && lineno > 0;
+  // The location key must match the point we will actually report at, so that
+  // copies of one pattern (produced e.g. by expanding a type alias at each use)
+  // collapse to a single diagnosis while genuinely distinct occurrences stay
+  // separate.  Fold the filename pointer and line together for a stable key.
+  const char* key_file = have_recorded_location
+                             ? filename
+                             : parser->syntax->lex->source->filename.value;
+  int key_line = have_recorded_location
+                     ? lineno
+                     : parser->syntax->lex->source->lineno;
+  intptr_t location_key =
+      (intptr_t)((((uintptr_t)key_file) << 20) ^ (uintptr_t)key_line);
+  if (SetContains(&reported_nodes, arg) ||
+      SetContains(&reported_locations, (void*)location_key)) {
+    return;
+  }
+  int before = NumErrors();
+  if (have_recorded_location) {
+    SyntaxErrorAtLocation(
+        parser->syntax, arg->location,
+        "template argument pack expansion requires a parameter pack");
+  } else {
+    SyntaxError(parser->syntax,
+                "template argument pack expansion requires a parameter pack");
+  }
+  if (NumErrors() > before) {
+    SetInsert(&reported_nodes, arg);
+    SetInsert(&reported_locations, (void*)location_key);
+  }
+}
+
 /* Substitute one template argument and append the result(s) to `out`. A normal
  * argument appends a single substituted argument; a pack-expansion argument
  * (e.g. `Ts...`) expands into one substituted argument per pack element. */
@@ -2360,8 +2428,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
         return;
       }
     }
-    SyntaxError(parser->syntax,
-                "template argument pack expansion requires a parameter pack");
+    ReportPackExpansionRequiresPack(parser, arg);
     return;
   }
 
@@ -2381,6 +2448,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
     pack->template_parameter_index = -1;
     pack->pack_arguments = NewVector();
     pack->dependent_expr = NULL;
+    pack->location = arg->location;
     for (size_t i = 0; i < arg->pack_arguments->length; i++) {
       AppendSubstitutedTemplateArgument(parser, pack->pack_arguments,
                                         arg->pack_arguments->value.p[i], args);
@@ -3435,6 +3503,20 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
+  func->info.function.explicit_condition = NULL;
+  // A value-dependent `explicit(cond)` was deferred at parse time; substitute
+  // the concrete template arguments and constant-fold it now so this
+  // instantiation gets the correct explicit-ness (C++20 [dcl.fct.spec]).
+  if (from->info.function.explicit_condition != NULL) {
+    int64_t explicit_value = 0;
+    if (TryFoldDependentTemplateArgument(
+            parser, from->info.function.explicit_condition, args,
+            &explicit_value)) {
+      func->info.function.is_explicit = explicit_value != 0;
+      func->info.function.is_explicit_conversion =
+          from->info.function.is_explicit_conversion && explicit_value != 0;
+    }
+  }
   func->info.function.is_final = from->info.function.is_final;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
@@ -6470,6 +6552,17 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
+  func->info.function.explicit_condition = NULL;
+  if (from->info.function.explicit_condition != NULL) {
+    int64_t explicit_value = 0;
+    if (TryFoldDependentTemplateArgument(
+            parser, from->info.function.explicit_condition, args,
+            &explicit_value)) {
+      func->info.function.is_explicit = explicit_value != 0;
+      func->info.function.is_explicit_conversion =
+          from->info.function.is_explicit_conversion && explicit_value != 0;
+    }
+  }
   func->info.function.is_virtual = from->info.function.is_virtual;
   func->info.function.is_override = from->info.function.is_override;
   func->info.function.is_final = from->info.function.is_final;
@@ -6875,6 +6968,24 @@ static Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
       return candidate;
     }
   }
+  // Instantiations are recorded in the template's `template_instantiations`
+  // cache (not the overload chain), so they must be searched here too.  The
+  // mangled name is the definitive ABI identity of an instantiation: two
+  // requests that mangle identically denote the same function even when their
+  // deduced signatures fail a structural `TypeEqual` (e.g. a `*this` self-type
+  // that lost its template_origin metadata), so reuse the cached one to avoid
+  // emitting a duplicate symbol.
+  if (templ != NULL && templ->type != NULL && TypeIsFunction(templ->type)) {
+    Vector* cache = &templ->type->info.function.template_instantiations;
+    for (size_t i = 0; i < cache->length; i++) {
+      Symbol* candidate = cache->value.p[i];
+      if (candidate != NULL && !candidate->flags.is_template &&
+          candidate->asm_name.value != NULL &&
+          strcmp(candidate->asm_name.value, asm_name) == 0) {
+        return candidate;
+      }
+    }
+  }
   return NULL;
 }
 
@@ -7073,6 +7184,7 @@ static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -7086,6 +7198,7 @@ static TemplateArgument* NewDeducedNonTypeTemplateArgument(long long value) {
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -7238,7 +7351,10 @@ static bool DeduceFunctionTemplatePackCallArgument(
     return false;
   }
   TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
-  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init)) {
+  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init) &&
+      !TypeIsCXXInitializerList(TypeIsReference(actual->type)
+                                    ? actual->type->next
+                                    : actual->type)) {
     return false;
   }
   if (actual->op == AST_OP(braced_init) &&
@@ -7675,13 +7791,47 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
     return false;
   }
   TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
-  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init)) {
+  /* An `initializer_list<U>` parameter deduces `U` either from a braced-init
+   * argument (`{1, 2, 3}`) or from an argument that is already an
+   * `initializer_list<V>` (e.g. forwarding a bound `init` parameter through a
+   * second template); reject only arguments that are neither. */
+  if (TypeIsCXXInitializerList(target) && actual->op != AST_OP(braced_init) &&
+      !TypeIsCXXInitializerList(TypeIsReference(actual->type)
+                                    ? actual->type->next
+                                    : actual->type)) {
     return false;
   }
   if (actual->op == AST_OP(braced_init) &&
       !TypeIsCXXInitializerList(target) &&
       (target == NULL || target->declarator != kDeclArray)) {
     return false;
+  }
+  /* A string literal may initialize an array of characters, so a parameter of
+   * type `CharT[N]` deduces its bound `N` (and, in aggregate CTAD, its element
+   * type) directly from the literal.  The literal itself has a `const`-qualified
+   * element type (`const char[M]`), which need not match the (possibly
+   * non-const) parameter element, so deduce against a copy of the literal's
+   * array type whose element cv-qualifiers are adjusted to the parameter's. */
+  if ((actual->op == AST_OP(string) || actual->op == AST_OP(string_wide)) &&
+      target != NULL && target->declarator == kDeclArray &&
+      target->next != NULL && actual->type != NULL &&
+      actual->type->declarator == kDeclArray && actual->type->next != NULL) {
+    // Copy the whole array->element chain so the adjustment below never mutates
+    // the shared element type of the original string-literal expression.
+    TypeRecord* adjusted = TypeRecordCopy(actual->type);
+    TypeRecord* element = TypeRecordCopy(actual->type->next);
+    element->qualifiers = target->next->qualifiers;
+    TypeRecordIncRef(element);
+    // `adjusted->next` still aliases the original (shared) element; drop that
+    // borrowed reference before repointing at our private copy.
+    TypeRecordDelete(adjusted->next);
+    adjusted->next = element;
+    TypeRecordCalculateSize(adjusted);
+    TypeRecordIncRef(adjusted);
+    bool ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                                 target, adjusted);
+    TypeRecordDelete(adjusted);
+    return ok;
   }
   /* [temp.deduct.call]: if the parameter type P contains no template
    * parameters, no deduction is performed from this argument.  The pairing
@@ -8348,6 +8498,7 @@ static TemplateArgument* NewDeducedTypePackTemplateArgument(void) {
   arg->template_parameter_index = -1;
   arg->pack_arguments = NewVector();
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -9392,6 +9543,7 @@ static TemplateArgument* NewDefaultTypeTemplateArgument(TypeRecord* type) {
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -9405,6 +9557,7 @@ static TemplateArgument* NewDefaultNonTypeTemplateArgument(
   arg->template_parameter_index = template_parameter_index;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -9418,6 +9571,7 @@ static TemplateArgument* NewEmptyPackTemplateArgument(
   arg->template_parameter_index = -1;
   arg->pack_arguments = NewVector();
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -9968,10 +10122,15 @@ TypeRecord* TypeInstantiateClassTemplate(Syntax* syntax, Symbol* templ,
   return type;
 }
 
+bool SymbolIsInStdNamespace(Symbol* symbol) {
+  return symbol != NULL && symbol->namespace_ != NULL &&
+         symbol->namespace_->qualified_name.value != NULL &&
+         strcmp(symbol->namespace_->qualified_name.value, "std") == 0;
+}
+
 static bool CXXSymbolIsStdInitializerListTemplate(Symbol* symbol) {
   return symbol != NULL && strcmp(symbol->name.value, "initializer_list") == 0 &&
-         symbol->namespace_ != NULL &&
-         strcmp(symbol->namespace_->qualified_name.value, "std") == 0;
+         SymbolIsInStdNamespace(symbol);
 }
 
 static bool CXXSymbolNamesStdInitializerList(Symbol* symbol) {
@@ -10052,6 +10211,7 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   VectorAppend(args, arg);
   TypeRecord* type = TypeInstantiateClassTemplate(syntax, templ, args);
   VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
@@ -11191,6 +11351,7 @@ static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
   arg->kind = kTemplateParameterType;
   arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
   arg->template_parameter_index = index;
+  arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
 
@@ -11245,6 +11406,25 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
     return false;
   }
 
+  // A parameter-type-specifier of the form `const auto&` / `volatile auto`
+  // begins with cv-qualifiers before the `auto` (or `Concept auto`) placeholder.
+  // Consume them speculatively; if no placeholder follows, rewind so the normal
+  // (non-abbreviated) parameter path re-parses from the qualifier.
+  LexCheckpoint cv_checkpoint;
+  LexCheckpointSave(lex, &cv_checkpoint);
+  int placeholder_qualifiers = kQualPlain;
+  while (true) {
+    if (LexLookingAt(lex, TOK(const))) {
+      placeholder_qualifiers |= kQualConst;
+      LexNextToken(lex);
+    } else if (LexLookingAt(lex, TOK(volatile))) {
+      placeholder_qualifiers |= kQualVolatile;
+      LexNextToken(lex);
+    } else {
+      break;
+    }
+  }
+
   Symbol* concept_symbol = NULL;
   SourceLocation constraint_location = lex->current_token_location;
   Vector* concept_arguments = NULL;
@@ -11279,14 +11459,17 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   }
 
   if (concept_symbol == NULL && !LexLookingAt(lex, TOK(auto))) {
+    LexCheckpointRestore(lex, &cv_checkpoint);
+    LexCheckpointDestruct(&cv_checkpoint);
     return false;
   }
+  LexCheckpointDestruct(&cv_checkpoint);
   LexNextToken(lex);  // auto
 
   int index = syntax->current_template_parameter_count +
               (int)func->info.function.template_parameters.length;
   TypeRecord* placeholder =
-      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers);
   placeholder->template_parameter_index = index;
   Symbol* formal = TypeParserParseDeclarator(proto_parser, placeholder);
   assert(formal != NULL);
@@ -13455,6 +13638,17 @@ static bool ParseCXXExplicitSpecifier(TypeParser* parser, bool* saw_explicit) {
   }
   ASTNode* expr =
       SyntaxParseExpression(parser->syntax, TC(closebra) | TC(exprsep));
+  // A value-dependent condition (e.g. `explicit(sizeof(T) > 4)`) is detected on
+  // the parsed (pre-analysis) tree, before constant-folding could collapse it
+  // to the placeholder's size.  The unanalyzed condition is stashed and
+  // re-folded per instantiation (see ParseCXXExplicitDeclarationSpecifier and
+  // InstantiateMemberFunctionType); mirrors static_assert deferral.
+  if (parser->syntax->parsing_template_declaration &&
+      ExpressionIsTemplateDependent(expr)) {
+    SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(decl));
+    parser->syntax->pending_explicit_condition = expr;
+    return true;
+  }
   expr = AnalyzeExpression(expr);
   int64_t value = 0;
   bool ok = EvaluateIntegerExpression(expr, &value);
@@ -14236,6 +14430,11 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   func->info.function.is_destructor = is_destructor;
   // Only a constructor may be declared explicit; a destructor never converts.
   func->info.function.is_explicit = is_explicit && !is_destructor;
+  if (!is_destructor && parser->syntax->pending_explicit_condition != NULL) {
+    func->info.function.explicit_condition =
+        parser->syntax->pending_explicit_condition;
+    parser->syntax->pending_explicit_condition = NULL;
+  }
   if (is_virtual && !is_destructor) {
     SyntaxError(parser->syntax, "Constructors cannot be virtual");
   }
@@ -14477,6 +14676,11 @@ static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
   TypeRecord* func = member_symbol->type;
   func->info.function.is_explicit = is_explicit;
   func->info.function.is_explicit_conversion = is_explicit;
+  if (parser->syntax->pending_explicit_condition != NULL) {
+    func->info.function.explicit_condition =
+        parser->syntax->pending_explicit_condition;
+    parser->syntax->pending_explicit_condition = NULL;
+  }
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
@@ -15778,6 +15982,7 @@ static TemplateArgument* NewTemplateParameterPatternArgument(
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
   arg->dependent_expr = NULL;
+  arg->location = SOURCE_LOCATION_MISSING;
   if (param->kind == kTemplateParameterType) {
     arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     arg->type->template_parameter_index = param->index;

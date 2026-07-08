@@ -8,6 +8,8 @@
 #ifndef type_traits_h
 #define type_traits_h
 
+#include <stddef.h>
+
 namespace std {
 
 template <class T, T v>
@@ -149,6 +151,79 @@ struct remove_cvref {
 
 template <class T>
 using remove_cvref_t = typename remove_cvref<T>::type;
+
+// is_array / remove_extent
+template <class T>
+struct is_array : false_type {
+};
+
+template <class T, size_t N>
+struct is_array<T[N]> : true_type {
+};
+
+template <class T>
+struct remove_extent {
+  using type = T;
+};
+
+template <class T, size_t N>
+struct remove_extent<T[N]> {
+  using type = T;
+};
+
+template <class T>
+using remove_extent_t = typename remove_extent<T>::type;
+
+// is_function: a type is a function type unless it is produced with a cv- or
+// ref-qualifier that only object/reference types accept.  The primary template
+// handles the non-function case; the specializations enumerate the plain
+// (and C-varargs) function types that arise after reference removal, which is
+// all `decay` needs.
+template <class T>
+struct is_function : false_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...)> : true_type {
+};
+
+// add_pointer: pointer to the referred-to type (references decay first).
+template <class T>
+struct add_pointer {
+  using type = remove_reference_t<T>*;
+};
+
+template <class T>
+using add_pointer_t = typename add_pointer<T>::type;
+
+// decay: models the type conversions applied when passing an argument by
+// value (array-to-pointer, function-to-pointer, and cv/ref removal).
+template <class T>
+struct decay {
+ private:
+  using U = remove_reference_t<T>;
+
+ public:
+  using type = conditional_t<
+      is_array<U>::value, remove_extent_t<U>*,
+      conditional_t<is_function<U>::value, add_pointer_t<U>, remove_cv_t<U> > >;
+};
+
+// Array (and array-reference) decay is handled by dedicated specializations:
+// deducing the element type through `remove_reference` is unreliable for
+// reference-to-array types, so match the array shape directly here.
+template <class T, size_t N>
+struct decay<T[N]> {
+  using type = T*;
+};
+
+template <class T, size_t N>
+struct decay<T (&)[N]> {
+  using type = T*;
+};
+
+template <class T>
+using decay_t = typename decay<T>::type;
 
 template <class T>
 struct is_void : false_type {

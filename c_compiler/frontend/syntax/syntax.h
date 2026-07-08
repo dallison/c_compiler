@@ -52,6 +52,7 @@ typedef struct Syntax {
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.
+  struct ASTNode* pending_explicit_condition;  // Deferred value-dependent explicit(bool).
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -95,6 +96,10 @@ typedef enum TokenClass {
 
 // Given a token, what class does it belong to?
 TokenClass ClassifyToken(Token tok);
+
+// True when an analyzed expression is value-dependent on a template parameter
+// (e.g. `sizeof(T) > 4`), i.e. it cannot be constant-folded until instantiation.
+bool ExpressionIsTemplateDependent(struct ASTNode* expr);
 
 void SyntaxInit(Syntax* syntax, Lex* lex);
 void SyntaxDestruct(Syntax* syntax);
@@ -154,6 +159,8 @@ const char* SyntaxFakeName(Syntax* syntax);
 void SyntaxFakeTagName(Syntax* syntax, String* tag_name);
 
 void SyntaxError(Syntax* syntax, const char* format, ...);
+void SyntaxErrorAtLocation(Syntax* syntax, SourceLocation location,
+                           const char* format, ...);
 void SyntaxWarning(Syntax* syntax, const char* warn, const char* format, ...);
 Storage SyntaxParseStorage(Syntax* syntax);
 
@@ -162,6 +169,12 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
 
 void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers);
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);
+
+// Closes a template-argument or template-parameter list, splitting a merged
+// `>>` / `>>=` / `>=` token so nested template-ids like `vector<vector<int>>`
+// parse correctly (C++11 CWG N1757).  Emits a diagnostic and recovers if the
+// current token does not close the list.
+void SyntaxNeedTemplateClose(Syntax* syntax, TokenClass followers);
 void SyntaxRecover(Syntax* syntax, TokenClass tc);
 bool SyntaxLookingAtType(Syntax* syntax);
 bool SyntaxLookingAtDeclaration(Syntax* syntax);
