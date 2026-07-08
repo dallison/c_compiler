@@ -1966,6 +1966,76 @@ static ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
   return AnalyzeExpression(lowered);
 }
 
+// Returns true if the integer constant `value` is representable in the
+// integral target type.  Used only for constant narrowing detection, so an
+// unknown width is treated as "fits" to avoid false positives.
+static bool NarrowingIntegerConstantFits(int64_t value, TypeRecord* target) {
+  int bytes = SizeofType(target->type);
+  if (bytes <= 0 || bytes > 8) {
+    return true;
+  }
+  if (TypeIsUnsigned(target)) {
+    if (value < 0) {
+      return false;
+    }
+    if (bytes >= 8) {
+      return true;
+    }
+    uint64_t max = (1ULL << (bytes * 8)) - 1;
+    return (uint64_t)value <= max;
+  }
+  if (bytes >= 8) {
+    return true;
+  }
+  int64_t max = (1LL << (bytes * 8 - 1)) - 1;
+  int64_t min = -(1LL << (bytes * 8 - 1));
+  return value >= min && value <= max;
+}
+
+// C++ [dcl.init.list]/7: diagnose the unambiguous narrowing conversions that
+// occur in scalar list-initialization (`T x{expr}`).  Only cases that never
+// produce a false positive are reported: a floating-point source converted to
+// an integer target (always narrowing), and a constant integer source whose
+// value does not fit in an integer target.  Conversions whose validity depends
+// on a runtime value are intentionally left undiagnosed.
+static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target) {
+  if (!CompilerIsCXX() || source == NULL || target == NULL) {
+    return;
+  }
+  TypeRecord* src = source->type;
+  if (src == NULL || !TypeIsIntegral(target)) {
+    return;
+  }
+  bool narrowing = false;
+  if (TypeIsFloatingPoint(src)) {
+    // Floating-point to integer is always a narrowing conversion.
+    narrowing = true;
+  } else if (TypeIsIntegral(src) && !TypeIsBool(target)) {
+    // A constant integer that does not fit in the target is narrowing.  A
+    // successful integer constant evaluation is exactly the standard's
+    // "constant expression" gate, so non-constant operands are skipped.
+    int64_t value = 0;
+    if (EvaluateIntegerExpression(source, &value) &&
+        !NarrowingIntegerConstantFits(value, target)) {
+      narrowing = true;
+    }
+  }
+  if (!narrowing) {
+    return;
+  }
+  String from_name;
+  String to_name;
+  StringInit(&from_name, "");
+  StringInit(&to_name, "");
+  TypeRecordToString(src, &from_name);
+  TypeRecordToString(target, &to_name);
+  SemanticError(source,
+                "narrowing conversion from '%s' to '%s' in list-initialization",
+                from_name.value, to_name.value);
+  StringDestruct(&from_name);
+  StringDestruct(&to_name);
+}
+
 static ASTNode* AnalyzeInitialization(ASTNode* node,
                                   IdentifierASTNode* id_node, ASTNode* init) {
   (void)AnalyzeExpression(&id_node->base);
@@ -2059,6 +2129,13 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
           DesignatedInitializerASTNode* designated =
               (DesignatedInitializerASTNode*)initializer;
           NormalConversion(designated->init, id_node->base.type);
+          DiagnoseScalarNarrowing(designated->init, id_node->base.type);
+        } else {
+          ASTNode* value_expr = initializer;
+          if (value_expr->op == AST_OP(expr_init)) {
+            value_expr = ((ExpressionInitializerASTNode*)value_expr)->expr;
+          }
+          DiagnoseScalarNarrowing(value_expr, id_node->base.type);
         }
       }
       break;
