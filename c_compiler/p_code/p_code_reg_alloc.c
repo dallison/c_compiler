@@ -399,6 +399,9 @@ static bool NeedsRegister(TargetInstruction* inst) {
 
 static void AllocateRegister(PCodeRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  if (inst->reg != NULL) {
+    return;
+  }
   PCodeRegister* reg;
   if (inst->dest != NULL) {
      if (inst->dest->reg == NULL) {

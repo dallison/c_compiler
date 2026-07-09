@@ -222,25 +222,25 @@ union __storage<I, T> {
     }
   }
 
-  void __copy_construct(const __storage& other, size_t index) {
+  constexpr void __copy_construct(const __storage& other, size_t index) {
     if (index == I) {
       new (&__value_) T(other.__value_);
     }
   }
 
-  void __move_construct(__storage& other, size_t index) {
+  constexpr void __move_construct(__storage& other, size_t index) {
     if (index == I) {
       new (&__value_) T(std::move(other.__value_));
     }
   }
 
-  void __copy_assign(const __storage& other, size_t index) {
+  constexpr void __copy_assign(const __storage& other, size_t index) {
     if (index == I) {
       __value_ = other.__value_;
     }
   }
 
-  void __move_assign(__storage& other, size_t index) {
+  constexpr void __move_assign(__storage& other, size_t index) {
     if (index == I) {
       __value_ = std::move(other.__value_);
     }
@@ -252,15 +252,15 @@ union __storage<I, T> {
     }
   }
 
-  bool __equals(const __storage& other, size_t index) const {
+  constexpr bool __equals(const __storage& other, size_t index) const {
     return index == I && __value_ == other.__value_;
   }
 
-  bool __less(const __storage& other, size_t index) const {
+  constexpr bool __less(const __storage& other, size_t index) const {
     return index == I && __value_ < other.__value_;
   }
 
-  auto __compare(const __storage& other, size_t index) const {
+  constexpr auto __compare(const __storage& other, size_t index) const {
     if (index == I) {
       return __value_ <=> other.__value_;
     }
@@ -339,7 +339,7 @@ union __storage<I, T, Rest...> {
     }
   }
 
-  void __copy_construct(const __storage& other, size_t index) {
+  constexpr void __copy_construct(const __storage& other, size_t index) {
     if (index == I) {
       new (&__value_) T(other.__value_);
     } else {
@@ -347,7 +347,7 @@ union __storage<I, T, Rest...> {
     }
   }
 
-  void __move_construct(__storage& other, size_t index) {
+  constexpr void __move_construct(__storage& other, size_t index) {
     if (index == I) {
       new (&__value_) T(std::move(other.__value_));
     } else {
@@ -355,7 +355,7 @@ union __storage<I, T, Rest...> {
     }
   }
 
-  void __copy_assign(const __storage& other, size_t index) {
+  constexpr void __copy_assign(const __storage& other, size_t index) {
     if (index == I) {
       __value_ = other.__value_;
     } else {
@@ -363,7 +363,7 @@ union __storage<I, T, Rest...> {
     }
   }
 
-  void __move_assign(__storage& other, size_t index) {
+  constexpr void __move_assign(__storage& other, size_t index) {
     if (index == I) {
       __value_ = std::move(other.__value_);
     } else {
@@ -379,21 +379,21 @@ union __storage<I, T, Rest...> {
     }
   }
 
-  bool __equals(const __storage& other, size_t index) const {
+  constexpr bool __equals(const __storage& other, size_t index) const {
     if (index == I) {
       return __value_ == other.__value_;
     }
     return __rest_.__equals(other.__rest_, index);
   }
 
-  bool __less(const __storage& other, size_t index) const {
+  constexpr bool __less(const __storage& other, size_t index) const {
     if (index == I) {
       return __value_ < other.__value_;
     }
     return __rest_.__less(other.__rest_, index);
   }
 
-  auto __compare(const __storage& other, size_t index) const {
+  constexpr auto __compare(const __storage& other, size_t index) const {
     if (index == I) {
       return __value_ <=> other.__value_;
     }
@@ -686,14 +686,14 @@ class variant {
     this->template __construct<0>();
   }
 
-  variant(const variant& other) : __index_(variant_npos) {
+  constexpr variant(const variant& other) : __index_(variant_npos) {
     if (!other.valueless_by_exception()) {
       __storage_.__copy_construct(other.__storage_, other.__index_);
       __index_ = other.__index_;
     }
   }
 
-  variant(variant&& other) : __index_(variant_npos) {
+  constexpr variant(variant&& other) : __index_(variant_npos) {
     if (!other.valueless_by_exception()) {
       __storage_.__move_construct(other.__storage_, other.__index_);
       __index_ = other.__index_;
@@ -753,7 +753,7 @@ class variant {
     }
   }
 
-  variant& operator=(const variant& other) {
+  constexpr variant& operator=(const variant& other) {
     if (this == &other) {
       return *this;
     }
@@ -777,7 +777,7 @@ class variant {
     return *this;
   }
 
-  variant& operator=(variant&& other) {
+  constexpr variant& operator=(variant&& other) {
     if (this == &other) {
       return *this;
     }
@@ -805,7 +805,7 @@ class variant {
             enable_if_t<__variant_detail::__converting_candidate<
                             T, Types...>::value,
                         int> = 0>
-  variant& operator=(T&& value) {
+  constexpr variant& operator=(T&& value) {
     if (__index_ ==
         __variant_detail::__index_of<decay_t<T>, Types...>::value) {
       *__storage_.template __ptr<
@@ -899,15 +899,15 @@ class variant {
     return __storage_.template __ptr<I>();
   }
 
-  bool __equals_same_index(const variant& other) const {
+  constexpr bool __equals_same_index(const variant& other) const {
     return __storage_.__equals(other.__storage_, __index_);
   }
 
-  bool __less_same_index(const variant& other) const {
+  constexpr bool __less_same_index(const variant& other) const {
     return __storage_.__less(other.__storage_, __index_);
   }
 
-  auto __compare_same_index(const variant& other) const {
+  constexpr auto __compare_same_index(const variant& other) const {
     return __storage_.__compare(other.__storage_, __index_);
   }
 
@@ -934,7 +934,7 @@ class variant {
 };
 
 template <class T, class... Types>
-bool holds_alternative(const variant<Types...>& value) noexcept {
+constexpr bool holds_alternative(const variant<Types...>& value) noexcept {
   static_assert(__variant_detail::__exactly_once<T, Types...>::value,
                 "variant type alternative must appear exactly once");
   return value.index() == __variant_detail::__index_of<T, Types...>::value;
@@ -988,30 +988,46 @@ template <class T, class... Types>
 constexpr T& get(variant<Types...>& value) {
   static_assert(__variant_detail::__exactly_once<T, Types...>::value,
                 "variant type alternative must appear exactly once");
-  return get<__variant_detail::__index_of<T, Types...>::value>(value);
+  T* result = get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
+  if (result == nullptr) {
+    throw bad_variant_access();
+  }
+  return *result;
 }
 
 template <class T, class... Types>
 constexpr const T& get(const variant<Types...>& value) {
   static_assert(__variant_detail::__exactly_once<T, Types...>::value,
                 "variant type alternative must appear exactly once");
-  return get<__variant_detail::__index_of<T, Types...>::value>(value);
+  const T* result =
+      get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
+  if (result == nullptr) {
+    throw bad_variant_access();
+  }
+  return *result;
 }
 
 template <class T, class... Types>
 constexpr T&& get(variant<Types...>&& value) {
   static_assert(__variant_detail::__exactly_once<T, Types...>::value,
                 "variant type alternative must appear exactly once");
-  return get<__variant_detail::__index_of<T, Types...>::value>(
-      std::move(value));
+  T* result = get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
+  if (result == nullptr) {
+    throw bad_variant_access();
+  }
+  return std::move(*result);
 }
 
 template <class T, class... Types>
 constexpr const T&& get(const variant<Types...>&& value) {
   static_assert(__variant_detail::__exactly_once<T, Types...>::value,
                 "variant type alternative must appear exactly once");
-  return get<__variant_detail::__index_of<T, Types...>::value>(
-      std::move(value));
+  const T* result =
+      get_if<__variant_detail::__index_of<T, Types...>::value>(&value);
+  if (result == nullptr) {
+    throw bad_variant_access();
+  }
+  return std::move(*result);
 }
 
 template <size_t I, class... Types>
@@ -1339,8 +1355,8 @@ struct hash<variant<Types...> > {
 };
 
 template <class... Types>
-bool operator==(const variant<Types...>& left,
-                const variant<Types...>& right) {
+constexpr bool operator==(const variant<Types...>& left,
+                          const variant<Types...>& right) {
   if (left.index() != right.index()) {
     return false;
   }
@@ -1351,13 +1367,14 @@ bool operator==(const variant<Types...>& left,
 }
 
 template <class... Types>
-bool operator!=(const variant<Types...>& left,
-                const variant<Types...>& right) {
+constexpr bool operator!=(const variant<Types...>& left,
+                          const variant<Types...>& right) {
   return !(left == right);
 }
 
 template <class... Types>
-bool operator<(const variant<Types...>& left, const variant<Types...>& right) {
+constexpr bool operator<(const variant<Types...>& left,
+                         const variant<Types...>& right) {
   if (right.valueless_by_exception()) {
     return false;
   }
@@ -1371,23 +1388,26 @@ bool operator<(const variant<Types...>& left, const variant<Types...>& right) {
 }
 
 template <class... Types>
-bool operator>(const variant<Types...>& left, const variant<Types...>& right) {
+constexpr bool operator>(const variant<Types...>& left,
+                         const variant<Types...>& right) {
   return right < left;
 }
 
 template <class... Types>
-bool operator<=(const variant<Types...>& left, const variant<Types...>& right) {
+constexpr bool operator<=(const variant<Types...>& left,
+                          const variant<Types...>& right) {
   return !(right < left);
 }
 
 template <class... Types>
-bool operator>=(const variant<Types...>& left, const variant<Types...>& right) {
+constexpr bool operator>=(const variant<Types...>& left,
+                          const variant<Types...>& right) {
   return !(left < right);
 }
 
 template <class... Types>
-auto operator<=>(const variant<Types...>& left,
-                 const variant<Types...>& right) {
+constexpr auto operator<=>(const variant<Types...>& left,
+                           const variant<Types...>& right) {
   if (left.valueless_by_exception() && right.valueless_by_exception()) {
     return strong_ordering::equal;
   }

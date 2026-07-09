@@ -1746,19 +1746,19 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
 }
 
 static TargetInstruction* LowerZeroExtend(PCodeGenerator* pcode, IRNode* node) {
+  IRNode* src = node->inputs.value.p[0];
+  int src_size = src->type != NULL ? src->type->size : node->type->size;
+  int keep_bytes = src_size < node->type->size ? src_size : node->type->size;
   TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
-  IRConstant* extend = node->inputs.value.p[1];
-  int64_t bits = extend->value.ivalue;
-  if (bits > 0 && bits < 64 && bits % 8 == 0) {
-    TargetInstruction* shift =
-        Emit(pcode, NewInstruction1(P_OP(movc),
-                                    GetIntConstant(pcode, NULL,
-                                                   kTargetType32Bit, bits)));
-    TargetInstruction* lsl = Emit(pcode, NewInstruction2(P_OP(lsl), value, shift));
-    value = Emit(pcode, NewInstruction2(P_OP(lsr), lsl, shift));
-  } else {
-    value = Emit(pcode, NewInstruction2(P_OP(and), value,
-                                        Materialize(pcode, node->inputs.value.p[1])));
+  if (keep_bytes < 8) {
+    uint64_t mask = (UINT64_C(1) << (keep_bytes * 8)) - 1;
+    value = Emit(pcode,
+                 NewInstruction2(
+                     P_OP(and), value,
+                     Emit(pcode, NewInstruction1(
+                                     P_OP(movxc),
+                                     GetIntConstant(pcode, NULL,
+                                                    kTargetType64Bit, mask)))));
   }
   SetLoweredNode(node, value);
   return value;
