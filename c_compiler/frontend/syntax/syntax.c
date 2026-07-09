@@ -5289,6 +5289,9 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       if (sym != NULL) {
         arg->type = TypeRecordCopy(sym->type);
         arg->is_pack_expansion = sym->flags.is_parameter_pack;
+        if (arg->is_pack_expansion && type != NULL) {
+          arg->type->qualifiers |= type->qualifiers;
+        }
         SymbolDelete(sym);
       } else {
         arg->type = type;

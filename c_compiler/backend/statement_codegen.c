@@ -1393,8 +1393,14 @@ static void GenerateReturnStatement(Generator* gen,
         gen->current_struct_address = old_struct_address;
         goto emit_return_branch;
       }
+      bool returns_reference = TypeIsReference(gen->func->next);
+      int old_cond_flags = node->cond->flags;
+      if (returns_reference) {
+        node->cond->flags |= kASTNeedAddress;
+      }
       IRNode* expr = GenerateExpression(gen, node->cond);
-      if (TypeIsReference(gen->func->next)) {
+      node->cond->flags = old_cond_flags;
+      if (returns_reference) {
         GeneratorEmit(gen, NewIR1(IR_OP(resulta), expr));
       } else if (TypeIsStructOrUnion(node->cond->type)) {
         if ((node->cond->flags & kASTRvoCall) != 0) {

@@ -1457,7 +1457,19 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else {
       IRNode* old_struct_address = gen->current_struct_address;
       gen->current_struct_address = NULL;
+      bool reference_formal = false;
+      if (callee_type != NULL && TypeIsFunction(callee_type) &&
+          (size_t)i < callee_type->info.function.prototype.length) {
+        Symbol* formal = callee_type->info.function.prototype.value.p[i];
+        reference_formal = TypeIsReference(formal->type);
+      }
+      int old_arg_flags = arg->flags;
+      if (reference_formal && !TypeIsStructOrUnion(arg->type) &&
+          !TypeIsArray(arg->type)) {
+        arg->flags |= kASTNeedAddress;
+      }
       arg_value = GenerateExpression(gen, arg);
+      arg->flags = old_arg_flags;
       gen->current_struct_address = old_struct_address;
     }
     if (cxx_constructor_call && i == 0 &&
@@ -1487,6 +1499,25 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         (!aggregate_actual || stashable_reference_actual)) {
       arg_value = StashCallResult(gen, arg_value,
                                   /*route_conversion_to_dest=*/true);
+    }
+
+    if (reference_formal && !TypeIsPointerOrArray(arg_value->type) &&
+        !TypeIsFunction(arg_value->type) &&
+        !TypeIsStructOrUnion(arg_value->type) &&
+        !TypeIsArray(arg_value->type)) {
+      IRNode* ref_source = arg_value;
+      if (!IRIsVariable(ref_source)) {
+        Symbol* tmp = SyntaxNewTemporary(gen->syntax, arg->type);
+        IRNode* var = GeneratorGetVariable(gen, tmp);
+        IROpcode store = GetStoreOpcodeForType(arg->type);
+        IRNode* write = GeneratorEmit(
+            gen, NewIR2(store, var,
+                        RemoveUnnecesaryShortening(gen, arg_value, store)));
+        IRSetVarDef(write, tmp);
+        ref_source = var;
+      }
+      arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
+      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
     if (reference_formal && TypeIsStructOrUnion(arg_value->type)) {
@@ -1675,6 +1706,14 @@ static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
 }
 
 static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
+  if (gen->for_constant_evaluation) {
+    Symbol* throw_symbol = GetDaveCCThrowFunction(node->base.location);
+    IRNode* func = GeneratorGetVariable(gen, throw_symbol);
+    IRNode* call = NewIR1(IR_OP(calla), func);
+    return IRSetType(GeneratorEmit(gen, call),
+                     NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  }
+
   IRNode* exception_object = NULL;
   if (node->expr != NULL) {
     exception_object = GenerateExpression(gen, node->expr);
@@ -2641,6 +2680,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
 
     case AST_OP(expr_init):
+      ((ExpressionInitializerASTNode*)node)->expr->flags |= node->flags;
       result =
           GenerateExpression(gen, ((ExpressionInitializerASTNode*)node)->expr);
       break;

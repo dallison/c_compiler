@@ -1824,7 +1824,33 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
     return;
   }
 
-  TypeRecord* base_type = TypeRecordCopy(base_symbol->type);
+  TypeRecord* base_type = NULL;
+  Vector* base_args = NULL;
+  if (base_symbol->flags.is_template && name.template_arguments.length > 0) {
+    base_args = TemplateArgumentVectorCopy(name.template_arguments.value.p[0]);
+  }
+  if (base_symbol->flags.is_template && base_args != NULL &&
+      !parser->syntax->parsing_template_declaration &&
+      TypeIsStructOrUnion(base_symbol->type)) {
+    base_type = InstantiateSimpleClassTemplate(parser, base_symbol, base_args);
+    VectorDestructWithContents(base_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    base_args = NULL;
+  } else {
+    base_type = TypeRecordCopy(base_symbol->type);
+    if (base_symbol->flags.is_template && base_args != NULL) {
+      base_type->template_origin = base_symbol;
+      if (base_type->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            base_type->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      base_type->template_arguments = base_args;
+      base_args = NULL;
+    }
+  }
   int placeholder_index = -1;
   bool is_template_parameter_base =
       TypeIsTemplateParameterPlaceholder(base_type, &placeholder_index);
@@ -1941,6 +1967,48 @@ static bool StructHasBaseStruct(Struct* str, Struct* target, int* offset) {
   return false;
 }
 
+static bool StructHasBaseType(Syntax* syntax, Struct* str, TypeRecord* target,
+                              int* offset) {
+  if (str == NULL || target == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL) {
+      continue;
+    }
+    TypeRecord* base_type =
+        TypeMaterializeClassTemplateSpecialization(syntax, base->type);
+    bool matches = TypeEqual(base_type, target);
+    if (matches) {
+      if (offset != NULL) {
+        *offset = base->byte_offset;
+      }
+      if (base_type != base->type) {
+        TypeRecordDelete(base_type);
+      }
+      return true;
+    }
+    if (TypeIsStructOrUnion(base_type) && base_type->info.struct_info != NULL) {
+      int nested_offset = 0;
+      if (StructHasBaseType(syntax, base_type->info.struct_info, target,
+                            &nested_offset)) {
+        if (offset != NULL) {
+          *offset = base->byte_offset + nested_offset;
+        }
+        if (base_type != base->type) {
+          TypeRecordDelete(base_type);
+        }
+        return true;
+      }
+    }
+    if (base_type != base->type) {
+      TypeRecordDelete(base_type);
+    }
+  }
+  return false;
+}
+
 static StructMember* CloneCXXMemberUsingMember(StructMember* member,
                                                CXXAccess access,
                                                int byte_offset) {
@@ -2004,16 +2072,26 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   if (owner == NULL || base_type == NULL || member_name == NULL) {
     return;
   }
-  if (!TypeIsStructOrUnion(base_type) || base_type->info.struct_info == NULL) {
+  TypeRecord* lookup_base =
+      TypeMaterializeClassTemplateSpecialization(parser->syntax, base_type);
+  if (!TypeIsStructOrUnion(lookup_base) ||
+      lookup_base->info.struct_info == NULL) {
     SyntaxError(parser->syntax,
                 "member using declaration requires a class base");
+    if (lookup_base != base_type) {
+      TypeRecordDelete(lookup_base);
+    }
     return;
   }
-  Struct* base_struct = base_type->info.struct_info;
+  Struct* base_struct = lookup_base->info.struct_info;
   int base_offset = 0;
-  if (!StructHasBaseStruct(owner, base_struct, &base_offset)) {
+  if (!StructHasBaseStruct(owner, base_struct, &base_offset) &&
+      !StructHasBaseType(parser->syntax, owner, lookup_base, &base_offset)) {
     SyntaxError(parser->syntax,
                 "using declaration base is not a base class");
+    if (lookup_base != base_type) {
+      TypeRecordDelete(lookup_base);
+    }
     return;
   }
   CXXAccess ignored_access = kAccessPublic;
@@ -2024,6 +2102,9 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
       &member_offset);
   if (first == NULL) {
     SyntaxError(parser->syntax, "No such base class member %s", member_name);
+    if (lookup_base != base_type) {
+      TypeRecordDelete(lookup_base);
+    }
     return;
   }
   if (ignored_access == kAccessPrivate) {
@@ -2031,6 +2112,9 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                 ignored_owner != NULL && ignored_owner->tag_name != NULL
                     ? ignored_owner->tag_name->value
                     : "<anonymous>");
+    if (lookup_base != base_type) {
+      TypeRecordDelete(lookup_base);
+    }
     return;
   }
   bool imported = false;
@@ -2050,6 +2134,9 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   }
   if (!imported) {
     SyntaxError(parser->syntax, "No such base class member %s", member_name);
+  }
+  if (lookup_base != base_type) {
+    TypeRecordDelete(lookup_base);
   }
 }
 
@@ -2402,10 +2489,32 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
                (size_t)arg->template_parameter_index < args->length) {
       pack = args->value.p[arg->template_parameter_index];
     }
+    if (pack == NULL && index >= 0 &&
+        (args == NULL || (size_t)index >= args->length)) {
+      VectorAppend(out, TemplateArgumentCopy(arg));
+      return;
+    }
     if (pack != NULL && pack->pack_arguments != NULL) {
       for (size_t i = 0; i < pack->pack_arguments->length; i++) {
-        VectorAppend(out, TemplateArgumentCopy(pack->pack_arguments->value.p[i]));
+        if (arg->kind == kTemplateParameterType && index >= 0 &&
+            arg->type != NULL && arg->type->qualifiers != kQualPlain) {
+          Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
+              args, index, pack->pack_arguments->value.p[i]);
+          TemplateArgument* subst =
+              NewSubstitutedTemplateArgument(parser, arg, element_args);
+          VectorAppend(out, subst);
+          VectorDeleteWithContents(
+              element_args, (VectorElementDestructor)TemplateArgumentDelete,
+              /*free_element=*/false);
+        } else {
+          VectorAppend(out,
+                       TemplateArgumentCopy(pack->pack_arguments->value.p[i]));
+        }
       }
+      return;
+    }
+    if (pack != NULL && pack->is_pack_expansion) {
+      VectorAppend(out, TemplateArgumentCopy(pack));
       return;
     }
     int pattern_pack_index = -1;
@@ -2419,8 +2528,9 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
         for (size_t i = 0; i < pattern_pack->pack_arguments->length; i++) {
           Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
               args, pattern_pack_index, pattern_pack->pack_arguments->value.p[i]);
-          VectorAppend(out,
-                       NewSubstitutedTemplateArgument(parser, arg, element_args));
+          TemplateArgument* subst =
+              NewSubstitutedTemplateArgument(parser, arg, element_args);
+          VectorAppend(out, subst);
           VectorDeleteWithContents(
               element_args, (VectorElementDestructor)TemplateArgumentDelete,
               /*free_element=*/false);
@@ -7828,6 +7938,20 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
         if (actual_arg == NULL) {
           return false;
         }
+        // The actual may be a still-dependent pack expansion (e.g. matching
+        // visit's `variant<VisitTypes...>` parameter against a dependent
+        // `variant<Types...>` actual inside another template).  Bind the formal
+        // pack to that dependent pack as a unit; it will be re-expanded when the
+        // surrounding template is instantiated.
+        if (actual_arg->is_pack_expansion) {
+          TemplateArgument* existing = args->value.p[pack_index];
+          if (existing == NULL) {
+            args->value.p[pack_index] = TemplateArgumentCopy(actual_arg);
+          } else if (!TemplateArgumentEqual(existing, actual_arg)) {
+            return false;
+          }
+          continue;
+        }
         // The actual may itself be an already-bundled pack; splice its elements.
         if (actual_arg->pack_arguments != NULL) {
           for (size_t j = 0; j < actual_arg->pack_arguments->length; j++) {
@@ -10626,7 +10750,8 @@ static bool AliasTemplateArgumentIsPackExpansion(TemplateArgument* arg,
  * applying defaults and gathering a trailing parameter pack, so the count
  * matches the alias's parameters. Returns NULL on an arity mismatch. */
 static Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals) {
-  if (!CXXAliasTemplatePatternNamesClassTemplate(alias)) {
+  if (alias == NULL || alias->type == NULL ||
+      alias->type->template_arguments == NULL) {
     return NULL;
   }
   int max_index = -1;
@@ -10984,6 +11109,21 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           }
         }
         if (symbol->flags.is_template && args != NULL &&
+            !TypeIsStructOrUnion(symbol->type) &&
+            !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
+            !TemplateArgumentVectorContainsTemplateParameter(args)) {
+          Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
+          if (completed_args != NULL) {
+            type_record =
+                SubstituteTemplateParameters(parser, symbol->type,
+                                             completed_args);
+            VectorDeleteWithContents(
+                completed_args, (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+          } else {
+            type_record = TypeRecordCopy(symbol->type);
+          }
+        } else if (symbol->flags.is_template && args != NULL &&
             !parser->syntax->parsing_template_declaration &&
             TypeIsStructOrUnion(symbol->type)) {
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
@@ -11036,6 +11176,22 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
           if (symbol->flags.is_template && args != NULL &&
+              !TypeIsStructOrUnion(symbol->type) &&
+              !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
+              !TemplateArgumentVectorContainsTemplateParameter(args)) {
+            Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
+            if (completed_args != NULL) {
+              type_record =
+                  SubstituteTemplateParameters(parser, symbol->type,
+                                               completed_args);
+              VectorDeleteWithContents(
+                  completed_args,
+                  (VectorElementDestructor)TemplateArgumentDelete,
+                  /*free_element=*/false);
+            } else {
+              type_record = TypeRecordCopy(symbol->type);
+            }
+          } else if (symbol->flags.is_template && args != NULL &&
               !parser->syntax->parsing_template_declaration &&
               TypeIsStructOrUnion(symbol->type)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);

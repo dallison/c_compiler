@@ -60,8 +60,6 @@ typedef struct ConstexprPCodeFreeBlock {
   struct ConstexprPCodeFreeBlock* next;
 } ConstexprPCodeFreeBlock;
 
-typedef struct ConstexprObject ConstexprObject;
-
 typedef struct {
   void* memory;
   size_t size;
@@ -116,6 +114,8 @@ enum {
   kConstexprPCodeEscapeFree = 101,
   kConstexprPCodeEscapeRealloc = 102,
   kConstexprPCodeEscapePlacementNew = 103,
+  kConstexprPCodeEscapeThrow = 104,
+  kConstexprPCodeEscapeMemcpy = 105,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -135,6 +135,16 @@ static const uint32_t constexpr_pcode_realloc_stub[] = {
 
 static const uint32_t constexpr_pcode_placement_new_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapePlacementNew,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_throw_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeThrow,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_memcpy_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeMemcpy,
     (PCODE_OP(ret) << 24),
 };
 
@@ -538,6 +548,14 @@ static bool ConstexprPCodeRuntimeSymbolAddress(AssemblerSymbol* symbol,
     *address = (uint64_t)(uintptr_t)constexpr_pcode_realloc_stub;
     return true;
   }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "__davecc_throw")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_throw_stub;
+    return true;
+  }
+  if (IsConstexprPCodeRuntimeSymbol(symbol, "memcpy")) {
+    *address = (uint64_t)(uintptr_t)constexpr_pcode_memcpy_stub;
+    return true;
+  }
   return false;
 }
 
@@ -551,7 +569,9 @@ static bool IsConstexprPCodeRuntimeCallSymbol(Symbol* symbol) {
          strcmp(symbol->name.value, "operator new") == 0 ||
          strcmp(symbol->name.value, "operator new[]") == 0 ||
          strcmp(symbol->name.value, "operator delete") == 0 ||
-         strcmp(symbol->name.value, "operator delete[]") == 0;
+         strcmp(symbol->name.value, "operator delete[]") == 0 ||
+         strcmp(symbol->name.value, "__davecc_throw") == 0 ||
+         strcmp(symbol->name.value, "memcpy") == 0;
 }
 
 static uint64_t SymbolRuntimeAddress(Assembler* assembler,
@@ -875,6 +895,23 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
   return false;
 }
 
+static bool ConstexprPCodeAggregateHasStoredMembers(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
                                      ConstexprValue* value) {
   if (type == NULL || src == NULL || value == NULL) {
@@ -1042,7 +1079,8 @@ static ConstexprObject* ConstexprObjectArgument(ASTNode* arg) {
   return NULL;
 }
 
-static bool StoreConstexprPCodeObjectPointer(PCodeVM* vm,
+static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
+                                             PCodeVM* vm,
                                              unsigned char** sp,
                                              TypeRecord* type, ASTNode* arg,
                                              Vector* allocations,
@@ -1050,7 +1088,10 @@ static bool StoreConstexprPCodeObjectPointer(PCodeVM* vm,
                                              const char** reason) {
   TypeRecord* object_type = type != NULL ? type->next : NULL;
   ConstexprObject* object = ConstexprObjectArgument(arg);
-  if (object_type == NULL || object == NULL) {
+  if (object == NULL && ctx != NULL) {
+    (void)ConstexprEvaluateObjectAddress(ctx, arg, &object);
+  }
+  if (object_type == NULL) {
     return false;
   }
   size_t memory_size = ConstexprPCodeHostBufferSize(object_type->size);
@@ -1059,7 +1100,45 @@ static bool StoreConstexprPCodeObjectPointer(PCodeVM* vm,
     *reason = "could not allocate constexpr object argument";
     return false;
   }
-  if (!StoreConstexprObjectBytes(object_type, object, memory)) {
+  if (object != NULL) {
+    if (!StoreConstexprObjectBytes(object_type, object, memory)) {
+      free(memory);
+      return false;
+    }
+  } else if (TypeIsReference(type)) {
+    if (TypeIsFloatingPoint(object_type)) {
+      double value;
+      if (!EvaluateFloatingPointExpressionInContext(ctx, arg, &value)) {
+        free(memory);
+        return false;
+      }
+      ConstexprValue constexpr_value = {
+          .is_floating = true,
+          .fvalue = value,
+          .ivalue = (int64_t)value,
+      };
+      if (!StoreConstexprScalarBytes(object_type, &constexpr_value, memory)) {
+        free(memory);
+        return false;
+      }
+    } else if (TypeIsIntegral(object_type) || TypeIsPointer(object_type) ||
+               TypeIsFunction(object_type)) {
+      int64_t value;
+      if (!EvaluateIntegerExpressionInContext(ctx, arg, &value)) {
+        free(memory);
+        return false;
+      }
+      ConstexprValue constexpr_value = {.ivalue = value};
+      if (!StoreConstexprScalarBytes(object_type, &constexpr_value, memory)) {
+        free(memory);
+        return false;
+      }
+    } else if (!TypeIsStructOrUnion(object_type) ||
+               ConstexprPCodeAggregateHasStoredMembers(object_type)) {
+      free(memory);
+      return false;
+    }
+  } else {
     free(memory);
     return false;
   }
@@ -1180,8 +1259,8 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     *reason = "bad constexpr pcode argument type";
     return false;
   }
-  if (TypeIsPointerOrArray(type) &&
-      StoreConstexprPCodeObjectPointer(vm, sp, type, arg, allocations,
+  if ((TypeIsPointerOrArray(type) || TypeIsReference(type)) &&
+      StoreConstexprPCodeObjectPointer(ctx, vm, sp, type, arg, allocations,
                                        address_regions, reason)) {
     return true;
   }
@@ -1193,6 +1272,10 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
   *sp -= size;
   if (TypeIsStructOrUnion(type)) {
     ConstexprObject* object = ConstexprObjectArgument(arg);
+    if (object == NULL && !ConstexprPCodeAggregateHasStoredMembers(type)) {
+      memset(*sp, 0, size);
+      return true;
+    }
     if (object == NULL || !StoreConstexprObjectBytes(type, object, *sp)) {
       *reason = "could not marshal aggregate constexpr argument";
       return false;
@@ -1355,7 +1438,13 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
           false) ||
       !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_realloc_stub,
-          sizeof(constexpr_pcode_realloc_stub), false)) {
+          sizeof(constexpr_pcode_realloc_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_throw_stub,
+          sizeof(constexpr_pcode_throw_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_memcpy_stub,
+          sizeof(constexpr_pcode_memcpy_stub), false)) {
     *reason = "could not enable checked constexpr pcode memory";
     return false;
   }
@@ -1710,7 +1799,6 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
       return;
     case AST_OP(try):
     case AST_OP(catch):
-    case AST_OP(throw):
       ValidationReject(state, "exceptions are not allowed in constexpr evaluation");
       return;
     case AST_OP(builtin_va_start):
@@ -2071,6 +2159,72 @@ static PCodeVMStatus ConstexprPCodeEscapePlacementNew(PCodeVM* vm) {
   return kPCodeVMStatusRunning;
 }
 
+static bool ConstexprPCodeRegionContains(uint64_t start, size_t region_size,
+                                         uint64_t address, size_t size) {
+  if (size == 0) {
+    return address >= start && address <= start + region_size;
+  }
+  if (size > UINT64_MAX - address || size > UINT64_MAX - start) {
+    return false;
+  }
+  return address >= start && address + size <= start + region_size;
+}
+
+static bool ConstexprPCodeNormalizeAddress(PCodeVM* vm, uint64_t raw,
+                                           size_t size, bool write,
+                                           uint64_t* normalized) {
+  if (vm->stack != NULL && vm->stack_size != 0) {
+    uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+    uint64_t stack_address =
+        (stack_start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
+    if (ConstexprPCodeRegionContains(stack_start, vm->stack_size,
+                                     stack_address, size) &&
+        stack_address >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
+      *normalized = stack_address;
+      return true;
+    }
+  }
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i];
+    if (write && !region->writable) {
+      continue;
+    }
+    if (ConstexprPCodeRegionContains(region->start, region->size, raw, size)) {
+      *normalized = raw;
+      return true;
+    }
+    uint64_t region_address =
+        (region->start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
+    if (ConstexprPCodeRegionContains(region->start, region->size,
+                                     region_address, size)) {
+      *normalized = region_address;
+      return true;
+    }
+  }
+  return false;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeMemcpy(PCodeVM* vm) {
+  uint64_t raw_dest = ConstexprPCodeStackArgument(vm, 0);
+  uint64_t raw_src = ConstexprPCodeStackArgument(vm, 1);
+  size_t size = (size_t)ConstexprPCodeStackArgument(vm, 2);
+  uint64_t dest_address = 0;
+  uint64_t src_address = 0;
+  if (!ConstexprPCodeNormalizeAddress(vm, raw_dest, size, true,
+                                      &dest_address)) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  if (!ConstexprPCodeNormalizeAddress(vm, raw_src, size, false,
+                                      &src_address)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  void* dest = (void*)(uintptr_t)dest_address;
+  void* src = (void*)(uintptr_t)src_address;
+  memcpy(dest, src, size);
+  vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)dest_address;
+  return kPCodeVMStatusRunning;
+}
+
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
   ConstexprPCodeRuntime* runtime = data;
   switch (code) {
@@ -2087,6 +2241,10 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
                              : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapePlacementNew:
       return ConstexprPCodeEscapePlacementNew(vm);
+    case kConstexprPCodeEscapeThrow:
+      return kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeMemcpy:
+      return ConstexprPCodeEscapeMemcpy(vm);
     default:
       return kPCodeVMStatusUndefinedEscape;
   }

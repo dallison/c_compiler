@@ -1,0 +1,60 @@
+//
+//  functional
+//  c_compiler
+//
+//  Minimal C++20 functional support for DaveCC.
+//
+
+#ifndef __davecc_functional__
+#define __davecc_functional__
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace std {
+
+template <class T>
+struct hash;
+
+namespace __functional_detail {
+
+static inline size_t __hash_integral(unsigned long long value) {
+  return static_cast<size_t>(value ^ (value >> 32));
+}
+
+}  // namespace __functional_detail
+
+#define __DAVECC_HASH_INTEGRAL(T)                                      \
+  template <>                                                          \
+  struct hash<T> {                                                     \
+    size_t operator()(T value) const noexcept {                        \
+      return __functional_detail::__hash_integral(                     \
+          static_cast<unsigned long long>(value));                     \
+    }                                                                  \
+  }
+
+__DAVECC_HASH_INTEGRAL(bool);
+__DAVECC_HASH_INTEGRAL(char);
+__DAVECC_HASH_INTEGRAL(signed char);
+__DAVECC_HASH_INTEGRAL(unsigned char);
+__DAVECC_HASH_INTEGRAL(short);
+__DAVECC_HASH_INTEGRAL(unsigned short);
+__DAVECC_HASH_INTEGRAL(int);
+__DAVECC_HASH_INTEGRAL(unsigned int);
+__DAVECC_HASH_INTEGRAL(long);
+__DAVECC_HASH_INTEGRAL(unsigned long);
+__DAVECC_HASH_INTEGRAL(long long);
+__DAVECC_HASH_INTEGRAL(unsigned long long);
+
+#undef __DAVECC_HASH_INTEGRAL
+
+template <class T>
+struct hash<T*> {
+  size_t operator()(T* value) const noexcept {
+    return static_cast<size_t>(reinterpret_cast<uintptr_t>(value));
+  }
+};
+
+}  // namespace std
+
+#endif /* __davecc_functional__ */

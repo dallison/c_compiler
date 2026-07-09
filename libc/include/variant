@@ -10,6 +10,7 @@
 
 #include <compare>
 #include <exception>
+#include <functional>
 #include <initializer_list>
 #include <new>
 #include <stddef.h>
@@ -52,6 +53,13 @@ constexpr strong_ordering operator<=>(monostate, monostate) noexcept {
   return strong_ordering::equal;
 }
 
+template <>
+struct hash<monostate> {
+  size_t operator()(monostate) const noexcept {
+    return 0;
+  }
+};
+
 class bad_variant_access : public exception {
  public:
   bad_variant_access() noexcept {}
@@ -71,16 +79,18 @@ struct variant_size<variant<Types...> >
     : integral_constant<size_t, sizeof...(Types)> {
 };
 
-template <class T>
-struct variant_size<const T> : variant_size<T> {
+template <class... Types>
+struct variant_size<const variant<Types...> > : variant_size<variant<Types...> > {
 };
 
-template <class T>
-struct variant_size<volatile T> : variant_size<T> {
+template <class... Types>
+struct variant_size<volatile variant<Types...> >
+    : variant_size<variant<Types...> > {
 };
 
-template <class T>
-struct variant_size<const volatile T> : variant_size<T> {
+template <class... Types>
+struct variant_size<const volatile variant<Types...> >
+    : variant_size<variant<Types...> > {
 };
 
 template <class T>
@@ -120,6 +130,58 @@ template <class T>
 struct __index_of<T> {
 };
 
+template <class T, class... Types>
+struct __count_of;
+
+template <class T>
+struct __count_of<T> : integral_constant<size_t, 0> {
+};
+
+template <class T, class First, class... Rest>
+struct __count_of<T, First, Rest...>
+    : integral_constant<size_t,
+                        (is_same<T, First>::value ? 1 : 0) +
+                            __count_of<T, Rest...>::value> {
+};
+
+template <class T, class... Types>
+struct __exactly_once
+    : bool_constant<__count_of<T, Types...>::value == 1> {
+};
+
+template <class T>
+struct __is_variant : false_type {
+};
+
+template <class... Types>
+struct __is_variant<variant<Types...> > : true_type {
+};
+
+template <class T>
+struct __is_in_place_type : false_type {
+};
+
+template <class T>
+struct __is_in_place_type<in_place_type_t<T> > : true_type {
+};
+
+template <class T>
+struct __is_in_place_index : false_type {
+};
+
+template <size_t I>
+struct __is_in_place_index<in_place_index_t<I> > : true_type {
+};
+
+template <class T, class... Types>
+struct __converting_candidate
+    : bool_constant<
+          __exactly_once<decay_t<T>, Types...>::value &&
+          !__is_variant<remove_cvref_t<T> >::value &&
+          !__is_in_place_type<remove_cvref_t<T> >::value &&
+          !__is_in_place_index<remove_cvref_t<T> >::value> {
+};
+
 template <size_t I, class... Types>
 union __storage;
 
@@ -128,33 +190,33 @@ union __storage<I, T> {
   char __dummy_;
   T __value_;
 
-  __storage() : __dummy_(0) {}
-  ~__storage() {}
+  constexpr __storage() : __dummy_(0) {}
+  constexpr ~__storage() {}
 
   template <size_t Target>
-  typename __type_at<Target - I, T>::type* __ptr() {
+  constexpr typename __type_at<Target - I, T>::type* __ptr() {
     return &__value_;
   }
 
   template <size_t Target>
-  const typename __type_at<Target - I, T>::type* __ptr() const {
+  constexpr const typename __type_at<Target - I, T>::type* __ptr() const {
     return &__value_;
   }
 
   template <size_t Target, class... Args>
-  void __construct(Args&&... args) {
+  constexpr void __construct(Args&&... args) {
     new (this->template __ptr<Target>())
         typename __type_at<Target - I, T>::type(std::forward<Args>(args)...);
   }
 
   template <size_t Target, class U, class... Args>
-  void __construct_list(initializer_list<U> init, Args&&... args) {
+  constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
     new (this->template __ptr<Target>())
         typename __type_at<Target - I, T>::type(
             init, std::forward<Args>(args)...);
   }
 
-  void __destroy(size_t index) {
+  constexpr void __destroy(size_t index) {
     if (index == I) {
       __value_.~T();
     }
@@ -215,6 +277,16 @@ union __storage<I, T> {
     return vis(__value_);
   }
 
+  template <class Visitor>
+  auto __visit_move(Visitor&& vis, size_t index) {
+    return vis(std::move(__value_));
+  }
+
+  template <class Visitor>
+  auto __visit_const_move(Visitor&& vis, size_t index) const {
+    return vis(std::move(__value_));
+  }
+
 };
 
 template <size_t I, class T, class... Rest>
@@ -223,11 +295,11 @@ union __storage<I, T, Rest...> {
   T __value_;
   __storage<I + 1, Rest...> __rest_;
 
-  __storage() : __dummy_(0) {}
-  ~__storage() {}
+  constexpr __storage() : __dummy_(0) {}
+  constexpr ~__storage() {}
 
   template <size_t Target>
-  typename __type_at<Target - I, T, Rest...>::type* __ptr() {
+  constexpr typename __type_at<Target - I, T, Rest...>::type* __ptr() {
     if constexpr (Target == I) {
       return &__value_;
     } else {
@@ -236,7 +308,8 @@ union __storage<I, T, Rest...> {
   }
 
   template <size_t Target>
-  const typename __type_at<Target - I, T, Rest...>::type* __ptr() const {
+  constexpr const typename __type_at<Target - I, T, Rest...>::type* __ptr()
+      const {
     if constexpr (Target == I) {
       return &__value_;
     } else {
@@ -245,20 +318,20 @@ union __storage<I, T, Rest...> {
   }
 
   template <size_t Target, class... Args>
-  void __construct(Args&&... args) {
+  constexpr void __construct(Args&&... args) {
     new (this->template __ptr<Target>())
         typename __type_at<Target - I, T, Rest...>::type(
             std::forward<Args>(args)...);
   }
 
   template <size_t Target, class U, class... Args>
-  void __construct_list(initializer_list<U> init, Args&&... args) {
+  constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
     new (this->template __ptr<Target>())
         typename __type_at<Target - I, T, Rest...>::type(
             init, std::forward<Args>(args)...);
   }
 
-  void __destroy(size_t index) {
+  constexpr void __destroy(size_t index) {
     if (index == I) {
       __value_.~T();
     } else {
@@ -341,6 +414,22 @@ union __storage<I, T, Rest...> {
       return vis(__value_);
     }
     return __rest_.__visit(vis, index);
+  }
+
+  template <class Visitor>
+  auto __visit_move(Visitor&& vis, size_t index) {
+    if (index == I) {
+      return vis(std::move(__value_));
+    }
+    return __rest_.__visit_move(vis, index);
+  }
+
+  template <class Visitor>
+  auto __visit_const_move(Visitor&& vis, size_t index) const {
+    if (index == I) {
+      return vis(std::move(__value_));
+    }
+    return __rest_.__visit_const_move(vis, index);
   }
 
 };
@@ -552,19 +641,20 @@ struct variant_alternative<I, variant<Types...> > {
   using type = typename __variant_detail::__type_at<I, Types...>::type;
 };
 
-template <size_t I, class T>
-struct variant_alternative<I, const T> {
-  using type = const typename variant_alternative<I, T>::type;
+template <size_t I, class... Types>
+struct variant_alternative<I, const variant<Types...> > {
+  using type = typename __variant_detail::__type_at<I, const Types...>::type;
 };
 
-template <size_t I, class T>
-struct variant_alternative<I, volatile T> {
-  using type = volatile typename variant_alternative<I, T>::type;
+template <size_t I, class... Types>
+struct variant_alternative<I, volatile variant<Types...> > {
+  using type = typename __variant_detail::__type_at<I, volatile Types...>::type;
 };
 
-template <size_t I, class T>
-struct variant_alternative<I, const volatile T> {
-  using type = const volatile typename variant_alternative<I, T>::type;
+template <size_t I, class... Types>
+struct variant_alternative<I, const volatile variant<Types...> > {
+  using type =
+      typename __variant_detail::__type_at<I, const volatile Types...>::type;
 };
 
 template <size_t I, class T>
@@ -579,20 +669,20 @@ class variant {
   size_t __index_;
 
   template <size_t I, class... Args>
-  void __construct(Args&&... args) {
+  constexpr void __construct(Args&&... args) {
     __storage_.template __construct<I>(std::forward<Args>(args)...);
     __index_ = I;
   }
 
   template <size_t I, class U, class... Args>
-  void __construct_list(initializer_list<U> init, Args&&... args) {
+  constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
     __storage_.template __construct_list<I>(
         init, std::forward<Args>(args)...);
     __index_ = I;
   }
 
  public:
-  variant() : __index_(variant_npos) {
+  constexpr variant() : __index_(variant_npos) {
     this->template __construct<0>();
   }
 
@@ -610,43 +700,54 @@ class variant {
     }
   }
 
-  template <class T>
-  variant(T&& value) : __index_(variant_npos) {
+  template <class T,
+            enable_if_t<__variant_detail::__converting_candidate<
+                            T, Types...>::value,
+                        int> = 0>
+  constexpr variant(T&& value) : __index_(variant_npos) {
     this->template __construct<
         __variant_detail::__index_of<decay_t<T>, Types...>::value>(
         std::forward<T>(value));
   }
 
   template <size_t I, class... Args>
-  explicit variant(in_place_index_t<I>, Args&&... args)
+  constexpr explicit variant(in_place_index_t<I>, Args&&... args)
       : __index_(variant_npos) {
     this->template __construct<I>(std::forward<Args>(args)...);
+    __index_ = I;
   }
 
   template <size_t I, class U, class... Args>
-  explicit variant(in_place_index_t<I>, initializer_list<U> init,
-                   Args&&... args)
+  constexpr explicit variant(in_place_index_t<I>, initializer_list<U> init,
+                             Args&&... args)
       : __index_(variant_npos) {
     this->template __construct_list<I>(init, std::forward<Args>(args)...);
+    __index_ = I;
   }
 
   template <class T, class... Args>
-  explicit variant(in_place_type_t<T>, Args&&... args)
+  constexpr explicit variant(in_place_type_t<T>, Args&&... args)
       : __index_(variant_npos) {
+    static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                  "variant type alternative must appear exactly once");
     this->template __construct<__variant_detail::__index_of<T, Types...>::value>(
         std::forward<Args>(args)...);
+    __index_ = __variant_detail::__index_of<T, Types...>::value;
   }
 
   template <class T, class U, class... Args>
-  explicit variant(in_place_type_t<T>, initializer_list<U> init,
-                   Args&&... args)
+  constexpr explicit variant(in_place_type_t<T>, initializer_list<U> init,
+                             Args&&... args)
       : __index_(variant_npos) {
+    static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                  "variant type alternative must appear exactly once");
     this->template __construct_list<
         __variant_detail::__index_of<T, Types...>::value>(
         init, std::forward<Args>(args)...);
+    __index_ = __variant_detail::__index_of<T, Types...>::value;
   }
 
-  ~variant() {
+  constexpr ~variant() {
     if (!valueless_by_exception()) {
       __storage_.__destroy(__index_);
     }
@@ -668,6 +769,7 @@ class variant {
     } else {
       if (!valueless_by_exception()) {
         __storage_.__destroy(__index_);
+        __index_ = variant_npos;
       }
       __storage_.__copy_construct(other.__storage_, other.__index_);
       __index_ = other.__index_;
@@ -691,6 +793,7 @@ class variant {
     } else {
       if (!valueless_by_exception()) {
         __storage_.__destroy(__index_);
+        __index_ = variant_npos;
       }
       __storage_.__move_construct(other.__storage_, other.__index_);
       __index_ = other.__index_;
@@ -698,7 +801,10 @@ class variant {
     return *this;
   }
 
-  template <class T>
+  template <class T,
+            enable_if_t<__variant_detail::__converting_candidate<
+                            T, Types...>::value,
+                        int> = 0>
   variant& operator=(T&& value) {
     if (__index_ ==
         __variant_detail::__index_of<decay_t<T>, Types...>::value) {
@@ -713,16 +819,16 @@ class variant {
     return *this;
   }
 
-  size_t index() const noexcept {
+  constexpr size_t index() const noexcept {
     return __index_;
   }
 
-  bool valueless_by_exception() const noexcept {
+  constexpr bool valueless_by_exception() const noexcept {
     return __index_ == variant_npos;
   }
 
   template <size_t I, class... Args>
-  variant_alternative_t<I, variant>& emplace(Args&&... args) {
+  constexpr variant_alternative_t<I, variant>& emplace(Args&&... args) {
     if (!valueless_by_exception()) {
       __storage_.__destroy(__index_);
       __index_ = variant_npos;
@@ -732,8 +838,8 @@ class variant {
   }
 
   template <size_t I, class U, class... Args>
-  variant_alternative_t<I, variant>& emplace(initializer_list<U> init,
-                                            Args&&... args) {
+  constexpr variant_alternative_t<I, variant>& emplace(
+      initializer_list<U> init, Args&&... args) {
     if (!valueless_by_exception()) {
       __storage_.__destroy(__index_);
       __index_ = variant_npos;
@@ -743,14 +849,18 @@ class variant {
   }
 
   template <class T, class... Args>
-  T& emplace(Args&&... args) {
+  constexpr T& emplace(Args&&... args) {
+    static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                  "variant type alternative must appear exactly once");
     return this->template emplace<
         __variant_detail::__index_of<T, Types...>::value>(
         std::forward<Args>(args)...);
   }
 
   template <class T, class U, class... Args>
-  T& emplace(initializer_list<U> init, Args&&... args) {
+  constexpr T& emplace(initializer_list<U> init, Args&&... args) {
+    static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                  "variant type alternative must appear exactly once");
     return this->template emplace<
         __variant_detail::__index_of<T, Types...>::value>(
         init, std::forward<Args>(args)...);
@@ -773,7 +883,7 @@ class variant {
   }
 
   template <size_t I>
-  variant_alternative_t<I, variant>* __get_if_index() noexcept {
+  constexpr variant_alternative_t<I, variant>* __get_if_index() noexcept {
     if (__index_ != I) {
       return nullptr;
     }
@@ -781,7 +891,8 @@ class variant {
   }
 
   template <size_t I>
-  const variant_alternative_t<I, variant>* __get_if_index() const noexcept {
+  constexpr const variant_alternative_t<I, variant>* __get_if_index()
+      const noexcept {
     if (__index_ != I) {
       return nullptr;
     }
@@ -809,71 +920,102 @@ class variant {
   auto __visit_impl(Visitor&& vis) const {
     return __storage_.__visit(vis, __index_);
   }
+
+  template <class Visitor>
+  auto __visit_impl_move(Visitor&& vis) {
+    return __storage_.__visit_move(vis, __index_);
+  }
+
+  template <class Visitor>
+  auto __visit_impl_const_move(Visitor&& vis) const {
+    return __storage_.__visit_const_move(vis, __index_);
+  }
+
 };
 
 template <class T, class... Types>
 bool holds_alternative(const variant<Types...>& value) noexcept {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return value.index() == __variant_detail::__index_of<T, Types...>::value;
 }
 
 template <size_t I, class... Types>
-variant_alternative_t<I, variant<Types...> >& get(variant<Types...>& value) {
-  if (value.index() != I) {
+constexpr variant_alternative_t<I, variant<Types...> >* get_if(
+    variant<Types...>* value) noexcept;
+
+template <size_t I, class... Types>
+constexpr const variant_alternative_t<I, variant<Types...> >* get_if(
+    const variant<Types...>* value) noexcept;
+
+template <size_t I, class... Types>
+constexpr variant_alternative_t<I, variant<Types...> >& get(
+    variant<Types...>& value) {
+  if (get_if<I>(&value) == nullptr) {
     throw bad_variant_access();
   }
-  return *value.template __get_if_index<I>();
+  return *get_if<I>(&value);
 }
 
 template <size_t I, class... Types>
-const variant_alternative_t<I, variant<Types...> >& get(
+constexpr const variant_alternative_t<I, variant<Types...> >& get(
     const variant<Types...>& value) {
-  if (value.index() != I) {
+  if (get_if<I>(&value) == nullptr) {
     throw bad_variant_access();
   }
-  return *value.template __get_if_index<I>();
+  return *get_if<I>(&value);
 }
 
 template <size_t I, class... Types>
-variant_alternative_t<I, variant<Types...> >&& get(variant<Types...>&& value) {
-  if (value.index() != I) {
+constexpr variant_alternative_t<I, variant<Types...> >&& get(
+    variant<Types...>&& value) {
+  if (get_if<I>(&value) == nullptr) {
     throw bad_variant_access();
   }
-  return std::move(*value.template __get_if_index<I>());
+  return std::move(*get_if<I>(&value));
 }
 
 template <size_t I, class... Types>
-const variant_alternative_t<I, variant<Types...> >&& get(
+constexpr const variant_alternative_t<I, variant<Types...> >&& get(
     const variant<Types...>&& value) {
-  if (value.index() != I) {
+  if (get_if<I>(&value) == nullptr) {
     throw bad_variant_access();
   }
-  return std::move(*value.template __get_if_index<I>());
+  return std::move(*get_if<I>(&value));
 }
 
 template <class T, class... Types>
-T& get(variant<Types...>& value) {
+constexpr T& get(variant<Types...>& value) {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get<__variant_detail::__index_of<T, Types...>::value>(value);
 }
 
 template <class T, class... Types>
-const T& get(const variant<Types...>& value) {
+constexpr const T& get(const variant<Types...>& value) {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get<__variant_detail::__index_of<T, Types...>::value>(value);
 }
 
 template <class T, class... Types>
-T&& get(variant<Types...>&& value) {
+constexpr T&& get(variant<Types...>&& value) {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get<__variant_detail::__index_of<T, Types...>::value>(
       std::move(value));
 }
 
 template <class T, class... Types>
-const T&& get(const variant<Types...>&& value) {
+constexpr const T&& get(const variant<Types...>&& value) {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get<__variant_detail::__index_of<T, Types...>::value>(
       std::move(value));
 }
 
 template <size_t I, class... Types>
-variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr variant_alternative_t<I, variant<Types...> >* get_if(
     variant<Types...>* value) noexcept {
   if (value == nullptr) {
     return nullptr;
@@ -882,7 +1024,7 @@ variant_alternative_t<I, variant<Types...> >* get_if(
 }
 
 template <size_t I, class... Types>
-const variant_alternative_t<I, variant<Types...> >* get_if(
+constexpr const variant_alternative_t<I, variant<Types...> >* get_if(
     const variant<Types...>* value) noexcept {
   if (value == nullptr) {
     return nullptr;
@@ -891,13 +1033,53 @@ const variant_alternative_t<I, variant<Types...> >* get_if(
 }
 
 template <class T, class... Types>
-T* get_if(variant<Types...>* value) noexcept {
+constexpr T* get_if(variant<Types...>* value) noexcept {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get_if<__variant_detail::__index_of<T, Types...>::value>(value);
 }
 
 template <class T, class... Types>
-const T* get_if(const variant<Types...>* value) noexcept {
+constexpr const T* get_if(const variant<Types...>* value) noexcept {
+  static_assert(__variant_detail::__exactly_once<T, Types...>::value,
+                "variant type alternative must appear exactly once");
   return get_if<__variant_detail::__index_of<T, Types...>::value>(value);
+}
+
+template <class R, class Visitor, class... Types>
+R visit(Visitor&& vis, variant<Types...>& var) {
+  if constexpr (is_void<R>::value) {
+    var.__visit_impl(std::forward<Visitor>(vis));
+  } else {
+    return var.__visit_impl(std::forward<Visitor>(vis));
+  }
+}
+
+template <class R, class Visitor, class... Types>
+R visit(Visitor&& vis, const variant<Types...>& var) {
+  if constexpr (is_void<R>::value) {
+    var.__visit_impl(std::forward<Visitor>(vis));
+  } else {
+    return var.__visit_impl(std::forward<Visitor>(vis));
+  }
+}
+
+template <class R, class Visitor, class... Types>
+R visit(Visitor&& vis, variant<Types...>&& var) {
+  if constexpr (is_void<R>::value) {
+    var.__visit_impl_move(std::forward<Visitor>(vis));
+  } else {
+    return var.__visit_impl_move(std::forward<Visitor>(vis));
+  }
+}
+
+template <class R, class Visitor, class... Types>
+R visit(Visitor&& vis, const variant<Types...>&& var) {
+  if constexpr (is_void<R>::value) {
+    var.__visit_impl_const_move(std::forward<Visitor>(vis));
+  } else {
+    return var.__visit_impl_const_move(std::forward<Visitor>(vis));
+  }
 }
 
 template <class Visitor, class... Types>
@@ -912,101 +1094,249 @@ auto visit(Visitor&& vis, const variant<Types...>& var) {
 
 template <class Visitor, class... Types>
 auto visit(Visitor&& vis, variant<Types...>&& var) {
-  return var.__visit_impl(std::forward<Visitor>(vis));
+  return var.__visit_impl_move(std::forward<Visitor>(vis));
+}
+
+template <class Visitor, class... Types>
+auto visit(Visitor&& vis, const variant<Types...>&& var) {
+  return var.__visit_impl_const_move(std::forward<Visitor>(vis));
 }
 
 namespace __variant_detail {
 
 template <class Visitor, class Variant0, class Variant1>
-auto __visit_two(Visitor vis, Variant0& var0, Variant1& var1) {
+auto __visit_two(Visitor vis, Variant0&& var0, Variant1&& var1) {
   auto visit_rest = [&, vis](auto&& value0) {
     auto invoke = [&, vis](auto&& value1) {
       return vis(value0, value1);
     };
-    return var1.__visit_impl(invoke);
+    return std::forward<Variant1>(var1).__visit_impl(invoke);
   };
-  return var0.__visit_impl(visit_rest);
+  return std::forward<Variant0>(var0).__visit_impl(visit_rest);
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2>
-auto __visit_three(Visitor vis, Variant0& var0, Variant1& var1,
-                   Variant2& var2) {
+auto __visit_three(Visitor vis, Variant0&& var0, Variant1&& var1,
+                   Variant2&& var2) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto invoke = [&, vis, value0, value1](auto value2) {
-      return vis(value0, value1, value2);
+      return vis(value0, value1, std::move(value2));
     };
-    return var2.__visit_impl(invoke);
+    return std::forward<Variant2>(var2).__visit_impl(invoke);
   };
-  return __visit_two(visit_first_two, var0, var1);
+  return __visit_two(visit_first_two, std::forward<Variant0>(var0),
+                     std::forward<Variant1>(var1));
 }
 
 }  // namespace __variant_detail
 
-template <class Visitor, class Variant0, class Variant1>
-auto visit(Visitor vis, Variant0& var0, Variant1& var1) {
-  return __variant_detail::__visit_two(vis, var0, var1);
+template <class R, class Visitor, class Variant0, class Variant1>
+R visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
+  if constexpr (is_void<R>::value) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1) {
+      vis(value0, value1);
+    };
+    __variant_detail::__visit_two(invoke, std::forward<Variant0>(var0),
+                                  std::forward<Variant1>(var1));
+  } else {
+    auto invoke = [&, vis](auto&& value0, auto&& value1) {
+      return vis(value0, value1);
+    };
+    return __variant_detail::__visit_two(invoke, std::forward<Variant0>(var0),
+                                        std::forward<Variant1>(var1));
+  }
+}
+
+template <class R, class Visitor, class Variant0, class Variant1,
+          class Variant2>
+R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
+  if constexpr (is_void<R>::value) {
+    auto invoke = [&, vis](auto&& value0, auto&& value1, auto&& value2) {
+      vis(value0, value1, value2);
+    };
+    __variant_detail::__visit_three(invoke, std::forward<Variant0>(var0),
+                                    std::forward<Variant1>(var1),
+                                    std::forward<Variant2>(var2));
+  } else {
+    auto invoke = [&, vis](auto&& value0, auto&& value1, auto&& value2) {
+      return vis(value0, value1, value2);
+    };
+    return __variant_detail::__visit_three(
+        invoke, std::forward<Variant0>(var0), std::forward<Variant1>(var1),
+        std::forward<Variant2>(var2));
+  }
+}
+
+template <class R, class Visitor, class Variant0, class Variant1,
+          class Variant2, class Variant3>
+R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
+        Variant3&& var3) {
+  if constexpr (is_void<R>::value) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) {
+      auto visit_last_two = [&, vis, value0, value1](auto value2,
+                                                     auto value3) {
+        vis(value0, value1, std::move(value2), std::move(value3));
+      };
+      __variant_detail::__visit_two(visit_last_two,
+                                    std::forward<Variant2>(var2),
+                                    std::forward<Variant3>(var3));
+    };
+    __variant_detail::__visit_two(visit_first_two,
+                                  std::forward<Variant0>(var0),
+                                  std::forward<Variant1>(var1));
+  } else {
+    auto visit_first_two = [&, vis](auto value0, auto value1) {
+      auto visit_last_two = [&, vis, value0, value1](auto value2,
+                                                     auto value3) {
+        return vis(value0, value1, std::move(value2), std::move(value3));
+      };
+      return __variant_detail::__visit_two(visit_last_two,
+                                          std::forward<Variant2>(var2),
+                                          std::forward<Variant3>(var3));
+    };
+    return __variant_detail::__visit_two(visit_first_two,
+                                        std::forward<Variant0>(var0),
+                                        std::forward<Variant1>(var1));
+  }
+}
+
+template <class R, class Visitor, class Variant0, class Variant1,
+          class Variant2, class Variant3, class Variant4>
+R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
+        Variant3&& var3, Variant4&& var4) {
+  if constexpr (is_void<R>::value) {
+    auto visit_first_two = [&, vis](auto value0, auto value1) {
+      auto visit_last_three = [&, vis, value0, value1](
+                                  auto value2, auto value3, auto value4) {
+        vis(value0, value1, std::move(value2), std::move(value3),
+            std::move(value4));
+      };
+      __variant_detail::__visit_three(visit_last_three,
+                                      std::forward<Variant2>(var2),
+                                      std::forward<Variant3>(var3),
+                                      std::forward<Variant4>(var4));
+    };
+    __variant_detail::__visit_two(visit_first_two,
+                                  std::forward<Variant0>(var0),
+                                  std::forward<Variant1>(var1));
+  } else {
+    auto visit_first_two = [&, vis](auto value0, auto value1) {
+      auto visit_last_three = [&, vis, value0, value1](
+                                  auto value2, auto value3, auto value4) {
+        return vis(value0, value1, std::move(value2), std::move(value3),
+                   std::move(value4));
+      };
+      return __variant_detail::__visit_three(visit_last_three,
+                                            std::forward<Variant2>(var2),
+                                            std::forward<Variant3>(var3),
+                                            std::forward<Variant4>(var4));
+    };
+    return __variant_detail::__visit_two(visit_first_two,
+                                        std::forward<Variant0>(var0),
+                                        std::forward<Variant1>(var1));
+  }
 }
 
 template <class Visitor, class Variant0, class Variant1>
-auto visit(Visitor vis, const Variant0& var0, const Variant1& var1) {
-  auto visit_rest = [&, vis](auto&& value0) {
-    auto invoke = [&, vis](auto&& value1) {
-      return vis(value0, value1);
-    };
-    return var1.__visit_impl(invoke);
-  };
-  return var0.__visit_impl(visit_rest);
+auto visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
+  return __variant_detail::__visit_two(vis, std::forward<Variant0>(var0),
+                                      std::forward<Variant1>(var1));
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2>
-auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2) {
-  return __variant_detail::__visit_three(vis, var0, var1, var2);
+auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
+  return __variant_detail::__visit_three(
+      vis, std::forward<Variant0>(var0), std::forward<Variant1>(var1),
+      std::forward<Variant2>(var2));
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3>
-auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
-           Variant3& var3) {
+auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
+           Variant3&& var3) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto visit_last_two = [&, vis, value0, value1](auto value2, auto value3) {
-      return vis(value0, value1, value2, value3);
+      return vis(value0, value1, std::move(value2), std::move(value3));
     };
-    return __variant_detail::__visit_two(visit_last_two, var2, var3);
+    return __variant_detail::__visit_two(visit_last_two,
+                                        std::forward<Variant2>(var2),
+                                        std::forward<Variant3>(var3));
   };
-  return __variant_detail::__visit_two(visit_first_two, var0, var1);
+  return __variant_detail::__visit_two(visit_first_two,
+                                      std::forward<Variant0>(var0),
+                                      std::forward<Variant1>(var1));
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3, class Variant4>
-auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
-           Variant3& var3, Variant4& var4) {
+auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
+           Variant3&& var3, Variant4&& var4) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto visit_last_three = [&, vis, value0, value1](auto value2, auto value3,
                                                      auto value4) {
-      return vis(value0, value1, value2, value3, value4);
+      return vis(value0, value1, std::move(value2), std::move(value3),
+                 std::move(value4));
     };
-    return __variant_detail::__visit_three(visit_last_three, var2, var3, var4);
+    return __variant_detail::__visit_three(visit_last_three,
+                                          std::forward<Variant2>(var2),
+                                          std::forward<Variant3>(var3),
+                                          std::forward<Variant4>(var4));
   };
-  return __variant_detail::__visit_two(visit_first_two, var0, var1);
+  return __variant_detail::__visit_two(visit_first_two,
+                                      std::forward<Variant0>(var0),
+                                      std::forward<Variant1>(var1));
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3, class Variant4, class Variant5, class... Variants>
-auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
-           Variant3& var3, Variant4& var4, Variant5& var5, Variants&... vars) {
+auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
+           Variant3&& var3, Variant4&& var4, Variant5&& var5,
+           Variants&&... vars) {
   auto visit_rest = [&, vis](auto&& value0) {
     auto invoke = [&, vis](auto&&... values) {
       return vis(value0, values...);
     };
-    return std::visit(invoke, var1, var2, var3, var4, var5, vars...);
+    return std::visit(invoke, std::forward<Variant1>(var1),
+                      std::forward<Variant2>(var2),
+                      std::forward<Variant3>(var3),
+                      std::forward<Variant4>(var4),
+                      std::forward<Variant5>(var5),
+                      std::forward<Variants>(vars)...);
   };
-  return var0.__visit_impl(visit_rest);
+  return std::forward<Variant0>(var0).__visit_impl(visit_rest);
 }
 
 template <class... Types>
 void swap(variant<Types...>& left, variant<Types...>& right) {
   left.swap(right);
 }
+
+namespace __variant_detail {
+
+template <class T>
+size_t __variant_hash_value(const T& value) {
+  hash<T> hasher;
+  return hasher(value);
+}
+
+}  // namespace __variant_detail
+
+template <class... Types>
+struct hash<variant<Types...> > {
+  size_t operator()(const variant<Types...>& value) const {
+    if (value.valueless_by_exception()) {
+      return variant_npos;
+    }
+    size_t active = value.index();
+    size_t payload = visit(
+        [](const auto& item) {
+          return __variant_detail::__variant_hash_value(item);
+        },
+        value);
+    return payload ^ (active + static_cast<size_t>(0x9e3779b9UL) +
+                      (payload << 6) + (payload >> 2));
+  }
+};
 
 template <class... Types>
 bool operator==(const variant<Types...>& left,

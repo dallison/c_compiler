@@ -12,7 +12,6 @@
 #include "constexpr_pcode.h"
 #include "type.h"
 
-typedef struct ConstexprObject ConstexprObject;
 typedef struct ConstexprBinding ConstexprBinding;
 
 struct ConstexprValue {
@@ -42,6 +41,9 @@ struct ConstexprObject {
   Vector slots;  // ConstexprValue*
   StructMember* active_union_member;
 };
+
+static bool ConstexprDereferenceAddress(ConstexprValue address,
+                                        ConstexprValue* result);
 
 typedef enum {
   kConstexprStmtInvalid,
@@ -109,7 +111,12 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
 }
 
 bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result) {
-  if (value.is_object || value.is_address) {
+  if (value.is_address) {
+    ConstexprValue dereferenced;
+    return ConstexprDereferenceAddress(value, &dereferenced) &&
+           ConstexprValueAsInteger(dereferenced, result);
+  }
+  if (value.is_object) {
     return false;
   }
   *result = value.is_floating ? (int64_t)value.fvalue : value.ivalue;
@@ -117,7 +124,12 @@ bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result) {
 }
 
 bool ConstexprValueAsFloating(ConstexprValue value, double* result) {
-  if (value.is_object || value.is_address) {
+  if (value.is_address) {
+    ConstexprValue dereferenced;
+    return ConstexprDereferenceAddress(value, &dereferenced) &&
+           ConstexprValueAsFloating(dereferenced, result);
+  }
+  if (value.is_object) {
     return false;
   }
   *result = value.is_floating ? value.fvalue : (double)value.ivalue;
@@ -1635,6 +1647,11 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
     return true;
   }
   return false;
+}
+
+bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
+                                    ConstexprObject** object) {
+  return EvaluateConstexprObjectAddress(ctx, node, object);
 }
 
 static Symbol* ConstexprFunctionDefinition(Symbol* symbol) {

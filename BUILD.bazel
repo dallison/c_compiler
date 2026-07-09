@@ -14,6 +14,7 @@ filegroup(
         "libc/include/cstdint",
         "libc/include/coroutine",
         "libc/include/exception",
+        "libc/include/functional",
         "libc/include/initializer_list",
         "libc/include/iterator",
         "libc/include/memory",

@@ -9,6 +9,7 @@
 #include "syntax.h"
 
 typedef struct ConstexprValue ConstexprValue;
+typedef struct ConstexprObject ConstexprObject;
 
 typedef struct {
   Vector bindings;  // ConstexprBinding*
@@ -54,6 +55,8 @@ bool ConstexprEvaluatePointerDereferenceAsFloating(ConstEvalContext* ctx,
                                                    double* result);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
+                                    ConstexprObject** object);
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);

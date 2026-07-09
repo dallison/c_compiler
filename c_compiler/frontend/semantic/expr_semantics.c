@@ -3415,7 +3415,7 @@ static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   }
   bool target_const = TypeIsConst(reference_type->next);
   if (reference_type->declarator == kDeclRValueReference) {
-    return 0;
+    return target_const && !TypeIsConst(actual->type) ? 1 : 0;
   }
   if (ASTNodeIsLValue(actual)) {
     return target_const ? 1 : 0;
@@ -5827,18 +5827,29 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     }
   }
   node->right = AnalyzeExpression(node->right);
+  TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
+  if (TypeIsReference(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (CompilerIsCXX() && receiver_type != NULL &&
+      TypeContainsTemplateParameter(receiver_type)) {
+    TypeRecord* placeholder = TypeRecordCopy(receiver_type);
+    placeholder->type |= kTypeUnknown;
+    ASTNodeSetType((ASTNode*)node, placeholder);
+    return;
+  }
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
-    if (!TypeIsStructOrUnionPointer(node->left->type)) {
+    if (!TypeIsStructOrUnionPointer(receiver_type)) {
       SemanticError((ASTNode*)node,
                     "Left of -> is not a pointer to a "
                     "struct/union; did you mean to use '.'");
     } else {
       // Dereference the pointer to get the struct info.
-      struct_info = node->left->type->next->info.struct_info;
+      struct_info = receiver_type->next->info.struct_info;
     }
-  } else if (!TypeIsStructOrUnion(node->left->type)) {
-    if (TypeIsStructOrUnionPointer(node->left->type)) {
+  } else if (!TypeIsStructOrUnion(receiver_type)) {
+    if (TypeIsStructOrUnionPointer(receiver_type)) {
       SemanticError((ASTNode*)node,
                     "Left of '.' is a pointer; did you mean to use ->?");
     } else {
@@ -5846,7 +5857,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     }
   } else {
     // Node is AST_OP(dot) and left is a struct/union.
-    struct_info = node->left->type->info.struct_info;
+    struct_info = receiver_type->info.struct_info;
   }
 
   if (struct_info == NULL) {
@@ -5855,7 +5866,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     return;
   }
 
-  if (TypeIsStructOrUnion(node->left->type)) {
+  if (TypeIsStructOrUnion(receiver_type)) {
     // Left is a struct, only need address.
     node->left->flags |= kASTNeedAddress;
   }

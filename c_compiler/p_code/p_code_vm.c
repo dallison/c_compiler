@@ -130,12 +130,49 @@ static bool CheckMemoryAccess(PCodeVM* vm, uint64_t address, size_t size,
   return false;
 }
 
+static bool NormalizeCheckedAddress(PCodeVM* vm, uint64_t raw, size_t size,
+                                    bool write, uint64_t* normalized) {
+  if (!vm->checked_memory) {
+    *normalized = raw;
+    return true;
+  }
+  if (vm->stack != NULL && vm->stack_size != 0) {
+    uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+    uint64_t stack_address =
+        (stack_start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
+    if (RegionContains(&(PCodeVMMemoryRegion){.start = stack_start,
+                                               .size = vm->stack_size,
+                                               .writable = true},
+                       stack_address, size, write) &&
+        stack_address >= (uint64_t)vm->iregs[PCODE_SP_REG]) {
+      *normalized = stack_address;
+      return true;
+    }
+  }
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i];
+    uint64_t region_address =
+        (region->start & ~UINT64_C(0xffffffff)) | (raw & UINT64_C(0xffffffff));
+    if (RegionContains(region, region_address, size, write)) {
+      *normalized = region_address;
+      return true;
+    }
+  }
+  *normalized = raw;
+  return false;
+}
+
 static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
                            bool write) {
-  if (!CheckMemoryAccess(vm, address, size, write)) {
-    return NULL;
+  uint64_t normalized = address;
+  if (!CheckMemoryAccess(vm, normalized, size, write)) {
+    if (!NormalizeCheckedAddress(vm, address, size, write, &normalized) ||
+        !CheckMemoryAccess(vm, normalized, size, write)) {
+      return NULL;
+    }
+    vm->status = kPCodeVMStatusRunning;
   }
-  return (void*)(uintptr_t)address;
+  return (void*)(uintptr_t)normalized;
 }
 
 static bool ReadVMU8(PCodeVM* vm, uint64_t address, uint8_t* value) {
