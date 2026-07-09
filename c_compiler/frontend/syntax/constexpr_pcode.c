@@ -392,6 +392,14 @@ static bool CompileFunctionToPCodeAssembly(TypeRecord* func, String* assembly,
     *reason = "constexpr function has no symbol";
     return false;
   }
+  // A function whose body is still being semantically analyzed has untyped
+  // nodes and cannot be lowered.  This is the recursive/mutually-recursive
+  // constexpr case: fail the fold cleanly here rather than relying on the
+  // code-generation recovery longjmp below to catch every fatal path.
+  if (VectorContainsPointer(&compiler->functions_being_analyzed, func)) {
+    *reason = "callee body is still being analyzed";
+    return false;
+  }
   Generator gen;
   GeneratorInit(&gen, &compiler->syntax, func);
   // This IR is only interpreted for constant evaluation, so suppress runtime-

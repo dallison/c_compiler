@@ -470,6 +470,15 @@ void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
 
 StructMember* NewStructMember(Symbol* symbol);
 void StructAddSyntheticMember(Struct* str, StructMember* member);
+
+// A generic lambda's call operator written inside another template numbers its
+// invented `auto` parameters after the enclosing template's parameters.  When
+// the closure captures nothing template-dependent it is never rebuilt per
+// instantiation, so its operator keeps that enclosing-relative numbering and
+// cannot be deduced or instantiated on its own.  Rebase such an operator to a
+// standalone 0-based template in place (no-op for dependent-capture closures or
+// operators that are already 0-based).
+void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op);
 Struct* NewStruct(bool is_union);
 void StructDelete(Struct* s);
 void StructMemberDelete(StructMember* member);
@@ -573,6 +582,13 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
+// If `type` (or a pointed-to/referenced type in its spine) is a class-template
+// primary carrying concrete template arguments, replace that primary with the
+// corresponding specialization.  Used when a type like `variant<int,long>` is
+// still represented as the primary `variant` plus args (common inside function
+// templates) and member lookup must see the instantiated members.
+TypeRecord* TypeMaterializeClassTemplateSpecialization(struct Syntax* syntax,
+                                                       TypeRecord* type);
 // Instantiate a variable template's initializer with concrete template
 // arguments and constant-fold it to an integer.  Returns true on success.
 bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,

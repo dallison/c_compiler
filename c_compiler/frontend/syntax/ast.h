@@ -347,6 +347,7 @@ struct ConstraintExpr;
 #define kASTDependentQualifiedName (1 << 22)  // Qualified value name through a dependent (template-parameter) scope.
 #define kASTDependentNewValueInit (1 << 23)  // new T() value-init parsed before T substitution.
 #define kASTReversedComparison (1 << 24)  // C++20 reversed comparison candidate; do not reverse again.
+#define kASTLambdaExpression (1 << 25)  // Compound literal that represents a C++ lambda expression (prvalue).
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

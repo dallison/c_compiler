@@ -915,6 +915,61 @@ auto visit(Visitor&& vis, variant<Types...>&& var) {
   return var.__visit_impl(std::forward<Visitor>(vis));
 }
 
+namespace __variant_detail {
+
+template <class Visitor, class Variant0, class Variant1>
+auto __visit_two(Visitor vis, Variant0& var0, Variant1& var1) {
+  auto visit_rest = [&, vis](auto&& value0) {
+    auto invoke = [&, vis](auto&& value1) {
+      return vis(value0, value1);
+    };
+    return var1.__visit_impl(invoke);
+  };
+  return var0.__visit_impl(visit_rest);
+}
+
+}  // namespace __variant_detail
+
+template <class Visitor, class Variant0, class Variant1>
+auto visit(Visitor vis, Variant0& var0, Variant1& var1) {
+  return __variant_detail::__visit_two(vis, var0, var1);
+}
+
+template <class Visitor, class Variant0, class Variant1>
+auto visit(Visitor vis, const Variant0& var0, const Variant1& var1) {
+  auto visit_rest = [&, vis](auto&& value0) {
+    auto invoke = [&, vis](auto&& value1) {
+      return vis(value0, value1);
+    };
+    return var1.__visit_impl(invoke);
+  };
+  return var0.__visit_impl(visit_rest);
+}
+
+template <class Visitor, class Variant0, class Variant1, class Variant2>
+auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2) {
+  auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto invoke = [&, vis, value0, value1](auto value2) {
+      return vis(value0, value1, value2);
+    };
+    return var2.__visit_impl(invoke);
+  };
+  return __variant_detail::__visit_two(visit_first_two, var0, var1);
+}
+
+template <class Visitor, class Variant0, class Variant1, class Variant2,
+          class Variant3, class... Variants>
+auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
+           Variant3& var3, Variants&... vars) {
+  auto visit_rest = [&, vis](auto&& value0) {
+    auto invoke = [&, vis](auto&&... values) {
+      return vis(value0, values...);
+    };
+    return std::visit(invoke, var1, var2, var3, vars...);
+  };
+  return var0.__visit_impl(visit_rest);
+}
+
 template <class... Types>
 void swap(variant<Types...>& left, variant<Types...>& right) {
   left.swap(right);

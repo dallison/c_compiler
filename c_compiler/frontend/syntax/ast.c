@@ -3790,6 +3790,17 @@ static ASTNode* CompoundLiteralASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
+static void CompoundLiteralASTNodeVisit(ASTNode* node,
+                                        void (*func)(ASTNode* node, void*, int,
+                                                     VisitorMode),
+                                        int child_id, void* data) {
+  CompoundLiteralASTNode* n = (CompoundLiteralASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(n->sym, func, 0, data);
+  ASTNodeVisit(n->initializer, func, 1, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
 static void CompoundLiteralASTNodeTransform(ASTNode* node,
                                             ASTNodeTransformer func,
                                             void* data) {
@@ -3798,10 +3809,10 @@ static void CompoundLiteralASTNodeTransform(ASTNode* node,
   ASTNodeTransformChild(node, 1, n->initializer, func, data);
 }
 
-static ASTNodeVirtuals compound_literal_vtbl = {CompoundLiteralASTNodeDelete, CompoundLiteralASTNodePrint,
-                                    CompoundLiteralASTNodeReplaceChild, CompoundLiteralASTNodeClone, NULL,
-  NULL, CompoundLiteralASTNodeTransform
-};
+static ASTNodeVirtuals compound_literal_vtbl = {
+    CompoundLiteralASTNodeDelete, CompoundLiteralASTNodePrint,
+    CompoundLiteralASTNodeReplaceChild, CompoundLiteralASTNodeClone,
+    CompoundLiteralASTNodeVisit, NULL, CompoundLiteralASTNodeTransform};
 
 ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,
                         ASTNode* initializer) {

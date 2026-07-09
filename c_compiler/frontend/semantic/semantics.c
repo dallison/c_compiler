@@ -340,6 +340,11 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   CheckVLAArgs(syntax, node);
   SemanticAnalyzeCoroutineFunction(node);
   
+  // Mark this function's body as in-flight so speculative constant folding
+  // reached during its own analysis (e.g. a recursive constexpr call) does not
+  // try to lower the still-incomplete body to pcode and crash code generation.
+  VectorAppend(&compiler->functions_being_analyzed, node->type);
+
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
   if (TypeFunctionReturnContainsAuto(node->type)) {
@@ -348,6 +353,15 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   CheckUnusedLabels(node->type->info.function.body);
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);
+
+  // Analysis is complete: the body is now fully typed and safe to lower.
+  Vector* analyzing = &compiler->functions_being_analyzed;
+  for (size_t i = analyzing->length; i-- > 0;) {
+    if (analyzing->value.p[i] == node->type) {
+      VectorDeleteElement(analyzing, i);
+      break;
+    }
+  }
 }
 
 // This table contains mappings from one type to another.  The 'from'

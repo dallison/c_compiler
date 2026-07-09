@@ -2730,6 +2730,19 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         copy->declarator = rvalue ? kDeclRValueReference : kDeclReference;
         collapsed_reference = true;
       }
+      /* Pointer-to-reference is not a valid C++ type.  It arises when a
+       * by-reference lambda capture field is `U*` and `U` substitutes to a
+       * reference (e.g. capturing an `auto&&` parameter whose deduced `T` is
+       * `int&`).  Form a pointer to the referent instead. */
+      if (!collapsed_reference && TypeIsPointer(copy) &&
+          TypeIsReference(copy->next)) {
+        TypeRecord* nested = copy->next;
+        TypeRecord* referent = nested->next;
+        TypeRecordIncRef(referent);
+        TypeRecordDelete(copy->next);
+        copy->next = referent;
+        collapsed_reference = true;
+      }
       if (!collapsed_reference) {
         TypeRecordIncRef(copy->next);
       }
@@ -2954,6 +2967,12 @@ static TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                  (void*)str);
     Symbol* tag = NewSymbol(synthetic_name.value, copy, STO(implicit));
     tag->flags.is_defined = true;
+    // Preserve invented-ness so nested lambda closures rebuilt during
+    // template substitution are still recognized as lambda closures (their
+    // operator() bodies must be cloned, not left lazy against the template).
+    if (from->tag_symbol != NULL) {
+      tag->flags.invented = from->tag_symbol->flags.invented;
+    }
     str->tag_name = &tag->name;
     str->tag_symbol = tag;
     StringDestruct(&synthetic_name);
@@ -3130,7 +3149,11 @@ static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base);
 /* Shift every template-parameter index in `type` down by `base`. Used when a
  * member/inner template's parameters follow the enclosing template's
  * parameters and must be renumbered to start from zero. */
-static void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
+/* Rebase placeholder indices along a type spine (pointers/refs/arrays/args)
+ * without descending into struct member lists.  Used when adjusting capture
+ * field types so we do not walk into a captured closure's own members (which
+ * would corrupt an unrelated lambda's operator() template parameters). */
+static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
   if (type == NULL || base <= 0) {
     return;
   }
@@ -3151,6 +3174,46 @@ static void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
   }
 }
 
+static void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
+  if (type == NULL || base <= 0) {
+    return;
+  }
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->template_parameter_index >= base) {
+      t->template_parameter_index -= base;
+    }
+    if (t->declarator == kDeclArray &&
+        t->info.array.template_parameter_index >= base) {
+      t->info.array.template_parameter_index -= base;
+    }
+    if (t->template_arguments != NULL) {
+      for (size_t i = 0; i < t->template_arguments->length; i++) {
+        RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
+                                               base);
+      }
+    }
+    // Nested lambda closures embed placeholder capture-field types numbered
+    // relative to an enclosing template.  After substituting the enclosing
+    // arguments, those own-parameter placeholders must be renumbered too or
+    // later instantiation still sees them as enclosing-relative.
+    // Only walk non-function data members, and only along each field's type
+    // spine: descending into a pointed-to/referenced struct would corrupt
+    // captured visitor closures' own template parameters.
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL) {
+      Struct* str = t->info.struct_info;
+      for (size_t i = 0; i < str->members.length; i++) {
+        StructMember* member = str->members.value.p[i];
+        if (member == NULL || member->symbol == NULL ||
+            member->is_member_function || member->is_static ||
+            member->is_using_declaration || StructMemberIsNestedType(member)) {
+          continue;
+        }
+        RebaseTemplateParameterIndicesSpine(member->symbol->type, base);
+      }
+    }
+  }
+}
+
 /* Rebase (see RebaseTemplateParameterIndices) the parameter indices inside a
  * template argument and its referenced type. */
 static void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
@@ -3164,6 +3227,48 @@ static void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   RebaseTemplateParameterIndices(arg->type, base);
   arg->dependent_expr =
       CloneAndRebaseDependentExpression(arg->dependent_expr, base);
+}
+
+/* A generic lambda written inside another template numbers its invented `auto`
+ * parameters after the enclosing template's parameters and records that offset
+ * as the call operator's template-parameter base (see NewLambdaCallOperator).
+ * A closure that captures template-dependent state is rebuilt per enclosing
+ * instantiation, and that rebuild rebases its operator to a 0-based standalone
+ * template.  A closure that captures nothing template-dependent, however, is
+ * genuinely identical across every instantiation of the enclosing template and
+ * is therefore never rebuilt, so its operator keeps the enclosing-relative
+ * numbering forever and neither deduction nor substitution (both of which
+ * assume a 0-based own-parameter list) can instantiate it.
+ *
+ * Rebase such an operator to a 0-based standalone template in place, once: the
+ * closure does not depend on the enclosing template, so this is the numbering
+ * it should have had all along.  Dependent-capture closures are left untouched
+ * (base > 0) so the rebuild path can still expand them safely. */
+void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op) {
+  if (closure == NULL || op == NULL || op->type == NULL ||
+      !TypeIsFunction(op->type)) {
+    return;
+  }
+  TypeRecord* func = op->type;
+  int base = func->info.function.template_parameter_base;
+  if (base <= 0 || StructContainsTemplateParameter(closure)) {
+    return;
+  }
+  RebaseTemplateParameterIndices(func->next, base);
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL) {
+      RebaseTemplateParameterIndices(formal->type, base);
+    }
+  }
+  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+    TemplateParameter* param =
+        func->info.function.template_parameters.value.p[i];
+    if (param != NULL && param->index >= base) {
+      param->index -= base;
+    }
+  }
+  func->info.function.template_parameter_base = 0;
 }
 
 typedef struct {
@@ -3555,11 +3660,32 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.template_parameter_count =
       from->info.function.template_parameter_count;
   func->info.function.template_parameter_base = 0;
-  CopyFunctionTemplateParameters(func, from,
-                                 from->info.function.template_parameter_base);
-  TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
-  RebaseTemplateParameterIndices(return_type,
-                                 from->info.function.template_parameter_base);
+  int member_template_base = from->info.function.template_parameter_base;
+  CopyFunctionTemplateParameters(func, from, member_template_base);
+  // A member function template's own parameters are numbered at/after
+  // `member_template_base`.  Only enclosing-template arguments (indices
+  // below that base) may be substituted here; the member's own placeholders
+  // must survive for later deduction.  When the member has already been
+  // rebased to a standalone template (base == 0) and is rebuilt again —
+  // e.g. a nested generic lambda whose closure is substituted while cloning
+  // an outer generic-lambda body — the enclosing args would otherwise
+  // consume the member's own `auto` placeholders at index 0.
+  Vector enclosing_only_args;
+  Vector* subst_args = args;
+  bool use_enclosing_only = false;
+  if (from->info.function.template_parameter_count > 0) {
+    VectorInit(&enclosing_only_args);
+    use_enclosing_only = true;
+    for (size_t i = 0;
+         args != NULL && (int)i < member_template_base && i < args->length;
+         i++) {
+      VectorAppend(&enclosing_only_args, args->value.p[i]);
+    }
+    subst_args = &enclosing_only_args;
+  }
+  TypeRecord* return_type =
+      SubstituteTemplateParameters(parser, from->next, subst_args);
+  RebaseTemplateParameterIndices(return_type, member_template_base);
   TypeRecordChain(func, return_type);
 
   if (is_static_member) {
@@ -3573,14 +3699,13 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     Symbol* formal = from->info.function.prototype.value.p[i];
     if (formal != NULL && formal->flags.is_parameter_pack) {
       AppendSubstitutedFormalParameter(
-          parser, &func->info.function.prototype, formal, args,
-          from->info.function.template_parameter_base);
+          parser, &func->info.function.prototype, formal, subst_args,
+          member_template_base);
       continue;
     }
     TypeRecord* formal_type =
-        SubstituteTemplateParameters(parser, formal->type, args);
-    RebaseTemplateParameterIndices(formal_type,
-                                   from->info.function.template_parameter_base);
+        SubstituteTemplateParameters(parser, formal->type, subst_args);
+    RebaseTemplateParameterIndices(formal_type, member_template_base);
     Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
@@ -3592,6 +3717,10 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
+  }
+  if (use_enclosing_only) {
+    // Shallow: elements are borrowed from `args`, not owned here.
+    VectorDestruct(&enclosing_only_args);
   }
   (void)parser;
   return func;
@@ -4168,12 +4297,24 @@ static bool ClonePatternReferencesUnresolvedPack(TemplateFunctionBodyClone* clon
   return search.found;
 }
 
-/* If `node` is (optionally dereferenced) member access `recv.name`/`recv->name`
- * naming a captured field, return that access node; otherwise NULL. Used to
- * expand lambda capture packs stored as synthetic struct members. */
+/* If `node` is (optionally cast/unary-wrapped) member access
+ * `recv.name`/`recv->name` naming a captured field, return that access node;
+ * otherwise NULL. Used to expand lambda capture packs stored as synthetic
+ * struct members.  Patterns like `static_cast<T&&>(xs)...` must peel the cast
+ * so the captured pack field can still be found and expanded. */
 static ASTNode* LambdaCapturePackMemberAccess(ASTNode* node) {
-  if (node != NULL && node->op == AST_OP(contents)) {
-    node = ((UnaryASTNode*)node)->sub;
+  while (node != NULL) {
+    if (node->op == AST_OP(cast)) {
+      node = ((CastASTNode*)node)->expr;
+      continue;
+    }
+    if (node->op == AST_OP(contents) || node->op == AST_OP(address) ||
+        node->op == AST_OP(plus) || node->op == AST_OP(minus) ||
+        node->op == AST_OP(not)) {
+      node = ((UnaryASTNode*)node)->sub;
+      continue;
+    }
+    break;
   }
   if (node == NULL || (node->op != AST_OP(arrow) &&
                        node->op != AST_OP(dot))) {
@@ -4206,8 +4347,12 @@ static const char* LambdaCapturePackMemberName(ASTNode* node) {
 }
 
 /* Return the closure struct on the receiver side of a lambda-capture-pack
- * member access (looking through a pointer), or NULL. */
-static Struct* LambdaCapturePackReceiverStruct(ASTNode* node) {
+ * member access (looking through a pointer), or NULL.  When the access has not
+ * yet been typed (common while cloning a body before re-analysis), fall back to
+ * `fallback_owner` -- typically the call operator's cxx_member_owner, i.e. the
+ * closure whose pack field was expanded into synthetic `$packN` elements. */
+static Struct* LambdaCapturePackReceiverStruct(ASTNode* node,
+                                               Struct* fallback_owner) {
   ASTNode* access_node = LambdaCapturePackMemberAccess(node);
   if (access_node == NULL) {
     return NULL;
@@ -4217,17 +4362,30 @@ static Struct* LambdaCapturePackReceiverStruct(ASTNode* node) {
   if (receiver_type != NULL && TypeIsPointer(receiver_type)) {
     receiver_type = receiver_type->next;
   }
-  if (receiver_type == NULL || !TypeIsStructOrUnion(receiver_type)) {
-    return NULL;
+  if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type)) {
+    return receiver_type->info.struct_info;
   }
-  return receiver_type->info.struct_info;
+  if (access->left != NULL && access->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)access->left;
+    if (id->symbol != NULL && id->symbol->type != NULL) {
+      TypeRecord* sym_type = id->symbol->type;
+      if (TypeIsPointer(sym_type)) {
+        sym_type = sym_type->next;
+      }
+      if (sym_type != NULL && TypeIsStructOrUnion(sym_type)) {
+        return sym_type->info.struct_info;
+      }
+    }
+  }
+  return fallback_owner;
 }
 
 /* Return the synthetic per-element fields (`base$pack0`, `base$pack1`, ...) of
  * a captured pack member, in declaration order, for expanding `field...`. */
-static Vector* LambdaCapturePackFieldReplacements(ASTNode* node) {
+static Vector* LambdaCapturePackFieldReplacements(ASTNode* node,
+                                                  Struct* fallback_owner) {
   const char* base_name = LambdaCapturePackMemberName(node);
-  Struct* receiver = LambdaCapturePackReceiverStruct(node);
+  Struct* receiver = LambdaCapturePackReceiverStruct(node, fallback_owner);
   if (base_name == NULL || receiver == NULL) {
     return NULL;
   }
@@ -4248,9 +4406,10 @@ static Vector* LambdaCapturePackFieldReplacements(ASTNode* node) {
 /* Determine how many elements a captured pack field expands to, from the
  * length of the corresponding template argument pack. */
 static bool LambdaCapturePackFieldArgumentLength(ASTNode* node, Vector* args,
-                                                 size_t* length) {
+                                                 size_t* length,
+                                                 Struct* fallback_owner) {
   const char* base_name = LambdaCapturePackMemberName(node);
-  Struct* receiver = LambdaCapturePackReceiverStruct(node);
+  Struct* receiver = LambdaCapturePackReceiverStruct(node, fallback_owner);
   if (base_name == NULL || receiver == NULL || length == NULL) {
     return false;
   }
@@ -4595,10 +4754,30 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
  * `element_index`: clone the pattern, rewrite pack references to this element,
  * instantiate any nested function-template calls, then reanalyze dependent
  * functor calls. */
+/* Deep-copy cast_type on every cast in a pack-expansion pattern clone so each
+ * element can substitute its own pack-dependent cast type without mutating the
+ * shared TypeRecord that ASTNodeClone only IncRefs. */
+static void DetachClonedPackExpansionCastTypes(ASTNode* node, void* data,
+                                               int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL || node->op != AST_OP(cast)) {
+    return;
+  }
+  CastASTNode* cast = (CastASTNode*)node;
+  if (cast->cast_type == NULL) {
+    return;
+  }
+  TypeRecord* copy = TypeRecordCopy(cast->cast_type);
+  TypeRecordDelete(cast->cast_type);
+  cast->cast_type = copy;
+}
+
 static ASTNode* ClonePackExpansionPattern(TemplateFunctionBodyClone* clone,
                                           ASTNode* pattern, Symbol* from,
                                           Symbol* to, size_t element_index) {
   ASTNode* pattern_clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
+  ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
   ReplacePackIdentifierData replace = {0};
   replace.clone = clone;
   replace.from = from;
@@ -4681,6 +4860,7 @@ static ASTNode* CloneLambdaCapturePackPattern(TemplateFunctionBodyClone* clone,
                                               StructMember* to,
                                               size_t element_index) {
   ASTNode* pattern_clone = ASTNodeClone(pattern, IdentityCloneNode, NULL, NULL);
+  ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
   ReplaceLambdaCapturePackFieldData replace = {0};
   replace.clone = clone;
   replace.from_name = from_name;
@@ -4695,6 +4875,15 @@ static ASTNode* CloneLambdaCapturePackPattern(TemplateFunctionBodyClone* clone,
  * pack actuals: a bare pack identifier, an arbitrary pattern containing a pack,
  * and a captured-pack member access. Returns true if the argument list was
  * rewritten. */
+
+static Struct* CloneLambdaClosureOwner(TemplateFunctionBodyClone* clone) {
+  if (clone == NULL || clone->to_func == NULL ||
+      !TypeIsFunction(clone->to_func)) {
+    return NULL;
+  }
+  return clone->to_func->info.function.cxx_member_owner;
+}
+
 static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
                                         ASTNode* node) {
   if (node->op != AST_OP(call)) {
@@ -4749,7 +4938,7 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
         changed = true;
         continue;
       }
-      Vector* capture_replacements = LambdaCapturePackFieldReplacements(actual);
+      Vector* capture_replacements = LambdaCapturePackFieldReplacements(actual, CloneLambdaClosureOwner(clone));
       const char* capture_name = LambdaCapturePackMemberName(actual);
       if (capture_replacements != NULL && capture_name != NULL) {
         for (size_t j = 0; j < capture_replacements->length; j++) {
@@ -4767,7 +4956,7 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
         continue;
       }
     }
-    Vector* capture_replacements = LambdaCapturePackFieldReplacements(actual);
+    Vector* capture_replacements = LambdaCapturePackFieldReplacements(actual, CloneLambdaClosureOwner(clone));
     const char* capture_name = LambdaCapturePackMemberName(actual);
     if (capture_replacements != NULL && capture_name != NULL &&
         capture_replacements->length > 0) {
@@ -4809,7 +4998,7 @@ static bool CallActualsStillContainPackExpansion(VectorASTNode* call) {
     if (actual != NULL && (actual->flags & kASTPackExpansion) != 0) {
       return true;
     }
-    Vector* replacements = LambdaCapturePackFieldReplacements(actual);
+    Vector* replacements = LambdaCapturePackFieldReplacements(actual, NULL);
     if (replacements != NULL) {
       bool still_contains_pack = replacements->length > 0;
       VectorDelete(replacements);
@@ -4876,6 +5065,34 @@ static void InstantiateClonedFunctionTemplateCall(
   }
   if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
     return;
+  }
+  // An actual argument whose type still contains `auto` has not been re-deduced
+  // yet in this instantiation (its declaration is re-analyzed later, at compile
+  // time).  A classic case is a local closure variable, `auto l = [..]{..};`,
+  // passed to a function template: at this early post-clone pass `l` is still an
+  // undeduced placeholder, so deducing the callee now would bind it against the
+  // wrong (placeholder) argument type.  Leave the call for the full re-analysis
+  // that runs once `auto` is resolved.
+  //
+  // The same deferral applies to a temporary lambda-expression passed directly
+  // (`f([&]{ ... })`): its closure type may already look concrete after nested
+  // struct substitution, but its `operator()` body is only fully re-analyzed
+  // later.  Instantiating the callee against that temporary now binds a
+  // specialization to a half-lowered call operator (e.g. an indirect call of a
+  // captured functor) and never recovers.
+  if (call->children != NULL) {
+    for (size_t i = 0; i < call->children->length; i++) {
+      ASTNode* actual = call->children->value.p[i];
+      if (actual == NULL) {
+        continue;
+      }
+      if (actual->type != NULL && TypeContainsAuto(actual->type)) {
+        return;
+      }
+      if ((actual->flags & kASTLambdaExpression) != 0) {
+        return;
+      }
+    }
   }
   Symbol* instantiated = NULL;
   if (id->symbol->overload_next != NULL) {
@@ -5048,7 +5265,7 @@ static void ExpandClonedBracedInitializerPackElements(
           continue;
         }
         Vector* capture_replacements =
-            LambdaCapturePackFieldReplacements(expr_init_node->expr);
+            LambdaCapturePackFieldReplacements(expr_init_node->expr, CloneLambdaClosureOwner(clone));
         const char* capture_name =
             LambdaCapturePackMemberName(expr_init_node->expr);
         if (capture_replacements != NULL && capture_name != NULL) {
@@ -5133,7 +5350,7 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
   const char* capture_name = NULL;
   bool capture_pack = false;
   if (replacements == NULL) {
-    replacements = LambdaCapturePackFieldReplacements(pack_node);
+    replacements = LambdaCapturePackFieldReplacements(pack_node, CloneLambdaClosureOwner(clone));
     capture_name = LambdaCapturePackMemberName(pack_node);
     capture_pack = replacements != NULL && capture_name != NULL;
   }
@@ -5581,14 +5798,15 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         }
       }
       Vector* capture_replacements =
-          LambdaCapturePackFieldReplacements(sizeof_node->expr);
+          LambdaCapturePackFieldReplacements(sizeof_node->expr, CloneLambdaClosureOwner(clone));
       if (capture_replacements != NULL) {
         size_t length = capture_replacements->length;
         VectorDelete(capture_replacements);
         size_t argument_length = 0;
         if (LambdaCapturePackFieldArgumentLength(sizeof_node->expr,
                                                  clone->args,
-                                                 &argument_length)) {
+                                                 &argument_length,
+                                                 CloneLambdaClosureOwner(clone))) {
           length = argument_length;
         }
         return NewIntConstantASTNode((int64_t)length, NewSizeTypeRecord(),
@@ -5717,15 +5935,6 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         }
       }
     }
-    if (getenv("DBG_FWD") != NULL && id->symbol != NULL &&
-        id->symbol->name.value != NULL &&
-        id->template_arguments != NULL) {
-      fprintf(stderr,
-              "[DBG_SUBID] id=%s contain_pack=%d within_pack=%d flags=%x parentflags=%x\n",
-              id->symbol->name.value, template_args_contain_pack,
-              ASTNodeWithinPackExpansion(node), node->flags,
-              node->parent != NULL ? node->parent->flags : 0);
-    }
     if (id->template_arguments != NULL && !template_args_contain_pack &&
         !ASTNodeWithinPackExpansion(node)) {
       Vector* concrete_args = SubstituteTemplateArgumentVector(
@@ -5757,7 +5966,8 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
     }
     if ((node->flags & kASTPackExpansion) != 0 &&
-        id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+        id->symbol != NULL && id->symbol->flags.is_parameter_pack &&
+        MapFindPointerKey(&clone->pack_symbol_map, id->symbol) != NULL) {
       return node;
     }
     Symbol* replacement = MapFindPointerKey(&clone->symbol_map, id->symbol);
@@ -5868,10 +6078,25 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   bool node_type_substituted = false;
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
-    if (TypeContainsTemplateParameter(cast->cast_type) ||
-        (clone->from_owner != NULL && clone->to_owner != NULL &&
-         clone->from_owner != clone->to_owner &&
-         TypeChainReferencesStruct(cast->cast_type, clone->from_owner))) {
+    // A cast whose type still names a pack (e.g. `static_cast<Ts&&>(args)...`)
+    // must keep the pack-dependent cast type until ExpandClonedCallPackActuals
+    // clones the pattern per element.  Substituting the whole pack here would
+    // collapse `Ts` to a single element (or leave a broken type) and poison
+    // every expanded copy that shares the cast_type pointer.
+    int pack_index = -1;
+    size_t pack_length = 0;
+    bool pack_dependent_cast =
+        FindPackExpansionInType(cast->cast_type, clone->args, &pack_index,
+                                &pack_length) &&
+        ASTNodeWithinPackExpansion(node);
+    if (pack_dependent_cast) {
+      // Leave cast_type / node->type pack-dependent for per-element expansion.
+      node_type_substituted = true;
+    } else if (TypeContainsTemplateParameter(cast->cast_type) ||
+               (clone->from_owner != NULL && clone->to_owner != NULL &&
+                clone->from_owner != clone->to_owner &&
+                TypeChainReferencesStruct(cast->cast_type,
+                                          clone->from_owner))) {
       TypeRecord* cast_type =
           SubstituteTemplateParameters(clone->parser, cast->cast_type,
                                        clone->args);
@@ -5900,12 +6125,6 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     TypeRecord* type =
         SubstituteTemplateParameters(clone->parser, node->type, clone->args);
     RebaseTemplateParameterIndices(type, clone->rebase_template_parameter_base);
-    // `type` is a freshly substituted record (refs == 0).  ASTNodeSetType takes
-    // the reference; do NOT TypeRecordDelete it afterwards -- that would drop the
-    // count back to zero and run the refs==0 cleanup, which frees the record's
-    // `template_arguments` and `dependent_member_name` out from under `node`
-    // (silently stripping a still-dependent `X<Target>::type` placeholder that a
-    // later member-template instantiation must still resolve).
     ASTNodeSetType(node, type);
   }
   if (node->op == AST_OP(call)) {
@@ -6316,10 +6535,10 @@ static ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
     if (from_formal->flags.is_parameter_pack) {
       int pack_index = -1;
       size_t pack_length = 0;
+      bool found_pack = FindPackExpansionInType(from_formal->type, args,
+                                                &pack_index, &pack_length);
       TemplateArgument* pack =
-          FindPackExpansionInType(from_formal->type, args, &pack_index,
-                                  &pack_length) &&
-                  pack_index >= 0 && (size_t)pack_index < args->length
+          found_pack && pack_index >= 0 && (size_t)pack_index < args->length
               ? args->value.p[pack_index]
               : NULL;
       bool expandable = pack != NULL && pack->pack_arguments != NULL;
@@ -6442,11 +6661,24 @@ static void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     return;
   }
   if (allow_lazy && !symbol->flags.is_template && args != NULL) {
-    symbol->value.func_defn = template_definition;
-    if (symbol->type->template_arguments == NULL) {
-      symbol->type->template_arguments = TemplateArgumentVectorCopy(args);
+    // A nested non-generic lambda inside a generic lambda / function template
+    // still needs its body cloned against the rebuilt closure: capture field
+    // types and dependent functor calls (e.g. `vis(x)` on a captured template
+    // parameter) are only concrete after this substitution.  The plain lazy
+    // path would keep the template-level body and mis-lower those calls.
+    bool nested_lambda_operator =
+        symbol->name.value != NULL &&
+        strcmp(symbol->name.value, "operator()") == 0 &&
+        symbol->type->info.function.cxx_member_owner != NULL &&
+        symbol->type->info.function.cxx_member_owner->tag_symbol != NULL &&
+        symbol->type->info.function.cxx_member_owner->tag_symbol->flags.invented;
+    if (!nested_lambda_operator) {
+      symbol->value.func_defn = template_definition;
+      if (symbol->type->template_arguments == NULL) {
+        symbol->type->template_arguments = TemplateArgumentVectorCopy(args);
+      }
+      return;
     }
-    return;
   }
   if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     symbol->type->info.function.definition = true;
@@ -10120,6 +10352,59 @@ TypeRecord* TypeInstantiateClassTemplate(Syntax* syntax, Symbol* templ,
   TypeRecord* type = InstantiateSimpleClassTemplate(&parser, templ, args);
   TypeParserDestruct(&parser);
   return type;
+}
+
+/* See TypeMaterializeClassTemplateSpecialization.  Recurses through
+ * pointer/reference spines so a capture field typed `variant<int,long>*` is
+ * rewritten to point at the concrete specialization. */
+TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
+                                                       TypeRecord* type) {
+  if (syntax == NULL || type == NULL || !CompilerIsCXX()) {
+    return type;
+  }
+  if (TypeIsPointer(type) || TypeIsReference(type)) {
+    TypeRecord* next =
+        TypeMaterializeClassTemplateSpecialization(syntax, type->next);
+    if (next == type->next) {
+      return type;
+    }
+    TypeRecord* copy = TypeRecordCopy(type);
+    TypeRecordIncRef(next);
+    TypeRecordDelete(copy->next);
+    copy->next = next;
+    copy->type = next != NULL ? next->type : copy->type;
+    return TypeRecordCalculateSize(copy);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return type;
+  }
+  Struct* str = type->info.struct_info;
+  // Concrete specializations are not flagged as templates; only the primary
+  // (still carrying unresolved-looking template_arguments) needs materializing.
+  if (!str->is_template || str->tag_symbol == NULL) {
+    return type;
+  }
+  Symbol* origin = type->template_origin;
+  Vector* args = type->template_arguments;
+  if (origin == NULL && str->tag_symbol->type != NULL) {
+    origin = str->tag_symbol->type->template_origin;
+    if (args == NULL) {
+      args = str->tag_symbol->type->template_arguments;
+    }
+  }
+  if (origin == NULL && str->tag_symbol->flags.is_template) {
+    origin = str->tag_symbol;
+  }
+  if (origin == NULL || args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(args)) {
+    return type;
+  }
+  TypeRecord* concrete = TypeInstantiateClassTemplate(syntax, origin, args);
+  if (concrete == NULL) {
+    return type;
+  }
+  concrete->qualifiers |= type->qualifiers;
+  return concrete;
 }
 
 bool SymbolIsInStdNamespace(Symbol* symbol) {

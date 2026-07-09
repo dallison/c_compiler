@@ -379,6 +379,15 @@ typedef struct {
   // on genuine compiler bugs.
   jmp_buf constexpr_codegen_abort;
   bool constexpr_codegen_recover;
+
+  // Set of function types (TypeRecord*) whose bodies are currently being
+  // semantically analyzed.  A body is incomplete (has untyped nodes) exactly
+  // while its analysis is in flight, so speculative constant folding must not
+  // lower any function in this set to pcode -- doing so is what previously
+  // crashed code generation on recursive/mutually-recursive constexpr calls.
+  // This is the primary guard; the constexpr_codegen_recover longjmp above is
+  // kept only as defense in depth.
+  Vector functions_being_analyzed;
 } Compiler;
 
 // Globals to avoid passing these around.

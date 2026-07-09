@@ -1170,6 +1170,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
+  VectorInit(&compiler->functions_being_analyzed);
   VectorInit(&compiler->pending_template_instantiations);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
@@ -1571,6 +1572,7 @@ void CompilerDestruct(Compiler* compiler) {
     ASTNodeDelete((ASTNode*)compiler->declaration_asts.value.p[i]);
   }
   VectorDestruct(&compiler->declaration_asts);
+  VectorDestruct(&compiler->functions_being_analyzed);
   for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
   }

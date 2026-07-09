@@ -8,6 +8,7 @@
 
 #include "constexpr.h"
 #include <stdlib.h>
+#include "compiler.h"
 #include "constexpr_pcode.h"
 #include "type.h"
 
@@ -2406,6 +2407,14 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
       func->info.function.is_virtual ||
       func->info.function.varargs) {
     return false;
+  }
+  // Refuse to interpret a body that is still being semantically analyzed (its
+  // nodes are not yet fully typed); this is the recursive/mutually-recursive
+  // constexpr case reached during the function's own analysis.
+  for (size_t i = 0; i < compiler->functions_being_analyzed.length; i++) {
+    if (compiler->functions_being_analyzed.value.p[i] == func) {
+      return false;
+    }
   }
 
   VectorASTNode* call = (VectorASTNode*)node;

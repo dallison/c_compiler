@@ -3257,6 +3257,17 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (current_owner == owner) {
     return true;
   }
+  // Nested lambda closures: while instantiating an outer generic lambda, an
+  // inner lambda's body may still be re-analyzed with the outer operator() as
+  // current_function.  Capture fields are private to the inner closure; allow
+  // access when both the accessor and the member owner are invented lambda
+  // closures (the rewritten `this->capture` form is only produced for the
+  // owning operator()'s body).
+  if (current_owner->tag_symbol != NULL &&
+      current_owner->tag_symbol->flags.invented && owner->tag_symbol != NULL &&
+      owner->tag_symbol->flags.invented) {
+    return true;
+  }
   if (original_access == kAccessPrivate) {
     return false;
   }
@@ -3730,8 +3741,12 @@ static bool CallActualIsPackExpansion(ASTNode* actual) {
   if ((actual->flags & kASTPackExpansion) != 0) {
     return true;
   }
-  if (actual->op == AST_OP(contents)) {
-    return CallActualIsPackExpansion(((UnaryASTNode*)actual)->sub);
+  if (actual->op == AST_OP(contents) || actual->op == AST_OP(address) ||
+      actual->op == AST_OP(cast)) {
+    ASTNode* sub = actual->op == AST_OP(cast)
+                       ? ((CastASTNode*)actual)->expr
+                       : ((UnaryASTNode*)actual)->sub;
+    return CallActualIsPackExpansion(sub);
   }
   if (actual->op != AST_OP(dot) && actual->op != AST_OP(arrow)) {
     return false;
@@ -5170,6 +5185,16 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
     return NULL;
   }
 
+  // A generic lambda captured inside a template whose closure does not depend
+  // on the enclosing template keeps its call operator numbered relative to that
+  // template; rebase it to a standalone 0-based template now so deduction and
+  // instantiation of `operator()` can proceed (no-op in the common case).
+  Struct* closure = node->left->type->info.struct_info;
+  for (Symbol* overload = member->symbol; overload != NULL;
+       overload = overload->overload_next) {
+    TypeRebaseNonDependentLambdaCallOperator(closure, overload);
+  }
+
   // Move the actuals out of the original call node into the member call.
   Vector* actuals = NewVector();
   for (size_t i = 0; i < node->children->length; i++) {
@@ -5568,17 +5593,6 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     }
   }
   num_actual_args = node->children->length;
-  if (getenv("DBG_CALL") && node->left != NULL && node->left->type != NULL) {
-    TypeRecord* lt = node->left->type;
-    fprintf(stderr,
-            "DBG_CALL non-func callee op=%d decl=%d unknown=%d tpi=%d "
-            "containsTP=%d next_decl=%d next_tpi=%d next_unknown=%d\n",
-            (int)node->left->op, (int)lt->declarator, (int)TypeIsUnknown(lt),
-            lt->template_parameter_index, (int)TypeContainsTemplateParameter(lt),
-            lt->next ? (int)lt->next->declarator : -1,
-            lt->next ? lt->next->template_parameter_index : -99,
-            lt->next ? (int)TypeIsUnknown(lt->next) : -1);
-  }
   if (node->left != NULL && !TypeIsFunctionPointer(node->left->type)) {
     SemanticError(node->left, "Cannot call a non-function");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
@@ -5801,6 +5815,17 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       node->left->child_id = 0;
     }
   }
+  // A class-template primary still carrying concrete template arguments (e.g.
+  // `variant` + `<int,long>` on a lambda capture field) must be materialized
+  // before member lookup, or we resolve against the primary's unrebased
+  // member templates.
+  if (node->left != NULL && node->left->type != NULL) {
+    TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+        &compiler->syntax, node->left->type);
+    if (materialized != node->left->type) {
+      ASTNodeSetType(node->left, materialized);
+    }
+  }
   node->right = AnalyzeExpression(node->right);
   if (node->base.op == AST_OP(arrow)) {
     // Op is ->, needs to be a pointer to a struct/union.
@@ -5929,9 +5954,21 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
     return;
   }
 
-  // Fake an integer type for the result.
-  // ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-  ASTNodeSetType((ASTNode*)node, node->sub->type->next);
+  TypeRecord* pointee = node->sub->type->next;
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(&compiler->syntax, pointee);
+  if (materialized != pointee) {
+    // Keep the pointer spine consistent with the materialized pointee so
+    // subsequent member access sees the concrete specialization.
+    TypeRecord* ptr = TypeRecordCopy(node->sub->type);
+    TypeRecordIncRef(materialized);
+    TypeRecordDelete(ptr->next);
+    ptr->next = materialized;
+    ptr->type = materialized->type;
+    ASTNodeSetType(node->sub, TypeRecordCalculateSize(ptr));
+    pointee = materialized;
+  }
+  ASTNodeSetType((ASTNode*)node, pointee);
   node->base.value_category = kValueCategoryLvalue;
 }
 
@@ -6193,7 +6230,13 @@ static void  AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
   node->initializer = AnalyzeInitialization(&node->base,
                                              (IdentifierASTNode*)node->sym,
                         node->initializer);
-  node->base.value_category = kValueCategoryLvalue;
+  // A C++ lambda-expression is a prvalue that materializes a temporary closure.
+  // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
+  if ((node->base.flags & kASTLambdaExpression) != 0) {
+    node->base.value_category = kValueCategoryPrvalue;
+  } else {
+    node->base.value_category = kValueCategoryLvalue;
+  }
 }
 
 static void AnalyzeLogicalOperator(BinaryASTNode* node) {

@@ -1492,12 +1492,14 @@ static TemplateArgument* NewLambdaTemplateParameterTypeArgument(int index,
 }
 
 static TemplateParameter* NewLambdaTemplateParameter(Syntax* syntax,
-                                                     int index) {
+                                                     int index,
+                                                     bool is_parameter_pack) {
   TemplateParameter* param = malloc(sizeof(TemplateParameter));
   memset(param, 0, sizeof(*param));
   StringInit(&param->name, SyntaxFakeName(syntax));
   param->kind = kTemplateParameterType;
   param->index = index;
+  param->is_parameter_pack = is_parameter_pack;
   return param;
 }
 
@@ -1603,9 +1605,14 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   formal->flags.is_defined = true;
   formal->flags.is_argument = true;
   formal->value.arg_number = arg_number;
+  // `auto... xs` / `Concept auto... xs`: the declarator sets
+  // formal->flags.is_parameter_pack; the invented template parameter must
+  // match or deduction treats the pack as a single type parameter and the
+  // instantiated operator() is never emitted for multi-arg calls.
   VectorAppend(&func->info.function.prototype, formal);
   VectorAppend(&func->info.function.template_parameters,
-               NewLambdaTemplateParameter(syntax, index));
+               NewLambdaTemplateParameter(syntax, index,
+                                          formal->flags.is_parameter_pack));
   if (concept_symbol != NULL) {
     if (concept_arguments == NULL) {
       concept_arguments = NewVector();
@@ -1821,6 +1828,11 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
     op->flags.is_template = true;
     func->info.function.template_parameter_count =
         (int)func->info.function.template_parameters.length;
+    // Generic lambda inside another template: own auto params are numbered
+    // after the enclosing template's; record that offset as the call
+    // operator's template-parameter base for deduction/substitution.
+    func->info.function.template_parameter_base =
+        syntax->current_template_parameter_count;
   }
   op->value.func_defn = op;
   func->info.function.symbol = op;
@@ -1840,37 +1852,88 @@ typedef struct {
   Vector* captures;
   TypeRecord* lambda_func;
   LambdaCaptureDefault capture_default;
+  Vector* body_locals;  // Symbols declared in this lambda body (not capturable).
 } LambdaCaptureScan;
+
+// Collect symbols introduced by variable declarations in the lambda body so
+// default-capture scanning does not treat them as enclosing-scope captures
+// (e.g. `[&]{ auto inner = []{}; return inner(); }` must not capture `inner`).
+static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
+                                          int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  // Locals declared inside a nested lambda belong to that nested closure.
+  // Its body is not under this compound-literal subtree; only skip walking
+  // further when we are at the nested lambda expression itself if needed.
+  // Nested lambda bodies are attached to their call operators, not here.
+  if (node->op != AST_OP(vardecl)) {
+    return;
+  }
+  VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+  if (decl->symbol != NULL) {
+    VectorAppend((Vector*)data, decl->symbol);
+  }
+}
+
+static bool LambdaBodyDeclaresSymbol(Vector* body_locals, Symbol* symbol) {
+  if (body_locals == NULL || symbol == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < body_locals->length; i++) {
+    if (body_locals->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Visitor: for a `[=]`/`[&]` lambda, append a capture for each enclosing-scope
 // identifier referenced in the body that is not already captured.
 static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  // Nested lambda-expressions are compound literals whose capture initializers
+  // may still name enclosing locals (e.g. `[&]{ auto i = [&]{ return x; }; }`).
+  // Walk those initializers so this lambda captures `x`; do not treat the
+  // nested closure's own body locals as capturable (handled via body_locals).
+  if (node->op != AST_OP(identifier)) {
     return;
   }
   LambdaCaptureScan* scan = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (!CanCaptureSymbol(id->symbol, scan->lambda_func) ||
+      LambdaBodyDeclaresSymbol(scan->body_locals, id->symbol) ||
       FindLambdaCapture(scan->captures, id->symbol) != NULL) {
     return;
   }
   bool by_reference =
       scan->capture_default == kLambdaCaptureDefaultReference;
+  // A default capture of a parameter pack is a pack capture: the closure field
+  // must be marked as a pack so instantiation expands it to per-element fields
+  // and so uses like `xs...` keep their pack-expansion marker after rewrite.
+  bool is_pack = id->symbol->flags.is_parameter_pack;
   VectorAppend(scan->captures, NewLambdaCapture(id->symbol, by_reference,
-                                                /*is_pack_expansion=*/false,
+                                                is_pack,
                                                 /*initializer=*/NULL,
                                                 /*is_init_capture=*/false));
 }
 
 // The closure-member type for a capture: a pointer to the captured object for
 // by-reference captures, otherwise a copy of the captured (referent) type.
+// Class-template specializations that are still represented as the primary
+// plus concrete args (common for locals inside function templates) are
+// materialized so member lookup on the capture sees instantiated members.
 static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture) {
   TypeRecord* captured_type = TypeIsReference(capture->captured->type)
                                   ? capture->captured->type->next
                                   : capture->captured->type;
+  captured_type = TypeMaterializeClassTemplateSpecialization(&compiler->syntax,
+                                                             captured_type);
   if (capture->by_reference) {
     return NewPointerTo(kQualPlain, captured_type);
   }
@@ -1964,18 +2027,29 @@ static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures) {
 }
 
 // Replace child `child_id` of `parent` with `replacement` while rewriting a
-// lambda body's capture uses.  For call-like nodes the arguments live in a
-// child vector indexed from zero while child_id 0 is the callee, so an argument
-// at child_id N maps to vector slot N-1; patch that slot directly.  All other
-// node shapes go through the generic child-replacement helper.
+// lambda body's capture uses.  Call-like VectorASTNodes use visitor child_ids
+// where 0 is the callee (`left`) and argument N is visitor child_id N+1
+// (vector slot N); map those explicitly.  All other node shapes go through the
+// generic child-replacement helper.
 static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
                                          ASTNode* replacement) {
   if (parent == NULL) {
     ASTNodeDelete(replacement);
     return;
   }
-  if (ASTIsCallNode(parent) && child_id > 0) {
+  // `inline_call` is call-like for visitors but is not a VectorASTNode; only
+  // ordinary/builtin call nodes store the callee in `left` and args in
+  // `children` with the 0 / N+1 numbering used here.
+  if (ASTIsCallNode(parent) && parent->op != AST_OP(inline_call)) {
     VectorASTNode* vector = (VectorASTNode*)parent;
+    if (child_id == 0) {
+      ASTNode* old = vector->left;
+      vector->left = replacement;
+      replacement->parent = parent;
+      replacement->child_id = 0;
+      ASTNodeDelete(old);
+      return;
+    }
     ASTNode* old = vector->children->value.p[child_id - 1];
     VectorSet(vector->children, (size_t)child_id - 1, replacement);
     replacement->parent = parent;
@@ -2003,6 +2077,13 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
   }
   ASTNode* replacement =
       NewLambdaCaptureAccess(rewrite->this_symbol, capture, node->location);
+  // Preserve a use-site pack-expansion marker (`xs...`) on the rewritten
+  // capture access.  NewLambdaCaptureAccess already sets this for captures
+  // recorded as pack expansions; OR it in for the use site as well so a
+  // pack use cannot lose its expansion flag during rewrite.
+  if ((node->flags & kASTPackExpansion) != 0) {
+    replacement->flags |= kASTPackExpansion;
+  }
   ReplaceChildForLambdaCapture(node->parent, child_id, replacement);
 }
 
@@ -2013,15 +2094,28 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
                                 Vector* captures, TokenClass followers) {
   ParserContext old_context = syntax->context;
   syntax->context = kParsingBlockScope;
+  // Nested lambdas inside a generic lambda must number their own `auto`
+  // parameters after this operator()'s invented template parameters (which
+  // themselves may already sit after an enclosing template).  Bump the
+  // current count for the duration of the body so nested placeholders do not
+  // collide with this operator's parameters.
+  int old_template_parameter_count = syntax->current_template_parameter_count;
+  TypeRecord* func = call_operator->type;
+  if (func != NULL && TypeIsFunction(func) &&
+      func->info.function.template_parameters.length > 0) {
+    syntax->current_template_parameter_count =
+        func->info.function.template_parameter_base +
+        (int)func->info.function.template_parameters.length;
+  }
   SyntaxOpenScope(syntax);
   AddLambdaFunctionScopeSymbols(syntax, call_operator->type);
   AddLambdaInitCaptureScopeSymbols(syntax, captures);
   ASTNode* body = SyntaxParseStatement(syntax, followers);
   SyntaxCloseScope(syntax);
+  syntax->current_template_parameter_count = old_template_parameter_count;
   syntax->context = old_context;
   call_operator->type->info.function.body = body;
   VectorAppend(&compiler->declaration_asts, body);
-  QueueLambdaCallOperatorDefinition(call_operator);
   return body;
 }
 
@@ -2091,9 +2185,15 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
     SyntaxCloseScope(syntax);
   }
   if (capture_default != kLambdaCaptureDefaultNone) {
-    LambdaCaptureScan scan = {&captures, call_operator->type, capture_default};
+    Vector body_locals;
+    VectorInit(&body_locals);
+    ASTNodeVisit(call_operator->type->info.function.body,
+                 CollectLambdaBodyLocalSymbols, 0, &body_locals);
+    LambdaCaptureScan scan = {&captures, call_operator->type, capture_default,
+                              &body_locals};
     ASTNodeVisit(call_operator->type->info.function.body,
                  CollectDefaultLambdaCaptures, 0, &scan);
+    VectorDestruct(&body_locals);
   }
   AddLambdaCaptureFields(closure_type, &captures, location);
   LambdaRewrite rewrite = {
@@ -2101,12 +2201,49 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   ASTNodeVisit(call_operator->type->info.function.body,
                RewriteLambdaCaptureUses, 0, &rewrite);
 
+  // Queue operator() for analysis/codegen unless the closure captures a
+  // non-pack value whose type still names an enclosing template parameter.
+  // Those bodies cannot be analyzed against placeholder capture-field types;
+  // SubstituteNestedStructTemplateParameters rebuilds the closure per
+  // instantiation and CloneInstantiatedMemberFunctionBody re-queues the body.
+  //
+  // Pack-only captures are still queued eagerly: fold/pack-expansion lowering
+  // (e.g. `[&]{ return (0 + ... + xs); }`) runs against the template-level
+  // operator().  But if the same lambda also captures a dependent non-pack
+  // (e.g. a visitor `vis` alongside a remaining pack `vars...`), defer: eager
+  // analysis of the dependent capture fails, and pack expansion still runs on
+  // the rebuilt per-instantiation body.
+  bool defer_dependent_capture = false;
+  if (syntax->current_template_parameter_count > 0) {
+    for (size_t i = 0; i < captures.length; i++) {
+      LambdaCapture* capture = captures.value.p[i];
+      if (capture == NULL || capture->captured == NULL) {
+        continue;
+      }
+      if (capture->is_pack_expansion) {
+        continue;
+      }
+      if (TypeContainsTemplateParameter(capture->captured->type)) {
+        defer_dependent_capture = true;
+        break;
+      }
+    }
+  }
+  if (!defer_dependent_capture) {
+    QueueLambdaCallOperatorDefinition(call_operator);
+  }
+
   Symbol* temp = SyntaxNewTemporary(syntax, closure_type);
   temp->location = location;
   ASTNode* initializer =
       NewLambdaClosureInitializer(closure_type, &captures, location);
   ASTNode* result = NewCompoundLiteralASTNode(NewIdentifierASTNode(temp, location),
                                              location, initializer);
+  // A lambda-expression is a prvalue that materializes a temporary closure.
+  // Mark it so analysis does not treat the compound literal as a C lvalue
+  // (which would break forwarding-reference deduction of `F&&` / `T&&`).
+  result->flags |= kASTLambdaExpression;
+  result->value_category = kValueCategoryPrvalue;
   VectorDestructWithContents(&captures, NULL, true);
   return result;
 }
