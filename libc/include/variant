@@ -928,6 +928,18 @@ auto __visit_two(Visitor vis, Variant0& var0, Variant1& var1) {
   return var0.__visit_impl(visit_rest);
 }
 
+template <class Visitor, class Variant0, class Variant1, class Variant2>
+auto __visit_three(Visitor vis, Variant0& var0, Variant1& var1,
+                   Variant2& var2) {
+  auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto invoke = [&, vis, value0, value1](auto value2) {
+      return vis(value0, value1, value2);
+    };
+    return var2.__visit_impl(invoke);
+  };
+  return __visit_two(visit_first_two, var0, var1);
+}
+
 }  // namespace __variant_detail
 
 template <class Visitor, class Variant0, class Variant1>
@@ -948,24 +960,45 @@ auto visit(Visitor vis, const Variant0& var0, const Variant1& var1) {
 
 template <class Visitor, class Variant0, class Variant1, class Variant2>
 auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2) {
+  return __variant_detail::__visit_three(vis, var0, var1, var2);
+}
+
+template <class Visitor, class Variant0, class Variant1, class Variant2,
+          class Variant3>
+auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
+           Variant3& var3) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
-    auto invoke = [&, vis, value0, value1](auto value2) {
-      return vis(value0, value1, value2);
+    auto visit_last_two = [&, vis, value0, value1](auto value2, auto value3) {
+      return vis(value0, value1, value2, value3);
     };
-    return var2.__visit_impl(invoke);
+    return __variant_detail::__visit_two(visit_last_two, var2, var3);
   };
   return __variant_detail::__visit_two(visit_first_two, var0, var1);
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
-          class Variant3, class... Variants>
+          class Variant3, class Variant4>
 auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
-           Variant3& var3, Variants&... vars) {
+           Variant3& var3, Variant4& var4) {
+  auto visit_first_two = [&, vis](auto value0, auto value1) {
+    auto visit_last_three = [&, vis, value0, value1](auto value2, auto value3,
+                                                     auto value4) {
+      return vis(value0, value1, value2, value3, value4);
+    };
+    return __variant_detail::__visit_three(visit_last_three, var2, var3, var4);
+  };
+  return __variant_detail::__visit_two(visit_first_two, var0, var1);
+}
+
+template <class Visitor, class Variant0, class Variant1, class Variant2,
+          class Variant3, class Variant4, class Variant5, class... Variants>
+auto visit(Visitor vis, Variant0& var0, Variant1& var1, Variant2& var2,
+           Variant3& var3, Variant4& var4, Variant5& var5, Variants&... vars) {
   auto visit_rest = [&, vis](auto&& value0) {
     auto invoke = [&, vis](auto&&... values) {
       return vis(value0, values...);
     };
-    return std::visit(invoke, var1, var2, var3, vars...);
+    return std::visit(invoke, var1, var2, var3, var4, var5, vars...);
   };
   return var0.__visit_impl(visit_rest);
 }

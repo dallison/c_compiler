@@ -6252,9 +6252,13 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
       }
     }
   }
-  *action = kASTTransformSkipChildren;
   ASTNode* parent = node->parent;
+  int child_id = node->child_id;
+  *action = kASTTransformSkipChildren;
+  node->parent = NULL;
   ASTNode* analyzed = AnalyzeExpression(node);
+  node->parent = parent;
+  node->child_id = child_id;
   RestoreSymbolOverloadLinks(&overload_snapshots);
   if (parent != NULL && parent->op == AST_OP(call)) {
     parent->flags |= kASTDependentFunctorCall;

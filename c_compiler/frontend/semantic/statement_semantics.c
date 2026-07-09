@@ -103,6 +103,66 @@ static bool CXXTemporaryNeedsDestructor(Symbol* sym) {
            destructor->symbol->type->info.function.is_trivial_special_member);
 }
 
+static bool CXXSameClassIgnoringQualifiers(TypeRecord* left,
+                                           TypeRecord* right) {
+  return TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
+         left->info.struct_info == right->info.struct_info;
+}
+
+static ASTNode* CXXSingleExpressionInitializer(ASTNode* initializer) {
+  if (initializer == NULL) {
+    return NULL;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer->op != AST_OP(braced_init)) {
+    return NULL;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+  if (braced->initializers == NULL || braced->initializers->length != 1) {
+    return NULL;
+  }
+  ASTNode* only = braced->initializers->value.p[0];
+  if (only != NULL && only->op == AST_OP(designated_init)) {
+    only = ((DesignatedInitializerASTNode*)only)->init;
+  }
+  if (only != NULL && only->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)only)->expr;
+  }
+  return only;
+}
+
+static Symbol* CXXTemporaryConstructionResultSymbol(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(identifier)) {
+    Symbol* sym = ((IdentifierASTNode*)expr)->symbol;
+    return sym != NULL && sym->flags.is_temp ? sym : NULL;
+  }
+  if (expr->op == AST_OP(comma)) {
+    return CXXTemporaryConstructionResultSymbol(((BinaryASTNode*)expr)->right);
+  }
+  if (expr->op == AST_OP(cast)) {
+    return CXXTemporaryConstructionResultSymbol(((CastASTNode*)expr)->expr);
+  }
+  return NULL;
+}
+
+static bool CXXCompoundLiteralWrapsConstructedTemporary(
+    CompoundLiteralASTNode* literal) {
+  if (literal == NULL || literal->sym == NULL ||
+      literal->sym->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* literal_sym = ((IdentifierASTNode*)literal->sym)->symbol;
+  ASTNode* expr = CXXSingleExpressionInitializer(literal->initializer);
+  Symbol* source = CXXTemporaryConstructionResultSymbol(expr);
+  return literal_sym != NULL && source != NULL && literal_sym != source &&
+         CXXSameClassIgnoringQualifiers(literal_sym->type, source->type);
+}
+
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
@@ -111,9 +171,18 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
   }
   Symbol* sym = NULL;
   if (node->op == AST_OP(identifier)) {
+    if (node->parent != NULL && node->parent->op == AST_OP(compound_literal) &&
+        child_id == 0 &&
+        CXXCompoundLiteralWrapsConstructedTemporary(
+            (CompoundLiteralASTNode*)node->parent)) {
+      return;
+    }
     sym = ((IdentifierASTNode*)node)->symbol;
   } else if (node->op == AST_OP(compound_literal)) {
     CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
+    if (CXXCompoundLiteralWrapsConstructedTemporary(literal)) {
+      return;
+    }
     if (literal->sym != NULL && literal->sym->op == AST_OP(identifier)) {
       sym = ((IdentifierASTNode*)literal->sym)->symbol;
     }
