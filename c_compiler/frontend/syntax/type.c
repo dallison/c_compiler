@@ -2625,6 +2625,365 @@ static bool FunctionTypeHasParameterPack(TypeRecord* type) {
   return false;
 }
 
+/* Replace a self-reference to a template definition with the concrete struct
+ * currently being instantiated. This keeps injected-class-name uses (`map`,
+ * `iterator`, etc.) tied to the active instantiation instead of the primary
+ * template's generic struct. */
+static TypeRecord* SubstituteTemplateSelfReference(TypeRecord* type,
+                                                   Struct* source,
+                                                   Struct* target) {
+  if (source == NULL || target == NULL || type->declarator != kDeclPrimitive ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info != source) {
+    return NULL;
+  }
+  TypeRecord* subst = TypeRecordCopy(type);
+  subst->info.struct_info = target;
+  if (target->tag_symbol != NULL && target->tag_symbol->type != NULL) {
+    if (subst->template_arguments != NULL) {
+      VectorDeleteWithContents(subst->template_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    subst->template_origin = target->tag_symbol->type->template_origin;
+    subst->template_arguments =
+        TemplateArgumentVectorCopy(target->tag_symbol->type->template_arguments);
+  }
+  return TypeRecordCalculateSize(subst);
+}
+
+/* Look up a nested type name on the active instantiation. This handles cases
+ * where the parsed type still points at the template definition's nested class,
+ * but the concrete outer class already owns the substituted nested type. */
+static TypeRecord* SubstituteNestedTypeFromActiveInstantiation(
+    TypeParser* parser, TypeRecord* type) {
+  if (!CompilerIsCXX() || parser == NULL ||
+      type->declarator != kDeclPrimitive || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  Struct* lookup_targets[] = {
+      parser->template_substitution_target,
+      parser->enclosing_template_substitution_target,
+  };
+  for (size_t i = 0; i < sizeof(lookup_targets) / sizeof(lookup_targets[0]);
+       i++) {
+    Struct* target = lookup_targets[i];
+    if (target == NULL) {
+      continue;
+    }
+    StructMember* member =
+        FindStructMember(target, type->info.struct_info->tag_name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef)) &&
+        member->symbol->type != NULL && TypeIsStructOrUnion(member->symbol->type)) {
+      TypeRecord* subst = TypeRecordCopy(member->symbol->type);
+      subst->qualifiers |= type->qualifiers;
+      return TypeRecordCalculateSize(subst);
+    }
+  }
+  return NULL;
+}
+
+/* True when `type` names a nested struct whose lexical parent is one of the
+ * template definitions currently being substituted. Such structs must be
+ * rebuilt member-by-member under the concrete parent. */
+static bool TypeNamesActiveNestedTemplateStruct(TypeParser* parser,
+                                                TypeRecord* type) {
+  return CompilerIsCXX() && parser != NULL &&
+         type->declarator == kDeclPrimitive && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         ((parser->template_substitution_source != NULL &&
+           type->info.struct_info->lexical_parent ==
+               parser->template_substitution_source) ||
+          (parser->enclosing_template_substitution_source != NULL &&
+           type->info.struct_info->lexical_parent ==
+               parser->enclosing_template_substitution_source));
+}
+
+/* Resolve a dependent member typedef such as `T::value_type` after `T` has been
+ * substituted to a concrete class. Missing typedefs on concrete classes are
+ * recorded as substitution failures for SFINAE-aware callers. */
+static TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
+                                                 TypeRecord* type,
+                                                 Vector* args) {
+  if (type->declarator != kDeclPrimitive ||
+      type->template_parameter_index < 0 ||
+      type->dependent_member_name == NULL) {
+    return NULL;
+  }
+  int index = type->template_parameter_index;
+  if (args == NULL || index < 0 || (size_t)index >= args->length) {
+    return TypeRecordCopy(type);
+  }
+  TemplateArgument* arg = args->value.p[index];
+  if (arg == NULL || arg->kind != kTemplateParameterType ||
+      arg->type == NULL || !TypeIsStructOrUnion(arg->type) ||
+      arg->type->info.struct_info == NULL) {
+    return TypeRecordCopy(type);
+  }
+  StructMember* member =
+      FindStructMember(arg->type->info.struct_info,
+                       type->dependent_member_name);
+  if (member == NULL || member->symbol == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef))) {
+    if (parser != NULL &&
+        !StructContainsTemplateParameter(arg->type->info.struct_info)) {
+      parser->template_substitution_failed = true;
+    }
+    return TypeRecordCopy(type);
+  }
+  TypeRecord* subst = TypeRecordCopy(member->symbol->type);
+  subst->qualifiers |= type->qualifiers;
+  return TypeRecordCalculateSize(subst);
+}
+
+typedef struct {
+  Symbol* origin;
+  Vector* args;
+} TemplateIdSubstitutionInfo;
+
+/* Recover the template-id represented by `type`. Some instantiated class types
+ * carry the origin/arguments on the TypeRecord itself; others only have them on
+ * the canonical tag type. This helper normalizes those two encodings. */
+static TemplateIdSubstitutionInfo TemplateIdInfoForSubstitution(
+    TypeRecord* type) {
+  TemplateIdSubstitutionInfo info = {
+      type != NULL ? type->template_origin : NULL,
+      type != NULL ? type->template_arguments : NULL,
+  };
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL &&
+      type->info.struct_info->tag_symbol->type != NULL) {
+    TypeRecord* tag_type = type->info.struct_info->tag_symbol->type;
+    if (tag_type->template_origin != NULL &&
+        (info.origin == NULL || tag_type->template_origin == info.origin)) {
+      info.origin = tag_type->template_origin;
+      if (info.args == NULL) {
+        info.args = tag_type->template_arguments;
+      }
+    } else if (info.origin == NULL && info.args != NULL &&
+               type->info.struct_info->is_template &&
+               type->info.struct_info->tag_symbol->flags.is_template) {
+      info.origin = type->info.struct_info->tag_symbol;
+    }
+  }
+  return info;
+}
+
+/* Substitute a template-id (`Wrapper<T>`, alias templates, and dependent
+ * `enable_if<T>::type`-style member typedefs). If any argument remains
+ * dependent, keep the template-id deferred rather than instantiating the primary
+ * template too early. */
+static TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
+                                            TypeRecord* type,
+                                            Vector* args,
+                                            TemplateIdSubstitutionInfo info) {
+  if (info.origin == NULL || info.args == NULL) {
+    return NULL;
+  }
+  Vector* concrete_args =
+      SubstituteTemplateArgumentVectorForTypes(parser, info.args, args);
+  if (TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
+    TypeRecord* deferred = TypeRecordCopy(type);
+    if (deferred->template_arguments != NULL) {
+      VectorDeleteWithContents(
+          deferred->template_arguments,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    deferred->template_arguments = concrete_args;
+    deferred->qualifiers |= type->qualifiers;
+    return deferred;
+  }
+  if (CompilerIsCXX() && info.origin->flags.is_template &&
+      StorageIs(info.origin->storage, STO(typedef)) &&
+      !TypeIsStructOrUnion(info.origin->type) &&
+      !CXXAliasTemplatePatternNamesClassTemplate(info.origin)) {
+    TypeRecord* subst =
+        SubstituteTemplateParameters(parser, info.origin->type, concrete_args);
+    subst->qualifiers |= type->qualifiers;
+    VectorDeleteWithContents(concrete_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return TypeRecordCalculateSize(subst);
+  }
+
+  TypeRecord* subst =
+      InstantiateSimpleClassTemplate(parser, info.origin, concrete_args);
+  if (subst == NULL) {
+    VectorDeleteWithContents(concrete_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return TypeRecordCopy(type);
+  }
+  subst->qualifiers |= type->qualifiers;
+  VectorDeleteWithContents(concrete_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+
+  if (type->dependent_member_name != NULL &&
+      TypeIsStructOrUnion(subst) && subst->info.struct_info != NULL) {
+    StructMember* member =
+        FindStructMember(subst->info.struct_info,
+                         type->dependent_member_name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      TypeRecord* member_type = TypeRecordCopy(member->symbol->type);
+      member_type->qualifiers |= type->qualifiers;
+      TypeRecordDelete(subst);
+      return TypeRecordCalculateSize(member_type);
+    }
+    if (parser != NULL &&
+        !StructContainsTemplateParameter(subst->info.struct_info)) {
+      parser->template_substitution_failed = true;
+    }
+  }
+  return TypeRecordCalculateSize(subst);
+}
+
+/* Replace a bare type parameter `T` with its actual type argument, preserving
+ * cv-qualifiers from the use site. */
+static TypeRecord* SubstituteBareTemplateParameter(TypeRecord* type,
+                                                   Vector* args) {
+  if (type->declarator != kDeclPrimitive ||
+      type->template_parameter_index < 0) {
+    return NULL;
+  }
+  int index = type->template_parameter_index;
+  if (args == NULL || index < 0 || (size_t)index >= args->length) {
+    return TypeRecordCopy(type);
+  }
+  TemplateArgument* arg = args->value.p[index];
+  if (arg == NULL || arg->kind != kTemplateParameterType ||
+      arg->type == NULL) {
+    return TypeRecordCopy(type);
+  }
+  TypeRecord* subst = TypeRecordCopy(arg->type);
+  subst->qualifiers |= type->qualifiers;
+  return subst;
+}
+
+/* Substitute a non-type template parameter used as an array bound. */
+static void SubstituteArrayTemplateBound(TypeRecord* copy,
+                                         TypeRecord* original,
+                                         Vector* args) {
+  if (copy->declarator != kDeclArray ||
+      original->info.array.template_parameter_index < 0) {
+    return;
+  }
+  int index = original->info.array.template_parameter_index;
+  if (args == NULL || (size_t)index >= args->length) {
+    return;
+  }
+  TemplateArgument* arg = args->value.p[index];
+  if (arg == NULL || arg->kind != kTemplateParameterNonType) {
+    return;
+  }
+  if (arg->template_parameter_index >= 0) {
+    copy->info.array.template_parameter_index = arg->template_parameter_index;
+  } else {
+    copy->info.array.size.fixed = (int)arg->int_value;
+    copy->info.array.template_parameter_index = -1;
+    copy->size = 0;
+  }
+}
+
+/* Replace the `next` type in a copied pointer/reference/array/function spine.
+ * C++ reference collapsing and pointer-to-reference cleanup both happen here so
+ * callers see a valid post-substitution type chain. */
+static void SubstituteTypeSpineNext(TypeParser* parser, TypeRecord* copy,
+                                    TypeRecord* original, Vector* args) {
+  if (copy->next == NULL) {
+    return;
+  }
+  TypeRecord* original_next = original->next;
+  TypeRecordIncRef(original_next);
+  TypeRecordDelete(copy->next);
+  copy->next = SubstituteTemplateParameters(parser, original_next, args);
+  TypeRecordDelete(original_next);
+  if (copy->next == NULL) {
+    return;
+  }
+
+  bool collapsed_reference = false;
+  if (TypeIsReference(copy) && TypeIsReference(copy->next)) {
+    TypeRecord* nested = copy->next;
+    TypeRecord* collapsed_next = nested->next;
+    bool rvalue = copy->declarator == kDeclRValueReference &&
+                  nested->declarator == kDeclRValueReference;
+    TypeRecordIncRef(collapsed_next);
+    TypeRecordDelete(copy->next);
+    copy->next = collapsed_next;
+    copy->declarator = rvalue ? kDeclRValueReference : kDeclReference;
+    collapsed_reference = true;
+  }
+  if (!collapsed_reference && TypeIsPointer(copy) && TypeIsReference(copy->next)) {
+    TypeRecord* nested = copy->next;
+    TypeRecord* referent = nested->next;
+    TypeRecordIncRef(referent);
+    TypeRecordDelete(copy->next);
+    copy->next = referent;
+    collapsed_reference = true;
+  }
+  if (!collapsed_reference) {
+    TypeRecordIncRef(copy->next);
+  }
+  copy->type = copy->next->type;
+}
+
+/* Rebuild a function prototype after substituting its return/parameter types.
+ * If a formal is a parameter pack, it expands into one concrete formal per pack
+ * element; otherwise formals are substituted in place. */
+static void SubstituteFunctionPrototype(TypeParser* parser, TypeRecord* copy,
+                                        TypeRecord* original, Vector* args) {
+  if (!TypeIsFunction(copy)) {
+    return;
+  }
+  if (FunctionTypeHasParameterPack(original)) {
+    VectorDestructWithContents(&copy->info.function.prototype,
+                               (VectorElementDestructor)SymbolDestruct,
+                               /*free_element=*/true);
+    VectorInit(&copy->info.function.prototype);
+    for (size_t i = 0; i < original->info.function.prototype.length; i++) {
+      Symbol* formal = original->info.function.prototype.value.p[i];
+      if (formal == NULL || formal->type == NULL) {
+        continue;
+      }
+      AppendSubstitutedFormalParameter(parser, &copy->info.function.prototype,
+                                       formal, args, 0);
+    }
+    for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
+      Symbol* formal = copy->info.function.prototype.value.p[i];
+      formal->value.arg_number = (int32_t)i;
+    }
+    return;
+  }
+  for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
+    Symbol* formal = copy->info.function.prototype.value.p[i];
+    Symbol* source_formal = original->info.function.prototype.value.p[i];
+    if (formal == NULL || source_formal == NULL ||
+        source_formal->type == NULL) {
+      continue;
+    }
+    TypeRecord* formal_type =
+        SubstituteTemplateParameters(parser, source_formal->type, args);
+    SymbolSetType(formal, formal_type);
+    TypeRecordDelete(formal_type);
+  }
+}
+
+/* Fallback for non-special cases: copy the type and substitute all recursively
+ * contained pieces (array bounds, next-chain, and function prototype). */
+static TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
+                                              TypeRecord* type,
+                                              Vector* args) {
+  TypeRecord* copy = TypeRecordCopy(type);
+  SubstituteArrayTemplateBound(copy, type, args);
+  SubstituteTypeSpineNext(parser, copy, type, args);
+  SubstituteFunctionPrototype(parser, copy, type, args);
+  return TypeRecordCalculateSize(copy);
+}
+
 /* Core type substitution: produce a concrete copy of `type` with every
  * template-parameter reference resolved against the actual arguments `args`.
  * Handles, in order:
@@ -2642,338 +3001,56 @@ static TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   if (type == NULL) {
     return NULL;
   }
-  /* Self-reference: a class template referring to its own type substitutes to
-   * the concrete instantiation currently being produced. */
-  if (CompilerIsCXX() && parser != NULL &&
-      parser->template_substitution_source != NULL &&
-      parser->template_substitution_target != NULL &&
-      type->declarator == kDeclPrimitive && TypeIsStructOrUnion(type) &&
-      type->info.struct_info == parser->template_substitution_source) {
-    TypeRecord* subst = TypeRecordCopy(type);
-    subst->info.struct_info = parser->template_substitution_target;
-    if (parser->template_substitution_target->tag_symbol != NULL &&
-        parser->template_substitution_target->tag_symbol->type != NULL) {
-      if (subst->template_arguments != NULL) {
-        VectorDeleteWithContents(subst->template_arguments,
-                                 (VectorElementDestructor)TemplateArgumentDelete,
-                                 /*free_element=*/false);
-      }
-      subst->template_origin =
-          parser->template_substitution_target->tag_symbol->type->template_origin;
-      subst->template_arguments =
-          TemplateArgumentVectorCopy(parser->template_substitution_target
-                                         ->tag_symbol->type->template_arguments);
+  if (CompilerIsCXX() && parser != NULL) {
+    TypeRecord* subst = SubstituteTemplateSelfReference(
+        type, parser->template_substitution_source,
+        parser->template_substitution_target);
+    if (subst != NULL) {
+      return subst;
     }
-    return TypeRecordCalculateSize(subst);
-  }
-  if (CompilerIsCXX() && parser != NULL &&
-      parser->enclosing_template_substitution_source != NULL &&
-      parser->enclosing_template_substitution_target != NULL &&
-      type->declarator == kDeclPrimitive && TypeIsStructOrUnion(type) &&
-      type->info.struct_info ==
-          parser->enclosing_template_substitution_source) {
-    TypeRecord* subst = TypeRecordCopy(type);
-    subst->info.struct_info = parser->enclosing_template_substitution_target;
-    if (parser->enclosing_template_substitution_target->tag_symbol != NULL &&
-        parser->enclosing_template_substitution_target->tag_symbol->type != NULL) {
-      if (subst->template_arguments != NULL) {
-        VectorDeleteWithContents(subst->template_arguments,
-                                 (VectorElementDestructor)TemplateArgumentDelete,
-                                 /*free_element=*/false);
-      }
-      subst->template_origin =
-          parser->enclosing_template_substitution_target->tag_symbol->type
-              ->template_origin;
-      subst->template_arguments =
-          TemplateArgumentVectorCopy(
-              parser->enclosing_template_substitution_target->tag_symbol->type
-                  ->template_arguments);
+    subst = SubstituteTemplateSelfReference(
+        type, parser->enclosing_template_substitution_source,
+        parser->enclosing_template_substitution_target);
+    if (subst != NULL) {
+      return subst;
     }
-    return TypeRecordCalculateSize(subst);
-  }
-  if (CompilerIsCXX() && parser != NULL &&
-      type->declarator == kDeclPrimitive && TypeIsStructOrUnion(type) &&
-      type->info.struct_info != NULL && type->info.struct_info->tag_name != NULL) {
-    Struct* lookup_targets[] = {
-        parser->template_substitution_target,
-        parser->enclosing_template_substitution_target,
-    };
-    for (size_t i = 0; i < sizeof(lookup_targets) / sizeof(lookup_targets[0]);
-         i++) {
-      Struct* target = lookup_targets[i];
-      if (target == NULL) {
-        continue;
-      }
-      StructMember* member =
-          FindStructMember(target, type->info.struct_info->tag_name);
-      if (member != NULL && member->symbol != NULL &&
-          StorageIs(member->symbol->storage, STO(typedef)) &&
-          member->symbol->type != NULL && TypeIsStructOrUnion(member->symbol->type)) {
-        TypeRecord* subst = TypeRecordCopy(member->symbol->type);
-        subst->qualifiers |= type->qualifiers;
-        return TypeRecordCalculateSize(subst);
-      }
+    subst = SubstituteNestedTypeFromActiveInstantiation(parser, type);
+    if (subst != NULL) {
+      return subst;
+    }
+    if (TypeNamesActiveNestedTemplateStruct(parser, type)) {
+      return SubstituteNestedStructTemplateParameters(parser, type, args);
     }
   }
-  if (CompilerIsCXX() && parser != NULL &&
-      type->declarator == kDeclPrimitive && TypeIsStructOrUnion(type) &&
-      type->info.struct_info != NULL &&
-      ((parser->template_substitution_source != NULL &&
-        type->info.struct_info->lexical_parent ==
-            parser->template_substitution_source) ||
-       (parser->enclosing_template_substitution_source != NULL &&
-        type->info.struct_info->lexical_parent ==
-            parser->enclosing_template_substitution_source))) {
-    return SubstituteNestedStructTemplateParameters(parser, type, args);
-  }
-  /* Dependent member typedef like `T::value_type`: resolve `T` then look the
-   * named typedef up inside the resulting struct. */
-  if (type->declarator == kDeclPrimitive &&
-      type->template_parameter_index >= 0 &&
-      type->dependent_member_name != NULL) {
-    int index = type->template_parameter_index;
-    if (index < 0 || (size_t)index >= args->length) {
-      return TypeRecordCopy(type);
-    }
-    TemplateArgument* arg = args->value.p[index];
-    if (arg == NULL || arg->kind != kTemplateParameterType ||
-        arg->type == NULL || !TypeIsStructOrUnion(arg->type) ||
-        arg->type->info.struct_info == NULL) {
-      return TypeRecordCopy(type);
-    }
-    StructMember* member =
-        FindStructMember(arg->type->info.struct_info,
-                         type->dependent_member_name);
-    if (member == NULL || member->symbol == NULL ||
-        !StorageIs(member->symbol->storage, STO(typedef))) {
-      // A missing member typedef on a concrete instantiation is a substitution
-      // failure in the immediate context (SFINAE); flag it for callers.
-      if (parser != NULL &&
-          !StructContainsTemplateParameter(arg->type->info.struct_info)) {
-        parser->template_substitution_failed = true;
-      }
-      return TypeRecordCopy(type);
-    }
-    TypeRecord* subst = TypeRecordCopy(member->symbol->type);
-    subst->qualifiers |= type->qualifiers;
-    return TypeRecordCalculateSize(subst);
-  }
-  Symbol* type_template_origin = type->template_origin;
-  Vector* type_template_args = type->template_arguments;
-  if (TypeIsStructOrUnion(type) &&
-      type->info.struct_info != NULL &&
-      type->info.struct_info->tag_symbol != NULL &&
-      type->info.struct_info->tag_symbol->type != NULL) {
-    TypeRecord* tag_type = type->info.struct_info->tag_symbol->type;
-    if (tag_type->template_origin != NULL &&
-        (type_template_origin == NULL ||
-         tag_type->template_origin == type_template_origin)) {
-      type_template_origin = tag_type->template_origin;
-      if (type_template_args == NULL) {
-        type_template_args = tag_type->template_arguments;
-      }
-    } else if (type_template_origin == NULL && type_template_args != NULL &&
-               type->info.struct_info->is_template &&
-               type->info.struct_info->tag_symbol->flags.is_template) {
-      type_template_origin = type->info.struct_info->tag_symbol;
-    }
-  }
-  /* A reference to another template (e.g. `Wrapper<T>`): substitute its
-   * arguments, then either expand an alias template inline or instantiate the
-   * concrete class template. */
-  if (type_template_origin != NULL && type_template_args != NULL) {
-    Vector* concrete_args =
-        SubstituteTemplateArgumentVectorForTypes(parser,
-                                                type_template_args, args);
-    // If the substituted arguments still mention a template parameter (an outer
-    // parameter has not been supplied yet), instantiating now would wrongly pick
-    // the primary template.  Keep this as a dependent template-id so its member
-    // type or value (`is_integral<It>::value`) is resolved only once every
-    // referenced parameter is concrete.
-    if (TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
-      TypeRecord* deferred = TypeRecordCopy(type);
-      if (deferred->template_arguments != NULL) {
-        VectorDeleteWithContents(
-            deferred->template_arguments,
-            (VectorElementDestructor)TemplateArgumentDelete,
-            /*free_element=*/false);
-      }
-      deferred->template_arguments = concrete_args;
-      deferred->qualifiers |= type->qualifiers;
-      return deferred;
-    }
-    if (CompilerIsCXX() && type_template_origin->flags.is_template &&
-        StorageIs(type_template_origin->storage, STO(typedef)) &&
-        !TypeIsStructOrUnion(type_template_origin->type) &&
-        !CXXAliasTemplatePatternNamesClassTemplate(type_template_origin)) {
-      TypeRecord* subst =
-          SubstituteTemplateParameters(parser, type_template_origin->type,
-                                       concrete_args);
-      subst->qualifiers |= type->qualifiers;
-      VectorDeleteWithContents(concrete_args,
-                               (VectorElementDestructor)TemplateArgumentDelete,
-                               /*free_element=*/false);
-      return TypeRecordCalculateSize(subst);
-    }
-    TypeRecord* subst =
-        InstantiateSimpleClassTemplate(parser, type_template_origin,
-                                       concrete_args);
-    if (subst == NULL) {
-      VectorDeleteWithContents(concrete_args,
-                               (VectorElementDestructor)TemplateArgumentDelete,
-                               /*free_element=*/false);
-      return TypeRecordCopy(type);
-    }
-    subst->qualifiers |= type->qualifiers;
-    VectorDeleteWithContents(concrete_args,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
-    if (type->dependent_member_name != NULL &&
-        TypeIsStructOrUnion(subst) && subst->info.struct_info != NULL) {
-      StructMember* member =
-          FindStructMember(subst->info.struct_info,
-                           type->dependent_member_name);
-      if (member != NULL && member->symbol != NULL &&
-          StorageIs(member->symbol->storage, STO(typedef))) {
-        TypeRecord* member_type = TypeRecordCopy(member->symbol->type);
-        member_type->qualifiers |= type->qualifiers;
-        TypeRecordDelete(subst);
-        return TypeRecordCalculateSize(member_type);
-      }
-      // The dependent member typedef (e.g. `enable_if<false, T>::type`) does not
-      // exist in this concrete instantiation.  That is a substitution failure in
-      // the immediate context; record it so an SFINAE-sensitive caller discards
-      // this candidate rather than proceeding with an ill-formed type.
-      if (parser != NULL &&
-          !StructContainsTemplateParameter(subst->info.struct_info)) {
-        parser->template_substitution_failed = true;
-      }
-    }
-    return TypeRecordCalculateSize(subst);
-  }
-  /* A bare type parameter `T`: replace with the actual type argument, carrying
-   * over any cv-qualifiers from the parameter use. */
-  if (type->declarator == kDeclPrimitive &&
-      type->template_parameter_index >= 0) {
-    int index = type->template_parameter_index;
-    if (index < 0 || (size_t)index >= args->length) {
-      return TypeRecordCopy(type);
-    }
-    TemplateArgument* arg = args->value.p[index];
-    if (arg == NULL || arg->kind != kTemplateParameterType ||
-        arg->type == NULL) {
-      return TypeRecordCopy(type);
-    }
-    TypeRecord* subst = TypeRecordCopy(arg->type);
-    subst->qualifiers |= type->qualifiers;
+
+  TypeRecord* subst = SubstituteDependentMemberType(parser, type, args);
+  if (subst != NULL) {
     return subst;
   }
-  /* A struct that still embeds parameters (e.g. a nested member type): recurse
-   * into its members. */
+
+  TemplateIdSubstitutionInfo template_id =
+      TemplateIdInfoForSubstitution(type);
+  subst = SubstituteTemplateIdType(parser, type, args, template_id);
+  if (subst != NULL) {
+    return subst;
+  }
+
+  subst = SubstituteBareTemplateParameter(type, args);
+  if (subst != NULL) {
+    return subst;
+  }
+
   if (CompilerIsCXX() && TypeIsStructOrUnion(type) &&
       StructContainsTemplateParameter(type->info.struct_info)) {
     if (type->info.struct_info != NULL &&
         type->info.struct_info->is_template &&
-        type_template_origin == NULL && type_template_args == NULL) {
+        template_id.origin == NULL && template_id.args == NULL) {
       return TypeRecordCopy(type);
     }
     return SubstituteNestedStructTemplateParameters(parser, type, args);
   }
 
-  /* Otherwise: copy and substitute compound pieces (array bounds, the
-   * pointed-to/element type, and function prototypes). */
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (copy->declarator == kDeclArray &&
-      type->info.array.template_parameter_index >= 0) {
-    int index = type->info.array.template_parameter_index;
-    if ((size_t)index < args->length) {
-      TemplateArgument* arg = args->value.p[index];
-      if (arg != NULL && arg->kind == kTemplateParameterNonType) {
-        if (arg->template_parameter_index >= 0) {
-          copy->info.array.template_parameter_index =
-              arg->template_parameter_index;
-        } else {
-          copy->info.array.size.fixed = (int)arg->int_value;
-          copy->info.array.template_parameter_index = -1;
-          copy->size = 0;
-        }
-      }
-    }
-  }
-  if (copy->next != NULL) {
-    TypeRecord* original_next = type->next;
-    TypeRecordIncRef(original_next);
-    TypeRecordDelete(copy->next);
-    copy->next = SubstituteTemplateParameters(parser, original_next, args);
-    TypeRecordDelete(original_next);
-    if (copy->next != NULL) {
-      /* Reference collapsing: T& & -> T&, T&& && -> T&&, otherwise -> T&. */
-      bool collapsed_reference = false;
-      if (TypeIsReference(copy) && TypeIsReference(copy->next)) {
-        TypeRecord* nested = copy->next;
-        TypeRecord* collapsed_next = nested->next;
-        bool rvalue = copy->declarator == kDeclRValueReference &&
-                      nested->declarator == kDeclRValueReference;
-        TypeRecordIncRef(collapsed_next);
-        TypeRecordDelete(copy->next);
-        copy->next = collapsed_next;
-        copy->declarator = rvalue ? kDeclRValueReference : kDeclReference;
-        collapsed_reference = true;
-      }
-      /* Pointer-to-reference is not a valid C++ type.  It arises when a
-       * by-reference lambda capture field is `U*` and `U` substitutes to a
-       * reference (e.g. capturing an `auto&&` parameter whose deduced `T` is
-       * `int&`).  Form a pointer to the referent instead. */
-      if (!collapsed_reference && TypeIsPointer(copy) &&
-          TypeIsReference(copy->next)) {
-        TypeRecord* nested = copy->next;
-        TypeRecord* referent = nested->next;
-        TypeRecordIncRef(referent);
-        TypeRecordDelete(copy->next);
-        copy->next = referent;
-        collapsed_reference = true;
-      }
-      if (!collapsed_reference) {
-        TypeRecordIncRef(copy->next);
-      }
-      copy->type = copy->next->type;
-    }
-  }
-  if (TypeIsFunction(copy)) {
-    /* Rebuild the parameter list. With a parameter pack, each pack expands into
-     * zero or more concrete formals; otherwise substitute each formal in place. */
-    if (FunctionTypeHasParameterPack(type)) {
-      VectorDestructWithContents(&copy->info.function.prototype,
-                                 (VectorElementDestructor)SymbolDestruct,
-                                 /*free_element=*/true);
-      VectorInit(&copy->info.function.prototype);
-      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
-        Symbol* original = type->info.function.prototype.value.p[i];
-        if (original == NULL || original->type == NULL) {
-          continue;
-        }
-        AppendSubstitutedFormalParameter(parser, &copy->info.function.prototype,
-                                         original, args, 0);
-      }
-      for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
-        Symbol* formal = copy->info.function.prototype.value.p[i];
-        formal->value.arg_number = (int32_t)i;
-      }
-    } else {
-      for (size_t i = 0; i < copy->info.function.prototype.length; i++) {
-        Symbol* formal = copy->info.function.prototype.value.p[i];
-        Symbol* original = type->info.function.prototype.value.p[i];
-        if (formal == NULL || original == NULL || original->type == NULL) {
-          continue;
-        }
-        TypeRecord* formal_type =
-            SubstituteTemplateParameters(parser, original->type, args);
-        SymbolSetType(formal, formal_type);
-        TypeRecordDelete(formal_type);
-      }
-    }
-  }
-  return TypeRecordCalculateSize(copy);
+  return SubstituteCopiedTypeRecord(parser, type, args);
 }
 
 /* Append a clone of formal parameter `formal` with the already-substituted
