@@ -1120,6 +1120,11 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     return;
   }
   return_value = AnalyzeExpression(return_value);
+  if (return_value != node->cond) {
+    ASTNodeReplaceChild((ASTNode*)node, 0, return_value, false);
+  } else {
+    node->cond = return_value;
+  }
 
   if (TypeFunctionReturnContainsAuto(compiler->current_function)) {
     if (!DeduceCurrentFunctionAutoReturn(return_value, (ASTNode*)node)) {
@@ -1488,6 +1493,10 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   if (node->initializer != NULL && !constructor_call &&
       !side_effect_initializer && !cxx_return_elision_initializer) {
     NormalConversion(node->initializer, node->symbol->type);
+  }
+  if (!TypeIsReference(node->symbol->type)) {
+    node->initializer =
+        AppendCXXFullExpressionTemporaryDestructors(node->initializer);
   }
 }
 

@@ -75,6 +75,8 @@ typedef struct CXXConstructorInitList {
   Vector base_statements;    // ASTNode*; transferred into function body.
   Vector member_specs;       // StructMember*; not owned.
   Vector member_statements;  // ASTNode*; transferred into function body.
+  Vector raw_initializers;  // CXXDeferredConstructorInitializer*; owned.
+  Vector deferred_initializers;  // CXXDeferredConstructorInitializer*; owned.
   int last_initializer_order;
 } CXXConstructorInitList;
 
@@ -191,11 +193,20 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs);
 void SyntaxApplyDeclarationAttributes(Symbol* sym);
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list);
 void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list);
+CXXConstructorInitList* SyntaxCXXConstructorInitListCloneRaw(
+    CXXConstructorInitList* init_list);
+CXXConstructorInitList* SyntaxCXXConstructorInitListCloneDeferred(
+    CXXConstructorInitList* init_list);
 void SyntaxParseCXXConstructorInitializerList(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list);
+void SyntaxResolveCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list);
 void SyntaxInsertCXXConstructorPreamble(
     Syntax* syntax, TypeRecord* func, Vector* body,
     CXXConstructorInitList* init_list, SourceLocation location);
+ASTNode* SyntaxNewCXXMemberInitializerStatement(
+    Syntax* syntax, TypeRecord* func, StructMember* member, Vector* actuals,
+    SourceLocation location);
 // Appends the base-class subobject destructor calls that must run at the end of
 // a destructor body (after the class's own members are destroyed).  Shared with
 // the inline / implicitly-defined destructor paths in type.c so those bodies

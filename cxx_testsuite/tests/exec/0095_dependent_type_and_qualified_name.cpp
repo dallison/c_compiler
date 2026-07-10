@@ -33,6 +33,37 @@ int make_of() {
   return R::make();
 }
 
+template <class T>
+struct WithNestedClass {
+  class iterator {
+   public:
+    using value_type = T;
+    value_type* p;
+  };
+};
+
+template <class T>
+struct WithDependentAlias {
+  using mapped_type = T;
+
+  int make(int key, const mapped_type& mapped) {
+    return key + mapped.value;
+  }
+
+  int make(const mapped_type& mapped) {
+    return mapped.value;
+  }
+
+  int call(int key) {
+    return make(key, mapped_type());
+  }
+};
+
+struct AliasValue {
+  int value;
+  AliasValue() : value(5) {}
+};
+
 int main() {
   if (size_of<Big>() != 7) {  // explicit type argument, used only in the body
     return 1;
@@ -52,6 +83,16 @@ int main() {
   }
   if (scale_of<ConfigA>() * 2 != 6) {  // dependent value in a larger expression
     return 6;
+  }
+  WithNestedClass<int>::iterator it;
+  int value = 11;
+  it.p = &value;
+  if (*it.p != 11) {
+    return 7;
+  }
+  WithDependentAlias<AliasValue> alias;
+  if (alias.call(4) != 9) {
+    return 8;
   }
   return 0;
 }

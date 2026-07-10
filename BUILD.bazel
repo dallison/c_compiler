@@ -18,6 +18,7 @@ filegroup(
         "libc/include/functional",
         "libc/include/initializer_list",
         "libc/include/iterator",
+        "libc/include/map",
         "libc/include/memory",
         "libc/include/new",
         "libc/include/optional",

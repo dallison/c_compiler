@@ -264,6 +264,7 @@ typedef struct StructMember {
 // deduction guides carry no wire number (rebuilt or deferred).
 struct Struct {
   int refs;          // @wire - (refcount, recomputed)
+  struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire -
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3
@@ -397,6 +398,8 @@ typedef struct {
   Struct* cxx_member_owner;
   Struct* template_substitution_source;
   Struct* template_substitution_target;
+  Struct* enclosing_template_substitution_source;
+  Struct* enclosing_template_substitution_target;
   StructMember* cxx_member_definition;
   Vector* declarator_template_arguments;
   // Set when substituting template arguments into a type produces a hard

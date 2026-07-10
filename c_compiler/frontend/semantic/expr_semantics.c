@@ -1038,6 +1038,13 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
   return NULL;
 }
 
+static TypeRecord* CXXOperatorOperandClassType(TypeRecord* type) {
+  if (TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsStructOrUnion(type) ? type : NULL;
+}
+
 // Returns true if the left operand's class has at least one member operator
 // `op_name` that is viable for the binary call `left.op(right)`.  A member
 // operator that is a template is treated as viable conservatively (deducing it
@@ -1047,12 +1054,12 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
 // yield to a free operator (e.g. `operator-(reverse_iterator, reverse_iterator)`).
 static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name) {
   ASTNode* left = node->left;
-  if (!TypeIsStructOrUnion(left->type) ||
-      left->type->info.struct_info == NULL) {
+  TypeRecord* class_type = CXXOperatorOperandClassType(left->type);
+  if (class_type == NULL || class_type->info.struct_info == NULL) {
     return false;
   }
   StructMember* first =
-      FindStructMemberByName(left->type->info.struct_info, op_name);
+      FindStructMemberByName(class_type->info.struct_info, op_name);
   if (first == NULL || !first->is_member_function) {
     return false;
   }
@@ -1115,16 +1122,16 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   if (!CompilerIsCXX() || op_name == NULL) {
     return NULL;
   }
-  if (!TypeIsStructOrUnion(node->left->type) &&
-      !TypeIsStructOrUnion(node->right->type)) {
+  TypeRecord* left_class = CXXOperatorOperandClassType(node->left->type);
+  TypeRecord* right_class = CXXOperatorOperandClassType(node->right->type);
+  if (left_class == NULL && right_class == NULL) {
     return NULL;
   }
 
   bool member_present = false;
-  if (TypeIsStructOrUnion(node->left->type) &&
-      node->left->type->info.struct_info != NULL) {
-    StructMember* member =
-        FindStructMemberByName(node->left->type->info.struct_info, op_name);
+  if (left_class != NULL && left_class->info.struct_info != NULL) {
+    StructMember* member = FindStructMemberByName(left_class->info.struct_info,
+                                                  op_name);
     member_present = member != NULL && member->is_member_function;
   }
 
@@ -2218,7 +2225,8 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
       return overloaded;
     }
   }
-  if (!IsAssignable(node->left, false)) {
+  bool is_initializer = ((ASTNode*)node)->flags & kASTCXXMemberInitializer;
+  if (!IsAssignable(node->left, is_initializer)) {
     SemanticError(node->left, "Cannot assign to this expression");
   }
 
@@ -3016,6 +3024,8 @@ static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
   return slot;
 }
 
+static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
+
 static bool LowerMemberFunctionCall(VectorASTNode* node) {
   if (node->left == NULL ||
       (node->left->op != AST_OP(dot) && node->left->op != AST_OP(arrow))) {
@@ -3039,6 +3049,92 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   member = ResolveMemberFunctionOverload(member, node, member_access);
   member_node->member = member;
   if (member != NULL) {
+    if (member->symbol != NULL && member->symbol->type != NULL &&
+        TypeIsFunction(member->symbol->type) &&
+        member->symbol->type->info.function.is_constructor &&
+        member_access->left != NULL) {
+      Struct* concrete_owner = NULL;
+      if (TypeIsStructOrUnion(member_access->left->type)) {
+        concrete_owner = member_access->left->type->info.struct_info;
+      } else if (TypeIsStructOrUnionPointer(member_access->left->type)) {
+        concrete_owner = member_access->left->type->next->info.struct_info;
+      }
+      Struct* selected_owner =
+          member->symbol->type->info.function.cxx_member_owner;
+      bool same_constructor_owner =
+          concrete_owner != NULL && concrete_owner->tag_name != NULL &&
+          selected_owner != NULL && selected_owner->tag_name != NULL &&
+          StringEqualString(concrete_owner->tag_name, selected_owner->tag_name);
+      if (same_constructor_owner &&
+          (compiler->current_class_access_context != NULL ||
+           (compiler->current_function != NULL &&
+            TypeIsFunction(compiler->current_function) &&
+            compiler->current_function->info.function.cxx_member_owner != NULL))) {
+        Struct* current_owner = compiler->current_class_access_context != NULL
+                                    ? compiler->current_class_access_context
+                                    : compiler->current_function->info.function
+                                          .cxx_member_owner;
+        StructMember* canonical =
+            FindStructMember(current_owner, concrete_owner->tag_name);
+        if (canonical != NULL && canonical->symbol != NULL &&
+            StorageIs(canonical->symbol->storage, STO(typedef)) &&
+            TypeIsStructOrUnion(canonical->symbol->type)) {
+          concrete_owner = canonical->symbol->type->info.struct_info;
+        }
+      }
+      if (same_constructor_owner && concrete_owner != NULL &&
+          concrete_owner->tag_name != NULL) {
+        StructMember* concrete_head =
+            FindCXXMemberOverloadHead(concrete_owner, concrete_owner->tag_name);
+        size_t selected_arity =
+            member->symbol->type->info.function.prototype.length;
+        StructMember* arity_fallback = NULL;
+        for (StructMember* candidate = concrete_head; candidate != NULL;
+             candidate = candidate->overload_next) {
+          if (candidate->is_member_function && candidate->symbol != NULL &&
+              candidate->symbol->type != NULL &&
+              TypeIsFunction(candidate->symbol->type) &&
+              candidate->symbol->type->info.function.is_constructor &&
+              candidate->symbol->type->info.function.prototype.length ==
+                  selected_arity) {
+            if (arity_fallback == NULL) {
+              arity_fallback = candidate;
+            }
+            bool same_formals = true;
+            for (size_t i = 1; i < selected_arity; i++) {
+              Symbol* selected_formal =
+                  member->symbol->type->info.function.prototype.value.p[i];
+              Symbol* candidate_formal =
+                  candidate->symbol->type->info.function.prototype.value.p[i];
+              if (selected_formal == NULL || candidate_formal == NULL ||
+                  !TypeEqualIgnoringQualifiers(selected_formal->type,
+                                               candidate_formal->type)) {
+                same_formals = false;
+                break;
+              }
+            }
+            if (same_formals) {
+              member = candidate;
+              member_node->member = candidate;
+              break;
+            }
+          }
+        }
+        if (member_node->member != arity_fallback && arity_fallback != NULL &&
+            member->symbol->type->info.function.cxx_member_owner !=
+                concrete_owner &&
+            member->symbol->type->info.function.cxx_special_member_kind ==
+                kCXXSpecialMemberNone) {
+          member = arity_fallback;
+          member_node->member = arity_fallback;
+        }
+      }
+      if (same_constructor_owner && concrete_owner != NULL) {
+        member->symbol->type->info.function.cxx_member_owner = concrete_owner;
+        StringClear(&member->symbol->asm_name);
+        SymbolSetCXXMangledAsmName(member->symbol);
+      }
+    }
     CheckDeletedFunctionUse(member->symbol, (ASTNode*)node);
   }
 
@@ -3179,6 +3275,42 @@ static Struct* CurrentFunctionMemberOwner(void) {
   return this_sym->type->next->info.struct_info;
 }
 
+static Symbol* CXXStructTemplateOrigin(Struct* str) {
+  if (str == NULL || str->tag_symbol == NULL) {
+    return NULL;
+  }
+  if (str->tag_symbol->type != NULL &&
+      str->tag_symbol->type->template_origin != NULL) {
+    return str->tag_symbol->type->template_origin;
+  }
+  if (str->is_template || str->tag_symbol->flags.is_template) {
+    return str->tag_symbol;
+  }
+  return NULL;
+}
+
+static bool CXXSameAccessClass(Struct* a, Struct* b) {
+  if (a == b) {
+    return true;
+  }
+  Symbol* a_origin = CXXStructTemplateOrigin(a);
+  Symbol* b_origin = CXXStructTemplateOrigin(b);
+  if (a_origin != NULL && b_origin != NULL) {
+    if (a_origin == b_origin ||
+        StringEqualString(&a_origin->name, &b_origin->name)) {
+      return true;
+    }
+  }
+  if (a == NULL || b == NULL || a->tag_name == NULL || b->tag_name == NULL) {
+    return false;
+  }
+  const char* a_name = a->tag_name->value;
+  const char* b_name = b->tag_name->value;
+  size_t a_len = strcspn(a_name, "<");
+  size_t b_len = strcspn(b_name, "<");
+  return a_len == b_len && strncmp(a_name, b_name, a_len) == 0;
+}
+
 // Returns true when the function currently being analyzed has been granted
 // friendship by class `owner` (via a 'friend class' or 'friend function'
 // declaration), and may therefore access its private and protected members.
@@ -3235,17 +3367,15 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     return true;
   }
   Struct* current_owner = NULL;
-  if (compiler->current_function != NULL &&
-      TypeIsFunction(compiler->current_function)) {
-    current_owner = CurrentFunctionMemberOwner();
-  }
-  if (current_owner == NULL &&
-      compiler->current_class_access_context != NULL) {
+  if (compiler->current_class_access_context != NULL) {
     // A static data member initializer is in the scope of its class and may
     // name the class's private and protected members. Template body cloning also
     // re-analyzes member expressions before current_function has a recoverable
     // owner, but still within the instantiated class context.
     current_owner = compiler->current_class_access_context;
+  } else if (compiler->current_function != NULL &&
+             TypeIsFunction(compiler->current_function)) {
+    current_owner = CurrentFunctionMemberOwner();
   }
   if (CurrentFunctionIsFriendOf(owner) ||
       (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context))) {
@@ -3254,7 +3384,7 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (current_owner == NULL) {
     return false;
   }
-  if (current_owner == owner) {
+  if (CXXSameAccessClass(current_owner, owner)) {
     return true;
   }
   // Nested lambda closures: while instantiating an outer generic lambda, an
@@ -3486,6 +3616,15 @@ static bool ClassTypesLayoutEquivalent(TypeRecord* a, TypeRecord* b) {
   return matched_any;
 }
 
+static bool PointerPointeesLayoutEquivalent(TypeRecord* actual,
+                                            TypeRecord* target) {
+  return TypeIsPointer(actual) && TypeIsPointer(target) &&
+         actual->next != NULL && target->next != NULL &&
+         TypeIsStructOrUnion(actual->next) &&
+         TypeIsStructOrUnion(target->next) &&
+         ClassTypesLayoutEquivalent(actual->next, target->next);
+}
+
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   if (TypeEqual(actual, target) || TypeEqualIgnoringQualifiers(actual, target)) {
     return 0;
@@ -3526,6 +3665,12 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
         TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
       return -1;
     }
+    if (PointerPointeesLayoutEquivalent(actual, target)) {
+      if (TypeIsConst(actual->next) && !TypeIsConst(target->next)) {
+        return -1;
+      }
+      return 0;
+    }
     if (TypeAssignmentCompatible(actual, target)) {
       return 1;
     }
@@ -3565,13 +3710,13 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     // `get_if<0>(variant<...>*)` between the `variant<Types...>*` and
     // `const variant<Types...>*` overloads).  The penalty is a sub-tier +1 so it
     // never outweighs a genuine conversion in another argument.
-    int qualification_penalty =
-        (TypeIsPointer(actual->type) || TypeIsArray(actual->type)) &&
-                (TypeIsPointer(target) || TypeIsArray(target)) &&
-                !TypeEqual(actual->type, target) &&
-                TypeEqualIgnoringQualifiers(actual->type, target)
-            ? 1
-            : 0;
+    bool pointer_qualification_conversion =
+        TypeIsPointer(actual->type) && TypeIsPointer(target) &&
+        actual->type->next != NULL && target->next != NULL &&
+        !TypeIsConst(actual->type->next) && TypeIsConst(target->next) &&
+        (TypeEqualIgnoringQualifiers(actual->type, target) ||
+         PointerPointeesLayoutEquivalent(actual->type, target));
+    int qualification_penalty = pointer_qualification_conversion ? 1 : 0;
     return base_rank * 10 + 5 + qualification_penalty;
   }
   if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
@@ -4843,6 +4988,12 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   if (id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.template_origin != NULL) {
+    Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
+    if (instantiated != NULL) {
+      id->symbol = instantiated;
+      ASTNodeSetType(node->left, instantiated->type);
+      CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
+    }
     return;
   }
   if (!CompilerIsCXX() && !id->symbol->flags.is_overloaded) {
@@ -4907,7 +5058,47 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   CheckDeletedFunctionUse(best, (ASTNode*)node);
 }
 
+static void InstantiateResolvedFunctionTemplateCall(VectorASTNode* node) {
+  if (node == NULL || node->left == NULL || node->left->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+  if (id->symbol == NULL || id->symbol->type == NULL ||
+      !TypeIsFunction(id->symbol->type) ||
+      id->symbol->type->info.function.template_origin == NULL ||
+      id->symbol->type->template_arguments == NULL) {
+    return;
+  }
+  Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
+  if (instantiated != NULL) {
+    id->symbol = instantiated;
+    ASTNodeSetType(node->left, instantiated->type);
+    CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
+  }
+}
+
 static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+
+static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name) {
+  StructMember* fallback = FindStructMember(owner, name);
+  if (owner == NULL || name == NULL) {
+    return fallback;
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        !StringEqualString(&member->symbol->name, name)) {
+      continue;
+    }
+    if (member->overload_next != NULL) {
+      return member;
+    }
+    if (fallback == NULL) {
+      fallback = member;
+    }
+  }
+  return fallback;
+}
 
 static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL ||
@@ -5001,6 +5192,20 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   TypeRecordCalculateSize(type);
   SourceLocation location = node->base.location;
   String* constructor_name = type->info.struct_info->tag_name;
+  if (type->info.struct_info->lexical_parent == NULL &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      compiler->current_function->info.function.cxx_member_owner != NULL &&
+      constructor_name != NULL) {
+    Struct* current_owner =
+        compiler->current_function->info.function.cxx_member_owner;
+    StructMember* nested = FindStructMember(current_owner, constructor_name);
+    if (nested != NULL && nested->symbol != NULL &&
+        StorageIs(nested->symbol->storage, STO(typedef)) &&
+        TypeIsStructOrUnion(nested->symbol->type)) {
+      type->info.struct_info->lexical_parent = current_owner;
+    }
+  }
   // For a single-argument functional cast `T(arg)` (equivalent to the explicit
   // conversion `(T)arg`), if `arg` is a class object that supplies a
   // user-defined conversion operator yielding T, perform that conversion via
@@ -5020,7 +5225,7 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     return AnalyzeExpression(cast);
   }
   StructMember* constructor =
-      FindStructMember(type->info.struct_info, constructor_name);
+      FindCXXMemberOverloadHead(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||
       !constructor->symbol->type->info.function.is_constructor) {
     // The target class has no constructor (e.g. it is an aggregate).  Per
@@ -5063,6 +5268,14 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   bool has_non_invented_constructor = false;
   for (StructMember* candidate = constructor; candidate != NULL;
        candidate = candidate->overload_next) {
+    if (candidate->is_member_function && candidate->symbol != NULL &&
+        candidate->symbol->type != NULL &&
+        TypeIsFunction(candidate->symbol->type)) {
+      candidate->symbol->type->info.function.cxx_member_owner =
+          type->info.struct_info;
+      StringClear(&candidate->symbol->asm_name);
+      SymbolSetCXXMangledAsmName(candidate->symbol);
+    }
     if (candidate->is_member_function && candidate->symbol != NULL &&
         !candidate->symbol->flags.invented) {
       has_non_invented_constructor = true;
@@ -5577,6 +5790,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   LowerMemberFunctionCall(node);
   ResolveOverloadedFunctionCall(node);
+  InstantiateResolvedFunctionTemplateCall(node);
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);

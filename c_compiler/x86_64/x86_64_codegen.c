@@ -4247,11 +4247,12 @@ static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
 // Returns the argument location in an ArgLocation struct.  Type type field
 // says where it is (in reg or stack) and the location.offset field is either
 // the register number or stack offset (from s0 - the frame pointer).
-static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
+static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args,
+                                    TypeRecord* func) {
   IRVariable* var = (IRVariable*)arg->pooled;
   size_t arg_num = var->symbol->value.arg_number;
-  bool is_struct_return = TypeIsStructOrUnion(
-      compiler->current_function->info.function.symbol->type->next);
+  bool is_struct_return =
+      func != NULL && TypeIsStructOrUnion(func->next);
   int int_reg = X86_64_INT_ARG_START;
   if (is_struct_return) {
     int_reg +=
@@ -4398,7 +4399,8 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(X86_64Generator* r
 // Assign a register to a variable or argument if possible.  The
 // var_offset is below the stack frame.
 static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
-                                   Vector* args, int* var_offset) {
+                                   Vector* args, TypeRecord* func,
+                                   int* var_offset) {
   // Variable length arrays are not given offsets until their block
   // is entered.
   if (TypeIsVLA(entry->pooled->type)) {
@@ -4433,7 +4435,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
       entry->pooled->data.ivalue = X86_64_REG_VAR | reg;
       SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
-        ArgLocation location = ArgumentLocation(entry, args);
+        ArgLocation location = ArgumentLocation(entry, args, func);
         if (location.type == kArgLocationRegister) {
           rv->num_fp_arg_regs++;
         }
@@ -4441,7 +4443,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
       }
     } else {
       if (is_arg) {
-        ArgLocation location = ArgumentLocation(entry, args);
+        ArgLocation location = ArgumentLocation(entry, args, func);
         if (location.type == kArgLocationRegister) {
           // Address-taken FP parameters need a stack home just like integer
           // parameters.  Defer the xmmN -> stack store to the prologue so rbp is
@@ -4483,7 +4485,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
           int reg = rv->num_int_reg_vars++;
           entry->pooled->data.ivalue = X86_64_REG_VAR | reg;
           SetDebugRegisterLocation(entry, reg);
-          ArgLocation location = ArgumentLocation(entry, args);
+          ArgLocation location = ArgumentLocation(entry, args, func);
           if (location.type == kArgLocationRegister) {
             // Named small-struct argument that consumed an integer argument
             // register; count it for va_start's gp_offset.
@@ -4491,7 +4493,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
           }
           LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
         } else {
-          ArgLocation location = ArgumentLocation(entry, args);
+          ArgLocation location = ArgumentLocation(entry, args, func);
           if (location.type == kArgLocationRegister) {
             int offset = -16 - rv->saved_arg_area_size - 8;
             rv->saved_arg_area_size += 8;
@@ -4523,7 +4525,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
         entry->pooled->data.ivalue = offset;
         SetDebugStackLocation(entry, offset);
 
-        ArgLocation location = ArgumentLocation(entry, args);
+        ArgLocation location = ArgumentLocation(entry, args, func);
         if (location.type == kArgLocationRegister) {
           // The pointer to the caller's copy arrived in an argument register.
           // Defer the copy to the prologue (after the frame pointer is set up)
@@ -4587,7 +4589,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
       SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
-        ArgLocation location = ArgumentLocation(entry, args);
+        ArgLocation location = ArgumentLocation(entry, args, func);
         if (location.type == kArgLocationRegister) {
           // This named argument consumed an integer argument register; count it
           // so va_start's gp_offset skips past all named register arguments.
@@ -4602,7 +4604,7 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
         // to make sure it's on the stack.  It is already on the stack
         // if it is not passed in a0..a7.  But if is in an arg reg
         // we need to save it to the stack frame.
-        ArgLocation location = ArgumentLocation(entry, args);
+        ArgLocation location = ArgumentLocation(entry, args, func);
         if (location.type == kArgLocationRegister) {
           // Argument is in a register so we need to save it to the stack. These
           // are stored immediately below the saved frame pointer (24 bytes
@@ -4640,7 +4642,8 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
   }
 }
 
-static void AssignRegisterVars(X86_64Generator* rv, Vector* vars, Vector* args) {
+static void AssignRegisterVars(X86_64Generator* rv, Vector* vars, Vector* args,
+                               TypeRecord* func) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -4655,7 +4658,7 @@ static void AssignRegisterVars(X86_64Generator* rv, Vector* vars, Vector* args) 
 
   for (size_t i = 0; i < vars->length; i++) {
     PoolEntry* entry = vars->value.p[i];
-    AssignRegisterOrOffset(rv, entry, args, &var_offset);
+    AssignRegisterOrOffset(rv, entry, args, func, &var_offset);
   }
   
   // We now know the stack frame size.  This includes the length of the saved
@@ -4691,8 +4694,8 @@ static void LowerVariables(X86_64Generator* rv, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(rv, &local_vars,
-                     &compiler->current_function->info.function.prototype);
+  AssignRegisterVars(rv, &local_vars, &gen->func->info.function.prototype,
+                     gen->func);
   VectorDestruct(&local_vars);
 }
 

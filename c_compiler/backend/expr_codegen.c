@@ -596,8 +596,15 @@ static IROpcode IncDecOp(ASTNode* node, bool is_inc) {
 }
 
 static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
+  if (node == NULL || node->right == NULL ||
+      node->right->op != AST_OP(structmember)) {
+    return load;
+  }
   StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
   StructMember* bitfield = member_node->member;
+  if (bitfield == NULL || bitfield->symbol == NULL) {
+    return load;
+  }
   
   if (bitfield->bit_size == bitfield->symbol->type->size * 8) {
     // Bitfield that is the whole word, just use the load.
@@ -657,9 +664,16 @@ static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
 static IRNode* CalculateNewBitfieldValue(Generator* gen, IRNode* load,
                                          IRNode* value,
                                          BinaryASTNode* member_ref_node) {
+  if (member_ref_node == NULL || member_ref_node->right == NULL ||
+      member_ref_node->right->op != AST_OP(structmember)) {
+    return value;
+  }
   StructMemberASTNode* member_node =
       (StructMemberASTNode*)member_ref_node->right;
   StructMember* member = member_node->member;
+  if (member == NULL || member->symbol == NULL) {
+    return value;
+  }
 
   if (member->bit_size == member->symbol->type->size * 8) {
     // Bitfield that is the whole word, just use the new value.
@@ -1500,8 +1514,12 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     bool stashable_reference_actual =
         reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
         !TypeIsArray(arg_value->type);
-    if (stash_call_results && ContainsCall(arg) &&
-        (!aggregate_actual || stashable_reference_actual)) {
+    bool call_result_reference_actual =
+        reference_formal && arg_value->opcode == IR_OP(calla);
+    if (((stash_call_results && ContainsCall(arg)) ||
+         call_result_reference_actual) &&
+        (!aggregate_actual || stashable_reference_actual ||
+         call_result_reference_actual)) {
       arg_value = StashCallResult(gen, arg_value,
                                   /*route_conversion_to_dest=*/true);
     }
@@ -1804,12 +1822,26 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   // The sub node has the kASTNeedAddress flag set so generating code for
   // it will calculate its address.
   IRNode* expr = GenerateExpression(gen, node->sub);
+  bool sub_returns_reference = false;
+  if (node->sub->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)node->sub;
+    TypeRecord* callee_type = call->left != NULL ? call->left->type : NULL;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      callee_type = ((IdentifierASTNode*)call->left)->symbol->type;
+    }
+    if (TypeIsPointer(callee_type)) {
+      callee_type = callee_type->next;
+    }
+    sub_returns_reference =
+        TypeIsFunction(callee_type) && TypeIsReference(callee_type->next);
+  }
   if (node->sub->op == AST_OP(compound_literal)) {
     IRSetType(expr, node->base.type);
     return expr;
   }
-  if (node->sub->op == AST_OP(identifier) &&
-      TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type)) {
+  if (sub_returns_reference || TypeIsReference(node->sub->type) ||
+      (node->sub->op == AST_OP(identifier) &&
+       TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type))) {
     IRSetType(expr, node->base.type);
     return expr;
   }

@@ -331,6 +331,84 @@ static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
   }
 }
 
+static void AppendCXXTypeEncoding(String* out, TypeRecord* type);
+
+static void AppendCXXTemplateArgumentVector(String* out, Vector* args) {
+  if (args == NULL) {
+    return;
+  }
+  StringAppendChar(out, 'I');
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (arg->pack_arguments != NULL) {
+      for (size_t j = 0; j < arg->pack_arguments->length; j++) {
+        TemplateArgument* element = arg->pack_arguments->value.p[j];
+        if (element == NULL) {
+          continue;
+        }
+        if (element->kind == kTemplateParameterType) {
+          AppendCXXTypeEncoding(out, element->type);
+        } else {
+          char value[64];
+          long long int_value = element->int_value;
+          if (int_value < 0) {
+            snprintf(value, sizeof(value), "Lin%lldE", -int_value);
+          } else {
+            snprintf(value, sizeof(value), "Li%lldE", int_value);
+          }
+          StringAppend(out, value);
+        }
+      }
+      continue;
+    }
+    if (arg->kind == kTemplateParameterType) {
+      AppendCXXTypeEncoding(out, arg->type);
+    } else {
+      char value[64];
+      long long int_value = arg->int_value;
+      if (int_value < 0) {
+        snprintf(value, sizeof(value), "Lin%lldE", -int_value);
+      } else {
+        snprintf(value, sizeof(value), "Li%lldE", int_value);
+      }
+      StringAppend(out, value);
+    }
+  }
+  StringAppendChar(out, 'E');
+}
+
+static Namespace* CXXStructNamespace(Struct* str) {
+  if (str == NULL) {
+    return NULL;
+  }
+  if (str->lexical_parent != NULL) {
+    return CXXStructNamespace(str->lexical_parent);
+  }
+  return str->tag_symbol != NULL ? str->tag_symbol->namespace_ : NULL;
+}
+
+static void AppendCXXStructNameComponents(String* out, Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  if (str->lexical_parent != NULL) {
+    AppendCXXStructNameComponents(out, str->lexical_parent);
+  }
+  if (str->tag_name != NULL) {
+    TypeRecord* tag_type =
+        str->tag_symbol != NULL ? str->tag_symbol->type : NULL;
+    if (tag_type != NULL && tag_type->template_origin != NULL) {
+      AppendCXXNameComponent(out, tag_type->template_origin->name.value);
+      AppendCXXTemplateArgumentVector(out, tag_type->template_arguments);
+    } else {
+      AppendCXXNameComponent(out, str->tag_name->value);
+    }
+  }
+}
+
 static void AppendCXXUnqualifiedName(String* out, Symbol* symbol) {
   TypeRecord* func = symbol->type;
   Struct* owner = func->info.function.cxx_member_owner;
@@ -369,8 +447,8 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   // owning class, so fall back to the class tag symbol's namespace (as
   // SymbolSetCXXDataAsmName does for static data members).
   Namespace* ns = symbol->namespace_;
-  if (ns == NULL && owner != NULL && owner->tag_symbol != NULL) {
-    ns = owner->tag_symbol->namespace_;
+  if (ns == NULL && owner != NULL) {
+    ns = CXXStructNamespace(owner);
   }
 
   StringAppendChar(out, 'N');
@@ -384,8 +462,8 @@ static void AppendCXXName(String* out, Symbol* symbol) {
     StringAppendChar(out, 'O');
   }
   AppendCXXNestedNamespaceComponents(out, ns);
-  if (owner != NULL && owner->tag_name != NULL) {
-    AppendCXXNameComponent(out, owner->tag_name->value);
+  if (owner != NULL) {
+    AppendCXXStructNameComponents(out, owner);
   }
   AppendCXXUnqualifiedName(out, symbol);
   StringAppendChar(out, 'E');
@@ -398,11 +476,24 @@ static void AppendCXXName(String* out, Symbol* symbol) {
 // bare `<length><name>` component.
 static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
                                     String* tag_name) {
-  Namespace* ns = tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
+  Struct* str = tag_symbol != NULL && tag_symbol->type != NULL &&
+                        TypeIsStructOrUnion(tag_symbol->type)
+                    ? tag_symbol->type->info.struct_info
+                    : NULL;
+  Namespace* ns = str != NULL ? CXXStructNamespace(str)
+                              : tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
   if (ns != NULL) {
     StringAppendChar(out, 'N');
     AppendCXXNestedNamespaceComponents(out, ns);
-    AppendCXXNameComponent(out, tag_name->value);
+    if (str != NULL) {
+      AppendCXXStructNameComponents(out, str);
+    } else {
+      AppendCXXNameComponent(out, tag_name->value);
+    }
+    StringAppendChar(out, 'E');
+  } else if (str != NULL && str->lexical_parent != NULL) {
+    StringAppendChar(out, 'N');
+    AppendCXXStructNameComponents(out, str);
     StringAppendChar(out, 'E');
   } else {
     AppendCXXNameComponent(out, tag_name->value);

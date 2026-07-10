@@ -16,6 +16,13 @@ namespace std {
 template <class T>
 struct hash;
 
+template <class T>
+struct less {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return left < right;
+  }
+};
+
 namespace __functional_detail {
 
 static inline size_t __hash_integral(unsigned long long value) {

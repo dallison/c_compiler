@@ -2500,6 +2500,56 @@ static void AppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* func,
   }
 }
 
+typedef struct {
+  String name;
+  Vector* actuals;
+  SourceLocation location;
+} CXXDeferredConstructorInitializer;
+
+static CXXDeferredConstructorInitializer* NewCXXDeferredConstructorInitializer(
+    const char* name, Vector* actuals, SourceLocation location) {
+  CXXDeferredConstructorInitializer* init =
+      malloc(sizeof(CXXDeferredConstructorInitializer));
+  StringInit(&init->name, name);
+  init->actuals = actuals;
+  init->location = location;
+  return init;
+}
+
+static Vector* CloneCXXConstructorInitializerActuals(Vector* actuals) {
+  Vector* clone = NewVector();
+  if (actuals == NULL) {
+    return clone;
+  }
+  for (size_t i = 0; i < actuals->length; i++) {
+    ASTNode* actual = actuals->value.p[i];
+    VectorAppend(clone, ASTNodeClone(actual, IdentityCloneNode, NULL, NULL));
+  }
+  return clone;
+}
+
+static CXXDeferredConstructorInitializer* CloneCXXDeferredConstructorInitializer(
+    CXXDeferredConstructorInitializer* init) {
+  if (init == NULL) {
+    return NULL;
+  }
+  return NewCXXDeferredConstructorInitializer(
+      init->name.value, CloneCXXConstructorInitializerActuals(init->actuals),
+      init->location);
+}
+
+static void CXXDeferredConstructorInitializerDelete(
+    CXXDeferredConstructorInitializer* init) {
+  if (init == NULL) {
+    return;
+  }
+  StringDestruct(&init->name);
+  if (init->actuals != NULL) {
+    VectorDelete(init->actuals);
+  }
+  free(init);
+}
+
 void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
   VectorInit(&init_list->virtual_base_specs);
   VectorInit(&init_list->virtual_base_statements);
@@ -2507,6 +2557,8 @@ void SyntaxCXXConstructorInitListInit(CXXConstructorInitList* init_list) {
   VectorInit(&init_list->base_statements);
   VectorInit(&init_list->member_specs);
   VectorInit(&init_list->member_statements);
+  VectorInit(&init_list->raw_initializers);
+  VectorInit(&init_list->deferred_initializers);
   init_list->last_initializer_order = -1;
 }
 
@@ -2517,6 +2569,49 @@ void SyntaxCXXConstructorInitListDestruct(CXXConstructorInitList* init_list) {
   VectorDestruct(&init_list->base_statements);
   VectorDestruct(&init_list->member_specs);
   VectorDestruct(&init_list->member_statements);
+  VectorDestructWithContents(
+      &init_list->raw_initializers,
+      (VectorElementDestructor)CXXDeferredConstructorInitializerDelete,
+      /*free_element=*/false);
+  VectorDestructWithContents(
+      &init_list->deferred_initializers,
+      (VectorElementDestructor)CXXDeferredConstructorInitializerDelete,
+      /*free_element=*/false);
+}
+
+static CXXConstructorInitList* SyntaxCXXConstructorInitListCloneVector(
+    Vector* initializers) {
+  CXXConstructorInitList* clone = malloc(sizeof(CXXConstructorInitList));
+  SyntaxCXXConstructorInitListInit(clone);
+  if (initializers == NULL) {
+    return clone;
+  }
+  for (size_t i = 0; i < initializers->length; i++) {
+    CXXDeferredConstructorInitializer* init = initializers->value.p[i];
+    CXXDeferredConstructorInitializer* cloned =
+        CloneCXXDeferredConstructorInitializer(init);
+    if (cloned != NULL) {
+      VectorAppend(&clone->deferred_initializers, cloned);
+    }
+  }
+  return clone;
+}
+
+CXXConstructorInitList* SyntaxCXXConstructorInitListCloneRaw(
+    CXXConstructorInitList* init_list) {
+  if (init_list == NULL) {
+    return NULL;
+  }
+  return SyntaxCXXConstructorInitListCloneVector(&init_list->raw_initializers);
+}
+
+CXXConstructorInitList* SyntaxCXXConstructorInitListCloneDeferred(
+    CXXConstructorInitList* init_list) {
+  if (init_list == NULL) {
+    return NULL;
+  }
+  return SyntaxCXXConstructorInitListCloneVector(
+      &init_list->deferred_initializers);
 }
 
 static void VectorInsertOrAppend(Vector* vec, size_t index, void* value) {
@@ -2697,11 +2792,17 @@ static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
   if (source == NULL) {
     return;
   }
+  bool is_constructor_initializer =
+      func->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberCopyConstructor ||
+      func->info.function.cxx_special_member_kind ==
+          kCXXSpecialMemberMoveConstructor;
   Struct* owner = func->info.function.cxx_member_owner;
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function) {
+        member->is_member_function || member->is_using_declaration ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
       continue;
     }
     TypeRecord* member_type = member->symbol->type;
@@ -2723,11 +2824,12 @@ static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
             NewIntConstantASTNode((int64_t)index,
                                   NewTypeRecordWithSize(kTypeInt, kQualPlain),
                                   location));
-        VectorAppend(body, NewExpressionStatementASTNode(
-                               NewBinaryASTNode(AST_OP(assign),
-                                                member_type->next, location,
-                                                target, value),
-                               location));
+        ASTNode* assign = NewBinaryASTNode(AST_OP(assign), member_type->next,
+                                           location, target, value);
+        if (is_constructor_initializer) {
+          assign->flags |= kASTCXXMemberInitializer;
+        }
+        VectorAppend(body, NewExpressionStatementASTNode(assign, location));
       }
     } else {
       ASTNode* target =
@@ -2735,10 +2837,22 @@ static void AppendCXXDefaultedMemberwiseAssignments(TypeRecord* func,
       ASTNode* value =
           NewCXXSourceMemberAccess(source, member->symbol->name.value,
                                    location);
-      VectorAppend(body, NewExpressionStatementASTNode(
-                             NewBinaryASTNode(AST_OP(assign), member_type,
-                                              location, target, value),
-                             location));
+      if (is_constructor_initializer && TypeIsStructOrUnion(member_type)) {
+        Vector* actuals = NewVector();
+        VectorAppend(actuals, value);
+        ASTNode* init = SyntaxNewCXXMemberInitializerStatement(
+            &compiler->syntax, func, member, actuals, location);
+        if (init != NULL) {
+          VectorAppend(body, init);
+        }
+        continue;
+      }
+      ASTNode* assign =
+          NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
+      if (is_constructor_initializer) {
+        assign->flags |= kASTCXXMemberInitializer;
+      }
+      VectorAppend(body, NewExpressionStatementASTNode(assign, location));
     }
   }
 }
@@ -2995,6 +3109,24 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
         location);
   }
 
+  if (actuals->length == 0) {
+    VectorDelete(actuals);
+    if (TypeIsStructOrUnion(member_type)) {
+      return NULL;
+    }
+    ASTNode* target =
+        NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+    if (target == NULL) {
+      return NULL;
+    }
+    ASTNode* value = NewIntConstantASTNode(
+        0, TypeRecordCopy(member_type), location);
+    ASTNode* assign =
+        NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
+    assign->flags |= kASTCXXMemberInitializer;
+    return NewExpressionStatementASTNode(assign, location);
+  }
+
   if (actuals->length != 1) {
     SyntaxError(syntax,
                 "member initializer for %s requires one expression",
@@ -3009,9 +3141,17 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
   if (target == NULL) {
     return NULL;
   }
-  return NewExpressionStatementASTNode(
-      NewBinaryASTNode(AST_OP(assign), member_type, location, target, value),
-      location);
+  ASTNode* assign =
+      NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
+  assign->flags |= kASTCXXMemberInitializer;
+  return NewExpressionStatementASTNode(assign, location);
+}
+
+ASTNode* SyntaxNewCXXMemberInitializerStatement(
+    Syntax* syntax, TypeRecord* func, StructMember* member, Vector* actuals,
+    SourceLocation location) {
+  return NewCXXMemberInitializerStatement(syntax, func, member, actuals,
+                                          location);
 }
 
 static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
@@ -3108,6 +3248,10 @@ void SyntaxParseCXXConstructorInitializerList(
     }
 
     const char* init_name = FullyQualifiedIdentifierLast(&name);
+    VectorAppend(&init_list->raw_initializers,
+                 NewCXXDeferredConstructorInitializer(
+                     init_name, CloneCXXConstructorInitializerActuals(actuals),
+                     location));
     CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
     CXXVirtualBaseInfo* virtual_base = NULL;
     if (base != NULL && base->is_virtual) {
@@ -3159,11 +3303,9 @@ void SyntaxParseCXXConstructorInitializerList(
     } else {
       StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
       if (member == NULL) {
-        SyntaxError(syntax, "%s is not a direct base or member of %s",
-                    init_name,
-                    owner->tag_name != NULL ? owner->tag_name->value
-                                            : "<anonymous>");
-        VectorDelete(actuals);
+        VectorAppend(&init_list->deferred_initializers,
+                     NewCXXDeferredConstructorInitializer(init_name, actuals,
+                                                          location));
       } else if (VectorContainsPointer(&init_list->member_specs, member)) {
         SyntaxError(syntax, "Duplicate initializer for member %s", init_name);
         VectorDelete(actuals);
@@ -3187,6 +3329,92 @@ void SyntaxParseCXXConstructorInitializerList(
   }
 }
 
+void SyntaxResolveCXXConstructorInitializerList(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
+  if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
+      func->info.function.cxx_member_owner == NULL || init_list == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  for (size_t i = 0; i < init_list->deferred_initializers.length; i++) {
+    CXXDeferredConstructorInitializer* deferred =
+        init_list->deferred_initializers.value.p[i];
+    if (deferred == NULL || deferred->actuals == NULL) {
+      continue;
+    }
+    const char* init_name = deferred->name.value;
+    Vector* actuals = deferred->actuals;
+    deferred->actuals = NULL;
+    SourceLocation location = deferred->location;
+    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
+    CXXVirtualBaseInfo* virtual_base = NULL;
+    if (base != NULL && base->is_virtual) {
+      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
+      base = NULL;
+    }
+    if (base != NULL) {
+      if (VectorContainsPointer(&init_list->base_specs, base)) {
+        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
+        VectorDelete(actuals);
+        continue;
+      }
+      CheckCXXConstructorInitializerOrder(
+          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
+      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                                  /*complete_object=*/false,
+                                                  actuals, location);
+      if (call != NULL) {
+        VectorAppend(&init_list->base_specs, base);
+        VectorAppend(&init_list->base_statements, call);
+      }
+      continue;
+    }
+    virtual_base = virtual_base != NULL
+                       ? virtual_base
+                       : FindCXXVirtualBaseByName(owner, init_name);
+    if (virtual_base != NULL) {
+      if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
+        SyntaxError(syntax, "Duplicate initializer for virtual base %s",
+                    init_name);
+        VectorDelete(actuals);
+        continue;
+      }
+      CheckCXXConstructorInitializerOrder(
+          syntax, init_list, init_name,
+          CXXVirtualBaseOrder(owner, virtual_base));
+      ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(
+          syntax, func, virtual_base, false, actuals, location);
+      if (call != NULL) {
+        VectorAppend(&init_list->virtual_base_specs, virtual_base);
+        VectorAppend(&init_list->virtual_base_statements, call);
+      }
+      continue;
+    }
+    StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
+    if (member == NULL) {
+      SyntaxError(syntax, "%s is not a direct base or member of %s",
+                  init_name,
+                  owner->tag_name != NULL ? owner->tag_name->value
+                                          : "<anonymous>");
+      VectorDelete(actuals);
+      continue;
+    }
+    if (VectorContainsPointer(&init_list->member_specs, member)) {
+      SyntaxError(syntax, "Duplicate initializer for member %s", init_name);
+      VectorDelete(actuals);
+      continue;
+    }
+    CheckCXXConstructorInitializerOrder(
+        syntax, init_list, init_name, CXXDirectMemberOrder(owner, member));
+    ASTNode* stmt = NewCXXMemberInitializerStatement(
+        syntax, func, member, actuals, location);
+    if (stmt != NULL) {
+      VectorAppend(&init_list->member_specs, member);
+      VectorAppend(&init_list->member_statements, stmt);
+    }
+  }
+}
+
 void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
                                         Vector* body,
                                         CXXConstructorInitList* init_list,
@@ -3196,6 +3424,7 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     return;
   }
   Struct* owner = func->info.function.cxx_member_owner;
+  SyntaxResolveCXXConstructorInitializerList(syntax, func, init_list);
   size_t insert_at = 0;
   Vector* complete_initializers = NewVector();
   AppendCXXVBPtrInitializers(func, complete_initializers, location);

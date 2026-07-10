@@ -349,6 +349,7 @@ struct ConstraintExpr;
 #define kASTDependentNewValueInit (1 << 23)  // new T() value-init parsed before T substitution.
 #define kASTReversedComparison (1 << 24)  // C++20 reversed comparison candidate; do not reverse again.
 #define kASTLambdaExpression (1 << 25)  // Compound literal that represents a C++ lambda expression (prvalue).
+#define kASTCXXMemberInitializer (1 << 26)  // Synthetic assignment that lowers a ctor mem-initializer.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

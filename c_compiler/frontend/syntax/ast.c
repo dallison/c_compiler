@@ -3841,8 +3841,13 @@ bool IsBitfieldReference(ASTNode* node) {
     return false;
   }
   BinaryASTNode* dot_or_arrow = (BinaryASTNode*)node;
+  if (dot_or_arrow->right == NULL ||
+      dot_or_arrow->right->op != AST_OP(structmember)) {
+    return false;
+  }
   StructMemberASTNode* member_node = (StructMemberASTNode*)dot_or_arrow->right;
-  return StructMemberIsBitField(member_node->member);
+  return member_node->member != NULL &&
+         StructMemberIsBitField(member_node->member);
 }
 
 
