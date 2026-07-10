@@ -69,6 +69,28 @@ static inline void swap(T& left, T& right) {
   right = std::move(tmp);
 }
 
+template <class T, T... Ints>
+struct integer_sequence {
+  using value_type = T;
+
+  static constexpr size_t size() noexcept {
+    return sizeof...(Ints);
+  }
+};
+
+template <size_t... Ints>
+using index_sequence = integer_sequence<size_t, Ints...>;
+
+template <class T1, class T2>
+struct pair {
+  T1 first;
+  T2 second;
+
+  constexpr pair() {}
+  constexpr pair(const T1& first_value, const T2& second_value)
+      : first(first_value), second(second_value) {}
+};
+
 }  // namespace std
 
 #endif /* utility_h */

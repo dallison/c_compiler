@@ -128,6 +128,7 @@ typedef enum {
   AST_OP(cast),   // Cast AST node token.
   AST_OP(label),  // Label AST node.
   AST_OP(vardecl),  // Variable declaration.
+  AST_OP(structured_binding),  // C++ structured binding declaration.
   AST_OP(decl_list),  // Declaration list
   AST_OP(macro),      // Macro in processor mode expressions.
   AST_OP(expr),       // Expression statement.
@@ -708,6 +709,21 @@ typedef struct {
 
 ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
                                        SourceLocation location);
+
+// C++ structured binding declaration.  This is lowered during semantic analysis
+// into ordinary variable declarations once the initializer type is known.
+typedef struct {
+  ASTNode base;
+  TypeRecord* declared_type;  // Type pattern before the [x, y] binding list.
+  Vector* names;              // String* binding names.
+  Vector* symbols;            // Symbol* binding symbols; owned by symbol table.
+  ASTNode* initializer;
+} StructuredBindingASTNode;
+
+ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
+                                     Vector* symbols,
+                                     ASTNode* initializer,
+                                     SourceLocation location);
 
 // Declaration list, containing a vector of variable declarations.
 typedef struct {

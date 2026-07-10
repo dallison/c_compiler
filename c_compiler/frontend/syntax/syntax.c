@@ -6470,6 +6470,106 @@ static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
   return init;
 }
 
+static Vector* ParseStructuredBindingNames(Syntax* syntax) {
+  if (!LexMatch(syntax->lex, TOK(lsquare))) {
+    return NULL;
+  }
+  Vector* names = NewVector();
+  while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rsquare))) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected structured binding name");
+      break;
+    }
+    VectorAppend(names, NewString(syntax->lex->spelling.value));
+    LexNextToken(syntax->lex);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra));
+  return names;
+}
+
+static TypeRecord* ParseStructuredBindingDeclaredType(Syntax* syntax,
+                                                      TypeRecord* base_type) {
+  TypeRecord* declared = TypeRecordCopy(base_type);
+  if (CompilerIsCXX() &&
+      (LexLookingAt(syntax->lex, TOK(amp)) ||
+       LexLookingAt(syntax->lex, TOK(ampamp)))) {
+    bool rvalue = LexMatch(syntax->lex, TOK(ampamp));
+    if (!rvalue) {
+      LexMatch(syntax->lex, TOK(amp));
+    }
+    TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecordChain(ref, declared);
+    TypeRecordCalculateSize(ref);
+    declared = ref;
+  }
+  return declared;
+}
+
+static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
+                                                 TypeRecord* base_type,
+                                                 Storage storage,
+                                                 Vector* declarations) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  TypeRecord* declared_type =
+      ParseStructuredBindingDeclaredType(syntax, base_type);
+  if (!LexLookingAt(syntax->lex, TOK(lsquare))) {
+    TypeRecordDelete(declared_type);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return false;
+  }
+  Vector* names = ParseStructuredBindingNames(syntax);
+  LexCheckpointDestruct(&checkpoint);
+  if (names == NULL || names->length == 0) {
+    SyntaxError(syntax, "Structured binding declaration requires at least one name");
+  }
+  if (StorageIs(storage, STO(extern))) {
+    SyntaxError(syntax, "Structured binding declaration cannot be extern");
+  }
+  ASTNode* initializer = NULL;
+  if (LexMatch(syntax->lex, TOK(equal))) {
+    if (LexMatch(syntax->lex, TOK(lbrace))) {
+      initializer = ParseBracedInitializer(syntax);
+    } else {
+      initializer = NewExpressionInitializerASTNode(
+          SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(stmt)),
+          syntax->lex->current_token_location);
+    }
+  } else if (LexMatch(syntax->lex, TOK(lbrace))) {
+    initializer = ParseBracedInitializer(syntax);
+  } else {
+    SyntaxError(syntax, "Structured binding declaration requires an initializer");
+  }
+  Vector* symbols = NewVector();
+  for (size_t i = 0; names != NULL && i < names->length; i++) {
+    String* name = names->value.p[i];
+    Symbol* sym = NewSymbol(name->value, NewTypeRecord(kTypeAuto, kQualPlain),
+                            STO(implicit));
+    sym->flags.is_local = true;
+    sym->flags.is_defined = true;
+    sym->location = syntax->lex->current_token_location;
+    if (!SyntaxAddSymbol(syntax, sym)) {
+      SyntaxError(syntax, "Duplicate structured binding name: %s",
+                  name->value);
+      SymbolDelete(sym);
+    } else {
+      VectorAppend(symbols, sym);
+    }
+  }
+  VectorAppend(declarations,
+               NewStructuredBindingASTNode(declared_type, names, symbols,
+                                           initializer,
+                                           syntax->lex->current_token_location));
+  return true;
+}
+
 // True if `type` is a class with a user-declared copy or move constructor.  Such
 // a class manages its own copy semantics (e.g. owns a resource), so a member-wise
 // byte copy of one of its objects is wrong; copy-initialization must run the
@@ -6822,7 +6922,11 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   TypeRecordIncRef(type);
 
   // Now we get a sequence of declarations, separated by commas.
-  ParseLocalDeclarationList(&parser, type, storage, &attributes, declarations);
+  if (!TryParseStructuredBindingDeclaration(syntax, type, storage,
+                                            declarations)) {
+    ParseLocalDeclarationList(&parser, type, storage, &attributes,
+                              declarations);
+  }
   TypeParserDestruct(&parser);
   TypeRecordDelete(type);
 

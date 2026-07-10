@@ -1,0 +1,178 @@
+//
+//  tuple
+//  c_compiler
+//
+//  Minimal C++20 tuple support for DaveCC.
+//
+
+#ifndef tuple_h
+#define tuple_h
+
+#include <stddef.h>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+struct __tuple_empty {
+};
+
+template <class T0 = __tuple_empty, class T1 = __tuple_empty,
+          class T2 = __tuple_empty>
+struct tuple;
+
+template <>
+struct tuple<__tuple_empty, __tuple_empty, __tuple_empty> {
+};
+
+template <class T0>
+struct tuple<T0, __tuple_empty, __tuple_empty> {
+  T0 __0;
+
+  constexpr tuple() {}
+  constexpr explicit tuple(const T0& v0) : __0(v0) {}
+};
+
+template <class T0, class T1>
+struct tuple<T0, T1, __tuple_empty> {
+  T0 __0;
+  T1 __1;
+
+  constexpr tuple() {}
+  constexpr tuple(const T0& v0, const T1& v1) : __0(v0), __1(v1) {}
+};
+
+template <class T0, class T1, class T2>
+struct tuple {
+  T0 __0;
+  T1 __1;
+  T2 __2;
+
+  constexpr tuple() {}
+  constexpr tuple(const T0& v0, const T1& v1, const T2& v2)
+      : __0(v0), __1(v1), __2(v2) {}
+};
+
+template <class T>
+struct tuple_size;
+
+template <class T1, class T2>
+struct tuple_size<pair<T1, T2> > : integral_constant<size_t, 2> {
+};
+
+template <class T>
+struct tuple_size<const T> : tuple_size<T> {
+};
+
+template <class T>
+struct tuple_size<volatile T> : tuple_size<T> {
+};
+
+template <class T>
+struct tuple_size<const volatile T> : tuple_size<T> {
+};
+
+template <class T>
+constexpr size_t tuple_size_v = tuple_size<T>::value;
+
+template <size_t I, class T>
+struct tuple_element;
+
+template <class T1, class T2>
+struct tuple_element<0, pair<T1, T2> > {
+  using type = T1;
+};
+
+template <class T1, class T2>
+struct tuple_element<1, pair<T1, T2> > {
+  using type = T2;
+};
+
+template <size_t I, class T>
+struct tuple_element<I, const T> {
+  using type = const typename tuple_element<I, T>::type;
+};
+
+template <size_t I, class T>
+using tuple_element_t = typename tuple_element<I, T>::type;
+
+template <size_t I, class T0>
+constexpr auto& get(tuple<T0>& value) {
+  static_assert(I == 0, "tuple index out of range");
+  return value.__0;
+}
+
+template <size_t I, class T0>
+constexpr const auto& get(const tuple<T0>& value) {
+  static_assert(I == 0, "tuple index out of range");
+  return value.__0;
+}
+
+template <size_t I, class T0, class T1>
+constexpr auto& get(tuple<T0, T1>& value) {
+  if constexpr (I == 0) {
+    return value.__0;
+  } else {
+    static_assert(I == 1, "tuple index out of range");
+    return value.__1;
+  }
+}
+
+template <size_t I, class T0, class T1>
+constexpr const auto& get(const tuple<T0, T1>& value) {
+  if constexpr (I == 0) {
+    return value.__0;
+  } else {
+    static_assert(I == 1, "tuple index out of range");
+    return value.__1;
+  }
+}
+
+template <size_t I, class T0, class T1, class T2>
+constexpr auto& get(tuple<T0, T1, T2>& value) {
+  if constexpr (I == 0) {
+    return value.__0;
+  } else if constexpr (I == 1) {
+    return value.__1;
+  } else {
+    static_assert(I == 2, "tuple index out of range");
+    return value.__2;
+  }
+}
+
+template <size_t I, class T0, class T1, class T2>
+constexpr const auto& get(const tuple<T0, T1, T2>& value) {
+  if constexpr (I == 0) {
+    return value.__0;
+  } else if constexpr (I == 1) {
+    return value.__1;
+  } else {
+    static_assert(I == 2, "tuple index out of range");
+    return value.__2;
+  }
+}
+
+template <size_t I, class T1, class T2>
+constexpr tuple_element_t<I, pair<T1, T2> >& get(pair<T1, T2>& value) {
+  if constexpr (I == 0) {
+    return value.first;
+  } else {
+    static_assert(I == 1, "pair index out of range");
+    return value.second;
+  }
+}
+
+template <size_t I, class T1, class T2>
+constexpr const tuple_element_t<I, pair<T1, T2> >& get(
+    const pair<T1, T2>& value) {
+  if constexpr (I == 0) {
+    return value.first;
+  } else {
+    static_assert(I == 1, "pair index out of range");
+    return value.second;
+  }
+}
+
+}  // namespace std
+
+#endif /* tuple_h */

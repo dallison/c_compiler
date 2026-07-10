@@ -4404,7 +4404,24 @@ static void AssignRegisterOrOffset(X86_64Generator* rv, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  switch (entry->pooled->opcode) {
+    case IR_OP(argument):
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+    case IR_OP(staticvar):
+    case IR_OP(externvar): {
+      IRVariable* variable = (IRVariable*)entry->pooled;
+      if (variable->symbol != NULL && variable->symbol->type != NULL) {
+        TypeRecordCalculateSize(variable->symbol->type);
+        IRSetType(entry->pooled, variable->symbol->type);
+      }
+      break;
+    }
+    default:
+      break;
+  }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
+  TypeRecordCalculateSize(entry->pooled->type);
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);

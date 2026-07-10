@@ -342,6 +342,10 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
     return NULL;
   }
   TypeRecordCalculateSize(record->next);
+  if (record->declarator == kDeclArray && !record->info.array.is_vla) {
+    record->size = record->info.array.size.fixed * record->next->size;
+    return record;
+  }
   if (record->size == 0) {
     switch (record->declarator) {
       case kDeclArray:
@@ -5897,8 +5901,8 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         if ((pack_index < 0) && id->symbol != NULL) {
           TypeIsTemplateParameterPlaceholder(id->symbol->type, &pack_index);
         }
-        if (id->symbol != NULL && id->symbol->flags.is_parameter_pack &&
-            pack_index >= 0 && (size_t)pack_index < clone->args->length) {
+        if (id->symbol != NULL && pack_index >= 0 &&
+            (size_t)pack_index < clone->args->length) {
           TemplateArgument* arg = clone->args->value.p[pack_index];
           if (arg != NULL && arg->pack_arguments != NULL) {
             return NewIntConstantASTNode(
@@ -6105,7 +6109,7 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       TemplateArgument* arg =
           clone->args->value.p[id->symbol->template_parameter_index];
       if (arg != NULL && arg->kind == kTemplateParameterNonType &&
-          arg->template_parameter_index < 0) {
+          arg->pack_arguments == NULL && arg->template_parameter_index < 0) {
         return NewIntConstantASTNode(
             arg->int_value, NewTypeRecordWithSize(kTypeInt, kQualPlain),
             node->location);
@@ -7897,11 +7901,30 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   }
   Vector* formal_args = formal->template_arguments;
   Vector* actual_args = actual->template_arguments;
+  Vector flat_actual_args;
+  bool flattened_actual_args = false;
+  VectorInit(&flat_actual_args);
+  for (size_t i = 0; i < actual_args->length; i++) {
+    TemplateArgument* actual_arg = actual_args->value.p[i];
+    if (actual_arg != NULL && actual_arg->pack_arguments != NULL) {
+      flattened_actual_args = true;
+      for (size_t j = 0; j < actual_arg->pack_arguments->length; j++) {
+        VectorAppend(&flat_actual_args, actual_arg->pack_arguments->value.p[j]);
+      }
+    } else {
+      VectorAppend(&flat_actual_args, actual_arg);
+    }
+  }
+  if (flattened_actual_args) {
+    actual_args = &flat_actual_args;
+  }
   size_t actual_index = 0;
+  bool ok = true;
   for (size_t i = 0; i < formal_args->length; i++) {
     TemplateArgument* formal_arg = formal_args->value.p[i];
     if (formal_arg == NULL) {
-      return false;
+      ok = false;
+      break;
     }
     // A formal parameter-pack argument (e.g. `Wrapper<Types...>` matched against
     // `Wrapper<int, char>`): absorb the actual arguments that line up with it,
@@ -7916,7 +7939,8 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
         pack_index >= 0) {
       size_t trailing_formals = formal_args->length - i - 1;
       if (actual_args->length < actual_index + trailing_formals) {
-        return false;
+        ok = false;
+        break;
       }
       size_t pack_end = actual_args->length - trailing_formals;
       // [temp.deduct]: the same template parameter pack may be named in more
@@ -7936,7 +7960,8 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
       for (; actual_index < pack_end; actual_index++) {
         TemplateArgument* actual_arg = actual_args->value.p[actual_index];
         if (actual_arg == NULL) {
-          return false;
+          ok = false;
+          break;
         }
         // The actual may be a still-dependent pack expansion (e.g. matching
         // visit's `variant<VisitTypes...>` parameter against a dependent
@@ -7948,7 +7973,8 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
           if (existing == NULL) {
             args->value.p[pack_index] = TemplateArgumentCopy(actual_arg);
           } else if (!TemplateArgumentEqual(existing, actual_arg)) {
-            return false;
+            ok = false;
+            break;
           }
           continue;
         }
@@ -7961,8 +7987,12 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
                 !AppendDeducedFunctionTemplatePackElement(
                     args, explicit_arg_count, pack_index, formal_arg->type,
                     element->type)) {
-              return false;
+              ok = false;
+              break;
             }
+          }
+          if (!ok) {
+            break;
           }
           continue;
         }
@@ -7971,25 +8001,35 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
             !AppendDeducedFunctionTemplatePackElement(
                 args, explicit_arg_count, pack_index, formal_arg->type,
                 actual_arg->type)) {
-          return false;
+          ok = false;
+          break;
         }
+      }
+      if (!ok) {
+        break;
       }
       if (pack_prefix > 0) {
         TemplateArgument* pack_now = args->value.p[pack_index];
         if (pack_now == NULL || pack_now->pack_arguments == NULL) {
-          return false;
+          ok = false;
+          break;
         }
         size_t total = pack_now->pack_arguments->length;
         size_t appended = total - pack_prefix;
         if (appended != pack_prefix) {
-          return false;
+          ok = false;
+          break;
         }
         for (size_t k = 0; k < appended; k++) {
           if (!TemplateArgumentEqual(
                   pack_now->pack_arguments->value.p[k],
                   pack_now->pack_arguments->value.p[pack_prefix + k])) {
-            return false;
+            ok = false;
+            break;
           }
+        }
+        if (!ok) {
+          break;
         }
         for (size_t k = total; k > pack_prefix; k--) {
           TemplateArgumentDelete(pack_now->pack_arguments->value.p[k - 1]);
@@ -8002,11 +8042,14 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
         !DeduceFunctionTemplateOneTemplateArgument(
             args, explicit_arg_count, formal_arg,
             actual_args->value.p[actual_index])) {
-      return false;
+      ok = false;
+      break;
     }
     actual_index++;
   }
-  return actual_index == actual_args->length;
+  ok = ok && actual_index == actual_args->length;
+  VectorDestruct(&flat_actual_args);
+  return ok;
 }
 
 /* True if any non-static data member of `str` still has a template-dependent

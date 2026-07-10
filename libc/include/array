@@ -1,0 +1,406 @@
+//
+//  array
+//  c_compiler
+//
+//  C++20 array support for DaveCC.
+//
+
+#ifndef array_h
+#define array_h
+
+#include <stddef.h>
+#include <iterator>
+#include <stdexcept>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class T, size_t N>
+struct array {
+  using value_type = T;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using iterator = T*;
+  using const_iterator = const T*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+  T __elems[N];
+
+  constexpr iterator begin() noexcept {
+    return __elems;
+  }
+
+  constexpr const_iterator begin() const noexcept {
+    return __elems;
+  }
+
+  constexpr const_iterator cbegin() const noexcept {
+    return __elems;
+  }
+
+  constexpr iterator end() noexcept {
+    return __elems + N;
+  }
+
+  constexpr const_iterator end() const noexcept {
+    return __elems + N;
+  }
+
+  constexpr const_iterator cend() const noexcept {
+    return __elems + N;
+  }
+
+  constexpr reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+
+  constexpr reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+
+  constexpr reference at(size_type index) {
+    if (index >= N) {
+      throw out_of_range("array::at");
+    }
+    return __elems[index];
+  }
+
+  constexpr const_reference at(size_type index) const {
+    if (index >= N) {
+      throw out_of_range("array::at");
+    }
+    return __elems[index];
+  }
+
+  constexpr reference operator[](size_type index) {
+    return __elems[index];
+  }
+
+  constexpr const_reference operator[](size_type index) const {
+    return __elems[index];
+  }
+
+  constexpr reference front() {
+    return __elems[0];
+  }
+
+  constexpr const_reference front() const {
+    return __elems[0];
+  }
+
+  constexpr reference back() {
+    return __elems[N - 1];
+  }
+
+  constexpr const_reference back() const {
+    return __elems[N - 1];
+  }
+
+  constexpr pointer data() noexcept {
+    return __elems;
+  }
+
+  constexpr const_pointer data() const noexcept {
+    return __elems;
+  }
+
+  constexpr bool empty() const noexcept {
+    return N == 0;
+  }
+
+  constexpr size_type size() const noexcept {
+    return N;
+  }
+
+  constexpr size_type max_size() const noexcept {
+    return N;
+  }
+
+  constexpr void fill(const T& value) {
+    for (size_type i = 0; i < N; i++) {
+      __elems[i] = value;
+    }
+  }
+
+  constexpr void swap(array& other) noexcept {
+    for (size_type i = 0; i < N; i++) {
+      std::swap(__elems[i], other.__elems[i]);
+    }
+  }
+};
+
+template <class T>
+struct array<T, 0> {
+  using value_type = T;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = T&;
+  using const_reference = const T&;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using iterator = T*;
+  using const_iterator = const T*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+  constexpr iterator begin() noexcept {
+    return nullptr;
+  }
+
+  constexpr const_iterator begin() const noexcept {
+    return nullptr;
+  }
+
+  constexpr const_iterator cbegin() const noexcept {
+    return nullptr;
+  }
+
+  constexpr iterator end() noexcept {
+    return nullptr;
+  }
+
+  constexpr const_iterator end() const noexcept {
+    return nullptr;
+  }
+
+  constexpr const_iterator cend() const noexcept {
+    return nullptr;
+  }
+
+  constexpr reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+
+  constexpr const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+
+  constexpr const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(cend());
+  }
+
+  constexpr reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+
+  constexpr const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  constexpr const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(cbegin());
+  }
+
+  constexpr reference at(size_type) {
+    throw out_of_range("array::at");
+  }
+
+  constexpr const_reference at(size_type) const {
+    throw out_of_range("array::at");
+  }
+
+  constexpr reference operator[](size_type) {
+    return *static_cast<pointer>(nullptr);
+  }
+
+  constexpr const_reference operator[](size_type) const {
+    return *static_cast<const_pointer>(nullptr);
+  }
+
+  constexpr reference front() {
+    return (*this)[0];
+  }
+
+  constexpr const_reference front() const {
+    return (*this)[0];
+  }
+
+  constexpr reference back() {
+    return (*this)[0];
+  }
+
+  constexpr const_reference back() const {
+    return (*this)[0];
+  }
+
+  constexpr pointer data() noexcept {
+    return nullptr;
+  }
+
+  constexpr const_pointer data() const noexcept {
+    return nullptr;
+  }
+
+  constexpr bool empty() const noexcept {
+    return true;
+  }
+
+  constexpr size_type size() const noexcept {
+    return 0;
+  }
+
+  constexpr size_type max_size() const noexcept {
+    return 0;
+  }
+
+  constexpr void fill(const T&) {
+  }
+
+  constexpr void swap(array&) noexcept {
+  }
+};
+
+template <class T, size_t N>
+struct tuple_size<array<T, N> > : integral_constant<size_t, N> {
+};
+
+template <size_t I, class T, size_t N>
+struct tuple_element<I, array<T, N> > {
+  static_assert(I < N, "array index out of range");
+  using type = T;
+};
+
+template <class T, size_t N>
+constexpr typename array<T, N>::iterator begin(array<T, N>& value) noexcept {
+  return value.begin();
+}
+
+template <class T, size_t N>
+constexpr typename array<T, N>::const_iterator begin(
+    const array<T, N>& value) noexcept {
+  return value.begin();
+}
+
+template <class T, size_t N>
+constexpr typename array<T, N>::iterator end(array<T, N>& value) noexcept {
+  return value.end();
+}
+
+template <class T, size_t N>
+constexpr typename array<T, N>::const_iterator end(
+    const array<T, N>& value) noexcept {
+  return value.end();
+}
+
+template <class T, size_t N>
+constexpr void swap(array<T, N>& left, array<T, N>& right) noexcept {
+  left.swap(right);
+}
+
+template <class T, size_t N>
+constexpr bool operator==(const array<T, N>& left,
+                          const array<T, N>& right) {
+  for (size_t i = 0; i < N; i++) {
+    if (!(left[i] == right[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class T, size_t N>
+constexpr bool operator!=(const array<T, N>& left,
+                          const array<T, N>& right) {
+  return !(left == right);
+}
+
+template <class T, size_t N>
+constexpr bool operator<(const array<T, N>& left,
+                         const array<T, N>& right) {
+  for (size_t i = 0; i < N; i++) {
+    if (left[i] < right[i]) {
+      return true;
+    }
+    if (right[i] < left[i]) {
+      return false;
+    }
+  }
+  return false;
+}
+
+template <class T, size_t N>
+constexpr bool operator>(const array<T, N>& left,
+                         const array<T, N>& right) {
+  return right < left;
+}
+
+template <class T, size_t N>
+constexpr bool operator<=(const array<T, N>& left,
+                          const array<T, N>& right) {
+  return !(right < left);
+}
+
+template <class T, size_t N>
+constexpr bool operator>=(const array<T, N>& left,
+                          const array<T, N>& right) {
+  return !(left < right);
+}
+
+template <size_t I, class T, size_t N>
+constexpr T& get(array<T, N>& value) {
+  static_assert(I < N, "array index out of range");
+  return value.__elems[I];
+}
+
+template <size_t I, class T, size_t N>
+constexpr const T& get(const array<T, N>& value) {
+  static_assert(I < N, "array index out of range");
+  return value.__elems[I];
+}
+
+template <size_t I, class T, size_t N>
+constexpr T&& get(array<T, N>&& value) {
+  static_assert(I < N, "array index out of range");
+  return std::move(value.__elems[I]);
+}
+
+template <size_t I, class T, size_t N>
+constexpr const T&& get(const array<T, N>&& value) {
+  static_assert(I < N, "array index out of range");
+  return std::move(value.__elems[I]);
+}
+
+template <class T, size_t N>
+constexpr array<remove_cv_t<T>, N> to_array(T (&input)[N]) {
+  array<remove_cv_t<T>, N> result;
+  for (size_t i = 0; i < N; i++) {
+    result.__elems[i] = input[i];
+  }
+  return result;
+}
+
+template <class T, size_t N>
+constexpr array<remove_cv_t<T>, N> to_array(T (&&input)[N]) {
+  array<remove_cv_t<T>, N> result;
+  for (size_t i = 0; i < N; i++) {
+    result.__elems[i] = std::move(input[i]);
+  }
+  return result;
+}
+
+}  // namespace std
+
+#endif /* array_h */

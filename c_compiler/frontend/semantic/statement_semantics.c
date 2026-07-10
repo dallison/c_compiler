@@ -1248,6 +1248,223 @@ static ASTNode* InitializerExpression(ASTNode* initializer) {
   return initializer;
 }
 
+static ASTNode* NewSemanticInitExpression(Symbol* sym, ASTNode* initializer,
+                                          SourceLocation location) {
+  ASTNode* id = NewIdentifierASTNode(sym, location);
+  id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  return NewBinaryASTNode(AST_OP(init), TypeRecordCopy(sym->type), location, id,
+                          initializer);
+}
+
+static TypeRecord* NewAutoReferenceType(bool rvalue) {
+  TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
+  TypeRecordChain(ref, NewTypeRecord(kTypeAuto, kQualPlain));
+  TypeRecordCalculateSize(ref);
+  return ref;
+}
+
+static Symbol* FindStdSymbolByName(const char* name) {
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  if (std_ns == NULL) {
+    return NULL;
+  }
+  String symbol_name;
+  StringInit(&symbol_name, name);
+  Symbol* symbol = NamespaceFindSymbol(std_ns, &symbol_name);
+  StringDestruct(&symbol_name);
+  return symbol;
+}
+
+static TemplateArgument* NewNonTypeTemplateArgument(size_t value,
+                                                    SourceLocation location) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
+  arg->kind = kTemplateParameterNonType;
+  arg->is_pack_expansion = false;
+  arg->type = NULL;
+  arg->int_value = (long long)value;
+  arg->template_parameter_index = -1;
+  arg->pack_arguments = NULL;
+  arg->dependent_expr = NULL;
+  arg->location = location;
+  return arg;
+}
+
+static bool StructuredBindingTupleSize(TypeRecord* type, size_t* element_count) {
+  Symbol* tuple_size = FindStdSymbolByName("tuple_size");
+  if (tuple_size == NULL || !tuple_size->flags.is_template ||
+      tuple_size->type == NULL || !TypeIsStructOrUnion(tuple_size->type)) {
+    return false;
+  }
+  TypeRecord* object_type = TypeIsReference(type) ? type->next : type;
+  Vector* args = NewVector();
+  VectorAppend(args, NewTypeTemplateArgument(object_type));
+  TypeRecord* tuple_size_type =
+      TypeInstantiateClassTemplate(&compiler->syntax, tuple_size, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (tuple_size_type == NULL || !TypeIsStructOrUnion(tuple_size_type) ||
+      tuple_size_type->info.struct_info == NULL) {
+    TypeRecordDelete(tuple_size_type);
+    return false;
+  }
+  StructMember* value = FindStructMemberByName(tuple_size_type->info.struct_info,
+                                               "value");
+  bool ok = value != NULL && value->symbol != NULL &&
+            value->symbol->flags.value_set && value->symbol->value.ivalue >= 0;
+  if (ok) {
+    *element_count = (size_t)value->symbol->value.ivalue;
+  }
+  TypeRecordDelete(tuple_size_type);
+  return ok;
+}
+
+static ASTNode* NewStructuredBindingGetCall(Symbol* hidden, size_t index,
+                                            SourceLocation location) {
+  Symbol* get = FindStdSymbolByName("get");
+  if (get == NULL) {
+    return NULL;
+  }
+  ASTNode* callee = NewIdentifierASTNode(get, location);
+  Vector* template_arguments = NewVector();
+  VectorAppend(template_arguments, NewNonTypeTemplateArgument(index, location));
+  ((IdentifierASTNode*)callee)->template_arguments = template_arguments;
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, NewIdentifierASTNode(hidden, location));
+  return NewVectorASTNode(AST_OP(call), NULL, location, callee, actuals);
+}
+
+static bool StructuredBindingDataMembers(TypeRecord* type, Vector* members,
+                                         ASTNode* diagnostic_node) {
+  TypeRecord* object_type = TypeIsReference(type) ? type->next : type;
+  if (!TypeIsStructOrUnion(object_type) || object_type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = object_type->info.struct_info;
+  if (str->is_union) {
+    SemanticError(diagnostic_node,
+                  "Cannot decompose union type in structured binding");
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (member->access != kAccessPublic) {
+      SemanticError(diagnostic_node,
+                    "Cannot decompose non-public member in structured binding");
+      return false;
+    }
+    VectorAppend(members, member);
+  }
+  return true;
+}
+
+static ASTNode* NewStructuredBindingElementAccess(Symbol* hidden,
+                                                  TypeRecord* hidden_type,
+                                                  size_t index,
+                                                  StructMember* member,
+                                                  SourceLocation location) {
+  ASTNode* object = NewIdentifierASTNode(hidden, location);
+  TypeRecord* object_type = TypeIsReference(hidden_type) ? hidden_type->next
+                                                        : hidden_type;
+  if (TypeIsFixedArray(object_type)) {
+    return NewBinaryASTNode(
+        AST_OP(subscript), NULL, location, object,
+        NewIntConstantASTNode((int64_t)index,
+                              NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                              location));
+  }
+  ASTNode* member_access = NewBinaryASTNode(
+      AST_OP(dot), NULL, location, object,
+      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+                               location));
+  return member_access;
+}
+
+static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
+                                              size_t index) {
+  StructuredBindingASTNode* binding =
+      (StructuredBindingASTNode*)list->declarations->value.p[index];
+  SourceLocation location = binding->base.location;
+  Symbol* hidden =
+      SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(binding->declared_type));
+  hidden->flags.is_local = true;
+  hidden->flags.is_defined = true;
+  hidden->location = location;
+
+  ASTNode* initializer = binding->initializer;
+  binding->initializer = NULL;
+  ASTNode* hidden_decl = NewVariableDeclarationASTNode(
+      hidden, NewSemanticInitExpression(hidden, initializer, location),
+      location);
+  list->declarations->value.p[index] = hidden_decl;
+
+  AnalyzeStatement(hidden_decl);
+
+  TypeRecord* object_type = TypeIsReference(hidden->type) ? hidden->type->next
+                                                         : hidden->type;
+  Vector elements;
+  VectorInit(&elements);
+  bool array_binding = TypeIsFixedArray(object_type);
+  bool tuple_like_binding = false;
+  size_t element_count = 0;
+  if (array_binding) {
+    element_count = (size_t)object_type->info.array.size.fixed;
+  } else if (StructuredBindingTupleSize(hidden->type, &element_count)) {
+    tuple_like_binding = true;
+  } else if (StructuredBindingDataMembers(hidden->type, &elements,
+                                          hidden_decl)) {
+    element_count = elements.length;
+  } else {
+    VectorDestruct(&elements);
+    SemanticError(hidden_decl, "Cannot decompose type in structured binding");
+    ASTNodeDelete((ASTNode*)binding);
+    return false;
+  }
+
+  if (element_count != binding->symbols->length) {
+    SemanticError(hidden_decl,
+                  "Structured binding declaration has wrong number of names");
+    VectorDestruct(&elements);
+    ASTNodeDelete((ASTNode*)binding);
+    return false;
+  }
+
+  for (size_t i = 0; i < binding->symbols->length; i++) {
+    Symbol* sym = binding->symbols->value.p[i];
+    SymbolSetType(sym, NewAutoReferenceType(false));
+    ASTNode* access =
+        tuple_like_binding
+            ? NewStructuredBindingGetCall(hidden, i, location)
+            : NewStructuredBindingElementAccess(
+                  hidden, hidden->type, i,
+                  array_binding ? NULL : elements.value.p[i], location);
+    if (access == NULL) {
+      SemanticError(hidden_decl, "Cannot find get for tuple-like structured binding");
+      VectorDestruct(&elements);
+      ASTNodeDelete((ASTNode*)binding);
+      return false;
+    }
+    ASTNode* decl = NewVariableDeclarationASTNode(
+        sym, NewSemanticInitExpression(
+                 sym, NewExpressionInitializerASTNode(access, location),
+                 location),
+        location);
+    AnalyzeStatement(decl);
+    VectorInsertAfter(list->declarations, index + i, decl);
+  }
+  VectorDestruct(&elements);
+  ASTNodeDelete((ASTNode*)binding);
+  return true;
+}
+
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   node->initializer = AnalyzeExpression(node->initializer);
   ASTNode* initializer_expr = InitializerExpression(node->initializer);
@@ -1275,9 +1492,13 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
 }
 
 void AnalyzeDeclarationList(DeclarationListASTNode* node) {
-  size_t num_decls = node->declarations->length;
-  for (size_t i = 0; i < num_decls; i++) {
-    AnalyzeStatement(node->declarations->value.p[i]);
+  for (size_t i = 0; i < node->declarations->length; i++) {
+    ASTNode* decl = node->declarations->value.p[i];
+    if (decl != NULL && decl->op == AST_OP(structured_binding)) {
+      LowerStructuredBindingDeclaration(node, i);
+      continue;
+    }
+    AnalyzeStatement(decl);
   }
 }
 

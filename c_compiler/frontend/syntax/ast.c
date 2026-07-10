@@ -309,6 +309,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "label";
     case AST_OP(vardecl):
       return "variable";
+    case AST_OP(structured_binding):
+      return "structured_binding";
     case AST_OP(decl_list):
       return "decl_list";
     case AST_OP(macro):
@@ -2924,6 +2926,111 @@ ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
     initializer->parent = (ASTNode*)node;
   }
   node->saved_sp = NULL;
+  return (ASTNode*)node;
+}
+
+static void StructuredBindingASTNodeDelete(ASTNode* node) {
+  StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+  TypeRecordDelete(binding->declared_type);
+  VectorDestructWithContents(binding->names,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+  VectorDelete(binding->names);
+  VectorDelete(binding->symbols);
+  if (binding->initializer != NULL) {
+    ASTNodeDelete(binding->initializer);
+  }
+  ASTNodeBaseDelete(node);
+}
+
+static void StructuredBindingASTNodePrint(ASTNode* node, int indents, FILE* fp) {
+  StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+  Indent(indents, fp);
+  fprintf(fp, "structured_binding");
+  for (size_t i = 0; i < binding->names->length; i++) {
+    String* name = binding->names->value.p[i];
+    fprintf(fp, "%s%s", i == 0 ? " [" : ", ",
+            name != NULL ? name->value : "<null>");
+  }
+  fprintf(fp, "]\n");
+  if (binding->initializer != NULL) {
+    ASTNodePrint(binding->initializer, indents + 2, fp);
+  }
+}
+
+static void StructuredBindingASTNodeReplaceChild(ASTNode* parent, int child_id,
+                                                 ASTNode* child,
+                                                 bool delete_old_child) {
+  StructuredBindingASTNode* node = (StructuredBindingASTNode*)parent;
+  ASTNode* old = node->initializer;
+  assert(child_id == 0);
+  node->initializer = child;
+  SetParent(child, parent, child_id);
+  if (delete_old_child) {
+    ASTNodeDelete(old);
+  }
+}
+
+static ASTNode* StructuredBindingASTNodeClone(
+    const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
+  StructuredBindingASTNode* from = (StructuredBindingASTNode*)node;
+  StructuredBindingASTNode* to =
+      ASTArenaAlloc(sizeof(StructuredBindingASTNode));
+  ASTNodeBaseCopy(&to->base, node);
+  to->declared_type = TypeRecordCopy(from->declared_type);
+  to->names = NewVector();
+  to->symbols = NewVector();
+  for (size_t i = 0; i < from->names->length; i++) {
+    String* name = from->names->value.p[i];
+    VectorAppend(to->names, NewString(name != NULL ? name->value : ""));
+  }
+  for (size_t i = 0; i < from->symbols->length; i++) {
+    VectorAppend(to->symbols, from->symbols->value.p[i]);
+  }
+  to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
+  return func(&to->base, data);
+}
+
+static void StructuredBindingASTNodeVisit(ASTNode* node,
+                                          void (*func)(ASTNode* node, void*,
+                                                       int, VisitorMode),
+                                          int child_id,
+                                          void* data) {
+  StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+  func(node, data, child_id, kVisitPreChildren);
+  ASTNodeVisit(binding->initializer, func, 0, data);
+  func(node, data, child_id, kVisitPostChildren);
+}
+
+static void StructuredBindingASTNodeTransform(ASTNode* node,
+                                              ASTNodeTransformer func,
+                                              void* data) {
+  StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+  ASTNodeTransformChild(node, 0, binding->initializer, func, data);
+}
+
+static ASTNodeVirtuals structured_binding_vtbl = {
+    StructuredBindingASTNodeDelete, StructuredBindingASTNodePrint,
+    StructuredBindingASTNodeReplaceChild, StructuredBindingASTNodeClone,
+    StructuredBindingASTNodeVisit, ValueAlwaysUsed,
+    StructuredBindingASTNodeTransform};
+
+ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Vector* names,
+                                     Vector* symbols,
+                                     ASTNode* initializer,
+                                     SourceLocation location) {
+  StructuredBindingASTNode* node =
+      ASTArenaAlloc(sizeof(StructuredBindingASTNode));
+  ASTNodeInit(&node->base, AST_OP(structured_binding), declared_type, location,
+              &structured_binding_vtbl);
+  node->declared_type = declared_type;
+  node->names = names;
+  node->symbols = symbols;
+  node->initializer = initializer;
+  if (initializer != NULL) {
+    initializer->parent = (ASTNode*)node;
+    initializer->child_id = 0;
+  }
   return (ASTNode*)node;
 }
 

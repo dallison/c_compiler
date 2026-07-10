@@ -729,7 +729,8 @@ static IRNode* GenerateVariableReference(Generator* gen,
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), var_ref)),
                   NewPointerTo(kQualPlain, node->base.type));
     if ((node->base.flags & kASTNeedAddress) != 0 ||
-        TypeIsStructOrUnion(node->base.type)) {
+        TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
+        TypeIsFunction(node->base.type)) {
       return ref_addr;
     }
     IROpcode load = GetLoadOpcode(&node->base);
@@ -1203,7 +1204,11 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     Symbol* dest_tmp = NULL;
     IRNode* dest_tmp_var = NULL;
     bool dest_was_spilled = false;
-    if (node->right->op == AST_OP(call) && !IRIsVariable(dest)) {
+    bool dest_needs_spill =
+        compiler->call_return_fixed_reg &&
+        !IRIsVariable(dest) &&
+        (ContainsCall(node->left) || ContainsCall(node->right));
+    if (dest_needs_spill) {
       dest_tmp =
           SyntaxNewTemporary(gen->syntax,
                              NewPointerTo(kQualPlain, node->left->type));
