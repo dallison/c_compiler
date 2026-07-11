@@ -844,22 +844,15 @@ static TargetInstruction* SetDestOrMoveToArgReg(X86_64Generator* rv,
                                                 TargetInstruction* from,
                                                 TargetInstruction* to,
                                                 X86_64Opcode rmov_opcode) {
-  // Look at all uses of from_node and make sure they are all in the
-  // same basic block as from_node itself.
-  bool candidate = true;
-  for (size_t i = 0; i < from_node->outputs.length; i++) {
-    IRNode* user = from_node->outputs.value.p[i];
-    if (user->block != from_node->block) {
-      candidate = false;
-      break;
-    }
+  (void)from_node;
+  if (from == to) {
+    return to;
   }
-  if (TargetIsConst(from) || (X86_64Opcode)from->opcode == X86_64_OP(x0)) {
-    return SetDestOrMove(rv, from, to, rmov_opcode);
-  }
-  if (candidate) {
-    return SetDestOrMove(rv, from, to, rmov_opcode);
-  }
+  // Calls may follow other calls while preparing their arguments.  Do not
+  // assign an argument register directly as an earlier expression's
+  // destination: that value can be produced before an intervening call and
+  // then be clobbered.  Materialize the final ABI-register move at the call
+  // site instead.
   TargetInstruction* move = Emit(rv, NewInstruction1(rmov_opcode, from));
   move->dest = to;
   return to;
@@ -3113,8 +3106,6 @@ static TargetInstruction* LowerMemcpy(X86_64Generator* rv, IRNode* node) {
       src_offset_value = (int)((TargetConstant*)src_offset)->value.ivalue;
     }
   }
-  src_node->data.ptr = src_addr;
-
   // Destination address.
   IRNode* dest_node = node->inputs.value.p[0];
   TargetInstruction* dest_addr;
@@ -3162,7 +3153,6 @@ static TargetInstruction* LowerMemzero(X86_64Generator* rv, IRNode* node) {
       offset_value = (int)((TargetConstant*)dest_offset)->value.ivalue;
     }
   }
-  dest_node->data.ptr = dest_addr;
   // Prefer the backing symbol's size, but fall back to the memzero node's type
   // when the destination is a symbol-less slot (e.g. an sret return location).
   int64_t zero_size = (IRIsVariable(addr_node) && var->symbol != NULL)
@@ -3189,6 +3179,8 @@ typedef struct {
     size_t offset;
   } location;
   size_t reference_offset;
+  size_t staging_offset;
+  bool staged;
 } ArgLocation;
 
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
@@ -3196,6 +3188,8 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   loc->type = kArgLocationRegister;
   loc->location.reg = reg;
   loc->reference_offset = 0;
+  loc->staging_offset = 0;
+  loc->staged = false;
   return loc;
 }
 
@@ -3204,6 +3198,8 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   loc->type = type;
   loc->location.offset = offset;
   loc->reference_offset = 0;
+  loc->staging_offset = 0;
+  loc->staged = false;
   return loc;
 }
 
@@ -3213,6 +3209,8 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   loc->type = kArgLocationPassedByReferenceInRegister;
   loc->location.reg = reg;
   loc->reference_offset = reference_offset;
+  loc->staging_offset = 0;
+  loc->staged = false;
   return loc;
 }
 
@@ -3222,6 +3220,8 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   loc->type = kArgLocationPassedByReferenceOnStack;
   loc->location.offset = offset;
   loc->reference_offset = reference_offset;
+  loc->staging_offset = 0;
+  loc->staged = false;
   return loc;
 }
 
@@ -3362,7 +3362,20 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
 
   // Phase 2:
   // Decrement the stack pointer to make space for the stack args
+  // Stage scalar register arguments in memory before assigning any ABI
+  // argument register. Straight-line moves cannot preserve cycles where
+  // argument values occupy each other's destination registers.
   size_t total_stack_size = struct_area_size + next_pushed_arg_offset;
+  for (size_t i = 1; i < node->inputs.length; i++) {
+    ArgLocation* loc = arg_locations.value.p[i - 1];
+    IRNode* arg_node = node->inputs.value.p[i];
+    if (loc->type == kArgLocationRegister &&
+        !TypeIsStructOrUnion(arg_node->type)) {
+      loc->staged = true;
+      loc->staging_offset = total_stack_size;
+      total_stack_size += 8;
+    }
+  }
   if (total_stack_size > 0) {
     TargetInstruction* newsp =
         AddImmediate(rv, StackPointer(rv), -total_stack_size);
@@ -3396,6 +3409,9 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
           Memcpy(rv, StackPointer(rv), arg, (int)size, 0,
                  (int)(arg_location->reference_offset + next_pushed_arg_offset),
                  false);
+        } else if (arg_location->staged) {
+          PushArg(rv, arg_node, Materialize(rv, arg_node),
+                  arg_location->staging_offset);
         }
         break;
       }
@@ -3453,7 +3469,22 @@ static TargetInstruction* LowerCall(X86_64Generator* rv, Generator* gen,
       }
       case kArgLocationRegister: {
         // Argument is in a register.
-        TargetInstruction* arg = Materialize(rv, arg_node);
+        TargetInstruction* arg;
+        if (arg_location->staged) {
+          X86_64Opcode load_opcode = X86_64_OP(loadq);
+          if (TypeIsFloat(arg_node->type)) {
+            load_opcode = X86_64_OP(loadss);
+          } else if (TypeIsDouble(arg_node->type) ||
+                     TypeIsLongDouble(arg_node->type)) {
+            load_opcode = X86_64_OP(loadsd);
+          }
+          arg = Emit(rv, NewInstruction2(
+                             load_opcode, StackPointer(rv),
+                             GetIntConstant(rv, arg_node, kTargetType64Bit,
+                                            arg_location->staging_offset)));
+        } else {
+          arg = Materialize(rv, arg_node);
+        }
         if (arg_node->opcode == IR_OP(pusharg) && arg_node->inputs.length > 0) {
           IRNode* pushed = arg_node->inputs.value.p[0];
           if (pushed != NULL && pushed->opcode == IR_OP(structreturn)) {

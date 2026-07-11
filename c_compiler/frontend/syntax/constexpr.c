@@ -1689,39 +1689,56 @@ static bool ConstexprParameterTypeSupported(TypeRecord* type) {
 static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
                                  Vector* actuals) {
   TypeRecord* func = function->type;
-  if (actuals->length != func->info.function.prototype.length) {
+  size_t count = actuals->length;
+  if (count != func->info.function.prototype.length) {
     return false;
   }
-  for (size_t i = 0; i < actuals->length; i++) {
+  // Evaluate every actual argument in the *caller's* binding context before
+  // binding any formal parameter.  Pushing a formal's binding eagerly (as the
+  // arguments are evaluated one by one) would let a later actual resolve a
+  // name against the freshly bound, not-yet-complete parameters instead of the
+  // caller's arguments.  For example, the recursive call `gcd(b, a % b)` would
+  // otherwise evaluate `a % b` after `a` had already been rebound to the value
+  // of `b`, yielding `b % b == 0` and a wrong result.
+  Symbol** formals = count > 0 ? malloc(count * sizeof(Symbol*)) : NULL;
+  ConstexprValue* values = count > 0 ? malloc(count * sizeof(ConstexprValue)) : NULL;
+  bool ok = true;
+  for (size_t i = 0; i < count; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     ASTNode* actual = actuals->value.p[i];
+    ConstexprValue value = {0};
     if (formal != NULL && StringEqual(&formal->name, "this")) {
-      ConstexprValue value = {0};
       ConstexprObject* object = NULL;
       if (!EvaluateConstexprObjectAddress(ctx, actual, &object)) {
-        return false;
+        ok = false;
+        break;
       }
-      value = (ConstexprValue){0};
       value.is_object = true;
       value.object = object;
-      PushConstexprBinding(ctx, formal, value);
-      continue;
-    }
-    if (formal == NULL || actual == NULL ||
-        !ConstexprParameterTypeSupported(formal->type)) {
-      return false;
-    }
-    ConstexprValue value;
-    if (TypeIsReference(formal->type)) {
+    } else if (formal == NULL || actual == NULL ||
+               !ConstexprParameterTypeSupported(formal->type)) {
+      ok = false;
+      break;
+    } else if (TypeIsReference(formal->type)) {
       if (!EvaluateConstexprReferenceInitializer(ctx, actual, &value)) {
-        return false;
+        ok = false;
+        break;
       }
     } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
-      return false;
+      ok = false;
+      break;
     }
-    PushConstexprBinding(ctx, formal, value);
+    formals[i] = formal;
+    values[i] = value;
   }
-  return true;
+  if (ok) {
+    for (size_t i = 0; i < count; i++) {
+      PushConstexprBinding(ctx, formals[i], values[i]);
+    }
+  }
+  free(formals);
+  free(values);
+  return ok;
 }
 
 static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,

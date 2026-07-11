@@ -852,6 +852,19 @@ static bool FunctionBodyContainsUnexpandedPack(ASTNode* body) {
   return search.found;
 }
 
+static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
+  if (asm_name == NULL || *asm_name == '\0') {
+    return false;
+  }
+  for (size_t i = 0; i < compiler->emitted_function_asm_names.length; i++) {
+    String* emitted = compiler->emitted_function_asm_names.value.p[i];
+    if (emitted != NULL && strcmp(emitted->value, asm_name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
   if (node != NULL) {
     // Retain the root so the whole AST can be torn down at CompilerDestruct.
@@ -868,6 +881,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           continue;
         }
         if (IsFunctionOrInlineDefinition(decl->symbol)) {
+          if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
+            continue;
+          }
           CheckMainSignature(syntax, decl->symbol);
           InjectCXXGlobalLifetimeCalls(decl->symbol);
           
@@ -902,6 +918,8 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             void* code = GenerateFunction(&codegen);
 
             VectorAppend(&compiler->functions, code);
+            VectorAppend(&compiler->emitted_function_asm_names,
+                         NewString(decl->symbol->asm_name.value));
 
             if (compiler->debug_output) {
                BuildDebugInfoAfterCodegen(&compiler->debug_builder,
@@ -1159,6 +1177,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   StringInit(&compiler->module_name, "");
   compiler->is_module_interface = false;
   VectorInit(&compiler->functions);
+  VectorInit(&compiler->emitted_function_asm_names);
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
@@ -1609,6 +1628,9 @@ void CompilerDestruct(Compiler* compiler) {
     compiler->target->cleanup(compiler->functions.value.p[i]);
   }
   VectorDestruct(&compiler->functions);
+  VectorDestructWithContents(
+      &compiler->emitted_function_asm_names,
+      (VectorElementDestructor)StringDelete, /*free_element=*/false);
 
   if (compiler->target != NULL) {
     DeleteCompilerTarget(compiler->target);

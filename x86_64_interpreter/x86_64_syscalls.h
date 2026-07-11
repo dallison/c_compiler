@@ -20,6 +20,8 @@
 #define X86_64_SYSCALL_REALLOC 10
 #define X86_64_SYSCALL_ABORT 11
 #define X86_64_SYSCALL_EXIT 12
+#define X86_64_SYSCALL_TIME 13
+#define X86_64_SYSCALL_CLOCK 14
 
 struct X86_64Interpreter;
 

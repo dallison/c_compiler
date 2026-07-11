@@ -371,6 +371,10 @@ typedef struct TypeRecord {
   // this vector, when present, has one entry per component.  Each entry is
   // either NULL or a Vector<TemplateArgument*> for that component's template-id.
   Vector* dependent_member_template_arguments;
+  // Unevaluated operand of a type-dependent decltype expression.  The AST is
+  // arena-owned and re-cloned with concrete template arguments during
+  // substitution.
+  struct ASTNode* dependent_decltype_expr;                          // @wire 15
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
     ArrayInfo array;             // @wire 11 (kDeclArray)
@@ -581,6 +585,11 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     Symbol* templ, Vector* explicit_args, Vector* actuals,
     size_t first_formal_arg);
 bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right);
+// Substitute explicit template arguments into a known function template's
+// return type without instantiating its body.  Used to preserve the type of
+// dependent calls in unevaluated contexts such as decltype.
+TypeRecord* TypeSubstituteFunctionTemplateReturnType(
+    struct Syntax* syntax, Symbol* function_template, Vector* explicit_args);
 Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
                                             Symbol* templ,
                                             Vector* explicit_args,

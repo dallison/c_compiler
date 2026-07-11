@@ -11,6 +11,7 @@ filegroup(
     srcs = glob(["libc/include/**/*.h"]) + [
         "libc/include/atomic",
         "libc/include/array",
+        "libc/include/chrono",
         "libc/include/compare",
         "libc/include/cstdint",
         "libc/include/coroutine",
@@ -22,6 +23,7 @@ filegroup(
         "libc/include/memory",
         "libc/include/new",
         "libc/include/optional",
+        "libc/include/ratio",
         "libc/include/source_location",
         "libc/include/stdexcept",
         "libc/include/string",

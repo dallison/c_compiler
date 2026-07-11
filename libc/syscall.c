@@ -9,19 +9,32 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <syscall.h>
+#include <time.h>
+
+time_t time(time_t* result) {
+  time_t value = (time_t)syscall(SYS_TIME);
+  if (result != NULL) {
+    *result = value;
+  }
+  return value;
+}
+
+clock_t clock(void) {
+  return (clock_t)syscall(SYS_CLOCK);
+}
 
 #if defined(__risc_v__)
 // Args are:
 // a0: syscall number
 // a1...: args to syscall
-int syscall(int n, ...) {
+long syscall(int n, ...) {
    return asm(
               "mv t6, a0\n"
               "ecall"
               );
 }
 #elif defined(__p_code__)
-int syscall(int n, ...) {
+long syscall(int n, ...) {
   (void)n;
   return -1;
 }

@@ -38,6 +38,7 @@ enum {
   kType_function = 12,
   kType_struct_info = 13,
   kType_enum_info = 14,
+  kType_dependent_decltype_expr = 15,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -55,6 +56,7 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_function, "function"},
     {kType_struct_info, "struct_info"},
     {kType_enum_info, "enum_info"},
+    {kType_dependent_decltype_expr, "dependent_decltype_expr"},
 };
 
 //
@@ -945,6 +947,8 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     WriteTemplateArgumentVector(ctx, buf, kType_template_arguments,
                                 t->template_arguments);
   }
+  SWriteRef(ctx, buf, kType_dependent_decltype_expr, kSerialKindAST,
+            t->dependent_decltype_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
 
   if (t->declarator == kDeclArray) {
@@ -1020,6 +1024,10 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_template_arguments:
         t->template_arguments = ReadTemplateArgumentVector(ctx, buf);
+        break;
+      case kType_dependent_decltype_expr:
+        t->dependent_decltype_expr =
+            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_next:
         t->next = (TypeRecord*)SReadRef(ctx, buf, kSerialKindType);

@@ -306,6 +306,10 @@ typedef struct {
 
   // Vector containing all the code for all functions.
   Vector functions;
+  // Mangled names whose function bodies have already reached code generation.
+  // Retained across draining template-instantiation queues to prevent emitting
+  // the same specialization more than once.
+  Vector emitted_function_asm_names;
 
   // Vector containing initialized static variables (InitializedStaticVariable*)
   Vector initialized_static_variables;

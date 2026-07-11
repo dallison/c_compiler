@@ -718,9 +718,16 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   String* member = name->components.value.p[1];
   TypeRecord* dependent_type = TypeRecordCopy(scope_symbol->type);
   if (dependent_type->dependent_member_name != NULL) {
-    StringDelete(dependent_type->dependent_member_name);
+    // The scope alias is itself a dependent member access (e.g. `q` was
+    // `typename W::period`).  Extend the existing member path rather than
+    // discarding it, so `q::num` becomes the full `W::period::num` path instead
+    // of collapsing to `W::num` (which would drop the intermediate member and
+    // leave the name unresolvable).
+    StringAppend(dependent_type->dependent_member_name, "::");
+    StringAppendString(dependent_type->dependent_member_name, member);
+  } else {
+    dependent_type->dependent_member_name = NewString(member->value);
   }
-  dependent_type->dependent_member_name = NewString(member->value);
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
   ASTNode* node = NewIdentifierASTNode(placeholder, location);
@@ -893,20 +900,25 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else {
-      ASTNode* member_access =
-          NewMemberAccessFromThis(syntax, &name,
-                                  /*allow_unresolved_member=*/true);
-      if (member_access != NULL) {
-        FullyQualifiedIdentifierDestruct(&name);
-        return member_access;
-      }
-      ASTNode* static_member = NewStaticMemberReference(syntax, &name);
-      if (static_member != NULL) {
-        FullyQualifiedIdentifierDestruct(&name);
-        return static_member;
+      bool builtin_call =
+          LexLookingAt(lex, TOK(lparen)) &&
+          IsBuiltinCallName(FullyQualifiedIdentifierLast(&name));
+      if (!builtin_call) {
+        ASTNode* member_access =
+            NewMemberAccessFromThis(syntax, &name,
+                                    /*allow_unresolved_member=*/true);
+        if (member_access != NULL) {
+          FullyQualifiedIdentifierDestruct(&name);
+          return member_access;
+        }
+        ASTNode* static_member = NewStaticMemberReference(syntax, &name);
+        if (static_member != NULL) {
+          FullyQualifiedIdentifierDestruct(&name);
+          return static_member;
+        }
       }
       if (LexLookingAt(lex, TOK(lparen))) {
-        if (!IsBuiltinCallName(FullyQualifiedIdentifierLast(&name))) {
+        if (!builtin_call) {
           ASTNode* deferred_member_access =
               NewMemberAccessFromThis(syntax, &name,
                                       /*allow_unresolved_member=*/true);
@@ -1091,6 +1103,128 @@ static ASTNode* ParseIntegerConstant(Syntax* syntax,
                                syntax->lex->current_token_location);
 }
 
+static void CXXUserDefinedLiteralOperatorName(String* name, String* suffix) {
+  StringInit(name, "operator\"\"");
+  StringAppendString(name, suffix);
+}
+
+static ASTNode* NewCXXLiteralOperatorIdentifier(Syntax* syntax, String* name,
+                                                SourceLocation location) {
+  Symbol* symbol = SyntaxFindSymbol(syntax, name);
+  if (symbol == NULL) {
+    SyntaxError(syntax, "No literal operator %s", name->value);
+    TypeRecord* result_type =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    TypeRecord* func_type = NewFunctionTypeRecord();
+    func_type->info.function.unknown_args = true;
+    TypeRecordChain(func_type, result_type);
+    symbol = NewSymbol(name->value, func_type, STO(implicit));
+    symbol->flags.invented = true;
+  }
+  return NewIdentifierASTNode(symbol, location);
+}
+
+static ASTNode* NewStringLiteralArgument(String* contents,
+                                         SourceLocation location,
+                                         bool wide) {
+  int terminator_size = wide ? compiler->wchar_size : 1;
+  TypeRecord* array = NewBasicArrayTypeRecord(
+      kQualPlain, (int)contents->length + terminator_size, false);
+  TypeRecord* element = NewTypeRecordWithSize(wide ? kTypeInt : kTypeChar,
+                                              wide ? kQualPlain : kQualConst);
+  TypeRecordChain(array, element);
+  TypeRecordCalculateSize(array);
+  return wide ? NewWideStringConstantASTNode(contents, array, location)
+              : NewStringConstantASTNode(contents, array, location);
+}
+
+static ASTNode* NewCXXUserDefinedLiteralCall(Syntax* syntax, String* suffix,
+                                             Vector* actuals,
+                                             SourceLocation location) {
+  String name;
+  CXXUserDefinedLiteralOperatorName(&name, suffix);
+  ASTNode* callee = NewCXXLiteralOperatorIdentifier(syntax, &name, location);
+  StringDestruct(&name);
+  return NewVectorASTNode(AST_OP(call), NULL, location, callee, actuals);
+}
+
+static TypeRecord* FirstFunctionFormal(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Symbol* formal = symbol->type->info.function.prototype.value.p[0];
+  return formal != NULL ? formal->type : NULL;
+}
+
+static bool LiteralOperatorHasCookedNumericCandidate(Symbol* first,
+                                                     bool floating) {
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    TypeRecord* formal = FirstFunctionFormal(candidate);
+    if (floating ? TypeIsLongDouble(formal)
+                 : TypeIsUnsignedLongLong(formal)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool LiteralOperatorHasRawNumericCandidate(Symbol* first) {
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    TypeRecord* formal = FirstFunctionFormal(candidate);
+    if (TypeIsPointer(formal) && formal->next != NULL &&
+        TypeIsChar(formal->next)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXNumericLiteralShouldUseRawOperator(Syntax* syntax,
+                                                  String* suffix,
+                                                  bool floating) {
+  String name;
+  CXXUserDefinedLiteralOperatorName(&name, suffix);
+  Symbol* symbol = SyntaxFindSymbol(syntax, &name);
+  bool use_raw =
+      !LiteralOperatorHasCookedNumericCandidate(symbol, floating) &&
+      LiteralOperatorHasRawNumericCandidate(symbol);
+  StringDestruct(&name);
+  return use_raw;
+}
+
+static ASTNode* ParseCXXUserDefinedIntegerLiteral(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  int64_t value = lex->number;
+  SourceLocation location = lex->current_token_location;
+  String suffix;
+  StringInit(&suffix, NULL);
+  StringSetString(&suffix, &lex->ud_suffix);
+  String spelling;
+  StringInit(&spelling, NULL);
+  StringSetString(&spelling, &lex->spelling);
+  bool use_raw = CXXNumericLiteralShouldUseRawOperator(syntax, &suffix,
+                                                       /*floating=*/false);
+  LexNextToken(lex);
+
+  Vector* actuals = NewVector();
+  if (use_raw) {
+    VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
+                                                  location, false));
+  } else {
+    TypeRecord* type =
+        NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+    VectorAppend(actuals, NewIntConstantASTNode(value, type, location));
+  }
+  StringDestruct(&spelling);
+  ASTNode* call = NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals,
+                                               location);
+  StringDestruct(&suffix);
+  return call;
+}
+
 static ASTNode* ParseFloatingPointConstant(Syntax* syntax,
                                                  TokenClass followers) {
   Lex* lex = syntax->lex;
@@ -1112,16 +1246,69 @@ static ASTNode* ParseFloatingPointConstant(Syntax* syntax,
                                 syntax->lex->current_token_location);
 }
 
+static ASTNode* ParseCXXUserDefinedFloatingLiteral(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  double value = lex->fnumber;
+  SourceLocation location = lex->current_token_location;
+  String suffix;
+  StringInit(&suffix, NULL);
+  StringSetString(&suffix, &lex->ud_suffix);
+  String spelling;
+  StringInit(&spelling, NULL);
+  StringSetString(&spelling, &lex->spelling);
+  bool use_raw = CXXNumericLiteralShouldUseRawOperator(syntax, &suffix,
+                                                       /*floating=*/true);
+  LexNextToken(lex);
+
+  Vector* actuals = NewVector();
+  if (use_raw) {
+    VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
+                                                  location, false));
+  } else {
+    TypeRecord* type = NewTypeRecordWithSize(kTypeLongDouble, kQualPlain);
+    VectorAppend(actuals, NewRealConstantASTNode(value, type, location));
+  }
+  StringDestruct(&spelling);
+  ASTNode* call = NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals,
+                                               location);
+  StringDestruct(&suffix);
+  return call;
+}
+
 static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
+  SourceLocation location = lex->current_token_location;
+  bool user_defined = lex->ud_suffix.length != 0;
+  String suffix;
+  StringInit(&suffix, NULL);
+  if (user_defined) {
+    StringSetString(&suffix, &lex->ud_suffix);
+  }
   String* contents = NewString(lex->spelling.value);
   LexNextToken(lex);
   
   // Adjacent string literals are joined together.
   while (LexLookingAt(lex, TOK(string))) {
     StringAppend(contents, lex->spelling.value);
+    if (lex->ud_suffix.length != 0) {
+      user_defined = true;
+      StringSetString(&suffix, &lex->ud_suffix);
+    }
     LexNextToken(lex);
   }
+  if (user_defined) {
+    Vector* actuals = NewVector();
+    size_t length = contents->length;
+    VectorAppend(actuals, NewStringLiteralArgument(contents, location, false));
+    VectorAppend(actuals,
+                 NewIntConstantASTNode((int64_t)length, NewSizeTypeRecord(),
+                                       location));
+    ASTNode* call =
+        NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
+    StringDestruct(&suffix);
+    return call;
+  }
+  StringDestruct(&suffix);
   
   TypeRecord* array =
     NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 1, false);
@@ -1140,6 +1327,13 @@ static ASTNode* ParseStringLiteral(Syntax* syntax, TokenClass followers) {
 static ASTNode* ParseWideStringLiteral(Syntax* syntax,
                                                TokenClass followers) {
   Lex* lex = syntax->lex;
+  SourceLocation location = lex->current_token_location;
+  bool user_defined = lex->ud_suffix.length != 0;
+  String suffix;
+  StringInit(&suffix, NULL);
+  if (user_defined) {
+    StringSetString(&suffix, &lex->ud_suffix);
+  }
   String* contents = NewStringWithLength(lex->spelling.value,
                                          lex->spelling.length + 4);
   LexNextToken(lex);
@@ -1147,8 +1341,28 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   // Adjacent wide string literals are joined together.
   while (LexLookingAt(lex, TOK(string_wide))) {
     StringAppend(contents, lex->spelling.value);
+    if (lex->ud_suffix.length != 0) {
+      user_defined = true;
+      StringSetString(&suffix, &lex->ud_suffix);
+    }
     LexNextToken(lex);
   }
+  if (user_defined) {
+    Vector* actuals = NewVector();
+    size_t length = contents->length > (size_t)compiler->wchar_size
+                        ? (contents->length - compiler->wchar_size) /
+                              compiler->wchar_size
+                        : 0;
+    VectorAppend(actuals, NewStringLiteralArgument(contents, location, true));
+    VectorAppend(actuals,
+                 NewIntConstantASTNode((int64_t)length, NewSizeTypeRecord(),
+                                       location));
+    ASTNode* call =
+        NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
+    StringDestruct(&suffix);
+    return call;
+  }
+  StringDestruct(&suffix);
   
   TypeRecord* array =
   NewBasicArrayTypeRecord(kQualPlain, (int)contents->length + 4, false);
@@ -1162,6 +1376,20 @@ static ASTNode* ParseCharacterConstant(Syntax* syntax,
                                                    TokenClass followers) {
   Lex* lex = syntax->lex;
   int value = (int)lex->number;
+  if (lex->ud_suffix.length != 0) {
+    SourceLocation location = lex->current_token_location;
+    String suffix;
+    StringInit(&suffix, NULL);
+    StringSetString(&suffix, &lex->ud_suffix);
+    LexNextToken(lex);
+    Vector* actuals = NewVector();
+    TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
+    VectorAppend(actuals, NewCharConstantASTNode(value, type, location));
+    ASTNode* call =
+        NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
+    StringDestruct(&suffix);
+    return call;
+  }
   LexNextToken(lex);
   TypeRecord* type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
   return NewCharConstantASTNode(value, type,
@@ -1172,6 +1400,20 @@ static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
                                        TokenClass followers) {
   Lex* lex = syntax->lex;
   int value = (int)lex->number;
+  if (lex->ud_suffix.length != 0) {
+    SourceLocation location = lex->current_token_location;
+    String suffix;
+    StringInit(&suffix, NULL);
+    StringSetString(&suffix, &lex->ud_suffix);
+    LexNextToken(lex);
+    Vector* actuals = NewVector();
+    TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+    VectorAppend(actuals, NewCharConstantASTNode(value, type, location));
+    ASTNode* call =
+        NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
+    StringDestruct(&suffix);
+    return call;
+  }
   LexNextToken(lex);
   TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   return NewCharConstantASTNode(value, type,
@@ -2395,11 +2637,17 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
 
   // Check for integer constant.
   if (LexLookingAt(lex, TOK(number))) {
+    if (lex->ud_suffix.length != 0) {
+      return ParseCXXUserDefinedIntegerLiteral(syntax);
+    }
     return ParseIntegerConstant(syntax, followers);
  }
 
   // Check for floating point constant.
   if (LexLookingAt(lex, TOK(fnumber))) {
+    if (lex->ud_suffix.length != 0) {
+      return ParseCXXUserDefinedFloatingLiteral(syntax);
+    }
     return ParseFloatingPointConstant(syntax, followers);
   }
 

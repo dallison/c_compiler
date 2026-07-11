@@ -1483,9 +1483,33 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         reference_formal = TypeIsReference(formal->type);
       }
       int old_arg_flags = arg->flags;
-      if (reference_formal && !TypeIsStructOrUnion(arg->type) &&
-          !TypeIsArray(arg->type)) {
+      bool directly_addressable =
+          arg->op == AST_OP(identifier) || arg->op == AST_OP(subscript) ||
+          arg->op == AST_OP(contents) || arg->op == AST_OP(dot) ||
+          arg->op == AST_OP(arrow);
+      bool reference_returning_call = false;
+      if (arg->op == AST_OP(call)) {
+        VectorASTNode* actual_call = (VectorASTNode*)arg;
+        TypeRecord* actual_callee_type =
+            actual_call->left != NULL ? actual_call->left->type : NULL;
+        if (actual_call->left != NULL &&
+            actual_call->left->op == AST_OP(identifier)) {
+          actual_callee_type =
+              ((IdentifierASTNode*)actual_call->left)->symbol->type;
+        }
+        reference_returning_call =
+            TypeIsFunction(actual_callee_type) &&
+            TypeIsReference(actual_callee_type->next);
+      }
+      if (reference_formal &&
+          (directly_addressable || reference_returning_call) &&
+          !TypeIsStructOrUnion(arg->type)) {
         arg->flags |= kASTNeedAddress;
+      } else if (reference_formal) {
+        // A reference bound to a conversion/prvalue needs a fresh temporary
+        // containing the value.  Do not let an address request inherited from
+        // an inner lvalue turn the converted value itself into pointer bits.
+        arg->flags &= ~kASTNeedAddress;
       }
       arg_value = GenerateExpression(gen, arg);
       arg->flags = old_arg_flags;

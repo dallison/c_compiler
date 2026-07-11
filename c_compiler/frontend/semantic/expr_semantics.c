@@ -627,6 +627,12 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
         NormalConversion(node->left, node->right->type);
         ASTNodeSetType((ASTNode*)node, node->right->type);
       }
+    } else {
+      // Equal-rank operands still determine the expression type.  Leaving the
+      // node's parser-default `int` type in place breaks expressions such as
+      // `false ? declval<long long>() : declval<long long>()`, and therefore
+      // `common_type_t<long long, long long>`.
+      ASTNodeSetType((ASTNode*)node, node->left->type);
     }
   }
 }
@@ -1791,9 +1797,31 @@ static bool HasAddress(ASTNode* node) {
   }
 }
 
+static TypeRecord* CopyTemporaryTypeSpine(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(type);
+  if (type->next != NULL) {
+    TypeRecordDelete(copy->next);
+    copy->next = CopyTemporaryTypeSpine(type->next);
+    TypeRecordIncRef(copy->next);
+  }
+  return TypeRecordCalculateSize(copy);
+}
+
 static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   SourceLocation location = expr->location;
-  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+  // Temporary materialization preserves the prvalue's object type.  The
+  // reference target may add top-level cv-qualification (e.g. `const T&`), but
+  // that qualification belongs to the reference binding, not to the temporary
+  // itself.  Making the temporary `const` also incorrectly sends class
+  // prvalues through constexpr-object reconstruction during initialization.
+  TypeRecord* temporary_type =
+      CopyTemporaryTypeSpine(expr->type != NULL ? expr->type : type);
+  temporary_type->qualifiers = kQualPlain;
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temporary_type);
+  TypeRecordDelete(temporary_type);
   ASTNode* temp_id = NewIdentifierASTNode(temp, location);
   temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
   ASTNode* initializer = NewExpressionInitializerASTNode(expr, location);
@@ -2245,7 +2273,23 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
 
   switch (node->base.op) {
     case AST_OP(assign):
-      NormalConversion(node->right, node->left->type);
+      // During the first (class-level) instantiation of a member function
+      // template, the enclosing template parameters are concrete but the
+      // member template's own parameters are not, so an assignment such as a
+      // constructor mem-initializer `__rep_ = value` may have a still-dependent
+      // right-hand side (`value` has type `const Rep2&`).  Choosing an
+      // arithmetic conversion now would bake in the wrong one (a dependent type
+      // is treated as `int`, yielding a bogus `i2d`/`cvtsi2sd` once the real
+      // argument is a floating type).  Leave the operand unconverted; the
+      // member template's second-stage instantiation re-analyzes the
+      // mem-initializer with the concrete argument type and inserts the correct
+      // conversion.
+      if (TypeContainsTemplateParameter(node->right->type) ||
+          TypeContainsTemplateParameter(node->left->type)) {
+        ((ASTNode*)node)->flags |= kASTDeferredDependentAssign;
+      } else {
+        NormalConversion(node->right, node->left->type);
+      }
       ASTNodeSetType((ASTNode*)node, node->left->type);
 
       break;
@@ -3150,9 +3194,6 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
 
   Struct* owner = member->symbol->type->info.function.cxx_member_owner;
   CXXAccess access = member->access;
-  if (member_access->right->op == AST_OP(structmember)) {
-    access = ((StructMemberASTNode*)member_access->right)->access;
-  }
   Struct* lookup_context = NULL;
   if (member_access->base.op == AST_OP(arrow) &&
       TypeIsStructOrUnionPointer(member_access->left->type)) {
@@ -3583,94 +3624,26 @@ static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   return 2;
 }
 
-// Advance to the next non-static data member at or after index *i, returning it
-// (and leaving *i at its position) or NULL when none remain.  Member functions
-// and static members do not contribute to an object's layout and are skipped.
-static StructMember* NextDataMember(Struct* s, size_t* i) {
-  for (; *i < s->members.length; (*i)++) {
-    StructMember* m = s->members.value.p[*i];
-    if (m != NULL && m->symbol != NULL && !m->is_static &&
-        !m->is_member_function) {
-      return m;
-    }
-  }
-  return NULL;
-}
-
-// Two distinct class TypeRecords can still denote the same type when the
-// compiler has produced separate struct records for one specialization (e.g.
-// unique_ptr<T[]>, whose records can differ even in member-function count).
-// They are treated as equivalent when they have the same data-member layout:
-// the same non-static data members, in order, with recursively equivalent
-// types.  Member functions are ignored.  Classes with no data members are not
-// matched here so unrelated empty structs are still rejected.
-static bool ClassTypesLayoutEquivalent(TypeRecord* a, TypeRecord* b) {
-  if (!TypeIsStructOrUnion(a) || !TypeIsStructOrUnion(b) ||
-      a->info.struct_info == NULL || b->info.struct_info == NULL) {
-    return false;
-  }
-  Struct* sa = a->info.struct_info;
-  Struct* sb = b->info.struct_info;
-  if (sa == sb) {
-    return true;
-  }
-  if (sa->is_union != sb->is_union) {
-    return false;
-  }
-  size_t ia = 0;
-  size_t ib = 0;
-  bool matched_any = false;
-  for (;;) {
-    StructMember* ma = NextDataMember(sa, &ia);
-    StructMember* mb = NextDataMember(sb, &ib);
-    if (ma == NULL || mb == NULL) {
-      if (ma != mb) {
-        return false;
-      }
-      break;
-    }
-    if (!StringEqualString(&ma->symbol->name, &mb->symbol->name)) {
-      return false;
-    }
-    TypeRecord* ta = ma->symbol->type;
-    TypeRecord* tb = mb->symbol->type;
-    if (!TypeEqual(ta, tb) &&
-        !(TypeIsStructOrUnion(ta) && TypeIsStructOrUnion(tb) &&
-          ClassTypesLayoutEquivalent(ta, tb))) {
-      return false;
-    }
-    matched_any = true;
-    ia++;
-    ib++;
-  }
-  return matched_any;
-}
-
-static bool PointerPointeesLayoutEquivalent(TypeRecord* actual,
-                                            TypeRecord* target) {
-  return TypeIsPointer(actual) && TypeIsPointer(target) &&
-         actual->next != NULL && target->next != NULL &&
-         TypeIsStructOrUnion(actual->next) &&
-         TypeIsStructOrUnion(target->next) &&
-         ClassTypesLayoutEquivalent(actual->next, target->next);
-}
-
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
+  if (TypeIsPointer(actual) && TypeIsPointer(target) &&
+      actual->next != NULL && target->next != NULL) {
+    Qualifiers discarded =
+        (actual->next->qualifiers & (kQualConst | kQualVolatile)) &
+        ~(target->next->qualifiers & (kQualConst | kQualVolatile));
+    if (discarded != 0) {
+      return -1;
+    }
+  }
   if (TypeEqual(actual, target) || TypeEqualIgnoringQualifiers(actual, target)) {
     return 0;
   }
   if (TypeIsStructOrUnion(actual) || TypeIsStructOrUnion(target)) {
-    // Two distinct class types convert only via a derived-to-base relationship
-    // or as separate records for the same specialization.  Unrelated classes
-    // (the common operator-overload mistake, e.g. `a + b` for unrelated `a` and
-    // `b`) are rejected here instead of being treated as differing only in sign
-    // by the scalar comparison below.
+    // Two distinct class types convert only via a derived-to-base relationship.
+    // TypeEqual above handles separately materialized records for the same
+    // template specialization by comparing their origins and arguments.
     if (TypeIsStructOrUnion(actual) && TypeIsStructOrUnion(target)) {
       if (TypeIsDerivedFrom(actual, target)) {
         return 2;
-      }
-      if (ClassTypesLayoutEquivalent(actual, target)) {
-        return 0;
       }
     }
     return -1;
@@ -3694,12 +3667,6 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     if (CompilerIsCXX() && TypeIsVoidPointer(actual) &&
         TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
       return -1;
-    }
-    if (PointerPointeesLayoutEquivalent(actual, target)) {
-      if (TypeIsConst(actual->next) && !TypeIsConst(target->next)) {
-        return -1;
-      }
-      return 0;
     }
     if (TypeAssignmentCompatible(actual, target)) {
       return 1;
@@ -3744,8 +3711,7 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
         TypeIsPointer(actual->type) && TypeIsPointer(target) &&
         actual->type->next != NULL && target->next != NULL &&
         !TypeIsConst(actual->type->next) && TypeIsConst(target->next) &&
-        (TypeEqualIgnoringQualifiers(actual->type, target) ||
-         PointerPointeesLayoutEquivalent(actual->type, target));
+        TypeEqualIgnoringQualifiers(actual->type, target);
     int qualification_penalty = pointer_qualification_conversion ? 1 : 0;
     return base_rank * 10 + 5 + qualification_penalty;
   }
@@ -3997,7 +3963,15 @@ static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
     ASTNode* actual = (ASTNode*)node->children->value.p[i];
     Symbol* formal =
         (Symbol*)func->info.function.prototype.value.p[i + first_formal_arg];
-    int rank = OverloadConversionRank(actual, formal->type);
+    bool constructor_this =
+        func->info.function.is_constructor &&
+        i + first_formal_arg == 0 &&
+        formal != NULL && strcmp(formal->name.value, "this") == 0;
+    int rank =
+        constructor_this &&
+                TypeEqualIgnoringQualifiers(actual->type, formal->type)
+            ? 0
+            : OverloadConversionRank(actual, formal->type);
     if (rank < 0) {
       return -1;
     }
@@ -5890,8 +5864,27 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // re-analyzed once the template arguments are known.
   if (CompilerIsCXX() && node->left != NULL && node->left->type != NULL &&
       !is_concrete_ctad_construction &&
-      TypeContainsTemplateParameter(node->left->type)) {
+      (TypeContainsTemplateParameter(node->left->type) ||
+       TypeIsUnknown(node->left->type))) {
     node->base.flags |= kASTDependentFunctorCall;
+    if (node->left->op == AST_OP(identifier)) {
+      IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+      TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
+          &compiler->syntax, id->symbol, id->template_arguments);
+      if (return_type != NULL) {
+        if (TypeIsReference(return_type)) {
+          ASTNodeSetType((ASTNode*)node, return_type->next);
+          node->base.value_category =
+              return_type->declarator == kDeclRValueReference
+                  ? kValueCategoryXvalue
+                  : kValueCategoryLvalue;
+        } else {
+          ASTNodeSetType((ASTNode*)node, return_type);
+        }
+        TypeRecordDelete(return_type);
+        return (ASTNode*)node;
+      }
+    }
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
@@ -6167,6 +6160,11 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       TypeContainsTemplateParameter(receiver_type)) {
     TypeRecord* placeholder = TypeRecordCopy(receiver_type);
     placeholder->type |= kTypeUnknown;
+    ASTNodeSetType((ASTNode*)node, placeholder);
+    return;
+  }
+  if (CompilerIsCXX() && receiver_type != NULL && TypeIsUnknown(receiver_type)) {
+    TypeRecord* placeholder = TypeRecordCopy(receiver_type);
     ASTNodeSetType((ASTNode*)node, placeholder);
     return;
   }

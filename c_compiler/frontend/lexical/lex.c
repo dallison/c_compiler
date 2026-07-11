@@ -481,6 +481,25 @@ static int EscapeChar(Lex* lex, int* size) {
 // If LLU or LU then it is reversed to ULL or UL.
 static void CollectIntegerSuffix(Lex* lex) {
   StringClear(&lex->suffix);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+    size_t bytes = LexIdentifierCharByteCount(lex->line.value, lex->pos,
+                                              lex->line.length, true);
+    if (bytes != 0) {
+      char first = toupper(lex->line.value[lex->pos]);
+      bool starts_unsigned_suffix = first == 'U';
+      bool followed_by_l =
+          lex->pos + bytes < lex->line.length &&
+          toupper(lex->line.value[lex->pos + bytes]) == 'L';
+      if (starts_unsigned_suffix && !followed_by_l) {
+        size_t next = lex->pos + bytes;
+        size_t next_bytes = LexIdentifierCharByteCount(
+            lex->line.value, next, lex->line.length, false);
+        if (next_bytes != 0) {
+          return;
+        }
+      }
+    }
+  }
   char ch = toupper(lex->line.value[lex->pos]);
   bool foundu = false;
   if (ch == 'U') {
@@ -1228,11 +1247,14 @@ bool LexInitFromString(Lex* lex, const char* filename, String* code,
 void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->source = lex->source;
   checkpoint->source_device = lex->source->device;
-  if (lex->source->device == kSourceFromFile) {
+  if (lex->source->device == kSourceFromFile &&
+      lex->source->from.file != NULL) {
     fgetpos(lex->source->from.file, &checkpoint->file_pos);
     checkpoint->string_index = 0;
-  } else {
+  } else if (lex->source->device == kSourceFromString) {
     checkpoint->string_index = lex->source->from.string.index;
+  } else {
+    checkpoint->string_index = 0;
   }
   checkpoint->lineno = lex->source->lineno;
   checkpoint->file_index = lex->source->file_index;
@@ -1259,10 +1281,11 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
 
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->source = checkpoint->source;
-  if (checkpoint->source_device == kSourceFromFile) {
+  if (checkpoint->source_device == kSourceFromFile &&
+      lex->source->from.file != NULL) {
     fsetpos(lex->source->from.file, &checkpoint->file_pos);
     clearerr(lex->source->from.file);
-  } else {
+  } else if (checkpoint->source_device == kSourceFromString) {
     lex->source->from.string.index = checkpoint->string_index;
   }
   lex->source->lineno = checkpoint->lineno;

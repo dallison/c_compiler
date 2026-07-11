@@ -64,29 +64,60 @@ static bool StructInitializationTypesMatch(TypeRecord* expr_type,
       target_type->info.struct_info == NULL) {
     return false;
   }
+  if (TypeEqual(expr_type, target_type)) {
+    return true;
+  }
+  TypeRecord* unqualified_expr = TypeRecordCopy(expr_type);
+  TypeRecord* unqualified_target = TypeRecordCopy(target_type);
+  unqualified_expr->qualifiers = kQualPlain;
+  unqualified_target->qualifiers = kQualPlain;
+  bool same_unqualified_type =
+      TypeEqual(unqualified_expr, unqualified_target);
+  TypeRecordDelete(unqualified_expr);
+  TypeRecordDelete(unqualified_target);
+  if (same_unqualified_type) {
+    return true;
+  }
   Struct* expr_struct = expr_type->info.struct_info;
   Struct* target_struct = target_type->info.struct_info;
   if (expr_struct == target_struct) {
     return true;
   }
-  if (expr_struct->is_union != target_struct->is_union ||
-      expr_struct->members.length != target_struct->members.length) {
+  if (expr_struct->is_union != target_struct->is_union) {
     return false;
   }
-  for (size_t i = 0; i < expr_struct->members.length; i++) {
-    StructMember* expr_member = expr_struct->members.value.p[i];
-    StructMember* target_member = target_struct->members.value.p[i];
-    if (expr_member == NULL || target_member == NULL ||
-        expr_member->symbol == NULL || target_member->symbol == NULL ||
-        expr_member->is_static != target_member->is_static ||
-        expr_member->is_member_function != target_member->is_member_function ||
-        !StringEqualString(&expr_member->symbol->name,
+  size_t expr_index = 0;
+  size_t target_index = 0;
+  bool matched_member = false;
+  for (;;) {
+    while (expr_index < expr_struct->members.length &&
+           !StructMemberIsObjectMember(
+               expr_struct->members.value.p[expr_index])) {
+      expr_index++;
+    }
+    while (target_index < target_struct->members.length &&
+           !StructMemberIsObjectMember(
+               target_struct->members.value.p[target_index])) {
+      target_index++;
+    }
+    if (expr_index == expr_struct->members.length ||
+        target_index == target_struct->members.length) {
+      return matched_member &&
+             expr_index == expr_struct->members.length &&
+             target_index == target_struct->members.length;
+    }
+    StructMember* expr_member = expr_struct->members.value.p[expr_index++];
+    StructMember* target_member =
+        target_struct->members.value.p[target_index++];
+    if (!StringEqualString(&expr_member->symbol->name,
                            &target_member->symbol->name) ||
-        !TypeEqual(expr_member->symbol->type, target_member->symbol->type)) {
+        (!TypeEqual(expr_member->symbol->type, target_member->symbol->type) &&
+         !StructInitializationTypesMatch(expr_member->symbol->type,
+                                         target_member->symbol->type))) {
       return false;
     }
+    matched_member = true;
   }
-  return true;
 }
 
 static INode* NewINode(IKind kind, TypeRecord* type, INode* parent) {

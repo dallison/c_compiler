@@ -9,6 +9,10 @@
 #ifndef time_h
 #define time_h
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef __SIZE_T
 #if defined(__W65C02__)
 typedef unsigned int size_t;
@@ -85,5 +89,9 @@ extern char*     tzname[];
 #define CLOCKS_PER_SEC     1000000
 
 extern clock_t   clock(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* time_h */

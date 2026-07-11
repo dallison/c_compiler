@@ -186,7 +186,9 @@ Source* NewSourceFromString(const char* filename, String* str) {
 void SourceDestruct(Source* src) {
   switch (src->device) {
     case kSourceFromFile:
-      fclose(src->from.file);
+      if (src->from.file != NULL) {
+        fclose(src->from.file);
+      }
       break;
     case kSourceFromString:
       StringDestruct(src->from.string.string);
@@ -205,7 +207,9 @@ void SourceDelete(Source* src) {
 void SourceRewind(Source* src) {
   switch (src->device) {
     case kSourceFromFile:
-      rewind(src->from.file);
+      if (src->from.file != NULL) {
+        rewind(src->from.file);
+      }
       break;
     case kSourceFromString:
       src->from.string.index = 0;
@@ -225,6 +229,9 @@ bool SourceEof(Source* src) {
   switch (src->device) {
     case kSourceFromFile:
       // From a file, use feof.
+      if (src->from.file == NULL) {
+        return true;
+      }
       return feof(src->from.file);
     case kSourceFromString:
       // From a string, check current index against length.
@@ -235,6 +242,9 @@ bool SourceEof(Source* src) {
 int SourceGetChar(Source* src) {
   switch (src->device) {
     case kSourceFromFile:
+      if (src->from.file == NULL) {
+        return EOF;
+      }
       return fgetc(src->from.file);
       break;
     case kSourceFromString:

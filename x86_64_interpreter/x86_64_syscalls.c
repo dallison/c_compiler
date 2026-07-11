@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
@@ -239,6 +240,15 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_ABORT:
       abort();
       break;
+    case X86_64_SYSCALL_TIME:
+      return (int64_t)time(NULL);
+    case X86_64_SYSCALL_CLOCK: {
+      struct timespec now;
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+      }
+      return (int64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+    }
     case X86_64_SYSCALL_RESOLVE: {
       bool rip_updated = false;
       ResolveAndFixupSymbol(interpreter, &rip_updated);

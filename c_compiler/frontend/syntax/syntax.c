@@ -544,6 +544,25 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
   }
   Token op = syntax->lex->current_token;
   switch (op) {
+    case TOK(string): {
+      if (syntax->lex->spelling.length != 0) {
+        SyntaxError(syntax, "Expected empty string in literal operator name");
+      }
+      StringInit(name, "operator\"\"");
+      if (syntax->lex->ud_suffix.length != 0) {
+        StringAppendString(name, &syntax->lex->ud_suffix);
+        LexNextToken(syntax->lex);
+        return true;
+      }
+      LexNextToken(syntax->lex);
+      if (LexLookingAt(syntax->lex, TOK(identifier))) {
+        StringAppend(name, syntax->lex->spelling.value);
+        LexNextToken(syntax->lex);
+      } else {
+        SyntaxError(syntax, "Expected suffix in literal operator name");
+      }
+      return true;
+    }
     case TOK(plus):
     case TOK(minus):
     case TOK(star):
@@ -761,6 +780,32 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
     return false;
   }
 
+  // A class/struct/union/enum name followed by `::` begins a qualified name
+  // too (e.g. `Clock::duration`, `Outer::Inner`).  Namespaces were handled
+  // above; recognising a leading *type* name here lets member types accessed
+  // through their enclosing class (rather than a namespace) be parsed as
+  // qualified type names instead of a bare type followed by a stray `::`.
+  {
+    Symbol* tag = SyntaxFindTag(syntax, &syntax->lex->spelling);
+    Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+    bool names_type =
+        (tag != NULL && tag->type != NULL && TypeIsStructOrUnion(tag->type)) ||
+        (sym != NULL && StorageIs(sym->storage, STO(typedef)) &&
+         sym->type != NULL &&
+         (TypeIsStructOrUnion(sym->type) || TypeIsEnum(sym->type)));
+    if (names_type) {
+      LexCheckpoint type_checkpoint;
+      LexCheckpointSave(syntax->lex, &type_checkpoint);
+      LexNextToken(syntax->lex);
+      bool followed_by_scope = LexLookingAt(syntax->lex, TOK(coloncolon));
+      LexCheckpointRestore(syntax->lex, &type_checkpoint);
+      LexCheckpointDestruct(&type_checkpoint);
+      if (followed_by_scope) {
+        return true;
+      }
+    }
+  }
+
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
   bool has_template_qualified_prefix = false;
@@ -768,13 +813,21 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
     LexNextToken(syntax->lex);
     if (LexLookingAt(syntax->lex, TOK(less))) {
       int depth = 0;
+      Token previous = TOK(identifier);
       do {
+        Token current = syntax->lex->current_token;
         if (LexLookingAt(syntax->lex, TOK(less))) {
-          depth++;
+          if (previous == TOK(identifier) || previous == TOK(greater) ||
+              previous == TOK(greatergreater)) {
+            depth++;
+          }
         } else if (LexLookingAt(syntax->lex, TOK(greater))) {
           depth--;
+        } else if (LexLookingAt(syntax->lex, TOK(greatergreater))) {
+          depth -= 2;
         }
         LexNextToken(syntax->lex);
+        previous = current;
       } while (!LexEof(syntax->lex) && depth > 0);
       if (depth == 0 && LexLookingAt(syntax->lex, TOK(coloncolon))) {
         has_template_qualified_prefix = true;
@@ -5613,8 +5666,18 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
             }
           }
           if (arg->template_parameter_index < 0) {
-            SyntaxError(syntax,
-                        "Template non-type argument must be an integer constant expression");
+            if (syntax->parsing_template_declaration) {
+              arg->dependent_expr = expr;
+              arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
+              VectorAppend(args, arg);
+              if (!LexMatch(lex, TOK(comma))) {
+                break;
+              }
+              continue;
+            } else {
+              SyntaxError(syntax,
+                          "Template non-type argument must be an integer constant expression");
+            }
           }
         }
         arg->int_value = value;
@@ -6114,6 +6177,17 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
     return ParseNamespaceDeclaration(syntax);
+  }
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(inline))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(namespace))) {
+      LexCheckpointDestruct(&checkpoint);
+      return ParseNamespaceDeclaration(syntax);
+    }
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
   }
   if (LexLookingAt(syntax->lex, TOK(template))) {
     return ParseTemplateDeclaration(syntax);
@@ -7247,6 +7321,7 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
   FullyQualifiedIdentifierInit(&name);
   SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
                                                      TC(openbra) | TC(stmt));
+  bool followed_by_assignment = LexLookingAt(syntax->lex, TOK(equal));
   bool decided = false;
   bool is_type = false;
   if (name.is_qualified) {
@@ -7258,12 +7333,29 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
       if (symbol != NULL) {
         decided = true;
         is_type = StorageIs(symbol->storage, STO(typedef));
+      } else if (name.components.length == 2) {
+        String* owner_name = name.components.value.p[0];
+        String* member_name = name.components.value.p[1];
+        Symbol* owner = SyntaxFindTag(syntax, owner_name);
+        if (owner != NULL && owner->type != NULL &&
+            TypeIsStructOrUnion(owner->type) &&
+            owner->type->info.struct_info != NULL) {
+          StructMember* member =
+              FindStructMember(owner->type->info.struct_info, member_name);
+          if (member != NULL && member->symbol != NULL) {
+            decided = true;
+            is_type = StorageIs(member->symbol->storage, STO(typedef));
+          }
+        }
       }
     }
   }
   FullyQualifiedIdentifierDestruct(&name);
   LexCheckpointRestore(syntax->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
+  if (followed_by_assignment) {
+    return false;
+  }
   if (decided) {
     return is_type;
   }
@@ -7303,12 +7395,31 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(identifier): {
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
-        if (CompilerIsCXX() && SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
-          return true;
+        if (CompilerIsCXX() &&
+            SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
+          LexCheckpoint checkpoint;
+          LexCheckpointSave(syntax->lex, &checkpoint);
+          LexNextToken(syntax->lex);
+          bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+          LexCheckpointRestore(syntax->lex, &checkpoint);
+          LexCheckpointDestruct(&checkpoint);
+          return qualified ? SyntaxQualifiedNameLooksLikeType(syntax) : true;
         }
         return SyntaxQualifiedNameLooksLikeType(syntax);
       }
       if (StorageIs(sym->storage , STO(typedef))) {
+        if (CompilerIsCXX() && sym->type != NULL &&
+            TypeIsStructOrUnion(sym->type)) {
+          LexCheckpoint checkpoint;
+          LexCheckpointSave(syntax->lex, &checkpoint);
+          LexNextToken(syntax->lex);
+          bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+          LexCheckpointRestore(syntax->lex, &checkpoint);
+          LexCheckpointDestruct(&checkpoint);
+          if (qualified) {
+            return SyntaxQualifiedNameLooksLikeType(syntax);
+          }
+        }
         return true;
       }
       return false;

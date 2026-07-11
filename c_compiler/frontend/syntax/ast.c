@@ -1090,6 +1090,7 @@ ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,
                                   SourceLocation location) {
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string), type, location, &constant_vtbl);
+  node->base.value_category = kValueCategoryLvalue;
   node->value.string = value;
   node->template_arguments = NULL;
   return (ASTNode*)node;
@@ -1099,6 +1100,7 @@ ASTNode* NewWideStringConstantASTNode(String* value, TypeRecord* type,
                                       SourceLocation location) {
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeInit(&node->base, AST_OP(string_wide), type, location, &constant_vtbl);
+  node->base.value_category = kValueCategoryLvalue;
   node->value.string = value;
   node->template_arguments = NULL;
   return (ASTNode*)node;

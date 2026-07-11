@@ -1011,7 +1011,7 @@ static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
     return false;
   }
   if (return_value->op == AST_OP(call)) {
-    return true;
+    return return_value->value_category == kValueCategoryPrvalue;
   }
   if (return_value->op != AST_OP(identifier)) {
     return false;
@@ -1044,11 +1044,9 @@ static bool IsCXXFunctionArgumentReturnValue(ASTNode* return_value) {
 static ASTNode* MaterializeCXXReturnByMove(ASTNode* return_value) {
   if (!CompilerIsCXX() || return_value == NULL ||
       compiler->current_function == NULL ||
-      compiler->current_function->info.function.is_constexpr ||
       !TypeIsStructOrUnion(compiler->current_function->next) ||
       compiler->current_function->next->info.struct_info == NULL ||
-      compiler->current_function->next->info.struct_info->tag_name == NULL ||
-      compiler->current_function->next->info.struct_info->is_aggregate) {
+      compiler->current_function->next->info.struct_info->tag_name == NULL) {
     return return_value;
   }
 
@@ -1061,26 +1059,6 @@ static ASTNode* MaterializeCXXReturnByMove(ASTNode* return_value) {
       !constructor->symbol->type->info.function.is_constructor) {
     return return_value;
   }
-  bool has_nontrivial_unary_constructor = false;
-  for (StructMember* candidate = constructor; candidate != NULL;
-       candidate = candidate->overload_next) {
-    if (!candidate->is_member_function || candidate->symbol == NULL ||
-        candidate->symbol->type == NULL ||
-        !TypeIsFunction(candidate->symbol->type) ||
-        !candidate->symbol->type->info.function.is_constructor) {
-      continue;
-    }
-    FunctionInfo* info = &candidate->symbol->type->info.function;
-    if (info->varargs ||
-        (info->prototype.length >= 2 && !info->is_trivial_special_member)) {
-      has_nontrivial_unary_constructor = true;
-      break;
-    }
-  }
-  if (!has_nontrivial_unary_constructor) {
-    return return_value;
-  }
-
   SourceLocation location = return_value->location;
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, return_type);
   temp->location = location;
@@ -1153,6 +1131,16 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
   }
 
   bool cxx_return_elision = IsEligibleCXXReturnElisionValue(return_value);
+  if (!cxx_return_elision && return_value != NULL &&
+      TypeIsStructOrUnion(compiler->current_function->next) &&
+      TypeEqual(return_value->type, compiler->current_function->next) &&
+      return_value->value_category != kValueCategoryPrvalue) {
+    ASTNode* materialized = MaterializeCXXReturnByMove(return_value);
+    if (materialized != return_value) {
+      ASTNodeReplaceChild((ASTNode*)node, 0, materialized, false);
+      return_value = materialized;
+    }
+  }
 
   // Check current function return type.
   if (TypeIsVoid(compiler->current_function->next)) {
