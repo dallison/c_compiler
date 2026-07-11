@@ -1,0 +1,1141 @@
+//
+//  type_compare.c
+//  c_compiler
+//
+
+#include "type_internal.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
+
+#include <assert.h>
+#include "ast.h"
+#include "compiler.h"
+#include "concepts.h"
+#include "constexpr.h"
+#include "dstring.h"
+#include "expr_evaluator.h"
+#include "expr_parser.h"
+#include "expr_semantics.h"
+#include "statement_semantics.h"
+#include "statement_parser.h"
+#include "symbol_table.h"
+#include "syntax.h"
+#include "semantics.h"
+#include "errors.h"
+#include "debug.h"
+#include "rtti.h"
+#include "set.h"
+
+static void DependentExpressionContainsParameterVisitor(ASTNode* node,
+                                                       void* data,
+                                                       int child_id,
+                                                       VisitorMode mode) {
+  (void)child_id;
+  (void)mode;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol == NULL) {
+    return;
+  }
+  if ((id->symbol->flags.is_template_parameter &&
+       id->symbol->template_parameter_index >= 0) ||
+      id->symbol->dependent_value_template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(id->symbol->type) ||
+      TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+    *(bool*)data = true;
+  }
+}
+
+bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right);
+bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
+bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
+
+bool DependentExpressionContainsTemplateParameter(ASTNode* expr) {
+  bool found = false;
+  ASTNodeVisit(expr, DependentExpressionContainsParameterVisitor, 0, &found);
+  return found;
+}
+
+/* True if a template argument is still dependent: it references a template
+ * parameter directly, contains a dependent pack element, or names a dependent
+ * type. */
+bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->kind == kTemplateParameterNonType &&
+      arg->template_parameter_index >= 0) {
+    return true;
+  }
+  if (arg->pack_arguments != NULL &&
+      TemplateArgumentVectorContainsTemplateParameter(arg->pack_arguments)) {
+    return true;
+  }
+  if (DependentExpressionContainsTemplateParameter(arg->dependent_expr)) {
+    return true;
+  }
+  return TypeContainsTemplateParameter(arg->type);
+}
+
+/* True if any argument in the vector is still dependent (see above). */
+bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    if (TemplateArgumentContainsTemplateParameter(args->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* True if `type` still mentions an unresolved template parameter anywhere: as a
+ * bare parameter, an array bound, a template argument, or a function parameter
+ * type. Used to decide whether a type is dependent. */
+bool TypeContainsTemplateParameter(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsUnknown(t) && t->template_parameter_index >= 0) {
+      return true;
+    }
+    if (t->dependent_member_name != NULL &&
+        (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
+      return true;
+    }
+    if (t->declarator == kDeclArray &&
+        t->info.array.template_parameter_index >= 0) {
+      return true;
+    }
+    if (t->template_arguments != NULL) {
+      for (size_t i = 0; i < t->template_arguments->length; i++) {
+        if (TemplateArgumentContainsTemplateParameter(
+                t->template_arguments->value.p[i])) {
+          return true;
+        }
+      }
+    }
+    if (TypeIsFunction(t)) {
+      if (TypeContainsTemplateParameter(t->next)) {
+        return true;
+      }
+      for (size_t i = 0; i < t->info.function.prototype.length; i++) {
+        Symbol* formal = t->info.function.prototype.value.p[i];
+        if (formal != NULL && TypeContainsTemplateParameter(formal->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b);
+
+bool TemplateArgumentEqual(TemplateArgument* left,
+                                  TemplateArgument* right) {
+  if (left == NULL || right == NULL || left->kind != right->kind) {
+    return left == right;
+  }
+  if (left->pack_arguments != NULL || right->pack_arguments != NULL) {
+    if (left->pack_arguments == NULL || right->pack_arguments == NULL ||
+        left->pack_arguments->length != right->pack_arguments->length) {
+      return false;
+    }
+    for (size_t i = 0; i < left->pack_arguments->length; i++) {
+      if (!TemplateArgumentEqual(left->pack_arguments->value.p[i],
+                                 right->pack_arguments->value.p[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (left->kind == kTemplateParameterType) {
+    return TypeEqual(left->type, right->type);
+  }
+  // Value-dependent non-type arguments (e.g. two `enable_if` SFINAE conditions)
+  // are distinguished by comparing their stored expressions structurally, so
+  // distinct overloads are not mistaken for redefinitions.
+  if (left->dependent_expr != NULL || right->dependent_expr != NULL) {
+    return DependentTemplateArgExprEqual(left->dependent_expr,
+                                         right->dependent_expr);
+  }
+  return left->int_value == right->int_value &&
+         left->template_parameter_index == right->template_parameter_index;
+}
+
+/* Element-wise equality of two concrete template argument vectors. */
+bool TemplateArgumentVectorEqual(Vector* left, Vector* right) {
+  if (left == NULL || right == NULL || left->length != right->length) {
+    return left == right;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    if (!TemplateArgumentEqual(left->value.p[i], right->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
+  if (a == b) {
+    return true;
+  }
+  if (a == NULL || b == NULL || a->op != b->op) {
+    return false;
+  }
+  switch (a->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+      return ((ConstantASTNode*)a)->value.ivalue ==
+             ((ConstantASTNode*)b)->value.ivalue;
+    case AST_OP(identifier): {
+      IdentifierASTNode* ia = (IdentifierASTNode*)a;
+      IdentifierASTNode* ib = (IdentifierASTNode*)b;
+      Symbol* sa = ia->symbol;
+      Symbol* sb = ib->symbol;
+      if (sa == sb) {
+        return true;
+      }
+      if (sa == NULL || sb == NULL) {
+        return false;
+      }
+      TypeRecord* ta = sa->type;
+      TypeRecord* tb = sb->type;
+      // Dependent qualified names (`Trait<Args>::member`): equal iff the same
+      // scope template, the same member, and structurally-equal scope arguments.
+      if (ta != NULL && tb != NULL && ta->dependent_member_name != NULL &&
+          tb->dependent_member_name != NULL) {
+        return ta->template_origin == tb->template_origin &&
+               ta->template_parameter_index == tb->template_parameter_index &&
+               StringEqual(ta->dependent_member_name,
+                           tb->dependent_member_name->value) &&
+               TemplateArgumentVectorEqual(ta->template_arguments,
+                                           tb->template_arguments);
+      }
+      // Plain non-type template parameter references compare by index.
+      if (sa->flags.is_template_parameter && sb->flags.is_template_parameter) {
+        return sa->template_parameter_index == sb->template_parameter_index;
+      }
+      return false;
+    }
+    case AST_OP(not):
+    case AST_OP(onescomp):
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+      return DependentTemplateArgExprEqual(((UnaryASTNode*)a)->sub,
+                                           ((UnaryASTNode*)b)->sub);
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshifta):
+    case AST_OP(rshiftl):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(logand):
+    case AST_OP(logor):
+      return DependentTemplateArgExprEqual(((BinaryASTNode*)a)->left,
+                                           ((BinaryASTNode*)b)->left) &&
+             DependentTemplateArgExprEqual(((BinaryASTNode*)a)->right,
+                                           ((BinaryASTNode*)b)->right);
+    case AST_OP(cast): {
+      CastASTNode* ca = (CastASTNode*)a;
+      CastASTNode* cb = (CastASTNode*)b;
+      return TypeEqual(ca->cast_type, cb->cast_type) &&
+             DependentTemplateArgExprEqual(ca->expr, cb->expr);
+    }
+    default:
+      return false;
+  }
+}
+
+/* Equality of two type *patterns* (types that may still mention template
+ * parameters), comparing parameter indices structurally rather than resolving
+ * them. Used to compare partial-specialization / template signatures. */
+static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL || left->declarator != right->declarator ||
+      left->qualifiers != right->qualifiers) {
+    return left == right;
+  }
+  if (left->template_parameter_index >= 0 ||
+      right->template_parameter_index >= 0) {
+    return left->template_parameter_index == right->template_parameter_index;
+  }
+  if (left->type != right->type) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(left)) {
+    if (left->info.struct_info != right->info.struct_info) {
+      return false;
+    }
+  } else if (TypeIsEnum(left)) {
+    if (left->info.enum_info != right->info.enum_info) {
+      return false;
+    }
+  }
+  if (!TemplateArgumentPatternVectorEqual(left->template_arguments,
+                                          right->template_arguments)) {
+    return false;
+  }
+  switch (left->declarator) {
+    case kDeclArray:
+      if (left->info.array.template_parameter_index !=
+          right->info.array.template_parameter_index) {
+        return false;
+      }
+      if (left->info.array.template_parameter_index < 0 &&
+          left->info.array.size.fixed != right->info.array.size.fixed) {
+        return false;
+      }
+      return TemplateTypePatternEqual(left->next, right->next);
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      return TemplateTypePatternEqual(left->next, right->next);
+    case kDeclFunction:
+      if (!TemplateTypePatternEqual(left->next, right->next) ||
+          left->info.function.prototype.length !=
+              right->info.function.prototype.length ||
+          left->info.function.is_const_member !=
+              right->info.function.is_const_member ||
+          left->info.function.ref_qualifier !=
+              right->info.function.ref_qualifier) {
+        return false;
+      }
+      for (size_t i = 0; i < left->info.function.prototype.length; i++) {
+        Symbol* left_formal = left->info.function.prototype.value.p[i];
+        Symbol* right_formal = right->info.function.prototype.value.p[i];
+        if (left_formal == NULL || right_formal == NULL ||
+            !TemplateTypePatternEqual(left_formal->type, right_formal->type)) {
+          return left_formal == right_formal;
+        }
+      }
+      return true;
+    case kDeclPrimitive:
+      return true;
+  }
+}
+
+/* Equality of two template argument *patterns* (arguments that may still be
+ * parameter-dependent), comparing parameter indices structurally. */
+static bool TemplateArgumentPatternEqual(TemplateArgument* left,
+                                         TemplateArgument* right) {
+  if (left == NULL || right == NULL || left->kind != right->kind ||
+      left->is_pack_expansion != right->is_pack_expansion) {
+    return left == right;
+  }
+  if (left->pack_arguments != NULL || right->pack_arguments != NULL) {
+    if (left->pack_arguments == NULL || right->pack_arguments == NULL ||
+        left->pack_arguments->length != right->pack_arguments->length) {
+      return false;
+    }
+    return TemplateArgumentPatternVectorEqual(left->pack_arguments,
+                                             right->pack_arguments);
+  }
+  if (left->kind == kTemplateParameterType) {
+    return TemplateTypePatternEqual(left->type, right->type);
+  }
+  return left->int_value == right->int_value &&
+         left->template_parameter_index == right->template_parameter_index;
+}
+
+/* Element-wise equality of two template argument pattern vectors. */
+bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right) {
+  if (left == NULL || right == NULL || left->length != right->length) {
+    return left == right;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    if (!TemplateArgumentPatternEqual(left->value.p[i], right->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* True when a cached instantiation `candidate` corresponds to the freshly
+ * requested instantiation `type` with the same template `args`. The template
+ * arguments already uniquely identify an instantiation, but the cheap identity
+ * check compares the whole function type. That fails for a function with a
+ * deduced (`auto`) return: the return type is filled in lazily by analyzing the
+ * body *after* the instantiation is cached, so a later request for the same
+ * instantiation arrives with an as-yet-undeduced `auto` return and would not
+ * TypeEqual the cached, now-deduced instantiation. Accept a match that differs
+ * only in an auto-deduced return; otherwise a duplicate instantiation is
+ * created whose body is never cloned (its asm name is already pending), leaving
+ * its return type unresolved. */
+static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
+                                                 TypeRecord* type,
+                                                 Vector* args) {
+  if (candidate == NULL || candidate->flags.is_template ||
+      candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+      !TemplateArgumentVectorEqual(candidate->type->template_arguments, args)) {
+    return false;
+  }
+  if (TypeEqual(candidate->type, type)) {
+    return true;
+  }
+  return TypeIsFunction(type) &&
+         (candidate->type->info.function.is_auto_return_deduced ||
+          TypeContainsAuto(candidate->type->next) ||
+          TypeContainsAuto(type->next));
+}
+
+/* Search a function template's instantiation overload chain for one whose type
+ * and template arguments match (cache lookup), or NULL. */
+Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
+                                                 TypeRecord* type,
+                                                 Vector* args) {
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type)) {
+    return NULL;
+  }
+  for (Symbol* candidate = templ->overload_next; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->type != NULL &&
+        candidate->type->info.function.template_origin == templ &&
+        FunctionTemplateInstantiationMatches(candidate, type, args)) {
+      return candidate;
+    }
+  }
+  Vector* cache = &templ->type->info.function.template_instantiations;
+  for (size_t i = 0; i < cache->length; i++) {
+    Symbol* candidate = cache->value.p[i];
+    if (FunctionTemplateInstantiationMatches(candidate, type, args)) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
+                                                          const char* asm_name) {
+  if (asm_name == NULL || *asm_name == '\0') {
+    return NULL;
+  }
+  for (Symbol* candidate = templ; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (!candidate->flags.is_template && candidate->asm_name.value != NULL &&
+        strcmp(candidate->asm_name.value, asm_name) == 0) {
+      return candidate;
+    }
+  }
+  // Instantiations are recorded in the template's `template_instantiations`
+  // cache (not the overload chain), so they must be searched here too.  The
+  // mangled name is the definitive ABI identity of an instantiation: two
+  // requests that mangle identically denote the same function even when their
+  // deduced signatures fail a structural `TypeEqual` (e.g. a `*this` self-type
+  // that lost its template_origin metadata), so reuse the cached one to avoid
+  // emitting a duplicate symbol.
+  if (templ != NULL && templ->type != NULL && TypeIsFunction(templ->type)) {
+    Vector* cache = &templ->type->info.function.template_instantiations;
+    for (size_t i = 0; i < cache->length; i++) {
+      Symbol* candidate = cache->value.p[i];
+      if (candidate != NULL && !candidate->flags.is_template &&
+          candidate->asm_name.value != NULL &&
+          strcmp(candidate->asm_name.value, asm_name) == 0) {
+        return candidate;
+      }
+    }
+  }
+  return NULL;
+}
+
+/* Append a newly created instantiation to the template's overload chain so it
+ * can be found later (and marks both ends as overloaded). */
+void AppendFunctionTemplateInstantiation(Symbol* templ,
+                                                Symbol* instantiated) {
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type) ||
+      instantiated == NULL) {
+    return;
+  }
+  instantiated->overload_next = NULL;
+  instantiated->flags.is_overloaded = false;
+  VectorAppend(&templ->type->info.function.template_instantiations,
+               instantiated);
+}
+
+bool TypeIsInt(TypeRecord* type);
+bool TypeIsChar(TypeRecord* type);
+bool TypeIsShort(TypeRecord* type);
+bool TypeIsLong(TypeRecord* type);
+bool TypeIsLongLong(TypeRecord* type);
+bool TypeIsUnsignedInt(TypeRecord* type);
+bool TypeIsUnsignedChar(TypeRecord* type);
+bool TypeIsUnsignedShort(TypeRecord* type);
+bool TypeIsUnsignedLong(TypeRecord* type);
+bool TypeIsUnsignedLongLong(TypeRecord* type);
+bool TypeIsFloat(TypeRecord* type);
+bool TypeIsDouble(TypeRecord* type);
+bool TypeIsLongDouble(TypeRecord* type);
+bool TypeIsBool(TypeRecord* type);
+bool TypeIsVoid(TypeRecord* type);
+bool TypeIsNullPointer(TypeRecord* type);
+
+bool TypeIsPointer(TypeRecord* type);
+bool TypeIsPrimitive(TypeRecord* type);
+bool TypeIsPointerOrArray(TypeRecord* type);
+bool TypeIsIntegral(TypeRecord* type);
+bool TypeIsFloatingPoint(TypeRecord* type);
+bool TypeIsFunction(TypeRecord* type);
+bool TypeIsFunctionDefinition(TypeRecord* type);
+bool TypeIsFunctionPointer(TypeRecord* type);
+bool TypeIsStructOrUnionPointer(TypeRecord* type);
+bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type);
+bool TypeIsVoidFunction(TypeRecord* type);
+
+bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2);
+bool TypeIsStructOrUnion(TypeRecord* type);
+bool TypeIsScalar(TypeRecord* type);
+bool TypeIsVoidPointer(TypeRecord* type);
+bool TypeIsArray(TypeRecord* type);
+bool TypeIsConst(TypeRecord* type);
+bool TypeIsVolatile(TypeRecord* type);
+bool TypeIsEnum(TypeRecord* type);
+
+bool TypeIsUnsigned(TypeRecord* type) {
+  if (!compiler->plain_char_is_signed && type->type == kTypeChar) {
+    return true;
+  }
+  return TypeIsPrimitive(type) && (type->type & (kTypeUnsigned | kTypeBool)) != 0;
+}
+
+bool TypeIsSigned(TypeRecord* type) {
+  if (compiler->plain_char_is_signed && type->type == kTypeChar) {
+    return true;
+  }
+  return TypeIsPrimitive(type) && (type->type & kTypeSigned) != 0;
+}
+
+bool TypeIsReference(TypeRecord* type) {
+  return type->declarator == kDeclReference ||
+         type->declarator == kDeclRValueReference;
+}
+
+bool TypeIsScopedEnum(TypeRecord* type) {
+  return TypeIsEnum(type) && type->info.enum_info != NULL &&
+         type->info.enum_info->is_scoped;
+}
+
+
+bool TypeIsIntConstant(TypeRecord* type);
+bool TypeIsFloatingPointConstant(TypeRecord* type);
+bool TypeIsUnknown(TypeRecord* type);
+bool TypeIsFixedArray(TypeRecord* type);
+bool TypeIsVLA(TypeRecord* type);
+
+static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
+  if (a->prototype.length != b->prototype.length) {
+    return false;
+  }
+  // The trailing const on a C++ member function is part of its signature: a
+  // non-const and a const member function with otherwise identical parameters
+  // are distinct overloads.  This matters for dependent return types (e.g.
+  // `T&` vs `const T&`) where the return type comparison cannot tell them
+  // apart, leaving the const qualifier as the only distinguishing feature.
+  if (a->is_const_member != b->is_const_member) {
+    return false;
+  }
+  if (a->ref_qualifier != b->ref_qualifier) {
+    return false;
+  }
+  for (size_t i = 0; i < a->prototype.length; i++) {
+    Symbol* s1 = a->prototype.value.p[i];
+    Symbol* s2 = b->prototype.value.p[i];
+    if (!TypeEqual(s1->type, s2->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool CXXStructTagNameEqual(Struct* left, Struct* right) {
+  if (left == NULL || right == NULL || left->tag_name == NULL ||
+      right->tag_name == NULL) {
+    return false;
+  }
+  // Closure types produced from the same lambda expression in different
+  // enclosing template instantiations can have different capture layouts.
+  // Their `$S...` suffix is therefore semantic type identity, not merely a
+  // duplicate materialization suffix.
+  if (strncmp(left->tag_name->value, "__invented__", 12) == 0 ||
+      strncmp(right->tag_name->value, "__invented__", 12) == 0) {
+    return StringEqualString(left->tag_name, right->tag_name);
+  }
+  // Materialized template specializations can acquire different internal
+  // `$S...` suffixes even though they denote the same C++ type.  Ignore only
+  // that implementation suffix; template arguments before it remain part of
+  // the type identity.
+  size_t left_len = strcspn(left->tag_name->value, "$");
+  size_t right_len = strcspn(right->tag_name->value, "$");
+  return left_len == right_len &&
+         strncmp(left->tag_name->value, right->tag_name->value, left_len) == 0;
+}
+
+static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
+                                                       Struct* right) {
+  if (left == right) {
+    return true;
+  }
+  Symbol* left_origin =
+      left != NULL && left->tag_symbol != NULL && left->tag_symbol->type != NULL
+          ? left->tag_symbol->type->template_origin
+          : NULL;
+  Symbol* right_origin =
+      right != NULL && right->tag_symbol != NULL && right->tag_symbol->type != NULL
+          ? right->tag_symbol->type->template_origin
+          : NULL;
+  if (left_origin != NULL || right_origin != NULL) {
+    if (left_origin != NULL && right_origin != NULL) {
+      if (left_origin != right_origin &&
+          !StringEqualString(&left_origin->name, &right_origin->name)) {
+        return false;
+      }
+      TypeRecord* left_tag_type =
+          left->tag_symbol != NULL ? left->tag_symbol->type : NULL;
+      TypeRecord* right_tag_type =
+          right->tag_symbol != NULL ? right->tag_symbol->type : NULL;
+      if (left_tag_type != NULL && right_tag_type != NULL &&
+          left_tag_type->template_arguments != NULL &&
+          right_tag_type->template_arguments != NULL) {
+        return TemplateArgumentVectorEqual(left_tag_type->template_arguments,
+                                           right_tag_type->template_arguments);
+      }
+      if (left->tag_name != NULL && right->tag_name != NULL &&
+          strchr(left->tag_name->value, '<') != NULL &&
+          strchr(right->tag_name->value, '<') != NULL) {
+        return strcmp(left->tag_name->value, right->tag_name->value) == 0;
+      }
+      return true;
+    }
+    Symbol* origin = left_origin != NULL ? left_origin : right_origin;
+    Struct* other = left_origin != NULL ? right : left;
+    if (other == NULL || other->tag_symbol == NULL) {
+      return false;
+    }
+    size_t other_name_len = strcspn(other->tag_symbol->name.value, "<$");
+    return origin->name.length == other_name_len &&
+           strncmp(origin->name.value, other->tag_symbol->name.value,
+                   other_name_len) == 0;
+  }
+  if (!CXXStructTagNameEqual(left, right)) {
+    return false;
+  }
+  if (left->lexical_parent != NULL || right->lexical_parent != NULL) {
+    return CXXStructSameTemplateFamilyForTypeEquality(left->lexical_parent,
+                                                     right->lexical_parent);
+  }
+  return true;
+}
+
+bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
+  if (t1 == NULL || t2 == NULL) {
+    return t1 == t2;
+  }
+  if (t1->declarator != t2->declarator) {
+    return false;
+  }
+  // `restrict` is an optimizer hint, not part of a type's identity for
+  // redeclaration or overload purposes (e.g. `const char *restrict` and
+  // `const char *` name the same parameter type), so ignore it when comparing
+  // qualifiers.  The remaining cv-qualifiers stay significant so that template
+  // argument identities such as `const T` versus `T` remain distinct.
+  if ((t1->qualifiers & ~kQualRestrict) != (t2->qualifiers & ~kQualRestrict)) {
+    return false;
+  }
+  // Dependent (unknown) leaves need care.  Only a leaf primitive carries a
+  // template parameter's positional identity, so pointer/reference/array
+  // wrappers fall through to the structural comparison below and recurse into
+  // `next` (their declarator shapes already matched); function types likewise
+  // compare their full signature via FunctionPrototypesEqual.  At a dependent
+  // leaf, distinct template parameters (`T` vs `U`), a parameter versus a
+  // concrete type, and a parameter versus a dependent member type (`T` vs
+  // `T::type`) are all different signatures and must stay distinct so that
+  // overloads like `f(const T&)` and `f(const U&)` do not collide.  Only when
+  // neither leaf is a positionally-identified parameter do we keep the lenient
+  // "unknown matches anything" behavior, so that an earlier error involving a
+  // genuinely unresolved symbol does not cascade into a spurious overload
+  // clash.
+  if (t1->declarator == kDeclPrimitive &&
+      ((t1->type & kTypeUnknown) != 0 || (t2->type & kTypeUnknown) != 0)) {
+    bool t1_param = t1->template_parameter_index >= 0;
+    bool t2_param = t2->template_parameter_index >= 0;
+    if (t1_param || t2_param) {
+      if (t1_param != t2_param ||
+          t1->template_parameter_index != t2->template_parameter_index) {
+        return false;
+      }
+      String* m1 = t1->dependent_member_name;
+      String* m2 = t2->dependent_member_name;
+      if ((m1 == NULL) != (m2 == NULL)) {
+        return false;
+      }
+      return m1 == NULL || StringEqualString(m1, m2);
+    }
+    // A dependent member of a template-id scope (`enable_if<Cond, T>::type`):
+    // the scope template, member name, and the scope's arguments -- which may
+    // include value-dependent SFINAE conditions -- distinguish otherwise
+    // identically-spelled unknown leaves (so two enable_if-guarded overloads are
+    // not treated as one).
+    if (t1->template_origin != NULL && t2->template_origin != NULL) {
+      if (t1->template_origin != t2->template_origin) {
+        return false;
+      }
+      String* m1 = t1->dependent_member_name;
+      String* m2 = t2->dependent_member_name;
+      if ((m1 == NULL) != (m2 == NULL)) {
+        return false;
+      }
+      if (m1 != NULL && !StringEqualString(m1, m2)) {
+        return false;
+      }
+      return TemplateArgumentVectorEqual(t1->template_arguments,
+                                         t2->template_arguments);
+    }
+    return true;
+  }
+  switch (t1->declarator) {
+    case kDeclArray:
+      if (!TypeEqual(t1->next, t2->next)) {
+        return false;
+      }
+      return t1->info.array.size.fixed == t2->info.array.size.fixed;
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      return TypeEqual(t1->next, t2->next);
+
+    case kDeclFunction:
+      if (!TypeEqual(t1->next, t2->next)) {
+        return false;
+      }
+      return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
+    case kDeclPrimitive:
+      if (TypeIsStructOrUnion(t1) || TypeIsStructOrUnion(t2)) {
+        if (!TypeIsStructOrUnion(t1) || !TypeIsStructOrUnion(t2) ||
+            t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
+          return false;
+        }
+        if (t1->template_origin != NULL || t2->template_origin != NULL) {
+          if (t1->template_origin == t2->template_origin &&
+              TemplateArgumentVectorEqual(t1->template_arguments,
+                                          t2->template_arguments)) {
+            return true;
+          }
+          // Some substitution paths preserve the specialization's concrete
+          // Struct but not the outer TypeRecord's template metadata.  Compare
+          // the full specialization spelling (minus its internal unique
+          // suffix), never merely its data layout or primary-template name.
+          return CXXStructSameTemplateFamilyForTypeEquality(
+              t1->info.struct_info, t2->info.struct_info);
+        }
+        return CXXStructSameTemplateFamilyForTypeEquality(t1->info.struct_info,
+                                                          t2->info.struct_info);
+      }
+      if (TypeIsEnum(t1) && TypeIsEnum(t2)) {
+        if (TypeIsScopedEnum(t1) || TypeIsScopedEnum(t2)) {
+          return t1->info.enum_info == t2->info.enum_info &&
+                 t1->qualifiers == t2->qualifiers;
+        }
+        // Enums can be char, signed int or unsigned int.
+        int e1 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+        int e2 = t2->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
+        return e1 == e2 && t1->qualifiers == t2->qualifiers;
+
+      }
+      return t1->type == t2->type && t1->qualifiers == t2->qualifiers;
+  }
+}
+
+bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->type->info.struct_info == to ||
+        StructIsDerivedFrom(base->type->info.struct_info, to, public_only)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  return StructIsDerivedFrom(from->info.struct_info, to->info.struct_info,
+                             /*public_only=*/true);
+}
+
+static bool StructBaseOffset(Struct* from, Struct* to, bool public_only,
+                             int inherited_offset, int* offset) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      if (offset != NULL) {
+        *offset = base_offset;
+      }
+      return true;
+    }
+    if (StructBaseOffset(base->type->info.struct_info, to, public_only,
+                         base_offset, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeBaseOffset(TypeRecord* from, TypeRecord* to, bool public_only,
+                    int* offset) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  if (from->info.struct_info == to->info.struct_info) {
+    if (offset != NULL) {
+      *offset = 0;
+    }
+    return true;
+  }
+  return StructBaseOffset(from->info.struct_info, to->info.struct_info,
+                          public_only, 0, offset);
+}
+
+static void CXXBaseAdjustmentSet(CXXBaseAdjustment* adjustment,
+                                 CXXBaseAdjustmentKind kind,
+                                 int byte_offset,
+                                 int vbtable_index) {
+  if (adjustment == NULL) {
+    return;
+  }
+  adjustment->kind = kind;
+  adjustment->byte_offset = byte_offset;
+  adjustment->vbtable_index = vbtable_index;
+}
+
+static bool StructNonVirtualBaseOffset(Struct* from, Struct* to,
+                                       bool public_only,
+                                       int inherited_offset,
+                                       int* offset) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if (base->is_virtual ||
+        (public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      if (offset != NULL) {
+        *offset = base_offset;
+      }
+      return true;
+    }
+    if (StructNonVirtualBaseOffset(base->type->info.struct_info, to,
+                                   public_only, base_offset, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool StructBaseAdjustment(Struct* from, Struct* to, bool public_only,
+                                 int inherited_offset,
+                                 CXXBaseAdjustment* adjustment) {
+  if (from == NULL || to == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < from->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = from->virtual_bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    int virtual_base_offset = 0;
+    if (base_struct == to ||
+        StructNonVirtualBaseOffset(base_struct, to, public_only, 0,
+                                   &virtual_base_offset)) {
+      CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentVirtual,
+                           virtual_base_offset, base->vbtable_index);
+      return true;
+    }
+  }
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if ((public_only && base->access != kAccessPublic) ||
+        base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (base->is_virtual) {
+      continue;
+    }
+    int base_offset = inherited_offset + base->byte_offset;
+    if (base->type->info.struct_info == to) {
+      CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentStatic,
+                           base_offset, -1);
+      return true;
+    }
+    if (StructBaseAdjustment(base->type->info.struct_info, to, public_only,
+                             base_offset, adjustment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
+                        CXXBaseAdjustment* adjustment) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  if (from->info.struct_info == to->info.struct_info) {
+    CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentNone, 0, -1);
+    return true;
+  }
+  return StructBaseAdjustment(from->info.struct_info, to->info.struct_info,
+                              public_only, 0, adjustment);
+}
+
+bool TypeIsAbstractClass(TypeRecord* type) {
+  return CompilerIsCXX() && type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL && type->info.struct_info->is_abstract;
+}
+
+bool TypeContainsAuto(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if ((t->type & kTypeAuto) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeFunctionReturnContainsAuto(TypeRecord* type) {
+  return TypeIsFunction(type) && TypeContainsAuto(type->next);
+}
+
+static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {
+  TypeRecord* result = NULL;
+  switch (pattern->declarator) {
+    case kDeclPointer:
+      result = NewPointerTypeRecord(pattern->qualifiers);
+      break;
+    case kDeclReference:
+      result = NewReferenceTypeRecord(pattern->qualifiers, false);
+      break;
+    case kDeclRValueReference:
+      result = NewReferenceTypeRecord(pattern->qualifiers, true);
+      break;
+    case kDeclArray:
+      result = NewBasicArrayTypeRecord(pattern->qualifiers,
+                                       pattern->info.array.size.fixed,
+                                       pattern->info.array.is_vla);
+      break;
+    default:
+      result = TypeRecordCopy(pattern);
+      break;
+  }
+  return result;
+}
+
+TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
+  if (pattern == NULL || initializer_type == NULL) {
+    return NULL;
+  }
+  if ((pattern->type & kTypeAuto) != 0 &&
+      pattern->declarator == kDeclPrimitive) {
+    TypeRecord* deduced = TypeRecordCopy(initializer_type);
+    deduced->qualifiers |= pattern->qualifiers;
+    TypeRecordCalculateSize(deduced);
+    return deduced;
+  }
+
+  switch (pattern->declarator) {
+    case kDeclPointer:
+      if (!TypeIsPointerOrArray(initializer_type)) {
+        return NULL;
+      }
+      break;
+    case kDeclArray:
+      if (!TypeIsArray(initializer_type)) {
+        return NULL;
+      }
+      break;
+    case kDeclReference:
+    case kDeclRValueReference:
+      break;
+    default:
+      if ((pattern->type & kTypeAuto) != 0) {
+        return NULL;
+      }
+      return TypeRecordCopy(pattern);
+  }
+
+  TypeRecord* next_initializer =
+      TypeIsPointerOrArray(initializer_type) &&
+              pattern->declarator != kDeclReference &&
+              pattern->declarator != kDeclRValueReference
+          ? initializer_type->next
+          : initializer_type;
+  TypeRecord* next = TypeDeduceAuto(pattern->next, next_initializer);
+  if (next == NULL) {
+    return NULL;
+  }
+  TypeRecord* result = NewDeclaratorLike(pattern);
+  TypeRecordChain(result, next);
+  result->type = next->type;
+  TypeRecordCalculateSize(result);
+  return result;
+}
+
+bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
+  if (TypeEqual(to, from)) {
+    return true;
+  }
+  // A pointer can be assigned to a const pointer of the same type.
+  if (TypeIsPointerOrArray(to) && TypeIsPointerOrArray(from) &&
+      to->next != NULL && from->next != NULL) {
+    if (TypeBaseOffset(from->next, to->next, /*public_only=*/true, NULL)) {
+      return true;
+    }
+    int to_quals = to->next->qualifiers & ~kQualConst;
+    int from_quals = from->next->qualifiers & ~kQualConst;
+    if (to_quals == from_quals) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
+  if (t1 == NULL || t2 == NULL) {
+    return t1 == t2;
+  }
+  if (t1->declarator != t2->declarator) {
+    return false;
+  }
+  switch (t1->declarator) {
+    case kDeclArray:
+      if (!TypeEqual(t1->next, t2->next)) {
+        return false;
+      }
+      return t1->info.array.size.fixed == t2->info.array.size.fixed;
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      return TypeEqual(t1->next, t2->next);
+
+    case kDeclFunction:
+      if (!TypeEqual(t1->next, t2->next)) {
+        return false;
+      }
+      return FunctionPrototypesEqual(&t1->info.function, &t2->info.function);
+    case kDeclPrimitive: {
+      Type a = t1->type & ~(kTypeUnsigned | kTypeSigned);
+      Type b = t2->type & ~(kTypeUnsigned | kTypeSigned);
+      return a == b;
+    }
+  }
+}
+
+static void FunctionPrototypesDetails(SourceLocation location, FunctionInfo* a, FunctionInfo* b) {
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  if (a->prototype.length != b->prototype.length) {
+    ReportNote(filename, lineno, "Different number of arguments: %zd vs %zd",
+               a->prototype.length, b->prototype.length);
+    return;
+  }
+  for (size_t i = 0; i < a->prototype.length; i++) {
+    Symbol* s1 = a->prototype.value.p[i];
+    Symbol* s2 = b->prototype.value.p[i];
+    if (!TypeEqual(s1->type, s2->type)) {
+      TypeErrorDetails(location, s1->type, s2->type);
+      ReportNote(filename, lineno, "  for argument #%zd", i+1);
+    }
+  }
+}
+
+void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
+  String error1 = {0};
+  String error2 = {0};
+  TypeRecordToString(t1, &error1);
+  TypeRecordToString(t2, &error2);
+
+  const char* filename;
+  int lineno;
+  int start, end;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+    
+  if (t1->declarator != t2->declarator) {
+    ReportNote(filename, lineno, "Declarators '%s' and '%s' are different",
+               error1.value, error2.value);
+    return;
+  }
+  switch (t1->declarator) {
+    case kDeclArray:
+    case kDeclPointer:
+    case kDeclReference:
+    case kDeclRValueReference:
+      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
+                 error1.value, error2.value);
+      TypeErrorDetails(location, t1->next, t2->next);
+      break;
+
+    case kDeclFunction:
+      ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
+                 error1.value, error2.value);
+      TypeErrorDetails(location, t1->next, t2->next);
+      return FunctionPrototypesDetails(location, &t1->info.function, &t2->info.function);
+      
+    case kDeclPrimitive:
+      if (t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
+        ReportNote(filename, lineno, "Types '%s' and '%s' are different",
+                   error1.value, error2.value);
+
+      }
+  }
+  StringDestruct(&error1);
+  StringDestruct(&error1);
+}
+

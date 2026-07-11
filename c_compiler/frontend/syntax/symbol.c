@@ -8,6 +8,7 @@
 
 #include "symbol.h"
 #include "type.h"
+#include "type_internal.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -21,11 +22,6 @@
 
 bool StorageIs(Storage storage, Storage value) {
   return (storage & value) != 0;
-}
-
-static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
-  (void)data;
-  return node;
 }
 
 // Normalizes an attribute name by stripping a surrounding "__" pair, so that

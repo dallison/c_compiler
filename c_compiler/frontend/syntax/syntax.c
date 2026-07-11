@@ -19,6 +19,7 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "type.h"
+#include "type_internal.h"
 #include "errors.h"
 #include "compiler.h"
 
@@ -636,6 +637,30 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
       }
       return true;
   }
+}
+
+bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(operator))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool is_conversion = SyntaxLookingAtType(syntax);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+
+  if (!is_conversion) {
+    return SyntaxParseOperatorFunctionName(syntax, name);
+  }
+
+  LexNextToken(syntax->lex);
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  TypeRecord* type = ParseCXXConversionType(&parser);
+  ConversionOperatorName(type, name);
+  TypeParserDestruct(&parser);
+  return true;
 }
 
 static bool ParseQualifiedIdentifierComponent(Syntax* syntax, String* component) {
@@ -1544,11 +1569,6 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   StringDestruct(&message);
   ASTNodeDelete(expr);
   return NULL;
-}
-
-// Identity transform used when deep-cloning an AST node.
-static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
-  return node;
 }
 
 // Deep-clone an initializer so that the same value can be used for each index
@@ -2521,7 +2541,7 @@ static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
                           member_name);
 }
 
-static void AppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* func,
+static void SyntaxAppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* func,
                                            Vector* body,
                                            SourceLocation location) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_destructor ||
@@ -3701,7 +3721,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                        &cxx_initializers, sym->location);
     AppendCXXDefaultedMemberwiseAssignments(sym->type, body, sym->location);
     AppendCXXDefaultedAssignmentReturnThis(sym->type, body, sym->location);
-    AppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
+    SyntaxAppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
@@ -3788,7 +3808,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
                                        &cxx_initializers, sym->location);
-    AppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
+    SyntaxAppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
     syntax->context = old_context;

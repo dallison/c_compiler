@@ -188,7 +188,19 @@ davecc_library(davecc_compiler
   c_compiler/frontend/syntax/symbol.c
   c_compiler/frontend/syntax/symbol_table.c
   c_compiler/frontend/syntax/syntax.c
-  c_compiler/frontend/syntax/type.c
+  c_compiler/frontend/syntax/type_core.c
+  c_compiler/frontend/syntax/type_print.c
+  c_compiler/frontend/syntax/type_compare.c
+  c_compiler/frontend/syntax/type_parse.c
+  c_compiler/frontend/syntax/type_enum.c
+  c_compiler/frontend/syntax/type_member.c
+  c_compiler/frontend/syntax/type_layout.c
+  c_compiler/frontend/syntax/type_inheritance.c
+  c_compiler/frontend/syntax/type_special_member.c
+  c_compiler/frontend/syntax/type_class.c
+  c_compiler/frontend/syntax/type_template_substitute.c
+  c_compiler/frontend/syntax/type_template_clone.c
+  c_compiler/frontend/syntax/type_template_instantiate.c
   c_compiler/optimization/codemotion.c
   c_compiler/optimization/constprop.c
   c_compiler/optimization/gvn.c

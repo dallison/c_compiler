@@ -1,0 +1,100 @@
+//
+//  type_template.h
+//  c_compiler
+//
+
+#ifndef type_template_h
+#define type_template_h
+
+#include "type_core.h"
+
+struct Syntax;
+
+struct ASTNode* TypeSubstituteTemplateExpression(struct Syntax* syntax,
+                                                struct ASTNode* expr,
+                                                Vector* args,
+                                                SourceLocation location);
+TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
+                                       TypeRecord* type,
+                                       Vector* args);
+Vector* TypeSubstituteTemplateArgumentVector(struct Syntax* syntax,
+                                             Vector* template_args,
+                                             Vector* args);
+
+void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op);
+Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
+                                        Vector* args);
+void TypeEnsureTemplateMemberFunctionDefinition(struct Syntax* syntax,
+                                                Symbol* symbol);
+Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,
+                                           Vector* actuals);
+Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+    struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
+    Vector* actuals);
+Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(struct Syntax* syntax,
+                                                     Symbol* templ,
+                                                     Vector* actuals,
+                                                     size_t first_formal_arg);
+Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+    struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
+    Vector* actuals, size_t first_formal_arg);
+bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+    Symbol* templ, Vector* explicit_args, Vector* actuals,
+    size_t first_formal_arg);
+bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right);
+// Substitute explicit template arguments into a known function template's
+// return type without instantiating its body.  Used to preserve the type of
+// dependent calls in unevaluated contexts such as decltype.
+TypeRecord* TypeSubstituteFunctionTemplateReturnType(
+    struct Syntax* syntax, Symbol* function_template, Vector* explicit_args);
+Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
+                                            Symbol* templ,
+                                            Vector* explicit_args,
+                                            Vector* actuals,
+                                            size_t first_formal_arg);
+Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
+                                                    Vector* actuals,
+                                                    size_t first_formal_arg);
+TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
+                                         Vector* args);
+// If `type` (or a pointed-to/referenced type in its spine) is a class-template
+// primary carrying concrete template arguments, replace that primary with the
+// corresponding specialization.  Used when a type like `variant<int,long>` is
+// still represented as the primary `variant` plus args (common inside function
+// templates) and member lookup must see the instantiated members.
+TypeRecord* TypeMaterializeClassTemplateSpecialization(struct Syntax* syntax,
+                                                       TypeRecord* type);
+// Instantiate a variable template's initializer with concrete template
+// arguments and constant-fold it to an integer.  Returns true on success.
+bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,
+                                             Symbol* var_template, Vector* args,
+                                             int64_t* out);
+// Instantiate the type of a variable template (e.g. `in_place_index<1>` ->
+// `in_place_index_t<1>`) with concrete template arguments.  Used for variable
+// templates whose value is a class-type tag object.  Returns NULL on failure.
+TypeRecord* TypeInstantiateVariableTemplateType(struct Syntax* syntax,
+                                                Symbol* var_template,
+                                                Vector* args);
+void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
+TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
+                                             Symbol* class_template,
+                                             Vector* actuals,
+                                             bool allow_explicit);
+TypeRecord* TypeDeduceClassTemplateFromPlaceholder(struct Syntax* syntax,
+                                                   TypeRecord* placeholder,
+                                                   Vector* actuals,
+                                                   bool allow_explicit,
+                                                   bool* alias_rejected);
+TypeRecord* TypeClassTemplatePlaceholderFromSymbol(Symbol* symbol);
+bool TypeIsClassTemplatePlaceholder(TypeRecord* type);
+Symbol* TypeClassTemplatePlaceholderOrigin(TypeRecord* type);
+bool TypeClassTemplatePlaceholderAcceptsDeduced(TypeRecord* placeholder,
+                                                TypeRecord* deduced);
+bool TypeIsCXXInitializerList(TypeRecord* type);
+TypeRecord* TypeCXXInitializerListElement(TypeRecord* type);
+TypeRecord* TypeInstantiateCXXInitializerList(struct Syntax* syntax,
+                                              TypeRecord* element_type);
+TypeRecord* TypeFindCXXComparisonCategory(const char* category_name);
+
+
+#endif /* type_template_h */

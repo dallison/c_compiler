@@ -1,0 +1,69 @@
+//
+//  type_core.h
+//  c_compiler
+//
+//  TypeRecord lifecycle, factories, and struct/enum shell APIs.
+//
+
+#ifndef type_core_h
+#define type_core_h
+
+#include "type_defs.h"
+
+TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
+TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
+void TypeRecordDelete(TypeRecord* record);
+// Free every TypeRecord struct allocated from the type arena.  Call once, at
+// CompilerDestruct, after all type-referencing structures are torn down.
+void TypeRecordArenaRelease(void);
+// Free every Struct info (and its members) in one pass.  Call once, at
+// CompilerDestruct, after the AST/symbols/tags are gone but before
+// TypeRecordArenaRelease.  Structs are freed here rather than by refcount
+// because they can form reference cycles.
+void StructRegistryRelease(void);
+TypeRecord* TypeRecordCalculateSize(TypeRecord* record);
+void TypeRecordChain(TypeRecord* from, TypeRecord* to);
+void TypeRecordIncRef(TypeRecord* record);
+void TypeRecordDecRef(TypeRecord* record);
+TypeRecord* TypeRecordCopy(TypeRecord* record);
+int TypeRecordAlignment(TypeRecord* record);
+void TemplateParameterDelete(TemplateParameter* param);
+void TemplateArgumentDelete(TemplateArgument* arg);
+TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
+Vector* TemplateArgumentVectorCopy(Vector* args);
+TypeRecord* NewPointerTypeRecord(Qualifiers quals);
+TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
+TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
+TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);
+
+TypeRecord* NewFunctionTypeRecord(void);
+TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
+Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
+                         SourceLocation location);
+void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
+                                   SourceLocation location);
+
+StructMember* NewStructMember(Symbol* symbol);
+Struct* NewStruct(bool is_union);
+void StructDelete(Struct* s);
+void StructMemberDelete(StructMember* member);
+
+// Records a C++ 'friend class X;' relationship: members of friend_class may
+// access the private and protected members of str.  Duplicates are ignored.
+void StructAddFriendClass(Struct* str, Struct* friend_class);
+// Records a C++ 'friend <function>;' relationship: the named function may
+// access the private and protected members of str.  Duplicates are ignored.
+void StructAddFriendFunction(Struct* str, Symbol* friend_function);
+bool StructMemberIsBitField(StructMember* member);
+
+Symbol* NewEnumConstant(const char* name, int value);
+Symbol* NewScopedEnumConstant(const char* name, int value, TypeRecord* enum_type);
+Enum* NewEnum(void);
+void EnumDelete(Enum* e);
+Symbol* EnumFindConstant(Enum* e, String* name);
+// What is the size of a given type in bytes?
+int SizeofType(Type type);
+int SizeofPointer(void);
+TypeRecord* NewSizeTypeRecord(void);
+
+#endif /* type_core_h */
