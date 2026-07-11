@@ -135,6 +135,49 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
                           syntax->lex->current_token_location, left, right);
 }
 
+static ASTNode* NewQualifiedBaseMemberAccessFromThis(
+    Syntax* syntax, FullyQualifiedIdentifier* name) {
+  if (!CompilerIsCXX() || name == NULL || !name->is_qualified ||
+      name->components.length < 2) {
+    return NULL;
+  }
+  Symbol* this_symbol = FindThisSymbol(syntax);
+  if (this_symbol == NULL || this_symbol->type == NULL ||
+      !TypeIsStructOrUnionPointer(this_symbol->type) ||
+      this_symbol->type->next == NULL ||
+      this_symbol->type->next->info.struct_info == NULL) {
+    return NULL;
+  }
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
+      syntax, name, name->components.length - 1);
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  TypeRecord* receiver_type = this_symbol->type->next;
+  if (receiver_type->info.struct_info != owner->type->info.struct_info &&
+      !TypeIsDerivedFrom(receiver_type, owner->type)) {
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+  StructMember* member = FindStructMember(owner->type->info.struct_info,
+                                          &member_name);
+  if (member == NULL || member->is_static) {
+    StringDestruct(&member_name);
+    return NULL;
+  }
+  ASTNode* left =
+      NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
+  ASTNode* right = NewStringConstantASTNode(NewString(member_name.value), NULL,
+                                            syntax->lex->current_token_location);
+  StringDestruct(&member_name);
+  right->flags |= kASTQualifiedName;
+  return NewBinaryASTNode(AST_OP(arrow), NULL,
+                          syntax->lex->current_token_location, left, right);
+}
+
 // Resolve an unqualified name that refers to a `static` data member of the
 // enclosing class.  Non-static members are reached through the implicit `this`
 // (see NewMemberAccessFromThis); a static member has no `this`, and inside a
@@ -824,6 +867,11 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
   if (symbol == NULL) {
     if (name.is_qualified) {
+      ASTNode* member_access = NewQualifiedBaseMemberAccessFromThis(syntax, &name);
+      if (member_access != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return member_access;
+      }
       ASTNode* dependent = BuildDependentQualifiedValueName(
           syntax, &name, lex->current_token_location);
       if (dependent != NULL) {

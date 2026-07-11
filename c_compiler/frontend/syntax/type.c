@@ -6454,6 +6454,29 @@ static ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
           concrete->info.struct_info != NULL) {
         StructMember* member = FindStructMember(
             concrete->info.struct_info, id->symbol->type->dependent_member_name);
+        if (member != NULL && member->symbol != NULL && !member->is_static &&
+            clone->to_owner != NULL && clone->to_owner->tag_symbol != NULL &&
+            clone->to_owner->tag_symbol->type != NULL &&
+            (clone->to_owner == concrete->info.struct_info ||
+             TypeIsDerivedFrom(clone->to_owner->tag_symbol->type, concrete))) {
+          Symbol* this_symbol = NULL;
+          if (clone->to_func != NULL && TypeIsFunction(clone->to_func) &&
+              clone->to_func->info.function.prototype.length > 0) {
+            Symbol* first = clone->to_func->info.function.prototype.value.p[0];
+            if (first != NULL && strcmp(first->name.value, "this") == 0) {
+              this_symbol = first;
+            }
+          }
+          if (this_symbol != NULL) {
+            ASTNode* left = NewIdentifierASTNode(this_symbol, node->location);
+            ASTNode* right = NewStringConstantASTNode(
+                NewString(member->symbol->name.value), NULL, node->location);
+            ASTNode* access = NewBinaryASTNode(AST_OP(arrow), NULL,
+                                               node->location, left, right);
+            TypeRecordDelete(concrete);
+            return access;
+          }
+        }
         if (member != NULL && member->symbol != NULL &&
             (member->is_static ||
              StorageIs(member->symbol->storage, STO(typedef)) ||
@@ -7992,16 +8015,51 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
   clone.to_owner = TypeIsFunction(func) ? func->info.function.cxx_member_owner
                                         : NULL;
   if (from_func != NULL && TypeIsFunction(from_func) && TypeIsFunction(func)) {
-    size_t count = from_func->info.function.prototype.length;
-    if (count > func->info.function.prototype.length) {
-      count = func->info.function.prototype.length;
-    }
-    for (size_t i = 0; i < count; i++) {
+    size_t to_index = 0;
+    for (size_t i = 0; i < from_func->info.function.prototype.length; i++) {
       Symbol* from_formal = from_func->info.function.prototype.value.p[i];
-      Symbol* to_formal = func->info.function.prototype.value.p[i];
-      if (from_formal == NULL || to_formal == NULL) {
+      if (from_formal == NULL) {
         continue;
       }
+      if (from_formal->flags.is_parameter_pack) {
+        int pack_index = -1;
+        size_t pack_length = 0;
+        bool found_pack = FindPackExpansionInType(from_formal->type, args,
+                                                  &pack_index, &pack_length);
+        TemplateArgument* pack =
+            found_pack && pack_index >= 0 && (size_t)pack_index < args->length
+                ? args->value.p[pack_index]
+                : NULL;
+        bool expandable = pack != NULL && pack->pack_arguments != NULL;
+        if (!expandable) {
+          if (to_index < func->info.function.prototype.length) {
+            MapKeyValue kv;
+            kv.key.p = from_formal;
+            kv.value.p = func->info.function.prototype.value.p[to_index++];
+            MapInsert(&clone.symbol_map, kv);
+          }
+          continue;
+        }
+        if (pack_length == 0) {
+          pack_length = pack->pack_arguments->length;
+        }
+        Vector* replacements = NewVector();
+        for (size_t j = 0; j < pack_length &&
+                           to_index < func->info.function.prototype.length;
+             j++) {
+          VectorAppend(replacements,
+                       func->info.function.prototype.value.p[to_index++]);
+        }
+        MapKeyValue kv;
+        kv.key.p = from_formal;
+        kv.value.p = replacements;
+        MapInsert(&clone.pack_symbol_map, kv);
+        continue;
+      }
+      if (to_index >= func->info.function.prototype.length) {
+        break;
+      }
+      Symbol* to_formal = func->info.function.prototype.value.p[to_index++];
       MapKeyValue kv;
       kv.key.p = from_formal;
       kv.value.p = to_formal;
@@ -8042,7 +8100,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
   parser->template_substitution_target = saved_substitution_target;
   compiler->current_class_access_context = saved_access_context;
   MapDestruct(&clone.symbol_map);
-  MapDestruct(&clone.pack_symbol_map);
+  MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);
 }
 
 /* True if a template argument is still dependent and therefore the
@@ -17957,6 +18015,35 @@ static void AddInjectedEnumName(TypeParser* parser, Symbol* tag) {
   }
 }
 
+static Symbol* EnsureCXXClassHeadTagForBaseClause(TypeParser* parser,
+                                                  String* tag_name,
+                                                  bool is_union,
+                                                  bool is_class) {
+  if (!CompilerIsCXX() || tag_name == NULL || tag_name->length == 0) {
+    return NULL;
+  }
+  Symbol* tag = SyntaxFindTopScopeTag(parser->syntax, tag_name);
+  if (tag != NULL) {
+    CheckTagType(parser, tag, is_union, false);
+    if (tag->type != NULL && TypeIsStructOrUnion(tag->type) &&
+        tag->type->info.struct_info != NULL) {
+      tag->type->info.struct_info->is_class = is_class;
+    }
+    return tag;
+  }
+  Struct* str = NewStruct(is_union);
+  str->is_class = is_class;
+  TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
+                                    kQualPlain);
+  type->info.struct_info = str;
+  tag = NewSymbol(tag_name->value, type, STO(implicit));
+  tag->flags.is_forward_declared = true;
+  str->tag_name = &tag->name;
+  str->tag_symbol = tag;
+  SyntaxAddTag(parser->syntax, tag);
+  return tag;
+}
+
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases) {
@@ -18286,7 +18373,19 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     }
   }
 
+  Symbol* class_head_tag = NULL;
+  Struct* saved_base_member_owner = parser->cxx_member_owner;
+  if (!has_qualified_tag && !is_full_specialization &&
+      !is_partial_specialization && LexLookingAt(parser->lex, TOK(colon))) {
+    class_head_tag =
+        EnsureCXXClassHeadTagForBaseClause(parser, &tag_name, is_union, is_class);
+    if (class_head_tag != NULL && class_head_tag->type != NULL &&
+        TypeIsStructOrUnion(class_head_tag->type)) {
+      parser->cxx_member_owner = class_head_tag->type->info.struct_info;
+    }
+  }
   ParseCXXBaseSpecifiers(parser, &bases, is_union, is_class);
+  parser->cxx_member_owner = saved_base_member_owner;
   if (LexMatch(parser->lex, TOK(lbrace))) {
     if (has_qualified_tag) {
       SyntaxError(parser->syntax, "Cannot define qualified struct tag %s",

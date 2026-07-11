@@ -4003,6 +4003,13 @@ static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
     }
     score += rank;
   }
+  if (func->info.function.varargs && num_actual_args > num_user_formal_args) {
+    // [over.ics.rank]: an ellipsis conversion sequence is worse than any
+    // standard or user-defined conversion sequence.  Keep it viable for true
+    // varargs calls, but do not let ignored tail arguments make `f(T, ...)`
+    // look better than an overload with declared parameters for those arguments.
+    score += 1000 * (int)(num_actual_args - num_user_formal_args);
+  }
   return score;
 }
 
