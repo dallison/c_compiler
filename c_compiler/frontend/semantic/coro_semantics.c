@@ -368,18 +368,11 @@ static Symbol* CoroFollowUsingAlias(Symbol* symbol) {
   return symbol;
 }
 
-/* Add `ns` and all its enclosing namespaces (up to global) to the set used for
- * argument-dependent lookup of operator co_await. */
-static void CoroADLAddNamespace(Vector* namespaces, Namespace* ns) {
-  while (ns != NULL) {
-    if (!CoroVectorContainsPointer(namespaces, ns)) {
-      VectorAppend(namespaces, ns);
-    }
-    if (ns == compiler->global_namespace) {
-      break;
-    }
-    ns = ns->parent;
-  }
+/* Add associated namespaces for operator co_await ADL, including inline and
+ * anonymous namespace closure in both directions. */
+static void CoroADLAddAssociatedNamespaceClosure(Vector* namespaces,
+                                                 Namespace* ns) {
+  NamespaceCollectADLAssociatedNamespaces(ns, namespaces);
 }
 
 /* Strip references/pointers/arrays to reach the underlying type for ADL. */
@@ -405,9 +398,10 @@ static void CoroADLCollectNamespacesForType(TypeRecord* type,
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
     if (str->tag_symbol != NULL) {
-      CoroADLAddNamespace(namespaces, str->tag_symbol->namespace_ != NULL
-                                          ? str->tag_symbol->namespace_
-                                          : compiler->global_namespace);
+      CoroADLAddAssociatedNamespaceClosure(
+          namespaces, str->tag_symbol->namespace_ != NULL
+                            ? str->tag_symbol->namespace_
+                            : compiler->global_namespace);
     }
     for (size_t i = 0; i < str->bases.length; i++) {
       CXXBaseSpecifier* base = str->bases.value.p[i];
@@ -418,9 +412,9 @@ static void CoroADLCollectNamespacesForType(TypeRecord* type,
   } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
              type->info.enum_info->tag_symbol != NULL) {
     Symbol* tag = type->info.enum_info->tag_symbol;
-    CoroADLAddNamespace(namespaces, tag->namespace_ != NULL
-                                        ? tag->namespace_
-                                        : compiler->global_namespace);
+    CoroADLAddAssociatedNamespaceClosure(namespaces, tag->namespace_ != NULL
+                                                      ? tag->namespace_
+                                                      : compiler->global_namespace);
   }
   if (type->template_arguments != NULL) {
     for (size_t i = 0; i < type->template_arguments->length; i++) {
@@ -449,12 +443,32 @@ static void CoroADLAddFunctionOverloadCandidates(Vector* candidates,
 }
 
 /* Look up `name` in namespace `ns` (or global) and add its overloads. */
+static void CoroAddCollectedFunctionSymbols(Vector* candidates, Vector* functions) {
+  for (size_t i = 0; i < functions->length; i++) {
+    Symbol* sym = (Symbol*)functions->value.p[i];
+    Symbol* effective = CoroFollowUsingAlias(sym);
+    if (effective != NULL && effective->type != NULL &&
+        TypeIsFunction(effective->type) &&
+        !CoroVectorContainsPointer(candidates, effective)) {
+      VectorAppend(candidates, effective);
+    }
+  }
+}
+
 static void CoroADLAddNamedFunctionCandidates(String* name, Namespace* ns,
                                               Vector* candidates) {
-  Symbol* found = (ns == NULL || ns == compiler->global_namespace)
-                      ? FindGlobalSymbol(name)
-                      : NamespaceFindSymbol(ns, name);
-  CoroADLAddFunctionOverloadCandidates(candidates, found);
+  Vector functions;
+  VectorInit(&functions);
+  if (ns == NULL || ns == compiler->global_namespace) {
+    NamespaceCollectFunctionSymbolsInInlineSet(compiler->global_namespace, name,
+                                               &functions);
+    CoroAddCollectedFunctionSymbols(candidates, &functions);
+    CoroADLAddFunctionOverloadCandidates(candidates, FindGlobalSymbol(name));
+  } else {
+    NamespaceCollectFunctionSymbolsInInlineSet(ns, name, &functions);
+    CoroAddCollectedFunctionSymbols(candidates, &functions);
+  }
+  VectorDestruct(&functions);
 }
 
 /* Gather `name` overloads from all namespaces associated with `type` (ADL). */
@@ -1557,17 +1571,16 @@ static TypeRecord* ResolveCoroutineTraitsPromiseType(TypeRecord* function_type) 
       !TypeIsFunction(function_type) || function_type->next == NULL) {
     return NULL;
   }
-  String std_name;
-  StringInit(&std_name, "std");
-  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
-  StringDestruct(&std_name);
+  Namespace* std_ns = NamespaceFindStdNamespace();
   if (std_ns == NULL) {
     return NULL;
   }
 
   String traits_name;
   StringInit(&traits_name, "coroutine_traits");
-  Symbol* traits = NamespaceFindSymbol(std_ns, &traits_name);
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(std_ns, &traits_name);
+  Symbol* traits = result.status == kInlineLookupUnique ? result.symbol : NULL;
   StringDestruct(&traits_name);
   if (traits == NULL || !traits->flags.is_template ||
       traits->type == NULL || !TypeIsStructOrUnion(traits->type)) {

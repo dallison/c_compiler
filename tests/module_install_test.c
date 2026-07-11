@@ -105,6 +105,17 @@ int main(void) {
   NamespaceInsertSymbol(mymod, MakeFn("ns_exported", int_type, true));
   NamespaceInsertSymbol(mymod, MakeFn("ns_hidden", int_type, false));
 
+  String inlname;
+  StringInit(&inlname, "inline_ns");
+  bool inline_conflict = false;
+  Namespace* inline_ns =
+      NamespaceFindOrReopenChild(mymod, &inlname, true, &inline_conflict);
+  StringDestruct(&inlname);
+  CHECK(inline_ns != NULL);
+  CHECK(!inline_conflict);
+  CHECK(inline_ns->is_inline);
+  NamespaceInsertSymbol(inline_ns, MakeFn("inline_exported", int_type, true));
+
   Vector ns_roots;
   VectorInit(&ns_roots);
   VectorAppend(&ns_roots, compiler->global_namespace);
@@ -151,6 +162,15 @@ int main(void) {
       StringInit(&name, "ns_hidden");
       CHECK(NamespaceFindSymbolInScope(imported, &name) == NULL);
       StringDestruct(&name);
+
+      Namespace* imported_inline = FindChild(imported, "inline_ns");
+      CHECK(imported_inline != NULL);
+      CHECK(imported_inline->is_inline);
+      if (imported_inline != NULL) {
+        StringInit(&name, "inline_exported");
+        CHECK(NamespaceFindSymbolInScope(imported_inline, &name) != NULL);
+        StringDestruct(&name);
+      }
     }
 
     LoadedModuleDestruct(&loaded);
@@ -158,6 +178,65 @@ int main(void) {
 
   CompilerDelete(compiler);
   compiler = NULL;
+
+  // --- Inline conflict: importer has non-inline child, module merges inline. --
+  {
+    char conflict_path[4096];
+    const char* dir = getenv("TEST_TMPDIR");
+    if (dir == NULL || dir[0] == '\0') {
+      dir = "/tmp";
+    }
+    snprintf(conflict_path, sizeof(conflict_path), "%s/install_conflict.dcm",
+             dir);
+
+    NewCompiler(&options);
+    TypeRecord* conflict_int_type = NewTypeRecord(kTypeInt, kQualPlain);
+    conflict_int_type->size = 4;
+
+    String conflict_name;
+    StringInit(&conflict_name, "conflict_ns");
+    Namespace* inline_src =
+        NamespaceFindOrReopenChild(compiler->global_namespace, &conflict_name,
+                                   true, NULL);
+    StringDestruct(&conflict_name);
+    CHECK(inline_src != NULL);
+    CHECK(inline_src->is_inline);
+    NamespaceInsertSymbol(inline_src,
+                          MakeFn("conflict_fn", conflict_int_type, true));
+
+    Vector conflict_roots;
+    VectorInit(&conflict_roots);
+    VectorAppend(&conflict_roots, compiler->global_namespace);
+
+    ModuleWriteRequest conflict_req = {
+        .module_name = "conflict_mod",
+        .target_triple = "x86_64-unknown-none",
+        .compiler_version = "davecc-test",
+        .flags = 0,
+        .root_symbols = NULL,
+        .root_namespaces = &conflict_roots,
+    };
+    CHECK(ModuleWrite(conflict_path, &conflict_req));
+    VectorDestruct(&conflict_roots);
+    CompilerDelete(compiler);
+    compiler = NULL;
+
+    NewCompiler(&options);
+    StringInit(&conflict_name, "conflict_ns");
+    Namespace* existing =
+        NamespaceFindOrReopenChild(compiler->global_namespace, &conflict_name,
+                                   false, NULL);
+    StringDestruct(&conflict_name);
+    CHECK(existing != NULL);
+    CHECK(!existing->is_inline);
+
+    LoadedModule conflict_loaded;
+    CHECK(ModuleLoad(conflict_path, &conflict_loaded));
+    CHECK(!ModuleInstallLoaded(&conflict_loaded));
+    LoadedModuleDestruct(&conflict_loaded);
+    CompilerDelete(compiler);
+    compiler = NULL;
+  }
 
   // options cleanup
   StringDestruct(&target->value.svalue);

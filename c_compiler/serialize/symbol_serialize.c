@@ -147,6 +147,7 @@ enum {
   kNs_anonymous_child = 6,
   kNs_symbols = 7,
   kNs_tags = 8,
+  kNs_is_inline = 9,
 };
 
 static const WireFieldDesc kNamespaceFields[] = {
@@ -158,6 +159,7 @@ static const WireFieldDesc kNamespaceFields[] = {
     {kNs_anonymous_child, "anonymous_child"},
     {kNs_symbols, "symbols"},
     {kNs_tags, "tags"},
+    {kNs_is_inline, "is_inline"},
 };
 
 // ---------------------------------------------------------------------------
@@ -555,6 +557,7 @@ static bool WriteNamespace(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SWriteStringVal(ctx, buf, kNs_name, &ns->name);
   SWriteStringVal(ctx, buf, kNs_qualified_name, &ns->qualified_name);
   WireWriteBool(buf, kNs_is_anonymous, ns->is_anonymous);
+  WireWriteBool(buf, kNs_is_inline, ns->is_inline);
   SWriteRefVector(ctx, buf, kNs_children, kSerialKindNamespace, &ns->children);
   SWriteRef(ctx, buf, kNs_parent, kSerialKindNamespace, ns->parent);
   SWriteRef(ctx, buf, kNs_anonymous_child, kSerialKindNamespace,
@@ -599,6 +602,9 @@ static bool ReadNamespace(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kNs_is_anonymous:
         WireReadBool(buf, &ns->is_anonymous);
+        break;
+      case kNs_is_inline:
+        WireReadBool(buf, &ns->is_inline);
         break;
       case kNs_children:
         SReadRefVector(ctx, buf, kSerialKindNamespace, &ns->children);

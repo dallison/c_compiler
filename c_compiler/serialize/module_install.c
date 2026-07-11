@@ -64,10 +64,10 @@ static void MergeSymbolNode(BinaryTreeNode* node, int depth, void* data) {
 }
 
 // Recursively merges the exported contents of loaded namespace `src` into the
-// live compiler namespace `dest`.
-static void MergeNamespace(Namespace* dest, Namespace* src) {
+// live compiler namespace `dest`.  Returns false on inline/non-inline conflict.
+static bool MergeNamespace(Namespace* dest, Namespace* src) {
   if (dest == NULL || src == NULL) {
-    return;
+    return false;
   }
 
   MergeContext sym_ctx = {dest, false};
@@ -78,13 +78,20 @@ static void MergeNamespace(Namespace* dest, Namespace* src) {
   for (size_t i = 0; i < src->children.length; i++) {
     Namespace* child = (Namespace*)VectorGet(&src->children, i);
     if (child == NULL || child->is_anonymous) {
-      // Anonymous namespaces have internal linkage and are not importable;
-      // skip them for this phase.
       continue;
     }
-    Namespace* child_dest = NamespaceFindOrCreateChild(dest, &child->name);
-    MergeNamespace(child_dest, child);
+    bool inline_conflict = false;
+    Namespace* child_dest =
+        NamespaceFindOrReopenChild(dest, &child->name, child->is_inline,
+                                   &inline_conflict);
+    if (inline_conflict) {
+      return false;
+    }
+    if (!MergeNamespace(child_dest, child)) {
+      return false;
+    }
   }
+  return true;
 }
 
 bool ModuleInstallLoaded(LoadedModule* m) {
@@ -106,7 +113,9 @@ bool ModuleInstallLoaded(LoadedModule* m) {
   // Namespaced exports (including nested namespaces).
   for (size_t i = 0; i < m->root_namespaces.length; i++) {
     Namespace* ns = (Namespace*)VectorGet(&m->root_namespaces, i);
-    MergeNamespace(compiler->global_namespace, ns);
+    if (!MergeNamespace(compiler->global_namespace, ns)) {
+      return false;
+    }
   }
 
   return true;

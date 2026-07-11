@@ -8,6 +8,7 @@
 
 #include "symbol_table.h"
 #include "compiler.h"
+#include "type.h"
 
 #include <stdlib.h>
 
@@ -93,6 +94,7 @@ Namespace* NewNamespace(const char* name, Namespace* parent, bool is_anonymous) 
   StringInit(&ns->name, name);
   StringInit(&ns->qualified_name, NULL);
   ns->is_anonymous = is_anonymous;
+  ns->is_inline = false;
   InitSymbolTree(&ns->symbol_table);
   InitSymbolTree(&ns->tag_table);
   VectorInit(&ns->children);
@@ -135,6 +137,430 @@ Namespace* NamespaceFindChild(Namespace* parent, String* name) {
   return NULL;
 }
 
+Namespace* NamespaceFindDirectChild(Namespace* parent, String* name) {
+  return NamespaceFindChild(parent, name);
+}
+
+Namespace* NamespaceFindOrReopenChild(Namespace* parent, String* name,
+                                      bool is_inline, bool* inline_conflict) {
+  if (inline_conflict != NULL) {
+    *inline_conflict = false;
+  }
+  Namespace* child = NamespaceFindChild(parent, name);
+  if (child == NULL) {
+    child = NewNamespace(name->value, parent, false);
+    child->is_inline = is_inline;
+    VectorAppend(&parent->children, child);
+    return child;
+  }
+  if (is_inline && !child->is_inline) {
+    if (inline_conflict != NULL) {
+      *inline_conflict = true;
+    }
+  }
+  return child;
+}
+
+void NamespaceForEachInlineChild(Namespace* parent,
+                                 void (*visit)(Namespace* child, void* ctx),
+                                 void* ctx) {
+  if (parent == NULL || visit == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < parent->children.length; i++) {
+    Namespace* child = parent->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      visit(child, ctx);
+    }
+  }
+}
+
+static bool NamespaceVectorContains(Vector* namespaces, Namespace* ns) {
+  for (size_t i = 0; i < namespaces->length; i++) {
+    if (namespaces->value.p[i] == ns) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void NamespaceVectorAdd(Vector* namespaces, Namespace* ns) {
+  if (ns != NULL && !NamespaceVectorContains(namespaces, ns)) {
+    VectorAppend(namespaces, ns);
+  }
+}
+
+static void NamespaceAddInlineDescendants(Vector* namespaces, Namespace* ns) {
+  if (ns == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child == NULL || !child->is_inline) {
+      continue;
+    }
+    NamespaceVectorAdd(namespaces, child);
+    NamespaceAddInlineDescendants(namespaces, child);
+  }
+}
+
+void NamespaceCollectADLAssociatedNamespaces(Namespace* ns, Vector* namespaces) {
+  if (ns == NULL || namespaces == NULL) {
+    return;
+  }
+
+  Namespace* inline_chain = ns;
+  while (inline_chain != NULL) {
+    NamespaceVectorAdd(namespaces, inline_chain);
+    if (inline_chain->is_anonymous) {
+      if (inline_chain->parent != NULL) {
+        NamespaceVectorAdd(namespaces, inline_chain->parent);
+      }
+      break;
+    }
+    if (!inline_chain->is_inline) {
+      break;
+    }
+    inline_chain = inline_chain->parent;
+  }
+
+  Namespace* search_root = ns;
+  while (search_root != NULL &&
+         (search_root->is_inline || search_root->is_anonymous)) {
+    search_root = search_root->parent;
+  }
+  if (search_root == NULL) {
+    search_root = ns;
+  }
+  NamespaceAddInlineDescendants(namespaces, search_root);
+  if (search_root->anonymous_child != NULL) {
+    NamespaceVectorAdd(namespaces, search_root->anonymous_child);
+    NamespaceAddInlineDescendants(namespaces, search_root->anonymous_child);
+  }
+}
+
+static bool SymbolVectorContains(Vector* symbols, Symbol* symbol) {
+  for (size_t i = 0; i < symbols->length; i++) {
+    if (symbols->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void AppendSymbolHeadIfPresent(BinaryTree* table, String* name,
+                                      Vector* heads) {
+  Symbol* symbol = FindSymbol(table, name);
+  if (symbol != NULL && !SymbolVectorContains(heads, symbol)) {
+    VectorAppend(heads, symbol);
+  }
+}
+
+static void CollectSymbolHeadsFromInlineNamespace(Namespace* ns, String* name,
+                                                  Vector* heads) {
+  if (ns == NULL) {
+    return;
+  }
+  AppendSymbolHeadIfPresent(&ns->symbol_table, name, heads);
+  if (ns->anonymous_child != NULL) {
+    AppendSymbolHeadIfPresent(&ns->anonymous_child->symbol_table, name, heads);
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectSymbolHeadsFromInlineNamespace(child, name, heads);
+    }
+  }
+}
+
+void NamespaceCollectSymbolHeadsInInlineSet(Namespace* ns, String* name,
+                                            Vector* heads) {
+  if (ns == NULL || heads == NULL) {
+    return;
+  }
+  AppendSymbolHeadIfPresent(&ns->symbol_table, name, heads);
+  if (ns->anonymous_child != NULL) {
+    AppendSymbolHeadIfPresent(&ns->anonymous_child->symbol_table, name, heads);
+    for (size_t i = 0; i < ns->anonymous_child->children.length; i++) {
+      Namespace* child = ns->anonymous_child->children.value.p[i];
+      if (child != NULL && child->is_inline) {
+        CollectSymbolHeadsFromInlineNamespace(child, name, heads);
+      }
+    }
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectSymbolHeadsFromInlineNamespace(child, name, heads);
+    }
+  }
+}
+
+static void AppendTagHeadIfPresent(BinaryTree* table, String* name,
+                                   Vector* tags) {
+  Symbol* tag = FindSymbol(table, name);
+  if (tag != NULL && !SymbolVectorContains(tags, tag)) {
+    VectorAppend(tags, tag);
+  }
+}
+
+static void CollectTagHeadsFromInlineNamespace(Namespace* ns, String* name,
+                                               Vector* tags) {
+  if (ns == NULL) {
+    return;
+  }
+  AppendTagHeadIfPresent(&ns->tag_table, name, tags);
+  if (ns->anonymous_child != NULL) {
+    AppendTagHeadIfPresent(&ns->anonymous_child->tag_table, name, tags);
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectTagHeadsFromInlineNamespace(child, name, tags);
+    }
+  }
+}
+
+void NamespaceCollectTagHeadsInInlineSet(Namespace* ns, String* name,
+                                         Vector* tags) {
+  if (ns == NULL || tags == NULL) {
+    return;
+  }
+  AppendTagHeadIfPresent(&ns->tag_table, name, tags);
+  if (ns->anonymous_child != NULL) {
+    AppendTagHeadIfPresent(&ns->anonymous_child->tag_table, name, tags);
+    for (size_t i = 0; i < ns->anonymous_child->children.length; i++) {
+      Namespace* child = ns->anonymous_child->children.value.p[i];
+      if (child != NULL && child->is_inline) {
+        CollectTagHeadsFromInlineNamespace(child, name, tags);
+      }
+    }
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectTagHeadsFromInlineNamespace(child, name, tags);
+    }
+  }
+}
+
+void NamespaceCollectFunctionSymbolsInInlineSet(Namespace* ns, String* name,
+                                                Vector* functions) {
+  if (ns == NULL || functions == NULL) {
+    return;
+  }
+  Vector heads;
+  VectorInit(&heads);
+  NamespaceCollectSymbolHeadsInInlineSet(ns, name, &heads);
+  for (size_t i = 0; i < heads.length; i++) {
+    Symbol* head = (Symbol*)heads.value.p[i];
+    for (Symbol* candidate = head; candidate != NULL;
+         candidate = candidate->overload_next) {
+      if (candidate->type != NULL && TypeIsFunction(candidate->type) &&
+          !SymbolVectorContains(functions, candidate)) {
+        VectorAppend(functions, candidate);
+      }
+    }
+  }
+  VectorDestruct(&heads);
+}
+
+static NamespaceInlineSymbolLookup
+ResolveCollectedSymbolHeads(Vector* heads) {
+  NamespaceInlineSymbolLookup result = {kInlineLookupNotFound, NULL};
+  Vector non_functions;
+  VectorInit(&non_functions);
+  Symbol* first_function = NULL;
+  for (size_t i = 0; i < heads->length; i++) {
+    Symbol* symbol = (Symbol*)heads->value.p[i];
+    if (symbol->type != NULL && TypeIsFunction(symbol->type)) {
+      if (first_function == NULL) {
+        first_function = symbol;
+      }
+      continue;
+    }
+    if (!SymbolVectorContains(&non_functions, symbol)) {
+      VectorAppend(&non_functions, symbol);
+    }
+  }
+  if (non_functions.length > 1) {
+    result.status = kInlineLookupAmbiguous;
+    VectorDestruct(&non_functions);
+    return result;
+  }
+  if (non_functions.length == 1) {
+    result.status = kInlineLookupUnique;
+    result.symbol = (Symbol*)non_functions.value.p[0];
+    VectorDestruct(&non_functions);
+    return result;
+  }
+  VectorDestruct(&non_functions);
+  if (first_function != NULL) {
+    result.status = kInlineLookupUnique;
+    result.symbol = first_function;
+  }
+  return result;
+}
+
+NamespaceInlineSymbolLookup NamespaceResolveSymbolInInlineSet(Namespace* ns,
+                                                              String* name) {
+  Vector heads;
+  VectorInit(&heads);
+  NamespaceCollectSymbolHeadsInInlineSet(ns, name, &heads);
+  NamespaceInlineSymbolLookup result = ResolveCollectedSymbolHeads(&heads);
+  VectorDestruct(&heads);
+  return result;
+}
+
+NamespaceInlineTagLookup NamespaceResolveTagInInlineSet(Namespace* ns,
+                                                        String* name) {
+  NamespaceInlineTagLookup result = {kInlineLookupNotFound, NULL};
+  Vector tags;
+  VectorInit(&tags);
+  NamespaceCollectTagHeadsInInlineSet(ns, name, &tags);
+  if (tags.length > 1) {
+    result.status = kInlineLookupAmbiguous;
+  } else if (tags.length == 1) {
+    result.status = kInlineLookupUnique;
+    result.tag = (Symbol*)tags.value.p[0];
+  }
+  VectorDestruct(&tags);
+  return result;
+}
+
+static void CollectNamespaceChildrenFromInlineNamespace(Namespace* ns,
+                                                        String* name,
+                                                        Vector* children);
+
+static void CollectNamespaceChildrenInInlineSet(Namespace* parent, String* name,
+                                                Vector* children) {
+  if (parent == NULL || children == NULL) {
+    return;
+  }
+  Namespace* direct = NamespaceFindDirectChild(parent, name);
+  if (direct != NULL && !NamespaceVectorContains(children, direct)) {
+    VectorAppend(children, direct);
+  }
+  for (size_t i = 0; i < parent->children.length; i++) {
+    Namespace* child = parent->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectNamespaceChildrenFromInlineNamespace(child, name, children);
+    }
+  }
+}
+
+static void CollectNamespaceChildrenFromInlineNamespace(Namespace* ns,
+                                                        String* name,
+                                                        Vector* children) {
+  if (ns == NULL) {
+    return;
+  }
+  Namespace* direct = NamespaceFindDirectChild(ns, name);
+  if (direct != NULL && !NamespaceVectorContains(children, direct)) {
+    VectorAppend(children, direct);
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = ns->children.value.p[i];
+    if (child != NULL && child->is_inline) {
+      CollectNamespaceChildrenFromInlineNamespace(child, name, children);
+    }
+  }
+}
+
+NamespaceInlineChildLookup NamespaceResolveChildInInlineSet(Namespace* parent,
+                                                          String* name) {
+  NamespaceInlineChildLookup result = {kInlineLookupNotFound, NULL};
+  Vector children;
+  VectorInit(&children);
+  CollectNamespaceChildrenInInlineSet(parent, name, &children);
+  if (children.length > 1) {
+    result.status = kInlineLookupAmbiguous;
+  } else if (children.length == 1) {
+    result.status = kInlineLookupUnique;
+    result.child = (Namespace*)children.value.p[0];
+  }
+  VectorDestruct(&children);
+  return result;
+}
+
+Symbol* NamespaceLookupUnqualifiedSymbol(Namespace* ns, String* name) {
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(ns, name);
+  if (result.status == kInlineLookupUnique) {
+    return result.symbol;
+  }
+  return NULL;
+}
+
+Symbol* NamespaceLookupUnqualifiedTag(Namespace* ns, String* name) {
+  NamespaceInlineTagLookup result = NamespaceResolveTagInInlineSet(ns, name);
+  if (result.status == kInlineLookupUnique) {
+    return result.tag;
+  }
+  return NULL;
+}
+
+Namespace* NamespaceFindChildForQualifiedLookup(Namespace* parent, String* name) {
+  NamespaceInlineChildLookup result =
+      NamespaceResolveChildInInlineSet(parent, name);
+  if (result.status == kInlineLookupUnique) {
+    return result.child;
+  }
+  return NULL;
+}
+
+Symbol* NamespaceLookupSymbolInEnclosingScopes(Namespace* ns, String* name) {
+  while (ns != NULL) {
+    NamespaceInlineSymbolLookup result =
+        NamespaceResolveSymbolInInlineSet(ns, name);
+    if (result.status == kInlineLookupUnique) {
+      return result.symbol;
+    }
+    if (result.status == kInlineLookupAmbiguous) {
+      return NULL;
+    }
+    ns = ns->parent;
+  }
+  return NULL;
+}
+
+Symbol* NamespaceLookupTagInEnclosingScopes(Namespace* ns, String* name) {
+  while (ns != NULL) {
+    NamespaceInlineTagLookup result = NamespaceResolveTagInInlineSet(ns, name);
+    if (result.status == kInlineLookupUnique) {
+      return result.tag;
+    }
+    if (result.status == kInlineLookupAmbiguous) {
+      return NULL;
+    }
+    ns = ns->parent;
+  }
+  return NULL;
+}
+
+Namespace* NamespaceFindStdNamespace(void) {
+  if (compiler == NULL || compiler->global_namespace == NULL) {
+    return NULL;
+  }
+  String std_name;
+  StringInit(&std_name, "std");
+  Namespace* std_ns =
+      NamespaceFindDirectChild(compiler->global_namespace, &std_name);
+  StringDestruct(&std_name);
+  return std_ns;
+}
+
+Namespace* NamespaceParentForInlineTransparentLookup(Namespace* declaring_ns) {
+  if (declaring_ns == NULL) {
+    return compiler != NULL ? compiler->global_namespace : NULL;
+  }
+  Namespace* ns = declaring_ns;
+  while (ns->parent != NULL && (ns->is_inline || ns->is_anonymous)) {
+    ns = ns->parent;
+  }
+  return ns;
+}
+
 Namespace* NamespaceFindOrCreateChild(Namespace* parent, String* name) {
   Namespace* child = NamespaceFindChild(parent, name);
   if (child != NULL) {
@@ -146,13 +572,28 @@ Namespace* NamespaceFindOrCreateChild(Namespace* parent, String* name) {
 }
 
 Namespace* NamespaceFindOrCreateAnonymousChild(Namespace* parent) {
+  bool inline_conflict = false;
+  return NamespaceFindOrReopenAnonymousChild(parent, false, &inline_conflict);
+}
+
+Namespace* NamespaceFindOrReopenAnonymousChild(Namespace* parent, bool is_inline,
+                                               bool* inline_conflict) {
+  if (inline_conflict != NULL) {
+    *inline_conflict = false;
+  }
   if (parent->anonymous_child != NULL) {
+    if (is_inline && !parent->anonymous_child->is_inline) {
+      if (inline_conflict != NULL) {
+        *inline_conflict = true;
+      }
+    }
     return parent->anonymous_child;
   }
   String name;
   StringInit(&name, NULL);
   StringPrintf(&name, "__anonymous_namespace_%d", anonymous_namespace_id++);
   Namespace* child = NewNamespace(name.value, parent, true);
+  child->is_inline = is_inline;
   StringDestruct(&name);
   parent->anonymous_child = child;
   VectorAppend(&parent->children, child);

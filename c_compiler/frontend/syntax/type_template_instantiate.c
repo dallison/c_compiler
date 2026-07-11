@@ -4166,16 +4166,15 @@ TypeRecord* TypeInstantiateCXXInitializerList(Syntax* syntax,
   if (!CompilerIsCXX() || syntax == NULL || element_type == NULL) {
     return NULL;
   }
-  String std_name;
-  StringInit(&std_name, "std");
-  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
-  StringDestruct(&std_name);
+  Namespace* std_ns = NamespaceFindStdNamespace();
   if (std_ns == NULL) {
     return NULL;
   }
   String initializer_list_name;
   StringInit(&initializer_list_name, "initializer_list");
-  Symbol* templ = NamespaceFindSymbol(std_ns, &initializer_list_name);
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(std_ns, &initializer_list_name);
+  Symbol* templ = result.status == kInlineLookupUnique ? result.symbol : NULL;
   StringDestruct(&initializer_list_name);
   if (!CXXSymbolIsStdInitializerListTemplate(templ) || !templ->flags.is_template) {
     return NULL;
@@ -4204,16 +4203,14 @@ TypeRecord* TypeFindCXXComparisonCategory(const char* category_name) {
   if (!CompilerIsCXX() || compiler == NULL || category_name == NULL) {
     return NULL;
   }
-  String std_name;
-  StringInit(&std_name, "std");
-  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
-  StringDestruct(&std_name);
+  Namespace* std_ns = NamespaceFindStdNamespace();
   if (std_ns == NULL) {
     return NULL;
   }
   String name;
   StringInit(&name, category_name);
-  Symbol* tag = NamespaceFindTag(std_ns, &name);
+  NamespaceInlineTagLookup result = NamespaceResolveTagInInlineSet(std_ns, &name);
+  Symbol* tag = result.status == kInlineLookupUnique ? result.tag : NULL;
   StringDestruct(&name);
   if (tag == NULL || tag->type == NULL || !TypeIsStructOrUnion(tag->type)) {
     return NULL;

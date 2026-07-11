@@ -411,49 +411,6 @@ class steady_clock {
 
 using high_resolution_clock = system_clock;
 
-inline namespace literals {
-inline namespace chrono_literals {
-
-constexpr hours operator""h(unsigned long long value) {
-  return hours((long long)value);
-}
-constexpr duration<long double, ratio<3600> > operator""h(long double value) {
-  return duration<long double, ratio<3600> >(value);
-}
-constexpr minutes operator""min(unsigned long long value) {
-  return minutes((long long)value);
-}
-constexpr duration<long double, ratio<60> > operator""min(long double value) {
-  return duration<long double, ratio<60> >(value);
-}
-constexpr seconds operator""s(unsigned long long value) {
-  return seconds((long long)value);
-}
-constexpr duration<long double> operator""s(long double value) {
-  return duration<long double>(value);
-}
-constexpr milliseconds operator""ms(unsigned long long value) {
-  return milliseconds((long long)value);
-}
-constexpr duration<long double, milli> operator""ms(long double value) {
-  return duration<long double, milli>(value);
-}
-constexpr microseconds operator""us(unsigned long long value) {
-  return microseconds((long long)value);
-}
-constexpr duration<long double, micro> operator""us(long double value) {
-  return duration<long double, micro>(value);
-}
-constexpr nanoseconds operator""ns(unsigned long long value) {
-  return nanoseconds((long long)value);
-}
-constexpr duration<long double, nano> operator""ns(long double value) {
-  return duration<long double, nano>(value);
-}
-
-}  // namespace chrono_literals
-}  // namespace literals
-
 }  // namespace chrono
 
 template <class Rep1, class Period1, class Rep2, class Period2>
@@ -470,15 +427,48 @@ struct common_type<chrono::time_point<Clock, Duration1>,
       chrono::time_point<Clock, typename common_type<Duration1, Duration2>::type>;
 };
 
-namespace literals {
-namespace chrono_literals {
-using namespace ::std::chrono::literals::chrono_literals;
+inline namespace literals {
+inline namespace chrono_literals {
+
+constexpr chrono::hours operator""h(unsigned long long value) {
+  return chrono::hours((long long)value);
+}
+constexpr chrono::duration<long double, ratio<3600> > operator""h(long double value) {
+  return chrono::duration<long double, ratio<3600> >(value);
+}
+constexpr chrono::minutes operator""min(unsigned long long value) {
+  return chrono::minutes((long long)value);
+}
+constexpr chrono::duration<long double, ratio<60> > operator""min(long double value) {
+  return chrono::duration<long double, ratio<60> >(value);
+}
+constexpr chrono::seconds operator""s(unsigned long long value) {
+  return chrono::seconds((long long)value);
+}
+constexpr chrono::duration<long double> operator""s(long double value) {
+  return chrono::duration<long double>(value);
+}
+constexpr chrono::milliseconds operator""ms(unsigned long long value) {
+  return chrono::milliseconds((long long)value);
+}
+constexpr chrono::duration<long double, milli> operator""ms(long double value) {
+  return chrono::duration<long double, milli>(value);
+}
+constexpr chrono::microseconds operator""us(unsigned long long value) {
+  return chrono::microseconds((long long)value);
+}
+constexpr chrono::duration<long double, micro> operator""us(long double value) {
+  return chrono::duration<long double, micro>(value);
+}
+constexpr chrono::nanoseconds operator""ns(unsigned long long value) {
+  return chrono::nanoseconds((long long)value);
+}
+constexpr chrono::duration<long double, nano> operator""ns(long double value) {
+  return chrono::duration<long double, nano>(value);
+}
+
 }  // namespace chrono_literals
 }  // namespace literals
-
-namespace chrono_literals {
-using namespace ::std::chrono::literals::chrono_literals;
-}  // namespace chrono_literals
 
 }  // namespace std
 

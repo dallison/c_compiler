@@ -47,6 +47,7 @@ typedef struct Namespace {
   Vector children;  // Namespace*, owned by this namespace.   // @wire 4
   struct Namespace* parent;             // @wire 5
   struct Namespace* anonymous_child;    // @wire 6
+  bool is_inline;                       // @wire 9
 } Namespace;
 
 // Create the global symbol tables.
@@ -56,8 +57,75 @@ void DeleteGlobalNamespace(void);
 Namespace* NewNamespace(const char* name, Namespace* parent, bool is_anonymous);
 void NamespaceDelete(Namespace* ns);
 Namespace* NamespaceFindChild(Namespace* parent, String* name);
+// Direct named-child lookup for namespace definitions and reopening.  Does not
+// treat inline namespaces differently from ordinary children.
+Namespace* NamespaceFindDirectChild(Namespace* parent, String* name);
 Namespace* NamespaceFindOrCreateChild(Namespace* parent, String* name);
+// Opens or reopens a direct child for a namespace-definition.  Inline status
+// is sticky across reopenings.  Sets *inline_conflict when `is_inline` is
+// requested for an existing non-inline namespace in this translation unit.
+Namespace* NamespaceFindOrReopenChild(Namespace* parent, String* name,
+                                      bool is_inline, bool* inline_conflict);
 Namespace* NamespaceFindOrCreateAnonymousChild(Namespace* parent);
+// Opens or reopens the translation unit's reusable anonymous namespace child.
+// Inline status is sticky; sets *inline_conflict when adding inline to an
+// existing non-inline anonymous namespace in this translation unit.
+Namespace* NamespaceFindOrReopenAnonymousChild(Namespace* parent, bool is_inline,
+                                               bool* inline_conflict);
+void NamespaceForEachInlineChild(Namespace* parent,
+                                 void (*visit)(Namespace* child, void* ctx),
+                                 void* ctx);
+// Collect associated namespaces for ADL, including transitive inline children
+// and enclosing-namespace relationships in both directions.
+void NamespaceCollectADLAssociatedNamespaces(Namespace* ns, Vector* namespaces);
+// Qualified namespace-name lookup: direct child, then descendants reachable
+// through inline namespace members (transitive).  Not for namespace definitions.
+Namespace* NamespaceFindChildForQualifiedLookup(Namespace* parent, String* name);
+typedef enum {
+  kInlineLookupNotFound,
+  kInlineLookupUnique,
+  kInlineLookupAmbiguous,
+} InlineLookupStatus;
+
+typedef struct {
+  InlineLookupStatus status;
+  Symbol* symbol;
+} NamespaceInlineSymbolLookup;
+
+typedef struct {
+  InlineLookupStatus status;
+  Symbol* tag;
+} NamespaceInlineTagLookup;
+
+typedef struct {
+  InlineLookupStatus status;
+  Namespace* child;
+} NamespaceInlineChildLookup;
+
+void NamespaceCollectSymbolHeadsInInlineSet(Namespace* ns, String* name,
+                                            Vector* heads);
+void NamespaceCollectTagHeadsInInlineSet(Namespace* ns, String* name,
+                                           Vector* tags);
+void NamespaceCollectFunctionSymbolsInInlineSet(Namespace* ns, String* name,
+                                                Vector* functions);
+NamespaceInlineSymbolLookup NamespaceResolveSymbolInInlineSet(Namespace* ns,
+                                                              String* name);
+NamespaceInlineTagLookup NamespaceResolveTagInInlineSet(Namespace* ns,
+                                                        String* name);
+NamespaceInlineChildLookup NamespaceResolveChildInInlineSet(Namespace* parent,
+                                                            String* name);
+Namespace* NamespaceFindStdNamespace(void);
+// The namespace whose inline-transparent lookup set contains symbols declared in
+// `declaring_ns` (walks out of inline/anonymous nested namespaces).
+Namespace* NamespaceParentForInlineTransparentLookup(Namespace* declaring_ns);
+// Unqualified member lookup treating inline namespace members as members of the
+// enclosing namespace (transitive).  Returns the unique match when present.
+Symbol* NamespaceLookupUnqualifiedSymbol(Namespace* ns, String* name);
+Symbol* NamespaceLookupUnqualifiedTag(Namespace* ns, String* name);
+// Walk enclosing namespaces from `ns`, using inline-transparent lookup at each
+// level.  Does not search C file-scope global hash tables.
+Symbol* NamespaceLookupSymbolInEnclosingScopes(Namespace* ns, String* name);
+Symbol* NamespaceLookupTagInEnclosingScopes(Namespace* ns, String* name);
 bool NamespaceInsertSymbol(Namespace* ns, Symbol* symbol);
 bool NamespaceInsertTag(Namespace* ns, Symbol* symbol);
 Symbol* NamespaceFindSymbol(Namespace* ns, String* name);

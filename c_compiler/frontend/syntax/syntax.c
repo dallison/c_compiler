@@ -34,6 +34,19 @@ static bool InNamedNamespace(Syntax* syntax) {
          syntax->current_namespace != compiler->global_namespace;
 }
 
+static Symbol* LookupSymbolInEnclosingScopesCheckingAmbiguity(Syntax* syntax,
+                                                              Namespace* ns,
+                                                              String* name,
+                                                              bool* ambiguous);
+static Symbol* LookupTagInEnclosingScopesCheckingAmbiguity(Syntax* syntax,
+                                                           Namespace* ns,
+                                                           String* name,
+                                                           bool* ambiguous);
+static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
+                                                         Namespace* parent,
+                                                         String* name,
+                                                         bool* ambiguous);
+
 static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   Lex* lex = syntax->lex;
   if (!LexLookingAt(lex, TOK(identifier))) {
@@ -778,17 +791,169 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
   return true;
 }
 
+static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
+                                                         Namespace* parent,
+                                                         String* name,
+                                                         bool* ambiguous) {
+  if (ambiguous != NULL) {
+    *ambiguous = false;
+  }
+  NamespaceInlineChildLookup result =
+      NamespaceResolveChildInInlineSet(parent, name);
+  if (result.status == kInlineLookupAmbiguous) {
+    if (ambiguous != NULL) {
+      *ambiguous = true;
+    }
+    SyntaxError(syntax, "ambiguous namespace name '%s'", name->value);
+    return NULL;
+  }
+  return result.child;
+}
+
+static Symbol* ResolveGlobalSymbolCheckingAmbiguity(Syntax* syntax,
+                                                    String* name,
+                                                    bool* ambiguous) {
+  if (ambiguous != NULL) {
+    *ambiguous = false;
+  }
+  NamespaceInlineSymbolLookup inline_result =
+      NamespaceResolveSymbolInInlineSet(compiler->global_namespace, name);
+  if (inline_result.status == kInlineLookupAmbiguous) {
+    if (ambiguous != NULL) {
+      *ambiguous = true;
+    }
+    SyntaxError(syntax, "reference to '%s' is ambiguous", name->value);
+    return NULL;
+  }
+
+  Symbol* global = FindGlobalSymbol(name);
+  if (inline_result.status != kInlineLookupUnique) {
+    return global;
+  }
+  if (global == NULL) {
+    return inline_result.symbol;
+  }
+
+  Symbol* inline_symbol = FollowAlias(inline_result.symbol);
+  Symbol* global_symbol = FollowAlias(global);
+  if (inline_symbol == global_symbol) {
+    return global;
+  }
+  if (inline_symbol != NULL && global_symbol != NULL &&
+      TypeIsFunction(inline_symbol->type) && TypeIsFunction(global_symbol->type)) {
+    // Call resolution gathers both independently owned overload chains.
+    return global;
+  }
+  if (ambiguous != NULL) {
+    *ambiguous = true;
+  }
+  SyntaxError(syntax, "reference to '%s' is ambiguous", name->value);
+  return NULL;
+}
+
+static Symbol* ResolveGlobalTagCheckingAmbiguity(Syntax* syntax, String* name,
+                                                 bool* ambiguous) {
+  if (ambiguous != NULL) {
+    *ambiguous = false;
+  }
+  NamespaceInlineTagLookup inline_result =
+      NamespaceResolveTagInInlineSet(compiler->global_namespace, name);
+  if (inline_result.status == kInlineLookupAmbiguous) {
+    if (ambiguous != NULL) {
+      *ambiguous = true;
+    }
+    SyntaxError(syntax, "reference to tag '%s' is ambiguous", name->value);
+    return NULL;
+  }
+
+  Symbol* global = FindGlobalTag(name);
+  if (inline_result.status != kInlineLookupUnique) {
+    return global;
+  }
+  if (global == NULL ||
+      FollowAlias(global) == FollowAlias(inline_result.tag)) {
+    return global != NULL ? global : inline_result.tag;
+  }
+  if (ambiguous != NULL) {
+    *ambiguous = true;
+  }
+  SyntaxError(syntax, "reference to tag '%s' is ambiguous", name->value);
+  return NULL;
+}
+
+static Symbol* LookupSymbolInEnclosingScopesCheckingAmbiguity(Syntax* syntax,
+                                                              Namespace* ns,
+                                                              String* name,
+                                                              bool* ambiguous) {
+  if (ambiguous != NULL) {
+    *ambiguous = false;
+  }
+  while (ns != NULL) {
+    if (ns == compiler->global_namespace) {
+      return ResolveGlobalSymbolCheckingAmbiguity(syntax, name, ambiguous);
+    }
+    NamespaceInlineSymbolLookup result =
+        NamespaceResolveSymbolInInlineSet(ns, name);
+    if (result.status == kInlineLookupAmbiguous) {
+      if (ambiguous != NULL) {
+        *ambiguous = true;
+      }
+      SyntaxError(syntax, "reference to '%s' is ambiguous", name->value);
+      return NULL;
+    }
+    if (result.status == kInlineLookupUnique) {
+      return result.symbol;
+    }
+    ns = ns->parent;
+  }
+  return NULL;
+}
+
+static Symbol* LookupTagInEnclosingScopesCheckingAmbiguity(Syntax* syntax,
+                                                           Namespace* ns,
+                                                           String* name,
+                                                           bool* ambiguous) {
+  if (ambiguous != NULL) {
+    *ambiguous = false;
+  }
+  while (ns != NULL) {
+    if (ns == compiler->global_namespace) {
+      return ResolveGlobalTagCheckingAmbiguity(syntax, name, ambiguous);
+    }
+    NamespaceInlineTagLookup result = NamespaceResolveTagInInlineSet(ns, name);
+    if (result.status == kInlineLookupAmbiguous) {
+      if (ambiguous != NULL) {
+        *ambiguous = true;
+      }
+      SyntaxError(syntax, "reference to tag '%s' is ambiguous", name->value);
+      return NULL;
+    }
+    if (result.status == kInlineLookupUnique) {
+      return result.tag;
+    }
+    ns = ns->parent;
+  }
+  return NULL;
+}
+
 static Namespace* FindNamespaceChildInScope(Syntax* syntax, String* name) {
   Namespace* ns = syntax->current_namespace != NULL ? syntax->current_namespace
                                                     : compiler->global_namespace;
   while (ns != NULL) {
-    Namespace* child = NamespaceFindChild(ns, name);
+    bool ambiguous = false;
+    Namespace* child =
+        ResolveNamespaceChildCheckingAmbiguity(syntax, ns, name, &ambiguous);
     if (child != NULL) {
       return child;
     }
+    if (ambiguous) {
+      return NULL;
+    }
     ns = ns->parent;
   }
-  return NamespaceFindChild(compiler->global_namespace, name);
+  return ResolveNamespaceChildCheckingAmbiguity(syntax,
+                                                compiler->global_namespace,
+                                                name, NULL);
 }
 
 bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
@@ -882,10 +1047,13 @@ static Namespace* ResolveQualifiedNamespace(Syntax* syntax,
 
   String* first = name->components.value.p[0];
   Namespace* ns = name->absolute
-      ? NamespaceFindChild(compiler->global_namespace, first)
+      ? ResolveNamespaceChildCheckingAmbiguity(syntax,
+                                               compiler->global_namespace,
+                                               first, NULL)
       : FindNamespaceChildInScope(syntax, first);
   for (size_t i = 1; ns != NULL && i < namespace_components; i++) {
-    ns = NamespaceFindChild(ns, name->components.value.p[i]);
+    ns = ResolveNamespaceChildCheckingAmbiguity(
+        syntax, ns, name->components.value.p[i], NULL);
   }
   return ns;
 }
@@ -898,10 +1066,13 @@ Namespace* SyntaxFindQualifiedNamespace(Syntax* syntax,
 
   String* first = name->components.value.p[0];
   Namespace* ns = name->absolute
-      ? NamespaceFindChild(compiler->global_namespace, first)
+      ? ResolveNamespaceChildCheckingAmbiguity(syntax,
+                                               compiler->global_namespace,
+                                               first, NULL)
       : FindNamespaceChildInScope(syntax, first);
   for (size_t i = 1; ns != NULL && i < name->components.length; i++) {
-    ns = NamespaceFindChild(ns, name->components.value.p[i]);
+    ns = ResolveNamespaceChildCheckingAmbiguity(
+        syntax, ns, name->components.value.p[i], NULL);
   }
   return ns;
 }
@@ -924,9 +1095,15 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
   Symbol* symbol = NULL;
   Namespace* ns = ResolveQualifiedNamespace(syntax, name);
   if (ns != NULL && ns != compiler->global_namespace) {
-    symbol = NamespaceFindSymbol(ns, &last);
+    NamespaceInlineSymbolLookup result =
+        NamespaceResolveSymbolInInlineSet(ns, &last);
+    if (result.status == kInlineLookupAmbiguous) {
+      SyntaxError(syntax, "reference to '%s' is ambiguous", last.value);
+    } else if (result.status == kInlineLookupUnique) {
+      symbol = result.symbol;
+    }
   } else if (ns == compiler->global_namespace) {
-    symbol = FindGlobalSymbol(&last);
+    symbol = ResolveGlobalSymbolCheckingAmbiguity(syntax, &last, NULL);
   }
   if (symbol == NULL && name->components.length >= 2) {
     FullyQualifiedIdentifier prefix;
@@ -1115,10 +1292,13 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   } else {
     String* first = name->components.value.p[0];
     ns = name->absolute
-        ? NamespaceFindChild(compiler->global_namespace, first)
+        ? ResolveNamespaceChildCheckingAmbiguity(syntax,
+                                                 compiler->global_namespace,
+                                                 first, NULL)
         : FindNamespaceChildInScope(syntax, first);
     for (size_t i = 1; ns != NULL && i < namespace_components; i++) {
-      ns = NamespaceFindChild(ns, name->components.value.p[i]);
+      ns = ResolveNamespaceChildCheckingAmbiguity(
+          syntax, ns, name->components.value.p[i], NULL);
     }
   }
   if (ns == NULL) {
@@ -1126,9 +1306,18 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   }
 
   String* last = name->components.value.p[component_count - 1];
-  Symbol* symbol = ns == compiler->global_namespace
-      ? FindGlobalSymbol(last)
-      : NamespaceFindSymbol(ns, last);
+  Symbol* symbol = NULL;
+  if (ns == compiler->global_namespace) {
+    symbol = ResolveGlobalSymbolCheckingAmbiguity(syntax, last, NULL);
+  } else {
+    NamespaceInlineSymbolLookup result =
+        NamespaceResolveSymbolInInlineSet(ns, last);
+    if (result.status == kInlineLookupAmbiguous) {
+      SyntaxError(syntax, "reference to '%s' is ambiguous", last->value);
+    } else if (result.status == kInlineLookupUnique) {
+      symbol = result.symbol;
+    }
+  }
   symbol = FollowAlias(symbol);
   if (template_args != NULL &&
       (allow_dependent_template_args ||
@@ -1167,9 +1356,15 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
   Symbol* symbol = NULL;
   Namespace* ns = ResolveQualifiedNamespace(syntax, name);
   if (ns != NULL && ns != compiler->global_namespace) {
-    symbol = NamespaceFindTag(ns, &last);
+    NamespaceInlineTagLookup result =
+        NamespaceResolveTagInInlineSet(ns, &last);
+    if (result.status == kInlineLookupAmbiguous) {
+      SyntaxError(syntax, "reference to tag '%s' is ambiguous", last.value);
+    } else if (result.status == kInlineLookupUnique) {
+      symbol = result.tag;
+    }
   } else if (ns == compiler->global_namespace) {
-    symbol = FindGlobalTag(&last);
+    symbol = ResolveGlobalTagCheckingAmbiguity(syntax, &last, NULL);
   }
   StringDestruct(&last);
   return FollowAlias(symbol);
@@ -1274,11 +1469,16 @@ Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
   if (symbol != NULL) {
     return FollowAlias(symbol);
   }
-  if (InNamedNamespace(syntax)) {
-    symbol = NamespaceFindSymbolInScope(syntax->current_namespace, name);
-    if (symbol != NULL) {
-      return FollowAlias(symbol);
-    }
+  Namespace* ns = syntax->current_namespace != NULL ? syntax->current_namespace
+                                                   : compiler->global_namespace;
+  bool ambiguous = false;
+  symbol = LookupSymbolInEnclosingScopesCheckingAmbiguity(
+      syntax, ns, name, &ambiguous);
+  if (symbol != NULL) {
+    return FollowAlias(symbol);
+  }
+  if (ambiguous) {
+    return NULL;
   }
   return FollowAlias(FindGlobalSymbol(name));
 }
@@ -1310,11 +1510,16 @@ Symbol* SyntaxFindTag(Syntax* syntax, String* name) {
   if (symbol != NULL) {
     return FollowAlias(symbol);
   }
-  if (InNamedNamespace(syntax)) {
-    symbol = NamespaceFindTagInScope(syntax->current_namespace, name);
-    if (symbol != NULL) {
-      return FollowAlias(symbol);
-    }
+  Namespace* ns = syntax->current_namespace != NULL ? syntax->current_namespace
+                                                   : compiler->global_namespace;
+  bool ambiguous = false;
+  symbol =
+      LookupTagInEnclosingScopesCheckingAmbiguity(syntax, ns, name, &ambiguous);
+  if (symbol != NULL) {
+    return FollowAlias(symbol);
+  }
+  if (ambiguous) {
+    return NULL;
   }
   return FollowAlias(FindGlobalTag(name));
 }
@@ -1448,7 +1653,7 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
 }
 
 static ASTNode* ParseBracedInitializer(Syntax* syntax);
-static ASTNode* ParseNamespaceDeclaration(Syntax* syntax);
+static ASTNode* ParseNamespaceDeclaration(Syntax* syntax, bool leading_inline);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
 
 static bool StaticAssertTemplateArgumentContainsTemplateParameter(
@@ -4801,6 +5006,21 @@ static Symbol* NewUsingAliasSymbol(const char* name, Symbol* target,
 }
 
 static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag) {
+  Symbol* existing = is_tag ? SyntaxFindTag(syntax, &alias->name)
+                            : SyntaxFindSymbol(syntax, &alias->name);
+  if (existing != NULL) {
+    Symbol* existing_target = FollowAlias(existing);
+    Symbol* new_target = alias->alias_target != NULL ? FollowAlias(alias->alias_target)
+                                                     : NULL;
+    if (existing_target != NULL && existing_target == new_target) {
+      SymbolDelete(alias);
+      return true;
+    }
+    SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
+                alias->name.value);
+    SymbolDelete(alias);
+    return false;
+  }
   bool added = is_tag ? SyntaxAddTag(syntax, alias) : SyntaxAddSymbol(syntax, alias);
   if (!added) {
     SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
@@ -4810,6 +5030,8 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag) {
   }
   return true;
 }
+
+static void ImportNamespace(Syntax* syntax, Namespace* ns);
 
 static void ImportNamespaceSymbol(BinaryTreeNode* node, int depth, void* data) {
   (void)depth;
@@ -4829,9 +5051,17 @@ static void ImportNamespaceTag(BinaryTreeNode* node, int depth, void* data) {
                 /*is_tag=*/true);
 }
 
+static void ImportInlineNamespaceChild(Namespace* child, void* ctx) {
+  ImportNamespace((Syntax*)ctx, child);
+}
+
 static void ImportNamespace(Syntax* syntax, Namespace* ns) {
   BinaryTreeTraverse(&ns->symbol_table, ImportNamespaceSymbol, syntax);
   BinaryTreeTraverse(&ns->tag_table, ImportNamespaceTag, syntax);
+  if (ns->anonymous_child != NULL) {
+    ImportNamespace(syntax, ns->anonymous_child);
+  }
+  NamespaceForEachInlineChild(ns, ImportInlineNamespaceChild, syntax);
 }
 
 static ASTNode* EmptyDeclarationList(SourceLocation location) {
@@ -5058,43 +5288,102 @@ static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
   return EmptyDeclarationList(location);
 }
 
-static Namespace* ParseNamespaceName(Syntax* syntax, Namespace* parent) {
+static Namespace* OpenNamespaceDefinition(Syntax* syntax, Namespace* parent,
+                                            bool leading_inline) {
   if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-    SyntaxError(syntax, "Expected namespace name");
-    return parent;
+    return NULL;
+  }
+
+  String component;
+  StringInit(&component, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+
+  if (!LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    bool inline_conflict = false;
+    Namespace* ns = NamespaceFindOrReopenChild(parent, &component, leading_inline,
+                                               &inline_conflict);
+    if (inline_conflict) {
+      SyntaxError(syntax, "cannot reopen namespace '%s' as inline",
+                  component.value);
+    }
+    StringDestruct(&component);
+    return ns;
+  }
+
+  if (leading_inline) {
+    SyntaxError(syntax,
+                "'inline namespace' cannot specify a nested-namespace-definition");
   }
 
   Namespace* ns = parent;
-  while (true) {
-    String name;
-    StringInit(&name, syntax->lex->spelling.value);
-    ns = NamespaceFindOrCreateChild(ns, &name);
-    StringDestruct(&name);
-    LexNextToken(syntax->lex);
+  bool inline_conflict = false;
+  ns = NamespaceFindOrReopenChild(ns, &component, false, &inline_conflict);
+  StringDestruct(&component);
+  if (inline_conflict) {
+    SyntaxError(syntax, "cannot reopen namespace as inline");
+  }
 
-    if (!LexMatch(syntax->lex, TOK(coloncolon))) {
-      break;
+  while (LexMatch(syntax->lex, TOK(coloncolon))) {
+    bool component_inline = false;
+    if (CompilerIsCXX() && CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+        LexMatch(syntax->lex, TOK(inline))) {
+      component_inline = true;
+    } else if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(inline))) {
+      SyntaxError(syntax,
+                  "'inline' in a nested namespace definition requires C++20");
+      LexNextToken(syntax->lex);
     }
+
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
       SyntaxError(syntax, "Expected namespace name after '::'");
-      break;
+      return ns;
+    }
+
+    StringInit(&component, syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+
+    inline_conflict = false;
+    ns = NamespaceFindOrReopenChild(ns, &component, component_inline,
+                                    &inline_conflict);
+    if (inline_conflict) {
+      SyntaxError(syntax, "cannot reopen namespace '%s' as inline",
+                  component.value);
+    }
+    StringDestruct(&component);
+
+    if (!LexLookingAt(syntax->lex, TOK(coloncolon))) {
+      return ns;
     }
   }
+
   return ns;
 }
 
-static ASTNode* ParseNamespaceDeclaration(Syntax* syntax) {
+static ASTNode* ParseNamespaceDeclaration(Syntax* syntax, bool leading_inline) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // namespace
+
+  if (!CompilerIsCXX()) {
+    leading_inline = false;
+  }
 
   Namespace* previous_namespace = syntax->current_namespace;
   Namespace* parent = previous_namespace != NULL ? previous_namespace
                                                  : compiler->global_namespace;
   Namespace* ns = NULL;
-  if (LexLookingAt(syntax->lex, TOK(identifier))) {
-    ns = ParseNamespaceName(syntax, parent);
+  if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+    bool inline_conflict = false;
+    ns = NamespaceFindOrReopenAnonymousChild(parent, leading_inline,
+                                             &inline_conflict);
+    if (inline_conflict) {
+      SyntaxError(syntax,
+                  "cannot reopen anonymous namespace as inline");
+    }
   } else {
-    ns = NamespaceFindOrCreateAnonymousChild(parent);
+    ns = OpenNamespaceDefinition(syntax, parent, leading_inline);
+    if (ns == NULL) {
+      ns = parent;
+    }
   }
 
   SyntaxNeedBracket(syntax, TOK(lbrace), TC(openbra) | TC(decl));
@@ -6196,7 +6485,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     return EmptyDeclarationList(location);
   }
   if (LexLookingAt(syntax->lex, TOK(namespace))) {
-    return ParseNamespaceDeclaration(syntax);
+    return ParseNamespaceDeclaration(syntax, /*leading_inline=*/false);
   }
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(inline))) {
     LexCheckpoint checkpoint;
@@ -6204,7 +6493,7 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
     LexNextToken(syntax->lex);
     if (LexLookingAt(syntax->lex, TOK(namespace))) {
       LexCheckpointDestruct(&checkpoint);
-      return ParseNamespaceDeclaration(syntax);
+      return ParseNamespaceDeclaration(syntax, /*leading_inline=*/true);
     }
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);

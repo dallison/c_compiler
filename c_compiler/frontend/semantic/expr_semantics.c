@@ -801,15 +801,13 @@ static bool VectorContainsPointer(Vector* vec, void* value) {
 }
 
 static void ADLAddNamespace(Vector* namespaces, Namespace* ns) {
-  // [basic.lookup.argdep]: the associated namespace of a class/enum is its
-  // *innermost* enclosing namespace only - not every enclosing namespace up to
-  // the global scope.  (Functions in the global namespace are still found, but
-  // through ordinary unqualified lookup rather than ADL.)  Adding the whole
-  // chain of ancestors would incorrectly make namespace-scope functions in an
-  // enclosing namespace visible by ADL and could change overload resolution.
   if (ns != NULL && !VectorContainsPointer(namespaces, ns)) {
     VectorAppend(namespaces, ns);
   }
+}
+
+static void ADLAddAssociatedNamespaceClosure(Vector* namespaces, Namespace* ns) {
+  NamespaceCollectADLAssociatedNamespaces(ns, namespaces);
 }
 
 static TypeRecord* ADLCanonicalType(TypeRecord* type) {
@@ -840,8 +838,8 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
       if (ns == NULL && type->template_origin != NULL) {
         ns = type->template_origin->namespace_;
       }
-      ADLAddNamespace(namespaces,
-                      ns != NULL ? ns : compiler->global_namespace);
+      ADLAddAssociatedNamespaceClosure(namespaces,
+                                       ns != NULL ? ns : compiler->global_namespace);
     }
     for (size_t i = 0; i < str->bases.length; i++) {
       CXXBaseSpecifier* base = str->bases.value.p[i];
@@ -852,9 +850,9 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
   } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
              type->info.enum_info->tag_symbol != NULL) {
     Symbol* tag = type->info.enum_info->tag_symbol;
-    ADLAddNamespace(namespaces, tag->namespace_ != NULL
-                                    ? tag->namespace_
-                                    : compiler->global_namespace);
+    ADLAddAssociatedNamespaceClosure(namespaces, tag->namespace_ != NULL
+                                                    ? tag->namespace_
+                                                    : compiler->global_namespace);
   }
   if (type->template_arguments != NULL) {
     for (size_t i = 0; i < type->template_arguments->length; i++) {
@@ -915,12 +913,32 @@ static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
   }
 }
 
+static void AddCollectedFunctionSymbols(Vector* candidates, Vector* functions) {
+  for (size_t i = 0; i < functions->length; i++) {
+    Symbol* sym = (Symbol*)functions->value.p[i];
+    Symbol* effective = FollowUsingAliasForADL(sym);
+    if (effective != NULL && effective->type != NULL &&
+        TypeIsFunction(effective->type) &&
+        !VectorContainsPointer(candidates, effective)) {
+      VectorAppend(candidates, effective);
+    }
+  }
+}
+
 static void AddNamedFunctionCandidates(String* name, Namespace* ns,
                                        Vector* candidates) {
-  Symbol* found = (ns == NULL || ns == compiler->global_namespace)
-                      ? FindGlobalSymbol(name)
-                      : NamespaceFindSymbol(ns, name);
-  AddFunctionOverloadCandidates(candidates, found);
+  Vector functions;
+  VectorInit(&functions);
+  if (ns == NULL || ns == compiler->global_namespace) {
+    NamespaceCollectFunctionSymbolsInInlineSet(compiler->global_namespace, name,
+                                               &functions);
+    AddCollectedFunctionSymbols(candidates, &functions);
+    AddFunctionOverloadCandidates(candidates, FindGlobalSymbol(name));
+  } else {
+    NamespaceCollectFunctionSymbolsInInlineSet(ns, name, &functions);
+    AddCollectedFunctionSymbols(candidates, &functions);
+  }
+  VectorDestruct(&functions);
 }
 
 static void AddADLFunctionCandidates(String* name, Vector* actuals,
@@ -5012,7 +5030,20 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   }
   Vector candidates;
   VectorInit(&candidates);
-  AddFunctionOverloadCandidates(&candidates, id->symbol);
+  bool gathered_inline_overloads = false;
+  bool is_namespace_scope_function =
+      id->symbol != NULL && id->symbol->type != NULL &&
+      TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.cxx_member_owner == NULL &&
+      !id->symbol->flags.is_block_scope;
+  if (is_namespace_scope_function) {
+    Namespace* lookup_ns =
+        NamespaceParentForInlineTransparentLookup(id->symbol->namespace_);
+    AddNamedFunctionCandidates(&id->symbol->name, lookup_ns, &candidates);
+    gathered_inline_overloads = candidates.length > 1;
+  } else {
+    AddFunctionOverloadCandidates(&candidates, id->symbol);
+  }
   size_t ordinary_count = candidates.length;
   // [basic.lookup.argdep]/3: argument-dependent lookup produces no candidates
   // when ordinary unqualified lookup for the call name finds
@@ -5046,17 +5077,17 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.unknown_args;
-  if (!id->symbol->flags.is_overloaded && !has_adl_candidates &&
-      !ordinary_unknown) {
+  if (!gathered_inline_overloads && !id->symbol->flags.is_overloaded &&
+      !has_adl_candidates && !ordinary_unknown) {
     VectorDestruct(&candidates);
     return;
   }
   Symbol* best = ResolveFunctionCandidateVector(
       &id->symbol->name, &candidates, node->children, id->template_arguments,
       /*diagnose_no_match=*/id->symbol->flags.is_overloaded || has_adl_candidates ||
-          ordinary_unknown,
+          ordinary_unknown || gathered_inline_overloads,
       /*diagnose_ambiguous=*/id->symbol->flags.is_overloaded ||
-          has_adl_candidates || ordinary_unknown,
+          has_adl_candidates || ordinary_unknown || gathered_inline_overloads,
       (ASTNode*)node);
   VectorDestruct(&candidates);
   if (best == NULL) {
@@ -6353,21 +6384,20 @@ static void AnalyzeSizeofExpression(SizeofASTNode* node) {
 // Finds the std::<name> class type, or NULL if it is not declared (e.g. the
 // relevant standard header has not been included).
 static TypeRecord* FindStdClassType(const char* name) {
-  String std_name;
-  StringInit(&std_name, "std");
-  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
-  StringDestruct(&std_name);
+  Namespace* std_ns = NamespaceFindStdNamespace();
   if (std_ns == NULL) {
     return NULL;
   }
   String class_name;
   StringInit(&class_name, name);
-  Symbol* sym = NamespaceFindSymbol(std_ns, &class_name);
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(std_ns, &class_name);
   StringDestruct(&class_name);
-  if (sym == NULL || sym->type == NULL || !TypeIsStructOrUnion(sym->type)) {
+  if (result.status != kInlineLookupUnique || result.symbol == NULL ||
+      result.symbol->type == NULL || !TypeIsStructOrUnion(result.symbol->type)) {
     return NULL;
   }
-  return sym->type;
+  return result.symbol->type;
 }
 
 static bool TypeIsPolymorphicClass(TypeRecord* type) {

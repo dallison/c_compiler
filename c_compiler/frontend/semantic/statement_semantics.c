@@ -1257,18 +1257,19 @@ static TypeRecord* NewAutoReferenceType(bool rvalue) {
 }
 
 static Symbol* FindStdSymbolByName(const char* name) {
-  String std_name;
-  StringInit(&std_name, "std");
-  Namespace* std_ns = NamespaceFindChild(compiler->global_namespace, &std_name);
-  StringDestruct(&std_name);
+  Namespace* std_ns = NamespaceFindStdNamespace();
   if (std_ns == NULL) {
     return NULL;
   }
   String symbol_name;
   StringInit(&symbol_name, name);
-  Symbol* symbol = NamespaceFindSymbol(std_ns, &symbol_name);
+  NamespaceInlineSymbolLookup result =
+      NamespaceResolveSymbolInInlineSet(std_ns, &symbol_name);
   StringDestruct(&symbol_name);
-  return symbol;
+  if (result.status != kInlineLookupUnique) {
+    return NULL;
+  }
+  return result.symbol;
 }
 
 static TemplateArgument* NewNonTypeTemplateArgument(size_t value,
