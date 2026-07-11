@@ -475,11 +475,7 @@ static void AppendCXXName(String* out, Symbol* symbol) {
 // rather than the unqualified `9nothrow_t`.  Types at global scope keep the
 // bare `<length><name>` component.
 static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
-                                    String* tag_name) {
-  Struct* str = tag_symbol != NULL && tag_symbol->type != NULL &&
-                        TypeIsStructOrUnion(tag_symbol->type)
-                    ? tag_symbol->type->info.struct_info
-                    : NULL;
+                                    String* tag_name, Struct* str) {
   Namespace* ns = str != NULL ? CXXStructNamespace(str)
                               : tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
   if (ns != NULL) {
@@ -564,11 +560,12 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
   } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
              type->info.struct_info->tag_name != NULL) {
     AppendCXXTaggedTypeName(out, type->info.struct_info->tag_symbol,
-                            type->info.struct_info->tag_name);
+                            type->info.struct_info->tag_name,
+                            type->info.struct_info);
   } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
              type->info.enum_info->tag_name != NULL) {
     AppendCXXTaggedTypeName(out, type->info.enum_info->tag_symbol,
-                            type->info.enum_info->tag_name);
+                            type->info.enum_info->tag_name, NULL);
   } else {
     StringAppendChar(out, 'v');
   }

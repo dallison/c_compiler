@@ -30,6 +30,11 @@ struct allocator {
   using propagate_on_container_swap = false_type;
   using is_always_equal = true_type;
 
+  template <class U>
+  struct rebind {
+    using other = allocator<U>;
+  };
+
   constexpr allocator() noexcept {
   }
 
@@ -129,6 +134,11 @@ struct __alloc_traits_always_equal<
   using type = typename Alloc::is_always_equal;
 };
 
+template <class Alloc, class T>
+struct __alloc_traits_rebind {
+  using type = typename Alloc::template rebind<T>::other;
+};
+
 template <class Alloc>
 struct allocator_traits {
   using allocator_type = Alloc;
@@ -144,6 +154,12 @@ struct allocator_traits {
   using propagate_on_container_swap =
       typename __alloc_traits_swap_propagate<Alloc>::type;
   using is_always_equal = typename __alloc_traits_always_equal<Alloc>::type;
+
+  template <class T>
+  using rebind_alloc = typename __alloc_traits_rebind<Alloc, T>::type;
+
+  template <class T>
+  using rebind_traits = allocator_traits<rebind_alloc<T> >;
 
   static bool __propagate_on_container_copy_assignment() {
     return __alloc_traits_bool((propagate_on_container_copy_assignment*)0);

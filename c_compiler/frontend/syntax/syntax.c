@@ -646,6 +646,9 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
   while (LexMatch(lex, TOK(coloncolon))) {
     name->is_qualified = true;
     bool is_destructor = LexMatch(lex, TOK(tilde));
+    if (!is_destructor && CompilerIsCXX()) {
+      LexMatch(lex, TOK(template));
+    }
     if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
       SyntaxError(syntax, "Expected identifier after '::'");
       return true;
@@ -708,6 +711,9 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
   while (LexMatch(lex, TOK(coloncolon))) {
     name->is_qualified = true;
     bool is_destructor = LexMatch(lex, TOK(tilde));
+    if (!is_destructor && CompilerIsCXX()) {
+      LexMatch(lex, TOK(template));
+    }
     if (!ParseQualifiedIdentifierComponent(syntax, &component)) {
       SyntaxError(syntax, "Expected identifier after '::'");
       return true;
@@ -1013,6 +1019,13 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
          (member->symbol != NULL &&
           (StorageIs(member->symbol->storage, STO(typedef)) ||
            member->symbol->flags.value_set)))) {
+      if (member->symbol != NULL && member->symbol->type != NULL &&
+          TypeIsFunction(member->symbol->type)) {
+        member->symbol->type->info.function.cxx_member_owner =
+            parent->type->info.struct_info;
+        StringClear(&member->symbol->asm_name);
+        SymbolSetCXXMangledAsmName(member->symbol);
+      }
       return FollowAlias(member->symbol);
     }
   }
@@ -3783,6 +3796,29 @@ static void RecordFriendFunction(Syntax* syntax, Struct* befriending,
   }
 }
 
+static Struct* ResolveFriendClassFromEnclosingClasses(Struct* befriending,
+                                                      TypeRecord* type) {
+  if (befriending == NULL || type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  const char* friend_name = type->info.struct_info->tag_name->value;
+  size_t friend_len = strcspn(friend_name, "<");
+  for (Struct* parent = befriending->lexical_parent; parent != NULL;
+       parent = parent->lexical_parent) {
+    if (parent->tag_name == NULL) {
+      continue;
+    }
+    size_t parent_len = strcspn(parent->tag_name->value, "<");
+    if (parent_len == friend_len &&
+        strncmp(parent->tag_name->value, friend_name, parent_len) == 0) {
+      return parent;
+    }
+  }
+  return NULL;
+}
+
 // Friend declared inside a class template: defer it.  We keep the parsed
 // symbol (with its inline body, if any) on the template so each specialization
 // can substitute the signature/body and register a concrete friend; we do NOT
@@ -3875,7 +3911,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   if (LexLookingAt(syntax->lex, TOK(semicolon))) {
     if (type != NULL && TypeIsStructOrUnion(type) &&
         type->info.struct_info != NULL) {
-      StructAddFriendClass(befriending, type->info.struct_info);
+      Struct* friend_class =
+          ResolveFriendClassFromEnclosingClasses(befriending, type);
+      StructAddFriendClass(
+          befriending,
+          friend_class != NULL ? friend_class : type->info.struct_info);
     } else {
       SyntaxError(syntax,
                   "friend declaration does not name a class or a function");

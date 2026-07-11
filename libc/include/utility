@@ -8,6 +8,7 @@
 #ifndef utility_h
 #define utility_h
 
+#include <compare>
 #include <stddef.h>
 #include <type_traits>
 
@@ -34,6 +35,12 @@ struct in_place_index_t {
 
 template <size_t I>
 const in_place_index_t<I> in_place_index{};
+
+struct piecewise_construct_t {
+  explicit piecewise_construct_t() = default;
+};
+
+const piecewise_construct_t piecewise_construct{};
 
 template <class T>
 static inline constexpr remove_reference_t<T>&& move(T&& value) noexcept {
@@ -87,9 +94,39 @@ struct pair {
   T2 second;
 
   constexpr pair() {}
+
   constexpr pair(const T1& first_value, const T2& second_value)
       : first(first_value), second(second_value) {}
 };
+
+template <class T1, class T2>
+constexpr pair<decay_t<T1>, decay_t<T2> > make_pair(T1&& first,
+                                                    T2&& second) {
+  return pair<decay_t<T1>, decay_t<T2> >(static_cast<T1&&>(first),
+                                         static_cast<T2&&>(second));
+}
+
+template <class T1, class T2, class U1, class U2>
+constexpr bool operator==(const pair<T1, T2>& left,
+                          const pair<U1, U2>& right) {
+  return left.first == right.first && left.second == right.second;
+}
+
+template <class T1, class T2, class U1, class U2>
+constexpr bool operator!=(const pair<T1, T2>& left,
+                          const pair<U1, U2>& right) {
+  return !(left == right);
+}
+
+template <class T1, class T2, class U1, class U2>
+constexpr auto operator<=>(const pair<T1, T2>& left,
+                           const pair<U1, U2>& right) {
+  auto first_cmp = left.first <=> right.first;
+  if (first_cmp != 0) {
+    return first_cmp;
+  }
+  return left.second <=> right.second;
+}
 
 }  // namespace std
 

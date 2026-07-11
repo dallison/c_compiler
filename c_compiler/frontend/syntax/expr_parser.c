@@ -664,6 +664,7 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
     return NULL;
   }
   bool dependent_scope = scope_symbol->type->template_parameter_index >= 0 ||
+                         TypeContainsTemplateParameter(scope_symbol->type) ||
                          (scope_symbol->type->dependent_member_name == NULL &&
                           scope_symbol->type->template_origin != NULL &&
                           TemplateArgumentListIsDependent(
@@ -846,7 +847,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     } else {
       ASTNode* member_access =
           NewMemberAccessFromThis(syntax, &name,
-                                  /*allow_unresolved_member=*/false);
+                                  /*allow_unresolved_member=*/true);
       if (member_access != NULL) {
         FullyQualifiedIdentifierDestruct(&name);
         return member_access;
@@ -2410,7 +2411,7 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
         SymbolDelete(sym);  // Don't need this.
         TypeParserDestruct(&parser);
       } else {
-        actual = SyntaxParseSingleExpression(syntax, followers);
+        actual = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
       }
       VectorAppend(actuals, actual);
       if (!LexMatch(syntax->lex, TOK(comma))) {
@@ -2479,7 +2480,8 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
   while (!LexLookingAt(syntax->lex, TOK(rparen))) {
     ASTNode* actual = LexMatch(syntax->lex, TOK(lbrace))
                           ? SyntaxParseBracedInitializer(syntax)
-                          : SyntaxParseSingleExpression(syntax, followers);
+                          : SyntaxParseSingleExpression(syntax,
+                                                        followers | TC(exprsep));
     MarkCXXPackExpansionIfPresent(syntax, actual);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {

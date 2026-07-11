@@ -106,6 +106,9 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if ((node->base.flags & kASTDependentQualifiedName) != 0 &&
       node->symbol != NULL && node->symbol->type != NULL &&
       node->symbol->type->dependent_member_name != NULL) {
+    if (TypeContainsTemplateParameter(node->symbol->type)) {
+      return &node->base;
+    }
     SemanticError(&node->base, "no member named '%s' in the dependent scope",
                   node->symbol->type->dependent_member_name->value);
     ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
@@ -823,9 +826,16 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
     if (str->tag_symbol != NULL) {
-      ADLAddNamespace(namespaces, str->tag_symbol->namespace_ != NULL
-                                      ? str->tag_symbol->namespace_
-                                      : compiler->global_namespace);
+      Namespace* ns = str->tag_symbol->namespace_;
+      if (ns == NULL && str->tag_symbol->type != NULL &&
+          str->tag_symbol->type->template_origin != NULL) {
+        ns = str->tag_symbol->type->template_origin->namespace_;
+      }
+      if (ns == NULL && type->template_origin != NULL) {
+        ns = type->template_origin->namespace_;
+      }
+      ADLAddNamespace(namespaces,
+                      ns != NULL ? ns : compiler->global_namespace);
     }
     for (size_t i = 0; i < str->bases.length; i++) {
       CXXBaseSpecifier* base = str->bases.value.p[i];
@@ -3326,7 +3336,9 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   Struct* current_owner = CurrentFunctionMemberOwner();
   if (current_owner != NULL) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
-      if (owner->friend_classes.value.p[i] == current_owner) {
+      Struct* friend_class = owner->friend_classes.value.p[i];
+      if (friend_class == current_owner ||
+          CXXSameAccessClass(friend_class, current_owner)) {
         return true;
       }
     }
@@ -3383,6 +3395,24 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   }
   if (current_owner == NULL) {
     return false;
+  }
+  if (owner != NULL) {
+    for (size_t i = 0; i < owner->friend_classes.length; i++) {
+      Struct* friend_class = owner->friend_classes.value.p[i];
+      if (friend_class == current_owner ||
+          CXXSameAccessClass(friend_class, current_owner)) {
+        return true;
+      }
+    }
+  }
+  if (lookup_context != owner && lookup_context != NULL) {
+    for (size_t i = 0; i < lookup_context->friend_classes.length; i++) {
+      Struct* friend_class = lookup_context->friend_classes.value.p[i];
+      if (friend_class == current_owner ||
+          CXXSameAccessClass(friend_class, current_owner)) {
+        return true;
+      }
+    }
   }
   if (CXXSameAccessClass(current_owner, owner)) {
     return true;
@@ -5101,9 +5131,34 @@ static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name) {
 }
 
 static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
-  if (!CompilerIsCXX() || node->left == NULL ||
-      !TypeIsStructOrUnion(node->left->type) ||
-      node->left->type->info.struct_info == NULL ||
+  if (!CompilerIsCXX() || node->left == NULL) {
+    return NULL;
+  }
+  if (!TypeIsStructOrUnion(node->left->type)) {
+    if (node->left->op != AST_OP(identifier)) {
+      return NULL;
+    }
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol == NULL ||
+        !StorageIs(id->symbol->storage, STO(typedef)) ||
+        node->children->length > 1) {
+      return NULL;
+    }
+    SourceLocation location = node->base.location;
+    ASTNode* initializer =
+        node->children->length == 0
+            ? NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                    location)
+            : ASTNodeMove(node->children->value.p[0]);
+    ASTNode* cast =
+        NewCastASTNode(TypeRecordCopy(node->left->type), location, initializer);
+    ASTNode* parent = node->base.parent;
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, node->base.child_id, cast, true);
+    }
+    return AnalyzeExpression(cast);
+  }
+  if (node->left->type->info.struct_info == NULL ||
       node->left->type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
@@ -5224,6 +5279,23 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     }
     return AnalyzeExpression(cast);
   }
+  if (type->info.struct_info->is_aggregate && node->children->length == 0) {
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+    temp->location = location;
+    ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+    temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    ASTNode* initializer =
+        NewBracedInitializerASTNode(NewVector(), NULL, location);
+    ASTNode* literal =
+        NewCompoundLiteralASTNode(temp_id, location, initializer);
+    ASTNode* parent = node->base.parent;
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, node->base.child_id, literal, true);
+    }
+    ASTNode* analyzed = AnalyzeExpression(literal);
+    analyzed->value_category = kValueCategoryPrvalue;
+    return analyzed;
+  }
   StructMember* constructor =
       FindCXXMemberOverloadHead(type->info.struct_info, constructor_name);
   if (constructor == NULL || !constructor->is_member_function ||
@@ -5281,6 +5353,23 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       has_non_invented_constructor = true;
       break;
     }
+  }
+  if (!has_non_invented_constructor && node->children->length == 0) {
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+    temp->location = location;
+    ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+    temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    ASTNode* initializer =
+        NewBracedInitializerASTNode(NewVector(), NULL, location);
+    ASTNode* literal =
+        NewCompoundLiteralASTNode(temp_id, location, initializer);
+    ASTNode* parent = node->base.parent;
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, node->base.child_id, literal, true);
+    }
+    ASTNode* analyzed = AnalyzeExpression(literal);
+    analyzed->value_category = kValueCategoryPrvalue;
+    return analyzed;
   }
   if (!has_non_invented_constructor && node->children->length > 1) {
     return NULL;
@@ -5390,6 +5479,12 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL ||
       !TypeIsStructOrUnion(node->left->type)) {
     return NULL;
+  }
+  if (node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL && StorageIs(id->symbol->storage, STO(typedef))) {
+      return NULL;
+    }
   }
 
   StructMember* member =
@@ -5506,6 +5601,16 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
   for (size_t i = 0; call != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
     if (actual != NULL && TypeContainsTemplateParameter(actual->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CallActualsContainDependentFunctorCall(VectorASTNode* call) {
+  for (size_t i = 0; call != NULL && i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual != NULL && (actual->flags & kASTDependentFunctorCall) != 0) {
       return true;
     }
   }
@@ -5704,6 +5809,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     node->children->value.p[i] = AnalyzeExpression((ASTNode*)node->children->value.p[i]);
   }
   bool has_pack_expansion_actual = CallHasPackExpansionActual(node);
+  if (CallActualsContainDependentFunctorCall(node)) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    return (ASTNode*)node;
+  }
   // A member-function-template call whose explicit template arguments or actuals
   // are still template-dependent cannot be resolved yet; defer it so it is
   // re-analyzed once the enclosing template is instantiated with concrete

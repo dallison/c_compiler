@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <utility>
 
 namespace std {
 
@@ -20,6 +21,50 @@ template <class T>
 struct less {
   constexpr bool operator()(const T& left, const T& right) const {
     return left < right;
+  }
+};
+
+template <>
+struct less<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return static_cast<T&&>(left) < static_cast<U&&>(right);
+  }
+};
+
+template <class T>
+struct greater {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return right < left;
+  }
+};
+
+template <>
+struct greater<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return static_cast<U&&>(right) < static_cast<T&&>(left);
+  }
+};
+
+template <class T>
+struct equal_to {
+  constexpr bool operator()(const T& left, const T& right) const {
+    return left == right;
+  }
+};
+
+template <>
+struct equal_to<void> {
+  using is_transparent = void;
+
+  template <class T, class U>
+  constexpr bool operator()(T&& left, U&& right) const {
+    return static_cast<T&&>(left) == static_cast<U&&>(right);
   }
 };
 

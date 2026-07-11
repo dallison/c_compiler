@@ -366,6 +366,11 @@ typedef struct TypeRecord {
   String* dependent_member_name;  // For T::type-like types.       // @wire 7
   Symbol* template_origin;       // Primary template for template-ids. // @wire 8
   Vector* template_arguments;    // TemplateArgument* (owned).      // @wire 9
+  // For dependent qualified member type paths rooted at a template parameter.
+  // `dependent_member_name` stores the `::`-joined components after the root;
+  // this vector, when present, has one entry per component.  Each entry is
+  // either NULL or a Vector<TemplateArgument*> for that component's template-id.
+  Vector* dependent_member_template_arguments;
   struct TypeRecord* next;                                        // @wire 10
   union {                        // Discriminated by declarator/type:
     ArrayInfo array;             // @wire 11 (kDeclArray)
@@ -402,6 +407,7 @@ typedef struct {
   Struct* enclosing_template_substitution_target;
   StructMember* cxx_member_definition;
   Vector* declarator_template_arguments;
+  bool parsing_direct_class_template;
   // Set when substituting template arguments into a type produces a hard
   // substitution failure in the immediate context (e.g. a dependent member
   // typedef like `enable_if<false, T>::type` that does not exist).  Callers
