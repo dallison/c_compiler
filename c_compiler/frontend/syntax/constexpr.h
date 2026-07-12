@@ -60,6 +60,10 @@ bool ConstexprEvaluateObjectAddress(ConstEvalContext* ctx, ASTNode* node,
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
+Symbol* ConstexprFunctionDefinition(Symbol* symbol);
+bool ConstexprMaterializeClassArgument(ConstEvalContext* ctx, ASTNode* arg,
+                                       TypeRecord* object_type,
+                                       ConstexprObject** object);
 ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
                                              SourceLocation location);
 

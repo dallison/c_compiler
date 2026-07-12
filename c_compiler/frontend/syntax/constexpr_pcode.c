@@ -101,9 +101,6 @@ static void DeletePCodeConstexprObject(ConstexprObject* object);
 static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type);
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol);
 static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(const char* name);
-static bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
-                                                   ASTNode* node,
-                                                   ConstexprObject** result);
 static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
                                                     TypeRecord* object_type,
                                                     ASTNode* node,
@@ -1197,9 +1194,18 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
                                              Vector* address_regions,
                                              const char** reason) {
   TypeRecord* object_type = type != NULL ? type->next : NULL;
-  ConstexprObject* object = ConstexprObjectArgument(arg);
-  if (object == NULL && ctx != NULL) {
-    (void)ConstexprEvaluateObjectAddress(ctx, arg, &object);
+  ConstexprObject* object = NULL;
+  if (ctx != NULL && TypeIsReference(type) && object_type != NULL &&
+      TypeIsStructOrUnion(object_type) && arg != NULL) {
+    if (!ConstexprMaterializeClassArgument(ctx, arg, object_type, &object)) {
+      *reason = "could not materialize constexpr reference argument";
+      return false;
+    }
+  } else {
+    object = ConstexprObjectArgument(arg);
+    if (object == NULL && ctx != NULL) {
+      (void)ConstexprEvaluateObjectAddress(ctx, arg, &object);
+    }
   }
   if (object_type == NULL) {
     return false;
@@ -1860,6 +1866,16 @@ static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
     return NULL;
   }
+  Symbol* resolved = ConstexprFunctionDefinition(symbol);
+  if (resolved != NULL && resolved->type != NULL &&
+      TypeIsFunction(resolved->type) &&
+      resolved->type->info.function.body != NULL) {
+    SymbolSetCXXMangledAsmName(resolved);
+    if (symbol->asm_name.length == 0 && resolved->asm_name.length != 0) {
+      StringSetString(&symbol->asm_name, &resolved->asm_name);
+    }
+    return resolved;
+  }
   if (symbol->value.func_defn != NULL &&
       symbol->value.func_defn->type != NULL &&
       TypeIsFunction(symbol->value.func_defn->type) &&
@@ -2405,9 +2421,9 @@ bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                           &reason);
 }
 
-static bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
-                                                   ASTNode* node,
-                                                   ConstexprObject** result) {
+bool ConstexprPCodeEvaluateCallObjectResult(ConstEvalContext* ctx,
+                                            ASTNode* node,
+                                            ConstexprObject** result) {
   const char* reason = NULL;
   if (!ConstexprPCodeValidateCall(node, &reason)) {
     return false;
@@ -2502,6 +2518,10 @@ static void DeletePCodeConstexprObject(ConstexprObject* object) {
   }
   VectorDestruct(&object->slots);
   free(object);
+}
+
+void ConstexprPCodeDeleteObject(ConstexprObject* object) {
+  DeletePCodeConstexprObject(object);
 }
 
 static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type) {

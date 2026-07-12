@@ -666,6 +666,41 @@ void NormalConversion(ASTNode* from, TypeRecord* to) {
   SemanticConvertType(from, to, kConvertNormal);
 }
 
+static bool CXXSameClassTypeIgnoringQualifiers(TypeRecord* from,
+                                               TypeRecord* to) {
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to)) {
+    return false;
+  }
+  Qualifiers from_q = from->qualifiers;
+  Qualifiers to_q = to->qualifiers;
+  from->qualifiers = kQualPlain;
+  to->qualifiers = kQualPlain;
+  bool same = TypeEqual(from, to);
+  from->qualifiers = from_q;
+  to->qualifiers = to_q;
+  return same;
+}
+
+static bool CXXStructLayoutCompatibleShortcut(TypeRecord* from,
+                                              TypeRecord* to) {
+  if (!TypeEqualIgnoringSign(from, to)) {
+    return false;
+  }
+  if (!TypeIsStructOrUnion(from) || !TypeIsStructOrUnion(to)) {
+    return true;
+  }
+  if (CXXSameClassTypeIgnoringQualifiers(from, to)) {
+    return true;
+  }
+  // Preserve the existing derived-to-base value conversion without treating
+  // arbitrary, layout-similar class types as interchangeable. Distinct class
+  // template specializations such as duration<..., ratio<1>> and
+  // duration<..., milli> must go through their converting constructor.
+  return CompilerIsCXX() &&
+         TypeBaseOffset(from, to, /*public_only=*/true, NULL);
+}
+
 static bool TypeDiscardsQualifiers(TypeRecord* from, TypeRecord* to) {
   if (from == NULL || to == NULL) {
     return false;
@@ -887,7 +922,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
-  if (TypeEqualIgnoringSign(from->type, to)) {
+  if (CXXStructLayoutCompatibleShortcut(from->type, to)) {
     // Use the 'to' type as the node type.
     ASTNodeSetType(from, to);
     return;
@@ -1054,7 +1089,11 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
       (TypeIsFixedArray(node->symbol->type) ||
        TypeIsStructOrUnion(node->symbol->type)) &&
       (node->initializer->op == AST_OP(braced_init) ||
-       node->initializer->op == AST_OP(call));
+       node->initializer->op == AST_OP(call) ||
+       (node->initializer->op == AST_OP(expr_init) &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr->op ==
+            AST_OP(call)));
   if (!object_initializer) {
     node->initializer = AnalyzeExpression(node->initializer);
     if (!SemanticDeduceAutoType(node->symbol, node->initializer,

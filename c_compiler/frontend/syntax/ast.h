@@ -351,6 +351,7 @@ struct ConstraintExpr;
 #define kASTLambdaExpression (1 << 25)  // Compound literal that represents a C++ lambda expression (prvalue).
 #define kASTCXXMemberInitializer (1 << 26)  // Synthetic assignment that lowers a ctor mem-initializer.
 #define kASTDeferredDependentAssign (1 << 27)  // Assignment whose operand conversion was deferred because an operand was still type-dependent (re-analyzed at final instantiation).
+#define kASTDependentCast (1 << 28)  // Cast target depended on template substitution.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

@@ -28,4 +28,8 @@ Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
 bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
                                          ConversionContext ctx);
 
+// Finds a viable converting constructor for overload/constexpr conversion.
+StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
+                                                    bool allow_explicit);
+
 #endif /* expr_semantics_h */

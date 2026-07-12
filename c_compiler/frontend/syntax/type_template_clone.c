@@ -93,6 +93,53 @@ static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
   }
 }
 
+static void ClearASTNodeType(ASTNode* node) {
+  if (node != NULL && node->type != NULL) {
+    TypeRecordDelete(node->type);
+    node->type = NULL;
+  }
+}
+
+static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op != AST_OP(call)) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
+static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL ||
+      node->op != AST_OP(cast) || (node->flags & kASTDependentCast) == 0) {
+    return;
+  }
+  CastASTNode* cast = (CastASTNode*)node;
+  TypeRecord* target = cast->cast_type;
+  if (TypeIsReference(target)) {
+    target = target->next;
+  }
+  if (!TypeIsStructOrUnion(target) || cast->expr == NULL ||
+      TypeIsStructOrUnion(cast->expr->type)) {
+    node->flags &= ~kASTDependentCast;
+    return;
+  }
+  // Cast lowering depends on its now-concrete target type. Clear the cast and
+  // the dependent arithmetic below it, plus its enclosing expression/statement
+  // path, so semantic analysis recomputes the concrete operand widths. Preserve
+  // already-lowered calls to avoid repeating overload/template resolution.
+  ASTNodeVisit(node, ClearClonedCastSubtreeFlagVisitor, 0, NULL);
+  for (ASTNode* current = node; current != NULL; current = current->parent) {
+    current->flags &= ~kASTAnalyzed;
+  }
+  node->flags &= ~kASTDependentCast;
+}
+
 static void AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
                                                       int child_id,
                                                       VisitorMode mode) {
@@ -2557,6 +2604,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                 clone->from_owner != clone->to_owner &&
                 TypeChainReferencesStruct(cast->cast_type,
                                           clone->from_owner))) {
+      node->flags |= kASTDependentCast;
       TypeRecord* cast_type =
           SubstituteTemplateParameters(clone->parser, cast->cast_type,
                                        clone->args);
@@ -2717,7 +2765,12 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
   ASTNodeSetType(node, NULL);
   if (call->left != NULL) {
     call->left->flags &= ~kASTAnalyzed;
-    ASTNodeSetType(call->left, NULL);
+    if ((call->left->op == AST_OP(dot) ||
+         call->left->op == AST_OP(arrow)) &&
+        ((BinaryASTNode*)call->left)->right != NULL &&
+        ((BinaryASTNode*)call->left)->right->op == AST_OP(string)) {
+      ClearASTNodeType(call->left);
+    }
   }
   if (call->children != NULL) {
     for (size_t i = 0; i < call->children->length; i++) {
@@ -3116,6 +3169,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
+  ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   compiler->current_class_access_context = saved_access_context;

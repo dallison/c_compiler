@@ -3709,7 +3709,21 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
       return -1;
     }
     int base_rank = OverloadBaseConversionRank(actual->type, target);
-    return base_rank < 0 ? -1 : base_rank * 10 + binding_rank;
+    if (base_rank >= 0) {
+      return base_rank * 10 + binding_rank;
+    }
+    // A converting constructor produces a temporary. It can satisfy an rvalue
+    // reference or a const lvalue reference, but never a non-const lvalue
+    // reference.
+    if (CompilerIsCXX() && !g_suppress_user_defined_conversion_rank &&
+        (formal_type->declarator == kDeclRValueReference ||
+         TypeIsConst(target)) &&
+        TypeIsStructOrUnion(target) &&
+        FindConvertingConstructorCandidate(target, actual,
+                                           /*allow_explicit=*/false) != NULL) {
+      return 100;
+    }
+    return -1;
   }
 
   if (actual != NULL && actual->op == AST_OP(braced_init)) {
@@ -3748,6 +3762,59 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   return -1;
 }
 
+static int ConvertingConstructorRank(StructMember* member, ASTNode* from,
+                                     bool allow_explicit) {
+  Symbol* ctor_symbol = member->symbol;
+  Symbol* temporary = NULL;
+  if (ctor_symbol->flags.is_template) {
+    Vector actuals;
+    VectorInit(&actuals);
+    VectorAppend(&actuals, from);
+    DiagnosticSuppressBegin();
+    temporary = TypeCreateFunctionTemplateCandidate(
+        &compiler->syntax, ctor_symbol, NULL, &actuals,
+        /*first_formal_arg=*/1);
+    DiagnosticSuppressEnd();
+    VectorDestruct(&actuals);
+    if (temporary == NULL || temporary->type == NULL ||
+        !TypeIsFunction(temporary->type)) {
+      if (temporary != NULL) {
+        SymbolDelete(temporary);
+      }
+      return -1;
+    }
+    ctor_symbol = temporary;
+  }
+
+  int rank = -1;
+  FunctionInfo* fi = &ctor_symbol->type->info.function;
+  if (!fi->is_constructor || fi->is_deleted ||
+      (fi->is_explicit && !allow_explicit) ||
+      member->symbol->flags.invented || fi->prototype.length < 2) {
+    goto done;
+  }
+  for (size_t i = 2; i < fi->prototype.length; i++) {
+    Symbol* param = fi->prototype.value.p[i];
+    if (param == NULL || param->default_argument == NULL) {
+      goto done;
+    }
+  }
+  Symbol* param = fi->prototype.value.p[1];
+  if (param == NULL || param->type == NULL) {
+    goto done;
+  }
+  bool saved = g_suppress_user_defined_conversion_rank;
+  g_suppress_user_defined_conversion_rank = true;
+  rank = OverloadConversionRank(from, param->type);
+  g_suppress_user_defined_conversion_rank = saved;
+
+done:
+  if (temporary != NULL) {
+    SymbolDelete(temporary);
+  }
+  return rank;
+}
+
 static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
                                                         ASTNode* from,
                                                         bool allow_explicit) {
@@ -3774,44 +3841,7 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
         c->symbol->type == NULL || !TypeIsFunction(c->symbol->type)) {
       continue;
     }
-    FunctionInfo* fi = &c->symbol->type->info.function;
-    if (!fi->is_constructor || fi->is_deleted) {
-      continue;
-    }
-    if (fi->is_explicit && !allow_explicit) {
-      continue;
-    }
-    // Skip compiler-synthesized special members (copy/move/default): they are
-    // not converting constructors.
-    if (c->symbol->flags.invented) {
-      continue;
-    }
-    // prototype[0] is the implicit object parameter; a converting constructor
-    // takes exactly one further argument (any remaining parameters must be
-    // defaulted).
-    size_t nparams = fi->prototype.length;
-    if (nparams < 2) {
-      continue;
-    }
-    bool rest_defaulted = true;
-    for (size_t i = 2; i < nparams; i++) {
-      Symbol* pi = fi->prototype.value.p[i];
-      if (pi == NULL || pi->default_argument == NULL) {
-        rest_defaulted = false;
-        break;
-      }
-    }
-    if (!rest_defaulted) {
-      continue;
-    }
-    Symbol* param = fi->prototype.value.p[1];
-    if (param == NULL || param->type == NULL) {
-      continue;
-    }
-    bool saved = g_suppress_user_defined_conversion_rank;
-    g_suppress_user_defined_conversion_rank = true;
-    int rank = OverloadConversionRank(from, param->type);
-    g_suppress_user_defined_conversion_rank = saved;
+    int rank = ConvertingConstructorRank(c, from, allow_explicit);
     if (rank < 0) {
       continue;
     }
@@ -3824,6 +3854,11 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
     }
   }
   return ambiguous ? NULL : best;
+}
+
+StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
+                                                    bool allow_explicit) {
+  return FindConvertingConstructorCandidate(to, from, allow_explicit);
 }
 
 // Converts `from` to the class type `to` by constructing a temporary through a
@@ -5872,7 +5907,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     ResolveOverloadedFunctionCall(node);
   }
-  LowerMemberFunctionCall(node);
+  bool lowered_member_call = LowerMemberFunctionCall(node);
+  if (!lowered_member_call && node->left != NULL &&
+      (node->left->op == AST_OP(dot) || node->left->op == AST_OP(arrow))) {
+    BinaryASTNode* member_access = (BinaryASTNode*)node->left;
+    TypeRecord* receiver_type =
+        member_access->left != NULL ? member_access->left->type : NULL;
+    if (receiver_type != NULL && node->left->op == AST_OP(arrow) &&
+        TypeIsPointerOrArray(receiver_type)) {
+      receiver_type = receiver_type->next;
+    }
+    if (receiver_type != NULL &&
+        TypeContainsTemplateParameter(receiver_type)) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                           kQualPlain));
+      return (ASTNode*)node;
+    }
+  }
   /* A callee that names a class or alias template (e.g. `AliasHolder(11)`) is a
    * CTAD functional construction, not a dependent functor call. Its type
    * legitimately contains the template's own parameters; whether the call is
@@ -6028,6 +6081,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         if (!polymorphic_special_this) {
           NormalConversion(actual,
                            ReferenceConversionTarget(actual, reference_type));
+          actual = node->children->value.p[i];
         }
         if (discards_qualifiers) {
           SemanticError(actual, "Reference argument discards qualifiers");
@@ -6241,8 +6295,9 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   Struct* member_owner = NULL;
   int member_offset = 0;
   StructMember* member =
-      FindStructMemberWithAccessAndOffset(struct_info, member_name, &access,
-                                          &member_owner, &member_offset);
+      FindStructMemberWithAccessAndOffsetByName(
+          struct_info, member_name->value, &access, &member_owner,
+          &member_offset);
   if (member == NULL) {
     SemanticError((ASTNode*)node, "%s is not a member of struct/union %s",
                   member_name->value, struct_info->tag_name->value);
