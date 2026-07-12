@@ -94,6 +94,61 @@ static bool MergeNamespace(Namespace* dest, Namespace* src) {
   return true;
 }
 
+static Namespace* FindInstalledNamespace(Namespace* loaded) {
+  if (loaded == NULL || compiler == NULL || compiler->global_namespace == NULL) {
+    return NULL;
+  }
+  if (loaded->parent == NULL) {
+    return compiler->global_namespace;
+  }
+
+  Vector components;
+  VectorInit(&components);
+  for (Namespace* ns = loaded; ns != NULL && ns->parent != NULL;
+       ns = ns->parent) {
+    VectorAppend(&components, &ns->name);
+  }
+
+  Namespace* installed = compiler->global_namespace;
+  for (size_t i = components.length; i > 0 && installed != NULL; i--) {
+    installed = NamespaceFindDirectChild(
+        installed, (String*)VectorGet(&components, i - 1));
+  }
+  VectorDestruct(&components);
+  return installed;
+}
+
+static bool MergeNamespaceAliases(Namespace* dest, Namespace* src) {
+  if (dest == NULL || src == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < src->namespace_aliases.length; i++) {
+    NamespaceAlias* alias =
+        (NamespaceAlias*)VectorGet(&src->namespace_aliases, i);
+    if (alias == NULL) {
+      continue;
+    }
+    Namespace* target = FindInstalledNamespace(alias->target);
+    if (target == NULL ||
+        NamespaceInsertAlias(dest, &alias->name, target) ==
+            kNamespaceAliasConflict) {
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < src->children.length; i++) {
+    Namespace* child = (Namespace*)VectorGet(&src->children, i);
+    if (child == NULL || child->is_anonymous) {
+      continue;
+    }
+    Namespace* child_dest = NamespaceFindDirectChild(dest, &child->name);
+    if (!MergeNamespaceAliases(child_dest, child)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ModuleInstallLoaded(LoadedModule* m) {
   if (compiler == NULL || compiler->global_namespace == NULL || m == NULL) {
     return false;
@@ -114,6 +169,12 @@ bool ModuleInstallLoaded(LoadedModule* m) {
   for (size_t i = 0; i < m->root_namespaces.length; i++) {
     Namespace* ns = (Namespace*)VectorGet(&m->root_namespaces, i);
     if (!MergeNamespace(compiler->global_namespace, ns)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < m->root_namespaces.length; i++) {
+    Namespace* ns = (Namespace*)VectorGet(&m->root_namespaces, i);
+    if (!MergeNamespaceAliases(compiler->global_namespace, ns)) {
       return false;
     }
   }

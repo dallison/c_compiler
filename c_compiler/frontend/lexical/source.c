@@ -166,6 +166,7 @@ Source* NewSourceFromFile(const char* filename, FILE* in) {
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
+  src->is_system_header = false;
   return src;
 }
 
@@ -180,7 +181,18 @@ Source* NewSourceFromString(const char* filename, String* str) {
   src->file_index = -1;
   src->prev = NULL;
   src->path_index = 0;
+  src->is_system_header = false;
   return src;
+}
+
+void SourceMarkSystemHeader(Source* source) {
+  if (source != NULL) {
+    source->is_system_header = true;
+  }
+}
+
+bool SourceIsSystemHeader(const Source* source) {
+  return source != NULL && source->is_system_header;
 }
 
 void SourceDestruct(Source* src) {

@@ -30,6 +30,7 @@ int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
 void TemplateArgumentDelete(TemplateArgument* arg);
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
+TemplateArgument* NewIntegralTemplateArgument(long long value);
 Vector* TemplateArgumentVectorCopy(Vector* args);
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);

@@ -1968,6 +1968,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   
   FILE* fp = NULL;
   size_t path_index = start_index;
+  bool found_in_system_path = false;
   if (!system_include) {
     // Not a system include (#include "...") so search user include
     // paths.
@@ -1977,6 +1978,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
     fp = FindFileInPath(&p->system_include_paths, &filename, &path_index);
+    found_in_system_path = fp != NULL;
   }
   if (fp == NULL) {
     if (start_index != 0) {
@@ -2007,6 +2009,9 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   // Allocate a new source provider from the include file and push
   // it as the current source in the Lex.
   Source* include_source = NewSourceFromFile(filename.value, fp);
+  if (found_in_system_path) {
+    SourceMarkSystemHeader(include_source);
+  }
   include_source->prev = p->lex->source;
   if (compiler->print_preprocessor) {
     printf("Including file %s\n", filename.value);
@@ -2621,13 +2626,25 @@ static void Pragma(Preprocessor* p, String* line, size_t pos) {
     } else if (MatchIdentifierToken(&ti, "davecc")) {
       HandleDiagnosticPragma(&ti, kDiagnosticVendorDavecc);
     } else if (MatchIdentifierToken(&ti, "clang")) {
-      HandleDiagnosticPragma(&ti, kDiagnosticVendorClang);
+      if (MatchIdentifierToken(&ti, "system_header")) {
+        // Match GCC/Clang: the pragma only affects the remainder of an
+        // included header and does not leak into the including source.
+        if (p->lex->source->prev != NULL) {
+          SourceMarkSystemHeader(p->lex->source);
+        }
+      } else {
+        HandleDiagnosticPragma(&ti, kDiagnosticVendorClang);
+      }
     } else if (MatchIdentifierToken(&ti, "gcc") ||
                MatchIdentifierToken(&ti, "GCC")) {
       // #pragma GCC warning "text" and #pragma GCC error "text" emit a
       // diagnostic with user-supplied text; everything else is a diagnostic
       // push/pop/ignored directive.
-      if (MatchIdentifierToken(&ti, "warning")) {
+      if (MatchIdentifierToken(&ti, "system_header")) {
+        if (p->lex->source->prev != NULL) {
+          SourceMarkSystemHeader(p->lex->source);
+        }
+      } else if (MatchIdentifierToken(&ti, "warning")) {
         String msg = {0};
         if (GetPragmaMessageString(&ti, &msg)) {
           PreprocessorWarning(p, "pragma-messages", "%s", msg.value);
