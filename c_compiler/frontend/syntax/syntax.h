@@ -116,6 +116,7 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
 bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
+bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol);
 // Parses an operator-function-id (operator+, operator(), operator[], ...) or a
 // conversion-function-id (operator <type-id>) used as the member name in an
 // explicit member access such as `x.operator+` or `p->operator int`.  The lexer

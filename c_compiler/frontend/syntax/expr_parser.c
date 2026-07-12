@@ -1138,12 +1138,26 @@ static ASTNode* NewStringLiteralArgument(String* contents,
               : NewStringConstantASTNode(contents, array, location);
 }
 
+static ASTNode* NewCXXUserDefinedLiteralCallForSymbol(
+    Syntax* syntax, String* suffix, Symbol* symbol, Vector* template_arguments,
+    Vector* actuals, SourceLocation location);
+
 static ASTNode* NewCXXUserDefinedLiteralCall(Syntax* syntax, String* suffix,
                                              Vector* actuals,
                                              SourceLocation location) {
+  return NewCXXUserDefinedLiteralCallForSymbol(
+      syntax, suffix, NULL, NULL, actuals, location);
+}
+
+static ASTNode* NewCXXUserDefinedLiteralCallForSymbol(
+    Syntax* syntax, String* suffix, Symbol* symbol, Vector* template_arguments,
+    Vector* actuals, SourceLocation location) {
   String name;
   CXXUserDefinedLiteralOperatorName(&name, suffix);
-  ASTNode* callee = NewCXXLiteralOperatorIdentifier(syntax, &name, location);
+  ASTNode* callee =
+      symbol != NULL ? NewIdentifierASTNode(symbol, location)
+                     : NewCXXLiteralOperatorIdentifier(syntax, &name, location);
+  ((IdentifierASTNode*)callee)->template_arguments = template_arguments;
   StringDestruct(&name);
   return NewVectorASTNode(AST_OP(call), NULL, location, callee, actuals);
 }
@@ -1157,42 +1171,97 @@ static TypeRecord* FirstFunctionFormal(Symbol* symbol) {
   return formal != NULL ? formal->type : NULL;
 }
 
-static bool LiteralOperatorHasCookedNumericCandidate(Symbol* first,
-                                                     bool floating) {
-  for (Symbol* candidate = first; candidate != NULL;
-       candidate = candidate->overload_next) {
-    TypeRecord* formal = FirstFunctionFormal(candidate);
-    if (floating ? TypeIsLongDouble(formal)
-                 : TypeIsUnsignedLongLong(formal)) {
-      return true;
-    }
+typedef enum {
+  kCXXNumericLiteralOperatorInvalid,
+  kCXXNumericLiteralOperatorCooked,
+  kCXXNumericLiteralOperatorRaw,
+  kCXXNumericLiteralOperatorTemplate,
+} CXXNumericLiteralOperatorKind;
+
+typedef struct {
+  CXXNumericLiteralOperatorKind kind;
+  Symbol* symbol;
+} CXXNumericLiteralOperator;
+
+static bool IsCookedNumericLiteralOperator(Symbol* symbol, bool floating) {
+  if (symbol == NULL || symbol->flags.is_template ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.prototype.length != 1) {
+    return false;
   }
-  return false;
+  TypeRecord* formal = FirstFunctionFormal(symbol);
+  return floating ? TypeIsLongDouble(formal)
+                  : TypeIsUnsignedLongLong(formal);
 }
 
-static bool LiteralOperatorHasRawNumericCandidate(Symbol* first) {
-  for (Symbol* candidate = first; candidate != NULL;
-       candidate = candidate->overload_next) {
-    TypeRecord* formal = FirstFunctionFormal(candidate);
-    if (TypeIsPointer(formal) && formal->next != NULL &&
-        TypeIsChar(formal->next)) {
-      return true;
-    }
+static bool IsRawNumericLiteralOperator(Symbol* symbol) {
+  if (symbol == NULL || symbol->flags.is_template ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.prototype.length != 1) {
+    return false;
   }
-  return false;
+  TypeRecord* formal = FirstFunctionFormal(symbol);
+  return TypeIsPointer(formal) && formal->next != NULL &&
+         formal->next->declarator == kDeclPrimitive &&
+         formal->next->type == kTypeChar && TypeIsConst(formal->next);
 }
 
-static bool CXXNumericLiteralShouldUseRawOperator(Syntax* syntax,
-                                                  String* suffix,
-                                                  bool floating) {
+static CXXNumericLiteralOperator ResolveCXXNumericLiteralOperator(
+    Syntax* syntax, String* suffix, bool floating) {
   String name;
   CXXUserDefinedLiteralOperatorName(&name, suffix);
-  Symbol* symbol = SyntaxFindSymbol(syntax, &name);
-  bool use_raw =
-      !LiteralOperatorHasCookedNumericCandidate(symbol, floating) &&
-      LiteralOperatorHasRawNumericCandidate(symbol);
+  Symbol* first = SyntaxFindSymbol(syntax, &name);
+  Symbol* cooked = NULL;
+  Symbol* raw = NULL;
+  Symbol* templ = NULL;
+  for (Symbol* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (IsCookedNumericLiteralOperator(candidate, floating)) {
+      cooked = candidate;
+    } else if (IsRawNumericLiteralOperator(candidate)) {
+      raw = candidate;
+    } else if (SyntaxIsCXXNumericLiteralOperatorTemplate(candidate)) {
+      templ = candidate;
+    }
+  }
+  CXXNumericLiteralOperator result = {
+      .kind = kCXXNumericLiteralOperatorInvalid,
+      .symbol = first,
+  };
+  if (cooked != NULL) {
+    result.kind = kCXXNumericLiteralOperatorCooked;
+    result.symbol = cooked;
+  } else if (raw != NULL && templ != NULL) {
+    SyntaxError(syntax,
+                "Raw and numeric literal operator template cannot both be "
+                "declared for %s",
+                name.value);
+    result.kind = kCXXNumericLiteralOperatorRaw;
+    result.symbol = raw;
+  } else if (raw != NULL) {
+    result.kind = kCXXNumericLiteralOperatorRaw;
+    result.symbol = raw;
+  } else if (templ != NULL) {
+    result.kind = kCXXNumericLiteralOperatorTemplate;
+    result.symbol = templ;
+  } else if (first != NULL) {
+    SyntaxError(syntax, "No matching numeric literal operator %s", name.value);
+  }
   StringDestruct(&name);
-  return use_raw;
+  return result;
+}
+
+static Vector* CXXNumericLiteralTemplateArguments(String* spelling) {
+  Vector* arguments = NewVector();
+  size_t length = spelling->length;
+  if (length > 0 && spelling->value[length - 1] == '\0') {
+    length--;
+  }
+  for (size_t i = 0; i < length; i++) {
+    VectorAppend(arguments, NewIntegralTemplateArgument(
+                                (unsigned char)spelling->value[i]));
+  }
+  return arguments;
 }
 
 static ASTNode* ParseCXXUserDefinedIntegerLiteral(Syntax* syntax) {
@@ -1204,23 +1273,29 @@ static ASTNode* ParseCXXUserDefinedIntegerLiteral(Syntax* syntax) {
   StringSetString(&suffix, &lex->ud_suffix);
   String spelling;
   StringInit(&spelling, NULL);
-  StringSetString(&spelling, &lex->spelling);
-  bool use_raw = CXXNumericLiteralShouldUseRawOperator(syntax, &suffix,
-                                                       /*floating=*/false);
+  StringSetString(&spelling, &lex->literal_spelling);
+  CXXNumericLiteralOperator literal_operator =
+      ResolveCXXNumericLiteralOperator(syntax, &suffix, /*floating=*/false);
   LexNextToken(lex);
 
   Vector* actuals = NewVector();
-  if (use_raw) {
+  Vector* template_arguments = NULL;
+  if (literal_operator.kind == kCXXNumericLiteralOperatorRaw) {
     VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
                                                   location, false));
+  } else if (literal_operator.kind == kCXXNumericLiteralOperatorTemplate) {
+    template_arguments = CXXNumericLiteralTemplateArguments(&spelling);
   } else {
+    // [lex.ext] fixes the cooked integer argument type regardless of the
+    // ordinary type the unsuffixed token would otherwise have.
     TypeRecord* type =
         NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
     VectorAppend(actuals, NewIntConstantASTNode(value, type, location));
   }
   StringDestruct(&spelling);
-  ASTNode* call = NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals,
-                                               location);
+  ASTNode* call = NewCXXUserDefinedLiteralCallForSymbol(
+      syntax, &suffix, literal_operator.symbol, template_arguments, actuals,
+      location);
   StringDestruct(&suffix);
   return call;
 }
@@ -1255,22 +1330,27 @@ static ASTNode* ParseCXXUserDefinedFloatingLiteral(Syntax* syntax) {
   StringSetString(&suffix, &lex->ud_suffix);
   String spelling;
   StringInit(&spelling, NULL);
-  StringSetString(&spelling, &lex->spelling);
-  bool use_raw = CXXNumericLiteralShouldUseRawOperator(syntax, &suffix,
-                                                       /*floating=*/true);
+  StringSetString(&spelling, &lex->literal_spelling);
+  CXXNumericLiteralOperator literal_operator =
+      ResolveCXXNumericLiteralOperator(syntax, &suffix, /*floating=*/true);
   LexNextToken(lex);
 
   Vector* actuals = NewVector();
-  if (use_raw) {
+  Vector* template_arguments = NULL;
+  if (literal_operator.kind == kCXXNumericLiteralOperatorRaw) {
     VectorAppend(actuals, NewStringLiteralArgument(NewString(spelling.value),
                                                   location, false));
+  } else if (literal_operator.kind == kCXXNumericLiteralOperatorTemplate) {
+    template_arguments = CXXNumericLiteralTemplateArguments(&spelling);
   } else {
+    // [lex.ext] fixes the cooked floating argument type at long double.
     TypeRecord* type = NewTypeRecordWithSize(kTypeLongDouble, kQualPlain);
     VectorAppend(actuals, NewRealConstantASTNode(value, type, location));
   }
   StringDestruct(&spelling);
-  ASTNode* call = NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals,
-                                               location);
+  ASTNode* call = NewCXXUserDefinedLiteralCallForSymbol(
+      syntax, &suffix, literal_operator.symbol, template_arguments, actuals,
+      location);
   StringDestruct(&suffix);
   return call;
 }

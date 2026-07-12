@@ -54,6 +54,7 @@ typedef struct Lex {
   Token current_token;  // Current token.
 
   String spelling;      // Spelling for identifier or string literal.
+  String literal_spelling;  // Exact numeric spelling for C++ UDL fallback.
   int64_t number;       // Integer literal value.
   double fnumber;       // Floating point literal value.
   String suffix;        // Integer or floating suffix.
@@ -80,6 +81,7 @@ typedef struct {
   SourceLocation current_token_location;
   Token current_token;
   String spelling;
+  String literal_spelling;
   int64_t number;
   double fnumber;
   String suffix;

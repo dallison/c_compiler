@@ -92,6 +92,7 @@ typedef struct Source {
     } string;
   } from;
   size_t path_index;  // Index into search path.
+  bool is_system_header;  // Set by -isystem resolution or system_header pragma.
 } Source;
 
 SourceLocation NewSourceLocation(Source* sou, int lineno, size_t start,
@@ -108,6 +109,8 @@ void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
 // Creates a new source in heap memory.
 Source* NewSourceFromFile(const char* filename, FILE* in);
 Source* NewSourceFromString(const char* filenname, String* str);
+void SourceMarkSystemHeader(Source* source);
+bool SourceIsSystemHeader(const Source* source);
 void SourceRewind(Source* src);
 
 int SourceGetChar(Source* src);

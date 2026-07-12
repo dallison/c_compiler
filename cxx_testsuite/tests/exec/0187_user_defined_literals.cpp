@@ -1,6 +1,8 @@
 // RUN: -std=c++20
 // EXPECT_EXIT: 0
 
+#include "cxx_testsuite/include/pragma_system_udl.hpp"
+
 int operator""_twice(unsigned long long value) {
   return (int)(value * 2);
 }
@@ -29,17 +31,35 @@ int operator""_len(const char* text, unsigned long size) {
   return (int)(text[0] + size);
 }
 
-int operator""s(unsigned long long value) {
-  return (int)value + 1000;
+template<char... Chars>
+constexpr int operator""_pack() {
+  return (0 + ... + Chars);
 }
 
-int operator""us(unsigned long long value) {
-  return (int)value + 2000;
+constexpr int operator""_prefer(unsigned long long) {
+  return 11;
 }
 
-int operator""cstr(const char* text, unsigned long size) {
-  return (int)(text[0] + text[1] + size);
+template<char... Chars>
+constexpr int operator""_prefer() {
+  return 22;
 }
+
+constexpr int operator""_preferf(long double) {
+  return 33;
+}
+
+template<char... Chars>
+constexpr int operator""_preferf() {
+  return 44;
+}
+
+static_assert(123_pack == '1' + '2' + '3');
+static_assert(0x2a_pack == '0' + 'x' + '2' + 'a');
+static_assert(1'23_pack == '1' + '\'' + '2' + '3');
+static_assert(1.5e+2_pack == '1' + '.' + '5' + 'e' + '+' + '2');
+static_assert(7_prefer == 11);
+static_assert(1.0_preferf == 33);
 
 int main() {
   if (21_twice != 42) {
@@ -65,6 +85,12 @@ int main() {
   }
   if ("a" "b"cstr != 'a' + 'b' + 2) {
     return 8;
+  }
+  if (456_pack != '4' + '5' + '6') {
+    return 9;
+  }
+  if (1'234_raw != 5) {
+    return 10;
   }
   return 0;
 }

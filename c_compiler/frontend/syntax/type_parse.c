@@ -1821,6 +1821,23 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
 
 void ConversionOperatorName(TypeRecord* type, String* name);
 TypeRecord* ParseCXXConversionType(TypeParser* parser);
+
+static void ValidateCXXLiteralOperatorDeclaration(TypeParser* parser,
+                                                  Symbol* symbol,
+                                                  bool in_system_header) {
+  static const char prefix[] = "operator\"\"";
+  size_t prefix_length = sizeof(prefix) - 1;
+  if (symbol == NULL || symbol->name.length <= prefix_length ||
+      !StringStartsWith(&symbol->name, prefix) ||
+      symbol->name.value[prefix_length] == '_' || in_system_header) {
+    return;
+  }
+  SyntaxError(parser->syntax,
+              "Literal operator suffix \"%s\" must begin with '_' outside a "
+              "system header",
+              symbol->name.value + prefix_length);
+}
+
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
     if (SyntaxLookingAtType(parser->syntax) || LexLookingAt(parser->lex, TOK(rparen))) {
@@ -1838,6 +1855,7 @@ void TypeParserParseBase(TypeParser* parser) {
         LexLookingAt(parser->lex, TOK(operator)) ||
         LexLookingAt(parser->lex, TOK(coloncolon))) {
       SourceLocation location = parser->lex->current_token_location;
+      bool in_system_header = SourceIsSystemHeader(parser->lex->source);
       FullyQualifiedIdentifier name;
       FullyQualifiedIdentifierInit(&name);
       bool parsed = CompilerIsCXX()
@@ -1853,6 +1871,8 @@ void TypeParserParseBase(TypeParser* parser) {
           NewSymbol(FullyQualifiedIdentifierLast(&name), parser->base_type,
                     parser->storage);
       parser->symbol->location = location;
+      ValidateCXXLiteralOperatorDeclaration(parser, parser->symbol,
+                                            in_system_header);
       if (name.template_arguments.length > 0) {
         Vector* args =
             name.template_arguments.value.p[name.template_arguments.length - 1];

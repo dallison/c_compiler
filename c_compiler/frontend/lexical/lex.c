@@ -1194,6 +1194,7 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->current_token = TOK(bad);
   StringInit(&lex->line, NULL);
   StringInit(&lex->spelling, NULL);
+  StringInit(&lex->literal_spelling, NULL);
   StringInit(&lex->suffix, NULL);
   StringInit(&lex->ud_suffix, NULL);
   lex->number = 0;
@@ -1266,6 +1267,9 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->current_token = lex->current_token;
   StringInitFromSegment(&checkpoint->spelling, lex->spelling.value,
                         lex->spelling.length);
+  StringInitFromSegment(&checkpoint->literal_spelling,
+                        lex->literal_spelling.value,
+                        lex->literal_spelling.length);
   checkpoint->number = lex->number;
   checkpoint->fnumber = lex->fnumber;
   StringInitFromSegment(&checkpoint->suffix, lex->suffix.value,
@@ -1297,6 +1301,7 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->current_token_location = checkpoint->current_token_location;
   lex->current_token = checkpoint->current_token;
   StringSetString(&lex->spelling, &checkpoint->spelling);
+  StringSetString(&lex->literal_spelling, &checkpoint->literal_spelling);
   lex->number = checkpoint->number;
   lex->fnumber = checkpoint->fnumber;
   StringSetString(&lex->suffix, &checkpoint->suffix);
@@ -1311,6 +1316,7 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
 void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
   StringDestruct(&checkpoint->line);
   StringDestruct(&checkpoint->spelling);
+  StringDestruct(&checkpoint->literal_spelling);
   StringDestruct(&checkpoint->suffix);
   StringDestruct(&checkpoint->ud_suffix);
 }
@@ -1324,6 +1330,7 @@ void LexDestruct(Lex* lex) {
 
   StringDestruct(&lex->line);
   StringDestruct(&lex->spelling);
+  StringDestruct(&lex->literal_spelling);
   StringDestruct(&lex->suffix);
   StringDestruct(&lex->ud_suffix);
 }
@@ -1367,6 +1374,7 @@ static bool IsDigitSeparator(Lex* lex, bool ishex, bool isoctal,
 }
 
 static void CollectNumber(Lex* lex, char ch) {
+  StringClear(&lex->literal_spelling);
   if (lex->assembler_mode && ch == '$') {
     lex->pos++;     // Skip $.
     CollectHex(lex);
@@ -1383,6 +1391,7 @@ static void CollectNumber(Lex* lex, char ch) {
     // for use.
     StringClear(&lex->spelling);
     StringAppendChar(&lex->spelling, ch);
+    StringAppendChar(&lex->literal_spelling, ch);
     lex->pos++;
     if (seenzero && !CompilerCXXAtLeast(kLanguageStandardCXX14) &&
         lex->pos + 1 < lex->line.length &&
@@ -1435,6 +1444,7 @@ static void CollectNumber(Lex* lex, char ch) {
         }
         seensign = true;
       } else if (IsDigitSeparator(lex, ishex, isoctal, isbinary)) {
+        StringAppendChar(&lex->literal_spelling, ch);
         lex->pos++;
         continue;
       } else if (isbinary) {
@@ -1456,11 +1466,13 @@ static void CollectNumber(Lex* lex, char ch) {
         break;
       }
       StringAppendChar(&lex->spelling, ch);
+      StringAppendChar(&lex->literal_spelling, ch);
       lex->pos++;
       seenzero = false;
     }
     // Terminate spelling.
     StringAppendChar(&lex->spelling, '\0');
+    StringAppendChar(&lex->literal_spelling, '\0');
     
     // Now we can determine the type.  If we've seen a dot
     // or exponent then we are a floating point number.

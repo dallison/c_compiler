@@ -652,6 +652,24 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
   }
 }
 
+bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol) {
+  if (symbol == NULL || !symbol->flags.is_template ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      !StringStartsWith(&symbol->name, "operator\"\"") ||
+      symbol->type->info.function.prototype.length != 0 ||
+      symbol->type->info.function.template_parameters.length != 1) {
+    return false;
+  }
+  TemplateParameter* parameter =
+      symbol->type->info.function.template_parameters.value.p[0];
+  return parameter != NULL &&
+         parameter->kind == kTemplateParameterNonType &&
+         parameter->is_parameter_pack && parameter->type != NULL &&
+         parameter->type->declarator == kDeclPrimitive &&
+         parameter->type->type == kTypeChar &&
+         parameter->type->qualifiers == kQualPlain;
+}
+
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
   if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(operator))) {
     return false;
@@ -6086,6 +6104,18 @@ static void MoveTemplateParameterConstraintsToFunction(TypeRecord* func) {
   }
 }
 
+static void ValidateLiteralOperatorTemplate(Syntax* syntax, Symbol* symbol) {
+  if (symbol == NULL || !StringStartsWith(&symbol->name, "operator\"\"")) {
+    return;
+  }
+  if (!SyntaxIsCXXNumericLiteralOperatorTemplate(symbol)) {
+    SyntaxError(
+        syntax,
+        "Numeric literal operator template must have the form "
+        "template<char...> operator\"\"suffix()");
+  }
+}
+
 static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
   if (node == NULL || node->op != AST_OP(decl_list)) {
     return;
@@ -6110,6 +6140,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
             MoveCurrentTemplateParametersToFunction(syntax, var->symbol->type);
           }
           MoveTemplateParameterConstraintsToFunction(var->symbol->type);
+          ValidateLiteralOperatorTemplate(syntax, var->symbol);
           if (syntax->current_template_requires_clause != NULL) {
             AddFunctionAssociatedConstraint(
                 var->symbol->type, syntax->current_template_requires_clause);

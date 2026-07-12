@@ -451,6 +451,16 @@ TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
   return arg;
 }
 
+TemplateArgument* NewIntegralTemplateArgument(long long value) {
+  TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+  memset(arg, 0, sizeof(*arg));
+  arg->kind = kTemplateParameterNonType;
+  arg->int_value = value;
+  arg->template_parameter_index = -1;
+  arg->location = SOURCE_LOCATION_MISSING;
+  return arg;
+}
+
 /* Deep-copy a vector of template arguments (NULL-safe). */
 Vector* TemplateArgumentVectorCopy(Vector* args) {
   if (args == NULL) {
