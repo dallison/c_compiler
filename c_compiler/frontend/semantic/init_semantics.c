@@ -565,6 +565,135 @@ static INode* FindDesignator(INode* inode,
   return NULL;
 }
 
+// Return the direct object member named by the first designator in a C++
+// designated-initializer clause.  C++ declaration-order checking applies to
+// this top-level field only, which is the only ordering case reachable in an
+// otherwise-valid C++ designated-initializer list.
+static StructMember* CXXDirectDesignatedMember(INode* inode,
+                                               ASTNode* initializer,
+                                               size_t* declaration_order) {
+  if (!CompilerIsCXX() || inode == NULL || inode->kind != kIStruct ||
+      initializer == NULL || initializer->op != AST_OP(designated_init) ||
+      declaration_order == NULL) {
+    return NULL;
+  }
+  DesignatedInitializerASTNode* designated =
+      (DesignatedInitializerASTNode*)initializer;
+  if (designated->designators == NULL ||
+      designated->designators->length == 0) {
+    return NULL;
+  }
+  Designator* first = designated->designators->value.p[0];
+  if (first == NULL || first->designator_type != kDesignatorStruct) {
+    return NULL;
+  }
+
+  Struct* owner = inode->type->info.struct_info;
+  if (owner == NULL || !owner->is_aggregate) {
+    return NULL;
+  }
+  StructMember* member =
+      first->is_resolved_member
+          ? first->value.struct_member
+          : FindStructMember(owner, first->value.struct_member_name);
+  if (!StructMemberIsObjectMember(member)) {
+    return NULL;
+  }
+
+  // FindStructMember also searches base classes.  C++ designated initializers
+  // name direct non-static data members, so inherited members do not
+  // participate in this ordering check.  A member injected by an anonymous
+  // aggregate has the declaration position of that aggregate.
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* direct = owner->members.value.p[i];
+    if (direct == member) {
+      *declaration_order = i;
+      return member;
+    }
+    if (direct != NULL && direct->is_anon && direct->symbol != NULL &&
+        TypeIsStructOrUnion(direct->symbol->type) &&
+        FindStructMember(direct->symbol->type->info.struct_info,
+                         &member->symbol->name) != NULL) {
+      *declaration_order = i;
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static String* CXXSingleDesignatorName(ASTNode* initializer) {
+  if (initializer == NULL || initializer->op != AST_OP(designated_init)) {
+    return NULL;
+  }
+  DesignatedInitializerASTNode* designated =
+      (DesignatedInitializerASTNode*)initializer;
+  if (designated->designators == NULL ||
+      designated->designators->length != 1) {
+    return NULL;
+  }
+  Designator* designator = designated->designators->value.p[0];
+  if (designator == NULL ||
+      designator->designator_type != kDesignatorStruct) {
+    return NULL;
+  }
+  if (designator->is_resolved_member &&
+      (designator->value.struct_member == NULL ||
+       designator->value.struct_member->symbol == NULL)) {
+    return NULL;
+  }
+  return designator->is_resolved_member
+             ? &designator->value.struct_member->symbol->name
+             : designator->value.struct_member_name;
+}
+
+static void CheckCXXDesignatedInitializers(
+    INode* inode, BracedInitializerASTNode* braced_init) {
+  if (!CompilerIsCXX() || inode == NULL || inode->kind != kIStruct ||
+      braced_init == NULL || braced_init->initializers == NULL) {
+    return;
+  }
+
+  StructMember* previous = NULL;
+  size_t previous_order = 0;
+  for (size_t i = 0; i < braced_init->initializers->length; i++) {
+    ASTNode* initializer = braced_init->initializers->value.p[i];
+    String* designator_name = CXXSingleDesignatorName(initializer);
+    if (designator_name != NULL) {
+      for (size_t j = 0; j < i; j++) {
+        String* prior_name = CXXSingleDesignatorName(
+            braced_init->initializers->value.p[j]);
+        if (prior_name != NULL &&
+            StringEqualString(designator_name, prior_name)) {
+          SemanticError(
+              initializer,
+              "'.%s' designator used multiple times in the same initializer "
+              "list",
+              designator_name->value);
+          break;
+        }
+      }
+    }
+
+    size_t declaration_order = 0;
+    StructMember* member =
+        CXXDirectDesignatedMember(inode, initializer, &declaration_order);
+    if (member == NULL) {
+      continue;
+    }
+    if (previous != NULL && declaration_order < previous_order) {
+      Struct* owner = inode->type->info.struct_info;
+      SemanticError(
+          initializer,
+          "designator order for field '%s' does not match declaration order "
+          "in '%s'",
+          member->symbol->name.value,
+          owner->tag_name != NULL ? owner->tag_name->value : "<anonymous>");
+    }
+    previous = member;
+    previous_order = declaration_order;
+  }
+}
+
 // If a flexible array (without a size) is initialized with a braced
 // initalizer we calculate its size from the number of initializers
 // inside the braces.  If there are designated initializers in there
@@ -602,6 +731,7 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
       LazyInitINode(inode);
+      CheckCXXDesignatedInitializers(inode, braced_init);
       INode* parent = inode->parent;
       inode->parent = NULL;
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
