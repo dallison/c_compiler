@@ -14,6 +14,7 @@
 #include "compiler.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
+#include "init_semantics.h"
 #include "bitset.h"
 #include "errors.h"
 
@@ -1491,6 +1492,56 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
 
 void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   node->initializer = AnalyzeExpression(node->initializer);
+  bool is_cxx_local_static =
+      CompilerIsCXX() && node->symbol != NULL &&
+      StorageIs(node->symbol->storage, STO(static));
+  if (is_cxx_local_static &&
+      node->local_static_init_kind == kLocalStaticInitUnclassified) {
+    if (node->initializer == NULL) {
+      node->local_static_init_kind = kLocalStaticInitConstant;
+    } else if (node->initializer->op == AST_OP(init)) {
+      BinaryASTNode* init = (BinaryASTNode*)node->initializer;
+      bool constant = InitializerIsLinkTimeConstant(init->right);
+      node->local_static_init_kind =
+          constant ? kLocalStaticInitConstant : kLocalStaticInitDynamic;
+      if (constant) {
+        node->initializer->flags |= kASTStaticInit;
+      }
+    } else {
+      ASTNode* candidate = InitializerExpression(node->initializer);
+      Symbol* constant_callee = NULL;
+      if (candidate != NULL && candidate->op == AST_OP(call)) {
+        VectorASTNode* call = (VectorASTNode*)candidate;
+        if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+          constant_callee = ((IdentifierASTNode*)call->left)->symbol;
+        }
+      }
+      ASTNode* constant_init =
+          constant_callee != NULL && constant_callee->flags.is_constexpr
+              ? ConstexprObjectInitializerForSymbol(
+                    node->symbol, node->initializer->location)
+              : NULL;
+      if (constant_init != NULL) {
+        ASTNode* simplified =
+            AnalyzeInitializer(node->symbol->type, constant_init, true);
+        ASTNodeDelete(node->initializer);
+        node->initializer = NewSemanticInitExpression(
+            node->symbol, simplified, node->base.location);
+        node->initializer->flags |= kASTStaticInit;
+        node->local_static_init_kind = kLocalStaticInitConstant;
+      } else {
+        node->local_static_init_kind = kLocalStaticInitDynamic;
+        if (node->symbol->flags.is_constexpr ||
+            node->symbol->flags.is_constinit) {
+          SemanticError(
+              node->initializer,
+              node->symbol->flags.is_constinit
+                  ? "constinit variable initializer is not a constant expression"
+                  : "constexpr variable initializer is not a constant expression");
+        }
+      }
+    }
+  }
   ASTNode* initializer_expr = InitializerExpression(node->initializer);
   bool constructor_call = false;
   if (initializer_expr != NULL && initializer_expr->op == AST_OP(call)) {

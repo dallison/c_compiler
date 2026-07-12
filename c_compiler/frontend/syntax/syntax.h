@@ -169,6 +169,7 @@ Storage SyntaxParseStorage(Syntax* syntax);
 
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
+void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function);
 
 void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers);
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);

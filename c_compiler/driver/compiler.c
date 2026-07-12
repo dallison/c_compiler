@@ -639,31 +639,87 @@ static ASTNode* CXXThreadLocalDynamicInitStatement(Symbol* sym,
   return NewExpressionStatementASTNode(init, location);
 }
 
-// Add all static variable declarations in the current function and
-// to the initailized or uninitialized static output.
-static void AddLocalStatics(Syntax* syntax) {
-  // The local statics are held in a vector in the Syntax
-  // struct.  The vector contains pointer to NewVariableDeclarationASTNode
-  // structs.  The vector does not own these pointers.
+static void AddUninitializedLocalStatic(Symbol* symbol) {
+  UninitializedStaticVariable* var =
+      malloc(sizeof(UninitializedStaticVariable));
+  var->symbol = symbol;
+  var->is_global = !StorageIs(symbol->storage, STO(static));
+  var->is_weak = SymbolHasWeakBinding(symbol);
+  var->size = symbol->type->size;
+  var->alignment = SymbolEffectiveAlignment(symbol);
+  var->is_tls = StorageIs(symbol->storage, STO(thread));
+  var->is_local = symbol->flags.is_local || SymbolHasWeakBinding(symbol);
+  VectorAppend(&compiler->uninitialized_static_variables, var);
+}
+
+static void CollectFunctionLocalStatic(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(vardecl)) {
+    return;
+  }
+  VariableDeclarationASTNode* declaration =
+      (VariableDeclarationASTNode*)node;
+  if (declaration->symbol != NULL &&
+      StorageIs(declaration->symbol->storage, STO(static)) &&
+      !StorageIs(declaration->symbol->storage, STO(thread))) {
+    VectorAppend((Vector*)data, declaration);
+  }
+}
+
+static void FindStaticInitializer(ASTNode* node, void* data, int child_id,
+                                  VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op == AST_OP(init) && (node->flags & kASTStaticInit) != 0 &&
+      *(BinaryASTNode**)data == NULL) {
+    *(BinaryASTNode**)data = (BinaryASTNode*)node;
+  }
+}
+
+// Add all static variable declarations in the current function to the
+// initialized or uninitialized static output.  Walking the final body makes
+// this work for deferred inline members and instantiated templates too.
+static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
+  Vector declarations;
+  VectorInit(&declarations);
+  ASTNodeVisit(function->info.function.body, CollectFunctionLocalStatic, 0,
+               &declarations);
+  for (size_t i = 0; i < declarations.length; i++) {
+    VariableDeclarationASTNode* decl =
+        (VariableDeclarationASTNode*)VectorGet(&declarations, i);
+    BinaryASTNode* init_node = NULL;
+    if (decl->local_static_init_kind == kLocalStaticInitConstant) {
+      ASTNodeVisit(decl->initializer, FindStaticInitializer, 0, &init_node);
+    }
+    if (init_node != NULL) {
+      AddInitializedStaticVariable(decl, init_node->right);
+    } else {
+      AddUninitializedLocalStatic(decl->symbol);
+    }
+    if (decl->local_static_guard != NULL) {
+      AddUninitializedLocalStatic(decl->local_static_guard);
+    }
+  }
+  VectorDestruct(&declarations);
+
+  // Thread-local block variables and their per-thread guard declarations are
+  // still collected during parsing because invented TLS guards do not appear
+  // as declarations in the final function body.
   for (size_t i = 0; i < syntax->local_statics.length; i++) {
     VariableDeclarationASTNode* decl =
         (VariableDeclarationASTNode*)syntax->local_statics.value.p[i];
-    if (decl->initializer == NULL || decl->initializer->op != AST_OP(init)) {
-      // No static data initializer. Runtime guards remain in the function body.
-      UninitializedStaticVariable* var =
-          malloc(sizeof(UninitializedStaticVariable));
-      var->symbol = decl->symbol;
-      var->is_global = !StorageIs(decl->symbol->storage, STO(static));
-      var->is_weak = SymbolHasWeakBinding(decl->symbol);
-      var->size = decl->symbol->type->size;
-      var->alignment = SymbolEffectiveAlignment(decl->symbol);
-      var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-      var->is_local =
-          decl->symbol->flags.is_local || SymbolHasWeakBinding(decl->symbol);
-      VectorAppend(&compiler->uninitialized_static_variables, var);
+    if (decl->symbol == NULL ||
+        !StorageIs(decl->symbol->storage, STO(thread))) {
+      continue;
+    }
+    if (decl->initializer != NULL &&
+        decl->initializer->op == AST_OP(init)) {
+      AddInitializedStaticVariable(
+          decl, ((BinaryASTNode*)decl->initializer)->right);
     } else {
-      BinaryASTNode* init_node = (BinaryASTNode*)decl->initializer;
-      AddInitializedStaticVariable(decl, init_node->right);
+      AddUninitializedLocalStatic(decl->symbol);
     }
   }
   VectorClear(&syntax->local_statics);
@@ -1004,6 +1060,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                                            DW_TAG(subprogram));
             }
              // Generate code for function.
+            SyntaxPrepareCXXLocalStatics(syntax, decl->base.type);
             Generator codegen;
             GeneratorInit(&codegen, syntax, compiler->current_function);
 
@@ -1020,7 +1077,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
              }
 
             // Handle local static variables.
-            AddLocalStatics(syntax);
+            AddLocalStatics(syntax, decl->base.type);
             GeneratorDestruct(&codegen);
           }
         } else {

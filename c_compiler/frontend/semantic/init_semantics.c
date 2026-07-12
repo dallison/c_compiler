@@ -402,6 +402,32 @@ static bool HasStaticAddress(ASTNode* expr) {
   return false;
 }
 
+bool InitializerIsLinkTimeConstant(ASTNode* init) {
+  if (init == NULL) {
+    return true;
+  }
+  switch (init->op) {
+    case AST_OP(braced_init): {
+      BracedInitializerASTNode* braced = (BracedInitializerASTNode*)init;
+      for (size_t i = 0; i < braced->initializers->length; i++) {
+        if (!InitializerIsLinkTimeConstant(
+                (ASTNode*)VectorGet(braced->initializers, i))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case AST_OP(designated_init):
+      return InitializerIsLinkTimeConstant(
+          ((DesignatedInitializerASTNode*)init)->init);
+    case AST_OP(expr_init):
+      return InitializerIsLinkTimeConstant(
+          ((ExpressionInitializerASTNode*)init)->expr);
+    default:
+      return IsConstantExpression(init) || HasStaticAddress(init);
+  }
+}
+
 // Initialize the current node and advance to the next.  Returns true
 // if the initialization is valid.
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {

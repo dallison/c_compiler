@@ -2986,6 +2986,9 @@ static ASTNode* VariableDeclarationASTNodeClone(
   ASTNodeBaseCopy(&to->base, node);
   to->symbol = from->symbol;
   to->initializer = ASTNodeClone(from->initializer, func, data, &to->base);
+  to->local_static_guard = from->local_static_guard;
+  to->local_static_init_kind = from->local_static_init_kind;
+  to->saved_sp = NULL;
   return func(&to->base, data);
 }
 
@@ -3020,6 +3023,8 @@ ASTNode* NewVariableDeclarationASTNode(Symbol* symbol, ASTNode* initializer,
               &var_decl_vtbl);
   node->symbol = symbol;
   node->initializer = initializer;
+  node->local_static_guard = NULL;
+  node->local_static_init_kind = kLocalStaticInitNone;
   if (initializer != NULL) {
     initializer->parent = (ASTNode*)node;
   }
@@ -4176,6 +4181,11 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
       VariableDeclarationASTNode* n =
           ASTArenaAlloc(sizeof(VariableDeclarationASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &var_decl_vtbl);
+      n->symbol = NULL;
+      n->initializer = NULL;
+      n->local_static_guard = NULL;
+      n->local_static_init_kind = kLocalStaticInitNone;
+      n->saved_sp = NULL;
       return &n->base;
     }
     case kASTShapeDeclList: {

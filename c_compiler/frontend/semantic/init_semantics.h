@@ -16,5 +16,6 @@
 
 ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* init,
                             bool constants_only);
+bool InitializerIsLinkTimeConstant(ASTNode* init);
 
 #endif /* init_semantics_h */

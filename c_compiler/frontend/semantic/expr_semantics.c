@@ -2213,7 +2213,11 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   bool is_static_storage = StorageIs(id_node->symbol->storage, STO(static)) ||
                            StorageIs(id_node->symbol->storage, STO(extern));
   bool constants_only = is_static_storage;
-  if (StorageIs(id_node->symbol->storage, STO(thread))) {
+  bool is_thread_local = StorageIs(id_node->symbol->storage, STO(thread));
+  bool is_cxx_local_static =
+      CompilerIsCXX() && compiler->current_function != NULL &&
+      StorageIs(id_node->symbol->storage, STO(static)) && !is_thread_local;
+  if (is_thread_local) {
     ASTNode* init_expr = init;
     if (init_expr->op == AST_OP(expr_init)) {
       init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
@@ -2222,7 +2226,10 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       constants_only = IsConstantExpression(init_expr);
     }
   }
-  bool is_static = is_static_storage && constants_only;
+  if (is_cxx_local_static && !id_node->symbol->flags.is_constexpr &&
+      !id_node->symbol->flags.is_constinit) {
+    constants_only = false;
+  }
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -2247,13 +2254,25 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   if (object_init != NULL) {
     init = object_init;
   }
-  ASTNode* simplified_init = AnalyzeInitializer(node->type, init, constants_only);
+  bool requires_constant_initializer =
+      constants_only || id_node->symbol->flags.is_constexpr ||
+      id_node->symbol->flags.is_constinit;
+  ASTNode* simplified_init =
+      AnalyzeInitializer(node->type, init, requires_constant_initializer);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
 
   // If the symbol being initialized is static set a flag to tell the
   // code generator not to generate any code for it.
-  if (is_static) {
+  bool link_time_constant = InitializerIsLinkTimeConstant(simplified_init);
+  if (is_static_storage && link_time_constant) {
     node->flags |= kASTStaticInit;
+  }
+  if (is_cxx_local_static && node->parent != NULL &&
+      node->parent->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* declaration =
+        (VariableDeclarationASTNode*)node->parent;
+    declaration->local_static_init_kind =
+        link_time_constant ? kLocalStaticInitConstant : kLocalStaticInitDynamic;
   }
   return simplified_init;
 }
