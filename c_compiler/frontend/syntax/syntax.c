@@ -6847,6 +6847,43 @@ static StructMember* FindCXXConstructor(TypeRecord* type) {
   return ctor;
 }
 
+static TypeRecord* CXXArrayBaseElementType(TypeRecord* type,
+                                           unsigned long* count) {
+  unsigned long elements = 1;
+  while (TypeIsFixedArray(type)) {
+    elements *= (unsigned long)type->info.array.size.fixed;
+    type = type->next;
+  }
+  if (count != NULL) {
+    *count = elements;
+  }
+  return type;
+}
+
+static ASTNode* NewCXXArrayElementExpression(Symbol* array,
+                                             unsigned long flat_index,
+                                             SourceLocation location) {
+  ASTNode* expression = NewIdentifierASTNode(array, location);
+  TypeRecord* array_type = array->type;
+  while (TypeIsFixedArray(array_type)) {
+    unsigned long lower_elements = 1;
+    for (TypeRecord* lower = array_type->next; TypeIsFixedArray(lower);
+         lower = lower->next) {
+      lower_elements *= (unsigned long)lower->info.array.size.fixed;
+    }
+    unsigned long index = flat_index / lower_elements;
+    flat_index %= lower_elements;
+    expression = NewBinaryASTNode(
+        AST_OP(subscript), TypeRecordCopy(array_type->next), location,
+        expression,
+        NewIntConstantASTNode(
+            index, NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain),
+            location));
+    array_type = array_type->next;
+  }
+  return expression;
+}
+
 static bool CXXConstructorSetHasInitializerList(StructMember* ctor) {
   for (StructMember* candidate = ctor; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -7094,6 +7131,55 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
 
 static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym) {
+  if (TypeIsFixedArray(sym->type)) {
+    unsigned long element_count = 0;
+    TypeRecord* element_type =
+        CXXArrayBaseElementType(sym->type, &element_count);
+    const char* constructor_name =
+        CXXConstructorNameForType(element_type);
+    if (constructor_name == NULL || element_type->info.struct_info == NULL ||
+        element_type->info.struct_info->is_aggregate) {
+      return NULL;
+    }
+    StructMember* ctor = FindStructMemberByName(
+        element_type->info.struct_info, constructor_name);
+    if (ctor == NULL || !ctor->is_member_function ||
+        !ctor->symbol->type->info.function.is_constructor) {
+      return NULL;
+    }
+    ASTNode* sequence = NULL;
+    for (unsigned long i = 0; i < element_count; i++) {
+      SourceLocation location = sym->location;
+      ASTNode* element =
+          NewCXXArrayElementExpression(sym, i, location);
+      ASTNode* member = NewStringConstantASTNode(
+          NewString(constructor_name), NULL, location);
+      ASTNode* member_access = NewBinaryASTNode(
+          AST_OP(dot), NULL, location, element, member);
+      Vector* actuals = NewVector();
+      CXXPrependCompleteObjectArgument(element_type, actuals,
+                                       /*complete_object=*/true, location);
+      ASTNode* call = NewVectorASTNode(
+          AST_OP(call), NULL, location, member_access, actuals);
+      if (sequence == NULL) {
+        sequence = call;
+      } else {
+        sequence = NewBinaryASTNode(
+            AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+            location, sequence, call);
+      }
+    }
+    if (sequence == NULL) {
+      return NULL;
+    }
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewExpressionStatementASTNode(sequence, sym->location));
+    return NewUnaryASTNode(
+        AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        sym->location,
+        NewCompoundStatementASTNode(statements, sym->location));
+  }
   const char* constructor_name = CXXConstructorNameForType(sym->type);
   if (constructor_name == NULL) {
     return NULL;
@@ -7111,55 +7197,14 @@ static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
 }
 
-static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
-      sym->type->info.struct_info == NULL ||
-      sym->type->info.struct_info->tag_name == NULL) {
-    return NULL;
-  }
-  SourceLocation location = sym->location;
-  String destructor_name;
-  StringInit(&destructor_name, "~");
-  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
-  StructMember* destructor =
-      FindStructMember(sym->type->info.struct_info, &destructor_name);
-  if (destructor == NULL || !destructor->is_member_function ||
-      !destructor->symbol->type->info.function.is_destructor) {
-    StringDestruct(&destructor_name);
-    return NULL;
-  }
-  ASTNode* member =
-      NewStringConstantASTNode(NewString(destructor_name.value), NULL,
-                               location);
-  StringDestruct(&destructor_name);
-  ASTNode* member_access =
-      NewBinaryASTNode(AST_OP(dot), NULL, location,
-                       NewIdentifierASTNode(sym, location), member);
-  Vector* actuals = NewVector();
-  CXXPrependCompleteObjectArgument(sym->type, actuals,
-                                   /*complete_object=*/true, location);
-  ASTNode* call =
-      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
-  return NewExpressionStatementASTNode(call, location);
-}
-
-static ASTNode* NewIntAssignment(Symbol* sym, int value,
-                                 SourceLocation location) {
-  return NewBinaryASTNode(
-      AST_OP(assign), sym->type, location,
-      NewIdentifierASTNode(sym, location),
-      NewIntConstantASTNode(value,
-                            NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                            location));
-}
-
-static bool ParsingExternalCXXInlineFunction(void) {
-  TypeRecord* func = compiler->current_function;
+static bool FunctionHasSharedCXXLocalStatics(TypeRecord* func) {
   if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
-      !func->info.function.is_inline || func->info.function.symbol == NULL) {
+      func->info.function.symbol == NULL) {
     return false;
   }
-  return !StorageIs(func->info.function.symbol->storage, STO(static));
+  Symbol* symbol = func->info.function.symbol;
+  return !StorageIs(symbol->storage, STO(static)) &&
+         (func->info.function.is_inline || SymbolHasWeakBinding(symbol));
 }
 
 static void AppendSanitizedAsmComponent(String* out, const char* component) {
@@ -7173,14 +7218,15 @@ static void AppendSanitizedAsmComponent(String* out, const char* component) {
   }
 }
 
-static void SetCXXInlineLocalStaticAsmNameFor(Symbol* sym, const char* local_name,
+static void SetCXXInlineLocalStaticAsmNameFor(TypeRecord* func, Symbol* sym,
+                                              const char* local_name,
                                               SourceLocation location,
                                               const char* suffix) {
-  if (!ParsingExternalCXXInlineFunction() || sym == NULL) {
+  if (!FunctionHasSharedCXXLocalStatics(func) || sym == NULL) {
     return;
   }
 
-  Symbol* func_symbol = compiler->current_function->info.function.symbol;
+  Symbol* func_symbol = func->info.function.symbol;
   const char* func_name = func_symbol->asm_name.length != 0
                               ? func_symbol->asm_name.value
                               : func_symbol->name.value;
@@ -7211,83 +7257,436 @@ static void SetCXXInlineLocalStaticAsmName(Symbol* sym, const char* suffix) {
   if (sym == NULL) {
     return;
   }
-  SetCXXInlineLocalStaticAsmNameFor(sym, sym->name.value, sym->location,
-                                    suffix);
+  SetCXXInlineLocalStaticAsmNameFor(compiler->current_function, sym,
+                                    sym->name.value, sym->location, suffix);
 }
 
-static void SetCXXInlineLocalStaticGuardAsmName(Symbol* guard,
+static void SetCXXInlineLocalStaticGuardAsmName(TypeRecord* func, Symbol* guard,
                                                 Symbol* guarded) {
   if (guard == NULL || guarded == NULL) {
     return;
   }
-  SetCXXInlineLocalStaticAsmNameFor(guard, guarded->name.value,
+  SetCXXInlineLocalStaticAsmNameFor(func, guard, guarded->name.value,
                                     guarded->location, "guard");
 }
 
-static void RegisterCXXLocalStaticDestructor(Symbol* sym, Symbol* guard) {
-  ASTNode* destructor = NewCXXDestructorCallIfNeeded(sym);
-  if (destructor == NULL) {
-    return;
-  }
-  SourceLocation location = sym->location;
-  ASTNode* condition = NewBinaryASTNode(
-      AST_OP(noteq), NULL, location, NewIdentifierASTNode(guard, location),
-      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                            location));
-  Vector* destructor_statements = NewVector();
-  VectorAppend(destructor_statements, destructor);
-  ASTNode* guarded_destructor = NewIfStatementASTNode(
-      condition, NewCompoundStatementASTNode(destructor_statements, location),
-      NULL, false, location);
-  VectorAppend(&compiler->cxx_global_destructor_calls, guarded_destructor);
-}
-
-static ASTNode* NewCXXLocalStaticGuardedConstructor(Syntax* syntax,
-                                                   Symbol* sym) {
-  ASTNode* constructor = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
-  if (constructor == NULL) {
+static Symbol* FindCXXDestructorForType(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
+  StructMember* destructor =
+      FindStructMember(type->info.struct_info, &destructor_name);
+  StringDestruct(&destructor_name);
+  if (destructor == NULL || !destructor->is_member_function ||
+      destructor->symbol == NULL ||
+      !destructor->symbol->type->info.function.is_destructor ||
+      destructor->symbol->type->info.function.is_trivial_special_member) {
+    return NULL;
+  }
+  return destructor->symbol;
+}
 
-  SourceLocation location = sym->location;
-  Symbol* guard =
-      NewSymbol(SyntaxFakeName(syntax),
-                NewTypeRecordWithSize(kTypeInt, kQualPlain), STO(static));
+static Symbol* GetCXXRuntimeFunction(const char* name, Type return_kind,
+                                     SourceLocation location) {
+  String runtime_name;
+  StringInit(&runtime_name, name);
+  Symbol* symbol = FindGlobalSymbol(&runtime_name);
+  StringDestruct(&runtime_name);
+  if (symbol != NULL) {
+    return symbol;
+  }
+  TypeRecord* function = NewFunctionTypeRecord();
+  TypeRecordChain(function,
+                  NewTypeRecordWithSize(return_kind, kQualPlain));
+  symbol = NewSymbol(name, function, STO(extern));
+  symbol->flags.invented = true;
+  symbol->flags.is_forward_declared = true;
+  symbol->location = location;
+  bool added = SyntaxAddSymbol(&compiler->syntax, symbol);
+  assert(added);
+  (void)added;
+  return symbol;
+}
+
+static ASTNode* NewCXXRuntimeCall(const char* name, Type return_kind,
+                                  Vector* actuals,
+                                  SourceLocation location) {
+  Symbol* function = GetCXXRuntimeFunction(name, return_kind, location);
+  ASTNode* callee = NewIdentifierASTNode(function, location);
+  callee->flags |= kASTNeedAddress;
+  return NewVectorASTNode(AST_OP(call), TypeRecordCopy(function->type->next),
+                          location, callee, actuals);
+}
+
+static ASTNode* NewSymbolAddress(Symbol* symbol, SourceLocation location) {
+  TypeRecord* pointer = NewPointerTo(kQualPlain, TypeRecordCopy(symbol->type));
+  ASTNode* identifier = NewIdentifierASTNode(symbol, location);
+  identifier->flags |= kASTNeedAddress;
+  return NewUnaryASTNode(AST_OP(address), pointer, location, identifier);
+}
+
+static ASTNode* NewGuardRuntimeCall(const char* name, Type return_kind,
+                                    Symbol* guard,
+                                    SourceLocation location) {
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, NewSymbolAddress(guard, location));
+  return NewCXXRuntimeCall(name, return_kind, actuals, location);
+}
+
+static ASTNode* NewCXXAtexitRegistration(Symbol* sym,
+                                         SourceLocation location) {
+  TypeRecord* object_type = sym->type;
+  unsigned long count = 1;
+  if (TypeIsFixedArray(object_type)) {
+    object_type = CXXArrayBaseElementType(object_type, &count);
+  }
+  Symbol* destructor = FindCXXDestructorForType(object_type);
+  if (destructor == NULL) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  ASTNode* destructor_address = NewIdentifierASTNode(destructor, location);
+  destructor_address->flags |= kASTNeedAddress;
+  VectorAppend(actuals, destructor_address);
+  VectorAppend(actuals, NewSymbolAddress(sym, location));
+  VectorAppend(actuals,
+               NewIntConstantASTNode(
+                   count,
+                   NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain),
+                   location));
+  VectorAppend(actuals,
+               NewIntConstantASTNode(
+                   object_type->size,
+                   NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain),
+                   location));
+  VectorAppend(actuals,
+               NewIntConstantASTNode(
+                   TypeNeedsCXXCompleteObjectArgument(object_type) ? 1 : 0,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+  return NewCXXRuntimeCall("__davecc_cxa_atexit", kTypeInt, actuals, location);
+}
+
+static Symbol* NewCXXLocalStaticGuard(Syntax* syntax, TypeRecord* func,
+                                      Symbol* sym) {
+  TypeRecord* guard_type =
+      NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+  Symbol* guard = NewSymbol(SyntaxFakeName(syntax), guard_type, STO(static));
   guard->flags.invented = true;
   guard->flags.is_defined = true;
   guard->flags.is_local = true;
-  guard->location = location;
-  SetCXXInlineLocalStaticGuardAsmName(guard, sym);
-  bool added = SyntaxAddSymbol(syntax, guard);
-  assert(added);
-  (void)added;
-  VectorAppend(&syntax->local_statics,
-               NewVariableDeclarationASTNode(guard, NULL, location));
-  RegisterCXXLocalStaticDestructor(sym, guard);
+  guard->alignment = 8;
+  guard->location = sym->location;
+  SetCXXInlineLocalStaticGuardAsmName(func, guard, sym);
+  VectorAppend(&syntax->all_local_symbols, guard);
+  return guard;
+}
+
+static ASTNode* NewIntegerAssignment(Symbol* symbol, int value,
+                                     SourceLocation location) {
+  ASTNode* destination = NewIdentifierASTNode(symbol, location);
+  destination->flags |= kASTNeedAddress;
+  return NewBinaryASTNode(
+      AST_OP(assign), TypeRecordCopy(symbol->type), location,
+      destination,
+      NewIntConstantASTNode(
+          value, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+}
+
+static void CollectCommaExpressions(ASTNode* expression, Vector* expressions) {
+  if (expression != NULL && expression->op == AST_OP(comma)) {
+    BinaryASTNode* comma = (BinaryASTNode*)expression;
+    CollectCommaExpressions(comma->left, expressions);
+    CollectCommaExpressions(comma->right, expressions);
+    return;
+  }
+  if (expression != NULL) {
+    VectorAppend(expressions, expression);
+  }
+}
+
+static ASTNode* ArrayElementAddress(Symbol* array, int index,
+                                    SourceLocation location) {
+  TypeRecord* element_type = CXXArrayBaseElementType(array->type, NULL);
+  ASTNode* element =
+      NewCXXArrayElementExpression(array, (unsigned long)index, location);
+  ASTNode* base = element;
+  while (base != NULL && base->op == AST_OP(subscript)) {
+    base->flags |= kASTNeedAddress;
+    ASTNode* left = ((BinaryASTNode*)base)->left;
+    if (left != NULL && left->op == AST_OP(identifier)) {
+      left->flags |= kASTNeedAddress;
+    }
+    base = left;
+  }
+  element->flags |= kASTNeedAddress;
+  return NewUnaryASTNode(
+      AST_OP(address), NewPointerTo(kQualPlain, TypeRecordCopy(element_type)),
+      location, element);
+}
+
+static ASTNode* NewDirectCXXSpecialMemberCall(Symbol* function,
+                                              ASTNode* object_address,
+                                              TypeRecord* object_type,
+                                              SourceLocation location) {
+  ASTNode* callee = NewIdentifierASTNode(function, location);
+  callee->flags |= kASTNeedAddress;
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, object_address);
+  if (TypeNeedsCXXCompleteObjectArgument(object_type)) {
+    VectorAppend(actuals,
+                 NewIntConstantASTNode(
+                     1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                     location));
+  }
+  return NewVectorASTNode(
+      AST_OP(call), TypeRecordCopy(function->type->next), location, callee,
+      actuals);
+}
+
+static Symbol* NewArrayConstructionCount(Syntax* syntax,
+                                         SourceLocation location) {
+  Symbol* count =
+      NewSymbol(SyntaxFakeName(syntax),
+                NewTypeRecordWithSize(kTypeInt, kQualPlain), STO(auto));
+  count->flags.invented = true;
+  count->flags.is_defined = true;
+  count->flags.is_local = true;
+  count->location = location;
+  VectorAppend(&syntax->all_local_symbols, count);
+  return count;
+}
+
+static bool PrepareDefaultArrayInitialization(
+    Syntax* syntax, VariableDeclarationASTNode* declaration, Vector* success,
+    Symbol** constructed_count) {
+  Symbol* array = declaration->symbol;
+  ASTNode* initializer = declaration->initializer;
+  if (!TypeIsFixedArray(array->type) || initializer == NULL ||
+      initializer->op != AST_OP(stmt_expr)) {
+    return false;
+  }
+  UnaryASTNode* statement_expression = (UnaryASTNode*)initializer;
+  if (statement_expression->sub == NULL ||
+      statement_expression->sub->op != AST_OP(compound)) {
+    return false;
+  }
+  CompoundStatementASTNode* compound =
+      (CompoundStatementASTNode*)statement_expression->sub;
+  if (compound->statements->length != 1) {
+    return false;
+  }
+  ASTNode* statement = VectorGet(compound->statements, 0);
+  if (statement == NULL || statement->op != AST_OP(expr)) {
+    return false;
+  }
+
+  Vector constructors;
+  VectorInit(&constructors);
+  CollectCommaExpressions(((ExpressionStatementASTNode*)statement)->expr,
+                          &constructors);
+  unsigned long element_count = 0;
+  CXXArrayBaseElementType(array->type, &element_count);
+  if (constructors.length != (size_t)element_count) {
+    VectorDestruct(&constructors);
+    return false;
+  }
+
+  Symbol* count = NewArrayConstructionCount(syntax, declaration->base.location);
+  *constructed_count = count;
+  VectorAppend(success,
+               NewVariableDeclarationASTNode(
+                   count,
+                   NewIntegerAssignment(count, 0, declaration->base.location),
+                   declaration->base.location));
+  for (size_t i = 0; i < constructors.length; i++) {
+    VectorAppend(success,
+                 NewExpressionStatementASTNode(
+                     VectorGet(&constructors, i), declaration->base.location));
+    VectorAppend(success,
+                 NewExpressionStatementASTNode(
+                     NewIntegerAssignment(count, (int)i + 1,
+                                          declaration->base.location),
+                     declaration->base.location));
+  }
+  VectorDestruct(&constructors);
+  return true;
+}
+
+static void AppendArrayInitializationCleanup(
+    VariableDeclarationASTNode* declaration, Symbol* constructed_count,
+    Vector* failure) {
+  if (constructed_count == NULL) {
+    return;
+  }
+  Symbol* array = declaration->symbol;
+  unsigned long element_count = 0;
+  TypeRecord* element_type =
+      CXXArrayBaseElementType(array->type, &element_count);
+  Symbol* destructor = FindCXXDestructorForType(element_type);
+  if (destructor == NULL) {
+    return;
+  }
+  SourceLocation location = declaration->base.location;
+  for (int i = (int)element_count - 1; i >= 0; i--) {
+    ASTNode* condition = NewBinaryASTNode(
+        AST_OP(greater), NewTypeRecordWithSize(kTypeBool, kQualPlain), location,
+        NewIdentifierASTNode(constructed_count, location),
+        NewIntConstantASTNode(
+            i, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+    ASTNode* destructor_call = NewDirectCXXSpecialMemberCall(
+        destructor, ArrayElementAddress(array, i, location), element_type,
+        location);
+    Vector* statements = NewVector();
+    VectorAppend(statements,
+                 NewExpressionStatementASTNode(destructor_call, location));
+    VectorAppend(
+        failure,
+        NewIfStatementASTNode(
+            condition, NewCompoundStatementASTNode(statements, location), NULL,
+            false, location));
+  }
+}
+
+static ASTNode* NewCXXLocalStaticGuardedInitializer(
+    Syntax* syntax, TypeRecord* func, VariableDeclarationASTNode* declaration,
+    bool run_initializer) {
+  Symbol* sym = declaration->symbol;
+  SourceLocation location = declaration->base.location;
+  ASTNode* original_initializer = declaration->initializer;
+  Symbol* guard = NewCXXLocalStaticGuard(syntax, func, sym);
+  declaration->local_static_guard = guard;
+
+  Vector* success = NewVector();
+  Symbol* constructed_count = NULL;
+  if (!run_initializer) {
+    // Constant initialization already resides in static storage.  The guard
+    // exists only to register a non-trivial destructor on first passage.
+  } else if (!PrepareDefaultArrayInitialization(syntax, declaration, success,
+                                                &constructed_count)) {
+    VectorAppend(success, NewExpressionStatementASTNode(
+                              declaration->initializer, location));
+  }
+  ASTNode* registration = NewCXXAtexitRegistration(sym, location);
+  if (registration != NULL) {
+    VectorAppend(success,
+                 NewExpressionStatementASTNode(registration, location));
+  }
+  VectorAppend(success,
+               NewExpressionStatementASTNode(
+                   NewGuardRuntimeCall("__cxa_guard_release", kTypeVoid, guard,
+                                       location),
+                   location));
+
+  ASTNode* success_body = NewCompoundStatementASTNode(success, location);
+  ASTNode* initialization = success_body;
+  if (CompilerExceptionsEnabled() && compiler->target_name != NULL &&
+      StringEqual(compiler->target_name, "x86_64")) {
+    Vector* catches = NewVector();
+    Vector* failure = NewVector();
+    AppendArrayInitializationCleanup(declaration, constructed_count, failure);
+    VectorAppend(failure,
+                 NewExpressionStatementASTNode(
+                     NewGuardRuntimeCall("__cxa_guard_abort", kTypeVoid, guard,
+                                         location),
+                     location));
+    VectorAppend(failure,
+                 NewExpressionStatementASTNode(
+                     NewThrowASTNode(NULL, location), location));
+    VectorAppend(catches,
+                 NewCatchASTNode(
+                     NULL, true,
+                     NewCompoundStatementASTNode(failure, location), location));
+    initialization = NewTryASTNode(success_body, catches, location);
+  }
 
   Vector* guarded_statements = NewVector();
-  VectorAppend(guarded_statements,
-               NewExpressionStatementASTNode(constructor, location));
-  VectorAppend(guarded_statements,
-               NewExpressionStatementASTNode(
-                   NewIntAssignment(guard, 1, location), location));
-
-  ASTNode* condition = NewBinaryASTNode(
-      AST_OP(equal), NULL, location, NewIdentifierASTNode(guard, location),
-      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                            location));
-  ASTNode* guarded =
-      NewIfStatementASTNode(condition,
-                            NewCompoundStatementASTNode(guarded_statements,
-                                                        location),
-                            NULL, false, location);
-
+  VectorAppend(guarded_statements, initialization);
+  ASTNode* guarded_if = NewIfStatementASTNode(
+      NewGuardRuntimeCall("__cxa_guard_acquire", kTypeInt, guard, location),
+      NewCompoundStatementASTNode(guarded_statements, location), NULL, false,
+      location);
   Vector* statements = NewVector();
-  VectorAppend(statements, guarded);
-  return NewUnaryASTNode(AST_OP(stmt_expr),
-                         NewTypeRecordWithSize(kTypeVoid, kQualPlain),
-                         location, NewCompoundStatementASTNode(statements,
-                                                               location));
+  VectorAppend(statements, guarded_if);
+  ASTNode* guarded = NewUnaryASTNode(
+      AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
+      NewCompoundStatementASTNode(statements, location));
+  if (!run_initializer && original_initializer != NULL) {
+    return NewBinaryASTNode(
+        AST_OP(comma), TypeRecordCopy(original_initializer->type), location,
+        guarded, original_initializer);
+  }
+  return guarded;
+}
+
+typedef struct {
+  Syntax* syntax;
+  TypeRecord* function;
+} CXXLocalStaticPreparation;
+
+static void FindCXXLocalStaticConstantInitializer(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op == AST_OP(init) && (node->flags & kASTStaticInit) != 0) {
+    *(bool*)data = true;
+  }
+}
+
+static void PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id,
+                                         VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL ||
+      node->op != AST_OP(vardecl)) {
+    return;
+  }
+  VariableDeclarationASTNode* declaration =
+      (VariableDeclarationASTNode*)node;
+  Symbol* symbol = declaration->symbol;
+  if (symbol == NULL || !StorageIs(symbol->storage, STO(static))) {
+    return;
+  }
+
+  CXXLocalStaticPreparation* preparation = data;
+  SetCXXInlineLocalStaticAsmNameFor(
+      preparation->function, symbol, symbol->name.value, symbol->location, "");
+  if (declaration->local_static_init_kind == kLocalStaticInitUnclassified) {
+    bool constant = declaration->initializer == NULL;
+    ASTNodeVisit(declaration->initializer,
+                 FindCXXLocalStaticConstantInitializer, 0, &constant);
+    declaration->local_static_init_kind =
+        constant ? kLocalStaticInitConstant : kLocalStaticInitDynamic;
+  }
+  bool dynamic =
+      declaration->local_static_init_kind == kLocalStaticInitDynamic;
+  TypeRecord* destructor_type = symbol->type;
+  if (TypeIsFixedArray(destructor_type)) {
+    destructor_type = CXXArrayBaseElementType(destructor_type, NULL);
+  }
+  bool needs_destructor_registration =
+      FindCXXDestructorForType(destructor_type) != NULL;
+  if ((!dynamic && !needs_destructor_registration) ||
+      (dynamic && declaration->initializer == NULL) ||
+      declaration->local_static_guard != NULL) {
+    return;
+  }
+  declaration->initializer = NewCXXLocalStaticGuardedInitializer(
+      preparation->syntax, preparation->function, declaration, dynamic);
+  declaration->initializer->parent = node;
+}
+
+void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function) {
+  if (!CompilerIsCXX() || syntax == NULL || function == NULL ||
+      !TypeIsFunction(function) || function->info.function.body == NULL) {
+    return;
+  }
+  CXXLocalStaticPreparation preparation = {syntax, function};
+  ASTNodeVisit(function->info.function.body, PrepareCXXLocalStaticVisitor, 0,
+               &preparation);
 }
 
 static ASTNode* NewVariableInitExpression(Syntax* syntax, Symbol* sym,
@@ -7671,8 +8070,6 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             SyntaxError(syntax, sym->flags.is_constinit
                                     ? "constinit variable requires an initializer"
                                     : "constexpr variable requires an initializer");
-          } else if (StorageIs(storage, STO(static))) {
-            initializer = NewCXXLocalStaticGuardedConstructor(syntax, sym);
           } else {
             initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
           }
@@ -7686,6 +8083,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
+      if (StorageIs(storage, STO(static))) {
+        ((VariableDeclarationASTNode*)decl)->local_static_init_kind =
+            CompilerIsCXX() ? kLocalStaticInitUnclassified
+                            : kLocalStaticInitConstant;
+      }
       VectorAppend(declarations, decl);
       if (sym->flags.is_constexpr || sym->flags.is_constinit ||
           (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {

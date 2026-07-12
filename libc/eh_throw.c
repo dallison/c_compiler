@@ -144,8 +144,12 @@ intptr_t __davecc_current_exception_int(void) {
 // full exception-unwinding runtime below.
 
 void __davecc_throw(intptr_t exception_object, const DaveTypeInfo* typeinfo) {
-  current_exception_object = exception_object;
-  current_exception_typeinfo = typeinfo;
+  // A null object and null typeinfo encode `throw;`: preserve the exception
+  // currently being handled and resume unwinding from this frame.
+  if (exception_object != 0 || typeinfo != NULL) {
+    current_exception_object = exception_object;
+    current_exception_typeinfo = typeinfo;
+  }
   DaveEHFrameRegisters regs;
   DaveEHFrameWalkResult walk;
   uintptr_t catch_label;

@@ -1180,11 +1180,13 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
   size_t pos = 0;
   uint8_t b0 = Fetch8(interpreter, &pos);
 
-  // Consume legacy / mandatory SSE prefixes (0x66 operand-size / packed-double,
-  // 0xF2 scalar-double, 0xF3 scalar-single).  These precede any REX prefix.
+  // Consume legacy / mandatory SSE prefixes and LOCK.  The interpreter is
+  // single-threaded, so LOCK does not need additional synchronization.
   uint8_t sse_prefix = 0;
-  while (b0 == 0x66 || b0 == 0xf2 || b0 == 0xf3) {
-    sse_prefix = b0;
+  while (b0 == 0x66 || b0 == 0xf0 || b0 == 0xf2 || b0 == 0xf3) {
+    if (b0 != 0xf0) {
+      sse_prefix = b0;
+    }
     b0 = Fetch8(interpreter, &pos);
   }
 
@@ -1273,6 +1275,38 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       }
       *insn_len = pos;
       return ExecuteSetcc(interpreter, b1 & 0x0F, modrm);
+    }
+    if (b1 == 0xB0) {  // CMPXCHG r/m8, r8
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      uint8_t destination;
+      uint64_t address = 0;
+      if (modrm.mod == 3) {
+        destination = (uint8_t)ReadReg(interpreter, modrm.rm);
+      } else {
+        address = EffectiveAddress(interpreter, &modrm, pos);
+        destination = Load8(interpreter, address);
+      }
+      uint64_t rax = ReadReg(interpreter, X86_REG_RAX);
+      uint8_t accumulator = (uint8_t)rax;
+      uint8_t source = (uint8_t)ReadReg(interpreter, modrm.reg);
+      interpreter->zf = accumulator == destination;
+      interpreter->cf = accumulator < destination;
+      if (interpreter->zf) {
+        if (modrm.mod == 3) {
+          uint64_t value = ReadReg(interpreter, modrm.rm);
+          WriteReg(interpreter, modrm.rm, (value & ~0xffULL) | source);
+        } else {
+          Store8(interpreter, address, source);
+        }
+      } else {
+        WriteReg(interpreter, X86_REG_RAX,
+                 (rax & ~0xffULL) | destination);
+      }
+      *insn_len = pos;
+      return true;
     }
     if (b1 == 0xAF) {  // IMUL r, r/m  (result truncated to operand size)
       ModRM modrm;

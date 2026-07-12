@@ -310,4 +310,67 @@ link_and_run "$work/inline.bin" \
   "$work/inline_strong.o"
 echo "ok C++ inline definitions link as weak definitions"
 
+cat >"$work/template_static_shared.h" <<'EOF'
+extern int template_static_ctor_count;
+
+template<int N>
+struct TemplateStaticBox {
+  TemplateStaticBox() : value(N * 10) {
+    template_static_ctor_count = template_static_ctor_count + 1;
+  }
+  int value;
+};
+
+template<int N>
+int template_static_counter(void) {
+  static int counter = N;
+  counter = counter + 1;
+  return counter;
+}
+
+template<int N>
+int template_static_box(void) {
+  static TemplateStaticBox<N> box;
+  int result = box.value;
+  box.value = box.value + 1;
+  return result;
+}
+EOF
+cat >"$work/template_static_a.cpp" <<'EOF'
+#include "template_static_shared.h"
+int template_static_a(void) {
+  return template_static_counter<1>() * 1000 +
+         template_static_box<3>();
+}
+EOF
+cat >"$work/template_static_b.cpp" <<'EOF'
+#include "template_static_shared.h"
+int template_static_b(void) {
+  return template_static_counter<1>() * 1000000 +
+         template_static_counter<2>() * 10000 +
+         template_static_box<3>() * 100 +
+         template_static_box<4>();
+}
+EOF
+cat >"$work/template_static_main.cpp" <<'EOF'
+int template_static_a(void);
+int template_static_b(void);
+int template_static_ctor_count = 0;
+int main(void) {
+  int a = template_static_a();
+  int b = template_static_b();
+  if (a != 2030 || b != 3033140) {
+    return 1;
+  }
+  return template_static_ctor_count == 2 ? 0 : 2;
+}
+EOF
+compile_cxx_obj "$work/template_static_a.cpp" "$work/template_static_a.o"
+compile_cxx_obj "$work/template_static_b.cpp" "$work/template_static_b.o"
+compile_cxx_obj "$work/template_static_main.cpp" "$work/template_static_main.o"
+link_and_run "$work/template_static.bin" \
+  "$work/template_static_main.o" "$work/template_static_a.o" \
+  "$work/template_static_b.o"
+echo "ok template local statics share per specialization"
+
 echo "=== weak binding tests passed ==="

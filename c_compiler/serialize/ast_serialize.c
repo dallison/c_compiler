@@ -467,6 +467,8 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       VariableDeclarationASTNode* v = (VariableDeclarationASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindSymbol, v->symbol);
       SWriteRef(ctx, buf, 17, kSerialKindAST, v->initializer);
+      SWriteRef(ctx, buf, 18, kSerialKindSymbol, v->local_static_guard);
+      WireWriteInt64(buf, 19, v->local_static_init_kind);
       break;
     }
     case kASTShapeDeclList: {
@@ -825,6 +827,17 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         v->initializer = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 18) {
+        v->local_static_guard =
+            (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        return;
+      }
+      if (field == 19) {
+        int64_t kind = 0;
+        WireReadInt64(buf, &kind);
+        v->local_static_init_kind = (LocalStaticInitKind)kind;
         return;
       }
       break;

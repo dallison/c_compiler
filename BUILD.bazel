@@ -135,6 +135,7 @@ LIBC_SRCS = [
     "libc/calloc.c",
     "libc/cdiv.c",
     "libc/ctype.c",
+    "libc/cxx_guard.c",
     "libc/cxx_new.c",
     "libc/cxx_rtti.c",
     "libc/eh_frame.c",
@@ -1017,6 +1018,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_terminate.c"
@@ -1120,6 +1122,7 @@ archivist="$(location :archivist)"
 cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "x86_64 support/cxx_guard.s"
   "x86_64 support/setjmp.s"
   "x86_64 support/longjmp.s"
   "x86_64 support/eh_transfer.s"
@@ -1141,6 +1144,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_frame.c"
@@ -1265,6 +1269,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_terminate.c"
@@ -1383,6 +1388,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_terminate.c"
@@ -1503,6 +1509,7 @@ libc_srcs=(
   "libc/calloc.c"
   "libc/cdiv.c"
   "libc/ctype.c"
+  "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
   "libc/eh_terminate.c"

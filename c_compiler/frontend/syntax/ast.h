@@ -703,11 +703,20 @@ typedef struct {
 ASTNode* NewForStatementASTNode(ASTNode* c1, ASTNode* c2, ASTNode* c3,
                                 ASTNode* stmt, SourceLocation location);
 
+typedef enum {
+  kLocalStaticInitNone,
+  kLocalStaticInitUnclassified,
+  kLocalStaticInitConstant,
+  kLocalStaticInitDynamic,
+} LocalStaticInitKind;
+
 // Variable declaration, optionally initializing the symbol.
 typedef struct {
   ASTNode base;
   Symbol* symbol;        // @wire 16
   ASTNode* initializer;  // Assignment expression to init variable.  // @wire 17
+  Symbol* local_static_guard;  // C++ dynamic-init guard.              // @wire 18
+  LocalStaticInitKind local_static_init_kind;                         // @wire 19
   void* saved_sp;        // Codegen SP for VLA.   // @wire - (not serialized)
 } VariableDeclarationASTNode;
 
