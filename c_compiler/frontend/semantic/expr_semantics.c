@@ -3745,12 +3745,14 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     return 25;
   }
   // As a last resort consider a user-defined conversion through a converting
-  // constructor of a class target.  This ranks worse than any standard
-  // conversion sequence above, matching the standard's ordering.
+  // constructor of a class target or a conversion operator on the source.
+  // This ranks worse than any standard conversion sequence above, matching
+  // the standard's ordering.
   if (CompilerIsCXX() && !g_suppress_user_defined_conversion_rank &&
-      TypeIsStructOrUnion(target) &&
-      FindConvertingConstructorCandidate(target, actual,
-                                         /*allow_explicit=*/false) != NULL) {
+      ((TypeIsStructOrUnion(target) &&
+        FindConvertingConstructorCandidate(target, actual,
+                                           /*allow_explicit=*/false) != NULL) ||
+       ClassHasConversionOperatorTo(actual, target))) {
     return 100;
   }
   return -1;
@@ -5874,17 +5876,20 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         TypeIsFunction(id->symbol->type) &&
         !has_pack_expansion_actual &&
         !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&
-        !CallActualsContainTemplateParameter(node) &&
-        FunctionTemplateHasDefinition(id->symbol)) {
-      Symbol* instantiated =
-          TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
-              &compiler->syntax, id->symbol, id->template_arguments,
-              node->children);
-      if (instantiated != id->symbol) {
-        id->symbol = instantiated;
-        ASTNodeSetType(node->left, instantiated->type);
-      } else if (!TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
-                     id->symbol, id->template_arguments, node->children, 0)) {
+        !CallActualsContainTemplateParameter(node)) {
+      if (FunctionTemplateHasDefinition(id->symbol)) {
+        Symbol* instantiated =
+            TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+                &compiler->syntax, id->symbol, id->template_arguments,
+                node->children);
+        if (instantiated != id->symbol) {
+          id->symbol = instantiated;
+          ASTNodeSetType(node->left, instantiated->type);
+        }
+      }
+      if (id->symbol->flags.is_template &&
+          !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
+              id->symbol, id->template_arguments, node->children, 0)) {
         if (ConceptsFunctionTemplateHasAssociatedConstraint(id->symbol)) {
           ReportUnsatisfiedFunctionTemplateConstraints(node, id->symbol,
                                                        id->template_arguments,

@@ -2521,6 +2521,20 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
         ASTNodeSetType(node, concrete);
         return node;
       }
+      if (concrete != NULL) {
+        concrete->dependent_member_name =
+            NewString(id->symbol->type->dependent_member_name->value);
+        Symbol* copy =
+            NewSymbol(id->symbol->name.value, concrete, id->symbol->storage);
+        copy->namespace_ = id->symbol->namespace_;
+        copy->flags = id->symbol->flags;
+        copy->template_parameter_index = id->symbol->template_parameter_index;
+        copy->dependent_value_template_parameter_index =
+            id->symbol->dependent_value_template_parameter_index;
+        id->symbol = copy;
+        ASTNodeSetType(node, concrete);
+        return node;
+      }
       TypeRecordDelete(concrete);
     }
     bool template_args_contain_pack = false;

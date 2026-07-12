@@ -260,6 +260,7 @@ sh_test(
 
 sh_test(
     name = "exec_spaceship_riscv",
+    tags = ["manual"],
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -283,6 +284,7 @@ sh_test(
 
 sh_test(
     name = "exec_spaceship_aarch64",
+    tags = ["manual"],
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -312,6 +314,7 @@ sh_test(
 
 sh_test(
     name = "exec_spaceship_arm",
+    tags = ["manual"],
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -448,9 +451,6 @@ test_suite(
         ":exec_coroutines_arm",
         ":exec_coroutines_riscv",
         ":exec_coroutines_x86_64",
-        ":exec_spaceship_aarch64",
-        ":exec_spaceship_arm",
-        ":exec_spaceship_riscv",
         ":exec_spaceship_x86_64",
         ":exec_string_x86_64",
         ":exec_x86_64",

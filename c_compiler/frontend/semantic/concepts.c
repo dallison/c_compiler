@@ -517,6 +517,16 @@ static void RequirementFailureInfoDestruct(RequirementFailureInfo* info) {
   info->expression_type = NULL;
 }
 
+static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 static bool EvaluateExpressionRequirement(Requirement* requirement,
                                           RequiresExpr* requires_expr,
                                           Vector* arguments,
@@ -544,6 +554,7 @@ static bool EvaluateExpressionRequirement(Requirement* requirement,
       &compiler->syntax, requirement->expr, arguments,
       requirement->location);
   if (cloned != NULL) {
+    ASTNodeVisit(cloned, ClearRequirementExpressionAnalysis, 0, NULL);
     cloned = AnalyzeExpression(cloned);
   }
   bool failed = cloned == NULL || DiagnosticErrorTrapped();

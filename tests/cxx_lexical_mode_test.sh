@@ -78,14 +78,16 @@ expect_compile cxx14_binary_literal \
   "int main(void) { return 0b1010'0101 == 165 ? 0 : 1; }" \
   -std=c++14
 expect_compile cxx14_macro_pp_number \
-  "#define N 0b1010'0101_suffix
+  "constexpr unsigned long long operator\"\"_suffix(unsigned long long value) { return value; }
+#define N 0b1010'0101_suffix
 int main(void) { return N == 165 ? 0 : 1; }" \
   -std=c++14
 
 expect_fail c_mode_user_defined_literal \
   'int main(void) { return 123_km; }'
 expect_compile cxx11_user_defined_literal \
-  'int main(void) { return 123_km == 123 ? 0 : 1; }' \
+  'constexpr unsigned long long operator""_km(unsigned long long value) { return value; }
+int main(void) { return 123_km == 123 ? 0 : 1; }' \
   -std=c++11
 
 expect_compile cxx11_prefixed_literals \
@@ -120,7 +122,7 @@ printf '%s\n' \
 expect_compile cxx17_module_identifiers \
   'int module; int import; int main(void) { module = 1; import = 2; return module + import; }' \
   -std=c++17
-expect_fail cxx20_module_keywords \
+expect_compile cxx20_module_keywords \
   'int module; int import; int main(void) { return 0; }' \
   -std=c++20
 
