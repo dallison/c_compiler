@@ -92,6 +92,7 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
   bool print_newline = false;
 
   while (record != NULL) {
+    StringClear(&str);
     if (record->declarator == kDeclPointer) {
       fprintf(fp, "pointer to ");
     } else if (record->declarator == kDeclReference) {
@@ -119,18 +120,18 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
 
     if (record->declarator == kDeclArray) {
       if (record->info.array.is_vla) {
-        fprintf(fp, "variable length array ");
+        fprintf(fp, " variable length array ");
       } else {
-        fprintf(fp, "array of size %d ", record->info.array.size.fixed);
+        fprintf(fp, " array of size %d ", record->info.array.size.fixed);
       }
     } else if (record->declarator == kDeclFunction) {
-      fprintf(fp, "function (");
+      fprintf(fp, " function (");
       const char* sep = "";
       size_t nformals = record->info.function.prototype.length;
       for (size_t i = 0; i < nformals; i++) {
         Symbol* formal = (Symbol*)record->info.function.prototype.value.p[i];
         fprintf(fp, "%s", sep);
-        sep = ",";
+        sep = ", ";
         SymbolPrint(formal, fp);
       }
       if (record->info.function.varargs) {
@@ -147,7 +148,7 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
         }
         for (size_t i = 0; i < num_statements; i++) {
           ASTNode* stmt = (ASTNode*)body->statements->value.p[i];
-          ASTNodePrint(stmt, 2, fp);
+          ASTNodePrintTree(stmt, 2, fp);
         }
         fprintf(fp, "} returning ");
       } else {

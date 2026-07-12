@@ -422,6 +422,7 @@ void ASTNodeSetType(ASTNode* node, TypeRecord* type);
 void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
 void ASTNodePrint(ASTNode* node, int indents, FILE* fp);
+void ASTNodePrintTree(ASTNode* node, int indents, FILE* fp);
 ASTNode* ASTNodeMove(ASTNode* node);
 bool ASTNodeUsesValue(ASTNode* node, ASTNode* value);
 

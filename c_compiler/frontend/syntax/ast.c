@@ -612,6 +612,102 @@ void ASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   node->virtuals->printer(node, indents, fp);
 }
 
+typedef struct {
+  int indents;
+  int depth;
+  FILE* fp;
+} ASTTreePrintContext;
+
+static void ASTTreePrintNodeDescription(ASTNode* node, FILE* fp) {
+  fprintf(fp, "(#%d) %s", node->id, ASTOpcodeName(node->op));
+  switch (node->op) {
+    case AST_OP(identifier): {
+      IdentifierASTNode* identifier = (IdentifierASTNode*)node;
+      if (identifier->symbol != NULL) {
+        fprintf(fp, " %s", identifier->symbol->name.value);
+      }
+      break;
+    }
+    case AST_OP(structmember): {
+      StructMemberASTNode* member = (StructMemberASTNode*)node;
+      if (member->member != NULL && member->member->symbol != NULL) {
+        fprintf(fp, " %s@%d", member->member->symbol->name.value,
+                member->byte_offset);
+      }
+      break;
+    }
+    case AST_OP(number):
+    case AST_OP(charconst):
+      fprintf(fp, " %" PRId64, ((ConstantASTNode*)node)->value.ivalue);
+      break;
+    case AST_OP(fnumber):
+      fprintf(fp, " %g", ((ConstantASTNode*)node)->value.fvalue);
+      break;
+    case AST_OP(string):
+    case AST_OP(string_wide): {
+      String escaped = {0};
+      StringEscape(((ConstantASTNode*)node)->value.string, &escaped);
+      fprintf(fp, " \"%s\"", escaped.value);
+      StringDestruct(&escaped);
+      break;
+    }
+    case AST_OP(vardecl): {
+      VariableDeclarationASTNode* declaration =
+          (VariableDeclarationASTNode*)node;
+      if (declaration->symbol != NULL) {
+        fprintf(fp, " %s", declaration->symbol->name.value);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  if (node->type != NULL) {
+    String type_name;
+    StringInit(&type_name, "");
+    TypeRecordToString(node->type, &type_name);
+    fprintf(fp, " -> %s", type_name.value);
+    StringDestruct(&type_name);
+  }
+  fputc('\n', fp);
+}
+
+static void ASTTreePrintVisitor(ASTNode* node, void* data, int child_id,
+                                VisitorMode mode) {
+  (void)child_id;
+  if (node == NULL) {
+    return;
+  }
+  ASTTreePrintContext* context = data;
+  if (mode == kVisitPostChildren) {
+    context->depth--;
+    return;
+  }
+  Indent(context->indents, context->fp);
+  for (int i = 1; i < context->depth; i++) {
+    fputs("|   ", context->fp);
+  }
+  if (context->depth > 0) {
+    fputs("+-- ", context->fp);
+  }
+  ASTTreePrintNodeDescription(node, context->fp);
+  if (node->virtuals->visitor != NULL) {
+    context->depth++;
+  }
+}
+
+void ASTNodePrintTree(ASTNode* node, int indents, FILE* fp) {
+  if (node == NULL) {
+    return;
+  }
+  ASTTreePrintContext context = {
+      .indents = indents,
+      .depth = 0,
+      .fp = fp,
+  };
+  ASTNodeVisit(node, ASTTreePrintVisitor, 0, &context);
+}
+
 void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child) {
   if (parent == NULL) {
