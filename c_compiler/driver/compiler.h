@@ -104,6 +104,10 @@ typedef struct {
   int this_adjustment;
 } CXXThisAdjustorThunk;
 
+typedef struct {
+  Symbol* thunk;
+} CXXTlsBlockDtorThunk;
+
 // A literal has an id.  The value is in a derived class.
 typedef enum {
   kLiteralString,
@@ -331,6 +335,10 @@ typedef struct {
   Vector cxx_global_destructors;
   Vector cxx_global_constructor_calls;  // ASTNode*, owned by function bodies.
   Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
+  // Per-thread C++ thread_local construction/destruction (not process-global).
+  Vector cxx_thread_constructor_calls;  // ASTNode*, owned by synthetic init body.
+  Vector cxx_thread_destructor_calls;   // ASTNode*, owned by synthetic fini body.
+  Vector cxx_tls_block_dtor_thunks;  // CXXTlsBlockDtorThunk* entries.
   Vector cxx_this_adjustor_thunks;  // CXXThisAdjustorThunk* entries.
 
   // De-duplication map for RTTI std::type_info objects: String* mangled key ->

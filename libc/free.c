@@ -11,7 +11,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__aarch64__) || \
+    defined(__arm__) || defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Rename functions to libc names.
@@ -19,6 +20,8 @@
 #define Free free
 #define Calloc calloc
 #define Realloc realloc
+#elif defined(__x86_64__)
+#include "6502/_malloc.h"
 #else
 #include "_malloc.h"
 #endif

@@ -11,6 +11,7 @@
 
 #include "loader.h"
 #include "loader_arch.h"
+#include "x86_64_process.h"
 
 typedef enum {
   kX86_64ModeInterpret,
@@ -20,6 +21,7 @@ typedef enum {
 typedef struct X86_64Runtime {
   Loader loader;
   LoaderArchitecture arch;
+  X86_64ProcessRuntime process;
   X86_64ExecutionMode mode;
   bool trace_instructions;
   bool trace_registers;

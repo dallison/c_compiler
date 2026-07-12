@@ -738,7 +738,11 @@ void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp) {
   StringInit(&storage, "");
   for (int i = 0; i < 32; i++) {
     if (StorageIs(sym->storage, 1<<i)) {
-      StringAppend(&storage, storages[i]);
+      if (1<<i == STO(thread)) {
+        StringAppend(&storage, CompilerIsCXX() ? "thread_local " : "__thread ");
+      } else {
+        StringAppend(&storage, storages[i]);
+      }
     }
   }
  

@@ -11,10 +11,6 @@
 #include <stddef.h>
 #include <stdarg.h>
 
-#if !defined(__6502__)
-int errno;
-#endif
-
 // The open function can take an extra arg for the open mode
 // if O_CREAT is in the flags.
 #if defined(__p_code__)

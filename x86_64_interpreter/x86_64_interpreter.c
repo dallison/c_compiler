@@ -4,6 +4,7 @@
 //
 
 #include "x86_64_interpreter.h"
+#include "x86_64_process.h"
 #include "x86_64_syscalls.h"
 #include "map.h"
 #include <inttypes.h>
@@ -26,6 +27,7 @@ typedef struct {
   int rm;
   int64_t disp;
   bool has_sib;
+  bool rip_relative;
   int scale;
   int index;
   int base;
@@ -53,6 +55,25 @@ static void WriteReg(X86_64Interpreter* interpreter, int reg, uint64_t value) {
   interpreter->iregs[reg] = value;
 }
 
+void X86_64InterpreterWriteReg(X86_64Interpreter* interpreter, int reg,
+                               uint64_t value) {
+  WriteReg(interpreter, reg, value);
+}
+
+SymbolScope* X86_64InterpreterFindSymbol(X86_64Interpreter* interpreter,
+                                         uint64_t address) {
+  if (address >= interpreter->symbol_cache.start &&
+      address < interpreter->symbol_cache.end) {
+    return &interpreter->symbol_cache;
+  }
+  bool found =
+      LoaderFindSymbol(interpreter->loader, address, &interpreter->symbol_cache);
+  if (!found) {
+    return NULL;
+  }
+  return &interpreter->symbol_cache;
+}
+
 static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];
@@ -65,14 +86,32 @@ static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
   return false;
 }
 
+static bool ProcessMemoryOk(X86_64Interpreter* interpreter, uint64_t addr,
+                            size_t size) {
+  if (interpreter->process == NULL) {
+    return false;
+  }
+  return X86_64ProcessGuestMemoryOk(interpreter->process, addr, size);
+}
+
 static bool InterpreterAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
                                  size_t size) {
+  if (interpreter->fs_base != 0 && interpreter->tls_block_size > 0) {
+    uint64_t tls_start = interpreter->fs_base;
+    uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
+    if (addr >= tls_start && addr + size <= tls_end) {
+      return true;
+    }
+  }
   if (interpreter->stack != NULL) {
     uint64_t start = (uint64_t)(uintptr_t)interpreter->stack;
     uint64_t end = start + X86_64_STACK_SIZE;
     if (addr >= start && addr + size <= end) {
       return true;
     }
+  }
+  if (ProcessMemoryOk(interpreter, addr, size)) {
+    return true;
   }
   return GuestAddressOk(interpreter->loader, addr, size);
 }
@@ -81,7 +120,8 @@ static void Store64(X86_64Interpreter* interpreter, uint64_t addr,
                     uint64_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
     fprintf(stderr, "Store64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return;
   }
   *(uint64_t*)(uintptr_t)addr = value;
 }
@@ -90,7 +130,8 @@ static void Store32(X86_64Interpreter* interpreter, uint64_t addr,
                     uint32_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
     fprintf(stderr, "Store32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return;
   }
   *(uint32_t*)(uintptr_t)addr = value;
 }
@@ -99,7 +140,8 @@ static COMPILER_UNUSED void Store16(X86_64Interpreter* interpreter, uint64_t add
                     uint16_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
     fprintf(stderr, "Store16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return;
   }
   *(uint16_t*)(uintptr_t)addr = value;
 }
@@ -107,7 +149,8 @@ static COMPILER_UNUSED void Store16(X86_64Interpreter* interpreter, uint64_t add
 static void Store8(X86_64Interpreter* interpreter, uint64_t addr, uint8_t value) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
     fprintf(stderr, "Store8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return;
   }
   *(uint8_t*)(uintptr_t)addr = value;
 }
@@ -115,7 +158,8 @@ static void Store8(X86_64Interpreter* interpreter, uint64_t addr, uint8_t value)
 static uint64_t Load64(X86_64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 8)) {
     fprintf(stderr, "Load64 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return 0;
   }
   return *(uint64_t*)(uintptr_t)addr;
 }
@@ -123,7 +167,8 @@ static uint64_t Load64(X86_64Interpreter* interpreter, uint64_t addr) {
 static uint32_t Load32(X86_64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 4)) {
     fprintf(stderr, "Load32 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return 0;
   }
   return *(uint32_t*)(uintptr_t)addr;
 }
@@ -131,7 +176,8 @@ static uint32_t Load32(X86_64Interpreter* interpreter, uint64_t addr) {
 static COMPILER_UNUSED uint16_t Load16(X86_64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 2)) {
     fprintf(stderr, "Load16 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return 0;
   }
   return *(uint16_t*)(uintptr_t)addr;
 }
@@ -139,7 +185,8 @@ static COMPILER_UNUSED uint16_t Load16(X86_64Interpreter* interpreter, uint64_t 
 static uint8_t Load8(X86_64Interpreter* interpreter, uint64_t addr) {
   if (!InterpreterAddressOk(interpreter, addr, 1)) {
     fprintf(stderr, "Load8 outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return 0;
   }
   return *(uint8_t*)(uintptr_t)addr;
 }
@@ -153,7 +200,8 @@ static uint8_t Fetch8At(X86_64Interpreter* interpreter, uint64_t addr) {
   if (!GuestAddressOk(interpreter->loader, addr, 1) &&
       !InterpreterAddressOk(interpreter, addr, 1)) {
     fprintf(stderr, "Fetch outside mapped memory at 0x%" PRIx64 "\n", addr);
-    exit(1);
+    X86_64InterpreterFail(interpreter, 1);
+    return 0;
   }
   return *(uint8_t*)(uintptr_t)addr;
 }
@@ -208,6 +256,7 @@ static bool DecodeModRM(X86_64Interpreter* interpreter, size_t* pos, REX rex,
   out->rm = raw_rm | (rex.b ? 8 : 0);
   out->disp = 0;
   out->has_sib = false;
+  out->rip_relative = false;
 
   if (!addr_size_64) {
     return false;
@@ -223,10 +272,16 @@ static bool DecodeModRM(X86_64Interpreter* interpreter, size_t* pos, REX rex,
     out->scale = (sib >> 6) & 3;
     out->index = ((sib >> 3) & 7) | (rex.x ? 8 : 0);
     out->base = (sib & 7) | (rex.b ? 8 : 0);
+    if (out->mod == 0 && (sib & 7) == 5) {
+      out->disp = (int32_t)Fetch32(interpreter, pos);
+      out->rm = -1;
+      return true;
+    }
     out->rm = out->base;
   } else if (out->mod == 0 && raw_rm == 5) {
     out->disp = (int32_t)Fetch32(interpreter, pos);
     out->rm = -1;
+    out->rip_relative = true;
     return true;
   }
 
@@ -246,17 +301,21 @@ static uint64_t EffectiveAddress(X86_64Interpreter* interpreter, const ModRM* mo
     return ReadReg(interpreter, modrm->rm);
   }
   uint64_t addr = 0;
-  if (modrm->rm >= 0) {
-    addr = ReadReg(interpreter, modrm->rm);
-  }
-  if (modrm->has_sib) {
-    if (modrm->index != 4) {
-      addr += ReadReg(interpreter, modrm->index) << modrm->scale;
-    }
-  }
-  addr = (uint64_t)((int64_t)addr + modrm->disp);
-  if (modrm->mod == 0 && modrm->rm < 0) {
+  if (modrm->rip_relative) {
     addr = interpreter->rip + insn_len + modrm->disp;
+  } else {
+    if (modrm->rm >= 0) {
+      addr = ReadReg(interpreter, modrm->rm);
+    }
+    if (modrm->has_sib) {
+      if (modrm->index != 4) {
+        addr += ReadReg(interpreter, modrm->index) << modrm->scale;
+      }
+    }
+    addr = (uint64_t)((int64_t)addr + modrm->disp);
+  }
+  if (interpreter->current_seg_prefix == 0x64 && interpreter->fs_base != 0) {
+    addr = interpreter->fs_base + addr;
   }
   return addr;
 }
@@ -780,12 +839,14 @@ static bool ExecuteSetcc(X86_64Interpreter* interpreter, uint8_t cc,
 }
 
 static bool ExecuteSyscall(X86_64Interpreter* interpreter) {
+  // syscall.s leaves registers in the Linux syscall ABI layout at the syscall
+  // instruction: rdi, rsi, rdx, r10, r8, r9.
   int64_t result = X86_64HandleSyscall(
       interpreter, (int64_t)ReadReg(interpreter, X86_REG_RAX),
       (int64_t)ReadReg(interpreter, X86_REG_RDI),
       (int64_t)ReadReg(interpreter, X86_REG_RSI),
       (int64_t)ReadReg(interpreter, X86_REG_RDX),
-      (int64_t)ReadReg(interpreter, X86_REG_RCX),
+      (int64_t)ReadReg(interpreter, X86_REG_R10),
       (int64_t)ReadReg(interpreter, X86_REG_R8),
       (int64_t)ReadReg(interpreter, X86_REG_R9));
   WriteReg(interpreter, X86_REG_RAX, (uint64_t)result);
@@ -1177,8 +1238,15 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
                                bool* rip_updated) {
   *rip_updated = false;
   interpreter->rip_updated = false;
+  interpreter->current_seg_prefix = 0;
   size_t pos = 0;
   uint8_t b0 = Fetch8(interpreter, &pos);
+
+  while (b0 == 0x26 || b0 == 0x2e || b0 == 0x36 || b0 == 0x3e || b0 == 0x64 ||
+         b0 == 0x65) {
+    interpreter->current_seg_prefix = b0;
+    b0 = Fetch8(interpreter, &pos);
+  }
 
   // Consume legacy / mandatory SSE prefixes (0x66 operand-size / packed-double,
   // 0xF2 scalar-double, 0xF3 scalar-single).  These precede any REX prefix.
@@ -1714,17 +1782,37 @@ void X86_64InterpreterDumpRegisters(X86_64Interpreter* interpreter) {
   printf("rip 0x%016" PRIx64 "\n", interpreter->rip);
 }
 
-void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,
-                             uint64_t entry_address, int argc, char** argv,
-                             bool trace_registers, bool trace_instructions) {
+void X86_64InterpreterInitForThread(
+    X86_64Interpreter* interpreter, X86_64ProcessRuntime* process,
+    X86_64GuestThread* guest_thread, Loader* loader, uint64_t entry_address,
+    int argc, char** argv, char* stack, uint64_t fs_base, size_t tls_block_size,
+    bool trace_registers, bool trace_instructions) {
   memset(interpreter, 0, sizeof(*interpreter));
   interpreter->loader = loader;
+  interpreter->process = process;
+  interpreter->guest_thread = guest_thread;
+  if (guest_thread != NULL) {
+    interpreter->guest_tid = guest_thread->tid;
+  }
   interpreter->trace_registers = trace_registers;
   interpreter->trace_instructions = trace_instructions;
-  interpreter->stack = malloc(X86_64_STACK_SIZE);
+  if (stack != NULL) {
+    interpreter->stack = stack;
+    interpreter->owns_stack = false;
+  } else {
+    interpreter->stack = malloc(X86_64_STACK_SIZE);
+    interpreter->owns_stack = true;
+  }
   interpreter->rsp =
       (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
   interpreter->rsp &= ~0xFULL;
+  if (fs_base != 0) {
+    interpreter->fs_base = fs_base;
+    interpreter->tls_block_size = tls_block_size;
+  } else if (loader->tls.present) {
+    interpreter->fs_base = loader->tls.fs_base;
+    interpreter->tls_block_size = loader->tls.block_size;
+  }
   Push64(interpreter, 0);
   interpreter->rip = entry_address;
   interpreter->running = true;
@@ -1737,7 +1825,34 @@ void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,
   }
 }
 
-int X86_64InterpreterRun(X86_64Interpreter* interpreter) {
+void X86_64InterpreterPrepareMain(X86_64Interpreter* interpreter,
+                                  uint64_t entry_address, int argc,
+                                  char** argv, bool is_static_link) {
+  interpreter->rsp =
+      (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
+  interpreter->rsp &= ~0xFULL;
+  Push64(interpreter, 0);
+  interpreter->rip = entry_address;
+  interpreter->running = true;
+  interpreter->rip_updated = false;
+
+  WriteReg(interpreter, X86_REG_RDI, (uint64_t)argc);
+  if (!is_static_link) {
+    WriteReg(interpreter, X86_REG_RSI, entry_address);
+  } else {
+    WriteReg(interpreter, X86_REG_RSI, (uint64_t)(uintptr_t)argv);
+  }
+}
+
+void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,
+                             uint64_t entry_address, int argc, char** argv,
+                             bool trace_registers, bool trace_instructions) {
+  X86_64InterpreterInitForThread(interpreter, NULL, NULL, loader, entry_address,
+                                 argc, argv, NULL, 0, 0, trace_registers,
+                                 trace_instructions);
+}
+
+static int X86_64InterpreterRunLoop(X86_64Interpreter* interpreter) {
   while (interpreter->running) {
     if (interpreter->rip == 0) {
       interpreter->exit_code = (int)ReadReg(interpreter, X86_REG_RAX);
@@ -1747,7 +1862,7 @@ int X86_64InterpreterRun(X86_64Interpreter* interpreter) {
 
     if (interpreter->trace_instructions) {
       SymbolScope* sym =
-          LoaderFindSymbolAndCacheResult(interpreter->loader, interpreter->rip);
+          X86_64InterpreterFindSymbol(interpreter, interpreter->rip);
       if (sym != NULL && sym->name != NULL) {
         printf("%s+0x%" PRIx64 ": ", sym->name, interpreter->rip - sym->start);
       }
@@ -1775,7 +1890,7 @@ int X86_64InterpreterRun(X86_64Interpreter* interpreter) {
       fprintf(stderr, "Unsupported instruction at 0x%" PRIx64 "\n",
               interpreter->rip);
       X86_64InterpreterDumpRegisters(interpreter);
-      exit(1);
+      X86_64InterpreterFail(interpreter, 1);
     }
     if (!rip_updated) {
       interpreter->rip += insn_len;
@@ -1804,7 +1919,35 @@ int X86_64InterpreterRun(X86_64Interpreter* interpreter) {
   return interpreter->exit_code;
 }
 
+void X86_64InterpreterPrepareCall(X86_64Interpreter* interpreter, uint64_t fn,
+                                  uint64_t arg) {
+  interpreter->rsp =
+      (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
+  interpreter->rsp &= ~0xFULL;
+  Push64(interpreter, 0);
+  interpreter->rip = fn;
+  interpreter->running = true;
+  interpreter->rip_updated = false;
+  WriteReg(interpreter, X86_REG_RDI, arg);
+}
+
+int X86_64InterpreterRunUntilReturn(X86_64Interpreter* interpreter) {
+  return X86_64InterpreterRunLoop(interpreter);
+}
+
+int X86_64InterpreterCall(X86_64Interpreter* interpreter, uint64_t fn,
+                          uint64_t arg) {
+  X86_64InterpreterPrepareCall(interpreter, fn, arg);
+  return X86_64InterpreterRunUntilReturn(interpreter);
+}
+
+int X86_64InterpreterRun(X86_64Interpreter* interpreter) {
+  return X86_64InterpreterRunLoop(interpreter);
+}
+
 void X86_64InterpreterDestruct(X86_64Interpreter* interpreter) {
-  free(interpreter->stack);
-  interpreter->stack = NULL;
+  if (interpreter->owns_stack && interpreter->stack != NULL) {
+    free(interpreter->stack);
+    interpreter->stack = NULL;
+  }
 }

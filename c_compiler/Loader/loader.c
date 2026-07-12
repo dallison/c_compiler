@@ -7,6 +7,7 @@
 
 #include "loader.h"
 #include "loader_arch.h"
+#include "elf.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
@@ -690,6 +691,8 @@ static void InitLibrarySearchPath(Loader* loader) {
   }
 }
 
+static bool LoaderInitMainThreadTls(Loader* loader);
+
 bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
                         LoaderArchitecture* arch, void* arch_data,
                         const char* initial_path) {
@@ -775,11 +778,124 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
 }
     
   memset(&loader->current_symbol, 0, sizeof(SymbolScope));
-  
+
+  if (ok && loader->is_static) {
+    ok = LoaderInitMainThreadTls(loader);
+  }
+
   return ok && LoaderNumErrors() == 0;
 }
 
+static bool LoaderInitMainThreadTls(Loader* loader) {
+  memset(&loader->tls, 0, sizeof(loader->tls));
+
+  ELFProgramHeader* tls_segment = NULL;
+  for (size_t i = 0; i < loader->elf_file->segments.length; i++) {
+    ELFProgramHeader* segment = loader->elf_file->segments.value.p[i];
+    if (segment->type == PT(tls)) {
+      tls_segment = segment;
+      break;
+    }
+  }
+  if (tls_segment == NULL || tls_segment->memsz == 0) {
+    return true;
+  }
+
+  if (tls_segment->filesz > 0 &&
+      tls_segment->offset + tls_segment->filesz >
+          (uint64_t)loader->elf_file->file_length) {
+    LoaderError("PT_TLS template extends past end of file\n");
+    return false;
+  }
+
+  const void* template_data = NULL;
+  if (tls_segment->filesz > 0) {
+    template_data =
+        (const char*)loader->elf_file->base + tls_segment->offset;
+  }
+
+  uint64_t align = tls_segment->align != 0 ? tls_segment->align : 16;
+  size_t block_size =
+      (size_t)AlignUp(tls_segment->memsz + X86_64_TLS_TP_SLOT_SIZE, align);
+  void* block = NULL;
+  if (posix_memalign(&block, (size_t)align, block_size) != 0 || block == NULL) {
+    LoaderError("Failed to allocate main-thread TLS block\n");
+    return false;
+  }
+
+  *(uint64_t*)block = (uint64_t)(uintptr_t)block;
+  if (tls_segment->filesz > 0) {
+    memcpy((char*)block + X86_64_TLS_TP_SLOT_SIZE, template_data,
+           (size_t)tls_segment->filesz);
+  }
+  if (block_size > tls_segment->filesz + X86_64_TLS_TP_SLOT_SIZE) {
+    memset((char*)block + X86_64_TLS_TP_SLOT_SIZE + tls_segment->filesz, 0,
+           block_size - (tls_segment->filesz + X86_64_TLS_TP_SLOT_SIZE));
+  }
+
+  // Linux-style thread pointer: %fs:0 reads the block base address.
+
+  loader->tls.present = true;
+  loader->tls.template_addr =
+      (uint64_t)(uintptr_t)((char*)block + X86_64_TLS_TP_SLOT_SIZE);
+  loader->tls.filesz = tls_segment->filesz;
+  loader->tls.memsz = tls_segment->memsz;
+  loader->tls.align = align;
+  loader->tls.file_offset = tls_segment->offset;
+  loader->tls.main_thread_block = block;
+  loader->tls.block_size = block_size;
+  loader->tls.fs_base = (uint64_t)(uintptr_t)block;
+  return true;
+}
+
+bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
+                               size_t* block_size_out, uint64_t* fs_base_out) {
+  if (block_out == NULL || block_size_out == NULL || fs_base_out == NULL) {
+    return false;
+  }
+  *block_out = NULL;
+  *block_size_out = 0;
+  *fs_base_out = 0;
+  if (!loader->tls.present) {
+    return false;
+  }
+
+  uint64_t align = loader->tls.align != 0 ? loader->tls.align : 16;
+  size_t block_size =
+      (size_t)AlignUp(loader->tls.memsz + X86_64_TLS_TP_SLOT_SIZE, align);
+  void* block = NULL;
+  if (posix_memalign(&block, (size_t)align, block_size) != 0 || block == NULL) {
+    return false;
+  }
+
+  const void* template_data = NULL;
+  if (loader->tls.filesz > 0 && loader->elf_file != NULL &&
+      loader->elf_file->base != NULL) {
+    template_data =
+        (const char*)loader->elf_file->base + loader->tls.file_offset;
+  }
+
+  *(uint64_t*)block = (uint64_t)(uintptr_t)block;
+  if (loader->tls.filesz > 0 && template_data != NULL) {
+    memcpy((char*)block + X86_64_TLS_TP_SLOT_SIZE, template_data,
+           (size_t)loader->tls.filesz);
+  }
+  if (block_size > loader->tls.filesz + X86_64_TLS_TP_SLOT_SIZE) {
+    memset((char*)block + X86_64_TLS_TP_SLOT_SIZE + loader->tls.filesz, 0,
+           block_size - (loader->tls.filesz + X86_64_TLS_TP_SLOT_SIZE));
+  }
+
+  *block_out = block;
+  *block_size_out = block_size;
+  *fs_base_out = (uint64_t)(uintptr_t)block;
+  return true;
+}
+
 void LoaderDestruct(Loader* loader) {
+  if (loader->tls.main_thread_block != NULL) {
+    free(loader->tls.main_thread_block);
+    loader->tls.main_thread_block = NULL;
+  }
   // Unmap all regions.
   for (size_t i = 0; i < loader->regions.length; i++) {
     Region* region = loader->regions.value.p[i];

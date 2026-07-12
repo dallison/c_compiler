@@ -49,6 +49,18 @@ typedef struct {
 #define LOADER_WRITEABLE_TEXT 4  // Map the text writeable.
 #define LOADER_EXECUTABLE_MAPPING 8  // Map text segments OS-executable.
 
+typedef struct LoaderTlsInfo {
+  bool present;
+  uint64_t template_addr;
+  uint64_t filesz;
+  uint64_t memsz;
+  uint64_t align;
+  uint64_t file_offset;
+  void* main_thread_block;
+  size_t block_size;
+  uint64_t fs_base;
+} LoaderTlsInfo;
+
 typedef struct {
   uint64_t load_address;
   const ELFSymbol* symtab;
@@ -79,6 +91,7 @@ typedef struct Loader {
   DynamicLibraryRegistry loaded_libraries;
   SymbolScope current_symbol;
   StaticSymbolTable static_symbol_table;
+  LoaderTlsInfo tls;
 } Loader;
 
 bool LoaderInitFromFile(Loader* loader, String* filename,
@@ -109,5 +122,10 @@ bool LoaderLinkedAddressToRuntime(Loader* loader,
 bool LoaderRuntimeAddressToLinked(Loader* loader,
                                   uint64_t runtime,
                                   uint64_t* linked);
+
+// Allocate an independent TLS block initialized from the immutable PT_TLS
+// template.  The caller must free() the returned pointer.
+bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
+                               size_t* block_size_out, uint64_t* fs_base_out);
 
 #endif /* loader_h */

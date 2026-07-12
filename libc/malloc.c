@@ -25,7 +25,8 @@
 #define STATIC
 #endif
 
-#if defined(__6502__) || defined(__risc_v__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
+#if defined(__6502__) || defined(__risc_v__) || defined(__aarch64__) || \
+    defined(__arm__) || defined(__p_code__)
 #include "6502/_malloc.h"
 
 // Defined by linker at end of .bss section.  This is the start
@@ -37,6 +38,12 @@ extern char _end[];
 #define Free free
 #define Calloc calloc
 #define Realloc realloc
+#elif defined(__x86_64__)
+#include "6502/_malloc.h"
+
+// Defined by linker at end of .bss section.  This is the start
+// of the memory available for the heap.
+extern char _end[];
 
 #else
 #include "_malloc.h"

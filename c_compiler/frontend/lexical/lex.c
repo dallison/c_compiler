@@ -118,6 +118,7 @@ static CXXReservedWord cxx_reserved_words[] = {
   // '_' precedes 'a'.
   {"__restrict", TOK(restrict), kLanguageStandardCXX98},
   {"__restrict__", TOK(restrict), kLanguageStandardCXX98},
+  {"__thread", TOK(thread), kLanguageStandardCXX98},
   {"alignas", TOK(alignas), kLanguageStandardCXX11},
   {"alignof", TOK(alignof), kLanguageStandardCXX11},
   {"and", TOK(ampamp), kLanguageStandardCXX98},

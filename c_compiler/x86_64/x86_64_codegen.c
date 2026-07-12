@@ -118,6 +118,8 @@ const char* X86_64OpcodeName(int op) {
     OPCODE(movq_xmm)
     OPCODE(fneg_ss)
     OPCODE(fneg_sd)
+    OPCODE(movxc)
+    OPCODE(tp)
     OPCODE(nop)
     OPCODE(movslq)
     OPCODE(sete)
@@ -1214,6 +1216,78 @@ static bool UseRegisterForVariable(X86_64Generator* rv, IRNode* var_node) {
   return true;
 }
 
+// TODO: allow override of tls model per variable.
+static void DiagnoseUnsupportedTlsModel(X86_64Generator* rv, const char* model) {
+  (void)rv;
+  fprintf(stderr,
+          "error: x86-64 TLS model '%s' is not supported; use -ftls-model=local-exec "
+          "for static executables\n",
+          model);
+  abort();
+}
+
+static const char* TlsModelName(TlsModel model) {
+  switch (model) {
+    case TLS(global_dynamic):
+      return "global-dynamic";
+    case TLS(local_dynamic):
+      return "local-dynamic";
+    case TLS(initial_exec):
+      return "initial-exec";
+    case TLS(local_exec):
+      return "local-exec";
+    default:
+      return "unknown";
+  }
+}
+
+static TargetInstruction* ThreadPointer(X86_64Generator* rv) {
+  return TargetThreadPointer(&rv->base);
+}
+
+static TargetInstruction* GetTlsVariableAddress(X86_64Generator* rv, IRNode* node) {
+  switch (compiler->tls_model) {
+    case TLS(global_dynamic):
+    case TLS(local_dynamic):
+    case TLS(initial_exec):
+      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
+      return NULL;
+    case TLS(local_exec): {
+      TargetInstruction* tp = ThreadPointer(rv);
+      TargetInstruction* offset =
+          Emit(rv, NewInstruction1(X86_64_OP(movxc), GetLoweredNode(node)));
+      offset->flags |= X86_64_TLS_RELOC;
+      return Emit(rv, NewInstruction2(X86_64_OP(add), tp, offset));
+    }
+    default:
+      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
+      return NULL;
+  }
+}
+
+static void GetTlsAddressAndOffset(X86_64Generator* rv, IRNode* addr_node,
+                                   TargetInstruction** addr,
+                                   TargetInstruction** offset) {
+  switch (compiler->tls_model) {
+    case TLS(global_dynamic):
+    case TLS(local_dynamic):
+    case TLS(initial_exec):
+      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
+      break;
+    case TLS(local_exec): {
+      TargetInstruction* tp_offset =
+          Emit(rv, NewInstruction1(X86_64_OP(movxc), GetLoweredNode(addr_node)));
+      tp_offset->flags |= X86_64_TLS_RELOC;
+      *addr = Emit(rv, NewInstruction2(X86_64_OP(add), ThreadPointer(rv), tp_offset));
+      *offset = GetIntConstant(rv, NULL, kTargetType64Bit, 0);
+      break;
+    }
+    default:
+      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
+      break;
+  }
+}
+
 // Static varaibles have an address calculated by the linker so at this
 // point they are unknown.  We need to load their address into a register.  This
 // is done using a la or lla pseudo-instruction.
@@ -1226,40 +1300,6 @@ static TargetInstruction* LoadStaticVariableAddress(X86_64Generator* rv,
     inst->flags |= X86_64_GOTPCREL_RELOC;
   }
   return inst;
-}
-
-static struct {
-  bool (*type_func)(TypeRecord*);
-  X86_64Opcode load;
-} load_opcodes[] = {
-    {TypeIsInt, X86_64_OP(loadl)},
-    {TypeIsShort, X86_64_OP(loadw)},
-    {TypeIsChar, X86_64_OP(loadb)},
-    {TypeIsLong, X86_64_OP(loadq)},
-    {TypeIsLongLong, X86_64_OP(loadq)},
-    {TypeIsUnsignedInt, X86_64_OP(loadl_z)},
-    {TypeIsUnsignedShort, X86_64_OP(loadw_z)},
-    {TypeIsUnsignedChar, X86_64_OP(loadb_z)},
-    {TypeIsFloat, X86_64_OP(loadss)},
-    {TypeIsDouble, X86_64_OP(loadsd)},
-    {TypeIsBool, X86_64_OP(loadb)},
-    {TypeIsPointerOrArray, X86_64_OP(loadq)},
-    {TypeIsFunction, X86_64_OP(loadq)},
-    {NULL, 0},
-};
-
-static COMPILER_UNUSED TargetInstruction* LoadVariableValue(X86_64Generator* rv, IRNode* node,
-                                            TargetInstruction* addr,
-                                            TargetInstruction* offset) {
-  X86_64Opcode opcode = X86_64_OP(loadq);
-  for (size_t i = 0; load_opcodes[i].type_func != NULL; i++) {
-    if (load_opcodes[i].type_func(node->type)) {
-      opcode = load_opcodes[i].load;
-      break;
-    }
-  }
-  assert(opcode != 0);
-  return Emit(rv, NewInstruction2(opcode, addr, offset));
 }
 
 // Materialize a value into a register.  This loads a constant into a register
@@ -1356,6 +1396,8 @@ static TargetInstruction* Materialize(X86_64Generator* rv, IRNode* node) {
       int32_t var_offset = node->data.ivalue;
       return OffsetFrom(rv, addr, var_offset);
     }
+  } else if (IRIsThreadVariable(node)) {
+    return GetTlsVariableAddress(rv, node);
   } else if (IRIsStaticVariable(node)) {
     // The address of static variables need to be moved into a register.
 
@@ -2139,6 +2181,9 @@ static bool GetRegAndOffset(X86_64Generator* rv, IRNode* addr_node,
       GetAddressAndOffsetFrom(rv, FramePointer(rv), var_offset,
                               addr, offset);
      }
+  } else if (IRIsThreadVariable(addr_node)) {
+    GetTlsAddressAndOffset(rv, addr_node, addr, offset);
+    return true;
   } else if (IRIsStaticVariable(addr_node)) {
     // The address of static variables need to be moved into a register.
 
@@ -2163,7 +2208,8 @@ static TargetInstruction* Load(X86_64Generator* rv, IRNode* addr_node, X86_64Opc
   }
 
   TargetInstruction* result = NULL;
-  if ((X86_64Opcode)((int)addr->opcode == (int)X86_64_OP(add)) && TargetIsZero(offset)) {
+  if ((X86_64Opcode)((int)addr->opcode == (int)X86_64_OP(add)) &&
+      TargetIsZero(offset)) {
     // If the address is calculated using an addi instruction we can
     // combine the immediate from the addi with the load.
     // The addi instruction will no longer be used and will be eliminated
@@ -2172,8 +2218,13 @@ static TargetInstruction* Load(X86_64Generator* rv, IRNode* addr_node, X86_64Opc
     TargetInstruction* immed = addr->operand[1];
     assert(src != NULL);
     assert(immed != NULL);
-    assert(TargetIsConst(immed));
-    result = Emit(rv, NewInstruction2(opcode, src, immed));
+    if ((X86_64Opcode)immed->opcode == X86_64_OP(movxc) &&
+        (immed->flags & X86_64_TLS_RELOC) != 0) {
+      result = Emit(rv, NewInstruction2(opcode, src, immed));
+    } else {
+      assert(TargetIsConst(immed));
+      result = Emit(rv, NewInstruction2(opcode, src, immed));
+    }
   }
   if (result == NULL) {
     result = Emit(rv, NewInstruction2(opcode, addr, offset));

@@ -5,17 +5,52 @@
 
 #include "x86_64_syscalls.h"
 #include "x86_64_interpreter.h"
+#include "x86_64_process.h"
 #include "loader_dynamic.h"
 #include "loader.h"
 #include "elf.h"
 #include "x86_64_machine.h"
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+static bool InterpreterIsWorker(X86_64Interpreter* interpreter) {
+  return interpreter->guest_thread != NULL &&
+         !interpreter->guest_thread->is_main;
+}
+
+static int64_t InterpreterTerminate(X86_64Interpreter* interpreter,
+                                    int64_t status) {
+  if (InterpreterIsWorker(interpreter)) {
+    X86_64SyscallThreadExit(interpreter->guest_thread, status);
+    return 0;
+  }
+  exit((int)status);
+  return -1;
+}
+
+static void LockGotResolve(X86_64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_lock(&interpreter->process->got_resolve_mutex);
+  }
+}
+
+static void UnlockGotResolve(X86_64Interpreter* interpreter) {
+  if (interpreter->process != NULL) {
+    pthread_mutex_unlock(&interpreter->process->got_resolve_mutex);
+  }
+}
+
+static void ResolveFail(X86_64Interpreter* interpreter, int status) {
+  UnlockGotResolve(interpreter);
+  X86_64InterpreterFail(interpreter, status);
+}
 
 static bool GuestAddressOk(Loader* loader, uint64_t addr, size_t size) {
   for (size_t i = 0; i < loader->regions.length; i++) {
@@ -102,19 +137,19 @@ static bool ResolveByPltIndex(X86_64Interpreter* interpreter,
                                     &symbol, &found_lib);
   if (!ok) {
     fprintf(stderr, "Undefined symbol %s\n", sym_name);
-    exit(1);
+    return false;
   }
   uint64_t symbol_address = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, found_lib, symbol->value,
                                     &symbol_address)) {
     fprintf(stderr, "Cannot translate symbol %s\n", sym_name);
-    exit(1);
+    return false;
   }
   uint64_t got_offset = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, lib, reloc.offset,
                                     &got_offset)) {
     fprintf(stderr, "Cannot translate GOT slot for %s\n", sym_name);
-    exit(1);
+    return false;
   }
   *(uint64_t*)(uintptr_t)got_offset = symbol_address;
   interpreter->rip = symbol_address;
@@ -124,6 +159,7 @@ static bool ResolveByPltIndex(X86_64Interpreter* interpreter,
 
 static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
                                   bool* rip_updated) {
+  LockGotResolve(interpreter);
   LoadedDynamicLibrary* lib =
       (LoadedDynamicLibrary*)interpreter->iregs[X86_REG_RDI];
   int64_t index = (int64_t)interpreter->iregs[X86_REG_RSI];
@@ -135,6 +171,7 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
   }
   if (lib != NULL && index >= 0 &&
       ResolveByPltIndex(interpreter, lib, index, rip_updated)) {
+    UnlockGotResolve(interpreter);
     return;
   }
 
@@ -144,7 +181,8 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
   }
   if (lib == NULL) {
     fprintf(stderr, "Undefined symbol\n");
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
 
   int64_t plt_rel_size = 0;
@@ -180,7 +218,8 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
   }
   if (reloc == NULL) {
     fprintf(stderr, "Undefined symbol\n");
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
 
   int32_t sym_index = ELF_R_SYM(reloc->info);
@@ -191,23 +230,27 @@ static void ResolveAndFixupSymbol(X86_64Interpreter* interpreter,
                                     &symbol, &found_lib);
   if (!ok) {
     fprintf(stderr, "Undefined symbol %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   uint64_t symbol_address = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, found_lib, symbol->value,
                                     &symbol_address)) {
     fprintf(stderr, "Cannot translate symbol %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   uint64_t got_offset = 0;
   if (!LoaderLinkedAddressToRuntime(lib->loader, lib, reloc->offset,
                                     &got_offset)) {
     fprintf(stderr, "Cannot translate GOT slot for %s\n", sym_name);
-    exit(1);
+    ResolveFail(interpreter, 1);
+    return;
   }
   *(uint64_t*)(uintptr_t)got_offset = symbol_address;
   interpreter->rip = symbol_address;
   *rip_updated = true;
+  UnlockGotResolve(interpreter);
 }
 
 int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
@@ -218,8 +261,7 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
   switch (number) {
     case X86_64_SYSCALL_HALT:
     case X86_64_SYSCALL_EXIT:
-      exit((int)a0);
-      break;
+      return InterpreterTerminate(interpreter, a0);
     case X86_64_SYSCALL_OPEN:
       return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
     case X86_64_SYSCALL_CLOSE:
@@ -255,9 +297,27 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
       interpreter->rip_updated = rip_updated;
       return 0;
     }
+    case X86_64_SYSCALL_THREAD_CREATE:
+      return X86_64SyscallThreadCreate(interpreter->guest_thread, (uint64_t)a0,
+                                       (uint64_t)a1, (uint64_t)a2,
+                                       (uint64_t)a3);
+    case X86_64_SYSCALL_THREAD_JOIN:
+      return X86_64SyscallThreadJoin(interpreter->guest_thread, (uint64_t)a0,
+                                     (uint64_t)a1);
+    case X86_64_SYSCALL_THREAD_SELF:
+      return X86_64SyscallThreadSelf(interpreter->guest_thread);
+    case X86_64_SYSCALL_GET_TP:
+      return X86_64SyscallGetTp(interpreter->guest_thread);
+    case X86_64_SYSCALL_THREAD_EXIT:
+      InterpreterTerminate(interpreter, a0);
+      return 0;
+    case X86_64_SYSCALL_HEAP_LOCK:
+      return X86_64SyscallHeapLock(interpreter->guest_thread);
+    case X86_64_SYSCALL_HEAP_UNLOCK:
+      return X86_64SyscallHeapUnlock(interpreter->guest_thread);
     default:
       fprintf(stderr, "Unknown x86_64 syscall %lld\n", (long long)number);
-      exit(1);
+      X86_64InterpreterFail(interpreter, 1);
   }
   return -1;
 }

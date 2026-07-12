@@ -48,6 +48,7 @@ case "$opt" in
   -O0)
     run_case if_else libc/tests/compiler/if_else.c pass
     run_case break_in_while libc/tests/compiler/break_in_while.c pass
+    run_case tls_local_exec libc/tests/runtime/tls_local_exec.c pass
     ;;
   -O1)
     run_case if_else libc/tests/compiler/if_else.c pass

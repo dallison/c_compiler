@@ -167,6 +167,7 @@ LIBC_SRCS = [
     "libc/memset.c",
     "libc/modf.c",
     "libc/perror.c",
+    "libc/errno.c",
     "libc/posix.c",
     "libc/printf.c",
     "libc/qsort.c",
@@ -198,6 +199,9 @@ LIBC_SRCS = [
     "libc/strtoul.c",
     "libc/strtoull.c",
     "libc/syscall.c",
+    "libc/cxx_tls.c",
+    "libc/cxx_tls_stubs.c",
+    "libc/threads.c",
     "libc/tan.c",
     "libc/ungetc.c",
 ]
@@ -616,6 +620,7 @@ cc_library(
     srcs = [
         "x86_64_interpreter/x86_64_interpreter.c",
         "x86_64_interpreter/x86_64_native.c",
+        "x86_64_interpreter/x86_64_process.c",
         "x86_64_interpreter/x86_64_runtime.c",
         "x86_64_interpreter/x86_64_syscalls.c",
     ],
@@ -1046,6 +1051,7 @@ libc_srcs=(
   "libc/memset.c"
   "libc/modf.c"
   "libc/perror.c"
+  "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
   "libc/qsort.c"
@@ -1102,7 +1108,9 @@ cd "$$work"
 
 genrule(
     name = "libc_x86_64",
-    srcs = LIBC_SRCS + glob([
+    srcs = LIBC_SRCS + [
+        "libc/x86_64_heap.c",
+    ] + glob([
         "libc/include/**/*.h",
         "x86_64 support/*.s",
     ]),
@@ -1143,6 +1151,8 @@ libc_srcs=(
   "libc/ctype.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
   "libc/eh_frame.c"
   "libc/eh_terminate.c"
   "libc/eh_throw.c"
@@ -1171,6 +1181,7 @@ libc_srcs=(
   "libc/memset.c"
   "libc/modf.c"
   "libc/perror.c"
+  "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
   "libc/qsort.c"
@@ -1201,7 +1212,9 @@ libc_srcs=(
   "libc/strtoul.c"
   "libc/strtoull.c"
   "libc/syscall.c"
+  "libc/threads.c"
   "libc/ungetc.c"
+  "libc/x86_64_heap.c"
   "libc/acos.c"
   "libc/asin.c"
   "libc/atan.c"
@@ -1293,6 +1306,7 @@ libc_srcs=(
   "libc/memset.c"
   "libc/modf.c"
   "libc/perror.c"
+  "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
   "libc/qsort.c"
@@ -1411,6 +1425,7 @@ libc_srcs=(
   "libc/memset.c"
   "libc/modf.c"
   "libc/perror.c"
+  "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
   "libc/qsort.c"
@@ -1531,6 +1546,7 @@ libc_srcs=(
   "libc/memset.c"
   "libc/modf.c"
   "libc/perror.c"
+  "libc/errno.c"
   "libc/posix.c"
   "libc/printf.c"
   "libc/qsort.c"
@@ -1623,7 +1639,9 @@ done
 """,
 )
 
-LIBC_TEST_DATA = LIBC_SRCS + glob([
+LIBC_TEST_DATA = LIBC_SRCS + [
+    "libc/x86_64_heap.c",
+] + glob([
     "libc/include/**/*.h",
     "libc/tests/**",
     "x86_64 support/*.s",
@@ -1651,9 +1669,11 @@ sh_test(
         "$(rootpath :davecc)",
         "x86_64",
         "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
     ],
     data = LIBC_TEST_DATA + [
         ":davecc",
+        ":libc_x86_64",
         ":x86_64",
     ],
 )

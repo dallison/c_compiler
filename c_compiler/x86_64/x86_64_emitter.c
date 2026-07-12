@@ -923,6 +923,30 @@ static void PrintMemoryBaseRegFromInst(FILE* fp, TargetInstruction* inst,
   PrintPercentReg(fp, reg);
 }
 
+static bool PrintTlsTporffMemoryOperand(FILE* fp, TargetInstruction* addr,
+                                        TargetInstruction* offset, char* buf,
+                                        size_t bufsz) {
+  TargetInstruction* tp = addr;
+  TargetInstruction* tporff = offset;
+  if ((X86_64Opcode)addr->opcode == X86_64_OP(add)) {
+    tp = addr->operand[0];
+    tporff = addr->operand[1];
+  }
+  if (tp == NULL || tporff == NULL ||
+      (X86_64Opcode)tporff->opcode != X86_64_OP(movxc) ||
+      (tporff->flags & X86_64_TLS_RELOC) == 0 || tporff->operand[0] == NULL ||
+      (int)tporff->operand[0]->opcode != (int)X86_64_OP(symbol)) {
+    return false;
+  }
+  char namebuf[256];
+  fprintf(fp, "%s@TPOFF(", TargetSymbolName(
+                               ((TargetSymbol*)tporff->operand[0])->symbol,
+                               namebuf, sizeof(namebuf)));
+  PrintMemoryBaseRegFromInst(fp, tp, buf, bufsz);
+  fprintf(fp, ")");
+  return true;
+}
+
 static X86_64RegisterType InstResultRegType(TargetInstruction* inst) {
   if (inst == NULL) {
     return kX86_64RegTypeInt;
@@ -2120,6 +2144,12 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "), ");
         PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
         fprintf(fp, "\n");
+      } else if (PrintTlsTporffMemoryOperand(fp, inst->operand[0],
+                                             inst->operand[1], buf2,
+                                             sizeof(buf2))) {
+        fprintf(fp, ", ");
+        PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+        fprintf(fp, "\n");
       } else {
         assert(false);
       }
@@ -2207,6 +2237,10 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "0(");
         PrintMemoryBaseRegFromInst(fp, inst->operand[1], buf2, sizeof(buf2));
         fprintf(fp, ")\n");
+      } else if (PrintTlsTporffMemoryOperand(fp, inst->operand[1],
+                                             inst->operand[2], buf2,
+                                             sizeof(buf2))) {
+        fprintf(fp, "\n");
       } else {
         assert(false);
       }
@@ -2551,6 +2585,35 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\tmovabs ");
       PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
       fprintf(fp, ", ");
+      PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+      fprintf(fp, "\n");
+      break;
+    }
+
+    case X86_64_OP(movxc): {
+      fprintf(fp, "\tmovabs ");
+      if (inst->operand[0] != NULL &&
+          (int)inst->operand[0]->opcode == (int)X86_64_OP(symbol)) {
+        TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
+        char namebuf[256];
+        const char* symname =
+            TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
+        if ((inst->flags & X86_64_TLS_RELOC) != 0) {
+          fprintf(fp, "%s@TPOFF, ", symname);
+        } else {
+          fprintf(fp, "%s, ", symname);
+        }
+      } else {
+        PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+        fprintf(fp, ", ");
+      }
+      PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
+      fprintf(fp, "\n");
+      break;
+    }
+
+    case X86_64_OP(tp): {
+      fprintf(fp, "\tmovq %%fs:0, ");
       PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
       fprintf(fp, "\n");
       break;

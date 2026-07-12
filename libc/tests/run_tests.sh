@@ -106,6 +106,97 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "riscv
     test $? -eq 0
   '
 
+  if [ "$target" = "x86_64" ]; then
+    tls_exe="$work/tls_local_exec.exe"
+    tls_obj="$work/tls_local_exec.o"
+    "$davecc" "${rt_cflags[@]}" libc/tests/runtime/tls_local_exec.c -o "$tls_obj"
+    "$davecc" "${link_cflags[@]}" "$tls_obj" -o "$tls_exe"
+    run_step "runtime tls local-exec test" env INTERP="$interpreter" EXE="$tls_exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+
+    thread_exe="$work/thread_tls_isolation.exe"
+    thread_obj="$work/thread_tls_isolation.o"
+    threads_obj="$work/threads.o"
+    cxx_tls_obj="$work/cxx_tls.o"
+    cxx_tls_stubs_obj="$work/cxx_tls_stubs.o"
+    runtime_objs=()
+    for src in \
+        "x86_64 support/syscall.s" \
+        "x86_64 support/abs.s"; do
+      obj="$work/rt_$(basename "${src%.s}").o"
+      "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
+      runtime_objs+=("$obj")
+    done
+    "$davecc" "${rt_cflags[@]}" libc/tests/runtime/thread_tls_isolation.c -o "$thread_obj"
+    "$davecc" "${rt_cflags[@]}" libc/threads.c -o "$threads_obj"
+    "$davecc" "${rt_cflags[@]}" libc/cxx_tls.c -o "$cxx_tls_obj"
+    "$davecc" "${rt_cflags[@]}" libc/cxx_tls_stubs.c -o "$cxx_tls_stubs_obj"
+    thread_libc_objs=()
+    if [ -z "${LIBC_ARCHIVE:-}" ] || [ ! -f "$LIBC_ARCHIVE" ]; then
+      for src in \
+          libc/malloc.c \
+          libc/free.c \
+          libc/realloc.c \
+          libc/calloc.c \
+          libc/x86_64_heap.c \
+          libc/memset.c \
+          libc/errno.c \
+          libc/posix.c; do
+        obj="$work/thread_libc_$(basename "${src%.c}").o"
+        "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
+        thread_libc_objs+=("$obj")
+      done
+    fi
+    if [ -n "${LIBC_ARCHIVE:-}" ] && [ -f "$LIBC_ARCHIVE" ]; then
+      "$davecc" "${link_cflags[@]}" "$thread_obj" "$threads_obj" "$cxx_tls_obj" \
+        "$cxx_tls_stubs_obj" "${runtime_objs[@]}" "$LIBC_ARCHIVE" -o "$thread_exe"
+    else
+      "$davecc" "${link_cflags[@]}" "$thread_obj" "$threads_obj" "$cxx_tls_obj" \
+        "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
+        -o "$thread_exe"
+    fi
+    run_step "runtime thread tls isolation test" env INTERP="$interpreter" EXE="$thread_exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+
+    link_thread_test() {
+      local name=$1
+      local src=$2
+      local exe="$work/${name}.exe"
+      local obj="$work/${name}.o"
+      "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
+      if [ -n "${LIBC_ARCHIVE:-}" ] && [ -f "$LIBC_ARCHIVE" ]; then
+        "$davecc" "${link_cflags[@]}" "$obj" "$threads_obj" "$cxx_tls_obj" \
+          "$cxx_tls_stubs_obj" "${runtime_objs[@]}" "$LIBC_ARCHIVE" -o "$exe"
+      else
+        "$davecc" "${link_cflags[@]}" "$obj" "$threads_obj" "$cxx_tls_obj" \
+          "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
+          -o "$exe"
+      fi
+      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+    }
+
+    link_thread_libc_test() {
+      local name=$1
+      local src=$2
+      local exe="$work/${name}.exe"
+      local obj="$work/${name}.o"
+      "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
+      if [ -n "${LIBC_ARCHIVE:-}" ] && [ -f "$LIBC_ARCHIVE" ]; then
+        "$davecc" "${link_cflags[@]}" "$obj" "$threads_obj" "$cxx_tls_obj" \
+          "$cxx_tls_stubs_obj" "${runtime_objs[@]}" -o "$exe" "$LIBC_ARCHIVE"
+      else
+        "$davecc" "${link_cflags[@]}" "$obj" "$threads_obj" "$cxx_tls_obj" \
+          "$cxx_tls_stubs_obj" "${thread_libc_objs[@]}" "${runtime_objs[@]}" \
+          -o "$exe"
+      fi
+      run_step "runtime ${name} test" env INTERP="$interpreter" EXE="$exe" bash -c '"$INTERP" -i "$EXE"; test $? -eq 0'
+    }
+
+    link_thread_test thread_join_negative libc/tests/runtime/thread_join_negative.c
+    link_thread_test thread_thrd_exit libc/tests/runtime/thread_thrd_exit.c
+
+    link_thread_libc_test thread_heap_stress libc/tests/runtime/thread_heap_stress.c
+    link_thread_libc_test thread_errno_isolation libc/tests/runtime/thread_errno_isolation.c
+  fi
+
   test_objs=()
   for src in \
       libc/tests/runtime/main.c \

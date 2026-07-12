@@ -179,6 +179,9 @@ void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);
 // current token does not close the list.
 void SyntaxNeedTemplateClose(Syntax* syntax, TokenClass followers);
 void SyntaxRecover(Syntax* syntax, TokenClass tc);
+void SyntaxCheckThreadLocal(Syntax* syntax, Symbol* symbol,
+                            ParserContext context, bool is_static_member,
+                            bool is_nonstatic_member);
 bool SyntaxLookingAtType(Syntax* syntax);
 bool SyntaxLookingAtDeclaration(Syntax* syntax);
 

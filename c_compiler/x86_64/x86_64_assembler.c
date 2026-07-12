@@ -49,6 +49,8 @@ typedef struct {
   bool sym_known;
   int64_t sym_value;
   bool rip_relative;
+  int segment_prefix;
+  int reloc_type;
 } X86Op;
 
 typedef struct {
@@ -388,21 +390,110 @@ static void InitMemOp(X86Op* op) {
   op->sym = NULL;
   op->sym_known = false;
   op->rip_relative = false;
+  op->segment_prefix = 0;
+  op->reloc_type = 0;
+}
+
+static bool ParseBareSymbolImmediate(X86_64Assembler* assembler, X86Op* op) {
+  String symbol_name;
+  String suffix;
+  StringInit(&symbol_name, NULL);
+  StringInit(&suffix, NULL);
+  AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
+  op->kind = kX86OpImm;
+  op->imm = 0;
+  op->sym = GetOrCreateSymbol(assembler, symbol_name.value);
+  op->sym_known = false;
+  op->reloc_type = R_X86_64_64;
+  if (StringEqual(&suffix, "TPOFF")) {
+    op->reloc_type = R_X86_64_TPOFF64;
+  } else if (suffix.length > 0) {
+    AssemblerError(&ASM, "Unsupported symbol suffix '@%s'", suffix.value);
+    StringDestruct(&symbol_name);
+    StringDestruct(&suffix);
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  StringDestruct(&symbol_name);
+  StringDestruct(&suffix);
+  return true;
+}
+
+static bool ParseSegmentOverrideFromCurrent(X86_64Assembler* assembler,
+                                            int* segment_prefix) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    return false;
+  }
+  const char* name = ASM.lex.spelling.value;
+  size_t len = ASM.lex.spelling.length;
+  if (len == 2 && strncmp(name, "fs", 2) == 0) {
+    *segment_prefix = 0x64;
+  } else if (len == 2 && strncmp(name, "gs", 2) == 0) {
+    *segment_prefix = 0x65;
+  } else {
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  if (!LexMatch(&ASM.lex, TOK(colon))) {
+    AssemblerError(&ASM, "Expected ':' after segment register");
+    return false;
+  }
+  return true;
+}
+
+static bool ParseSegmentOverride(X86_64Assembler* assembler, int* segment_prefix) {
+  if (!LexMatch(&ASM.lex, TOK(percent))) {
+    return false;
+  }
+  return ParseSegmentOverrideFromCurrent(assembler, segment_prefix);
 }
 
 static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
   InitMemOp(op);
+
+  if (LexLookingAt(&ASM.lex, TOK(percent))) {
+    size_t save_pos = ASM.lex.pos;
+    int segment_prefix = 0;
+    if (ParseSegmentOverride(assembler, &segment_prefix)) {
+      op->segment_prefix = segment_prefix;
+      if (LexLookingAt(&ASM.lex, TOK(number))) {
+        op->disp = AssemblerEvaluateExpression(&ASM);
+        return true;
+      }
+      if (LexLookingAt(&ASM.lex, TOK(lparen))) {
+        return ParseMemoryTail(assembler, op);
+      }
+      AssemblerError(&ASM, "Expected displacement or '(' after segment override");
+      return false;
+    }
+    ASM.lex.pos = save_pos;
+  }
 
   if (LexLookingAt(&ASM.lex, TOK(lparen))) {
     return ParseMemoryTail(assembler, op);
   }
 
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
-    op->sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    String symbol_name;
+    String suffix;
+    StringInit(&symbol_name, NULL);
+    StringInit(&suffix, NULL);
+    AssemblerExtractSymbolSuffix(&ASM.lex.spelling, &symbol_name, &suffix);
+    op->sym = GetOrCreateSymbol(assembler, symbol_name.value);
     op->sym_known =
         op->sym->defined && op->sym->section == ASM.current_section;
     op->sym_value = op->sym->value;
+    if (StringEqual(&suffix, "TPOFF")) {
+      op->reloc_type = R_X86_64_TPOFF32;
+    } else if (suffix.length > 0) {
+      AssemblerError(&ASM, "Unsupported symbol suffix '@%s'", suffix.value);
+      StringDestruct(&symbol_name);
+      StringDestruct(&suffix);
+      return false;
+    }
     LexNextToken(&ASM.lex);
+    StringDestruct(&symbol_name);
+    StringDestruct(&suffix);
     return ParseMemoryTail(assembler, op);
   }
 
@@ -435,6 +526,20 @@ static bool ParseOperand(X86_64Assembler* assembler, X86Op* op) {
     return true;
   }
   if (LexMatch(&ASM.lex, TOK(percent))) {
+    int segment_prefix = 0;
+    if (ParseSegmentOverrideFromCurrent(assembler, &segment_prefix)) {
+      InitMemOp(op);
+      op->segment_prefix = segment_prefix;
+      if (LexLookingAt(&ASM.lex, TOK(number))) {
+        op->disp = AssemblerEvaluateExpression(&ASM);
+        return true;
+      }
+      if (LexLookingAt(&ASM.lex, TOK(lparen))) {
+        return ParseMemoryTail(assembler, op);
+      }
+      AssemblerError(&ASM, "Expected displacement or '(' after segment override");
+      return false;
+    }
     op->kind = kX86OpReg;
     return ParseRegister(assembler, &op->reg, /*allow_rip=*/false, NULL);
   }
@@ -445,6 +550,9 @@ static bool ParseOperand(X86_64Assembler* assembler, X86Op* op) {
       op->reg = reg;
       LexNextToken(&ASM.lex);
       return true;
+    }
+    if (!AsmLookingAtLParen(&ASM)) {
+      return ParseBareSymbolImmediate(assembler, op);
     }
     return ParseMemory(assembler, op);
   }
@@ -473,6 +581,19 @@ static int PickMemDispSize(int64_t disp) {
 
 static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
   Assembler* base = &enc->assembler->base;
+  if (mem->segment_prefix != 0) {
+    EncodeLegacyPrefix(enc, (uint8_t)mem->segment_prefix);
+  }
+  if (mem->segment_prefix != 0 && mem->base.num < 0 && mem->index.num < 0 &&
+      !mem->rip_relative && mem->sym == NULL) {
+    SetRexW(enc);
+    EncodeModRM(enc, 0, reg_field, 4);
+    EncodeSIB(enc, 1, 4, 5);
+    enc->disp_pos = enc->len;
+    enc->disp_size = 4;
+    EncodeDisp(enc, 4, (int32_t)mem->disp);
+    return;
+  }
   if (mem->rip_relative || (mem->base.num < 0 && mem->sym != NULL)) {
     SetRexW(enc);
     EncodeModRM(enc, 0, reg_field, 5);
@@ -508,6 +629,35 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
   int base_reg = mem->base.num;
   int index = mem->index.num;
   int64_t disp = mem->disp;
+  if (mem->sym != NULL &&
+      (mem->reloc_type == R_X86_64_TPOFF64 ||
+       mem->reloc_type == R_X86_64_TPOFF32)) {
+    if (base_reg < 0) {
+      AssemblerError(&enc->assembler->base,
+                     "TPOFF memory operand requires a base register");
+      return;
+    }
+    bool need_sib = (base_reg & 7) == (X86_REG_RSP & 7) || index >= 0;
+    if (need_sib) {
+      EncodeModRM(enc, 2, reg_field, 4);
+      EncodeSIB(enc, mem->scale, index < 0 ? 4 : index, base_reg);
+    } else {
+      EncodeModRM(enc, 2, reg_field, base_reg);
+    }
+    enc->disp_pos = enc->len;
+    enc->disp_size = 4;
+    for (int i = 0; i < 4; i++) {
+      EncodeByte(enc, 0);
+    }
+    int64_t next_ip = AssemblerCurrentAddress(base) + enc->num_prefixes +
+                      (enc->rex >= 0 ? 1 : 0) + enc->len + enc->tail_bytes;
+    int32_t disp_offset = (int32_t)(next_ip - 4);
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+        mem->sym, mem->reloc_type, base->current_section, disp_offset,
+        (int32_t)mem->disp);
+    AssemblerAddRelocation(base, reloc);
+    return;
+  }
   if (mem->sym != NULL) {
     if (!mem->sym_known) {
       AssemblerError(&enc->assembler->base,
@@ -680,9 +830,11 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
         enc.imm_size = 8;
         EncodeImm(&enc, 8, 0);
         EncodeFinish(&enc);
-        int offset = (int32_t)(enc.imm_pos - (enc.rex >= 0 ? 1 : 0));
+        int offset = (int32_t)(AssemblerCurrentAddress(&ASM) - enc.imm_size);
         AssemblerRelocation* reloc = NewAssemblerRelocation(
-            src.sym, R_X86_64_64, ASM.current_section, offset, 0);
+            src.sym,
+            src.reloc_type != 0 ? src.reloc_type : R_X86_64_64,
+            ASM.current_section, offset, 0);
         AssemblerAddRelocation(&ASM, reloc);
         return;
       }
@@ -1010,6 +1162,22 @@ static void EmitMovabs(X86_64Assembler* assembler) {
   }
   X86Encode enc;
   EncodeInit(&enc, assembler);
+  if (imm.sym != NULL) {
+    SetRexW(&enc);
+    EncodeByte(&enc, (uint8_t)(0xb8 + (dst.reg.num & 7)));
+    SetRexB(&enc, dst.reg.num);
+    enc.imm_pos = enc.len;
+    enc.imm_size = 8;
+    EncodeImm(&enc, 8, 0);
+    EncodeFinish(&enc);
+    int offset = (int32_t)(AssemblerCurrentAddress(&ASM) - enc.imm_size);
+    AssemblerRelocation* reloc = NewAssemblerRelocation(
+        imm.sym,
+        imm.reloc_type != 0 ? imm.reloc_type : R_X86_64_64,
+        ASM.current_section, offset, 0);
+    AssemblerAddRelocation(&ASM, reloc);
+    return;
+  }
   SetRexW(&enc);
   EncodeByte(&enc, (uint8_t)(0xb8 + (dst.reg.num & 7)));
   SetRexB(&enc, dst.reg.num);
@@ -1798,7 +1966,7 @@ bool X86_64AssemblerInit(X86_64Assembler* assembler, String* infile,
   static int reloc_types[] = {
       R_X86_64_16,    R_X86_64_32,    R_X86_64_64,    R_X86_64_16,
       R_X86_64_32,    R_X86_64_64,    R_X86_64_16,    R_X86_64_32,
-      R_X86_64_64,    R_X86_64_PLT32, R_X86_64_GOTPCREL,
+      R_X86_64_64,    R_X86_64_PLT32, R_X86_64_GOTPCREL, R_X86_64_TPOFF64,
   };
 
   if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_X86_64, 0, reloc_types,

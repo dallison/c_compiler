@@ -431,6 +431,16 @@ typedef struct  {
 #define R_X86_64_PC16 13
 #define R_X86_64_PC8 14
 #define R_X86_64_PC64 24
+#define R_X86_64_DTPMOD64 16
+#define R_X86_64_DTPOFF64 17
+#define R_X86_64_TPOFF64 18
+#define R_X86_64_TLSGD 19
+#define R_X86_64_TLSLD 20
+#define R_X86_64_DTPOFF32 21
+#define R_X86_64_GOTTPOFF 22
+#define R_X86_64_TPOFF32 23
+// Reserved bytes at the start of each thread's TLS block for %fs:0.
+#define X86_64_TLS_TP_SLOT_SIZE 8
 
 // A program header.
 typedef struct {

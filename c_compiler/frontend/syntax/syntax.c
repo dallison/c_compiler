@@ -1681,6 +1681,9 @@ Storage SyntaxParseStorage(Syntax* syntax) {
     case TOK(thread):
       LexNextToken(syntax->lex);
       return STO(thread);
+    case TOK(thread_local):
+      LexNextToken(syntax->lex);
+      return STO(thread);
    default:
       return STO(implicit);
   }
@@ -4375,15 +4378,48 @@ static bool IsPowerOf2OrZero(int32_t v) {
   return (v & (v - 1)) == 0;
 }
 
-// Only static variables can be thread local.  This checks for invalid
-// symbol storage or type.
-static void CheckThreadLocal(Syntax* syntax, Symbol* symbol) {
-  if (StorageIs(symbol->storage, STO(thread))) {
-    bool error = TypeIsFunction(symbol->type);
-    error |= !StorageIs(symbol->storage, STO(static) | STO(extern));
-    if (error) {
-      SyntaxError(syntax, "Illegal use of __thread");
-    }
+static const char* ThreadLocalDiagnosticKeyword(void) {
+  return CompilerIsCXX() ? "thread_local" : "__thread";
+}
+
+// thread_local / __thread imply static storage duration at block scope only.
+static void NormalizeThreadLocalStorage(Storage* storage,
+                                      ParserContext context) {
+  if (!StorageIs(*storage, STO(thread)) || !CompilerIsCXX()) {
+    return;
+  }
+  if (context == kParsingBlockScope &&
+      !StorageIs(*storage, STO(extern))) {
+    *storage |= STO(static);
+  }
+}
+
+// Validate thread-local storage for the current language and scope.
+void SyntaxCheckThreadLocal(Syntax* syntax, Symbol* symbol,
+                            ParserContext context, bool is_static_member,
+                            bool is_nonstatic_member) {
+  if (!StorageIs(symbol->storage, STO(thread))) {
+    return;
+  }
+
+  const char* keyword = ThreadLocalDiagnosticKeyword();
+  if (TypeIsFunction(symbol->type) || symbol->flags.is_argument) {
+    SyntaxError(syntax, "Illegal use of %s", keyword);
+    return;
+  }
+  if (is_nonstatic_member) {
+    SyntaxError(syntax, "Non-static data member cannot be %s", keyword);
+    return;
+  }
+  if (CompilerIsCXX()) {
+    return;
+  }
+
+  // C: __thread at block scope requires an explicit static or extern storage
+  // class.  File-scope behavior is left unchanged.
+  if (context == kParsingBlockScope &&
+      !StorageIs(symbol->storage, STO(static) | STO(extern))) {
+    SyntaxError(syntax, "Illegal use of %s", keyword);
   }
 }
 
@@ -4525,10 +4561,12 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                       "type specifier missing, defaults to int");
       }
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+      NormalizeThreadLocalStorage(storage, context);
       TypeParserDestruct(&parser);
       return;
     }
   }
+  NormalizeThreadLocalStorage(storage, context);
   TypeParserDestruct(&parser);
 }
 
@@ -4834,6 +4872,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(sym);
+
+    SyntaxCheckThreadLocal(syntax, sym, kParsingFileScope,
+                     parser->cxx_member_definition != NULL &&
+                         parser->cxx_member_definition->is_static,
+                     parser->cxx_member_definition != NULL &&
+                         !parser->cxx_member_definition->is_static &&
+                         !TypeIsFunction(sym->type));
 
     // Check for GCC-style assembler name after a declarator:
     //   int x asm("external_name");
@@ -7111,18 +7156,19 @@ static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   return NewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
 }
 
-static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
-      sym->type->info.struct_info == NULL ||
-      sym->type->info.struct_info->tag_name == NULL) {
+static ASTNode* NewCXXDestructorCallOnReceiver(ASTNode* receiver,
+                                               TypeRecord* type,
+                                               SourceLocation location) {
+  if (!CompilerIsCXX() || receiver == NULL || type == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
-  SourceLocation location = sym->location;
   String destructor_name;
   StringInit(&destructor_name, "~");
-  StringAppendString(&destructor_name, sym->type->info.struct_info->tag_name);
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
   StructMember* destructor =
-      FindStructMember(sym->type->info.struct_info, &destructor_name);
+      FindStructMember(type->info.struct_info, &destructor_name);
   if (destructor == NULL || !destructor->is_member_function ||
       !destructor->symbol->type->info.function.is_destructor) {
     StringDestruct(&destructor_name);
@@ -7133,14 +7179,23 @@ static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
                                location);
   StringDestruct(&destructor_name);
   ASTNode* member_access =
-      NewBinaryASTNode(AST_OP(dot), NULL, location,
-                       NewIdentifierASTNode(sym, location), member);
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
   Vector* actuals = NewVector();
-  CXXPrependCompleteObjectArgument(sym->type, actuals,
+  CXXPrependCompleteObjectArgument(type, actuals,
                                    /*complete_object=*/true, location);
   ASTNode* call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
   return NewExpressionStatementASTNode(call, location);
+}
+
+static ASTNode* NewCXXDestructorCallIfNeeded(Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
+      sym->type->info.struct_info == NULL ||
+      sym->type->info.struct_info->tag_name == NULL) {
+    return NULL;
+  }
+  return NewCXXDestructorCallOnReceiver(NewIdentifierASTNode(sym, sym->location),
+                                        sym->type, sym->location);
 }
 
 static ASTNode* NewIntAssignment(Symbol* sym, int value,
@@ -7240,6 +7295,230 @@ static void RegisterCXXLocalStaticDestructor(Symbol* sym, Symbol* guard) {
       condition, NewCompoundStatementASTNode(destructor_statements, location),
       NULL, false, location);
   VectorAppend(&compiler->cxx_global_destructor_calls, guarded_destructor);
+}
+
+static void RegisterCXXThreadLocalDestructor(Symbol* sym, Symbol* guard) {
+  ASTNode* destructor = NewCXXDestructorCallIfNeeded(sym);
+  if (destructor == NULL) {
+    return;
+  }
+  SourceLocation location = sym->location;
+  if (sym->flags.is_local) {
+    return;
+  }
+  ASTNode* condition = NewBinaryASTNode(
+      AST_OP(noteq), NULL, location, NewIdentifierASTNode(guard, location),
+      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+  Vector* destructor_statements = NewVector();
+  VectorAppend(destructor_statements, destructor);
+  ASTNode* guarded_destructor = NewIfStatementASTNode(
+      condition, NewCompoundStatementASTNode(destructor_statements, location),
+      NULL, false, location);
+  VectorAppend(&compiler->cxx_thread_destructor_calls, guarded_destructor);
+}
+
+static ASTNode* NewCXXRuntimeCallStatement(const char* name, Vector* args,
+                                           SourceLocation location) {
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_type);
+  if (args != NULL) {
+    for (size_t i = 0; i < args->length; i++) {
+      ASTNode* arg = args->value.p[i];
+      Symbol* formal = NewSymbol(
+          SyntaxFakeName(&compiler->syntax),
+          arg->type != NULL ? TypeRecordCopy(arg->type)
+                            : NewTypeRecordWithSize(kTypeInt, kQualPlain),
+          STO(auto));
+      formal->flags.is_argument = true;
+      formal->flags.invented = true;
+      formal->location = location;
+      formal->value.arg_number = (int32_t)i;
+      VectorAppend(&func_type->info.function.prototype, formal);
+    }
+  }
+  Symbol* func_sym = NewSymbol(name, func_type, STO(extern));
+  ASTNode* call = NewVectorASTNode(
+      AST_OP(call), NULL, location, NewIdentifierASTNode(func_sym, location),
+      args != NULL ? args : NewVector());
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static Symbol* RegisterCXXTlsBlockDtorThunk(Syntax* syntax, Symbol* sym) {
+  SourceLocation location = sym->location;
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, void_type);
+  Symbol* param = NewSymbol("__ignored", void_ptr, STO(auto));
+  param->flags.is_argument = true;
+  param->flags.invented = true;
+  param->location = location;
+  param->value.arg_number = 0;
+  VectorAppend(&func_type->info.function.prototype, param);
+
+  String name;
+  StringInit(&name, "__davecc_tls_block_dtor_");
+  char suffix[32];
+  snprintf(suffix, sizeof(suffix), "%zu_",
+           compiler->cxx_tls_block_dtor_thunks.length);
+  StringAppend(&name, suffix);
+  AppendSanitizedAsmComponent(&name, sym->name.value);
+
+  Symbol* thunk = NewSymbol(name.value, func_type, STO(static));
+  thunk->flags.invented = true;
+  thunk->flags.is_defined = true;
+  thunk->location = location;
+  func_type->info.function.symbol = thunk;
+  func_type->info.function.definition = true;
+  StringDestruct(&name);
+
+  Vector* body_statements = NewVector();
+  ASTNode* destructor =
+      NewCXXDestructorCallOnReceiver(NewIdentifierASTNode(sym, location),
+                                     sym->type, location);
+  if (destructor != NULL) {
+    VectorAppend(body_statements, destructor);
+  }
+  func_type->info.function.body =
+      NewCompoundStatementASTNode(body_statements, location);
+
+  bool added = SyntaxAddSymbol(syntax, thunk);
+  assert(added);
+  (void)added;
+
+  CXXTlsBlockDtorThunk* entry = malloc(sizeof(CXXTlsBlockDtorThunk));
+  entry->thunk = thunk;
+  VectorAppend(&compiler->cxx_tls_block_dtor_thunks, entry);
+  return thunk;
+}
+
+static ASTNode* NewCXXTlsRegisterBlockDtorCall(Symbol* thunk, Symbol* object,
+                                               SourceLocation location) {
+  (void)object;
+  TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
+  TypeRecordCalculateSize(void_ptr);
+
+  TypeRecord* register_func = NewFunctionTypeRecord();
+  TypeRecordChain(register_func, void_type);
+  Symbol* fn_param = NewSymbol("__fn", void_ptr, STO(auto));
+  fn_param->flags.is_argument = true;
+  fn_param->flags.invented = true;
+  fn_param->value.arg_number = 0;
+  Symbol* obj_param = NewSymbol("__obj", void_ptr, STO(auto));
+  obj_param->flags.is_argument = true;
+  obj_param->flags.invented = true;
+  obj_param->value.arg_number = 1;
+  VectorAppend(&register_func->info.function.prototype, fn_param);
+  VectorAppend(&register_func->info.function.prototype, obj_param);
+  TypeRecordCalculateSize(register_func);
+
+  ASTNode* thunk_id = NewIdentifierASTNode(thunk, location);
+  thunk->flags.address_taken = true;
+  TypeRecord* thunk_ptr_type = NewPointerTo(kQualPlain, thunk->type);
+  TypeRecordCalculateSize(thunk_ptr_type);
+  ASTNode* thunk_addr =
+      NewUnaryASTNode(AST_OP(address), thunk_ptr_type, location, thunk_id);
+
+  ASTNode* null_arg =
+      NewIntConstantASTNode(0, void_ptr, location);
+
+  Vector* args = NewVector();
+  VectorAppend(args, thunk_addr);
+  VectorAppend(args, null_arg);
+
+  Symbol* register_sym =
+      NewSymbol("__davecc_tls_register_block_dtor", register_func, STO(extern));
+  ASTNode* call = NewVectorASTNode(
+      AST_OP(call), NULL, location, NewIdentifierASTNode(register_sym, location),
+      args);
+  return NewExpressionStatementASTNode(call, location);
+}
+
+static ASTNode* CXXThreadLocalInitializerExpression(ASTNode* initializer) {
+  if (initializer == NULL) {
+    return NULL;
+  }
+  if (initializer->op == AST_OP(init)) {
+    initializer = ((BinaryASTNode*)initializer)->right;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  return initializer;
+}
+
+static bool CXXThreadLocalInitializerIsDynamic(ASTNode* initializer) {
+  ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
+  return expr != NULL && !IsConstantExpression(expr);
+}
+
+static ASTNode* NewCXXThreadLocalGuardedInit(Syntax* syntax, Symbol* sym,
+                                             ASTNode* init) {
+  if (init == NULL) {
+    init = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+    if (init == NULL) {
+      return NULL;
+    }
+  }
+  init = NewExpressionStatementASTNode(init, sym->location);
+
+  SourceLocation location = sym->location;
+  Symbol* guard = NewSymbol(
+      SyntaxFakeName(syntax), NewTypeRecordWithSize(kTypeInt, kQualPlain),
+      STO(static) | STO(thread));
+  guard->flags.invented = true;
+  guard->flags.is_defined = true;
+  guard->flags.is_local = true;
+  guard->location = location;
+  SetCXXInlineLocalStaticGuardAsmName(guard, sym);
+  bool added = SyntaxAddSymbol(syntax, guard);
+  assert(added);
+  (void)added;
+  VectorAppend(&syntax->local_statics,
+               NewVariableDeclarationASTNode(guard, NULL, location));
+
+  Symbol* block_dtor_thunk = NULL;
+  if (sym->flags.is_local && NewCXXDestructorCallIfNeeded(sym) != NULL) {
+    block_dtor_thunk = RegisterCXXTlsBlockDtorThunk(syntax, sym);
+  } else {
+    RegisterCXXThreadLocalDestructor(sym, guard);
+  }
+
+  Vector* guarded_statements = NewVector();
+  VectorAppend(guarded_statements, init);
+  VectorAppend(guarded_statements,
+               NewExpressionStatementASTNode(
+                   NewIntAssignment(guard, 1, location), location));
+  if (block_dtor_thunk != NULL) {
+    VectorAppend(guarded_statements,
+                 NewCXXTlsRegisterBlockDtorCall(block_dtor_thunk, sym,
+                                                location));
+  }
+
+  ASTNode* condition = NewBinaryASTNode(
+      AST_OP(equal), NULL, location, NewIdentifierASTNode(guard, location),
+      NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            location));
+  ASTNode* guarded =
+      NewIfStatementASTNode(condition,
+                            NewCompoundStatementASTNode(guarded_statements,
+                                                        location),
+                            NULL, false, location);
+
+  Vector* statements = NewVector();
+  VectorAppend(statements, guarded);
+  return NewUnaryASTNode(AST_OP(stmt_expr),
+                         NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+                         location, NewCompoundStatementASTNode(statements,
+                                                               location));
+}
+
+static ASTNode* NewCXXThreadLocalGuardedConstructor(Syntax* syntax,
+                                                    Symbol* sym) {
+  return NewCXXThreadLocalGuardedInit(syntax, sym, NULL);
 }
 
 static ASTNode* NewCXXLocalStaticGuardedConstructor(Syntax* syntax,
@@ -7569,11 +7848,23 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           }
         }
       } else {
-        // This is the first declaration of this symbol, add to the symbol
-        // table.
-        bool added = SyntaxAddSymbol(syntax, sym);
-        assert(added);
-        (void)added;
+        if (StorageIs(storage, STO(extern))) {
+          Symbol* link = FindFileScopeSymbol(syntax, &sym->name);
+          if (link != NULL) {
+            SymbolDelete(sym);
+            sym = link;
+          } else {
+            bool added = SyntaxAddSymbol(syntax, sym);
+            assert(added);
+            (void)added;
+          }
+        } else {
+          // This is the first declaration of this symbol, add to the symbol
+          // table.
+          bool added = SyntaxAddSymbol(syntax, sym);
+          assert(added);
+          (void)added;
+        }
       }
     }
 
@@ -7610,8 +7901,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       SetCXXInlineLocalStaticAsmName(sym, "");
     }
     
-    // Check for __thread violations.
-    CheckThreadLocal(syntax, sym);
+    // Check for thread-local violations.
+    SyntaxCheckThreadLocal(syntax, sym, kParsingBlockScope, false, false);
 
     // Declaring or defining a function?
     if (TypeIsFunction(sym->type)) {
@@ -7627,7 +7918,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         // then we will exit the loop.
       }
     } else {
-      sym->flags.is_defined = true;
+      if (!StorageIs(sym->storage, STO(extern))) {
+        sym->flags.is_defined = true;
+      }
       if (parser->is_inline) {
          SyntaxError(syntax, "inline can only be applied to functions");
       }
@@ -7657,6 +7950,11 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         if (initializer == NULL || initializer->op != AST_OP(call)) {
           initializer = NewVariableInitExpression(syntax, sym, initializer);
         }
+        if (!StorageIs(sym->storage, STO(extern)) &&
+            StorageIs(sym->storage, STO(thread)) &&
+            CXXThreadLocalInitializerIsDynamic(initializer)) {
+          initializer = NewCXXThreadLocalGuardedInit(syntax, sym, initializer);
+        }
       } else {
         initializer = ParseCXXDirectInitializer(syntax, sym, true);
         if (initializer == NULL && CompilerIsCXX() &&
@@ -7671,11 +7969,21 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             SyntaxError(syntax, sym->flags.is_constinit
                                     ? "constinit variable requires an initializer"
                                     : "constexpr variable requires an initializer");
-          } else if (StorageIs(storage, STO(static))) {
-            initializer = NewCXXLocalStaticGuardedConstructor(syntax, sym);
+          } else if (!StorageIs(storage, STO(extern)) &&
+                     StorageIs(storage, STO(static) | STO(thread))) {
+            if (StorageIs(storage, STO(thread))) {
+              initializer = NewCXXThreadLocalGuardedConstructor(syntax, sym);
+            } else {
+              initializer = NewCXXLocalStaticGuardedConstructor(syntax, sym);
+            }
           } else {
             initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
           }
+        } else if (!StorageIs(storage, STO(extern)) &&
+                   StorageIs(sym->storage, STO(thread)) &&
+                   initializer->op == AST_OP(call) &&
+                   CXXThreadLocalInitializerIsDynamic(initializer)) {
+          initializer = NewCXXThreadLocalGuardedInit(syntax, sym, initializer);
         }
         if (!syntax->parsing_template_declaration &&
             TypeIsClassTemplatePlaceholder(sym->type)) {
@@ -7693,7 +8001,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                                         (VariableDeclarationASTNode*)decl);
       }
       
-      if (StorageIs(storage, STO(static))) {
+      if (!StorageIs(storage, STO(extern)) &&
+          StorageIs(storage, STO(static) | STO(thread))) {
         VectorAppend(&syntax->local_statics, decl);
       }
     }
@@ -7989,6 +8298,8 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(static):
     case TOK(auto):
     case TOK(register):
+    case TOK(thread):
+    case TOK(thread_local):
     case TOK(typedef):
     case TOK(using):
     case TOK(namespace):

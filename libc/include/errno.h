@@ -35,8 +35,10 @@
 #if defined(__6502__)
 #define ERRNO_ADDRESS 0x3d6
 #define errno (*(int*)ERRNO_ADDRESS)
-#else
+#elif defined(__x86_64__) && !defined(__p_code__)
 extern __thread int errno;
+#else
+extern int errno;
 #endif
 
 #endif /* __DAVECC__ */

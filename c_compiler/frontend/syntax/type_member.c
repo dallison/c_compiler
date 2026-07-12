@@ -1700,7 +1700,20 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       continue;
     }
 
-    bool is_static_member = LexMatch(parser->lex, TOK(static));
+    bool is_thread_member = false;
+    bool is_static_member = false;
+    while (true) {
+      if (!is_thread_member &&
+          (LexLookingAt(parser->lex, TOK(thread)) ||
+           LexLookingAt(parser->lex, TOK(thread_local)))) {
+        is_thread_member = true;
+        LexNextToken(parser->lex);
+      } else if (!is_static_member && LexLookingAt(parser->lex, TOK(static))) {
+        is_static_member = LexMatch(parser->lex, TOK(static));
+      } else {
+        break;
+      }
+    }
     // 'mutable' is a storage-class specifier on a data member.  Accept it in
     // either order with respect to 'static' so the (ill-formed) combination is
     // still reported by the conflict check rather than as a parse error.
@@ -1831,6 +1844,12 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         }
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);
+        if (is_thread_member) {
+          member_symbol->storage |= STO(thread);
+        }
+        SyntaxCheckThreadLocal(parser->syntax, member_symbol, kParsingFileScope,
+                               member->is_static, !member->is_static &&
+                                   !member->is_member_function);
         if (member->is_member_function &&
             SymbolIsCXXAllocationFunction(member_symbol)) {
           member->is_static = true;

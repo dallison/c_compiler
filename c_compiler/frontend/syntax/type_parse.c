@@ -1382,6 +1382,14 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
                                              PrototypeStyle style,
                                              int arg_number,
                                              bool* seen_default_argument) {
+  if (LexLookingAt(proto_parser->lex, TOK(thread)) ||
+      LexLookingAt(proto_parser->lex, TOK(thread_local))) {
+    const char* keyword =
+        LexLookingAt(proto_parser->lex, TOK(thread_local)) ? "thread_local"
+                                                           : "__thread";
+    SyntaxError(proto_parser->syntax, "Illegal use of %s", keyword);
+    LexNextToken(proto_parser->lex);
+  }
   if (ParseAbbreviatedFunctionParameter(proto_parser, func, arg_number)) {
     if (style == kStyleUnknown) {
       style = kStyleNew;

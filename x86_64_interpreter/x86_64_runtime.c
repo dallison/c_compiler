@@ -6,6 +6,7 @@
 #include "x86_64_runtime.h"
 #include "x86_64_interpreter.h"
 #include "x86_64_native.h"
+#include "x86_64_process.h"
 #include "x86_64_syscalls.h"
 #include "loader_arch_x86_64.h"
 #include <stdlib.h>
@@ -69,13 +70,23 @@ bool X86_64RuntimeInit(X86_64Runtime* runtime, const char* filename,
 
 static int RunInterpreter(X86_64Runtime* runtime, int program_argc,
                           char** program_argv) {
-  X86_64Interpreter interpreter;
-  X86_64InterpreterInit(&interpreter, &runtime->loader,
-                        runtime->loader.main_address, program_argc,
-                        program_argv, runtime->trace_registers,
-                        runtime->trace_instructions);
-  int result = X86_64InterpreterRun(&interpreter);
-  X86_64InterpreterDestruct(&interpreter);
+  X86_64ProcessRuntimeInit(&runtime->process, runtime, &runtime->loader);
+  if (!runtime->process.initialized) {
+    return 1;
+  }
+  X86_64GuestThread* main_thread = X86_64ProcessCreateMainThread(
+      &runtime->process, runtime->loader.main_address, program_argc,
+      program_argv, runtime->trace_registers, runtime->trace_instructions);
+  if (main_thread == NULL) {
+    X86_64ProcessRuntimeDestruct(&runtime->process);
+    return 1;
+  }
+  int result = X86_64InterpreterRun(&main_thread->cpu);
+  if (!main_thread->tls_fini_done && main_thread->tls_fini_fn != 0) {
+    main_thread->tls_fini_done = true;
+    X86_64InterpreterCall(&main_thread->cpu, main_thread->tls_fini_fn, 0);
+  }
+  X86_64ProcessRuntimeDestruct(&runtime->process);
   return result;
 }
 
@@ -106,5 +117,6 @@ int X86_64RuntimeRun(X86_64Runtime* runtime, int argc, char** argv,
 }
 
 void X86_64RuntimeDestruct(X86_64Runtime* runtime) {
+  X86_64ProcessRuntimeDestruct(&runtime->process);
   LoaderDestruct(&runtime->loader);
 }

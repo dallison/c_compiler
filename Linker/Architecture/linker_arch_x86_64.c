@@ -157,6 +157,14 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_X86_64_RELATIVE:
       return;
 
+    case R_X86_64_TPOFF64:
+      *((int64_t*)target_address) = (int64_t)(S + A + X86_64_TLS_TP_SLOT_SIZE);
+      return;
+
+    case R_X86_64_TPOFF32:
+      *((int32_t*)target_address) = (int32_t)(S + A + X86_64_TLS_TP_SLOT_SIZE);
+      return;
+
     default:
       break;
   }

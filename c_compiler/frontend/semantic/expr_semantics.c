@@ -2210,8 +2210,19 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   }
 
   
-  bool is_static = StorageIs(id_node->symbol->storage, STO(static)) ||
-                   StorageIs(id_node->symbol->storage, STO(extern));
+  bool is_static_storage = StorageIs(id_node->symbol->storage, STO(static)) ||
+                           StorageIs(id_node->symbol->storage, STO(extern));
+  bool constants_only = is_static_storage;
+  if (StorageIs(id_node->symbol->storage, STO(thread))) {
+    ASTNode* init_expr = init;
+    if (init_expr->op == AST_OP(expr_init)) {
+      init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
+    }
+    if (init_expr != NULL && init_expr->op != AST_OP(braced_init)) {
+      constants_only = IsConstantExpression(init_expr);
+    }
+  }
+  bool is_static = is_static_storage && constants_only;
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -2236,7 +2247,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   if (object_init != NULL) {
     init = object_init;
   }
-  ASTNode* simplified_init = AnalyzeInitializer(node->type, init, is_static);
+  ASTNode* simplified_init = AnalyzeInitializer(node->type, init, constants_only);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
 
   // If the symbol being initialized is static set a flag to tell the
