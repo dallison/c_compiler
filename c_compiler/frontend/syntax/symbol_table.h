@@ -24,12 +24,26 @@ typedef struct SymbolNode {
   Symbol* symbol;
 } SymbolNode;
 
+typedef struct Namespace Namespace;
+
+typedef struct NamespaceAlias {
+  String name;
+  Namespace* target;
+} NamespaceAlias;
+
+typedef enum {
+  kNamespaceAliasInserted,
+  kNamespaceAliasRedeclared,
+  kNamespaceAliasConflict,
+} NamespaceAliasInsertResult;
+
 // Local symbol tables are arranged in a stack where the top
 // of the stack is the innermost scope.  The LocalSymbolTable
 // structs are pushed onto the stack when a new scope is entered
 // and popped off when it exits.
 typedef struct LocalSymbolTable {
   BinaryTree table;
+  Vector namespace_aliases;  // NamespaceAlias*, owned by this scope.
   struct LocalSymbolTable* prev;
 } LocalSymbolTable;
 
@@ -38,17 +52,18 @@ typedef struct LocalSymbolTable {
 // Module-serialization field numbers (see
 // c_compiler/serialize/symbol_serialize.c).  The symbol_table/tag_table trees
 // are flattened to symbol-handle lists on the wire (@wire 7 / @wire 8).
-typedef struct Namespace {
+struct Namespace {
   String name;                          // @wire 1
   String qualified_name;                // @wire 2
   bool is_anonymous;                    // @wire 3
   BinaryTree symbol_table;              // flattened -> @wire 7 (symbols)
   BinaryTree tag_table;                 // flattened -> @wire 8 (tags)
   Vector children;  // Namespace*, owned by this namespace.   // @wire 4
+  Vector namespace_aliases;  // NamespaceAlias*, owned.       // @wire 10/11
   struct Namespace* parent;             // @wire 5
   struct Namespace* anonymous_child;    // @wire 6
   bool is_inline;                       // @wire 9
-} Namespace;
+};
 
 // Create the global symbol tables.
 void CreateGlobalSymbolTables(void);
@@ -60,6 +75,9 @@ Namespace* NamespaceFindChild(Namespace* parent, String* name);
 // Direct named-child lookup for namespace definitions and reopening.  Does not
 // treat inline namespaces differently from ordinary children.
 Namespace* NamespaceFindDirectChild(Namespace* parent, String* name);
+Namespace* NamespaceFindDirectAlias(Namespace* ns, String* name);
+NamespaceAliasInsertResult NamespaceInsertAlias(Namespace* ns, String* name,
+                                                Namespace* target);
 Namespace* NamespaceFindOrCreateChild(Namespace* parent, String* name);
 // Opens or reopens a direct child for a namespace-definition.  Inline status
 // is sticky across reopenings.  Sets *inline_conflict when `is_inline` is
@@ -136,6 +154,10 @@ Symbol* NamespaceFindTagInScope(Namespace* ns, String* name);
 // Create a new local symbol table.
 LocalSymbolTable* NewLocalSymbolTable(void);
 void LocalSymbolTableDelete(LocalSymbolTable* table);
+Namespace* FindDirectLocalNamespaceAlias(LocalSymbolTable* table, String* name);
+NamespaceAliasInsertResult InsertLocalNamespaceAlias(LocalSymbolTable* table,
+                                                     String* name,
+                                                     Namespace* target);
 
 void ClearSymbolTable(HashTable* table, bool delete_symbols);
 

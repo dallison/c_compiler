@@ -148,6 +148,8 @@ enum {
   kNs_symbols = 7,
   kNs_tags = 8,
   kNs_is_inline = 9,
+  kNs_alias_names = 10,
+  kNs_alias_targets = 11,
 };
 
 static const WireFieldDesc kNamespaceFields[] = {
@@ -160,6 +162,8 @@ static const WireFieldDesc kNamespaceFields[] = {
     {kNs_symbols, "symbols"},
     {kNs_tags, "tags"},
     {kNs_is_inline, "is_inline"},
+    {kNs_alias_names, "alias_names"},
+    {kNs_alias_targets, "alias_targets"},
 };
 
 // ---------------------------------------------------------------------------
@@ -563,6 +567,24 @@ static bool WriteNamespace(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SWriteRef(ctx, buf, kNs_anonymous_child, kSerialKindNamespace,
             ns->anonymous_child);
 
+  Vector alias_names;
+  Vector alias_targets;
+  VectorInit(&alias_names);
+  VectorInit(&alias_targets);
+  for (size_t i = 0; i < ns->namespace_aliases.length; i++) {
+    NamespaceAlias* alias =
+        (NamespaceAlias*)VectorGet(&ns->namespace_aliases, i);
+    if (alias != NULL) {
+      VectorAppend(&alias_names, &alias->name);
+      VectorAppend(&alias_targets, alias->target);
+    }
+  }
+  SWriteStringVector(ctx, buf, kNs_alias_names, &alias_names);
+  SWriteRefVector(ctx, buf, kNs_alias_targets, kSerialKindNamespace,
+                  &alias_targets);
+  VectorDestruct(&alias_names);
+  VectorDestruct(&alias_targets);
+
   Vector symbols;
   VectorInit(&symbols);
   BinaryTreeTraverse(&ns->symbol_table, CollectSymbol, &symbols);
@@ -587,6 +609,10 @@ static void* AllocNamespace(DeserializeContext* ctx, const void* blob,
 
 static bool ReadNamespace(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
   Namespace* ns = (Namespace*)obj;
+  Vector alias_names;
+  Vector alias_targets;
+  VectorInit(&alias_names);
+  VectorInit(&alias_targets);
   while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
     int field;
     WireType wt;
@@ -615,6 +641,12 @@ static bool ReadNamespace(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kNs_anonymous_child:
         ns->anonymous_child =
             (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);
+        break;
+      case kNs_alias_names:
+        SReadStringVector(ctx, buf, &alias_names);
+        break;
+      case kNs_alias_targets:
+        SReadRefVector(ctx, buf, kSerialKindNamespace, &alias_targets);
         break;
       case kNs_symbols: {
         Vector symbols;
@@ -647,6 +679,21 @@ static bool ReadNamespace(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
     }
   }
+  size_t alias_count = alias_names.length < alias_targets.length
+      ? alias_names.length
+      : alias_targets.length;
+  for (size_t i = 0; i < alias_count; i++) {
+    String* name = (String*)VectorGet(&alias_names, i);
+    Namespace* target = (Namespace*)VectorGet(&alias_targets, i);
+    if (name != NULL && target != NULL) {
+      NamespaceInsertAlias(ns, name, target);
+    }
+  }
+  for (size_t i = 0; i < alias_names.length; i++) {
+    StringDelete((String*)VectorGet(&alias_names, i));
+  }
+  VectorDestruct(&alias_names);
+  VectorDestruct(&alias_targets);
   return !WireBufferHasError(buf);
 }
 

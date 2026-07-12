@@ -19,6 +19,49 @@
 
 static int anonymous_namespace_id = 0;
 
+static NamespaceAlias* NewNamespaceAlias(String* name, Namespace* target) {
+  NamespaceAlias* alias = malloc(sizeof(NamespaceAlias));
+  StringInit(&alias->name, name->value);
+  alias->target = target;
+  return alias;
+}
+
+static void NamespaceAliasDelete(NamespaceAlias* alias) {
+  if (alias == NULL) {
+    return;
+  }
+  StringDestruct(&alias->name);
+  free(alias);
+}
+
+static void NamespaceAliasVectorDestruct(Vector* aliases) {
+  for (size_t i = 0; i < aliases->length; i++) {
+    NamespaceAliasDelete((NamespaceAlias*)VectorGet(aliases, i));
+  }
+  VectorDestruct(aliases);
+}
+
+static Namespace* FindNamespaceAliasInVector(Vector* aliases, String* name) {
+  for (size_t i = 0; i < aliases->length; i++) {
+    NamespaceAlias* alias = (NamespaceAlias*)VectorGet(aliases, i);
+    if (alias != NULL && StringEqualString(&alias->name, name)) {
+      return alias->target;
+    }
+  }
+  return NULL;
+}
+
+static NamespaceAliasInsertResult InsertNamespaceAliasInVector(
+    Vector* aliases, String* name, Namespace* target) {
+  Namespace* existing = FindNamespaceAliasInVector(aliases, name);
+  if (existing != NULL) {
+    return existing == target ? kNamespaceAliasRedeclared
+                              : kNamespaceAliasConflict;
+  }
+  VectorAppend(aliases, NewNamespaceAlias(name, target));
+  return kNamespaceAliasInserted;
+}
+
 static int SymbolNodeInsertCompare(BinaryTreeNode* node1,
                                    BinaryTreeNode* node2) {
   SymbolNode* sym1 = (SymbolNode*)node1;
@@ -55,6 +98,7 @@ LocalSymbolTable* NewLocalSymbolTable() {
                  SymbolNodeInsertCompare,
                  SymbolNodeSearchCompare,
                  SymbolNodeDestructor);
+  VectorInit(&table->namespace_aliases);
   table->prev = NULL;
   return table;
 }
@@ -79,7 +123,24 @@ void LocalSymbolTableDelete(LocalSymbolTable* table) {
   // BinaryTreeTraverse(&table->table, Printer, NULL);
 
   BinaryTreeDestruct(&table->table, NULL);
+  NamespaceAliasVectorDestruct(&table->namespace_aliases);
   free(table);
+}
+
+Namespace* FindDirectLocalNamespaceAlias(LocalSymbolTable* table, String* name) {
+  if (table == NULL) {
+    return NULL;
+  }
+  return FindNamespaceAliasInVector(&table->namespace_aliases, name);
+}
+
+NamespaceAliasInsertResult InsertLocalNamespaceAlias(LocalSymbolTable* table,
+                                                     String* name,
+                                                     Namespace* target) {
+  if (table == NULL || target == NULL) {
+    return kNamespaceAliasConflict;
+  }
+  return InsertNamespaceAliasInVector(&table->namespace_aliases, name, target);
 }
 
 static void InitSymbolTree(BinaryTree* tree) {
@@ -98,6 +159,7 @@ Namespace* NewNamespace(const char* name, Namespace* parent, bool is_anonymous) 
   InitSymbolTree(&ns->symbol_table);
   InitSymbolTree(&ns->tag_table);
   VectorInit(&ns->children);
+  VectorInit(&ns->namespace_aliases);
   ns->parent = parent;
   ns->anonymous_child = NULL;
 
@@ -120,6 +182,7 @@ void NamespaceDelete(Namespace* ns) {
     NamespaceDelete((Namespace*)ns->children.value.p[i]);
   }
   VectorDestruct(&ns->children);
+  NamespaceAliasVectorDestruct(&ns->namespace_aliases);
   BinaryTreeDestruct(&ns->symbol_table, (void*)true);
   BinaryTreeDestruct(&ns->tag_table, (void*)true);
   StringDestruct(&ns->name);
@@ -139,6 +202,21 @@ Namespace* NamespaceFindChild(Namespace* parent, String* name) {
 
 Namespace* NamespaceFindDirectChild(Namespace* parent, String* name) {
   return NamespaceFindChild(parent, name);
+}
+
+Namespace* NamespaceFindDirectAlias(Namespace* ns, String* name) {
+  if (ns == NULL) {
+    return NULL;
+  }
+  return FindNamespaceAliasInVector(&ns->namespace_aliases, name);
+}
+
+NamespaceAliasInsertResult NamespaceInsertAlias(Namespace* ns, String* name,
+                                                Namespace* target) {
+  if (ns == NULL || target == NULL || NamespaceFindDirectChild(ns, name) != NULL) {
+    return kNamespaceAliasConflict;
+  }
+  return InsertNamespaceAliasInVector(&ns->namespace_aliases, name, target);
 }
 
 Namespace* NamespaceFindOrReopenChild(Namespace* parent, String* name,
@@ -441,6 +519,10 @@ static void CollectNamespaceChildrenInInlineSet(Namespace* parent, String* name,
   if (direct != NULL && !NamespaceVectorContains(children, direct)) {
     VectorAppend(children, direct);
   }
+  Namespace* alias = NamespaceFindDirectAlias(parent, name);
+  if (alias != NULL && !NamespaceVectorContains(children, alias)) {
+    VectorAppend(children, alias);
+  }
   for (size_t i = 0; i < parent->children.length; i++) {
     Namespace* child = parent->children.value.p[i];
     if (child != NULL && child->is_inline) {
@@ -458,6 +540,10 @@ static void CollectNamespaceChildrenFromInlineNamespace(Namespace* ns,
   Namespace* direct = NamespaceFindDirectChild(ns, name);
   if (direct != NULL && !NamespaceVectorContains(children, direct)) {
     VectorAppend(children, direct);
+  }
+  Namespace* alias = NamespaceFindDirectAlias(ns, name);
+  if (alias != NULL && !NamespaceVectorContains(children, alias)) {
+    VectorAppend(children, alias);
   }
   for (size_t i = 0; i < ns->children.length; i++) {
     Namespace* child = ns->children.value.p[i];
@@ -601,6 +687,9 @@ Namespace* NamespaceFindOrReopenAnonymousChild(Namespace* parent, bool is_inline
 }
 
 bool NamespaceInsertSymbol(Namespace* ns, Symbol* symbol) {
+  if (NamespaceFindDirectAlias(ns, &symbol->name) != NULL) {
+    return false;
+  }
   symbol->namespace_ = ns;
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&ns->symbol_table, &node->header);
@@ -612,6 +701,9 @@ bool NamespaceInsertSymbol(Namespace* ns, Symbol* symbol) {
 }
 
 bool NamespaceInsertTag(Namespace* ns, Symbol* symbol) {
+  if (NamespaceFindDirectAlias(ns, &symbol->name) != NULL) {
+    return false;
+  }
   symbol->namespace_ = ns;
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&ns->tag_table, &node->header);
@@ -687,6 +779,9 @@ Symbol* FindGlobalTag(String* name) {
 }
 
 bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
+  if (FindDirectLocalNamespaceAlias(table, &symbol->name) != NULL) {
+    return false;
+  }
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&table->table, &node->header);
   if (!ok) {

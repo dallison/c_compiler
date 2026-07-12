@@ -955,6 +955,23 @@ static Symbol* LookupTagInEnclosingScopesCheckingAmbiguity(Syntax* syntax,
 }
 
 static Namespace* FindNamespaceChildInScope(Syntax* syntax, String* name) {
+  LocalSymbolTable* symbols = syntax->local_symbol_stack;
+  LocalSymbolTable* tags = syntax->local_tag_stack;
+  while (symbols != NULL) {
+    Namespace* alias = FindDirectLocalNamespaceAlias(symbols, name);
+    if (alias != NULL) {
+      return alias;
+    }
+    if (FindSymbol(&symbols->table, name) != NULL ||
+        (tags != NULL && FindSymbol(&tags->table, name) != NULL)) {
+      return NULL;
+    }
+    symbols = symbols->prev;
+    if (tags != NULL) {
+      tags = tags->prev;
+    }
+  }
+
   Namespace* ns = syntax->current_namespace != NULL ? syntax->current_namespace
                                                     : compiler->global_namespace;
   while (ns != NULL) {
@@ -1506,6 +1523,10 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
     if (InNamedNamespace(syntax)) {
       return NamespaceInsertSymbol(syntax->current_namespace, symbol);
     }
+    if (NamespaceFindDirectAlias(compiler->global_namespace,
+                                 &symbol->name) != NULL) {
+      return false;
+    }
     return InsertGlobalSymbol(symbol);
   }
   bool ok = InsertLocalSymbol(syntax->local_symbol_stack, symbol);
@@ -1562,7 +1583,16 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
     if (InNamedNamespace(syntax)) {
       return NamespaceInsertTag(syntax->current_namespace, symbol);
     }
+    if (NamespaceFindDirectAlias(compiler->global_namespace,
+                                 &symbol->name) != NULL) {
+      return false;
+    }
     return InsertGlobalTag(symbol);
+  }
+  if (syntax->local_symbol_stack != NULL &&
+      FindDirectLocalNamespaceAlias(syntax->local_symbol_stack,
+                                    &symbol->name) != NULL) {
+    return false;
   }
   bool ok = InsertLocalSymbol(syntax->local_tag_stack, symbol);
   if (ok) {
@@ -5073,9 +5103,51 @@ static void ImportInlineNamespaceChild(Namespace* child, void* ctx) {
   ImportNamespace((Syntax*)ctx, child);
 }
 
+static NamespaceAliasInsertResult InsertNamespaceAliasInCurrentScope(
+    Syntax* syntax, String* name, Namespace* target) {
+  if (syntax->local_symbol_stack != NULL) {
+    if (FindTopLocalSymbol(syntax->local_symbol_stack, name) != NULL ||
+        (syntax->local_tag_stack != NULL &&
+         FindTopLocalSymbol(syntax->local_tag_stack, name) != NULL)) {
+      return kNamespaceAliasConflict;
+    }
+    return InsertLocalNamespaceAlias(syntax->local_symbol_stack, name, target);
+  }
+
+  Namespace* scope = syntax->current_namespace != NULL
+      ? syntax->current_namespace
+      : compiler->global_namespace;
+  if (scope == compiler->global_namespace) {
+    if (FindGlobalSymbol(name) != NULL || FindGlobalTag(name) != NULL) {
+      return kNamespaceAliasConflict;
+    }
+  } else if (NamespaceFindSymbol(scope, name) != NULL ||
+             NamespaceFindTag(scope, name) != NULL) {
+    return kNamespaceAliasConflict;
+  }
+  return NamespaceInsertAlias(scope, name, target);
+}
+
+static void ImportNamespaceNames(Syntax* syntax, Namespace* ns) {
+  for (size_t i = 0; i < ns->namespace_aliases.length; i++) {
+    NamespaceAlias* alias =
+        (NamespaceAlias*)VectorGet(&ns->namespace_aliases, i);
+    if (alias != NULL) {
+      InsertNamespaceAliasInCurrentScope(syntax, &alias->name, alias->target);
+    }
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    Namespace* child = (Namespace*)VectorGet(&ns->children, i);
+    if (child != NULL && !child->is_anonymous) {
+      InsertNamespaceAliasInCurrentScope(syntax, &child->name, child);
+    }
+  }
+}
+
 static void ImportNamespace(Syntax* syntax, Namespace* ns) {
   BinaryTreeTraverse(&ns->symbol_table, ImportNamespaceSymbol, syntax);
   BinaryTreeTraverse(&ns->tag_table, ImportNamespaceTag, syntax);
+  ImportNamespaceNames(syntax, ns);
   if (ns->anonymous_child != NULL) {
     ImportNamespace(syntax, ns->anonymous_child);
   }
@@ -5084,6 +5156,61 @@ static void ImportNamespace(Syntax* syntax, Namespace* ns) {
 
 static ASTNode* EmptyDeclarationList(SourceLocation location) {
   return NewDeclarationListASTNode(NewVector(), location);
+}
+
+static bool LookingAtNamespaceAliasDefinition(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = LexLookingAt(syntax->lex, TOK(equal));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+static ASTNode* ParseNamespaceAliasDefinition(Syntax* syntax,
+                                              SourceLocation location) {
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected namespace alias name");
+    SyntaxNeedSemicolon(syntax, TC(decl) | TC(stmt));
+    return EmptyDeclarationList(location);
+  }
+
+  String alias_name;
+  StringInit(&alias_name, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  if (!LexMatch(syntax->lex, TOK(equal))) {
+    SyntaxError(syntax, "Expected '=' in namespace alias declaration");
+    StringDestruct(&alias_name);
+    SyntaxNeedSemicolon(syntax, TC(decl) | TC(stmt));
+    return EmptyDeclarationList(location);
+  }
+
+  FullyQualifiedIdentifier target_name;
+  FullyQualifiedIdentifierInit(&target_name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &target_name)) {
+    SyntaxError(syntax, "Expected namespace name after '='");
+  } else {
+    Namespace* target = SyntaxFindQualifiedNamespace(syntax, &target_name);
+    if (target == NULL) {
+      SyntaxError(syntax, "Unknown namespace %s", target_name.spelling.value);
+    } else {
+      NamespaceAliasInsertResult result =
+          InsertNamespaceAliasInCurrentScope(syntax, &alias_name, target);
+      if (result == kNamespaceAliasConflict) {
+        SyntaxError(syntax, "Conflicting declaration of namespace alias '%s'",
+                    alias_name.value);
+      }
+    }
+  }
+
+  FullyQualifiedIdentifierDestruct(&target_name);
+  StringDestruct(&alias_name);
+  SyntaxNeedSemicolon(syntax, TC(decl) | TC(stmt));
+  return EmptyDeclarationList(location);
 }
 
 static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
@@ -5317,6 +5444,10 @@ static Namespace* OpenNamespaceDefinition(Syntax* syntax, Namespace* parent,
   LexNextToken(syntax->lex);
 
   if (!LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    if (NamespaceFindDirectAlias(parent, &component) != NULL) {
+      SyntaxError(syntax, "namespace alias '%s' cannot be extended",
+                  component.value);
+    }
     bool inline_conflict = false;
     Namespace* ns = NamespaceFindOrReopenChild(parent, &component, leading_inline,
                                                &inline_conflict);
@@ -5335,6 +5466,10 @@ static Namespace* OpenNamespaceDefinition(Syntax* syntax, Namespace* parent,
 
   Namespace* ns = parent;
   bool inline_conflict = false;
+  if (NamespaceFindDirectAlias(ns, &component) != NULL) {
+    SyntaxError(syntax, "namespace alias '%s' cannot be extended",
+                component.value);
+  }
   ns = NamespaceFindOrReopenChild(ns, &component, false, &inline_conflict);
   StringDestruct(&component);
   if (inline_conflict) {
@@ -5361,6 +5496,10 @@ static Namespace* OpenNamespaceDefinition(Syntax* syntax, Namespace* parent,
     LexNextToken(syntax->lex);
 
     inline_conflict = false;
+    if (NamespaceFindDirectAlias(ns, &component) != NULL) {
+      SyntaxError(syntax, "namespace alias '%s' cannot be extended",
+                  component.value);
+    }
     ns = NamespaceFindOrReopenChild(ns, &component, component_inline,
                                     &inline_conflict);
     if (inline_conflict) {
@@ -5383,6 +5522,13 @@ static ASTNode* ParseNamespaceDeclaration(Syntax* syntax, bool leading_inline) {
 
   if (!CompilerIsCXX()) {
     leading_inline = false;
+  }
+
+  if (CompilerIsCXX() && LookingAtNamespaceAliasDefinition(syntax)) {
+    if (leading_inline) {
+      SyntaxError(syntax, "namespace alias declaration cannot be inline");
+    }
+    return ParseNamespaceAliasDefinition(syntax, location);
   }
 
   Namespace* previous_namespace = syntax->current_namespace;
@@ -7566,6 +7712,14 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   if (LexLookingAt(syntax->lex, TOK(using))) {
     return ParseUsingDeclaration(syntax);
   }
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(namespace))) {
+    SourceLocation location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    if (!LookingAtNamespaceAliasDefinition(syntax)) {
+      SyntaxError(syntax, "namespace definition is not allowed at block scope");
+    }
+    return ParseNamespaceAliasDefinition(syntax, location);
+  }
 
   Vector* declarations = NewVector();
 
@@ -7834,12 +7988,14 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     case TOK(register):
     case TOK(typedef):
     case TOK(using):
+    case TOK(namespace):
     case TOK(static_assert):
     case TOK(explicit):
     case TOK(consteval):
     case TOK(constexpr):
     case TOK(constinit):
-      return true;
+      return syntax->lex->current_token != TOK(namespace) ||
+             (CompilerIsCXX() && syntax->context == kParsingBlockScope);
     default:
       return SyntaxLookingAtType(syntax);
   }
