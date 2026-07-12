@@ -39,6 +39,7 @@ enum {
   kType_struct_info = 13,
   kType_enum_info = 14,
   kType_dependent_decltype_expr = 15,
+  kType_template_parameter_name = 16,
 };
 
 static const WireFieldDesc kTypeFields[] = {
@@ -57,6 +58,7 @@ static const WireFieldDesc kTypeFields[] = {
     {kType_struct_info, "struct_info"},
     {kType_enum_info, "enum_info"},
     {kType_dependent_decltype_expr, "dependent_decltype_expr"},
+    {kType_template_parameter_name, "template_parameter_name"},
 };
 
 //
@@ -939,6 +941,8 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kType_size, t->size);
   WireWriteInt32(buf, kType_template_parameter_index,
                  t->template_parameter_index);
+  SWriteStringPtr(ctx, buf, kType_template_parameter_name,
+                  t->template_parameter_name);
   SWriteStringPtr(ctx, buf, kType_dependent_member_name,
                   t->dependent_member_name);
   SWriteRef(ctx, buf, kType_template_origin, kSerialKindSymbol,
@@ -1015,6 +1019,9 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kType_template_parameter_index:
         WireReadInt32(buf, &t->template_parameter_index);
+        break;
+      case kType_template_parameter_name:
+        t->template_parameter_name = SReadStringPtr(ctx, buf);
         break;
       case kType_dependent_member_name:
         t->dependent_member_name = SReadStringPtr(ctx, buf);

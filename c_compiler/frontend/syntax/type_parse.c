@@ -783,7 +783,7 @@ static void TypeComboError1(Syntax* syntax, Type t1, Type t2) {
   StringInit(&error, "");
   TypeToString(t1, &error);
   if (t2 != kTypeImplicit) {
-    StringAppend(&error, "and ");
+    StringAppend(&error, " and ");
     TypeToString(t2, &error);
   }
   SyntaxError(syntax, "Invalid type combination; can't combine %s",
@@ -795,7 +795,7 @@ static void TypeComboError2(Syntax* syntax, TypeRecord* t1, Type t2) {
   String error;
   StringInit(&error, "defined type ");
   TypeRecordToString(t1, &error);
-  StringAppend(&error, "and ");
+  StringAppend(&error, " and ");
   TypeToString(t2, &error);
   SyntaxError(syntax, "Invalid type combination; can't combine %s",
               error.value);
@@ -806,7 +806,7 @@ static void TypeComboError3(Syntax* syntax, TypeRecord* t1, TypeRecord* t2) {
   String error;
   StringInit(&error, "defined type ");
   TypeRecordToString(t1, &error);
-  StringAppend(&error, "and defined type ");
+  StringAppend(&error, " and defined type ");
   TypeRecordToString(t2, &error);
   SyntaxError(syntax, "Invalid type combination; can't combine %s",
               error.value);
@@ -817,7 +817,7 @@ static void QualifierComboError(Syntax* syntax, Qualifiers q1, Qualifiers q2) {
   String error;
   StringInit(&error, "");
   QualifiersToString(q1, &error);
-  StringAppend(&error, "and ");
+  StringAppend(&error, " and ");
   QualifiersToString(q2, &error);
   SyntaxError(syntax, "Invalid type combination; can't combine %s",
               error.value);
@@ -1338,8 +1338,12 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   TypeRecord* placeholder =
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers);
   placeholder->template_parameter_index = index;
+  placeholder->template_parameter_name = NewString("auto");
   Symbol* formal = TypeParserParseDeclarator(proto_parser, placeholder);
   assert(formal != NULL);
+  if (formal->name.length != 0) {
+    StringSet(placeholder->template_parameter_name, formal->name.value);
+  }
   ParseFormalArgument(proto_parser, func, formal, arg_number);
 
   VectorAppend(&func->info.function.template_parameters,

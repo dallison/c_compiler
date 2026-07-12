@@ -227,6 +227,7 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
   record->qualifiers = quals;
   record->size = 0;
   record->template_parameter_index = -1;
+  record->template_parameter_name = NULL;
   record->dependent_member_name = NULL;
   record->template_origin = NULL;
   record->template_arguments = NULL;
@@ -271,6 +272,10 @@ void TypeRecordDelete(TypeRecord* record) {
     if (record->dependent_member_name != NULL) {
       StringDelete(record->dependent_member_name);
       record->dependent_member_name = NULL;
+    }
+    if (record->template_parameter_name != NULL) {
+      StringDelete(record->template_parameter_name);
+      record->template_parameter_name = NULL;
     }
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
@@ -491,6 +496,9 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   memcpy(r, record, sizeof(TypeRecord));
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
+  r->template_parameter_name = record->template_parameter_name != NULL
+      ? NewString(record->template_parameter_name->value)
+      : NULL;
   r->dependent_member_name = record->dependent_member_name != NULL
       ? NewString(record->dependent_member_name->value)
       : NULL;

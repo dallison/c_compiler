@@ -353,6 +353,7 @@ typedef struct TypeRecord {
   Declarator declarator;                                          // @wire 4
   int size;                                                       // @wire 5
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
+  String* template_parameter_name;  // Source name for diagnostics. // @wire 16
   String* dependent_member_name;  // For T::type-like types.       // @wire 7
   Symbol* template_origin;       // Primary template for template-ids. // @wire 8
   Vector* template_arguments;    // TemplateArgument* (owned).      // @wire 9

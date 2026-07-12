@@ -89,6 +89,9 @@ static TemplateArgument* NewTemplateParameterPatternArgument(
   if (param->kind == kTemplateParameterType) {
     arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     arg->type->template_parameter_index = param->index;
+    if (param->name.length != 0) {
+      arg->type->template_parameter_name = NewString(param->name.value);
+    }
   } else {
     arg->template_parameter_index = param->index;
   }

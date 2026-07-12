@@ -5693,6 +5693,7 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
   TypeRecord* placeholder =
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   placeholder->template_parameter_index = index;
+  placeholder->template_parameter_name = NewString(lex->spelling.value);
   Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
   param->flags.invented = true;
   param->flags.is_template_parameter = true;
@@ -5803,6 +5804,7 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
     TypeRecord* placeholder =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     placeholder->template_parameter_index = index;
+    placeholder->template_parameter_name = NewString(param_name.value);
     Symbol* param = NewSymbol(param_name.value, placeholder, STO(typedef));
     param->flags.invented = true;
     param->flags.is_template_parameter = true;
@@ -5853,6 +5855,7 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     TypeRecord* placeholder =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     placeholder->template_parameter_index = index;
+    placeholder->template_parameter_name = NewString(lex->spelling.value);
     Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
     param->flags.invented = true;
     param->flags.is_template_parameter = true;

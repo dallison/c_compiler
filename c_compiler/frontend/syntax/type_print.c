@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <ctype.h>
 
 #include <assert.h>
 #include "ast.h"
@@ -45,30 +46,40 @@ static struct {
 };
 
 void TypeToString(Type type, String* result) {
+  const char* separator = "";
   if ((type & kTypeSigned) != 0) {
-    StringAppend(result, "signed ");
+    StringAppend(result, "signed");
+    separator = " ";
   }
   if ((type & kTypeUnsigned) != 0) {
-    StringAppend(result, "unsigned ");
+    StringAppend(result, separator);
+    StringAppend(result, "unsigned");
+    separator = " ";
   }
   for (int i = 0; type_names[i].type != kTypeImplicit; i++) {
     if ((type & type_names[i].type) != 0) {
+      StringAppend(result, separator);
       StringAppend(result, type_names[i].name);
-      StringAppend(result, " ");
+      separator = " ";
     }
   }
 }
 
 // Converts qualifiers to string and appends them to result.
 void QualifiersToString(Qualifiers quals, String* result) {
+  const char* separator = "";
   if ((quals & kQualConst) != 0) {
-    StringAppend(result, "const ");
+    StringAppend(result, "const");
+    separator = " ";
   }
   if ((quals & kQualVolatile) != 0) {
-    StringAppend(result, "volatile ");
+    StringAppend(result, separator);
+    StringAppend(result, "volatile");
+    separator = " ";
   }
   if ((quals & kQualRestrict) != 0) {
-    StringAppend(result, "restrict ");
+    StringAppend(result, separator);
+    StringAppend(result, "restrict");
   }
 }
 
@@ -89,7 +100,21 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
       fprintf(fp, "rvalue reference to ");
     }
     QualifiersToString(record->qualifiers, &str);
-    TypeToString(record->type, &str);
+    if (record->qualifiers != 0) {
+      StringAppend(&str, " ");
+    }
+    Type printable_type = record->type;
+    if (CompilerIsCXX()) {
+      printable_type &= ~kTypeStruct;
+    }
+    TypeToString(printable_type, &str);
+    if (TypeIsStructOrUnion(record) && record->info.struct_info != NULL &&
+        record->info.struct_info->tag_name != NULL) {
+      if (printable_type != kTypeImplicit) {
+        StringAppend(&str, " ");
+      }
+      StringAppendString(&str, record->info.struct_info->tag_name);
+    }
     fprintf(fp, "%s", str.value);
 
     if (record->declarator == kDeclArray) {
@@ -142,8 +167,49 @@ void TypeRecordPrint(TypeRecord* record, FILE* fp) {
   TypeRecordPrintDetails(record, false, fp);
 }
 
-// Convert a type record to a string in C syntax.  Not verbose.
-void TypeRecordToString(TypeRecord* type, String* result) {
+static void AppendReadableTypeName(String* result, String* name) {
+  if (name == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < name->length && name->value[i] != '\0';) {
+    if (i + 4 < name->length && name->value[i] == '$' &&
+        name->value[i + 1] == 'S' && name->value[i + 2] == '0' &&
+        name->value[i + 3] == 'x' &&
+        isxdigit((unsigned char)name->value[i + 4])) {
+      i += 4;
+      while (i < name->length &&
+             isxdigit((unsigned char)name->value[i])) {
+        i++;
+      }
+      continue;
+    }
+    if (i + 2 < name->length && name->value[i] == '$' &&
+        (name->value[i + 1] == 'T' || name->value[i + 1] == 'N') &&
+        isdigit((unsigned char)name->value[i + 2])) {
+      i++;
+      continue;
+    }
+    StringAppendChar(result, name->value[i++]);
+  }
+}
+
+static String* TemplateParameterDisplayName(Vector* parameters, int index) {
+  if (parameters == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* parameter = parameters->value.p[i];
+    if (parameter != NULL && parameter->index == index &&
+        parameter->name.length != 0) {
+      return &parameter->name;
+    }
+  }
+  return NULL;
+}
+
+static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
+                                                     Vector* parameters,
+                                                     String* result) {
   if (type == NULL) {
     StringAppend(result, "<invalid>");
     return;
@@ -152,7 +218,19 @@ void TypeRecordToString(TypeRecord* type, String* result) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
         QualifiersToString(type->qualifiers, result);
-        StringPrintf(result, "$T%d", type->template_parameter_index);
+        if (type->qualifiers != 0) {
+          StringAppend(result, " ");
+        }
+        String* parameter_name = TemplateParameterDisplayName(
+            parameters, type->template_parameter_index);
+        if (parameter_name != NULL) {
+          StringAppendString(result, parameter_name);
+        } else if (type->template_parameter_name != NULL &&
+                   type->template_parameter_name->length != 0) {
+          StringAppendString(result, type->template_parameter_name);
+        } else {
+          StringPrintf(result, "T%d", type->template_parameter_index);
+        }
         if (type->dependent_member_name != NULL) {
           StringAppend(result, "::");
           StringAppendString(result, type->dependent_member_name);
@@ -160,55 +238,78 @@ void TypeRecordToString(TypeRecord* type, String* result) {
         break;
       }
       QualifiersToString(type->qualifiers, result);
-      TypeToString(type->type, result);
+      if (type->qualifiers != 0) {
+        StringAppend(result, " ");
+      }
+      Type printable_type = type->type;
+      if (CompilerIsCXX()) {
+        printable_type &= ~kTypeStruct;
+      }
+      TypeToString(printable_type, result);
       if (TypeIsStructOrUnion(type)) {
-        StringAppendString(result, type->info.struct_info->tag_name);
+        if (printable_type != kTypeImplicit) {
+          StringAppend(result, " ");
+        }
+        AppendReadableTypeName(result, type->info.struct_info->tag_name);
       } else if (TypeIsEnum(type)) {
+        StringAppend(result, " ");
         StringAppendString(result, type->info.enum_info->tag_name);
       }
       break;
 
     case kDeclPointer:
-      TypeRecordToString(type->next, result);
+      TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       if (type->next != NULL &&
           (type->next->declarator == kDeclArray ||
            type->next->declarator == kDeclFunction)) {
         StringAppend(result, "(*");
+        if (type->qualifiers != 0) {
+          StringAppend(result, " ");
+        }
         QualifiersToString(type->qualifiers, result);
         StringAppendChar(result, ')');
       } else {
         StringAppendChar(result, '*');
+        if (type->qualifiers != 0) {
+          StringAppend(result, " ");
+        }
         QualifiersToString(type->qualifiers, result);
       }
       break;
 
     case kDeclReference:
     case kDeclRValueReference:
-      TypeRecordToString(type->next, result);
+      TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       StringAppend(result,
                    type->declarator == kDeclRValueReference ? "&&" : "&");
       break;
 
     case kDeclArray:
-      TypeRecordToString(type->next, result);
+      TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       StringPrintf(result, "[%d]", type->info.array.size.fixed);
       break;
 
     case kDeclFunction: {
-      TypeRecordToString(type->next, result);
+      TypeRecordToStringWithTemplateParameters(type->next, parameters, result);
       StringAppendChar(result, '(');
       const char* sep = "";
       size_t nformals = type->info.function.prototype.length;
       for (size_t i = 0; i < nformals; i++) {
         Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
         StringAppend(result, sep);
-        TypeRecordToString(formal->type, result);
+        TypeRecordToStringWithTemplateParameters(formal->type, parameters,
+                                                 result);
         sep = ",";
       }
       StringAppendChar(result, ')');
       break;
     }
   }
+}
+
+// Convert a type record to a string in C syntax.  Not verbose.
+void TypeRecordToString(TypeRecord* type, String* result) {
+  TypeRecordToStringWithTemplateParameters(type, NULL, result);
 }
 
 static bool FunctionFormalIsImplicitThis(TypeRecord* func, size_t index) {
@@ -267,7 +368,8 @@ static void AppendFunctionParameterList(TypeRecord* func, String* out) {
       continue;
     }
     StringAppend(out, sep);
-    TypeRecordToString(formal->type, out);
+    TypeRecordToStringWithTemplateParameters(
+        formal->type, &func->info.function.template_parameters, out);
     sep = ", ";
     wrote_parameter = true;
   }
@@ -284,7 +386,8 @@ void TypeRecordFunctionPrettyName(TypeRecord* func, String* result) {
   }
   if (!func->info.function.is_constructor &&
       !func->info.function.is_destructor) {
-    TypeRecordToString(func->next, result);
+    TypeRecordToStringWithTemplateParameters(
+        func->next, &func->info.function.template_parameters, result);
     TrimTrailingSpaces(result);
     StringAppendChar(result, ' ');
   }
@@ -339,6 +442,9 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
         QualifiersToString(type->qualifiers, result);
+        if (type->qualifiers != 0) {
+          StringAppend(result, " ");
+        }
         StringPrintf(result, "$T%d", type->template_parameter_index);
         if (type->dependent_member_name != NULL) {
           StringAppend(result, "::");
@@ -347,10 +453,14 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         break;
       }
       QualifiersToString(type->qualifiers, result);
+      if (type->qualifiers != 0) {
+        StringAppend(result, " ");
+      }
       TypeToString(type->type, result);
       if (TypeIsStructOrUnion(type)) {
         Struct* str = type->info.struct_info;
         if (str != NULL && str->tag_name != NULL) {
+          StringAppend(result, " ");
           if (str->tag_symbol != NULL && str->tag_symbol->namespace_ != NULL &&
               str->tag_symbol->namespace_ != compiler->global_namespace) {
             StringAppendString(result,
@@ -373,6 +483,9 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclPointer:
       TypeRecordToTemplateKeyString(type->next, result);
       StringAppendChar(result, '*');
+      if (type->qualifiers != 0) {
+        StringAppend(result, " ");
+      }
       QualifiersToString(type->qualifiers, result);
       break;
 

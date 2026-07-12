@@ -800,12 +800,6 @@ static bool VectorContainsPointer(Vector* vec, void* value) {
   return false;
 }
 
-static void ADLAddNamespace(Vector* namespaces, Namespace* ns) {
-  if (ns != NULL && !VectorContainsPointer(namespaces, ns)) {
-    VectorAppend(namespaces, ns);
-  }
-}
-
 static void ADLAddAssociatedNamespaceClosure(Vector* namespaces, Namespace* ns) {
   NamespaceCollectADLAssociatedNamespaces(ns, namespaces);
 }

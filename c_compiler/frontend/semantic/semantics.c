@@ -1091,6 +1091,9 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
       (node->initializer->op == AST_OP(braced_init) ||
        node->initializer->op == AST_OP(call) ||
        (node->initializer->op == AST_OP(expr_init) &&
+        (!TypeIsStructOrUnion(node->symbol->type) ||
+         node->symbol->type->info.struct_info !=
+             compiler->current_class_access_context) &&
         ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL &&
         ((ExpressionInitializerASTNode*)node->initializer)->expr->op ==
             AST_OP(call)));

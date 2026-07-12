@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: No matching overload for pick (int pick(int *))
+// EXPECT: No matching overload for pick (int pick(int*))
 int pick(int *value) {
   return sizeof(value);
 }
