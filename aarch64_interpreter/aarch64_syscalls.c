@@ -7,6 +7,7 @@
 #include "aarch64_interpreter.h"
 #include "loader_dynamic.h"
 #include "loader.h"
+#include "loader_lifecycle.h"
 #include "elf.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -141,6 +142,15 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
     case AARCH64_SYSCALL_EXIT:
       exit((int)a0);
       break;
+    case AARCH64_SYSCALL_EXIT_CLEAN:
+      if (interpreter->loader != NULL) {
+        LoaderLifecycleMarkExecutableFiniComplete(
+            interpreter->loader, interpreter->loader->lifecycle);
+      }
+      interpreter->exit_code = (int)a0;
+      interpreter->running = false;
+      interpreter->pc = 0;
+      return 0;
     case AARCH64_SYSCALL_OPEN:
       return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
     case AARCH64_SYSCALL_CLOSE:

@@ -33,6 +33,7 @@
 #define ARM_SYSCALL_REALLOC 10
 #define ARM_SYSCALL_ABORT 11
 #define ARM_SYSCALL_EXIT 12
+#define ARM_SYSCALL_EXIT_CLEAN 22
 
 typedef struct ARMInterpreter {
   Loader* loader;
@@ -54,8 +55,25 @@ typedef struct ARMInterpreter {
 void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
                         uint64_t entry_address, int argc, char** argv,
                         bool trace_regs, bool trace_instructions);
+void ARMInterpreterPrepareMain(ARMInterpreter* interpreter,
+                               uint64_t entry_address, int argc, char** argv,
+                               bool is_static_link);
+int ARMInterpreterCall(ARMInterpreter* interpreter, uint64_t fn);
+int ARMInterpreterRun(ARMInterpreter* interpreter);
 void ARMInterpreterCycle(ARMInterpreter* interpreter);
 void ARMInterpreterDestruct(ARMInterpreter* interpreter);
 void ARMInterpreterDumpRegisters(ARMInterpreter* interpreter);
+
+bool ARMGuestAddressExecutable(Loader* loader, uint64_t addr);
+uint64_t ARMLookupGuestFunction(Loader* loader, const char* name);
+void ARMGuestCallVoidFunction(ARMInterpreter* cpu, uint64_t fn);
+void ARMGuestRunProgramFini(Loader* loader, ARMInterpreter* cpu);
+bool ARMGuestRunProgramShutdown(Loader* loader, ARMInterpreter* cpu);
+bool ARMGuestRunInitArrays(Loader* loader, ARMInterpreter* cpu);
+bool ARMGuestRunFiniArrays(Loader* loader, ARMInterpreter* cpu);
+
+int ARMGuestRunProgram(ARMInterpreter* interpreter, Loader* loader,
+                       uint64_t entry_address, int argc, char** argv,
+                       bool trace_regs, bool trace_instructions);
 
 #endif /* arm_interpreter_h */

@@ -35,7 +35,11 @@ long syscall(int n, ...) {
 }
 #elif defined(__p_code__)
 long syscall(int n, ...) {
-  (void)n;
+  if (n == SYS_EXIT_CLEAN) {
+    return asm(
+        "ldw r0, [ap, #20]\n"
+        "esc #22");
+  }
   return -1;
 }
 #elif defined(__x86_64__)

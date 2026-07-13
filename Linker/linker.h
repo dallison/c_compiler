@@ -264,4 +264,7 @@ void LinkerInitArchitecture(Linker* linker);
 void LinkerInitConfigLayout(Linker* linker,
                             const char* config_file,
                             const char* layout_type_name);
+
+SectionGroup* LinkerFindSectionGroup(Linker* linker, const char* name);
+uint64_t LinkerSectionGroupSize(SectionGroup* group);
 #endif /* linker_h */

@@ -76,15 +76,22 @@ static int RunInterpreter(X86_64Runtime* runtime, int program_argc,
   }
   X86_64GuestThread* main_thread = X86_64ProcessCreateMainThread(
       &runtime->process, runtime->loader.main_address, program_argc,
-      program_argv, runtime->trace_registers, runtime->trace_instructions);
+      program_argv, runtime->trace_registers,
+      runtime->trace_instructions);
   if (main_thread == NULL) {
     X86_64ProcessRuntimeDestruct(&runtime->process);
     return 1;
   }
+  if (!X86_64GuestRunInitArrays(&runtime->loader, &main_thread->cpu)) {
+    X86_64ProcessRuntimeDestruct(&runtime->process);
+    return 1;
+  }
+  X86_64InterpreterPrepareMain(
+      &main_thread->cpu, runtime->loader.main_address, program_argc,
+      program_argv, runtime->loader.is_static);
   int result = X86_64InterpreterRun(&main_thread->cpu);
-  if (!main_thread->tls_fini_done && main_thread->tls_fini_fn != 0) {
-    main_thread->tls_fini_done = true;
-    X86_64InterpreterCall(&main_thread->cpu, main_thread->tls_fini_fn, 0);
+  if (!X86_64GuestRunProgramShutdown(&runtime->loader, &main_thread->cpu)) {
+    result = 1;
   }
   X86_64ProcessRuntimeDestruct(&runtime->process);
   return result;

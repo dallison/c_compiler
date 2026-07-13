@@ -7,6 +7,7 @@
 
 #include "loader.h"
 #include "loader_arch.h"
+#include "loader_lifecycle.h"
 #include "elf.h"
 #include <sys/mman.h>
 #include <unistd.h>
@@ -290,6 +291,41 @@ bool LoaderRuntimeAddressToLinked(Loader* loader, uint64_t runtime,
     return true;
   }
   return false;
+}
+
+bool LoaderGetFunctionArray(Loader* loader, int32_t section_type,
+                            uint64_t* runtime_start, size_t* entry_count,
+                            size_t* entry_size) {
+  if (loader == NULL || runtime_start == NULL || entry_count == NULL ||
+      entry_size == NULL) {
+    return false;
+  }
+  LoaderLifecyclePhase phase;
+  if (section_type == SHT(preinit_array)) {
+    phase = kLoaderLifecyclePreinit;
+  } else if (section_type == SHT(init_array)) {
+    phase = kLoaderLifecycleInit;
+  } else if (section_type == SHT(fini_array)) {
+    phase = kLoaderLifecycleFini;
+  } else {
+    return false;
+  }
+  return LoaderGetImageFunctionArray(loader, NULL, phase, runtime_start,
+                                     entry_count, entry_size);
+}
+
+bool LoaderReadFunctionArrayEntry(uint64_t runtime_start, size_t entry_index,
+                                  size_t entry_size, uint64_t* function) {
+  if (runtime_start == 0 || function == NULL ||
+      (entry_size != 2 && entry_size != 4 && entry_size != 8)) {
+    return false;
+  }
+  const unsigned char* entry =
+      (const unsigned char*)(uintptr_t)(runtime_start + entry_index * entry_size);
+  uint64_t value = 0;
+  memcpy(&value, entry, entry_size);
+  *function = value;
+  return true;
 }
 
 static void LoaderFixupStaticAddresses(Loader* loader) {
@@ -696,6 +732,7 @@ static bool LoaderInitMainThreadTls(Loader* loader);
 bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
                         LoaderArchitecture* arch, void* arch_data,
                         const char* initial_path) {
+  memset(loader, 0, sizeof(*loader));
   loader->arch = arch;
   loader->arch_data = arch_data;
   loader->flags = flags;
@@ -778,9 +815,15 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
 }
     
   memset(&loader->current_symbol, 0, sizeof(SymbolScope));
+  loader->lifecycle = calloc(1, sizeof(LoaderLifecycleState));
 
   if (ok && loader->is_static) {
     ok = LoaderInitMainThreadTls(loader);
+  }
+
+  if (ok && (loader->lifecycle == NULL ||
+             !LoaderLifecycleStateInit(loader, loader->lifecycle))) {
+    ok = false;
   }
 
   return ok && LoaderNumErrors() == 0;
@@ -892,6 +935,11 @@ bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
 }
 
 void LoaderDestruct(Loader* loader) {
+  if (loader->lifecycle != NULL) {
+    LoaderLifecycleStateDestruct(loader->lifecycle);
+    free(loader->lifecycle);
+    loader->lifecycle = NULL;
+  }
   if (loader->tls.main_thread_block != NULL) {
     free(loader->tls.main_thread_block);
     loader->tls.main_thread_block = NULL;

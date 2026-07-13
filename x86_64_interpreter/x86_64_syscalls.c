@@ -8,6 +8,7 @@
 #include "x86_64_process.h"
 #include "loader_dynamic.h"
 #include "loader.h"
+#include "loader_lifecycle.h"
 #include "elf.h"
 #include "x86_64_machine.h"
 #include <errno.h>
@@ -33,6 +34,22 @@ static int64_t InterpreterTerminate(X86_64Interpreter* interpreter,
   }
   exit((int)status);
   return -1;
+}
+
+static int64_t InterpreterRequestNormalExit(X86_64Interpreter* interpreter,
+                                            int64_t status) {
+  if (InterpreterIsWorker(interpreter)) {
+    X86_64SyscallThreadExit(interpreter->guest_thread, status);
+    return 0;
+  }
+  if (interpreter->loader != NULL) {
+    LoaderLifecycleMarkExecutableFiniComplete(interpreter->loader,
+                                              interpreter->loader->lifecycle);
+  }
+  interpreter->exit_code = (int)status;
+  interpreter->running = false;
+  interpreter->rip = 0;
+  return 0;
 }
 
 static void LockGotResolve(X86_64Interpreter* interpreter) {
@@ -262,6 +279,8 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_HALT:
     case X86_64_SYSCALL_EXIT:
       return InterpreterTerminate(interpreter, a0);
+    case X86_64_SYSCALL_EXIT_CLEAN:
+      return InterpreterRequestNormalExit(interpreter, a0);
     case X86_64_SYSCALL_OPEN:
       return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
     case X86_64_SYSCALL_CLOSE:

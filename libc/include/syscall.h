@@ -20,6 +20,7 @@
 #define SYS_REALLOC 10
 #define SYS_ABORT 11
 #define SYS_EXIT 12
+#define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
 
@@ -34,6 +35,7 @@
 #define SYS_REALLOC 10
 #define SYS_ABORT 11
 #define SYS_EXIT 12
+#define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
 #define SYS_THREAD_CREATE 15
@@ -52,6 +54,7 @@
 #define SYS_LSEEK 7
 #define SYS_ABORT 11
 #define SYS_EXIT 12
+#define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
 
@@ -66,6 +69,7 @@
 #define SYS_REALLOC 10
 #define SYS_ABORT 11
 #define SYS_EXIT 12
+#define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
 
@@ -80,11 +84,13 @@
 #define SYS_REALLOC 10
 #define SYS_ABORT 11
 #define SYS_EXIT 12
+#define SYS_EXIT_CLEAN 22
 #define SYS_TIME 13
 #define SYS_CLOCK 14
 
 #elif defined(__W65C02__)
 #define SYS_EXIT 1
+#define SYS_EXIT_CLEAN 22
 #define SYS_OPEN 2
 #define SYS_CLOSE 3
 #define SYS_WRITE 4

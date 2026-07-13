@@ -29,6 +29,9 @@
 #define RISC_V_ECALL_FREE 9
 #define RISC_V_ECALL_REALLOC 10
 #define RISC_V_ECALL_ABORT 11
+#define RISC_V_ECALL_EXIT 12
+#define RISC_V_ECALL_EXIT_CLEAN 22
+#define RISC_V_ECALL_NESTED_RETURN 255
 
 // Registers
 #define RISC_V_REG_x0 0
@@ -75,6 +78,7 @@ typedef struct RISCVInterpreter {
   double old_fregs[RV_NUM_FLOAT_REGS];;
 
   int32_t startup_code[3];
+  int32_t call_return_code[2];
   int32_t symbol_resolver_code[2];
   char* stack;
   int64_t pc;
@@ -82,13 +86,26 @@ typedef struct RISCVInterpreter {
   bool trace_regs;
   bool trace_instructions;
   int64_t num_steps;
+  bool running;
+  int exit_code;
   jmp_buf debugger;
 } RISCVInterpreter;
 
 void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,
                           bool trace_regs, bool trace_instructions);
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter);
+int RISCVInterpreterRun(RISCVInterpreter* interpreter);
+void RISCVInterpreterCall(RISCVInterpreter* interpreter, uint64_t fn);
 void RISCVInterpreterDestruct(RISCVInterpreter* interpreter);
 void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter);
+
+bool RISCVGuestAddressExecutable(Loader* loader, uint64_t addr);
+uint64_t RISCVLookupGuestFunction(Loader* loader, const char* name);
+void RISCVGuestCallVoidFunction(RISCVInterpreter* interpreter, uint64_t fn);
+bool RISCVGuestRunInitArrays(Loader* loader, RISCVInterpreter* interpreter);
+bool RISCVGuestRunFiniArrays(Loader* loader, RISCVInterpreter* interpreter);
+void RISCVGuestRunProgramFini(Loader* loader, RISCVInterpreter* interpreter);
+bool RISCVGuestRunProgramShutdown(Loader* loader,
+                                  RISCVInterpreter* interpreter);
 
 #endif /* risc_v_interpreter_h */

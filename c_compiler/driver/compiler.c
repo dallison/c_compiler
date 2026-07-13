@@ -30,8 +30,13 @@
 #include "arm_target.h"
 #include "x86_64_target.h"
 
+void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
+
 // This is global to avoid having to pass it around everywhere.
 Compiler* compiler;
+
+static Vector cxx_init_array_functions;
+static Vector cxx_fini_array_functions;
 
 static CompilerOptionDefinition compiler_options[] = {
     {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info"},
@@ -793,14 +798,6 @@ static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
   return NewExpressionStatementASTNode(call, location);
 }
 
-static void AppendCXXGlobalDestructorCalls(Vector* statements) {
-  for (size_t i = compiler->cxx_global_destructors.length; i > 0; i--) {
-    Symbol* object = compiler->cxx_global_destructors.value.p[i - 1];
-    ASTNode* call = NewCXXGlobalSpecialMemberCall(object, true);
-    VectorAppend(statements, call);
-    VectorAppend(&compiler->cxx_global_destructor_calls, call);
-  }
-}
 
 static void RegisterCXXThreadLocalObject(Symbol* sym) {
   bool statically_constructed =
@@ -858,47 +855,106 @@ static ASTNode* NewCXXRuntimeVoidCallStatement(const char* name,
   return NewExpressionStatementASTNode(call, location);
 }
 
-static void InjectCXXThreadLifetimeCalls(CompoundStatementASTNode* body) {
-  if (!CompilerIsCXX() ||
-      (compiler->cxx_thread_constructor_calls.length == 0 &&
-       compiler->cxx_thread_destructor_calls.length == 0 &&
-       compiler->cxx_tls_block_dtor_thunks.length == 0)) {
-    return;
-  }
-  SourceLocation location = body->base.location;
-  CompoundASTNodeInsertStatement(
-      body, NewCXXRuntimeVoidCallStatement("__davecc_tls_thread_init", location),
-      0);
-  VectorAppend(body->statements,
-               NewCXXRuntimeVoidCallStatement("__davecc_tls_thread_fini",
-                                              location));
+static bool CXXProcessNeedsMainThreadTlsInit(void) {
+  return compiler->cxx_thread_constructor_calls.length != 0 ||
+         compiler->cxx_tls_block_dtor_thunks.length != 0;
 }
 
-static void InjectCXXGlobalLifetimeCalls(Symbol* sym) {
-  if (!CompilerIsCXX() || !StringEqual(&sym->name, "main") ||
-      sym->type->info.function.body == NULL) {
+static bool CXXProcessNeedsGlobalInitFunction(void) {
+  return compiler->cxx_global_constructor_calls.length != 0 ||
+         compiler->cxx_global_constructors.length != 0 ||
+         compiler->cxx_global_destructors.length != 0 ||
+         CXXProcessNeedsMainThreadTlsInit();
+}
+
+void CXXInitFiniArrayEntryDelete(CXXInitFiniArrayEntry* entry) {
+  (void)entry;
+}
+
+static void RegisterInitFiniArrayEntry(Vector* functions, Symbol* function) {
+  VectorAppend(functions, function);
+}
+
+Vector* CXXInitArrayFunctionsVector(void) { return &cxx_init_array_functions; }
+
+Vector* CXXFiniArrayFunctionsVector(void) { return &cxx_fini_array_functions; }
+
+static bool CXXGlobalObjectAlreadyRegistered(Set* registered, Symbol* sym) {
+  if (sym == NULL) {
+    return false;
+  }
+  if (SetContains(registered, sym)) {
+    return true;
+  }
+  SetInsert(registered, sym);
+  return false;
+}
+
+static void AppendCXXGlobalAtexitRegistration(Vector* statements, Symbol* sym,
+                                              Set* registered) {
+  if (CXXGlobalObjectAlreadyRegistered(registered, sym)) {
     return;
   }
-  CompoundStatementASTNode* body =
-      (CompoundStatementASTNode*)sym->type->info.function.body;
-  for (size_t i = compiler->cxx_global_constructor_calls.length; i > 0; i--) {
-    ASTNode* constructor = compiler->cxx_global_constructor_calls.value.p[i - 1];
-    CompoundASTNodeInsertStatement(body, constructor, 0);
+  ASTNode* registration = SyntaxNewCXXGlobalAtexitStatement(sym, sym->location);
+  if (registration != NULL) {
+    VectorAppend(statements, registration);
   }
-  for (size_t i = compiler->cxx_global_constructors.length; i > 0; i--) {
-    Symbol* object = compiler->cxx_global_constructors.value.p[i - 1];
-    CompoundASTNodeInsertStatement(
-        body, NewCXXGlobalSpecialMemberCall(object, false), 0);
+}
+
+static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
+                                                Vector* statements,
+                                                bool local);
+
+static void BuildCXXProcessInitStatements(Vector* statements) {
+  Set registered = {0};
+  SetInitForPointers(&registered);
+
+  if (CXXProcessNeedsMainThreadTlsInit()) {
+    SourceLocation location = {0};
+    VectorAppend(statements,
+                 NewCXXRuntimeVoidCallStatement("__davecc_tls_thread_init",
+                                                location));
   }
-  // Insert this after the process-global constructors so it becomes the first
-  // statement and thread-local objects are ready if a global constructor
-  // odr-uses one of them.
-  InjectCXXThreadLifetimeCalls(body);
-  size_t registered_destructors = compiler->cxx_global_destructor_calls.length;
-  for (size_t i = 0; i < registered_destructors; i++) {
-    VectorAppend(body->statements, compiler->cxx_global_destructor_calls.value.p[i]);
+
+  for (size_t i = 0; i < compiler->cxx_global_constructor_calls.length; i++) {
+    VectorAppend(statements,
+                 compiler->cxx_global_constructor_calls.value.p[i]);
+    Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
+    AppendCXXGlobalAtexitRegistration(statements, object, &registered);
   }
-  AppendCXXGlobalDestructorCalls(body->statements);
+
+  for (size_t i = 0; i < compiler->cxx_global_constructors.length; i++) {
+    Symbol* object = compiler->cxx_global_constructors.value.p[i];
+    VectorAppend(statements, NewCXXGlobalSpecialMemberCall(object, false));
+    AppendCXXGlobalAtexitRegistration(statements, object, &registered);
+  }
+
+  for (size_t i = 0; i < compiler->cxx_global_destructors.length; i++) {
+    Symbol* object = compiler->cxx_global_destructors.value.p[i];
+    AppendCXXGlobalAtexitRegistration(statements, object, &registered);
+  }
+
+  SetDestruct(&registered);
+}
+
+static void CompileCXXProcessInitFunction(Syntax* syntax) {
+  if (!CompilerIsCXX() || !CXXProcessNeedsGlobalInitFunction()) {
+    return;
+  }
+
+  Vector* statements = NewVector();
+  BuildCXXProcessInitStatements(statements);
+  if (statements->length == 0) {
+    VectorDelete(statements);
+    return;
+  }
+
+  Symbol* sym =
+      CompileCXXThreadLifetimeFunction(syntax, "__davecc_cxx_global_init",
+                                       statements, true);
+  if (sym != NULL) {
+    RegisterInitFiniArrayEntry(CXXInitArrayFunctionsVector(), sym);
+  }
 }
 
 static void CheckMainSignature(Syntax* syntax, Symbol* sym) {
@@ -1034,7 +1090,6 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             continue;
           }
           CheckMainSignature(syntax, decl->symbol);
-          InjectCXXGlobalLifetimeCalls(decl->symbol);
           
           // This is a function definition, generate the code.
           compiler->current_function = decl->base.type;
@@ -1079,6 +1134,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             // Handle local static variables.
             AddLocalStatics(syntax, decl->base.type);
             GeneratorDestruct(&codegen);
+            SyntaxRegisterFunctionInitFiniAttributes(syntax, decl->symbol);
           }
         } else {
           // Declaration is a variable or extern function.
@@ -1151,6 +1207,8 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     VectorAppend(&compiler->cxx_global_constructor_calls,
                                  NewExpressionStatementASTNode(
                                      constructor, constructor->location));
+                    VectorAppend(&compiler->cxx_global_constructor_objects,
+                                 decl->symbol);
                     RegisterCXXGlobalDestructor(decl->symbol);
                   }
                   continue;
@@ -1255,17 +1313,20 @@ static void CompileDeferredCXXStaticMembers(Syntax* syntax) {
   }
 }
 
-static void CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
-                                             Vector* statements) {
+static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
+                                                Vector* statements,
+                                                bool local) {
   if (statements->length == 0) {
-    return;
+    return NULL;
   }
 
   SourceLocation location = {0};
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   TypeRecord* func_type = NewFunctionTypeRecord();
-  Symbol* sym = NewSymbol(name, func_type, STO(extern));
+  Symbol* sym =
+      NewSymbol(name, func_type, local ? STO(static) : STO(extern));
   sym->flags.is_defined = true;
+  sym->flags.is_local = local;
   TypeRecordChain(func_type, void_type);
   func_type->info.function.symbol = sym;
   func_type->info.function.body =
@@ -1275,7 +1336,7 @@ static void CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
   SemanticAnalyzeFunction(syntax, decl);
 
   if (NumErrors() != 0) {
-    return;
+    return NULL;
   }
 
   compiler->current_function = func_type;
@@ -1286,6 +1347,7 @@ static void CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
   VectorAppend(&compiler->emitted_function_asm_names, NewString(name));
   GeneratorDestruct(&codegen);
   compiler->current_function = NULL;
+  return sym;
 }
 
 static void CompileCXXTlsBlockDtorThunk(Syntax* syntax,
@@ -1338,7 +1400,7 @@ static void CompileCXXThreadLifetimeFunctions(Syntax* syntax) {
                  compiler->cxx_thread_constructor_calls.value.p[i]);
   }
   CompileCXXThreadLifetimeFunction(syntax, "__davecc_tls_thread_init_impl",
-                                   init_statements);
+                                   init_statements, false);
 
   Vector* fini_statements = NewVector();
   for (size_t i = compiler->cxx_thread_destructor_calls.length; i > 0; i--) {
@@ -1346,7 +1408,7 @@ static void CompileCXXThreadLifetimeFunctions(Syntax* syntax) {
                  compiler->cxx_thread_destructor_calls.value.p[i - 1]);
   }
   CompileCXXThreadLifetimeFunction(syntax, "__davecc_tls_thread_fini_impl",
-                                   fini_statements);
+                                   fini_statements, false);
 }
 
 static void CompileDeclaration(Syntax* syntax) {
@@ -1406,6 +1468,13 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
       "#define __restrict restrict\n"
       "#define __restrict__ restrict\n"
       "\n");
+  if (CompilerIsCXX()) {
+    StringAppend(code,
+                 "extern \"C\" int __davecc_cxa_atexit(void*, void*, unsigned long, "
+                 "unsigned long, int);\n"
+                 "extern \"C\" void __davecc_tls_thread_init(void);\n"
+                 "extern \"C\" void __davecc_tls_thread_fini(void);\n");
+  }
 
   Lex* old_lex = preprocessor->lex;
   Lex lex;
@@ -1458,7 +1527,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_global_constructor_calls);
-  VectorInit(&compiler->cxx_global_destructor_calls);
+  VectorInit(&compiler->cxx_global_constructor_objects);
   VectorInit(&compiler->cxx_thread_constructor_calls);
   VectorInit(&compiler->cxx_thread_destructor_calls);
   VectorInit(&compiler->cxx_tls_block_dtor_thunks);
@@ -1467,6 +1536,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
   VectorInit(&compiler->functions_being_analyzed);
+  VectorInit(&cxx_init_array_functions);
+  VectorInit(&cxx_fini_array_functions);
   VectorInit(&compiler->pending_template_instantiations);
   VectorInit(&compiler->orphan_function_symbols);
   SetInit(&compiler->disabled_warnings, CompareWarning);
@@ -1930,7 +2001,9 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
   VectorDestruct(&compiler->cxx_global_constructor_calls);
-  VectorDestruct(&compiler->cxx_global_destructor_calls);
+  VectorDestruct(&compiler->cxx_global_constructor_objects);
+  VectorDestruct(&cxx_init_array_functions);
+  VectorDestruct(&cxx_fini_array_functions);
   VectorDestruct(&compiler->cxx_thread_constructor_calls);
   VectorDestruct(&compiler->cxx_thread_destructor_calls);
   VectorDestructWithContents(&compiler->cxx_tls_block_dtor_thunks, NULL,
@@ -2101,6 +2174,9 @@ static bool EmitAssemblyFile(Compiler* compiler, String* asm_filename) {
     DebugBuilderEmitAbbreviations(&compiler->debug_builder);
   }
 
+  EmitInitFiniArrayEntries(CXXInitArrayFunctionsVector(), false, asm_file);
+  EmitInitFiniArrayEntries(CXXFiniArrayFunctionsVector(), true, asm_file);
+
   if (asm_file != stdout) {
     fclose(asm_file);
   }
@@ -2209,7 +2285,11 @@ static String* Compile(Compiler* compiler, Vector* options) {
   if (NumErrors() != 0) {
     return NULL;
   }
-  
+
+  CompileCXXProcessInitFunction(&compiler->syntax);
+  if (NumErrors() != 0) {
+    return NULL;
+  }
   // Emit the assembly language into a file ending in .s.
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);
   String asm_filename = {0};

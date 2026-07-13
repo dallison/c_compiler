@@ -15,6 +15,8 @@
 #include "loader_dynamic.h"
 #include <stdarg.h>
 
+struct LoaderLifecycleState;
+
 struct LoaderArchitecture;
 
 // A Region is a mapped region of memory that should be unmapped when
@@ -92,6 +94,7 @@ typedef struct Loader {
   SymbolScope current_symbol;
   StaticSymbolTable static_symbol_table;
   LoaderTlsInfo tls;
+  struct LoaderLifecycleState* lifecycle;
 } Loader;
 
 bool LoaderInitFromFile(Loader* loader, String* filename,
@@ -122,6 +125,14 @@ bool LoaderLinkedAddressToRuntime(Loader* loader,
 bool LoaderRuntimeAddressToLinked(Loader* loader,
                                   uint64_t runtime,
                                   uint64_t* linked);
+
+// Locate a linked ELF preinit/init/fini function-pointer array in the main
+// executable and translate its start address for host-side inspection.
+bool LoaderGetFunctionArray(Loader* loader, int32_t section_type,
+                            uint64_t* runtime_start, size_t* entry_count,
+                            size_t* entry_size);
+bool LoaderReadFunctionArrayEntry(uint64_t runtime_start, size_t entry_index,
+                                  size_t entry_size, uint64_t* function);
 
 // Allocate an independent TLS block initialized from the immutable PT_TLS
 // template.  The caller must free() the returned pointer.

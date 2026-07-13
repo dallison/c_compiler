@@ -99,18 +99,23 @@ int main(int argc, char * argv[]) {
   if (print_libraries_only) {
     exit(0);
   }
-  ARMInterpreterInit(&interpreter, &loader,
+  if (enter_debugger) {
+    ARMInterpreterInit(&interpreter, &loader,
                        loader.main_address, program_argc, program_argv,
                        trace_regs, trace_instructions);
-  if (enter_debugger) {
     ARMDebugger debugger;
     ARMDebuggerInit(&debugger, &interpreter, loader.main_address);
     ARMDebuggerRun(&debugger);
   } else {
-    // Run the code at its entry address.
-    ARMInterpreterCycle(&interpreter);
+    int result = ARMGuestRunProgram(&interpreter, &loader, loader.main_address,
+                                    program_argc, program_argv, trace_regs,
+                                    trace_instructions);
+    ARMInterpreterDestruct(&interpreter);
+    LoaderDestruct(&loader);
+    return result;
   }
-  
+
   ARMInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
+  return 0;
 }

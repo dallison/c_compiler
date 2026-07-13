@@ -5,6 +5,8 @@
 
 #include "aarch64_native.h"
 
+#include "aarch64_runtime.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -115,12 +117,16 @@ static bool MakeEntryExecutable(Loader* loader, uint64_t entry_address,
 __attribute__((target("branch-protection=none")))
 static int CallGuestEntry(Loader* loader, uint64_t entry, int argc,
                           char** argv) {
-  (void)loader;
-  (void)argc;
-  (void)argv;
-  typedef int (*GuestFn)(void);
-  GuestFn fn = (GuestFn)(uintptr_t)entry;
-  return fn();
+  if (!AARCH64GuestRunInitArrays(loader, NULL)) {
+    return 1;
+  }
+  typedef int (*GuestMainFn)(int, char**);
+  GuestMainFn fn = (GuestMainFn)(uintptr_t)entry;
+  int result = fn(argc, argv);
+  if (!AARCH64GuestRunProgramShutdown(loader, NULL)) {
+    return 1;
+  }
+  return result;
 }
 #endif
 

@@ -471,6 +471,9 @@ typedef enum {
   SHT(rel),          // Relocations without addend.
   SHT(shlib),        // Shared library information.
   SHT(dynsym),       // Dynamic symbol table.
+  SHT(init_array) = 14,     // Array of initialization function pointers.
+  SHT(fini_array) = 15,     // Array of termination function pointers.
+  SHT(preinit_array) = 16,  // Array of pre-initialization function pointers.
   SHT(gnu_hash) = 0x6ffffff6,     // GNU hash table.
   SHT(num),
 } ELFSectionType;

@@ -300,24 +300,6 @@ static Symbol* GetDaveCCTerminateFunction(SourceLocation location) {
   return symbol;
 }
 
-static Symbol* GetDaveCCFinalizeFunction(SourceLocation location) {
-  String name;
-  StringInit(&name, "__davecc_finalize");
-  Symbol* symbol = FindGlobalSymbol(&name);
-  StringDestruct(&name);
-  if (symbol != NULL) {
-    return symbol;
-  }
-  TypeRecord* func_type = NewFunctionTypeRecord();
-  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
-  symbol = NewSymbol("__davecc_finalize", func_type, STO(extern));
-  symbol->flags.invented = true;
-  symbol->flags.is_forward_declared = true;
-  symbol->location = location;
-  SyntaxAddSymbol(&compiler->syntax, symbol);
-  return symbol;
-}
-
 // Visitor that flags whether a subtree can raise an exception: only a `throw`
 // or a call (which may itself throw) can do so.  Used to decide whether a
 // noexcept function needs a runtime terminate guard at all.
@@ -1454,15 +1436,6 @@ static void GenerateReturnStatement(Generator* gen,
   }
 
 emit_return_branch:
-  if (CompilerIsCXX() &&
-      strcmp(gen->func->info.function.symbol->name.value, "main") == 0) {
-    GenerateNoArgRuntimeCall(gen,
-                             GetDaveCCFinalizeFunction(node->base.location));
-    for (size_t i = 0; i < compiler->cxx_global_destructor_calls.length; i++) {
-      GenerateStatement(gen, compiler->cxx_global_destructor_calls.value.p[i]);
-    }
-  }
-
   // We don't explictly do the return here because the code
   // sequence can be large (restoring saved registers, etc).
   // So instead, we branch to the first return in the function.

@@ -6,6 +6,7 @@
 #include "x86_64_process.h"
 
 #include "elf.h"
+#include "loader_lifecycle.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -295,12 +296,99 @@ static bool GuestExecutableOrZero(Loader* loader, uint64_t addr) {
   return addr == 0 || X86_64GuestAddressExecutable(loader, addr);
 }
 
-static uint64_t LookupGuestFunction(Loader* loader, const char* name) {
+uint64_t X86_64LookupGuestFunction(Loader* loader, const char* name) {
   uint64_t addr = LoaderLookupSymbol(loader, name);
   if (addr == 0 || !X86_64GuestAddressExecutable(loader, addr)) {
     return 0;
   }
   return addr;
+}
+
+void X86_64GuestCallVoidFunction(X86_64Interpreter* cpu, uint64_t fn) {
+  if (cpu == NULL || fn == 0) {
+    return;
+  }
+  X86_64InterpreterCall(cpu, fn, 0);
+}
+
+void X86_64GuestRunProgramInit(Loader* loader, X86_64Interpreter* cpu) {
+  X86_64GuestCallVoidFunction(cpu,
+                              X86_64LookupGuestFunction(loader,
+                                                          "__davecc_program_init"));
+}
+
+void X86_64GuestRunProgramFini(Loader* loader, X86_64Interpreter* cpu) {
+  X86_64GuestCallVoidFunction(cpu,
+                              X86_64LookupGuestFunction(loader,
+                                                          "__davecc_run_fini"));
+}
+
+bool X86_64GuestRunProgramShutdown(Loader* loader, X86_64Interpreter* cpu) {
+  if (!LoaderLifecycleExecutableFiniAlreadyDone(loader->lifecycle)) {
+    uint64_t guest_fini = X86_64LookupGuestFunction(loader, "__davecc_run_fini");
+    if (guest_fini != 0) {
+      if (cpu != NULL) {
+        X86_64GuestCallVoidFunction(cpu, guest_fini);
+      } else {
+        X86_64NativeCallVoidFunction(loader, guest_fini);
+      }
+      LoaderLifecycleMarkExecutableFiniComplete(loader, loader->lifecycle);
+    }
+  }
+  return X86_64GuestRunFiniArrays(loader, cpu);
+}
+
+static bool X86_64LifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                      uint64_t function,
+                                      LoaderLifecyclePhase phase) {
+  (void)image;
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    X86_64Interpreter* cpu;
+  } X86_64LifecycleContext;
+  X86_64LifecycleContext* ctx = context;
+  if (!X86_64GuestAddressExecutable(ctx->loader, function)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)function);
+    return false;
+  }
+  if (ctx->cpu != NULL) {
+    X86_64GuestCallVoidFunction(ctx->cpu, function);
+  } else {
+    X86_64NativeCallVoidFunction(ctx->loader, function);
+  }
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader, X86_64Interpreter* cpu,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    X86_64Interpreter* cpu;
+  } X86_64LifecycleContext;
+  X86_64LifecycleContext ctx = {loader, cpu};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 X86_64LifecycleCallback, &ctx);
+}
+
+bool X86_64GuestRunInitArrays(Loader* loader, X86_64Interpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecyclePreinit) &&
+         RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleInit);
+}
+
+bool X86_64GuestRunFiniArrays(Loader* loader, X86_64Interpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleFini);
+}
+
+int X86_64NativeCallVoidFunction(Loader* loader, uint64_t fn) {
+  if (fn == 0 || !GuestExecutableOrZero(loader, fn)) {
+    return 0;
+  }
+  typedef void (*GuestVoidFn)(void);
+  GuestVoidFn guest_fn = (GuestVoidFn)(uintptr_t)fn;
+  guest_fn();
+  return 0;
 }
 
 X86_64GuestThread* X86_64ProcessCreateMainThread(
@@ -318,7 +406,7 @@ X86_64GuestThread* X86_64ProcessCreateMainThread(
   process->main_thread = thread;
 
   thread->tls_fini_fn =
-      LookupGuestFunction(process->loader, "__davecc_tls_thread_fini");
+      X86_64LookupGuestFunction(process->loader, "__davecc_tls_thread_fini");
 
   X86_64InterpreterInitForThread(&thread->cpu, process, thread, process->loader,
                                  entry_address, argc, argv, NULL, 0, 0,

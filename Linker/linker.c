@@ -20,6 +20,9 @@
 #include "linker_file.h"
 #include "linker_dynamic.h"
 #include <sys/stat.h>
+#include <limits.h>
+
+#define LINKER_ARRAY_DEFAULT_PRIORITY 65535
 
 // Supported architectures.
 #include "linker_arch_pcode.h"
@@ -556,6 +559,244 @@ struct SectionGroupingData {
   int32_t section_type;
 };
 
+typedef enum {
+  kLinkerArrayKindNone,
+  kLinkerArrayKindPreinit,
+  kLinkerArrayKindInit,
+  kLinkerArrayKindFini,
+} LinkerArrayKind;
+
+typedef struct LinkerArraySectionEntry {
+  ELFReaderSection* section;
+  size_t file_index;
+  size_t section_index;
+  int32_t priority;
+} LinkerArraySectionEntry;
+
+static bool LinkerParseArrayPrioritySuffix(const char* name, const char* base,
+                                           int32_t default_priority,
+                                           int32_t* priority) {
+  size_t base_len = strlen(base);
+  if (strcmp(name, base) == 0) {
+    *priority = default_priority;
+    return true;
+  }
+  if (strncmp(name, base, base_len) != 0 || name[base_len] != '.') {
+    return false;
+  }
+  const char* suffix = name + base_len + 1;
+  if (*suffix == '\0') {
+    return false;
+  }
+  char* end = NULL;
+  unsigned long value = strtoul(suffix, &end, 10);
+  if (end == suffix || *end != '\0' || value > 65535) {
+    return false;
+  }
+  *priority = (int32_t)value;
+  return true;
+}
+
+static bool LinkerClassifyArraySection(ELFReaderSection* section,
+                                       LinkerArrayKind* kind,
+                                       int32_t* priority) {
+  int32_t type = section->header->type;
+  const char* name = section->name.value;
+
+  if (type == SHT(preinit_array)) {
+    *kind = kLinkerArrayKindPreinit;
+    if (!LinkerParseArrayPrioritySuffix(name, ".preinit_array", 0, priority)) {
+      *priority = 0;
+    }
+    return true;
+  }
+  if (type == SHT(init_array)) {
+    *kind = kLinkerArrayKindInit;
+    if (!LinkerParseArrayPrioritySuffix(name, ".init_array",
+                                        LINKER_ARRAY_DEFAULT_PRIORITY,
+                                        priority)) {
+      *priority = LINKER_ARRAY_DEFAULT_PRIORITY;
+    }
+    return true;
+  }
+  if (type == SHT(fini_array)) {
+    *kind = kLinkerArrayKindFini;
+    if (!LinkerParseArrayPrioritySuffix(name, ".fini_array",
+                                        LINKER_ARRAY_DEFAULT_PRIORITY,
+                                        priority)) {
+      *priority = LINKER_ARRAY_DEFAULT_PRIORITY;
+    }
+    return true;
+  }
+  if (type == SHT(progbits)) {
+    if (LinkerParseArrayPrioritySuffix(name, ".ctors",
+                                       LINKER_ARRAY_DEFAULT_PRIORITY,
+                                       priority)) {
+      *kind = kLinkerArrayKindInit;
+      return true;
+    }
+    if (LinkerParseArrayPrioritySuffix(name, ".dtors",
+                                       LINKER_ARRAY_DEFAULT_PRIORITY,
+                                       priority)) {
+      *kind = kLinkerArrayKindFini;
+      return true;
+    }
+  }
+  *kind = kLinkerArrayKindNone;
+  return false;
+}
+
+static bool LinkerIsArrayInputSection(ELFReaderSection* section) {
+  LinkerArrayKind kind;
+  int32_t priority;
+  return LinkerClassifyArraySection(section, &kind, &priority);
+}
+
+static int32_t LinkerArrayOutputType(LinkerArrayKind kind) {
+  switch (kind) {
+    case kLinkerArrayKindPreinit:
+      return SHT(preinit_array);
+    case kLinkerArrayKindInit:
+      return SHT(init_array);
+    case kLinkerArrayKindFini:
+      return SHT(fini_array);
+    default:
+      abort();
+  }
+}
+
+static const char* LinkerArrayCanonicalName(LinkerArrayKind kind) {
+  switch (kind) {
+    case kLinkerArrayKindPreinit:
+      return ".preinit_array";
+    case kLinkerArrayKindInit:
+      return ".init_array";
+    case kLinkerArrayKindFini:
+      return ".fini_array";
+    default:
+      abort();
+  }
+}
+
+static int64_t LinkerArrayDefaultFlags(void) {
+  return SHF(alloc) | SHF(write);
+}
+
+static int64_t LinkerPointerSize(const Linker* linker) {
+  if (linker->arch != NULL &&
+      linker->arch->machine_type == ELF_MACHINE_TYPEW65C02) {
+    return 2;
+  }
+  return linker->ops->is_64_bit ? 8 : 4;
+}
+
+static bool LinkerIsArrayOutputType(int32_t type) {
+  return type == SHT(preinit_array) || type == SHT(init_array) ||
+         type == SHT(fini_array);
+}
+
+static int CompareLinkerArraySectionEntries(const void* a, const void* b) {
+  const LinkerArraySectionEntry* e1 = *(const LinkerArraySectionEntry* const*)a;
+  const LinkerArraySectionEntry* e2 = *(const LinkerArraySectionEntry* const*)b;
+  if (e1->priority != e2->priority) {
+    return e1->priority - e2->priority;
+  }
+  if (e1->file_index != e2->file_index) {
+    return (int)(e1->file_index - e2->file_index);
+  }
+  return (int)(e1->section_index - e2->section_index);
+}
+
+static void LinkerBuildArraySectionGroup(Linker* linker, LinkerArrayKind kind,
+                                         Vector* entries) {
+  if (entries->length == 0) {
+    return;
+  }
+
+  VectorSortPointers(entries, CompareLinkerArraySectionEntries);
+
+  ELFReaderSection* first = ((LinkerArraySectionEntry*)entries->value.p[0])->section;
+  int64_t flags = first->header->flags != 0 ? first->header->flags
+                                              : LinkerArrayDefaultFlags();
+  int64_t alignment = first->header->addralign;
+  int64_t pointer_size = LinkerPointerSize(linker);
+
+  String canonical_name;
+  StringInit(&canonical_name, LinkerArrayCanonicalName(kind));
+  SectionGroup* group =
+      NewSectionGroup(&canonical_name, LinkerArrayOutputType(kind), flags,
+                      alignment > pointer_size ? alignment : pointer_size);
+  StringDestruct(&canonical_name);
+
+  for (size_t i = 0; i < entries->length; i++) {
+    LinkerArraySectionEntry* entry = entries->value.p[i];
+    ELFReaderSection* section = entry->section;
+    if (section->header->addralign > group->alignment) {
+      group->alignment = section->header->addralign;
+    }
+    if (section->header->flags != 0) {
+      flags = section->header->flags;
+      group->flags = flags;
+    }
+    GroupedSection* gsection = NewExistingGroupedSection(section);
+    VectorAppend(&group->components, gsection);
+  }
+
+  VectorAppend(&linker->section_groups, group);
+}
+
+static void LinkerGroupArraySections(Linker* linker) {
+  Vector preinit_entries;
+  Vector init_entries;
+  Vector fini_entries;
+  VectorInit(&preinit_entries);
+  VectorInit(&init_entries);
+  VectorInit(&fini_entries);
+
+  for (size_t file_index = 0; file_index < linker->files.length; file_index++) {
+    ObjectFile* file = linker->files.value.p[file_index];
+    for (size_t section_index = 0; section_index < file->elf_file->sections.length;
+         section_index++) {
+      ELFReaderSection* section =
+          file->elf_file->sections.value.p[section_index];
+      LinkerArrayKind kind;
+      int32_t priority;
+      if (!LinkerClassifyArraySection(section, &kind, &priority)) {
+        continue;
+      }
+
+      LinkerArraySectionEntry* entry = malloc(sizeof(LinkerArraySectionEntry));
+      entry->section = section;
+      entry->file_index = file_index;
+      entry->section_index = section_index;
+      entry->priority = priority;
+
+      switch (kind) {
+        case kLinkerArrayKindPreinit:
+          VectorAppend(&preinit_entries, entry);
+          break;
+        case kLinkerArrayKindInit:
+          VectorAppend(&init_entries, entry);
+          break;
+        case kLinkerArrayKindFini:
+          VectorAppend(&fini_entries, entry);
+          break;
+        default:
+          free(entry);
+          break;
+      }
+    }
+  }
+
+  LinkerBuildArraySectionGroup(linker, kLinkerArrayKindPreinit, &preinit_entries);
+  LinkerBuildArraySectionGroup(linker, kLinkerArrayKindInit, &init_entries);
+  LinkerBuildArraySectionGroup(linker, kLinkerArrayKindFini, &fini_entries);
+
+  VectorDestructWithContents(&preinit_entries, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&init_entries, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&fini_entries, NULL, /*free_element=*/true);
+}
+
 // Build the symbol tables.  There is probably only one in the file
 // but we should find them all just in case.  Each symbol table section
 // says where its string table is in the 'link' field in the header.
@@ -875,6 +1116,10 @@ static void GroupSections(Linker* linker, int32_t section_type,
       if (section_flags != 0 && (section->header->flags & section_flags) == 0) {
         continue;
       }
+      if (section_type == SHT(progbits) &&
+          LinkerIsArrayInputSection(section)) {
+        continue;
+      }
       Vector* result_vec = MapFindPointerKey(&section_map, &section->name);
       if (result_vec == NULL) {
         result_vec = NewVector();
@@ -953,6 +1198,10 @@ static LinkerSymbol* InventSymbol(Linker* linker, const char* name, int size, ui
 }
 
 static SectionGroup* FindSectionGroup(Linker* linker, const char* name) {
+  return LinkerFindSectionGroup(linker, name);
+}
+
+SectionGroup* LinkerFindSectionGroup(Linker* linker, const char* name) {
   for (size_t i = 0; i < linker->section_groups.length; i++) {
     SectionGroup* group = linker->section_groups.value.p[i];
     if (strcmp(group->name.value, name) == 0) {
@@ -963,6 +1212,10 @@ static SectionGroup* FindSectionGroup(Linker* linker, const char* name) {
 }
 
 static uint64_t SectionGroupSize(SectionGroup* group) {
+  return LinkerSectionGroupSize(group);
+}
+
+uint64_t LinkerSectionGroupSize(SectionGroup* group) {
   uint64_t size = 0;
   for (size_t i = 0; i < group->components.length; i++) {
     GroupedSection* section = group->components.value.p[i];
@@ -1005,12 +1258,55 @@ static void InventExceptionTableBounds(Linker* linker) {
   InventSymbol(linker, "__davecc_except_table_end", 8, end);
 }
 
+static void LinkerInventArrayBoundsSymbols(Linker* linker) {
+  static const struct {
+    const char* section_name;
+    const char* start_symbol;
+    const char* end_symbol;
+  } kArrayBounds[] = {
+      {".preinit_array", "__preinit_array_start", "__preinit_array_end"},
+      {".init_array", "__init_array_start", "__init_array_end"},
+      {".fini_array", "__fini_array_start", "__fini_array_end"},
+  };
+
+  for (size_t i = 0; i < sizeof(kArrayBounds) / sizeof(kArrayBounds[0]); i++) {
+    SectionGroup* group = LinkerFindSectionGroup(linker, kArrayBounds[i].section_name);
+    uint64_t start = 0;
+    uint64_t end = 0;
+    if (group != NULL && group->region != NULL) {
+      start = group->address;
+      end = start + LinkerSectionGroupSize(group);
+    }
+    InventSymbol(linker, kArrayBounds[i].start_symbol, 8, start);
+    InventSymbol(linker, kArrayBounds[i].end_symbol, 8, end);
+  }
+}
+
+static int SectionOrderInRegion(const SectionGroup* group) {
+  if (group->region == NULL) {
+    return INT_MAX;
+  }
+  for (size_t i = 0; i < group->region->sections.length; i++) {
+    String* configured_name = group->region->sections.value.p[i];
+    if (strcmp(configured_name->value, group->name.value) == 0) {
+      return (int)i;
+    }
+  }
+  return INT_MAX;
+}
+
 static int CompareGroupRegion(const void* a, const void* b) {
   const SectionGroup* g1 = *(const SectionGroup**)a;
   const SectionGroup* g2 = *(const SectionGroup**)b;
   uint64_t start1 = g1->region != NULL ? g1->region->start : 0;
   uint64_t start2 = g2->region != NULL ? g2->region->start : 0;
-  return (int)(start1 - start2);
+  if (start1 != start2) {
+    if (start1 < start2) {
+      return -1;
+    }
+    return 1;
+  }
+  return SectionOrderInRegion(g1) - SectionOrderInRegion(g2);
 }
 
 static uint64_t AlignedStartAddress(SegmentMemoryRegion* region, uint64_t file_offset) {
@@ -1202,6 +1498,9 @@ void LinkerLinkAllFiles(Linker* linker) {
   // that have data associated with them in the ELF file.  This also
   // adds the grouped sections to the appropriate segment (code, data or tls).
   GroupSections(linker, SHT(progbits), 0);
+
+  // Group init/fini/preinit array sections (including legacy .ctors/.dtors).
+  LinkerGroupArraySections(linker);
   
   // Group the TLS nobits sections.
   GroupSections(linker, SHT(nobits), SHF(tls));
@@ -1283,6 +1582,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Expose the linked .eh_frame range to the in-process unwind runtime.
   InventEHFrameBounds(linker);
   InventExceptionTableBounds(linker);
+  LinkerInventArrayBoundsSymbols(linker);
   
   if (!linker->fully_static) {
     // Define the dynamic linker symbols.  This includes
@@ -1311,7 +1611,7 @@ void LinkerLinkAllFiles(Linker* linker) {
 // Build an output section from a group of sections.  Each component of the
 // group is a GroupedSection that can come from an existing file or can
 // be generated by the linker.
-static void BuildOutputSection(ELFWriterFile* elf, Segment* segment,
+static void BuildOutputSection(Linker* linker, ELFWriterFile* elf, Segment* segment,
                                             SectionGroup* group) {
   (void)segment;
   if (group->region == NULL && (group->flags & SHF(tls)) == 0) {
@@ -1323,13 +1623,19 @@ static void BuildOutputSection(ELFWriterFile* elf, Segment* segment,
                       group->flags,
                       group->alignment,
                       contents, group->address);
+  if (LinkerIsArrayOutputType(group->type)) {
+    section->header.entsize = LinkerPointerSize(linker);
+  }
   for (size_t i = 0; i < group->components.length; i++) {
     GroupedSection* gsect = group->components.value.p[i];
     ELFWriterSectionContents* part_contents;
     switch (gsect->source) {
       case kGroupedSectionExisting: {
         ELFReaderSection* part = gsect->section.existing;
-        if (part->header->type == SHT(progbits)) {
+        if (part->header->type == SHT(progbits) ||
+            part->header->type == SHT(init_array) ||
+            part->header->type == SHT(fini_array) ||
+            part->header->type == SHT(preinit_array)) {
           part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
           part_contents->size = part->header->size;
           part_contents->data.raw = part->contents;
@@ -1430,29 +1736,29 @@ static void BuildSections(Linker* linker, ELFWriterFile* elf) {
   
   // Build output sections in code segment.
   for (size_t i = 0; i < linker->code_segment.sections.length; i++) {
-    BuildOutputSection(elf, &linker->code_segment, linker->code_segment.sections.value.p[i]);
+    BuildOutputSection(linker, elf, &linker->code_segment, linker->code_segment.sections.value.p[i]);
   }
   
   if (!linker->fully_static) {
     for (size_t i = 0; i < linker->dynamic_segment.sections.length; i++) {
-      BuildOutputSection(elf, &linker->dynamic_segment, linker->dynamic_segment.sections.value.p[i]);
+      BuildOutputSection(linker, elf, &linker->dynamic_segment, linker->dynamic_segment.sections.value.p[i]);
     }
   }
   
   if (!linker->fully_static && !linker->building_dso) {
     for (size_t i = 0; i < linker->interpreter_segment.sections.length; i++) {
-      BuildOutputSection(elf, &linker->interpreter_segment, linker->interpreter_segment.sections.value.p[i]);
+      BuildOutputSection(linker, elf, &linker->interpreter_segment, linker->interpreter_segment.sections.value.p[i]);
     }
   }
   
   // Build output sections in data segment.
   for (size_t i = 0; i < linker->data_segment.sections.length; i++) {
-    BuildOutputSection(elf, &linker->data_segment, linker->data_segment.sections.value.p[i]);
+    BuildOutputSection(linker, elf, &linker->data_segment, linker->data_segment.sections.value.p[i]);
   }
   
   // Build output sections in tls segment.
   for (size_t i = 0; i < linker->tls_segment.sections.length; i++) {
-    BuildOutputSection(elf, &linker->tls_segment, linker->tls_segment.sections.value.p[i]);
+    BuildOutputSection(linker, elf, &linker->tls_segment, linker->tls_segment.sections.value.p[i]);
   }
 
   // Add BSS section.

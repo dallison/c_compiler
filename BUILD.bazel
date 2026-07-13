@@ -139,6 +139,7 @@ LIBC_SRCS = [
     "libc/cxx_guard.c",
     "libc/cxx_new.c",
     "libc/cxx_rtti.c",
+    "libc/davecc_lifecycle.c",
     "libc/eh_frame.c",
     "libc/eh_terminate.c",
     "libc/eh_throw.c",
@@ -362,6 +363,7 @@ cc_library(
         "c_compiler/Loader/Architecture/loader_arch_riscv.c",
         "c_compiler/Loader/loader.c",
         "c_compiler/Loader/loader_dynamic.c",
+        "c_compiler/Loader/loader_lifecycle.c",
     ],
     hdrs = glob([
         "c_compiler/Loader/*.h",
@@ -1028,6 +1030,9 @@ libc_srcs=(
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
   "libc/eh_throw.c"
   "libc/exit.c"
@@ -1159,6 +1164,7 @@ libc_srcs=(
   "libc/cxx_rtti.c"
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
   "libc/eh_frame.c"
   "libc/eh_terminate.c"
   "libc/eh_throw.c"
@@ -1287,6 +1293,9 @@ libc_srcs=(
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1407,6 +1416,9 @@ libc_srcs=(
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1529,6 +1541,9 @@ libc_srcs=(
   "libc/cxx_guard.c"
   "libc/cxx_new.c"
   "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
   "libc/eh_terminate.c"
   "libc/exit.c"
   "libc/fclose.c"
@@ -1778,6 +1793,63 @@ sh_test(
     data = [
         ":davecc",
         ":elfdump",
+    ],
+)
+
+sh_test(
+    name = "init_fini_multitu_test",
+    srcs = ["tests/init_fini_multitu_test.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath :davecc)",
+        "--archivist",
+        "$(rootpath :archivist)",
+        "--libc",
+        "$(rootpath :libc_x86_64)",
+        "--interpreter",
+        "$(rootpath :x86_64)",
+        "--elfdump",
+        "$(rootpath :elfdump)",
+        "--sources",
+        "$(rootpath tests/init_fini_multitu/a.cpp)",
+    ],
+    data = [
+        ":archivist",
+        ":davecc",
+        ":elfdump",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/init_fini_multitu/a.cpp",
+        "tests/init_fini_multitu/b.cpp",
+        "tests/init_fini_multitu/foreign_arrays.s",
+        "tests/init_fini_multitu/main.cpp",
+    ],
+)
+
+sh_test(
+    name = "init_fini_dso_test",
+    srcs = ["tests/init_fini_dso_test.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath :davecc)",
+        "--libc",
+        "$(rootpath :libc_x86_64)",
+        "--interpreter",
+        "$(rootpath :x86_64)",
+        "--elfdump",
+        "$(rootpath :elfdump)",
+        "--sources",
+        "$(rootpath tests/init_fini_dso/dep.c)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/init_fini_dso/dep.c",
+        "tests/init_fini_dso/dso.c",
+        "tests/init_fini_dso/main.c",
     ],
 )
 

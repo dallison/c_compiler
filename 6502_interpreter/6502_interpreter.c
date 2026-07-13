@@ -7,6 +7,8 @@
 //
 
 #include "6502_interpreter.h"
+#include "elf.h"
+#include "loader_lifecycle.h"
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -685,6 +687,10 @@ static char irq_handler[] = {
 #define REG_I0 0x08
 
 #define W65C02_INT_EXIT 1
+#define W65C02_INT_EXIT_CLEAN 22
+#define W65C02_GUEST_CALL_RETURN 0x0002
+#define W65C02_GUEST_STACK_BOTTOM 0xc000
+#define W65C02_REG_SP 0x98
 #define W65C02_INT_OPEN 2
 #define W65C02_INT_CLOSE 3
 #define W65C02_INT_LSEEK 4
@@ -867,6 +873,146 @@ static void SetErrno(W65C02Interpreter* interpreter) {
   *(int16_t*)&interpreter->memory[ERRNO_ADDR] = TranslateErrno(errno);
 }
 
+typedef struct {
+  uint16_t pc;
+  uint8_t a;
+  uint8_t x;
+  uint8_t y;
+  uint8_t s;
+  int8_t flags;
+  uint16_t guest_call_return_pc;
+} W65C02SavedState;
+
+static void StepOneInstruction(W65C02Interpreter* interpreter,
+                               bool cycle_accurate);
+
+static void W65C02SaveState(W65C02Interpreter* interpreter,
+                            W65C02SavedState* saved) {
+  saved->pc = interpreter->pc;
+  saved->a = interpreter->a;
+  saved->x = interpreter->x;
+  saved->y = interpreter->y;
+  saved->s = interpreter->s;
+  saved->flags = interpreter->flags.value;
+  saved->guest_call_return_pc = interpreter->guest_call_return_pc;
+}
+
+static void W65C02RestoreState(W65C02Interpreter* interpreter,
+                               const W65C02SavedState* saved) {
+  interpreter->pc = saved->pc;
+  interpreter->a = saved->a;
+  interpreter->x = saved->x;
+  interpreter->y = saved->y;
+  interpreter->s = saved->s;
+  interpreter->flags.value = saved->flags;
+  interpreter->guest_call_return_pc = saved->guest_call_return_pc;
+}
+
+static void W65C02SetupGuestStartupStack(W65C02Interpreter* interpreter) {
+  interpreter->memory[W65C02_REG_SP] = W65C02_GUEST_STACK_BOTTOM & 0xff;
+  interpreter->memory[W65C02_REG_SP + 1] = W65C02_GUEST_STACK_BOTTOM >> 8;
+  interpreter->memory[W65C02_REG_SP + 2] = W65C02_GUEST_STACK_BOTTOM & 0xff;
+  interpreter->memory[W65C02_REG_SP + 3] = W65C02_GUEST_STACK_BOTTOM >> 8;
+  interpreter->s = 0xff;
+}
+
+bool W65C02GuestAddressExecutable(Loader* loader, uint16_t addr) {
+  if (loader == NULL) {
+    return false;
+  }
+  if (addr == 0) {
+    return true;
+  }
+  for (size_t i = 1; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    for (size_t section_index = 0; section_index < region->sections.length;
+         section_index++) {
+      ELFReaderSection* section = region->sections.value.p[section_index];
+      if ((section->header->flags & SHF(execinstr)) == 0) {
+        continue;
+      }
+      uint16_t start = (uint16_t)section->header->addr;
+      uint16_t end = start + (uint16_t)section->header->size;
+      if (addr >= start && addr < end) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void W65C02PushGuestReturnAddress(W65C02Interpreter* interpreter,
+                                         uint16_t return_pc) {
+  uint16_t pushed = (uint16_t)(return_pc - 1);
+  interpreter->memory[0x100 + interpreter->s--] = pushed >> 8;
+  interpreter->memory[0x100 + interpreter->s--] = pushed & 0xff;
+}
+
+void W65C02GuestCallVoidFunction(W65C02Interpreter* interpreter, uint16_t fn) {
+  if (interpreter == NULL || fn == 0) {
+    return;
+  }
+  W65C02SavedState saved;
+  W65C02SaveState(interpreter, &saved);
+  W65C02PushGuestReturnAddress(interpreter, W65C02_GUEST_CALL_RETURN);
+  interpreter->guest_call_return_pc = W65C02_GUEST_CALL_RETURN;
+  interpreter->pc = fn;
+  while (interpreter->pc != interpreter->guest_call_return_pc) {
+    StepOneInstruction(interpreter, false);
+  }
+  W65C02RestoreState(interpreter, &saved);
+}
+
+static bool W65C02LifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                    uint64_t function,
+                                    LoaderLifecyclePhase phase) {
+  (void)image;
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    W65C02Interpreter* interpreter;
+  } W65C02LifecycleContext;
+  W65C02LifecycleContext* ctx = context;
+  if (function > 0xffff ||
+      !W65C02GuestAddressExecutable(ctx->loader, (uint16_t)function)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)function);
+    return false;
+  }
+  W65C02GuestCallVoidFunction(ctx->interpreter, (uint16_t)function);
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader,
+                                   W65C02Interpreter* interpreter,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    W65C02Interpreter* interpreter;
+  } W65C02LifecycleContext;
+  W65C02LifecycleContext ctx = {loader, interpreter};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 W65C02LifecycleCallback, &ctx);
+}
+
+bool W65C02GuestRunInitArrays(Loader* loader,
+                              W65C02Interpreter* interpreter) {
+  if (interpreter->init_arrays_done) {
+    return true;
+  }
+  if (!RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecyclePreinit) ||
+      !RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleInit)) {
+    return false;
+  }
+  interpreter->init_arrays_done = true;
+  return true;
+}
+
+bool W65C02GuestRunFiniArrays(Loader* loader,
+                              W65C02Interpreter* interpreter) {
+  return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleFini);
+}
+
 // This is entered from a BRK instruction
 // sp+0: result address
 // sp+2... args from system call.
@@ -878,6 +1024,12 @@ static void BrkHandler(W65C02Interpreter* interpreter, int8_t code) {
   switch (code) {
     case W65C02_INT_EXIT:
       exit(*((uint16_t*)(sp+2)));
+      break;
+    case W65C02_INT_EXIT_CLEAN:
+      interpreter->exit_code = *((uint16_t*)(sp + 2));
+      LoaderLifecycleMarkExecutableFiniComplete(interpreter->loader,
+                                                interpreter->loader->lifecycle);
+      interpreter->running = false;
       break;
     case W65C02_INT_ABORT:
       abort();
@@ -1028,7 +1180,9 @@ void W65C02Reset(W65C02Interpreter* interpreter) {
 
 #define VECTOR_RAM 0xfd00
 
-void W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv, int first_arg) {
+int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
+                         uint64_t entry_address, int argc, char** argv,
+                         int first_arg) {
   interpreter->memory = calloc(65536, 1);    // 64K of memory.
   interpreter->s = 0xff;
   interpreter->zero_page = (uint8_t*)interpreter->memory;
@@ -1101,6 +1255,12 @@ void W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader, uint64
   }
   interpreter->entry_address = (int)entry_address;
   
+  W65C02SetupGuestStartupStack(interpreter);
+  if (!W65C02GuestRunInitArrays(loader, interpreter)) {
+    fprintf(stderr, "Error running guest init arrays\n");
+    exit(1);
+  }
+
   // Write entry address into zero page 0,1
   interpreter->memory[0] = entry_address & 0xff;
   interpreter->memory[1] = (entry_address >> 8) & 0xff;
@@ -1112,12 +1272,19 @@ void W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader, uint64
     interpreter->stop_at_next_instruction = true;
   }
 
+  interpreter->running = true;
+  interpreter->exit_code = 0;
+
   // Run processor by fetching instruction at PC and jumping to the handler
   // function for that opcode.  Each handler function will set the PC to
   // the next instruction address.
-  for (;;) {
+  while (interpreter->running) {
     StepOneInstruction(interpreter, true);
   }
+  if (!W65C02GuestRunFiniArrays(loader, interpreter)) {
+    return 1;
+  }
+  return interpreter->exit_code;
 }
 
 void W65C02InterpreterDisassemble(W65C02Interpreter* interpreter, Loader* loader) {

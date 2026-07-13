@@ -6,6 +6,8 @@
 //  Copyright © 2022 David Allison. All rights reserved.
 //
 
+#include <davecc_lifecycle.h>
+#include <syscall.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -166,9 +168,7 @@ void __davecc_finalize(void) {
 // If atexit is called from an atexit func it must be called after all
 // currently registered atexit funcs.
 void exit(int status) {
-  __cxa_finalize(NULL);
-  // Flush all open streams so buffered output reaches the OS before we
-  // terminate.  Required for normal program termination per the C standard.
-  fflush(NULL);
+  __davecc_run_fini();
+  syscall(SYS_EXIT_CLEAN, status);
   _Exit(status);
 }

@@ -4,6 +4,7 @@
 //
 
 #include "x86_64_native.h"
+#include "x86_64_process.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -81,12 +82,16 @@ static bool MakeEntryExecutable(Loader* loader, uint64_t entry_address) {
 
 static int CallGuestEntry(Loader* loader, uint64_t entry, int argc,
                           char** argv) {
-  (void)loader;
-  (void)argc;
-  (void)argv;
-  typedef int (*GuestFn)(void);
-  GuestFn fn = (GuestFn)(uintptr_t)entry;
-  return fn();
+  if (!X86_64GuestRunInitArrays(loader, NULL)) {
+    return 1;
+  }
+  typedef int (*GuestMainFn)(int, char**);
+  GuestMainFn fn = (GuestMainFn)(uintptr_t)entry;
+  int result = fn(argc, argv);
+  if (!X86_64GuestRunProgramShutdown(loader, NULL)) {
+    return 1;
+  }
+  return result;
 }
 #endif
 

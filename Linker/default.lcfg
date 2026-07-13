@@ -46,6 +46,9 @@ layout {
     name: "data"
     region {
       section: ".data"
+      section: ".preinit_array"
+      section: ".init_array"
+      section: ".fini_array"
     }
   }
 }
@@ -67,6 +70,9 @@ layout {
     region {
       name: "data"
       section: ".data"
+      section: ".preinit_array"
+      section: ".init_array"
+      section: ".fini_array"
       start_addr: 0x410000000
       alignment: 0x1000
     }

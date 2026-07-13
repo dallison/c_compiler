@@ -81,9 +81,30 @@ int main(int argc, char *argv[]) {
   if (print_libraries_only) {
     exit(0);
   }
-  // Run the code at its entry address.
-  PCodeInterpreterRun(&interpreter, &loader, loader.main_address, argc, argv);
+
+  PCodeInterpreterInit(&interpreter);
+  PCodeInterpreterSetDisassemble(trace_instructions);
+  interpreter.stack = malloc(P_CODE_STACK_SIZE);
+  if (interpreter.stack == NULL) {
+    LoaderDestruct(&loader);
+    exit(1);
+  }
+  interpreter.iregs[PCODE_SP_REG] =
+      (int64_t)(interpreter.stack + P_CODE_STACK_SIZE);
+  interpreter.loader = &loader;
+  if (!PCodeGuestRunInitArrays(&loader, &interpreter)) {
+    PCodeInterpreterDestruct(&interpreter);
+    LoaderDestruct(&loader);
+    exit(1);
+  }
+
+  int result = PCodeInterpreterRun(&interpreter, &loader, loader.main_address,
+                                   argc, argv);
+  if (!PCodeGuestRunProgramShutdown(&loader, &interpreter)) {
+    result = 1;
+  }
 
   PCodeInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
+  return result;
 }

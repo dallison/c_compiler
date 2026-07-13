@@ -65,15 +65,26 @@ typedef struct W65C02Interpreter {
   bool cycle_accurate;
   uint16_t enter_func;        // Address of __enter (treated specially)
   uint16_t enter_leaf_func;        // Address of __enter_leaf (treated specially)
+  uint16_t guest_call_return_pc;
+  bool init_arrays_done;
+  bool running;
+  int exit_code;
   String rom_filename;
   int open_files[W65C02_MAX_OPEN_FILES];
 } W65C02Interpreter;
+
+bool W65C02GuestAddressExecutable(Loader* loader, uint16_t addr);
+void W65C02GuestCallVoidFunction(W65C02Interpreter* interpreter, uint16_t fn);
+bool W65C02GuestRunInitArrays(Loader* loader, W65C02Interpreter* interpreter);
+bool W65C02GuestRunFiniArrays(Loader* loader, W65C02Interpreter* interpreter);
 
 void W65C02InterpreterInit(W65C02Interpreter* interpreter, bool debug,
                            bool cycle_accurate,
                            bool trace, const char* rom_filename);
 
-void W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,  int first_arg);
+int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
+                         uint64_t entry_address, int argc, char** argv,
+                         int first_arg);
 void W65C02InterpreterDisassemble(W65C02Interpreter* interpreter, Loader* loader);
 void W65C02InterpreterExtract(W65C02Interpreter* interpreter, Loader* loader, FILE* fp);
 void W65C02InterpreterDestruct(W65C02Interpreter* interpreter);

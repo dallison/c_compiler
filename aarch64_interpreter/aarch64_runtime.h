@@ -11,6 +11,8 @@
 #include "loader.h"
 #include "loader_arch.h"
 
+struct AARCH64Interpreter;
+
 typedef enum {
   kAARCH64ModeInterpret,
   kAARCH64ModeNative,
@@ -33,5 +35,15 @@ int AARCH64RuntimeRun(AARCH64Runtime* runtime, int argc, char** argv,
 void AARCH64RuntimeDestruct(AARCH64Runtime* runtime);
 
 AARCH64ExecutionMode AARCH64DefaultExecutionMode(void);
+
+bool AARCH64GuestAddressExecutable(Loader* loader, uint64_t addr);
+uint64_t AARCH64LookupGuestFunction(Loader* loader, const char* name);
+void AARCH64GuestCallVoidFunction(struct AARCH64Interpreter* cpu, uint64_t fn);
+void AARCH64GuestRunProgramFini(Loader* loader, struct AARCH64Interpreter* cpu);
+bool AARCH64GuestRunProgramShutdown(Loader* loader,
+                                    struct AARCH64Interpreter* cpu);
+bool AARCH64GuestRunInitArrays(Loader* loader, struct AARCH64Interpreter* cpu);
+bool AARCH64GuestRunFiniArrays(Loader* loader, struct AARCH64Interpreter* cpu);
+int AARCH64NativeCallVoidFunction(Loader* loader, uint64_t fn);
 
 #endif /* aarch64_runtime_h */

@@ -2234,12 +2234,13 @@ static bool IsKnownAttribute(const char* name) {
     // Acted upon by davecc.
     "packed", "aligned", "format", "deprecated", "unused",
     "warn_unused_result", "noreturn", "noinline", "always_inline",
+    "constructor", "destructor",
     // Accepted but not modelled (parsed cleanly, no effect).
     "stdcall", "cdecl", "fastcall", "thiscall", "regparm", "ms_abi",
     "sysv_abi", "may_alias", "gnu_inline", "nothrow", "leaf", "cold", "hot",
     "malloc", "pure", "const", "nonnull", "returns_nonnull", "sentinel",
-    "weak", "alias", "section", "visibility", "used", "constructor",
-    "destructor", "transparent_union", "vector_size", "mode",
+    "weak", "alias", "section", "visibility", "used",
+    "transparent_union", "vector_size", "mode",
     "no_instrument_function", "cleanup", "returns_twice", "artificial",
     "designated_init", "fallthrough", "warning", "error", "alloc_size",
     "format_arg", "nonstring", "noclone", "noipa", "flatten", "naked",
@@ -7961,6 +7962,89 @@ static ASTNode* NewCXXAtexitRegistration(Symbol* sym,
                    TypeNeedsCXXCompleteObjectArgument(object_type) ? 1 : 0,
                    NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
   return NewCXXRuntimeCall("__davecc_cxa_atexit", kTypeInt, actuals, location);
+}
+
+ASTNode* SyntaxNewCXXGlobalAtexitStatement(Symbol* sym,
+                                           SourceLocation location) {
+  ASTNode* registration = NewCXXAtexitRegistration(sym, location);
+  if (registration == NULL) {
+    return NULL;
+  }
+  return NewExpressionStatementASTNode(registration, location);
+}
+
+static bool FunctionTypeIsVoidVoid(TypeRecord* type) {
+  if (type == NULL || !TypeIsFunction(type) || type->next == NULL ||
+      !TypeIsVoid(type->next)) {
+    return false;
+  }
+  return type->info.function.prototype.length == 0;
+}
+
+static int ParseInitFiniAttributePriority(Syntax* syntax, Attribute* attr,
+                                          SourceLocation location) {
+  int priority = kCXXInitFiniPriorityDefault;
+  if (AttributeArgCount(attr) > 0) {
+    long value = 0;
+    if (!AttributeArgInt(attr, 0, &value) || value < 0 || value > 65535) {
+      SyntaxErrorAtLocation(
+          syntax, location,
+          "constructor/destructor attribute priority must be an integer "
+          "between 0 and 65535");
+      return -1;
+    }
+    priority = (int)value;
+    if (priority < 101) {
+      SyntaxWarning(syntax, "attributes",
+                    "priority %d is reserved for the implementation", priority);
+    }
+  }
+  return priority;
+}
+
+static void RegisterInitFiniArrayEntry(Vector* functions, Symbol* function) {
+  VectorAppend(functions, function);
+}
+
+void SyntaxRegisterFunctionInitFiniAttributes(Syntax* syntax, Symbol* sym) {
+  if (sym == NULL || !TypeIsFunction(sym->type) || !sym->flags.is_defined) {
+    return;
+  }
+  Attribute* constructor =
+      AttributeListFind(&sym->attributes, "constructor");
+  Attribute* destructor = AttributeListFind(&sym->attributes, "destructor");
+  if (constructor == NULL && destructor == NULL) {
+    return;
+  }
+  if (!FunctionTypeIsVoidVoid(sym->type)) {
+    SyntaxErrorAtLocation(
+        syntax, sym->location,
+        "constructor/destructor attribute applies only to void functions "
+        "with no parameters");
+    return;
+  }
+  if (sym->flags.is_template) {
+    SyntaxErrorAtLocation(syntax, sym->location,
+                          "constructor/destructor attribute cannot be applied "
+                          "to a function template");
+    return;
+  }
+  if (constructor != NULL) {
+    int priority =
+        ParseInitFiniAttributePriority(syntax, constructor, sym->location);
+    if (priority >= 0) {
+      RegisterInitFiniArrayEntry(CXXInitArrayFunctionsVector(), sym);
+      sym->flags.used = true;
+    }
+  }
+  if (destructor != NULL) {
+    int priority =
+        ParseInitFiniAttributePriority(syntax, destructor, sym->location);
+    if (priority >= 0) {
+      RegisterInitFiniArrayEntry(CXXFiniArrayFunctionsVector(), sym);
+      sym->flags.used = true;
+    }
+  }
 }
 
 static Symbol* NewCXXLocalStaticGuard(Syntax* syntax, TypeRecord* func,

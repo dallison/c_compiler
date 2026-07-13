@@ -9,8 +9,10 @@
 #include "common_emitter.h"
 #include "compiler.h"
 #include "source.h"
+#include "symbol.h"
 #include <string.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include "target_generator.h"
 
 static COMPILER_UNUSED void FilePrinter(int index, File* file, void* data) {
@@ -294,4 +296,97 @@ void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
 
 void EmitTlsVariable(InitializedStaticVariable* var, FILE* fp) {
   EmitStaticVariable(var, fp);
+}
+
+static void EmitFunctionPointer(Symbol* function, FILE* fp) {
+  char buf[256];
+  const char* ptr_asm =
+      compiler->pointer_size == 8 ? ".8byte" :
+      compiler->pointer_size == 2 ? ".short" : ".word";
+  if (function->flags.is_local) {
+    fprintf(fp, "\t.local %s\n",
+            TargetSymbolName(function, buf, sizeof(buf)));
+  } else if (SymbolHasWeakBinding(function)) {
+    fprintf(fp, "\t.weak %s\n",
+            TargetSymbolName(function, buf, sizeof(buf)));
+  } else {
+    fprintf(fp, "\t.global %s\n",
+            TargetSymbolName(function, buf, sizeof(buf)));
+  }
+  fprintf(fp, "\t%s    %s\n", ptr_asm,
+          TargetSymbolName(function, buf, sizeof(buf)));
+}
+
+static int InitFiniPriorityForSymbol(Symbol* function, bool is_fini) {
+  if (function == NULL) {
+    return kCXXInitFiniPriorityDefault;
+  }
+  const char* name = is_fini ? "destructor" : "constructor";
+  Attribute* attr = AttributeListFind(&function->attributes, name);
+  if (attr == NULL) {
+    return kCXXInitFiniPriorityDefault;
+  }
+  long value = 0;
+  if (!AttributeArgInt(attr, 0, &value) || value < 0 || value > 65535) {
+    return kCXXInitFiniPriorityDefault;
+  }
+  return (int)value;
+}
+
+static void StableSortInitFiniFunctions(Symbol** functions, size_t count,
+                                        bool is_fini) {
+  for (size_t i = 1; i < count; i++) {
+    Symbol* function = functions[i];
+    int priority = InitFiniPriorityForSymbol(function, is_fini);
+    size_t j = i;
+    while (j != 0 &&
+           InitFiniPriorityForSymbol(functions[j - 1], is_fini) > priority) {
+      functions[j] = functions[j - 1];
+      j--;
+    }
+    functions[j] = function;
+  }
+}
+
+static void EmitInitFiniSectionStart(int priority, bool is_fini, FILE* fp) {
+  const char* section = is_fini ? ".fini_array" : ".init_array";
+  const char* type = is_fini ? "fini_array" : "init_array";
+  if (priority == kCXXInitFiniPriorityDefault) {
+    fprintf(fp, "\t.section \"%s\", \"aw\", @%s, %d\n", section, type,
+            compiler->pointer_size);
+  } else {
+    fprintf(fp, "\t.section \"%s.%05d\", \"aw\", @%s, %d\n", section,
+            priority, type, compiler->pointer_size);
+  }
+  EmitP2Align(compiler->pointer_size, fp);
+}
+
+void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp) {
+  if (functions == NULL || functions->length == 0) {
+    return;
+  }
+
+  Symbol** sorted = malloc(functions->length * sizeof(Symbol*));
+  if (sorted == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < functions->length; i++) {
+    sorted[i] = functions->value.p[i];
+  }
+  StableSortInitFiniFunctions(sorted, functions->length, is_fini);
+
+  int current_priority = -1;
+  for (size_t i = 0; i < functions->length; i++) {
+    int priority = InitFiniPriorityForSymbol(sorted[i], is_fini);
+    if (priority != current_priority) {
+      if (current_priority >= 0) {
+        fprintf(fp, "\n");
+      }
+      EmitInitFiniSectionStart(priority, is_fini, fp);
+      current_priority = priority;
+    }
+    EmitFunctionPointer(sorted[i], fp);
+  }
+  fprintf(fp, "\n");
+  free(sorted);
 }

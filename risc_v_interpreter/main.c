@@ -89,15 +89,25 @@ int main(int argc, char * argv[]) {
   RISCVInterpreterInit(&interpreter, &loader,
                        loader.main_address, argc, argv,
                        trace_regs, trace_instructions);
+  if (!RISCVGuestRunInitArrays(&loader, &interpreter)) {
+    RISCVInterpreterDestruct(&interpreter);
+    LoaderDestruct(&loader);
+    exit(1);
+  }
+  int result;
   if (enter_debugger) {
     RISCVDebugger debugger;
     RISCVDebuggerInit(&debugger, &interpreter, loader.main_address);
     RISCVDebuggerRun(&debugger);
+    result = interpreter.exit_code;
   } else {
-    // Run the code at its entry address.
-    RISCVInterpreterCycle(&interpreter);
+    result = RISCVInterpreterRun(&interpreter);
+  }
+  if (!RISCVGuestRunProgramShutdown(&loader, &interpreter)) {
+    result = 1;
   }
   
   RISCVInterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
+  return result;
 }

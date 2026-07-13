@@ -98,6 +98,15 @@ int64_t X86_64SyscallHeapUnlock(X86_64GuestThread* caller);
 
 bool X86_64GuestAddressExecutable(Loader* loader, uint64_t addr);
 
+uint64_t X86_64LookupGuestFunction(Loader* loader, const char* name);
+void X86_64GuestCallVoidFunction(X86_64Interpreter* cpu, uint64_t fn);
+void X86_64GuestRunProgramInit(Loader* loader, X86_64Interpreter* cpu);
+void X86_64GuestRunProgramFini(Loader* loader, X86_64Interpreter* cpu);
+bool X86_64GuestRunProgramShutdown(Loader* loader, X86_64Interpreter* cpu);
+bool X86_64GuestRunInitArrays(Loader* loader, X86_64Interpreter* cpu);
+bool X86_64GuestRunFiniArrays(Loader* loader, X86_64Interpreter* cpu);
+int X86_64NativeCallVoidFunction(Loader* loader, uint64_t fn);
+
 void X86_64ProcessRegisterGuestMemory(X86_64ProcessRuntime* process,
                                       uint64_t start, size_t size);
 bool X86_64ProcessGuestMemoryOk(X86_64ProcessRuntime* process, uint64_t addr,

@@ -734,9 +734,17 @@ static void AddSections(Assembler* assembler, ELFWriterFile* elf) {
     }
     
     // Add the section to the ELF file.
+    int64_t entry_size = 0;
+    if (section->type == SHT(init_array) ||
+        section->type == SHT(fini_array) ||
+        section->type == SHT(preinit_array)) {
+      entry_size = assembler->elf_machine_type == ELF_MACHINE_TYPEW65C02
+                       ? 2
+                       : (assembler->is_64_bit ? 8 : 4);
+    }
     ELFWriterSection* elf_section =
     ELFWriterAddSection(elf, section->name, section->type, section->flags,
-                        section->alignment, &section->contents, 0);
+                        section->alignment, &section->contents, entry_size);
     
     // For debug_line we need to add a relocation for the initial address.  We
     // can only do this when we know the section index.
@@ -1366,8 +1374,16 @@ static void HandleDirective_section(Assembler* assembler) {
               type = SHT(progbits);
             } else if (strcmp(assembler->lex.spelling.value, "@nobits") == 0) {
               type = SHT(nobits);
+            } else if (strcmp(assembler->lex.spelling.value, "@init_array") ==
+                       0) {
+              type = SHT(init_array);
+            } else if (strcmp(assembler->lex.spelling.value, "@fini_array") ==
+                       0) {
+              type = SHT(fini_array);
+            } else if (strcmp(assembler->lex.spelling.value,
+                              "@preinit_array") == 0) {
+              type = SHT(preinit_array);
             }
-            // TODO: others.
             LexNextToken(&assembler->lex);
           }
         }

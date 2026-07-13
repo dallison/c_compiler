@@ -55,12 +55,14 @@ long lseek(int fd, fpos_t pos, int whence) {
 }
 
 void abort() {
-  asm("esc #4");
+  asm("esc #11");
 }
 
 void _Exit(int status) {
   (void)status;
-  asm("esc #4");
+  asm(
+      "ldw r0, [ap, #16]\n"
+      "esc #12");
 }
 #else
 int open(const char* filename, int flags, ...) {

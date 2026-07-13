@@ -5,6 +5,8 @@
 
 #include "arm_interpreter.h"
 #include "elf.h"
+#include "loader_lifecycle.h"
+#include "loader_arch.h"
 #include "loader_dynamic.h"
 #include <fcntl.h>
 #include <inttypes.h>
@@ -606,6 +608,14 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       // is in r1 (== a1), matching the other syscalls' argument layout.
       exit(a1);
       break;
+    case ARM_SYSCALL_EXIT_CLEAN:
+      if (interpreter->loader != NULL) {
+        LoaderLifecycleMarkExecutableFiniComplete(
+            interpreter->loader, interpreter->loader->lifecycle);
+      }
+      WriteReg(interpreter, 0, (uint64_t)(uint32_t)a1);
+      interpreter->pc = 0;
+      return 0;
     case ARM_SYSCALL_OPEN: {
       void* path = ResolveHostPtr(interpreter, (uint32_t)a1, 1);
       return open((const char*)path, a2, (mode_t)a3);
@@ -1569,6 +1579,40 @@ static void MapGuestResolver(ARMInterpreter* interpreter) {
   }
 }
 
+static uint64_t ARMInterpreterInitialSp(void) {
+  return (((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull) - 4096;
+}
+
+static void SetupGuestMainArgs(ARMInterpreter* interpreter, Loader* loader,
+                               int argc, char** argv, uint64_t entry_address,
+                               bool is_static_link) {
+  WriteReg(interpreter, 0, (uint64_t)(uint32_t)argc);
+  if (!is_static_link) {
+    WriteReg(interpreter, 1, entry_address);
+  } else if (argc > 0 && argv != NULL) {
+    uint64_t guest_top = ((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull;
+    uint64_t p = guest_top;
+    uint32_t* guest_ptrs = malloc((size_t)(argc + 1) * sizeof(uint32_t));
+    for (int i = 0; i < argc; i++) {
+      size_t len = strlen(argv[i]) + 1;
+      p -= len;
+      memcpy(interpreter->stack + (p - ARM_STACK_BASE), argv[i], len);
+      guest_ptrs[i] = (uint32_t)p;
+    }
+    guest_ptrs[argc] = 0;
+    p &= ~0x7ull;
+    p -= (uint64_t)(argc + 1) * sizeof(uint32_t);
+    p &= ~0x7ull;
+    uint64_t guest_argv = p;
+    memcpy(interpreter->stack + (guest_argv - ARM_STACK_BASE), guest_ptrs,
+           (size_t)(argc + 1) * sizeof(uint32_t));
+    free(guest_ptrs);
+    WriteReg(interpreter, 1, guest_argv);
+  } else {
+    WriteReg(interpreter, 1, 0);
+  }
+}
+
 void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
                         uint64_t entry_address, int argc, char** argv,
                         bool trace_regs, bool trace_instructions) {
@@ -1596,44 +1640,207 @@ void ARMInterpreterInit(ARMInterpreter* interpreter, Loader* loader,
   VectorAppend(&loader->regions,
                NewRegion(interpreter->stack, 0, ARM_STACK_SIZE, &stack_segment,
                          NULL));
-  interpreter->regs[ARM_SP_REG] =
-      (((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull) - 4096;
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
   interpreter->pc = entry_address;
   interpreter->regs[ARM_LR_REG] = 0;
-
-  // Build argc/argv in *guest* stack memory.  ARM is a 32-bit machine with
-  // address translation, so we cannot hand the guest a host pointer (as the
-  // 64-bit backends do); the argv array and the argument strings must live at
-  // guest addresses the program can dereference.  We place them in the unused
-  // headroom between the initial SP and the top of the stack (the stack grows
-  // downward from SP, so it never clobbers this region).
-  WriteReg(interpreter, 0, (uint64_t)(uint32_t)argc);
-  if (!loader->is_static) {
-    WriteReg(interpreter, 1, entry_address);
-  } else if (argc > 0 && argv != NULL) {
-    uint64_t guest_top = ((uint64_t)ARM_STACK_BASE + ARM_STACK_SIZE) & ~0x7ull;
-    uint64_t p = guest_top;
-    uint32_t* guest_ptrs = malloc((size_t)(argc + 1) * sizeof(uint32_t));
-    for (int i = 0; i < argc; i++) {
-      size_t len = strlen(argv[i]) + 1;
-      p -= len;
-      memcpy(interpreter->stack + (p - ARM_STACK_BASE), argv[i], len);
-      guest_ptrs[i] = (uint32_t)p;
-    }
-    guest_ptrs[argc] = 0;
-    // Place the pointer array (word aligned) below the strings.
-    p &= ~0x7ull;
-    p -= (uint64_t)(argc + 1) * sizeof(uint32_t);
-    p &= ~0x7ull;
-    uint64_t guest_argv = p;
-    memcpy(interpreter->stack + (guest_argv - ARM_STACK_BASE), guest_ptrs,
-           (size_t)(argc + 1) * sizeof(uint32_t));
-    free(guest_ptrs);
-    WriteReg(interpreter, 1, guest_argv);
-  } else {
-    WriteReg(interpreter, 1, 0);
-  }
+  SetupGuestMainArgs(interpreter, loader, argc, argv, entry_address,
+                     loader->is_static);
   MapGuestResolver(interpreter);
+}
+
+void ARMInterpreterPrepareMain(ARMInterpreter* interpreter,
+                               uint64_t entry_address, int argc, char** argv,
+                               bool is_static_link) {
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
+  interpreter->pc = entry_address;
+  interpreter->regs[ARM_LR_REG] = 0;
+  SetupGuestMainArgs(interpreter, interpreter->loader, argc, argv,
+                     entry_address, is_static_link);
+}
+
+static void ARMInterpreterPrepareCall(ARMInterpreter* interpreter, uint64_t fn) {
+  interpreter->regs[ARM_SP_REG] = ARMInterpreterInitialSp();
+  interpreter->pc = fn;
+  interpreter->regs[ARM_LR_REG] = 0;
+}
+
+static int ARMInterpreterRunLoop(ARMInterpreter* interpreter) {
+  for (;;) {
+    if (interpreter->pc == 0) {
+      return (int)(ReadReg(interpreter, 0) & 0xffffffffu);
+    }
+    if (interpreter->num_steps == 0) {
+      return 0;
+    }
+    if (interpreter->num_steps > 0) {
+      --interpreter->num_steps;
+    }
+
+    if (interpreter->trace_instructions) {
+      interpreter->current_symbol = LoaderFindSymbolAndCacheResult(
+          interpreter->loader, interpreter->pc);
+      if (interpreter->current_symbol != NULL &&
+          interpreter->current_symbol->name != NULL) {
+        printf("%s+0x%x: ", interpreter->current_symbol->name,
+               (uint32_t)(interpreter->pc -
+                          interpreter->current_symbol->start));
+      }
+    }
+
+    if (interpreter->trace_regs) {
+      memcpy(interpreter->old_regs, interpreter->regs,
+             sizeof(interpreter->old_regs));
+      memcpy(interpreter->old_sregs, interpreter->sregs,
+             sizeof(interpreter->old_sregs));
+    }
+
+    uint32_t insn = Fetch32(interpreter);
+    if (interpreter->trace_instructions) {
+      printf("0x%016" PRIx64 ": %08x\n", interpreter->pc, insn);
+    }
+
+    bool pc_updated = false;
+    if (!ExecuteInstruction(interpreter, insn, &pc_updated)) {
+      fprintf(stderr, "Unsupported instruction 0x%08x at 0x%016" PRIx64 "\n",
+              insn, interpreter->pc);
+      ARMInterpreterDumpRegisters(interpreter);
+      exit(1);
+    }
+    if (!pc_updated) {
+      interpreter->pc += 4;
+    }
+
+    if (interpreter->trace_regs) {
+      for (int i = 0; i < ARM_PC_REG; i++) {
+        if (interpreter->regs[i] != interpreter->old_regs[i]) {
+          printf("r%d: 0x%08" PRIx64 " -> 0x%08" PRIx64 "\n", i,
+                 interpreter->old_regs[i], interpreter->regs[i]);
+        }
+      }
+    }
+  }
+}
+
+int ARMInterpreterCall(ARMInterpreter* interpreter, uint64_t fn) {
+  ARMInterpreterPrepareCall(interpreter, fn);
+  return ARMInterpreterRunLoop(interpreter);
+}
+
+int ARMInterpreterRun(ARMInterpreter* interpreter) {
+  return ARMInterpreterRunLoop(interpreter);
+}
+
+bool ARMGuestAddressExecutable(Loader* loader, uint64_t addr) {
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (region->segment == NULL) {
+      continue;
+    }
+    if (region->segment->type != PT(load) ||
+        (region->segment->flags & PF(x)) == 0) {
+      continue;
+    }
+    uint64_t base = (uint64_t)(uintptr_t)region->address;
+    uint64_t end = base + (uint64_t)region->length;
+    if (addr >= base && addr < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint64_t ARMLookupGuestFunction(Loader* loader, const char* name) {
+  uint64_t addr = LoaderLookupSymbol(loader, name);
+  if (addr == 0 || !ARMGuestAddressExecutable(loader, addr)) {
+    return 0;
+  }
+  return addr;
+}
+
+void ARMGuestCallVoidFunction(ARMInterpreter* cpu, uint64_t fn) {
+  if (cpu == NULL || fn == 0) {
+    return;
+  }
+  ARMInterpreterCall(cpu, fn);
+}
+
+void ARMGuestRunProgramFini(Loader* loader, ARMInterpreter* cpu) {
+  ARMGuestCallVoidFunction(cpu, ARMLookupGuestFunction(loader, "__davecc_run_fini"));
+}
+
+bool ARMGuestRunProgramShutdown(Loader* loader, ARMInterpreter* cpu) {
+  if (!LoaderLifecycleExecutableFiniAlreadyDone(loader->lifecycle)) {
+    uint64_t guest_fini = ARMLookupGuestFunction(loader, "__davecc_run_fini");
+    if (guest_fini != 0) {
+      ARMGuestCallVoidFunction(cpu, guest_fini);
+      LoaderLifecycleMarkExecutableFiniComplete(loader, loader->lifecycle);
+    }
+  }
+  return ARMGuestRunFiniArrays(loader, cpu);
+}
+
+static bool ARMLifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                 uint64_t function,
+                                 LoaderLifecyclePhase phase) {
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    ARMInterpreter* cpu;
+  } ARMLifecycleContext;
+  ARMLifecycleContext* ctx = context;
+  uint64_t call_addr = function;
+  if (ctx->loader->arch->ignore_vaddr) {
+    if (!LoaderLinkedAddressToRuntime(ctx->loader, image, function,
+                                      &call_addr)) {
+      LoaderError("Cannot translate function array entry 0x%llx\n",
+                  (unsigned long long)function);
+      return false;
+    }
+  }
+  if (!ARMGuestAddressExecutable(ctx->loader, call_addr)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)call_addr);
+    return false;
+  }
+  ARMGuestCallVoidFunction(ctx->cpu, call_addr);
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader, ARMInterpreter* cpu,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    ARMInterpreter* cpu;
+  } ARMLifecycleContext;
+  ARMLifecycleContext ctx = {loader, cpu};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 ARMLifecycleCallback, &ctx);
+}
+
+bool ARMGuestRunInitArrays(Loader* loader, ARMInterpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecyclePreinit) &&
+         RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleInit);
+}
+
+bool ARMGuestRunFiniArrays(Loader* loader, ARMInterpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleFini);
+}
+
+int ARMGuestRunProgram(ARMInterpreter* interpreter, Loader* loader,
+                       uint64_t entry_address, int argc, char** argv,
+                       bool trace_regs, bool trace_instructions) {
+  ARMInterpreterInit(interpreter, loader, entry_address, argc, argv, trace_regs,
+                     trace_instructions);
+  if (!ARMGuestRunInitArrays(loader, interpreter)) {
+    return 1;
+  }
+  ARMInterpreterPrepareMain(interpreter, entry_address, argc, argv,
+                            loader->is_static);
+  int result = ARMInterpreterRun(interpreter);
+  if (!ARMGuestRunProgramShutdown(loader, interpreter)) {
+    result = 1;
+  }
+  return result;
 }
 
 void ARMInterpreterCycle(ARMInterpreter* interpreter) {

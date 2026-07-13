@@ -176,6 +176,8 @@ Storage SyntaxParseStorage(Syntax* syntax);
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
 void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function);
+ASTNode* SyntaxNewCXXGlobalAtexitStatement(Symbol* sym, SourceLocation location);
+void SyntaxRegisterFunctionInitFiniAttributes(Syntax* syntax, Symbol* sym);
 
 void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers);
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers);

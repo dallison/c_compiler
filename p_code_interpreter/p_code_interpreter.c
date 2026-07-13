@@ -12,6 +12,8 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include "elf.h"
+#include "loader_lifecycle.h"
 #include "p_code_disassembler.h"
 
 #define DEST(inst) ((inst >> 16) & 0xff)
@@ -22,6 +24,8 @@ static void DumpStateAndExit(PCodeInterpreter* interpreter) {
   // TODO: dump registers.
   exit(1);
 }
+
+static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code);
 
 static bool disassemble = false;
 
@@ -149,7 +153,23 @@ static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code){
       break;
     }
     case P_CODE_ESC_HALT:
-      exit(0);
+    case P_CODE_ESC_EXIT:
+      exit((int)interpreter->iregs[0]);
+      break;
+    case P_CODE_ESC_EXIT_CLEAN:
+      if (interpreter->loader != NULL) {
+        LoaderLifecycleMarkExecutableFiniComplete(
+            interpreter->loader, interpreter->loader->lifecycle);
+      }
+      interpreter->exit_code = (int)interpreter->iregs[0];
+      interpreter->running = false;
+      break;
+    case P_CODE_ESC_ABORT:
+      abort();
+      break;
+    case P_CODE_ESC_PROGRAM_RETURN:
+      interpreter->exit_code = (int)interpreter->iregs[0];
+      interpreter->running = false;
       break;
 
     case P_CODE_ESC_DEBUG:
@@ -168,6 +188,8 @@ static void EscapeHandler(PCodeInterpreter* interpreter, int32_t code){
 
 void PCodeInterpreterInit(PCodeInterpreter* interpreter) {
   memset(interpreter, 0, sizeof(PCodeInterpreter));
+  interpreter->running = true;
+  interpreter->escape = EscapeHandler;
   
   // Create symbol resolver code.  This is invoked from the first
   // PLT entry with the following registers set:
@@ -193,67 +215,61 @@ void PCodeInterpreterInit(PCodeInterpreter* interpreter) {
       P_CODE_ESC_RESOLVE;
 }
 
-void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv) {
-  interpreter->stack = malloc(P_CODE_STACK_SIZE);
-  interpreter->iregs[PCODE_SP_REG] = (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
-  interpreter->escape = EscapeHandler;
-  interpreter->loader = loader;
-  
-  // Set up register banks.
+static void PCodeInterpreterPrepareCall(PCodeInterpreter* interpreter,
+                                        uint64_t fn) {
+  interpreter->iregs[PCODE_SP_REG] =
+      (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
+  interpreter->iregs[PCODE_SP_REG] -= 8;
+  WriteU64((void*)interpreter->iregs[PCODE_SP_REG], 0);
+  interpreter->iregs[PCODE_PC_REG] = (int64_t)fn;
+}
+
+typedef struct {
+  int64_t iregs[PCODE_NUM_INT_REGS];
+  float fregs[PCODE_NUM_FLOAT_REGS];
+  double dregs[PCODE_NUM_DOUBLE_REGS];
+  bool running;
+  int exit_code;
+} PCodeSavedState;
+
+static void PCodeInterpreterSaveState(PCodeInterpreter* interpreter,
+                                      PCodeSavedState* saved) {
+  memcpy(saved->iregs, interpreter->iregs, sizeof(saved->iregs));
+  memcpy(saved->fregs, interpreter->fregs, sizeof(saved->fregs));
+  memcpy(saved->dregs, interpreter->dregs, sizeof(saved->dregs));
+  saved->running = interpreter->running;
+  saved->exit_code = interpreter->exit_code;
+}
+
+static void PCodeInterpreterRestoreState(PCodeInterpreter* interpreter,
+                                         const PCodeSavedState* saved) {
+  memcpy(interpreter->iregs, saved->iregs, sizeof(interpreter->iregs));
+  memcpy(interpreter->fregs, saved->fregs, sizeof(interpreter->fregs));
+  memcpy(interpreter->dregs, saved->dregs, sizeof(interpreter->dregs));
+  interpreter->running = saved->running;
+  interpreter->exit_code = saved->exit_code;
+}
+
+static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
   int64_t* iregs = interpreter->iregs;
   float* fregs = interpreter->fregs;
   double* dregs = interpreter->dregs;
 
-  // Build a sequence of code to call main followed by esc #4. The ret
-  // instruction at the end of main will return to the esc #4 instruction.
-  int32_t* startup = interpreter->startup_code;
-  interpreter->iregs[PCODE_PC_REG] = (int64_t)startup;
-  startup[0] = 0xc0000000 | PCODE_OP(call) << 24;          // call
-  int64_t pcrel = entry_address - (int64_t)startup - 12;
-  startup[1] = (uint32_t)(pcrel & 0xffffffffLL);           // main low word.
-  startup[2] = (uint32_t)(pcrel >> 32);                    // main high word.
-  startup[3] = PCODE_OP(esc) << 24 | 4;                    // esc #4
+  int32_t* pc = (int32_t*)iregs[PCODE_PC_REG];
+  interpreter->current_symbol = LoaderFindSymbolAndCacheResult(interpreter->loader,
+                                                 interpreter->iregs[PCODE_PC_REG]);
 
-  // Invoke interpreter at startup code.  This will call main and then
-  // halt.
+  if (disassemble) {
+    DisassemblePCodeInstruction(interpreter, pc, stdout);
+    fflush(stdout);
+  }
 
-  // Push argv and argc onto stack.
-  iregs[PCODE_SP_REG] -= 8;
-  WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)argv);
-  iregs[PCODE_SP_REG] -= 4;
-  WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)argc);
+  uint32_t inst = *pc++;
+  iregs[PCODE_PC_REG] += 4;
 
-  for (;;) {
-    // Fetch instruction from current PC location.
-    // We keep a local copy of the program counter as a pointer for
-    // convenience.  This is only valid in this loop and the main program counter
-    // register is canonical.
-    int32_t* pc = (int32_t*)iregs[PCODE_PC_REG];
-    interpreter->current_symbol = LoaderFindSymbolAndCacheResult(interpreter->loader,
-                                                   interpreter->iregs[PCODE_PC_REG]);
-
-    if (disassemble) {
-      DisassemblePCodeInstruction(interpreter, pc, stdout);
-      fflush(stdout);
-    }
-    
-    // Fetch first word and advance PC to next word.  All instructions are at least
-    // 32 bits long.
-    uint32_t inst = *pc++;
-    iregs[PCODE_PC_REG] += 4;     // PC is moved to next instruction for most.
-
-    // The top 2 bits of the first instruction word tell us the size of the
-    // instruction as follows:
-    //
-    // Bits 31 and 30:
-    // 0x   - 32 bit, with 7 bit opcode.
-    // 10   - 64 bit, with 6 bit opcode.
-    // 11   - 96 bit, with 6 bit opcode.
-
-    bool is_32_bit = (inst & 0x80000000) == 0;
-    if (is_32_bit) {
-      // 7 bit opcode
-      switch ((inst >> 24) & 0x7f) {
+  bool is_32_bit = (inst & 0x80000000) == 0;
+  if (is_32_bit) {
+    switch ((inst >> 24) & 0x7f) {
         case PCODE_OP(add):
           iregs[DEST(inst)] = iregs[SRC1(inst)] + iregs[SRC2(inst)];
           break;
@@ -663,7 +679,150 @@ void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t
        }
       }
     }
+}
+
+void PCodeInterpreterCall(PCodeInterpreter* interpreter, uint64_t fn) {
+  if (interpreter == NULL || fn == 0) {
+    return;
   }
+  PCodeSavedState saved;
+  PCodeInterpreterSaveState(interpreter, &saved);
+  PCodeInterpreterPrepareCall(interpreter, fn);
+  while (interpreter->iregs[PCODE_PC_REG] != 0) {
+    PCodeInterpreterStep(interpreter);
+  }
+  PCodeInterpreterRestoreState(interpreter, &saved);
+}
+
+int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader,
+                        uint64_t entry_address, int argc, char** argv) {
+  if (interpreter->stack == NULL) {
+    interpreter->stack = malloc(P_CODE_STACK_SIZE);
+  }
+  interpreter->iregs[PCODE_SP_REG] =
+      (int64_t)(interpreter->stack + P_CODE_STACK_SIZE);
+  interpreter->escape = EscapeHandler;
+  interpreter->loader = loader;
+  interpreter->running = true;
+  interpreter->exit_code = 0;
+
+  int64_t* iregs = interpreter->iregs;
+
+  int32_t* startup = interpreter->startup_code;
+  interpreter->iregs[PCODE_PC_REG] = (int64_t)startup;
+  startup[0] = 0xc0000000 | PCODE_OP(call) << 24;
+  int64_t pcrel = entry_address - (int64_t)startup - 12;
+  startup[1] = (uint32_t)(pcrel & 0xffffffffLL);
+  startup[2] = (uint32_t)(pcrel >> 32);
+  startup[3] = PCODE_OP(esc) << 24 | P_CODE_ESC_PROGRAM_RETURN;
+
+  iregs[PCODE_SP_REG] -= 8;
+  WriteU64((void*)iregs[PCODE_SP_REG], (uint64_t)argv);
+  iregs[PCODE_SP_REG] -= 4;
+  WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)argc);
+
+  while (interpreter->running) {
+    if (interpreter->iregs[PCODE_PC_REG] == 0) {
+      interpreter->exit_code = (int)interpreter->iregs[0];
+      break;
+    }
+    PCodeInterpreterStep(interpreter);
+  }
+  return interpreter->exit_code;
+}
+
+bool PCodeGuestAddressExecutable(Loader* loader, uint64_t addr) {
+  if (loader == NULL || addr == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (region->segment == NULL) {
+      continue;
+    }
+    if (region->segment->type != PT(load) ||
+        (region->segment->flags & PF(x)) == 0) {
+      continue;
+    }
+    uint64_t start = (uint64_t)(uintptr_t)region->address;
+    uint64_t end = start + (uint64_t)region->length;
+    if (addr >= start && addr < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint64_t PCodeLookupGuestFunction(Loader* loader, const char* name) {
+  uint64_t addr = LoaderLookupSymbol(loader, name);
+  if (addr == 0 || !PCodeGuestAddressExecutable(loader, addr)) {
+    return 0;
+  }
+  return addr;
+}
+
+void PCodeGuestCallVoidFunction(PCodeInterpreter* interpreter, uint64_t fn) {
+  if (interpreter == NULL || fn == 0) {
+    return;
+  }
+  PCodeInterpreterCall(interpreter, fn);
+}
+
+static bool PCodeLifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                   uint64_t function,
+                                   LoaderLifecyclePhase phase) {
+  (void)image;
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    PCodeInterpreter* interpreter;
+  } PCodeLifecycleContext;
+  PCodeLifecycleContext* ctx = context;
+  if (!PCodeGuestAddressExecutable(ctx->loader, function)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)function);
+    return false;
+  }
+  PCodeGuestCallVoidFunction(ctx->interpreter, function);
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader, PCodeInterpreter* interpreter,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    PCodeInterpreter* interpreter;
+  } PCodeLifecycleContext;
+  PCodeLifecycleContext ctx = {loader, interpreter};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 PCodeLifecycleCallback, &ctx);
+}
+
+bool PCodeGuestRunInitArrays(Loader* loader, PCodeInterpreter* interpreter) {
+  return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecyclePreinit) &&
+         RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleInit);
+}
+
+bool PCodeGuestRunFiniArrays(Loader* loader, PCodeInterpreter* interpreter) {
+  return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleFini);
+}
+
+void PCodeGuestRunProgramFini(Loader* loader, PCodeInterpreter* interpreter) {
+  PCodeGuestCallVoidFunction(interpreter,
+                             PCodeLookupGuestFunction(loader,
+                                                      "__davecc_run_fini"));
+}
+
+bool PCodeGuestRunProgramShutdown(Loader* loader,
+                                  PCodeInterpreter* interpreter) {
+  if (!LoaderLifecycleExecutableFiniAlreadyDone(loader->lifecycle)) {
+    uint64_t guest_fini = PCodeLookupGuestFunction(loader, "__davecc_run_fini");
+    if (guest_fini != 0) {
+      PCodeGuestCallVoidFunction(interpreter, guest_fini);
+      LoaderLifecycleMarkExecutableFiniComplete(loader, loader->lifecycle);
+    }
+  }
+  return PCodeGuestRunFiniArrays(loader, interpreter);
 }
 
 void PCodeInterpreterDestruct(PCodeInterpreter* interpreter) {

@@ -1192,18 +1192,40 @@ void AARCH64InterpreterInit(AARCH64Interpreter* interpreter, Loader* loader,
   interpreter->trace_registers = trace_registers;
   interpreter->trace_instructions = trace_instructions;
   interpreter->stack = malloc(AARCH64_STACK_SIZE);
+  AARCH64InterpreterPrepareMain(interpreter, entry_address, argc, argv,
+                                loader->is_static);
+}
+
+void AARCH64InterpreterPrepareMain(AARCH64Interpreter* interpreter,
+                                   uint64_t entry_address, int argc,
+                                   char** argv, bool is_static_link) {
   interpreter->sp =
       (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
   interpreter->sp &= ~0xFULL;
   interpreter->pc = entry_address;
   interpreter->running = true;
   WriteX(interpreter, 0, (uint64_t)argc);
-  if (!loader->is_static) {
+  if (!is_static_link) {
     WriteX(interpreter, 1, entry_address);
   } else {
     WriteX(interpreter, 1, (uint64_t)(uintptr_t)argv);
   }
   WriteX(interpreter, AARCH64_LR_REG, 0);
+}
+
+static void AARCH64InterpreterPrepareCall(AARCH64Interpreter* interpreter,
+                                          uint64_t fn) {
+  interpreter->sp =
+      (uint64_t)(uintptr_t)(interpreter->stack + AARCH64_STACK_SIZE);
+  interpreter->sp &= ~0xFULL;
+  interpreter->pc = fn;
+  interpreter->running = true;
+  WriteX(interpreter, AARCH64_LR_REG, 0);
+}
+
+int AARCH64InterpreterCall(AARCH64Interpreter* interpreter, uint64_t fn) {
+  AARCH64InterpreterPrepareCall(interpreter, fn);
+  return AARCH64InterpreterRun(interpreter);
 }
 
 int AARCH64InterpreterRun(AARCH64Interpreter* interpreter) {

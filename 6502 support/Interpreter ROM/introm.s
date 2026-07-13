@@ -32,6 +32,7 @@
 .set int_poll 7
 .set int_ioctl 8
 .set int_abort 9
+.set int_exit_clean 22
 
 // File descriptors are at 0x300 and each consists of:
 // 0: device id (index into device table)
@@ -538,6 +539,8 @@ syscalls:
 
 .global __syscall_handler
 __syscall_handler:
+  CMP #int_exit_clean
+  BEQ __exit_clean
   CMP #max_syscall_number+1
   BCC syscall_ok
   LDA #0
@@ -562,6 +565,10 @@ syscall_ok:
 __exit:
   LDA #int_exit
   .byte 0xef      // Interpreter exit
+
+__exit_clean:
+  LDA #int_exit_clean
+  .byte 0xef      // Interpreter clean exit
 
 // write syscall
 // Entry:

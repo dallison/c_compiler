@@ -175,7 +175,7 @@ const void* DynamicLoaderFindDynamicSectionAddressEntry(
   return NULL;
 }
 
-const int64_t DynamicLoaderFindDynamicSectionOffsetEntry(
+int64_t DynamicLoaderFindDynamicSectionOffsetEntry(
                                                         const LoadedDynamicLibrary* lib,
                                                         ELFDynamicTag tag) {
   const DynamicSection* dynamic = lib->dynamic;
@@ -288,7 +288,9 @@ static void LoadNeededLibraries(DynamicLibraryRegistry* registry,
     if (section->entries[i].tag == DT(needed)) {
       const char* libname = strtab + section->entries[i].un.val;
       String pathname = {0};
-      bool found = FindDynamicLibraryFile(NULL, &all_search_paths, libname, &pathname);
+      bool found = FindDynamicLibraryFile(
+          lib->loader != NULL ? &lib->loader->library_search_path : search_path,
+          &all_search_paths, libname, &pathname);
       if (found) {
         LoadedDynamicLibrary* dep = DynamicLoaderFindLibrary(registry, &pathname);
         if (dep == NULL) {
@@ -696,7 +698,17 @@ static bool FindDynamicSection(LoadedDynamicLibrary* lib,
                                            lib->program_headers[i].offset);
         } else {
           if (lib->header->type == ET(exec)) {
-            lib->dynamic = (DynamicSection*)(lib->program_headers[i].vaddr);
+            uint64_t dynamic_address = lib->program_headers[i].vaddr;
+            if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+              if (!LoaderLinkedAddressToRuntime(lib->loader, lib,
+                                                dynamic_address,
+                                                &dynamic_address)) {
+                LoaderError("Cannot translate dynamic section in %s\n",
+                            lib->filename.value);
+                return false;
+              }
+            }
+            lib->dynamic = (DynamicSection*)dynamic_address;
           } else {
             lib->dynamic = (DynamicSection*)((char*)lib->load_address +
                                              lib->program_headers[i].offset);

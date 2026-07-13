@@ -41,6 +41,10 @@ typedef struct AARCH64Interpreter {
 void AARCH64InterpreterInit(AARCH64Interpreter* interpreter, Loader* loader,
                             uint64_t entry_address, int argc, char** argv,
                             bool trace_registers, bool trace_instructions);
+void AARCH64InterpreterPrepareMain(AARCH64Interpreter* interpreter,
+                                   uint64_t entry_address, int argc,
+                                   char** argv, bool is_static_link);
+int AARCH64InterpreterCall(AARCH64Interpreter* interpreter, uint64_t fn);
 int AARCH64InterpreterRun(AARCH64Interpreter* interpreter);
 void AARCH64InterpreterDestruct(AARCH64Interpreter* interpreter);
 void AARCH64InterpreterDumpRegisters(AARCH64Interpreter* interpreter);

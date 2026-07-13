@@ -7,7 +7,10 @@
 #include "aarch64_interpreter.h"
 #include "aarch64_native.h"
 #include "aarch64_syscalls.h"
+#include "elf.h"
+#include "loader_lifecycle.h"
 #include "loader_arch_aarch64.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,6 +66,120 @@ bool AARCH64RuntimeInit(AARCH64Runtime* runtime, const char* filename,
   return true;
 }
 
+bool AARCH64GuestAddressExecutable(Loader* loader, uint64_t addr) {
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (region->segment == NULL) {
+      continue;
+    }
+    if (region->segment->type != PT(load) ||
+        (region->segment->flags & PF(x)) == 0) {
+      continue;
+    }
+    uint64_t start = (uint64_t)(uintptr_t)region->address;
+    uint64_t end = start + (uint64_t)region->length;
+    if (addr >= start && addr < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool GuestExecutableOrZero(Loader* loader, uint64_t addr) {
+  return addr == 0 || AARCH64GuestAddressExecutable(loader, addr);
+}
+
+uint64_t AARCH64LookupGuestFunction(Loader* loader, const char* name) {
+  uint64_t addr = LoaderLookupSymbol(loader, name);
+  if (addr == 0 || !AARCH64GuestAddressExecutable(loader, addr)) {
+    return 0;
+  }
+  return addr;
+}
+
+void AARCH64GuestCallVoidFunction(AARCH64Interpreter* cpu, uint64_t fn) {
+  if (cpu == NULL || fn == 0) {
+    return;
+  }
+  AARCH64InterpreterCall(cpu, fn);
+}
+
+void AARCH64GuestRunProgramFini(Loader* loader, AARCH64Interpreter* cpu) {
+  AARCH64GuestCallVoidFunction(cpu,
+                               AARCH64LookupGuestFunction(loader,
+                                                          "__davecc_run_fini"));
+}
+
+bool AARCH64GuestRunProgramShutdown(Loader* loader, AARCH64Interpreter* cpu) {
+  if (!LoaderLifecycleExecutableFiniAlreadyDone(loader->lifecycle)) {
+    uint64_t guest_fini = AARCH64LookupGuestFunction(loader, "__davecc_run_fini");
+    if (guest_fini != 0) {
+      if (cpu != NULL) {
+        AARCH64GuestCallVoidFunction(cpu, guest_fini);
+      } else {
+        AARCH64NativeCallVoidFunction(loader, guest_fini);
+      }
+      LoaderLifecycleMarkExecutableFiniComplete(loader, loader->lifecycle);
+    }
+  }
+  return AARCH64GuestRunFiniArrays(loader, cpu);
+}
+
+static bool AARCH64LifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                     uint64_t function,
+                                     LoaderLifecyclePhase phase) {
+  (void)image;
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    AARCH64Interpreter* cpu;
+  } AARCH64LifecycleContext;
+  AARCH64LifecycleContext* ctx = context;
+  if (!AARCH64GuestAddressExecutable(ctx->loader, function)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)function);
+    return false;
+  }
+  if (ctx->cpu != NULL) {
+    AARCH64GuestCallVoidFunction(ctx->cpu, function);
+  } else {
+    AARCH64NativeCallVoidFunction(ctx->loader, function);
+  }
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader, AARCH64Interpreter* cpu,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    AARCH64Interpreter* cpu;
+  } AARCH64LifecycleContext;
+  AARCH64LifecycleContext ctx = {loader, cpu};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 AARCH64LifecycleCallback, &ctx);
+}
+
+bool AARCH64GuestRunInitArrays(Loader* loader, AARCH64Interpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecyclePreinit) &&
+         RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleInit);
+}
+
+bool AARCH64GuestRunFiniArrays(Loader* loader, AARCH64Interpreter* cpu) {
+  return RunGuestLifecyclePhase(loader, cpu, kLoaderLifecycleFini);
+}
+
+int AARCH64NativeCallVoidFunction(Loader* loader, uint64_t fn) {
+  if (fn == 0 || !GuestExecutableOrZero(loader, fn)) {
+    return 0;
+  }
+#if defined(__aarch64__)
+  typedef void (*GuestVoidFn)(void);
+  GuestVoidFn guest_fn = (GuestVoidFn)(uintptr_t)fn;
+  guest_fn();
+#endif
+  return 0;
+}
+
 static int RunInterpreter(AARCH64Runtime* runtime, int program_argc,
                           char** program_argv) {
   AARCH64Interpreter interpreter;
@@ -70,7 +187,17 @@ static int RunInterpreter(AARCH64Runtime* runtime, int program_argc,
                          runtime->loader.main_address, program_argc,
                          program_argv, runtime->trace_registers,
                          runtime->trace_instructions);
+  if (!AARCH64GuestRunInitArrays(&runtime->loader, &interpreter)) {
+    AARCH64InterpreterDestruct(&interpreter);
+    return 1;
+  }
+  AARCH64InterpreterPrepareMain(
+      &interpreter, runtime->loader.main_address, program_argc, program_argv,
+      runtime->loader.is_static);
   int result = AARCH64InterpreterRun(&interpreter);
+  if (!AARCH64GuestRunProgramShutdown(&runtime->loader, &interpreter)) {
+    result = 1;
+  }
   AARCH64InterpreterDestruct(&interpreter);
   return result;
 }

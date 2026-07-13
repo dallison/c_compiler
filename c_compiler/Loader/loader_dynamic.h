@@ -133,6 +133,9 @@ bool DynamicLoaderFindSymbol(DynamicLibraryRegistry* registry,
 const void* DynamicLoaderFindDynamicSectionAddressEntry(const LoadedDynamicLibrary* lib,
                                                         ELFDynamicTag tag);
 
+int64_t DynamicLoaderFindDynamicSectionOffsetEntry(const LoadedDynamicLibrary* lib,
+                                                   ELFDynamicTag tag);
+
 uint32_t DynamicLoaderGNUHash(const char* name);
 uint64_t DynamicLoaderBloomBits64(uint32_t hash);
 

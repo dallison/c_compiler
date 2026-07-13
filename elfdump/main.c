@@ -168,6 +168,15 @@ static void PrintSections(ELFReaderFile* elf) {
       case SHT(dynsym):       // Dynamic symbol table.
           type = "dynsym";
           break;
+      case SHT(init_array):
+          type = "init_array";
+          break;
+      case SHT(fini_array):
+          type = "fini_array";
+          break;
+      case SHT(preinit_array):
+          type = "preinit_array";
+          break;
       case SHT(gnu_hash):     // GNU hash table.
          type = "gnu_hash";
          break;

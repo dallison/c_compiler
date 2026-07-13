@@ -636,6 +636,24 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   WriteDynamicSectionEntryWithValue(buffer, DT(pltrel), DT(rela));
   WriteDynamicSectionEntryWithValue(buffer, DT(jmprel), 0);
 
+  SectionGroup* preinit = LinkerFindSectionGroup(linker, ".preinit_array");
+  if (preinit != NULL && LinkerSectionGroupSize(preinit) > 0) {
+    WriteDynamicSectionEntryWithValue(buffer, DT(preinit_array), 0);
+    WriteDynamicSectionEntryWithValue(buffer, DT(preinit_arraysz), 0);
+  }
+
+  SectionGroup* init_array = LinkerFindSectionGroup(linker, ".init_array");
+  if (init_array != NULL && LinkerSectionGroupSize(init_array) > 0) {
+    WriteDynamicSectionEntryWithValue(buffer, DT(init_array), 0);
+    WriteDynamicSectionEntryWithValue(buffer, DT(init_arraysz), 0);
+  }
+
+  SectionGroup* fini_array = LinkerFindSectionGroup(linker, ".fini_array");
+  if (fini_array != NULL && LinkerSectionGroupSize(fini_array) > 0) {
+    WriteDynamicSectionEntryWithValue(buffer, DT(fini_array), 0);
+    WriteDynamicSectionEntryWithValue(buffer, DT(fini_arraysz), 0);
+  }
+
   // TODO: STATIC_TLS flag
   // TODO: text relocations flag.
   
@@ -644,9 +662,9 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
 }
 
 // Given a dynamic section entry tag, replace its value in the buffer
-// with the new value.
-static void FixupDynamicSectionEntryValue(Buffer* buffer,
-                                   ELF_Xword tag, ELF_Xword value) {
+// with the new value.  Returns false if the tag is not present.
+static bool FixupDynamicSectionEntryValue(Buffer* buffer,
+                                          ELF_Xword tag, ELF_Xword value) {
   size_t index = 0;
   while (index < buffer->length) {
     ELFDynamicSectionEntry* entry =
@@ -656,11 +674,22 @@ static void FixupDynamicSectionEntryValue(Buffer* buffer,
     }
     if (entry->tag == tag) {
       entry->un.val = value;
-      return;
+      return true;
     }
     index += sizeof(*entry);
   }
-  assert(false);
+  return false;
+}
+
+static void FixupArrayDynamicTags(ELFWriterFile* elf, Buffer* buffer,
+                                  const char* section_name,
+                                  ELF_Xword tag_addr, ELF_Xword tag_size) {
+  ELFWriterSection* section = ELFWriterFindSection(elf, section_name);
+  if (section == NULL || section->header.size == 0) {
+    return;
+  }
+  FixupDynamicSectionEntryValue(buffer, tag_addr, section->header.addr);
+  FixupDynamicSectionEntryValue(buffer, tag_size, section->header.size);
 }
 
 // Now that we have the offsets for all the sections we can set the values
@@ -717,6 +746,13 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   // Size of .rela.plt section.
   FixupDynamicSectionEntryValue(buffer, DT(pltrelsz),
                                 jmp_rel->header.size);
+
+  FixupArrayDynamicTags(elf, buffer, ".preinit_array",
+                        DT(preinit_array), DT(preinit_arraysz));
+  FixupArrayDynamicTags(elf, buffer, ".init_array",
+                        DT(init_array), DT(init_arraysz));
+  FixupArrayDynamicTags(elf, buffer, ".fini_array",
+                        DT(fini_array), DT(fini_arraysz));
 }
 
 static SectionGroup* AddDynamicSection(Linker* linker) {

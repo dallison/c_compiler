@@ -108,6 +108,21 @@ typedef struct {
   Symbol* thunk;
 } CXXTlsBlockDtorThunk;
 
+// A function pointer recorded for ELF .init_array / .fini_array emission.
+// Lower priority values run earlier (GNU constructor/destructor convention).
+typedef struct CXXInitFiniArrayEntry {
+  Symbol* function;
+  int priority;
+} CXXInitFiniArrayEntry;
+
+void CXXInitFiniArrayEntryDelete(CXXInitFiniArrayEntry* entry);
+Vector* CXXInitArrayFunctionsVector(void);
+Vector* CXXFiniArrayFunctionsVector(void);
+
+enum {
+  kCXXInitFiniPriorityDefault = 65535,
+};
+
 // A literal has an id.  The value is in a derived class.
 typedef enum {
   kLiteralString,
@@ -333,8 +348,8 @@ typedef struct {
   // Elements are Symbol* owned by the normal symbol tables.
   Vector cxx_global_constructors;
   Vector cxx_global_destructors;
-  Vector cxx_global_constructor_calls;  // ASTNode*, owned by function bodies.
-  Vector cxx_global_destructor_calls;  // ASTNode*, owned by declaration ASTs.
+  Vector cxx_global_constructor_calls;  // ASTNode*, owned by init function body.
+  Vector cxx_global_constructor_objects;  // Symbol* parallel to constructor_calls.
   // Per-thread C++ thread_local construction/destruction (not process-global).
   Vector cxx_thread_constructor_calls;  // ASTNode*, owned by synthetic init body.
   Vector cxx_thread_destructor_calls;   // ASTNode*, owned by synthetic fini body.

@@ -14,6 +14,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include "elf.h"
+#include "loader_lifecycle.h"
 #include "risc_v_disassembler.h"
 
 void RISCVInterpreterDumpRegisters(RISCVInterpreter* interpreter) {
@@ -111,7 +113,22 @@ const bool kShowRegChanges = false;
 static void HandleEcall(RISCVInterpreter* interpreter) {
   switch (interpreter->iregs[REG(t6)]) {
     case RISC_V_ECALL_HALT:
-      exit(0);
+      interpreter->exit_code = (int)interpreter->iregs[REG(a0)];
+      interpreter->pc = 0;
+      break;
+    case RISC_V_ECALL_EXIT:
+      exit((int)interpreter->iregs[REG(a1)]);
+      break;
+    case RISC_V_ECALL_EXIT_CLEAN:
+      if (interpreter->loader != NULL) {
+        LoaderLifecycleMarkExecutableFiniComplete(
+            interpreter->loader, interpreter->loader->lifecycle);
+      }
+      interpreter->exit_code = (int)interpreter->iregs[REG(a1)];
+      interpreter->pc = 0;
+      break;
+    case RISC_V_ECALL_NESTED_RETURN:
+      interpreter->pc = 0;
       break;
     case RISC_V_ECALL_OPEN: {
       const char* filename = (const char*)interpreter->iregs[REG(a1)];
@@ -228,6 +245,11 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
       (RISC_V_ECALL_RESOLVE << 20);                          // addi x31, x0, 6
   interpreter->symbol_resolver_code[1] = RV_OPCODE(system);  // ecall
 
+  interpreter->call_return_code[0] =
+      RV_OPCODE(op_imm) | (31 << 7) |
+      (RISC_V_ECALL_NESTED_RETURN << 20);
+  interpreter->call_return_code[1] = RV_OPCODE(system);
+
   interpreter->loader = loader;
   interpreter->stack = malloc(RISC_V_STACK_SIZE);
   interpreter->iregs[RV_SP_REG] =
@@ -248,6 +270,8 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
   startup[2] = RV_OPCODE(system);                          // ecall
   interpreter->iregs[1] = entry_address;
   interpreter->pc = (int64_t)startup;
+  interpreter->running = true;
+  interpreter->exit_code = 0;
 
   // Move argc and argv into regs a0 and a1.
   iregs[RV_INT_ARG_START] = argc;
@@ -261,7 +285,7 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
 void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
   int64_t* iregs = interpreter->iregs;
   double* fregs = interpreter->fregs;
-  for (; interpreter->pc != 0; interpreter->pc += 4) {
+  for (; interpreter->pc != 0;) {
     if (interpreter->num_steps > 0) {
       --interpreter->num_steps;
     }
@@ -935,7 +959,153 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
       interpreter->pc += 4;
       break;
     }
+    if (interpreter->pc == 0) {
+      break;
+    }
+    interpreter->pc += 4;
   }
+}
+
+void RISCVInterpreterPrepareCall(RISCVInterpreter* interpreter, uint64_t fn) {
+  interpreter->iregs[RISC_V_REG_ra] = (int64_t)interpreter->call_return_code;
+  interpreter->pc = (int64_t)fn;
+  interpreter->running = true;
+}
+
+typedef struct {
+  int64_t pc;
+  int64_t iregs[RV_NUM_INT_REGS];
+  double fregs[RV_NUM_FLOAT_REGS];
+  bool running;
+  int exit_code;
+} RISCVSavedState;
+
+static void RISCVInterpreterSaveState(RISCVInterpreter* interpreter,
+                                      RISCVSavedState* saved) {
+  saved->pc = interpreter->pc;
+  memcpy(saved->iregs, interpreter->iregs, sizeof(saved->iregs));
+  memcpy(saved->fregs, interpreter->fregs, sizeof(saved->fregs));
+  saved->running = interpreter->running;
+  saved->exit_code = interpreter->exit_code;
+}
+
+static void RISCVInterpreterRestoreState(RISCVInterpreter* interpreter,
+                                         const RISCVSavedState* saved) {
+  interpreter->pc = saved->pc;
+  memcpy(interpreter->iregs, saved->iregs, sizeof(interpreter->iregs));
+  memcpy(interpreter->fregs, saved->fregs, sizeof(interpreter->fregs));
+  interpreter->running = saved->running;
+  interpreter->exit_code = saved->exit_code;
+}
+
+void RISCVInterpreterCall(RISCVInterpreter* interpreter, uint64_t fn) {
+  if (interpreter == NULL || fn == 0) {
+    return;
+  }
+  RISCVSavedState saved;
+  RISCVInterpreterSaveState(interpreter, &saved);
+  RISCVInterpreterPrepareCall(interpreter, fn);
+  RISCVInterpreterCycle(interpreter);
+  RISCVInterpreterRestoreState(interpreter, &saved);
+}
+
+int RISCVInterpreterRun(RISCVInterpreter* interpreter) {
+  RISCVInterpreterCycle(interpreter);
+  return interpreter->exit_code;
+}
+
+bool RISCVGuestAddressExecutable(Loader* loader, uint64_t addr) {
+  if (loader == NULL || addr == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < loader->regions.length; i++) {
+    Region* region = loader->regions.value.p[i];
+    if (region->segment == NULL) {
+      continue;
+    }
+    if (region->segment->type != PT(load) ||
+        (region->segment->flags & PF(x)) == 0) {
+      continue;
+    }
+    uint64_t start = (uint64_t)(uintptr_t)region->address;
+    uint64_t end = start + (uint64_t)region->length;
+    if (addr >= start && addr < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint64_t RISCVLookupGuestFunction(Loader* loader, const char* name) {
+  uint64_t addr = LoaderLookupSymbol(loader, name);
+  if (addr == 0 || !RISCVGuestAddressExecutable(loader, addr)) {
+    return 0;
+  }
+  return addr;
+}
+
+void RISCVGuestCallVoidFunction(RISCVInterpreter* interpreter, uint64_t fn) {
+  if (interpreter == NULL || fn == 0) {
+    return;
+  }
+  RISCVInterpreterCall(interpreter, fn);
+}
+
+static bool RISCVLifecycleCallback(void* context, LoadedDynamicLibrary* image,
+                                   uint64_t function,
+                                   LoaderLifecyclePhase phase) {
+  (void)image;
+  (void)phase;
+  typedef struct {
+    Loader* loader;
+    RISCVInterpreter* interpreter;
+  } RISCVLifecycleContext;
+  RISCVLifecycleContext* ctx = context;
+  if (!RISCVGuestAddressExecutable(ctx->loader, function)) {
+    LoaderError("Function array entry 0x%llx is not executable\n",
+                (unsigned long long)function);
+    return false;
+  }
+  RISCVGuestCallVoidFunction(ctx->interpreter, function);
+  return true;
+}
+
+static bool RunGuestLifecyclePhase(Loader* loader, RISCVInterpreter* interpreter,
+                                   LoaderLifecyclePhase phase) {
+  typedef struct {
+    Loader* loader;
+    RISCVInterpreter* interpreter;
+  } RISCVLifecycleContext;
+  RISCVLifecycleContext ctx = {loader, interpreter};
+  return LoaderLifecycleRunPhase(loader, loader->lifecycle, phase,
+                                 RISCVLifecycleCallback, &ctx);
+}
+
+bool RISCVGuestRunInitArrays(Loader* loader, RISCVInterpreter* interpreter) {
+  return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecyclePreinit) &&
+         RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleInit);
+}
+
+bool RISCVGuestRunFiniArrays(Loader* loader, RISCVInterpreter* interpreter) {
+  return RunGuestLifecyclePhase(loader, interpreter, kLoaderLifecycleFini);
+}
+
+void RISCVGuestRunProgramFini(Loader* loader, RISCVInterpreter* interpreter) {
+  RISCVGuestCallVoidFunction(interpreter,
+                             RISCVLookupGuestFunction(loader,
+                                                      "__davecc_run_fini"));
+}
+
+bool RISCVGuestRunProgramShutdown(Loader* loader, RISCVInterpreter* interpreter) {
+  if (!LoaderLifecycleExecutableFiniAlreadyDone(loader->lifecycle)) {
+    uint64_t guest_fini =
+        RISCVLookupGuestFunction(loader, "__davecc_run_fini");
+    if (guest_fini != 0) {
+      RISCVGuestCallVoidFunction(interpreter, guest_fini);
+      LoaderLifecycleMarkExecutableFiniComplete(loader, loader->lifecycle);
+    }
+  }
+  return RISCVGuestRunFiniArrays(loader, interpreter);
 }
 
 void RISCVInterpreterDestruct(RISCVInterpreter* interpreter) {

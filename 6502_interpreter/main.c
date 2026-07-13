@@ -103,6 +103,7 @@ int main(int argc, char *argv[]) {
   }
   
  
+  int result = 0;
   if (disassemble_only) {
     W65C02InterpreterDisassemble(&interpreter, &loader);
   } else {
@@ -113,7 +114,8 @@ int main(int argc, char *argv[]) {
     // the in-array 6502, so use the original ELF entry directly.
     uint64_t entry = loader.elf_file != NULL ? loader.elf_file->header->entry
                                              : loader.main_address;
-    W65C02InterpreterRun(&interpreter, &loader, entry, argc, argv, program_arg_offset);
+    result = W65C02InterpreterRun(&interpreter, &loader, entry, argc, argv,
+                                  program_arg_offset);
   }
   
   if (extract) {
@@ -124,5 +126,6 @@ int main(int argc, char *argv[]) {
   }
   W65C02InterpreterDestruct(&interpreter);
   LoaderDestruct(&loader);
+  return result;
 }
 

@@ -23,8 +23,12 @@
 #define P_CODE_ESC_HALT 4           // Halt interpreter.
 #define P_CODE_ESC_DEBUG 5         // Debug escape.
 #define P_CODE_ESC_RESOLVE 6      // Resolve symbol.
+#define P_CODE_ESC_ABORT 11
+#define P_CODE_ESC_EXIT 12
+#define P_CODE_ESC_EXIT_CLEAN 22
 // Start of user escape codes.
 #define P_CODE_ESC_USER_START  256
+#define P_CODE_ESC_PROGRAM_RETURN P_CODE_ESC_USER_START
 
 typedef struct PCodeInterpreter {
   Loader* loader;
@@ -38,12 +42,24 @@ typedef struct PCodeInterpreter {
   char* stack;
   void (*escape)(struct PCodeInterpreter*, int32_t value);
   SymbolScope* current_symbol;
+  bool running;
+  int exit_code;
 } PCodeInterpreter;
 
 void PCodeInterpreterInit(PCodeInterpreter* interpreter);
 void PCodeInterpreterSetDisassemble(bool enabled);
 
-void PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv);
+void PCodeInterpreterCall(PCodeInterpreter* interpreter, uint64_t fn);
 void PCodeInterpreterDestruct(PCodeInterpreter* interpreter);
+
+bool PCodeGuestAddressExecutable(Loader* loader, uint64_t addr);
+uint64_t PCodeLookupGuestFunction(Loader* loader, const char* name);
+void PCodeGuestCallVoidFunction(PCodeInterpreter* interpreter, uint64_t fn);
+bool PCodeGuestRunInitArrays(Loader* loader, PCodeInterpreter* interpreter);
+bool PCodeGuestRunFiniArrays(Loader* loader, PCodeInterpreter* interpreter);
+void PCodeGuestRunProgramFini(Loader* loader, PCodeInterpreter* interpreter);
+bool PCodeGuestRunProgramShutdown(Loader* loader,
+                                  PCodeInterpreter* interpreter);
 
 #endif /* p_code_interpreter_h */

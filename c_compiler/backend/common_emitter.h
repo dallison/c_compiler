@@ -25,5 +25,6 @@ void EmitTlsDataStart(FILE* fp);
 void EmitTlsBSSStart(FILE* fp);
 void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitTlsVariable(InitializedStaticVariable* var, FILE* fp);
+void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
 
 #endif /* common_emitter_h */
