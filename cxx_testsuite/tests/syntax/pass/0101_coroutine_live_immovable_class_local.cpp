@@ -1,5 +1,4 @@
 // RUN: -std=c++20
-// EXPECT: coroutine local live across suspension requires a copy or move constructor
 
 struct SuspendNever {
   bool await_ready(void) {
@@ -27,9 +26,15 @@ struct Awaiter {
 
 struct Box {
   int value;
+  Box();
   Box(int input);
   Box(const Box& other) = delete;
+  Box(Box&& other) = delete;
 };
+
+Box::Box() {
+  value = 11;
+}
 
 Box::Box(int input) {
   value = input;
@@ -63,9 +68,17 @@ struct Promise {
   }
 };
 
-Task rejected_live_class_local(void) {
+Task accepted_live_immovable_class_local(void) {
   Box box(7);
   Awaiter awaiter = {3};
   int value = co_await awaiter;
   co_return box.value + value;
 }
+
+Task accepted_default_immovable_class_local(void) {
+  Box box;
+  Awaiter awaiter = {3};
+  int value = co_await awaiter;
+  co_return box.value + value;
+}
+

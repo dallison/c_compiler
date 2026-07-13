@@ -120,6 +120,9 @@ int persisted_local_dtor_count;
 int persisted_move_local_ctor_count;
 int persisted_move_local_move_count;
 int persisted_move_local_dtor_count;
+int persisted_immovable_local_ctor_count;
+int persisted_immovable_local_dtor_count;
+int persisted_local_dtor_order;
 int persisted_param_ctor_count;
 int persisted_param_copy_count;
 int persisted_param_move_count;
@@ -694,6 +697,41 @@ PersistedMoveOnlyLocalBox::PersistedMoveOnlyLocalBox(
 
 PersistedMoveOnlyLocalBox::~PersistedMoveOnlyLocalBox() {
   persisted_move_local_dtor_count = persisted_move_local_dtor_count + 1;
+}
+
+struct PersistedImmovableLocalBox {
+  int value;
+  PersistedImmovableLocalBox(int input);
+  PersistedImmovableLocalBox(const PersistedImmovableLocalBox& other) = delete;
+  PersistedImmovableLocalBox(PersistedImmovableLocalBox&& other) = delete;
+  ~PersistedImmovableLocalBox();
+};
+
+PersistedImmovableLocalBox::PersistedImmovableLocalBox(int input) {
+  persisted_immovable_local_ctor_count =
+      persisted_immovable_local_ctor_count + 1;
+  value = input;
+}
+
+PersistedImmovableLocalBox::~PersistedImmovableLocalBox() {
+  persisted_immovable_local_dtor_count =
+      persisted_immovable_local_dtor_count + 1;
+}
+
+struct PersistedOrderLocal {
+  int id;
+  PersistedOrderLocal(int input);
+  PersistedOrderLocal(const PersistedOrderLocal& other) = delete;
+  PersistedOrderLocal(PersistedOrderLocal&& other) = delete;
+  ~PersistedOrderLocal();
+};
+
+PersistedOrderLocal::PersistedOrderLocal(int input) {
+  id = input;
+}
+
+PersistedOrderLocal::~PersistedOrderLocal() {
+  persisted_local_dtor_order = persisted_local_dtor_order * 10 + id;
 }
 
 struct Task {
@@ -1955,6 +1993,23 @@ Task coroutine_persist_move_only_class_local_suspend(void) {
   co_return kept.value + value;
 }
 
+Task coroutine_persist_immovable_class_local_suspend(void) {
+  PersistedImmovableLocalBox kept(80);
+  SuspendValue awaiter = {9};
+  int value = co_await awaiter;
+  co_return kept.value + value;
+}
+
+Task coroutine_nested_persisted_local_destruction_order(void) {
+  PersistedOrderLocal outer(1);
+  {
+    PersistedOrderLocal inner(2);
+    SuspendValue awaiter = {4};
+    int value = co_await awaiter;
+    co_return outer.id + inner.id + value;
+  }
+}
+
 Task coroutine_persist_parameter_suspend(int input) {
   SuspendValue awaiter = {6};
   int value = co_await awaiter;
@@ -2847,19 +2902,21 @@ int main(void) {
   if (persist_class_local_started.value != 0 ||
       persist_class_local_started.handle == 0 ||
       persisted_local_ctor_count != 2 ||
-      persisted_local_copy_count != 2 ||
+      persisted_local_copy_count != 0 ||
       frame_state(persist_class_local_started.handle) != 1) {
     return 60;
   }
+  int persisted_local_dtor_before_completion = persisted_local_dtor_count;
   resume_coroutine(persist_class_local_started.handle);
-  if (last_resume_value != 246 ||
+  if (last_resume_value != 46 ||
+      persisted_local_dtor_count != persisted_local_dtor_before_completion + 1 ||
       frame_state(persist_class_local_started.handle) != 0 ||
       !frame_done(persist_class_local_started.handle)) {
     return 61;
   }
   int persisted_local_dtor_before_destroy = persisted_local_dtor_count;
   destroy_coroutine(persist_class_local_started.handle);
-  if (persisted_local_dtor_count != persisted_local_dtor_before_destroy + 1) {
+  if (persisted_local_dtor_count != persisted_local_dtor_before_destroy) {
     return 62;
   }
 
@@ -2868,12 +2925,16 @@ int main(void) {
   if (persist_move_local_started.value != 0 ||
       persist_move_local_started.handle == 0 ||
       persisted_move_local_ctor_count != 1 ||
-      persisted_move_local_move_count != 1 ||
+      persisted_move_local_move_count != 0 ||
       frame_state(persist_move_local_started.handle) != 1) {
     return 190;
   }
+  int persisted_move_local_dtor_before_completion =
+      persisted_move_local_dtor_count;
   resume_coroutine(persist_move_local_started.handle);
-  if (last_resume_value != 378 ||
+  if (last_resume_value != 78 ||
+      persisted_move_local_dtor_count !=
+          persisted_move_local_dtor_before_completion + 1 ||
       frame_state(persist_move_local_started.handle) != 0 ||
       !frame_done(persist_move_local_started.handle)) {
     return 191;
@@ -2882,8 +2943,82 @@ int main(void) {
       persisted_move_local_dtor_count;
   destroy_coroutine(persist_move_local_started.handle);
   if (persisted_move_local_dtor_count !=
-      persisted_move_local_dtor_before_destroy + 1) {
+      persisted_move_local_dtor_before_destroy) {
     return 192;
+  }
+
+  Task persist_immovable_local_started =
+      coroutine_persist_immovable_class_local_suspend();
+  if (persist_immovable_local_started.value != 0 ||
+      persist_immovable_local_started.handle == 0 ||
+      persisted_immovable_local_ctor_count != 1 ||
+      frame_state(persist_immovable_local_started.handle) != 1) {
+    return 254;
+  }
+  int persisted_immovable_dtor_before_completion =
+      persisted_immovable_local_dtor_count;
+  resume_coroutine(persist_immovable_local_started.handle);
+  if (last_resume_value != 89 ||
+      persisted_immovable_local_dtor_count !=
+          persisted_immovable_dtor_before_completion + 1 ||
+      frame_state(persist_immovable_local_started.handle) != 0 ||
+      !frame_done(persist_immovable_local_started.handle)) {
+    return 254;
+  }
+  int persisted_immovable_dtor_before_destroy =
+      persisted_immovable_local_dtor_count;
+  destroy_coroutine(persist_immovable_local_started.handle);
+  if (persisted_immovable_local_dtor_count !=
+      persisted_immovable_dtor_before_destroy) {
+    return 254;
+  }
+
+  Task destroy_immovable_local_while_suspended =
+      coroutine_persist_immovable_class_local_suspend();
+  if (destroy_immovable_local_while_suspended.value != 0 ||
+      destroy_immovable_local_while_suspended.handle == 0 ||
+      persisted_immovable_local_ctor_count != 2 ||
+      frame_state(destroy_immovable_local_while_suspended.handle) != 1) {
+    return 254;
+  }
+  persisted_immovable_dtor_before_destroy =
+      persisted_immovable_local_dtor_count;
+  destroy_coroutine(destroy_immovable_local_while_suspended.handle);
+  if (persisted_immovable_local_dtor_count !=
+      persisted_immovable_dtor_before_destroy + 1) {
+    return 254;
+  }
+
+  persisted_local_dtor_order = 0;
+  Task nested_local_order_started =
+      coroutine_nested_persisted_local_destruction_order();
+  if (nested_local_order_started.value != 0 ||
+      nested_local_order_started.handle == 0 ||
+      frame_state(nested_local_order_started.handle) != 1) {
+    return 254;
+  }
+  resume_coroutine(nested_local_order_started.handle);
+  if (last_resume_value != 7 || persisted_local_dtor_order != 21 ||
+      frame_state(nested_local_order_started.handle) != 0 ||
+      !frame_done(nested_local_order_started.handle)) {
+    return 254;
+  }
+  destroy_coroutine(nested_local_order_started.handle);
+  if (persisted_local_dtor_order != 21) {
+    return 254;
+  }
+
+  persisted_local_dtor_order = 0;
+  Task destroy_nested_locals_while_suspended =
+      coroutine_nested_persisted_local_destruction_order();
+  if (destroy_nested_locals_while_suspended.value != 0 ||
+      destroy_nested_locals_while_suspended.handle == 0 ||
+      frame_state(destroy_nested_locals_while_suspended.handle) != 1) {
+    return 254;
+  }
+  destroy_coroutine(destroy_nested_locals_while_suspended.handle);
+  if (persisted_local_dtor_order != 21) {
+    return 254;
   }
 
   Task persist_parameter_started = coroutine_persist_parameter_suspend(70);
@@ -2993,11 +3128,11 @@ int main(void) {
   if (nested_branch_local_started.value != 0 ||
       nested_branch_local_started.handle == 0 ||
       frame_state(nested_branch_local_started.handle) != 1 ||
-      persisted_local_copy_count != 3) {
+      persisted_local_copy_count != 0) {
     return 73;
   }
   resume_coroutine(nested_branch_local_started.handle);
-  if (last_resume_value != 211 ||
+  if (last_resume_value != 11 ||
       frame_state(nested_branch_local_started.handle) != 0 ||
       !frame_done(nested_branch_local_started.handle)) {
     return 74;
@@ -4773,8 +4908,8 @@ int main(void) {
   destroy_coroutine(started.handle);
   destroy_coroutine(yielded.handle);
   destroy_coroutine(initially_suspended.handle);
-  if (promise_coroutine_operator_new_count != 118 ||
-      promise_coroutine_operator_delete_count != 118 ||
+  if (promise_coroutine_operator_new_count != 122 ||
+      promise_coroutine_operator_delete_count != 122 ||
       global_coroutine_operator_new_count != 4 ||
       global_coroutine_operator_delete_count != 4) {
     return 44;
