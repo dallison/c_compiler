@@ -2,7 +2,7 @@
 //  type_traits
 //  c_compiler
 //
-//  Minimal C++20 type traits support for DaveCC.
+//  C++20 type traits support for DaveCC.
 //
 
 #ifndef type_traits_h
@@ -73,45 +73,28 @@ template <class T>
 add_rvalue_reference_t<T> declval() noexcept;
 
 template <class T>
-struct is_lvalue_reference : false_type {
+struct add_const {
+  using type = const T;
 };
 
 template <class T>
-struct is_lvalue_reference<T&> : true_type {
+using add_const_t = typename add_const<T>::type;
+
+template <class T>
+struct add_volatile {
+  using type = volatile T;
 };
 
 template <class T>
-struct is_rvalue_reference : false_type {
+using add_volatile_t = typename add_volatile<T>::type;
+
+template <class T>
+struct add_cv {
+  using type = const volatile T;
 };
 
 template <class T>
-struct is_rvalue_reference<T&&> : true_type {
-};
-
-template <bool B, class T = void>
-struct enable_if {
-};
-
-template <class T>
-struct enable_if<true, T> {
-  using type = T;
-};
-
-template <bool B, class T, class F>
-struct conditional {
-  using type = T;
-};
-
-template <class T, class F>
-struct conditional<false, T, F> {
-  using type = F;
-};
-
-template <bool B, class T, class F>
-using conditional_t = typename conditional<B, T, F>::type;
-
-template <bool B, class T = void>
-using enable_if_t = typename enable_if<B, T>::type;
+using add_cv_t = typename add_cv<T>::type;
 
 template <class T>
 struct remove_const {
@@ -155,6 +138,67 @@ struct remove_cvref {
 template <class T>
 using remove_cvref_t = typename remove_cvref<T>::type;
 
+template <class T>
+struct remove_pointer {
+  using type = T;
+};
+
+template <class T>
+struct remove_pointer<T*> {
+  using type = T;
+};
+
+template <class T>
+struct remove_pointer<T* const> {
+  using type = T;
+};
+
+template <class T>
+struct remove_pointer<T* volatile> {
+  using type = T;
+};
+
+template <class T>
+struct remove_pointer<T* const volatile> {
+  using type = T;
+};
+
+template <class T>
+using remove_pointer_t = typename remove_pointer<T>::type;
+
+template <bool B, class T = void>
+struct enable_if {
+};
+
+template <class T>
+struct enable_if<true, T> {
+  using type = T;
+};
+
+template <bool B, class T, class F>
+struct conditional {
+  using type = T;
+};
+
+template <class T, class F>
+struct conditional<false, T, F> {
+  using type = F;
+};
+
+template <bool B, class T, class F>
+using conditional_t = typename conditional<B, T, F>::type;
+
+template <bool B, class T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+
+template <class... Ts>
+struct voider {
+  using type = void;
+};
+
+template <class... Ts>
+using void_t = typename voider<Ts...>::type;
+
 // is_array / remove_extent
 template <class T>
 struct is_array : false_type {
@@ -177,11 +221,6 @@ struct remove_extent<T[N]> {
 template <class T>
 using remove_extent_t = typename remove_extent<T>::type;
 
-// is_function: a type is a function type unless it is produced with a cv- or
-// ref-qualifier that only object/reference types accept.  The primary template
-// handles the non-function case; the specializations enumerate the plain
-// (and C-varargs) function types that arise after reference removal, which is
-// all `decay` needs.
 template <class T>
 struct is_function : false_type {
 };
@@ -190,7 +229,6 @@ template <class Ret, class... Args>
 struct is_function<Ret(Args...)> : true_type {
 };
 
-// add_pointer: pointer to the referred-to type (references decay first).
 template <class T>
 struct add_pointer {
   using type = remove_reference_t<T>*;
@@ -199,8 +237,6 @@ struct add_pointer {
 template <class T>
 using add_pointer_t = typename add_pointer<T>::type;
 
-// decay: models the type conversions applied when passing an argument by
-// value (array-to-pointer, function-to-pointer, and cv/ref removal).
 template <class T>
 struct decay {
  private:
@@ -212,9 +248,6 @@ struct decay {
       conditional_t<is_function<U>::value, add_pointer_t<U>, remove_cv_t<U> > >;
 };
 
-// Array (and array-reference) decay is handled by dedicated specializations:
-// deducing the element type through `remove_reference` is unreliable for
-// reference-to-array types, so match the array shape directly here.
 template <class T, size_t N>
 struct decay<T[N]> {
   using type = T*;
@@ -249,6 +282,22 @@ struct is_void<const volatile void> : true_type {
 };
 
 template <class T>
+struct is_lvalue_reference : false_type {
+};
+
+template <class T>
+struct is_lvalue_reference<T&> : true_type {
+};
+
+template <class T>
+struct is_rvalue_reference : false_type {
+};
+
+template <class T>
+struct is_rvalue_reference<T&&> : true_type {
+};
+
+template <class T>
 struct is_reference : false_type {
 };
 
@@ -258,6 +307,30 @@ struct is_reference<T&> : true_type {
 
 template <class T>
 struct is_reference<T&&> : true_type {
+};
+
+template <class T>
+struct is_const : false_type {
+};
+
+template <class T>
+struct is_const<const T> : true_type {
+};
+
+template <class T>
+struct is_volatile : false_type {
+};
+
+template <class T>
+struct is_volatile<volatile T> : true_type {
+};
+
+template <class T>
+struct is_pointer : false_type {
+};
+
+template <class T>
+struct is_pointer<T*> : true_type {
 };
 
 template <class T>
@@ -288,46 +361,6 @@ template <>
 struct is_object<const volatile void> : false_type {
 };
 
-template <class T>
-struct is_destructible : true_type {
-};
-
-template <>
-struct is_destructible<void> : false_type {
-};
-
-template <>
-struct is_destructible<const void> : false_type {
-};
-
-template <>
-struct is_destructible<volatile void> : false_type {
-};
-
-template <>
-struct is_destructible<const volatile void> : false_type {
-};
-
-template <class T, class... Args>
-struct is_constructible : true_type {
-};
-
-template <class From, class To>
-struct is_convertible : true_type {
-};
-
-template <class T, class U>
-struct is_assignable : true_type {
-};
-
-template <class T>
-struct is_swappable : true_type {
-};
-
-// is_integral: true for the standard integer types (and bool / character
-// types).  Each recognized type is given an explicit full specialization that
-// derives directly from true_type; cv-qualified variants are enumerated too so
-// `const int` etc. are recognized without relying on a dependent base class.
 template <class T>
 struct is_integral : false_type {
 };
@@ -378,8 +411,278 @@ __DAVECC_FLOATING_POINT(long double);
 #undef __DAVECC_FLOATING_POINT
 
 template <class T>
+struct is_member_pointer : bool_constant<__davecc_is_member_pointer(T) != 0> {
+};
+
+template <class T>
+struct is_member_object_pointer
+    : bool_constant<__davecc_is_member_object_pointer(T) != 0> {
+};
+
+template <class T>
+struct is_member_function_pointer
+    : bool_constant<__davecc_is_member_function_pointer(T) != 0> {
+};
+
+template <class T>
+struct is_signed : false_type {
+};
+
+#define __DAVECC_SIGNED(T)                            \
+  template <>                                         \
+  struct is_signed<T> : true_type {};                \
+  template <>                                         \
+  struct is_signed<const T> : true_type {};          \
+  template <>                                         \
+  struct is_signed<volatile T> : true_type {};       \
+  template <>                                         \
+  struct is_signed<const volatile T> : true_type {}
+
+__DAVECC_SIGNED(signed char);
+__DAVECC_SIGNED(short);
+__DAVECC_SIGNED(int);
+__DAVECC_SIGNED(long);
+__DAVECC_SIGNED(long long);
+
+#undef __DAVECC_SIGNED
+
+template <class T>
+struct is_unsigned : false_type {
+};
+
+#define __DAVECC_UNSIGNED(T)                          \
+  template <>                                         \
+  struct is_unsigned<T> : true_type {};              \
+  template <>                                         \
+  struct is_unsigned<const T> : true_type {};        \
+  template <>                                         \
+  struct is_unsigned<volatile T> : true_type {};     \
+  template <>                                         \
+  struct is_unsigned<const volatile T> : true_type {}
+
+__DAVECC_UNSIGNED(bool);
+__DAVECC_UNSIGNED(unsigned char);
+__DAVECC_UNSIGNED(unsigned short);
+__DAVECC_UNSIGNED(unsigned int);
+__DAVECC_UNSIGNED(unsigned long);
+__DAVECC_UNSIGNED(unsigned long long);
+
+#undef __DAVECC_UNSIGNED
+
+namespace __type_traits_detail {
+
+template <class... Args>
+struct __is_constructible
+    : bool_constant<__davecc_is_constructible(Args...) != 0> {
+};
+
+template <class... Args>
+struct __is_nothrow_constructible
+    : bool_constant<__davecc_is_nothrow_constructible(Args...) != 0> {
+};
+
+template <class From, class To>
+struct __is_convertible
+    : bool_constant<__davecc_is_convertible(From, To) != 0> {
+};
+
+template <class T, class U>
+struct __is_assignable
+    : bool_constant<__davecc_is_assignable(T, U) != 0> {
+};
+
+template <class T, class U>
+struct __is_nothrow_assignable
+    : bool_constant<__davecc_is_nothrow_assignable(T, U) != 0> {
+};
+
+template <class T>
+struct __is_destructible
+    : bool_constant<__davecc_is_destructible(T) != 0> {
+};
+
+template <class T>
+struct __is_nothrow_destructible
+    : bool_constant<__davecc_is_nothrow_destructible(T) != 0> {
+};
+
+template <class Base, class Derived>
+struct __is_base_of
+    : bool_constant<__davecc_is_base_of(Base, Derived) != 0> {
+};
+
+template <class T>
+struct __is_swappable
+    : bool_constant<__davecc_is_swappable(T) != 0> {
+};
+
+template <class T, class U>
+struct __is_swappable_with
+    : bool_constant<__davecc_is_swappable_with(T, U) != 0> {
+};
+
+template <class T, class U>
+struct __copy_constructible
+    : __is_constructible<T, add_lvalue_reference_t<const U> > {
+};
+
+template <class T, class U>
+struct __move_constructible
+    : __is_constructible<T, add_rvalue_reference_t<U> > {
+};
+
+template <class T, class U>
+struct __copy_assignable
+    : __is_assignable<add_lvalue_reference_t<T>,
+                      add_lvalue_reference_t<const U> > {
+};
+
+template <class T, class U>
+struct __move_assignable
+    : __is_assignable<add_lvalue_reference_t<T>, add_rvalue_reference_t<U> > {
+};
+
+}  // namespace __type_traits_detail
+
+template <class T>
+struct is_enum : bool_constant<__davecc_is_enum(T) != 0> {
+};
+
+template <class T>
+struct is_union : bool_constant<__davecc_is_union(T) != 0> {
+};
+
+template <class T>
+struct is_class : bool_constant<__davecc_is_class(T) != 0> {
+};
+
+template <class T>
 struct is_arithmetic
     : bool_constant<is_integral<T>::value || is_floating_point<T>::value> {
+};
+
+template <class T>
+struct is_fundamental
+    : bool_constant<is_void<T>::value || is_arithmetic<T>::value> {
+};
+
+template <class T>
+struct is_scalar
+    : bool_constant<is_arithmetic<T>::value || is_pointer<T>::value ||
+                    is_member_pointer<T>::value || is_enum<T>::value> {
+};
+
+template <class T>
+struct is_compound
+    : bool_constant<!is_fundamental<T>::value> {
+};
+
+template <class T, class... Args>
+struct is_constructible
+    : __type_traits_detail::__is_constructible<T, Args...> {
+};
+
+template <class T>
+struct is_default_constructible : is_constructible<T> {
+};
+
+template <class T>
+struct is_copy_constructible
+    : __type_traits_detail::__copy_constructible<T, T> {
+};
+
+template <class T>
+struct is_move_constructible
+    : __type_traits_detail::__move_constructible<T, T> {
+};
+
+template <class From, class To>
+struct is_convertible
+    : __type_traits_detail::__is_convertible<From, To> {
+};
+
+template <class T, class U>
+struct is_assignable : __type_traits_detail::__is_assignable<T, U> {
+};
+
+template <class T>
+struct is_copy_assignable
+    : __type_traits_detail::__copy_assignable<T, T> {
+};
+
+template <class T>
+struct is_move_assignable
+    : __type_traits_detail::__move_assignable<T, T> {
+};
+
+template <class T>
+struct is_destructible : __type_traits_detail::__is_destructible<T> {
+};
+
+template <class T>
+struct is_swappable : __type_traits_detail::__is_swappable<T> {
+};
+
+template <class T, class U>
+struct is_swappable_with : __type_traits_detail::__is_swappable_with<T, U> {
+};
+
+template <class Base, class Derived>
+struct is_base_of : __type_traits_detail::__is_base_of<Base, Derived> {
+};
+
+template <class T, class... Args>
+struct is_nothrow_constructible
+    : __type_traits_detail::__is_nothrow_constructible<T, Args...> {
+};
+
+template <class T>
+struct is_nothrow_default_constructible : is_nothrow_constructible<T> {
+};
+
+template <class T>
+struct is_nothrow_copy_constructible
+    : is_nothrow_constructible<T, add_lvalue_reference_t<const T> > {
+};
+
+template <class T>
+struct is_nothrow_move_constructible
+    : is_nothrow_constructible<T, add_rvalue_reference_t<T> > {
+};
+
+template <class T, class U>
+struct is_nothrow_assignable
+    : __type_traits_detail::__is_nothrow_assignable<T, U> {
+};
+
+template <class T>
+struct is_nothrow_copy_assignable
+    : is_nothrow_assignable<T, add_lvalue_reference_t<const T> > {
+};
+
+template <class T>
+struct is_nothrow_move_assignable
+    : is_nothrow_assignable<T, add_rvalue_reference_t<T> > {
+};
+
+template <class T>
+struct is_nothrow_destructible
+    : __type_traits_detail::__is_nothrow_destructible<T> {
+};
+
+template <class T>
+struct is_nothrow_swappable
+    : bool_constant<is_swappable<T>::value && is_nothrow_move_constructible<T>::value &&
+                    is_nothrow_move_assignable<T>::value> {
+};
+
+template <class T, class U>
+struct is_nothrow_swappable_with
+    : bool_constant<is_swappable_with<T, U>::value &&
+                    is_nothrow_move_constructible<T>::value &&
+                    is_nothrow_move_assignable<T>::value &&
+                    is_nothrow_move_constructible<U>::value &&
+                    is_nothrow_move_assignable<U>::value> {
 };
 
 template <class... T>
@@ -391,9 +694,16 @@ struct common_type<T> {
   using type = decay_t<T>;
 };
 
+// The __davecc_common_type_t builtin is only recognized as a type-specifier at
+// the top level of a declaration, not nested directly inside another
+// template-argument list, so name it through a helper alias before applying
+// decay_t.
+template <class T, class U>
+using __davecc_common_type = __davecc_common_type_t(T, U);
+
 template <class T, class U>
 struct common_type<T, U> {
-  using type = decay_t<decltype(false ? declval<T>() : declval<U>())>;
+  using type = decay_t<__davecc_common_type<T, U> >;
 };
 
 template <class T, class U, class... V>
@@ -405,13 +715,100 @@ struct common_type<T, U, V...> {
 template <class... T>
 using common_type_t = typename common_type<T...>::type;
 
-template <class T>
-struct is_nothrow_move_constructible : true_type {
+template <class T, class U>
+struct copy_cv {
+ private:
+  using __base = remove_cv_t<T>;
+ public:
+  using type = typename conditional<
+      is_const<T>::value || is_const<U>::value,
+      typename conditional<is_volatile<T>::value || is_volatile<U>::value,
+                           const volatile __base,
+                           const __base>::type,
+      typename conditional<is_volatile<T>::value || is_volatile<U>::value,
+                           volatile __base, __base>::type>::type;
 };
 
 template <class T>
-struct is_copy_constructible : true_type {
+struct copy_cv<T, const T> {
+  using type = const T;
 };
+
+template <class T>
+struct copy_cv<T, volatile T> {
+  using type = volatile T;
+};
+
+template <class T>
+struct copy_cv<T, const volatile T> {
+  using type = const volatile T;
+};
+
+template <class T, class U>
+using copy_cv_t = typename copy_cv<T, U>::type;
+
+template <class T, class U>
+struct __cond_res {
+  using type = typename conditional<is_convertible<T, U>::value, U,
+                                  typename conditional<is_convertible<U, T>::value,
+                                                       T, void>::type>::type;
+};
+
+template <class... T>
+struct common_reference {
+};
+
+template <class T>
+struct common_reference<T> {
+  using type = T;
+};
+
+template <class T, class U>
+struct basic_common_reference {
+  using type = typename common_reference<T, U>::type;
+};
+
+// COMMON-REF for two reference types: the standard defines this via the
+// conditional (ternary) expression COND-RES(COPY-CV(X,Y)&, COPY-CV(Y,X)&),
+// which is symmetric. A plain cv-merge is *not* symmetric when the referenced
+// types differ (e.g. const int& vs const long&), so we must use the ternary so
+// that arithmetic operands collapse to their common type (long) both ways.
+template <class T, class U>
+struct __common_ref_refs {
+  using __rt = remove_reference_t<T>;
+  using __ru = remove_reference_t<U>;
+  using type = decltype(false ? declval<copy_cv_t<__rt, __ru>&>()
+                              : declval<copy_cv_t<__ru, __rt>&>());
+};
+
+template <class T, class U>
+struct common_reference<T, U> {
+ private:
+  using __t = remove_reference_t<T>;
+  using __u = remove_reference_t<U>;
+
+ public:
+  using type = typename conditional<
+      is_reference<T>::value && is_reference<U>::value,
+      typename __common_ref_refs<T, U>::type,
+      typename conditional<
+          is_reference<T>::value,
+          copy_cv_t<__t, remove_cv_t<__u> >&,
+          typename conditional<
+              is_reference<U>::value,
+              copy_cv_t<__u, remove_cv_t<__t> >&,
+              typename common_type<T, U>::type>::type>::type>::type;
+};
+
+template <class T, class U, class... Rest>
+struct common_reference<T, U, Rest...> {
+  using type =
+      typename common_reference<typename common_reference<T, U>::type,
+                                  Rest...>::type;
+};
+
+template <class... T>
+using common_reference_t = typename common_reference<T...>::type;
 
 template <class T>
 struct is_trivially_destructible : false_type {
@@ -445,6 +842,91 @@ __DAVECC_TRIVIALLY_DESTRUCTIBLE(unsigned long long);
 template <class T>
 struct is_trivially_destructible<T*> : true_type {
 };
+
+template <class T, class U>
+inline constexpr bool is_same_v = is_same<T, U>::value;
+
+template <class T>
+inline constexpr bool is_void_v = is_void<T>::value;
+
+template <class T>
+inline constexpr bool is_lvalue_reference_v = is_lvalue_reference<T>::value;
+
+template <class T>
+inline constexpr bool is_rvalue_reference_v = is_rvalue_reference<T>::value;
+
+template <class T>
+inline constexpr bool is_reference_v = is_reference<T>::value;
+
+template <class T>
+inline constexpr bool is_const_v = is_const<T>::value;
+
+template <class T>
+inline constexpr bool is_volatile_v = is_volatile<T>::value;
+
+template <class T>
+inline constexpr bool is_pointer_v = is_pointer<T>::value;
+
+template <class T>
+inline constexpr bool is_object_v = is_object<T>::value;
+
+template <class T>
+inline constexpr bool is_integral_v = is_integral<T>::value;
+
+template <class T>
+inline constexpr bool is_floating_point_v = is_floating_point<T>::value;
+
+template <class T>
+inline constexpr bool is_signed_v = is_signed<T>::value;
+
+template <class T>
+inline constexpr bool is_unsigned_v = is_unsigned<T>::value;
+
+template <class T>
+inline constexpr bool is_enum_v = is_enum<T>::value;
+
+template <class T>
+inline constexpr bool is_union_v = is_union<T>::value;
+
+template <class T>
+inline constexpr bool is_class_v = is_class<T>::value;
+
+template <class T, class... Args>
+inline constexpr bool is_constructible_v = is_constructible<T, Args...>::value;
+
+template <class T>
+inline constexpr bool is_default_constructible_v =
+    is_default_constructible<T>::value;
+
+template <class From, class To>
+inline constexpr bool is_convertible_v = is_convertible<From, To>::value;
+
+template <class T, class U>
+inline constexpr bool is_assignable_v = is_assignable<T, U>::value;
+
+template <class T>
+inline constexpr bool is_destructible_v = is_destructible<T>::value;
+
+template <class T>
+inline constexpr bool is_swappable_v = is_swappable<T>::value;
+
+template <class T, class U>
+inline constexpr bool is_swappable_with_v = is_swappable_with<T, U>::value;
+
+template <class T>
+inline constexpr bool is_nothrow_destructible_v =
+    is_nothrow_destructible<T>::value;
+
+template <class T>
+inline constexpr bool is_nothrow_move_constructible_v =
+    is_nothrow_move_constructible<T>::value;
+
+template <class T>
+inline constexpr bool is_nothrow_move_assignable_v =
+    is_nothrow_move_assignable<T>::value;
+
+template <class Base, class Derived>
+inline constexpr bool is_base_of_v = is_base_of<Base, Derived>::value;
 
 }  // namespace std
 

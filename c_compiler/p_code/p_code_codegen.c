@@ -1466,6 +1466,7 @@ static struct {
     {TypeIsFunction, P_OP(pushx), 8},
     {TypeIsReference, P_OP(pushx), 8},
     {TypeIsStructOrUnion, P_OP(pushx), 8},
+    {TypeIsMemberPointer, P_OP(pushx), 8},
     {NULL, P_OP(push), 0},
 };
 

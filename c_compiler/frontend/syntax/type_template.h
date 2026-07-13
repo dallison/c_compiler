@@ -20,6 +20,13 @@ TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
 Vector* TypeSubstituteTemplateArgumentVector(struct Syntax* syntax,
                                              Vector* template_args,
                                              Vector* args);
+// Complete a concept-id's argument list against the concept's template
+// parameters, filling in trailing default arguments (which may reference the
+// earlier, already-provided arguments, e.g. `C = common_type_t<T, U>`).
+// Returns a freshly owned Vector of TemplateArgument* (caller frees), or NULL
+// if completion is unnecessary/impossible.  Never emits diagnostics.
+Vector* TypeCompleteConceptArguments(struct Syntax* syntax,
+                                     Vector* concept_parameters, Vector* args);
 
 void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op);
 Symbol* TypeInstantiateFunctionTemplate(struct Syntax* syntax, Symbol* templ,
@@ -41,6 +48,14 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
 bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
     Symbol* templ, Vector* explicit_args, Vector* actuals,
     size_t first_formal_arg);
+typedef enum {
+  kFunctionTemplateCandidateViable,
+  kFunctionTemplateCandidateDeductionFailed,
+  kFunctionTemplateCandidateConstraintsNotSatisfied,
+} FunctionTemplateCandidateStatus;
+FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
+    struct Syntax* syntax, Symbol* templ, Vector* explicit_args,
+    Vector* actuals, size_t first_formal_arg);
 bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right);
 // Substitute explicit template arguments into a known function template's
 // return type without instantiating its body.  Used to preserve the type of
@@ -57,6 +72,8 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     size_t first_formal_arg);
 TypeRecord* TypeInstantiateClassTemplate(struct Syntax* syntax, Symbol* templ,
                                          Vector* args);
+TypeRecord* TypeInstantiateClassTemplateQuiet(struct Syntax* syntax,
+                                              Symbol* templ, Vector* args);
 // If `type` (or a pointed-to/referenced type in its spine) is a class-template
 // primary carrying concrete template arguments, replace that primary with the
 // corresponding specialization.  Used when a type like `variant<int,long>` is

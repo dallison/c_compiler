@@ -45,7 +45,14 @@ bool StorageIs(Storage storage, Storage value);
 typedef struct VariableTemplate {
   struct ASTNode* initializer;  // Unanalyzed initializer expression (owned).
   Vector parameters;            // TemplateParameter* entries (owned).
+  struct ConstraintExpr* associated_constraint;  // C++20 requires-clause. // @wire 3
 } VariableTemplate;
+
+// Parameter list for an alias template whose RHS does not carry a template-id
+// pattern (e.g. `template<typename T> using X = int;`).
+typedef struct AliasTemplate {
+  Vector parameters;  // TemplateParameter* entries (owned). // @wire 1
+} AliasTemplate;
 
 // A parsed __attribute__((...)) clause: a name with optional argument tokens.
 // e.g. "aligned(16)"          -> name "aligned", args ["16"]
@@ -146,7 +153,12 @@ typedef struct Symbol {
   struct Symbol* overload_next; // Next overload, same name.     // @wire 39
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
+  struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
   struct Concept* concept_definition;  // C++20 concept body when flags.is_concept. // @wire 45
+  // C++20 requires-clause for alias templates (`template<...> using A = ...`).
+  // Function/class/variable templates store constraints on their type bodies;
+  // alias templates have no other durable owner.
+  struct ConstraintExpr* associated_constraint;  // @wire 46
   struct DIE* die;          // @wire - (debug info, not serialized)
 } Symbol;
 

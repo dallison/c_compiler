@@ -25,6 +25,7 @@
 #include "symbol_table.h"
 #include "syntax.h"
 #include "semantics.h"
+#include "type_traits_semantics.h"
 #include "errors.h"
 #include "debug.h"
 #include "rtti.h"
@@ -36,6 +37,10 @@ ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
 }
 
 static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base);
+static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
+                                                         Vector* actuals);
+static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
+                                                              Vector* actuals);
 
 static bool RecordPackExpansionIndex(int candidate, Vector* args,
                                      int* pack_index, size_t* pack_length) {
@@ -201,6 +206,27 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       } else {
         concrete->template_parameter_index = actual->template_parameter_index;
       }
+    } else if (actual != NULL && actual->kind == kTemplateParameterNonType &&
+               actual->type != NULL) {
+      concrete->type = TypeRecordCopy(actual->type);
+      concrete->type =
+          TypeMaterializeClassTemplateSpecialization(parser->syntax,
+                                                     concrete->type);
+      concrete->template_parameter_index = -1;
+    }
+  } else if (arg->kind == kTemplateParameterType && arg->type != NULL &&
+             TypeIsTemplateParameterPlaceholder(arg->type, NULL) &&
+             arg->type->template_parameter_index >= 0 &&
+             (size_t)arg->type->template_parameter_index < args->length) {
+    TemplateArgument* actual =
+        args->value.p[arg->type->template_parameter_index];
+    if (actual != NULL && actual->kind == kTemplateParameterNonType &&
+        actual->type != NULL) {
+      concrete->type = TypeRecordCopy(actual->type);
+      concrete->type =
+          TypeMaterializeClassTemplateSpecialization(parser->syntax,
+                                                     concrete->type);
+      concrete->template_parameter_index = -1;
     }
   } else if (arg->kind == kTemplateParameterNonType &&
              arg->template_parameter_index >= 0 &&
@@ -210,6 +236,9 @@ static TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
         actual->pack_arguments == NULL) {
       concrete->int_value = actual->int_value;
       concrete->template_parameter_index = actual->template_parameter_index;
+      if (actual->type != NULL) {
+        concrete->type = TypeRecordCopy(actual->type);
+      }
     }
   }
   return concrete;
@@ -249,12 +278,40 @@ void SubstituteStaticMemberInitializerValue(TypeParser* parser,
                                                    Vector* args) {
   if (parser == NULL || symbol == NULL || initializer == NULL ||
       !CompilerIsCXX() ||
-      (!symbol->flags.is_constexpr && !TypeIsConst(symbol->type)) ||
-      (!TypeIsIntegral(symbol->type) && !TypeIsFloatingPoint(symbol->type))) {
+      (!symbol->flags.is_constexpr && !TypeIsConst(symbol->type))) {
     return;
   }
   ASTNode* expr = ConstexprInitializerExpression(initializer);
   if (expr == NULL) {
+    return;
+  }
+  if (TypeContainsAuto(symbol->type)) {
+    ASTNode* cloned = CloneDependentExpressionWithArgs(parser, expr, args);
+    if (cloned == NULL) {
+      return;
+    }
+    DiagnosticSuppressBegin();
+    cloned = AnalyzeExpression(cloned);
+    if (cloned != NULL && cloned->type != NULL) {
+      TypeRecord* deduced = TypeDeduceAuto(symbol->type, cloned->type);
+      if (deduced != NULL) {
+        SymbolSetType(symbol, deduced);
+      }
+    }
+    if (cloned != NULL && symbol->type != NULL &&
+        TypeIsIntegral(symbol->type)) {
+      int64_t ivalue = 0;
+      if (EvaluateIntegerExpression(cloned, &ivalue)) {
+        symbol->value.ivalue = ivalue;
+        symbol->flags.value_set = true;
+        symbol->dependent_value_template_parameter_index = -1;
+      }
+    }
+    DiagnosticSuppressEnd();
+    ASTNodeDelete(cloned);
+    return;
+  }
+  if (!TypeIsIntegral(symbol->type) && !TypeIsFloatingPoint(symbol->type)) {
     return;
   }
   int64_t ivalue = 0;
@@ -1100,11 +1157,34 @@ static bool DependentDecltypeStackContains(ASTNode* expr) {
   return false;
 }
 
+static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
+                                             int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                                 TypeRecord* type,
                                                 Vector* args) {
   if (type == NULL) {
     return NULL;
+  }
+  if (TypeRecordIsInvokeResultPlaceholder(type)) {
+    TypeRecord* resolved =
+        TypeRecordSubstituteInvokeResultPlaceholder(parser->syntax, type, args);
+    if (resolved != NULL) {
+      return resolved;
+    }
+  }
+  if (TypeRecordIsCommonTypePlaceholder(type)) {
+    TypeRecord* resolved =
+        TypeRecordSubstituteCommonTypePlaceholder(parser->syntax, type, args);
+    if (resolved != NULL) {
+      return resolved;
+    }
   }
   if (!g_dependent_decltype_stack_initialized) {
     VectorInit(&g_dependent_decltype_stack);
@@ -1119,6 +1199,14 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     ASTNode* expr = CloneDependentExpressionWithArgs(
         parser, type->dependent_decltype_expr, args);
     if (expr != NULL) {
+      // The definition-time expression was analyzed while its operands were
+      // still dependent, so its nodes carry kASTAnalyzed with dependent types.
+      // AnalyzeExpression is a no-op on an already-analyzed node, so unless we
+      // clear the flag across the freshly substituted clone the arithmetic/
+      // conversion rules never re-run against the now-concrete operand types
+      // (e.g. decltype(declval<int>() + declval<long>()) would keep the stale
+      // type instead of resolving to long).
+      ASTNodeVisit(expr, ClearDependentExpressionAnalysis, 0, NULL);
       expr = AnalyzeExpression(expr);
       TypeRecord* result = NULL;
       if (expr != NULL && expr->type != NULL) {
@@ -1725,6 +1813,76 @@ Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
 /* True if `node` is a pack-expansion of a single parameter-pack identifier,
  * i.e. the `xs` in `xs...`. */
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals) {
+  if (alias == NULL) {
+    return NULL;
+  }
+  if (alias->type != NULL && alias->type->template_arguments != NULL) {
+    return CompleteAliasTemplateArgumentsFromPattern(alias, actuals);
+  }
+  if (alias->alias_template == NULL ||
+      alias->alias_template->parameters.length == 0) {
+    return NULL;
+  }
+  return CompleteAliasTemplateArgumentsFromParameters(
+      &alias->alias_template->parameters, actuals);
+}
+
+static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
+                                                              Vector* actuals) {
+  if (parameters == NULL || parameters->length == 0) {
+    return NULL;
+  }
+  int pack_index = -1;
+  TemplateParameterKind pack_kind = kTemplateParameterType;
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      pack_index = param->index;
+      pack_kind = param->kind;
+      break;
+    }
+  }
+  size_t parameter_count = parameters->length;
+  size_t actual_count = actuals != NULL ? actuals->length : 0;
+  if (pack_index < 0 && actual_count != parameter_count) {
+    return NULL;
+  }
+  if (pack_index >= 0 && actual_count < (size_t)pack_index) {
+    return NULL;
+  }
+
+  Vector* completed = NewVector();
+  for (size_t i = 0; i < parameter_count; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      TemplateArgument* pack = NewEmptyPackTemplateArgument(pack_kind);
+      for (size_t j = i; j < actual_count; j++) {
+        TemplateArgument* actual = actuals->value.p[j];
+        if (actual == NULL || actual->kind != pack_kind) {
+          TemplateArgumentDelete(pack);
+          VectorDeleteWithContents(completed,
+                                   (VectorElementDestructor)TemplateArgumentDelete,
+                                   /*free_element=*/false);
+          return NULL;
+        }
+        VectorAppend(pack->pack_arguments, TemplateArgumentCopy(actual));
+      }
+      VectorAppend(completed, pack);
+      continue;
+    }
+    if (actuals == NULL || i >= actual_count) {
+      VectorDeleteWithContents(completed,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+    VectorAppend(completed, TemplateArgumentCopy(actuals->value.p[i]));
+  }
+  return completed;
+}
+
+static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
+                                                         Vector* actuals) {
   if (alias == NULL || alias->type == NULL ||
       alias->type->template_arguments == NULL) {
     return NULL;

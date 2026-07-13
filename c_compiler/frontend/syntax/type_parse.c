@@ -28,6 +28,12 @@
 #include "debug.h"
 #include "rtti.h"
 #include "set.h"
+#include "type_traits_semantics.h"
+
+static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
+                                                                 TypeRecord* type);
+static bool ParseMemberPointerDeclarator(TypeParser* parser);
+static void DebugTypeParseLeavingToken(TypeParser* parser, const char* where);
 
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
                     Storage storage, ParserContext context) {
@@ -53,6 +59,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->declarator_template_arguments = NULL;
   parser->parsing_direct_class_template = false;
   parser->template_substitution_failed = false;
+  parser->placeholder_variable_constraint = NULL;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -70,6 +77,7 @@ void TypeParserReset(TypeParser* parser) {
   parser->enclosing_template_substitution_target = NULL;
   parser->cxx_member_definition = NULL;
   parser->parsing_direct_class_template = false;
+  parser->placeholder_variable_constraint = NULL;
   if (parser->declarator_template_arguments != NULL) {
     VectorDeleteWithContents(parser->declarator_template_arguments,
                              (VectorElementDestructor)TemplateArgumentDelete,
@@ -120,6 +128,102 @@ TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
   ref->type = base->type;
   TypeRecordCalculateSize(ref);
   return ref;
+}
+
+static bool TypeVectorContainsTemplateParameter(Vector* types) {
+  if (types == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < types->length; i++) {
+    if (TypeContainsTemplateParameter((TypeRecord*)types->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TypeRecord* ParseDaveInvokeResultType(TypeParser* parser) {
+  LexNextToken(parser->lex);
+  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
+  Vector type_args;
+  Vector pack_flags;
+  VectorInit(&type_args);
+  VectorInit(&pack_flags);
+  while (!LexLookingAt(parser->lex, TOK(rparen))) {
+    parser->declarator_is_parameter_pack = false;
+    TypeRecord* arg_type = TypeParserParseType(parser, true);
+    Symbol* sym = TypeParserParseDeclarator(parser, arg_type);
+    bool is_pack = sym->flags.is_parameter_pack;
+    if (CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis))) {
+      is_pack = true;
+    }
+    VectorAppend(&type_args, sym->type);
+    VectorAppend(&pack_flags, (void*)(intptr_t)is_pack);
+    SymbolDelete(sym);
+    if (!LexMatch(parser->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+  bool defer = TypeVectorContainsTemplateParameter(&type_args) ||
+               parser->syntax->parsing_template_declaration;
+  TypeRecord* result = NULL;
+  if (!defer) {
+    result = DaveTypeTraitInvokeResultType(parser->syntax, &type_args);
+  }
+  if (result == NULL) {
+    TypeRecord* placeholder =
+        TypeRecordNewInvokeResultPlaceholderWithFlags(&type_args, &pack_flags);
+    VectorDestruct(&type_args);
+    VectorDestruct(&pack_flags);
+    if (placeholder == NULL) {
+      SyntaxError(parser->syntax, "Invalid invoke_result type");
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+    return placeholder;
+  }
+  VectorDestruct(&type_args);
+  VectorDestruct(&pack_flags);
+  return result;
+}
+
+static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
+  LexNextToken(parser->lex);
+  SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
+  Vector type_args;
+  VectorInit(&type_args);
+  while (!LexLookingAt(parser->lex, TOK(rparen))) {
+    TypeRecord* arg_type = TypeParserParseType(parser, true);
+    Symbol* sym = TypeParserParseDeclarator(parser, arg_type);
+    VectorAppend(&type_args, sym->type);
+    SymbolDelete(sym);
+    if (!LexMatch(parser->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+  if (type_args.length != 2) {
+    SyntaxError(parser->syntax, "Invalid common_type type");
+    VectorDestruct(&type_args);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  bool defer = TypeVectorContainsTemplateParameter(&type_args) ||
+               parser->syntax->parsing_template_declaration;
+  TypeRecord* result = NULL;
+  if (!defer) {
+    result = DaveTypeTraitCommonType(parser->syntax, &type_args);
+  }
+  if (result == NULL) {
+    TypeRecord* placeholder = TypeRecordNewCommonTypePlaceholder(&type_args);
+    VectorDestruct(&type_args);
+    if (placeholder == NULL) {
+      SyntaxError(parser->syntax, "Invalid common_type type");
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+    return placeholder;
+  }
+  VectorDestruct(&type_args);
+  return result;
 }
 
 static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
@@ -363,6 +467,38 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
 
   Token tok = lex->current_token;
   bool found = false;
+
+  if (CompilerIsCXX() && allow_typedef && tok == TOK(identifier) &&
+      strcmp(lex->spelling.value, "__davecc_invoke_result_t") == 0) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(lex, &checkpoint);
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(lparen))) {
+      LexCheckpointRestore(lex, &checkpoint);
+      type_record = ParseDaveInvokeResultType(parser);
+      type |= type_record->type;
+      found = true;
+    } else {
+      LexCheckpointRestore(lex, &checkpoint);
+    }
+    LexCheckpointDestruct(&checkpoint);
+  }
+
+  if (!found && CompilerIsCXX() && allow_typedef && tok == TOK(identifier) &&
+      strcmp(lex->spelling.value, "__davecc_common_type_t") == 0) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(lex, &checkpoint);
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(lparen))) {
+      LexCheckpointRestore(lex, &checkpoint);
+      type_record = ParseDaveCommonTypeType(parser);
+      type |= type_record->type;
+      found = true;
+    } else {
+      LexCheckpointRestore(lex, &checkpoint);
+    }
+    LexCheckpointDestruct(&checkpoint);
+  }
   
   if (parser->found_void) {
     // Special handling for already-consumed void type.  This can
@@ -390,7 +526,59 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
   // If we didn't find a known type, look for qualifiers and typedef
   // name.
   if (!found) {
-    if (LexMatch(lex, TOK(const))) {
+    if (CompilerCXXAtLeast(kLanguageStandardCXX20) && allow_typedef &&
+        LexLookingAt(lex, TOK(identifier))) {
+      String concept_name;
+      StringInit(&concept_name, lex->spelling.value);
+      Symbol* concept_symbol = SyntaxFindSymbol(parser->syntax, &concept_name);
+      if (concept_symbol != NULL && concept_symbol->flags.is_concept) {
+        LexCheckpoint checkpoint;
+        LexCheckpointSave(lex, &checkpoint);
+        SourceLocation constraint_location = lex->current_token_location;
+        LexNextToken(lex);
+        Vector* concept_arguments = NULL;
+        if (LexLookingAt(lex, TOK(less))) {
+          concept_arguments =
+              SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
+        } else {
+          concept_arguments = NewVector();
+        }
+        if (concept_arguments == NULL) {
+          concept_arguments = NewVector();
+        }
+        if (LexLookingAt(lex, TOK(auto))) {
+          LexNextToken(lex);
+          TypeRecord* placeholder =
+              NewTypeRecordWithSize(kTypeAuto, kQualPlain);
+          TemplateArgument* constrained_arg =
+              NewTemplateParameterTypeArgumentForType(0, placeholder);
+          if (concept_arguments->length == 0) {
+            VectorAppend(concept_arguments, constrained_arg);
+          } else {
+            VectorInsertBefore(concept_arguments, 0, constrained_arg);
+          }
+          parser->placeholder_variable_constraint =
+              NewConceptIdConstraint(concept_symbol, concept_arguments,
+                                     constraint_location);
+          type_record = placeholder;
+          type |= kTypeAuto;
+          found = true;
+          StringDestruct(&concept_name);
+          LexCheckpointDestruct(&checkpoint);
+        } else {
+          if (concept_arguments != NULL) {
+            VectorDeleteWithContents(
+                concept_arguments,
+                (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+          }
+          LexCheckpointRestore(lex, &checkpoint);
+          LexCheckpointDestruct(&checkpoint);
+        }
+      }
+      StringDestruct(&concept_name);
+    }
+    if (!found && LexMatch(lex, TOK(const))) {
       quals |= kQualConst;
     } else if (LexMatch(lex, TOK(volatile))) {
       quals |= kQualVolatile;
@@ -525,9 +713,20 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             !TemplateArgumentVectorContainsTemplateParameter(args)) {
           Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
           if (completed_args != NULL) {
-            type_record =
-                SubstituteTemplateParameters(parser, symbol->type,
-                                             completed_args);
+            if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
+                                             completed_args)) {
+              SyntaxError(parser->syntax,
+                          "constraints not satisfied for alias template %s",
+                          symbol->name.value);
+              ConceptsReportAssociatedConstraintFailure(
+                  symbol->associated_constraint, completed_args, symbol->location,
+                  NULL);
+              type_record = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+            } else {
+              type_record =
+                  SubstituteTemplateParameters(parser, symbol->type,
+                                               completed_args);
+            }
             VectorDeleteWithContents(
                 completed_args, (VectorElementDestructor)TemplateArgumentDelete,
                 /*free_element=*/false);
@@ -599,9 +798,21 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               !TemplateArgumentVectorContainsTemplateParameter(args)) {
             Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
             if (completed_args != NULL) {
-              type_record =
-                  SubstituteTemplateParameters(parser, symbol->type,
-                                               completed_args);
+              if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
+                                               completed_args)) {
+                SyntaxError(parser->syntax,
+                            "constraints not satisfied for alias template %s",
+                            symbol->name.value);
+                ConceptsReportAssociatedConstraintFailure(
+                    symbol->associated_constraint, completed_args,
+                    symbol->location, NULL);
+                type_record =
+                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+              } else {
+                type_record =
+                    SubstituteTemplateParameters(parser, symbol->type,
+                                                 completed_args);
+              }
               VectorDeleteWithContents(
                   completed_args,
                   (VectorElementDestructor)TemplateArgumentDelete,
@@ -945,6 +1156,12 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
 
   while (parser->found_void || SyntaxLookingAtType(syntax) ||
          CurrentClassTemplateNameStartsType(parser)) {
+    if (type_specifier.type != kTypeImplicit &&
+        (SyntaxCurrentIdentifierFollowedByScopeOperator(syntax) ||
+         SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax))) {
+      // `int S::*` is a member-pointer declarator, not a second type specifier.
+      break;
+    }
     PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit);
     if (new_type_specifier.type == kTypeImplicit && new_type_specifier.quals == kQualPlain) {
       break;
@@ -964,12 +1181,16 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     }
     return NULL;
   }
-  return TypeParserBuildTypeRecord(parser, &type_specifier);
+  TypeRecord* built = TypeParserBuildTypeRecord(parser, &type_specifier);
+  return built;
 }
 
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   if (base_type == NULL) {
     return NULL;
+  }
+  if (parser->context == kParsingPrototype) {
+    parser->syntax->found_open_paren = false;
   }
   
   VectorClear(&parser->stack);
@@ -977,7 +1198,11 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   parser->base_type = base_type;
   parser->declarator_is_parameter_pack =
       CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis));
-  TypeParserParsePointer(parser);
+  if (ParseMemberPointerDeclarator(parser)) {
+    // Handled `T C::*` without going through the generic pointer path.
+  } else {
+    TypeParserParsePointer(parser);
+  }
   if (CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis))) {
     parser->declarator_is_parameter_pack = true;
   }
@@ -1850,9 +2075,54 @@ static void ValidateCXXLiteralOperatorDeclaration(TypeParser* parser,
               symbol->name.value + prefix_length);
 }
 
+static bool LookingAtMemberPointerDeclaratorSuffix(TypeParser* parser) {
+  return SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(parser->syntax);
+}
+
+static bool ParseMemberPointerDeclarator(TypeParser* parser) {
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+  if (!LookingAtMemberPointerDeclaratorSuffix(parser)) {
+    return false;
+  }
+  String class_name;
+  StringInit(&class_name, parser->lex->spelling.value);
+  LexNextToken(parser->lex);
+  LexMatch(parser->lex, TOK(coloncolon));
+  LexMatch(parser->lex, TOK(star));
+  Symbol* class_sym = SyntaxFindSymbol(parser->syntax, &class_name);
+  Struct* class_info = NULL;
+  if (class_sym == NULL) {
+    class_sym = SyntaxFindTag(parser->syntax, &class_name);
+  }
+  if (class_sym != NULL && class_sym->type != NULL &&
+      TypeIsStructOrUnion(class_sym->type) &&
+      class_sym->type->info.struct_info != NULL) {
+    class_info = class_sym->type->info.struct_info;
+  }
+  StringDestruct(&class_name);
+  if (class_info == NULL) {
+    SyntaxError(parser->syntax, "Pointer-to-member requires a class type");
+    return true;
+  }
+  TypeRecord* mptr = NewMemberPointerTypeRecord(class_info, kQualPlain);
+  VectorAppend(&parser->stack, mptr);
+  if (LexLookingAt(parser->lex, TOK(identifier))) {
+    SourceLocation location = parser->lex->current_token_location;
+    parser->symbol =
+        NewSymbol(parser->lex->spelling.value, parser->base_type, parser->storage);
+    parser->symbol->location = location;
+    LexNextToken(parser->lex);
+  }
+  return true;
+}
+
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
-    if (SyntaxLookingAtType(parser->syntax) || LexLookingAt(parser->lex, TOK(rparen))) {
+    if (!LookingAtMemberPointerDeclaratorSuffix(parser) &&
+        (SyntaxLookingAtType(parser->syntax) ||
+         LexLookingAt(parser->lex, TOK(rparen)))) {
       // Open paren followed by a type isn't a parenthesized decl, it's
       // a function prototype.
       parser->syntax->found_open_paren = true;
@@ -1863,6 +2133,9 @@ void TypeParserParseBase(TypeParser* parser) {
       LexError(parser->lex, "Missing close parenthesis in declaration");
     }
   } else {
+    if (ParseMemberPointerDeclarator(parser)) {
+      return;
+    }
     if (LexLookingAt(parser->lex, TOK(identifier)) ||
         LexLookingAt(parser->lex, TOK(operator)) ||
         LexLookingAt(parser->lex, TOK(coloncolon))) {
@@ -1875,6 +2148,37 @@ void TypeParserParseBase(TypeParser* parser) {
                 parser->syntax, &name, TC(decl))
           : SyntaxParseFullyQualifiedIdentifier(parser->syntax, &name);
       if (!parsed) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return;
+      }
+      if (CompilerIsCXX() && LexMatch(parser->lex, TOK(coloncolon)) &&
+          LexMatch(parser->lex, TOK(star))) {
+        String class_name;
+        StringInit(&class_name, FullyQualifiedIdentifierLast(&name));
+        Symbol* class_sym = SyntaxFindSymbol(parser->syntax, &class_name);
+        Struct* class_info = NULL;
+        if (class_sym != NULL && class_sym->type != NULL &&
+            TypeIsStructOrUnion(class_sym->type) &&
+            class_sym->type->info.struct_info != NULL) {
+          class_info = class_sym->type->info.struct_info;
+        }
+        StringDestruct(&class_name);
+        if (class_info == NULL) {
+          SyntaxError(parser->syntax,
+                      "Pointer-to-member requires a class type");
+        } else {
+          TypeRecord* mptr =
+              NewMemberPointerTypeRecord(class_info, kQualPlain);
+          VectorAppend(&parser->stack, mptr);
+          if (LexLookingAt(parser->lex, TOK(identifier))) {
+            SourceLocation location = parser->lex->current_token_location;
+            parser->symbol =
+                NewSymbol(parser->lex->spelling.value, parser->base_type,
+                          parser->storage);
+            parser->symbol->location = location;
+            LexNextToken(parser->lex);
+          }
+        }
         FullyQualifiedIdentifierDestruct(&name);
         return;
       }

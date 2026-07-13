@@ -61,6 +61,7 @@ typedef enum {
   kDeclRValueReference,
   kDeclArray,
   kDeclFunction,
+  kDeclMemberPointer,
 } Declarator;
 
 typedef struct Struct Struct;
@@ -112,6 +113,10 @@ typedef struct ClassTemplatePartialSpecialization {
   Symbol* tag_symbol;       // Parsed specialization body tag (not owned).
   Vector template_parameters;  // TemplateParameter* entries owned.
   Vector pattern_arguments;    // TemplateArgument* entries owned.
+  // Optional C++20 requires-clause for this partial specialization.  Not
+  // serialized: Struct::partial_specializations is intentionally deferred on
+  // the wire (see @wire - below).
+  struct ConstraintExpr* associated_constraint;
 } ClassTemplatePartialSpecialization;
 
 typedef enum {
@@ -298,6 +303,7 @@ struct Struct {
   Vector template_parameters;  // TemplateParameter* entries.     // @wire 15
   Vector partial_specializations;  // @wire - (deferred)
   Vector deduction_guides;  // @wire - (deferred)
+  struct ConstraintExpr* associated_constraint;  // C++20 requires-clause. // @wire 30
   int template_parameter_count;  // Simple template arity.        // @wire 16
   bool packed;       // packed: no inter-member padding.          // @wire 17
   bool is_abstract;  // Has an unimplemented pure virtual.        // @wire 18

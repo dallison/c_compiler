@@ -1,0 +1,287 @@
+//
+//  concepts
+//  c_compiler
+//
+//  C++20 <concepts> for DaveCC.
+//
+
+#ifndef concepts_h
+#define concepts_h
+
+#include <functional>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// [concepts.lang]
+
+template <class T, class U>
+concept __same_as_impl = is_same_v<T, U>;
+
+template <class T, class U>
+concept same_as = __same_as_impl<T, U> && __same_as_impl<U, T>;
+
+template <class Derived, class Base>
+concept derived_from =
+    is_base_of_v<Base, Derived> &&
+    is_convertible_v<const volatile Derived*, const volatile Base*>;
+
+template <class From, class To>
+concept convertible_to = is_convertible_v<From, To>;
+
+template <class T, class U>
+concept common_reference_with =
+    same_as<common_reference_t<T, U>, common_reference_t<U, T>> &&
+    is_convertible_v<T, common_reference_t<T, U>> &&
+    is_convertible_v<U, common_reference_t<T, U>>;
+
+template <class T, class U>
+concept common_with =
+    same_as<typename common_type<T, U>::type, typename common_type<U, T>::type> &&
+    requires {
+      static_cast<typename common_type<T, U>::type>(declval<T>());
+      static_cast<typename common_type<T, U>::type>(declval<U>());
+    } &&
+    common_reference_with<add_lvalue_reference_t<const remove_cvref_t<T> >,
+                          add_lvalue_reference_t<const remove_cvref_t<U> > > &&
+    common_reference_with<
+        add_lvalue_reference_t<const typename common_type<T, U>::type>,
+        common_reference_t<
+            add_lvalue_reference_t<const remove_cvref_t<T> >,
+            add_lvalue_reference_t<const remove_cvref_t<U> > > >;
+
+// [concepts.arithmetic]
+
+template <class T>
+concept integral = is_integral_v<T>;
+
+template <class T>
+concept signed_integral = integral<T> && is_signed_v<T>;
+
+template <class T>
+concept unsigned_integral = integral<T> && !signed_integral<T>;
+
+template <class T>
+concept floating_point = is_floating_point_v<T>;
+
+namespace __detail {
+
+template <class T>
+using __make_const_lvalue_ref = const remove_reference_t<T>&;
+
+template <class T>
+concept __boolean_testable_impl = is_convertible_v<T, bool>;
+
+template <class T>
+concept __boolean_testable = __boolean_testable_impl<T> &&
+    requires(T&& t) {
+      { !static_cast<T&&>(t) } -> __boolean_testable_impl;
+    };
+
+template <class T, class U, class C = typename common_type<T, U>::type>
+concept __comparison_common_type_with_impl =
+    same_as<common_reference_t<const remove_reference_t<T>&,
+                               const remove_reference_t<U>&>,
+            common_reference_t<const remove_reference_t<U>&,
+                               const remove_reference_t<T>&> > &&
+    requires {
+      requires is_convertible_v<const T&, const C&> ||
+               is_convertible_v<T, const C&>;
+      requires is_convertible_v<const U&, const C&> ||
+               is_convertible_v<U, const C&>;
+    };
+
+template <class T, class U>
+concept __comparison_common_type_with =
+    __comparison_common_type_with_impl<remove_cvref_t<T>, remove_cvref_t<U> >;
+
+template <class T>
+concept __class_or_enum = is_class_v<T> || is_union_v<T> || is_enum_v<T>;
+
+}  // namespace __detail
+
+// [concept.destructible]
+
+template <class T>
+concept destructible = is_nothrow_destructible_v<T>;
+
+// [concept.constructible]
+
+template <class T, class... Args>
+concept constructible_from =
+    destructible<T> && (__davecc_is_constructible(T, Args...) != 0);
+
+template <class T>
+concept __default_initializable = requires { ::new T; };
+
+template <class T>
+concept default_initializable =
+    constructible_from<T> && is_default_constructible_v<T> &&
+    __default_initializable<T>;
+
+template <class T>
+concept move_constructible =
+    constructible_from<T, T> && is_convertible_v<T, T>;
+
+template <class T>
+concept copy_constructible =
+    move_constructible<T> && constructible_from<T, T&> &&
+    is_convertible_v<T&, T> && constructible_from<T, const T&> &&
+    is_convertible_v<const T&, T> && constructible_from<T, const T> &&
+    is_convertible_v<const T, T>;
+
+// [concept.assignable]
+
+template <class Lhs, class Rhs>
+concept assignable_from =
+    is_lvalue_reference_v<Lhs> &&
+    common_reference_with<__detail::__make_const_lvalue_ref<Lhs>,
+                          __detail::__make_const_lvalue_ref<Rhs> > &&
+    is_assignable_v<Lhs, Rhs>;
+
+// [concept.swappable]
+
+namespace ranges {
+namespace __swap {
+
+template <class T>
+void swap(T&, T&) = delete;
+
+template <class T, class U>
+concept __unqualified_swappable_with =
+    (__detail::__class_or_enum<remove_cvref_t<T> > ||
+     __detail::__class_or_enum<remove_cvref_t<U> >) &&
+    requires(T&& t, U&& u) {
+      swap(static_cast<T&&>(t), static_cast<U&&>(u));
+    };
+
+struct __fn;
+
+template <class T>
+concept __exchangeable =
+    !__unqualified_swappable_with<T&, T&> && move_constructible<T> &&
+    assignable_from<T&, T>;
+
+struct __fn {
+  template <class T, class U>
+    requires __unqualified_swappable_with<T, U>
+  constexpr void operator()(T&& t, U&& u) const {
+    swap(static_cast<T&&>(t), static_cast<U&&>(u));
+  }
+
+  template <__exchangeable T>
+  constexpr void operator()(T& x, T& y) const {
+    y = exchange(x, move(y));
+  }
+};
+
+}  // namespace __swap
+
+inline namespace __cpo {
+inline constexpr __swap::__fn swap{};
+}  // namespace __cpo
+}  // namespace ranges
+
+template <class T>
+concept swappable = is_swappable_v<T>;
+
+template <class T, class U>
+concept swappable_with =
+    common_reference_with<T, U> && is_swappable_with_v<T, U>;
+
+// [concept.equalitycomparable]
+
+template <class T, class U>
+concept __weakly_equality_comparable_with =
+    requires(remove_cvref_t<T> t, remove_cvref_t<U> u) {
+      { t == u } -> __detail::__boolean_testable;
+      { t != u } -> __detail::__boolean_testable;
+      { u == t } -> __detail::__boolean_testable;
+      { u != t } -> __detail::__boolean_testable;
+    };
+
+template <class T>
+concept equality_comparable = __weakly_equality_comparable_with<T, T>;
+
+template <class T, class U>
+concept equality_comparable_with =
+    equality_comparable<T> && equality_comparable<U> &&
+    __detail::__comparison_common_type_with<T, U> &&
+    equality_comparable<common_reference_t<
+        __detail::__make_const_lvalue_ref<T>,
+        __detail::__make_const_lvalue_ref<U> > > &&
+    __weakly_equality_comparable_with<T, U>;
+
+// [concept.totallyordered]
+
+template <class T, class U>
+concept __partially_ordered_with =
+    requires(remove_cvref_t<T> t, remove_cvref_t<U> u) {
+      { t < u } -> __detail::__boolean_testable;
+      { t > u } -> __detail::__boolean_testable;
+      { t <= u } -> __detail::__boolean_testable;
+      { t >= u } -> __detail::__boolean_testable;
+      { u < t } -> __detail::__boolean_testable;
+      { u > t } -> __detail::__boolean_testable;
+      { u <= t } -> __detail::__boolean_testable;
+      { u >= t } -> __detail::__boolean_testable;
+    };
+
+template <class T>
+concept totally_ordered =
+    equality_comparable<T> && __partially_ordered_with<T, T>;
+
+template <class T, class U>
+concept totally_ordered_with =
+    totally_ordered<T> && totally_ordered<U> &&
+    equality_comparable_with<T, U> &&
+    totally_ordered<common_reference_t<
+        __detail::__make_const_lvalue_ref<T>,
+        __detail::__make_const_lvalue_ref<U> > > &&
+    __partially_ordered_with<T, U>;
+
+// [concepts.object]
+
+template <class T>
+concept movable =
+    is_object_v<T> && move_constructible<T> && assignable_from<T&, T> &&
+    swappable<T>;
+
+template <class T>
+concept copyable =
+    copy_constructible<T> && movable<T> && assignable_from<T&, T&> &&
+    assignable_from<T&, const T&> && assignable_from<T&, const T>;
+
+template <class T>
+concept semiregular = copyable<T> && default_initializable<T>;
+
+template <class T>
+concept regular = semiregular<T> && equality_comparable<T>;
+
+// [concepts.callable]
+
+template <class F, class... Args>
+concept invocable = (__davecc_is_invocable(F, Args...) != 0);
+
+template <class F, class... Args>
+concept regular_invocable = (__davecc_is_invocable(F, Args...) != 0);
+
+template <class F, class... Args>
+concept predicate = (__davecc_is_invocable(F, Args...) != 0);
+
+template <class R, class T, class U>
+concept relation =
+    invocable<R, T, T> && invocable<R, U, U> && invocable<R, T, U> &&
+    invocable<R, U, T>;
+
+template <class R, class T, class U>
+concept equivalence_relation = relation<R, T, U>;
+
+template <class R, class T, class U>
+concept strict_weak_order = relation<R, T, U>;
+
+}  // namespace std
+
+#endif /* concepts_h */

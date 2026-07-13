@@ -51,6 +51,8 @@ typedef enum {
   AST_OP(continue),
   AST_OP(do),
   AST_OP(dot),
+  AST_OP(dotstar),
+  AST_OP(arrowstar),
   AST_OP(equal),
   AST_OP(for),
   AST_OP(goto),
@@ -100,6 +102,7 @@ typedef enum {
   AST_OP(onescomp),
   AST_OP(while),
   AST_OP(structmember),
+  AST_OP(member_ptr),
   
   AST_OP(asm),
   AST_OP(attribute),
@@ -124,6 +127,7 @@ typedef enum {
   AST_OP(builtin_source_column),
   AST_OP(builtin_source_function),
   AST_OP(builtin_source_pretty_function),
+  AST_OP(builtin_type_trait),
 
   AST_OP(cast),   // Cast AST node token.
   AST_OP(label),  // Label AST node.

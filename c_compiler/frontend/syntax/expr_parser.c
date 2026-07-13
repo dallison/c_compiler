@@ -21,6 +21,7 @@
 #include "symbol_table.h"
 #include "type.h"
 #include "compiler.h"
+#include "type_traits_semantics.h"
 
 static struct Intrinsic {
   const char* name;
@@ -88,7 +89,122 @@ static const struct Intrinsic* GetIntrinsic(const char* name) {
 }
 
 static bool IsBuiltinCallName(const char* name) {
-  return GetIntrinsic(name) != NULL || strcmp(name, "__builtin_expect") == 0;
+  if (GetIntrinsic(name) != NULL || strcmp(name, "__builtin_expect") == 0) {
+    return true;
+  }
+  return strncmp(name, "__davecc_is_", 12) == 0;
+}
+
+static DaveTypeTraitKind TypeTraitKindFromName(const char* name) {
+  if (strcmp(name, "__davecc_is_constructible") == 0) {
+    return kDaveTypeTraitIsConstructible;
+  }
+  if (strcmp(name, "__davecc_is_nothrow_constructible") == 0) {
+    return kDaveTypeTraitIsNothrowConstructible;
+  }
+  if (strcmp(name, "__davecc_is_convertible") == 0) {
+    return kDaveTypeTraitIsConvertible;
+  }
+  if (strcmp(name, "__davecc_is_assignable") == 0) {
+    return kDaveTypeTraitIsAssignable;
+  }
+  if (strcmp(name, "__davecc_is_nothrow_assignable") == 0) {
+    return kDaveTypeTraitIsNothrowAssignable;
+  }
+  if (strcmp(name, "__davecc_is_destructible") == 0) {
+    return kDaveTypeTraitIsDestructible;
+  }
+  if (strcmp(name, "__davecc_is_nothrow_destructible") == 0) {
+    return kDaveTypeTraitIsNothrowDestructible;
+  }
+  if (strcmp(name, "__davecc_is_base_of") == 0) {
+    return kDaveTypeTraitIsBaseOf;
+  }
+  if (strcmp(name, "__davecc_is_swappable") == 0) {
+    return kDaveTypeTraitIsSwappable;
+  }
+  if (strcmp(name, "__davecc_is_swappable_with") == 0) {
+    return kDaveTypeTraitIsSwappableWith;
+  }
+  if (strcmp(name, "__davecc_is_invocable") == 0) {
+    return kDaveTypeTraitIsInvocable;
+  }
+  if (strcmp(name, "__davecc_is_nothrow_invocable") == 0) {
+    return kDaveTypeTraitIsNothrowInvocable;
+  }
+  if (strcmp(name, "__davecc_is_class") == 0) {
+    return kDaveTypeTraitIsClass;
+  }
+  if (strcmp(name, "__davecc_is_union") == 0) {
+    return kDaveTypeTraitIsUnion;
+  }
+  if (strcmp(name, "__davecc_is_enum") == 0) {
+    return kDaveTypeTraitIsEnum;
+  }
+  if (strcmp(name, "__davecc_is_member_pointer") == 0) {
+    return kDaveTypeTraitIsMemberPointer;
+  }
+  if (strcmp(name, "__davecc_is_member_object_pointer") == 0) {
+    return kDaveTypeTraitIsMemberObjectPointer;
+  }
+  if (strcmp(name, "__davecc_is_member_function_pointer") == 0) {
+    return kDaveTypeTraitIsMemberFunctionPointer;
+  }
+  return (DaveTypeTraitKind)-1;
+}
+
+static Vector* ParseTypeTraitTypeArguments(Syntax* syntax, TokenClass followers) {
+  Vector* type_args = NewVector();
+  while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingBlockScope);
+    TypeRecord* type = TypeParserParseType(&parser, true);
+    Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    type = sym->type;
+    ASTNode* type_node =
+        NewIntConstantASTNode(0, TypeRecordCopy(type), syntax->lex->current_token_location);
+    if (sym->flags.is_parameter_pack ||
+        (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(ellipsis)))) {
+      if (LexMatch(syntax->lex, TOK(ellipsis))) {
+        type_node->flags |= kASTPackExpansion;
+      } else if (sym->flags.is_parameter_pack) {
+        type_node->flags |= kASTPackExpansion;
+      }
+    }
+    VectorAppend(type_args, type_node);
+    SymbolDelete(sym);
+    TypeParserDestruct(&parser);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
+    }
+  }
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  return type_args;
+}
+
+static ASTNode* TypeTraitIntrinsic(Syntax* syntax, ASTNode* left,
+                                   TokenClass followers) {
+  if (left->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  IdentifierASTNode* id_node = (IdentifierASTNode*)left;
+  const char* name = id_node->symbol->name.value;
+  DaveTypeTraitKind kind = TypeTraitKindFromName(name);
+  if ((int)kind < 0) {
+    return NULL;
+  }
+  Vector* type_args = ParseTypeTraitTypeArguments(syntax, followers);
+  ASTNode* kind_node = NewIntConstantASTNode(
+      (int)kind, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+      syntax->lex->current_token_location);
+  Vector* actuals = NewVector();
+  VectorAppend(actuals, kind_node);
+  for (size_t i = 0; i < type_args->length; i++) {
+    VectorAppend(actuals, type_args->value.p[i]);
+  }
+  VectorDelete(type_args);
+  return NewVectorASTNode(AST_OP(builtin_type_trait), NULL,
+                          syntax->lex->current_token_location, left, actuals);
 }
 
 static Symbol* FindThisSymbol(Syntax* syntax) {
@@ -2850,6 +2966,11 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
   if (varargs != NULL) {
     return varargs;
   }
+
+  ASTNode* type_trait = TypeTraitIntrinsic(syntax, left, followers);
+  if (type_trait != NULL) {
+    return type_trait;
+  }
   
   // Normal function call.
   Vector* actuals = NewVector();
@@ -3134,9 +3255,19 @@ static ASTNode* ParsePostfixOperators(Syntax* syntax, ASTNode* result,
     } else if (LexMatch(syntax->lex, TOK(dot))) {
       result = ParseStructMember(result, AST_OP(dot), syntax,
                                  followers);
+    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(dotstar))) {
+      ASTNode* pm = ParseCastExpression(syntax, followers);
+      result = NewBinaryASTNode(AST_OP(dotstar), NULL,
+                                syntax->lex->current_token_location, result,
+                                pm);
     } else if (LexMatch(syntax->lex, TOK(arrow))) {
       result = ParseStructMember(result, AST_OP(arrow), syntax,
                                  followers);
+    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(arrowstar))) {
+      ASTNode* pm = ParseCastExpression(syntax, followers);
+      result = NewBinaryASTNode(AST_OP(arrowstar), NULL,
+                                syntax->lex->current_token_location, result,
+                                pm);
     } else {
       break;
     }
@@ -4409,6 +4540,8 @@ static ASTNode* ParseCXXCoYieldExpression(Syntax* syntax,
 // unary-operator: one of
 //    & * + - ~ !
 
+static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers);
+
 static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
   if (syntax->lex->preprocessor_mode) {
     // In preprocessor mode we have a unary operator that is a the identifier
@@ -4436,6 +4569,12 @@ static ASTNode* ParseUnaryExpression(Syntax* syntax, TokenClass followers) {
   }
 
   if (LexMatch(syntax->lex, TOK(amp))) {
+    if (CompilerIsCXX()) {
+      ASTNode* member_ptr = ParsePointerToMember(syntax, followers);
+      if (member_ptr != NULL) {
+        return member_ptr;
+      }
+    }
     ASTNode* sub = ParseCastExpression(syntax, followers);
     // If we are taking the address of an identifier we need to
     // set a flag so that the later phases know that this has
@@ -4585,6 +4724,58 @@ static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
   // A named cast is a postfix-expression, so it may be directly followed by
   // postfix operators, e.g. `static_cast<T>(x).member` or `static_cast<T>(p)->m`.
   return ParsePostfixOperators(syntax, result, followers);
+}
+
+static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    return NULL;
+  }
+  String class_name;
+  StringInit(&class_name, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  if (!LexMatch(syntax->lex, TOK(coloncolon)) ||
+      !LexLookingAt(syntax->lex, TOK(identifier))) {
+    StringDestruct(&class_name);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  Symbol* class_sym = SyntaxFindSymbol(syntax, &class_name);
+  Struct* class_info = NULL;
+  if (class_sym != NULL && class_sym->type != NULL &&
+      TypeIsStructOrUnion(class_sym->type) &&
+      class_sym->type->info.struct_info != NULL) {
+    class_info = class_sym->type->info.struct_info;
+  }
+  StringDestruct(&class_name);
+  if (class_info == NULL) {
+    StringDestruct(&member_name);
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    return NULL;
+  }
+  StructMember* member = FindStructMember(class_info, &member_name);
+  StringDestruct(&member_name);
+  if (member == NULL || member->symbol == NULL || member->symbol->type == NULL ||
+      member->is_static) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    return NULL;
+  }
+  TypeRecord* member_type = TypeMemberPointerPointeeFromMember(member);
+  TypeRecord* mptr = NewMemberPointerTypeRecord(class_info, kQualPlain);
+  TypeRecordChain(mptr, member_type);
+  TypeRecordCalculateSize(mptr);
+  SourceLocation location = syntax->lex->current_token_location;
+  StructMemberASTNode* member_node =
+      (StructMemberASTNode*)NewStructMemberASTNode(member, location);
+  ASTNode* result =
+      NewUnaryASTNode(AST_OP(member_ptr), NULL, location, (ASTNode*)member_node);
+  ASTNodeSetType(result, mptr);
+  (void)followers;
+  return result;
 }
 
 // Parse cast expression with syntax:

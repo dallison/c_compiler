@@ -39,6 +39,50 @@ typedef struct {
   CXXConstructorInitList* initializers;
 } TemplateConstructorInitializers;
 
+static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
+                                         ConstraintExpr* constraint) {
+  if (target == NULL || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* current = *target;
+  if (current == NULL) {
+    *target = constraint;
+    return;
+  }
+  *target = NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static void MoveTemplateParameterConstraints(Vector* parameters,
+                                             ConstraintExpr** target) {
+  if (parameters == NULL || target == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param == NULL || param->associated_constraint == NULL) {
+      continue;
+    }
+    ConstraintExpr* constraint = param->associated_constraint;
+    param->associated_constraint = NULL;
+    AddOwnedAssociatedConstraint(target, constraint);
+  }
+}
+
+static void FinalizeMemberFunctionTemplateConstraints(
+    TypeRecord* func, Vector* member_template_parameters,
+    ConstraintExpr* member_requires_clause) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    ConstraintExprDelete(member_requires_clause);
+    return;
+  }
+  MoveTemplateParameterConstraints(member_template_parameters,
+                                   &func->info.function.associated_constraint);
+  if (member_requires_clause != NULL) {
+    AddOwnedAssociatedConstraint(&func->info.function.associated_constraint,
+                                 member_requires_clause);
+  }
+}
+
 static Vector pending_inline_constructor_preambles;
 static bool pending_inline_constructor_preambles_initialized = false;
 
@@ -1043,6 +1087,17 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
   SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
                                            &cxx_initializers);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      LexLookingAt(parser->lex, TOK(requires))) {
+    ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
+    if (constraint != NULL && TypeIsFunction(member_symbol->type)) {
+      AddOwnedAssociatedConstraint(
+          &member_symbol->type->info.function.associated_constraint,
+          constraint);
+    } else {
+      ConstraintExprDelete(constraint);
+    }
+  }
   if (!LexMatch(parser->lex, TOK(lbrace))) {
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
@@ -1163,6 +1218,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
                                     bool is_consteval, bool is_explicit,
                                     bool is_member_template,
                                     Vector* member_template_parameters,
+                                    ConstraintExpr* member_template_requires_clause,
                                     int member_template_parameter_base) {
   if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
@@ -1265,6 +1321,8 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
       member_template_parameters->length = 0;
     }
   }
+  FinalizeMemberFunctionTemplateConstraints(
+      func, member_template_parameters, member_template_requires_clause);
   CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
@@ -1583,7 +1641,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     int old_template_parameter_count =
         parser->syntax->current_template_parameter_count;
     Vector* old_template_parameters = parser->syntax->current_template_parameters;
+    ConstraintExpr* old_requires_clause =
+        parser->syntax->current_template_requires_clause;
     Vector* member_template_parameters = NULL;
+    ConstraintExpr* member_template_requires_clause = NULL;
     int member_template_parameter_base = old_template_parameter_count;
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(template))) {
       SyntaxOpenScope(parser->syntax);
@@ -1595,6 +1656,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->syntax->current_template_parameter_count =
           member_template_parameter_base +
           (int)member_template_parameters->length;
+      member_template_requires_clause = ConceptsParseRequiresClause(parser->syntax);
       is_member_template = true;
     }
 
@@ -1610,6 +1672,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->syntax->current_template_parameter_count =
           old_template_parameter_count;
       parser->syntax->current_template_parameters = old_template_parameters;
+      ConstraintExprDelete(member_template_requires_clause);
+      parser->syntax->current_template_requires_clause = old_requires_clause;
+      member_template_requires_clause = NULL;
       continue;
     }
 
@@ -1636,6 +1701,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->syntax->current_template_parameter_count =
           old_template_parameter_count;
       parser->syntax->current_template_parameters = old_template_parameters;
+      ConstraintExprDelete(member_template_requires_clause);
+      parser->syntax->current_template_requires_clause = old_requires_clause;
+      member_template_requires_clause = NULL;
       continue;
     }
 
@@ -1677,6 +1745,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                 is_virtual_member, is_constexpr_member,
                                 is_consteval_member, is_explicit_member,
                                 is_member_template, member_template_parameters,
+                                member_template_requires_clause,
                                 member_template_parameter_base)) {
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
@@ -1693,6 +1762,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         parser->syntax->current_template_parameter_count =
             old_template_parameter_count;
         parser->syntax->current_template_parameters = old_template_parameters;
+        parser->syntax->current_template_requires_clause = old_requires_clause;
+        member_template_requires_clause = NULL;
       }
       if (!LexLookingAt(parser->lex, TOK(rbrace))) {
         LexMatch(parser->lex, TOK(semicolon));
@@ -1756,6 +1827,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         parser->syntax->current_template_parameter_count =
             old_template_parameter_count;
         parser->syntax->current_template_parameters = old_template_parameters;
+        parser->syntax->current_template_requires_clause = old_requires_clause;
+        member_template_requires_clause = NULL;
       }
       if (!LexLookingAt(parser->lex, TOK(rbrace))) {
         LexMatch(parser->lex, TOK(semicolon));
@@ -1909,6 +1982,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                   member_template_parameters->value.p[i]);
             }
             member_template_parameters->length = 0;
+            FinalizeMemberFunctionTemplateConstraints(
+                member_symbol->type, member_template_parameters,
+                member_template_requires_clause);
+            member_template_requires_clause = NULL;
           } else if (TypeIsStructOrUnion(member_symbol->type) &&
                      member_symbol->type->info.struct_info != NULL) {
             member_symbol->flags.is_template = true;
@@ -2081,6 +2158,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->syntax->current_template_parameter_count =
           old_template_parameter_count;
       parser->syntax->current_template_parameters = old_template_parameters;
+      ConstraintExprDelete(member_template_requires_clause);
+      parser->syntax->current_template_requires_clause = old_requires_clause;
+      member_template_requires_clause = NULL;
     }
   }
 }

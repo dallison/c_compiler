@@ -367,6 +367,7 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
         }
         break;
       case kDeclPointer:
+      case kDeclMemberPointer:
       case kDeclReference:
       case kDeclRValueReference:
         record->size = SizeofPointer();
@@ -420,8 +421,8 @@ TemplateParameter* TemplateParameterCopy(TemplateParameter* param) {
   copy->default_int_value = param->default_int_value;
   copy->default_template_parameter_index =
       param->default_template_parameter_index;
-  // Constraint cloning is introduced with full associated-constraint semantics.
-  copy->associated_constraint = NULL;
+  copy->associated_constraint =
+      ConceptsCloneConstraint(param->associated_constraint);
   copy->index = param->index;
   return copy;
 }
@@ -534,9 +535,8 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
                        record->info.function.template_parameters.value.p[i]));
     }
     VectorInit(&r->info.function.template_instantiations);
-    // Constraint cloning is introduced with full associated-constraint
-    // semantics; avoid sharing ownership across function type copies.
-    r->info.function.associated_constraint = NULL;
+    r->info.function.associated_constraint =
+        ConceptsCloneConstraint(record->info.function.associated_constraint);
     TypeRecordIncRef(r->info.function.coroutine_promise_type);
     TypeRecordIncRef(r->info.function.coroutine_frame_type);
   }
@@ -562,6 +562,47 @@ TypeRecord* NewPointerTypeRecord(Qualifiers quals) {
   t->declarator = kDeclPointer;
   t->size = compiler->pointer_size;
   return t;
+}
+
+TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals) {
+  TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
+  t->declarator = kDeclMemberPointer;
+  t->size = compiler->pointer_size;
+  t->info.struct_info = class_info;
+  return t;
+}
+
+TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member) {
+  if (member == NULL || member->symbol == NULL || member->symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = TypeRecordCopy(member->symbol->type);
+  if (!member->is_member_function || !TypeIsFunction(type)) {
+    return type;
+  }
+  FunctionInfo* info = &type->info.function;
+  if (info->prototype.length == 0) {
+    return type;
+  }
+  Symbol* first = (Symbol*)info->prototype.value.p[0];
+  if (first == NULL || !StringEqual(&first->name, "this")) {
+    return type;
+  }
+  Vector new_prototype;
+  VectorInit(&new_prototype);
+  for (size_t i = 1; i < info->prototype.length; i++) {
+    VectorAppend(&new_prototype, info->prototype.value.p[i]);
+  }
+  SymbolDelete(first);
+  VectorDestruct(&info->prototype);
+  info->prototype = new_prototype;
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = (Symbol*)info->prototype.value.p[i];
+    if (formal != NULL) {
+      formal->value.arg_number = (int)i;
+    }
+  }
+  return type;
 }
 
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue) {
@@ -775,6 +816,7 @@ ClassTemplatePartialSpecialization* NewClassTemplatePartialSpecialization(
   ClassTemplatePartialSpecialization* partial =
       malloc(sizeof(ClassTemplatePartialSpecialization));
   partial->tag_symbol = tag_symbol;
+  partial->associated_constraint = NULL;
   VectorInit(&partial->template_parameters);
   VectorInit(&partial->pattern_arguments);
   for (size_t i = 0; template_parameters != NULL &&
@@ -802,6 +844,7 @@ void ClassTemplatePartialSpecializationDelete(
   VectorDestructWithContents(&partial->pattern_arguments,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
+  ConstraintExprDelete(partial->associated_constraint);
   free(partial);
 }
 
@@ -890,6 +933,7 @@ Struct* NewStruct(bool is_union) {
   VectorInit(&s->template_parameters);
   VectorInit(&s->partial_specializations);
   VectorInit(&s->deduction_guides);
+  s->associated_constraint = NULL;
   s->vptr_member = NULL;
   s->vtable_symbol = NULL;
   s->vbptr_member = NULL;
@@ -955,6 +999,8 @@ static void StructTeardownMembers(Struct* s) {
   VectorDestructWithContents(&s->template_parameters,
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
+  ConstraintExprDelete(s->associated_constraint);
+  s->associated_constraint = NULL;
   VectorDestructWithContents(
       &s->partial_specializations,
       (VectorElementDestructor)ClassTemplatePartialSpecializationDelete,

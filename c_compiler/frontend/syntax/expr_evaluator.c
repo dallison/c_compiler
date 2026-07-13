@@ -7,6 +7,7 @@
 //
 
 #include "expr_evaluator.h"
+#include <stdio.h>
 #include "assembler.h"
 #include "concepts.h"
 #include "constexpr.h"

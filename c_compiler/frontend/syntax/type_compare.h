@@ -17,6 +17,8 @@ inline bool TypeIsPointer(TypeRecord* type) {
   return type->declarator == kDeclPointer;
 }
 
+bool TypeIsMemberPointer(TypeRecord* type);
+
 bool TypeIsReference(TypeRecord* type);
 
 inline bool TypeIsPrimitive(TypeRecord* type) {
@@ -246,6 +248,7 @@ inline bool TypeIsUnknown(TypeRecord* type) {
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to);
 bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only);
+int StructCountPublicDerivationPaths(Struct* from, Struct* to);
 bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to);
 bool TypeBaseOffset(TypeRecord* from, TypeRecord* to, bool public_only,
                     int* offset);

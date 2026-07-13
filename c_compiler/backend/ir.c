@@ -444,6 +444,7 @@ static struct {
     {TypeIsDouble, IR_OP(constd)},
     {TypeIsLongDouble, IR_OP(constd)},
   {TypeIsPointerOrArray, IR_OP(consta)},
+  {TypeIsMemberPointer, IR_OP(consta)},
   {TypeIsStructOrUnion, IR_OP(consta)},
     {NULL, IR_OP(nop)},
 };

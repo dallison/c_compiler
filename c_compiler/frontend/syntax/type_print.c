@@ -278,6 +278,28 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
       }
       break;
 
+    case kDeclMemberPointer:
+      if (type->info.struct_info != NULL &&
+          type->info.struct_info->tag_name != NULL) {
+        AppendReadableTypeName(result, type->info.struct_info->tag_name);
+      } else {
+        StringAppend(result, "<class>");
+      }
+      StringAppend(result, "::*");
+      if (type->next != NULL) {
+        if (type->next->declarator == kDeclFunction) {
+          StringAppendChar(result, '(');
+          TypeRecordToStringWithTemplateParameters(type->next, parameters,
+                                                   result);
+          StringAppendChar(result, ')');
+        } else {
+          StringAppend(result, " ");
+          TypeRecordToStringWithTemplateParameters(type->next, parameters,
+                                                   result);
+        }
+      }
+      break;
+
     case kDeclReference:
     case kDeclRValueReference:
       TypeRecordToStringWithTemplateParameters(type->next, parameters, result);

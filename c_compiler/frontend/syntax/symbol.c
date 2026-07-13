@@ -7,7 +7,7 @@
 //
 
 #include "symbol.h"
-#include "type.h"
+#include "concepts.h"
 #include "type_internal.h"
 
 #include <ctype.h>
@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
-#include "concepts.h"
 #include "dstring.h"
 #include "compiler.h"
 #include "symbol_table.h"
@@ -156,6 +155,8 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->overload_next = NULL;
   sym->default_argument = NULL;
   sym->variable_template = NULL;
+  sym->alias_template = NULL;
+  sym->associated_constraint = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -186,9 +187,20 @@ void SymbolDestruct(Symbol* symbol) {
         &symbol->variable_template->parameters,
         (VectorElementDestructor)TemplateParameterDelete,
         /*free_element=*/false);
+    ConstraintExprDelete(symbol->variable_template->associated_constraint);
     free(symbol->variable_template);
     symbol->variable_template = NULL;
   }
+  if (symbol->alias_template != NULL) {
+    VectorDestructWithContents(
+        &symbol->alias_template->parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    free(symbol->alias_template);
+    symbol->alias_template = NULL;
+  }
+  ConstraintExprDelete(symbol->associated_constraint);
+  symbol->associated_constraint = NULL;
   ConceptDelete(symbol->concept_definition);
   AttributeListDestruct(&symbol->attributes);
   if (symbol->overload_next != NULL) {
@@ -689,6 +701,8 @@ Symbol* SymbolClone(Symbol* sym) {
   Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
   new_sym->flags = sym->flags;
   new_sym->concept_definition = NULL;
+  new_sym->associated_constraint =
+      ConceptsCloneConstraint(sym->associated_constraint);
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;

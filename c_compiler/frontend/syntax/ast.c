@@ -158,6 +158,10 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "do";
     case AST_OP(dot):
       return ".";
+    case AST_OP(dotstar):
+      return ".*";
+    case AST_OP(arrowstar):
+      return "->*";
     case AST_OP(equal):
       return "==";
     case AST_OP(for):
@@ -259,6 +263,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "while";
     case AST_OP(structmember):
       return "structmember";
+    case AST_OP(member_ptr):
+      return "member_ptr";
     case AST_OP(asm):
       return "__asm";
     case AST_OP(attribute):

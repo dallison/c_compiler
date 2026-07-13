@@ -10,6 +10,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include "concepts.h"
 #include "expr_evaluator.h"
@@ -47,7 +48,7 @@ static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
                                                          String* name,
                                                          bool* ambiguous);
 
-static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
+bool SyntaxCurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   Lex* lex = syntax->lex;
   if (!LexLookingAt(lex, TOK(identifier))) {
     return false;
@@ -77,6 +78,23 @@ static bool CurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   return pos + 1 < lex->line.length &&
          lex->line.value[pos] == ':' &&
          lex->line.value[pos + 1] == ':';
+}
+
+bool SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  if (!CompilerIsCXX() || !LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  LexNextToken(lex);
+  bool result = false;
+  if (LexMatch(lex, TOK(coloncolon))) {
+    result = LexLookingAt(lex, TOK(star));
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
 }
 
 static bool ReadLookaheadIdentifier(Lex* lex, size_t* pos, String* out) {
@@ -1428,6 +1446,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->current_template_parameters = NULL;
   syntax->current_template_requires_clause = NULL;
   syntax->pending_explicit_condition = NULL;
+  syntax->pending_placeholder_variable_constraint = NULL;
   syntax->context = kParsingFileScope;
   syntax->extern_c_depth = 0;
 }
@@ -1450,6 +1469,8 @@ void SyntaxDestruct(Syntax* syntax) {
   VectorDestruct(&syntax->inline_static_member_definitions);
   ConstraintExprDelete(syntax->current_template_requires_clause);
   syntax->current_template_requires_clause = NULL;
+  ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
+  syntax->pending_placeholder_variable_constraint = NULL;
   ASTNodeDelete(syntax->ast);
 }
 
@@ -1485,6 +1506,8 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   // to a function (e.g. after error recovery) so it cannot bleed into the next
   // declaration.  The node itself is arena-owned, so only the handle is cleared.
   syntax->pending_explicit_condition = NULL;
+  ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
+  syntax->pending_placeholder_variable_constraint = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->inline_static_member_definitions);
@@ -1541,6 +1564,13 @@ bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
     VectorAppend(&syntax->all_local_symbols, symbol);
   }
   return ok;
+}
+
+bool SyntaxAddBorrowedSymbol(Syntax* syntax, Symbol* symbol) {
+  if (syntax == NULL || symbol == NULL || syntax->local_symbol_stack == NULL) {
+    return false;
+  }
+  return InsertLocalSymbol(syntax->local_symbol_stack, symbol);
 }
 
 Symbol* SyntaxFindTag(Syntax* syntax, String* name) {
@@ -1706,6 +1736,10 @@ static bool IsDefinition(TypeParser* parser, Symbol* sym, Storage storage) {
 static ASTNode* ParseBracedInitializer(Syntax* syntax);
 static ASTNode* ParseNamespaceDeclaration(Syntax* syntax, bool leading_inline);
 static ASTNode* ParseUsingDeclaration(Syntax* syntax);
+static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
+                                         ConstraintExpr* constraint);
+static void MoveTemplateParameterConstraints(Vector* parameters,
+                                             ConstraintExpr** target);
 
 static bool StaticAssertTemplateArgumentContainsTemplateParameter(
     TemplateArgument* arg) {
@@ -1779,6 +1813,29 @@ bool ExpressionIsTemplateDependent(ASTNode* expr) {
   return dependent;
 }
 
+static void ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_id,
+                                          VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
+static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
+  ASTNode* cloned = ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
+  if (cloned == NULL) {
+    return NULL;
+  }
+  ASTNodeVisit(cloned, ClearStaticAssertExprAnalysis, 0, NULL);
+  cloned = AnalyzeExpression(cloned);
+  if (cloned == NULL) {
+    ASTNodeDelete(cloned);
+    return NULL;
+  }
+  return cloned;
+}
+
 ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);  // static_assert
@@ -1807,23 +1864,32 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
     return node;
   }
 
-  expr = AnalyzeExpression(expr);
+  ASTNode* evaluated = EvaluateStaticAssertExpression(expr);
+  ASTNodeDelete(expr);
+  if (evaluated == NULL) {
+    StringDestruct(&message);
+    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+    return NULL;
+  }
 
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(expr, &value)) {
-    if (ExpressionIsTemplateDependent(expr)) {
-      ASTNode* node = NewStaticAssertASTNode(expr, &message, location);
+  if (!EvaluateIntegerExpression(evaluated, &value)) {
+    if (ExpressionIsTemplateDependent(evaluated)) {
+      ASTNode* node = NewStaticAssertASTNode(evaluated, &message, location);
       StringDestruct(&message);
       return node;
     }
+    ASTNodeDelete(evaluated);
+    StringDestruct(&message);
     SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+    return NULL;
   }
 
   if (value == 0) {
     SyntaxError(syntax, "%s", message.value);
   }
   StringDestruct(&message);
-  ASTNodeDelete(expr);
+  ASTNodeDelete(evaluated);
   return NULL;
 }
 
@@ -4530,7 +4596,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       }
       *is_constinit = true;
     } else if (!(type_specifier.type != kTypeImplicit &&
-                 CurrentIdentifierFollowedByScopeOperator(syntax)) &&
+                 SyntaxCurrentIdentifierFollowedByScopeOperator(syntax)) &&
                SyntaxLookingAtType(syntax) &&
                (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
       // Guard against a type specifier that consumes no input (e.g. a stray
@@ -4542,6 +4608,12 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       if (syntax->lex->pos == prev_pos &&
           syntax->lex->current_token == prev_token) {
         *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+        if (parser.placeholder_variable_constraint != NULL) {
+          ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
+          syntax->pending_placeholder_variable_constraint =
+              parser.placeholder_variable_constraint;
+          parser.placeholder_variable_constraint = NULL;
+        }
         TypeParserDestruct(&parser);
         return;
       }
@@ -4561,6 +4633,12 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
                       "type specifier missing, defaults to int");
       }
       *type = TypeParserBuildTypeRecord(&parser, &type_specifier);
+      if (parser.placeholder_variable_constraint != NULL) {
+        ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
+        syntax->pending_placeholder_variable_constraint =
+            parser.placeholder_variable_constraint;
+        parser.placeholder_variable_constraint = NULL;
+      }
       NormalizeThreadLocalStorage(storage, context);
       TypeParserDestruct(&parser);
       return;
@@ -4872,6 +4950,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     VectorCopy(&sym->attributes, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(sym);
+    if (parser->placeholder_variable_constraint != NULL) {
+      sym->associated_constraint = parser->placeholder_variable_constraint;
+      parser->placeholder_variable_constraint = NULL;
+    } else if (syntax->pending_placeholder_variable_constraint != NULL) {
+      sym->associated_constraint = syntax->pending_placeholder_variable_constraint;
+      syntax->pending_placeholder_variable_constraint = NULL;
+    }
 
     SyntaxCheckThreadLocal(syntax, sym, kParsingFileScope,
                      parser->cxx_member_definition != NULL &&
@@ -5018,6 +5103,24 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     } else if (TypeContainsAuto(sym->type)) {
       initializer = AnalyzeExpression(initializer);
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
+      if (sym->associated_constraint != NULL && sym->type != NULL) {
+        Vector* constraint_args = NewVector();
+        TemplateArgument* type_arg = malloc(sizeof(TemplateArgument));
+        memset(type_arg, 0, sizeof(*type_arg));
+        type_arg->kind = kTemplateParameterType;
+        type_arg->type = TypeRecordCopy(sym->type);
+        VectorAppend(constraint_args, type_arg);
+        if (!ConceptsConstraintSatisfied(sym->associated_constraint,
+                                         constraint_args)) {
+          SyntaxError(syntax, "constraints not satisfied");
+          ConceptsReportAssociatedConstraintFailure(sym->associated_constraint,
+                                                    constraint_args,
+                                                    sym->location, NULL);
+        }
+        VectorDeleteWithContents(
+            constraint_args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
     }
     if ((sym->flags.is_constexpr || sym->flags.is_constinit) &&
         initializer == NULL && parser->cxx_member_definition == NULL) {
@@ -5333,11 +5436,12 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   Symbol* alias =
       NewSymbol(FullyQualifiedIdentifierLast(name), alias_type, STO(typedef));
   alias->location = location;
-  if (syntax->parsing_template_declaration) {
+  bool block_scope_alias = syntax->context == kParsingBlockScope;
+  if (!block_scope_alias && syntax->parsing_template_declaration) {
     alias->flags.is_template = true;
   }
   LocalSymbolTable* template_parameter_scope = NULL;
-  if (syntax->parsing_template_declaration &&
+  if (!block_scope_alias && syntax->parsing_template_declaration &&
       syntax->local_symbol_stack != NULL) {
     template_parameter_scope = syntax->local_symbol_stack;
     syntax->local_symbol_stack = template_parameter_scope->prev;
@@ -5350,6 +5454,26 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
     SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
                 alias->name.value);
     SymbolDelete(alias);
+  }
+  if (added && !block_scope_alias && syntax->parsing_template_declaration) {
+    MoveTemplateParameterConstraints(syntax->current_template_parameters,
+                                     &alias->associated_constraint);
+    if (syntax->current_template_requires_clause != NULL) {
+      AddOwnedAssociatedConstraint(&alias->associated_constraint,
+                                   syntax->current_template_requires_clause);
+      syntax->current_template_requires_clause = NULL;
+    }
+    if (alias->alias_template == NULL) {
+      alias->alias_template = malloc(sizeof(AliasTemplate));
+      VectorInit(&alias->alias_template->parameters);
+    }
+    if (syntax->current_template_parameters != NULL) {
+      for (size_t p = 0; p < syntax->current_template_parameters->length; p++) {
+        VectorAppend(&alias->alias_template->parameters,
+                     syntax->current_template_parameters->value.p[p]);
+      }
+      syntax->current_template_parameters->length = 0;
+    }
   }
   if (parsed != NULL) {
     SymbolDelete(parsed);
@@ -5695,6 +5819,16 @@ static TemplateArgument* NewTemplateParameterTypeArgument(int index,
   return arg;
 }
 
+static TemplateArgument* NewConstrainedPlaceholderTypeArgument(
+    int index, TypeRecord* placeholder) {
+  TemplateArgument* constrained_arg =
+      NewTemplateParameterTypeArgument(index, placeholder);
+  if (constrained_arg->type != NULL) {
+    constrained_arg->type->template_parameter_index = index;
+  }
+  return constrained_arg;
+}
+
 static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
                                                  Vector* params, int base) {
   Lex* lex = syntax->lex;
@@ -5703,34 +5837,119 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
     return false;
   }
 
-  String concept_name;
-  StringInit(&concept_name, lex->spelling.value);
-  Symbol* concept_symbol = SyntaxFindSymbol(syntax, &concept_name);
-  if (concept_symbol == NULL || !concept_symbol->flags.is_concept) {
-    StringDestruct(&concept_name);
+  LexCheckpoint start_checkpoint;
+  LexCheckpointSave(lex, &start_checkpoint);
+  SourceLocation constraint_location = lex->current_token_location;
+
+  FullyQualifiedIdentifier concept_id;
+  FullyQualifiedIdentifierInit(&concept_id);
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &concept_id,
+                                                          TC(closebra))) {
+    FullyQualifiedIdentifierDestruct(&concept_id);
+    LexCheckpointRestore(lex, &start_checkpoint);
+    LexCheckpointDestruct(&start_checkpoint);
     return false;
   }
 
-  SourceLocation constraint_location = lex->current_token_location;
-  LexNextToken(lex);
-  Vector* concept_arguments = NULL;
-  if (LexLookingAt(lex, TOK(less))) {
-    concept_arguments = SyntaxParseTemplateArgumentList(syntax, TC(closebra));
-  } else {
-    concept_arguments = NewVector();
+  Symbol* concept_symbol = SyntaxFindQualifiedSymbol(syntax, &concept_id);
+  if (concept_symbol == NULL || !concept_symbol->flags.is_concept) {
+    FullyQualifiedIdentifierDestruct(&concept_id);
+    LexCheckpointRestore(lex, &start_checkpoint);
+    LexCheckpointDestruct(&start_checkpoint);
+    return false;
   }
+  LexCheckpointDestruct(&start_checkpoint);
+
+  Vector* concept_arguments = NewVector();
+  if (concept_id.template_arguments.length > 0) {
+    Vector* last_args = concept_id.template_arguments.value.p
+        [concept_id.template_arguments.length - 1];
+    if (last_args != NULL) {
+      for (size_t i = 0; i < last_args->length; i++) {
+        TemplateArgument* copy =
+            TemplateArgumentCopy(last_args->value.p[i]);
+        if (copy != NULL) {
+          VectorAppend(concept_arguments, copy);
+        }
+      }
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&concept_id);
   if (concept_arguments == NULL) {
     concept_arguments = NewVector();
   }
 
   int index = base + (int)params->length;
   bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
+  if (LexLookingAt(lex, TOK(auto))) {
+    LexNextToken(lex);
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected constrained template parameter name");
+      VectorDeleteWithContents(concept_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      SyntaxRecover(syntax, TC(closebra));
+      return true;
+    }
+
+    TypeRecord* placeholder_type =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    placeholder_type->template_parameter_index = index;
+    placeholder_type->template_parameter_name = NewString("auto");
+    Symbol* param =
+        NewSymbol(lex->spelling.value, TypeRecordCopy(placeholder_type),
+                  STO(typedef));
+    param->flags.invented = true;
+    param->flags.is_template_parameter = true;
+    param->flags.is_template_type_parameter = false;
+    param->flags.is_parameter_pack = is_parameter_pack;
+    param->template_parameter_index = index;
+    param->location = lex->current_token_location;
+    bool added = SyntaxAddSymbol(syntax, param);
+    if (!added) {
+      SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
+      SymbolDelete(param);
+    }
+
+    String param_name;
+    StringInit(&param_name, lex->spelling.value);
+    LexNextToken(lex);
+    TemplateArgument* constrained_arg =
+        NewConstrainedPlaceholderTypeArgument(index, placeholder_type);
+    if (concept_arguments->length == 0) {
+      VectorAppend(concept_arguments, constrained_arg);
+    } else {
+      VectorInsertBefore(concept_arguments, 0, constrained_arg);
+    }
+    bool has_default_int = false;
+    long long default_int_value = 0;
+    int default_template_parameter_index = -1;
+    if (LexMatch(lex, TOK(equal))) {
+      if (is_parameter_pack) {
+        SyntaxError(syntax, "Template parameter pack cannot have a default");
+      }
+      has_default_int =
+          ParseTemplateNonTypeDefault(syntax, &default_int_value,
+                                      &default_template_parameter_index);
+    }
+    TemplateParameter* template_param =
+        NewTemplateParameter(param_name.value, kTemplateParameterNonType,
+                             is_parameter_pack, placeholder_type, NULL,
+                             has_default_int, default_int_value,
+                             default_template_parameter_index, index);
+    template_param->associated_constraint =
+        NewConceptIdConstraint(concept_symbol, concept_arguments,
+                               constraint_location);
+    VectorAppend(params, template_param);
+    StringDestruct(&param_name);
+    return true;
+  }
+
   if (!LexLookingAt(lex, TOK(identifier))) {
     SyntaxError(syntax, "Expected constrained template parameter name");
     VectorDeleteWithContents(concept_arguments,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
-    StringDestruct(&concept_name);
     SyntaxRecover(syntax, TC(closebra));
     return true;
   }
@@ -5756,7 +5975,7 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
   StringInit(&param_name, lex->spelling.value);
   LexNextToken(lex);
   TemplateArgument* constrained_arg =
-      NewTemplateParameterTypeArgument(index, placeholder);
+      NewConstrainedPlaceholderTypeArgument(index, placeholder);
   if (concept_arguments->length == 0) {
     VectorAppend(concept_arguments, constrained_arg);
   } else {
@@ -5779,7 +5998,6 @@ static bool ParseConstrainedTemplateTypeParameter(Syntax* syntax,
                              constraint_location);
   VectorAppend(params, template_param);
   StringDestruct(&param_name);
-  StringDestruct(&concept_name);
   TypeRecordDelete(default_type);
   TypeRecordDelete(placeholder);
   return true;
@@ -6065,8 +6283,21 @@ static bool ExpressionIsNonTypeTemplateParameter(ASTNode* node,
 // leading `typename` is already handled: SyntaxLookingAtType returns true on
 // the `typename` token, and a bare dependent name -- a type parameter `T` or a
 // class-template-id `C<T>` -- stays a type because it is not qualified.)
+static bool SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  const char* name = syntax->lex->spelling.value;
+  return strncmp(name, "__davecc_is_", 12) == 0 ||
+         strcmp(name, "__davecc_invoke_result_t") == 0 ||
+         strcmp(name, "__davecc_common_type_t") == 0;
+}
+
 static bool SyntaxTemplateArgumentLooksLikeType(Syntax* syntax) {
   if (!SyntaxLookingAtType(syntax)) {
+    return false;
+  }
+  if (SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(syntax)) {
     return false;
   }
   Token tok = syntax->lex->current_token;
@@ -6202,6 +6433,9 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           }
         }
         arg->int_value = value;
+        if (expr->type != NULL) {
+          arg->type = TypeRecordCopy(expr->type);
+        }
         ASTNodeDelete(expr);
         arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
       }
@@ -6282,20 +6516,57 @@ static void AddFunctionAssociatedConstraint(TypeRecord* func,
       NewConjunctionConstraint(current, constraint, constraint->location);
 }
 
-static void MoveTemplateParameterConstraintsToFunction(TypeRecord* func) {
-  if (func == NULL || !TypeIsFunction(func)) {
+static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
+                                         ConstraintExpr* constraint) {
+  if (target == NULL || constraint == NULL) {
     return;
   }
-  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
-    TemplateParameter* param =
-        func->info.function.template_parameters.value.p[i];
+  ConstraintExpr* current = *target;
+  if (current == NULL) {
+    *target = constraint;
+    return;
+  }
+  *target = NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static void MoveTemplateParameterConstraints(Vector* parameters,
+                                             ConstraintExpr** target) {
+  if (parameters == NULL || target == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
     if (param == NULL || param->associated_constraint == NULL) {
       continue;
     }
     ConstraintExpr* constraint = param->associated_constraint;
     param->associated_constraint = NULL;
-    AddFunctionAssociatedConstraint(func, constraint);
+    AddOwnedAssociatedConstraint(target, constraint);
   }
+}
+
+static void MoveTemplateParameterConstraintsToFunction(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  MoveTemplateParameterConstraints(&func->info.function.template_parameters,
+                                   &func->info.function.associated_constraint);
+}
+
+static void MoveTemplateParameterConstraintsToStruct(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  MoveTemplateParameterConstraints(&str->template_parameters,
+                                   &str->associated_constraint);
+}
+
+static void MoveTemplateParameterConstraintsToVariableTemplate(
+    VariableTemplate* vt) {
+  if (vt == NULL) {
+    return;
+  }
+  MoveTemplateParameterConstraints(&vt->parameters, &vt->associated_constraint);
 }
 
 static void ValidateLiteralOperatorTemplate(Syntax* syntax, Symbol* symbol) {
@@ -6348,6 +6619,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
           VariableTemplate* vt = malloc(sizeof(VariableTemplate));
           vt->initializer = var->initializer;
           var->initializer = NULL;
+          vt->associated_constraint = NULL;
           VectorInit(&vt->parameters);
           if (syntax->current_template_parameters != NULL) {
             for (size_t p = 0;
@@ -6356,6 +6628,12 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
                            syntax->current_template_parameters->value.p[p]);
             }
             syntax->current_template_parameters->length = 0;
+          }
+          MoveTemplateParameterConstraintsToVariableTemplate(vt);
+          if (syntax->current_template_requires_clause != NULL) {
+            AddOwnedAssociatedConstraint(&vt->associated_constraint,
+                                         syntax->current_template_requires_clause);
+            syntax->current_template_requires_clause = NULL;
           }
           var->symbol->variable_template = vt;
         }
@@ -6382,6 +6660,13 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
         CurrentTemplateParameterListLength(syntax);
     MoveCurrentTemplateParametersToStruct(
         syntax, syntax->last_parsed_tag->type->info.struct_info);
+    Struct* class_template = syntax->last_parsed_tag->type->info.struct_info;
+    MoveTemplateParameterConstraintsToStruct(class_template);
+    if (syntax->current_template_requires_clause != NULL) {
+      AddOwnedAssociatedConstraint(&class_template->associated_constraint,
+                                   syntax->current_template_requires_clause);
+      syntax->current_template_requires_clause = NULL;
+    }
     Symbol* alias = NewSymbol(syntax->last_parsed_tag->name.value,
                               syntax->last_parsed_tag->type, STO(typedef));
     alias->namespace_ = syntax->last_parsed_tag->namespace_;
@@ -6471,6 +6756,19 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   bool is_specialization = syntax->current_template_parameters->length == 0;
   syntax->parsing_template_declaration = !is_specialization;
   syntax->parsing_template_specialization = is_specialization;
+  if (is_specialization && LexLookingAt(syntax->lex, TOK(concept))) {
+    SyntaxError(syntax, "concept specialization is not permitted");
+    SyntaxRecover(syntax, TC(semicolon));
+    SyntaxNeedSemicolon(syntax, TC(decl));
+    syntax->parsing_template_declaration = old_parsing_template;
+    syntax->parsing_template_specialization = old_parsing_specialization;
+    syntax->local_tag_stack = template_tag_scope;
+    SyntaxCloseScope(syntax);
+    syntax->current_template_parameter_count = old_template_parameter_count;
+    syntax->current_template_parameters = old_template_parameters;
+    syntax->current_template_requires_clause = old_requires_clause;
+    return EmptyDeclarationList(location);
+  }
   syntax->current_template_requires_clause =
       ConceptsParseRequiresClause(syntax);
   ASTNode* declaration = ConceptsParseDefinition(syntax, location);
@@ -8413,7 +8711,17 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       }
       VectorAppend(declarations, decl);
       if (sym->flags.is_constexpr || sym->flags.is_constinit ||
-          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) {
+          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)) ||
+          // Deduce `auto` eagerly at parse time. Block-scope declarations are
+          // otherwise analyzed only after the whole function body is parsed, so
+          // a later `decltype(var)` in the same block (resolved during parsing)
+          // would still see the undeduced `auto` type. Analyzing here fixes the
+          // symbol's type up front; the definition is idempotent under the
+          // later body-analysis pass. Skip this inside a template, where the
+          // initializer may be dependent and unanalyzable until instantiation
+          // (decltype defers via dependent_decltype_expr there anyway).
+          (CompilerIsCXX() && TypeContainsAuto(sym->type) &&
+           syntax->current_template_parameters == NULL)) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }
@@ -8538,6 +8846,9 @@ void SyntaxRecover(Syntax* syntax, TokenClass tc) {
 // (a dependent name, an incomplete template-id, etc.) fall back to the
 // conservative "could be a type" answer so dependent code keeps parsing.
 static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
+  if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+    return false;
+  }
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
   FullyQualifiedIdentifier name;
@@ -8616,6 +8927,18 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(typename):
       return CompilerIsCXX();
     case TOK(identifier): {
+      if (CompilerIsCXX() &&
+          SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(syntax)) {
+        LexCheckpoint checkpoint;
+        LexCheckpointSave(syntax->lex, &checkpoint);
+        LexNextToken(syntax->lex);
+        bool is_type_trait = LexLookingAt(syntax->lex, TOK(lparen));
+        LexCheckpointRestore(syntax->lex, &checkpoint);
+        LexCheckpointDestruct(&checkpoint);
+        if (is_type_trait) {
+          return true;
+        }
+      }
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
         if (CompilerIsCXX() &&
@@ -8626,7 +8949,16 @@ bool SyntaxLookingAtType(Syntax* syntax) {
           bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
           LexCheckpointRestore(syntax->lex, &checkpoint);
           LexCheckpointDestruct(&checkpoint);
-          return qualified ? SyntaxQualifiedNameLooksLikeType(syntax) : true;
+          if (qualified) {
+            if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+              return false;
+            }
+            return SyntaxQualifiedNameLooksLikeType(syntax);
+          }
+          return true;
+        }
+        if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+          return false;
         }
         return SyntaxQualifiedNameLooksLikeType(syntax);
       }
@@ -8640,10 +8972,46 @@ bool SyntaxLookingAtType(Syntax* syntax) {
           LexCheckpointRestore(syntax->lex, &checkpoint);
           LexCheckpointDestruct(&checkpoint);
           if (qualified) {
+            if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+              return false;
+            }
             return SyntaxQualifiedNameLooksLikeType(syntax);
           }
         }
         return true;
+      }
+      if (CompilerCXXAtLeast(kLanguageStandardCXX20) && sym->flags.is_concept) {
+        LexCheckpoint checkpoint;
+        LexCheckpointSave(syntax->lex, &checkpoint);
+        LexNextToken(syntax->lex);
+        if (LexLookingAt(syntax->lex, TOK(less))) {
+          int depth = 0;
+          while (!LexEof(syntax->lex)) {
+            Token t = syntax->lex->current_token;
+            if (t == TOK(less)) {
+              depth++;
+            } else if (t == TOK(lessless)) {
+              depth += 2;
+            } else if (t == TOK(greater)) {
+              depth--;
+            } else if (t == TOK(greatergreater) ||
+                       t == TOK(greatergreatereq)) {
+              depth -= 2;
+            } else if (t == TOK(greatereq)) {
+              depth -= 1;
+            }
+            LexNextToken(syntax->lex);
+            if (depth <= 0) {
+              break;
+            }
+          }
+        }
+        bool constrained_auto = LexLookingAt(syntax->lex, TOK(auto));
+        LexCheckpointRestore(syntax->lex, &checkpoint);
+        LexCheckpointDestruct(&checkpoint);
+        if (constrained_auto) {
+          return true;
+        }
       }
       return false;
     }
@@ -8677,7 +9045,7 @@ static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
   // an infinite loop.
   if (!CompilerIsCXX() ||
       !(SyntaxCurrentTokenStartsQualifiedName(syntax) ||
-        CurrentIdentifierFollowedByScopeOperator(syntax))) {
+        SyntaxCurrentIdentifierFollowedByScopeOperator(syntax))) {
     return false;
   }
 

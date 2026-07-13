@@ -18,6 +18,8 @@
 #include "errors.h"
 #include "symbol_table.h"
 #include "rtti.h"
+#include "type_traits_semantics.h"
+#include "type_compare.h"
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -633,6 +635,20 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       // `false ? declval<long long>() : declval<long long>()`, and therefore
       // `common_type_t<long long, long long>`.
       ASTNodeSetType((ASTNode*)node, node->left->type);
+    }
+    // The result of the usual arithmetic conversions is a prvalue of a cv-
+    // unqualified type.  Operand types can still carry cv-qualifiers when they
+    // arrive through the lvalue-to-rvalue conversion (e.g. via decltype /
+    // declval, `declval<const int&>() + declval<long>()`), so normalize the
+    // result; otherwise decltype would observe a spurious `const`.
+    if (node->base.type != NULL &&
+        (TypeIsIntegral(node->base.type) ||
+         TypeIsFloatingPoint(node->base.type)) &&
+        node->base.type->qualifiers != kQualPlain) {
+      TypeRecord* unqualified = TypeRecordCopy(node->base.type);
+      unqualified->qualifiers = kQualPlain;
+      ASTNodeSetType((ASTNode*)node, unqualified);
+      TypeRecordDelete(unqualified);
     }
   }
 }
@@ -1774,9 +1790,16 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   InsertNumericConversions(colon, false);
-  ASTNodeSetType((ASTNode*)node, colon->left->type);
-
+  // [expr.cond]/7: when the operands have arithmetic (or unscoped enumeration)
+  // type, the usual arithmetic conversions apply and the result is a prvalue of
+  // the cv-unqualified common type (InsertNumericConversions strips the cv).
+  if (colon->base.type != NULL &&
+      (TypeIsIntegral(colon->base.type) ||
+       TypeIsFloatingPoint(colon->base.type))) {
+    colon->base.value_category = kValueCategoryPrvalue;
+  }
   ASTNodeSetType((ASTNode*)node, colon->base.type);
+  node->base.value_category = colon->base.value_category;
 }
 
 // Does the node have an address?  In other words, can you take its
@@ -2257,6 +2280,23 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   bool requires_constant_initializer =
       constants_only || id_node->symbol->flags.is_constexpr ||
       id_node->symbol->flags.is_constinit;
+  if (TypeIsMemberPointer(id_node->symbol->type)) {
+    ASTNode* init_expr = init;
+    if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
+      init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
+    }
+    if (init_expr != NULL && init_expr->op == AST_OP(member_ptr)) {
+      UnaryASTNode* unary = (UnaryASTNode*)init_expr;
+      if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
+        StructMember* member = ((StructMemberASTNode*)unary->sub)->member;
+        if (member != NULL) {
+          id_node->symbol->value.ivalue = member->byte_offset;
+          id_node->symbol->value.other = member;
+          id_node->symbol->flags.value_set = true;
+        }
+      }
+    }
+  }
   ASTNode* simplified_init =
       AnalyzeInitializer(node->type, init, requires_constant_initializer);
   ASTNodeReplaceChild(node, 1, simplified_init, true);
@@ -3121,6 +3161,10 @@ static ASTNode* NewVirtualCalleeFromReceiver(ASTNode* receiver,
 }
 
 static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
+
+static StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);
+
+static bool LowerMemberPointerFunctionCall(VectorASTNode* node);
 
 static bool LowerMemberFunctionCall(VectorASTNode* node) {
   if (node->left == NULL ||
@@ -4349,6 +4393,14 @@ static void EmitCandidateNote(Symbol* candidate, const char* reason) {
   StringDestruct(&signature);
 }
 
+static void ReportUnsatisfiedFunctionTemplateConstraints(VectorASTNode* node,
+                                                         Symbol* templ,
+                                                         Vector* explicit_args,
+                                                         size_t first_formal_arg);
+static void EmitFunctionTemplateCandidateRejectionNote(
+    Symbol* candidate, VectorASTNode* call, Vector* explicit_args,
+    size_t first_formal_arg);
+
 // Emits one note per overload in `candidates` after a failed free-function /
 // operator resolution.  When `ambiguous` is false (no viable candidate) each
 // note explains the rejection; when true, the equally-best candidates (those
@@ -4372,8 +4424,7 @@ static void EmitFreeCandidateNotes(Vector* candidates, VectorASTNode* call,
       continue;
     }
     if (is_template) {
-      EmitCandidateNote(candidate,
-                        "could not deduce template arguments for this call");
+      EmitFunctionTemplateCandidateRejectionNote(candidate, call, NULL, 0);
       continue;
     }
     String reason;
@@ -4503,6 +4554,30 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
       (diagnostic_node->flags & kASTOverloadDiagnosed) != 0;
   if (best == NULL) {
     if (diagnose_no_match && !already_diagnosed) {
+      Symbol* constraint_rejected = NULL;
+      for (size_t i = 0; i < candidates->length; i++) {
+        Symbol* candidate = candidates->value.p[i];
+        if (candidate == NULL || !SymbolIsTemplateFunction(candidate)) {
+          continue;
+        }
+        if (TypeClassifyFunctionTemplateCandidate(&compiler->syntax, candidate,
+                                                  explicit_args, actuals,
+                                                  0) ==
+            kFunctionTemplateCandidateConstraintsNotSatisfied) {
+          constraint_rejected = candidate;
+          break;
+        }
+      }
+      if (constraint_rejected != NULL &&
+          ConceptsFunctionTemplateHasAssociatedConstraint(constraint_rejected)) {
+        VectorASTNode call_node = {0};
+        call_node.children = actuals;
+        ReportUnsatisfiedFunctionTemplateConstraints(
+            &call_node, constraint_rejected, explicit_args, 0);
+        diagnostic_node->flags |= kASTOverloadDiagnosed;
+        DeleteTemporaryFunctionTemplateCandidates(&temporary_candidates, NULL);
+        return NULL;
+      }
       String function_name;
       StringInit(&function_name, NULL);
       Symbol* first_candidate =
@@ -4640,6 +4715,35 @@ static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
   return instantiated != NULL ? instantiated : selected;
 }
 
+static void EmitFunctionTemplateCandidateRejectionNote(
+    Symbol* candidate, VectorASTNode* call, Vector* explicit_args,
+    size_t first_formal_arg) {
+  if (candidate == NULL || !SymbolIsTemplateFunction(candidate)) {
+    return;
+  }
+  FunctionTemplateCandidateStatus status =
+      TypeClassifyFunctionTemplateCandidate(&compiler->syntax, candidate,
+                                            explicit_args, call->children,
+                                            first_formal_arg);
+  if (status == kFunctionTemplateCandidateConstraintsNotSatisfied) {
+    EmitCandidateNote(candidate, NULL);
+    Vector* args = TypeDeduceFunctionTemplateArgumentsFromCall(
+        candidate, call->children, first_formal_arg);
+    if (args == NULL && explicit_args != NULL) {
+      args = TemplateArgumentVectorCopy(explicit_args);
+    }
+    if (args != NULL) {
+      ConceptsReportFunctionTemplateConstraintFailure(candidate, args);
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    return;
+  }
+  EmitCandidateNote(candidate,
+                    "could not deduce template arguments for this call");
+}
+
 static void ReportUnsatisfiedFunctionTemplateConstraints(VectorASTNode* node,
                                                          Symbol* templ,
                                                          Vector* explicit_args,
@@ -4738,6 +4842,63 @@ static int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right) {
 static int MemberOverloadCallScore(StructMember* candidate,
                                    VectorASTNode* node,
                                    BinaryASTNode* member_access,
+                                   bool check_receiver_const);
+
+static Vector* ClassTemplateArgumentsFromMemberAccess(
+    BinaryASTNode* member_access) {
+  if (member_access == NULL || member_access->left == NULL) {
+    return NULL;
+  }
+  TypeRecord* receiver_type = member_access->left->type;
+  if (receiver_type == NULL) {
+    return NULL;
+  }
+  if (TypeIsPointer(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_type == NULL) {
+    return NULL;
+  }
+  if (receiver_type->template_arguments != NULL) {
+    return receiver_type->template_arguments;
+  }
+  if (TypeIsStructOrUnion(receiver_type) &&
+      receiver_type->info.struct_info != NULL) {
+    if (receiver_type->template_arguments != NULL) {
+      return receiver_type->template_arguments;
+    }
+    if (receiver_type->info.struct_info->tag_symbol != NULL &&
+        receiver_type->info.struct_info->tag_symbol->type != NULL &&
+        receiver_type->info.struct_info->tag_symbol->type->template_arguments !=
+            NULL) {
+      return receiver_type->info.struct_info->tag_symbol->type
+          ->template_arguments;
+    }
+  }
+  return NULL;
+}
+
+static bool MemberFunctionConstraintsSatisfied(StructMember* candidate,
+                                               BinaryASTNode* member_access) {
+  if (candidate == NULL || candidate->symbol == NULL ||
+      candidate->symbol->type == NULL ||
+      !TypeIsFunction(candidate->symbol->type) ||
+      candidate->symbol->type->info.function.associated_constraint == NULL) {
+    return true;
+  }
+  ConstraintExpr* constraint =
+      candidate->symbol->type->info.function.associated_constraint;
+  Vector* class_args = ClassTemplateArgumentsFromMemberAccess(member_access);
+  if (class_args == NULL &&
+      ConceptsConstraintContainsTemplateParameter(constraint)) {
+    return true;
+  }
+  return ConceptsConstraintSatisfied(constraint, class_args);
+}
+
+static int MemberOverloadCallScore(StructMember* candidate,
+                                   VectorASTNode* node,
+                                   BinaryASTNode* member_access,
                                    bool check_receiver_const) {
   size_t first_formal_arg = candidate->is_static ? 0 : 1;
   if (check_receiver_const && !candidate->is_static &&
@@ -4753,6 +4914,10 @@ static int MemberOverloadCallScore(StructMember* candidate,
     return -1;
   }
   int score = FunctionCallScore(candidate->symbol->type, node, first_formal_arg);
+  if (score >= 0 &&
+      !MemberFunctionConstraintsSatisfied(candidate, member_access)) {
+    return -1;
+  }
   if (score >= 0 && !candidate->is_static &&
       candidate->symbol->type->info.function.is_const_member &&
       !MemberReceiverIsConst(member_access)) {
@@ -4767,7 +4932,8 @@ static int MemberOverloadCallScore(StructMember* candidate,
 // non-const method); when true, the equally-best candidates are listed.
 static void EmitMemberCandidateNotes(StructMember* first, VectorASTNode* node,
                                      BinaryASTNode* member_access,
-                                     bool ambiguous, int best_score) {
+                                     Vector* explicit_args, bool ambiguous,
+                                     int best_score) {
   bool receiver_const = MemberReceiverIsConst(member_access);
   for (StructMember* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -4784,8 +4950,10 @@ static void EmitMemberCandidateNotes(StructMember* first, VectorASTNode* node,
       continue;
     }
     if (is_template) {
-      EmitCandidateNote(candidate->symbol,
-                        "could not deduce template arguments for this call");
+      size_t first_formal_arg = candidate->is_static ? 0 : 1;
+      EmitFunctionTemplateCandidateRejectionNote(candidate->symbol, node,
+                                                 explicit_args,
+                                                 first_formal_arg);
       continue;
     }
     // A non-static method rejected only because the object is const (it would
@@ -4998,6 +5166,15 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
          candidate = candidate->overload_next) {
       if (candidate->symbol == NULL ||
           !ConceptsFunctionTemplateHasAssociatedConstraint(candidate->symbol)) {
+        if (candidate->symbol != NULL &&
+            candidate->symbol->type != NULL &&
+            TypeIsFunction(candidate->symbol->type) &&
+            candidate->symbol->type->info.function.associated_constraint !=
+                NULL &&
+            !MemberFunctionConstraintsSatisfied(candidate, member_access)) {
+          constraint_rejected = candidate;
+          break;
+        }
         continue;
       }
       size_t first_formal_arg = candidate->is_static ? 0 : 1;
@@ -5017,9 +5194,22 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       }
     }
     if (constraint_rejected != NULL) {
-      size_t first_formal_arg = constraint_rejected->is_static ? 0 : 1;
-      ReportUnsatisfiedFunctionTemplateConstraints(
-          node, constraint_rejected->symbol, explicit_args, first_formal_arg);
+      if (ConceptsFunctionTemplateHasAssociatedConstraint(
+              constraint_rejected->symbol)) {
+        size_t first_formal_arg = constraint_rejected->is_static ? 0 : 1;
+        ReportUnsatisfiedFunctionTemplateConstraints(
+            node, constraint_rejected->symbol, explicit_args, first_formal_arg);
+      } else {
+        SemanticError((ASTNode*)node, "constraints not satisfied");
+        if (constraint_rejected->symbol != NULL &&
+            TypeIsFunction(constraint_rejected->symbol->type)) {
+          ConceptsReportAssociatedConstraintFailure(
+              constraint_rejected->symbol->type->info.function
+                  .associated_constraint,
+              ClassTemplateArgumentsFromMemberAccess(member_access),
+              constraint_rejected->symbol->location, NULL);
+        }
+      }
       ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     } else if (receiver_const_rejected) {
       String function_name;
@@ -5029,8 +5219,8 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                     "Cannot call non-const member function %s on const object%s",
                     first->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
-      EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/false,
-                               -1);
+      EmitMemberCandidateNotes(first, node, member_access, explicit_args,
+                               /*ambiguous=*/false, -1);
       ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     } else if (first->overload_next != NULL ||
                first->symbol->type->info.function.is_constructor) {
@@ -5040,8 +5230,19 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       SemanticError((ASTNode*)node, "No matching overload for %s",
                     function_name.value);
       StringDestruct(&function_name);
-      EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/false,
-                               -1);
+      EmitMemberCandidateNotes(first, node, member_access, explicit_args,
+                               /*ambiguous=*/false, -1);
+      ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
+    } else if (first != NULL &&
+               MemberOverloadCallScore(first, node, member_access, true) < 0 &&
+               first->symbol != NULL && first->symbol->type != NULL &&
+               TypeIsFunction(first->symbol->type) &&
+               first->symbol->type->info.function.associated_constraint != NULL) {
+      SemanticError((ASTNode*)node, "constraints not satisfied");
+      ConceptsReportAssociatedConstraintFailure(
+          first->symbol->type->info.function.associated_constraint,
+          ClassTemplateArgumentsFromMemberAccess(member_access),
+          first->symbol->location, NULL);
       ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     }
     DeleteTemporaryMemberTemplateCandidates(&temporary_members, NULL);
@@ -5058,10 +5259,25 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
     SemanticError((ASTNode*)node, "Ambiguous overload for %s",
                   function_name.value);
     StringDestruct(&function_name);
-    EmitMemberCandidateNotes(first, node, member_access, /*ambiguous=*/true,
-                             best_score);
+    EmitMemberCandidateNotes(first, node, member_access, explicit_args,
+                             /*ambiguous=*/true, best_score);
     ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
     DeleteTemporaryMemberTemplateCandidates(&temporary_members, best);
+    return best;
+  }
+  if (best != NULL && !MemberFunctionConstraintsSatisfied(best, member_access)) {
+    if (!already_diagnosed) {
+      SemanticError((ASTNode*)node, "constraints not satisfied");
+      if (best->symbol != NULL && TypeIsFunction(best->symbol->type)) {
+        ConceptsReportAssociatedConstraintFailure(
+            best->symbol->type->info.function.associated_constraint,
+            ClassTemplateArgumentsFromMemberAccess(member_access),
+            best->symbol->location, NULL);
+      }
+      ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
+    }
+    DeleteTemporaryMemberTemplateCandidates(
+        &temporary_members, best);
     return best;
   }
   StructMember* resolved = InstantiateSelectedMemberTemplateCandidate(best);
@@ -5937,6 +6153,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     ResolveOverloadedFunctionCall(node);
   }
   bool lowered_member_call = LowerMemberFunctionCall(node);
+  if (!lowered_member_call) {
+    lowered_member_call = LowerMemberPointerFunctionCall(node);
+  }
   if (!lowered_member_call && node->left != NULL &&
       (node->left->op == AST_OP(dot) || node->left->op == AST_OP(arrow))) {
     BinaryASTNode* member_access = (BinaryASTNode*)node->left;
@@ -6236,6 +6455,127 @@ static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
   return AnalyzeExpression(call);
 }
 
+static StructMember* MemberPointerExpressionMember(ASTNode* node) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->op == AST_OP(member_ptr)) {
+    UnaryASTNode* unary = (UnaryASTNode*)node;
+    if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
+      return ((StructMemberASTNode*)unary->sub)->member;
+    }
+    return NULL;
+  }
+  if (node->op == AST_OP(number) && TypeIsMemberPointer(node->type)) {
+    return NULL;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && TypeIsMemberPointer(id->symbol->type) &&
+        id->symbol->flags.value_set && id->symbol->value.other != NULL) {
+      return (StructMember*)id->symbol->value.other;
+    }
+  }
+  return NULL;
+}
+
+static void AnalyzeMemberReference(BinaryASTNode* node);
+
+static void AnalyzeMemberPointerReference(BinaryASTNode* node) {
+  node->left = AnalyzeExpression(node->left);
+  node->right = AnalyzeExpression(node->right);
+  if (node->right == NULL || !TypeIsMemberPointer(node->right->type)) {
+    SemanticError((ASTNode*)node, "Right operand of .* / ->* is not a pointer to member");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  StructMember* member = MemberPointerExpressionMember(node->right);
+  if (member == NULL || member->symbol == NULL || member->symbol->type == NULL) {
+    SemanticError((ASTNode*)node,
+                  "Pointer-to-member expression is not a constant member pointer");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
+  if (node->base.op == AST_OP(arrowstar)) {
+    if (receiver_type == NULL || !TypeIsPointer(receiver_type)) {
+      SemanticError((ASTNode*)node, "Left operand of ->* is not a pointer");
+      ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      return;
+    }
+    receiver_type = receiver_type->next;
+  } else if (receiver_type != NULL && TypeIsReference(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  Struct* class_info = NULL;
+  for (TypeRecord* cur = node->right->type; cur != NULL; cur = cur->next) {
+    if (cur->declarator == kDeclMemberPointer) {
+      class_info = cur->info.struct_info;
+      break;
+    }
+  }
+  if (receiver_type == NULL || class_info == NULL ||
+      !TypeIsStructOrUnion(receiver_type) ||
+      receiver_type->info.struct_info != class_info) {
+    SemanticError((ASTNode*)node,
+                  "Pointer-to-member object expression has incompatible class type");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  if (member->is_member_function) {
+    ASTNodeSetType((ASTNode*)node, TypeRecordCopy(member->symbol->type));
+    node->base.value_category = kValueCategoryLvalue;
+    return;
+  }
+  ASTOpcode access_op =
+      node->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
+  ASTNode* old_right = node->right;
+  ASTNode* old_left = node->left;
+  node->base.op = access_op;
+  node->right = NewStructMemberASTNode(member, node->base.location);
+  ((StructMemberASTNode*)node->right)->byte_offset = member->byte_offset;
+  ASTNodeDelete(old_right);
+  AnalyzeMemberReference(node);
+  node->left = old_left;
+}
+
+static void AnalyzePointerToMember(UnaryASTNode* node) {
+  if (node->sub == NULL || node->sub->op != AST_OP(structmember)) {
+    SemanticError((ASTNode*)node, "Invalid pointer-to-member expression");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)node->sub;
+  if (member_node->member == NULL || member_node->member->symbol == NULL) {
+    SemanticError((ASTNode*)node, "Invalid pointer-to-member expression");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
+  member_node->byte_offset = member_node->member->byte_offset;
+  node->base.value_category = kValueCategoryPrvalue;
+}
+
+static bool LowerMemberPointerFunctionCall(VectorASTNode* node) {
+  if (node->left == NULL ||
+      (node->left->op != AST_OP(dotstar) &&
+       node->left->op != AST_OP(arrowstar))) {
+    return false;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node->left;
+  StructMember* member = MemberPointerExpressionMember(access->right);
+  if (member == NULL || !member->is_member_function ||
+      member->symbol == NULL || member->symbol->type == NULL) {
+    return false;
+  }
+  ASTOpcode access_op =
+      access->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
+  ASTNode* member_node = NewStructMemberASTNode(member, access->base.location);
+  ((StructMemberASTNode*)member_node)->byte_offset = member->byte_offset;
+  node->left = NewBinaryASTNode(access_op, NULL, access->base.location,
+                                access->left, member_node);
+  return LowerMemberFunctionCall(node);
+}
+
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // Already analyzed.
@@ -6266,6 +6606,23 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     }
   }
   node->right = AnalyzeExpression(node->right);
+  if (node->right != NULL && node->right->op == AST_OP(structmember)) {
+    StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
+    StructMember* member = member_node->member;
+    if (member != NULL && member->symbol != NULL) {
+      TypeRecord* member_type = member->symbol->type;
+      if (!member->is_static && !member->is_member_function &&
+          !member->is_mutable && MemberReceiverIsConst(node)) {
+        member_type = TypeRecordCopy(member_type);
+        member_type->qualifiers |= kQualConst;
+      }
+      ASTNodeSetType((ASTNode*)node, member_type);
+      if (!member->is_member_function) {
+        node->base.value_category = kValueCategoryLvalue;
+      }
+      return;
+    }
+  }
   TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
   if (TypeIsReference(receiver_type)) {
     receiver_type = receiver_type->next;
@@ -6852,6 +7209,44 @@ static void AnalyzeSourceIntegerBuiltin(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain));
 }
 
+static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
+  SourceLocation location = node->base.location;
+  if (node->children == NULL || node->children->length == 0) {
+    return (ASTNode*)NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  ASTNode* kind_node = node->children->value.p[0];
+  int64_t kind_value = 0;
+  if (!EvaluateIntegerExpression(kind_node, &kind_value)) {
+    SemanticError(&node->base, "Invalid type trait builtin");
+    return (ASTNode*)NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  Vector type_args;
+  VectorInit(&type_args);
+  for (size_t i = 1; i < node->children->length; i++) {
+    ASTNode* arg = node->children->value.p[i];
+    if (arg == NULL || arg->type == NULL) {
+      continue;
+    }
+    TypeRecord* type = TypeRecordCopy(arg->type);
+    if (type != NULL) {
+      VectorAppend(&type_args, type);
+    }
+  }
+  bool value = DaveTypeTraitEvaluateBool(&compiler->syntax,
+                                         (DaveTypeTraitKind)kind_value,
+                                         &type_args);
+  VectorDestructWithContents(&type_args, (VectorElementDestructor)TypeRecordDelete,
+                             /*free_element=*/false);
+  ASTNode* constant = (ASTNode*)NewIntConstantASTNode(
+      value ? 1 : 0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  if (node->base.parent != NULL) {
+    ASTNodeReplaceChild(node->base.parent, node->base.child_id, constant, false);
+  }
+  return constant;
+}
+
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
@@ -7015,6 +7410,15 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       AnalyzeMemberReference(binary_node);
       break;
 
+    case AST_OP(dotstar):
+    case AST_OP(arrowstar):
+      AnalyzeMemberPointerReference(binary_node);
+      break;
+
+    case AST_OP(member_ptr):
+      AnalyzePointerToMember(unary_node);
+      break;
+
     case AST_OP(comma):
       binary_node->left = AnalyzeExpression(binary_node->left);
       binary_node->right = AnalyzeExpression(binary_node->right);
@@ -7111,6 +7515,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_source_column):
       AnalyzeSourceIntegerBuiltin(vector_node);
       break;
+
+    case AST_OP(builtin_type_trait):
+      return AnalyzeTypeTraitBuiltin(vector_node);
 
     case AST_OP(stmt_expr): {
       // GCC statement expression: analyze the compound statement; the value

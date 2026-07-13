@@ -53,6 +53,7 @@ typedef struct Syntax {
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.
   struct ASTNode* pending_explicit_condition;  // Deferred value-dependent explicit(bool).
+  struct ConstraintExpr* pending_placeholder_variable_constraint;  // `Concept auto x`.
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -108,6 +109,9 @@ void SyntaxDestruct(Syntax* syntax);
 void SyntaxResetForNewDeclaration(Syntax* syntax);
 
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol);
+// Adds a symbol to the current lookup scope without taking ownership. The
+// caller must keep the symbol alive until the scope closes.
+bool SyntaxAddBorrowedSymbol(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name);
 void FullyQualifiedIdentifierInit(FullyQualifiedIdentifier* name);
 void FullyQualifiedIdentifierDestruct(FullyQualifiedIdentifier* name);
@@ -150,6 +154,8 @@ Namespace* SyntaxFindQualifiedNamespace(Syntax* syntax,
                                         FullyQualifiedIdentifier* name);
 const char* FullyQualifiedIdentifierLast(FullyQualifiedIdentifier* name);
 bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax);
+bool SyntaxCurrentIdentifierFollowedByScopeOperator(Syntax* syntax);
+bool SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(Syntax* syntax);
 
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol);
 Symbol* SyntaxFindTag(Syntax* syntax, String* name);
