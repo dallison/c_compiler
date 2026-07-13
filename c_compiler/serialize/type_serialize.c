@@ -264,6 +264,7 @@ enum {
   kStruct_virtual_members = 27,
   kStruct_friend_classes = 28,
   kStruct_friend_functions = 29,
+  kStruct_associated_constraint = 30,
 };
 
 static const WireFieldDesc kStructFields[] = {
@@ -296,6 +297,7 @@ static const WireFieldDesc kStructFields[] = {
     {kStruct_virtual_members, "virtual_members"},
     {kStruct_friend_classes, "friend_classes"},
     {kStruct_friend_functions, "friend_functions"},
+    {kStruct_associated_constraint, "associated_constraint"},
 };
 
 // ---------------------------------------------------------------------------
@@ -1284,6 +1286,8 @@ static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                   &s->friend_classes);
   SWriteRefVector(ctx, buf, kStruct_friend_functions, kSerialKindSymbol,
                   &s->friend_functions);
+  SerialWriteConstraint(ctx, buf, kStruct_associated_constraint,
+                        s->associated_constraint);
   return !WireBufferHasError(buf);
 }
 
@@ -1392,6 +1396,9 @@ static bool ReadStruct(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kStruct_friend_functions:
         SReadRefVector(ctx, buf, kSerialKindSymbol, &s->friend_functions);
+        break;
+      case kStruct_associated_constraint:
+        s->associated_constraint = SerialReadConstraint(ctx, buf);
         break;
       default:
         WireSkip(buf, wt);

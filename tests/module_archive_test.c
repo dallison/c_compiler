@@ -161,10 +161,65 @@ static Symbol* BuildVariableTemplate(TypeRecord* int_type) {
 
   VariableTemplate* vt = (VariableTemplate*)malloc(sizeof(VariableTemplate));
   vt->initializer = NewIntConstantASTNode(7, int_type, 0);
+  vt->associated_constraint = NULL;
   VectorInit(&vt->parameters);
   VectorAppend(&vt->parameters, MakeTypeParam("T", 0));
   sym->variable_template = vt;
   return sym;
+}
+
+// A constrained variable template whose requires-clause is a concept-id.
+static Symbol* BuildConstrainedVariableTemplate(TypeRecord* int_type,
+                                                Symbol* concept_sym) {
+  Symbol* sym = NewSymbol("constrained_pi_v", int_type, STO(static));
+  sym->namespace_ = compiler->global_namespace;
+  sym->flags.is_template = true;
+
+  VariableTemplate* vt = (VariableTemplate*)malloc(sizeof(VariableTemplate));
+  vt->initializer = NewIntConstantASTNode(3, int_type, 0);
+  vt->associated_constraint = NULL;
+  VectorInit(&vt->parameters);
+  TemplateParameter* tp = MakeTypeParam("T", 0);
+  VectorAppend(&vt->parameters, tp);
+
+  Vector* args = NewVector();
+  TemplateArgument* arg = (TemplateArgument*)calloc(1, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->type = int_type;
+  arg->template_parameter_index = 0;
+  VectorAppend(args, arg);
+  vt->associated_constraint = NewConceptIdConstraint(concept_sym, args, 0);
+  sym->variable_template = vt;
+  return sym;
+}
+
+// A constrained class template with a requires-clause on the Struct body.
+static Symbol* BuildConstrainedClassTemplate(TypeRecord* int_type,
+                                             Symbol* concept_sym) {
+  Struct* box = NewStruct(false);
+  box->is_class = true;
+  box->is_template = true;
+  box->tag_name = NewString("ConstrainedBox");
+  box->template_parameter_count = 1;
+  VectorAppend(&box->template_parameters, MakeTypeParam("T", 0));
+
+  Vector* args = NewVector();
+  TemplateArgument* arg = (TemplateArgument*)calloc(1, sizeof(*arg));
+  arg->kind = kTemplateParameterType;
+  arg->type = int_type;
+  arg->template_parameter_index = 0;
+  VectorAppend(args, arg);
+  box->associated_constraint = NewConceptIdConstraint(concept_sym, args, 0);
+
+  TypeRecord* struct_type = NewTypeRecord(kTypeStruct, kQualPlain);
+  struct_type->info.struct_info = box;
+
+  Symbol* tag = NewSymbol("ConstrainedBox", struct_type, STO(implicit));
+  tag->namespace_ = compiler->global_namespace;
+  tag->flags.is_template = true;
+  tag->flags.is_defined = true;
+  box->tag_symbol = tag;
+  return tag;
 }
 
 // A constrained function template whose requires-clause is a concept-id
@@ -354,6 +409,44 @@ static void CheckVariableTemplate(Symbol* sym) {
   }
 }
 
+static void CheckConstrainedVariableTemplate(Symbol* sym, Symbol* concept_sym) {
+  CHECK(sym != NULL);
+  if (sym == NULL) return;
+  CHECK(StringEqual(&sym->name, "constrained_pi_v"));
+  CHECK(sym->flags.is_template);
+  VariableTemplate* vt = sym->variable_template;
+  CHECK(vt != NULL);
+  if (vt == NULL) return;
+  CHECK(vt->associated_constraint != NULL &&
+        vt->associated_constraint->kind == kConstraintConceptId);
+  if (vt->associated_constraint != NULL &&
+      vt->associated_constraint->kind == kConstraintConceptId) {
+    CHECK(vt->associated_constraint->as.concept_id.concept_symbol ==
+          concept_sym);
+  }
+}
+
+static void CheckConstrainedClassTemplate(Symbol* sym, Symbol* concept_sym) {
+  CHECK(sym != NULL);
+  if (sym == NULL) return;
+  CHECK(StringEqual(&sym->name, "ConstrainedBox"));
+  CHECK(sym->flags.is_template);
+  CHECK(sym->type != NULL && (sym->type->type & kTypeStruct) != 0);
+  if (sym->type == NULL) return;
+  Struct* box = sym->type->info.struct_info;
+  CHECK(box != NULL);
+  if (box == NULL) return;
+  CHECK(box->is_template);
+  CHECK(box->template_parameters.length == 1);
+  CHECK(box->associated_constraint != NULL &&
+        box->associated_constraint->kind == kConstraintConceptId);
+  if (box->associated_constraint != NULL &&
+      box->associated_constraint->kind == kConstraintConceptId) {
+    CHECK(box->associated_constraint->as.concept_id.concept_symbol ==
+          concept_sym);
+  }
+}
+
 static void CheckConstrainedFunction(Symbol* sym, Symbol* concept_sym) {
   CHECK(sym != NULL);
   if (sym == NULL) return;
@@ -422,6 +515,8 @@ int main(void) {
   VectorAppend(&roots, concept_sym);
   VectorAppend(&roots, BuildVariableTemplate(int_type));
   VectorAppend(&roots, BuildConstrainedFunction(int_type, concept_sym));
+  VectorAppend(&roots, BuildConstrainedVariableTemplate(int_type, concept_sym));
+  VectorAppend(&roots, BuildConstrainedClassTemplate(int_type, concept_sym));
 
   char path[4096];
   MakeTempPath(path, sizeof(path));
@@ -441,8 +536,8 @@ int main(void) {
     CHECK(loaded.format_version == MODULE_FORMAT_VERSION);
     CHECK(StringEqual(&loaded.module_name, "roundtrip_module"));
     CHECK(StringEqual(&loaded.target_triple, "x86_64-unknown-none"));
-    CHECK(loaded.root_symbols.length == 7);
-    if (loaded.root_symbols.length == 7) {
+    CHECK(loaded.root_symbols.length == 9);
+    if (loaded.root_symbols.length == 9) {
       CheckVariable((Symbol*)VectorGet(&loaded.root_symbols, 0));
       CheckStructVariable((Symbol*)VectorGet(&loaded.root_symbols, 1));
       CheckEnumVariable((Symbol*)VectorGet(&loaded.root_symbols, 2));
@@ -452,9 +547,13 @@ int main(void) {
       CheckVariableTemplate((Symbol*)VectorGet(&loaded.root_symbols, 5));
       CheckConstrainedFunction((Symbol*)VectorGet(&loaded.root_symbols, 6),
                                loaded_concept);
+      CheckConstrainedVariableTemplate(
+          (Symbol*)VectorGet(&loaded.root_symbols, 7), loaded_concept);
+      CheckConstrainedClassTemplate(
+          (Symbol*)VectorGet(&loaded.root_symbols, 8), loaded_concept);
     }
     // Shared namespace round-trips to a single shared object.
-    if (loaded.root_symbols.length == 7) {
+    if (loaded.root_symbols.length == 9) {
       Symbol* a = (Symbol*)VectorGet(&loaded.root_symbols, 0);
       Symbol* p = (Symbol*)VectorGet(&loaded.root_symbols, 1);
       CHECK(a->namespace_ != NULL && a->namespace_ == p->namespace_);

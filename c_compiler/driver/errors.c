@@ -284,7 +284,11 @@ void DiagnosticErrorTrapEnd(bool saved) {
   if (compiler->diagnostic_error_trap_depth > 0) {
     compiler->diagnostic_error_trap_depth--;
   }
-  compiler->diagnostic_error_trapped = saved;
+  // The trapped bit is meaningful only while a trap is active. Never carry a
+  // speculative failure into unrelated later analysis after the outermost trap
+  // closes; nested traps still restore their parent's state.
+  compiler->diagnostic_error_trapped =
+      compiler->diagnostic_error_trap_depth > 0 ? saved : false;
 }
 
 bool DiagnosticErrorTrapped(void) {

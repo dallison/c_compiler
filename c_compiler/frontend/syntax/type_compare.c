@@ -28,6 +28,7 @@
 #include "debug.h"
 #include "rtti.h"
 #include "set.h"
+#include "type_traits_semantics.h"
 
 static void DependentExpressionContainsParameterVisitor(ASTNode* node,
                                                        void* data,
@@ -301,6 +302,7 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
       }
       return TemplateTypePatternEqual(left->next, right->next);
     case kDeclPointer:
+    case kDeclMemberPointer:
     case kDeclReference:
     case kDeclRValueReference:
       return TemplateTypePatternEqual(left->next, right->next);
@@ -522,6 +524,18 @@ bool TypeIsReference(TypeRecord* type) {
          type->declarator == kDeclRValueReference;
 }
 
+bool TypeIsMemberPointer(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
+    if (cur->declarator == kDeclMemberPointer) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool TypeIsScopedEnum(TypeRecord* type) {
   return TypeIsEnum(type) && type->info.enum_info != NULL &&
          type->info.enum_info->is_scoped;
@@ -642,6 +656,23 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   if (t1 == NULL || t2 == NULL) {
     return t1 == t2;
   }
+  if (compiler != NULL) {
+    TypeRecord* resolved1 =
+        TypeRecordTryResolveTraitPlaceholder(&compiler->syntax, t1);
+    TypeRecord* resolved2 =
+        TypeRecordTryResolveTraitPlaceholder(&compiler->syntax, t2);
+    if (resolved1 != NULL || resolved2 != NULL) {
+      bool equal = TypeEqual(resolved1 != NULL ? resolved1 : t1,
+                             resolved2 != NULL ? resolved2 : t2);
+      if (resolved1 != NULL) {
+        TypeRecordDelete(resolved1);
+      }
+      if (resolved2 != NULL) {
+        TypeRecordDelete(resolved2);
+      }
+      return equal;
+    }
+  }
   if (t1->declarator != t2->declarator) {
     return false;
   }
@@ -714,6 +745,11 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
     case kDeclReference:
     case kDeclRValueReference:
       return TypeEqual(t1->next, t2->next);
+    case kDeclMemberPointer:
+      if (t1->info.struct_info != t2->info.struct_info) {
+        return false;
+      }
+      return TypeEqual(t1->next, t2->next);
 
     case kDeclFunction:
       if (!TypeEqual(t1->next, t2->next)) {
@@ -774,6 +810,26 @@ bool StructIsDerivedFrom(Struct* from, Struct* to, bool public_only) {
     }
   }
   return false;
+}
+
+int StructCountPublicDerivationPaths(Struct* from, Struct* to) {
+  if (from == NULL || to == NULL) {
+    return 0;
+  }
+  if (from == to) {
+    return 1;
+  }
+  int count = 0;
+  for (size_t i = 0; i < from->bases.length; i++) {
+    CXXBaseSpecifier* base = from->bases.value.p[i];
+    if (base->access != kAccessPublic || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    count += StructCountPublicDerivationPaths(base->type->info.struct_info, to);
+  }
+  return count;
 }
 
 bool TypeIsDerivedFrom(TypeRecord* from, TypeRecord* to) {
@@ -1061,6 +1117,11 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
+      return TypeEqual(t1->next, t2->next);
+    case kDeclMemberPointer:
+      if (t1->info.struct_info != t2->info.struct_info) {
+        return false;
+      }
       return TypeEqual(t1->next, t2->next);
 
     case kDeclFunction:

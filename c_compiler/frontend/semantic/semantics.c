@@ -666,19 +666,37 @@ void NormalConversion(ASTNode* from, TypeRecord* to) {
   SemanticConvertType(from, to, kConvertNormal);
 }
 
+static TypeRecord* ConversionCopyOwnedSpine(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(type);
+  if (type->next != NULL) {
+    TypeRecordDelete(copy->next);
+    copy->next = ConversionCopyOwnedSpine(type->next);
+    TypeRecordIncRef(copy->next);
+  }
+  return TypeRecordCalculateSize(copy);
+}
+
 static bool CXXSameClassTypeIgnoringQualifiers(TypeRecord* from,
                                                TypeRecord* to) {
   if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
       !TypeIsStructOrUnion(to)) {
     return false;
   }
-  Qualifiers from_q = from->qualifiers;
-  Qualifiers to_q = to->qualifiers;
-  from->qualifiers = kQualPlain;
-  to->qualifiers = kQualPlain;
-  bool same = TypeEqual(from, to);
-  from->qualifiers = from_q;
-  to->qualifiers = to_q;
+  TypeRecord* from_copy = ConversionCopyOwnedSpine(from);
+  TypeRecord* to_copy = ConversionCopyOwnedSpine(to);
+  if (from_copy == NULL || to_copy == NULL) {
+    TypeRecordDelete(from_copy);
+    TypeRecordDelete(to_copy);
+    return false;
+  }
+  from_copy->qualifiers = kQualPlain;
+  to_copy->qualifiers = kQualPlain;
+  bool same = TypeEqual(from_copy, to_copy);
+  TypeRecordDelete(from_copy);
+  TypeRecordDelete(to_copy);
   return same;
 }
 

@@ -2128,6 +2128,78 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
                                  NewTypeRecordWithSize(kTypeBool, kQualPlain),
                                  location);
   }
+  if (node->op == AST_OP(builtin_type_trait)) {
+    VectorASTNode* trait = (VectorASTNode*)node;
+    if (trait->children != NULL && trait->children->length > 1) {
+      Vector* new_children = NewVector();
+      VectorAppend(new_children, trait->children->value.p[0]);
+      bool expanded_pack = false;
+      for (size_t i = 1; i < trait->children->length; i++) {
+        ASTNode* arg = trait->children->value.p[i];
+        if (arg != NULL && (arg->flags & kASTPackExpansion) != 0 &&
+            arg->type != NULL) {
+          int pack_index = arg->type->template_parameter_index;
+          if (pack_index < 0) {
+            TypeIsTemplateParameterPlaceholder(arg->type, &pack_index);
+          }
+          if (pack_index >= 0 && (size_t)pack_index < clone->args->length) {
+            TemplateArgument* pack = clone->args->value.p[pack_index];
+            if (pack != NULL && pack->pack_arguments != NULL &&
+                pack->pack_arguments->length > 0) {
+              expanded_pack = true;
+              for (size_t j = 0; j < pack->pack_arguments->length; j++) {
+                TemplateArgument* element = pack->pack_arguments->value.p[j];
+                if (element != NULL && element->type != NULL) {
+                  TypeRecord* concrete = TypeRecordCopy(element->type);
+                  concrete = TypeMaterializeClassTemplateSpecialization(
+                      clone->parser->syntax, concrete);
+                  VectorAppend(
+                      new_children,
+                      (ASTNode*)NewIntConstantASTNode(0, concrete, arg->location));
+                }
+              }
+              continue;
+            }
+          }
+          size_t param_index = i - 1;
+          if (param_index < clone->args->length) {
+            expanded_pack = true;
+            for (size_t j = param_index; j < clone->args->length; j++) {
+              TemplateArgument* element = clone->args->value.p[j];
+              if (element != NULL && element->type != NULL) {
+                TypeRecord* concrete = TypeRecordCopy(element->type);
+                concrete = TypeMaterializeClassTemplateSpecialization(
+                    clone->parser->syntax, concrete);
+                VectorAppend(
+                    new_children,
+                    (ASTNode*)NewIntConstantASTNode(0, concrete, arg->location));
+              }
+            }
+            continue;
+          }
+          expanded_pack = true;
+          continue;
+        }
+        if (arg != NULL && arg->type != NULL) {
+          TypeRecord* subst = SubstituteTemplateParameters(
+              clone->parser, arg->type, clone->args);
+          if (subst != NULL) {
+            subst = TypeMaterializeClassTemplateSpecialization(
+                clone->parser->syntax, subst);
+            ASTNodeSetType(arg, subst);
+          }
+          arg->flags &= ~kASTPackExpansion;
+        }
+        if (arg != NULL) {
+          VectorAppend(new_children, arg);
+        }
+      }
+      if (expanded_pack) {
+        VectorDelete(trait->children);
+        trait->children = new_children;
+      }
+    }
+  }
   if (node->op == AST_OP(structmember) && clone->from_owner != NULL &&
       clone->to_owner != NULL && clone->from_owner != clone->to_owner) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)node;

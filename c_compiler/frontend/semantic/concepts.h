@@ -5,8 +5,9 @@
 //  C++20 concepts and constraints.
 //
 //  This module owns the representation of concept definitions, the normalized
-//  constraint expression tree, and (in later phases) constraint satisfaction
-//  checking and the diagnostics emitted when a constraint is not satisfied.
+//  constraint expression tree, constraint satisfaction checking, C++20
+//  normalization/subsumption for partial ordering ([temp.constr.order]), and
+//  the diagnostics emitted when a constraint is not satisfied.
 //
 //  Everything here is only meaningful in C++20 (or later) mode.  Below C++20
 //  the `concept` and `requires` spellings lex as ordinary identifiers and none
@@ -150,6 +151,15 @@ bool ConceptsEvaluateConstraint(ConstraintExpr* constraint, int64_t* result);
 bool ConceptsEvaluateConstraintWithArguments(ConstraintExpr* constraint,
                                              Vector* arguments,
                                              int64_t* result);
+bool ConceptsConstraintSatisfied(ConstraintExpr* constraint, Vector* arguments);
+bool ConceptsHasAssociatedConstraint(ConstraintExpr* constraint);
+void ConceptsReportAssociatedConstraintFailure(ConstraintExpr* constraint,
+                                               Vector* arguments,
+                                               SourceLocation location,
+                                               const char* summary);
+int ConceptsCompareAssociatedConstraints(
+    ConstraintExpr* left, ConstraintExpr* right,
+    Vector* left_parameter_mapping, Vector* right_parameter_mapping);
 bool ConceptsFunctionTemplateConstraintsSatisfied(struct Symbol* templ,
                                                  Vector* arguments);
 bool ConceptsFunctionTemplateHasAssociatedConstraint(struct Symbol* templ);

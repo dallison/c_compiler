@@ -18,6 +18,20 @@
 #include "bitset.h"
 #include "errors.h"
 
+static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
+static void ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 static bool ExpressionHasSideEffects(ASTNode* node) {
   if (node == NULL) {
     return false;
@@ -296,13 +310,27 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
 }
 
 static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
-  node->expr = AnalyzeExpression(node->expr);
-  int64_t value = 0;
-  if (!EvaluateIntegerExpression(node->expr, &value)) {
+  ASTNode* expr = ASTNodeClone(node->expr, StaticAssertIdentityClone, NULL, NULL);
+  if (expr == NULL) {
+    SemanticError((ASTNode*)node, "Invalid static_assert expression");
+    return;
+  }
+  ASTNodeVisit(expr, ClearStaticAssertAnalysis, 0, NULL);
+  expr = AnalyzeExpression(expr);
+  if (expr == NULL) {
+    ASTNodeDelete(expr);
     SemanticError((ASTNode*)node,
                   "static_assert expression is not an integer constant expression");
     return;
   }
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    ASTNodeDelete(expr);
+    SemanticError((ASTNode*)node,
+                  "static_assert expression is not an integer constant expression");
+    return;
+  }
+  ASTNodeDelete(expr);
   if (value == 0) {
     SemanticError((ASTNode*)node, "%s", node->message.value);
   }

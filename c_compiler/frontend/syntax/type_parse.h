@@ -45,6 +45,10 @@ typedef struct {
   // and, if it becomes set, discard the (ill-formed) instantiation instead of
   // emitting a diagnostic.
   bool template_substitution_failed;
+  // C++20 `Concept auto x`: constraint to attach to the declared symbol after
+  // auto deduction.  Alias templates reuse Symbol::associated_constraint at
+  // template definition time instead.
+  struct ConstraintExpr* placeholder_variable_constraint;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.

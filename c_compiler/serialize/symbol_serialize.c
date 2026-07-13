@@ -76,6 +76,8 @@ enum {
   kSym_is_concept = 43,
   kSym_variable_template = 44,
   kSym_concept_definition = 45,
+  kSym_associated_constraint = 46,
+  kSym_alias_template = 47,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -125,6 +127,8 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_is_concept, "is_concept"},
     {kSym_variable_template, "variable_template"},
     {kSym_concept_definition, "concept_definition"},
+    {kSym_associated_constraint, "associated_constraint"},
+    {kSym_alias_template, "alias_template"},
 };
 
 //
@@ -238,6 +242,7 @@ static void ReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
 enum {
   kVt_initializer = 1,  // ASTNode ref (unanalyzed initializer expression).
   kVt_parameters = 2,   // TemplateParameter vector.
+  kVt_associated_constraint = 3,
 };
 
 static void WriteVariableTemplate(SerializeContext* ctx, WireBuffer* buf,
@@ -247,6 +252,8 @@ static void WriteVariableTemplate(SerializeContext* ctx, WireBuffer* buf,
   SWriteRef(ctx, &sub, kVt_initializer, kSerialKindAST, vt->initializer);
   SerialWriteTemplateParameterVector(ctx, &sub, kVt_parameters,
                                      &vt->parameters);
+  SerialWriteConstraint(ctx, &sub, kVt_associated_constraint,
+                        vt->associated_constraint);
   WireWriteBytes(buf, field, WireBufferData(&sub), WireBufferSize(&sub));
   WireBufferDestruct(&sub);
 }
@@ -262,6 +269,7 @@ static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
   // frees it correctly.
   VariableTemplate* vt = (VariableTemplate*)malloc(sizeof(VariableTemplate));
   vt->initializer = NULL;
+  vt->associated_constraint = NULL;
   VectorInit(&vt->parameters);
   WireBuffer sub;
   WireBufferInitReader(&sub, data, len);
@@ -278,12 +286,58 @@ static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
       case kVt_parameters:
         SerialReadTemplateParameterVector(ctx, &sub, &vt->parameters);
         break;
+      case kVt_associated_constraint:
+        vt->associated_constraint = SerialReadConstraint(ctx, &sub);
+        break;
       default:
         WireSkip(&sub, wt);
         break;
     }
   }
   return vt;
+}
+
+// ---------------------------------------------------------------------------
+// AliasTemplate (inline sub-message).
+// ---------------------------------------------------------------------------
+enum {
+  kAt_parameters = 1,
+};
+
+static void WriteAliasTemplate(SerializeContext* ctx, WireBuffer* buf,
+                               int field, AliasTemplate* at) {
+  WireBuffer sub;
+  WireBufferInitOwned(&sub, 32);
+  SerialWriteTemplateParameterVector(ctx, &sub, kAt_parameters,
+                                     &at->parameters);
+  WireWriteBytes(buf, field, WireBufferData(&sub), WireBufferSize(&sub));
+  WireBufferDestruct(&sub);
+}
+
+static AliasTemplate* ReadAliasTemplate(DeserializeContext* ctx,
+                                        WireBuffer* in) {
+  const void* data;
+  size_t len;
+  if (!WireReadBytes(in, &data, &len)) {
+    return NULL;
+  }
+  AliasTemplate* at = malloc(sizeof(AliasTemplate));
+  VectorInit(&at->parameters);
+  WireBuffer sub;
+  WireBufferInitReader(&sub, data, len);
+  while (!WireBufferEof(&sub) && !WireBufferHasError(&sub)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(&sub, &field, &wt)) {
+      break;
+    }
+    if (field == kAt_parameters) {
+      SerialReadTemplateParameterVector(ctx, &sub, &at->parameters);
+    } else {
+      WireSkip(&sub, wt);
+    }
+  }
+  return at;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +403,12 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     WriteVariableTemplate(ctx, buf, kSym_variable_template,
                           s->variable_template);
   }
+  if (s->alias_template != NULL) {
+    WriteAliasTemplate(ctx, buf, kSym_alias_template, s->alias_template);
+  }
   SerialWriteConcept(ctx, buf, kSym_concept_definition, s->concept_definition);
+  SerialWriteConstraint(ctx, buf, kSym_associated_constraint,
+                        s->associated_constraint);
   return !WireBufferHasError(buf);
 }
 
@@ -538,6 +597,12 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       case kSym_concept_definition:
         s->concept_definition = SerialReadConcept(ctx, buf);
+        break;
+      case kSym_associated_constraint:
+        s->associated_constraint = SerialReadConstraint(ctx, buf);
+        break;
+      case kSym_alias_template:
+        s->alias_template = ReadAliasTemplate(ctx, buf);
         break;
       default:
         WireSkip(buf, wt);

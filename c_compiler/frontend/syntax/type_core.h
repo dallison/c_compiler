@@ -33,6 +33,8 @@ TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
 TemplateArgument* NewIntegralTemplateArgument(long long value);
 Vector* TemplateArgumentVectorCopy(Vector* args);
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
+TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals);
+TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member);
 TypeRecord* NewReferenceTypeRecord(Qualifiers quals, bool rvalue);
 TypeRecord* NewArrayTypeRecord(Qualifiers quals, bool is_static);
 TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible);

@@ -52,6 +52,11 @@ uint64_t CXXExceptionTypeID(TypeRecord* type) {
         hash = HashExceptionTypePart(hash, (uint64_t)(type->qualifiers & ~kQualConst));
         type = type->next;
         continue;
+      case kDeclMemberPointer:
+        hash = HashExceptionTypePart(hash,
+                                    (uint64_t)(uintptr_t)type->info.struct_info);
+        type = type->next;
+        continue;
       case kDeclArray:
         hash = HashExceptionTypePart(hash, (uint64_t)type->info.array.size.fixed);
         type = type->next;

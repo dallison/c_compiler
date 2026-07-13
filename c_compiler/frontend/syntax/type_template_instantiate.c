@@ -51,6 +51,37 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                    TypeRecord* func,
                                                    Vector* args,
                                                    bool emit_error);
+static Vector* CompleteTemplateArguments(TypeParser* parser, Vector* parameters,
+                                         Vector* args, const char* error_message,
+                                         bool emit_error);
+static Vector* CompleteVariableTemplateArguments(TypeParser* parser,
+                                                 VariableTemplate* vt,
+                                                 Vector* args, bool emit_error);
+static TypeRecord* InstantiateSimpleClassTemplateImpl(TypeParser* parser,
+                                                      Symbol* templ,
+                                                      Vector* args,
+                                                      bool emit_constraint_error);
+static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
+                                                   Symbol* alias, Vector* args,
+                                                   bool emit_constraint_error);
+TypeRecord* TypeInstantiateClassTemplateQuiet(Syntax* syntax, Symbol* templ,
+                                              Vector* args);
+static bool TypeInstantiateVariableTemplateConstantImpl(
+    Syntax* syntax, Symbol* var_template, Vector* args, int64_t* out,
+    bool emit_constraint_error);
+static void ReportVariableTemplateConstraintFailure(Syntax* syntax,
+                                                    Symbol* var_template,
+                                                    Vector* arguments);
+static void ReportAliasTemplateConstraintFailure(TypeParser* parser,
+                                                 Symbol* alias,
+                                                 Vector* arguments);
+static void ReportClassTemplateConstraintFailure(TypeParser* parser,
+                                                 Symbol* templ,
+                                                 ConstraintExpr* constraint,
+                                                 Vector* arguments);
+static TypeRecord* ClassTemplateConstraintFailureType(
+    TypeParser* parser, Symbol* templ, ConstraintExpr* constraint,
+    Vector* arguments, bool emit_constraint_error);
 
 void AppendTemplateInstantiationName(String* name, Symbol* templ, Vector* args);
 Vector* CompleteClassTemplateArguments(TypeParser* parser, Struct* template_struct,
@@ -585,6 +616,10 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     // Shallow: elements are borrowed from `args`, not owned here.
     VectorDestruct(&enclosing_only_args);
   }
+  if (from->info.function.associated_constraint != NULL) {
+    func->info.function.associated_constraint =
+        ConceptsCloneConstraint(from->info.function.associated_constraint);
+  }
   (void)parser;
   return func;
 }
@@ -592,14 +627,45 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
 bool TypeInstantiateVariableTemplateConstant(Syntax* syntax,
                                              Symbol* var_template, Vector* args,
                                              int64_t* out) {
+  return TypeInstantiateVariableTemplateConstantImpl(syntax, var_template, args,
+                                                       out,
+                                                       /*emit_constraint_error=*/true);
+}
+
+static bool TypeInstantiateVariableTemplateConstantImpl(
+    Syntax* syntax, Symbol* var_template, Vector* args, int64_t* out,
+    bool emit_constraint_error) {
   if (var_template == NULL || var_template->variable_template == NULL ||
       var_template->variable_template->initializer == NULL) {
     return false;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args = CompleteVariableTemplateArguments(
+      &parser, var_template->variable_template, args, emit_constraint_error);
+  if (completed_args == NULL) {
+    TypeParserDestruct(&parser);
+    return false;
+  }
+  if (!ConceptsConstraintSatisfied(
+          var_template->variable_template->associated_constraint,
+          completed_args)) {
+    if (emit_constraint_error) {
+      ReportVariableTemplateConstraintFailure(syntax, var_template,
+                                              completed_args);
+    }
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    TypeParserDestruct(&parser);
+    return false;
+  }
   bool ok = TryFoldDependentTemplateArgument(
-      &parser, var_template->variable_template->initializer, args, out);
+      &parser, var_template->variable_template->initializer, completed_args,
+      out);
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
   TypeParserDestruct(&parser);
   return ok;
 }
@@ -618,8 +684,27 @@ TypeRecord* TypeInstantiateVariableTemplateType(Syntax* syntax,
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args = CompleteVariableTemplateArguments(
+      &parser, var_template->variable_template, args, /*emit_error=*/true);
+  if (completed_args == NULL) {
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
+  if (!ConceptsConstraintSatisfied(
+          var_template->variable_template->associated_constraint,
+          completed_args)) {
+    ReportVariableTemplateConstraintFailure(syntax, var_template, completed_args);
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    TypeParserDestruct(&parser);
+    return NULL;
+  }
   TypeRecord* concrete =
-      SubstituteTemplateParameters(&parser, var_template->type, args);
+      SubstituteTemplateParameters(&parser, var_template->type, completed_args);
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
   TypeParserDestruct(&parser);
   return concrete;
 }
@@ -2112,6 +2197,52 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   return ok;
 }
 
+FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
+    Syntax* syntax, Symbol* templ, Vector* explicit_args, Vector* actuals,
+    size_t first_formal_arg) {
+  if (templ == NULL || !templ->flags.is_template) {
+    return kFunctionTemplateCandidateViable;
+  }
+  Vector* args =
+      DeduceSimpleFunctionTemplateArguments(templ, explicit_args, actuals,
+                                            first_formal_arg);
+  if (args == NULL) {
+    return kFunctionTemplateCandidateDeductionFailed;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+                                        /*emit_error=*/false);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameterForInstantiation(
+          completed_args)) {
+    if (completed_args != NULL) {
+      VectorDeleteWithContents(
+          completed_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    TypeParserDestruct(&parser);
+    return kFunctionTemplateCandidateDeductionFailed;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    TypeParserDestruct(&parser);
+    return kFunctionTemplateCandidateConstraintsNotSatisfied;
+  }
+  VectorDeleteWithContents(completed_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  TypeParserDestruct(&parser);
+  return kFunctionTemplateCandidateViable;
+}
+
 /* Public: build a non-emitting concrete candidate for overload resolution.
  * This performs deduction, constraint checking, default completion, and
  * signature substitution, but it does not clone a body or enqueue codegen. */
@@ -2932,6 +3063,84 @@ static int PartialSpecializationPackCount(
   return count;
 }
 
+static bool PartialSpecializationConstraintsSatisfied(
+    ClassTemplatePartialSpecialization* partial, Vector* bindings) {
+  return ConceptsConstraintSatisfied(partial->associated_constraint, bindings);
+}
+
+static int ComparePartialSpecializationConstraints(
+    ClassTemplatePartialSpecialization* left,
+    ClassTemplatePartialSpecialization* right, Vector* left_bindings,
+    Vector* right_bindings) {
+  return ConceptsCompareAssociatedConstraints(
+      left->associated_constraint, right->associated_constraint, left_bindings,
+      right_bindings);
+}
+
+static void ReportClassTemplateConstraintFailure(TypeParser* parser,
+                                                 Symbol* templ,
+                                                 ConstraintExpr* constraint,
+                                                 Vector* arguments) {
+  if (!ConceptsHasAssociatedConstraint(constraint)) {
+    return;
+  }
+  SyntaxError(parser->syntax, "constraints not satisfied for class template %s",
+              templ != NULL ? templ->name.value : "<unknown>");
+  ConceptsReportAssociatedConstraintFailure(
+      constraint, arguments, templ != NULL ? templ->location : SOURCE_LOCATION_MISSING,
+      NULL);
+}
+
+static TypeRecord* ClassTemplateConstraintFailureType(TypeParser* parser,
+                                                    Symbol* templ,
+                                                    ConstraintExpr* constraint,
+                                                    Vector* arguments,
+                                                    bool emit_constraint_error) {
+  if (emit_constraint_error) {
+    ReportClassTemplateConstraintFailure(parser, templ, constraint, arguments);
+  }
+  return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+}
+
+static Vector* CompleteVariableTemplateArguments(TypeParser* parser,
+                                                 VariableTemplate* vt,
+                                                 Vector* args,
+                                                 bool emit_error) {
+  if (vt == NULL) {
+    return NULL;
+  }
+  return CompleteTemplateArguments(parser, &vt->parameters, args,
+                                   "Variable template instantiation failed",
+                                   emit_error);
+}
+
+static void ReportVariableTemplateConstraintFailure(Syntax* syntax,
+                                                    Symbol* var_template,
+                                                    Vector* arguments) {
+  if (var_template == NULL || var_template->variable_template == NULL ||
+      !ConceptsHasAssociatedConstraint(
+          var_template->variable_template->associated_constraint)) {
+    return;
+  }
+  SyntaxError(syntax, "constraints not satisfied for variable template %s",
+              var_template->name.value);
+  ConceptsReportAssociatedConstraintFailure(
+      var_template->variable_template->associated_constraint, arguments,
+      var_template->location, NULL);
+}
+
+static void ReportAliasTemplateConstraintFailure(TypeParser* parser,
+                                                 Symbol* alias,
+                                                 Vector* arguments) {
+  if (!ConceptsHasAssociatedConstraint(alias->associated_constraint)) {
+    return;
+  }
+  SyntaxError(parser->syntax, "constraints not satisfied for alias template %s",
+              alias->name.value);
+  ConceptsReportAssociatedConstraintFailure(alias->associated_constraint,
+                                            arguments, alias->location, NULL);
+}
+
 /* Choose the best-matching partial specialization of class template `primary`
  * for the actual arguments: the one with the highest specificity score. Reports
  * an ambiguity error if two equally-specific specializations match, and returns
@@ -2959,6 +3168,12 @@ static ClassTemplatePartialSpecialization* SelectClassTemplatePartialSpecializat
                                                 &bindings, &score)) {
       continue;
     }
+    if (!PartialSpecializationConstraintsSatisfied(partial, bindings)) {
+      VectorDeleteWithContents(bindings,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      continue;
+    }
     int pack_count = PartialSpecializationPackCount(partial);
     // Higher specificity wins; on a tie the specialization with fewer trailing
     // parameter packs is more specialized (partial ordering) and is preferred.
@@ -2966,6 +3181,20 @@ static ClassTemplatePartialSpecialization* SelectClassTemplatePartialSpecializat
                   (score == best_score && pack_count < best_pack_count);
     bool tied = best != NULL && score == best_score &&
                 pack_count == best_pack_count;
+    if (tied) {
+      int constraint_cmp = ComparePartialSpecializationConstraints(
+          partial, best, bindings, best_bindings);
+      if (constraint_cmp > 0) {
+        better = true;
+        tied = false;
+      } else if (constraint_cmp < 0) {
+        tied = false;
+        VectorDeleteWithContents(bindings,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+        continue;
+      }
+    }
     if (better) {
       if (best_bindings != NULL) {
         VectorDeleteWithContents(
@@ -3216,6 +3445,12 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
       if (args == NULL) {
         continue;
       }
+      if (!ConceptsFunctionTemplateConstraintsSatisfied(guide, args)) {
+        VectorDeleteWithContents(args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+        continue;
+      }
       if (!ScoreDeductionGuideCall(&parser, guide->type, args, actuals,
                                    &guide_score)) {
         VectorDeleteWithContents(args,
@@ -3247,9 +3482,13 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
     TypeRecord* candidate = NULL;
     if (guide_return->template_origin == class_template &&
         guide_return->template_arguments != NULL) {
-      candidate =
-          TypeInstantiateClassTemplate(syntax, class_template,
-                                       guide_return->template_arguments);
+      Struct* class_struct = class_template->type->info.struct_info;
+      if (class_struct != NULL &&
+          ConceptsConstraintSatisfied(class_struct->associated_constraint,
+                                    guide_return->template_arguments)) {
+        candidate = TypeInstantiateClassTemplateQuiet(
+            syntax, class_template, guide_return->template_arguments);
+      }
     } else if (guide_return->template_origin == class_template ||
                (TypeIsStructOrUnion(guide_return) &&
                 guide_return->info.struct_info != NULL &&
@@ -3572,6 +3811,25 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
   return completed;
 }
 
+/* Complete a concept-id's argument list against the concept's own template
+ * parameters, applying trailing default arguments.  Concept default arguments
+ * can name earlier parameters (e.g. `C = common_type_t<T, U>`), which
+ * CompleteTemplateArguments resolves by substituting the arguments filled so
+ * far.  Returns a freshly owned vector or NULL; never diagnoses. */
+Vector* TypeCompleteConceptArguments(Syntax* syntax, Vector* concept_parameters,
+                                     Vector* args) {
+  if (syntax == NULL || concept_parameters == NULL || args == NULL) {
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed = CompleteTemplateArguments(
+      &parser, concept_parameters, args,
+      "too few template arguments for concept", /*emit_error=*/false);
+  TypeParserDestruct(&parser);
+  return completed;
+}
+
 /* Complete a class template's argument list against its parameters (filling in
  * defaults and gathering a trailing pack); see CompleteTemplateArguments. */
 Vector* CompleteClassTemplateArguments(TypeParser* parser,
@@ -3585,6 +3843,35 @@ Vector* CompleteClassTemplateArguments(TypeParser* parser,
 
 /* Register a partial specialization (its tag and argument pattern) on the
  * primary class template, rejecting an exact duplicate pattern. */
+static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
+                                         ConstraintExpr* constraint) {
+  if (target == NULL || constraint == NULL) {
+    return;
+  }
+  ConstraintExpr* current = *target;
+  if (current == NULL) {
+    *target = constraint;
+    return;
+  }
+  *target = NewConjunctionConstraint(current, constraint, constraint->location);
+}
+
+static void MoveTemplateParameterConstraints(Vector* parameters,
+                                             ConstraintExpr** target) {
+  if (parameters == NULL || target == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param == NULL || param->associated_constraint == NULL) {
+      continue;
+    }
+    ConstraintExpr* constraint = param->associated_constraint;
+    param->associated_constraint = NULL;
+    AddOwnedAssociatedConstraint(target, constraint);
+  }
+}
+
 void AddClassTemplatePartialSpecialization(TypeParser* parser,
                                                   Symbol* primary,
                                                   Symbol* partial_tag,
@@ -3612,6 +3899,13 @@ void AddClassTemplatePartialSpecialization(TypeParser* parser,
       NewClassTemplatePartialSpecialization(
           partial_tag, parser->syntax->current_template_parameters,
           pattern_args);
+  MoveTemplateParameterConstraints(&partial->template_parameters,
+                                   &partial->associated_constraint);
+  if (parser->syntax->current_template_requires_clause != NULL) {
+    AddOwnedAssociatedConstraint(&partial->associated_constraint,
+                                 parser->syntax->current_template_requires_clause);
+    parser->syntax->current_template_requires_clause = NULL;
+  }
   VectorAppend(&primary_struct->partial_specializations, partial);
 }
 
@@ -3725,7 +4019,16 @@ static void InstantiateTemplateFriendFunctions(TypeParser* parser, Struct* str,
 TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
                                                   Symbol* templ,
                                                   Vector* args) {
-  TypeRecord* alias_type = InstantiateAliasClassTemplate(parser, templ, args);
+  return InstantiateSimpleClassTemplateImpl(parser, templ, args,
+                                            /*emit_constraint_error=*/true);
+}
+
+static TypeRecord* InstantiateSimpleClassTemplateImpl(
+    TypeParser* parser, Symbol* templ, Vector* args,
+    bool emit_constraint_error) {
+  TypeRecord* alias_type =
+      InstantiateAliasClassTemplateImpl(parser, templ, args,
+                                        emit_constraint_error);
   if (alias_type != NULL) {
     return alias_type;
   }
@@ -3742,6 +4045,31 @@ TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
 
+  Vector* partial_args = NULL;
+  ClassTemplatePartialSpecialization* partial =
+      SelectClassTemplatePartialSpecialization(parser, templ, completed_args,
+                                               &partial_args);
+  ConstraintExpr* active_constraint = template_struct->associated_constraint;
+  Vector* constraint_args = completed_args;
+  if (partial != NULL) {
+    active_constraint = partial->associated_constraint;
+    constraint_args = partial_args;
+  }
+  if (!ConceptsConstraintSatisfied(active_constraint, constraint_args)) {
+    TypeRecord* failure = ClassTemplateConstraintFailureType(
+        parser, templ, active_constraint, constraint_args,
+        emit_constraint_error);
+    if (partial_args != NULL) {
+      VectorDeleteWithContents(partial_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return failure;
+  }
+
   String instantiated_name;
   StringInit(&instantiated_name, NULL);
   AppendTemplateInstantiationName(&instantiated_name, templ, completed_args);
@@ -3752,6 +4080,11 @@ TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
       existing->type->info.struct_info != NULL &&
       !existing->type->info.struct_info->is_template) {
     StringDestruct(&instantiated_name);
+    if (partial_args != NULL) {
+      VectorDeleteWithContents(partial_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
@@ -3762,15 +4095,16 @@ TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
                 "Class template instantiation conflicts with existing tag %s",
                 instantiated_name.value);
     StringDestruct(&instantiated_name);
+    if (partial_args != NULL) {
+      VectorDeleteWithContents(partial_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
     return TypeRecordCopy(templ->type);
   }
-  Vector* partial_args = NULL;
-  ClassTemplatePartialSpecialization* partial =
-      SelectClassTemplatePartialSpecialization(parser, templ, completed_args,
-                                               &partial_args);
   Struct* source_struct = template_struct;
   Vector* source_args = completed_args;
   if (partial != NULL && partial->tag_symbol != NULL &&
@@ -4023,7 +4357,21 @@ TypeRecord* TypeInstantiateClassTemplate(Syntax* syntax, Symbol* templ,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
-  TypeRecord* type = InstantiateSimpleClassTemplate(&parser, templ, args);
+  TypeRecord* type = InstantiateSimpleClassTemplateImpl(&parser, templ, args,
+                                                        /*emit_constraint_error=*/true);
+  TypeParserDestruct(&parser);
+  return type;
+}
+
+/* Like TypeInstantiateClassTemplate, but rejects unsatisfied constraints
+ * without emitting diagnostics (for speculative CTAD/deduction). */
+TypeRecord* TypeInstantiateClassTemplateQuiet(Syntax* syntax, Symbol* templ,
+                                              Vector* args) {
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* type = InstantiateSimpleClassTemplateImpl(&parser, templ, args,
+                                                        /*emit_constraint_error=*/false);
   TypeParserDestruct(&parser);
   return type;
 }
@@ -4315,6 +4663,14 @@ bool AliasTemplateArgumentIsPackExpansion(TemplateArgument* arg,
 TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser,
                                                  Symbol* alias,
                                                  Vector* args) {
+  return InstantiateAliasClassTemplateImpl(parser, alias, args,
+                                           /*emit_constraint_error=*/true);
+}
+
+static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
+                                                     Symbol* alias,
+                                                     Vector* args,
+                                                     bool emit_constraint_error) {
   if (!CXXAliasTemplatePatternNamesClassTemplate(alias) ||
       alias->type->template_origin == NULL ||
       alias->type->template_arguments == NULL) {
@@ -4324,13 +4680,23 @@ TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser,
   if (completed_alias_args == NULL) {
     return NULL;
   }
+  if (!ConceptsConstraintSatisfied(alias->associated_constraint,
+                                   completed_alias_args)) {
+    if (emit_constraint_error) {
+      ReportAliasTemplateConstraintFailure(parser, alias, completed_alias_args);
+    }
+    VectorDeleteWithContents(completed_alias_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
   Vector* underlying_args =
       SubstituteTemplateArgumentVectorForTypes(parser,
                                               alias->type->template_arguments,
                                               completed_alias_args);
-  TypeRecord* instantiated =
-      InstantiateSimpleClassTemplate(parser, alias->type->template_origin,
-                                     underlying_args);
+  TypeRecord* instantiated = InstantiateSimpleClassTemplateImpl(
+      parser, alias->type->template_origin, underlying_args,
+      emit_constraint_error);
   VectorDeleteWithContents(underlying_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);

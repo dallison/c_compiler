@@ -164,6 +164,7 @@ static struct {
   {TypeIsDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
   {TypeIsLongDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
     {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {TypeIsMemberPointer, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsFunction, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsStructOrUnion, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {NULL, IR_OP(nop), IR_OP(nop), IR_OP(nop)},
@@ -376,8 +377,9 @@ static struct {
 } mov_opcodes[] = {
     {TypeIsIntegral, IR_OP(movi)},       {TypeIsFloat, IR_OP(movf)},
     {TypeIsDouble, IR_OP(movd)},         {TypeIsStructOrUnion, IR_OP(mova)},
-    {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsFunction, IR_OP(mova)},
-    {TypeIsVoid, IR_OP(mova)},           {NULL, 0},
+    {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsMemberPointer, IR_OP(mova)},
+    {TypeIsFunction, IR_OP(mova)},       {TypeIsVoid, IR_OP(mova)},
+    {NULL, 0},
 };
 
 static IROpcode MoveToTmpOpcode(TypeRecord* type) {
@@ -2685,6 +2687,23 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(arrow):
       result = GenerateMemberReference(gen, binary_node);
       break;
+
+    case AST_OP(member_ptr): {
+      UnaryASTNode* unary = (UnaryASTNode*)node;
+      if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
+        StructMemberASTNode* member_node = (StructMemberASTNode*)unary->sub;
+        StructMember* member = member_node->member;
+        if (member != NULL && member->is_member_function &&
+            member->symbol != NULL) {
+          result = GeneratorGetVariable(gen, member->symbol);
+          break;
+        }
+        result = GeneratorGetIntConstant(gen, node->type, member_node->byte_offset);
+        break;
+      }
+      result = GeneratorGetIntConstant(gen, node->type, 0);
+      break;
+    }
 
     case AST_OP(sizeof):
     case AST_OP(alignof):
