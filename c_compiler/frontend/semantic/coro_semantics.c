@@ -134,9 +134,14 @@ static void CoroutineFrameAddOwnedSymbol(CoroutineFrame* frame,
                                          StructMember* member,
                                          StructMember* constructed_member,
                                          bool construct_at_start);
+static CoroutinePersistedLocal* FindPersistedCoroutineLocal(Vector* locals,
+                                                            Symbol* symbol);
 static void AppendCoroutineFrameBodyDestructors(Vector* statements,
                                                 CoroutineFrame* frame,
                                                 SourceLocation location);
+static void AppendPersistedCoroutineLocalDestructors(
+    Vector* statements, CoroutineFrame* frame, Vector* persisted_locals,
+    ASTNode* return_statement, SourceLocation location);
 static void AppendCoroutineAwaitSuspendReturn(Vector* suspend_statements,
                                               CoroutineFrame* frame,
                                               Symbol* promise,
@@ -1894,6 +1899,7 @@ static ASTNode* NewFinalSuspendStatement(Symbol* promise,
 static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                        Symbol* promise,
                                        CoroutineFrame* frame,
+                                       Vector* persisted_locals,
                                        Symbol* final_awaiter,
                                        TypeRecord* coroutine_return_type) {
   SourceLocation location = co_return->base.location;
@@ -1913,6 +1919,8 @@ static ASTNode* LowerCoReturnStatement(CombinedStatementASTNode* co_return,
                                                    NewVector(), location),
                      location));
   }
+  AppendPersistedCoroutineLocalDestructors(
+      statements, frame, persisted_locals, (ASTNode*)co_return, location);
   if (frame != NULL) {
     VectorAppend(statements,
                  NewFrameIntAssignment(frame, frame->state, 0, location));
@@ -1982,6 +1990,7 @@ static ASTNode* NewCoroutineUnhandledExceptionStatement(
 typedef struct {
   Symbol* promise;
   CoroutineFrame* frame;
+  Vector* persisted_locals;
   Symbol* final_awaiter;
   TypeRecord* coroutine_return_type;
 } CoroutineStatementLowering;
@@ -1997,6 +2006,7 @@ static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
   CoroutineStatementLowering* lowering = data;
   return LowerCoReturnStatement((CombinedStatementASTNode*)node,
                                 lowering->promise, lowering->frame,
+                                lowering->persisted_locals,
                                 lowering->final_awaiter,
                                 lowering->coroutine_return_type);
 }
@@ -2005,10 +2015,12 @@ static ASTNode* LowerCoReturnTransform(ASTNode* node, void* data,
  * sequences. */
 static void LowerCoReturnsInStatement(ASTNode* node, Symbol* promise,
                                       CoroutineFrame* frame,
+                                      Vector* persisted_locals,
                                       Symbol* final_awaiter,
                                       TypeRecord* coroutine_return_type) {
   CoroutineStatementLowering lowering = {
-      promise, frame, final_awaiter, coroutine_return_type};
+      promise, frame, persisted_locals, final_awaiter,
+      coroutine_return_type};
   ASTNodeVisitAndTransform(node, LowerCoReturnTransform, &lowering);
 }
 
@@ -2056,7 +2068,7 @@ static void LowerCoroutineThrowsInStatement(ASTNode* node, Symbol* promise,
                                             Symbol* final_awaiter,
                                             TypeRecord* coroutine_return_type) {
   CoroutineStatementLowering lowering = {
-      promise, frame, final_awaiter, coroutine_return_type};
+      promise, frame, NULL, final_awaiter, coroutine_return_type};
   ASTNodeVisitAndTransform(node, LowerCoroutineThrowTransform, &lowering);
 }
 
@@ -3483,6 +3495,71 @@ static void AppendCoroutineFrameBodyDestructors(Vector* statements,
   }
 }
 
+/* Append guarded destruction for one persisted local, if any. */
+static void AppendPersistedCoroutineLocalDestructor(
+    Vector* statements, CoroutineFrame* frame, Vector* persisted_locals,
+    Symbol* symbol, SourceLocation location) {
+  CoroutinePersistedLocal* local =
+      FindPersistedCoroutineLocal(persisted_locals, symbol);
+  if (local == NULL || local->is_parameter || local->member == NULL) {
+    return;
+  }
+  ASTNode* dtor = NewCoroutineFrameMemberGuardedDestructor(
+      frame, local->member, local->constructed_member, location);
+  if (dtor != NULL) {
+    VectorAppend(statements, dtor);
+  }
+}
+
+/* Destroy frame-backed locals when the coroutine body exits normally.  Walk
+ * from the co_return out through its enclosing scopes so active locals are
+ * destroyed in exact reverse declaration/nesting order.  Frame copies of
+ * function parameters intentionally outlive the body until the coroutine state
+ * itself is destroyed. */
+static void AppendPersistedCoroutineLocalDestructors(
+    Vector* statements, CoroutineFrame* frame, Vector* persisted_locals,
+    ASTNode* return_statement, SourceLocation location) {
+  if (statements == NULL || frame == NULL || persisted_locals == NULL ||
+      return_statement == NULL) {
+    return;
+  }
+
+  ASTNode* current = return_statement;
+  while (current != NULL && current->parent != NULL) {
+    ASTNode* parent = current->parent;
+    if (parent->op == AST_OP(compound)) {
+      CompoundStatementASTNode* compound =
+          (CompoundStatementASTNode*)parent;
+      size_t limit = current->child_id >= 0 ? (size_t)current->child_id : 0;
+      if (limit > compound->statements->length) {
+        limit = compound->statements->length;
+      }
+      for (size_t i = limit; i > 0; i--) {
+        ASTNode* stmt = compound->statements->value.p[i - 1];
+        if (stmt == NULL || stmt->op != AST_OP(decl_list)) {
+          continue;
+        }
+        DeclarationListASTNode* declarations =
+            (DeclarationListASTNode*)stmt;
+        for (size_t j = declarations->declarations->length; j > 0; j--) {
+          ASTNode* declaration = declarations->declarations->value.p[j - 1];
+          if (declaration == NULL || declaration->op != AST_OP(vardecl)) {
+            continue;
+          }
+          AppendPersistedCoroutineLocalDestructor(
+              statements, frame, persisted_locals,
+              ((VariableDeclarationASTNode*)declaration)->symbol, location);
+        }
+      }
+    } else if (parent->op == AST_OP(catch)) {
+      AppendPersistedCoroutineLocalDestructor(
+          statements, frame, persisted_locals,
+          ((CatchASTNode*)parent)->symbol, location);
+    }
+    current = parent;
+  }
+}
+
 /* Build the `FrameType*` pointer type. */
 static TypeRecord* NewCoroutineFramePointerType(TypeRecord* frame_type) {
   return NewPointerTo(kQualPlain, TypeRecordCopy(frame_type));
@@ -4793,11 +4870,24 @@ static bool CoroutineParameterCanBePersisted(Symbol* symbol,
   return CoroutineTypeCanBeCopyConstructed(symbol->type);
 }
 
-/* True if a local can be persisted into the frame; for class types, prefer
- * copy, falling back to move (sets *move_local). */
-static bool CoroutineLocalCanBePersisted(Symbol* symbol, bool* move_local) {
-  if (move_local != NULL) {
-    *move_local = false;
+/* True if a local can be represented directly in the coroutine frame.  Unlike
+ * parameters, locals are initialized in their frame slots at their declaration
+ * sites, so class types do not need a copy or move constructor. */
+static bool CoroutineLocalCanBePersisted(Symbol* symbol) {
+  if (CoroutineScalarCanBePersisted(symbol)) {
+    return true;
+  }
+  return symbol != NULL && symbol->type != NULL &&
+         TypeIsStructOrUnion(symbol->type);
+}
+
+/* Catch parameters cannot be initialized directly in a frame slot because the
+ * exception machinery creates them.  Preserve the old copy-first, move-second
+ * transfer into the frame. */
+static bool CoroutineCatchParameterCanBePersisted(Symbol* symbol,
+                                                  bool* move_parameter) {
+  if (move_parameter != NULL) {
+    *move_parameter = false;
   }
   if (CoroutineScalarCanBePersisted(symbol)) {
     return true;
@@ -4810,8 +4900,8 @@ static bool CoroutineLocalCanBePersisted(Symbol* symbol, bool* move_local) {
     return true;
   }
   if (CoroutineTypeCanBeMoveConstructed(symbol->type)) {
-    if (move_local != NULL) {
-      *move_local = true;
+    if (move_parameter != NULL) {
+      *move_parameter = true;
     }
     return true;
   }
@@ -4926,8 +5016,8 @@ static void AddPersistedCoroutineLocal(Vector* persisted_locals,
 }
 
 /* Examine declarations in `compound` before `limit` and, for any local that is
- * used after `point`, mark it for frame persistence (erroring if its type can be
- * neither copied nor moved). Clears *ok on error. */
+ * used after `point`, mark it for direct construction in the frame. Clears *ok
+ * when the local has a representation that cannot be persisted. */
 static void CollectPersistedCoroutineLocalsBeforeIndex(
     CompoundStatementASTNode* root,
     CompoundStatementASTNode* compound,
@@ -4953,17 +5043,15 @@ static void CollectPersistedCoroutineLocalsBeforeIndex(
       if (!SuspensionPointUsesSymbolAfter(root, point, symbol)) {
         continue;
       }
-      bool move_local = false;
-      if (!CoroutineLocalCanBePersisted(symbol, &move_local)) {
+      if (!CoroutineLocalCanBePersisted(symbol)) {
         SemanticError(
             (ASTNode*)decl,
-            "coroutine local live across suspension requires a copy or move "
-            "constructor");
+            "coroutine local live across suspension has unsupported type");
         *ok = false;
         continue;
       }
       AddPersistedCoroutineLocal(persisted_locals, symbol, false, false,
-                                 move_local, NULL);
+                                 false, NULL);
     }
   }
 }
@@ -4977,25 +5065,25 @@ typedef struct {
   bool* ok;
 } PersistedLocalCollectionSearch;
 
-/* Upward visitor: at each enclosing compound, persist any locals declared before
- * the path that are live across the suspension. */
-static bool CollectPersistedCoroutineLocalsFromAncestor(ASTNode* current,
-                                                        void* data) {
-  PersistedLocalCollectionSearch* search = data;
+/* Recurse to the outermost enclosing scope first, then collect declarations as
+ * the recursion unwinds toward the suspension.  This keeps persisted locals in
+ * construction order, which is also needed for reverse-order frame teardown. */
+static void CollectPersistedCoroutineLocalsFromAncestors(
+    ASTNode* current, PersistedLocalCollectionSearch* search) {
   if (current == NULL || current == (ASTNode*)search->root) {
-    return false;
+    return;
   }
   ASTNode* parent = current->parent;
   if (parent == NULL) {
-    return false;
+    return;
   }
+  CollectPersistedCoroutineLocalsFromAncestors(parent, search);
   if (parent->op == AST_OP(compound)) {
     CollectPersistedCoroutineLocalsBeforeIndex(
         search->root, (CompoundStatementASTNode*)parent,
         (size_t)current->child_id, search->point, search->persisted_locals,
         search->ok);
   }
-  return true;
 }
 
 /* Collect all locals that must be persisted for a single suspension point: those
@@ -5008,17 +5096,17 @@ static void CollectPersistedCoroutineLocalsForPoint(
   if (root == NULL || point == NULL || point->compound == NULL) {
     return;
   }
-  CollectPersistedCoroutineLocalsBeforeIndex(
-      root, point->compound, point->statement_index, point, persisted_locals,
-      ok);
   PersistedLocalCollectionSearch search = {
       .root = root,
       .point = point,
       .persisted_locals = persisted_locals,
       .ok = ok,
   };
-  ASTNodeVisitUpwards((ASTNode*)point->compound,
-                      CollectPersistedCoroutineLocalsFromAncestor, &search);
+  CollectPersistedCoroutineLocalsFromAncestors(
+      (ASTNode*)point->compound, &search);
+  CollectPersistedCoroutineLocalsBeforeIndex(
+      root, point->compound, point->statement_index, point, persisted_locals,
+      ok);
 }
 
 /* Upward visitor: persist an enclosing catch clause's exception parameter if it
@@ -5043,7 +5131,7 @@ static bool CollectPersistedCoroutineCatchParameterFromAncestor(
     return true;
   }
   bool move_parameter = false;
-  if (!CoroutineLocalCanBePersisted(symbol, &move_parameter)) {
+  if (!CoroutineCatchParameterCanBePersisted(symbol, &move_parameter)) {
     SemanticError(
         (ASTNode*)catch_stmt,
         "coroutine catch parameter live across suspension requires a copy or "
@@ -5083,7 +5171,8 @@ static void CollectPersistedCoroutineCatchParametersForPoint(
 
 /* Build the full set of locals and catch-parameters that live across any
  * suspension point and so must be promoted into the frame. Returns false if any
- * such object cannot be copied or moved. */
+ * such object cannot be represented there (catch parameters still require a
+ * copy or move). */
 static bool CollectPersistedCoroutineLocals(
     CompoundStatementASTNode* body,
     SuspensionPoints* points,
@@ -5181,8 +5270,137 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
     Vector* persisted_locals,
     SuspensionPoints* points);
 
-/* Recurse into a statement's sub-statements to insert persisted-local store
- * statements within nested blocks. */
+typedef struct {
+  Symbol* symbol;
+  CoroutineFrame* frame;
+  StructMember* member;
+} PersistedLocalInitializerRewrite;
+
+/* Retarget every reference to the declared local within its initializer to the
+ * corresponding frame member.  This turns the parser's `local.Ctor(args...)`
+ * or `init(local, value)` directly into initialization of `frame->__localN`,
+ * without introducing an intermediate local object. */
+static ASTNode* RewritePersistedLocalInitializerTransform(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)action;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return node;
+  }
+  PersistedLocalInitializerRewrite* rewrite = data;
+  if (((IdentifierASTNode*)node)->symbol != rewrite->symbol) {
+    return node;
+  }
+  ASTNode* access = NewFrameMemberAccess(rewrite->frame, rewrite->member,
+                                         node->location);
+  access->flags |= node->flags & (kASTNeedAddress | kASTIsDeclaration);
+  return access;
+}
+
+/* Retarget a persisted local's original initializer to the frame slot and mark
+ * the slot constructed afterwards.  Ordinary initializers move into the
+ * inserted statement so variable codegen cannot redirect class-return elision
+ * back to stack storage.  Initializers containing a tracked co_await/co_yield
+ * stay attached until suspension lowering rewrites them. */
+static ASTNode* NewPersistedCoroutineLocalFrameInitialization(
+    VariableDeclarationASTNode* decl,
+    CoroutinePersistedLocal* local,
+    CoroutineFrame* frame,
+    bool keep_initializer_on_declaration) {
+  if (decl == NULL || local == NULL || local->member == NULL ||
+      frame == NULL) {
+    return NULL;
+  }
+
+  Vector* statements = NewVector();
+  if (decl->initializer != NULL) {
+    PersistedLocalInitializerRewrite rewrite = {
+        .symbol = local->symbol,
+        .frame = frame,
+        .member = local->member,
+    };
+    decl->initializer = ASTNodeVisitAndTransform(
+        decl->initializer, RewritePersistedLocalInitializerTransform, &rewrite);
+    if (!keep_initializer_on_declaration) {
+      VectorAppend(
+          statements,
+          NewExpressionStatementASTNode(ASTNodeMove(decl->initializer),
+                                        decl->base.location));
+    }
+  }
+  if (local->constructed_member != NULL) {
+    VectorAppend(statements,
+                 NewFrameIntAssignment(frame, local->constructed_member, 1,
+                                       decl->base.location));
+  }
+  if (statements->length == 0) {
+    VectorDelete(statements);
+    return NULL;
+  }
+  if (statements->length == 1) {
+    ASTNode* statement = statements->value.p[0];
+    VectorDelete(statements);
+    return statement;
+  }
+  return NewCompoundStatementASTNode(statements, decl->base.location);
+}
+
+/* Suspension lowering keeps a pointer to declarations initialized by co_await
+ * or co_yield, so those initializers must remain attached until that lowering
+ * has replaced the suspended expression. */
+static bool CoroutineSuspensionUsesValueDeclaration(
+    SuspensionPoints* points, VariableDeclarationASTNode* decl) {
+  if (points == NULL || decl == NULL) {
+    return false;
+  }
+  for (int i = 0; i < points->count; i++) {
+    if (points->points[i].value_decl == decl) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* If `stmt` is a direct destructor call on a persisted local, return its frame
+ * descriptor.  Parser-generated scope-exit destructors and explicit destructor
+ * calls share this shape and both end the object's current lifetime. */
+static CoroutinePersistedLocal* PersistedLocalDestroyedByStatement(
+    ASTNode* stmt, Vector* persisted_locals) {
+  if (stmt == NULL || stmt->op != AST_OP(expr) ||
+      persisted_locals == NULL) {
+    return NULL;
+  }
+  ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+  if (expr == NULL || expr->op != AST_OP(call)) {
+    return NULL;
+  }
+  ASTNode* callee = ((VectorASTNode*)expr)->left;
+  if (callee == NULL || callee->op != AST_OP(dot)) {
+    return NULL;
+  }
+  BinaryASTNode* member_call = (BinaryASTNode*)callee;
+  if (member_call->left == NULL ||
+      member_call->left->op != AST_OP(identifier) ||
+      member_call->right == NULL ||
+      member_call->right->op != AST_OP(string)) {
+    return NULL;
+  }
+  String* member_name = ((ConstantASTNode*)member_call->right)->value.string;
+  if (member_name == NULL || member_name->value == NULL ||
+      member_name->value[0] != '~') {
+    return NULL;
+  }
+  CoroutinePersistedLocal* local = FindPersistedCoroutineLocal(
+      persisted_locals,
+      ((IdentifierASTNode*)member_call->left)->symbol);
+  if (local == NULL || local->member == NULL || local->is_parameter ||
+      local->is_catch_parameter) {
+    return NULL;
+  }
+  return local;
+}
+
+/* Recurse into a statement's sub-statements to insert direct frame-local
+ * initializations within nested blocks. */
 static void InsertPersistedCoroutineLocalStoresInStatementChildren(
     ASTNode* stmt,
     CoroutineFrame* frame,
@@ -5210,11 +5428,11 @@ static void InsertPersistedCoroutineLocalStoresInStatementChildren(
   VectorDestruct(&collector.children);
 }
 
-/* After each declaration of a persisted (non-parameter) local, insert a store
- * that copies/moves the local's value into its frame slot, so subsequent
- * statements (and code after resumption) see the frame copy. Keeps suspension
- * point indices in sync as statements are inserted, and recurses into nested
- * blocks. */
+/* After each declaration of a persisted (non-parameter) local, move its
+ * initializer to the corresponding frame slot.  Scope-exit destructor calls
+ * are replaced with guarded frame-member destruction so teardown remains
+ * idempotent.  Suspension-point indices are kept in sync as statements are
+ * inserted, and nested blocks are processed recursively. */
 static void InsertPersistedCoroutineLocalStoresInCompound(
     CompoundStatementASTNode* compound,
     CoroutineFrame* frame,
@@ -5226,6 +5444,17 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
   }
   for (size_t i = 0; i < compound->statements->length; i++) {
     ASTNode* stmt = compound->statements->value.p[i];
+    CoroutinePersistedLocal* destroyed =
+        PersistedLocalDestroyedByStatement(stmt, persisted_locals);
+    if (destroyed != NULL) {
+      ASTNode* replacement = NewCoroutineFrameMemberGuardedDestructor(
+          frame, destroyed->member, destroyed->constructed_member,
+          stmt->location);
+      if (replacement != NULL) {
+        ASTNodeReplaceChild((ASTNode*)compound, (int)i, replacement, true);
+      }
+      continue;
+    }
     if (stmt != NULL && stmt->op == AST_OP(compound)) {
       InsertPersistedCoroutineLocalStoresInCompound(
           (CompoundStatementASTNode*)stmt, frame, persisted_locals, points);
@@ -5249,20 +5478,14 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
         continue;
       }
       size_t insert_index = i + 1 + inserted;
-      ASTNode* value = local->move_parameter
-                           ? NewCoroutineMoveExpression(local->symbol,
-                                                        decl->base.location)
-                           : NewIdentifierASTNode(local->symbol,
-                                                  decl->base.location);
-      ASTNode* store = TypeIsStructOrUnion(local->symbol->type)
-                           ? NewFrameMemberInitialization(
-                                 frame, local->member,
-                                 local->constructed_member, value,
-                                 decl->base.location)
-                           : NewFrameAssignment(frame, local->member, value,
-                                                decl->base.location);
-      CompoundASTNodeInsertStatement(
-          compound, store, insert_index);
+      ASTNode* initialization =
+          NewPersistedCoroutineLocalFrameInitialization(
+              decl, local, frame,
+              CoroutineSuspensionUsesValueDeclaration(points, decl));
+      if (initialization == NULL) {
+        continue;
+      }
+      CompoundASTNodeInsertStatement(compound, initialization, insert_index);
       AdjustSuspensionPointIndicesAfterInsert(points, compound, insert_index);
       inserted++;
     }
@@ -5270,7 +5493,7 @@ static void InsertPersistedCoroutineLocalStoresInCompound(
   }
 }
 
-/* Entry point: insert frame stores for all persisted locals in the body. */
+/* Entry point: redirect persisted-local initialization into the frame. */
 static void InsertPersistedCoroutineLocalStores(
     CompoundStatementASTNode* body,
     CoroutineFrame* frame,
@@ -5784,9 +6007,19 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                               node->location);
     CoroutineFrameAddOwnedSymbol(&frame, promise, frame.promise,
                                  frame.promise_constructed, true);
+    /* Parameter copies are constructed before the coroutine body begins and
+     * therefore register before body locals, so reverse teardown destroys active
+     * locals first. */
     for (size_t i = 0; i < persisted_locals.length; i++) {
       CoroutinePersistedLocal* local = persisted_locals.value.p[i];
-      if (local != NULL && local->member != NULL) {
+      if (local != NULL && local->member != NULL && local->is_parameter) {
+        CoroutineFrameAddOwnedSymbol(&frame, local->symbol, local->member,
+                                     local->constructed_member, false);
+      }
+    }
+    for (size_t i = 0; i < persisted_locals.length; i++) {
+      CoroutinePersistedLocal* local = persisted_locals.value.p[i];
+      if (local != NULL && local->member != NULL && !local->is_parameter) {
         CoroutineFrameAddOwnedSymbol(&frame, local->symbol, local->member,
                                      local->constructed_member, false);
       }
@@ -5859,7 +6092,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
         1);
   }
   LowerCoReturnsInStatement(info->body, promise, needs_frame ? &frame : NULL,
-                            final_awaiter, node->type->next);
+                            &persisted_locals, final_awaiter,
+                            node->type->next);
   LowerCoroutineThrowsInStatement(info->body, promise,
                                   needs_frame ? &frame : NULL,
                                   final_awaiter, node->type->next);
