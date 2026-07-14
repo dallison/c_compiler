@@ -2394,6 +2394,68 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                first_formal_arg);
 }
 
+/* Public: deduce the template arguments of a conversion function template for a
+ * requested target type.  A conversion function template has no value
+ * parameters, so its arguments are deduced by matching the declared (dependent)
+ * target type (`func->next`) against the required type `target`
+ * ([temp.deduct.conv]) rather than from call arguments.  Returns the completed
+ * argument vector (caller owns) or NULL if deduction/default-completion/
+ * constraints fail. */
+Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
+                                                      Symbol* templ,
+                                                      TypeRecord* target) {
+  if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
+      !TypeIsFunction(templ->type) || target == NULL) {
+    return NULL;
+  }
+  TypeRecord* func =
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
+          ? templ->value.func_defn->type
+          : templ->type;
+  if (func->info.function.template_parameter_count <= 0 || func->next == NULL) {
+    return NULL;
+  }
+  size_t explicit_arg_count = 0;
+  Vector* args = NewFunctionTemplateDeductionArguments(func, /*explicit_args=*/
+                                                       NULL, &explicit_arg_count);
+  if (args == NULL) {
+    return NULL;
+  }
+  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func->next,
+                                          target)) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, func, args,
+                                        /*emit_error=*/false);
+  TypeParserDestruct(&parser);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameterForInstantiation(
+          completed_args)) {
+    if (completed_args != NULL) {
+      VectorDeleteWithContents(completed_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return NULL;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  return completed_args;
+}
+
 /* Public: register a user-written CTAD deduction guide for a class template. */
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide) {
   if (class_template == NULL || class_template->type == NULL ||

@@ -77,6 +77,18 @@ Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
                                             Vector* explicit_args,
                                             Vector* actuals,
                                             size_t first_formal_arg);
+// Deduce the template arguments of a conversion function template
+// (`template<class T> operator T()`) for a requested target type.  A conversion
+// function template has no value parameters, so its arguments are deduced by
+// matching the operator's declared (dependent) target type against `target`
+// ([temp.deduct.conv]).  Returns the completed template-argument vector (caller
+// owns; delete with TemplateArgumentDelete), or NULL if deduction, default
+// completion, or constraint checking fails.  Does not instantiate a body or
+// emit diagnostics; feed the result back as explicit template arguments so the
+// ordinary member-template instantiation path builds and owns the specialization.
+Vector* TypeDeduceConversionOperatorTemplateArguments(struct Syntax* syntax,
+                                                      Symbol* templ,
+                                                      TypeRecord* target);
 Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     Vector* actuals,
                                                     size_t first_formal_arg);

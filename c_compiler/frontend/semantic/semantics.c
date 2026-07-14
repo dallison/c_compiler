@@ -907,6 +907,12 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
     StructMember* member = candidates.value.p[i];
     TypeRecord* func = member->symbol->type;
     TypeRecord* result = func->next;
+    // Conversion operator templates have a dependent result type that cannot be
+    // ranked directly; they are handled separately by deducing their arguments
+    // from the target type (see SelectConversionOperatorTemplate).
+    if (member->symbol->flags.is_template) {
+      continue;
+    }
     if (!ConversionOperatorAllowedInContext(func, to, ctx)) {
       continue;
     }
@@ -927,6 +933,60 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
   return ambiguous ? NULL : best;
 }
 
+// Select a conversion operator template of `str` (or a base) whose target-type
+// deduction against `to` succeeds, returning its member symbol via *out_templ
+// and the deduced template arguments via *out_args (caller owns).  The
+// specialization itself is left to be built by the ordinary member-template
+// instantiation path (fed the deduced arguments as explicit template
+// arguments), which owns the resulting symbol; this avoids double-freeing an
+// instantiation that the template subsystem already tracks.  Returns false when
+// no template conversion operator deduces to `to`.
+static bool SelectConversionOperatorTemplate(Struct* str, TypeRecord* to,
+                                             ConversionContext ctx,
+                                             Symbol** out_templ,
+                                             Vector** out_args) {
+  if (str == NULL) {
+    return false;
+  }
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectConversionOperators(str, &candidates);
+
+  Symbol* chosen = NULL;
+  Vector* chosen_args = NULL;
+  for (size_t i = 0; i < candidates.length; i++) {
+    StructMember* member = candidates.value.p[i];
+    Symbol* templ = member->symbol;
+    if (!templ->flags.is_template ||
+        !ConversionOperatorAllowedInContext(templ->type, to, ctx)) {
+      continue;
+    }
+    Vector* args = TypeDeduceConversionOperatorTemplateArguments(
+        &compiler->syntax, templ, to);
+    if (args == NULL) {
+      continue;
+    }
+    if (chosen == NULL) {
+      chosen = templ;
+      chosen_args = args;
+    } else {
+      // A second viable template conversion operator: keep the first (a
+      // reasonable default; distinct viable templates are extremely rare) and
+      // discard the redundant deduction.
+      VectorDeleteWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+  }
+  VectorDestruct(&candidates);
+  if (chosen == NULL) {
+    return false;
+  }
+  *out_templ = chosen;
+  *out_args = chosen_args;
+  return true;
+}
+
 static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
                                              ConversionContext ctx) {
   if (!CompilerIsCXX() || from == NULL || from->type == NULL ||
@@ -935,15 +995,34 @@ static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
   }
   StructMember* member =
       FindConversionOperator(from->type->info.struct_info, to, ctx);
-  if (member == NULL) {
-    return false;
+  // Explicit template arguments to attach to the member-access name when the
+  // selected operator is a conversion operator template; NULL otherwise.
+  Vector* template_args = NULL;
+  String member_lookup_name;
+  StringInit(&member_lookup_name, NULL);
+  if (member != NULL) {
+    StringSet(&member_lookup_name, member->symbol->name.value);
+  } else {
+    Symbol* templ = NULL;
+    if (!SelectConversionOperatorTemplate(from->type->info.struct_info, to, ctx,
+                                          &templ, &template_args)) {
+      StringDestruct(&member_lookup_name);
+      return false;
+    }
+    StringSet(&member_lookup_name, templ->name.value);
   }
   ASTNode* parent = from->parent;
   int child_id = from->child_id;
   ASTNode* receiver = ASTNodeMove(from);
   ASTNode* member_name =
-      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+      NewStringConstantASTNode(NewString(member_lookup_name.value), NULL,
                                from->location);
+  StringDestruct(&member_lookup_name);
+  // The member-access analysis moves these explicit template arguments onto the
+  // resolved member node, where overload resolution uses them to instantiate
+  // the conversion operator template (it cannot deduce them from a zero-argument
+  // call).  Ownership transfers to the name node, which frees them on deletion.
+  ((ConstantASTNode*)member_name)->template_arguments = template_args;
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, from->location, receiver,
                        member_name);

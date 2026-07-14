@@ -1407,10 +1407,12 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   return true;
 }
 
-static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
-                                             CXXAccess access,
-                                             bool is_virtual,
-                                             bool is_explicit) {
+static bool ParseCXXConversionOperatorMember(
+    TypeParser* parser, Struct* str, CXXAccess access, bool is_virtual,
+    bool is_explicit, bool is_member_template,
+    Vector* member_template_parameters,
+    ConstraintExpr* member_template_requires_clause,
+    int member_template_parameter_base) {
   if (!CompilerIsCXX() || !LexLookingAt(parser->lex, TOK(operator))) {
     return false;
   }
@@ -1440,6 +1442,30 @@ static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
     func->info.function.explicit_condition =
         parser->syntax->pending_explicit_condition;
     parser->syntax->pending_explicit_condition = NULL;
+  }
+  if (is_member_template) {
+    // Store the template parameters on the function type, exactly like an
+    // ordinary member function template.  Deduction of the parameters happens
+    // at the conversion site by matching the (dependent) target type against
+    // the requested type ([temp.deduct.conv]).
+    member_symbol->flags.is_template = true;
+    func->info.function.template_parameter_count =
+        (int)member_template_parameters->length;
+    func->info.function.template_parameter_base =
+        member_template_parameter_base;
+    VectorDestructWithContents(
+        &func->info.function.template_parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    VectorInit(&func->info.function.template_parameters);
+    for (size_t i = 0; i < member_template_parameters->length; i++) {
+      VectorAppend(&func->info.function.template_parameters,
+                   member_template_parameters->value.p[i]);
+    }
+    // Ownership of the parameter entries has moved into the function type.
+    member_template_parameters->length = 0;
+    FinalizeMemberFunctionTemplateConstraints(
+        func, member_template_parameters, member_template_requires_clause);
   }
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
@@ -1856,12 +1882,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
     if (!is_static_member &&
         ParseCXXConversionOperatorMember(parser, str, current_access,
-                                         is_virtual_member,
-                                         is_explicit_member)) {
+                                         is_virtual_member, is_explicit_member,
+                                         is_member_template,
+                                         member_template_parameters,
+                                         member_template_requires_clause,
+                                         member_template_parameter_base)) {
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
-        SyntaxError(parser->syntax,
-                    "Conversion operator templates are not supported yet");
+        // The conversion operator template consumed the parameter entries
+        // (moving them into the function type) and the requires-clause; tear
+        // down the template scope and parsing flags, freeing only the (now
+        // empty) parameter vector container.
         SyntaxCloseScope(parser->syntax);
         VectorDestructWithContents(
             member_template_parameters,
