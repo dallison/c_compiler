@@ -1425,6 +1425,12 @@ static bool ParseCXXConversionOperatorMember(
     SyntaxError(parser->syntax,
                 "Unsupported conversion operator target type");
     SyntaxRecover(parser->syntax, TC(semicolon) | TC(openbra) | TC(closebra));
+    // This early exit precedes the template-parameter storage below, so the
+    // member's requires-clause would otherwise never be consumed.  The caller
+    // frees the parameter vector; free the requires-clause here to match.
+    if (is_member_template) {
+      ConstraintExprDelete(member_template_requires_clause);
+    }
     return true;
   }
   SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(decl));
