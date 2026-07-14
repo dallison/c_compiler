@@ -954,6 +954,7 @@ static bool SelectConversionOperatorTemplate(Struct* str, TypeRecord* to,
 
   Symbol* chosen = NULL;
   Vector* chosen_args = NULL;
+  bool ambiguous = false;
   for (size_t i = 0; i < candidates.length; i++) {
     StructMember* member = candidates.value.p[i];
     Symbol* templ = member->symbol;
@@ -969,17 +970,31 @@ static bool SelectConversionOperatorTemplate(Struct* str, TypeRecord* to,
     if (chosen == NULL) {
       chosen = templ;
       chosen_args = args;
-    } else {
-      // A second viable template conversion operator: keep the first (a
-      // reasonable default; distinct viable templates are extremely rare) and
-      // discard the redundant deduction.
-      VectorDeleteWithContents(args,
-                               (VectorElementDestructor)TemplateArgumentDelete,
-                               /*free_element=*/false);
+      continue;
+    }
+    // A second viable template conversion operator: prefer the more specialized
+    // one by partial ordering ([temp.func.order]); if neither is more
+    // specialized the conversion is ambiguous.
+    int order = TypeConversionOperatorTemplateMoreSpecialized(&compiler->syntax,
+                                                              templ, chosen);
+    VectorDeleteWithContents(
+        order > 0 ? chosen_args : args,
+        (VectorElementDestructor)TemplateArgumentDelete, /*free_element=*/false);
+    if (order > 0) {
+      chosen = templ;
+      chosen_args = args;
+      ambiguous = false;
+    } else if (order == 0) {
+      ambiguous = true;
     }
   }
   VectorDestruct(&candidates);
-  if (chosen == NULL) {
+  if (chosen == NULL || ambiguous) {
+    if (chosen_args != NULL) {
+      VectorDeleteWithContents(chosen_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     return false;
   }
   *out_templ = chosen;

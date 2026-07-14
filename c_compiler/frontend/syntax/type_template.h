@@ -89,6 +89,12 @@ Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
 Vector* TypeDeduceConversionOperatorTemplateArguments(struct Syntax* syntax,
                                                       Symbol* templ,
                                                       TypeRecord* target);
+// Partial ordering of two conversion function templates by their target type
+// ([temp.func.order]).  Returns 1 if `a` is more specialized than `b`, -1 if
+// `b` is more specialized than `a`, and 0 if neither (equivalent/incomparable,
+// i.e. an ambiguous conversion).
+int TypeConversionOperatorTemplateMoreSpecialized(struct Syntax* syntax,
+                                                  Symbol* a, Symbol* b);
 Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     Vector* actuals,
                                                     size_t first_formal_arg);
