@@ -6118,31 +6118,36 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
   }
   if (LexMatch(lex, TOK(typename)) || LexMatch(lex, TOK(class))) {
     bool is_parameter_pack = LexMatch(lex, TOK(ellipsis));
-    if (!LexLookingAt(lex, TOK(identifier))) {
-      SyntaxError(syntax, "Expected template parameter name");
+    String param_name;
+    StringInit(&param_name, "");
+    if (LexLookingAt(lex, TOK(identifier))) {
+      StringSet(&param_name, lex->spelling.value);
+      TypeRecord* placeholder =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      placeholder->template_parameter_index = index;
+      placeholder->template_parameter_name = NewString(lex->spelling.value);
+      Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
+      param->flags.invented = true;
+      param->flags.is_template_parameter = true;
+      param->flags.is_template_type_parameter = true;
+      param->flags.is_parameter_pack = is_parameter_pack;
+      param->template_parameter_index = index;
+      param->location = lex->current_token_location;
+      bool added = SyntaxAddSymbol(syntax, param);
+      if (!added) {
+        SyntaxError(syntax, "Duplicate template parameter %s",
+                    param->name.value);
+        SymbolDelete(param);
+      }
+      LexNextToken(lex);
+    } else if (!LexLookingAt(lex, TOK(equal)) &&
+               !LexLookingAt(lex, TOK(comma)) &&
+               !LexLookingAtClosingAngle(lex)) {
+      SyntaxError(syntax, "Expected template parameter name or delimiter");
       SyntaxRecover(syntax, TC(closebra));
+      StringDestruct(&param_name);
       return false;
     }
-
-    TypeRecord* placeholder =
-        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-    placeholder->template_parameter_index = index;
-    placeholder->template_parameter_name = NewString(lex->spelling.value);
-    Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
-    param->flags.invented = true;
-    param->flags.is_template_parameter = true;
-    param->flags.is_template_type_parameter = true;
-    param->flags.is_parameter_pack = is_parameter_pack;
-    param->template_parameter_index = index;
-    param->location = lex->current_token_location;
-    bool added = SyntaxAddSymbol(syntax, param);
-    if (!added) {
-      SyntaxError(syntax, "Duplicate template parameter %s", param->name.value);
-      SymbolDelete(param);
-    }
-    String param_name;
-    StringInit(&param_name, lex->spelling.value);
-    LexNextToken(lex);
     TypeRecord* default_type = NULL;
     if (LexMatch(lex, TOK(equal))) {
       if (is_parameter_pack) {
@@ -6394,6 +6399,9 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
         TypeRecordCalculateSize(ref);
         TypeRecordDelete(arg->type);
         arg->type = ref;
+        if (CompilerIsCXX() && LexMatch(lex, TOK(ellipsis))) {
+          arg->is_pack_expansion = true;
+        }
       }
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;

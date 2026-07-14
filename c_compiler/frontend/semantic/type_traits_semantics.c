@@ -89,19 +89,22 @@ static Vector* TemplateArgumentsFromTypeVector(Vector* types,
   return args;
 }
 
-TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(Syntax* syntax,
+TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
                                                         TypeRecord* type,
                                                         Vector* args) {
-  if (!TypeRecordIsInvokeResultPlaceholder(type)) {
+  if (!TypeRecordIsInvokeResultPlaceholder(type) ||
+      parser->template_substitution_failed) {
     return NULL;
   }
-  TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* substituted =
-      SubstituteTemplateArgumentVector(&parser, type->template_arguments, args,
+      SubstituteTemplateArgumentVector(parser, type->template_arguments, args,
                                        0);
-  TypeParserDestruct(&parser);
-  if (substituted == NULL) {
+  if (substituted == NULL || parser->template_substitution_failed) {
+    if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
     return NULL;
   }
   Vector* types = TypeVectorFromTemplateArguments(substituted);
@@ -111,7 +114,7 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(Syntax* syntax,
   if (types == NULL) {
     return NULL;
   }
-  TypeRecord* result = CXXTypeTraitInvokeResultType(syntax, types);
+  TypeRecord* result = CXXTypeTraitInvokeResultType(parser->syntax, types);
   VectorDelete(types);
   if (result == NULL) {
     return NULL;
@@ -145,19 +148,22 @@ bool TypeRecordIsCommonTypePlaceholder(TypeRecord* type) {
          type->template_arguments != NULL;
 }
 
-TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(Syntax* syntax,
+TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(TypeParser* parser,
                                                       TypeRecord* type,
                                                       Vector* args) {
-  if (!TypeRecordIsCommonTypePlaceholder(type)) {
+  if (!TypeRecordIsCommonTypePlaceholder(type) ||
+      parser->template_substitution_failed) {
     return NULL;
   }
-  TypeParser parser;
-  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* substituted =
-      SubstituteTemplateArgumentVector(&parser, type->template_arguments, args,
+      SubstituteTemplateArgumentVector(parser, type->template_arguments, args,
                                        0);
-  TypeParserDestruct(&parser);
-  if (substituted == NULL) {
+  if (substituted == NULL || parser->template_substitution_failed) {
+    if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
     return NULL;
   }
   Vector* types = TypeVectorFromTemplateArguments(substituted);
@@ -167,7 +173,7 @@ TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(Syntax* syntax,
   if (types == NULL) {
     return NULL;
   }
-  TypeRecord* result = CXXTypeTraitCommonType(syntax, types);
+  TypeRecord* result = CXXTypeTraitCommonType(parser->syntax, types);
   VectorDelete(types);
   if (result == NULL) {
     return NULL;
@@ -502,28 +508,13 @@ static bool TypeIsReferenceConstructibleFrom(Syntax* syntax, TypeRecord* target,
   if (arg_type == NULL) {
     return false;
   }
-  ASTNode* arg = NewSyntheticValue(syntax, arg_type);
+  ASTNode* arg = TypeTraitSyntheticExpressionFromType(syntax, arg_type);
   if (arg == NULL) {
     return false;
   }
-  int rank = 0;
   bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
-  if (target->declarator == kDeclRValueReference) {
-    rank = arg->value_category == kValueCategoryXvalue ? 0 : -1;
-    if (rank < 0 && arg->value_category == kValueCategoryPrvalue &&
-        TypeIsStructOrUnion(arg->type)) {
-      rank = 0;
-    }
-  } else {
-    if (arg->value_category == kValueCategoryLvalue) {
-      rank = TypeEqualIgnoringQualifiers(arg->type, target->next) ? 0 : -1;
-    } else if (arg->value_category == kValueCategoryXvalue &&
-               target->declarator == kDeclReference) {
-      rank = TypeEqualIgnoringQualifiers(arg->type, target->next) ? 0 : -1;
-    }
-  }
-  bool ok = rank >= 0;
+  bool ok = TypeTraitCanBindToReference(arg, target);
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);
   ASTNodeDelete(arg);

@@ -463,6 +463,40 @@ void SymbolFunctionDiagnosticName(Symbol* symbol, String* result) {
   SymbolFunctionDiagnosticSuffix(symbol, result);
 }
 
+static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
+                                                String* result) {
+  if (argument == NULL) {
+    StringAppend(result, "<null>");
+    return;
+  }
+  if (argument->pack_arguments != NULL) {
+    StringAppendChar(result, '[');
+    for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+      if (i != 0) {
+        StringAppendChar(result, ',');
+      }
+      TemplateArgumentToTemplateKeyString(
+          argument->pack_arguments->value.p[i], result);
+    }
+    StringAppendChar(result, ']');
+    return;
+  }
+  if (argument->kind == kTemplateParameterType) {
+    if (argument->type != NULL) {
+      TypeRecordToTemplateKeyString(argument->type, result);
+    } else {
+      StringPrintf(result, "$T%d", argument->template_parameter_index);
+    }
+  } else if (argument->template_parameter_index >= 0) {
+    StringPrintf(result, "$N%d", argument->template_parameter_index);
+  } else {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%lld",
+             (long long)argument->int_value);
+    StringAppend(result, buffer);
+  }
+}
+
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
   if (type == NULL) {
     StringAppend(result, "<invalid-type>");
@@ -470,6 +504,30 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
   }
   switch (type->declarator) {
     case kDeclPrimitive:
+      if (TypeIsUnknown(type) && type->template_origin != NULL &&
+          type->template_arguments != NULL) {
+        QualifiersToString(type->qualifiers, result);
+        if (type->qualifiers != 0) {
+          StringAppend(result, " ");
+        }
+        StringAppend(result, "$A");
+        StringAppendString(result, &type->template_origin->name);
+        StringPrintf(result, "@%" PRIu64 "<",
+                     (uint64_t)type->template_origin->location);
+        for (size_t i = 0; i < type->template_arguments->length; i++) {
+          if (i != 0) {
+            StringAppendChar(result, ',');
+          }
+          TemplateArgumentToTemplateKeyString(
+              type->template_arguments->value.p[i], result);
+        }
+        StringAppendChar(result, '>');
+        if (type->dependent_member_name != NULL) {
+          StringAppend(result, "::");
+          StringAppendString(result, type->dependent_member_name);
+        }
+        break;
+      }
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
         QualifiersToString(type->qualifiers, result);
         if (type->qualifiers != 0) {

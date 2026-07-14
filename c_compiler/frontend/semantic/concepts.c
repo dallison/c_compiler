@@ -894,22 +894,6 @@ static bool EvaluateExpressionRequirement(Requirement* requirement,
   return !failed;
 }
 
-#if 0  // debug
-static void DebugPrintType(const char* label, TypeRecord* type) {
-  if (type == NULL) {
-    fprintf(stderr, "%s: NULL\n", label);
-    return;
-  }
-  String s;
-  StringInit(&s, "");
-  TypeRecordToString(type, &s);
-  fprintf(stderr, "%s: %s (tpl_idx=%d, has_tpl_param=%d)\n", label, s.value,
-          type->template_parameter_index,
-          TypeContainsTemplateParameter(type));
-  StringDestruct(&s);
-}
-#endif
-
 static bool EvaluateTypeRequirement(Requirement* requirement,
                                     Vector* arguments) {
   if (requirement == NULL || requirement->type == NULL) {

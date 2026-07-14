@@ -159,6 +159,11 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   EHTypeInfo* info = malloc(sizeof(EHTypeInfo));
   StringInit(&info->type_name, type_name.value);
   StringDestruct(&type_name);
+  if (type != NULL) {
+    TypeRecordCalculateSize(type);
+  }
+  info->object_size = type != NULL ? type->size : 0;
+  info->object_is_class = type != NULL && TypeIsStructOrUnion(type);
   VectorInit(&info->bases);
   CollectExceptionBaseTypes(type, 0, &info->bases);
   StringInit(&info->symbol_name, "__davecc_typeinfo_");

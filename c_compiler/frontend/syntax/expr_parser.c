@@ -513,6 +513,55 @@ static ASTNode* ParseFoldPackExpression(Syntax* syntax, TokenClass followers) {
   return expr;
 }
 
+// A parenthesized expression may contain a template argument pack expansion,
+// as in `Trait<T, Args&&...>::value`.  That ellipsis is not a fold-expression
+// ellipsis.  At a `<`, look ahead for a balanced template close before the
+// surrounding `)`; a genuine `<` fold operator has no matching `>`.
+static bool FoldLessStartsTemplateArgument(Syntax* syntax) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  int angle_depth = 0;
+  int paren_depth = 0;
+  bool matched = false;
+  while (!LexEof(syntax->lex)) {
+    Token token = syntax->lex->current_token;
+    if (token == TOK(rparen) && paren_depth == 0) {
+      break;
+    }
+    if (token == TOK(less)) {
+      angle_depth++;
+    } else if (token == TOK(greater)) {
+      angle_depth--;
+    } else if (token == TOK(greatergreater) ||
+               token == TOK(greatergreatereq)) {
+      angle_depth -= 2;
+    } else if (token == TOK(greatereq)) {
+      angle_depth--;
+    } else if (token == TOK(lparen)) {
+      paren_depth++;
+    } else if (token == TOK(rparen)) {
+      paren_depth--;
+    }
+    LexNextToken(syntax->lex);
+    if (angle_depth <= 0) {
+      matched = true;
+      break;
+    }
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return matched;
+}
+
+static bool TokenIsFoldOperator(Token token) {
+  return token == TOK(star) || token == TOK(slash) ||
+         token == TOK(percent) || token == TOK(plus) ||
+         token == TOK(minus) || token == TOK(lessless) ||
+         token == TOK(greatergreater) || token == TOK(amp) ||
+         token == TOK(caret) || token == TOK(bar) ||
+         token == TOK(ampamp) || token == TOK(barbar);
+}
+
 static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
@@ -520,6 +569,9 @@ static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
   int paren_depth = 0;
   int square_depth = 0;
   int brace_depth = 0;
+  int angle_depth = 0;
+  Token previous_top_level = TOK(bad);
+  bool at_start = true;
 
   while (!LexEof(syntax->lex)) {
     Token token = syntax->lex->current_token;
@@ -528,11 +580,29 @@ static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
       break;
     }
     if (token == TOK(ellipsis) && paren_depth == 0 &&
-        square_depth == 0 && brace_depth == 0) {
-      found = true;
-      break;
+        square_depth == 0 && brace_depth == 0 && angle_depth == 0) {
+      if (at_start || TokenIsFoldOperator(previous_top_level)) {
+        found = true;
+        break;
+      }
     }
-    if (token == TOK(lparen)) {
+    if (token == TOK(less) && angle_depth == 0 &&
+        FoldLessStartsTemplateArgument(syntax)) {
+      angle_depth++;
+    } else if (token == TOK(less) && angle_depth > 0) {
+      angle_depth++;
+    } else if (token == TOK(greater) && angle_depth > 0) {
+      angle_depth--;
+    } else if ((token == TOK(greatergreater) ||
+                token == TOK(greatergreatereq)) &&
+               angle_depth > 0) {
+      angle_depth -= 2;
+      if (angle_depth < 0) {
+        angle_depth = 0;
+      }
+    } else if (token == TOK(greatereq) && angle_depth > 0) {
+      angle_depth--;
+    } else if (token == TOK(lparen)) {
       paren_depth++;
     } else if (token == TOK(rparen)) {
       paren_depth--;
@@ -544,6 +614,11 @@ static bool FoldExpressionHasTopLevelEllipsis(Syntax* syntax) {
       brace_depth++;
     } else if (token == TOK(rbrace)) {
       brace_depth--;
+    }
+    if (paren_depth == 0 && square_depth == 0 && brace_depth == 0 &&
+        angle_depth == 0) {
+      previous_top_level = token;
+      at_start = false;
     }
     LexNextToken(syntax->lex);
   }
@@ -4425,7 +4500,9 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                           SourceLocation location,
                                           bool global_scope) {
   TypeRecord* pointer_type = expr->type;
-  if (pointer_type != NULL && TypeContainsTemplateParameter(pointer_type)) {
+  if ((pointer_type != NULL && TypeContainsTemplateParameter(pointer_type)) ||
+      (syntax->parsing_template_declaration &&
+       (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)))) {
     Vector* actuals = NewVector();
     VectorAppend(actuals, expr);
     ASTNode* node = NewCallASTNode(

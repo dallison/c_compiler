@@ -264,6 +264,7 @@ const char default_config[] = {
 "        name: \"text\"\n"
 "        section: \".text\"\n"
 "        section: \".rodata\"\n"
+"        section: \".davecc_except_table\"\n"
 "        start_addr: 0x40000000\n"
 "        falign: 1\n"
 "      }\n"

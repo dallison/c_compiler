@@ -2740,7 +2740,12 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
                    STO(implicit), compiler->syntax.context);
     TypeRecord* substituted =
         SubstituteTemplateParameters(&parser, pattern->type, bindings);
+    bool substitution_failed = parser.template_substitution_failed;
     TypeParserDestruct(&parser);
+    if (substitution_failed) {
+      TypeRecordDelete(substituted);
+      return false;
+    }
     bool ok = ClassTemplateTypePatternMatches(bindings, substituted,
                                               actual->type);
     TypeRecordDelete(substituted);

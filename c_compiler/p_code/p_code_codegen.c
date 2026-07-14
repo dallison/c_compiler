@@ -2530,8 +2530,15 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
       if ((entry->pooled->flags & kIRNrvoMarker) != 0) {
         continue;
       }
-      int32_t size = entry->value.symbol->type->size;
-      var_offset = (var_offset + (size - 1)) & ~(size - 1);   // Align.
+      TypeRecord* type = entry->value.symbol->type;
+      if (type->size == 0) {
+        TypeRecordCalculateSize(type);
+      }
+      int32_t size = type->size;
+      int32_t alignment = TypeRecordAlignment(type);
+      assert(size > 0);
+      assert(alignment > 0 && (alignment & (alignment - 1)) == 0);
+      var_offset = (var_offset + alignment - 1) & ~(alignment - 1);
       entry->pooled->data.ivalue = var_offset;
       var_offset += size;
     } else if (entry->pooled->opcode == IR_OP(argument)) {
@@ -2547,7 +2554,7 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
   }
 
   // We now know the stack frame size.
-  pcode->base.stack_frame_size = (int32_t)var_offset;
+  pcode->base.stack_frame_size = (var_offset + 7) & ~7;
 
   IRNode* node = GeneratorFirstInstruction(gen);
   while (node != NULL) {

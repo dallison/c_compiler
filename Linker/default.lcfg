@@ -6,6 +6,7 @@
 # ELF machine type
 .set MW65C02 6502
 .set M_RISC_V 243
+.set M_ARM 40
 
 layout {
   machine: MW65C02
@@ -75,6 +76,33 @@ layout {
       section: ".init_array"
       section: ".fini_array"
       start_addr: 0x410000000
+      alignment: 0x1000
+    }
+  }
+}
+
+layout {
+  machine: M_ARM
+  type: "program"
+
+  text_segment {
+    region {
+      name: "text"
+      section: ".text"
+      section: ".rodata"
+      section: ".davecc_except_table"
+      start_addr: 0x40000000
+      alignment: 0x1000
+    }
+  }
+  data_segment {
+    region {
+      name: "data"
+      section: ".data"
+      section: ".preinit_array"
+      section: ".init_array"
+      section: ".fini_array"
+      start_addr: 0x41000000
       alignment: 0x1000
     }
   }

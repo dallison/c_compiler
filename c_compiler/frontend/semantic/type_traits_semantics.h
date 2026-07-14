@@ -42,7 +42,7 @@ TypeRecord* CXXTypeTraitCommonType(Syntax* syntax, Vector* type_args);
 
 bool TypeRecordIsInvokeResultPlaceholder(TypeRecord* type);
 
-TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(Syntax* syntax,
+TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
                                                         TypeRecord* type,
                                                         Vector* args);
 
@@ -53,7 +53,7 @@ TypeRecord* TypeRecordNewInvokeResultPlaceholderWithFlags(Vector* type_args,
 
 bool TypeRecordIsCommonTypePlaceholder(TypeRecord* type);
 
-TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(Syntax* syntax,
+TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(TypeParser* parser,
                                                       TypeRecord* type,
                                                       Vector* args);
 

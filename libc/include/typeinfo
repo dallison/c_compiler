@@ -10,15 +10,15 @@
 //  first member is __name.  Equality is by object identity, which holds because
 //  the compiler emits one weak type_info per type.
 //
-//  Simplifications relative to the standard:
-//   * type_info has no virtual members (the standard's virtual destructor would
-//     introduce a vptr and shift the layout the compiler emits).
-//   * bad_cast / bad_typeid are minimal standalone classes (not derived from
-//     std::exception, which DaveCC does not yet provide).
+//  Simplification relative to the standard: type_info has no virtual members
+//  because the standard's virtual destructor would introduce a vptr and shift
+//  the layout emitted by the compiler.
 //
 
 #ifndef typeinfo_h
 #define typeinfo_h
+
+#include <exception>
 
 namespace std {
 
@@ -43,16 +43,16 @@ class type_info {
   unsigned long hash_code() const { return (unsigned long)(const void*)this; }
 };
 
-class bad_cast {
+class bad_cast : public exception {
  public:
-  bad_cast() {}
-  const char* what() const { return "std::bad_cast"; }
+  bad_cast() noexcept {}
+  const char* what() const noexcept override { return "std::bad_cast"; }
 };
 
-class bad_typeid {
+class bad_typeid : public exception {
  public:
-  bad_typeid() {}
-  const char* what() const { return "std::bad_typeid"; }
+  bad_typeid() noexcept {}
+  const char* what() const noexcept override { return "std::bad_typeid"; }
 };
 
 }  // namespace std

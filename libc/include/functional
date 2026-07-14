@@ -21,7 +21,7 @@ namespace std {
 template <class T>
 struct hash;
 
-template <class T>
+template <class T = void>
 struct less {
   constexpr bool operator()(const T& left, const T& right) const {
     return left < right;
@@ -38,7 +38,7 @@ struct less<void> {
   }
 };
 
-template <class T>
+template <class T = void>
 struct greater {
   constexpr bool operator()(const T& left, const T& right) const {
     return right < left;
@@ -55,7 +55,7 @@ struct greater<void> {
   }
 };
 
-template <class T>
+template <class T = void>
 struct equal_to {
   constexpr bool operator()(const T& left, const T& right) const {
     return left == right;

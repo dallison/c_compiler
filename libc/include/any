@@ -1,0 +1,414 @@
+//
+//  any
+//  c_compiler
+//
+//  C++20 std::any support for DaveCC.
+//
+
+#ifndef __davecc_any__
+#define __davecc_any__
+
+#include <exception>
+#include <initializer_list>
+#include <new>
+#include <stddef.h>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+namespace std {
+
+class bad_any_cast : public bad_cast {
+ public:
+  bad_any_cast() noexcept {}
+
+  const char* what() const noexcept override {
+    return "bad any_cast";
+  }
+};
+
+class any;
+
+namespace __any_detail {
+
+struct __storage_type {
+  alignas(void*) unsigned char data[2 * sizeof(void*)];
+};
+
+struct __operations {
+  void (*copy)(__storage_type*, const __storage_type*);
+  void (*move)(__storage_type*, __storage_type*);
+  void (*destroy)(__storage_type*);
+  const type_info& (*type)();
+  void* (*target)(__storage_type*);
+  const void* (*const_target)(const __storage_type*);
+};
+
+template <class T>
+struct __is_in_place_type : false_type {
+};
+
+template <class T>
+struct __is_in_place_type<in_place_type_t<T> > : true_type {
+};
+
+template <class T>
+struct __valid_stored_type
+    : bool_constant<is_same<T, decay_t<T> >::value &&
+                    is_copy_constructible<T>::value> {
+};
+
+template <class T>
+struct __manager {
+  static constexpr bool is_local =
+      sizeof(T) <= sizeof(__storage_type) &&
+      alignof(T) <= alignof(__storage_type) &&
+      is_nothrow_move_constructible<T>::value;
+
+  static T*& heap_pointer(__storage_type& storage) {
+    return *reinterpret_cast<T**>(storage.data);
+  }
+
+  static T* const& heap_pointer(const __storage_type& storage) {
+    return *reinterpret_cast<T* const*>(storage.data);
+  }
+
+  static T* get(__storage_type& storage) {
+    if constexpr (is_local) {
+      return reinterpret_cast<T*>(storage.data);
+    } else {
+      return heap_pointer(storage);
+    }
+  }
+
+  static const T* get(const __storage_type& storage) {
+    if constexpr (is_local) {
+      return reinterpret_cast<const T*>(storage.data);
+    } else {
+      return heap_pointer(storage);
+    }
+  }
+
+  static void copy(__storage_type* destination,
+                   const __storage_type* source) {
+    if constexpr (is_local) {
+      ::new (static_cast<void*>(destination->data)) T(*get(*source));
+    } else {
+      heap_pointer(*destination) = new T(*get(*source));
+    }
+  }
+
+  static void move(__storage_type* destination,
+                   __storage_type* source) {
+    if constexpr (is_local) {
+      T* source_target = get(*source);
+      ::new (static_cast<void*>(destination->data))
+          T(static_cast<T&&>(*source_target));
+      source_target->~T();
+    } else {
+      heap_pointer(*destination) = heap_pointer(*source);
+      heap_pointer(*source) = nullptr;
+    }
+  }
+
+  static void destroy(__storage_type* storage) {
+    if constexpr (is_local) {
+      get(*storage)->~T();
+    } else {
+      delete heap_pointer(*storage);
+      heap_pointer(*storage) = nullptr;
+    }
+  }
+
+  static const type_info& type() {
+    return typeid(T);
+  }
+
+  static void* target(__storage_type* storage) {
+    return get(*storage);
+  }
+
+  static const void* const_target(const __storage_type* storage) {
+    return get(*storage);
+  }
+
+  static const __operations* table() {
+    static const __operations value = {
+        &copy, &move, &destroy, &type, &target, &const_target};
+    return &value;
+  }
+};
+
+}  // namespace __any_detail
+
+class any {
+ private:
+  using __storage_type = __any_detail::__storage_type;
+  using __operations = __any_detail::__operations;
+
+  template <class T, class... Args>
+  T& __initialize(Args&&... args) {
+    using Manager = __any_detail::__manager<T>;
+    T* target;
+    if constexpr (Manager::is_local) {
+      target = ::new (static_cast<void*>(__storage.data))
+          T(std::forward<Args>(args)...);
+    } else {
+      target = new T(std::forward<Args>(args)...);
+      Manager::heap_pointer(__storage) = target;
+    }
+    __ops = Manager::table();
+    return *target;
+  }
+
+  template <class T, class U, class... Args>
+  T& __initialize(initializer_list<U> values, Args&&... args) {
+    using Manager = __any_detail::__manager<T>;
+    T* target;
+    if constexpr (Manager::is_local) {
+      target = ::new (static_cast<void*>(__storage.data))
+          T(values, std::forward<Args>(args)...);
+    } else {
+      target = new T(values, std::forward<Args>(args)...);
+      Manager::heap_pointer(__storage) = target;
+    }
+    __ops = Manager::table();
+    return *target;
+  }
+
+ public:
+  constexpr any() noexcept : __storage{}, __ops(nullptr) {}
+
+  any(const any& other) : __storage{}, __ops(nullptr) {
+    if (other.__ops != nullptr) {
+      other.__ops->copy(&__storage, &other.__storage);
+      __ops = other.__ops;
+    }
+  }
+
+  any(any&& other) noexcept : __storage{}, __ops(nullptr) {
+    if (other.__ops != nullptr) {
+      other.__ops->move(&__storage, &other.__storage);
+      __ops = other.__ops;
+      other.__ops = nullptr;
+    }
+  }
+
+  template <class ValueType>
+    requires (!is_same<decay_t<ValueType>, any>::value &&
+              !__any_detail::__is_in_place_type<
+                  decay_t<ValueType> >::value &&
+              is_copy_constructible<decay_t<ValueType> >::value &&
+              is_constructible<decay_t<ValueType>, ValueType&&>::value)
+  any(ValueType&& value) : __storage{}, __ops(nullptr) {
+    using T = decay_t<ValueType>;
+    this->template __initialize<T>(static_cast<ValueType&&>(value));
+  }
+
+  template <class T, class... Args>
+    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+              is_constructible<decay_t<T>, Args&&...>::value)
+  explicit any(in_place_type_t<T>, Args&&... args)
+      : __storage{}, __ops(nullptr) {
+    using ValueType = decay_t<T>;
+    this->template __initialize<ValueType>(std::forward<Args>(args)...);
+  }
+
+  template <class T, class U, class... Args>
+    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+              is_constructible<decay_t<T>,
+                               initializer_list<U>&, Args&&...>::value)
+  explicit any(in_place_type_t<T>, initializer_list<U> values,
+               Args&&... args)
+      : __storage{}, __ops(nullptr) {
+    using ValueType = decay_t<T>;
+    this->template __initialize<ValueType>(
+        values, std::forward<Args>(args)...);
+  }
+
+  ~any() {
+    reset();
+  }
+
+  any& operator=(const any& other) {
+    if (this == &other) {
+      return *this;
+    }
+    any temporary(other);
+    temporary.swap(*this);
+    return *this;
+  }
+
+  any& operator=(any&& other) noexcept {
+    if (this != &other) {
+      reset();
+      if (other.__ops != nullptr) {
+        other.__ops->move(&__storage, &other.__storage);
+        __ops = other.__ops;
+        other.__ops = nullptr;
+      }
+    }
+    return *this;
+  }
+
+  template <class ValueType>
+    requires (!is_same<decay_t<ValueType>, any>::value &&
+              is_copy_constructible<decay_t<ValueType> >::value &&
+              is_constructible<decay_t<ValueType>, ValueType&&>::value)
+  any& operator=(ValueType&& value) {
+    any temporary(static_cast<ValueType&&>(value));
+    temporary.swap(*this);
+    return *this;
+  }
+
+  template <class T, class... Args>
+    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+              is_constructible<decay_t<T>, Args&&...>::value)
+  decay_t<T>& emplace(Args&&... args) {
+    using ValueType = decay_t<T>;
+    reset();
+    return this->template __initialize<ValueType>(
+        std::forward<Args>(args)...);
+  }
+
+  template <class T, class U, class... Args>
+    requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+              is_constructible<decay_t<T>,
+                               initializer_list<U>&, Args&&...>::value)
+  decay_t<T>& emplace(initializer_list<U> values, Args&&... args) {
+    using ValueType = decay_t<T>;
+    reset();
+    return this->template __initialize<ValueType>(
+        values, std::forward<Args>(args)...);
+  }
+
+  void reset() noexcept {
+    if (__ops != nullptr) {
+      const __operations* operations = __ops;
+      __ops = nullptr;
+      operations->destroy(&__storage);
+    }
+  }
+
+  void swap(any& other) noexcept {
+    if (this == &other) {
+      return;
+    }
+    any temporary(static_cast<any&&>(other));
+    if (__ops != nullptr) {
+      __ops->move(&other.__storage, &__storage);
+      other.__ops = __ops;
+      __ops = nullptr;
+    }
+    if (temporary.__ops != nullptr) {
+      temporary.__ops->move(&__storage, &temporary.__storage);
+      __ops = temporary.__ops;
+      temporary.__ops = nullptr;
+    }
+  }
+
+  bool has_value() const noexcept {
+    return __ops != nullptr;
+  }
+
+  const type_info& type() const noexcept {
+    return __ops != nullptr ? __ops->type() : typeid(void);
+  }
+
+  template <class T>
+    requires (is_object<T>::value)
+  T* __any_target() noexcept {
+    if (!has_value() || type() != typeid(T)) {
+      return nullptr;
+    }
+    return static_cast<T*>(__ops->target(&__storage));
+  }
+
+  template <class T>
+    requires (is_object<T>::value)
+  const T* __any_target() const noexcept {
+    if (!has_value() || type() != typeid(T)) {
+      return nullptr;
+    }
+    return static_cast<const T*>(__ops->const_target(&__storage));
+  }
+
+ private:
+  __storage_type __storage;
+  const __operations* __ops;
+};
+
+template <class T>
+  requires (is_object<T>::value)
+T* any_cast(any* operand) noexcept {
+  return operand != nullptr
+             ? operand->template __any_target<T>()
+             : nullptr;
+}
+
+template <class T>
+  requires (is_object<T>::value)
+const T* any_cast(const any* operand) noexcept {
+  return operand != nullptr
+             ? operand->template __any_target<T>()
+             : nullptr;
+}
+
+template <class T>
+  requires (is_constructible<
+            T, const remove_cv_t<remove_reference_t<T> >&>::value)
+T any_cast(const any& operand) {
+  using U = remove_cv_t<remove_reference_t<T> >;
+  const U* value = any_cast<U>(&operand);
+  if (value == nullptr) {
+    throw bad_any_cast();
+  }
+  return static_cast<T>(*value);
+}
+
+template <class T>
+  requires (is_constructible<
+            T, remove_cv_t<remove_reference_t<T> >&>::value)
+T any_cast(any& operand) {
+  using U = remove_cv_t<remove_reference_t<T> >;
+  U* value = any_cast<U>(&operand);
+  if (value == nullptr) {
+    throw bad_any_cast();
+  }
+  return static_cast<T>(*value);
+}
+
+template <class T>
+  requires (is_constructible<
+            T, remove_cv_t<remove_reference_t<T> >&&>::value)
+T any_cast(any&& operand) {
+  using U = remove_cv_t<remove_reference_t<T> >;
+  U* value = any_cast<U>(&operand);
+  if (value == nullptr) {
+    throw bad_any_cast();
+  }
+  return static_cast<T>(static_cast<U&&>(*value));
+}
+
+template <class T, class... Args>
+  requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+            is_constructible<decay_t<T>, Args&&...>::value)
+any make_any(Args&&... args) {
+  return any(in_place_type<T>, std::forward<Args>(args)...);
+}
+
+template <class T, class U, class... Args>
+  requires (__any_detail::__valid_stored_type<decay_t<T> >::value &&
+            is_constructible<decay_t<T>,
+                             initializer_list<U>&, Args&&...>::value)
+any make_any(initializer_list<U> values, Args&&... args) {
+  return any(in_place_type<T>, values, std::forward<Args>(args)...);
+}
+
+inline void swap(any& left, any& right) noexcept {
+  left.swap(right);
+}
+
+}  // namespace std
+
+#endif /* __davecc_any__ */

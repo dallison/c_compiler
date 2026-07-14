@@ -157,6 +157,7 @@ static TypeRecord* ParseDaveInvokeResultType(TypeParser* parser) {
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(ellipsis))) {
       is_pack = true;
     }
+    TypeRecordIncRef(sym->type);
     VectorAppend(&type_args, sym->type);
     VectorAppend(&pack_flags, (void*)(intptr_t)is_pack);
     SymbolDelete(sym);
@@ -174,7 +175,9 @@ static TypeRecord* ParseDaveInvokeResultType(TypeParser* parser) {
   if (result == NULL) {
     TypeRecord* placeholder =
         TypeRecordNewInvokeResultPlaceholderWithFlags(&type_args, &pack_flags);
-    VectorDestruct(&type_args);
+    VectorDestructWithContents(
+        &type_args, (VectorElementDestructor)TypeRecordDelete,
+        /*free_element=*/false);
     VectorDestruct(&pack_flags);
     if (placeholder == NULL) {
       SyntaxError(parser->syntax, "Invalid invoke_result type");
@@ -182,7 +185,9 @@ static TypeRecord* ParseDaveInvokeResultType(TypeParser* parser) {
     }
     return placeholder;
   }
-  VectorDestruct(&type_args);
+  VectorDestructWithContents(
+      &type_args, (VectorElementDestructor)TypeRecordDelete,
+      /*free_element=*/false);
   VectorDestruct(&pack_flags);
   return result;
 }
@@ -195,6 +200,7 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
   while (!LexLookingAt(parser->lex, TOK(rparen))) {
     TypeRecord* arg_type = TypeParserParseType(parser, true);
     Symbol* sym = TypeParserParseDeclarator(parser, arg_type);
+    TypeRecordIncRef(sym->type);
     VectorAppend(&type_args, sym->type);
     SymbolDelete(sym);
     if (!LexMatch(parser->lex, TOK(comma))) {
@@ -204,7 +210,9 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
   if (type_args.length != 2) {
     SyntaxError(parser->syntax, "Invalid common_type type");
-    VectorDestruct(&type_args);
+    VectorDestructWithContents(
+        &type_args, (VectorElementDestructor)TypeRecordDelete,
+        /*free_element=*/false);
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
   bool defer = TypeVectorContainsTemplateParameter(&type_args) ||
@@ -215,14 +223,18 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
   }
   if (result == NULL) {
     TypeRecord* placeholder = TypeRecordNewCommonTypePlaceholder(&type_args);
-    VectorDestruct(&type_args);
+    VectorDestructWithContents(
+        &type_args, (VectorElementDestructor)TypeRecordDelete,
+        /*free_element=*/false);
     if (placeholder == NULL) {
       SyntaxError(parser->syntax, "Invalid common_type type");
       return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     }
     return placeholder;
   }
-  VectorDestruct(&type_args);
+  VectorDestructWithContents(
+      &type_args, (VectorElementDestructor)TypeRecordDelete,
+      /*free_element=*/false);
   return result;
 }
 

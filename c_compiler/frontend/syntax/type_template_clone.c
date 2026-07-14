@@ -2535,6 +2535,15 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
     VectorASTNode* call = (VectorASTNode*)node;
     if (call->children != NULL && call->children->length == 1) {
       ASTNode* expr = call->children->value.p[0];
+      if (expr->type != NULL && TypeContainsTemplateParameter(expr->type)) {
+        TypeRecord* concrete = SubstituteTemplateParameters(
+            clone->parser, expr->type, clone->args);
+        RebaseTemplateParameterIndices(
+            concrete, clone->rebase_template_parameter_base);
+        TypeRecordCalculateSize(concrete);
+        ASTNodeSetType(expr, concrete);
+        TypeRecordDelete(concrete);
+      }
       bool is_array_delete = (node->flags & kASTDependentArrayDelete) != 0;
       return NewCXXDeleteExpressionForPointer(clone->parser->syntax, expr,
                                               is_array_delete,

@@ -82,6 +82,8 @@ typedef struct __davecc_eh_type_info {
   const char* name;
   long base_count;
   const void* bases;
+  long object_size;
+  long object_is_class;
 } __davecc_eh_type_info;
 void __davecc_throw(intptr_t exception_object,
                     const __davecc_eh_type_info* typeinfo);
@@ -89,7 +91,7 @@ static char __davecc_bad_cast_object;
 // Must match the compiler's exception type name for std::bad_cast.
 static const char __davecc_bad_cast_name[] = "bad_cast";
 static const __davecc_eh_type_info __davecc_bad_cast_typeinfo = {
-    __davecc_bad_cast_name, 0, 0};
+    __davecc_bad_cast_name, 0, 0, 1, 0};
 #endif
 
 // Reference form of dynamic_cast: like the pointer form but throws

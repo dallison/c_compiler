@@ -67,7 +67,8 @@ static bool g_suppress_user_defined_conversion_rank = false;
 // ambiguous.
 static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
                                                         ASTNode* from,
-                                                        bool allow_explicit);
+                                                        bool allow_explicit,
+                                                        bool allow_same_class);
 
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
@@ -2657,6 +2658,7 @@ typedef struct {
   ASTNode* end_label;   // End label for return conversion.
   Symbol* return_value; // Return value symbol.
   ASTNode* top_stmt;    // Top level compound statement.
+  bool return_is_reference;
 } Inliner;
 
 
@@ -2694,6 +2696,10 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
     Vector* new_ret = NewVector();
     if (inliner->return_value != NULL && ret_node->cond != NULL) {
       ASTNode* value = ASTNodeMove(ret_node->cond);
+      if (inliner->return_is_reference) {
+        value = NewUnaryASTNode(AST_OP(address), inliner->return_value->type,
+                                value->location, value);
+      }
       ASTNode* ret_value =
           NewIdentifierASTNode(inliner->return_value, ret_node->base.location);
       ASTNode* ret_assign = NewBinaryASTNode(AST_OP(assign),
@@ -2768,7 +2774,14 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* 
   
   // Allocate a temporary for the return value if it's not void.
   if (!TypeIsVoid(call->base.type)) {
-    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, call->base.type);
+    TypeRecord* temp_type =
+        inliner->return_is_reference
+            ? NewPointerTo(kQualPlain, call->base.type)
+            : call->base.type;
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temp_type);
+    if (inliner->return_is_reference) {
+      TypeRecordDelete(temp_type);
+    }
     inliner->return_value = temp;
     VectorAppend(decls, NewVariableDeclarationASTNode(temp, NULL, location));
   } else {
@@ -2789,6 +2802,9 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   SourceLocation location = call->base.location;
   Inliner inliner;
   MapInitForPointerKeys(&inliner.argument_map);
+  inliner.return_is_reference =
+      info->symbol != NULL && info->symbol->type != NULL &&
+      TypeIsReference(info->symbol->type->next);
   
   VectorAppend(statements,
                CopyArguments(info, call, &inliner));
@@ -2821,7 +2837,10 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
     ret_node = NewIdentifierASTNode(inliner.return_value, location);
   }
   MapDestruct(&inliner.argument_map);
-  return NewInlineCallASTNode(call->base.type, location, inlined, ret_node);
+  ASTNode* result =
+      NewInlineCallASTNode(call->base.type, location, inlined, ret_node);
+  result->value_category = call->base.value_category;
+  return result;
 }
 
 typedef struct {
@@ -3624,12 +3643,27 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   // identity or, since a friend declaration and the later definition may be
   // separate symbols, by name and signature.
   Symbol* current_symbol = current->info.function.symbol;
+  Symbol* current_template = current->info.function.template_origin;
   for (size_t i = 0; i < owner->friend_functions.length; i++) {
     Symbol* friend_symbol = owner->friend_functions.value.p[i];
     if (friend_symbol == NULL) {
       continue;
     }
     if (friend_symbol == current_symbol) {
+      return true;
+    }
+    if (current_template != NULL &&
+        (friend_symbol == current_template ||
+         (friend_symbol->type != NULL &&
+          TypeIsFunction(friend_symbol->type) &&
+          friend_symbol->type->info.function.template_origin ==
+              current_template))) {
+      return true;
+    }
+    if (current_template != NULL && friend_symbol->type != NULL &&
+        current_template->type != NULL &&
+        StringEqualString(&friend_symbol->name, &current_template->name) &&
+        TypeEqual(friend_symbol->type, current_template->type)) {
       return true;
     }
     if (current_symbol != NULL &&
@@ -3946,7 +3980,8 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
          TypeIsConst(target)) &&
         TypeIsStructOrUnion(target) &&
         FindConvertingConstructorCandidate(target, actual,
-                                           /*allow_explicit=*/false) != NULL) {
+                                           /*allow_explicit=*/false,
+                                           /*allow_same_class=*/false) != NULL) {
       return 100;
     }
     return -1;
@@ -3983,7 +4018,8 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   if (CompilerIsCXX() && !g_suppress_user_defined_conversion_rank &&
       ((TypeIsStructOrUnion(target) &&
         FindConvertingConstructorCandidate(target, actual,
-                                           /*allow_explicit=*/false) != NULL) ||
+                                           /*allow_explicit=*/false,
+                                           /*allow_same_class=*/false) != NULL) ||
        ClassHasConversionOperatorTo(actual, target))) {
     return 100;
   }
@@ -3991,7 +4027,8 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
 }
 
 static int ConvertingConstructorRank(StructMember* member, ASTNode* from,
-                                     bool allow_explicit) {
+                                     bool allow_explicit,
+                                     bool allow_invented) {
   Symbol* ctor_symbol = member->symbol;
   Symbol* temporary = NULL;
   if (ctor_symbol->flags.is_template) {
@@ -4018,7 +4055,8 @@ static int ConvertingConstructorRank(StructMember* member, ASTNode* from,
   FunctionInfo* fi = &ctor_symbol->type->info.function;
   if (!fi->is_constructor || fi->is_deleted ||
       (fi->is_explicit && !allow_explicit) ||
-      member->symbol->flags.invented || fi->prototype.length < 2) {
+      (member->symbol->flags.invented && !allow_invented) ||
+      fi->prototype.length < 2) {
     goto done;
   }
   for (size_t i = 2; i < fi->prototype.length; i++) {
@@ -4045,18 +4083,25 @@ done:
 
 static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
                                                         ASTNode* from,
-                                                        bool allow_explicit) {
+                                                        bool allow_explicit,
+                                                        bool allow_same_class) {
   if (!CompilerIsCXX() || to == NULL || from == NULL || from->type == NULL ||
       !TypeIsStructOrUnion(to) || to->info.struct_info == NULL ||
       to->info.struct_info->tag_name == NULL) {
     return NULL;
   }
-  // A source of the same class (or a derived class) is handled by copy/move
-  // construction and derived-to-base conversions, not by a converting
-  // constructor, so leave those to the existing machinery.
-  if (TypeIsStructOrUnion(from->type) &&
-      (TypeEqualIgnoringQualifiers(from->type, to) ||
-       TypeIsDerivedFrom(from->type, to))) {
+  bool same_class_source =
+      TypeIsStructOrUnion(from->type) &&
+      TypeEqualIgnoringQualifiers(from->type, to);
+  // Same-class sources are only considered when an explicit class cast needs
+  // to materialize a copy or move. Other conversion contexts already have
+  // their own copy-initialization path. Derived sources use the standard
+  // derived-to-base conversion.
+  if (same_class_source && !allow_same_class) {
+    return NULL;
+  }
+  if (TypeIsStructOrUnion(from->type) && !same_class_source &&
+      TypeIsDerivedFrom(from->type, to)) {
     return NULL;
   }
   Struct* str = to->info.struct_info;
@@ -4069,7 +4114,8 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
         c->symbol->type == NULL || !TypeIsFunction(c->symbol->type)) {
       continue;
     }
-    int rank = ConvertingConstructorRank(c, from, allow_explicit);
+    int rank = ConvertingConstructorRank(
+        c, from, allow_explicit, allow_same_class && same_class_source);
     if (rank < 0) {
       continue;
     }
@@ -4086,7 +4132,8 @@ static StructMember* FindConvertingConstructorCandidate(TypeRecord* to,
 
 StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
                                                     bool allow_explicit) {
-  return FindConvertingConstructorCandidate(to, from, allow_explicit);
+  return FindConvertingConstructorCandidate(
+      to, from, allow_explicit, /*allow_same_class=*/false);
 }
 
 // Converts `from` to the class type `to` by constructing a temporary through a
@@ -4094,8 +4141,9 @@ StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* fro
 // prvalue temporary in place of `from`.  Returns true if such a conversion was
 // performed.  `ctx == kConvertCast` additionally allows explicit constructors
 // (matching the explicit-conversion semantics of a cast).
-bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
-                                         ConversionContext ctx) {
+static bool TryConvertWithConvertingConstructorImpl(
+    ASTNode* from, TypeRecord* to, ConversionContext ctx,
+    bool allow_same_class) {
   if (!CompilerIsCXX() || from == NULL || to == NULL ||
       !TypeIsStructOrUnion(to)) {
     return false;
@@ -4110,7 +4158,7 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
     return false;
   }
   StructMember* ctor = FindConvertingConstructorCandidate(
-      to, from, /*allow_explicit=*/ctx == kConvertCast);
+      to, from, /*allow_explicit=*/ctx == kConvertCast, allow_same_class);
   if (ctor == NULL) {
     return false;
   }
@@ -4154,6 +4202,12 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
     ASTNodeReplaceChild(parent, child_id, analyzed, false);
   }
   return true;
+}
+
+bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
+                                         ConversionContext ctx) {
+  return TryConvertWithConvertingConstructorImpl(
+      from, to, ctx, /*allow_same_class=*/false);
 }
 
 static bool CallActualIsPackExpansion(ASTNode* actual) {
@@ -6141,6 +6195,30 @@ static bool IsMemberTemplateCallWithDependentExplicitArgs(VectorASTNode* node) {
       member_node->template_arguments);
 }
 
+static void SetDependentMemberTemplateCallType(VectorASTNode* node) {
+  BinaryASTNode* access = (BinaryASTNode*)node->left;
+  StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
+  TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
+      &compiler->syntax, member_node->member->symbol,
+      member_node->template_arguments);
+  if (return_type == NULL) {
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                         kQualPlain));
+    return;
+  }
+  if (TypeIsReference(return_type)) {
+    ASTNodeSetType((ASTNode*)node, return_type->next);
+    node->base.value_category =
+        return_type->declarator == kDeclRValueReference
+            ? kValueCategoryXvalue
+            : kValueCategoryLvalue;
+  } else {
+    ASTNodeSetType((ASTNode*)node, return_type);
+  }
+  TypeRecordDelete(return_type);
+}
+
 // Handles an explicit destructor or pseudo-destructor call written through a
 // member-access callee: `obj.~T()`, `p->~T()`, or `p->~int()`.  This is needed
 // for generic code (e.g. containers destroying their elements) where the named
@@ -6270,8 +6348,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // arguments.
   if (IsMemberTemplateCallWithDependentExplicitArgs(node)) {
     node->base.flags |= kASTDependentFunctorCall;
-    ASTNodeSetType((ASTNode*)node,
-                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    SetDependentMemberTemplateCallType(node);
     return (ASTNode*)node;
   }
   size_t num_actual_args = node->children->length;
@@ -6291,8 +6368,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // arguments.
   if (!has_pack_expansion_actual && IsDependentMemberTemplateCall(node)) {
     node->base.flags |= kASTDependentFunctorCall;
-    ASTNodeSetType((ASTNode*)node,
-                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    SetDependentMemberTemplateCallType(node);
     return (ASTNode*)node;
   }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
@@ -7140,7 +7216,10 @@ static ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
     static_type = static_type->next;
   }
 
-  TypeRecord* type_info_ptr = NewPointerTo(kQualPlain, type_info_type);
+  TypeRecord* const_type_info = TypeRecordCopy(type_info_type);
+  const_type_info->qualifiers |= kQualConst;
+  TypeRecord* type_info_ptr = NewPointerTo(kQualPlain, const_type_info);
+  TypeRecordDelete(const_type_info);
 
   ASTNode* result;
   if (polymorphic) {
@@ -7298,7 +7377,15 @@ static void AnalyzeCastExpression(CastASTNode* node) {
             ? kValueCategoryXvalue
             : kValueCategoryLvalue;
   } else {
-    SemanticConvertType(node->expr, node->cast_type, kConvertCast);
+    bool materialized_same_class =
+        CompilerIsCXX() && TypeIsStructOrUnion(node->cast_type) &&
+        TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type) &&
+        TryConvertWithConvertingConstructorImpl(
+            node->expr, node->cast_type, kConvertCast,
+            /*allow_same_class=*/true);
+    if (!materialized_same_class) {
+      SemanticConvertType(node->expr, node->cast_type, kConvertCast);
+    }
     // Result is the requested type.
     ASTNodeSetType((ASTNode*)node, node->cast_type);
   }

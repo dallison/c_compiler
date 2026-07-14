@@ -892,6 +892,20 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // encoding to that concrete specialization so downstream uses (e.g. as a
     // template argument whose members are later accessed) see a plain class.
     subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
+    // Once this alias has expanded to its concrete result, do not retain the
+    // alias template-id on that result. Keeping `decay_t<const T>` metadata on
+    // the resulting `T` makes later substitutions treat the concrete type as
+    // dependent and prevents non-type trait arguments from folding.
+    if (subst->template_origin == info.origin) {
+      subst->template_origin = NULL;
+      if (subst->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            subst->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      subst->template_arguments = NULL;
+    }
     if (grouped_args != NULL) {
       VectorDeleteWithContents(grouped_args,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -1087,13 +1101,13 @@ static void SubstituteTypeSpineNext(TypeParser* parser, TypeRecord* copy,
     copy->declarator = rvalue ? kDeclRValueReference : kDeclReference;
     collapsed_reference = true;
   }
-  if (!collapsed_reference && TypeIsPointer(copy) && TypeIsReference(copy->next)) {
-    TypeRecord* nested = copy->next;
-    TypeRecord* referent = nested->next;
-    TypeRecordIncRef(referent);
-    TypeRecordDelete(copy->next);
-    copy->next = referent;
-    collapsed_reference = true;
+  if (!collapsed_reference && TypeIsPointer(copy) &&
+      TypeIsReference(copy->next)) {
+    // Forming a pointer to reference during substitution is an invalid type.
+    // Report substitution failure so this function-template candidate is
+    // discarded rather than silently normalizing `T*` with `T = U&` to `U*`.
+    parser->template_substitution_failed = true;
+    return;
   }
   if (copy->next == NULL) {
     return;
@@ -1197,14 +1211,14 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   }
   if (TypeRecordIsInvokeResultPlaceholder(type)) {
     TypeRecord* resolved =
-        TypeRecordSubstituteInvokeResultPlaceholder(parser->syntax, type, args);
+        TypeRecordSubstituteInvokeResultPlaceholder(parser, type, args);
     if (resolved != NULL) {
       return resolved;
     }
   }
   if (TypeRecordIsCommonTypePlaceholder(type)) {
     TypeRecord* resolved =
-        TypeRecordSubstituteCommonTypePlaceholder(parser->syntax, type, args);
+        TypeRecordSubstituteCommonTypePlaceholder(parser, type, args);
     if (resolved != NULL) {
       return resolved;
     }

@@ -49,7 +49,10 @@ static CXXAggregateDeductionElement* NewCXXAggregateDeductionElement(
 
 bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
   if (type == NULL || type->declarator != kDeclPrimitive ||
-      type->template_parameter_index < 0) {
+      type->template_parameter_index < 0 ||
+      type->dependent_member_name != NULL ||
+      type->template_origin != NULL ||
+      type->template_arguments != NULL) {
     return false;
   }
   if (index != NULL) {

@@ -1404,6 +1404,8 @@ static void AARCH64PrintTypeInfoRecords(AARCH64Emitter* emitter, FILE* fp) {
     } else {
       fprintf(fp, "\t.8byte 0\n");
     }
+    fprintf(fp, "\t.8byte %lld\n", (long long)info->object_size);
+    fprintf(fp, "\t.8byte %d\n", info->object_is_class ? 1 : 0);
   }
   fprintf(fp, "\t.text\n\n");
 }

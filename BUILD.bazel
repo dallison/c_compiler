@@ -9,6 +9,7 @@ package(default_visibility = ["//visibility:public"])
 filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]) + [
+        "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",
         "libc/include/chrono",
@@ -1532,6 +1533,7 @@ archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "arm support/eh_transfer.s"
   "arm support/syscall.s"
 )
 
@@ -1552,7 +1554,9 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"

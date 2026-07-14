@@ -23,10 +23,29 @@ typedef struct CXXTypeInfo {
   const char* name;
   long base_count;
   const CXXTypeInfoBase* bases;
+  long object_size;
+  long object_is_class;
 } CXXTypeInfo;
 
 static intptr_t current_exception_object;
 static const CXXTypeInfo* current_exception_typeinfo;
+
+static intptr_t CopyExceptionObject(intptr_t exception_object,
+                                    const CXXTypeInfo* typeinfo) {
+  if (exception_object == 0 || typeinfo == 0 || !typeinfo->object_is_class ||
+      typeinfo->object_size <= 0) {
+    return exception_object;
+  }
+  unsigned char* copy = (unsigned char*)malloc((size_t)typeinfo->object_size);
+  if (copy == 0) {
+    abort();
+  }
+  const unsigned char* source = (const unsigned char*)exception_object;
+  for (long i = 0; i < typeinfo->object_size; i++) {
+    copy[i] = source[i];
+  }
+  return (intptr_t)copy;
+}
 
 extern char __davecc_except_table_start[];
 extern char __davecc_except_table_end[];
@@ -147,7 +166,10 @@ void __davecc_throw(intptr_t exception_object, const CXXTypeInfo* typeinfo) {
   // A null object and null typeinfo encode `throw;`: preserve the exception
   // currently being handled and resume unwinding from this frame.
   if (exception_object != 0 || typeinfo != NULL) {
-    current_exception_object = exception_object;
+    // Class throw operands are initially materialized in the throwing frame.
+    // Preserve the completed object before unwinding discards and reuses that
+    // stack storage.
+    current_exception_object = CopyExceptionObject(exception_object, typeinfo);
     current_exception_typeinfo = typeinfo;
   }
   DaveEHFrameRegisters regs;

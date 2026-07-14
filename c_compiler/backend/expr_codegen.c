@@ -167,6 +167,7 @@ static struct {
   {TypeIsDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
   {TypeIsLongDouble, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
     {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {TypeIsNullPointer, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsMemberPointerScalar, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsFunction, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsStructOrUnion, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
@@ -1769,9 +1770,11 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     }
     bool reference_formal = false;
     bool function_reference_formal = false;
+    TypeRecord* formal_type = NULL;
     if (callee_type != NULL && TypeIsFunction(callee_type) &&
         (size_t)i < callee_type->info.function.prototype.length) {
       Symbol* formal = callee_type->info.function.prototype.value.p[i];
+      formal_type = formal->type;
       reference_formal = TypeIsReference(formal->type);
       function_reference_formal =
           reference_formal && formal->type->next != NULL &&
@@ -1834,17 +1837,24 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
     }
 
-    if ((TypeIsStructOrUnion(arg->type) ||
+    bool aggregate_value_formal =
+        formal_type != NULL && !reference_formal &&
+        (TypeIsStructOrUnion(formal_type) ||
+         TypeIsMemberPointerAggregate(formal_type));
+    if ((aggregate_value_formal || TypeIsStructOrUnion(arg->type) ||
          TypeIsMemberPointerAggregate(arg->type)) &&
         !reference_formal) {
       // If the argument is the result of another call it may
       // have been converted to an IR_OP(addressof) which is no longer
       // a struct type (we want its address, not its value)
-      if (TypeIsStructOrUnion(arg_value->type) ||
+      if (aggregate_value_formal || TypeIsStructOrUnion(arg_value->type) ||
           TypeIsMemberPointerAggregate(arg_value->type)) {
         arg_value = GeneratorEmit(gen,
                                NewIR1(IR_OP(structarg),
                                       arg_value));
+        if (aggregate_value_formal) {
+          IRSetType(arg_value, formal_type);
+        }
         if (arg->op == AST_OP(call)) {
           arg_value->flags |= kIRFromCall;
         }

@@ -667,6 +667,8 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   VectorInit(&g->var_regs);
   VectorInit(&g->saved_regs);
   VectorInit(&g->offsets);
+  VectorInit(&g->exception_ranges);
+  VectorInit(&g->exception_typeinfos);
 
   MapInitForInt64Keys(&g->conditions);
   ARMRegisterAllocatorInit(&g->register_allocator, g);
@@ -683,6 +685,8 @@ void ARMGeneratorDestruct(ARMGenerator* g) {
   VectorDestructWithContents(&g->var_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&g->saved_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&g->offsets, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&g->exception_ranges, NULL, /*free_element=*/true);
+  VectorDestruct(&g->exception_typeinfos);
   MapDestruct(&g->conditions);
   ARMRegisterAllocatorDestruct(&g->register_allocator);
 }
@@ -5317,6 +5321,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
       effective_type = var->symbol->type;
     }
   }
+  TypeRecordCalculateSize(entry->pooled->type);
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
@@ -5596,6 +5601,38 @@ static void LowerVariables(ARMGenerator* g, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
+static void ResolveExceptionRanges(ARMGenerator* g, Generator* gen) {
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    VectorAppend(&g->exception_typeinfos, gen->exception_typeinfos.value.p[i]);
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* ir_range = gen->exception_ranges.value.p[i];
+    TargetInstruction* try_start = ir_range->try_start->data.ptr;
+    TargetInstruction* try_end = ir_range->try_end->data.ptr;
+    TargetInstruction* catch_label = ir_range->catch_label->data.ptr;
+    if (try_start == NULL || try_end == NULL || catch_label == NULL) {
+      continue;
+    }
+    try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |=
+        TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    ARMExceptionRange* range = malloc(sizeof(ARMExceptionRange));
+    range->try_start = try_start;
+    range->try_end = try_end;
+    range->catch_label = catch_label;
+    range->catch_typeinfo = ir_range->catch_typeinfo;
+    VectorAppend(&g->exception_ranges, range);
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    TargetInstruction* target_label = label->data.ptr;
+    if (target_label != NULL) {
+      target_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    }
+  }
+}
+
 void ARMLower(ARMGenerator* g, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
   
@@ -5610,6 +5647,7 @@ void ARMLower(ARMGenerator* g, Generator* gen) {
     LowerIRNode(g, gen, node);
     node = IRNext(node);
   }
+  ResolveExceptionRanges(g, gen);
 
   if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
     ARMPrint(g, compiler->ir_output_file);

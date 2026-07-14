@@ -378,6 +378,13 @@ typedef struct {
   bool is_fp;
 } RegisterVariable;
 
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* try_end;
+  TargetInstruction* catch_label;
+  EHTypeInfo* catch_typeinfo;
+} ARMExceptionRange;
+
 typedef struct ARMGenerator {
   TargetGenerator base;
 
@@ -400,6 +407,8 @@ typedef struct ARMGenerator {
   TargetInstruction* int_argument_registers[ARM_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[ARM_NUM_FP_ARGS];
   Vector var_regs;
+  Vector exception_ranges;
+  Vector exception_typeinfos;
 
   TargetInstruction* zero;  // Explicit zero register pseudo-op.
   TargetInstruction* tmp;  // Temp reg.

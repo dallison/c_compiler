@@ -1,7 +1,7 @@
 #include <eh_frame.h>
 
-// DaveCC's AArch64 and RISC-V ABIs maintain a frame-pointer chain in every
-// generated function. Exception unwinding on those targets therefore does not
+// DaveCC's AArch64, ARM, and RISC-V ABIs maintain a frame-pointer chain in every
+// generated non-leaf function. Exception unwinding on those targets does not
 // need to decode DWARF CFI: the saved frame pointer and return address live at
 // fixed offsets from the current frame pointer.
 int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
@@ -15,6 +15,11 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
   out->caller_pc = frame[1];
   out->caller_rsp = regs->rbp + 2 * sizeof(uintptr_t);
 #elif defined(__risc_v__)
+  uintptr_t* frame = (uintptr_t*)regs->rbp;
+  out->caller_rbp = frame[-2];
+  out->caller_pc = frame[-1];
+  out->caller_rsp = regs->rbp;
+#elif defined(__arm__)
   uintptr_t* frame = (uintptr_t*)regs->rbp;
   out->caller_rbp = frame[-2];
   out->caller_pc = frame[-1];

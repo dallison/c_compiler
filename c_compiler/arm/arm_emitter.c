@@ -251,6 +251,7 @@ static bool OmitFramePointer(ARMEmitter* emitter) {
   return emitter->g->base.num_calls == 0 && OptLevel1() &&
          !emitter->g->not_leaf && !emitter->g->base.varargs &&
          !emitter->g->uses_dynamic_stack && !emitter->g->has_stack_args &&
+         emitter->g->exception_ranges.length == 0 &&
          emitter->g->base.stack_frame_size == 0 &&
          emitter->spill_region_size == 0 &&
          emitter->g->saved_regs.length == 0;
@@ -298,6 +299,7 @@ static bool EmptyStackFrame(ARMEmitter* emitter) {
   return emitter->g->base.stack_frame_size == 0 &&
          emitter->g->base.num_calls == 0 && !emitter->g->not_leaf &&
          !emitter->g->has_stack_args &&
+         emitter->g->exception_ranges.length == 0 &&
          BitSetCount(&emitter->regs->used_int_regs) == 0 &&
          BitSetCount(&emitter->regs->used_float_regs) == 0 &&
          emitter->spill_region_size == 0;
@@ -811,6 +813,61 @@ static void RestoreRegisters(ARMEmitter* emitter, FILE* fp) {
   }
 }
 
+static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
+  int stack_frame_size = StackFrameSize(emitter);
+  int space_above_frame_pointer =
+      emitter->g->base.varargs ? ARM_NUM_INT_ARGS * 4 : 0;
+
+  // The unwinder restores fp before entering this label. Reconstruct the
+  // fixed-frame sp so VLA/alloca adjustments made inside the try block cannot
+  // affect the saved-register addresses.
+  AddSubImmediate(emitter, "sp", "fp", /*add=*/false,
+                  stack_frame_size - space_above_frame_pointer,
+                  "restore exception landing sp", fp);
+
+  int offset = emitter->saved_reg_offset;
+  char buf[8];
+  BitSetIterator it;
+  int int_regs[16];
+  int num_int = 0;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int_regs[num_int++] = (int)BitSetIteratorValue(&it);
+    BitSetIteratorNext(&it);
+  }
+  if (num_int >= 3) {
+    int base_low = offset - 4 * (num_int - 1);
+    const char* base = "sp";
+    if (base_low != 0) {
+      AddSubImmediate(emitter, "ip", "sp", /*add=*/true, base_low, NULL, fp);
+      base = "ip";
+    }
+    EmitIntRegBlock(fp, "ldmia", base, int_regs, num_int);
+  } else {
+    for (int i = 0; i < num_int; i++) {
+      fprintf(fp, "\tldr %s, [sp, #%d]\n",
+              ARMRegisterNameFromNum(int_regs[i], kARMRegTypeInt, kSize32Bit,
+                                     buf, sizeof(buf)),
+              offset - 4 * i);
+    }
+  }
+  offset -= 4 * num_int;
+  if (num_int > 0) {
+    offset -= 4;
+  }
+
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tvldr %s, [sp, #%d]\n",
+            ARMRegisterNameFromNum(reg, kARMRegTypeFloat, kSize64Bit, buf,
+                                   sizeof(buf)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+}
+
 // In arm_codegen.c.
 extern int ARMGetRegisterSize(TargetInstruction* inst);
 
@@ -1064,6 +1121,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
     }
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      RestoreExceptionLandingState(emitter, fp);
+    }
     return;
   }
 
@@ -1590,6 +1650,91 @@ void ARMEmitterDelete(ARMEmitter* emitter) {
 }
 
 
+static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
+                                     TargetInstruction* label) {
+  fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void PrintEscapedAsmString(FILE* fp, const char* s) {
+  for (; *s != '\0'; s++) {
+    unsigned char ch = (unsigned char)*s;
+    if (ch == '"' || ch == '\\') {
+      fprintf(fp, "\\%c", ch);
+    } else if (ch >= 32 && ch < 127) {
+      fputc(ch, fp);
+    } else {
+      fprintf(fp, "\\%03o", ch);
+    }
+  }
+}
+
+static void ARMPrintTypeInfoRecords(ARMEmitter* emitter, FILE* fp) {
+  if (emitter->g->exception_typeinfos.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
+  for (size_t i = 0; i < emitter->g->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = emitter->g->exception_typeinfos.value.p[i];
+    const char* name = info->symbol_name.value;
+    fprintf(fp, "\t.p2align 2\n");
+    fprintf(fp, "\t.local %s_name\n", name);
+    fprintf(fp, "%s_name:\n\t.asciz \"", name);
+    PrintEscapedAsmString(fp, info->type_name.value);
+    fprintf(fp, "\"\n");
+    for (size_t b = 0; b < info->bases.length; b++) {
+      EHTypeInfoBase* base = info->bases.value.p[b];
+      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
+      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
+      PrintEscapedAsmString(fp, base->base_name.value);
+      fprintf(fp, "\"\n");
+    }
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.p2align 2\n\t.local %s_bases\n%s_bases:\n", name,
+              name);
+      for (size_t b = 0; b < info->bases.length; b++) {
+        EHTypeInfoBase* base = info->bases.value.p[b];
+        fprintf(fp, "\t.4byte %s_base%zu_name\n", name, b);
+        fprintf(fp, "\t.4byte %lld\n", (long long)base->offset);
+      }
+    }
+    fprintf(fp, "\t.p2align 2\n\t.weak %s\n%s:\n", name, name);
+    fprintf(fp, "\t.4byte %s_name\n", name);
+    fprintf(fp, "\t.4byte %zu\n", info->bases.length);
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.4byte %s_bases\n", name);
+    } else {
+      fprintf(fp, "\t.4byte 0\n");
+    }
+    fprintf(fp, "\t.4byte %lld\n", (long long)info->object_size);
+    fprintf(fp, "\t.4byte %d\n", info->object_is_class ? 1 : 0);
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void ARMPrintExceptionTable(ARMEmitter* emitter, FILE* fp,
+                                   const char* func_name) {
+  if (emitter->g->exception_ranges.length == 0) {
+    return;
+  }
+  fprintf(fp,
+          "\t.section \".davecc_except_table\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 2\n");
+  for (size_t i = 0; i < emitter->g->exception_ranges.length; i++) {
+    ARMExceptionRange* range = emitter->g->exception_ranges.value.p[i];
+    fprintf(fp, "\t.4byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_start);
+    fprintf(fp, "\n\t.4byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_end);
+    fprintf(fp, "\n\t.4byte ");
+    PrintExceptionTableLabel(fp, func_name, range->catch_label);
+    fprintf(fp, "\n\t.4byte %s\n",
+            range->catch_typeinfo != NULL
+                ? range->catch_typeinfo->symbol_name.value
+                : "0");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
 void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
   if (emitter->g->base.is_weak) {
@@ -1609,5 +1754,7 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
+  ARMPrintTypeInfoRecords(emitter, fp);
+  ARMPrintExceptionTable(emitter, fp, func_name);
 }
 

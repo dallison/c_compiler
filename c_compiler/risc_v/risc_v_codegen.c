@@ -4368,6 +4368,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
           ? ((IRVariable*)entry->pooled)->symbol->type
           : entry->pooled->type;
+  TypeRecordCalculateSize(entry->pooled->type);
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);

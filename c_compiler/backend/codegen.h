@@ -53,6 +53,8 @@ typedef struct EHTypeInfo {
   String symbol_name;
   String type_name;
   Vector bases;  // EHTypeInfoBase* entries (flattened public base graph).
+  int64_t object_size;
+  bool object_is_class;
 } EHTypeInfo;
 
 // Main IR code generator.
