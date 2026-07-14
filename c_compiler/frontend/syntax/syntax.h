@@ -196,6 +196,11 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
 ASTNode* SyntaxNewPCLabel(SourceLocation location);
+ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
+                                                    Symbol* sym);
+ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,
+                                                     Symbol* sym,
+                                                     ASTNode* initializer);
 ASTNode* SyntaxParseBracedInitializer(Syntax* syntax);
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage);
 ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax);

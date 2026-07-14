@@ -20,6 +20,7 @@
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "member_pointer.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -498,6 +499,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_constructor = from->info.function.is_constructor;
   func->info.function.is_destructor = from->info.function.is_destructor;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.is_volatile_member =
+      from->info.function.is_volatile_member;
   func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
@@ -612,13 +615,15 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
   }
+  if (from->info.function.associated_constraint != NULL) {
+    func->info.function.associated_constraint =
+        ConceptsSubstituteConstraint(
+            parser->syntax, from->info.function.associated_constraint,
+            subst_args, member_template_base);
+  }
   if (use_enclosing_only) {
     // Shallow: elements are borrowed from `args`, not owned here.
     VectorDestruct(&enclosing_only_args);
-  }
-  if (from->info.function.associated_constraint != NULL) {
-    func->info.function.associated_constraint =
-        ConceptsCloneConstraint(from->info.function.associated_constraint);
   }
   (void)parser;
   return func;
@@ -721,6 +726,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_constexpr = from->info.function.is_constexpr;
   func->info.function.is_consteval = from->info.function.is_consteval;
   func->info.function.is_const_member = from->info.function.is_const_member;
+  func->info.function.is_volatile_member =
+      from->info.function.is_volatile_member;
   func->info.function.ref_qualifier = from->info.function.ref_qualifier;
   // Preserve constructor/destructor-ness so an instantiated constructor
   // template is still recognized as a constructor (its call is void-typed and
@@ -974,8 +981,10 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   Symbol* existing = FindFunctionTemplateInstantiation(templ, func,
                                                        completed_args);
   if (existing != NULL) {
-    EnsureFunctionTemplateInstantiationQueued(parser, template_definition,
-                                             existing, completed_args);
+    if (compiler->speculative_template_instantiation_depth == 0) {
+      EnsureFunctionTemplateInstantiationQueued(
+          parser, template_definition, existing, completed_args);
+    }
     TypeRecordDelete(func);
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
@@ -993,8 +1002,10 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   existing = FindFunctionTemplateInstantiationByAsmName(templ,
                                                        symbol->asm_name.value);
   if (existing != NULL) {
-    EnsureFunctionTemplateInstantiationQueued(parser, template_definition,
-                                             existing, completed_args);
+    if (compiler->speculative_template_instantiation_depth == 0) {
+      EnsureFunctionTemplateInstantiationQueued(
+          parser, template_definition, existing, completed_args);
+    }
     SymbolDelete(symbol);
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
@@ -1012,7 +1023,8 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   }
   VectorDestruct(&symbol->attributes);
   AttributeListClone(&symbol->attributes, &templ->attributes);
-  if (template_definition->type->info.function.body != NULL) {
+  if (template_definition->type->info.function.body != NULL &&
+      compiler->speculative_template_instantiation_depth == 0) {
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, completed_args);
@@ -1432,15 +1444,29 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
                                                     TypeRecord* formal,
                                                     TypeRecord* actual) {
   if (formal == NULL || actual == NULL ||
-      formal->template_origin == NULL ||
-      actual->template_origin == NULL ||
       formal->template_arguments == NULL ||
       actual->template_arguments == NULL) {
     return false;
   }
-  if (formal->template_origin != actual->template_origin &&
-      !StringEqualString(&formal->template_origin->name,
-                         &actual->template_origin->name)) {
+  Symbol* formal_origin = formal->template_origin;
+  Symbol* actual_origin = actual->template_origin;
+  if (formal_origin == NULL && TypeIsStructOrUnion(formal) &&
+      formal->info.struct_info != NULL &&
+      formal->info.struct_info->tag_symbol != NULL &&
+      formal->info.struct_info->tag_symbol->type != NULL) {
+    formal_origin =
+        formal->info.struct_info->tag_symbol->type->template_origin;
+  }
+  if (actual_origin == NULL && TypeIsStructOrUnion(actual) &&
+      actual->info.struct_info != NULL &&
+      actual->info.struct_info->tag_symbol != NULL &&
+      actual->info.struct_info->tag_symbol->type != NULL) {
+    actual_origin =
+        actual->info.struct_info->tag_symbol->type->template_origin;
+  }
+  if (formal_origin == NULL || actual_origin == NULL ||
+      (formal_origin != actual_origin &&
+       !StringEqualString(&formal_origin->name, &actual_origin->name))) {
     return false;
   }
   Vector* formal_args = formal->template_arguments;
@@ -1687,6 +1713,13 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
       return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                 formal->next,
                                                 actual->next);
+    case kDeclMemberPointer:
+      return TypeMemberPointerClass(formal) ==
+                 TypeMemberPointerClass(actual) &&
+             DeduceFunctionTemplateTypeArgument(
+                 args, explicit_arg_count,
+                 TypeMemberPointerPointeeType(formal),
+                 TypeMemberPointerPointeeType(actual));
     case kDeclReference:
     case kDeclRValueReference:
       return false;
@@ -1707,21 +1740,52 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
                                               formal->next, actual->next)) {
         return false;
       }
-      if (formal->info.function.prototype.length !=
-          actual->info.function.prototype.length) {
-        return false;
-      }
+      size_t actual_index = 0;
       for (size_t i = 0; i < formal->info.function.prototype.length; i++) {
         Symbol* formal_arg = formal->info.function.prototype.value.p[i];
-        Symbol* actual_arg = actual->info.function.prototype.value.p[i];
-        if (formal_arg == NULL || actual_arg == NULL ||
+        if (formal_arg == NULL) {
+          return false;
+        }
+        if (formal_arg->flags.is_parameter_pack) {
+          int pack_index = -1;
+          if (!TypeIsTemplateParameterPlaceholder(formal_arg->type,
+                                                  &pack_index) ||
+              pack_index < 0) {
+            return false;
+          }
+          size_t trailing =
+              formal->info.function.prototype.length - i - 1;
+          if (actual->info.function.prototype.length <
+              actual_index + trailing) {
+            return false;
+          }
+          size_t pack_end =
+              actual->info.function.prototype.length - trailing;
+          for (; actual_index < pack_end; actual_index++) {
+            Symbol* actual_arg =
+                actual->info.function.prototype.value.p[actual_index];
+            if (actual_arg == NULL ||
+                !AppendDeducedFunctionTemplatePackElement(
+                    args, explicit_arg_count, pack_index,
+                    formal_arg->type, actual_arg->type)) {
+              return false;
+            }
+          }
+          continue;
+        }
+        if (actual_index >= actual->info.function.prototype.length) {
+          return false;
+        }
+        Symbol* actual_arg =
+            actual->info.function.prototype.value.p[actual_index++];
+        if (actual_arg == NULL ||
             !DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                 formal_arg->type,
                                                 actual_arg->type)) {
           return false;
         }
       }
-      return true;
+      return actual_index == actual->info.function.prototype.length;
   }
   return false;
 }
@@ -2576,6 +2640,34 @@ static bool SetDeducedClassTemplateTypePackArgument(Vector* bindings, int index,
   return equal;
 }
 
+static bool SetDeducedClassTemplateFunctionTypePackArgument(
+    Vector* bindings, int index, Vector* actual_formals, size_t first_actual,
+    size_t last_actual) {
+  if (index < 0 || bindings == NULL || (size_t)index >= bindings->length ||
+      actual_formals == NULL || first_actual > last_actual ||
+      last_actual > actual_formals->length) {
+    return false;
+  }
+  TemplateArgument* pack = NewDeducedTypePackTemplateArgument();
+  for (size_t i = first_actual; i < last_actual; i++) {
+    Symbol* formal = actual_formals->value.p[i];
+    if (formal == NULL || formal->type == NULL) {
+      TemplateArgumentDelete(pack);
+      return false;
+    }
+    VectorAppend(pack->pack_arguments,
+                 NewDeducedTypeTemplateArgument(formal->type));
+  }
+  TemplateArgument* existing = bindings->value.p[index];
+  if (existing == NULL) {
+    bindings->value.p[index] = pack;
+    return true;
+  }
+  bool equal = TemplateArgumentEqual(existing, pack);
+  TemplateArgumentDelete(pack);
+  return equal;
+}
+
 static bool TemplateArgumentIsTypeParameterPackPattern(TemplateArgument* arg,
                                                        int* index) {
   if (index != NULL) {
@@ -2754,6 +2846,23 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
     case kDeclRValueReference:
       return ClassTemplateTypePatternMatches(bindings, pattern->next,
                                              actual->next);
+    case kDeclMemberPointer:
+      if (pattern->template_parameter_index >= 0) {
+        Struct* actual_class = TypeMemberPointerClass(actual);
+        if (actual_class == NULL || actual_class->tag_symbol == NULL ||
+            actual_class->tag_symbol->type == NULL ||
+            !SetDeducedClassTemplateTypeArgument(
+                bindings, pattern->template_parameter_index,
+                actual_class->tag_symbol->type)) {
+          return false;
+        }
+      } else if (TypeMemberPointerClass(pattern) !=
+                 TypeMemberPointerClass(actual)) {
+        return false;
+      }
+      return ClassTemplateTypePatternMatches(
+          bindings, TypeMemberPointerPointeeType(pattern),
+          TypeMemberPointerPointeeType(actual));
     case kDeclArray:
       if (pattern->info.array.template_parameter_index >= 0) {
         if (actual->info.array.is_vla ||
@@ -2771,12 +2880,56 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
     case kDeclFunction:
       if (!ClassTemplateTypePatternMatches(bindings, pattern->next,
                                            actual->next) ||
-          pattern->info.function.prototype.length !=
-              actual->info.function.prototype.length) {
+          pattern->info.function.is_const_member !=
+              actual->info.function.is_const_member ||
+          pattern->info.function.is_volatile_member !=
+              actual->info.function.is_volatile_member ||
+          pattern->info.function.ref_qualifier !=
+              actual->info.function.ref_qualifier ||
+          pattern->info.function.is_noexcept !=
+              actual->info.function.is_noexcept) {
         return false;
       }
-      for (size_t i = 0; i < pattern->info.function.prototype.length; i++) {
+      Vector* pattern_formals = &pattern->info.function.prototype;
+      Vector* actual_formals = &actual->info.function.prototype;
+      int pack_position = -1;
+      int pack_index = -1;
+      for (size_t i = 0; i < pattern_formals->length; i++) {
         Symbol* pattern_formal = pattern->info.function.prototype.value.p[i];
+        int candidate_index = -1;
+        if (pattern_formal != NULL &&
+            pattern_formal->flags.is_parameter_pack &&
+            TypeIsTemplateParameterPlaceholder(pattern_formal->type,
+                                               &candidate_index)) {
+          if (pack_position >= 0) {
+            return false;
+          }
+          pack_position = (int)i;
+          pack_index = candidate_index;
+        }
+      }
+      if (pack_position < 0) {
+        if (pattern_formals->length != actual_formals->length) {
+          return false;
+        }
+        for (size_t i = 0; i < pattern_formals->length; i++) {
+          Symbol* pattern_formal = pattern_formals->value.p[i];
+          Symbol* actual_formal = actual_formals->value.p[i];
+          if (pattern_formal == NULL || actual_formal == NULL ||
+              !ClassTemplateTypePatternMatches(bindings, pattern_formal->type,
+                                               actual_formal->type)) {
+            return false;
+          }
+        }
+        return true;
+      }
+      size_t leading = (size_t)pack_position;
+      size_t trailing = pattern_formals->length - leading - 1;
+      if (actual_formals->length < leading + trailing) {
+        return false;
+      }
+      for (size_t i = 0; i < leading; i++) {
+        Symbol* pattern_formal = pattern_formals->value.p[i];
         Symbol* actual_formal = actual->info.function.prototype.value.p[i];
         if (pattern_formal == NULL || actual_formal == NULL ||
             !ClassTemplateTypePatternMatches(bindings, pattern_formal->type,
@@ -2784,7 +2937,20 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
           return false;
         }
       }
-      return true;
+      for (size_t i = 0; i < trailing; i++) {
+        Symbol* pattern_formal =
+            pattern_formals->value.p[leading + 1 + i];
+        Symbol* actual_formal =
+            actual_formals->value.p[actual_formals->length - trailing + i];
+        if (pattern_formal == NULL || actual_formal == NULL ||
+            !ClassTemplateTypePatternMatches(bindings, pattern_formal->type,
+                                             actual_formal->type)) {
+          return false;
+        }
+      }
+      return SetDeducedClassTemplateFunctionTypePackArgument(
+          bindings, pack_index, actual_formals, leading,
+          actual_formals->length - trailing);
     case kDeclPrimitive:
       if (pattern->type != actual->type) {
         return false;
@@ -2915,10 +3081,23 @@ static int TemplateTypePatternSpecificity(TypeRecord* type) {
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
+    case kDeclMemberPointer:
       return score + 2 + TemplateTypePatternSpecificity(type->next);
     case kDeclArray:
       return score + 2 + TemplateTypePatternSpecificity(type->next);
     case kDeclFunction:
+      if (type->info.function.is_const_member) {
+        score++;
+      }
+      if (type->info.function.is_volatile_member) {
+        score++;
+      }
+      if (type->info.function.ref_qualifier != kCXXRefQualifierNone) {
+        score++;
+      }
+      if (type->info.function.is_noexcept) {
+        score++;
+      }
       score += TemplateTypePatternSpecificity(type->next);
       for (size_t i = 0; i < type->info.function.prototype.length; i++) {
         Symbol* formal = type->info.function.prototype.value.p[i];
@@ -3284,6 +3463,11 @@ static int DeductionGuideConversionRank(TypeRecord* formal,
   if (formal->declarator == kDeclPointer &&
       actual->declarator == kDeclArray &&
       TypeCanAddTopLevelQualifiers(actual->next, formal->next)) {
+    return 1;
+  }
+  if (formal->declarator == kDeclPointer &&
+      actual->declarator == kDeclFunction &&
+      TypeEqual(formal->next, actual)) {
     return 1;
   }
   if (TypeEqualIgnoringSign(formal, actual)) {
@@ -4032,8 +4216,10 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   if (alias_type != NULL) {
     return alias_type;
   }
-  if (templ == NULL || templ->type == NULL ||
-      !TypeIsStructOrUnion(templ->type) ||
+  if (templ == NULL || templ->type == NULL) {
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  if (!TypeIsStructOrUnion(templ->type) ||
       templ->type->info.struct_info == NULL ||
       !templ->type->info.struct_info->is_template) {
     return TypeRecordCopy(templ->type);

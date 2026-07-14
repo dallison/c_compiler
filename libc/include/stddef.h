@@ -40,6 +40,12 @@ typedef int wchar_t;
 #define __WCHAR_T
 #endif
 
+#ifdef __cplusplus
+namespace std {
+using nullptr_t = decltype(nullptr);
+}
+#endif
+
 #define offsetof(type, member) ((size_t)(&((type*)0)->member))
 #endif /* __DAVECC__ */
 

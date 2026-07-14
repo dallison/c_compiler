@@ -13,6 +13,7 @@
 #include <inttypes.h>
 #include "ast.h"
 #include "compiler.h"
+#include "member_pointer.h"
 
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag);
 static DIE* NewMemberDIE(DebugBuilder* builder, StructMember* member);
@@ -292,6 +293,24 @@ static DIE* NewPointerDIE(DebugBuilder* builder, DIE* subtype) {
   return &ptr->die;
 }
 
+static void PtrToMemberDIEBuild(DebugBuilder* builder, DIE* die);
+static void PtrToMemberDIEPrint(DIE* die, int level);
+static void PtrToMemberDIEEmit(DebugBuilder* builder, DIE* die);
+
+static DIEVirtuals ptr_to_member_virtuals = {
+    DIEBaseDestruct, PtrToMemberDIEBuild, PtrToMemberDIEPrint, PtrToMemberDIEEmit};
+
+static DIE* NewPtrToMemberDIE(DebugBuilder* builder, DIE* member_type,
+                              DIE* containing_type, int byte_size) {
+  PtrToMemberTypeDIE* ptr = malloc(sizeof(PtrToMemberTypeDIE));
+  DIEInit(&ptr->die, DW_TAG(ptr_to_member_type), &ptr_to_member_virtuals, false);
+  ptr->member_type = member_type;
+  ptr->containing_type = containing_type;
+  ptr->byte_size = byte_size;
+  AddDIE(builder, &ptr->die);
+  return &ptr->die;
+}
+
 static void LexicalScopeDestruct(DIE* die) {
   LexicalScopeDIE* scope = (LexicalScopeDIE*)die;
   VectorDestruct(&scope->variables);
@@ -459,6 +478,18 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
     case kDeclRValueReference:
       die = NewPointerDIE(builder, NewTypeRecordDIE(builder, type->next));
       break;
+
+    case kDeclMemberPointer: {
+      Struct* class_info = type->info.struct_info;
+      TypeRecord* class_type =
+          NewTypeRecord(class_info->is_union ? kTypeUnion : kTypeStruct,
+                        kQualPlain);
+      class_type->info.struct_info = class_info;
+      die = NewPtrToMemberDIE(builder, NewTypeRecordDIE(builder, type->next),
+                              NewTypeRecordDIE(builder, class_type),
+                              MemberPointerSize(type));
+      break;
+    }
 
     case kDeclFunction: {
       CompoundStatementASTNode* body =
@@ -1024,6 +1055,34 @@ static void PointerDIEEmit(DebugBuilder* builder, DIE* die) {
   DIEBaseEmit(builder, die);
   PointerTypeDIE* ptr = (PointerTypeDIE*)die;
   DIEEmit(builder, ptr->subtype);
+}
+
+static void PtrToMemberDIEBuild(DebugBuilder* builder, DIE* die) {
+  PtrToMemberTypeDIE* ptr = (PtrToMemberTypeDIE*)die;
+  DIEBuild(builder, ptr->member_type);
+  DIEBuild(builder, ptr->containing_type);
+  AddAttributeAndValue(builder, die,
+                       DIEReference(DW_AT(type), ptr->member_type));
+  AddAttributeAndValue(builder, die, DIEReference(DW_AT(containing_type),
+                                                  ptr->containing_type));
+  AddAttributeAndValue(
+      builder, die, UnsignedConstant(DW_AT(byte_size), ptr->byte_size));
+  DIEAllocateAbbreviation(builder, die);
+}
+
+static void PtrToMemberDIEPrint(DIE* die, int level) {
+  DoIndent(level);
+  PtrToMemberTypeDIE* ptr = (PtrToMemberTypeDIE*)die;
+  printf("%s:\n", DW_TAGString(die->tag));
+  DIEPrint(ptr->member_type, level + 1);
+  DIEPrint(ptr->containing_type, level + 1);
+}
+
+static void PtrToMemberDIEEmit(DebugBuilder* builder, DIE* die) {
+  DIEBaseEmit(builder, die);
+  PtrToMemberTypeDIE* ptr = (PtrToMemberTypeDIE*)die;
+  DIEEmit(builder, ptr->member_type);
+  DIEEmit(builder, ptr->containing_type);
 }
 
 static void LexicalScopeDIEBuild(DebugBuilder* builder, DIE* die) {

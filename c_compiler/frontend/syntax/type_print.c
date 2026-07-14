@@ -419,6 +419,9 @@ void TypeRecordFunctionPrettyName(TypeRecord* func, String* result) {
   if (func->info.function.is_const_member) {
     StringAppend(result, " const");
   }
+  if (func->info.function.is_volatile_member) {
+    StringAppend(result, " volatile");
+  }
   if (func->info.function.ref_qualifier == kCXXRefQualifierLValue) {
     StringAppend(result, " &");
   } else if (func->info.function.ref_qualifier == kCXXRefQualifierRValue) {
@@ -461,6 +464,10 @@ void SymbolFunctionDiagnosticName(Symbol* symbol, String* result) {
 }
 
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
+  if (type == NULL) {
+    StringAppend(result, "<invalid-type>");
+    return;
+  }
   switch (type->declarator) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
@@ -512,6 +519,32 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
       QualifiersToString(type->qualifiers, result);
       break;
 
+    case kDeclMemberPointer: {
+      StringAppend(result, "$M");
+      Struct* str = type->info.struct_info;
+      if (type->template_parameter_index >= 0) {
+        StringPrintf(result, "$T%d", type->template_parameter_index);
+      } else if (str != NULL) {
+        if (str->tag_symbol != NULL && str->tag_symbol->namespace_ != NULL &&
+            str->tag_symbol->namespace_ != compiler->global_namespace) {
+          StringAppendString(result,
+                             &str->tag_symbol->namespace_->qualified_name);
+          StringAppend(result, "::");
+        }
+        if (str->tag_name != NULL) {
+          StringAppendString(result, str->tag_name);
+        }
+        StringPrintf(result, "$S%p", (void*)str);
+      } else {
+        StringAppend(result, "<class>");
+      }
+      StringAppendChar(result, '{');
+      TypeRecordToTemplateKeyString(type->next, result);
+      StringAppendChar(result, '}');
+      QualifiersToString(type->qualifiers, result);
+      break;
+    }
+
     case kDeclReference:
     case kDeclRValueReference:
       TypeRecordToTemplateKeyString(type->next, result);
@@ -526,6 +559,21 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
 
     case kDeclFunction:
       TypeRecordToString(type, result);
+      if (type->info.function.is_const_member) {
+        StringAppend(result, "$const");
+      }
+      if (type->info.function.is_volatile_member) {
+        StringAppend(result, "$volatile");
+      }
+      if (type->info.function.ref_qualifier == kCXXRefQualifierLValue) {
+        StringAppend(result, "$ref");
+      } else if (type->info.function.ref_qualifier ==
+                 kCXXRefQualifierRValue) {
+        StringAppend(result, "$rref");
+      }
+      if (type->info.function.is_noexcept) {
+        StringAppend(result, "$noexcept");
+      }
       break;
   }
 }

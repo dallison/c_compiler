@@ -1646,6 +1646,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     Vector* member_template_parameters = NULL;
     ConstraintExpr* member_template_requires_clause = NULL;
     int member_template_parameter_base = old_template_parameter_count;
+    if (str->template_parameter_count > member_template_parameter_base) {
+      member_template_parameter_base = str->template_parameter_count;
+    }
     if (CompilerIsCXX() && LexMatch(parser->lex, TOK(template))) {
       SyntaxOpenScope(parser->syntax);
       member_template_parameters =

@@ -130,6 +130,10 @@ bool LexMatchIdentifier(Lex* lex, String* spelling);
 
 bool LexLookingAt(Lex* lex, Token tok);
 
+// True when the current token begins with a closing angle bracket, including
+// a merged `>>`, `>>=`, or `>=` token.
+bool LexLookingAtClosingAngle(Lex* lex);
+
 // Consumes exactly one closing '>' when a template-argument or
 // template-parameter list is being closed.  Because the lexer greedily merges
 // consecutive '>' / '=' characters, the current token may be `>>`, `>>=` or

@@ -304,7 +304,9 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   } else if (StringEqual(compiler->target_name, "p-code") ||
              StringEqual(compiler->target_name, "pcode")) {
     PreprocessorDefineMacro(p, "__p_code__", "1");
-    PreprocessorDefineMacro(p, "__x86_64__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "64");
+    PreprocessorDefineMacro(p, "__LP64__", "1");
+    PreprocessorDefineMacro(p, "_LP64", "1");
   } else if (StringEqual(compiler->target_name, "risc-v") ||
              StringEqual(compiler->target_name, "riscv")) {
     PreprocessorDefineMacro(p, "__risc_v__", "1");

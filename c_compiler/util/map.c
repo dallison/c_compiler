@@ -8,6 +8,7 @@
 
 #include "map.h"
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,13 +51,15 @@ static int CompareCharPointersCaseBlind(const void* a, const void* b) {
 static int CompareMappedInt64s(const void*a, const void* b) {
   const MapKeyValue* s1 = a;
   const MapKeyValue* s2 = b;
-  return (int)(s1->key.w - s2->key.w);
+  return s1->key.w < s2->key.w ? -1 : s1->key.w > s2->key.w ? 1 : 0;
 }
 
 static int CompareMappedPointers(const void*a, const void* b) {
   const MapKeyValue* s1 = a;
   const MapKeyValue* s2 = b;
-  return (int)(s1->key.p - s2->key.p);
+  uintptr_t p1 = (uintptr_t)s1->key.p;
+  uintptr_t p2 = (uintptr_t)s2->key.p;
+  return p1 < p2 ? -1 : p1 > p2 ? 1 : 0;
 }
 
 void MapInitForStringKeys(Map* map) {

@@ -834,6 +834,8 @@ static bool CXXMemberFunctionSignaturesMatch(TypeRecord* a, TypeRecord* b) {
   if (!TypeIsFunction(a) || !TypeIsFunction(b) ||
       !TypeEqual(a->next, b->next) ||
       a->info.function.is_const_member != b->info.function.is_const_member ||
+      a->info.function.is_volatile_member !=
+          b->info.function.is_volatile_member ||
       a->info.function.ref_qualifier != b->info.function.ref_qualifier) {
     return false;
   }

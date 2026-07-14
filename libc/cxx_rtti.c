@@ -76,7 +76,7 @@ void* __davecc_dynamic_cast(void* p, const __davecc_type_info* dst) {
 
 #if defined(__x86_64__)
 // EH is only wired up on x86_64; elsewhere a failed reference cast terminates.
-// This DaveTypeInfo layout must match libc/eh_throw.c and the compiler's
+// This CXXTypeInfo layout must match libc/eh_throw.c and the compiler's
 // exception type_info emission.
 typedef struct __davecc_eh_type_info {
   const char* name;

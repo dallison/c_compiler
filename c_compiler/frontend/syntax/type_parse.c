@@ -169,7 +169,7 @@ static TypeRecord* ParseDaveInvokeResultType(TypeParser* parser) {
                parser->syntax->parsing_template_declaration;
   TypeRecord* result = NULL;
   if (!defer) {
-    result = DaveTypeTraitInvokeResultType(parser->syntax, &type_args);
+    result = CXXTypeTraitInvokeResultType(parser->syntax, &type_args);
   }
   if (result == NULL) {
     TypeRecord* placeholder =
@@ -211,7 +211,7 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
                parser->syntax->parsing_template_declaration;
   TypeRecord* result = NULL;
   if (!defer) {
-    result = DaveTypeTraitCommonType(parser->syntax, &type_args);
+    result = CXXTypeTraitCommonType(parser->syntax, &type_args);
   }
   if (result == NULL) {
     TypeRecord* placeholder = TypeRecordNewCommonTypePlaceholder(&type_args);
@@ -1163,7 +1163,9 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
       break;
     }
     PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit);
-    if (new_type_specifier.type == kTypeImplicit && new_type_specifier.quals == kQualPlain) {
+    if (new_type_specifier.type == kTypeImplicit &&
+        new_type_specifier.quals == kQualPlain &&
+        new_type_specifier.type_record == NULL) {
       break;
     }
     if (type_specifier.type == kTypeImplicit && type_specifier.quals == kQualPlain) {
@@ -1173,7 +1175,8 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     }
   }
   // No type?
-  if (type_specifier.type == kTypeImplicit) {
+  if (type_specifier.type == kTypeImplicit &&
+      type_specifier.type_record == NULL) {
     if (needed) {
       SyntaxError(parser->syntax, "Type expected");
       SyntaxRecover(parser->syntax, TC(semicolon) | TC(type));
@@ -1849,7 +1852,14 @@ static void ParseFunctionDecl(TypeParser* parser) {
   
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
-  func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  while (LexLookingAt(parser->lex, TOK(const)) ||
+         LexLookingAt(parser->lex, TOK(volatile))) {
+    if (LexMatch(parser->lex, TOK(const))) {
+      func->info.function.is_const_member = true;
+    } else if (LexMatch(parser->lex, TOK(volatile))) {
+      func->info.function.is_volatile_member = true;
+    }
+  }
   func->info.function.ref_qualifier = ParseCXXRefQualifier(parser);
   ParseCXXExceptionSpecifier(parser, func);
   if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
@@ -2079,6 +2089,30 @@ static bool LookingAtMemberPointerDeclaratorSuffix(TypeParser* parser) {
   return SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(parser->syntax);
 }
 
+static TypeRecord* MemberPointerTypeForClassName(TypeParser* parser,
+                                                 String* class_name) {
+  Symbol* class_sym = SyntaxFindSymbol(parser->syntax, class_name);
+  if (class_sym == NULL) {
+    class_sym = SyntaxFindTag(parser->syntax, class_name);
+  }
+  if (class_sym != NULL && class_sym->type != NULL &&
+      TypeIsStructOrUnion(class_sym->type) &&
+      class_sym->type->info.struct_info != NULL) {
+    return NewMemberPointerTypeRecord(class_sym->type->info.struct_info,
+                                      kQualPlain);
+  }
+  if (class_sym != NULL && class_sym->flags.is_template_type_parameter &&
+      class_sym->template_parameter_index >= 0) {
+    TypeRecord* type =
+        NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+    type->declarator = kDeclMemberPointer;
+    type->template_parameter_index = class_sym->template_parameter_index;
+    type->size = 0;
+    return type;
+  }
+  return NULL;
+}
+
 static bool ParseMemberPointerDeclarator(TypeParser* parser) {
   if (!CompilerIsCXX()) {
     return false;
@@ -2091,22 +2125,12 @@ static bool ParseMemberPointerDeclarator(TypeParser* parser) {
   LexNextToken(parser->lex);
   LexMatch(parser->lex, TOK(coloncolon));
   LexMatch(parser->lex, TOK(star));
-  Symbol* class_sym = SyntaxFindSymbol(parser->syntax, &class_name);
-  Struct* class_info = NULL;
-  if (class_sym == NULL) {
-    class_sym = SyntaxFindTag(parser->syntax, &class_name);
-  }
-  if (class_sym != NULL && class_sym->type != NULL &&
-      TypeIsStructOrUnion(class_sym->type) &&
-      class_sym->type->info.struct_info != NULL) {
-    class_info = class_sym->type->info.struct_info;
-  }
+  TypeRecord* mptr = MemberPointerTypeForClassName(parser, &class_name);
   StringDestruct(&class_name);
-  if (class_info == NULL) {
+  if (mptr == NULL) {
     SyntaxError(parser->syntax, "Pointer-to-member requires a class type");
     return true;
   }
-  TypeRecord* mptr = NewMemberPointerTypeRecord(class_info, kQualPlain);
   VectorAppend(&parser->stack, mptr);
   if (LexLookingAt(parser->lex, TOK(identifier))) {
     SourceLocation location = parser->lex->current_token_location;
@@ -2120,6 +2144,13 @@ static bool ParseMemberPointerDeclarator(TypeParser* parser) {
 
 void TypeParserParseBase(TypeParser* parser) {
   if (LexMatch(parser->lex, TOK(lparen))) {
+    if (LookingAtMemberPointerDeclaratorSuffix(parser)) {
+      if (ParseMemberPointerDeclarator(parser) &&
+          !LexMatch(parser->lex, TOK(rparen))) {
+        LexError(parser->lex, "Missing close parenthesis in declaration");
+      }
+      return;
+    }
     if (!LookingAtMemberPointerDeclaratorSuffix(parser) &&
         (SyntaxLookingAtType(parser->syntax) ||
          LexLookingAt(parser->lex, TOK(rparen)))) {

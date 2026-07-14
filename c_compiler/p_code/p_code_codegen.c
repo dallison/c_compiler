@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include "compiler.h"
+#include "member_pointer.h"
 #include "p_code_optimize.h"
 
 const char* PCodeOpcodeName(int op) {
@@ -435,6 +436,8 @@ void PCodeGeneratorInit(PCodeGenerator* pcode, Generator* gen) {
   TargetGeneratorInit(&pcode->base, gen, &virtuals);
 
   pcode->argument_pointer = NULL;
+  VectorInit(&pcode->exception_ranges);
+  VectorInit(&pcode->exception_typeinfos);
   PCodeRegisterAllocatorInit(&pcode->register_allocator, pcode);
 }
 
@@ -446,7 +449,43 @@ PCodeGenerator* NewPCodeGenerator(Generator* gen) {
 
 void PCodeGeneratorDestruct(PCodeGenerator* pcode) {
   TargetGeneratorDestruct(&pcode->base);
+  VectorDestructWithContents(&pcode->exception_ranges, NULL,
+                             /*free_element=*/true);
+  VectorDestruct(&pcode->exception_typeinfos);
   PCodeRegisterAllocatorDestruct(&pcode->register_allocator);
+}
+
+static void ResolveExceptionRanges(PCodeGenerator* pcode, Generator* gen) {
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    VectorAppend(&pcode->exception_typeinfos,
+                 gen->exception_typeinfos.value.p[i]);
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* ir_range = gen->exception_ranges.value.p[i];
+    TargetInstruction* try_start = ir_range->try_start->data.ptr;
+    TargetInstruction* try_end = ir_range->try_end->data.ptr;
+    TargetInstruction* catch_label = ir_range->catch_label->data.ptr;
+    if (try_start == NULL || try_end == NULL || catch_label == NULL) {
+      continue;
+    }
+    try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |=
+        TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    PCodeExceptionRange* range = malloc(sizeof(PCodeExceptionRange));
+    range->try_start = try_start;
+    range->try_end = try_end;
+    range->catch_label = catch_label;
+    range->catch_typeinfo = ir_range->catch_typeinfo;
+    VectorAppend(&pcode->exception_ranges, range);
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    TargetInstruction* target_label = label->data.ptr;
+    if (target_label != NULL) {
+      target_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    }
+  }
 }
 
 void PCodeGeneratorDelete(PCodeGenerator* pcode) {
@@ -1532,7 +1571,8 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   size_t args_size = 0;
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (TypeIsStructOrUnion(arg_node->type)) {
+    if (TypeIsStructOrUnion(arg_node->type) ||
+        TypeIsMemberPointerAggregate(arg_node->type)) {
       PushStructArg(pcode, arg_node, &args_size);
     } else {
       TargetInstruction* arg = Materialize(pcode, arg_node);
@@ -2514,6 +2554,7 @@ void PCodeLower(PCodeGenerator* pcode, Generator* gen) {
     LowerIRNode(pcode, node);
     node = IRNext(node);
   }
+  ResolveExceptionRanges(pcode, gen);
 
   PCodeOptimize(pcode);
 

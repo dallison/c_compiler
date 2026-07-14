@@ -80,7 +80,14 @@ Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
   func->info.function.is_consteval = parser->is_consteval;
   func->info.function.is_virtual = is_virtual;
   TypeRecordChain(func, return_type);
-  func->info.function.is_const_member = LexMatch(parser->lex, TOK(const));
+  while (LexLookingAt(parser->lex, TOK(const)) ||
+         LexLookingAt(parser->lex, TOK(volatile))) {
+    if (LexMatch(parser->lex, TOK(const))) {
+      func->info.function.is_const_member = true;
+    } else if (LexMatch(parser->lex, TOK(volatile))) {
+      func->info.function.is_volatile_member = true;
+    }
+  }
   func->info.function.ref_qualifier = ParseCXXRefQualifier(parser);
   ParseCXXExceptionSpecifier(parser, func);
   TypeRecordAddCXXThisParameter(func, owner, location);
@@ -488,8 +495,8 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
             parser->syntax, func, member, actuals, location);
         if (init != NULL) {
           VectorAppend(body, init);
+          continue;
         }
-        continue;
       }
       ASTNode* assign = NewBinaryASTNode(AST_OP(assign), member_type, location,
                                          target, value);
@@ -1374,6 +1381,84 @@ static void AddImplicitCXXEqualityOperator(TypeParser* parser, Struct* str,
   AddCXXSyntheticMemberFunction(parser, str, symbol);
 }
 
+static TypeRecord* CXXFindSpecialMemberFunction(Struct* str,
+                                                CXXSpecialMemberKind kind) {
+  if (str == NULL || kind == kCXXSpecialMemberNone) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func =
+          member->is_member_function && member->symbol != NULL
+              ? member->symbol->type
+              : NULL;
+      if (func != NULL && TypeIsFunction(func) &&
+          func->info.function.cxx_special_member_kind == kind) {
+        return func;
+      }
+    }
+  }
+  return NULL;
+}
+
+static bool CXXTypeSpecialMemberIsNoexcept(TypeRecord* type,
+                                          CXXSpecialMemberKind kind) {
+  if (type == NULL) {
+    return true;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeSpecialMemberIsNoexcept(type->next, kind);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return true;
+  }
+  TypeRecord* func =
+      CXXFindSpecialMemberFunction(type->info.struct_info, kind);
+  if (func == NULL && kind == kCXXSpecialMemberMoveConstructor) {
+    func = CXXFindSpecialMemberFunction(type->info.struct_info,
+                                        kCXXSpecialMemberCopyConstructor);
+  } else if (func == NULL && kind == kCXXSpecialMemberMoveAssignment) {
+    func = CXXFindSpecialMemberFunction(type->info.struct_info,
+                                        kCXXSpecialMemberCopyAssignment);
+  }
+  return func != NULL && !func->info.function.is_deleted &&
+         func->info.function.is_noexcept;
+}
+
+static bool CXXImplicitSpecialMemberIsNoexcept(Struct* str,
+                                              CXXSpecialMemberKind kind) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        !CXXTypeSpecialMemberIsNoexcept(base->type, kind)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base != NULL &&
+        !CXXTypeSpecialMemberIsNoexcept(base->type, kind)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    if (!CXXTypeSpecialMemberIsNoexcept(member->symbol->type, kind)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
                                             Symbol* tag,
                                             const char* name,
@@ -1398,6 +1483,8 @@ static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
   func->info.function.cxx_special_member_kind = kind;
   func->info.function.is_constexpr_eligible = true;
   func->info.function.is_noexcept_eligible = true;
+  func->info.function.is_noexcept =
+      !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
   func->info.function.is_trivial_special_member =
       !deleted &&
       (kind != kCXXSpecialMemberDestructor ||
@@ -1448,34 +1535,6 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
   bool user_declared_copy_or_move = CXXStructHasUserDeclaredCopyOrMove(str);
   bool user_declared_destructor = CXXStructHasUserDeclaredDestructor(str);
   AddImplicitCXXEqualityOperator(parser, str, tag);
-  if (str->is_aggregate) {
-    bool deleted_assignment =
-        CXXStructHasUnassignableMember(str) ||
-        CXXStructHasDeletedBaseSpecialMemberKind(
-            str, kCXXSpecialMemberCopyAssignment) ||
-        CXXStructHasDeletedBaseSpecialMemberKind(
-            str, kCXXSpecialMemberMoveAssignment) ||
-        CXXStructHasDeletedMemberSpecialMemberKind(
-            str, kCXXSpecialMemberCopyAssignment) ||
-        CXXStructHasDeletedMemberSpecialMemberKind(
-            str, kCXXSpecialMemberMoveAssignment);
-    if (deleted_assignment &&
-        !CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberCopyAssignment)) {
-      TypeRecord* assign_return = NewCXXClassReferenceType(str, false, false);
-      Symbol* copy_assign = NewCXXSyntheticSpecialMember(
-          parser, str, tag, "operator=", assign_return,
-          kCXXSpecialMemberCopyAssignment, false, false, true, false, true);
-      AddCXXSyntheticMemberFunction(parser, str, copy_assign);
-      TypeRecord* move_return = NewCXXClassReferenceType(str, false, false);
-      Symbol* move_assign = NewCXXSyntheticSpecialMember(
-          parser, str, tag, "operator=", move_return,
-          kCXXSpecialMemberMoveAssignment, false, false, false, true, true);
-      AddCXXSyntheticMemberFunction(parser, str, move_assign);
-    }
-    str->cxx_special_members_complete = true;
-    return;
-  }
-
   if (!CXXStructHasAnyConstructor(str)) {
     Symbol* ctor = NewCXXSyntheticSpecialMember(
         parser, str, tag, str->tag_name->value,
@@ -1558,4 +1617,222 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
     AddCXXSyntheticMemberFunction(parser, str, move_assign);
   }
   str->cxx_special_members_complete = true;
+}
+
+static bool CXXLambdaCaptureMemberIsPlaceholder(StructMember* member) {
+  return member != NULL && member->symbol != NULL &&
+         strcmp(member->symbol->name.value, "__lambda_empty") == 0;
+}
+
+static bool CXXMemberTypePreventsSpecialMember(TypeRecord* type,
+                                               CXXSpecialMemberKind kind) {
+  if (type == NULL || kind == kCXXSpecialMemberNone) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXMemberTypePreventsSpecialMember(type->next, kind);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* member_struct = type->info.struct_info;
+  return CXXStructHasDeletedSpecialMemberKind(member_struct, kind) ||
+         CXXStructHasDeletedBaseSpecialMemberKind(member_struct, kind) ||
+         CXXStructHasDeletedMemberSpecialMemberKind(member_struct, kind);
+}
+
+static bool CXXLambdaClosureSpecialMemberIsTrivial(Struct* str,
+                                                   CXXSpecialMemberKind kind) {
+  if (str == NULL) {
+    return true;
+  }
+  if (kind == kCXXSpecialMemberDestructor) {
+    return !StructNeedsImplicitCXXDestructor(str);
+  }
+  if (kind != kCXXSpecialMemberCopyConstructor &&
+      kind != kCXXSpecialMemberMoveConstructor &&
+      kind != kCXXSpecialMemberDefaultConstructor) {
+    return true;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member) ||
+        CXXLambdaCaptureMemberIsPlaceholder(member)) {
+      continue;
+    }
+    TypeRecord* member_type = member->symbol->type;
+    if (kind == kCXXSpecialMemberMoveConstructor) {
+      if (CXXMemberTypePreventsSpecialMember(member_type,
+                                             kCXXSpecialMemberMoveConstructor)) {
+        return false;
+      }
+    } else if (CXXMemberTypePreventsSpecialMember(
+                   member_type, kCXXSpecialMemberCopyConstructor)) {
+      return false;
+    }
+    if (CXXDestructibleElementType(member_type) != NULL) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void CXXFinalizeLambdaClosureSpecialMember(Symbol* symbol, Struct* str,
+                                                  bool deleted) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      deleted) {
+    return;
+  }
+  CXXSpecialMemberKind kind =
+      symbol->type->info.function.cxx_special_member_kind;
+  symbol->type->info.function.is_trivial_special_member =
+      CXXLambdaClosureSpecialMemberIsTrivial(str, kind);
+}
+
+static bool CXXLambdaCaptureMemberPreventsSpecialMember(
+    Struct* str, CXXSpecialMemberKind kind) {
+  if (str == NULL || kind == kCXXSpecialMemberNone) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member) ||
+        CXXLambdaCaptureMemberIsPlaceholder(member)) {
+      continue;
+    }
+    if (CXXMemberTypePreventsSpecialMember(member->symbol->type, kind)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void LambdaClosureRemoveEmptyPlaceholder(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  StructMember* empty = FindStructMemberByName(str, "__lambda_empty");
+  if (empty == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    if (str->members.value.p[i] == empty) {
+      VectorDeleteElement(&str->members, i);
+      break;
+    }
+  }
+  String name;
+  StringInit(&name, "__lambda_empty");
+  MapRemove(&str->symbol_table, (MapKeyType){.p = &name});
+  StringDestruct(&name);
+  RelayoutStruct(str);
+}
+
+void AddImplicitLambdaClosureSpecialMembers(Syntax* syntax, Struct* str,
+                                            Symbol* tag, bool has_capture_fields,
+                                            bool has_explicit_template_params) {
+  if (!CompilerIsCXX() || syntax == NULL || str == NULL || tag == NULL ||
+      !tag->flags.invented || str->tag_name == NULL ||
+      str->cxx_special_members_complete) {
+    return;
+  }
+
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+
+  str->is_aggregate = false;
+  ComputeCXXAggregateStatus(str);
+
+  bool captureless = !has_capture_fields;
+  bool allow_default_ctor = captureless && !has_explicit_template_params;
+
+  if (allow_default_ctor && !CXXStructHasAnyConstructor(str)) {
+    Symbol* ctor = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, str->tag_name->value,
+        NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        kCXXSpecialMemberDefaultConstructor, true, false, false, false,
+        false);
+    CXXFinalizeLambdaClosureSpecialMember(ctor, str, false);
+    AddCXXSyntheticMemberFunction(&parser, str, ctor);
+  }
+
+  if (!CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberDestructor)) {
+    String destructor_name;
+    StringInit(&destructor_name, "~");
+    StringAppendString(&destructor_name, str->tag_name);
+    bool dtor_deleted =
+        CXXStructHasDeletedBaseSpecialMemberKind(
+            str, kCXXSpecialMemberDestructor) ||
+        CXXStructHasDeletedMemberSpecialMemberKind(
+            str, kCXXSpecialMemberDestructor);
+    Symbol* dtor = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, destructor_name.value,
+        NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        kCXXSpecialMemberDestructor, false, true, false, false,
+        dtor_deleted);
+    StringDestruct(&destructor_name);
+    CXXFinalizeLambdaClosureSpecialMember(dtor, str, dtor_deleted);
+    AddCXXSyntheticMemberFunction(&parser, str, dtor);
+  }
+
+  bool copy_deleted =
+      CXXStructHasDeletedBaseSpecialMemberKind(
+          str, kCXXSpecialMemberCopyConstructor) ||
+      CXXStructHasDeletedMemberSpecialMemberKind(
+          str, kCXXSpecialMemberCopyConstructor) ||
+      CXXLambdaCaptureMemberPreventsSpecialMember(
+          str, kCXXSpecialMemberCopyConstructor);
+  if (!CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberCopyConstructor)) {
+    Symbol* copy = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, str->tag_name->value,
+        NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        kCXXSpecialMemberCopyConstructor, true, false, true, false,
+        copy_deleted);
+    CXXFinalizeLambdaClosureSpecialMember(copy, str, copy_deleted);
+    AddCXXSyntheticMemberFunction(&parser, str, copy);
+  }
+
+  bool move_deleted =
+      copy_deleted ||
+      CXXStructHasDeletedBaseSpecialMemberKind(
+          str, kCXXSpecialMemberMoveConstructor) ||
+      CXXStructHasDeletedMemberSpecialMemberKind(
+          str, kCXXSpecialMemberMoveConstructor) ||
+      CXXLambdaCaptureMemberPreventsSpecialMember(
+          str, kCXXSpecialMemberMoveConstructor);
+  if (!CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberMoveConstructor)) {
+    Symbol* move = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, str->tag_name->value,
+        NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+        kCXXSpecialMemberMoveConstructor, true, false, false, true,
+        move_deleted);
+    CXXFinalizeLambdaClosureSpecialMember(move, str, move_deleted);
+    AddCXXSyntheticMemberFunction(&parser, str, move);
+  }
+
+  bool assignment_deleted = !captureless;
+  if (!CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberCopyAssignment)) {
+    TypeRecord* assign_return = NewCXXClassReferenceType(str, false, false);
+    Symbol* copy_assign = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, "operator=", assign_return,
+        kCXXSpecialMemberCopyAssignment, false, false, true, false,
+        assignment_deleted);
+    AddCXXSyntheticMemberFunction(&parser, str, copy_assign);
+  }
+
+  if (!CXXStructHasSpecialMemberKind(str, kCXXSpecialMemberMoveAssignment)) {
+    TypeRecord* move_return = NewCXXClassReferenceType(str, false, false);
+    Symbol* move_assign = NewCXXSyntheticSpecialMember(
+        &parser, str, tag, "operator=", move_return,
+        kCXXSpecialMemberMoveAssignment, false, false, false, true,
+        assignment_deleted);
+    AddCXXSyntheticMemberFunction(&parser, str, move_assign);
+  }
+
+  str->cxx_special_members_complete = true;
+  TypeParserDestruct(&parser);
 }

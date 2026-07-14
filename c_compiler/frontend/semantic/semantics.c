@@ -13,6 +13,7 @@
 #include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
+#include "member_pointer.h"
 #include "lex.h"
 #include "statement_semantics.h"
 #include "var_analysis.h"
@@ -336,6 +337,12 @@ static bool NodeIsZero(ASTNode* node) {
 }
 
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
+  TypeRecord* saved_current_function = compiler->current_function;
+  Struct* saved_class_access_context =
+      compiler->current_class_access_context;
+  compiler->current_function = node->type;
+  compiler->current_class_access_context =
+      node->type->info.function.cxx_member_owner;
   // Check Variable Langth Array arguments.
   CheckVLAArgs(syntax, node);
   SemanticAnalyzeCoroutineFunction(node);
@@ -362,6 +369,8 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
       break;
     }
   }
+  compiler->current_function = saved_current_function;
+  compiler->current_class_access_context = saved_class_access_context;
 }
 
 // This table contains mappings from one type to another.  The 'from'
@@ -915,6 +924,33 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
+  if (TypeIsMemberPointer(from->type) && TypeIsMemberPointer(to)) {
+    bool rejects_virtual = false;
+    bool is_cast = ctx == kConvertCast;
+    if (!MemberPointerCanConvert(from->type, to, is_cast, &rejects_virtual)) {
+      if (rejects_virtual) {
+        SemanticTypeConversionError(
+            from, to,
+            "Pointer-to-member conversion through virtual base is not allowed");
+      } else {
+        SemanticTypeConversionError(
+            from, to, "Illegal conversion; cannot convert from '%s' to '%s'");
+      }
+      return;
+    }
+    if (TypeEqual(from->type, to)) {
+      return;
+    }
+    ASTNode* parent = from->parent;
+    int child_id = from->child_id;
+    ASTNode* converted =
+        MemberPointerBuildConversion(from, from->type, to, is_cast);
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, child_id, converted, false);
+    }
+    return;
+  }
+
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
     return;
@@ -1005,7 +1041,8 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
            bad_cast = true;
          }
          if (bad_cast) {
-           SemanticTypeConversionError(from, to, "Illegal cast");
+           SemanticTypeConversionError(from, to,
+                                       "Illegal cast from '%s' to '%s'");
          }
        }
       break;
@@ -1061,6 +1098,22 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       // Allow the number 0 (explicitly) to be converted to a pointer.
       if (NodeIsZero(from) && TypeIsPointer(to)) {
           return;
+      }
+
+      if (NodeIsZero(from) && TypeIsMemberPointer(to)) {
+        MemberPointerValue null_value;
+        MemberPointerEncodeNull(to, &null_value);
+        ASTNode* parent = from->parent;
+        int child_id = from->child_id;
+        ASTNode* converted =
+            NewIntConstantASTNode(null_value.ptr, to, from->location);
+        ASTNodeReplaceChild(parent, child_id, converted, false);
+        return;
+      }
+
+      if (TypeIsMemberPointer(from->type) && TypeIsMemberPointer(to) &&
+          MemberPointerCanConvert(from->type, to, false, NULL)) {
+        return;
       }
 
       if (TypeIsFunction(from->type) && TypeIsFunctionPointer(to)) {
@@ -1128,6 +1181,20 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     EvaluateScalarConstantForSymbol(node->symbol, node->initializer) ||
         ConstexprEvaluateObjectConstantForSymbol(node->symbol,
                                                 node->initializer);
+  }
+  if (TypeIsMemberPointer(node->symbol->type)) {
+    MemberPointerValue value;
+    if (MemberPointerTryEvaluateConstant(node->initializer, node->symbol->type,
+                                         &value)) {
+      StructMember* member =
+          MemberPointerReferencedMember(node->initializer);
+      if (member != NULL) {
+        node->symbol->value.other = member;
+      } else {
+        node->symbol->value.ivalue = value.ptr;
+      }
+      node->symbol->flags.value_set = true;
+    }
   }
   if ((node->symbol->flags.is_constexpr || node->symbol->flags.is_constinit) &&
       !node->symbol->flags.value_set) {

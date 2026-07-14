@@ -20,6 +20,7 @@
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "member_pointer.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -1038,6 +1039,25 @@ static void SubstituteArrayTemplateBound(TypeRecord* copy,
   }
 }
 
+static void SubstituteMemberPointerClass(TypeRecord* copy, Vector* args) {
+  if (copy == NULL || copy->declarator != kDeclMemberPointer ||
+      copy->template_parameter_index < 0 || args == NULL ||
+      (size_t)copy->template_parameter_index >= args->length) {
+    return;
+  }
+  TemplateArgument* argument =
+      args->value.p[copy->template_parameter_index];
+  if (argument == NULL || argument->kind != kTemplateParameterType ||
+      argument->type == NULL || !TypeIsStructOrUnion(argument->type) ||
+      argument->type->info.struct_info == NULL) {
+    return;
+  }
+  copy->info.struct_info = argument->type->info.struct_info;
+  copy->template_parameter_index = -1;
+  copy->type &= ~kTypeUnknown;
+  copy->size = MemberPointerSize(copy);
+}
+
 /* Replace the `next` type in a copied pointer/reference/array/function spine.
  * C++ reference collapsing and pointer-to-reference cleanup both happen here so
  * callers see a valid post-substitution type chain. */
@@ -1074,6 +1094,9 @@ static void SubstituteTypeSpineNext(TypeParser* parser, TypeRecord* copy,
     TypeRecordDelete(copy->next);
     copy->next = referent;
     collapsed_reference = true;
+  }
+  if (copy->next == NULL) {
+    return;
   }
   if (!collapsed_reference) {
     TypeRecordIncRef(copy->next);
@@ -1118,7 +1141,6 @@ static void SubstituteFunctionPrototype(TypeParser* parser, TypeRecord* copy,
     TypeRecord* formal_type =
         SubstituteTemplateParameters(parser, source_formal->type, args);
     SymbolSetType(formal, formal_type);
-    TypeRecordDelete(formal_type);
   }
 }
 
@@ -1128,6 +1150,7 @@ TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
                                               TypeRecord* type,
                                               Vector* args) {
   TypeRecord* copy = TypeRecordCopy(type);
+  SubstituteMemberPointerClass(copy, args);
   SubstituteArrayTemplateBound(copy, type, args);
   SubstituteTypeSpineNext(parser, copy, type, args);
   SubstituteFunctionPrototype(parser, copy, type, args);
@@ -1708,14 +1731,14 @@ bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
  * name sibling members fold, e.g. `using type = ratio<num, den>;` where `num`
  * and `den` are themselves computed from the template parameters.  Returns a
  * fresh constant node on success, or NULL to leave the reference unchanged. */
-ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
-                                          Vector* args,
-                                          SourceLocation location) {
+ASTNode* TypeSubstituteTemplateExpressionAndRebase(
+    Syntax* syntax, ASTNode* expr, Vector* args, int rebase_base,
+    SourceLocation location) {
   if (syntax == NULL || expr == NULL) {
     return NULL;
   }
   if (args == NULL) {
-    return ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
+    return CloneAndRebaseDependentExpression(expr, rebase_base);
   }
 
   TypeParser parser;
@@ -1727,7 +1750,7 @@ ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
   clone.parser = &parser;
   clone.args = args;
   clone.to_func = NULL;
-  clone.rebase_template_parameter_base = 0;
+  clone.rebase_template_parameter_base = rebase_base;
   clone.from_owner = NULL;
   clone.to_owner = NULL;
   ASTNode* cloned = ASTNodeClone(expr, CloneTemplateFunctionBodyNode,
@@ -1739,6 +1762,22 @@ ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
     cloned->location = location;
   }
   return cloned;
+}
+
+ASTNode* TypeSubstituteTemplateExpression(Syntax* syntax, ASTNode* expr,
+                                          Vector* args,
+                                          SourceLocation location) {
+  return TypeSubstituteTemplateExpressionAndRebase(
+      syntax, expr, args, 0, location);
+}
+
+TypeRecord* TypeSubstituteTemplateTypeAndRebase(Syntax* syntax,
+                                                TypeRecord* type,
+                                                Vector* args,
+                                                int rebase_base) {
+  TypeRecord* result = TypeSubstituteTemplateType(syntax, type, args);
+  RebaseTemplateParameterIndices(result, rebase_base);
+  return result;
 }
 
 TypeRecord* TypeSubstituteTemplateType(Syntax* syntax, TypeRecord* type,
@@ -1760,17 +1799,29 @@ TypeRecord* TypeSubstituteTemplateType(Syntax* syntax, TypeRecord* type,
 Vector* TypeSubstituteTemplateArgumentVector(Syntax* syntax,
                                              Vector* template_args,
                                              Vector* args) {
+  return TypeSubstituteTemplateArgumentVectorAndRebase(
+      syntax, template_args, args, 0);
+}
+
+Vector* TypeSubstituteTemplateArgumentVectorAndRebase(
+    Syntax* syntax, Vector* template_args, Vector* args, int rebase_base) {
   if (template_args == NULL) {
     return NULL;
   }
   if (args == NULL) {
-    return TemplateArgumentVectorCopy(template_args);
+    Vector empty;
+    VectorInit(&empty);
+    Vector* result = TypeSubstituteTemplateArgumentVectorAndRebase(
+        syntax, template_args, &empty, rebase_base);
+    VectorDestruct(&empty);
+    return result;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
   Vector* result =
-      SubstituteTemplateArgumentVector(&parser, template_args, args, 0);
+      SubstituteTemplateArgumentVector(&parser, template_args, args,
+                                       rebase_base);
   TypeParserDestruct(&parser);
   return result;
 }

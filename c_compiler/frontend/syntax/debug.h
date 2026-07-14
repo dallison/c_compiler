@@ -128,6 +128,13 @@ typedef struct {
   DIE* subtype;
 } PointerTypeDIE;
 
+typedef struct {
+  DIE die;
+  DIE* member_type;
+  DIE* containing_type;
+  int byte_size;
+} PtrToMemberTypeDIE;
+
 typedef struct LexicalScopeDIE {
   DIE die;
   Vector variables;       // Vector of VariableDIE*.

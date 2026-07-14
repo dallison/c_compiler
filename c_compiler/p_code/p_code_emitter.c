@@ -170,11 +170,52 @@ static void RestoreRegisters(PCodeEmitter* emitter, FILE* fp) {
   VectorDestruct(&regs);
 }
 
+static void RestoreExceptionLandingState(PCodeEmitter* emitter, FILE* fp) {
+  Vector regs = {0};
+  int offset = 8;  // Saved registers begin above the saved frame pointer.
+
+  BitSetExpand(&emitter->regs->used_double_regs, &regs);
+  for (size_t i = regs.length; i > 0; i--) {
+    int reg = (int)regs.value.w[i - 1];
+    if (reg != PCODE_DOUBLE_RETURN_REG) {
+      fprintf(fp, "\tldd d%d, [fp, #%d]\n", reg, offset);
+      offset += 8;
+    }
+  }
+  VectorClear(&regs);
+  BitSetExpand(&emitter->regs->used_float_regs, &regs);
+  for (size_t i = regs.length; i > 0; i--) {
+    int reg = (int)regs.value.w[i - 1];
+    if (reg != PCODE_FLOAT_RETURN_REG) {
+      fprintf(fp, "\tldf f%d, [fp, #%d]\n", reg, offset);
+      offset += 4;
+    }
+  }
+  VectorClear(&regs);
+  BitSetExpand(&emitter->regs->used_int_regs, &regs);
+  for (size_t i = regs.length; i > 0; i--) {
+    int reg = (int)regs.value.w[i - 1];
+    if (reg != PCODE_INT_RETURN_REG) {
+      fprintf(fp, "\tldx r%d, [fp, #%d]\n", reg, offset);
+      offset += 8;
+    }
+  }
+  VectorDestruct(&regs);
+
+  fprintf(fp, "\tmov sp, fp\n");
+  if (emitter->pcode->base.stack_frame_size > 0) {
+    fprintf(fp, "\tdecsp #%d\n", emitter->pcode->base.stack_frame_size);
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
   if (((int)inst->opcode == (int)P_OP(label))) {
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      RestoreExceptionLandingState(emitter, fp);
+    }
     return;
   }
   
@@ -393,6 +434,89 @@ void PCodeEmitterDelete(PCodeEmitter* emitter) {
   free(emitter);
 }
 
+static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
+                                     TargetInstruction* label) {
+  fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void PrintEscapedAsmString(FILE* fp, const char* s) {
+  for (; *s != '\0'; s++) {
+    unsigned char ch = (unsigned char)*s;
+    if (ch == '"' || ch == '\\') {
+      fprintf(fp, "\\%c", ch);
+    } else if (ch >= 32 && ch < 127) {
+      fputc(ch, fp);
+    } else {
+      fprintf(fp, "\\%03o", ch);
+    }
+  }
+}
+
+static void PCodePrintTypeInfoRecords(PCodeEmitter* emitter, FILE* fp) {
+  if (emitter->pcode->exception_typeinfos.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
+  for (size_t i = 0; i < emitter->pcode->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = emitter->pcode->exception_typeinfos.value.p[i];
+    const char* name = info->symbol_name.value;
+    fprintf(fp, "\t.p2align 3\n");
+    fprintf(fp, "\t.local %s_name\n", name);
+    fprintf(fp, "%s_name:\n\t.asciz \"", name);
+    PrintEscapedAsmString(fp, info->type_name.value);
+    fprintf(fp, "\"\n");
+    for (size_t b = 0; b < info->bases.length; b++) {
+      EHTypeInfoBase* base = info->bases.value.p[b];
+      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
+      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
+      PrintEscapedAsmString(fp, base->base_name.value);
+      fprintf(fp, "\"\n");
+    }
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.p2align 3\n\t.local %s_bases\n%s_bases:\n", name,
+              name);
+      for (size_t b = 0; b < info->bases.length; b++) {
+        EHTypeInfoBase* base = info->bases.value.p[b];
+        fprintf(fp, "\t.8byte %s_base%zu_name\n", name, b);
+        fprintf(fp, "\t.8byte %lld\n", (long long)base->offset);
+      }
+    }
+    fprintf(fp, "\t.p2align 3\n\t.weak %s\n%s:\n", name, name);
+    fprintf(fp, "\t.8byte %s_name\n", name);
+    fprintf(fp, "\t.8byte %zu\n", info->bases.length);
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.8byte %s_bases\n", name);
+    } else {
+      fprintf(fp, "\t.8byte 0\n");
+    }
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void PCodePrintExceptionTable(PCodeEmitter* emitter, FILE* fp,
+                                     const char* func_name) {
+  if (emitter->pcode->exception_ranges.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 3\n");
+  for (size_t i = 0; i < emitter->pcode->exception_ranges.length; i++) {
+    PCodeExceptionRange* range =
+        emitter->pcode->exception_ranges.value.p[i];
+    fprintf(fp, "\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_start);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_end);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->catch_label);
+    fprintf(fp, "\n\t.8byte %s\n",
+            range->catch_typeinfo != NULL
+                ? range->catch_typeinfo->symbol_name.value
+                : "0");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
 void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->pcode->base.function_name.value;
   if (emitter->pcode->base.is_weak) {
@@ -414,4 +538,6 @@ void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
+  PCodePrintTypeInfoRecords(emitter, fp);
+  PCodePrintExceptionTable(emitter, fp, func_name);
 }

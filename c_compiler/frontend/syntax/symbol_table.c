@@ -66,19 +66,28 @@ static int SymbolNodeInsertCompare(BinaryTreeNode* node1,
                                    BinaryTreeNode* node2) {
   SymbolNode* sym1 = (SymbolNode*)node1;
   SymbolNode* sym2 = (SymbolNode*)node2;
-  return StringCompareString(&sym1->symbol->name, &sym2->symbol->name);
+  return StringCompareString(&sym1->name, &sym2->name);
 }
 
 static int SymbolNodeSearchCompare(BinaryTreeNode* node, void* name) {
   SymbolNode* sym = (SymbolNode*)node;
-  return StringCompareString(&sym->symbol->name, name);
+  return StringCompareString(&sym->name, name);
 }
 
 static void SymbolNodeDestructor(BinaryTreeNode* node, void* delete_symbols) {
+  SymbolNode* sym = (SymbolNode*)node;
   if (delete_symbols != NULL) {
-    SymbolNode* sym = (SymbolNode*)node;
     SymbolDelete(sym->symbol);
   }
+  StringDestruct(&sym->name);
+}
+
+void SymbolNodeDelete(SymbolNode* node) {
+  if (node == NULL) {
+    return;
+  }
+  StringDestruct(&node->name);
+  free(node);
 }
 
 static void DeleteSymbolTable(void* table, void* data) {
@@ -108,9 +117,9 @@ static void PrintSymbolNode(SymbolNode* node, int indent) {
     printf("%s", " ");
   }
   SymbolNode* parent = (SymbolNode*)node->header.parent;
-  printf("%s: %s (%s)\n", node->symbol->name.value,
+  printf("%s: %s (%s)\n", node->name.value,
          node->header.color == kBinaryTreeNodeRed ? "RED" : "BLACK",
-         parent == NULL ? "" : parent->symbol->name.value);
+         parent == NULL ? "" : parent->name.value);
 }
 
 static COMPILER_UNUSED void Printer(BinaryTreeNode* node, int depth, void* data) {
@@ -694,7 +703,7 @@ bool NamespaceInsertSymbol(Namespace* ns, Symbol* symbol) {
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&ns->symbol_table, &node->header);
   if (!ok) {
-    free(node);
+    SymbolNodeDelete(node);
     symbol->namespace_ = NULL;
   }
   return ok;
@@ -708,7 +717,7 @@ bool NamespaceInsertTag(Namespace* ns, Symbol* symbol) {
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&ns->tag_table, &node->header);
   if (!ok) {
-    free(node);
+    SymbolNodeDelete(node);
     symbol->namespace_ = NULL;
   }
   return ok;
@@ -755,7 +764,7 @@ bool InsertGlobalSymbol(Symbol* symbol) {
   bool ok = HashTableInsert(&compiler->global_symbol_table, node);
   if (!ok) {
     // Insertion unsuccessful.  Don't need the SymbolNode any more.
-    free(node);
+    SymbolNodeDelete(node);
   }
   return ok;
 }
@@ -765,7 +774,7 @@ bool InsertGlobalTag(Symbol* symbol) {
   bool ok = HashTableInsert(&compiler->global_tag_table, node);
   if (!ok) {
     // Insertion unsuccessful.  Don't need the SymbolNode any more.
-    free(node);
+    SymbolNodeDelete(node);
   }
   return ok;
 }
@@ -785,7 +794,7 @@ bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {
   SymbolNode* node = NewSymbolNode(symbol);
   bool ok = BinaryTreeInsert(&table->table, &node->header);
   if (!ok) {
-    free(node);
+    SymbolNodeDelete(node);
   }
   return ok;
 }
@@ -808,6 +817,7 @@ Symbol* FindTopLocalSymbol(LocalSymbolTable* table, String* name) {
 SymbolNode* NewSymbolNode(Symbol* symbol) {
   SymbolNode* node = malloc(sizeof(SymbolNode));
   BinaryTreeNodeInit(&node->header);
+  StringInit(&node->name, symbol->name.value);
   node->symbol = symbol;
   return node;
 }
@@ -829,6 +839,9 @@ static bool InsertSymbolIntoHashTable(void* table, void* node, void** parent) {
 // Find a symbol given its name in the given symbol table.  This
 // searches the binary tree using a recursive algorithm.
 Symbol* FindSymbol(BinaryTree* table, String* name) {
+  if (table == NULL) {
+    return NULL;
+  }
   SymbolNode* node = (SymbolNode*)BinaryTreeSearch(table, name);
   if (node == NULL) {
     return NULL;
@@ -849,7 +862,7 @@ static size_t HashSymbol(void* value, HashTable* table, HashMode mode) {
   switch (mode) {
     case kHashInsert:
       // For insertion we have a pointer to symbol node.
-      name = &((SymbolNode*)value)->symbol->name;
+      name = &((SymbolNode*)value)->name;
       break;
     case kHashSearch:
       // For search we have pointer to a String containing the name

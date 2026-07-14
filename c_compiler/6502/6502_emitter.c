@@ -159,7 +159,10 @@ static void PrintOperand(W65C02Emitter* emitter, TargetInstruction* inst,
   }
   int offset = 0;
   W65C02Register* reg = (W65C02Register*)operand->reg;
-  char buf[32];
+  // C++ mangled names routinely exceed 32 bytes.  Truncating an operand here
+  // creates a relocation for a different, undefined symbol while the label
+  // definition retains its full name.
+  char buf[1024];
   switch (mode) {
     case kAddrModeInvalid:
     case kAddrModeUnknown:

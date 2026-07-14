@@ -460,6 +460,9 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   }
 
   StringAppendChar(out, 'N');
+  if (symbol->type->info.function.is_volatile_member) {
+    StringAppendChar(out, 'V');
+  }
   if (symbol->type->info.function.is_const_member) {
     StringAppendChar(out, 'K');
   }
@@ -528,6 +531,17 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       StringAppendChar(out, 'O');
       AppendCXXTypeEncoding(out, type->next);
       return;
+    case kDeclMemberPointer: {
+      StringAppendChar(out, 'M');
+      Struct* owner = type->info.struct_info;
+      if (owner != NULL && owner->tag_name != NULL) {
+        AppendCXXTaggedTypeName(out, owner->tag_symbol, owner->tag_name, owner);
+      } else {
+        StringAppendChar(out, 'v');
+      }
+      AppendCXXTypeEncoding(out, type->next);
+      return;
+    }
     case kDeclArray:
       StringAppendChar(out, 'P');
       AppendCXXTypeEncoding(out, type->next);

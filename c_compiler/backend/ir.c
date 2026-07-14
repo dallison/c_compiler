@@ -8,6 +8,7 @@
 
 #include "ir.h"
 #include "compiler.h"
+#include "member_pointer.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -464,6 +465,8 @@ static IROpcode IntConstOpcode(TypeRecord* type) {
   int size = 0;
   if (type == NULL) {
     size = compiler->int_size;
+  } else if (TypeIsMemberPointerScalar(type)) {
+    size = MemberPointerSize(type);
   } else if (TypeIsShort(type)) {
     size = compiler->short_size;
   } else if (TypeIsBool(type)) {

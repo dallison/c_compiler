@@ -270,9 +270,20 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
       left->qualifiers != right->qualifiers) {
     return left == right;
   }
-  if (left->template_parameter_index >= 0 ||
-      right->template_parameter_index >= 0) {
-    return left->template_parameter_index == right->template_parameter_index;
+  // A primitive placeholder with an index denotes the entire template type.
+  // Other declarators also use this field for one dependent component (for
+  // example, the class in `R (C::*)(Args...)` or an array bound); those must
+  // still be compared structurally below.
+  bool left_is_type_parameter =
+      left->declarator == kDeclPrimitive &&
+      left->template_parameter_index >= 0;
+  bool right_is_type_parameter =
+      right->declarator == kDeclPrimitive &&
+      right->template_parameter_index >= 0;
+  if (left_is_type_parameter || right_is_type_parameter) {
+    return left_is_type_parameter == right_is_type_parameter &&
+           left->template_parameter_index ==
+               right->template_parameter_index;
   }
   if (left->type != right->type) {
     return false;
@@ -302,9 +313,18 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
       }
       return TemplateTypePatternEqual(left->next, right->next);
     case kDeclPointer:
-    case kDeclMemberPointer:
     case kDeclReference:
     case kDeclRValueReference:
+      return TemplateTypePatternEqual(left->next, right->next);
+    case kDeclMemberPointer:
+      if (left->template_parameter_index >= 0 ||
+          right->template_parameter_index >= 0) {
+        if (left->template_parameter_index != right->template_parameter_index) {
+          return false;
+        }
+      } else if (left->info.struct_info != right->info.struct_info) {
+        return false;
+      }
       return TemplateTypePatternEqual(left->next, right->next);
     case kDeclFunction:
       if (!TemplateTypePatternEqual(left->next, right->next) ||
@@ -312,8 +332,12 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
               right->info.function.prototype.length ||
           left->info.function.is_const_member !=
               right->info.function.is_const_member ||
+          left->info.function.is_volatile_member !=
+              right->info.function.is_volatile_member ||
           left->info.function.ref_qualifier !=
-              right->info.function.ref_qualifier) {
+              right->info.function.ref_qualifier ||
+          left->info.function.is_noexcept !=
+              right->info.function.is_noexcept) {
         return false;
       }
       for (size_t i = 0; i < left->info.function.prototype.length; i++) {
@@ -525,15 +549,7 @@ bool TypeIsReference(TypeRecord* type) {
 }
 
 bool TypeIsMemberPointer(TypeRecord* type) {
-  if (type == NULL) {
-    return false;
-  }
-  for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
-    if (cur->declarator == kDeclMemberPointer) {
-      return true;
-    }
-  }
-  return false;
+  return type != NULL && type->declarator == kDeclMemberPointer;
 }
 
 bool TypeIsScopedEnum(TypeRecord* type) {
@@ -560,7 +576,13 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   if (a->is_const_member != b->is_const_member) {
     return false;
   }
+  if (a->is_volatile_member != b->is_volatile_member) {
+    return false;
+  }
   if (a->ref_qualifier != b->ref_qualifier) {
+    return false;
+  }
+  if (a->is_noexcept != b->is_noexcept) {
     return false;
   }
   for (size_t i = 0; i < a->prototype.length; i++) {
@@ -746,7 +768,12 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
     case kDeclRValueReference:
       return TypeEqual(t1->next, t2->next);
     case kDeclMemberPointer:
-      if (t1->info.struct_info != t2->info.struct_info) {
+      if (t1->template_parameter_index >= 0 ||
+          t2->template_parameter_index >= 0) {
+        if (t1->template_parameter_index != t2->template_parameter_index) {
+          return false;
+        }
+      } else if (t1->info.struct_info != t2->info.struct_info) {
         return false;
       }
       return TypeEqual(t1->next, t2->next);
@@ -1119,7 +1146,12 @@ bool TypeEqualIgnoringSign(TypeRecord* t1, TypeRecord* t2) {
     case kDeclRValueReference:
       return TypeEqual(t1->next, t2->next);
     case kDeclMemberPointer:
-      if (t1->info.struct_info != t2->info.struct_info) {
+      if (t1->template_parameter_index >= 0 ||
+          t2->template_parameter_index >= 0) {
+        if (t1->template_parameter_index != t2->template_parameter_index) {
+          return false;
+        }
+      } else if (t1->info.struct_info != t2->info.struct_info) {
         return false;
       }
       return TypeEqual(t1->next, t2->next);
@@ -1178,6 +1210,7 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
     case kDeclPointer:
     case kDeclReference:
     case kDeclRValueReference:
+    case kDeclMemberPointer:
       ReportNote(filename, lineno, "Declaration of '%s' and '%s' are different",
                  error1.value, error2.value);
       TypeErrorDetails(location, t1->next, t2->next);
@@ -1197,6 +1230,6 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
       }
   }
   StringDestruct(&error1);
-  StringDestruct(&error1);
+  StringDestruct(&error2);
 }
 

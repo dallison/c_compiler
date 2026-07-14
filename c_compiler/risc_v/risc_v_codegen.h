@@ -360,6 +360,13 @@ typedef struct {
   bool is_fp;
 } RegisterVariable;
 
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* try_end;
+  TargetInstruction* catch_label;
+  EHTypeInfo* catch_typeinfo;
+} RVExceptionRange;
+
 // A RISC-V Generator is derived from a TargetGenerator.  It has
 // a '.base' field that is the TargetGenerator.
 typedef struct RVGenerator {
@@ -378,6 +385,8 @@ typedef struct RVGenerator {
   TargetInstruction* int_argument_registers[RV_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[RV_NUM_FP_ARGS];
   Vector var_regs;
+  Vector exception_ranges;
+  Vector exception_typeinfos;
 
   TargetInstruction* zero;  // Explicit zero (register x0).
   TargetInstruction* tmp;   // Temp reg for tail calls vi jr instruction.

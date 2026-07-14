@@ -14,6 +14,7 @@
 #include "6502_spiller.h"
 #include "6502_optimize.h"
 #include "compiler.h"
+#include "member_pointer.h"
 #include "target_basic_block.h"
 #include "6502_target.h"
 #include "map.h"
@@ -5164,7 +5165,10 @@ static struct {
     {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},         {TypeIsChar, 1, 2},
     {TypeIsLong, 4, 4},     {TypeIsLongLong, 8, 8},      {TypeIsFloat, 4, 4},
     {TypeIsDouble, 4, 4},   {TypeIsLongDouble, 4, 4},    {TypeIsPointerOrArray, 2, 2},
-  {TypeIsFunction, 2, 2}, {TypeIsStructOrUnion, 2, 2}, {TypeIsBool, 1, 2}, {NULL, 0},
+  {TypeIsFunction, 2, 2}, {TypeIsStructOrUnion, 2, 2},
+  {TypeIsMemberPointerScalar, 2, 2},
+  {TypeIsMemberPointerAggregate, 4, 4},
+  {TypeIsBool, 1, 2}, {NULL, 0},
 };
 
 
@@ -5266,6 +5270,12 @@ static TargetInstruction* PushLiteralRef(W65C02Generator* g, IRNode* node) {
 // we can't because C says that they need to be passed as ints.
 static TargetInstruction* PushVariable(W65C02Generator* g, IRNode* node, int size) {
   TargetInstruction* addr = GetLoweredNode(node);
+  if (addr == NULL || addr->operand[0] == NULL ||
+      !TargetIsConst(addr->operand[0])) {
+    TargetInstruction* value = Materialize(g, node, size, true);
+    AddReloadPoint(g, value);
+    return PushExpression(g, node, value, size);
+  }
   int offset = (int)TargetIntValue(addr->operand[0]);
   struct {
     int size;
@@ -5369,6 +5379,9 @@ static size_t GetPushedSize(IRNode* node) {
   if (expr->type == NULL) {
     return 2;
   }
+  if (TypeIsStructOrUnion(expr->type)) {
+    return Sizeof(expr->type);
+  }
   for (size_t i = 0; push_map[i].type_func != NULL; i++) {
     if (push_map[i].type_func(expr->type)) {
       return push_map[i].pushed_size;
@@ -5383,8 +5396,8 @@ static size_t GetPushedSize(IRNode* node) {
 // mem_src: source address
 // mem_size: size of memory
 // JSR pushmem
-static COMPILER_UNUSED void PushStructArg(W65C02Generator* g, IRNode* node,
-                                          size_t* args_size) {
+static TargetInstruction* PushStructArg(W65C02Generator* g, IRNode* node,
+                                        size_t* args_size) {
   size_t struct_size = Sizeof(node->type);
   *args_size += struct_size;
   bool from_call = (node->flags & kIRFromCall) != 0;
@@ -5432,7 +5445,7 @@ static COMPILER_UNUSED void PushStructArg(W65C02Generator* g, IRNode* node,
   }
   
   // JSR pushmem
-  jsr(g, pushmem);
+  return jsr(g, pushmem);
 }
 
 static bool IsIntrinsicCall(W65C02Generator* g, IRNode* node) {
@@ -5710,7 +5723,13 @@ static void LowerPushArg(W65C02Generator* g, IRNode* node) {
     SetLoweredNode(node, GetLoweredNode(arg));
     return;
   }
-  SetLoweredNode(node, PushArg(g, node->inputs.value.p[0]));
+  IRNode* arg = node->inputs.value.p[0];
+  if (arg->type != NULL && TypeIsStructOrUnion(arg->type)) {
+    size_t pushed_size = 0;
+    SetLoweredNode(node, PushStructArg(g, arg, &pushed_size));
+    return;
+  }
+  SetLoweredNode(node, PushArg(g, arg));
 }
 
 // First push all the args onto the stack right to left.
@@ -7656,7 +7675,7 @@ static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord*
     reg_type = k6502RegTypeF;
   } else if (TypeIsChar(type) || TypeIsBool(type)) {
     reg_type = k6502RegTypeB;
-  } else if (TypeIsLong(type)) {
+  } else if (TypeIsLong(type) || TypeIsMemberPointerAggregate(type)) {
     reg_type = k6502RegTypeL;
   } else if (TypeIsLongLong(type)) {
     reg_type = k6502RegTypeX;

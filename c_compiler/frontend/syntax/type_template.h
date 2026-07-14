@@ -14,12 +14,22 @@ struct ASTNode* TypeSubstituteTemplateExpression(struct Syntax* syntax,
                                                 struct ASTNode* expr,
                                                 Vector* args,
                                                 SourceLocation location);
+struct ASTNode* TypeSubstituteTemplateExpressionAndRebase(
+    struct Syntax* syntax, struct ASTNode* expr, Vector* args, int rebase_base,
+    SourceLocation location);
 TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
                                        TypeRecord* type,
                                        Vector* args);
+TypeRecord* TypeSubstituteTemplateTypeAndRebase(struct Syntax* syntax,
+                                                TypeRecord* type,
+                                                Vector* args,
+                                                int rebase_base);
 Vector* TypeSubstituteTemplateArgumentVector(struct Syntax* syntax,
                                              Vector* template_args,
                                              Vector* args);
+Vector* TypeSubstituteTemplateArgumentVectorAndRebase(
+    struct Syntax* syntax, Vector* template_args, Vector* args,
+    int rebase_base);
 // Complete a concept-id's argument list against the concept's template
 // parameters, filling in trailing default arguments (which may reference the
 // earlier, already-provided arguments, e.g. `C = common_type_t<T, U>`).

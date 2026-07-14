@@ -1608,6 +1608,13 @@ bool LexMatchIdentifier(Lex* lex, String* string) {
 
 bool LexLookingAt(Lex* lex, Token tok) { return lex->current_token == tok; }
 
+bool LexLookingAtClosingAngle(Lex* lex) {
+  return lex->current_token == TOK(greater) ||
+         lex->current_token == TOK(greatergreater) ||
+         lex->current_token == TOK(greatergreatereq) ||
+         lex->current_token == TOK(greatereq);
+}
+
 bool LexConsumeClosingAngle(Lex* lex) {
   switch (lex->current_token) {
     case TOK(greater):

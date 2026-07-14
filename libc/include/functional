@@ -10,6 +10,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <exception>
+#include <new>
+#include <typeinfo>
 #include <type_traits>
 #include <utility>
 
@@ -113,15 +116,20 @@ class reference_wrapper {
  public:
   typedef T type;
 
-  reference_wrapper(T& value) : __value(&value) {
+  reference_wrapper(T& value) noexcept : __value(&value) {
   }
 
-  operator T&() const {
+  operator T&() const noexcept {
     return *__value;
   }
 
-  T& get() const {
+  T& get() const noexcept {
     return *__value;
+  }
+
+  template <class... Args>
+  __davecc_invoke_result_t(T&, Args...) operator()(Args&&... args) const {
+    return get()(static_cast<Args&&>(args)...);
   }
 
  private:
@@ -160,6 +168,17 @@ struct __is_reference_wrapper : false_type {};
 template <class T>
 struct __is_reference_wrapper<reference_wrapper<T> > : true_type {};
 
+template <class T>
+struct __is_reference_wrapper<T&> : __is_reference_wrapper<T> {};
+
+template <class T>
+struct __is_reference_wrapper<T&&> : __is_reference_wrapper<T> {};
+
+template <class T>
+struct __is_member_pointer_argument
+    : is_member_pointer<remove_reference_t<T>> {
+};
+
 template <class F>
 struct __invoke_helper {
   template <class... Args>
@@ -176,18 +195,142 @@ struct __invoke_helper<R(A)> {
   }
 };
 
-template <class T, class... Args>
-__davecc_invoke_result_t(T, Args...)
-invoke(reference_wrapper<T>& function, Args&&... args) {
-  return function.get()(static_cast<Args&&>(args)...);
+template <class Function, class Object, bool IsMemberFunction,
+          bool IsMemberObject, bool IsReferenceWrapper, bool IsPointer>
+struct __invoke_dispatch;
+
+template <class Function, class Object, bool IsReferenceWrapper,
+          bool IsPointer>
+struct __invoke_dispatch<Function, Object, false, false, IsReferenceWrapper,
+                         IsPointer> {
+  template <class Argument, class... Args>
+  static __davecc_invoke_result_t(Function, Argument, Args...)
+  call(Function& function, Argument&& object, Args&&... args) {
+    return function(static_cast<Argument&&>(object),
+                    static_cast<Args&&>(args)...);
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, true, false, true, false> {
+  using Value = remove_reference_t<Object>;
+
+  template <class... Args>
+  static __davecc_invoke_result_t(Function, Object, Args...)
+  call(Function& function, Value& object, Args&&... args) {
+    return (object.get().*function)(static_cast<Args&&>(args)...);
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, true, false, false, true> {
+  template <class... Args>
+  static __davecc_invoke_result_t(Function, Object, Args...)
+  call(Function& function, Object object, Args&&... args) {
+    return ((*object).*function)(static_cast<Args&&>(args)...);
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, true, false, false, false> {
+  template <class Argument, class... Args>
+  static __davecc_invoke_result_t(Function, Argument, Args...)
+  call(Function& function, Argument&& object, Args&&... args) {
+    return (static_cast<Argument&&>(object).*function)(
+        static_cast<Args&&>(args)...);
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, false, true, true, false> {
+  using Value = remove_reference_t<Object>;
+
+  static __davecc_invoke_result_t(Function, Object)
+  call(Function& function, Value& object) {
+    return object.get().*function;
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, false, true, false, true> {
+  static __davecc_invoke_result_t(Function, Object)
+  call(Function& function, Object object) {
+    return (*object).*function;
+  }
+};
+
+template <class Function, class Object>
+struct __invoke_dispatch<Function, Object, false, true, false, false> {
+  template <class Argument>
+  static __davecc_invoke_result_t(Function, Argument)
+  call(Function& function, Argument&& object) {
+    return static_cast<Argument&&>(object).*function;
+  }
+};
+
+template <class F>
+__davecc_invoke_result_t(F) invoke(F&& function) {
+  return function();
 }
 
-template <class F, class... Args>
-typename enable_if<!__is_reference_wrapper<remove_reference_t<F> >::value,
-                   typename __invoke_result<F, Args...>::type>::type
-invoke(F&& function, Args&&... args) {
-  return __invoke_helper<remove_reference_t<F> >::call(
-      function, static_cast<Args&&>(args)...);
+template <class F, class T, class... Args>
+  requires (__is_member_pointer_argument<F>::value)
+__davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
+invoke(F&& function, reference_wrapper<T>&& object, Args&&... args) {
+  using Function = remove_reference_t<F>;
+  using Object = reference_wrapper<T>;
+  return __invoke_dispatch<
+      Function, Object, is_member_function_pointer<Function>::value,
+      is_member_object_pointer<Function>::value, true, false>::call(
+      function, object, static_cast<Args&&>(args)...);
+}
+
+template <class F, class T, class... Args>
+  requires (__is_member_pointer_argument<F>::value)
+__davecc_invoke_result_t(F, reference_wrapper<T>, Args...)
+invoke(F&& function, reference_wrapper<T>& object, Args&&... args) {
+  using Function = remove_reference_t<F>;
+  using Object = reference_wrapper<T>;
+  return __invoke_dispatch<
+      Function, Object, is_member_function_pointer<Function>::value,
+      is_member_object_pointer<Function>::value, true, false>::call(
+      function, object, static_cast<Args&&>(args)...);
+}
+
+template <class F, class T, class... Args>
+  requires (__is_member_pointer_argument<F>::value &&
+            __davecc_is_member_pointer_direct_object(F, T) != 0)
+__davecc_invoke_result_t(F, T, Args...)
+invoke(F&& function, T&& object, Args&&... args) {
+  using Function = remove_reference_t<F>;
+  using Object = remove_reference_t<T>;
+  return __invoke_dispatch<
+      Function, Object, is_member_function_pointer<Function>::value,
+      is_member_object_pointer<Function>::value, false, false>::call(
+      function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
+}
+
+template <class F, class T, class... Args>
+  requires (__is_member_pointer_argument<F>::value &&
+            __davecc_is_member_pointer_direct_object(F, T) == 0)
+__davecc_invoke_result_t(F, T, Args...)
+invoke(F&& function, T&& object, Args&&... args) {
+  using Function = remove_reference_t<F>;
+  using Object = remove_reference_t<T>;
+  return __invoke_dispatch<
+      Function, Object, is_member_function_pointer<Function>::value,
+      is_member_object_pointer<Function>::value, false, true>::call(
+      function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
+}
+
+template <class F, class T, class... Args>
+  requires (!__is_member_pointer_argument<F>::value)
+__davecc_invoke_result_t(F, T, Args...)
+invoke(F&& function, T&& object, Args&&... args) {
+  using Function = remove_reference_t<F>;
+  using Object = remove_reference_t<T>;
+  return __invoke_dispatch<Function, Object, false, false, false, false>::call(
+      function, static_cast<T&&>(object), static_cast<Args&&>(args)...);
 }
 
 template <class F, class... Args>
@@ -235,10 +378,20 @@ struct is_invocable : __invoke_detail::__is_invocable<F, Args...> {
 template <class F, class... Args>
 inline constexpr bool is_invocable_v = is_invocable<F, Args...>::value;
 
+template <class R, bool IsVoid, class F, class... Args>
+struct __invoke_r_convertible
+    : is_convertible<invoke_result_t<F, Args...>, R> {
+};
+
+template <class R, class F, class... Args>
+struct __invoke_r_convertible<R, true, F, Args...> : true_type {
+};
+
 template <class R, class F, class... Args>
 struct is_invocable_r
     : bool_constant<is_invocable<F, Args...>::value &&
-                    is_convertible<invoke_result_t<F, Args...>, R>::value> {
+                    __invoke_r_convertible<
+                        R, is_void<R>::value, F, Args...>::value> {
 };
 
 template <class F, class... Args>
@@ -249,10 +402,377 @@ struct is_nothrow_invocable
 template <class R, class F, class... Args>
 struct is_nothrow_invocable_r
     : bool_constant<is_nothrow_invocable<F, Args...>::value &&
-                    is_convertible<invoke_result_t<F, Args...>, R>::value> {
+                    __invoke_r_convertible<
+                        R, is_void<R>::value, F, Args...>::value> {
 };
 
 using __invoke_detail::invoke;
+
+class bad_function_call : public exception {
+ public:
+  bad_function_call() noexcept {}
+
+  const char* what() const noexcept override {
+    return "std::bad_function_call";
+  }
+};
+
+template <class Signature>
+class function;
+
+namespace __function_detail {
+
+struct __storage_type {
+  alignas(void*) unsigned char data[2 * sizeof(void*)];
+};
+
+struct __operations {
+    void* invoke;
+    void (*copy)(__storage_type*, const __storage_type*);
+    void (*move)(__storage_type*, __storage_type*);
+    void (*destroy)(__storage_type*);
+    const type_info& (*target_type)();
+    void* (*target)(__storage_type*);
+    const void* (*const_target)(const __storage_type*);
+};
+
+template <class F, class Signature>
+struct __manager;
+
+template <class F, class Source, class Self, class Signature>
+struct __valid_target;
+
+template <class F, class Source, class Self, class R, class... Args>
+struct __valid_target<F, Source, Self, R(Args...)>
+    : bool_constant<!is_same<F, Self>::value &&
+                    is_constructible<F, Source>::value &&
+                    is_copy_constructible<F>::value &&
+                    is_invocable_r<R, F&, Args...>::value> {
+};
+
+template <class F, class R, class... Args>
+struct __manager<F, R(Args...)> {
+  static constexpr bool is_local =
+      sizeof(F) <= sizeof(__storage_type) &&
+      alignof(F) <= alignof(__storage_type) &&
+      is_nothrow_move_constructible<F>::value;
+
+  static F*& heap_pointer(__storage_type& storage) {
+    return *reinterpret_cast<F**>(storage.data);
+  }
+
+  static F* const& heap_pointer(const __storage_type& storage) {
+    return *reinterpret_cast<F* const*>(storage.data);
+  }
+
+  static F* get(__storage_type& storage) {
+    if constexpr (is_local) {
+      return reinterpret_cast<F*>(storage.data);
+    } else {
+      return heap_pointer(storage);
+    }
+  }
+
+  static const F* get(const __storage_type& storage) {
+    if constexpr (is_local) {
+      return reinterpret_cast<const F*>(storage.data);
+    } else {
+      return heap_pointer(storage);
+    }
+  }
+
+  static R invoke_target(__storage_type* storage, Args... args) {
+    F* target = get(*storage);
+    if constexpr (is_void<R>::value) {
+      std::invoke(*target, static_cast<Args&&>(args)...);
+      return;
+    } else {
+      return std::invoke(*target, static_cast<Args&&>(args)...);
+    }
+  }
+
+  static void copy(__storage_type* destination,
+                   const __storage_type* source) {
+    if constexpr (is_local) {
+      ::new (static_cast<void*>(destination->data)) F(*get(*source));
+    } else {
+      heap_pointer(*destination) = new F(*get(*source));
+    }
+  }
+
+  static void move(__storage_type* destination, __storage_type* source) {
+    if constexpr (is_local) {
+      F* source_target = get(*source);
+      ::new (static_cast<void*>(destination->data))
+          F(static_cast<F&&>(*source_target));
+      source_target->~F();
+    } else {
+      heap_pointer(*destination) = heap_pointer(*source);
+      heap_pointer(*source) = nullptr;
+    }
+  }
+
+  static void destroy(__storage_type* storage) {
+    if constexpr (is_local) {
+      get(*storage)->~F();
+    } else {
+      delete heap_pointer(*storage);
+      heap_pointer(*storage) = nullptr;
+    }
+  }
+
+  static const type_info& target_type() {
+    return typeid(F);
+  }
+
+  static void* target(__storage_type* storage) {
+    return get(*storage);
+  }
+
+  static const void* const_target(const __storage_type* storage) {
+    return get(*storage);
+  }
+
+  static const __operations* table() {
+    static const __operations value = {
+        reinterpret_cast<void*>(&invoke_target),
+        &copy, &move, &destroy, &target_type, &target, &const_target};
+    return &value;
+  }
+};
+
+template <class T>
+struct __function_guide;
+
+#define __DAVECC_FUNCTION_GUIDE(qualifiers)                              \
+  template <class R, class C, class... Args>                             \
+  struct __function_guide<R (C::*)(Args...) qualifiers> {                \
+    using type = R(Args...);                                             \
+  };
+
+__DAVECC_FUNCTION_GUIDE()
+__DAVECC_FUNCTION_GUIDE(const)
+__DAVECC_FUNCTION_GUIDE(volatile)
+__DAVECC_FUNCTION_GUIDE(const volatile)
+__DAVECC_FUNCTION_GUIDE(&)
+__DAVECC_FUNCTION_GUIDE(const &)
+__DAVECC_FUNCTION_GUIDE(volatile &)
+__DAVECC_FUNCTION_GUIDE(const volatile &)
+__DAVECC_FUNCTION_GUIDE(&&)
+__DAVECC_FUNCTION_GUIDE(const &&)
+__DAVECC_FUNCTION_GUIDE(volatile &&)
+__DAVECC_FUNCTION_GUIDE(const volatile &&)
+__DAVECC_FUNCTION_GUIDE(noexcept)
+__DAVECC_FUNCTION_GUIDE(const noexcept)
+__DAVECC_FUNCTION_GUIDE(volatile noexcept)
+__DAVECC_FUNCTION_GUIDE(const volatile noexcept)
+__DAVECC_FUNCTION_GUIDE(& noexcept)
+__DAVECC_FUNCTION_GUIDE(const & noexcept)
+__DAVECC_FUNCTION_GUIDE(volatile & noexcept)
+__DAVECC_FUNCTION_GUIDE(const volatile & noexcept)
+__DAVECC_FUNCTION_GUIDE(&& noexcept)
+__DAVECC_FUNCTION_GUIDE(const && noexcept)
+__DAVECC_FUNCTION_GUIDE(volatile && noexcept)
+__DAVECC_FUNCTION_GUIDE(const volatile && noexcept)
+
+#undef __DAVECC_FUNCTION_GUIDE
+
+template <class F>
+using __function_guide_t =
+    typename __function_guide<decltype(&F::operator())>::type;
+
+}  // namespace __function_detail
+
+template <class R, class... Args>
+class function<R(Args...)> {
+ private:
+  using __signature = R(Args...);
+  using __self = function<__signature>;
+  using __storage_type = __function_detail::__storage_type;
+  using __operations = __function_detail::__operations;
+  using __invoke_type = R (*)(__storage_type*, Args...);
+
+  template <class F>
+  void __initialize(F&& value) {
+    using Target = decay_t<F>;
+    using Manager = __function_detail::__manager<Target, __signature>;
+    if constexpr (is_pointer<Target>::value ||
+                  is_member_pointer<Target>::value) {
+      if (static_cast<Target>(value) == nullptr) {
+        return;
+      }
+    }
+
+    if constexpr (Manager::is_local) {
+      ::new (static_cast<void*>(__storage.data))
+          Target(static_cast<F&&>(value));
+    } else {
+      Manager::heap_pointer(__storage) =
+          new Target(static_cast<F&&>(value));
+    }
+    __ops = Manager::table();
+    __invoke = reinterpret_cast<__invoke_type>(__ops->invoke);
+  }
+
+ public:
+  using result_type = R;
+
+  function() noexcept : __storage{}, __ops(nullptr), __invoke(nullptr) {}
+
+  function(nullptr_t) noexcept : function() {}
+
+  function(const function& other)
+      : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    if (other.__ops != nullptr) {
+      other.__ops->copy(&__storage, &other.__storage);
+      __ops = other.__ops;
+      __invoke = other.__invoke;
+    }
+  }
+
+  function(function&& other) noexcept
+      : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    if (other.__ops != nullptr) {
+      other.__ops->move(&__storage, &other.__storage);
+      __ops = other.__ops;
+      __invoke = other.__invoke;
+      other.__ops = nullptr;
+      other.__invoke = nullptr;
+    }
+  }
+
+  template <class F>
+    requires (__function_detail::__valid_target<decay_t<F>, F&&, __self,
+                                                 __signature>::value)
+  function(F&& value) : __storage{}, __ops(nullptr), __invoke(nullptr) {
+    __initialize(static_cast<F&&>(value));
+  }
+
+  ~function() {
+    if (__ops != nullptr) {
+      __ops->destroy(&__storage);
+    }
+  }
+
+  function& operator=(nullptr_t) noexcept {
+    __self temporary;
+    temporary.swap(*this);
+    return *this;
+  }
+
+  function& operator=(const function& other) {
+    __self temporary = other;
+    temporary.swap(*this);
+    return *this;
+  }
+
+  function& operator=(function&& other) noexcept {
+    __self temporary = static_cast<__self&&>(other);
+    temporary.swap(*this);
+    return *this;
+  }
+
+  template <class F>
+    requires (__function_detail::__valid_target<decay_t<F>, F&&, __self,
+                                                 __signature>::value)
+  function& operator=(F&& value) {
+    __self temporary = static_cast<F&&>(value);
+    temporary.swap(*this);
+    return *this;
+  }
+
+  template <class F>
+  function& operator=(reference_wrapper<F> value) noexcept {
+    __self temporary = value;
+    temporary.swap(*this);
+    return *this;
+  }
+
+  void swap(function& other) noexcept {
+    if (this == &other) {
+      return;
+    }
+    __self temporary = static_cast<__self&&>(other);
+    if (__ops != nullptr) {
+      __ops->move(&other.__storage, &__storage);
+      other.__ops = __ops;
+      other.__invoke = __invoke;
+      __ops = nullptr;
+      __invoke = nullptr;
+    }
+    if (temporary.__ops != nullptr) {
+      temporary.__ops->move(&__storage, &temporary.__storage);
+      __ops = temporary.__ops;
+      __invoke = temporary.__invoke;
+      temporary.__ops = nullptr;
+      temporary.__invoke = nullptr;
+    }
+  }
+
+  explicit operator bool() const noexcept {
+    return __ops != nullptr;
+  }
+
+  R operator()(Args... args) const {
+    if (__ops == nullptr) {
+      throw bad_function_call();
+    }
+    return __invoke(
+        const_cast<__storage_type*>(&__storage),
+        static_cast<Args&&>(args)...);
+  }
+
+  const type_info& target_type() const noexcept {
+    if (__ops == nullptr) {
+      return typeid(void);
+    }
+    return __ops->target_type();
+  }
+
+  template <class T>
+  T* target() noexcept {
+    if (__ops == nullptr || target_type() != typeid(T)) {
+      return nullptr;
+    }
+    return static_cast<T*>(__ops->target(&__storage));
+  }
+
+  template <class T>
+  const T* target() const noexcept {
+    if (__ops == nullptr || target_type() != typeid(T)) {
+      return nullptr;
+    }
+    return static_cast<const T*>(__ops->const_target(&__storage));
+  }
+
+ private:
+  __storage_type __storage;
+  const __operations* __ops;
+  __invoke_type __invoke;
+};
+
+template <class R, class... Args>
+function(R (*)(Args...)) -> function<R(Args...)>;
+
+template <class F>
+  requires is_class<F>::value
+function(F) -> function<__function_detail::__function_guide_t<F>>;
+
+template <class R, class... Args>
+bool operator==(const function<R(Args...)>& value, nullptr_t) noexcept {
+  return !value;
+}
+
+template <class R, class... Args>
+bool operator==(nullptr_t, const function<R(Args...)>& value) noexcept {
+  return !value;
+}
+
+template <class R, class... Args>
+void swap(function<R(Args...)>& left,
+          function<R(Args...)>& right) noexcept {
+  left.swap(right);
+}
 
 }  // namespace std
 

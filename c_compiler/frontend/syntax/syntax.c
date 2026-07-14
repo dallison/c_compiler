@@ -357,6 +357,7 @@ static bool OverloadFunctionPrototypesEqual(FunctionInfo* left,
   if (left->prototype.length != right->prototype.length ||
       left->varargs != right->varargs ||
       left->is_const_member != right->is_const_member ||
+      left->is_volatile_member != right->is_volatile_member ||
       left->ref_qualifier != right->ref_qualifier) {
     return false;
   }
@@ -400,6 +401,8 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
     case kDeclReference:
     case kDeclRValueReference:
       return OverloadTypesEqual(left->next, right->next);
+    case kDeclMemberPointer:
+      return TypeEqual(left, right);
     case kDeclFunction:
       return OverloadTypesEqual(left->next, right->next) &&
              OverloadFunctionPrototypesEqual(&left->info.function,
@@ -4708,6 +4711,11 @@ static bool TryParseCXXDeductionGuide(Syntax* syntax, Symbol* sym) {
       sym->type->info.function.template_parameters.length == 0) {
     MoveCurrentTemplateParametersToFunction(syntax, sym->type);
   }
+  if (syntax->current_template_requires_clause != NULL) {
+    AddFunctionAssociatedConstraint(
+        sym->type, syntax->current_template_requires_clause);
+    syntax->current_template_requires_clause = NULL;
+  }
   TypeAddCXXDeductionGuide(class_template, sym);
   return true;
 }
@@ -6202,7 +6210,7 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
     return NewVector();
   }
   Vector* params = NewVector();
-  while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
+  while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     ParseTemplateParameter(syntax, params, base);
     if (!LexMatch(lex, TOK(comma))) {
       break;
@@ -6225,6 +6233,7 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
     return;
   }
   if ((node->flags & kASTDependentQualifiedName) != 0 ||
+      TypeIsUnknown(node->type) ||
       TypeContainsTemplateParameter(node->type)) {
     *(bool*)data = true;
     return;
@@ -6343,7 +6352,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     return NULL;
   }
   Vector* args = NewVector();
-  while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
+  while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     TemplateArgument* arg = malloc(sizeof(TemplateArgument));
     arg->kind = kTemplateParameterType;
     arg->is_pack_expansion = false;
@@ -7473,7 +7482,7 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
   return NewCXXConstructorCall(syntax, sym, actuals, location);
 }
 
-static ASTNode* NewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
+ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym) {
   if (TypeIsFixedArray(sym->type)) {
     unsigned long element_count = 0;
@@ -7626,6 +7635,23 @@ static void SetCXXInlineLocalStaticAsmNameFor(TypeRecord* func, Symbol* sym,
   const char* func_name = func_symbol->asm_name.length != 0
                               ? func_symbol->asm_name.value
                               : func_symbol->name.value;
+  char fallback_func_name[64];
+  if (func_name == NULL || func_name[0] == '\0') {
+    const char* function_filename;
+    int function_lineno;
+    int function_start;
+    int function_end;
+    DecodeSourceLocation(func_symbol->location, &function_filename,
+                         &function_lineno, &function_start, &function_end);
+    (void)function_filename;
+    (void)function_end;
+    snprintf(fallback_func_name, sizeof(fallback_func_name),
+             "anonymous_function_%d_%d", function_lineno, function_start);
+    func_name = fallback_func_name;
+  }
+  if (local_name == NULL || local_name[0] == '\0') {
+    local_name = "anonymous_local";
+  }
   const char* filename;
   int lineno;
   int start;
@@ -7800,7 +7826,7 @@ static bool CXXThreadLocalInitializerIsDynamic(ASTNode* initializer) {
 static ASTNode* NewCXXThreadLocalGuardedInit(Syntax* syntax, Symbol* sym,
                                              ASTNode* init) {
   if (init == NULL) {
-    init = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+    init = SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
     if (init == NULL) {
       return NULL;
     }
@@ -8548,6 +8574,26 @@ static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym
   return NewCXXConstructorCall(syntax, sym, actuals, initializer->location);
 }
 
+ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,
+                                                     Symbol* sym,
+                                                     ASTNode* initializer) {
+  if (initializer == NULL || initializer->op != AST_OP(init)) {
+    return initializer;
+  }
+  BinaryASTNode* init = (BinaryASTNode*)initializer;
+  ASTNode* expression_initializer = init->right;
+  ASTNode* rewritten = NewCXXCopyInitConstructorInitializer(
+      syntax, sym, expression_initializer);
+  if (rewritten == expression_initializer) {
+    return initializer;
+  }
+
+  init->right = NULL;
+  ASTNodeDelete(initializer);
+  ASTNodeDelete(expression_initializer);
+  return rewritten;
+}
+
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -8770,7 +8816,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                      StorageIs(storage, STO(thread))) {
             initializer = NewCXXThreadLocalGuardedConstructor(syntax, sym);
           } else {
-            initializer = NewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+            initializer =
+                SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
           }
         } else if (!StorageIs(storage, STO(extern)) &&
                    StorageIs(sym->storage, STO(thread)) &&

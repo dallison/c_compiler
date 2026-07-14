@@ -12,32 +12,33 @@
 #include "type.h"
 
 typedef enum {
-  kDaveTypeTraitIsConstructible,
-  kDaveTypeTraitIsNothrowConstructible,
-  kDaveTypeTraitIsConvertible,
-  kDaveTypeTraitIsAssignable,
-  kDaveTypeTraitIsNothrowAssignable,
-  kDaveTypeTraitIsDestructible,
-  kDaveTypeTraitIsNothrowDestructible,
-  kDaveTypeTraitIsBaseOf,
-  kDaveTypeTraitIsSwappable,
-  kDaveTypeTraitIsSwappableWith,
-  kDaveTypeTraitIsInvocable,
-  kDaveTypeTraitIsNothrowInvocable,
-  kDaveTypeTraitIsClass,
-  kDaveTypeTraitIsUnion,
-  kDaveTypeTraitIsEnum,
-  kDaveTypeTraitIsMemberPointer,
-  kDaveTypeTraitIsMemberObjectPointer,
-  kDaveTypeTraitIsMemberFunctionPointer,
-} DaveTypeTraitKind;
+  kCXXTypeTraitIsConstructible,
+  kCXXTypeTraitIsNothrowConstructible,
+  kCXXTypeTraitIsConvertible,
+  kCXXTypeTraitIsAssignable,
+  kCXXTypeTraitIsNothrowAssignable,
+  kCXXTypeTraitIsDestructible,
+  kCXXTypeTraitIsNothrowDestructible,
+  kCXXTypeTraitIsBaseOf,
+  kCXXTypeTraitIsSwappable,
+  kCXXTypeTraitIsSwappableWith,
+  kCXXTypeTraitIsInvocable,
+  kCXXTypeTraitIsNothrowInvocable,
+  kCXXTypeTraitIsClass,
+  kCXXTypeTraitIsUnion,
+  kCXXTypeTraitIsEnum,
+  kCXXTypeTraitIsMemberPointer,
+  kCXXTypeTraitIsMemberObjectPointer,
+  kCXXTypeTraitIsMemberFunctionPointer,
+  kCXXTypeTraitMemberPointerDirectObject,
+} CXXTypeTraitKind;
 
-bool DaveTypeTraitEvaluateBool(Syntax* syntax, DaveTypeTraitKind kind,
-                               Vector* type_args);
+bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
+                              Vector* type_args);
 
-TypeRecord* DaveTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args);
+TypeRecord* CXXTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args);
 
-TypeRecord* DaveTypeTraitCommonType(Syntax* syntax, Vector* type_args);
+TypeRecord* CXXTypeTraitCommonType(Syntax* syntax, Vector* type_args);
 
 bool TypeRecordIsInvokeResultPlaceholder(TypeRecord* type);
 

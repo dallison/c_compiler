@@ -141,6 +141,7 @@ LIBC_SRCS = [
     "libc/cxx_rtti.c",
     "libc/davecc_lifecycle.c",
     "libc/eh_frame.c",
+    "libc/eh_frame_pointer.c",
     "libc/eh_terminate.c",
     "libc/eh_throw.c",
     "libc/exit.c",
@@ -497,6 +498,7 @@ cc_library(
         "c_compiler/backend/target_basic_block.c",
         "c_compiler/backend/target_generator.c",
         "c_compiler/frontend/lexical/tokens.c",
+        "c_compiler/frontend/syntax/member_pointer.c",
         "c_compiler/frontend/syntax/type_core.c",
         "c_compiler/frontend/syntax/type_print.c",
         "c_compiler/frontend/syntax/type_compare.c",
@@ -1275,6 +1277,7 @@ cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "RISCV_support/start.s"
+  "RISCV_support/eh_transfer.s"
 )
 
 runtime_objs=()
@@ -1296,7 +1299,9 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1397,6 +1402,7 @@ archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
+  "aarch64 support/eh_transfer.s"
   "aarch64 support/syscall.s"
 )
 
@@ -1419,7 +1425,9 @@ libc_srcs=(
   "libc/cxx_tls.c"
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
+  "libc/eh_frame_pointer.c"
   "libc/eh_terminate.c"
+  "libc/eh_throw.c"
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
@@ -1630,6 +1638,7 @@ genrule(
     name = "libc_pcode",
     srcs = LIBC_SRCS + glob([
         "libc/include/**/*.h",
+        "pcode support/*.s",
     ]) + [
         ":davecc",
         ":archivist",
@@ -1647,10 +1656,17 @@ davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target pcode -O1 -c -isystem libc/include -Ilibc)
 
+runtime_objs=()
+for src in "pcode support"/*.s; do
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
+
 libc_objs=()
 for src in libc/*.c; do
   case "$$(basename "$$src")" in
-    libc_test.c)
+    libc_test.c|eh_frame.c)
       continue
       ;;
   esac
@@ -1659,7 +1675,7 @@ for src in libc/*.c; do
   libc_objs+=("$$obj")
 done
 
-"$$archivist" r "$$out" "$${libc_objs[@]}"
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}"
 """,
 )
 

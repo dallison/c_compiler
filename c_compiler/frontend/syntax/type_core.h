@@ -42,7 +42,7 @@ TypeRecord* NewBasicArrayTypeRecord(Qualifiers quals, int size, bool is_flexible
 TypeRecord* NewFunctionTypeRecord(void);
 TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type);
 Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
-                         SourceLocation location);
+                         bool is_volatile_member, SourceLocation location);
 void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location);
 

@@ -13,6 +13,7 @@
 #include <string.h>
 #include "compiler.h"
 #include "debug.h"
+#include "member_pointer.h"
 
 #include "target_basic_block.h"
 
@@ -642,7 +643,8 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
     // Struct/union-typed nodes denote an aggregate, which in this ABI is
     // referenced by address; size them as 64-bit pointers (e.g. forming
     // &local to copy a struct argument by value).
-    if (TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
+    if (node->type->size == 8 ||
+        TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
         TypeIsDouble(node->type) || TypeIsLongDouble(node->type) ||
         TypeIsStructOrUnion(node->type)) {
@@ -708,6 +710,8 @@ void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {
   VectorInit(&g->var_regs);
   VectorInit(&g->saved_regs);
   VectorInit(&g->offsets);
+  VectorInit(&g->exception_ranges);
+  VectorInit(&g->exception_typeinfos);
 
   MapInitForInt64Keys(&g->conditions);
   AARCH64RegisterAllocatorInit(&g->register_allocator, g);
@@ -724,8 +728,43 @@ void AARCH64GeneratorDestruct(AARCH64Generator* g) {
   VectorDestructWithContents(&g->var_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&g->saved_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&g->offsets, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&g->exception_ranges, NULL,
+                             /*free_element=*/true);
+  VectorDestruct(&g->exception_typeinfos);
   MapDestruct(&g->conditions);
   AARCH64RegisterAllocatorDestruct(&g->register_allocator);
+}
+
+static void ResolveExceptionRanges(AARCH64Generator* g, Generator* gen) {
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    VectorAppend(&g->exception_typeinfos, gen->exception_typeinfos.value.p[i]);
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* ir_range = gen->exception_ranges.value.p[i];
+    TargetInstruction* try_start = ir_range->try_start->data.ptr;
+    TargetInstruction* try_end = ir_range->try_end->data.ptr;
+    TargetInstruction* catch_label = ir_range->catch_label->data.ptr;
+    if (try_start == NULL || try_end == NULL || catch_label == NULL) {
+      continue;
+    }
+    try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |=
+        TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    AARCH64ExceptionRange* range = malloc(sizeof(AARCH64ExceptionRange));
+    range->try_start = try_start;
+    range->try_end = try_end;
+    range->catch_label = catch_label;
+    range->catch_typeinfo = ir_range->catch_typeinfo;
+    VectorAppend(&g->exception_ranges, range);
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    TargetInstruction* target_label = label->data.ptr;
+    if (target_label != NULL) {
+      target_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    }
+  }
 }
 
 void AARCH64GeneratorDelete(AARCH64Generator* g) {
@@ -1176,15 +1215,25 @@ static TargetInstruction* LoadImmediate(AARCH64Generator* g, AARCH64Opcode opcod
 
 static TargetInstruction* StoreImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
                                          TargetInstruction* value, TargetInstruction* base, int32_t offset) {
+  int size = opcode == AARCH64_OP(strb) || opcode == AARCH64_OP(strh) ||
+                     opcode == AARCH64_OP(sturb) || opcode == AARCH64_OP(sturh)
+                 ? kSize32Bit
+                 : kSize64Bit;
   if (AARCH64LoadStoreImmInRange(offset)) {
-    return Emit(g, NewInstruction3(opcode, value, base,
-                                    GetIntConstant(g, NULL, kTargetType32Bit, offset)));
+    return Emit(g, SetInstructionSize(
+                       NewInstruction3(
+                           opcode, value, base,
+                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                       size));
   }
   // The offset does not fit the store's 9-bit immediate; fold it into the base
   // address and store at offset 0.
   TargetInstruction* addr = OffsetFrom(g, base, offset);
-  return Emit(g, NewInstruction3(opcode, value, addr,
-                                  GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+  return Emit(g, SetInstructionSize(
+                     NewInstruction3(
+                         opcode, value, addr,
+                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                     size));
 }
 
 static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_addr,
@@ -1408,13 +1457,16 @@ static bool UseRegisterForVariable(AARCH64Generator* g, IRNode* var_node) {
 // is done using a la or lla pseudo-instruction.
 static TargetInstruction* LoadStaticVariableAddress(AARCH64Generator* g,
                                                     IRNode* node) {
-  (void)node;
+  IRVariable* var = (IRVariable*)node;
   // The address of a static/global symbol is materialized with an adrp/add
   // pair.  The linker places the code and data segments far apart (well beyond
   // adr's +/-1MB range), so a single PC-relative adr cannot reach data symbols.
   // adrp computes the 4KB page (R_AARCH64_ADR_PREL_PG_HI21, +/-4GB range) and
   // the add fills in the low 12 bits (R_AARCH64_ADD_ABS_LO12_NC).
-  TargetInstruction* sym = GetLoweredNode(node);
+  // Do not reuse node->data.ptr here. A static variable can also flow through
+  // argument lowering, which may redirect that lowered value to an argument
+  // register. The relocation must always name the variable's symbol.
+  TargetInstruction* sym = GetSymbol(g, NULL, var->symbol);
   TargetInstruction* page =
       Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), sym),
                                  kSize64Bit));
@@ -3340,7 +3392,9 @@ static TargetInstruction* LowerMemzero(AARCH64Generator* g, IRNode* node) {
 
 typedef enum {
   kArgLocationRegister,
+  kArgLocationRegisterPair,
   kArgLocationPushed,
+  kArgLocationPushedPair,
   kArgLocationPassedByReferenceInRegister,
   kArgLocationPassedByReferenceOnStack,
 } ArgLocationType;
@@ -3352,6 +3406,8 @@ typedef struct {
     size_t offset;
   } location;
   size_t reference_offset;
+  TargetInstruction* second_reg;
+  size_t second_offset;
 } ArgLocation;
 
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
@@ -3359,6 +3415,8 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   loc->type = kArgLocationRegister;
   loc->location.reg = reg;
   loc->reference_offset = 0;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3367,6 +3425,23 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   loc->type = type;
   loc->location.offset = offset;
   loc->reference_offset = 0;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
+  return loc;
+}
+
+static ArgLocation* NewArgLocationRegisterPair(TargetInstruction* first,
+                                               TargetInstruction* second) {
+  ArgLocation* loc = NewArgLocationRegister(first);
+  loc->type = kArgLocationRegisterPair;
+  loc->second_reg = second;
+  return loc;
+}
+
+static ArgLocation* NewArgLocationPushedPair(size_t first_offset) {
+  ArgLocation* loc =
+      NewArgLocationPushed(kArgLocationPushedPair, first_offset);
+  loc->second_offset = first_offset + 8;
   return loc;
 }
 
@@ -3376,6 +3451,8 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   loc->type = kArgLocationPassedByReferenceInRegister;
   loc->location.reg = reg;
   loc->reference_offset = reference_offset;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3385,6 +3462,8 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   loc->type = kArgLocationPassedByReferenceOnStack;
   loc->location.offset = offset;
   loc->reference_offset = reference_offset;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3408,6 +3487,11 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
     if (loc->type == kArgLocationRegister) {
       result =
           Emit(g, NewInstruction2(AARCH64_OP(regarg), result, loc->location.reg));
+    } else if (loc->type == kArgLocationRegisterPair) {
+      result =
+          Emit(g, NewInstruction2(AARCH64_OP(regarg), result, loc->location.reg));
+      result = Emit(
+          g, NewInstruction2(AARCH64_OP(regarg), result, loc->second_reg));
     }
   }
   return result;
@@ -3450,7 +3534,20 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
-    if (TypeIsStructOrUnion(arg_node->type)) {
+    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+      if (next_int_arg_reg + 1 < AARCH64_NUM_INT_ARGS) {
+        TargetInstruction* first =
+            FreshIntArgumentRegister(g, next_int_arg_reg++);
+        TargetInstruction* second =
+            FreshIntArgumentRegister(g, next_int_arg_reg++);
+        VectorAppend(&arg_locations,
+                     NewArgLocationRegisterPair(first, second));
+      } else {
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushedPair(next_pushed_arg_offset));
+        next_pushed_arg_offset += 16;
+      }
+    } else if (TypeIsStructOrUnion(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg->base.
         TargetInstruction* arg_reg =
@@ -3603,6 +3700,48 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     IRNode* arg_node = node->inputs.value.p[i];
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
     switch (arg_location->type) {
+      case kArgLocationRegisterPair: {
+        TargetInstruction* address = Materialize(g, arg_node);
+        SetInstructionSize(address, kSize64Bit);
+        TargetInstruction* first = Emit(
+            g, SetInstructionSize(
+                   NewInstruction2(
+                       AARCH64_OP(ldr), address,
+                       GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                   kSize64Bit));
+        TargetInstruction* second = Emit(
+            g, SetInstructionSize(
+                   NewInstruction2(
+                       AARCH64_OP(ldr), address,
+                       GetIntConstant(g, NULL, kTargetType32Bit, 8)),
+                   kSize64Bit));
+        SetDestOrMoveToArgReg(g, arg_node, first,
+                              arg_location->location.reg, AARCH64_OP(mov));
+        SetDestOrMoveToArgReg(g, arg_node, second, arg_location->second_reg,
+                              AARCH64_OP(mov));
+        break;
+      }
+      case kArgLocationPushedPair: {
+        TargetInstruction* address = Materialize(g, arg_node);
+        SetInstructionSize(address, kSize64Bit);
+        TargetInstruction* first = Emit(
+            g, SetInstructionSize(
+                   NewInstruction2(
+                       AARCH64_OP(ldr), address,
+                       GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                   kSize64Bit));
+        TargetInstruction* second = Emit(
+            g, SetInstructionSize(
+                   NewInstruction2(
+                       AARCH64_OP(ldr), address,
+                       GetIntConstant(g, NULL, kTargetType32Bit, 8)),
+                   kSize64Bit));
+        StoreImmediate(g, AARCH64_OP(str), first, StackPointer(g),
+                       (int32_t)arg_location->location.offset);
+        StoreImmediate(g, AARCH64_OP(str), second, StackPointer(g),
+                       (int32_t)arg_location->second_offset);
+        break;
+      }
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
         // contains the offset from the to of the pushed args to the copied
@@ -4032,8 +4171,15 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
       return LowerAddressOf(g, node);
 
     case IR_OP(const32):
-    case IR_OP(consta):
+      if (TypeIsMemberPointerScalar(node->type) &&
+          MemberPointerSize(node->type) == 8) {
+        return GetIntConstant(g, node, kTargetType64Bit,
+                              ((IRConstant*)node)->value.ivalue);
+      }
       return GetIntConstant(g, node, kTargetType32Bit,
+                            ((IRConstant*)node)->value.ivalue);
+    case IR_OP(consta):
+      return GetIntConstant(g, node, kTargetType64Bit,
                             ((IRConstant*)node)->value.ivalue);
     case IR_OP(const8):
       return GetIntConstant(g, node, kTargetType8Bit,
@@ -4313,16 +4459,21 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
 
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(IRNode* arg) {
-  if (TypeIsFloatingPoint(arg->type)) {
+  TypeRecord* type = arg->type;
+  if (arg->opcode == IR_OP(argument) &&
+      ((IRVariable*)arg)->symbol != NULL) {
+    type = ((IRVariable*)arg)->symbol->type;
+  }
+  if (TypeIsFloatingPoint(type)) {
     return 8;
   }
-  if (TypeIsPointerOrArray(arg->type)) {
+  if (TypeIsPointerOrArray(type)) {
     return 8;
   }
-  if (TypeIsStructOrUnion(arg->type)) {
-    return arg->type->info.struct_info->size;
+  if (TypeIsStructOrUnion(type)) {
+    return type->info.struct_info->size;
   }
-  return arg->type->size < 4 ? 4 : arg->type->size;
+  return type->size < 4 ? 4 : type->size;
 }
 
 static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
@@ -4348,6 +4499,8 @@ static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
 // the register number or stack offset (from s0 - the frame pointer).
 static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   IRVariable* var = (IRVariable*)arg->pooled;
+  TypeRecord* arg_type =
+      var->symbol != NULL ? var->symbol->type : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
   bool is_struct_return = TypeIsStructOrUnion(
       compiler->current_function->info.function.symbol->type->next);
@@ -4365,8 +4518,18 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   int stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
-      ArgLocation location;
-      if (TypeIsFloatingPoint(arg->pooled->type)) {
+      ArgLocation location = {0};
+      if (TypeIsMemberPointerAggregate(arg_type)) {
+        if (int_reg + 1 <= AARCH64_INT_ARG_END) {
+          location.type = kArgLocationRegisterPair;
+          location.location.offset = int_reg;
+          location.second_offset = int_reg + 1;
+        } else {
+          location.type = kArgLocationPushedPair;
+          location.location.offset = stack_offset;
+          location.second_offset = stack_offset + 8;
+        }
+      } else if (TypeIsFloatingPoint(arg_type)) {
         if (fp_reg <= AARCH64_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -4396,7 +4559,13 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
     // past x7 and never advance stack_offset, so every stacked argument would
     // be read from the same (first) stack slot.
     Symbol* arg_symbol = args->value.p[i];
-    if (TypeIsFloatingPoint(arg_symbol->type)) {
+    if (TypeIsMemberPointerAggregate(arg_symbol->type)) {
+      if (int_reg + 1 <= AARCH64_INT_ARG_END) {
+        int_reg += 2;
+      } else {
+        stack_offset += 16;
+      }
+    } else if (TypeIsFloatingPoint(arg_symbol->type)) {
       if (fp_reg <= AARCH64_FP_ARG_END) {
         fp_reg++;
       } else {
@@ -4464,7 +4633,12 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(AARCH64Generator* g
       load->dest = var;
       return var;
     }
+    case kArgLocationRegisterPair:
+    case kArgLocationPushedPair:
+      assert(false);
+      return NULL;
   }
+  return NULL;
 }
 
 static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* g,
@@ -4496,7 +4670,12 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* 
       load->dest = var;
       return var;
     }
+    case kArgLocationRegisterPair:
+    case kArgLocationPushedPair:
+      assert(false);
+      return NULL;
   }
+  return NULL;
 }
 
 // Assign a register to a variable or argument if possible.  The
@@ -4509,6 +4688,10 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
     return;
   }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
+  TypeRecord* variable_type =
+      is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
+          ? ((IRVariable*)entry->pooled)->symbol->type
+          : entry->pooled->type;
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
@@ -4546,6 +4729,35 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
         SetDebugStackLocation(entry, *var_offset);
         *var_offset += size;
       }
+    }
+  } else if (TypeIsMemberPointerAggregate(variable_type)) {
+    AlignOffset(entry, var_offset);
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      if (location.type == kArgLocationRegisterPair) {
+        int offset =
+            -24 - ((int)g->saved_regs.length + 1) * 8;
+        entry->pooled->data.ivalue = offset;
+        SetDebugStackLocation(entry, offset);
+        VectorAppend(
+            &g->saved_regs,
+            NewSavedArgumentRegister((int)location.location.offset,
+                                     AARCH64_FP_REG, offset, false));
+        VectorAppend(
+            &g->saved_regs,
+            NewSavedArgumentRegister((int)location.second_offset,
+                                     AARCH64_FP_REG, offset + 8, false));
+        g->num_int_arg_regs += 2;
+      } else {
+        g->not_leaf = true;
+        entry->pooled->data.ivalue =
+            16 + (int)location.location.offset;
+        SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+      }
+    } else {
+      entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
+      *var_offset += size;
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
@@ -4746,6 +4958,7 @@ void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
     LowerIRNode(g, gen, node);
     node = IRNext(node);
   }
+  ResolveExceptionRanges(g, gen);
 
   if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
     AARCH64Print(g, compiler->ir_output_file);

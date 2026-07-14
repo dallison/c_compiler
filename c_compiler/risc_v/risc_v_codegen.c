@@ -13,6 +13,7 @@
 #include <string.h>
 #include "compiler.h"
 #include "debug.h"
+#include "member_pointer.h"
 
 #include "risc_v_optimize.h"
 #include "target_basic_block.h"
@@ -801,6 +802,8 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   VectorInit(&rv->var_regs);
   VectorInit(&rv->saved_regs);
   VectorInit(&rv->offsets);
+  VectorInit(&rv->exception_ranges);
+  VectorInit(&rv->exception_typeinfos);
 
   RVRegisterAllocatorInit(&rv->register_allocator, rv);
 }
@@ -816,8 +819,43 @@ void RVGeneratorDestruct(RVGenerator* rv) {
   VectorDestructWithContents(&rv->var_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->saved_regs, NULL, /*free_element=*/true);
   VectorDestructWithContents(&rv->offsets, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&rv->exception_ranges, NULL,
+                             /*free_element=*/true);
+  VectorDestruct(&rv->exception_typeinfos);
   RVRegisterAllocatorDestruct(&rv->register_allocator);
   
+}
+
+static void ResolveExceptionRanges(RVGenerator* rv, Generator* gen) {
+  for (size_t i = 0; i < gen->exception_typeinfos.length; i++) {
+    VectorAppend(&rv->exception_typeinfos, gen->exception_typeinfos.value.p[i]);
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    ExceptionHandlerRange* ir_range = gen->exception_ranges.value.p[i];
+    TargetInstruction* try_start = ir_range->try_start->data.ptr;
+    TargetInstruction* try_end = ir_range->try_end->data.ptr;
+    TargetInstruction* catch_label = ir_range->catch_label->data.ptr;
+    if (try_start == NULL || try_end == NULL || catch_label == NULL) {
+      continue;
+    }
+    try_start->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    try_end->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    catch_label->flags |=
+        TARGET_INST_KEEP_UNREACHABLE | TARGET_INST_EXCEPTION_LANDING;
+    RVExceptionRange* range = malloc(sizeof(RVExceptionRange));
+    range->try_start = try_start;
+    range->try_end = try_end;
+    range->catch_label = catch_label;
+    range->catch_typeinfo = ir_range->catch_typeinfo;
+    VectorAppend(&rv->exception_ranges, range);
+  }
+  for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {
+    IRNode* label = gen->exception_keep_labels.value.p[i];
+    TargetInstruction* target_label = label->data.ptr;
+    if (target_label != NULL) {
+      target_label->flags |= TARGET_INST_KEEP_UNREACHABLE;
+    }
+  }
 }
 
 void RVGeneratorDelete(RVGenerator* rv) {
@@ -1439,7 +1477,10 @@ static TargetInstruction* LoadStaticVariableAddress(RVGenerator* rv,
   // are loaded using la.  The difference is in PIC code lla will
   // not use the GOT for the relocation.
   RVOpcode opcode = var->symbol->flags.is_local ? RV_OP(lla) : RV_OP(la);
-  return Emit(rv, NewInstruction1(opcode, GetLoweredNode(node)));
+  // The lowered value may have been redirected to an argument register by a
+  // prior call. Address materialization must continue to reference the static
+  // variable's symbol, not that transient register.
+  return Emit(rv, NewInstruction1(opcode, GetSymbol(rv, NULL, var->symbol)));
 }
 
 static struct {
@@ -3167,7 +3208,9 @@ static TargetInstruction* LowerMemzero(RVGenerator* rv, IRNode* node) {
 
 typedef enum {
   kArgLocationRegister,
+  kArgLocationRegisterPair,
   kArgLocationPushed,
+  kArgLocationPushedPair,
   kArgLocationPassedByReferenceInRegister,
   kArgLocationPassedByReferenceOnStack,
 } ArgLocationType;
@@ -3179,6 +3222,8 @@ typedef struct {
     size_t offset;
   } location;
   size_t reference_offset;
+  TargetInstruction* second_reg;
+  size_t second_offset;
 } ArgLocation;
 
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
@@ -3186,6 +3231,8 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   loc->type = kArgLocationRegister;
   loc->location.reg = reg;
   loc->reference_offset = 0;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3194,6 +3241,23 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   loc->type = type;
   loc->location.offset = offset;
   loc->reference_offset = 0;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
+  return loc;
+}
+
+static ArgLocation* NewArgLocationRegisterPair(TargetInstruction* first,
+                                               TargetInstruction* second) {
+  ArgLocation* loc = NewArgLocationRegister(first);
+  loc->type = kArgLocationRegisterPair;
+  loc->second_reg = second;
+  return loc;
+}
+
+static ArgLocation* NewArgLocationPushedPair(size_t first_offset) {
+  ArgLocation* loc =
+      NewArgLocationPushed(kArgLocationPushedPair, first_offset);
+  loc->second_offset = first_offset + 8;
   return loc;
 }
 
@@ -3203,6 +3267,8 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   loc->type = kArgLocationPassedByReferenceInRegister;
   loc->location.reg = reg;
   loc->reference_offset = reference_offset;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3212,6 +3278,8 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   loc->type = kArgLocationPassedByReferenceOnStack;
   loc->location.offset = offset;
   loc->reference_offset = reference_offset;
+  loc->second_reg = NULL;
+  loc->second_offset = 0;
   return loc;
 }
 
@@ -3235,6 +3303,11 @@ static TargetInstruction* BuildArgList(RVGenerator* rv, Vector* arg_locations) {
     if (loc->type == kArgLocationRegister) {
       result =
           Emit(rv, NewInstruction2(RV_OP(regarg), result, loc->location.reg));
+    } else if (loc->type == kArgLocationRegisterPair) {
+      result =
+          Emit(rv, NewInstruction2(RV_OP(regarg), result, loc->location.reg));
+      result = Emit(rv,
+                    NewInstruction2(RV_OP(regarg), result, loc->second_reg));
     }
   }
   return result;
@@ -3282,7 +3355,20 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
     bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
-    if (TypeIsStructOrUnion(arg_node->type)) {
+    if (TypeIsMemberPointerAggregate(arg_node->type)) {
+      if (next_int_arg_reg + 1 < RV_NUM_INT_ARGS) {
+        TargetInstruction* first =
+            IntArgumentRegister(rv, next_int_arg_reg++);
+        TargetInstruction* second =
+            IntArgumentRegister(rv, next_int_arg_reg++);
+        VectorAppend(&arg_locations,
+                     NewArgLocationRegisterPair(first, second));
+      } else {
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushedPair(next_pushed_arg_offset));
+        next_pushed_arg_offset += 16;
+      }
+    } else if (TypeIsStructOrUnion(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg.
         TargetInstruction* arg_reg =
@@ -3404,6 +3490,38 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     bool pass_float_as_int =
         is_variadic_arg && TypeIsFloatingPoint(arg_node->type);
     switch (arg_location->type) {
+      case kArgLocationRegisterPair: {
+        TargetInstruction* address = Materialize(rv, arg_node);
+        TargetInstruction* first = Emit(rv, NewInstruction2(
+            RV_OP(ld), address,
+            GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+        TargetInstruction* second = Emit(rv, NewInstruction2(
+            RV_OP(ld), address,
+            GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
+        SetDestOrMoveToArgReg(rv, arg_node, first,
+                              arg_location->location.reg, RV_OP(mv));
+        SetDestOrMoveToArgReg(rv, arg_node, second, arg_location->second_reg,
+                              RV_OP(mv));
+        break;
+      }
+      case kArgLocationPushedPair: {
+        TargetInstruction* address = Materialize(rv, arg_node);
+        TargetInstruction* first = Emit(rv, NewInstruction2(
+            RV_OP(ld), address,
+            GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+        TargetInstruction* second = Emit(rv, NewInstruction2(
+            RV_OP(ld), address,
+            GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
+        Emit(rv, NewInstruction3(
+                     RV_OP(sd), first, StackPointer(rv),
+                     GetIntConstant(rv, NULL, kTargetType64Bit,
+                                    arg_location->location.offset)));
+        Emit(rv, NewInstruction3(
+                     RV_OP(sd), second, StackPointer(rv),
+                     GetIntConstant(rv, NULL, kTargetType64Bit,
+                                    arg_location->second_offset)));
+        break;
+      }
       case kArgLocationPassedByReferenceInRegister: {
         // Struct passed by reference in a register.  The reference_offset
         // contains the offset from the to of the pushed args to the copied
@@ -4039,16 +4157,21 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
 
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(IRNode* arg) {
-  if (TypeIsFloatingPoint(arg->type)) {
+  TypeRecord* type = arg->type;
+  if (arg->opcode == IR_OP(argument) &&
+      ((IRVariable*)arg)->symbol != NULL) {
+    type = ((IRVariable*)arg)->symbol->type;
+  }
+  if (TypeIsFloatingPoint(type)) {
     return 8;
   }
-  if (TypeIsPointerOrArray(arg->type)) {
+  if (TypeIsPointerOrArray(type)) {
     return 8;
   }
-  if (TypeIsStructOrUnion(arg->type)) {
-    return arg->type->info.struct_info->size;
+  if (TypeIsStructOrUnion(type)) {
+    return type->info.struct_info->size;
   }
-  return arg->type->size < 4 ? 4 : arg->type->size;
+  return type->size < 4 ? 4 : type->size;
 }
 
 static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
@@ -4074,6 +4197,8 @@ static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
 // the register number or stack offset (from s0 - the frame pointer).
 static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   IRVariable* var = (IRVariable*)arg->pooled;
+  TypeRecord* arg_type =
+      var->symbol != NULL ? var->symbol->type : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
   bool is_struct_return = TypeIsStructOrUnion(
       compiler->current_function->info.function.symbol->type->next);
@@ -4086,8 +4211,18 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   int stack_offset = 0;
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
-      ArgLocation location;
-      if (TypeIsFloatingPoint(arg->pooled->type)) {
+      ArgLocation location = {0};
+      if (TypeIsMemberPointerAggregate(arg_type)) {
+        if (int_reg + 1 <= RV_INT_ARG_END) {
+          location.type = kArgLocationRegisterPair;
+          location.location.offset = int_reg;
+          location.second_offset = int_reg + 1;
+        } else {
+          location.type = kArgLocationPushedPair;
+          location.location.offset = stack_offset;
+          location.second_offset = stack_offset + 8;
+        }
+      } else if (TypeIsFloatingPoint(arg_type)) {
         if (fp_reg <= RV_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -4110,7 +4245,13 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
     }
 
     Symbol* arg_symbol = args->value.p[i];
-    if (TypeIsFloatingPoint(arg_symbol->type)) {
+    if (TypeIsMemberPointerAggregate(arg_symbol->type)) {
+      if (int_reg + 1 <= RV_INT_ARG_END) {
+        int_reg += 2;
+      } else {
+        stack_offset += 16;
+      }
+    } else if (TypeIsFloatingPoint(arg_symbol->type)) {
       if (fp_reg <= RV_FP_ARG_END) {
         fp_reg++;
       } else {
@@ -4173,7 +4314,12 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(RVGenerator* rv,
       Emit(rv, NewInstruction2(move_op, var, load));
       return var;
     }
+    case kArgLocationRegisterPair:
+    case kArgLocationPushedPair:
+      assert(false);
+      return NULL;
   }
+  return NULL;
 }
 
 static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
@@ -4200,7 +4346,12 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(RVGenerator* rv,
       mv->dest = var;
       return var;
     }
+    case kArgLocationRegisterPair:
+    case kArgLocationPushedPair:
+      assert(false);
+      return NULL;
   }
+  return NULL;
 }
 
 // Assign a register to a variable or argument if possible.  The
@@ -4213,6 +4364,10 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
     return;
   }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
+  TypeRecord* variable_type =
+      is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
+          ? ((IRVariable*)entry->pooled)->symbol->type
+          : entry->pooled->type;
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
@@ -4251,6 +4406,33 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         SetDebugStackLocation(entry, *var_offset);
         *var_offset += size;
       }
+    }
+  } else if (TypeIsMemberPointerAggregate(variable_type)) {
+    AlignOffset(entry, var_offset);
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      if (location.type == kArgLocationRegisterPair) {
+        int offset =
+            -24 - ((int)rv->saved_regs.length + 1) * 8;
+        entry->pooled->data.ivalue = offset;
+        SetDebugStackLocation(entry, offset);
+        VectorAppend(
+            &rv->saved_regs,
+            NewSavedArgumentRegister((int)location.location.offset, RV_FP_REG,
+                                     offset, 8, false));
+        VectorAppend(
+            &rv->saved_regs,
+            NewSavedArgumentRegister((int)location.second_offset, RV_FP_REG,
+                                     offset + 8, 8, false));
+        rv->num_int_arg_regs += 2;
+      } else {
+        entry->pooled->data.ivalue = (int32_t)location.location.offset;
+        SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+      }
+    } else {
+      entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
+      *var_offset += size;
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {
@@ -4447,6 +4629,7 @@ void RVLower(RVGenerator* rv, Generator* gen) {
     LowerIRNode(rv, gen, node);
     node = IRNext(node);
   }
+  ResolveExceptionRanges(rv, gen);
 
   if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
     RVPrint(rv, compiler->ir_output_file);

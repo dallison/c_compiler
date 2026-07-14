@@ -69,6 +69,10 @@ bool CXXClassNameMatchesUnqualifiedTemplateName(String* class_name,
 
 void ComputeCXXAggregateStatus(Struct* str);
 void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str, Symbol* tag);
+void AddImplicitLambdaClosureSpecialMembers(struct Syntax* syntax, Struct* str,
+                                            Symbol* tag, bool has_capture_fields,
+                                            bool has_explicit_template_params);
+void LambdaClosureRemoveEmptyPlaceholder(Struct* str);
 void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
                                       Symbol* tag);
 void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag);

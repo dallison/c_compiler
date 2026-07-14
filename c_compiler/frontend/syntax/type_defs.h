@@ -186,6 +186,7 @@ typedef struct {
   Vector template_instantiations;  // Symbol* cache, not overload candidates. // @wire 46
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
+  bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49
 } FunctionInfo;
 
 typedef enum {

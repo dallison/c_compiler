@@ -156,7 +156,11 @@ static int StackFrameSize(RVEmitter* emitter) {
 
 static bool EmptyStackFrame(RVEmitter* emitter) {
   return emitter->rv->base.stack_frame_size == 0 &&
-         emitter->rv->base.num_calls == 0 && !emitter->rv->not_leaf;
+         emitter->rv->base.num_calls == 0 && !emitter->rv->not_leaf &&
+         emitter->rv->saved_regs.length == 0 &&
+         BitSetCount(&emitter->regs->used_int_regs) == 0 &&
+         BitSetCount(&emitter->regs->used_float_regs) == 0 &&
+         emitter->spill_region_size == 0;
 }
 
 static void DecrementStackPointer(RVEmitter* emitter, int stack_frame_size,
@@ -526,6 +530,33 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
   }
 }
 
+static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
+  fprintf(fp, "\tmv sp, s0\n");
+  DecrementStackPointer(emitter, StackFrameSize(emitter), fp);
+
+  int offset = emitter->saved_reg_offset;
+  char buf[8];
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tld %s, %d(sp)\n",
+            RVRegisterNameFromNum(reg, kRVRegTypeInt, buf, sizeof(buf)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tfld %s, %d(sp)\n",
+            RVRegisterNameFromNum(reg, kRVRegTypeFloat, buf, sizeof(buf)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+}
+
 // The rmov instructions are an explicit mov from operand[1] to
 // operand[0].  Both are registers.
 static const char* MoveMnemonic(RVOpcode opcode, RVRegister* dest,
@@ -761,6 +792,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
     }
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      RestoreExceptionLandingState(emitter, fp);
+    }
     return;
   }
 
@@ -1169,6 +1203,87 @@ void RVEmitterDelete(RVEmitter* emitter) {
   free(emitter);
 }
 
+static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
+                                     TargetInstruction* label) {
+  fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void PrintEscapedAsmString(FILE* fp, const char* s) {
+  for (; *s != '\0'; s++) {
+    unsigned char ch = (unsigned char)*s;
+    if (ch == '"' || ch == '\\') {
+      fprintf(fp, "\\%c", ch);
+    } else if (ch >= 32 && ch < 127) {
+      fputc(ch, fp);
+    } else {
+      fprintf(fp, "\\%03o", ch);
+    }
+  }
+}
+
+static void RVPrintTypeInfoRecords(RVEmitter* emitter, FILE* fp) {
+  if (emitter->rv->exception_typeinfos.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
+  for (size_t i = 0; i < emitter->rv->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = emitter->rv->exception_typeinfos.value.p[i];
+    const char* name = info->symbol_name.value;
+    fprintf(fp, "\t.p2align 3\n");
+    fprintf(fp, "\t.local %s_name\n", name);
+    fprintf(fp, "%s_name:\n\t.asciz \"", name);
+    PrintEscapedAsmString(fp, info->type_name.value);
+    fprintf(fp, "\"\n");
+    for (size_t b = 0; b < info->bases.length; b++) {
+      EHTypeInfoBase* base = info->bases.value.p[b];
+      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
+      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
+      PrintEscapedAsmString(fp, base->base_name.value);
+      fprintf(fp, "\"\n");
+    }
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.p2align 3\n\t.local %s_bases\n%s_bases:\n", name,
+              name);
+      for (size_t b = 0; b < info->bases.length; b++) {
+        EHTypeInfoBase* base = info->bases.value.p[b];
+        fprintf(fp, "\t.8byte %s_base%zu_name\n", name, b);
+        fprintf(fp, "\t.8byte %lld\n", (long long)base->offset);
+      }
+    }
+    fprintf(fp, "\t.p2align 3\n\t.weak %s\n%s:\n", name, name);
+    fprintf(fp, "\t.8byte %s_name\n", name);
+    fprintf(fp, "\t.8byte %zu\n", info->bases.length);
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.8byte %s_bases\n", name);
+    } else {
+      fprintf(fp, "\t.8byte 0\n");
+    }
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void RVPrintExceptionTable(RVEmitter* emitter, FILE* fp,
+                                  const char* func_name) {
+  if (emitter->rv->exception_ranges.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 3\n");
+  for (size_t i = 0; i < emitter->rv->exception_ranges.length; i++) {
+    RVExceptionRange* range = emitter->rv->exception_ranges.value.p[i];
+    fprintf(fp, "\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_start);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_end);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->catch_label);
+    fprintf(fp, "\n\t.8byte %s\n",
+            range->catch_typeinfo != NULL
+                ? range->catch_typeinfo->symbol_name.value
+                : "0");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
 
 void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
@@ -1189,4 +1304,6 @@ void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
+  RVPrintTypeInfoRecords(emitter, fp);
+  RVPrintExceptionTable(emitter, fp, func_name);
 }

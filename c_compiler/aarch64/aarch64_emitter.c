@@ -607,6 +607,42 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   }
 }
 
+static void RestoreExceptionLandingState(AARCH64Emitter* emitter, FILE* fp) {
+  int stack_frame_size = StackFrameSize(emitter);
+  int frame_adjustment =
+      stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+  if (frame_adjustment <= 4095) {
+    fprintf(fp, "\tsub sp, x29, #%d\n", frame_adjustment);
+  } else {
+    MoveImmediate(emitter, "x9", (uint64_t)frame_adjustment, fp);
+    fprintf(fp, "\tsub sp, x29, x9\n");
+  }
+
+  int offset = emitter->saved_reg_offset;
+  char buf[8];
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tldr %s, [sp, #%d]\n",
+            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeInt, kSize64Bit,
+                                      buf, sizeof(buf)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+  BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    fprintf(fp, "\tfldr %s, [sp, #%d]\n",
+            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeFloat, kSize64Bit,
+                                      buf, sizeof(buf)),
+            offset);
+    offset -= 8;
+    BitSetIteratorNext(&it);
+  }
+}
+
 // In aarch64_codegen.c.
 extern int GetRegisterSize(TargetInstruction* inst);
 
@@ -818,6 +854,9 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t.local .%s_label_%d\n", func_name, inst->id);
     }
     fprintf(fp, ".%s_label_%d:\n", func_name, inst->id);
+    if ((inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0) {
+      RestoreExceptionLandingState(emitter, fp);
+    }
     return;
   }
 
@@ -1310,6 +1349,87 @@ void AARCH64EmitterDelete(AARCH64Emitter* emitter) {
   free(emitter);
 }
 
+static void PrintExceptionTableLabel(FILE* fp, const char* func_name,
+                                     TargetInstruction* label) {
+  fprintf(fp, ".%s_label_%d", func_name, label->id);
+}
+
+static void PrintEscapedAsmString(FILE* fp, const char* s) {
+  for (; *s != '\0'; s++) {
+    unsigned char ch = (unsigned char)*s;
+    if (ch == '"' || ch == '\\') {
+      fprintf(fp, "\\%c", ch);
+    } else if (ch >= 32 && ch < 127) {
+      fputc(ch, fp);
+    } else {
+      fprintf(fp, "\\%03o", ch);
+    }
+  }
+}
+
+static void AARCH64PrintTypeInfoRecords(AARCH64Emitter* emitter, FILE* fp) {
+  if (emitter->g->exception_typeinfos.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".rodata\", \"a\", @progbits\n");
+  for (size_t i = 0; i < emitter->g->exception_typeinfos.length; i++) {
+    EHTypeInfo* info = emitter->g->exception_typeinfos.value.p[i];
+    const char* name = info->symbol_name.value;
+    fprintf(fp, "\t.p2align 3\n");
+    fprintf(fp, "\t.local %s_name\n", name);
+    fprintf(fp, "%s_name:\n\t.asciz \"", name);
+    PrintEscapedAsmString(fp, info->type_name.value);
+    fprintf(fp, "\"\n");
+    for (size_t b = 0; b < info->bases.length; b++) {
+      EHTypeInfoBase* base = info->bases.value.p[b];
+      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
+      fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
+      PrintEscapedAsmString(fp, base->base_name.value);
+      fprintf(fp, "\"\n");
+    }
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.p2align 3\n\t.local %s_bases\n%s_bases:\n", name,
+              name);
+      for (size_t b = 0; b < info->bases.length; b++) {
+        EHTypeInfoBase* base = info->bases.value.p[b];
+        fprintf(fp, "\t.8byte %s_base%zu_name\n", name, b);
+        fprintf(fp, "\t.8byte %lld\n", (long long)base->offset);
+      }
+    }
+    fprintf(fp, "\t.p2align 3\n\t.weak %s\n%s:\n", name, name);
+    fprintf(fp, "\t.8byte %s_name\n", name);
+    fprintf(fp, "\t.8byte %zu\n", info->bases.length);
+    if (info->bases.length > 0) {
+      fprintf(fp, "\t.8byte %s_bases\n", name);
+    } else {
+      fprintf(fp, "\t.8byte 0\n");
+    }
+  }
+  fprintf(fp, "\t.text\n\n");
+}
+
+static void AARCH64PrintExceptionTable(AARCH64Emitter* emitter, FILE* fp,
+                                       const char* func_name) {
+  if (emitter->g->exception_ranges.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.section \".davecc_except_table\", \"a\", @progbits\n");
+  fprintf(fp, "\t.p2align 3\n");
+  for (size_t i = 0; i < emitter->g->exception_ranges.length; i++) {
+    AARCH64ExceptionRange* range = emitter->g->exception_ranges.value.p[i];
+    fprintf(fp, "\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_start);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->try_end);
+    fprintf(fp, "\n\t.8byte ");
+    PrintExceptionTableLabel(fp, func_name, range->catch_label);
+    fprintf(fp, "\n\t.8byte %s\n",
+            range->catch_typeinfo != NULL
+                ? range->catch_typeinfo->symbol_name.value
+                : "0");
+  }
+  fprintf(fp, "\t.text\n\n");
+}
 
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
@@ -1334,5 +1454,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   fprintf(fp, ".func_end_%s:\n", func_name);
   fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", func_name, func_name,
           func_name);
+  AARCH64PrintTypeInfoRecords(emitter, fp);
+  AARCH64PrintExceptionTable(emitter, fp, func_name);
 }
 

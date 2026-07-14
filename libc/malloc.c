@@ -67,7 +67,8 @@ STATIC void InitFreeList() {
 #elif defined(__risc_v__)
   __free_list = __riscv_heap;
   __free_list->length = sizeof(__riscv_heap);
-#elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__)
+#elif defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || \
+    defined(__p_code__)
   extern char _end[];
   __free_list = (FreeBlockHeader*)_end;
   if (__initial_heap_size == 0) {
@@ -87,7 +88,7 @@ STATIC void InitFreeList() {
   __free_list->next = NULL;
 }
 
-#if !defined(__6502__) && !defined(__risc_v__)
+#if !defined(__6502__) && !defined(__risc_v__) && !defined(__p_code__)
 void PrintFreeList(const char* tag) {
   FreeBlockHeader* b = __free_list;
   while (b != NULL) {

@@ -508,13 +508,10 @@ void GeneratorReplaceInstruction(Generator* gen, IRNode* old, IRNode* new) {
 IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
                                 int64_t value) {
   PoolEntry* entry;
-  Type type_spec = kTypeInt;
-  if (type != NULL) {
-    type_spec = type->type;
-  }
   for (size_t i = 0; i < gen->int_constant_pool.length; i++) {
     entry = gen->int_constant_pool.value.p[i];
-    if (entry->value.ivalue == value && entry->type == type_spec) {
+    if (entry->value.ivalue == value &&
+        TypeEqual(entry->pooled->type, type)) {
       return entry->pooled;
     }
   }

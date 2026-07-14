@@ -20,6 +20,7 @@
 #include "rtti.h"
 #include "type_traits_semantics.h"
 #include "type_compare.h"
+#include "member_pointer.h"
 
 // This is the semantic analyzer for expressions.  It propagates type
 // information from the leaves of the AST (Abstract Syntax Tree) up
@@ -49,6 +50,7 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type);
 static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
                              size_t first_formal_arg);
 static bool MemberReceiverIsConst(BinaryASTNode* node);
+static bool MemberReceiverIsVolatile(BinaryASTNode* node);
 static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
                                               BinaryASTNode* member_access);
 
@@ -257,6 +259,12 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
 static ASTNode* FoldConstantExpression(ASTNode* node) {
+  // A value-dependent expression cannot be evaluated until its template
+  // arguments are known. Folding it now would freeze placeholder properties
+  // such as the provisional size of a dependent type into the template body.
+  if (CompilerIsCXX() && ExpressionIsTemplateDependent(node)) {
+    return NULL;
+  }
   switch (node->op) {
     case AST_OP(number):
     case AST_OP(charconst):
@@ -304,6 +312,8 @@ static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   return EvaluateScalarConstantForSymbol(symbol, initializer) ||
          ConstexprEvaluateObjectConstantForSymbol(symbol, initializer);
 }
+
+static StructMember* MemberPointerMemberFromExpression(ASTNode* node);
 
 static bool IsNullPointer(ASTNode* node) {
   switch (node->op) {
@@ -524,6 +534,10 @@ static bool IsIntConstant(ASTNode* node) {
 // Check that we have a valid operands for a numeric expression
 // and insert conversions as necessary.
 static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
+  if (TypeIsMemberPointer(node->left->type) ||
+      TypeIsMemberPointer(node->right->type)) {
+    return;
+  }
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeIsStructOrUnion(node->right->type)) {
     SemanticTypeConversionError(node->left, node->right->type,
@@ -611,7 +625,12 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       right_rank = 0;
     }
     // Convert smaller rank to larger.
-    assert(left_rank != -1 && right_rank != -1);
+    if (left_rank == -1 || right_rank == -1) {
+      SemanticTypeConversionError(node->left, node->right->type,
+                                  "Illegal numeric operand types "
+                                  "'%s' and '%s'");
+      return;
+    }
     if (left_rank > right_rank) {
       // Convert right to left.
       NormalConversion(node->right, node->left->type);
@@ -721,6 +740,8 @@ static const char* BinaryOperatorFunctionName(ASTOpcode op) {
       return "operator>=";
     case AST_OP(spaceship):
       return "operator<=>";
+    case AST_OP(arrowstar):
+      return "operator->*";
     default:
       return NULL;
   }
@@ -839,15 +860,17 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
   }
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
-    if (str->tag_symbol != NULL) {
-      Namespace* ns = str->tag_symbol->namespace_;
-      if (ns == NULL && str->tag_symbol->type != NULL &&
-          str->tag_symbol->type->template_origin != NULL) {
-        ns = str->tag_symbol->type->template_origin->namespace_;
-      }
-      if (ns == NULL && type->template_origin != NULL) {
-        ns = type->template_origin->namespace_;
-      }
+    Namespace* ns =
+        str->tag_symbol != NULL ? str->tag_symbol->namespace_ : NULL;
+    if (ns == NULL && str->tag_symbol != NULL &&
+        str->tag_symbol->type != NULL &&
+        str->tag_symbol->type->template_origin != NULL) {
+      ns = str->tag_symbol->type->template_origin->namespace_;
+    }
+    if (ns == NULL && type->template_origin != NULL) {
+      ns = type->template_origin->namespace_;
+    }
+    if (str->tag_symbol != NULL || type->template_origin != NULL) {
       ADLAddAssociatedNamespaceClosure(namespaces,
                                        ns != NULL ? ns : compiler->global_namespace);
     }
@@ -1113,6 +1136,7 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
   VectorASTNode call = {0};
   call.children = &children;
   bool receiver_const = MemberReceiverIsConst(node);
+  bool receiver_volatile = MemberReceiverIsVolatile(node);
   bool viable = false;
   for (StructMember* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -1131,6 +1155,12 @@ static bool BinaryMemberOperatorViable(BinaryASTNode* node, const char* op_name)
     }
     if (receiver_const &&
         !candidate->symbol->type->info.function.is_const_member &&
+        !candidate->symbol->type->info.function.is_constructor &&
+        !candidate->symbol->type->info.function.is_destructor) {
+      continue;
+    }
+    if (receiver_volatile &&
+        !candidate->symbol->type->info.function.is_volatile_member &&
         !candidate->symbol->type->info.function.is_constructor &&
         !candidate->symbol->type->info.function.is_destructor) {
       continue;
@@ -1583,6 +1613,105 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   if (overloaded != NULL) {
     return overloaded;
   }
+  if (TypeIsMemberPointer(node->left->type) &&
+      (TypeIsMemberPointer(node->right->type) ||
+       (node->right != NULL &&
+        (TypeIsNullPointer(node->right->type) ||
+         (IsIntConstant(node->right) &&
+          ((ConstantASTNode*)node->right)->value.ivalue == 0))))) {
+    if (node->base.op != AST_OP(equal) &&
+        node->base.op != AST_OP(noteq)) {
+      SemanticError((ASTNode*)node,
+                    "Only == and != are valid for pointers to members");
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeBool, kQualPlain));
+      return (ASTNode*)node;
+    }
+    TypeRecord* comparison_type = node->left->type;
+    if (TypeIsMemberPointer(node->right->type) &&
+        !TypeEqual(node->left->type, node->right->type)) {
+      if (MemberPointerCanConvert(node->left->type, node->right->type,
+                                  /*is_cast=*/false, NULL)) {
+        SemanticConvertType(node->left, node->right->type,
+                            kConvertNormal);
+        comparison_type = node->right->type;
+      } else if (MemberPointerCanConvert(node->right->type, node->left->type,
+                                         /*is_cast=*/false, NULL)) {
+        SemanticConvertType(node->right, node->left->type,
+                            kConvertNormal);
+      } else {
+        SemanticError((ASTNode*)node,
+                      "Pointers to members of unrelated classes cannot be compared");
+      }
+    }
+    SemanticCheckScalarType(node->left);
+    if (TypeIsMemberPointer(node->right->type)) {
+      SemanticCheckScalarType(node->right);
+    } else {
+      MemberPointerValue null_value;
+      MemberPointerEncodeNull(comparison_type, &null_value);
+      ASTNode* converted_null = NewIntConstantASTNode(
+          null_value.ptr, comparison_type, node->right->location);
+      ASTNodeReplaceChild((ASTNode*)node, 1, converted_null, true);
+    }
+    MemberPointerValue left_value;
+    MemberPointerValue right_value;
+    bool left_constant = MemberPointerTryEvaluateConstant(
+        node->left, comparison_type, &left_value);
+    bool right_constant = false;
+    right_constant = MemberPointerTryEvaluateConstant(
+        node->right, comparison_type, &right_value);
+    if (left_constant && right_constant) {
+      bool equal = MemberPointerValuesEqual(comparison_type, &left_value,
+                                            &right_value);
+      if (node->base.op == AST_OP(noteq)) {
+        equal = !equal;
+      }
+      return NewIntConstantASTNode(
+          equal ? 1 : 0,
+          NewTypeRecordWithSize(kTypeBool, kQualPlain),
+          node->base.location);
+    }
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return (ASTNode*)node;
+  }
+  if (TypeIsMemberPointer(node->right->type) &&
+      node->left != NULL &&
+      (TypeIsNullPointer(node->left->type) ||
+       (IsIntConstant(node->left) &&
+        ((ConstantASTNode*)node->left)->value.ivalue == 0))) {
+    if (node->base.op != AST_OP(equal) &&
+        node->base.op != AST_OP(noteq)) {
+      SemanticError((ASTNode*)node,
+                    "Only == and != are valid for pointers to members");
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeBool, kQualPlain));
+      return (ASTNode*)node;
+    }
+    SemanticCheckScalarType(node->right);
+    MemberPointerValue null_value;
+    MemberPointerEncodeNull(node->right->type, &null_value);
+    ASTNode* converted_null = NewIntConstantASTNode(
+        null_value.ptr, node->right->type, node->left->location);
+    ASTNodeReplaceChild((ASTNode*)node, 0, converted_null, true);
+    MemberPointerValue left_value;
+    MemberPointerValue right_value;
+    if (MemberPointerEncodeNull(node->right->type, &left_value) &&
+        MemberPointerTryEvaluateConstant(node->right, node->right->type,
+                                         &right_value)) {
+      bool equal = MemberPointerValuesEqual(node->right->type, &left_value,
+                                            &right_value);
+      if (node->base.op == AST_OP(noteq)) {
+        equal = !equal;
+      }
+      return NewIntConstantASTNode(
+          equal ? 1 : 0,
+          NewTypeRecordWithSize(kTypeBool, kQualPlain),
+          node->base.location);
+    }
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return (ASTNode*)node;
+  }
   ASTNode* rewritten = TryRewriteComparisonOperator(node);
   if (rewritten != NULL) {
     return rewritten;
@@ -1789,6 +1918,15 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     TypeRecordDelete(result_type);
     return;
   }
+  if (CompilerIsCXX() && TypeIsMemberPointer(colon->left->type) &&
+      TypeIsMemberPointer(colon->right->type) &&
+      TypeEqual(colon->left->type, colon->right->type)) {
+    ASTNodeSetType((ASTNode*)colon, colon->left->type);
+    ASTNodeSetType((ASTNode*)node, colon->base.type);
+    colon->base.value_category = kValueCategoryPrvalue;
+    node->base.value_category = kValueCategoryPrvalue;
+    return;
+  }
   InsertNumericConversions(colon, false);
   // [expr.cond]/7: when the operands have arithmetic (or unscoped enumeration)
   // type, the usual arithmetic conversions apply and the result is a prvalue of
@@ -1832,19 +1970,6 @@ static bool HasAddress(ASTNode* node) {
   }
 }
 
-static TypeRecord* CopyTemporaryTypeSpine(TypeRecord* type) {
-  if (type == NULL) {
-    return NULL;
-  }
-  TypeRecord* copy = TypeRecordCopy(type);
-  if (type->next != NULL) {
-    TypeRecordDelete(copy->next);
-    copy->next = CopyTemporaryTypeSpine(type->next);
-    TypeRecordIncRef(copy->next);
-  }
-  return TypeRecordCalculateSize(copy);
-}
-
 static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   SourceLocation location = expr->location;
   // Temporary materialization preserves the prvalue's object type.  The
@@ -1853,7 +1978,7 @@ static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   // itself.  Making the temporary `const` also incorrectly sends class
   // prvalues through constexpr-object reconstruction during initialization.
   TypeRecord* temporary_type =
-      CopyTemporaryTypeSpine(expr->type != NULL ? expr->type : type);
+      TypeRecordCopy(expr->type != NULL ? expr->type : type);
   temporary_type->qualifiers = kQualPlain;
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temporary_type);
   TypeRecordDelete(temporary_type);
@@ -2137,8 +2262,11 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             reference_type->declarator == kDeclRValueReference;
         bool discards_qualifiers =
             TypeIsConst(e->expr->type) && !TypeIsConst(reference_type->next);
-        NormalConversion(e->expr,
-                         ReferenceConversionTarget(e->expr, reference_type));
+        if (!TypeEqualIgnoringQualifiers(e->expr->type,
+                                         reference_type->next)) {
+          NormalConversion(e->expr,
+                           ReferenceConversionTarget(e->expr, reference_type));
+        }
         if (discards_qualifiers) {
           SemanticError(e->expr, "Reference initializer discards qualifiers");
         } else if (!ReferenceCanBind(e->expr, reference_type)) {
@@ -2176,18 +2304,6 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             !constructor_call &&
             TypeIsStructOrUnion(id_node->base.type) &&
             TypeEqual(e->expr->type, id_node->base.type);
-        if (!cxx_return_elision_initializer &&
-            e->expr->value_category == kValueCategoryXvalue &&
-            TypeIsStructOrUnion(id_node->base.type) &&
-            TypeIsStructOrUnion(e->expr->type) &&
-            TypeEqualIgnoringQualifiers(e->expr->type, id_node->base.type)) {
-          ASTNode* materialized =
-              MaterializeCXXByValueClassArgument(e->expr, id_node->base.type);
-          if (materialized != e->expr) {
-            ASTNodeReplaceChild((ASTNode*)e, 0, materialized, false);
-            e->expr = materialized;
-          }
-        }
         if (!cxx_return_elision_initializer) {
           NormalConversion(e->expr, id_node->base.type);
         }
@@ -2263,15 +2379,6 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
        id_node->symbol->flags.is_constinit)) {
     EvaluateConstantForSymbol(id_node->symbol, init);
   }
-  if ((id_node->symbol->flags.is_constexpr ||
-       id_node->symbol->flags.is_constinit) &&
-      !id_node->symbol->flags.is_template &&
-      !id_node->symbol->flags.value_set) {
-    SemanticError(init,
-                  id_node->symbol->flags.is_constinit
-                      ? "constinit variable initializer is not a constant expression"
-                      : "constexpr variable initializer is not a constant expression");
-  }
   ASTNode* object_init = ConstexprObjectInitializerForSymbol(
       id_node->symbol, init->location);
   if (object_init != NULL) {
@@ -2289,13 +2396,42 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       UnaryASTNode* unary = (UnaryASTNode*)init_expr;
       if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
         StructMember* member = ((StructMemberASTNode*)unary->sub)->member;
-        if (member != NULL) {
-          id_node->symbol->value.ivalue = member->byte_offset;
-          id_node->symbol->value.other = member;
+        Struct* class_info = TypeMemberPointerClass(id_node->symbol->type);
+        MemberPointerValue pm_value;
+        if (member != NULL && class_info != NULL &&
+            MemberPointerEncodeFromMember(member, class_info, &pm_value)) {
+          id_node->symbol->value.ivalue = pm_value.ptr;
           id_node->symbol->flags.value_set = true;
+          id_node->symbol->value.other = member;
         }
       }
+    } else if (init_expr != NULL) {
+      MemberPointerValue pm_value;
+      if (MemberPointerTryEvaluateConstant(init_expr, id_node->symbol->type,
+                                           &pm_value)) {
+        StructMember* member = MemberPointerMemberFromExpression(init_expr);
+        if (member != NULL) {
+          id_node->symbol->value.other = member;
+        } else if (TypeIsMemberFunctionPointer(id_node->symbol->type) &&
+            init_expr->op == AST_OP(member_ptr) &&
+            ((UnaryASTNode*)init_expr)->sub != NULL &&
+            ((UnaryASTNode*)init_expr)->sub->op == AST_OP(structmember)) {
+          id_node->symbol->value.other =
+              ((StructMemberASTNode*)((UnaryASTNode*)init_expr)->sub)->member;
+        }
+        id_node->symbol->value.ivalue = pm_value.ptr;
+        id_node->symbol->flags.value_set = true;
+      }
     }
+  }
+  if ((id_node->symbol->flags.is_constexpr ||
+       id_node->symbol->flags.is_constinit) &&
+      !id_node->symbol->flags.is_template &&
+      !id_node->symbol->flags.value_set) {
+    SemanticError(init,
+                  id_node->symbol->flags.is_constinit
+                      ? "constinit variable initializer is not a constant expression"
+                      : "constexpr variable initializer is not a constant expression");
   }
   ASTNode* simplified_init =
       AnalyzeInitializer(node->type, init, requires_constant_initializer);
@@ -2984,6 +3120,7 @@ static void RenumberVectorChildren(VectorASTNode* node) {
 }
 
 static bool MemberReceiverIsConst(BinaryASTNode* node);
+static bool MemberReceiverIsVolatile(BinaryASTNode* node);
 static const char* CXXAccessName(CXXAccess access);
 static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
                                            Struct* owner,
@@ -3319,6 +3456,19 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
                     member->symbol->name.value, function_name.value);
       StringDestruct(&function_name);
     }
+    if (!member->symbol->type->info.function.is_volatile_member &&
+        !member->symbol->type->info.function.is_constructor &&
+        !member->symbol->type->info.function.is_destructor &&
+        MemberReceiverIsVolatile(member_access)) {
+      String function_name;
+      StringInit(&function_name, NULL);
+      SymbolFunctionDiagnosticSuffix(member->symbol, &function_name);
+      SemanticError(
+          (ASTNode*)member_access,
+          "Cannot call non-volatile member function %s on volatile object%s",
+          member->symbol->name.value, function_name.value);
+      StringDestruct(&function_name);
+    }
     if (!MemberReceiverMatchesRefQualifier(member->symbol->type, member_access)) {
       SemanticError((ASTNode*)member_access,
                     "Cannot call ref-qualified member function %s on this "
@@ -3573,6 +3723,14 @@ static bool MemberReceiverIsConst(BinaryASTNode* node) {
            TypeIsConst(node->left->type->next);
   }
   return TypeIsConst(node->left->type);
+}
+
+static bool MemberReceiverIsVolatile(BinaryASTNode* node) {
+  if (node->base.op == AST_OP(arrow)) {
+    return TypeIsPointerOrArray(node->left->type) &&
+           TypeIsVolatile(node->left->type->next);
+  }
+  return TypeIsVolatile(node->left->type);
 }
 
 static bool MemberReceiverIsLValue(BinaryASTNode* node) {
@@ -4779,7 +4937,11 @@ static int FunctionTemplatePatternTypeSpecificity(TypeRecord* type) {
     if (t->template_parameter_index >= 0) {
       continue;
     }
-    if (TypeIsReference(t) || TypeIsPointer(t) || TypeIsArray(t)) {
+    if (TypeIsReference(t)) {
+      // A forwarding-reference pattern `T&&` accepts essentially any type and
+      // is less specialized than structural patterns such as `T*`.
+      score += 0;
+    } else if (TypeIsPointer(t) || TypeIsArray(t)) {
       score += 1;
     } else {
       score += 2;
@@ -4908,6 +5070,13 @@ static int MemberOverloadCallScore(StructMember* candidate,
       MemberReceiverIsConst(member_access)) {
     return -1;
   }
+  if (check_receiver_const && !candidate->is_static &&
+      !candidate->symbol->type->info.function.is_volatile_member &&
+      !candidate->symbol->type->info.function.is_constructor &&
+      !candidate->symbol->type->info.function.is_destructor &&
+      MemberReceiverIsVolatile(member_access)) {
+    return -1;
+  }
   if (!candidate->is_static &&
       !MemberReceiverMatchesRefQualifier(candidate->symbol->type,
                                          member_access)) {
@@ -4921,6 +5090,11 @@ static int MemberOverloadCallScore(StructMember* candidate,
   if (score >= 0 && !candidate->is_static &&
       candidate->symbol->type->info.function.is_const_member &&
       !MemberReceiverIsConst(member_access)) {
+    score++;
+  }
+  if (score >= 0 && !candidate->is_static &&
+      candidate->symbol->type->info.function.is_volatile_member &&
+      !MemberReceiverIsVolatile(member_access)) {
     score++;
   }
   return score;
@@ -5568,13 +5742,20 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     }
     return AnalyzeExpression(cast);
   }
-  if (type->info.struct_info->is_aggregate && node->children->length == 0) {
+  if (type->info.struct_info->is_aggregate) {
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
     temp->location = location;
     ASTNode* temp_id = NewIdentifierASTNode(temp, location);
     temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    Vector* elements = NewVector();
+    for (size_t i = 0; i < node->children->length; i++) {
+      ASTNode* child = node->children->value.p[i];
+      if (child != NULL) {
+        VectorAppend(elements, ASTNodeMove(child));
+      }
+    }
     ASTNode* initializer =
-        NewBracedInitializerASTNode(NewVector(), NULL, location);
+        NewBracedInitializerASTNode(elements, NULL, location);
     ASTNode* literal =
         NewCompoundLiteralASTNode(temp_id, location, initializer);
     ASTNode* parent = node->base.parent;
@@ -6326,7 +6507,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         TypeRecord* reference_type = formal->type;
         bool discards_qualifiers =
             TypeIsConst(actual->type) && !TypeIsConst(reference_type->next);
-        if (!polymorphic_special_this) {
+        if (!polymorphic_special_this &&
+            !TypeEqualIgnoringQualifiers(actual->type,
+                                         reference_type->next)) {
           NormalConversion(actual,
                            ReferenceConversionTarget(actual, reference_type));
           actual = node->children->value.p[i];
@@ -6343,7 +6526,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
             SemanticError(actual, "Reference argument must be an lvalue");
           }
         }
-        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual)) {
+        if (ReferenceCanBind(actual, reference_type) && !HasAddress(actual) &&
+            TypeIsStructOrUnion(actual->type)) {
           ASTNode* materialized =
               MaterializeTemporary(actual, reference_type->next);
           ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
@@ -6455,7 +6639,9 @@ static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
   return AnalyzeExpression(call);
 }
 
-static StructMember* MemberPointerExpressionMember(ASTNode* node) {
+static void AnalyzeMemberReference(BinaryASTNode* node);
+
+static StructMember* MemberPointerMemberFromExpression(ASTNode* node) {
   if (node == NULL) {
     return NULL;
   }
@@ -6466,7 +6652,21 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
     }
     return NULL;
   }
-  if (node->op == AST_OP(number) && TypeIsMemberPointer(node->type)) {
+  if (node->op == AST_OP(cast)) {
+    return MemberPointerMemberFromExpression(((CastASTNode*)node)->expr);
+  }
+  return NULL;
+}
+
+static StructMember* MemberPointerExpressionMember(ASTNode* node) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->op == AST_OP(member_ptr)) {
+    UnaryASTNode* unary = (UnaryASTNode*)node;
+    if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
+      return ((StructMemberASTNode*)unary->sub)->member;
+    }
     return NULL;
   }
   if (node->op == AST_OP(identifier)) {
@@ -6479,64 +6679,120 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
   return NULL;
 }
 
-static void AnalyzeMemberReference(BinaryASTNode* node);
-
-static void AnalyzeMemberPointerReference(BinaryASTNode* node) {
+static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
+  if ((node->right != NULL && node->right->type != NULL &&
+       (TypeContainsTemplateParameter(node->right->type) ||
+        TypeIsUnknown(node->right->type))) ||
+      (node->left != NULL && node->left->type != NULL &&
+       TypeContainsTemplateParameter(node->left->type))) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    return (ASTNode*)node;
+  }
   if (node->right == NULL || !TypeIsMemberPointer(node->right->type)) {
     SemanticError((ASTNode*)node, "Right operand of .* / ->* is not a pointer to member");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
-  StructMember* member = MemberPointerExpressionMember(node->right);
-  if (member == NULL || member->symbol == NULL || member->symbol->type == NULL) {
-    SemanticError((ASTNode*)node,
-                  "Pointer-to-member expression is not a constant member pointer");
-    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
-  }
+
+  bool receiver_is_pointer = node->base.op == AST_OP(arrowstar);
   TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
-  if (node->base.op == AST_OP(arrowstar)) {
+  while (receiver_type != NULL && TypeIsReference(receiver_type)) {
+    receiver_type = receiver_type->next;
+  }
+  if (receiver_is_pointer) {
     if (receiver_type == NULL || !TypeIsPointer(receiver_type)) {
       SemanticError((ASTNode*)node, "Left operand of ->* is not a pointer");
       ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-      return;
+      return (ASTNode*)node;
     }
     receiver_type = receiver_type->next;
-  } else if (receiver_type != NULL && TypeIsReference(receiver_type)) {
-    receiver_type = receiver_type->next;
   }
-  Struct* class_info = NULL;
-  for (TypeRecord* cur = node->right->type; cur != NULL; cur = cur->next) {
-    if (cur->declarator == kDeclMemberPointer) {
-      class_info = cur->info.struct_info;
-      break;
-    }
-  }
-  if (receiver_type == NULL || class_info == NULL ||
-      !TypeIsStructOrUnion(receiver_type) ||
-      receiver_type->info.struct_info != class_info) {
+
+  Struct* pm_class = TypeMemberPointerClass(node->right->type);
+  if (receiver_type == NULL || pm_class == NULL ||
+      !TypeIsStructOrUnion(receiver_type)) {
     SemanticError((ASTNode*)node,
                   "Pointer-to-member object expression has incompatible class type");
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
-  if (member->is_member_function) {
-    ASTNodeSetType((ASTNode*)node, TypeRecordCopy(member->symbol->type));
+  TypeRecord* receiver_class_type =
+      NewTypeRecord(receiver_type->info.struct_info->is_union ? kTypeUnion
+                                                                : kTypeStruct,
+                    kQualPlain);
+  receiver_class_type->info.struct_info = receiver_type->info.struct_info;
+  TypeRecord* pm_class_type =
+      NewTypeRecord(pm_class->is_union ? kTypeUnion : kTypeStruct, kQualPlain);
+  pm_class_type->info.struct_info = pm_class;
+  CXXBaseAdjustment member_base_adjustment;
+  bool compatible_class =
+      TypeEqual(receiver_class_type, pm_class_type) ||
+      TypeBaseAdjustment(receiver_class_type, pm_class_type,
+                         /*public_only=*/true, &member_base_adjustment);
+  if (!compatible_class) {
+    String receiver_name;
+    String member_class_name;
+    StringInit(&receiver_name, NULL);
+    StringInit(&member_class_name, NULL);
+    TypeRecordToString(receiver_type, &receiver_name);
+    TypeRecordToString(pm_class_type, &member_class_name);
+    SemanticError((ASTNode*)node,
+                  "Pointer-to-member object type '%s' is incompatible with "
+                  "member class '%s'",
+                  receiver_name.value, member_class_name.value);
+    StringDestruct(&receiver_name);
+    StringDestruct(&member_class_name);
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
+  }
+
+  TypeRecord* pointee = TypeMemberPointerPointeeType(node->right->type);
+  if (pointee == NULL) {
+    SemanticError((ASTNode*)node, "Invalid pointer-to-member type");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
+  }
+
+  StructMember* known_member = MemberPointerExpressionMember(node->right);
+  if (known_member != NULL && node->right->op != AST_OP(identifier) &&
+      known_member->symbol != NULL &&
+      known_member->symbol->type != NULL && !known_member->is_member_function) {
+    ASTOpcode access_op =
+        node->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
+    ASTNode* old_right = node->right;
+    ASTNode* old_left = node->left;
+    node->base.op = access_op;
+    node->right = NewStructMemberASTNode(known_member, node->base.location);
+    ((StructMemberASTNode*)node->right)->byte_offset = known_member->byte_offset;
+    ASTNodeDelete(old_right);
+    AnalyzeMemberReference(node);
+    node->left = old_left;
+    return (ASTNode*)node;
+  }
+
+  if (TypeIsFunction(pointee)) {
+    ASTNodeSetType((ASTNode*)node, TypeRecordCopy(pointee));
     node->base.value_category = kValueCategoryLvalue;
-    return;
+    return (ASTNode*)node;
   }
-  ASTOpcode access_op =
-      node->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
-  ASTNode* old_right = node->right;
-  ASTNode* old_left = node->left;
-  node->base.op = access_op;
-  node->right = NewStructMemberASTNode(member, node->base.location);
-  ((StructMemberASTNode*)node->right)->byte_offset = member->byte_offset;
-  ASTNodeDelete(old_right);
-  AnalyzeMemberReference(node);
-  node->left = old_left;
+
+  ASTNode* member_ptr = node->right;
+  MemberPointerValue pm_value;
+  if (MemberPointerTryEvaluateConstant(member_ptr, member_ptr->type, &pm_value)) {
+    member_ptr = NewIntConstantASTNode(pm_value.ptr, member_ptr->type,
+                                        node->base.location);
+    member_ptr = AnalyzeExpression(member_ptr);
+  }
+
+  ASTNode* result = MemberPointerApplyDataAccess(&compiler->syntax, node->base.location,
+                                        node->left, receiver_is_pointer,
+                                        member_ptr, TypeRecordCopy(pointee));
+  result->value_category = kValueCategoryLvalue;
+  return result;
 }
 
 static void AnalyzePointerToMember(UnaryASTNode* node) {
@@ -6563,17 +6819,20 @@ static bool LowerMemberPointerFunctionCall(VectorASTNode* node) {
   }
   BinaryASTNode* access = (BinaryASTNode*)node->left;
   StructMember* member = MemberPointerExpressionMember(access->right);
-  if (member == NULL || !member->is_member_function ||
-      member->symbol == NULL || member->symbol->type == NULL) {
-    return false;
+  if (member != NULL && member->is_member_function &&
+      member->symbol != NULL && member->symbol->type != NULL) {
+    ASTOpcode access_op =
+        access->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
+    ASTNode* member_node = NewStructMemberASTNode(member, access->base.location);
+    ((StructMemberASTNode*)member_node)->byte_offset = member->byte_offset;
+    node->left = NewBinaryASTNode(access_op, NULL, access->base.location,
+                                  access->left, member_node);
+    return LowerMemberFunctionCall(node);
   }
-  ASTOpcode access_op =
-      access->base.op == AST_OP(arrowstar) ? AST_OP(arrow) : AST_OP(dot);
-  ASTNode* member_node = NewStructMemberASTNode(member, access->base.location);
-  ((StructMemberASTNode*)member_node)->byte_offset = member->byte_offset;
-  node->left = NewBinaryASTNode(access_op, NULL, access->base.location,
-                                access->left, member_node);
-  return LowerMemberFunctionCall(node);
+
+  return MemberPointerLowerRuntimeFunctionCall(
+      node, access->left, access->base.op == AST_OP(arrowstar), access->right,
+      access->right->type);
 }
 
 static void AnalyzeMemberReference(BinaryASTNode* node) {
@@ -6734,6 +6993,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
 // a pointer to the type of the operand.
 static void AnalyzeAddressOperator(UnaryASTNode* node) {
   node->sub = AnalyzeExpression(node->sub);
+  node->base.value_category = kValueCategoryPrvalue;
   TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");
@@ -6925,6 +7185,11 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
     case kDeclRValueReference:
     case kDeclArray:
       return TypeEqualIgnoringQualifiers(left->next, right->next);
+    case kDeclMemberPointer:
+      return TypeMemberPointerClass(left) == TypeMemberPointerClass(right) &&
+             TypeEqualIgnoringQualifiers(
+                 TypeMemberPointerPointeeType(left),
+                 TypeMemberPointerPointeeType(right));
     case kDeclFunction:
       return TypeEqual(left, right);
     case kDeclPrimitive:
@@ -6938,6 +7203,7 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
       }
       return left->type == right->type;
   }
+  return false;
 }
 
 static void ValidateCXXConstCast(CastASTNode* node) {
@@ -7224,6 +7490,7 @@ static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
   }
   Vector type_args;
   VectorInit(&type_args);
+  bool dependent = false;
   for (size_t i = 1; i < node->children->length; i++) {
     ASTNode* arg = node->children->value.p[i];
     if (arg == NULL || arg->type == NULL) {
@@ -7231,12 +7498,22 @@ static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
     }
     TypeRecord* type = TypeRecordCopy(arg->type);
     if (type != NULL) {
+      dependent = dependent || TypeIsUnknown(type) ||
+                  TypeContainsTemplateParameter(type);
       VectorAppend(&type_args, type);
     }
   }
-  bool value = DaveTypeTraitEvaluateBool(&compiler->syntax,
-                                         (DaveTypeTraitKind)kind_value,
-                                         &type_args);
+  if (dependent) {
+    VectorDestructWithContents(
+        &type_args, (VectorElementDestructor)TypeRecordDelete,
+        /*free_element=*/false);
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return (ASTNode*)node;
+  }
+  bool value = CXXTypeTraitEvaluateBool(&compiler->syntax,
+                                        (CXXTypeTraitKind)kind_value,
+                                        &type_args);
   VectorDestructWithContents(&type_args, (VectorElementDestructor)TypeRecordDelete,
                              /*free_element=*/false);
   ASTNode* constant = (ASTNode*)NewIntConstantASTNode(
@@ -7411,9 +7688,18 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(dotstar):
-    case AST_OP(arrowstar):
-      AnalyzeMemberPointerReference(binary_node);
+      node = AnalyzeMemberPointerReference(binary_node);
       break;
+    case AST_OP(arrowstar): {
+      ASTNode* overloaded =
+          TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(binary_node);
+      if (overloaded != NULL) {
+        node = overloaded;
+        break;
+      }
+      node = AnalyzeMemberPointerReference(binary_node);
+      break;
+    }
 
     case AST_OP(member_ptr):
       AnalyzePointerToMember(unary_node);
@@ -7613,6 +7899,11 @@ bool IsConstantExpression(ASTNode* node) {
         }
       }
       return false;
+    }
+    case AST_OP(member_ptr): {
+      MemberPointerValue value;
+      return CompilerIsCXX() && node->type != NULL &&
+             MemberPointerTryEvaluateConstant(node, node->type, &value);
     }
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;

@@ -141,6 +141,9 @@ void RequirementDelete(Requirement* requirement);
 void RequiresExprDelete(RequiresExpr* expr);
 void ConceptDelete(Concept* concept);
 ConstraintExpr* ConceptsCloneConstraint(ConstraintExpr* constraint);
+ConstraintExpr* ConceptsSubstituteConstraint(
+    struct Syntax* syntax, ConstraintExpr* constraint, Vector* arguments,
+    int rebase_base);
 bool ConceptsConstraintContainsTemplateParameter(ConstraintExpr* constraint);
 
 // Evaluates a concept-id expression represented by an identifier node.  This is

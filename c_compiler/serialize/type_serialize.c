@@ -156,6 +156,7 @@ enum {
   kFn_template_instantiations = 46,
   kFn_associated_constraint = 47,
   kFn_explicit_condition = 48,
+  kFn_is_volatile_member = 49,
 };
 
 //
@@ -631,6 +632,7 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kFn_is_constructor, f->is_constructor);
   WireWriteBool(out, kFn_is_destructor, f->is_destructor);
   WireWriteBool(out, kFn_is_const_member, f->is_const_member);
+  WireWriteBool(out, kFn_is_volatile_member, f->is_volatile_member);
   WireWriteInt32(out, kFn_ref_qualifier, (int32_t)f->ref_qualifier);
   WireWriteBool(out, kFn_is_explicit, f->is_explicit);
   WireWriteBool(out, kFn_is_explicit_conversion, f->is_explicit_conversion);
@@ -731,6 +733,9 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       case kFn_is_const_member:
         WireReadBool(in, &f->is_const_member);
+        break;
+      case kFn_is_volatile_member:
+        WireReadBool(in, &f->is_volatile_member);
         break;
       case kFn_ref_qualifier: {
         int32_t v;

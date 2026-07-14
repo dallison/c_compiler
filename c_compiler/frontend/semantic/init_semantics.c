@@ -794,7 +794,10 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       }
     }
     default:
-      return false;
+      // Some scalar expressions, including pointer-to-member constants, are
+      // stored directly in a braced initializer rather than wrapped in an
+      // expr_init node.  They still initialize the current scalar subobject.
+      return InitCurrentAndAdvance(inode, init_expr, constants_only);
   }
 }
 

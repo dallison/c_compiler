@@ -22,6 +22,7 @@
 #include "semantics.h"
 #include "syntax.h"
 #include "debug.h"
+#include "member_pointer.h"
 
 #include "6502_target.h"
 #include "p_code_target.h"
@@ -383,6 +384,29 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
     // Pointers can be initialized to the address of an existing static
     // variable of the same type.
     InitPointer(expr, subinit, init_out, offset, initializers);
+  } else if (TypeIsMemberPointer(subinit->type)) {
+    MemberPointerValue pm_value;
+    if (expr->op == AST_OP(member_ptr)) {
+      UnaryASTNode* unary = (UnaryASTNode*)expr;
+      if (unary->sub != NULL && unary->sub->op == AST_OP(structmember)) {
+        StructMember* member = ((StructMemberASTNode*)unary->sub)->member;
+        Struct* class_info = TypeMemberPointerClass(subinit->type);
+        if (member != NULL && class_info != NULL &&
+            MemberPointerEncodeFromMember(member, class_info, &pm_value)) {
+          free(init_out);
+          MemberPointerEmitStaticInitializers(subinit->type, &pm_value, offset,
+                                              initializers);
+          return;
+        }
+      }
+    }
+    if (MemberPointerTryEvaluateConstant(expr, subinit->type, &pm_value)) {
+      free(init_out);
+      MemberPointerEmitStaticInitializers(subinit->type, &pm_value, offset,
+                                          initializers);
+      return;
+    }
+    SemanticError(subinit, "Invalid static pointer-to-member initialization");
   } else {
     SemanticError(subinit, "Invalid static initialization");
   }
@@ -1031,10 +1055,6 @@ static void FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
     return;
   }
   UnexpandedPackSearch* search = data;
-  if ((node->flags & kASTPackExpansion) != 0) {
-    search->found = true;
-    return;
-  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
@@ -1092,7 +1112,14 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           CheckMainSignature(syntax, decl->symbol);
           
           // This is a function definition, generate the code.
+          TypeRecord* saved_current_function = compiler->current_function;
+          Struct* saved_class_access_context =
+              compiler->current_class_access_context;
           compiler->current_function = decl->base.type;
+          if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
+            compiler->current_class_access_context =
+                decl->base.type->info.function.cxx_member_owner;
+          }
           
           // Run the semantic analyzer.
           SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
@@ -1136,6 +1163,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             GeneratorDestruct(&codegen);
             SyntaxRegisterFunctionInitFiniAttributes(syntax, decl->symbol);
           }
+          compiler->current_function = saved_current_function;
+          compiler->current_class_access_context =
+              saved_class_access_context;
         } else {
           // Declaration is a variable or extern function.
           if (TypeIsFunction(decl->base.type)) {

@@ -373,6 +373,13 @@ typedef struct {
   bool is_fp;
 } RegisterVariable;
 
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* try_end;
+  TargetInstruction* catch_label;
+  EHTypeInfo* catch_typeinfo;
+} AARCH64ExceptionRange;
+
 typedef struct AARCH64Generator {
   TargetGenerator base;
 
@@ -389,6 +396,8 @@ typedef struct AARCH64Generator {
   TargetInstruction* int_argument_registers[AARCH64_NUM_INT_ARGS];
   TargetInstruction* fp_argument_registers[AARCH64_NUM_FP_ARGS];
   Vector var_regs;
+  Vector exception_ranges;
+  Vector exception_typeinfos;
 
   TargetInstruction* zero;  // Explicit zero (register xzr).
   TargetInstruction* tmp;  // Temp reg.

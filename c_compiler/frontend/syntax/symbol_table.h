@@ -21,6 +21,7 @@
 // less than the parent node based on symbol name.
 typedef struct SymbolNode {
   BinaryTreeNode header;
+  String name;
   Symbol* symbol;
 } SymbolNode;
 

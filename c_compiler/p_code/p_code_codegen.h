@@ -217,12 +217,21 @@ typedef enum {
   P_OP(rcalld),   // Call register with double result.
 } PCodeOpcode;
 
+typedef struct {
+  TargetInstruction* try_start;
+  TargetInstruction* try_end;
+  TargetInstruction* catch_label;
+  EHTypeInfo* catch_typeinfo;
+} PCodeExceptionRange;
+
 // A PCode Generator is derived from a TargetGenerator.  It has
 // a '.base' field that is the TargetGenerator.
 typedef struct PCodeGenerator {
   TargetGenerator base;
 
   TargetInstruction* argument_pointer;
+  Vector exception_ranges;
+  Vector exception_typeinfos;
 
   // Register allocator.
   PCodeRegisterAllocator register_allocator;

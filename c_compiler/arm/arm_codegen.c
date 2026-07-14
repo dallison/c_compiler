@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
+#include "member_pointer.h"
 #include "debug.h"
 
 #include "target_basic_block.h"
@@ -1403,7 +1404,13 @@ static TargetInstruction* EmitAddressOfSymbol(ARMGenerator* g,
 
 static TargetInstruction* LoadStaticVariableAddress(ARMGenerator* g,
                                                     IRNode* node) {
-  return EmitAddressOfSymbol(g, GetLoweredNode(node), kSize32Bit);
+  TargetInstruction* address = GetLoweredNode(node);
+  if ((ARMOpcode)address->opcode == ARM_OP(symbol) ||
+      (ARMOpcode)address->opcode == ARM_OP(literal) ||
+      TargetIsConst(address)) {
+    return EmitAddressOfSymbol(g, address, kSize32Bit);
+  }
+  return address;
 }
 
 static struct {
@@ -3768,6 +3775,8 @@ typedef enum {
   kArgLocationFpIntPair,
   // A 64-bit integer (long long) passed in an even-aligned core register pair.
   kArgLocationIntPair,
+  // First word in the last core register and second word on the stack.
+  kArgLocationIntPairSplit,
   // A 64-bit integer passed on the stack (both halves, 8-byte aligned).
   kArgLocationPushedWide,
 } ArgLocationType;
@@ -3779,6 +3788,7 @@ typedef struct {
     size_t offset;
   } location;
   TargetInstruction* reg2;  // High half register for kArgLocationFpIntPair.
+  size_t second_offset;
   size_t reference_offset;
 } ArgLocation;
 
@@ -3787,6 +3797,7 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   loc->type = kArgLocationRegister;
   loc->location.reg = reg;
   loc->reg2 = NULL;
+  loc->second_offset = 0;
   loc->reference_offset = 0;
   return loc;
 }
@@ -3798,6 +3809,7 @@ static ArgLocation* NewArgLocationFpIntPair(TargetInstruction* lo,
   loc->type = kArgLocationFpIntPair;
   loc->location.reg = lo;
   loc->reg2 = hi;
+  loc->second_offset = 0;
   loc->reference_offset = 0;
   return loc;
 }
@@ -3809,6 +3821,7 @@ static ArgLocation* NewArgLocationIntPair(TargetInstruction* lo,
   loc->type = kArgLocationIntPair;
   loc->location.reg = lo;
   loc->reg2 = hi;
+  loc->second_offset = 0;
   loc->reference_offset = 0;
   return loc;
 }
@@ -3818,6 +3831,7 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   loc->type = type;
   loc->location.offset = offset;
   loc->reg2 = NULL;
+  loc->second_offset = 0;
   loc->reference_offset = 0;
   return loc;
 }
@@ -3828,6 +3842,7 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   loc->type = kArgLocationPassedByReferenceInRegister;
   loc->location.reg = reg;
   loc->reg2 = NULL;
+  loc->second_offset = 0;
   loc->reference_offset = reference_offset;
   return loc;
 }
@@ -3838,7 +3853,19 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   loc->type = kArgLocationPassedByReferenceOnStack;
   loc->location.offset = offset;
   loc->reg2 = NULL;
+  loc->second_offset = 0;
   loc->reference_offset = reference_offset;
+  return loc;
+}
+
+static ArgLocation* NewArgLocationIntPairSplit(TargetInstruction* lo,
+                                               size_t hi_offset) {
+  ArgLocation* loc = malloc(sizeof(ArgLocation));
+  loc->type = kArgLocationIntPairSplit;
+  loc->location.reg = lo;
+  loc->reg2 = NULL;
+  loc->second_offset = hi_offset;
+  loc->reference_offset = 0;
   return loc;
 }
 
@@ -3868,6 +3895,9 @@ static TargetInstruction* BuildArgList(ARMGenerator* g, Vector* arg_locations) {
       result =
           Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->location.reg));
       result = Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->reg2));
+    } else if (loc->type == kArgLocationIntPairSplit) {
+      result =
+          Emit(g, NewInstruction2(ARM_OP(regarg), result, loc->location.reg));
     }
   }
   return result;
@@ -3921,7 +3951,7 @@ static size_t ArgStackAlignment(TypeRecord* type) {
   if (type == NULL) {
     return 4;
   }
-  if (TypeIsStructOrUnion(type)) {
+  if (TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type)) {
     // A by-value struct keeps its natural alignment, clamped to the 4/8-byte
     // argument-slot granularity (AAPCS aligns aggregate arguments to at most a
     // double-word).
@@ -3945,7 +3975,7 @@ static size_t ArgStackSize(TypeRecord* type) {
   if (type == NULL) {
     return 4;
   }
-  if (TypeIsStructOrUnion(type)) {
+  if (TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type)) {
     // A by-value struct occupies its whole size on the stack, rounded up to a
     // whole number of 4-byte words.
     return ((size_t)type->size + 3) & ~(size_t)3;
@@ -4066,6 +4096,29 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
         VectorAppend(&arg_locations,
                      NewArgLocationPushed(kArgLocationPushed, slot));
+      }
+    } else if (TypeIsMemberPointerAggregate(arg_node->type)) {
+      // ARM EABI member-function pointers are two 32-bit words with 4-byte
+      // alignment.  They therefore use two consecutive core registers (which
+      // need not begin at an even register), or an 8-byte stack slot.
+      if (next_int_arg_reg + 1 < ARM_NUM_INT_ARGS) {
+        TargetInstruction* lo = IntArgumentRegister(g, next_int_arg_reg);
+        TargetInstruction* hi = IntArgumentRegister(g, next_int_arg_reg + 1);
+        next_int_arg_reg += 2;
+        VectorAppend(&arg_locations, NewArgLocationIntPair(lo, hi));
+      } else if (next_int_arg_reg < ARM_NUM_INT_ARGS) {
+        size_t hi_slot = next_pushed_arg_offset;
+        next_pushed_arg_offset += 4;
+        VectorAppend(
+            &arg_locations,
+            NewArgLocationIntPairSplit(
+                IntArgumentRegister(g, next_int_arg_reg), hi_slot));
+        next_int_arg_reg = ARM_NUM_INT_ARGS;
+      } else {
+        next_int_arg_reg = ARM_NUM_INT_ARGS;
+        size_t slot = ArgStackSlot(arg_node->type, &next_pushed_arg_offset);
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushedWide, slot));
       }
     } else if (TypeIsWideInt(arg_node->type)) {
       // AAPCS: a 64-bit integer is passed in an even-aligned pair of core
@@ -4268,7 +4321,21 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         // before its own move reads it.
         TargetInstruction* lo;
         TargetInstruction* hi;
-        MaterializeWide(g, arg_node, &lo, &hi);
+        if (TypeIsMemberPointerAggregate(arg_node->type)) {
+          TargetInstruction* address = Materialize(g, arg_node);
+          lo = Emit(g, SetInstructionSize(
+                           NewInstruction2(
+                               ARM_OP(ldr), address,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                           kSize32Bit));
+          hi = Emit(g, SetInstructionSize(
+                           NewInstruction2(
+                               ARM_OP(ldr), address,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 4)),
+                           kSize32Bit));
+        } else {
+          MaterializeWide(g, arg_node, &lo, &hi);
+        }
         TargetInstruction* mlo = Emit(g, NewInstruction1(ARM_OP(mov), lo));
         mlo->dest = arg_location->location.reg;
         mlo->flags |= kARMArgMove;
@@ -4277,11 +4344,49 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         mhi->flags |= kARMArgMove;
         break;
       }
+      case kArgLocationIntPairSplit: {
+        assert(TypeIsMemberPointerAggregate(arg_node->type));
+        TargetInstruction* address = Materialize(g, arg_node);
+        TargetInstruction* lo = Emit(g, SetInstructionSize(
+            NewInstruction2(
+                ARM_OP(ldr), address,
+                GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+            kSize32Bit));
+        TargetInstruction* hi = Emit(g, SetInstructionSize(
+            NewInstruction2(
+                ARM_OP(ldr), address,
+                GetIntConstant(g, NULL, kTargetType32Bit, 4)),
+            kSize32Bit));
+        TargetInstruction* mlo = Emit(g, NewInstruction1(ARM_OP(mov), lo));
+        mlo->dest = arg_location->location.reg;
+        mlo->flags |= kARMArgMove;
+        Emit(g, SetInstructionSize(
+                    NewInstruction3(
+                        ARM_OP(str), hi, StackPointer(g),
+                        GetIntConstant(g, NULL, kTargetType32Bit,
+                                       (int)arg_location->second_offset)),
+                    kSize32Bit));
+        break;
+      }
       case kArgLocationPushedWide: {
         // 64-bit integer passed on the stack: store both halves.
         TargetInstruction* lo;
         TargetInstruction* hi;
-        MaterializeWide(g, arg_node, &lo, &hi);
+        if (TypeIsMemberPointerAggregate(arg_node->type)) {
+          TargetInstruction* address = Materialize(g, arg_node);
+          lo = Emit(g, SetInstructionSize(
+                           NewInstruction2(
+                               ARM_OP(ldr), address,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                           kSize32Bit));
+          hi = Emit(g, SetInstructionSize(
+                           NewInstruction2(
+                               ARM_OP(ldr), address,
+                               GetIntConstant(g, NULL, kTargetType32Bit, 4)),
+                           kSize32Bit));
+        } else {
+          MaterializeWide(g, arg_node, &lo, &hi);
+        }
         size_t off = arg_location->location.offset;
         Emit(g, SetInstructionSize(
                     NewInstruction3(ARM_OP(str), lo, StackPointer(g),
@@ -4946,16 +5051,23 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
 
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(IRNode* arg) {
-  if (TypeIsFloatingPoint(arg->type)) {
+  TypeRecord* type = arg->type;
+  if (IRIsVariable(arg)) {
+    IRVariable* var = (IRVariable*)arg;
+    if (var->symbol != NULL && var->symbol->type != NULL) {
+      type = var->symbol->type;
+    }
+  }
+  if (TypeIsFloatingPoint(type)) {
     return 8;
   }
-  if (TypeIsPointerOrArray(arg->type)) {
+  if (TypeIsPointerOrArray(type)) {
     return 8;
   }
-  if (TypeIsStructOrUnion(arg->type)) {
-    return arg->type->info.struct_info->size;
+  if (TypeIsStructOrUnion(type)) {
+    return type->info.struct_info->size;
   }
-  return arg->type->size < 4 ? 4 : arg->type->size;
+  return type->size < 4 ? 4 : type->size;
 }
 
 static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
@@ -4981,6 +5093,9 @@ static COMPILER_UNUSED int CompareRegisterVar(const void* a, const void* b) {
 // the register number or stack offset (from s0 - the frame pointer).
 static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   IRVariable* var = (IRVariable*)arg->pooled;
+  TypeRecord* arg_type =
+      var->symbol != NULL && var->symbol->type != NULL ? var->symbol->type
+                                                       : arg->pooled->type;
   size_t arg_num = var->symbol->value.arg_number;
   bool is_struct_return = TypeIsStructOrUnion(
       compiler->current_function->info.function.symbol->type->next);
@@ -4998,7 +5113,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
-      if (TypeIsFloatingPoint(arg->pooled->type)) {
+      if (TypeIsFloatingPoint(arg_type)) {
         // Each floating-point argument (float or double) consumes one full
         // double-precision argument register.  fp_reg counts d-register indices
         // (d0..d3), matching the caller side in LowerCall.
@@ -5008,10 +5123,24 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         } else {
           location.type = kArgLocationPushed;
           location.location.offset =
-              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
-              ~(ArgStackAlignment(arg->pooled->type) - 1);
+              (stack_offset + ArgStackAlignment(arg_type) - 1) &
+              ~(ArgStackAlignment(arg_type) - 1);
         }
-      } else if (TypeIsWideInt(arg->pooled->type)) {
+      } else if (TypeIsMemberPointerAggregate(arg_type)) {
+        if (int_reg + 1 <= ARM_INT_ARG_END) {
+          location.type = kArgLocationIntPair;
+          location.location.offset = int_reg;
+        } else if (int_reg <= ARM_INT_ARG_END) {
+          location.type = kArgLocationIntPairSplit;
+          location.location.offset = int_reg;
+          location.second_offset = stack_offset;
+        } else {
+          location.type = kArgLocationPushed;
+          location.location.offset =
+              (stack_offset + ArgStackAlignment(arg_type) - 1) &
+              ~(ArgStackAlignment(arg_type) - 1);
+        }
+      } else if (TypeIsWideInt(arg_type)) {
         // 64-bit integer: even-aligned register pair (r0:r1 / r2:r3) or stack.
         if ((int_reg - ARM_INT_ARG_START) % 2 != 0) {
           int_reg++;
@@ -5022,16 +5151,16 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         } else {
           location.type = kArgLocationPushed;
           location.location.offset =
-              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
-              ~(ArgStackAlignment(arg->pooled->type) - 1);
+              (stack_offset + ArgStackAlignment(arg_type) - 1) &
+              ~(ArgStackAlignment(arg_type) - 1);
         }
-      } else if (TypeIsStructOrUnion(arg->pooled->type)) {
+      } else if (TypeIsStructOrUnion(arg_type)) {
         // Named struct/union: always passed by value in the stacked-argument
         // area (matching the caller in LowerCall).  fp + offset addresses it.
         location.type = kArgLocationPushed;
         location.location.offset =
-            (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
-            ~(ArgStackAlignment(arg->pooled->type) - 1);
+            (stack_offset + ArgStackAlignment(arg_type) - 1) &
+            ~(ArgStackAlignment(arg_type) - 1);
       } else {
         if (int_reg <= ARM_INT_ARG_END) {
           // Arg is in an integer register.
@@ -5040,8 +5169,8 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         } else {
           location.type = kArgLocationPushed;
           location.location.offset =
-              (stack_offset + ArgStackAlignment(arg->pooled->type) - 1) &
-              ~(ArgStackAlignment(arg->pooled->type) - 1);
+              (stack_offset + ArgStackAlignment(arg_type) - 1) &
+              ~(ArgStackAlignment(arg_type) - 1);
         }
       }
       return location;
@@ -5059,6 +5188,16 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       if (fp_reg < ARM_NUM_FP_ARGS) {
         fp_reg++;
       } else {
+        ArgStackSlot(arg_symbol->type, &stack_offset);
+      }
+    } else if (TypeIsMemberPointerAggregate(arg_symbol->type)) {
+      if (int_reg + 1 <= ARM_INT_ARG_END) {
+        int_reg += 2;
+      } else if (int_reg <= ARM_INT_ARG_END) {
+        int_reg = ARM_INT_ARG_END + 1;
+        stack_offset += 4;
+      } else {
+        int_reg = ARM_INT_ARG_END + 1;
         ArgStackSlot(arg_symbol->type, &stack_offset);
       }
     } else if (TypeIsWideInt(arg_symbol->type)) {
@@ -5171,6 +5310,13 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     return;
   }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
+  TypeRecord* effective_type = entry->pooled->type;
+  if (is_arg) {
+    IRVariable* var = (IRVariable*)entry->pooled;
+    if (var->symbol != NULL && var->symbol->type != NULL) {
+      effective_type = var->symbol->type;
+    }
+  }
   int64_t size =
       is_arg ? CalculateArgumentSize(entry->pooled) : entry->pooled->type->size;
   assert(size != 0);
@@ -5180,7 +5326,8 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   if (is_arg) {
     ArgLocation loc = ArgumentLocation(entry, args);
     if (loc.type == kArgLocationPushed ||
-        loc.type == kArgLocationPassedByReferenceOnStack) {
+        loc.type == kArgLocationPassedByReferenceOnStack ||
+        loc.type == kArgLocationIntPairSplit) {
       g->has_stack_args = true;
     }
   }
@@ -5234,6 +5381,49 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         SetDebugStackLocation(entry, *var_offset);
         *var_offset += size;
       }
+    }
+  } else if (TypeIsMemberPointerAggregate(effective_type)) {
+    if (is_arg) {
+      ArgLocation location = ArgumentLocation(entry, args);
+      if (location.type == kArgLocationIntPair) {
+        int offset = AllocateSavedArgumentHome(g, 8, 4);
+        int lo_reg = (int)location.location.offset;
+        VectorAppend(&g->saved_regs,
+                     NewSavedArgumentRegister(lo_reg, ARM_FP_REG, offset, false));
+        VectorAppend(&g->saved_regs,
+                     NewSavedArgumentRegister(lo_reg + 1, ARM_FP_REG, offset + 4,
+                                              false));
+        entry->pooled->data.ivalue = offset;
+        g->num_int_arg_regs += 2;
+      } else if (location.type == kArgLocationIntPairSplit) {
+        int offset = AllocateSavedArgumentHome(g, 8, 4);
+        int lo_reg = (int)location.location.offset;
+        VectorAppend(&g->saved_regs,
+                     NewSavedArgumentRegister(lo_reg, ARM_FP_REG, offset, false));
+        TargetInstruction* hi = Emit(g, SetInstructionSize(
+            NewInstruction2(
+                ARM_OP(ldr), FramePointer(g),
+                GetIntConstant(
+                    g, NULL, kTargetType32Bit,
+                    ARM_STACK_FRAME_HEADER_SIZE + (int)location.second_offset)),
+            kSize32Bit));
+        Emit(g, SetInstructionSize(
+                    NewInstruction3(
+                        ARM_OP(str), hi, FramePointer(g),
+                        GetIntConstant(g, NULL, kTargetType32Bit, offset + 4)),
+                    kSize32Bit));
+        entry->pooled->data.ivalue = offset;
+        g->num_int_arg_regs++;
+      } else {
+        entry->pooled->data.ivalue =
+            ARM_STACK_FRAME_HEADER_SIZE + (int)location.location.offset;
+      }
+      SetDebugStackLocation(entry, entry->pooled->data.ivalue);
+    } else {
+      AlignOffset(entry, var_offset);
+      entry->pooled->data.ivalue = *var_offset;
+      SetDebugStackLocation(entry, *var_offset);
+      *var_offset += size;
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type)) {
     if (is_arg) {

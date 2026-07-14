@@ -4,6 +4,7 @@
 //
 
 #include "type_internal.h"
+#include "member_pointer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -324,9 +325,10 @@ int TypeRecordAlignment(TypeRecord* record) {
     case kDeclReference:
     case kDeclRValueReference:
       return SizeofPointer();
+    case kDeclMemberPointer:
+      return SizeofPointer();
     case kDeclFunction:
       return SizeofPointer();
-      break;
     case kDeclPrimitive:
       if (TypeIsStructOrUnion(record)) {
         int a = record->info.struct_info->alignment;
@@ -367,10 +369,12 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
         }
         break;
       case kDeclPointer:
-      case kDeclMemberPointer:
       case kDeclReference:
       case kDeclRValueReference:
         record->size = SizeofPointer();
+        break;
+      case kDeclMemberPointer:
+        record->size = MemberPointerSize(record);
         break;
       case kDeclFunction:
         record->size = SizeofPointer();
@@ -567,7 +571,6 @@ TypeRecord* NewPointerTypeRecord(Qualifiers quals) {
 TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals) {
   TypeRecord* t = NewTypeRecord(kTypeImplicit, quals);
   t->declarator = kDeclMemberPointer;
-  t->size = compiler->pointer_size;
   t->info.struct_info = class_info;
   return t;
 }
@@ -619,10 +622,17 @@ TypeRecord* NewPointerTo(Qualifiers quals, TypeRecord* type) {
 }
 
 Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
-                         SourceLocation location) {
+                         bool is_volatile_member, SourceLocation location) {
+  Qualifiers object_qualifiers = kQualPlain;
+  if (is_const_member) {
+    object_qualifiers |= kQualConst;
+  }
+  if (is_volatile_member) {
+    object_qualifiers |= kQualVolatile;
+  }
   TypeRecord* class_type =
       NewTypeRecord(owner != NULL && owner->is_union ? kTypeUnion : kTypeStruct,
-                    is_const_member ? kQualConst : kQualPlain);
+                    object_qualifiers);
   class_type->info.struct_info = owner;
   TypeRecord* this_type = NewPointerTo(kQualPlain, class_type);
   Symbol* this_symbol = NewSymbol("this", this_type, STO(implicit));
@@ -652,7 +662,8 @@ void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
     return;
   }
   Symbol* this_symbol =
-      NewCXXThisSymbol(owner, func->info.function.is_const_member, location);
+      NewCXXThisSymbol(owner, func->info.function.is_const_member,
+                       func->info.function.is_volatile_member, location);
   if (func->info.function.prototype.length == 0) {
     VectorAppend(&func->info.function.prototype, this_symbol);
   } else {
@@ -708,6 +719,7 @@ TypeRecord* NewFunctionTypeRecord() {
   t->info.function.is_constructor = false;
   t->info.function.is_destructor = false;
   t->info.function.is_const_member = false;
+  t->info.function.is_volatile_member = false;
   t->info.function.ref_qualifier = kCXXRefQualifierNone;
   t->info.function.is_explicit = false;
   t->info.function.is_explicit_conversion = false;

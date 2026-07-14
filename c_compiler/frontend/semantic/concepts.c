@@ -293,6 +293,137 @@ static RequiresExpr* RequiresExprClone(RequiresExpr* expr) {
   return NewRequiresExpr(parameters, requirements, expr->location);
 }
 
+static Requirement* RequirementSubstitute(Syntax* syntax,
+                                          Requirement* requirement,
+                                          Vector* arguments,
+                                          int rebase_base);
+
+static RequiresExpr* RequiresExprSubstitute(Syntax* syntax, RequiresExpr* expr,
+                                            Vector* arguments,
+                                            int rebase_base) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  Vector* parameters = NewVector();
+  for (size_t i = 0;
+       expr->parameters != NULL && i < expr->parameters->length; i++) {
+    Symbol* parameter = expr->parameters->value.p[i];
+    if (parameter == NULL) {
+      VectorAppend(parameters, NULL);
+      continue;
+    }
+    TypeRecord* type = TypeSubstituteTemplateTypeAndRebase(
+        syntax, parameter->type, arguments, rebase_base);
+    Symbol* copy =
+        NewSymbol(parameter->name.value, type, parameter->storage);
+    copy->flags = parameter->flags;
+    copy->location = parameter->location;
+    copy->value = parameter->value;
+    copy->template_parameter_index = parameter->template_parameter_index;
+    if (copy->template_parameter_index >= rebase_base) {
+      copy->template_parameter_index -= rebase_base;
+    }
+    copy->dependent_value_template_parameter_index =
+        parameter->dependent_value_template_parameter_index;
+    if (copy->dependent_value_template_parameter_index >= rebase_base) {
+      copy->dependent_value_template_parameter_index -= rebase_base;
+    }
+    VectorAppend(parameters, copy);
+  }
+  Vector* requirements = NewVector();
+  for (size_t i = 0;
+       expr->requirements != NULL && i < expr->requirements->length; i++) {
+    VectorAppend(requirements,
+                 RequirementSubstitute(syntax,
+                                       expr->requirements->value.p[i],
+                                       arguments, rebase_base));
+  }
+  return NewRequiresExpr(parameters, requirements, expr->location);
+}
+
+ConstraintExpr* ConceptsSubstituteConstraint(Syntax* syntax,
+                                             ConstraintExpr* constraint,
+                                             Vector* arguments,
+                                             int rebase_base) {
+  if (constraint == NULL) {
+    return NULL;
+  }
+  switch (constraint->kind) {
+    case kConstraintAtomic:
+      return NewAtomicConstraint(
+          TypeSubstituteTemplateExpressionAndRebase(
+              syntax, constraint->as.atomic.expr, arguments, rebase_base,
+              constraint->location),
+          constraint->location);
+    case kConstraintConjunction:
+      return NewConjunctionConstraint(
+          ConceptsSubstituteConstraint(syntax, constraint->as.binary.left,
+                                       arguments, rebase_base),
+          ConceptsSubstituteConstraint(syntax, constraint->as.binary.right,
+                                       arguments, rebase_base),
+          constraint->location);
+    case kConstraintDisjunction:
+      return NewDisjunctionConstraint(
+          ConceptsSubstituteConstraint(syntax, constraint->as.binary.left,
+                                       arguments, rebase_base),
+          ConceptsSubstituteConstraint(syntax, constraint->as.binary.right,
+                                       arguments, rebase_base),
+          constraint->location);
+    case kConstraintConceptId:
+      return NewConceptIdConstraint(
+          constraint->as.concept_id.concept_symbol,
+          TypeSubstituteTemplateArgumentVectorAndRebase(
+              syntax, constraint->as.concept_id.arguments, arguments,
+              rebase_base),
+          constraint->location);
+    case kConstraintRequires:
+      return NewRequiresConstraint(
+          RequiresExprSubstitute(syntax,
+                                 constraint->as.requires_.requires_expr,
+                                 arguments, rebase_base),
+          constraint->location);
+  }
+  return NULL;
+}
+
+static Requirement* RequirementSubstitute(Syntax* syntax,
+                                          Requirement* requirement,
+                                          Vector* arguments,
+                                          int rebase_base) {
+  if (requirement == NULL) {
+    return NULL;
+  }
+  switch (requirement->kind) {
+    case kRequirementSimple:
+      return NewSimpleRequirement(
+          TypeSubstituteTemplateExpressionAndRebase(
+              syntax, requirement->expr, arguments, rebase_base,
+              requirement->location),
+          requirement->location);
+    case kRequirementType:
+      return NewTypeRequirement(
+          TypeSubstituteTemplateTypeAndRebase(
+              syntax, requirement->type, arguments, rebase_base),
+          requirement->location);
+    case kRequirementCompound:
+      return NewCompoundRequirement(
+          TypeSubstituteTemplateExpressionAndRebase(
+              syntax, requirement->expr, arguments, rebase_base,
+              requirement->location),
+          requirement->is_noexcept,
+          ConceptsSubstituteConstraint(
+              syntax, requirement->return_type_constraint, arguments,
+              rebase_base),
+          requirement->location);
+    case kRequirementNested:
+      return NewNestedRequirement(
+          ConceptsSubstituteConstraint(syntax, requirement->nested, arguments,
+                                       rebase_base),
+          requirement->location);
+  }
+  return NULL;
+}
+
 static bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;

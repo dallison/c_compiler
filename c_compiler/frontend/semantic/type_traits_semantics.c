@@ -16,6 +16,7 @@
 #include "expr_semantics.h"
 #include "init_semantics.h"
 #include "type_compare.h"
+#include "type_inheritance.h"
 #include "type_template.h"
 #include "type_member.h"
 #include "type_template_internal.h"
@@ -110,7 +111,7 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(Syntax* syntax,
   if (types == NULL) {
     return NULL;
   }
-  TypeRecord* result = DaveTypeTraitInvokeResultType(syntax, types);
+  TypeRecord* result = CXXTypeTraitInvokeResultType(syntax, types);
   VectorDelete(types);
   if (result == NULL) {
     return NULL;
@@ -166,7 +167,7 @@ TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(Syntax* syntax,
   if (types == NULL) {
     return NULL;
   }
-  TypeRecord* result = DaveTypeTraitCommonType(syntax, types);
+  TypeRecord* result = CXXTypeTraitCommonType(syntax, types);
   VectorDelete(types);
   if (result == NULL) {
     return NULL;
@@ -251,7 +252,7 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
       Vector* types = TypeVectorFromTemplateArguments(cur->template_arguments);
       TypeRecord* resolved = NULL;
       if (types != NULL && !TypeVectorHasDependentTemplateParameter(types)) {
-        TypeRecord* common = DaveTypeTraitCommonType(syntax, types);
+        TypeRecord* common = CXXTypeTraitCommonType(syntax, types);
         if (common != NULL) {
           resolved = TypeTraitCopyOwnedSpine(common);
           if (resolved != NULL) {
@@ -267,7 +268,7 @@ TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
       Vector* types = TypeVectorFromTemplateArguments(cur->template_arguments);
       TypeRecord* resolved = NULL;
       if (types != NULL && !TypeVectorHasDependentTemplateParameter(types)) {
-        resolved = DaveTypeTraitInvokeResultType(syntax, types);
+        resolved = CXXTypeTraitInvokeResultType(syntax, types);
         if (resolved != NULL) {
           resolved = TypeRecordCalculateSize(resolved);
         }
@@ -529,6 +530,85 @@ static bool TypeIsReferenceConstructibleFrom(Syntax* syntax, TypeRecord* target,
   return ok && !DiagnosticErrorTrapped();
 }
 
+static StructMember* TypeTraitFindSpecialMember(
+    Struct* str, CXXSpecialMemberKind kind) {
+  if (str == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func =
+          member->is_member_function && member->symbol != NULL
+              ? member->symbol->type
+              : NULL;
+      if (func != NULL && TypeIsFunction(func) &&
+          func->info.function.cxx_special_member_kind == kind) {
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
+static bool TypeTraitSameClassSpecialMemberConstruction(
+    TypeRecord* target, Vector* arg_types, bool check_nothrow, bool* handled) {
+  *handled = false;
+  if (!TypeIsStructOrUnion(target) || target->info.struct_info == NULL ||
+      arg_types == NULL || arg_types->length != 1) {
+    return false;
+  }
+  TypeRecord* arg = arg_types->value.p[0];
+  bool rvalue = !TypeIsReference(arg) ||
+                arg->declarator == kDeclRValueReference;
+  TypeRecord* object = TypeIsReference(arg) ? arg->next : arg;
+  if (object == NULL || !TypeIsStructOrUnion(object) ||
+      object->info.struct_info != target->info.struct_info) {
+    return false;
+  }
+  *handled = true;
+  CXXSpecialMemberKind kind =
+      rvalue ? kCXXSpecialMemberMoveConstructor
+             : kCXXSpecialMemberCopyConstructor;
+  StructMember* member =
+      TypeTraitFindSpecialMember(target->info.struct_info, kind);
+  if (member == NULL && rvalue) {
+    member = TypeTraitFindSpecialMember(target->info.struct_info,
+                                        kCXXSpecialMemberCopyConstructor);
+  }
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      member->access != kAccessPublic ||
+      member->symbol->type->info.function.is_deleted) {
+    return false;
+  }
+  if (TypeIsConst(object)) {
+    TypeRecord* source_type = NULL;
+    FunctionInfo* info = &member->symbol->type->info.function;
+    for (size_t i = 0; i < info->prototype.length; i++) {
+      Symbol* formal = info->prototype.value.p[i];
+      TypeRecord* formal_object =
+          formal != NULL && TypeIsReference(formal->type)
+              ? formal->type->next
+              : NULL;
+      if (formal_object != NULL && TypeIsStructOrUnion(formal_object) &&
+          formal_object->info.struct_info == target->info.struct_info) {
+        source_type = formal->type;
+        break;
+      }
+    }
+    TypeRecord* source_object =
+        source_type != NULL && TypeIsReference(source_type)
+            ? source_type->next
+            : source_type;
+    if (source_object == NULL || !TypeIsConst(source_object)) {
+      return false;
+    }
+  }
+  return !check_nothrow ||
+         member->symbol->type->info.function.is_noexcept;
+}
+
 static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
                                      bool check_nothrow) {
   if (type_args == NULL || type_args->length == 0) {
@@ -547,6 +627,13 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
   }
 
   bool result = false;
+  bool handled_special_member = false;
+  result = TypeTraitSameClassSpecialMemberConstruction(
+      target, &arg_types, check_nothrow, &handled_special_member);
+  if (handled_special_member) {
+    VectorDestruct(&arg_types);
+    return result;
+  }
   if (TypeIsReference(target)) {
     result = TypeIsReferenceConstructibleFrom(syntax, target, &arg_types);
     VectorDestruct(&arg_types);
@@ -570,22 +657,25 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
 
   ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, kTypeTraitLocation,
                                    callee, actuals);
-  result = TryAnalyzeExpression(call);
-  if (result && check_nothrow) {
-    if (!TypeIsStructOrUnion(target)) {
-      return true;
+  SyntaxOpenScope(&compiler->syntax);
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  DiagnosticSuppressBegin();
+  ASTNode* analyzed = AnalyzeExpression(call);
+  result = analyzed != NULL && !DiagnosticErrorTrapped();
+  if (result && check_nothrow && analyzed->op == AST_OP(call)) {
+    VectorASTNode* call_node = (VectorASTNode*)analyzed;
+    TypeRecord* callee_type =
+        call_node->left != NULL ? call_node->left->type : NULL;
+    while (callee_type != NULL && !TypeIsFunction(callee_type)) {
+      callee_type = callee_type->next;
     }
-    Struct* str = target->info.struct_info;
-    if (str != NULL && str->tag_name != NULL) {
-      StructMember* ctor = FindStructMember(str, str->tag_name);
-      if (ctor != NULL && ctor->symbol != NULL &&
-          ctor->symbol->type != NULL &&
-          TypeIsFunction(ctor->symbol->type) &&
-          !ctor->symbol->type->info.function.is_noexcept) {
-        return false;
-      }
-    }
+    result = callee_type != NULL && TypeIsFunction(callee_type) &&
+             callee_type->info.function.is_noexcept;
   }
+  DiagnosticSuppressEnd();
+  DiagnosticErrorTrapEnd(saved_trap);
+  SyntaxCloseScope(&compiler->syntax);
+  ASTNodeDelete(analyzed);
   return result;
 }
 
@@ -1079,7 +1169,9 @@ static bool TypeTraitIsInvocable(Syntax* syntax, Vector* type_args,
   SyntaxOpenScope(&compiler->syntax);
   bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
+  compiler->speculative_template_instantiation_depth++;
   ASTNode* analyzed = AnalyzeExpression(call);
+  compiler->speculative_template_instantiation_depth--;
   bool ok = analyzed != NULL && !DiagnosticErrorTrapped();
   if (ok && check_nothrow && analyzed != NULL && analyzed->op == AST_OP(call)) {
     VectorASTNode* call_node = (VectorASTNode*)analyzed;
@@ -1221,6 +1313,57 @@ static bool TypeTraitObjectCompatibleWithClass(Syntax* syntax, TypeRecord* objec
          object->info.struct_info == class_info;
 }
 
+static bool TypeTraitMemberPointerUsesDirectObject(Syntax* syntax,
+                                                   Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
+    return false;
+  }
+  TypeRecord* member_pointer =
+      MaterializeTraitType(syntax, type_args->value.p[0]);
+  Struct* owner = NULL;
+  TypeRecord* pointee =
+      TypeTraitMemberPointerPointee(member_pointer, &owner);
+  TypeRecordDelete(pointee);
+  if (owner == NULL) {
+    return false;
+  }
+  TypeRecord* object =
+      MaterializeTraitType(syntax, type_args->value.p[1]);
+  while (object != NULL && TypeIsReference(object)) {
+    object = object->next;
+  }
+  if (object == NULL || !TypeIsStructOrUnion(object) ||
+      object->info.struct_info == NULL) {
+    return false;
+  }
+  if (object->info.struct_info == owner) {
+    return true;
+  }
+  if (owner->tag_symbol == NULL || owner->tag_symbol->type == NULL) {
+    return false;
+  }
+  CXXBaseAdjustment adjustment;
+  return TypeBaseAdjustment(object, owner->tag_symbol->type,
+                            /*public_only=*/true, &adjustment);
+}
+
+static bool TypeTraitObjectCanAccessMemberClass(TypeRecord* object,
+                                                Struct* owner) {
+  if (object == NULL || owner == NULL || !TypeIsStructOrUnion(object) ||
+      object->info.struct_info == NULL) {
+    return false;
+  }
+  if (object->info.struct_info == owner) {
+    return true;
+  }
+  if (owner->tag_symbol == NULL || owner->tag_symbol->type == NULL) {
+    return false;
+  }
+  CXXBaseAdjustment adjustment;
+  return TypeBaseAdjustment(object, owner->tag_symbol->type,
+                            /*public_only=*/true, &adjustment);
+}
+
 // Models INVOKE(pm, t1, ...tN) for a pointer to member, per [func.require].
 // The real `.*` analysis path requires a *constant* member pointer whose target
 // member (and thus its offset/prototype) is statically known, but a type trait
@@ -1247,29 +1390,72 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
     return false;
   }
 
-  // Classify the object argument (t1): given by value/reference the access is
-  // `t1.*pm`, given by pointer it is `t1->*pm`.  Its (reference/pointer-
-  // stripped) class type must be class_info or a class derived from it.
+  // Classify the object argument according to INVOKE: reference_wrapper uses
+  // get(), an object of the member's class (or a derived class) uses .*, and
+  // every other type uses *t1 before applying .*.
   TypeRecord* object_type =
       MaterializeTraitType(syntax, (TypeRecord*)type_args->value.p[1]);
   TypeRecord* obj = object_type;
+  bool object_is_lvalue = false;
   while (obj != NULL && TypeIsReference(obj)) {
+    object_is_lvalue =
+        object_is_lvalue || obj->declarator == kDeclReference;
     obj = obj->next;
   }
-  if (obj != NULL && TypeIsPointer(obj)) {
-    obj = obj->next;
-  }
-  bool object_ok = false;
-  if (obj != NULL && TypeIsStructOrUnion(obj)) {
-    if (obj->info.struct_info == class_info) {
-      object_ok = true;
-    } else if (class_info->tag_symbol != NULL &&
-               class_info->tag_symbol->type != NULL &&
-               TypeIsDerivedFrom(obj, class_info->tag_symbol->type)) {
-      object_ok = true;
+  if (obj != NULL && TypeIsStructOrUnion(obj) &&
+      obj->template_arguments != NULL &&
+      obj->template_arguments->length == 1) {
+    Symbol* origin = obj->template_origin;
+    if (origin == NULL && obj->info.struct_info != NULL &&
+        obj->info.struct_info->tag_symbol != NULL &&
+        obj->info.struct_info->tag_symbol->type != NULL) {
+      origin = obj->info.struct_info->tag_symbol->type->template_origin;
+    }
+    if (origin != NULL &&
+        strcmp(origin->name.value, "reference_wrapper") == 0) {
+      TemplateArgument* wrapped = obj->template_arguments->value.p[0];
+      if (wrapped != NULL && wrapped->kind == kTemplateParameterType) {
+        obj = wrapped->type;
+        while (obj != NULL && TypeIsReference(obj)) {
+          obj = obj->next;
+        }
+        object_is_lvalue = true;
+      }
     }
   }
+  bool object_ok = TypeTraitObjectCanAccessMemberClass(obj, class_info);
+  TypeRecord* dereferenced_type = NULL;
   if (!object_ok) {
+    ASTNode* operand = NewSyntheticValue(syntax, object_type);
+    ASTNode* dereference =
+        operand != NULL
+            ? NewUnaryASTNode(AST_OP(contents), NULL, kTypeTraitLocation,
+                              operand)
+            : NULL;
+    SyntaxOpenScope(syntax);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    ASTNode* analyzed =
+        dereference != NULL ? AnalyzeExpression(dereference) : NULL;
+    bool dereference_ok = analyzed != NULL && !DiagnosticErrorTrapped();
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    SyntaxCloseScope(syntax);
+    if (dereference_ok && analyzed->type != NULL) {
+      dereferenced_type = TypeRecordCopy(analyzed->type);
+      object_is_lvalue = analyzed->value_category == kValueCategoryLvalue;
+      obj = dereferenced_type;
+      while (obj != NULL && TypeIsReference(obj)) {
+        object_is_lvalue =
+            object_is_lvalue || obj->declarator == kDeclReference;
+        obj = obj->next;
+      }
+      object_ok = TypeTraitObjectCanAccessMemberClass(obj, class_info);
+    }
+    ASTNodeDelete(analyzed);
+  }
+  if (!object_ok) {
+    TypeRecordDelete(dereferenced_type);
     TypeRecordDelete(pointee);
     return false;
   }
@@ -1283,15 +1469,17 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
       return false;
     }
     if (result_out != NULL) {
-      bool object_is_rvalue =
-          object_type != NULL &&
-          object_type->declarator == kDeclRValueReference;
       TypeRecord* ref = NewTypeRecord(kTypeImplicit, kQualPlain);
-      ref->declarator =
-          object_is_rvalue ? kDeclRValueReference : kDeclReference;
+      ref->declarator = object_is_lvalue ? kDeclReference
+                                         : kDeclRValueReference;
       ref->next = TypeRecordCopy(pointee);
+      if (obj != NULL) {
+        ref->next->qualifiers |=
+            obj->qualifiers & (kQualConst | kQualVolatile);
+      }
       *result_out = ref;
     }
+    TypeRecordDelete(dereferenced_type);
     TypeRecordDelete(pointee);
     return true;
   }
@@ -1299,14 +1487,26 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
   // Pointer to member function: the remaining call arguments (t2..tN) must be
   // implicitly convertible to the (this-stripped) parameter types.
   FunctionInfo* info = &pointee->info.function;
+  if ((!info->is_const_member && obj != NULL && TypeIsConst(obj)) ||
+      (!info->is_volatile_member && obj != NULL && TypeIsVolatile(obj)) ||
+      (info->ref_qualifier == kCXXRefQualifierLValue &&
+       !object_is_lvalue) ||
+      (info->ref_qualifier == kCXXRefQualifierRValue &&
+       object_is_lvalue)) {
+    TypeRecordDelete(dereferenced_type);
+    TypeRecordDelete(pointee);
+    return false;
+  }
+  size_t formal_count = info->prototype.length;
   size_t call_args = type_args->length - 2;
-  if (call_args != info->prototype.length &&
-      !(info->varargs && call_args >= info->prototype.length)) {
+  if (call_args != formal_count &&
+      !(info->varargs && call_args >= formal_count)) {
+    TypeRecordDelete(dereferenced_type);
     TypeRecordDelete(pointee);
     return false;
   }
   bool args_ok = true;
-  for (size_t i = 0; i < info->prototype.length && args_ok; i++) {
+  for (size_t i = 0; i < formal_count && args_ok; i++) {
     Symbol* param = (Symbol*)info->prototype.value.p[i];
     TypeRecord* param_type = param != NULL ? param->type : NULL;
     ASTNode* arg =
@@ -1318,6 +1518,7 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
     ASTNodeDelete(arg);
   }
   if (!args_ok || (check_nothrow && !info->is_noexcept)) {
+    TypeRecordDelete(dereferenced_type);
     TypeRecordDelete(pointee);
     return false;
   }
@@ -1326,60 +1527,88 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
                       ? TypeRecordCopy(pointee->next)
                       : NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   }
+  TypeRecordDelete(dereferenced_type);
   TypeRecordDelete(pointee);
   return true;
 }
 
-bool DaveTypeTraitEvaluateBool(Syntax* syntax, DaveTypeTraitKind kind,
-                               Vector* type_args) {
+bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
+                              Vector* type_args) {
+  SyntaxOpenScope(syntax);
+  bool result = false;
   switch (kind) {
-    case kDaveTypeTraitIsConstructible:
-      return TypeTraitIsConstructible(syntax, type_args, false);
-    case kDaveTypeTraitIsNothrowConstructible:
-      return TypeTraitIsConstructible(syntax, type_args, true);
-    case kDaveTypeTraitIsConvertible:
-      return TypeTraitIsConvertible(syntax, type_args);
-    case kDaveTypeTraitIsAssignable:
-      return TypeTraitIsAssignable(syntax, type_args, false);
-    case kDaveTypeTraitIsNothrowAssignable:
-      return TypeTraitIsAssignable(syntax, type_args, true);
-    case kDaveTypeTraitIsDestructible:
-      return TypeTraitIsDestructible(syntax, type_args, false);
-    case kDaveTypeTraitIsNothrowDestructible:
-      return TypeTraitIsDestructible(syntax, type_args, true);
-    case kDaveTypeTraitIsBaseOf:
-      return TypeTraitIsBaseOf(syntax, type_args);
-    case kDaveTypeTraitIsSwappable:
-      return TypeTraitIsSwappable(syntax, type_args);
-    case kDaveTypeTraitIsSwappableWith:
-      return TypeTraitIsSwappableWith(syntax, type_args);
-    case kDaveTypeTraitIsInvocable:
-      return TypeTraitIsInvocable(syntax, type_args, false);
-    case kDaveTypeTraitIsNothrowInvocable:
-      return TypeTraitIsInvocable(syntax, type_args, true);
-    case kDaveTypeTraitIsClass:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsClass((TypeRecord*)type_args->value.p[0]);
-    case kDaveTypeTraitIsUnion:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsUnion((TypeRecord*)type_args->value.p[0]);
-    case kDaveTypeTraitIsEnum:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsEnum((TypeRecord*)type_args->value.p[0]);
-    case kDaveTypeTraitIsMemberPointer:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsMemberPointer((TypeRecord*)type_args->value.p[0]);
-    case kDaveTypeTraitIsMemberObjectPointer:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsMemberObjectPointer((TypeRecord*)type_args->value.p[0]);
-    case kDaveTypeTraitIsMemberFunctionPointer:
-      return type_args != NULL && type_args->length == 1 &&
-             TypeTraitIsMemberFunctionPointer((TypeRecord*)type_args->value.p[0]);
+    case kCXXTypeTraitIsConstructible:
+      result = TypeTraitIsConstructible(syntax, type_args, false);
+      break;
+    case kCXXTypeTraitIsNothrowConstructible:
+      result = TypeTraitIsConstructible(syntax, type_args, true);
+      break;
+    case kCXXTypeTraitIsConvertible:
+      result = TypeTraitIsConvertible(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsAssignable:
+      result = TypeTraitIsAssignable(syntax, type_args, false);
+      break;
+    case kCXXTypeTraitIsNothrowAssignable:
+      result = TypeTraitIsAssignable(syntax, type_args, true);
+      break;
+    case kCXXTypeTraitIsDestructible:
+      result = TypeTraitIsDestructible(syntax, type_args, false);
+      break;
+    case kCXXTypeTraitIsNothrowDestructible:
+      result = TypeTraitIsDestructible(syntax, type_args, true);
+      break;
+    case kCXXTypeTraitIsBaseOf:
+      result = TypeTraitIsBaseOf(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsSwappable:
+      result = TypeTraitIsSwappable(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsSwappableWith:
+      result = TypeTraitIsSwappableWith(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsInvocable:
+      result = TypeTraitIsInvocable(syntax, type_args, false);
+      break;
+    case kCXXTypeTraitIsNothrowInvocable:
+      result = TypeTraitIsInvocable(syntax, type_args, true);
+      break;
+    case kCXXTypeTraitIsClass:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsClass((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsUnion:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsUnion((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsEnum:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsEnum((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsMemberPointer:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsMemberPointer((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsMemberObjectPointer:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsMemberObjectPointer(
+                   (TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsMemberFunctionPointer:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsMemberFunctionPointer(
+                   (TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitMemberPointerDirectObject:
+      result = TypeTraitMemberPointerUsesDirectObject(syntax, type_args);
+      break;
   }
-  return false;
+  SyntaxCloseScope(syntax);
+  return result;
 }
 
-TypeRecord* DaveTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args) {
+static TypeRecord* CXXTypeTraitInvokeResultTypeImpl(Syntax* syntax,
+                                                    Vector* type_args) {
   if (type_args == NULL || type_args->length == 0) {
     return NULL;
   }
@@ -1425,7 +1654,9 @@ TypeRecord* DaveTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args) {
   SyntaxOpenScope(&compiler->syntax);
   bool saved_trap = DiagnosticErrorTrapBegin();
   DiagnosticSuppressBegin();
+  compiler->speculative_template_instantiation_depth++;
   ASTNode* analyzed = AnalyzeExpression(call);
+  compiler->speculative_template_instantiation_depth--;
   TypeRecord* result = NULL;
   if (analyzed != NULL && analyzed->type != NULL && !DiagnosticErrorTrapped()) {
     result = TypeRecordCopy(analyzed->type);
@@ -1436,6 +1667,13 @@ TypeRecord* DaveTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args) {
   if (analyzed != NULL) {
     ASTNodeDelete(analyzed);
   }
+  return result;
+}
+
+TypeRecord* CXXTypeTraitInvokeResultType(Syntax* syntax, Vector* type_args) {
+  SyntaxOpenScope(syntax);
+  TypeRecord* result = CXXTypeTraitInvokeResultTypeImpl(syntax, type_args);
+  SyntaxCloseScope(syntax);
   return result;
 }
 
@@ -1542,7 +1780,8 @@ static TypeRecord* TypeTraitConditionalCommonType(Syntax* syntax,
   return result;
 }
 
-TypeRecord* DaveTypeTraitCommonType(Syntax* syntax, Vector* type_args) {
+static TypeRecord* CXXTypeTraitCommonTypeImpl(Syntax* syntax,
+                                              Vector* type_args) {
   if (type_args == NULL || type_args->length != 2) {
     return NULL;
   }
@@ -1561,5 +1800,12 @@ TypeRecord* DaveTypeTraitCommonType(Syntax* syntax, Vector* type_args) {
   }
   TypeRecordDelete(left);
   TypeRecordDelete(right);
+  return result;
+}
+
+TypeRecord* CXXTypeTraitCommonType(Syntax* syntax, Vector* type_args) {
+  SyntaxOpenScope(syntax);
+  TypeRecord* result = CXXTypeTraitCommonTypeImpl(syntax, type_args);
+  SyntaxCloseScope(syntax);
   return result;
 }

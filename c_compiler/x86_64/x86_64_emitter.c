@@ -2735,14 +2735,14 @@ static void PrintEscapedAsmString(FILE* fp, const char* s) {
   }
 }
 
-// Emits the exception type_info objects.  The layout must match `DaveTypeInfo`
+// Emits the exception type_info objects.  The layout must match `CXXTypeInfo`
 // in libc/eh_throw.c:
 //
-//   struct DaveTypeInfoBase { const char* name; long offset; };
-//   struct DaveTypeInfo { const char* name; long base_count;
-//                         const DaveTypeInfoBase* bases; };
+//   struct CXXTypeInfoBase { const char* name; long offset; };
+//   struct CXXTypeInfo { const char* name; long base_count;
+//                        const CXXTypeInfoBase* bases; };
 //
-// The public label is `symbol_name` (the DaveTypeInfo object); the throw site
+// The public label is `symbol_name` (the CXXTypeInfo object); the throw site
 // and exception table reference it by address.
 static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
   if (emitter->rv->exception_typeinfos.length == 0) {
@@ -2754,12 +2754,14 @@ static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
     const char* name = info->symbol_name.value;
 
     fprintf(fp, "\t.p2align 3\n");
+    fprintf(fp, "\t.local %s_name\n", name);
     fprintf(fp, "%s_name:\n\t.asciz \"", name);
     PrintEscapedAsmString(fp, info->type_name.value);
     fprintf(fp, "\"\n");
 
     for (size_t b = 0; b < info->bases.length; b++) {
       EHTypeInfoBase* base = info->bases.value.p[b];
+      fprintf(fp, "\t.local %s_base%zu_name\n", name, b);
       fprintf(fp, "%s_base%zu_name:\n\t.asciz \"", name, b);
       PrintEscapedAsmString(fp, base->base_name.value);
       fprintf(fp, "\"\n");
@@ -2767,6 +2769,7 @@ static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
 
     if (info->bases.length > 0) {
       fprintf(fp, "\t.p2align 3\n");
+      fprintf(fp, "\t.local %s_bases\n", name);
       fprintf(fp, "%s_bases:\n", name);
       for (size_t b = 0; b < info->bases.length; b++) {
         EHTypeInfoBase* base = info->bases.value.p[b];
@@ -2776,6 +2779,7 @@ static void X86_64PrintTypeInfoRecords(X86_64Emitter* emitter, FILE* fp) {
     }
 
     fprintf(fp, "\t.p2align 3\n");
+    fprintf(fp, "\t.weak %s\n", name);
     fprintf(fp, "%s:\n", name);
     fprintf(fp, "\t.8byte %s_name\n", name);
     fprintf(fp, "\t.8byte %zu\n", info->bases.length);

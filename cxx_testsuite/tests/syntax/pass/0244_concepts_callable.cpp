@@ -66,21 +66,14 @@ int main() {
   if (std::invoke(callable, 3) != 4) {
     return 1;
   }
-  // The pointer-to-member *concepts* (std::invocable / invoke_result_t on
-  // member pointers) are checked above and are fully supported. Applying them
-  // through std::invoke() at runtime, however, requires dereferencing a
-  // *non-constant* member pointer (obj.*pmf where pmf is a value forwarded
-  // through a function template). DaveCC currently only supports member
-  // pointers whose target member is a compile-time constant, so we exercise the
-  // constant form directly here rather than through std::invoke().
   MemberFn object{5};
   int (MemberFn::*method)(int) const = &MemberFn::add;
-  if ((object.*method)(2) != 7) {
+  if (std::invoke(method, object, 2) != 7) {
     return 2;
   }
   MemberData data{9};
   int MemberData::*field = &MemberData::value;
-  if (data.*field != 9) {
+  if (std::invoke(field, data) != 9) {
     return 3;
   }
   return 0;

@@ -1493,6 +1493,12 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                                              symbuf, sizeof(symbuf)));
       } else if (((int)sym->opcode == (int)ARM_OP(literal))) {
         fprintf(fp, ".str.%d\n", ((TargetLiteral*)sym)->literal_id);
+      } else if (TargetIsConst(sym)) {
+        uint64_t value = (uint64_t)TargetIntValue(sym);
+        if ((ARMOpcode)inst->opcode == ARM_OP(movt)) {
+          value >>= 16;
+        }
+        fprintf(fp, "#%" PRIu64 "\n", value & 0xffffu);
       } else {
         assert(false);
       }

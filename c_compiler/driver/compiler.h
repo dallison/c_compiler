@@ -270,6 +270,10 @@ typedef struct {
   // set, so a speculative parse can be rolled back without user-visible output.
   int diagnostic_error_trap_depth;
   bool diagnostic_error_trapped;
+  // Signature-only template instantiations performed for unevaluated type
+  // traits. Such probes may populate instantiation caches, but must not clone,
+  // queue, analyze, or emit function bodies.
+  int speculative_template_instantiation_depth;
   // Current #pragma pack(n) member alignment cap (0 = no packing in effect).
   int pack_alignment;
   // Stack of saved pack values for #pragma pack(push[,n]) / pack(pop).

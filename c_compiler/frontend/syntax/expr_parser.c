@@ -20,6 +20,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "type.h"
+#include "type_class_internal.h"
 #include "compiler.h"
 #include "type_traits_semantics.h"
 
@@ -95,62 +96,65 @@ static bool IsBuiltinCallName(const char* name) {
   return strncmp(name, "__davecc_is_", 12) == 0;
 }
 
-static DaveTypeTraitKind TypeTraitKindFromName(const char* name) {
+static CXXTypeTraitKind TypeTraitKindFromName(const char* name) {
   if (strcmp(name, "__davecc_is_constructible") == 0) {
-    return kDaveTypeTraitIsConstructible;
+    return kCXXTypeTraitIsConstructible;
   }
   if (strcmp(name, "__davecc_is_nothrow_constructible") == 0) {
-    return kDaveTypeTraitIsNothrowConstructible;
+    return kCXXTypeTraitIsNothrowConstructible;
   }
   if (strcmp(name, "__davecc_is_convertible") == 0) {
-    return kDaveTypeTraitIsConvertible;
+    return kCXXTypeTraitIsConvertible;
   }
   if (strcmp(name, "__davecc_is_assignable") == 0) {
-    return kDaveTypeTraitIsAssignable;
+    return kCXXTypeTraitIsAssignable;
   }
   if (strcmp(name, "__davecc_is_nothrow_assignable") == 0) {
-    return kDaveTypeTraitIsNothrowAssignable;
+    return kCXXTypeTraitIsNothrowAssignable;
   }
   if (strcmp(name, "__davecc_is_destructible") == 0) {
-    return kDaveTypeTraitIsDestructible;
+    return kCXXTypeTraitIsDestructible;
   }
   if (strcmp(name, "__davecc_is_nothrow_destructible") == 0) {
-    return kDaveTypeTraitIsNothrowDestructible;
+    return kCXXTypeTraitIsNothrowDestructible;
   }
   if (strcmp(name, "__davecc_is_base_of") == 0) {
-    return kDaveTypeTraitIsBaseOf;
+    return kCXXTypeTraitIsBaseOf;
   }
   if (strcmp(name, "__davecc_is_swappable") == 0) {
-    return kDaveTypeTraitIsSwappable;
+    return kCXXTypeTraitIsSwappable;
   }
   if (strcmp(name, "__davecc_is_swappable_with") == 0) {
-    return kDaveTypeTraitIsSwappableWith;
+    return kCXXTypeTraitIsSwappableWith;
   }
   if (strcmp(name, "__davecc_is_invocable") == 0) {
-    return kDaveTypeTraitIsInvocable;
+    return kCXXTypeTraitIsInvocable;
   }
   if (strcmp(name, "__davecc_is_nothrow_invocable") == 0) {
-    return kDaveTypeTraitIsNothrowInvocable;
+    return kCXXTypeTraitIsNothrowInvocable;
   }
   if (strcmp(name, "__davecc_is_class") == 0) {
-    return kDaveTypeTraitIsClass;
+    return kCXXTypeTraitIsClass;
   }
   if (strcmp(name, "__davecc_is_union") == 0) {
-    return kDaveTypeTraitIsUnion;
+    return kCXXTypeTraitIsUnion;
   }
   if (strcmp(name, "__davecc_is_enum") == 0) {
-    return kDaveTypeTraitIsEnum;
+    return kCXXTypeTraitIsEnum;
   }
   if (strcmp(name, "__davecc_is_member_pointer") == 0) {
-    return kDaveTypeTraitIsMemberPointer;
+    return kCXXTypeTraitIsMemberPointer;
   }
   if (strcmp(name, "__davecc_is_member_object_pointer") == 0) {
-    return kDaveTypeTraitIsMemberObjectPointer;
+    return kCXXTypeTraitIsMemberObjectPointer;
   }
   if (strcmp(name, "__davecc_is_member_function_pointer") == 0) {
-    return kDaveTypeTraitIsMemberFunctionPointer;
+    return kCXXTypeTraitIsMemberFunctionPointer;
   }
-  return (DaveTypeTraitKind)-1;
+  if (strcmp(name, "__davecc_is_member_pointer_direct_object") == 0) {
+    return kCXXTypeTraitMemberPointerDirectObject;
+  }
+  return (CXXTypeTraitKind)-1;
 }
 
 static Vector* ParseTypeTraitTypeArguments(Syntax* syntax, TokenClass followers) {
@@ -189,7 +193,7 @@ static ASTNode* TypeTraitIntrinsic(Syntax* syntax, ASTNode* left,
   }
   IdentifierASTNode* id_node = (IdentifierASTNode*)left;
   const char* name = id_node->symbol->name.value;
-  DaveTypeTraitKind kind = TypeTraitKindFromName(name);
+  CXXTypeTraitKind kind = TypeTraitKindFromName(name);
   if ((int)kind < 0) {
     return NULL;
   }
@@ -768,6 +772,11 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
         if (LexLookingAt(syntax->lex, TOK(less))) {
           depth++;
         } else if (LexLookingAt(syntax->lex, TOK(greater))) {
+          depth--;
+        } else if (LexLookingAt(syntax->lex, TOK(greatergreater)) ||
+                   LexLookingAt(syntax->lex, TOK(greatergreatereq))) {
+          depth -= 2;
+        } else if (LexLookingAt(syntax->lex, TOK(greatereq))) {
           depth--;
         }
         LexNextToken(syntax->lex);
@@ -2434,6 +2443,19 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
   Struct* closure = closure_type->info.struct_info;
   for (size_t i = 0; i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
+    if (capture->is_init_capture && capture->initializer != NULL) {
+      capture->initializer = AnalyzeExpression(capture->initializer);
+      if (capture->initializer->type != NULL && capture->captured != NULL) {
+        TypeRecord* deduced = capture->initializer->type;
+        if (TypeIsReference(deduced)) {
+          deduced = deduced->next;
+        }
+        deduced = TypeMaterializeClassTemplateSpecialization(&compiler->syntax,
+                                                             deduced);
+        TypeRecordDelete(capture->captured->type);
+        capture->captured->type = TypeRecordCopy(deduced);
+      }
+    }
     Symbol* field = NewSymbol(capture->captured->name.value,
                               LambdaCaptureFieldType(capture), STO(implicit));
     field->flags.invented = true;
@@ -2445,7 +2467,11 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
     StructAddSyntheticMember(closure, member);
     capture->field = field;
   }
+  if (captures->length > 0) {
+    LambdaClosureRemoveEmptyPlaceholder(closure);
+  }
   closure_type->size = closure->size;
+  TypeRecordCalculateSize(closure_type);
 }
 
 // Build the designated initializer (`.field = value`) for one capture used when
@@ -2683,6 +2709,9 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
     VectorDestruct(&body_locals);
   }
   AddLambdaCaptureFields(closure_type, &captures, location);
+  AddImplicitLambdaClosureSpecialMembers(
+      syntax, closure_type->info.struct_info, closure_type->info.struct_info->tag_symbol,
+      captures.length > 0, explicit_template_params != NULL);
   LambdaRewrite rewrite = {
       &captures, call_operator->type->info.function.prototype.value.p[0]};
   ASTNodeVisit(call_operator->type->info.function.body,
@@ -4201,6 +4230,8 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                 "Class template argument deduction requires an initializer");
   }
   TypeRecordCalculateSize(allocated_type);
+  bool allocated_type_dependent =
+      TypeContainsTemplateParameter(allocated_type);
   if (TypeIsAbstractClass(allocated_type)) {
     SyntaxError(syntax, "Cannot allocate object of abstract class %s",
                 allocated_type->info.struct_info->tag_name != NULL
@@ -4219,20 +4250,32 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     if (FindCXXConstructorForType(allocated_type) == NULL) {
       Vector* initializers =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
-      bool dependent = TypeContainsTemplateParameter(allocated_type);
+      bool class_direct_init =
+          !allocated_type_dependent && TypeIsStructOrUnion(allocated_type) &&
+          allocated_type->info.struct_info != NULL &&
+          allocated_type->info.struct_info->tag_name != NULL &&
+          allocated_type->info.struct_info->is_class &&
+          !allocated_type->info.struct_info->is_aggregate;
       if (initializers->length == 1) {
-        // `new T(x)` / `new T{x}`: direct/copy-initialization of a scalar (or a
-        // same-typed class object).  For a dependent T this assignment is kept
-        // and may be rewritten to `receiver.T(x)` once T resolves to a class.
-        scalar_initializer = initializers->value.p[0];
-        VectorDestruct(initializers);
+        if (class_direct_init) {
+          // `new (p) T(arg)` on a class type performs direct/copy/move
+          // construction, never assignment into uninitialized storage.
+          ctor_actuals = initializers;
+        } else {
+          // `new T(x)` / `new T{x}`: direct/copy-initialization of a scalar (or a
+          // same-typed class object).  For a dependent T this assignment is kept
+          // and may be rewritten to `receiver.T(x)` once T resolves to a class.
+          scalar_initializer = initializers->value.p[0];
+          VectorDestruct(initializers);
+        }
       } else if (initializers->length == 0) {
         // `new T()` / `new T{}`: value-initialization.  A scalar (or dependent
         // T, which is resolved during instantiation) is zero-initialized with a
         // plain assignment; a concrete aggregate is zero-initialized with an
         // empty compound literal so its members and padding are cleared.
         value_init = true;
-        if (dependent || (!TypeIsStructOrUnion(allocated_type) &&
+        if (allocated_type_dependent ||
+            (!TypeIsStructOrUnion(allocated_type) &&
                           !TypeIsArray(allocated_type))) {
           scalar_initializer = NewIntLiteral(0, location);
         } else {
@@ -4240,7 +4283,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
               syntax, allocated_type, NULL, location);
         }
         VectorDelete(initializers);
-      } else if (dependent) {
+      } else if (allocated_type_dependent) {
         scalar_initializer =
             NewBracedInitializerASTNode(initializers, NULL, location);
       } else if (TypeIsStructOrUnion(allocated_type) ||
@@ -4265,7 +4308,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
 
   Vector* actuals = NewVector();
   ASTNode* allocation_size =
-      NewSizeofASTNodeWithKnownSize(allocated_type->size, location);
+      allocated_type_dependent
+          ? NewSizeofASTNodeWithType(allocated_type, location)
+          : NewSizeofASTNodeWithKnownSize(allocated_type->size, location);
   Symbol* array_count = NULL;
   if (array_size != NULL) {
     array_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
@@ -4294,6 +4339,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
   ((CastASTNode*)result)->kind = kCastStatic;
+  if (allocated_type_dependent) {
+    result->flags |= kASTDependentNewAllocation;
+  }
   if (array_size != NULL) {
     TypeRecord* size_type = NewSizeTypeRecord();
     TypeRecord* size_ptr_type = NewPointerTo(kQualPlain, size_type);
