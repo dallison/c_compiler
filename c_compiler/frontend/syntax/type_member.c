@@ -632,6 +632,47 @@ StructMember* FindStructMember(Struct* str, String* name) {
   return NULL;
 }
 
+// A conversion operator is a member function whose synthesized name matches the
+// name derived from its result type (e.g. a member named "operator long" whose
+// result type is `long`).  Regular operator overloads such as "operator+" never
+// satisfy this because their name is unrelated to the return type.
+static bool MemberIsConversionOperator(StructMember* member) {
+  if (member == NULL || !member->is_member_function || member->symbol == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
+      member->symbol->type->next == NULL) {
+    return false;
+  }
+  String expected;
+  ConversionOperatorName(member->symbol->type->next, &expected);
+  bool matches = strcmp(expected.value, member->symbol->name.value) == 0;
+  StringDestruct(&expected);
+  return matches;
+}
+
+// Append every conversion-operator member reachable from `str`, including those
+// inherited from base classes, to `out` (a Vector of StructMember*).  Only the
+// head of each overload chain is recorded; overloads that share a name (e.g.
+// const/non-const) also share a result type, so callers ranking by result type
+// do not need the whole chain.
+void CollectConversionOperators(Struct* str, Vector* out) {
+  if (str == NULL || out == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (MemberIsConversionOperator(member)) {
+      VectorAppend(out, member);
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      CollectConversionOperators(base->type->info.struct_info, out);
+    }
+  }
+}
+
 static StructMember* FindDirectStructMemberByName(Struct* str,
                                                   const char* name) {
   if (str == NULL || name == NULL) {
