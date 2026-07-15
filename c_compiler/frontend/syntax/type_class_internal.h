@@ -100,6 +100,7 @@ StructMember* FindStructMemberByName(Struct* str, const char* name);
 StructMember* FindStructMemberWithAccess(Struct* str, String* name,
                                          CXXAccess* access, Struct** owner);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
+void CollectConversionOperators(Struct* str, Vector* out);
 
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         String* tag_name);

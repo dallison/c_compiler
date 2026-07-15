@@ -2506,6 +2506,123 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                first_formal_arg);
 }
 
+/* Public: deduce the template arguments of a conversion function template for a
+ * requested target type.  A conversion function template has no value
+ * parameters, so its arguments are deduced by matching the declared (dependent)
+ * target type (`func->next`) against the required type `target`
+ * ([temp.deduct.conv]) rather than from call arguments.  Returns the completed
+ * argument vector (caller owns) or NULL if deduction/default-completion/
+ * constraints fail. */
+Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
+                                                      Symbol* templ,
+                                                      TypeRecord* target) {
+  if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
+      !TypeIsFunction(templ->type) || target == NULL) {
+    return NULL;
+  }
+  TypeRecord* func =
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
+          ? templ->value.func_defn->type
+          : templ->type;
+  if (func->info.function.template_parameter_count <= 0 || func->next == NULL) {
+    return NULL;
+  }
+  size_t explicit_arg_count = 0;
+  Vector* args = NewFunctionTemplateDeductionArguments(func, /*explicit_args=*/
+                                                       NULL, &explicit_arg_count);
+  if (args == NULL) {
+    return NULL;
+  }
+  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func->next,
+                                          target)) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* completed_args =
+      CompleteFunctionTemplateArguments(&parser, func, args,
+                                        /*emit_error=*/false);
+  TypeParserDestruct(&parser);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (completed_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameterForInstantiation(
+          completed_args)) {
+    if (completed_args != NULL) {
+      VectorDeleteWithContents(completed_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return NULL;
+  }
+  if (!ConceptsFunctionTemplateConstraintsSatisfied(templ, completed_args)) {
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  return completed_args;
+}
+
+/* True if conversion function template `specialized` is at least as specialized
+ * as `general` for partial ordering ([temp.func.order], [temp.deduct.partial]):
+ * treat `specialized`'s target pattern as the argument (its own parameters act
+ * as unique opaque types on the argument side) and try to deduce `general`'s
+ * parameters from it.  Success means `general` is at least as general, i.e.
+ * `specialized` is at least as specialized. */
+static bool ConversionTargetAtLeastAsSpecialized(Symbol* specialized,
+                                                 Symbol* general) {
+  TypeRecord* sfunc =
+      specialized->value.func_defn != NULL &&
+              specialized->value.func_defn->type != NULL
+          ? specialized->value.func_defn->type
+          : specialized->type;
+  TypeRecord* gfunc =
+      general->value.func_defn != NULL && general->value.func_defn->type != NULL
+          ? general->value.func_defn->type
+          : general->type;
+  if (sfunc->next == NULL || gfunc->next == NULL) {
+    return false;
+  }
+  size_t explicit_arg_count = 0;
+  Vector* args =
+      NewFunctionTemplateDeductionArguments(gfunc, NULL, &explicit_arg_count);
+  if (args == NULL) {
+    return false;
+  }
+  bool ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                               gfunc->next, sfunc->next);
+  VectorDeleteWithContents(args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return ok;
+}
+
+/* Public: partial ordering of two conversion function templates by their target
+ * type ([temp.func.order]).  Returns 1 if `a` is more specialized than `b`, -1
+ * if `b` is more specialized than `a`, and 0 if neither is (they are equivalent
+ * or incomparable, i.e. ambiguous). */
+int TypeConversionOperatorTemplateMoreSpecialized(Syntax* syntax, Symbol* a,
+                                                  Symbol* b) {
+  (void)syntax;
+  if (a == NULL || b == NULL || a->type == NULL || b->type == NULL) {
+    return 0;
+  }
+  bool a_at_least_as_specialized = ConversionTargetAtLeastAsSpecialized(a, b);
+  bool b_at_least_as_specialized = ConversionTargetAtLeastAsSpecialized(b, a);
+  if (a_at_least_as_specialized && !b_at_least_as_specialized) {
+    return 1;
+  }
+  if (b_at_least_as_specialized && !a_at_least_as_specialized) {
+    return -1;
+  }
+  return 0;
+}
+
 /* Public: register a user-written CTAD deduction guide for a class template. */
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide) {
   if (class_template == NULL || class_template->type == NULL ||
