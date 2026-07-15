@@ -847,7 +847,24 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // placeholder.
     StructMember* member = FindStructMember(
         info.origin->type->info.struct_info, type->dependent_member_name);
-    if (member != NULL && member->symbol != NULL &&
+    // A nested class/struct member (its injected type-name, stored as a
+    // typedef to a struct lexically owned by the origin template) must NOT be
+    // resolved from the primary while any argument is still dependent: doing so
+    // yields the *primary's* single shared nested type and drops the differing
+    // argument (e.g. a member function template's own parameter appearing in the
+    // enclosing class-template's argument list, `Map<Key, C2>::iterator`).  Such
+    // a type must stay deferred as `Origin<concrete_args>::member` so it later
+    // resolves to the correct specialization's nested type.  The shortcut is
+    // meant only for genuine alias/typedef members (e.g. `add_rvalue_reference<
+    // T>::type = T&&`) whose definition substitutes correctly.
+    bool member_is_nested_type =
+        member != NULL && member->symbol != NULL &&
+        member->symbol->type != NULL &&
+        TypeIsStructOrUnion(member->symbol->type) &&
+        member->symbol->type->info.struct_info != NULL &&
+        member->symbol->type->info.struct_info->lexical_parent ==
+            info.origin->type->info.struct_info;
+    if (member != NULL && member->symbol != NULL && !member_is_nested_type &&
         StorageIs(member->symbol->storage, STO(typedef))) {
       TypeRecord* subst = SubstituteTemplateParameters(
           parser, member->symbol->type, concrete_args);
@@ -1233,8 +1250,16 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     // decltype is unevaluated: cloning and resolving a declaration-only
     // function such as std::declval must not require a function body.
     DiagnosticSuppressBegin();
+    // Cloning the operand substitutes template arguments and may speculatively
+    // instantiate declaration-only helpers (e.g. std::declval), which can
+    // record recovered diagnostics in the enclosing error trap even though the
+    // clone itself succeeds.  Isolate that noise so a SFINAE-sensitive caller
+    // (e.g. a `requires { typename decltype(...); }` type-requirement) only
+    // observes errors from the actual re-analysis below, not from cloning.
+    bool clone_trap = DiagnosticErrorTrapBegin();
     ASTNode* expr = CloneDependentExpressionWithArgs(
         parser, type->dependent_decltype_expr, args);
+    DiagnosticErrorTrapEnd(clone_trap);
     if (expr != NULL) {
       // The definition-time expression was analyzed while its operands were
       // still dependent, so its nodes carry kASTAnalyzed with dependent types.
@@ -1245,8 +1270,49 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       // type instead of resolving to long).
       ASTNodeVisit(expr, ClearDependentExpressionAnalysis, 0, NULL);
       expr = AnalyzeExpression(expr);
-      TypeRecord* result = NULL;
       if (expr != NULL && expr->type != NULL) {
+        // If the substituted operand is still type-dependent, the `decltype` is
+        // not yet evaluable: only some enclosing template arguments were
+        // supplied (e.g. substituting the class parameter `D` while a member
+        // template's own parameter `R` survives).  The re-analyzed operand type
+        // here is a *partially-resolved spine* (e.g. `ranges::begin(declval<R&>())`
+        // resolving to `R&`).  Returning that spine lets an enclosing alias
+        // textually reduce it -- `iter_difference_t<iterator_t<R>>` collapsing
+        // via `iterator_traits<remove_cvref_t<R&>>::difference_type` down to
+        // `R::difference_type`, which bakes in the *primary* iterator_traits body
+        // and never re-dispatches to the `T*` specialization once `R` becomes
+        // concrete.  Keep the `decltype` opaque (carry the substituted operand as
+        // the deferred expression) so a later substitution with a concrete `R`
+        // re-evaluates the whole chain from scratch.
+        bool operand_still_dependent =
+            TypeIsUnknown(expr->type) || TypeContainsTemplateParameter(expr->type);
+        if (operand_still_dependent) {
+          TypeRecord* opaque = TypeRecordCopy(type);
+          opaque->qualifiers |= type->qualifiers;
+          // Carry a FRESH, UNANALYZED clone of the substituted operand as the
+          // deferred expression, not the just-analyzed `expr`.  The re-analysis
+          // above may have resolved to an unknown/dependent type only because a
+          // type involved was still incomplete at this substitution point (e.g. a
+          // CRTP Derived being completed while its view_interface base's member
+          // constraint `contiguous_iterator<iterator_t<Derived>>` is substituted):
+          // the CPO call `ranges::begin(declval<Derived&>())` cannot deduce its
+          // `auto` return yet, so `expr` becomes a call node baked to `unknown`.
+          // Re-analyzing that stale, already-resolved tree later never recovers.
+          // A clean clone re-analyzes from scratch once Derived is complete and
+          // then resolves correctly (e.g. to `int*`).
+          ASTNode* deferred = CloneDependentExpressionWithArgs(
+              parser, type->dependent_decltype_expr, args);
+          if (deferred != NULL) {
+            opaque->dependent_decltype_expr = deferred;
+            ASTNodeDelete(expr);
+          } else {
+            opaque->dependent_decltype_expr = expr;
+          }
+          DiagnosticSuppressEnd();
+          VectorPop(&g_dependent_decltype_stack);
+          return TypeRecordCalculateSize(opaque);
+        }
+        TypeRecord* result = NULL;
         if (expr->value_category == kValueCategoryLvalue) {
           result = NewDecltypeReference(expr->type, false);
         } else if (expr->value_category == kValueCategoryXvalue) {
@@ -1254,18 +1320,13 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         } else {
           result = TypeRecordCopy(expr->type);
         }
-      }
-      if (result != NULL) {
-        result->qualifiers |= type->qualifiers;
-        if (TypeIsUnknown(result) ||
-            TypeContainsTemplateParameter(result)) {
-          result->dependent_decltype_expr = expr;
-        } else {
+        if (result != NULL) {
+          result->qualifiers |= type->qualifiers;
           ASTNodeDelete(expr);
+          DiagnosticSuppressEnd();
+          VectorPop(&g_dependent_decltype_stack);
+          return TypeRecordCalculateSize(result);
         }
-        DiagnosticSuppressEnd();
-        VectorPop(&g_dependent_decltype_stack);
-        return TypeRecordCalculateSize(result);
       }
       ASTNodeDelete(expr);
     }
@@ -1532,6 +1593,16 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
                                                base);
       }
     }
+    // A deferred `decltype` operand (e.g. `iterator_t<R> =
+    // decltype(ranges::begin(declval<R&>()))`) references template parameters
+    // inside its expression AST, not the type spine.  Those must be rebased too
+    // or a later substitution with the member's own arguments (numbered from 0)
+    // would fail to reach the enclosing-relative parameter still named in the
+    // operand, leaving the decltype permanently unresolved.
+    if (t->dependent_decltype_expr != NULL) {
+      t->dependent_decltype_expr =
+          CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
+    }
   }
 }
 
@@ -1552,6 +1623,10 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
         RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
                                                base);
       }
+    }
+    if (t->dependent_decltype_expr != NULL) {
+      t->dependent_decltype_expr =
+          CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
     }
     // Nested lambda closures embed placeholder capture-field types numbered
     // relative to an enclosing template.  After substituting the enclosing
@@ -1681,6 +1756,18 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   copy->alias_target = old->alias_target;
   id->symbol = copy;
   ASTNodeSetType(node, copy->type);
+  // Explicit template arguments on the id (e.g. the `R&` in `declval<R&>()`
+  // inside `iterator_t<R> = decltype(ranges::begin(declval<R&>()))`) also carry
+  // enclosing-relative parameter indices.  The clone owns its own copy of this
+  // vector (IdentifierASTNodeCopy deep-copies it), so rebasing it in place is
+  // safe and is required or the operand keeps naming the pre-rebase parameter
+  // and never resolves once the member's own arguments arrive.
+  if (id->template_arguments != NULL) {
+    for (size_t i = 0; i < id->template_arguments->length; i++) {
+      RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],
+                                             rebase->base);
+    }
+  }
 }
 
 static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base) {

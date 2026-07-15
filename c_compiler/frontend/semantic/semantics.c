@@ -829,33 +829,6 @@ static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
   return true;
 }
 
-static void ConversionOperatorName(TypeRecord* type, String* name) {
-  String type_name;
-  StringInit(&type_name, "");
-  TypeRecordToString(type, &type_name);
-  StringInit(name, "operator ");
-  for (size_t i = 0; i < type_name.length; i++) {
-    char ch = type_name.value[i];
-    if (ch == '*') {
-      StringAppend(name, " pointer");
-    } else if (ch == '&') {
-      if (i + 1 < type_name.length && type_name.value[i + 1] == '&') {
-        StringAppend(name, " rvalue_reference");
-        i++;
-      } else {
-        StringAppend(name, " reference");
-      }
-    } else {
-      StringAppendChar(name, ch);
-    }
-  }
-  while (name->length > 0 && name->value[name->length - 1] == ' ') {
-    name->value[name->length - 1] = '\0';
-    name->length--;
-  }
-  StringDestruct(&type_name);
-}
-
 static bool ConversionOperatorAllowedInContext(TypeRecord* func,
                                                TypeRecord* to,
                                                ConversionContext ctx) {
@@ -866,25 +839,167 @@ static bool ConversionOperatorAllowedInContext(TypeRecord* func,
          (ctx == kConvertContextualBool && TypeIsBool(to));
 }
 
+// Rank of the standard conversion needed to turn a conversion operator's
+// result type into the requested target `to`.  Lower is better; -1 means no
+// implicit standard conversion exists.  The tiers mirror [over.ics.scs]
+// (exact < promotion < conversion) so the best conversion operator can be
+// selected and genuine ambiguities detected.
+static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
+  if (result == NULL || to == NULL) {
+    return -1;
+  }
+  if (TypeEqual(result, to)) {
+    return 0;  // Exact match: no trailing conversion required.
+  }
+  // A trailing standard conversion is only modeled for arithmetic scalars.
+  // Class, pointer and reference targets require an exact match: notably, any
+  // two distinct struct/union types compare equal-ignoring-sign (their sign
+  // bits are meaningless), which would otherwise make an unrelated
+  // class-returning operator look like a viable candidate; and a reference
+  // target must bind an exact `operator T&` rather than a value-returning one.
+  if (TypeIsStructOrUnion(result) || TypeIsStructOrUnion(to) ||
+      TypeIsPointerOrArray(result) || TypeIsPointerOrArray(to) ||
+      TypeIsReference(result) || TypeIsReference(to)) {
+    return -1;
+  }
+  if (TypeEqualIgnoringSign(result, to)) {
+    return 1;  // Differs only in signedness.
+  }
+  // Integral and floating-point promotions rank above ordinary conversions.
+  if (TypeIsInt(to) &&
+      (TypeIsChar(result) || TypeIsShort(result) || TypeIsBool(result) ||
+       (TypeIsEnum(result) && !TypeIsScopedEnum(result)))) {
+    return 2;
+  }
+  if (TypeIsDouble(to) && TypeIsFloat(result)) {
+    return 2;
+  }
+  // Any other standard scalar conversion the codegen table supports (integral
+  // conversions, floating-integral conversions, contextual bool, etc.).
+  for (int i = 0; i < NUM_TYPE_CONVERSIONS; i++) {
+    if (type_conversions[i].from(result) && type_conversions[i].to(to)) {
+      return 3;
+    }
+  }
+  return -1;
+}
+
+// Select the best conversion operator of `str` that can reach `to`, allowing a
+// trailing standard conversion on the operator's result (a user-defined
+// conversion sequence is [conversion operator][standard conversion]).  An exact
+// match is preferred; among converting candidates the best-ranked one wins, and
+// two equally-ranked candidates with distinct result types are ambiguous (which
+// we report by returning NULL so the caller emits a conversion error).
 static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
                                             ConversionContext ctx) {
   if (str == NULL) {
     return NULL;
   }
-  String name;
-  ConversionOperatorName(to, &name);
-  StructMember* member = FindStructMember(str, &name);
-  StringDestruct(&name);
-  while (member != NULL) {
-    if (member->is_member_function && member->symbol != NULL &&
-        TypeIsFunction(member->symbol->type) &&
-        TypeEqual(member->symbol->type->next, to) &&
-        ConversionOperatorAllowedInContext(member->symbol->type, to, ctx)) {
-      return member;
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectConversionOperators(str, &candidates);
+
+  StructMember* best = NULL;
+  TypeRecord* best_result = NULL;
+  int best_rank = -1;
+  bool ambiguous = false;
+  for (size_t i = 0; i < candidates.length; i++) {
+    StructMember* member = candidates.value.p[i];
+    TypeRecord* func = member->symbol->type;
+    TypeRecord* result = func->next;
+    // Conversion operator templates have a dependent result type that cannot be
+    // ranked directly; they are handled separately by deducing their arguments
+    // from the target type (see SelectConversionOperatorTemplate).
+    if (member->symbol->flags.is_template) {
+      continue;
     }
-    member = member->overload_next;
+    if (!ConversionOperatorAllowedInContext(func, to, ctx)) {
+      continue;
+    }
+    int rank = ConversionOperatorTrailingRank(result, to);
+    if (rank < 0) {
+      continue;
+    }
+    if (best == NULL || rank < best_rank) {
+      best = member;
+      best_result = result;
+      best_rank = rank;
+      ambiguous = false;
+    } else if (rank == best_rank && !TypeEqual(result, best_result)) {
+      ambiguous = true;
+    }
   }
-  return NULL;
+  VectorDestruct(&candidates);
+  return ambiguous ? NULL : best;
+}
+
+// Select a conversion operator template of `str` (or a base) whose target-type
+// deduction against `to` succeeds, returning its member symbol via *out_templ
+// and the deduced template arguments via *out_args (caller owns).  The
+// specialization itself is left to be built by the ordinary member-template
+// instantiation path (fed the deduced arguments as explicit template
+// arguments), which owns the resulting symbol; this avoids double-freeing an
+// instantiation that the template subsystem already tracks.  Returns false when
+// no template conversion operator deduces to `to`.
+static bool SelectConversionOperatorTemplate(Struct* str, TypeRecord* to,
+                                             ConversionContext ctx,
+                                             Symbol** out_templ,
+                                             Vector** out_args) {
+  if (str == NULL) {
+    return false;
+  }
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectConversionOperators(str, &candidates);
+
+  Symbol* chosen = NULL;
+  Vector* chosen_args = NULL;
+  bool ambiguous = false;
+  for (size_t i = 0; i < candidates.length; i++) {
+    StructMember* member = candidates.value.p[i];
+    Symbol* templ = member->symbol;
+    if (!templ->flags.is_template ||
+        !ConversionOperatorAllowedInContext(templ->type, to, ctx)) {
+      continue;
+    }
+    Vector* args = TypeDeduceConversionOperatorTemplateArguments(
+        &compiler->syntax, templ, to);
+    if (args == NULL) {
+      continue;
+    }
+    if (chosen == NULL) {
+      chosen = templ;
+      chosen_args = args;
+      continue;
+    }
+    // A second viable template conversion operator: prefer the more specialized
+    // one by partial ordering ([temp.func.order]); if neither is more
+    // specialized the conversion is ambiguous.
+    int order = TypeConversionOperatorTemplateMoreSpecialized(&compiler->syntax,
+                                                              templ, chosen);
+    VectorDeleteWithContents(
+        order > 0 ? chosen_args : args,
+        (VectorElementDestructor)TemplateArgumentDelete, /*free_element=*/false);
+    if (order > 0) {
+      chosen = templ;
+      chosen_args = args;
+      ambiguous = false;
+    } else if (order == 0) {
+      ambiguous = true;
+    }
+  }
+  VectorDestruct(&candidates);
+  if (chosen == NULL || ambiguous) {
+    if (chosen_args != NULL) {
+      VectorDeleteWithContents(chosen_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return false;
+  }
+  *out_templ = chosen;
+  *out_args = chosen_args;
+  return true;
 }
 
 static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
@@ -895,15 +1010,34 @@ static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
   }
   StructMember* member =
       FindConversionOperator(from->type->info.struct_info, to, ctx);
-  if (member == NULL) {
-    return false;
+  // Explicit template arguments to attach to the member-access name when the
+  // selected operator is a conversion operator template; NULL otherwise.
+  Vector* template_args = NULL;
+  String member_lookup_name;
+  StringInit(&member_lookup_name, NULL);
+  if (member != NULL) {
+    StringSet(&member_lookup_name, member->symbol->name.value);
+  } else {
+    Symbol* templ = NULL;
+    if (!SelectConversionOperatorTemplate(from->type->info.struct_info, to, ctx,
+                                          &templ, &template_args)) {
+      StringDestruct(&member_lookup_name);
+      return false;
+    }
+    StringSet(&member_lookup_name, templ->name.value);
   }
   ASTNode* parent = from->parent;
   int child_id = from->child_id;
   ASTNode* receiver = ASTNodeMove(from);
   ASTNode* member_name =
-      NewStringConstantASTNode(NewString(member->symbol->name.value), NULL,
+      NewStringConstantASTNode(NewString(member_lookup_name.value), NULL,
                                from->location);
+  StringDestruct(&member_lookup_name);
+  // The member-access analysis moves these explicit template arguments onto the
+  // resolved member node, where overload resolution uses them to instantiate
+  // the conversion operator template (it cannot deduce them from a zero-argument
+  // call).  Ownership transfers to the name node, which frees them on deletion.
+  ((ConstantASTNode*)member_name)->template_arguments = template_args;
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, from->location, receiver,
                        member_name);
@@ -915,6 +1049,17 @@ static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
   call = AnalyzeExpression(call);
   if (parent != NULL) {
     ASTNodeReplaceChild(parent, child_id, call, false);
+    // The selected operator may yield a type that only reaches `to` through a
+    // trailing standard conversion (e.g. `operator long` used where an `int`
+    // is wanted, or `operator int` in a contextual-bool position).  Apply it
+    // now; the result is a scalar, so this cannot recurse back into the
+    // conversion-operator search.  Reference targets are excluded: the operator
+    // was chosen by exact match and its result is an lvalue that binds directly
+    // (its expression type is the referent, not the reference itself).
+    if (call != NULL && call->type != NULL && !TypeIsReference(to) &&
+        !TypeEqual(call->type, to)) {
+      SemanticConvertType(call, to, ctx);
+    }
   }
   return true;
 }

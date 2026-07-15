@@ -558,12 +558,16 @@ static bool TypeTraitSameClassSpecialMemberConstruction(
     return false;
   }
   *handled = true;
+  // A const source cannot bind to a move constructor's `T&&` parameter, so a
+  // const rvalue (e.g. `const T`) selects the copy constructor (`const T&`)
+  // just like a const lvalue does.  Only a non-const rvalue uses the move ctor.
+  bool use_move = rvalue && !TypeIsConst(object);
   CXXSpecialMemberKind kind =
-      rvalue ? kCXXSpecialMemberMoveConstructor
-             : kCXXSpecialMemberCopyConstructor;
+      use_move ? kCXXSpecialMemberMoveConstructor
+               : kCXXSpecialMemberCopyConstructor;
   StructMember* member =
       TypeTraitFindSpecialMember(target->info.struct_info, kind);
-  if (member == NULL && rvalue) {
+  if (member == NULL && use_move) {
     member = TypeTraitFindSpecialMember(target->info.struct_info,
                                         kCXXSpecialMemberCopyConstructor);
   }

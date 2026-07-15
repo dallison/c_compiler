@@ -632,6 +632,47 @@ StructMember* FindStructMember(Struct* str, String* name) {
   return NULL;
 }
 
+// A conversion operator is a member function whose synthesized name matches the
+// name derived from its result type (e.g. a member named "operator long" whose
+// result type is `long`).  Regular operator overloads such as "operator+" never
+// satisfy this because their name is unrelated to the return type.
+static bool MemberIsConversionOperator(StructMember* member) {
+  if (member == NULL || !member->is_member_function || member->symbol == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
+      member->symbol->type->next == NULL) {
+    return false;
+  }
+  String expected;
+  ConversionOperatorName(member->symbol->type->next, &expected);
+  bool matches = strcmp(expected.value, member->symbol->name.value) == 0;
+  StringDestruct(&expected);
+  return matches;
+}
+
+// Append every conversion-operator member reachable from `str`, including those
+// inherited from base classes, to `out` (a Vector of StructMember*).  Only the
+// head of each overload chain is recorded; overloads that share a name (e.g.
+// const/non-const) also share a result type, so callers ranking by result type
+// do not need the whole chain.
+void CollectConversionOperators(Struct* str, Vector* out) {
+  if (str == NULL || out == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (MemberIsConversionOperator(member)) {
+      VectorAppend(out, member);
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL) {
+      CollectConversionOperators(base->type->info.struct_info, out);
+    }
+  }
+}
+
 static StructMember* FindDirectStructMemberByName(Struct* str,
                                                   const char* name) {
   if (str == NULL || name == NULL) {
@@ -839,6 +880,42 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   return NULL;
 }
 
+// Like FindStructMemberOverload, but for two function templates that share the
+// same signature it additionally requires their associated constraints
+// (requires-clauses / constrained template parameters) to be equivalent before
+// treating them as the *same* declaration.  This lets a class declare several
+// overloads of e.g. `operator()` distinguished solely by their `requires`
+// clause, as the range-access CPOs in <ranges> do.
+static StructMember* FindConstrainedMemberOverload(StructMember* first,
+                                                   Symbol* candidate) {
+  if (candidate == NULL) {
+    return NULL;
+  }
+  bool candidate_is_template =
+      TypeIsFunction(candidate->type) &&
+      candidate->type->info.function.template_parameter_count > 0;
+  for (StructMember* overload = first; overload != NULL;
+       overload = overload->overload_next) {
+    if (overload->symbol == NULL) {
+      continue;
+    }
+    bool overload_is_template = overload->symbol->flags.is_template;
+    if (overload_is_template != candidate_is_template) {
+      continue;
+    }
+    if (!TypeEqual(overload->symbol->type, candidate->type)) {
+      continue;
+    }
+    if (overload_is_template &&
+        !ConceptsFunctionTemplateConstraintsEquivalent(overload->symbol,
+                                                       candidate)) {
+      continue;
+    }
+    return overload;
+  }
+  return NULL;
+}
+
 static bool CheckStructMember(Struct* str, String* name) {
   return MapFindPointerKey(&str->symbol_table, name) == NULL;
 }
@@ -1033,6 +1110,36 @@ static void AddInlineFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   }
 }
 
+// Parse a constructor/destructor's trailing requires-clause (C++20), e.g.
+// `Class() requires C<T> = default;`.  The regular function-declarator path
+// handles this in ParseCXXTrailingRequiresClause, but constructors are parsed
+// through a dedicated path that must consume the clause before the pure/default
+// specifier is examined, otherwise the leftover `requires` token is mistaken
+// for the start of a new member declaration.
+static void ParseCXXSpecialMemberTrailingRequires(TypeParser* parser,
+                                                   TypeRecord* func) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX20) || func == NULL ||
+      !TypeIsFunction(func) ||
+      !LexLookingAt(parser->lex, TOK(requires))) {
+    return;
+  }
+  SyntaxOpenScope(parser->syntax);
+  if (parser->cxx_member_owner != NULL) {
+    SyntaxInsertClassMembersForConstraint(parser->syntax,
+                                          parser->cxx_member_owner);
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->name.length > 0) {
+      InsertLocalSymbol(parser->syntax->local_symbol_stack, formal);
+    }
+  }
+  ConstraintExpr* constraint = ConceptsParseRequiresClause(parser->syntax);
+  SyntaxCloseScope(parser->syntax);
+  AddOwnedAssociatedConstraint(&func->info.function.associated_constraint,
+                               constraint);
+}
+
 void QueueInlineMemberFunctionDefinition(Symbol* symbol) {
   Vector* declarations = NewVector();
   VectorAppend(declarations,
@@ -1071,6 +1178,24 @@ static void QueueTemplateConstructorInitializers(
   stored->symbol = symbol;
   stored->initializers = initializers;
   VectorAppend(&template_constructor_initializers, stored);
+}
+
+// Associate the deferred constructor member-initializer list already recorded
+// for `from` with `to` as well.  Used when a class-template instantiation
+// creates a class-level member function *template* constructor (`to`) from the
+// primary template's constructor (`from`): the preamble is not inserted at
+// class-instantiation time (its own template parameters are still unbound), so
+// the per-call instantiation must be able to rediscover the init-list keyed on
+// the class-level symbol it clones from.  The deferred list is shared (cloned
+// on each use), so re-keying the same pointer is safe.
+void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
+  if (from == NULL || to == NULL || from == to) {
+    return;
+  }
+  CXXConstructorInitList* inits = FindTemplateConstructorInitializers(from);
+  if (inits != NULL && FindTemplateConstructorInitializers(to) == NULL) {
+    QueueTemplateConstructorInitializers(to, inits);
+  }
 }
 
 CXXConstructorInitList* FindTemplateConstructorInitializers(
@@ -1296,6 +1421,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   ParseCXXExceptionSpecifier(parser, func);
   ParseCXXVirtSpecifiers(parser, func);
+  ParseCXXSpecialMemberTrailingRequires(parser, func);
   ParseCXXPureSpecifier(parser, func);
   TypeParserDestruct(&proto_parser);
   TypeRecordAddCXXThisParameter(func, str, location);
@@ -1379,10 +1505,12 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   return true;
 }
 
-static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
-                                             CXXAccess access,
-                                             bool is_virtual,
-                                             bool is_explicit) {
+static bool ParseCXXConversionOperatorMember(
+    TypeParser* parser, Struct* str, CXXAccess access, bool is_virtual,
+    bool is_explicit, bool is_member_template,
+    Vector* member_template_parameters,
+    ConstraintExpr* member_template_requires_clause,
+    int member_template_parameter_base) {
   if (!CompilerIsCXX() || !LexLookingAt(parser->lex, TOK(operator))) {
     return false;
   }
@@ -1395,6 +1523,12 @@ static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
     SyntaxError(parser->syntax,
                 "Unsupported conversion operator target type");
     SyntaxRecover(parser->syntax, TC(semicolon) | TC(openbra) | TC(closebra));
+    // This early exit precedes the template-parameter storage below, so the
+    // member's requires-clause would otherwise never be consumed.  The caller
+    // frees the parameter vector; free the requires-clause here to match.
+    if (is_member_template) {
+      ConstraintExprDelete(member_template_requires_clause);
+    }
     return true;
   }
   SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(decl));
@@ -1412,6 +1546,30 @@ static bool ParseCXXConversionOperatorMember(TypeParser* parser, Struct* str,
     func->info.function.explicit_condition =
         parser->syntax->pending_explicit_condition;
     parser->syntax->pending_explicit_condition = NULL;
+  }
+  if (is_member_template) {
+    // Store the template parameters on the function type, exactly like an
+    // ordinary member function template.  Deduction of the parameters happens
+    // at the conversion site by matching the (dependent) target type against
+    // the requested type ([temp.deduct.conv]).
+    member_symbol->flags.is_template = true;
+    func->info.function.template_parameter_count =
+        (int)member_template_parameters->length;
+    func->info.function.template_parameter_base =
+        member_template_parameter_base;
+    VectorDestructWithContents(
+        &func->info.function.template_parameters,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    VectorInit(&func->info.function.template_parameters);
+    for (size_t i = 0; i < member_template_parameters->length; i++) {
+      VectorAppend(&func->info.function.template_parameters,
+                   member_template_parameters->value.p[i]);
+    }
+    // Ownership of the parameter entries has moved into the function type.
+    member_template_parameters->length = 0;
+    FinalizeMemberFunctionTemplateConstraints(
+        func, member_template_parameters, member_template_requires_clause);
   }
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
@@ -1828,12 +1986,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
     if (!is_static_member &&
         ParseCXXConversionOperatorMember(parser, str, current_access,
-                                         is_virtual_member,
-                                         is_explicit_member)) {
+                                         is_virtual_member, is_explicit_member,
+                                         is_member_template,
+                                         member_template_parameters,
+                                         member_template_requires_clause,
+                                         member_template_parameter_base)) {
       AttributeListDestruct(&member_attributes);
       if (is_member_template) {
-        SyntaxError(parser->syntax,
-                    "Conversion operator templates are not supported yet");
+        // The conversion operator template consumed the parameter entries
+        // (moving them into the function type) and the requires-clause; tear
+        // down the template scope and parsing flags, freeing only the (now
+        // empty) parameter vector container.
         SyntaxCloseScope(parser->syntax);
         VectorDestructWithContents(
             member_template_parameters,
@@ -2044,8 +2207,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                         member_symbol->name.value);
             StructMemberDelete(member);
             member = NULL;
-          } else if (FindStructMemberOverload(existing,
-                                             member_symbol->type) != NULL) {
+          } else if (FindConstrainedMemberOverload(existing, member_symbol) !=
+                     NULL) {
             SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                         member_symbol->name.value);
             StructMemberDelete(member);

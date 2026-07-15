@@ -27,6 +27,11 @@
 #include "type.h"
 #include "type_template.h"
 
+// Defined in type_parse.c (declared in the type subsystem's internal header,
+// which cannot be included here without colliding with concepts.c's own
+// file-local helpers).  Builds the `decltype((expr))` reference type.
+TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue);
+
 static void ReportConstraintFailure(ConstraintExpr* constraint, Vector* arguments);
 static bool ConstraintSubsumesWithMapping(ConstraintExpr* stronger,
                                           ConstraintExpr* weaker,
@@ -567,21 +572,13 @@ static TypeRecord* CompoundRequirementDecltypeType(ASTNode* expr) {
   if (expr == NULL || expr->type == NULL) {
     return NULL;
   }
+  // The return-type requirement checks `C<decltype((E))>`.  Build that
+  // decltype type with the same helper the decltype operator uses so its
+  // structure matches a written-out type (e.g. `int*&`) exactly.
   if (expr->value_category == kValueCategoryLvalue ||
       expr->value_category == kValueCategoryXvalue) {
-    TypeRecord* base =
-        TypeIsReference(expr->type) ? TypeRecordCopy(expr->type->next)
-                                    : TypeRecordCopy(expr->type);
-    if (base == NULL) {
-      return NULL;
-    }
-    TypeRecord* ref = NewReferenceTypeRecord(
-        kQualPlain, expr->value_category == kValueCategoryXvalue);
-    TypeRecordChain(ref, base);
-    TypeRecordDelete(base);
-    ref->type = base->type;
-    TypeRecordCalculateSize(ref);
-    return ref;
+    return NewDecltypeReference(
+        expr->type, expr->value_category == kValueCategoryXvalue);
   }
   return TypeRecordCopy(expr->type);
 }
@@ -789,6 +786,48 @@ static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
   }
 }
 
+// Pristine (never-substituted) type patterns for requires-expression
+// parameters.  A requires-expression's parameter Symbols are shared across
+// every satisfaction check of the owning concept, and EvaluateExpressionRequirement
+// temporarily overwrites each parameter's `type` with the concrete, substituted
+// type so the tested expression analyzes against real types.  When a concept is
+// checked *re-entrantly* (e.g. `range<T>` -> `ranges::begin` overloading ->
+// `__member_begin<T>` -> ... -> `range<U>` again), an inner evaluation would
+// otherwise read the outer evaluation's already-substituted concrete type as its
+// substitution pattern and re-instantiate it, which for a constrained class
+// template (e.g. `ref_view`) re-checks the class's associated constraint and
+// spins forever.  Capturing each parameter's original, template-parameter-bearing
+// pattern the first time it is seen (always the outermost, pre-mutation call) and
+// substituting from that pristine pattern keeps re-entrant checks correct.
+typedef struct PristineParamPattern {
+  Symbol* param;
+  TypeRecord* pattern;  // Owned; kept alive for the whole compilation.
+} PristineParamPattern;
+
+static Vector g_pristine_param_patterns;
+static bool g_pristine_param_patterns_init = false;
+
+static TypeRecord* PristineParameterPattern(Symbol* param) {
+  if (!g_pristine_param_patterns_init) {
+    VectorInit(&g_pristine_param_patterns);
+    g_pristine_param_patterns_init = true;
+  }
+  for (size_t i = 0; i < g_pristine_param_patterns.length; i++) {
+    PristineParamPattern* entry = g_pristine_param_patterns.value.p[i];
+    if (entry->param == param) {
+      return entry->pattern;
+    }
+  }
+  // First (outermost) sighting: param->type is still the pristine pattern.
+  TypeRecord* copy = TypeRecordCopy(param->type);
+  TypeRecordIncRef(copy);
+  PristineParamPattern* entry = malloc(sizeof(*entry));
+  entry->param = param;
+  entry->pattern = copy;
+  VectorAppend(&g_pristine_param_patterns, entry);
+  return copy;
+}
+
 static bool EvaluateExpressionRequirement(Requirement* requirement,
                                           RequiresExpr* requires_expr,
                                           Vector* arguments,
@@ -805,13 +844,18 @@ static bool EvaluateExpressionRequirement(Requirement* requirement,
       }
       VectorAppend(&saved_types, param->type);
       TypeRecordIncRef(param->type);
-      TypeRecord* parameter_pattern = TypeRecordCopy(param->type);
+      TypeRecord* parameter_pattern =
+          TypeRecordCopy(PristineParameterPattern(param));
       TypeRecord* concrete =
           TypeSubstituteTemplateType(&compiler->syntax, parameter_pattern,
                                      arguments);
       TypeRecordDelete(parameter_pattern);
+      // SymbolSetType takes a reference on `concrete`.  The substitution result
+      // is a freshly created (refs == 0) type, so the symbol becomes its sole
+      // owner; deleting it here would drop the count back to zero and free the
+      // type out from under the parameter (nulling nested pointees).  The
+      // original type is restored (and this one released) after evaluation.
       SymbolSetType(param, concrete);
-      TypeRecordDelete(concrete);
     }
   }
   SyntaxOpenScope(&compiler->syntax);
@@ -903,7 +947,8 @@ static bool EvaluateTypeRequirement(Requirement* requirement,
   TypeRecord* concrete =
       TypeSubstituteTemplateType(&compiler->syntax, requirement->type,
                                  arguments);
-  bool failed = concrete == NULL || DiagnosticErrorTrapped() ||
+  bool trapped = DiagnosticErrorTrapped();
+  bool failed = concrete == NULL || trapped ||
                 TypeContainsTemplateParameter(concrete);
   DiagnosticErrorTrapEnd(saved_trap);
   TypeRecordDelete(concrete);
@@ -1352,9 +1397,8 @@ static Vector* FunctionTemplateParameters(Symbol* templ) {
   return &templ->type->info.function.template_parameters;
 }
 
-static Vector* NewIdentityParameterMapping(Symbol* templ) {
+static Vector* NewIdentityParameterMappingFromParameters(Vector* parameters) {
   Vector* mapping = NewVector();
-  Vector* parameters = FunctionTemplateParameters(templ);
   if (parameters == NULL) {
     return mapping;
   }
@@ -1383,6 +1427,11 @@ static Vector* NewIdentityParameterMapping(Symbol* templ) {
     VectorAppend(mapping, arg);
   }
   return mapping;
+}
+
+static Vector* NewIdentityParameterMapping(Symbol* templ) {
+  return NewIdentityParameterMappingFromParameters(
+      FunctionTemplateParameters(templ));
 }
 
 static Vector* CopyParameterMapping(Vector* mapping) {
@@ -1904,6 +1953,39 @@ int ConceptsCompareAssociatedConstraints(
   return left_subsumes_right ? 1 : -1;
 }
 
+// Two associated constraints are equivalent iff each subsumes the other.  This
+// is stricter than `ConceptsCompareAssociatedConstraints` returning 0, which
+// also holds for merely *incomparable* constraints (neither subsumes).  Used to
+// decide whether two same-pattern partial specializations are true redeclaration
+// duplicates (equivalent) versus distinct constrained specializations.
+bool ConceptsAssociatedConstraintsEquivalent(ConstraintExpr* left,
+                                             Vector* left_parameters,
+                                             ConstraintExpr* right,
+                                             Vector* right_parameters) {
+  bool left_constrained = ConceptsHasAssociatedConstraint(left);
+  bool right_constrained = ConceptsHasAssociatedConstraint(right);
+  if (!left_constrained && !right_constrained) {
+    return true;
+  }
+  if (left_constrained != right_constrained) {
+    return false;
+  }
+  Vector* left_mapping =
+      NewIdentityParameterMappingFromParameters(left_parameters);
+  Vector* right_mapping =
+      NewIdentityParameterMappingFromParameters(right_parameters);
+  bool equivalent =
+      ConstraintSubsumesWithMapping(left, right, left_mapping) &&
+      ConstraintSubsumesWithMapping(right, left, right_mapping);
+  VectorDeleteWithContents(left_mapping,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  VectorDeleteWithContents(right_mapping,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return equivalent;
+}
+
 bool ConceptsFunctionTemplateConstraintsEquivalent(Symbol* left,
                                                    Symbol* right) {
   ConstraintExpr* left_constraint = FunctionTemplateConstraint(left);
@@ -2168,6 +2250,7 @@ static Requirement* ParseRequiresRequirement(Syntax* syntax) {
   if (LexLookingAt(lex, TOK(typename))) {
     TypeParser parser;
     TypeParserInit(&parser, lex, syntax, STO(auto), kParsingPrototype);
+    parser.typename_allows_unqualified = true;
     TypeRecord* type = TypeParserParseType(&parser, true);
     TypeParserDestruct(&parser);
     SyntaxNeedSemicolon(syntax, TC(closebra) | TC(semicolon));

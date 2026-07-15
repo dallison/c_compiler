@@ -2844,6 +2844,29 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
 //   constant
 //   string-literal
 //   ( expression )
+// True if `token` begins a fundamental (built-in) simple-type-specifier that
+// can introduce a functional-style cast `T(...)` / `T{...}`.  Class/enum tags,
+// cv-qualifiers, and `auto` are deliberately excluded: they never start a
+// functional cast in an expression.
+static bool TokenStartsFundamentalTypeSpecifier(Token token) {
+  switch (token) {
+    case TOK(char):
+    case TOK(short):
+    case TOK(int):
+    case TOK(long):
+    case TOK(float):
+    case TOK(double):
+    case TOK(signed):
+    case TOK(unsigned):
+    case TOK(bool):
+    case TOK(void):
+    case TOK(wchar_t):
+      return true;
+    default:
+      return false;
+  }
+}
+
 static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   Lex* lex = syntax->lex;
 
@@ -2883,6 +2906,54 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   if (LexLookingAt(lex, TOK(identifier)) &&
       StringEqual(&lex->spelling, "_Generic")) {
     return ParseGenericSelection(syntax, followers);
+  }
+
+  // C++ explicit type conversion in functional notation with a fundamental
+  // simple-type-specifier: `int(x)`, `unsigned long(y)`, `bool{z}`, `double()`.
+  // Named type specifiers (class/typedef names) arrive here as identifiers and
+  // construct through the ordinary call path, so only the built-in keyword
+  // specifiers need this branch.  A cv-qualifier or aggregate keyword
+  // (const/class/struct/...) never begins a functional cast, so those keep
+  // falling through to the normal type/declaration handling elsewhere.
+  if (CompilerIsCXX() && TokenStartsFundamentalTypeSpecifier(lex->current_token)) {
+    SourceLocation location = lex->current_token_location;
+    TypeParser type_parser;
+    TypeParserInit(&type_parser, lex, syntax, STO(implicit), syntax->context);
+    TypeRecord* type = TypeParserParseType(&type_parser, true);
+    TypeParserDestruct(&type_parser);
+    bool brace_init = LexLookingAt(lex, TOK(lbrace));
+    if (!brace_init && !LexLookingAt(lex, TOK(lparen))) {
+      SyntaxError(syntax,
+                  "expected '(' or '{' after type in functional-style cast");
+      SyntaxRecover(syntax, followers);
+      return NewIntConstantASTNode(0, type, location);
+    }
+    Token close = brace_init ? TOK(rbrace) : TOK(rparen);
+    LexNextToken(lex);
+    ASTNode* argument = NULL;
+    if (!LexLookingAt(lex, close)) {
+      argument = SyntaxParseSingleExpression(syntax, followers | TC(exprsep) |
+                                                         TC(closebra));
+      if (LexLookingAt(lex, TOK(comma))) {
+        SyntaxError(syntax,
+                    "a functional-style cast to a fundamental type takes at "
+                    "most one argument");
+        while (LexMatch(lex, TOK(comma))) {
+          ASTNodeDelete(SyntaxParseSingleExpression(
+              syntax, followers | TC(exprsep) | TC(closebra)));
+        }
+      }
+    }
+    SyntaxNeedBracket(syntax, close, followers);
+    if (argument == NULL) {
+      // Value-initialization of a fundamental type yields a zero-valued prvalue
+      // of that type.
+      return NewCastASTNode(
+          type, location,
+          NewIntConstantASTNode(
+              0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+    }
+    return NewCastASTNode(type, location, argument);
   }
 
   // Check for identifier.  In C++ an unqualified operator-function-id (e.g.
@@ -3108,29 +3179,33 @@ static bool CXXExpressionNamesTemplateTypeParameter(ASTNode* node) {
 static ASTNode* ParseCXXDependentValueInitialization(ASTNode* type_expr,
                                                      Syntax* syntax,
                                                      TokenClass followers) {
-  IdentifierASTNode* id = (IdentifierASTNode*)type_expr;
-  SourceLocation location = type_expr->location;
-  TypeRecord* type = TypeRecordCopy(id->symbol->type);
-  ASTNodeDelete(type_expr);
-
-  ASTNode* initializer = NULL;
-  if (LexLookingAt(syntax->lex, TOK(rparen))) {
-    initializer = NewIntConstantASTNode(
-        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
-  } else {
-    initializer = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
-    if (LexMatch(syntax->lex, TOK(comma))) {
-      SyntaxError(syntax,
-                  "dependent function-style cast supports at most one argument");
-      SyntaxRecover(syntax, TC(closebra));
+  // `T(args)` where T names a template type parameter is a dependent explicit
+  // type conversion / value-initialization.  Represent it as an ordinary
+  // functional-construction `call` node with the type-parameter identifier as
+  // the callee (exactly as a non-dependent `Foo(args)` is represented).  Once
+  // the enclosing template is instantiated and T is concrete,
+  // AnalyzeCXXFunctionalClassConstruction resolves it correctly: a scalar T
+  // yields a functional cast (`T()` -> value 0), while a class T is
+  // constructed or value-initialized through its constructors.  (Previously
+  // this produced a hardcoded `static_cast<T>(0)`, which was only valid when T
+  // turned out to be scalar and made value-initialization of a class T --
+  // e.g. an allocator default argument `Allocator()` -- an illegal cast.)
+  Vector* actuals = NewVector();
+  while (!LexLookingAt(syntax->lex, TOK(rparen))) {
+    ASTNode* actual = LexMatch(syntax->lex, TOK(lbrace))
+                          ? SyntaxParseBracedInitializer(syntax)
+                          : SyntaxParseSingleExpression(
+                                syntax, followers | TC(exprsep));
+    MarkCXXPackExpansionIfPresent(syntax, actual);
+    VectorAppend(actuals, actual);
+    if (!LexMatch(syntax->lex, TOK(comma))) {
+      break;
     }
   }
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
-
-  ASTNode* result = NewCastASTNode(type, location, initializer);
-  ((CastASTNode*)result)->kind = kCastStatic;
-  ASTNodeSetType(result, type);
-  return result;
+  return NewVectorASTNode(AST_OP(call), NULL,
+                          syntax->lex->current_token_location, type_expr,
+                          actuals);
 }
 
 // Whether the object expression of a member access is type-dependent (i.e.

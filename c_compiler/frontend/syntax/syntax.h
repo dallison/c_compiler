@@ -20,6 +20,7 @@
 #include "parser_context.h"
 
 struct ConstraintExpr;
+struct Struct;
 
 extern jmp_buf error_abort_state;       // Where to abort to.
 extern bool abort_on_error;
@@ -54,6 +55,10 @@ typedef struct Syntax {
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.
   struct ASTNode* pending_explicit_condition;  // Deferred value-dependent explicit(bool).
   struct ConstraintExpr* pending_placeholder_variable_constraint;  // `Concept auto x`.
+  struct Struct* cxx_class_head;  // Class whose base-clause/body is being parsed;
+                                  // lets self-template-ids resolve inside nested
+                                  // template-argument parsing that spins up fresh
+                                  // TypeParsers lacking cxx_member_owner.
   
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -164,6 +169,13 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name);
 void SyntaxOpenScope(Syntax* syntax);
 void SyntaxCloseScope(Syntax* syntax);
 
+// Make the non-static data members (and member typedefs) of `owner` visible as
+// unqualified names in the current (already-open) scope.  Used so a member
+// function's trailing requires-clause can name earlier-declared members (which
+// are accessible there via the implicit object parameter), e.g.
+// `bool empty() const requires requires { ranges::empty(*__r_); }`.
+void SyntaxInsertClassMembersForConstraint(Syntax* syntax, struct Struct* owner);
+
 const char* SyntaxFakeName(Syntax* syntax);
 void SyntaxFakeTagName(Syntax* syntax, String* tag_name);
 
@@ -231,6 +243,12 @@ ASTNode* SyntaxNewCXXMemberInitializerStatement(
 // those bodies destroy their base subobjects too.
 void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
                                   Vector* body, SourceLocation location);
+// Appends the base-subobject copy/move assignments for a defaulted copy/move
+// assignment operator, forwarding to each direct base's operator=.  The
+// memberwise-copy helper only assigns the class's own members, so a derived
+// class needs this to assign its inherited base subobjects too.
+void AppendCXXBaseAssignments(Syntax* syntax, TypeRecord* func, Vector* body,
+                              SourceLocation location);
 // Emits the __vptr initializers that were deferred (see the preamble) for
 // constructors of `owner`, now that its vtables have been registered.
 void SyntaxFlushPendingVPtrInitializers(struct Struct* owner);

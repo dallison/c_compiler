@@ -17,6 +17,8 @@
 #ifndef __davecc_iterator__
 #define __davecc_iterator__
 
+#include <concepts>
+#include <functional>
 #include <stddef.h>  // size_t, ptrdiff_t
 #include <type_traits>
 
@@ -52,6 +54,7 @@ struct iterator_traits<T*> {
   using pointer = T*;
   using reference = T&;
   using iterator_category = random_access_iterator_tag;
+  using iterator_concept = contiguous_iterator_tag;
 };
 
 // distance: O(1) for random-access iterators, O(n) otherwise.
@@ -261,6 +264,299 @@ template <class Iter>
 constexpr reverse_iterator<Iter> make_reverse_iterator(Iter it) {
   return reverse_iterator<Iter>(it);
 }
+
+// ------------------------------------------------------------------
+// C++20 iterator concepts ([iterator.concepts]).
+//
+// Every iterator DaveCC currently uses is either a raw pointer (covered by the
+// iterator_traits<T*> specialization) or a class iterator that supplies the
+// member typedefs read by the primary iterator_traits.  The associated-type
+// aliases are therefore defined directly through iterator_traits rather than
+// through the standard's incrementable_traits / indirectly_readable_traits
+// fallbacks, which are only needed for iterators that expose a partial set of
+// members.
+// ------------------------------------------------------------------
+
+template <class T>
+using iter_value_t = typename iterator_traits<remove_cvref_t<T> >::value_type;
+
+template <class T>
+using iter_reference_t = decltype(*declval<T&>());
+
+// [incrementable.traits]  The associated "difference" type of an incrementable
+// type.  Class iterators expose a `difference_type` member, raw pointers use
+// ptrdiff_t, and integer-like types (e.g. the `W` of an iota_view<int>) derive
+// a signed difference from their subtraction result.  iter_difference_t routes
+// through this rather than iterator_traits so that non-iterator incrementable
+// types (plain integers) are supported.
+namespace __detail {
+template <class T>
+concept __has_member_difference_type = requires { typename T::difference_type; };
+
+template <class T>
+concept __subtractable_difference =
+    !__has_member_difference_type<T> && requires(const T& a, const T& b) {
+      { a - b } -> integral;
+    };
+}  // namespace __detail
+
+template <class>
+struct incrementable_traits {};
+
+template <class T>
+  requires is_object_v<T>
+struct incrementable_traits<T*> {
+  using difference_type = ptrdiff_t;
+};
+
+template <class I>
+struct incrementable_traits<const I> : incrementable_traits<I> {};
+
+template <__detail::__has_member_difference_type T>
+struct incrementable_traits<T> {
+  using difference_type = typename T::difference_type;
+};
+
+template <__detail::__subtractable_difference T>
+struct incrementable_traits<T> {
+  using difference_type = make_signed_t<decltype(declval<T>() - declval<T>())>;
+};
+
+template <class T>
+using iter_difference_t =
+    typename incrementable_traits<remove_cvref_t<T> >::difference_type;
+
+// ITER_CONCEPT(I): prefer iterator_traits<I>::iterator_concept when present,
+// otherwise fall back to iterator_category.
+template <class I, class = void>
+struct __iter_concept_of {
+  using type = typename iterator_traits<I>::iterator_category;
+};
+
+template <class I>
+struct __iter_concept_of<
+    I, void_t<typename iterator_traits<I>::iterator_concept> > {
+  using type = typename iterator_traits<I>::iterator_concept;
+};
+
+template <class I>
+using __iter_concept = typename __iter_concept_of<remove_cvref_t<I> >::type;
+
+template <class T>
+using __with_reference = T&;
+
+template <class T>
+concept __can_reference = requires { typename __with_reference<T>; };
+
+template <class T>
+concept __dereferenceable = requires(T& t) {
+  { *t } -> __can_reference;
+};
+
+namespace ranges {
+namespace __iter_move {
+
+struct __fn {
+  template <class I>
+    requires __dereferenceable<I> &&
+             is_lvalue_reference_v<decltype(*declval<I&>())>
+  constexpr remove_reference_t<decltype(*declval<I&>())>&& operator()(
+      I&& it) const {
+    return static_cast<remove_reference_t<decltype(*it)>&&>(*it);
+  }
+
+  template <class I>
+    requires __dereferenceable<I> &&
+             (!is_lvalue_reference_v<decltype(*declval<I&>())>)
+  constexpr decltype(*declval<I&>()) operator()(I&& it) const {
+    return *it;
+  }
+};
+
+}  // namespace __iter_move
+
+inline namespace __cpo {
+inline constexpr __iter_move::__fn iter_move{};
+}  // namespace __cpo
+}  // namespace ranges
+
+template <class T>
+  requires __dereferenceable<T>
+using iter_rvalue_reference_t = decltype(ranges::iter_move(declval<T&>()));
+
+// [iterator.concept.readable]
+template <class In>
+concept indirectly_readable = requires {
+  typename iter_value_t<In>;
+  typename iter_reference_t<In>;
+};
+
+// [iterator.concept.writable]
+template <class Out, class T>
+concept indirectly_writable = requires(Out&& o, T&& t) {
+  *o = static_cast<T&&>(t);
+  *static_cast<Out&&>(o) = static_cast<T&&>(t);
+};
+
+// [iterator.concept.winc]
+template <class I>
+concept weakly_incrementable = movable<I> && requires(I i) {
+  typename iter_difference_t<I>;
+  { ++i } -> same_as<I&>;
+  i++;
+};
+
+// [iterator.concept.inc]
+template <class I>
+concept incrementable = regular<I> && weakly_incrementable<I> && requires(I i) {
+  { i++ } -> same_as<I>;
+};
+
+// [iterator.concept.iterator]
+template <class I>
+concept input_or_output_iterator =
+    requires(I i) {
+      { *i } -> __can_reference;
+    } &&
+    weakly_incrementable<I>;
+
+// [iterator.concept.sentinel]
+template <class S, class I>
+concept sentinel_for =
+    semiregular<S> && input_or_output_iterator<I> &&
+    __weakly_equality_comparable_with<S, I>;
+
+template <class S, class I>
+inline constexpr bool disable_sized_sentinel_for = false;
+
+template <class S, class I>
+concept sized_sentinel_for =
+    sentinel_for<S, I> &&
+    !disable_sized_sentinel_for<remove_cv_t<S>, remove_cv_t<I> > &&
+    requires(const I& i, const S& s) {
+      { s - i } -> same_as<iter_difference_t<I> >;
+      { i - s } -> same_as<iter_difference_t<I> >;
+    };
+
+// [iterator.concept.input]
+template <class I>
+concept input_iterator =
+    input_or_output_iterator<I> && indirectly_readable<I> &&
+    requires { typename __iter_concept<I>; } &&
+    derived_from<__iter_concept<I>, input_iterator_tag>;
+
+// [iterator.concept.output]
+template <class I, class T>
+concept output_iterator =
+    input_or_output_iterator<I> && indirectly_writable<I, T> &&
+    requires(I i, T&& t) {
+      *i++ = static_cast<T&&>(t);
+    };
+
+// [iterator.concept.forward]
+template <class I>
+concept forward_iterator =
+    input_iterator<I> &&
+    derived_from<__iter_concept<I>, forward_iterator_tag> &&
+    incrementable<I> && sentinel_for<I, I>;
+
+// [iterator.concept.bidir]
+template <class I>
+concept bidirectional_iterator =
+    forward_iterator<I> &&
+    derived_from<__iter_concept<I>, bidirectional_iterator_tag> &&
+    requires(I i) {
+      { --i } -> same_as<I&>;
+      { i-- } -> same_as<I>;
+    };
+
+// [iterator.concept.random.access]
+template <class I>
+concept random_access_iterator =
+    bidirectional_iterator<I> &&
+    derived_from<__iter_concept<I>, random_access_iterator_tag> &&
+    totally_ordered<I> && sized_sentinel_for<I, I> &&
+    requires(I i, const I j, const iter_difference_t<I> n) {
+      { i += n } -> same_as<I&>;
+      { j + n } -> same_as<I>;
+      { n + j } -> same_as<I>;
+      { i -= n } -> same_as<I&>;
+      { j - n } -> same_as<I>;
+      { j[n] } -> same_as<iter_reference_t<I> >;
+    };
+
+// [iterator.concept.contiguous]
+template <class I>
+concept contiguous_iterator =
+    random_access_iterator<I> &&
+    derived_from<__iter_concept<I>, contiguous_iterator_tag> &&
+    is_lvalue_reference_v<iter_reference_t<I> > &&
+    same_as<iter_value_t<I>, remove_cvref_t<iter_reference_t<I> > >;
+
+// [std.iterator.tags] sentinels
+struct default_sentinel_t {};
+inline constexpr default_sentinel_t default_sentinel{};
+
+struct unreachable_sentinel_t {
+  template <class I>
+  friend constexpr bool operator==(unreachable_sentinel_t,
+                                   const I&) noexcept {
+    return false;
+  }
+};
+inline constexpr unreachable_sentinel_t unreachable_sentinel{};
+
+// [alg.req] indirect callable concepts.
+template <class F, class I>
+concept indirectly_unary_invocable =
+    indirectly_readable<I> && invocable<F&, iter_value_t<I>&> &&
+    invocable<F&, iter_reference_t<I> >;
+
+template <class F, class I>
+concept indirectly_regular_unary_invocable =
+    indirectly_readable<I> && regular_invocable<F&, iter_value_t<I>&> &&
+    regular_invocable<F&, iter_reference_t<I> >;
+
+template <class F, class I>
+concept indirect_unary_predicate =
+    indirectly_readable<I> && predicate<F&, iter_value_t<I>&> &&
+    predicate<F&, iter_reference_t<I> >;
+
+template <class F, class I1, class I2>
+concept indirect_binary_predicate =
+    indirectly_readable<I1> && indirectly_readable<I2> &&
+    predicate<F&, iter_reference_t<I1>, iter_reference_t<I2> >;
+
+// [projected]
+template <class I, class Proj>
+struct __projected {
+  struct __type {
+    using value_type =
+        remove_cvref_t<invoke_result_t<Proj&, iter_reference_t<I> > >;
+    using difference_type = iter_difference_t<I>;
+    invoke_result_t<Proj&, iter_reference_t<I> > operator*() const;
+  };
+};
+
+template <class I, class Proj>
+using projected = typename __projected<I, Proj>::__type;
+
+namespace ranges {
+namespace __iter_swap {
+
+struct __fn {
+  template <class X, class Y>
+  constexpr void operator()(X&& a, Y&& b) const {
+    ranges::swap(*a, *b);
+  }
+};
+
+}  // namespace __iter_swap
+
+inline namespace __cpo {
+inline constexpr __iter_swap::__fn iter_swap{};
+}  // namespace __cpo
+}  // namespace ranges
 
 }  // namespace std
 

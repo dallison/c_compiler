@@ -38,6 +38,10 @@ typedef enum {
   kTypeUnknown = 1 << 15,
   kTypeAuto = 1 << 16,
   kTypeNullPointer = 1 << 17,
+  // Marks a `decltype(auto)` placeholder.  Always set together with kTypeAuto
+  // so the existing auto-placeholder machinery treats it as a deduced type; the
+  // extra bit selects decltype (value-category preserving) deduction rules.
+  kTypeDecltypeAuto = 1 << 18,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
@@ -117,6 +121,12 @@ typedef struct ClassTemplatePartialSpecialization {
   // serialized: Struct::partial_specializations is intentionally deferred on
   // the wire (see @wire - below).
   struct ConstraintExpr* associated_constraint;
+  // The same record type is reused for variable-template partial/explicit
+  // specializations (stored on VariableTemplate::partial_specializations).  For
+  // those, tag_symbol is NULL and these carry the specialization's unanalyzed
+  // initializer and declared type; they are NULL for class specializations.
+  struct ASTNode* variable_initializer;  // Owned (unanalyzed).
+  struct TypeRecord* variable_type;       // Owned.
 } ClassTemplatePartialSpecialization;
 
 typedef enum {
@@ -301,6 +311,15 @@ struct Struct {
   // populated).  Constructor preambles built before this point defer their
   // __vptr initializers, since the vtables they reference do not exist yet.
   bool vtables_registered;  // @wire - (recomputed)
+  // Template-parameter count in scope when this class's *body* began parsing
+  // (enclosing templates plus this class's own template head).  A class's own
+  // `is_template`/`template_parameter_count` are only set after its body is
+  // parsed, so this is the only reliable in-body signal that we are inside a
+  // class template -- used to decide whether a friend declaration is dependent
+  // on an enclosing class template (defer per specialization) versus a friend
+  // function template in a non-template class (register immediately).  Transient
+  // parse state; not serialized.
+  int defining_template_scope_count;  // @wire - (recomputed)
   Vector template_parameters;  // TemplateParameter* entries.     // @wire 15
   Vector partial_specializations;  // @wire - (deferred)
   Vector deduction_guides;  // @wire - (deferred)

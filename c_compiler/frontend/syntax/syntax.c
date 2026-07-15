@@ -1462,6 +1462,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->current_template_requires_clause = NULL;
   syntax->pending_explicit_condition = NULL;
   syntax->pending_placeholder_variable_constraint = NULL;
+  syntax->cxx_class_head = NULL;
   syntax->context = kParsingFileScope;
   syntax->extern_c_depth = 0;
   syntax->export_depth = 0;
@@ -2684,6 +2685,52 @@ static void CXXPrependCompleteObjectArgument(TypeRecord* type, Vector* actuals,
   }
 }
 
+// Builds an lvalue expression naming the base subobject of `source` (the
+// `other` reference parameter of a defaulted copy/move special member) as
+// `*(B*)((char*)&source + byte_offset)`.  The nodes are emitted pre-analyzed
+// with forced types so the later analysis pass does not re-run a derived-to-base
+// conversion on them.  This is important because that conversion is access
+// checked and would reject a *private/protected* base (e.g.
+// `struct D : private B {}`), even though a class may always access its own base
+// subobjects from within its special members.  Using the raw offset mirrors how
+// the `this` receiver already reaches the base subobject and sidesteps the check
+// entirely.
+static ASTNode* NewCXXSourceBaseSubobject(Symbol* source,
+                                          CXXBaseSpecifier* base,
+                                          SourceLocation location) {
+  if (source == NULL || source->type == NULL || base == NULL ||
+      base->type == NULL) {
+    return NULL;
+  }
+  if (!TypeIsReference(source->type)) {
+    return NULL;
+  }
+  TypeRecord* referent = source->type->next;
+  TypeRecord* source_pointer =
+      NewPointerTo(kQualPlain, TypeRecordCopy(referent));
+  // Reading the reference parameter yields the underlying pointer to the
+  // referent (references are lowered to pointers), so treat the identifier as a
+  // `owner*` directly -- exactly as the `this` pointer is used for the receiver.
+  // Taking its address instead would yield the address of the reference slot.
+  ASTNode* source_ptr = NewIdentifierASTNode(source, location);
+  source_ptr->flags |= kASTAnalyzed;
+  ASTNodeSetType(source_ptr, source_pointer);
+  TypeRecord* base_pointer =
+      NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
+  ASTNode* offset = NewIntConstantASTNode(
+      base->byte_offset, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  ASTNode* base_ptr =
+      NewBinaryASTNode(AST_OP(plus), base_pointer, location, source_ptr, offset);
+  base_ptr->flags |= kASTAnalyzed;
+  ASTNodeSetType(base_ptr, base_pointer);
+  ASTNode* base_ref = NewUnaryASTNode(AST_OP(contents),
+                                      TypeRecordCopy(base->type), location,
+                                      base_ptr);
+  base_ref->flags |= kASTAnalyzed;
+  ASTNodeSetType(base_ref, TypeRecordCopy(base->type));
+  return base_ref;
+}
+
 static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
                                             TypeRecord* receiver_func,
                                             CXXBaseSpecifier* base,
@@ -2805,6 +2852,70 @@ void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
     } else {
       VectorAppend(body, guarded);
     }
+  }
+}
+
+// Emits the base-subobject copy/move assignments for a defaulted copy/move
+// assignment operator.  The memberwise-copy helper only assigns the class's own
+// members; a derived class must additionally forward to each direct base's
+// assignment operator so the base subobject is assigned rather than left
+// untouched.  The base assignment is expressed as
+// `(B*)(this + offset)->operator=(*(B*)(&other + offset))`: reinterpreting
+// `this` as `B*` (via a type-forced, already-analyzed pointer adjustment) makes
+// name lookup resolve the *base's* operator= instead of the enclosing class's,
+// and the argument is the source's base subobject extracted by the same offset
+// trick (see NewCXXSourceBaseSubobject) so no access-checked derived-to-base
+// conversion is needed -- which matters for private/protected bases.
+void AppendCXXBaseAssignments(Syntax* syntax, TypeRecord* func, Vector* body,
+                              SourceLocation location) {
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL ||
+      func->info.function.prototype.length < 2) {
+    return;
+  }
+  CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
+  if (kind != kCXXSpecialMemberCopyAssignment &&
+      kind != kCXXSpecialMemberMoveAssignment) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  Symbol* source =
+      func->info.function.prototype.value
+          .p[func->info.function.prototype.length - 1];
+  if (this_symbol == NULL || source == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    TypeRecord* base_pointer =
+        NewPointerTo(kQualPlain, TypeRecordCopy(base->type));
+    ASTNode* offset = NewIntConstantASTNode(
+        base->byte_offset, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+        location);
+    ASTNode* receiver =
+        NewBinaryASTNode(AST_OP(plus), base_pointer, location,
+                         NewIdentifierASTNode(this_symbol, location), offset);
+    receiver->flags |= kASTAnalyzed;
+    ASTNodeSetType(receiver, base_pointer);
+    ASTNode* source_base = NewCXXSourceBaseSubobject(source, base, location);
+    if (source_base == NULL) {
+      continue;
+    }
+    ASTNode* member_node =
+        NewStringConstantASTNode(NewString("operator="), NULL, location);
+    ASTNode* member_access =
+        NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver, member_node);
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, source_base);
+    ASTNode* call = NewVectorASTNode(AST_OP(call), NULL, location,
+                                     member_access, actuals);
+    VectorAppend(body, NewExpressionStatementASTNode(call, location));
   }
 }
 
@@ -3853,6 +3964,21 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
   Struct* owner = func->info.function.cxx_member_owner;
   SyntaxResolveCXXConstructorInitializerList(syntax, func, init_list);
   size_t insert_at = 0;
+  // A defaulted copy/move constructor must copy/move-construct each base
+  // subobject (virtual or not) from the corresponding subobject of the source,
+  // not default-construct it.  The source's base subobject is extracted directly
+  // by offset (NewCXXSourceBaseSubobject) and passed as the base-constructor
+  // argument, so the base's copy/move constructor binds to it without an
+  // access-checked derived-to-base conversion (which would reject a
+  // private/protected base).
+  CXXSpecialMemberKind ctor_kind = func->info.function.cxx_special_member_kind;
+  Symbol* base_copy_source =
+      (ctor_kind == kCXXSpecialMemberCopyConstructor ||
+       ctor_kind == kCXXSpecialMemberMoveConstructor) &&
+              func->info.function.prototype.length > 0
+          ? func->info.function.prototype.value
+                .p[func->info.function.prototype.length - 1]
+          : NULL;
   Vector* complete_initializers = NewVector();
   AppendCXXVBPtrInitializers(func, complete_initializers, location);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
@@ -3861,8 +3987,22 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
         FindCXXExplicitVirtualBaseInitializer(init_list, base);
     if (call == NULL &&
         !VectorContainsPointer(&init_list->virtual_base_specs, base)) {
+      Vector* vbase_actuals = NULL;
+      if (base_copy_source != NULL) {
+        CXXBaseSpecifier vbase_spec;
+        vbase_spec.type = base->type;
+        vbase_spec.access = base->access;
+        vbase_spec.byte_offset = base->byte_offset;
+        vbase_spec.is_virtual = true;
+        ASTNode* source_base =
+            NewCXXSourceBaseSubobject(base_copy_source, &vbase_spec, location);
+        if (source_base != NULL) {
+          vbase_actuals = NewVector();
+          VectorAppend(vbase_actuals, source_base);
+        }
+      }
       call = NewCXXVirtualBaseSpecialMemberCall(syntax, func, base, false,
-                                                NULL, location);
+                                                vbase_actuals, location);
     }
     if (call == NULL) {
       continue;
@@ -3884,8 +4024,17 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
       }
     }
     if (call == NULL && !VectorContainsPointer(&init_list->base_specs, base)) {
+      Vector* base_actuals = NULL;
+      if (base_copy_source != NULL) {
+        ASTNode* source_base =
+            NewCXXSourceBaseSubobject(base_copy_source, base, location);
+        if (source_base != NULL) {
+          base_actuals = NewVector();
+          VectorAppend(base_actuals, source_base);
+        }
+      }
       call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
-                                         /*complete_object=*/false, NULL,
+                                         /*complete_object=*/false, base_actuals,
                                          location);
     }
     if (call == NULL) {
@@ -4294,6 +4443,11 @@ Symbol* SyntaxRegisterInstantiatedFriendFunction(Syntax* syntax, Namespace* ns,
   return in_scope;
 }
 
+static void AddFunctionAssociatedConstraint(TypeRecord* func,
+                                            ConstraintExpr* constraint);
+static void MoveTemplateParameterConstraints(Vector* parameters,
+                                             ConstraintExpr** target);
+
 void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   LexMatch(syntax->lex, TOK(friend));
 
@@ -4393,11 +4547,25 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     return;
   }
 
-  // A friend declared inside a class template is dependent: defer its
-  // registration and code emission until each specialization is instantiated,
-  // where the signature (and any inline body) is substituted with the template
-  // arguments.  Friend *classes* are handled separately above and are unchanged.
-  if (syntax->parsing_template_declaration) {
+  // Distinguish two "template friend" situations:
+  //   (a) a friend declared inside a class *template* — its signature depends on
+  //       the class's template parameters, so it is dependent and must be
+  //       materialized per specialization (deferred below); versus
+  //   (b) a friend function *template* declared inside a non-template class,
+  //       e.g. `struct S { template<class I> friend bool operator==(S,const I&); };`
+  //       — this is an ordinary namespace-scope function template, discoverable
+  //       via ADL, and must be registered now (not deferred, since the class is
+  //       never "instantiated").
+  bool enclosing_class_is_template = false;
+  for (Struct* c = befriending; c != NULL; c = c->lexical_parent) {
+    if (c->is_template || c->template_parameter_count > 0 ||
+        c->defining_template_scope_count > 0) {
+      enclosing_class_is_template = true;
+      break;
+    }
+  }
+
+  if (syntax->parsing_template_declaration && enclosing_class_is_template) {
     SyntaxDeferTemplateFriendFunction(syntax, befriending, sym);
     SyntaxCloseScope(syntax);
     TypeParserDestruct(&parser);
@@ -4405,6 +4573,33 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     AttributeListDestruct(&attributes);
     syntax->local_tag_stack = saved_tag_stack;
     return;
+  }
+
+  // Case (b): give the friend its own template-parameter list and mark it a
+  // function template so overload resolution / ADL treat it accordingly.  The
+  // parameters currently live in `current_template_parameters`; copy them onto
+  // the function type (the caller frees its own copy).
+  if (syntax->parsing_template_declaration && TypeIsFunction(sym->type) &&
+      syntax->current_template_parameters != NULL &&
+      sym->type->info.function.template_parameters.length == 0) {
+    Vector* params = syntax->current_template_parameters;
+    for (size_t i = 0; i < params->length; i++) {
+      VectorAppend(&sym->type->info.function.template_parameters,
+                   TemplateParameterCopy(params->value.p[i]));
+    }
+    sym->flags.is_template = true;
+    sym->type->info.function.template_parameter_count = (int)params->length;
+    sym->type->info.function.template_parameter_base = 0;
+    // Fold any concept-constrained parameters (e.g. `template <integral I>`) and
+    // an explicit trailing requires-clause into the function's constraint.
+    MoveTemplateParameterConstraints(
+        &sym->type->info.function.template_parameters,
+        &sym->type->info.function.associated_constraint);
+    if (syntax->current_template_requires_clause != NULL) {
+      AddFunctionAssociatedConstraint(sym->type,
+                                      syntax->current_template_requires_clause);
+      syntax->current_template_requires_clause = NULL;
+    }
   }
 
   Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
@@ -4749,6 +4944,35 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
 
     Symbol* sym = TypeParserParseDeclarator(parser, type);
+    // A variable-template specialization: `template<...> T name<pattern> = ...`.
+    // The declarator carried a template-argument list and an existing variable
+    // template of the same name is in scope.  Register it as a partial/explicit
+    // specialization rather than treating the reused name as a redefinition.
+    if (CompilerIsCXX() && sym != NULL && !TypeIsFunction(sym->type) &&
+        parser->declarator_template_arguments != NULL &&
+        (syntax->parsing_template_declaration ||
+         syntax->parsing_template_specialization)) {
+      Symbol* primary = SyntaxFindSymbol(syntax, &sym->name);
+      if (primary != NULL && primary->variable_template != NULL) {
+        ASTNode* initializer = NULL;
+        if (LexMatch(syntax->lex, TOK(equal))) {
+          syntax->init_storage = storage;
+          initializer = SyntaxParseInitializer(syntax, sym, storage);
+        } else {
+          SyntaxError(syntax,
+                      "variable template specialization requires an initializer");
+        }
+        AddVariableTemplatePartialSpecialization(
+            parser, primary, parser->declarator_template_arguments, initializer,
+            sym->type);
+        SymbolDelete(sym);
+        TypeParserReset(parser);
+        if (LexMatch(syntax->lex, TOK(comma))) {
+          continue;
+        }
+        break;
+      }
+    }
     // The old_sym refers to a previous declaration if found.
     Symbol* old_sym = NULL;
     bool overload_was_appended = false;
@@ -4788,9 +5012,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             CurrentTemplateParameterListLength(syntax);
         sym->type->info.function.template_parameter_base =
             CurrentTemplateParameterBase(syntax);
-        if (sym->type->info.function.template_parameters.length == 0) {
-          MoveCurrentTemplateParametersToFunction(syntax, sym->type);
-        }
       }
       if (TypeIsFunction(sym->type)) {
         sym->type->info.function.is_explicit = is_explicit;
@@ -6533,8 +6754,7 @@ static int CurrentTemplateParameterBase(Syntax* syntax) {
 static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
                                                     TypeRecord* func) {
   if (syntax->current_template_parameters == NULL || func == NULL ||
-      !TypeIsFunction(func) ||
-      syntax->current_template_parameters->length == 0) {
+      !TypeIsFunction(func)) {
     return;
   }
   if (func->info.function.symbol != NULL &&
@@ -6687,6 +6907,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
           var->initializer = NULL;
           vt->associated_constraint = NULL;
           VectorInit(&vt->parameters);
+          VectorInit(&vt->partial_specializations);
           if (syntax->current_template_parameters != NULL) {
             for (size_t p = 0;
                  p < syntax->current_template_parameters->length; p++) {
@@ -9188,6 +9409,29 @@ void SyntaxCloseScope(Syntax* syntax) {
   prev = syntax->local_tag_stack->prev;
   LocalSymbolTableDelete(syntax->local_tag_stack);
   syntax->local_tag_stack = prev;
+}
+
+void SyntaxInsertClassMembersForConstraint(Syntax* syntax, Struct* owner) {
+  if (syntax == NULL || owner == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->name.length == 0 || member->is_anon) {
+      continue;
+    }
+    // A trailing requires-clause may name earlier-declared data members and
+    // member typedefs (they are reachable through the implicit object
+    // parameter).  Member functions participate through normal (this-based)
+    // member call syntax at satisfaction time and are intentionally not
+    // shadowed here.  Skip statics and functions; only surface the names that
+    // would otherwise fail bare lookup.
+    if (member->is_member_function) {
+      continue;
+    }
+    InsertLocalSymbol(syntax->local_symbol_stack, member->symbol);
+  }
 }
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type) {

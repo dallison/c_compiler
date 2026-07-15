@@ -60,6 +60,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->parsing_direct_class_template = false;
   parser->template_substitution_failed = false;
   parser->placeholder_variable_constraint = NULL;
+  parser->typename_allows_unqualified = false;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -242,6 +243,14 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   LexNextToken(parser->lex);
   SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
 
+  // `decltype(auto)` is a placeholder type: its deduction follows decltype
+  // (value-category preserving) rules rather than template-argument deduction.
+  if (LexLookingAt(parser->lex, TOK(auto))) {
+    LexNextToken(parser->lex);
+    SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+    return NewTypeRecord(kTypeDecltypeAuto | kTypeAuto, kQualPlain);
+  }
+
   bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));
   bool unparenthesized_identifier =
       !parenthesized_expression &&
@@ -325,6 +334,15 @@ Struct* CurrentClassBeingParsed(TypeParser* parser) {
       TypeIsFunction(compiler->current_function)) {
     return compiler->current_function->info.function.cxx_member_owner;
   }
+  // Fall back to the class whose base-clause/body is currently being parsed.
+  // Nested template-argument parsing (e.g. a self-template-id inside a base
+  // specifier like `base<subrange<I, S> >`) spins up fresh TypeParsers that do
+  // not carry cxx_member_owner, so recover the enclosing class from the syntax
+  // state instead.
+  if (parser != NULL && parser->syntax != NULL &&
+      parser->syntax->cxx_class_head != NULL) {
+    return parser->syntax->cxx_class_head;
+  }
   return NULL;
 }
 
@@ -395,6 +413,79 @@ static bool CurrentClassTemplateNameStartsType(TypeParser* parser) {
   }
   StringDestruct(&name);
   return false;
+}
+
+// Returns true if `type` (recursively, including template arguments, array
+// bounds, and dependent-member paths) references a template parameter whose
+// index is at or beyond `threshold`.  Used to detect a self-qualified type such
+// as `EnclosingClass<..., MemberTemplateParam, ...>::member` inside a member
+// function template: a parameter introduced by the *member* template has an
+// index past the enclosing class's own parameters, which proves the prefix is a
+// *different* specialization (a member of an unknown specialization) rather than
+// the current instantiation.
+static bool TypeReferencesTemplateParameterAtLeast(TypeRecord* type,
+                                                   int threshold);
+
+static bool TemplateArgumentReferencesTemplateParameterAtLeast(
+    TemplateArgument* arg, int threshold) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->template_parameter_index >= threshold) {
+    return true;
+  }
+  if (arg->type != NULL &&
+      TypeReferencesTemplateParameterAtLeast(arg->type, threshold)) {
+    return true;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      if (TemplateArgumentReferencesTemplateParameterAtLeast(
+              arg->pack_arguments->value.p[i], threshold)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool TypeReferencesTemplateParameterAtLeast(TypeRecord* type,
+                                                   int threshold) {
+  if (type == NULL) {
+    return false;
+  }
+  if (type->template_parameter_index >= threshold) {
+    return true;
+  }
+  if (TypeIsArray(type) &&
+      type->info.array.template_parameter_index >= threshold) {
+    return true;
+  }
+  if (type->template_arguments != NULL) {
+    for (size_t i = 0; i < type->template_arguments->length; i++) {
+      if (TemplateArgumentReferencesTemplateParameterAtLeast(
+              type->template_arguments->value.p[i], threshold)) {
+        return true;
+      }
+    }
+  }
+  if (type->dependent_member_template_arguments != NULL) {
+    for (size_t i = 0; i < type->dependent_member_template_arguments->length;
+         i++) {
+      Vector* component_args =
+          type->dependent_member_template_arguments->value.p[i];
+      if (component_args == NULL) {
+        continue;
+      }
+      for (size_t j = 0; j < component_args->length; j++) {
+        if (TemplateArgumentReferencesTemplateParameterAtLeast(
+                component_args->value.p[j], threshold)) {
+          return true;
+        }
+      }
+    }
+  }
+  return TypeReferencesTemplateParameterAtLeast(type->next, threshold);
 }
 
 static TypeRecord* BuildDependentMemberTemplateTypename(
@@ -601,11 +692,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       type |= type_record->type;
     } else if (CompilerIsCXX() && allow_typedef &&
                LexMatch(lex, TOK(typename))) {
+      LexCheckpoint typename_name_start;
+      LexCheckpointSave(lex, &typename_name_start);
       FullyQualifiedIdentifier typename_name;
       FullyQualifiedIdentifierInit(&typename_name);
       if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
               parser->syntax, &typename_name, TC(decl))) {
         SyntaxError(parser->syntax, "Expected qualified type name after typename");
+      } else if (!typename_name.is_qualified &&
+                 parser->typename_allows_unqualified) {
+        // In a type-requirement the type-name after `typename` may be an
+        // unqualified simple-template-id or type-name.  Reparse it through the
+        // ordinary type-name path, which already resolves aliases, class
+        // templates, and type parameters.
+        LexCheckpointRestore(lex, &typename_name_start);
+        LexCheckpointDestruct(&typename_name_start);
+        FullyQualifiedIdentifierDestruct(&typename_name);
+        return ParseTypeSpecifier(parser, allow_typedef);
       } else if (!typename_name.is_qualified) {
         SyntaxError(parser->syntax, "typename requires a qualified type name");
       } else {
@@ -641,12 +744,59 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                            TemplateArgumentVectorCopy(component_args));
             }
             Symbol* base = SyntaxFindQualifiedSymbol(parser->syntax, &prefix);
+            Symbol* dependent_member_origin = NULL;
             if (base != NULL && base->flags.is_template) {
+              dependent_member_origin = base;
+            } else if (base_index == 0) {
+              // The prefix may name an enclosing class template by its
+              // injected-class-name, which is not yet flagged is_template while
+              // that class's own body is being parsed.  If any prefix argument
+              // is introduced by a *member* template -- its parameter index sits
+              // at or beyond the class's own parameters -- then `Prefix<...>` is
+              // a different specialization, so `Prefix<...>::member` denotes a
+              // member of an unknown specialization and must stay dependent
+              // (resolved per specialization at instantiation) rather than
+              // collapse to the current instantiation's member and silently drop
+              // the differing argument.
+              String* prefix_name = typename_name.components.value.p[0];
+              for (Struct* owner = CurrentClassBeingParsed(parser);
+                   owner != NULL; owner = owner->lexical_parent) {
+                bool owner_is_template =
+                    owner->is_template || owner->template_parameter_count > 0 ||
+                    owner->defining_template_scope_count > 0;
+                if (!owner_is_template || owner->tag_name == NULL ||
+                    owner->tag_symbol == NULL ||
+                    strcmp(owner->tag_name->value, prefix_name->value) != 0) {
+                  continue;
+                }
+                int own_scope = owner->template_parameter_count > 0
+                                    ? owner->template_parameter_count
+                                    : owner->defining_template_scope_count;
+                bool references_member_template_param = false;
+                for (size_t i = 0; i < parsed_args->length; i++) {
+                  if (TemplateArgumentReferencesTemplateParameterAtLeast(
+                          parsed_args->value.p[i], own_scope)) {
+                    references_member_template_param = true;
+                    break;
+                  }
+                }
+                if (references_member_template_param) {
+                  Symbol* primary =
+                      SyntaxFindSymbol(parser->syntax, prefix_name);
+                  dependent_member_origin =
+                      (primary != NULL && primary->flags.is_template)
+                          ? primary
+                          : owner->tag_symbol;
+                }
+                break;
+              }
+            }
+            if (dependent_member_origin != NULL) {
               String* member_name =
                   typename_name.components.value.p[
                       typename_name.components.length - 1];
             type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
-            type_record->template_origin = base;
+            type_record->template_origin = dependent_member_origin;
             type_record->template_arguments =
                 TemplateArgumentVectorCopy(parsed_args);
             type_record->dependent_member_name =
@@ -700,6 +850,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         }
         }
       }
+      LexCheckpointDestruct(&typename_name_start);
       FullyQualifiedIdentifierDestruct(&typename_name);
     } else if (allow_typedef && SyntaxCurrentTokenStartsQualifiedName(parser->syntax)) {
       FullyQualifiedIdentifier typedef_name;
@@ -1493,6 +1644,10 @@ static void ParseCXXTrailingRequiresClause(TypeParser* parser,
     return;
   }
   SyntaxOpenScope(parser->syntax);
+  if (parser->cxx_member_owner != NULL) {
+    SyntaxInsertClassMembersForConstraint(parser->syntax,
+                                          parser->cxx_member_owner);
+  }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     if (formal != NULL && formal->name.length > 0) {

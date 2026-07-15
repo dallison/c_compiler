@@ -491,6 +491,14 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   tag->flags.is_forward_declared = false;
   tag->flags.is_defined = true;
 
+  // Record how many template parameters are in scope as the body begins (this
+  // class's own template head plus any enclosing templates).  The class's
+  // is_template / template_parameter_count are only set once the body is fully
+  // parsed, so this captured count is the reliable in-body signal that we are
+  // inside a class template (needed for friend-declaration disambiguation).
+  str->defining_template_scope_count =
+      parser->syntax->current_template_parameter_count;
+
   // Now 'tag' will be the struct tag pointer
   // and 'str' will be a pointer to the Struct information.
   // Capture the #pragma pack(n) value in effect at the point of definition so
@@ -523,12 +531,15 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     parser->syntax->local_symbol_stack = class_symbol_scope;
   }
   Struct* saved_member_owner = parser->cxx_member_owner;
+  Struct* saved_class_head = parser->syntax->cxx_class_head;
   if (str->lexical_parent == NULL && saved_member_owner != NULL) {
     str->lexical_parent = saved_member_owner;
   }
   parser->cxx_member_owner = str;
+  parser->syntax->cxx_class_head = str;
   ParseStructMembers(parser, str, is_union, tag_name);
   parser->cxx_member_owner = saved_member_owner;
+  parser->syntax->cxx_class_head = saved_class_head;
   if (class_symbol_scope != NULL) {
     assert(parser->syntax->local_symbol_stack == class_symbol_scope);
     parser->syntax->local_symbol_stack = class_symbol_scope->prev;
@@ -666,6 +677,22 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
                                         specialization_template,
                                         completed_specialization_args);
         StringSetString(&tag_name, &specialization_name);
+        if (is_partial_specialization &&
+            specialization_template->type->info.struct_info != NULL) {
+          // Two constrained partial specializations may share an identical
+          // pattern (differing only in their associated constraints), e.g.
+          //   template <HasDiff T>  struct S<T> { ... };
+          //   template <SubInt  T>  struct S<T> { ... };
+          // Mangling the pattern alone would produce the same tag name and
+          // collide as a "duplicate definition".  Disambiguate by appending the
+          // index this specialization will occupy in the primary template's
+          // partial-specialization list, so each gets a distinct body tag while
+          // constraint-based selection still chooses the right one.
+          size_t partial_index =
+              specialization_template->type->info.struct_info
+                  ->partial_specializations.length;
+          StringPrintf(&tag_name, "#%zu", partial_index);
+        }
         has_qualified_tag = false;
         saved_specialization_tag_stack = parser->syntax->local_tag_stack;
         saved_specialization_namespace = parser->syntax->current_namespace;
@@ -681,6 +708,7 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
 
   Symbol* class_head_tag = NULL;
   Struct* saved_base_member_owner = parser->cxx_member_owner;
+  Struct* saved_base_class_head = parser->syntax->cxx_class_head;
   if (!has_qualified_tag && !is_full_specialization &&
       !is_partial_specialization && LexLookingAt(parser->lex, TOK(colon))) {
     class_head_tag =
@@ -688,10 +716,12 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     if (class_head_tag != NULL && class_head_tag->type != NULL &&
         TypeIsStructOrUnion(class_head_tag->type)) {
       parser->cxx_member_owner = class_head_tag->type->info.struct_info;
+      parser->syntax->cxx_class_head = class_head_tag->type->info.struct_info;
     }
   }
   ParseCXXBaseSpecifiers(parser, &bases, is_union, is_class);
   parser->cxx_member_owner = saved_base_member_owner;
+  parser->syntax->cxx_class_head = saved_base_class_head;
   if (LexMatch(parser->lex, TOK(lbrace))) {
     if (has_qualified_tag) {
       SyntaxError(parser->syntax, "Cannot define qualified struct tag %s",

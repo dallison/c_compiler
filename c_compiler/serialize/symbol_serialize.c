@@ -283,6 +283,7 @@ static VariableTemplate* ReadVariableTemplate(DeserializeContext* ctx,
   vt->initializer = NULL;
   vt->associated_constraint = NULL;
   VectorInit(&vt->parameters);
+  VectorInit(&vt->partial_specializations);
   WireBuffer sub;
   WireBufferInitReader(&sub, data, len);
   while (!WireBufferEof(&sub) && !WireBufferHasError(&sub)) {

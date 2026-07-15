@@ -52,6 +52,7 @@ typedef struct VariableTemplate {
   struct ASTNode* initializer;  // Unanalyzed initializer expression (owned).
   Vector parameters;            // TemplateParameter* entries (owned).
   struct ConstraintExpr* associated_constraint;  // C++20 requires-clause. // @wire 3
+  Vector partial_specializations;  // ClassTemplatePartialSpecialization* (owned).
 } VariableTemplate;
 
 // Parameter list for an alias template whose RHS does not carry a template-id

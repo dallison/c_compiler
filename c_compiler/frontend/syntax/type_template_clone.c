@@ -3350,6 +3350,21 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
     } else {
       ctor_owner = NULL;
     }
+    /* A base- or member-subobject initializer inside a cloned constructor body
+     * has the *derived* (enclosing) object as its receiver, yet the call
+     * actually targets the subobject's own, already-concrete constructor. The
+     * receiver-based detection above would hijack the owner to the derived
+     * class in that case. When the call already resolves to a constructor of a
+     * concrete (non-dependent) class that differs from the receiver's class,
+     * trust that binding rather than the receiver: only a still-generic owner
+     * needs rebinding from the receiver. */
+    Struct* current_owner = id->symbol->type->info.function.cxx_member_owner;
+    if (ctor_owner != NULL && current_owner != NULL &&
+        current_owner != ctor_owner &&
+        !StructContainsTemplateParameter(current_owner)) {
+      ctor_owner = NULL;
+      ctor_name = NULL;
+    }
   }
   if (ctor_owner == NULL &&
       id->symbol->type->info.function.cxx_member_owner != NULL) {
@@ -3385,6 +3400,45 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   }
   ASTNodeSetType(call->left, id->symbol->type);
   return true;
+}
+
+/* Post-clone pass: prune the discarded branch of an `if constexpr` whose
+ * condition has already been folded to a constant during the body clone (a
+ * `requires`-expression condition is evaluated and replaced with 0/1 by
+ * CloneTemplateFunctionBodyNode).  Statement-level analysis of `if constexpr`
+ * (AnalyzeIfStatement) would eventually drop the not-taken branch, but the
+ * intervening re-analysis passes below (ReanalyzeClonedResolvedCall, etc.)
+ * would first walk that dead branch and re-resolve its construction calls --
+ * e.g. `owning_view(v)` in the false branch of `views::all`'s
+ * `if constexpr (requires { ref_view(v); }) ... else ...`.  Re-analyzing a
+ * discarded branch can raise spurious errors (its constraints legitimately
+ * fail for this argument), so eliminate it here, before those passes run. */
+static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
+                                       ASTNodeTransformAction* action) {
+  (void)action;
+  if (node == NULL || node->op != AST_OP(if)) {
+    return node;
+  }
+  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+  if (!if_node->is_constexpr || if_node->cond == NULL ||
+      if_node->cond->op != AST_OP(number)) {
+    return node;
+  }
+  int64_t value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
+  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
+  ASTNode* taken = *taken_slot;
+  SourceLocation location = node->location;
+  // Detach the surviving branch so deleting the `if` node does not free it.
+  *taken_slot = NULL;
+  ASTNodeDelete(node);
+  if (taken == NULL) {
+    taken = NewCompoundStatementASTNode(NewVector(), location);
+  } else {
+    taken->parent = NULL;
+  }
+  // Recurse so nested `if constexpr` statements inside the surviving branch are
+  // pruned too (the driver does not descend into a replaced node).
+  return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
 }
 
 /* Post-clone pass: re-resolve already-typed construction calls in the cloned
@@ -3638,6 +3692,9 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   }
   ASTNode* body = ASTNodeClone(from->info.function.body,
                                CloneTemplateFunctionBodyNode, &clone, NULL);
+  // Drop discarded `if constexpr` branches (whose condition the clone above has
+  // already folded to a constant) before the re-analysis passes can walk them.
+  body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   ASTNodeVisit(body, ReplaceSingleElementPackIdentifierVisitor, 0, &clone);
@@ -3684,6 +3741,64 @@ bool PendingTemplateInstantiationHasAsmName(const char* asm_name) {
   return false;
 }
 
+// True if a function template has a template parameter pack among its own
+// parameters (e.g. `template <class... Args>`).  Such member constructor
+// templates must defer member-initializer preamble insertion until per-call
+// instantiation, when the pack length is known (see the caller).
+static bool FunctionTemplateHasOwnParameterPack(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+    TemplateParameter* param =
+        func->info.function.template_parameters.value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
+                                                    Symbol* template_definition,
+                                                    Symbol* symbol,
+                                                    Vector* args) {
+  if (symbol == NULL || symbol->type == NULL ||
+      !symbol->type->info.function.is_constructor ||
+      symbol->type->info.function.body == NULL ||
+      symbol->type->info.function.body->op != AST_OP(compound)) {
+    return;
+  }
+  CXXConstructorInitList* stored =
+      FindTemplateConstructorInitializers(template_definition);
+  CXXConstructorInitList* initializers =
+      SyntaxCXXConstructorInitListCloneDeferred(stored);
+  if (initializers == NULL) {
+    return;
+  }
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)symbol->type->info.function.body;
+  size_t first_new_statement = body->statements->length;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_class_access_context =
+      symbol->type->info.function.cxx_member_owner;
+  SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
+                                     body->statements, initializers,
+                                     symbol->location);
+  AnalyzeInsertedConstructorPreamble(
+      parser, template_definition->type, symbol->type, body->statements,
+      body->statements->length - first_new_statement, args);
+  compiler->current_class_access_context = saved_access_context;
+  SyntaxCXXConstructorInitListDestruct(initializers);
+  free(initializers);
+}
+
 /* Instantiate the body of a member function template into `symbol` by cloning
  * `template_definition`'s body with `args`, mark it defined, set inline/weak
  * linkage as appropriate, and queue the instantiation for code emission (unless
@@ -3728,30 +3843,26 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
+    // A member function TEMPLATE constructor with a *parameter pack* must not
+    // have its member-initializer list inserted and analyzed now: with its own
+    // parameters still unbound, a member pack such as an in-place variadic
+    // constructor `v(static_cast<Args&&>(args)...)` mis-expands to a
+    // value-initialization `v()` that then fails for a type (e.g. a lambda)
+    // whose value-init is not viable here.  For those, the preamble is deferred
+    // to per-call instantiation (its init-list is re-keyed onto this class-level
+    // symbol so the per-call clone can rediscover it).  A non-pack member
+    // template constructor (e.g. `duration`'s converting constructor) is instead
+    // baked here, with the enclosing class arguments substituted, so the
+    // init-list -- which may reference the enclosing class parameters -- is
+    // resolved against concrete enclosing arguments (the per-call clone then
+    // only substitutes the member's own parameters).
     if (symbol->type->info.function.is_constructor &&
-        symbol->type->info.function.body != NULL &&
-        symbol->type->info.function.body->op == AST_OP(compound)) {
-      CXXConstructorInitList* stored =
-          FindTemplateConstructorInitializers(template_definition);
-      CXXConstructorInitList* initializers =
-          SyntaxCXXConstructorInitListCloneDeferred(stored);
-      if (initializers != NULL) {
-        CompoundStatementASTNode* body =
-            (CompoundStatementASTNode*)symbol->type->info.function.body;
-        size_t first_new_statement = body->statements->length;
-        Struct* saved_access_context = compiler->current_class_access_context;
-        compiler->current_class_access_context =
-            symbol->type->info.function.cxx_member_owner;
-        SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
-                                           body->statements, initializers,
-                                           symbol->location);
-        AnalyzeInsertedConstructorPreamble(
-            parser, template_definition->type, symbol->type, body->statements,
-            body->statements->length - first_new_statement, args);
-        compiler->current_class_access_context = saved_access_context;
-        SyntaxCXXConstructorInitListDestruct(initializers);
-        free(initializers);
-      }
+        (symbol->type->info.function.template_parameter_count == 0 ||
+         !FunctionTemplateHasOwnParameterPack(symbol->type))) {
+      SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
+                                                    symbol, args);
+    } else if (symbol->type->info.function.is_constructor) {
+      CopyTemplateConstructorInitializersKey(template_definition, symbol);
     }
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
@@ -3761,31 +3872,8 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, args);
-  if (symbol->type->info.function.is_constructor &&
-      symbol->type->info.function.body != NULL &&
-      symbol->type->info.function.body->op == AST_OP(compound)) {
-    CXXConstructorInitList* stored =
-        FindTemplateConstructorInitializers(template_definition);
-    CXXConstructorInitList* initializers =
-        SyntaxCXXConstructorInitListCloneDeferred(stored);
-    if (initializers != NULL) {
-      CompoundStatementASTNode* body =
-          (CompoundStatementASTNode*)symbol->type->info.function.body;
-      size_t first_new_statement = body->statements->length;
-      Struct* saved_access_context = compiler->current_class_access_context;
-      compiler->current_class_access_context =
-          symbol->type->info.function.cxx_member_owner;
-      SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
-                                         body->statements, initializers,
-                                         symbol->location);
-      AnalyzeInsertedConstructorPreamble(
-          parser, template_definition->type, symbol->type, body->statements,
-          body->statements->length - first_new_statement, args);
-      compiler->current_class_access_context = saved_access_context;
-      SyntaxCXXConstructorInitListDestruct(initializers);
-      free(initializers);
-    }
-  }
+  SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
+                                                symbol, args);
   symbol->type->info.function.definition = true;
   symbol->flags.is_defined = true;
   symbol->value.func_defn = symbol;

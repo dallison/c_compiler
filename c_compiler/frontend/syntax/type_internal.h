@@ -84,6 +84,15 @@ void AddClassTemplatePartialSpecialization(TypeParser* parser, Symbol* primary,
                                            Symbol* partial_tag,
                                            Vector* pattern_args);
 
+ClassTemplatePartialSpecialization* NewVariableTemplatePartialSpecialization(
+    Vector* template_parameters, Vector* pattern_arguments,
+    struct ASTNode* initializer, struct TypeRecord* type);
+void AddVariableTemplatePartialSpecialization(TypeParser* parser,
+                                              Symbol* primary,
+                                              Vector* pattern_args,
+                                              struct ASTNode* initializer,
+                                              struct TypeRecord* type);
+
 struct ASTNode* CloneCXXDefaultMemberInitializer(struct ASTNode* initializer);
 
 #endif /* type_internal_h */

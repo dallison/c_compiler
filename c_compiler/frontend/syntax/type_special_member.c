@@ -807,6 +807,14 @@ void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser,
                                      &cxx_initializers,
                                      member_symbol->location);
   if (CXXFunctionNeedsMemberwiseCopy(member_symbol->type)) {
+    if (CXXFunctionIsAssignmentOperator(member_symbol->type)) {
+      // A defaulted copy/move constructor initializes its base subobjects in
+      // the constructor preamble above; a defaulted assignment operator has no
+      // preamble, so its base subobjects must be assigned explicitly here
+      // before the class's own members.
+      AppendCXXBaseAssignments(parser->syntax, member_symbol->type, body,
+                               member_symbol->location);
+    }
     AppendCXXMemberwiseAssignments(
         parser, member_symbol->type, body,
         member_symbol->type->info.function.cxx_member_owner,
@@ -1269,6 +1277,75 @@ static bool CXXStructHasDeletedMemberSpecialMemberKind(
   return false;
 }
 
+// A subobject participates in the enclosing class's defaulted move
+// constructor / move assignment by move-constructing / move-assigning that
+// subobject.  Overload resolution selects the subobject type's move operation
+// when one is declared; otherwise the corresponding copy operation is selected
+// (a `const&` copy operation binds an rvalue).  The enclosing defaulted move
+// operation is defined as deleted when the selected operation is deleted
+// ([class.copy.ctor]/11, [class.copy.assign]/7).  The dedicated "deleted move
+// operation" checks alone miss the common case where a type has *no* move
+// operation and its copy operation is deleted (e.g. a member with a
+// user-declared move constructor has an implicitly deleted copy assignment and
+// no move assignment at all).
+static bool CXXStructSelectedMoveSpecialMemberIsDeleted(Struct* member_struct,
+                                                        bool assignment) {
+  if (member_struct == NULL) {
+    return false;
+  }
+  CXXSpecialMemberKind move_kind = assignment
+                                       ? kCXXSpecialMemberMoveAssignment
+                                       : kCXXSpecialMemberMoveConstructor;
+  CXXSpecialMemberKind copy_kind = assignment
+                                       ? kCXXSpecialMemberCopyAssignment
+                                       : kCXXSpecialMemberCopyConstructor;
+  CXXSpecialMemberKind selected =
+      CXXStructHasSpecialMemberKind(member_struct, move_kind) ? move_kind
+                                                              : copy_kind;
+  return CXXStructHasDeletedSpecialMemberKind(member_struct, selected) ||
+         CXXStructHasDeletedBaseSpecialMemberKind(member_struct, selected);
+}
+
+static bool CXXStructMoveSpecialMemberDeletedByMembers(Struct* str,
+                                                       bool assignment) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    TypeRecord* type = member->symbol->type;
+    while (type != NULL && TypeIsFixedArray(type)) {
+      type = type->next;
+    }
+    if (type == NULL || !TypeIsStructOrUnion(type) ||
+        type->info.struct_info == NULL) {
+      continue;
+    }
+    if (CXXStructSelectedMoveSpecialMemberIsDeleted(type->info.struct_info,
+                                                    assignment)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (CXXStructSelectedMoveSpecialMemberIsDeleted(base->type->info.struct_info,
+                                                    assignment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
   if (type == NULL) {
     return false;
@@ -1306,19 +1383,21 @@ static void AddCXXSyntheticMemberFunction(TypeParser* parser, Struct* str,
   } else {
     AddStructMember(parser, str, member);
   }
-  CXXSpecialMemberKind kind = symbol->type->info.function.cxx_special_member_kind;
   bool dependent_owner =
       StructContainsTemplateParameter(str) ||
       (str->lexical_parent != NULL &&
        (str->lexical_parent->is_template ||
         StructContainsTemplateParameter(str->lexical_parent)));
-  bool inherited_copy_or_assign =
-      (str->bases.length > 0 || str->virtual_bases.length > 0) &&
-      (kind == kCXXSpecialMemberCopyConstructor ||
-       kind == kCXXSpecialMemberMoveConstructor ||
-       kind == kCXXSpecialMemberCopyAssignment ||
-       kind == kCXXSpecialMemberMoveAssignment);
-  if (!inherited_copy_or_assign && !dependent_owner) {
+  // Previously the body of a base-having copy/move constructor or assignment
+  // was left unsynthesized here ("inherited_copy_or_assign"), on the assumption
+  // that some later pass would materialize it.  Nothing did, so an implicitly
+  // declared copy/move of a derived class was emitted as a weak *declaration*
+  // with no definition -- a call to it resolved to a null address at link time
+  // and crashed.  SyntaxInsertCXXConstructorPreamble (invoked from the synthesis
+  // below) already emits the base-subobject copy/move calls and defers the vptr
+  // initializers until the vtables are registered, so synthesizing now is
+  // correct.  Templates still defer to instantiation via dependent_owner.
+  if (!dependent_owner) {
     SynthesizeDefaultedMemberFunctionBody(parser, symbol);
   }
 }
@@ -1599,7 +1678,9 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
         CXXStructHasDeletedBaseSpecialMemberKind(
             str, kCXXSpecialMemberMoveConstructor) ||
             CXXStructHasDeletedMemberSpecialMemberKind(
-                str, kCXXSpecialMemberMoveConstructor));
+                str, kCXXSpecialMemberMoveConstructor) ||
+            CXXStructMoveSpecialMemberDeletedByMembers(
+                str, /*assignment=*/false));
     AddCXXSyntheticMemberFunction(parser, str, move);
   }
 
@@ -1613,7 +1694,9 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
             CXXStructHasDeletedBaseSpecialMemberKind(
                 str, kCXXSpecialMemberMoveAssignment) ||
             CXXStructHasDeletedMemberSpecialMemberKind(
-                str, kCXXSpecialMemberMoveAssignment));
+                str, kCXXSpecialMemberMoveAssignment) ||
+            CXXStructMoveSpecialMemberDeletedByMembers(
+                str, /*assignment=*/true));
     AddCXXSyntheticMemberFunction(parser, str, move_assign);
   }
   str->cxx_special_members_complete = true;

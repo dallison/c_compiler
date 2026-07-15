@@ -25,6 +25,7 @@ filegroup(
         "libc/include/memory",
         "libc/include/new",
         "libc/include/optional",
+        "libc/include/ranges",
         "libc/include/ratio",
         "libc/include/source_location",
         "libc/include/stdexcept",

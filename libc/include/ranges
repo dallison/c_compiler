@@ -1,0 +1,1148 @@
+//
+//  ranges
+//  c_compiler
+//
+//  C++20 <ranges> for DaveCC: range-access CPOs, range concepts, view_interface,
+//  subrange, and the common views/adaptors + factories.
+//
+
+#ifndef __davecc_ranges__
+#define __davecc_ranges__
+
+#include <compare>
+#include <concepts>
+#include <initializer_list>
+#include <iterator>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// A prvalue copy of an expression's decayed type, used in the range-access CPO
+// constraints to check the *decayed* return type of member/ADL calls.
+template <class T>
+constexpr decay_t<T> __decay_copy(T&& t) noexcept {
+  return static_cast<T&&>(t);
+}
+
+// to_address for a raw pointer or a contiguous class iterator.
+template <class T>
+constexpr T* __to_address(T* p) noexcept {
+  return p;
+}
+template <class It>
+  requires requires(const It& i) { i.operator->(); }
+constexpr auto __to_address(const It& it) noexcept {
+  return __to_address(it.operator->());
+}
+
+namespace ranges {
+
+// [range.access] helpers -----------------------------------------------------
+
+namespace __access {
+
+template <class T>
+concept __class_or_enum =
+    is_class_v<remove_cvref_t<T> > || is_union_v<remove_cvref_t<T> > ||
+    is_enum_v<remove_cvref_t<T> >;
+
+template <class T>
+concept __pointer = is_pointer_v<T>;
+
+}  // namespace __access
+
+// [range.range] borrowed-range opt-in (specialized by view types).
+template <class>
+inline constexpr bool enable_borrowed_range = false;
+
+// [range.access.begin] --------------------------------------------------------
+namespace __begin {
+
+template <class T>
+void begin(T&) = delete;
+template <class T>
+void begin(const T&) = delete;
+
+template <class T>
+concept __member_begin = requires(T& t) {
+  { std::__decay_copy(t.begin()) } -> input_or_output_iterator;
+};
+
+template <class T>
+concept __adl_begin = __access::__class_or_enum<T> && requires(T& t) {
+  { std::__decay_copy(begin(t)) } -> input_or_output_iterator;
+};
+
+struct __fn {
+  template <class T>
+    requires is_array_v<remove_reference_t<T> >
+  constexpr auto operator()(T&& t) const noexcept {
+    return t + 0;
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && __member_begin<T>
+  constexpr auto operator()(T&& t) const {
+    return t.begin();
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && (!__member_begin<T>) &&
+            __adl_begin<T>
+  constexpr auto operator()(T&& t) const {
+    return begin(t);
+  }
+};
+
+}  // namespace __begin
+
+inline namespace __cpo {
+inline constexpr __begin::__fn begin{};
+}  // namespace __cpo
+
+// [range.access.end] ----------------------------------------------------------
+namespace __end {
+
+template <class T>
+void end(T&) = delete;
+template <class T>
+void end(const T&) = delete;
+
+template <class T>
+concept __member_end = requires(T& t) {
+  { std::__decay_copy(t.end()) } -> sentinel_for<decltype(ranges::begin(t))>;
+};
+
+template <class T>
+concept __adl_end = __access::__class_or_enum<T> && requires(T& t) {
+  { std::__decay_copy(end(t)) } -> sentinel_for<decltype(ranges::begin(t))>;
+};
+
+struct __fn {
+  template <class T, size_t N>
+  constexpr auto operator()(T (&t)[N]) const noexcept {
+    return t + N;
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && __member_end<T>
+  constexpr auto operator()(T&& t) const {
+    return t.end();
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && (!__member_end<T>) &&
+            __adl_end<T>
+  constexpr auto operator()(T&& t) const {
+    return end(t);
+  }
+};
+
+}  // namespace __end
+
+inline namespace __cpo {
+inline constexpr __end::__fn end{};
+}  // namespace __cpo
+
+// [range.access.cbegin/cend] --------------------------------------------------
+namespace __cbegin {
+struct __fn {
+  template <class T>
+    requires requires(T& t) { ranges::begin(static_cast<const T&>(t)); }
+  constexpr auto operator()(const T& t) const {
+    return ranges::begin(t);
+  }
+};
+}  // namespace __cbegin
+inline namespace __cpo {
+inline constexpr __cbegin::__fn cbegin{};
+}  // namespace __cpo
+
+namespace __cend {
+struct __fn {
+  template <class T>
+    requires requires(T& t) { ranges::end(static_cast<const T&>(t)); }
+  constexpr auto operator()(const T& t) const {
+    return ranges::end(t);
+  }
+};
+}  // namespace __cend
+inline namespace __cpo {
+inline constexpr __cend::__fn cend{};
+}  // namespace __cpo
+
+// [range.primitives] iterator_t/sentinel_t ------------------------------------
+template <class T>
+using iterator_t = decltype(ranges::begin(declval<T&>()));
+
+template <class T>
+using sentinel_t = decltype(ranges::end(declval<T&>()));
+
+// [range.range] ---------------------------------------------------------------
+template <class T>
+concept range = requires(T& t) {
+  ranges::begin(t);
+  ranges::end(t);
+};
+
+template <class T>
+concept borrowed_range =
+    range<T> &&
+    (is_lvalue_reference_v<T> || enable_borrowed_range<remove_cvref_t<T> >);
+
+// [range.sized] ---------------------------------------------------------------
+namespace __size {
+
+template <class T>
+void size(T&&) = delete;
+
+template <class T>
+concept __member_size = requires(T& t) {
+  { std::__decay_copy(t.size()) } -> integral;
+};
+
+template <class T>
+concept __adl_size = __access::__class_or_enum<T> && requires(T& t) {
+  { std::__decay_copy(size(t)) } -> integral;
+};
+
+struct __fn {
+  template <class T, size_t N>
+  constexpr size_t operator()(T (&)[N]) const noexcept {
+    return N;
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && __member_size<T>
+  constexpr auto operator()(T&& t) const {
+    return t.size();
+  }
+
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && (!__member_size<T>) &&
+            __adl_size<T>
+  constexpr auto operator()(T&& t) const {
+    return size(t);
+  }
+
+  // Fallback: a range with a sized sentinel yields end - begin.
+  template <class T>
+    requires(!is_array_v<remove_reference_t<T> >) && (!__member_size<T>) &&
+            (!__adl_size<T>) && requires(T& t) {
+              { ranges::begin(t) } -> forward_iterator;
+              requires sized_sentinel_for<decltype(ranges::end(t)),
+                                          decltype(ranges::begin(t))>;
+            }
+  constexpr auto operator()(T&& t) const {
+    return static_cast<size_t>(ranges::end(t) - ranges::begin(t));
+  }
+};
+
+}  // namespace __size
+inline namespace __cpo {
+inline constexpr __size::__fn size{};
+}  // namespace __cpo
+
+// [range.prim.ssize]
+namespace __ssize {
+struct __fn {
+  template <class T>
+    requires requires(T& t) { ranges::size(t); }
+  constexpr auto operator()(T&& t) const {
+    using __st = decltype(ranges::size(t));
+    using __sst = make_signed_t<__st>;
+    if constexpr (sizeof(ptrdiff_t) > sizeof(__sst)) {
+      return static_cast<ptrdiff_t>(ranges::size(t));
+    } else {
+      return static_cast<__sst>(ranges::size(t));
+    }
+  }
+};
+}  // namespace __ssize
+inline namespace __cpo {
+inline constexpr __ssize::__fn ssize{};
+}  // namespace __cpo
+
+// [range.prim.empty]
+namespace __empty {
+
+template <class T>
+concept __member_empty = requires(T& t) {
+  bool(t.empty());
+};
+
+template <class T>
+concept __size_empty = requires(T& t) {
+  { ranges::size(t) } -> integral;
+};
+
+template <class T>
+concept __iter_empty = requires(T& t) {
+  { ranges::begin(t) } -> forward_iterator;
+  bool(ranges::begin(t) == ranges::end(t));
+};
+
+struct __fn {
+  template <__member_empty T>
+  constexpr bool operator()(T&& t) const {
+    return bool(t.empty());
+  }
+
+  template <class T>
+    requires(!__member_empty<T>) && __size_empty<T>
+  constexpr bool operator()(T&& t) const {
+    return ranges::size(t) == 0;
+  }
+
+  template <class T>
+    requires(!__member_empty<T>) && (!__size_empty<T>) && __iter_empty<T>
+  constexpr bool operator()(T&& t) const {
+    return bool(ranges::begin(t) == ranges::end(t));
+  }
+};
+
+}  // namespace __empty
+inline namespace __cpo {
+inline constexpr __empty::__fn empty{};
+}  // namespace __cpo
+
+// [range.prim.data]
+namespace __data {
+
+template <class T>
+concept __member_data = requires(T& t) {
+  { std::__decay_copy(t.data()) } -> __access::__pointer;
+};
+
+template <class T>
+concept __ptr_begin = requires(T& t) {
+  { ranges::begin(t) } -> contiguous_iterator;
+};
+
+struct __fn {
+  template <class T>
+    requires __member_data<T>
+  constexpr auto operator()(T&& t) const {
+    return t.data();
+  }
+
+  template <class T>
+    requires(!__member_data<T>) && __ptr_begin<T>
+  constexpr auto operator()(T&& t) const {
+    return std::__to_address(ranges::begin(t));
+  }
+};
+
+}  // namespace __data
+inline namespace __cpo {
+inline constexpr __data::__fn data{};
+}  // namespace __cpo
+
+namespace __cdata {
+struct __fn {
+  template <class T>
+    requires requires(T& t) { ranges::data(static_cast<const T&>(t)); }
+  constexpr auto operator()(const T& t) const {
+    return ranges::data(t);
+  }
+};
+}  // namespace __cdata
+inline namespace __cpo {
+inline constexpr __cdata::__fn cdata{};
+}  // namespace __cpo
+
+// [range.sized]
+template <class T>
+concept sized_range = range<T> && requires(T& t) { ranges::size(t); };
+
+// [range.refinements] ---------------------------------------------------------
+template <class T>
+using range_difference_t = iter_difference_t<iterator_t<T> >;
+
+template <class T>
+using range_value_t = iter_value_t<iterator_t<T> >;
+
+template <class T>
+using range_reference_t = iter_reference_t<iterator_t<T> >;
+
+template <class T>
+using range_rvalue_reference_t = iter_rvalue_reference_t<iterator_t<T> >;
+
+template <sized_range R>
+using range_size_t = decltype(ranges::size(declval<R&>()));
+
+template <class R, class T>
+concept output_range =
+    range<R> && output_iterator<iterator_t<R>, T>;
+
+template <class T>
+concept input_range = range<T> && input_iterator<iterator_t<T> >;
+
+template <class T>
+concept forward_range = input_range<T> && forward_iterator<iterator_t<T> >;
+
+template <class T>
+concept bidirectional_range =
+    forward_range<T> && bidirectional_iterator<iterator_t<T> >;
+
+template <class T>
+concept random_access_range =
+    bidirectional_range<T> && random_access_iterator<iterator_t<T> >;
+
+template <class T>
+concept contiguous_range =
+    random_access_range<T> && contiguous_iterator<iterator_t<T> > &&
+    requires(T& t) {
+      { ranges::data(t) } -> same_as<add_pointer_t<range_reference_t<T> > >;
+    };
+
+template <class T>
+concept common_range =
+    range<T> && same_as<iterator_t<T>, sentinel_t<T> >;
+
+// [range.view] ----------------------------------------------------------------
+struct view_base {};
+
+template <class T>
+inline constexpr bool enable_view =
+    derived_from<T, view_base> || false;
+
+template <class T>
+concept view =
+    range<T> && movable<T> && enable_view<T>;
+
+template <class T>
+concept viewable_range =
+    range<T> &&
+    ((view<remove_cvref_t<T> > && constructible_from<remove_cvref_t<T>, T>) ||
+     (!view<remove_cvref_t<T> > &&
+      (is_lvalue_reference_v<T> ||
+       (movable<remove_reference_t<T> >))));
+
+// [range.dangling] ------------------------------------------------------------
+struct dangling {
+  constexpr dangling() noexcept = default;
+  template <class... Args>
+  constexpr dangling(Args&&...) noexcept {}
+};
+
+template <range R>
+using borrowed_iterator_t =
+    conditional_t<borrowed_range<R>, iterator_t<R>, dangling>;
+
+// [range.move.wrap] __movable_box ---------------------------------------------
+// A wrapper that gives a move-constructible object the copy/move assignment a
+// view needs to store predicates and function objects (whose closure types are
+// not assignable in C++20).  When the wrapped type already provides the needed
+// assignment it is used directly; otherwise assignment is emulated by
+// destroy-then-reconstruct.
+template <class T>
+concept __boxable = move_constructible<T> && is_object_v<T>;
+
+template <__boxable T>
+class __movable_box {
+ private:
+  T __value_;
+
+ public:
+  constexpr __movable_box()
+    requires default_initializable<T>
+      : __value_() {}
+
+  constexpr __movable_box(const T& t)
+    requires copy_constructible<T>
+      : __value_(t) {}
+
+  constexpr __movable_box(T&& t) : __value_(static_cast<T&&>(t)) {}
+
+  template <class... Args>
+    requires constructible_from<T, Args...>
+  constexpr explicit __movable_box(in_place_t, Args&&... args)
+      : __value_(static_cast<Args&&>(args)...) {}
+
+  __movable_box(const __movable_box&)
+    requires copy_constructible<T>
+  = default;
+  __movable_box(__movable_box&&) = default;
+
+  constexpr __movable_box& operator=(const __movable_box& other)
+    requires copy_constructible<T>
+  {
+    if (this != &other) {
+      if constexpr (is_copy_assignable_v<T>) {
+        __value_ = other.__value_;
+      } else {
+        __value_.~T();
+        ::new (static_cast<void*>(&__value_)) T(other.__value_);
+      }
+    }
+    return *this;
+  }
+
+  constexpr __movable_box& operator=(__movable_box&& other) {
+    if (this != &other) {
+      if constexpr (is_move_assignable_v<T>) {
+        __value_ = static_cast<T&&>(other.__value_);
+      } else {
+        __value_.~T();
+        ::new (static_cast<void*>(&__value_)) T(static_cast<T&&>(other.__value_));
+      }
+    }
+    return *this;
+  }
+
+  constexpr bool has_value() const noexcept { return true; }
+  constexpr T& operator*() noexcept { return __value_; }
+  constexpr const T& operator*() const noexcept { return __value_; }
+  constexpr T* operator->() noexcept { return &__value_; }
+  constexpr const T* operator->() const noexcept { return &__value_; }
+};
+
+// [view.interface] ------------------------------------------------------------
+template <class D>
+  requires is_class_v<D> && same_as<D, remove_cv_t<D> >
+class view_interface {
+ private:
+  constexpr D& __derived() noexcept { return static_cast<D&>(*this); }
+  constexpr const D& __derived() const noexcept {
+    return static_cast<const D&>(*this);
+  }
+
+ public:
+  constexpr bool empty()
+    requires forward_range<D>
+  {
+    return ranges::begin(__derived()) == ranges::end(__derived());
+  }
+  constexpr bool empty() const
+    requires forward_range<const D>
+  {
+    return ranges::begin(__derived()) == ranges::end(__derived());
+  }
+
+  constexpr explicit operator bool()
+    requires requires(D& d) { ranges::empty(d); }
+  {
+    return !ranges::empty(__derived());
+  }
+  constexpr explicit operator bool() const
+    requires requires(const D& d) { ranges::empty(d); }
+  {
+    return !ranges::empty(__derived());
+  }
+
+  constexpr auto data()
+    requires contiguous_iterator<iterator_t<D> >
+  {
+    return std::__to_address(ranges::begin(__derived()));
+  }
+  constexpr auto data() const
+    requires range<const D> && contiguous_iterator<iterator_t<const D> >
+  {
+    return std::__to_address(ranges::begin(__derived()));
+  }
+
+  constexpr auto size()
+    requires forward_range<D> &&
+             sized_sentinel_for<sentinel_t<D>, iterator_t<D> >
+  {
+    return static_cast<size_t>(ranges::end(__derived()) -
+                               ranges::begin(__derived()));
+  }
+  constexpr auto size() const
+    requires forward_range<const D> &&
+             sized_sentinel_for<sentinel_t<const D>, iterator_t<const D> >
+  {
+    return static_cast<size_t>(ranges::end(__derived()) -
+                               ranges::begin(__derived()));
+  }
+
+  constexpr decltype(auto) front()
+    requires forward_range<D>
+  {
+    return *ranges::begin(__derived());
+  }
+  constexpr decltype(auto) front() const
+    requires forward_range<const D>
+  {
+    return *ranges::begin(__derived());
+  }
+
+  constexpr decltype(auto) back()
+    requires bidirectional_range<D> && common_range<D>
+  {
+    return *std::prev(ranges::end(__derived()));
+  }
+  constexpr decltype(auto) back() const
+    requires bidirectional_range<const D> && common_range<const D>
+  {
+    return *std::prev(ranges::end(__derived()));
+  }
+
+  template <random_access_range R = D>
+  constexpr decltype(auto) operator[](range_difference_t<R> n) {
+    return ranges::begin(__derived())[n];
+  }
+  template <random_access_range R = const D>
+  constexpr decltype(auto) operator[](range_difference_t<R> n) const {
+    return ranges::begin(__derived())[n];
+  }
+};
+
+// [range.subrange] ------------------------------------------------------------
+enum class subrange_kind : bool { unsized, sized };
+
+// A pair of an iterator and a sentinel forming a view.  This implementation
+// takes two template parameters (iterator + sentinel); when the sentinel is a
+// sized sentinel for the iterator, the range models sized_range with an O(1)
+// size() computed as `end - begin` (no stored size is needed for any of the
+// ranges produced by this library, all of which have sized sentinels or common
+// iterators).
+template <input_or_output_iterator I, sentinel_for<I> S = I>
+class subrange : public view_interface<subrange<I, S> > {
+ private:
+  I __begin_ = I();
+  S __end_ = S();
+
+ public:
+  subrange()
+    requires default_initializable<I>
+  = default;
+
+  constexpr subrange(I i, S s)
+      : __begin_(static_cast<I&&>(i)), __end_(static_cast<S&&>(s)) {}
+
+  template <borrowed_range R>
+    requires convertible_to<iterator_t<R>, I> &&
+             convertible_to<sentinel_t<R>, S>
+  constexpr subrange(R&& r)
+      : __begin_(ranges::begin(r)), __end_(ranges::end(r)) {}
+
+  constexpr I begin() const
+    requires copyable<I>
+  {
+    return __begin_;
+  }
+  constexpr S end() const { return __end_; }
+
+  constexpr bool empty() const { return __begin_ == __end_; }
+
+  constexpr size_t size() const
+    requires sized_sentinel_for<S, I>
+  {
+    return static_cast<size_t>(__end_ - __begin_);
+  }
+
+  [[nodiscard]] constexpr subrange next(iter_difference_t<I> n = 1) const {
+    subrange copy = *this;
+    std::advance(copy.__begin_, n);
+    return copy;
+  }
+};
+
+template <input_or_output_iterator I, sentinel_for<I> S>
+subrange(I, S) -> subrange<I, S>;
+
+template <borrowed_range R>
+subrange(R&&) -> subrange<iterator_t<R>, sentinel_t<R> >;
+
+template <class I, class S>
+inline constexpr bool enable_borrowed_range<subrange<I, S> > = true;
+
+template <size_t N, class I, class S>
+  requires(N < 2)
+constexpr auto get(const subrange<I, S>& r) {
+  if constexpr (N == 0) {
+    return r.begin();
+  } else {
+    return r.end();
+  }
+}
+
+// [range.ref.view] ------------------------------------------------------------
+template <range R>
+  requires is_object_v<R>
+class ref_view : public view_interface<ref_view<R> > {
+ private:
+  R* __r_ = nullptr;
+
+  // Only bind to an lvalue that converts to R& (never a temporary): the LWG
+  // "__fun" idiom -- `void __fun(R&); __fun(t);` -- is well-formed exactly when
+  // the argument is (or converts to) an lvalue reference.
+  static void __fun(R&);
+  static void __fun(R&&) = delete;
+
+ public:
+  template <class T>
+    requires(!same_as<remove_cvref_t<T>, ref_view>) &&
+            convertible_to<T, R&> && requires { __fun(declval<T>()); }
+  constexpr ref_view(T&& t)
+      : __r_(&static_cast<R&>(static_cast<T&&>(t))) {}
+
+  constexpr R& base() const { return *__r_; }
+
+  constexpr iterator_t<R> begin() const { return ranges::begin(*__r_); }
+  constexpr sentinel_t<R> end() const { return ranges::end(*__r_); }
+
+  constexpr bool empty() const
+    requires requires { ranges::empty(*__r_); }
+  {
+    return ranges::empty(*__r_);
+  }
+
+  constexpr auto size() const
+    requires sized_range<R>
+  {
+    return ranges::size(*__r_);
+  }
+
+  constexpr auto data() const
+    requires contiguous_range<R>
+  {
+    return ranges::data(*__r_);
+  }
+};
+
+template <class R>
+ref_view(R&) -> ref_view<R>;
+
+template <class T>
+inline constexpr bool enable_borrowed_range<ref_view<T> > = true;
+
+// [range.owning.view] ---------------------------------------------------------
+template <class T>
+inline constexpr bool __is_initializer_list = false;
+template <class T>
+inline constexpr bool __is_initializer_list<initializer_list<T> > = true;
+
+template <range R>
+  requires movable<R> && (!__is_initializer_list<remove_cvref_t<R> >)
+class owning_view : public view_interface<owning_view<R> > {
+ private:
+  R __r_ = R();
+
+ public:
+  owning_view()
+    requires default_initializable<R>
+  = default;
+  constexpr owning_view(R&& t) : __r_(static_cast<R&&>(t)) {}
+
+  owning_view(owning_view&&) = default;
+  owning_view& operator=(owning_view&&) = default;
+
+  constexpr R& base() & noexcept { return __r_; }
+  constexpr const R& base() const& noexcept { return __r_; }
+  constexpr R&& base() && noexcept { return static_cast<R&&>(__r_); }
+  constexpr const R&& base() const&& noexcept {
+    return static_cast<const R&&>(__r_);
+  }
+
+  constexpr iterator_t<R> begin() { return ranges::begin(__r_); }
+  constexpr sentinel_t<R> end() { return ranges::end(__r_); }
+
+  constexpr auto begin() const
+    requires range<const R>
+  {
+    return ranges::begin(__r_);
+  }
+  constexpr auto end() const
+    requires range<const R>
+  {
+    return ranges::end(__r_);
+  }
+
+  constexpr bool empty()
+    requires requires { ranges::empty(__r_); }
+  {
+    return ranges::empty(__r_);
+  }
+  constexpr bool empty() const
+    requires requires { ranges::empty(__r_); }
+  {
+    return ranges::empty(__r_);
+  }
+
+  constexpr auto size()
+    requires sized_range<R>
+  {
+    return ranges::size(__r_);
+  }
+  constexpr auto size() const
+    requires sized_range<const R>
+  {
+    return ranges::size(__r_);
+  }
+
+  constexpr auto data()
+    requires contiguous_range<R>
+  {
+    return ranges::data(__r_);
+  }
+  constexpr auto data() const
+    requires contiguous_range<const R>
+  {
+    return ranges::data(__r_);
+  }
+};
+
+template <class T>
+inline constexpr bool enable_borrowed_range<owning_view<T> > =
+    enable_borrowed_range<T>;
+
+// [range.adaptor.object] range adaptor closures + operator| -------------------
+namespace __detail {
+
+// Marker base: every range adaptor closure object derives from this so the
+// pipe operators below can recognise it.
+struct __adaptor_closure_base {};
+
+template <class T>
+concept __is_closure =
+    derived_from<remove_cvref_t<T>, __adaptor_closure_base>;
+
+// The composition C1 | C2: a closure that applies C1 then C2.
+template <class C1, class C2>
+struct __pipe_closure : __adaptor_closure_base {
+  C1 __c1;
+  C2 __c2;
+  constexpr __pipe_closure(C1 c1, C2 c2)
+      : __c1(static_cast<C1&&>(c1)), __c2(static_cast<C2&&>(c2)) {}
+  template <class R>
+  constexpr decltype(auto) operator()(R&& r) & {
+    return __c2(__c1(static_cast<R&&>(r)));
+  }
+  template <class R>
+  constexpr decltype(auto) operator()(R&& r) const& {
+    return __c2(__c1(static_cast<R&&>(r)));
+  }
+  template <class R>
+  constexpr decltype(auto) operator()(R&& r) && {
+    return static_cast<C2&&>(__c2)(static_cast<C1&&>(__c1)(static_cast<R&&>(r)));
+  }
+};
+
+// The pipe operators live in the same namespace as the adaptor-closure types
+// (and their `__adaptor_closure_base`) so that argument-dependent lookup on a
+// closure argument -- e.g. `v | views::all` where `views::all` has type
+// `__detail::__all_fn` -- reaches them.  ADL only searches a type's own
+// (and its bases') namespaces, never the enclosing `ranges` namespace.
+
+// r | closure  ==  closure(r)
+template <class R, class C>
+  requires(!__is_closure<R>) && __is_closure<C> &&
+          requires(R&& r, C&& c) { static_cast<C&&>(c)(static_cast<R&&>(r)); }
+constexpr decltype(auto) operator|(R&& r, C&& c) {
+  return static_cast<C&&>(c)(static_cast<R&&>(r));
+}
+
+// c1 | c2  ==  composed closure (applies c1 then c2)
+template <class C1, class C2>
+  requires __is_closure<C1> && __is_closure<C2>
+constexpr auto operator|(C1&& c1, C2&& c2) {
+  return __pipe_closure<decay_t<C1>, decay_t<C2> >(
+      static_cast<C1&&>(c1), static_cast<C2&&>(c2));
+}
+
+}  // namespace __detail
+
+// [range.all] -----------------------------------------------------------------
+namespace __detail {
+
+struct __all_fn : __adaptor_closure_base {
+  template <class R>
+    requires viewable_range<R>
+  constexpr auto operator()(R&& r) const {
+    if constexpr (view<decay_t<R> >) {
+      return decay_t<R>(static_cast<R&&>(r));
+    } else if constexpr (requires { ref_view(static_cast<R&&>(r)); }) {
+      return ref_view(static_cast<R&&>(r));
+    } else {
+      return owning_view(static_cast<R&&>(r));
+    }
+  }
+};
+
+}  // namespace __detail
+
+namespace views {
+inline constexpr __detail::__all_fn all{};
+}  // namespace views
+
+template <viewable_range R>
+using all_t = decltype(views::all(declval<R>()));
+
+// [range.empty.view] ----------------------------------------------------------
+template <class T>
+  requires is_object_v<T>
+class empty_view : public view_interface<empty_view<T> > {
+ public:
+  static constexpr T* begin() noexcept { return nullptr; }
+  static constexpr T* end() noexcept { return nullptr; }
+  static constexpr T* data() noexcept { return nullptr; }
+  static constexpr size_t size() noexcept { return 0; }
+  static constexpr bool empty() noexcept { return true; }
+};
+
+template <class T>
+inline constexpr bool enable_borrowed_range<empty_view<T> > = true;
+
+namespace views {
+template <class T>
+inline constexpr empty_view<T> empty{};
+}  // namespace views
+
+// [range.single.view] ---------------------------------------------------------
+template <class T>
+  requires is_object_v<T> && move_constructible<T>
+class single_view : public view_interface<single_view<T> > {
+ private:
+  __movable_box<T> __value_;
+
+ public:
+  single_view()
+    requires default_initializable<T>
+  = default;
+
+  constexpr explicit single_view(const T& t)
+    requires copy_constructible<T>
+      : __value_(t) {}
+  constexpr explicit single_view(T&& t) : __value_(static_cast<T&&>(t)) {}
+
+  template <class... Args>
+    requires constructible_from<T, Args...>
+  constexpr explicit single_view(in_place_t, Args&&... args)
+      : __value_(in_place, static_cast<Args&&>(args)...) {}
+
+  constexpr T* begin() noexcept { return this->data(); }
+  constexpr const T* begin() const noexcept { return this->data(); }
+  constexpr T* end() noexcept { return this->data() + 1; }
+  constexpr const T* end() const noexcept { return this->data() + 1; }
+  static constexpr size_t size() noexcept { return 1; }
+  constexpr T* data() noexcept { return &*__value_; }
+  constexpr const T* data() const noexcept { return &*__value_; }
+};
+
+template <class T>
+single_view(T) -> single_view<T>;
+
+namespace __detail {
+struct __single_fn {
+  template <class T>
+  constexpr auto operator()(T&& t) const {
+    return single_view<decay_t<T> >(static_cast<T&&>(t));
+  }
+};
+}  // namespace __detail
+
+namespace views {
+inline constexpr __detail::__single_fn single{};
+}  // namespace views
+
+// [range.iota.view] -----------------------------------------------------------
+// Signed "difference" type for an iota over W.  For an integral W we use
+// ptrdiff_t (wide enough for the value ranges this library produces); for an
+// iterator-like W the associated iter_difference_t is used.
+template <class W>
+using __iota_diff_t =
+    conditional_t<(!integral<W>), iter_difference_t<W>, ptrdiff_t>;
+
+template <weakly_incrementable W, semiregular Bound = unreachable_sentinel_t>
+  requires __weakly_equality_comparable_with<W, Bound> && semiregular<W>
+class iota_view : public view_interface<iota_view<W, Bound> > {
+ private:
+  struct __iterator {
+    friend class iota_view;
+
+    using iterator_concept = conditional_t<
+        random_access_iterator<W>, random_access_iterator_tag,
+        conditional_t<bidirectional_iterator<W>, bidirectional_iterator_tag,
+                      conditional_t<forward_iterator<W>, forward_iterator_tag,
+                                    input_iterator_tag> > >;
+    using iterator_category = input_iterator_tag;
+    using value_type = W;
+    using difference_type = __iota_diff_t<W>;
+
+    W __value_ = W();
+
+    constexpr __iterator() requires default_initializable<W> = default;
+    constexpr explicit __iterator(W value) : __value_(value) {}
+
+    constexpr W operator*() const noexcept { return __value_; }
+
+    constexpr __iterator& operator++() {
+      ++__value_;
+      return *this;
+    }
+    constexpr __iterator operator++(int) {
+      __iterator tmp = *this;
+      ++__value_;
+      return tmp;
+    }
+
+    constexpr __iterator& operator--()
+      requires bidirectional_iterator<W>
+    {
+      --__value_;
+      return *this;
+    }
+    constexpr __iterator operator--(int)
+      requires bidirectional_iterator<W>
+    {
+      __iterator tmp = *this;
+      --__value_;
+      return tmp;
+    }
+
+    constexpr __iterator& operator+=(difference_type n)
+      requires random_access_iterator<W>
+    {
+      __value_ = static_cast<W>(__value_ + n);
+      return *this;
+    }
+    constexpr __iterator& operator-=(difference_type n)
+      requires random_access_iterator<W>
+    {
+      __value_ = static_cast<W>(__value_ - n);
+      return *this;
+    }
+    constexpr W operator[](difference_type n) const
+      requires random_access_iterator<W>
+    {
+      return static_cast<W>(__value_ + n);
+    }
+
+    friend constexpr bool operator==(const __iterator& x, const __iterator& y)
+      requires equality_comparable<W>
+    {
+      return x.__value_ == y.__value_;
+    }
+    friend constexpr bool operator<(const __iterator& x, const __iterator& y)
+      requires totally_ordered<W>
+    {
+      return x.__value_ < y.__value_;
+    }
+    friend constexpr bool operator>(const __iterator& x, const __iterator& y)
+      requires totally_ordered<W>
+    {
+      return y < x;
+    }
+    friend constexpr bool operator<=(const __iterator& x, const __iterator& y)
+      requires totally_ordered<W>
+    {
+      return !(y < x);
+    }
+    friend constexpr bool operator>=(const __iterator& x, const __iterator& y)
+      requires totally_ordered<W>
+    {
+      return !(x < y);
+    }
+
+    friend constexpr __iterator operator+(__iterator i, difference_type n)
+      requires random_access_iterator<W>
+    {
+      i += n;
+      return i;
+    }
+    friend constexpr __iterator operator+(difference_type n, __iterator i)
+      requires random_access_iterator<W>
+    {
+      i += n;
+      return i;
+    }
+    friend constexpr __iterator operator-(__iterator i, difference_type n)
+      requires random_access_iterator<W>
+    {
+      i -= n;
+      return i;
+    }
+    friend constexpr difference_type operator-(const __iterator& x,
+                                               const __iterator& y)
+      requires random_access_iterator<W>
+    {
+      return static_cast<difference_type>(x.__value_) -
+             static_cast<difference_type>(y.__value_);
+    }
+  };
+
+  struct __sentinel {
+    friend class iota_view;
+    Bound __bound_ = Bound();
+
+    constexpr __sentinel() = default;
+    constexpr explicit __sentinel(Bound bound) : __bound_(bound) {}
+
+    friend constexpr bool operator==(const __iterator& x, const __sentinel& y) {
+      return x.__value_ == y.__bound_;
+    }
+    friend constexpr bool operator==(const __sentinel& y, const __iterator& x) {
+      return x.__value_ == y.__bound_;
+    }
+    friend constexpr bool operator!=(const __iterator& x, const __sentinel& y) {
+      return !(x.__value_ == y.__bound_);
+    }
+    friend constexpr bool operator!=(const __sentinel& y, const __iterator& x) {
+      return !(x.__value_ == y.__bound_);
+    }
+  };
+
+  W __value_ = W();
+  Bound __bound_ = Bound();
+
+ public:
+  iota_view()
+    requires default_initializable<W>
+  = default;
+
+  constexpr explicit iota_view(W value) : __value_(value) {}
+  constexpr iota_view(type_identity_t<W> value, type_identity_t<Bound> bound)
+      : __value_(value), __bound_(bound) {}
+
+  constexpr __iterator begin() const { return __iterator{__value_}; }
+
+  constexpr auto end() const {
+    if constexpr (same_as<Bound, unreachable_sentinel_t>) {
+      return unreachable_sentinel;
+    } else {
+      return __sentinel{__bound_};
+    }
+  }
+
+  constexpr auto size() const
+    requires(integral<W> && integral<Bound>) || sized_sentinel_for<Bound, W>
+  {
+    return static_cast<size_t>(__bound_ - __value_);
+  }
+};
+
+template <class W, class Bound>
+iota_view(W, Bound) -> iota_view<W, Bound>;
+
+namespace __detail {
+struct __iota_fn {
+  template <class W>
+  constexpr auto operator()(W&& value) const {
+    return iota_view<decay_t<W> >(static_cast<W&&>(value));
+  }
+  template <class W, class Bound>
+  constexpr auto operator()(W&& value, Bound&& bound) const {
+    return iota_view<decay_t<W>, decay_t<Bound> >(static_cast<W&&>(value),
+                                                  static_cast<Bound&&>(bound));
+  }
+};
+}  // namespace __detail
+
+namespace views {
+inline constexpr __detail::__iota_fn iota{};
+}  // namespace views
+
+}  // namespace ranges
+
+namespace views = ranges::views;
+
+using ranges::get;
+
+}  // namespace std
+
+#endif /* __davecc_ranges__ */
