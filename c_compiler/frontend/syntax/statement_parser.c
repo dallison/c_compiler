@@ -779,6 +779,12 @@ static ASTNode* ParseReturnStatement(Syntax* syntax, TokenClass followers,
       // will move the RISC-V frame pointer into the return value
       // and then return from the function.
       expr = ParseAsmStatement(syntax, followers, location);
+    } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))) {
+      // `return {};` / `return {a, b};` returns a braced-init-list, which
+      // value-initializes (or aggregate/list-initializes) the returned object.
+      // Semantic analysis lowers it to a temporary of the function's return
+      // type.
+      expr = SyntaxParseBracedInitializer(syntax);
     } else {
       expr = SyntaxParseExpression(syntax, followers);
     }

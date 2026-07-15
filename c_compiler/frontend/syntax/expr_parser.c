@@ -5382,7 +5382,17 @@ static ASTNode* ParseAssignmentExpression(Syntax* syntax,
     case TOK(careteq): {
       Token tok = syntax->lex->current_token;
       LexNextToken(syntax->lex);
-      ASTNode* right = ParseAssignmentExpression(syntax, followers);
+      // In C++, the right-hand side of a simple assignment may be a
+      // braced-init-list (`x = {}`, `x = {1, 2}`).  A braced-init-list is not
+      // an expression, so parse it explicitly here; semantic analysis lowers it
+      // to a temporary of the left-hand side's type.  Only `=` accepts it as a
+      // complete right-hand side, so anything trailing the braces (e.g.
+      // `x = {} + 1`) remains and is correctly rejected as a syntax error.
+      ASTNode* right =
+          (CompilerIsCXX() && tok == TOK(equal) &&
+           LexMatch(syntax->lex, TOK(lbrace)))
+              ? SyntaxParseBracedInitializer(syntax)
+              : ParseAssignmentExpression(syntax, followers);
       result = NewBinaryASTNode(AssignASTOpcode(syntax, tok), NULL,
                                 syntax->lex->current_token_location, result,
                                 right);

@@ -1178,6 +1178,24 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     ASTNodeSetType(return_value, compiler->current_function->next);
     return;
   }
+  // `return {...};` returns a braced-init-list, which is not itself an
+  // expression.  When the function's return type is already known (not an
+  // `auto` return to be deduced), lower it to a temporary of that type so it is
+  // analyzed and generated exactly like `return T{...};`.
+  if (return_value != NULL && return_value->op == AST_OP(braced_init) &&
+      compiler->current_function != NULL &&
+      !TypeIsVoid(compiler->current_function->next) &&
+      !TypeFunctionReturnContainsAuto(compiler->current_function)) {
+    TypeRecord* return_type = compiler->current_function->next;
+    TypeRecord* braced_target =
+        TypeIsReference(return_type) ? return_type->next : return_type;
+    ASTNode* lowered = LowerCXXBracedInitToTarget(return_value, braced_target);
+    if (lowered != return_value) {
+      ASTNodeReplaceChild((ASTNode*)node, 0, lowered, false);
+      node->cond = lowered;
+      return_value = lowered;
+    }
+  }
   return_value = AnalyzeExpression(return_value);
   if (return_value != node->cond) {
     ASTNodeReplaceChild((ASTNode*)node, 0, return_value, false);
