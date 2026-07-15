@@ -664,12 +664,23 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     // helper function templates (e.g. `std::forward`/`std::move`) with degenerate
     // arguments.  Those must never be cloned, queued, or codegen'd here, so
     // perform the substitution in speculative (signature-only) mode.
+    //
+    // Resolving those alias/decltype types can also transiently *fail* while
+    // Derived is incomplete (e.g. `ranges::begin(D&)` where `D::begin` is not
+    // yet visible), emitting diagnostics.  This is only a best-effort signature
+    // substitution: the constraint is re-checked properly when the member is
+    // actually named/called.  Trap any such errors so they cannot leak into --
+    // and poison -- an enclosing speculative context (e.g. a requires-expression
+    // that merely instantiates this class), which would otherwise report the
+    // requirement as unsatisfied.
+    bool saved_trap = DiagnosticErrorTrapBegin();
     compiler->speculative_template_instantiation_depth++;
     func->info.function.associated_constraint =
         ConceptsSubstituteConstraint(
             parser->syntax, from->info.function.associated_constraint,
             subst_args, member_template_base);
     compiler->speculative_template_instantiation_depth--;
+    DiagnosticErrorTrapEnd(saved_trap);
   }
   if (use_enclosing_only) {
     // Shallow: elements are borrowed from `args`, not owned here.

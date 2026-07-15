@@ -7486,6 +7486,32 @@ static void AnalyzeCastExpression(CastASTNode* node) {
   if (node->kind == kCastConst) {
     ValidateCXXConstCast(node);
   }
+  // A cast whose target or operand type still mentions an unbound template
+  // parameter is dependent: during the first (class-level) instantiation of a
+  // member function template, the enclosing class parameters are concrete but
+  // the member template's own parameters are not, so a cast such as a
+  // constructor mem-initializer's `static_cast<T&&>(t)` cannot be checked yet.
+  // Forcing a conversion now would either bake in the wrong one or, when a
+  // dependent parameter is treated as an incomplete class, spuriously reject a
+  // struct-to-struct cast.  Leave the operand unconverted and take the target
+  // type; the member template's second-stage (per-call) instantiation re-clones
+  // and re-analyzes the cast against the concrete argument type.
+  if (CompilerIsCXX() &&
+      (TypeContainsTemplateParameter(node->cast_type) ||
+       (node->expr != NULL && node->expr->type != NULL &&
+        TypeContainsTemplateParameter(node->expr->type)))) {
+    if (TypeIsReference(node->cast_type)) {
+      ASTNodeSetType((ASTNode*)node, node->cast_type->next);
+      node->base.value_category =
+          node->cast_type->declarator == kDeclRValueReference
+              ? kValueCategoryXvalue
+              : kValueCategoryLvalue;
+    } else {
+      ASTNodeSetType((ASTNode*)node, node->cast_type);
+      node->base.value_category = kValueCategoryPrvalue;
+    }
+    return;
+  }
   if (TypeIsReference(node->cast_type)) {
     if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
       if (!TryCastReferenceRelatedClass(node)) {

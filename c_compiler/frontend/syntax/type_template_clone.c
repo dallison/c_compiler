@@ -3350,6 +3350,21 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
     } else {
       ctor_owner = NULL;
     }
+    /* A base- or member-subobject initializer inside a cloned constructor body
+     * has the *derived* (enclosing) object as its receiver, yet the call
+     * actually targets the subobject's own, already-concrete constructor. The
+     * receiver-based detection above would hijack the owner to the derived
+     * class in that case. When the call already resolves to a constructor of a
+     * concrete (non-dependent) class that differs from the receiver's class,
+     * trust that binding rather than the receiver: only a still-generic owner
+     * needs rebinding from the receiver. */
+    Struct* current_owner = id->symbol->type->info.function.cxx_member_owner;
+    if (ctor_owner != NULL && current_owner != NULL &&
+        current_owner != ctor_owner &&
+        !StructContainsTemplateParameter(current_owner)) {
+      ctor_owner = NULL;
+      ctor_name = NULL;
+    }
   }
   if (ctor_owner == NULL &&
       id->symbol->type->info.function.cxx_member_owner != NULL) {
@@ -3385,6 +3400,45 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   }
   ASTNodeSetType(call->left, id->symbol->type);
   return true;
+}
+
+/* Post-clone pass: prune the discarded branch of an `if constexpr` whose
+ * condition has already been folded to a constant during the body clone (a
+ * `requires`-expression condition is evaluated and replaced with 0/1 by
+ * CloneTemplateFunctionBodyNode).  Statement-level analysis of `if constexpr`
+ * (AnalyzeIfStatement) would eventually drop the not-taken branch, but the
+ * intervening re-analysis passes below (ReanalyzeClonedResolvedCall, etc.)
+ * would first walk that dead branch and re-resolve its construction calls --
+ * e.g. `owning_view(v)` in the false branch of `views::all`'s
+ * `if constexpr (requires { ref_view(v); }) ... else ...`.  Re-analyzing a
+ * discarded branch can raise spurious errors (its constraints legitimately
+ * fail for this argument), so eliminate it here, before those passes run. */
+static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
+                                       ASTNodeTransformAction* action) {
+  (void)action;
+  if (node == NULL || node->op != AST_OP(if)) {
+    return node;
+  }
+  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+  if (!if_node->is_constexpr || if_node->cond == NULL ||
+      if_node->cond->op != AST_OP(number)) {
+    return node;
+  }
+  int64_t value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
+  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
+  ASTNode* taken = *taken_slot;
+  SourceLocation location = node->location;
+  // Detach the surviving branch so deleting the `if` node does not free it.
+  *taken_slot = NULL;
+  ASTNodeDelete(node);
+  if (taken == NULL) {
+    taken = NewCompoundStatementASTNode(NewVector(), location);
+  } else {
+    taken->parent = NULL;
+  }
+  // Recurse so nested `if constexpr` statements inside the surviving branch are
+  // pruned too (the driver does not descend into a replaced node).
+  return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
 }
 
 /* Post-clone pass: re-resolve already-typed construction calls in the cloned
@@ -3638,6 +3692,9 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   }
   ASTNode* body = ASTNodeClone(from->info.function.body,
                                CloneTemplateFunctionBodyNode, &clone, NULL);
+  // Drop discarded `if constexpr` branches (whose condition the clone above has
+  // already folded to a constant) before the re-analysis passes can walk them.
+  body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   ASTNodeVisit(body, ReplaceSingleElementPackIdentifierVisitor, 0, &clone);

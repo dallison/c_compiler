@@ -786,6 +786,48 @@ static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
   }
 }
 
+// Pristine (never-substituted) type patterns for requires-expression
+// parameters.  A requires-expression's parameter Symbols are shared across
+// every satisfaction check of the owning concept, and EvaluateExpressionRequirement
+// temporarily overwrites each parameter's `type` with the concrete, substituted
+// type so the tested expression analyzes against real types.  When a concept is
+// checked *re-entrantly* (e.g. `range<T>` -> `ranges::begin` overloading ->
+// `__member_begin<T>` -> ... -> `range<U>` again), an inner evaluation would
+// otherwise read the outer evaluation's already-substituted concrete type as its
+// substitution pattern and re-instantiate it, which for a constrained class
+// template (e.g. `ref_view`) re-checks the class's associated constraint and
+// spins forever.  Capturing each parameter's original, template-parameter-bearing
+// pattern the first time it is seen (always the outermost, pre-mutation call) and
+// substituting from that pristine pattern keeps re-entrant checks correct.
+typedef struct PristineParamPattern {
+  Symbol* param;
+  TypeRecord* pattern;  // Owned; kept alive for the whole compilation.
+} PristineParamPattern;
+
+static Vector g_pristine_param_patterns;
+static bool g_pristine_param_patterns_init = false;
+
+static TypeRecord* PristineParameterPattern(Symbol* param) {
+  if (!g_pristine_param_patterns_init) {
+    VectorInit(&g_pristine_param_patterns);
+    g_pristine_param_patterns_init = true;
+  }
+  for (size_t i = 0; i < g_pristine_param_patterns.length; i++) {
+    PristineParamPattern* entry = g_pristine_param_patterns.value.p[i];
+    if (entry->param == param) {
+      return entry->pattern;
+    }
+  }
+  // First (outermost) sighting: param->type is still the pristine pattern.
+  TypeRecord* copy = TypeRecordCopy(param->type);
+  TypeRecordIncRef(copy);
+  PristineParamPattern* entry = malloc(sizeof(*entry));
+  entry->param = param;
+  entry->pattern = copy;
+  VectorAppend(&g_pristine_param_patterns, entry);
+  return copy;
+}
+
 static bool EvaluateExpressionRequirement(Requirement* requirement,
                                           RequiresExpr* requires_expr,
                                           Vector* arguments,
@@ -802,7 +844,8 @@ static bool EvaluateExpressionRequirement(Requirement* requirement,
       }
       VectorAppend(&saved_types, param->type);
       TypeRecordIncRef(param->type);
-      TypeRecord* parameter_pattern = TypeRecordCopy(param->type);
+      TypeRecord* parameter_pattern =
+          TypeRecordCopy(PristineParameterPattern(param));
       TypeRecord* concrete =
           TypeSubstituteTemplateType(&compiler->syntax, parameter_pattern,
                                      arguments);

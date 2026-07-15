@@ -823,11 +823,15 @@ struct __pipe_closure : __adaptor_closure_base {
   }
 };
 
-}  // namespace __detail
+// The pipe operators live in the same namespace as the adaptor-closure types
+// (and their `__adaptor_closure_base`) so that argument-dependent lookup on a
+// closure argument -- e.g. `v | views::all` where `views::all` has type
+// `__detail::__all_fn` -- reaches them.  ADL only searches a type's own
+// (and its bases') namespaces, never the enclosing `ranges` namespace.
 
 // r | closure  ==  closure(r)
 template <class R, class C>
-  requires(!__detail::__is_closure<R>) && __detail::__is_closure<C> &&
+  requires(!__is_closure<R>) && __is_closure<C> &&
           requires(R&& r, C&& c) { static_cast<C&&>(c)(static_cast<R&&>(r)); }
 constexpr decltype(auto) operator|(R&& r, C&& c) {
   return static_cast<C&&>(c)(static_cast<R&&>(r));
@@ -835,11 +839,13 @@ constexpr decltype(auto) operator|(R&& r, C&& c) {
 
 // c1 | c2  ==  composed closure (applies c1 then c2)
 template <class C1, class C2>
-  requires __detail::__is_closure<C1> && __detail::__is_closure<C2>
+  requires __is_closure<C1> && __is_closure<C2>
 constexpr auto operator|(C1&& c1, C2&& c2) {
-  return __detail::__pipe_closure<decay_t<C1>, decay_t<C2> >(
+  return __pipe_closure<decay_t<C1>, decay_t<C2> >(
       static_cast<C1&&>(c1), static_cast<C2&&>(c2));
 }
+
+}  // namespace __detail
 
 // [range.all] -----------------------------------------------------------------
 namespace __detail {
