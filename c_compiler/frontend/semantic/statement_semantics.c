@@ -1045,9 +1045,31 @@ static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   }
 }
 
+// Declared in type_internal.h; forward-declared here to avoid pulling the whole
+// type-parser internal header into the semantic layer.
+TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue);
+
 static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
                                             ASTNode* diagnostic_node) {
   TypeRecord* pattern = compiler->current_function->next;
+  // `decltype(auto)` return: the deduced type is decltype(return-expression),
+  // which preserves the expression's value category (lvalue -> T&,
+  // xvalue -> T&&, prvalue -> T) rather than decaying like plain `auto`.
+  if (pattern != NULL && (pattern->type & kTypeDecltypeAuto) != 0 &&
+      pattern->declarator == kDeclPrimitive) {
+    TypeRecord* deduced;
+    if (return_value == NULL) {
+      deduced = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+    } else if (return_value->value_category == kValueCategoryLvalue) {
+      deduced = NewDecltypeReference(return_value->type, false);
+    } else if (return_value->value_category == kValueCategoryXvalue) {
+      deduced = NewDecltypeReference(return_value->type, true);
+    } else {
+      deduced = TypeRecordCopy(return_value->type);
+    }
+    SetCurrentFunctionReturnType(deduced);
+    return true;
+  }
   TypeRecord* initializer_type =
       return_value != NULL ? return_value->type
                            : NewTypeRecordWithSize(kTypeVoid, kQualPlain);

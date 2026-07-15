@@ -847,8 +847,14 @@ static void BuildDesignator(INode* inode, Vector* designators) {
 static ASTNode* BuildDesignatedInitializer(INode* inode) {
   Vector* designators = NewVector();
   if (inode->parent == NULL) {
-    // Top level.
-    BuildSingleDesignator(inode, inode->kind, inode->type, designators);
+    // Top level: this INode *is* the object being initialized, so the
+    // designator path from the object root to it is empty.  (A whole-object
+    // struct copy lands here; emitting `members[0]`'s designator would offset
+    // the destination by that member's byte offset -- harmless when it is 0 but
+    // wrong for a class with a base, whose first declared member sits after the
+    // base subobject.)  BuildSingleDesignator is only meaningful for describing
+    // a subobject's position *within its parent*, which the recursive
+    // BuildDesignator handles for non-top-level nodes below.
   } else {
     BuildDesignator(inode, designators);
   }

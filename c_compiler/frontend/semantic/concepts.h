@@ -163,6 +163,10 @@ void ConceptsReportAssociatedConstraintFailure(ConstraintExpr* constraint,
 int ConceptsCompareAssociatedConstraints(
     ConstraintExpr* left, ConstraintExpr* right,
     Vector* left_parameter_mapping, Vector* right_parameter_mapping);
+bool ConceptsAssociatedConstraintsEquivalent(ConstraintExpr* left,
+                                             Vector* left_parameters,
+                                             ConstraintExpr* right,
+                                             Vector* right_parameters);
 bool ConceptsFunctionTemplateConstraintsSatisfied(struct Symbol* templ,
                                                  Vector* arguments);
 bool ConceptsFunctionTemplateHasAssociatedConstraint(struct Symbol* templ);

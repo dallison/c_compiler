@@ -3684,6 +3684,64 @@ bool PendingTemplateInstantiationHasAsmName(const char* asm_name) {
   return false;
 }
 
+// True if a function template has a template parameter pack among its own
+// parameters (e.g. `template <class... Args>`).  Such member constructor
+// templates must defer member-initializer preamble insertion until per-call
+// instantiation, when the pack length is known (see the caller).
+static bool FunctionTemplateHasOwnParameterPack(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+    TemplateParameter* param =
+        func->info.function.template_parameters.value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
+                                                    Symbol* template_definition,
+                                                    Symbol* symbol,
+                                                    Vector* args) {
+  if (symbol == NULL || symbol->type == NULL ||
+      !symbol->type->info.function.is_constructor ||
+      symbol->type->info.function.body == NULL ||
+      symbol->type->info.function.body->op != AST_OP(compound)) {
+    return;
+  }
+  CXXConstructorInitList* stored =
+      FindTemplateConstructorInitializers(template_definition);
+  CXXConstructorInitList* initializers =
+      SyntaxCXXConstructorInitListCloneDeferred(stored);
+  if (initializers == NULL) {
+    return;
+  }
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)symbol->type->info.function.body;
+  size_t first_new_statement = body->statements->length;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_class_access_context =
+      symbol->type->info.function.cxx_member_owner;
+  SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
+                                     body->statements, initializers,
+                                     symbol->location);
+  AnalyzeInsertedConstructorPreamble(
+      parser, template_definition->type, symbol->type, body->statements,
+      body->statements->length - first_new_statement, args);
+  compiler->current_class_access_context = saved_access_context;
+  SyntaxCXXConstructorInitListDestruct(initializers);
+  free(initializers);
+}
+
 /* Instantiate the body of a member function template into `symbol` by cloning
  * `template_definition`'s body with `args`, mark it defined, set inline/weak
  * linkage as appropriate, and queue the instantiation for code emission (unless
@@ -3728,30 +3786,26 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
+    // A member function TEMPLATE constructor with a *parameter pack* must not
+    // have its member-initializer list inserted and analyzed now: with its own
+    // parameters still unbound, a member pack such as an in-place variadic
+    // constructor `v(static_cast<Args&&>(args)...)` mis-expands to a
+    // value-initialization `v()` that then fails for a type (e.g. a lambda)
+    // whose value-init is not viable here.  For those, the preamble is deferred
+    // to per-call instantiation (its init-list is re-keyed onto this class-level
+    // symbol so the per-call clone can rediscover it).  A non-pack member
+    // template constructor (e.g. `duration`'s converting constructor) is instead
+    // baked here, with the enclosing class arguments substituted, so the
+    // init-list -- which may reference the enclosing class parameters -- is
+    // resolved against concrete enclosing arguments (the per-call clone then
+    // only substitutes the member's own parameters).
     if (symbol->type->info.function.is_constructor &&
-        symbol->type->info.function.body != NULL &&
-        symbol->type->info.function.body->op == AST_OP(compound)) {
-      CXXConstructorInitList* stored =
-          FindTemplateConstructorInitializers(template_definition);
-      CXXConstructorInitList* initializers =
-          SyntaxCXXConstructorInitListCloneDeferred(stored);
-      if (initializers != NULL) {
-        CompoundStatementASTNode* body =
-            (CompoundStatementASTNode*)symbol->type->info.function.body;
-        size_t first_new_statement = body->statements->length;
-        Struct* saved_access_context = compiler->current_class_access_context;
-        compiler->current_class_access_context =
-            symbol->type->info.function.cxx_member_owner;
-        SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
-                                           body->statements, initializers,
-                                           symbol->location);
-        AnalyzeInsertedConstructorPreamble(
-            parser, template_definition->type, symbol->type, body->statements,
-            body->statements->length - first_new_statement, args);
-        compiler->current_class_access_context = saved_access_context;
-        SyntaxCXXConstructorInitListDestruct(initializers);
-        free(initializers);
-      }
+        (symbol->type->info.function.template_parameter_count == 0 ||
+         !FunctionTemplateHasOwnParameterPack(symbol->type))) {
+      SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
+                                                    symbol, args);
+    } else if (symbol->type->info.function.is_constructor) {
+      CopyTemplateConstructorInitializersKey(template_definition, symbol);
     }
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
@@ -3761,31 +3815,8 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, args);
-  if (symbol->type->info.function.is_constructor &&
-      symbol->type->info.function.body != NULL &&
-      symbol->type->info.function.body->op == AST_OP(compound)) {
-    CXXConstructorInitList* stored =
-        FindTemplateConstructorInitializers(template_definition);
-    CXXConstructorInitList* initializers =
-        SyntaxCXXConstructorInitListCloneDeferred(stored);
-    if (initializers != NULL) {
-      CompoundStatementASTNode* body =
-          (CompoundStatementASTNode*)symbol->type->info.function.body;
-      size_t first_new_statement = body->statements->length;
-      Struct* saved_access_context = compiler->current_class_access_context;
-      compiler->current_class_access_context =
-          symbol->type->info.function.cxx_member_owner;
-      SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
-                                         body->statements, initializers,
-                                         symbol->location);
-      AnalyzeInsertedConstructorPreamble(
-          parser, template_definition->type, symbol->type, body->statements,
-          body->statements->length - first_new_statement, args);
-      compiler->current_class_access_context = saved_access_context;
-      SyntaxCXXConstructorInitListDestruct(initializers);
-      free(initializers);
-    }
-  }
+  SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
+                                                symbol, args);
   symbol->type->info.function.definition = true;
   symbol->flags.is_defined = true;
   symbol->value.func_defn = symbol;

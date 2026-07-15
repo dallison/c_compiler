@@ -80,6 +80,20 @@ void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag);
 void ApplyCXXMemberUsingDeclarations(TypeParser* parser, Struct* owner,
                                      Struct* template_struct, Vector* args);
 struct CXXConstructorInitList* FindTemplateConstructorInitializers(Symbol* symbol);
+void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to);
+
+// Insert and analyze the constructor member-initializer preamble for a freshly
+// cloned constructor instantiation `symbol` (whose body was cloned from
+// `template_definition` with template arguments `args`).  Shared by the
+// class-instantiation queuing path and the per-call function-template
+// instantiation path; the latter is required for member function *template*
+// constructors, whose preamble is intentionally deferred from class
+// instantiation until their own arguments are known.  No-op if `symbol` is not
+// a constructor or has no cloned compound body.
+void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
+                                                    Symbol* template_definition,
+                                                    Symbol* symbol,
+                                                    Vector* args);
 
 StructMember* FindStructMember(Struct* str, String* name);
 StructMember* FindStructMemberByName(Struct* str, const char* name);

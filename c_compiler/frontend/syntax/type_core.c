@@ -829,6 +829,8 @@ ClassTemplatePartialSpecialization* NewClassTemplatePartialSpecialization(
       malloc(sizeof(ClassTemplatePartialSpecialization));
   partial->tag_symbol = tag_symbol;
   partial->associated_constraint = NULL;
+  partial->variable_initializer = NULL;
+  partial->variable_type = NULL;
   VectorInit(&partial->template_parameters);
   VectorInit(&partial->pattern_arguments);
   for (size_t i = 0; template_parameters != NULL &&
@@ -841,6 +843,21 @@ ClassTemplatePartialSpecialization* NewClassTemplatePartialSpecialization(
     VectorAppend(&partial->pattern_arguments,
                  TemplateArgumentCopy(pattern_arguments->value.p[i]));
   }
+  return partial;
+}
+
+/* Build a partial/explicit specialization record for a *variable* template.
+ * Reuses the class-template specialization record (tag_symbol left NULL) and
+ * additionally captures the specialization's unanalyzed initializer and type,
+ * which are folded per use once its parameters are deduced from actual args. */
+ClassTemplatePartialSpecialization* NewVariableTemplatePartialSpecialization(
+    Vector* template_parameters, Vector* pattern_arguments,
+    struct ASTNode* initializer, TypeRecord* type) {
+  ClassTemplatePartialSpecialization* partial =
+      NewClassTemplatePartialSpecialization(NULL, template_parameters,
+                                            pattern_arguments);
+  partial->variable_initializer = initializer;
+  partial->variable_type = type != NULL ? TypeRecordCopy(type) : NULL;
   return partial;
 }
 
@@ -857,6 +874,12 @@ void ClassTemplatePartialSpecializationDelete(
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   ConstraintExprDelete(partial->associated_constraint);
+  if (partial->variable_initializer != NULL) {
+    ASTNodeDelete(partial->variable_initializer);
+  }
+  if (partial->variable_type != NULL) {
+    TypeRecordDelete(partial->variable_type);
+  }
   free(partial);
 }
 
@@ -962,6 +985,7 @@ Struct* NewStruct(bool is_union) {
   s->cxx_special_members_complete = false;
   s->vtables_registered = false;
   s->template_parameter_count = 0;
+  s->defining_template_scope_count = 0;
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;

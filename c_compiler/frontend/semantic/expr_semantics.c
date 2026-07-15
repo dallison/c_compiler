@@ -871,7 +871,31 @@ static void ADLCollectNamespacesForType(TypeRecord* type, Vector* namespaces,
     if (ns == NULL && type->template_origin != NULL) {
       ns = type->template_origin->namespace_;
     }
-    if (str->tag_symbol != NULL || type->template_origin != NULL) {
+    bool has_associated_class = str->tag_symbol != NULL ||
+                                type->template_origin != NULL;
+    // A nested class (e.g. an instantiated view's __iterator) carries no
+    // namespace on its own tag and is not itself a template instantiation, so
+    // walk out through enclosing classes to the nearest namespace.  Without
+    // this, ADL over such a type finds none of its hidden-friend operators.
+    if (ns == NULL) {
+      for (Struct* parent = str->lexical_parent; parent != NULL;
+           parent = parent->lexical_parent) {
+        if (parent->tag_symbol == NULL) {
+          continue;
+        }
+        has_associated_class = true;
+        if (parent->tag_symbol->namespace_ != NULL) {
+          ns = parent->tag_symbol->namespace_;
+          break;
+        }
+        if (parent->tag_symbol->type != NULL &&
+            parent->tag_symbol->type->template_origin != NULL) {
+          ns = parent->tag_symbol->type->template_origin->namespace_;
+          break;
+        }
+      }
+    }
+    if (has_associated_class) {
       ADLAddAssociatedNamespaceClosure(namespaces,
                                        ns != NULL ? ns : compiler->global_namespace);
     }
@@ -1263,6 +1287,29 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
 
 // A binary plus operator allows an integer to be added to a pointer (or array).
 // The integer is scaled (multiplied) by the size of the thing pointed to.
+// The result of pointer arithmetic (p + n, n + p, p - n) is a prvalue whose
+// type is the cv-unqualified pointer type: a top-level const/volatile on the
+// operand (e.g. `int* const`) does not carry over to the computed value.  Only
+// the top-level qualifiers are dropped; the pointee's qualifiers are retained.
+static TypeRecord* PointerArithmeticResultType(TypeRecord* pointer_type) {
+  if (pointer_type == NULL) {
+    return pointer_type;
+  }
+  // An array operand decays to a (cv-unqualified) prvalue pointer to its
+  // element type: `decltype(arr + 0)` is `T*`, not the array type `T[N]`.
+  if (TypeIsArray(pointer_type)) {
+    TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
+    TypeRecordChain(ptr, pointer_type->next);
+    return ptr;
+  }
+  if (pointer_type->qualifiers == kQualPlain) {
+    return pointer_type;
+  }
+  TypeRecord* plain = TypeRecordCopy(pointer_type);
+  plain->qualifiers = kQualPlain;
+  return plain;
+}
+
 static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   if (node == NULL) {
     return NULL;
@@ -1277,6 +1324,8 @@ static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);
   if (TypeIsPointerOrArray(node->left->type)) {
+    ASTNodeSetType((ASTNode*)node,
+                   PointerArithmeticResultType(node->left->type));
     if (node->right->op == AST_OP(ptr_scale)) {
       return &node->base;
     }
@@ -1300,8 +1349,9 @@ static ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
       SemanticError((ASTNode*)node, "Can only add an integer to a pointer");
     }
   } else if (TypeIsPointerOrArray(node->right->type)) {
+    ASTNodeSetType((ASTNode*)node,
+                   PointerArithmeticResultType(node->right->type));
     if (node->left->op == AST_OP(ptr_scale)) {
-      ASTNodeSetType((ASTNode*)node, node->right->type);
       return &node->base;
     }
     if (TypeIsIntegral(node->left->type)) {
@@ -1337,6 +1387,8 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
   AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
     if (TypeIsIntegral(node->right->type)) {
+      ASTNodeSetType((ASTNode*)node,
+                     PointerArithmeticResultType(node->left->type));
       // Scale right side by size of left.
       // If the right node is a constant we can do the multiplication now.
       if (ASTNodeIsIntConstant(node->right)) {
@@ -1382,9 +1434,10 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
                                              node->right->location);
         ASTNodeReplaceChild(parent, node->base.child_id, scale, false);
   
-        // The type of the result is unsigned long (size_t).
+        // The result of subtracting two pointers is the signed type
+        // ptrdiff_t (`long` on this target), not an unsigned type.
         ASTNodeSetType(scale,
-                       NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain));
+                       NewTypeRecordWithSize(kTypeLong, kQualPlain));
         return scale;
       }
     } else {
@@ -6455,12 +6508,28 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       !is_concrete_ctad_construction &&
       (TypeContainsTemplateParameter(node->left->type) ||
        TypeIsUnknown(node->left->type))) {
-    node->base.flags |= kASTDependentFunctorCall;
     if (node->left->op == AST_OP(identifier)) {
       IdentifierASTNode* id = (IdentifierASTNode*)node->left;
       TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
           &compiler->syntax, id->symbol, id->template_arguments);
       if (return_type != NULL) {
+        // Even though the *generic* callee type still mentions a template
+        // parameter, a call with fully concrete explicit template arguments and
+        // actuals (e.g. a declaration-only helper such as
+        // `std::declval<int*&>()`) resolves to a concrete return type now.  In
+        // that case the call is NOT dependent: leaving it flagged would make
+        // any enclosing call that receives it as an argument needlessly defer
+        // (and later lose reference qualifiers on the deferred result).
+        bool result_is_concrete =
+            !TypeContainsTemplateParameter(return_type) &&
+            !TypeIsUnknown(return_type) &&
+            !TemplateArgumentVectorContainsTemplateParameter(
+                id->template_arguments) &&
+            !CallActualsContainTemplateParameter(node) &&
+            !CallActualsContainDependentFunctorCall(node);
+        if (!result_is_concrete) {
+          node->base.flags |= kASTDependentFunctorCall;
+        }
         if (TypeIsReference(return_type)) {
           ASTNodeSetType((ASTNode*)node, return_type->next);
           node->base.value_category =
@@ -6474,6 +6543,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         return (ASTNode*)node;
       }
     }
+    node->base.flags |= kASTDependentFunctorCall;
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
@@ -7096,6 +7166,18 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
 // is the type pointed to.
 static void AnalyzeContentsOperator(UnaryASTNode* node) {
   node->sub = AnalyzeExpression(node->sub);
+  // A dependent operand (a template parameter or otherwise unknown type, such
+  // as `*declval<T&>()` inside a decltype) has no known pointee yet.  Its
+  // built-in or overloaded meaning is resolved after substitution, so leave the
+  // result dependent rather than diagnosing it here.
+  if (CompilerIsCXX() && node->sub->type != NULL &&
+      (TypeIsUnknown(node->sub->type) ||
+       TypeContainsTemplateParameter(node->sub->type))) {
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+    node->base.value_category = kValueCategoryLvalue;
+    return;
+  }
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");
     // Fake an integer type for the result.
@@ -7358,6 +7440,43 @@ static void AnalyzeDynamicCast(CastASTNode* node) {
   }
 }
 
+// A cast to a reference of a base or derived class (e.g. the CRTP downcast
+// `static_cast<Derived&>(*this)`) is a reference conversion, not a value
+// conversion.  Rewrite it as `*static_cast<Target*>(&expr)` so the established
+// pointer up/down-cast path (which applies any base-class offset adjustment)
+// handles it, leaving an lvalue of the target class type.  Returns true when the
+// rewrite was applied (i.e. the classes are base/derived related).
+static bool TryCastReferenceRelatedClass(CastASTNode* node) {
+  if (!CompilerIsCXX() || node->expr == NULL || node->expr->type == NULL) {
+    return false;
+  }
+  TypeRecord* target = node->cast_type->next;
+  if (target == NULL || !TypeIsStructOrUnion(node->expr->type) ||
+      !TypeIsStructOrUnion(target)) {
+    return false;
+  }
+  CXXBaseAdjustment adjustment;
+  bool related =
+      TypeBaseAdjustment(node->expr->type, target, /*public_only=*/false,
+                         &adjustment) ||
+      TypeBaseAdjustment(target, node->expr->type, /*public_only=*/false,
+                         &adjustment);
+  if (!related) {
+    return false;
+  }
+  SourceLocation loc = node->expr->location;
+  ASTNode* addr = NewAnalyzedBuiltinAddressOf(node->expr, loc);
+  TypeRecord* target_ptr = NewPointerTo(kQualPlain, TypeRecordCopy(target));
+  ASTNode* ptr_cast = NewCastASTNode(target_ptr, loc, addr);
+  ((CastASTNode*)ptr_cast)->kind = node->kind;
+  ptr_cast = AnalyzeExpression(ptr_cast);
+  ASTNode* deref = NewUnaryASTNode(AST_OP(contents), NULL, loc, ptr_cast);
+  deref = AnalyzeExpression(deref);
+  node->expr = deref;
+  deref->parent = (ASTNode*)node;
+  return true;
+}
+
 static void AnalyzeCastExpression(CastASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   if (node->kind == kCastDynamic) {
@@ -7369,7 +7488,9 @@ static void AnalyzeCastExpression(CastASTNode* node) {
   }
   if (TypeIsReference(node->cast_type)) {
     if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
-      SemanticConvertType(node->expr, node->cast_type->next, kConvertCast);
+      if (!TryCastReferenceRelatedClass(node)) {
+        SemanticConvertType(node->expr, node->cast_type->next, kConvertCast);
+      }
     }
     ASTNodeSetType((ASTNode*)node, node->cast_type->next);
     node->base.value_category =

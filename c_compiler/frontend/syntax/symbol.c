@@ -188,6 +188,10 @@ void SymbolDestruct(Symbol* symbol) {
         (VectorElementDestructor)TemplateParameterDelete,
         /*free_element=*/false);
     ConstraintExprDelete(symbol->variable_template->associated_constraint);
+    VectorDestructWithContents(
+        &symbol->variable_template->partial_specializations,
+        (VectorElementDestructor)ClassTemplatePartialSpecializationDelete,
+        /*free_element=*/false);
     free(symbol->variable_template);
     symbol->variable_template = NULL;
   }

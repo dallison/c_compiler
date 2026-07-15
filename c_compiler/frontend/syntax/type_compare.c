@@ -101,6 +101,16 @@ bool TypeContainsTemplateParameter(TypeRecord* type) {
     if (TypeIsUnknown(t) && t->template_parameter_index >= 0) {
       return true;
     }
+    // A deferred `decltype` whose operand is still type-dependent (e.g.
+    // `iterator_t<R> = decltype(ranges::begin(declval<R&>()))` substituted while
+    // `R` survives) carries the unevaluated expression here.  Such a type is
+    // still dependent even though its placeholder spine (an `int` fallback)
+    // carries no parameter index, so it must be re-substituted once concrete
+    // arguments arrive.  The operand is only retained while dependent (it is
+    // dropped once the decltype resolves), so its mere presence is sufficient.
+    if (t->dependent_decltype_expr != NULL) {
+      return true;
+    }
     if (t->dependent_member_name != NULL &&
         (t->template_parameter_index >= 0 || t->template_origin != NULL)) {
       return true;

@@ -49,6 +49,10 @@ typedef struct {
   // auto deduction.  Alias templates reuse Symbol::associated_constraint at
   // template definition time instead.
   struct ConstraintExpr* placeholder_variable_constraint;
+  // C++20 type-requirement (`requires { typename T; }`): the type-name after
+  // `typename` may be unqualified (including a simple-template-id), unlike an
+  // elaborated typename-specifier which requires a qualified dependent name.
+  bool typename_allows_unqualified;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.
