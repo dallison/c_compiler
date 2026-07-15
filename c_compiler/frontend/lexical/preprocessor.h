@@ -62,6 +62,14 @@ void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,
                              const char* value);
 void PreprocessorUndefineMacro(Preprocessor* p, String* macro_name);
 
+// Header-unit support. Collection appends borrowed Macro* definitions created
+// by source files (excluding command-line/predefined state). Import validates
+// conflicts before copying a definition into this preprocessor.
+void PreprocessorCollectHeaderUnitMacros(Preprocessor* p, Vector* out);
+bool PreprocessorCanImportMacro(Preprocessor* p, const Macro* macro);
+bool PreprocessorImportMacro(Preprocessor* p, const Macro* macro,
+                             bool* inserted);
+
 void PreprocessorReplaceMacros(Preprocessor* p, String* line);
 
 bool PreprocessorParseDirective(Preprocessor* p, String* line);

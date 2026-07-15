@@ -67,6 +67,8 @@ void SerializeContextInit(SerializeContext* ctx) {
   MapInitForCharPointerKeys(&ctx->string_map);
   VectorInit(&ctx->string_pool);
   VectorInit(&ctx->string_lens);
+  ctx->writing_module_interface = false;
+  ctx->writing_internal_partition = false;
   ctx->error = false;
 }
 

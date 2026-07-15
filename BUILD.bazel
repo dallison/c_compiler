@@ -310,7 +310,9 @@ cc_library(
         "c_compiler/serialize/ast_serialize.c",
         "c_compiler/serialize/constraint_serialize.c",
         "c_compiler/serialize/module_archive.c",
+        "c_compiler/serialize/module_import.c",
         "c_compiler/serialize/module_install.c",
+        "c_compiler/serialize/module_reachability.c",
         "c_compiler/serialize/serialize.c",
         "c_compiler/serialize/serialize_common.c",
         "c_compiler/serialize/symbol_serialize.c",
@@ -349,6 +351,37 @@ cc_test(
 cc_test(
     name = "module_install_test",
     srcs = ["tests/module_install_test.c"],
+    copts = COMMON_COPTS,
+    data = [
+        ":davecc",
+        "//cxx_testsuite:tests/modules/surface.cppm",
+    ],
+    env = {
+        "DAVECC_BIN": "$(rootpath :davecc)",
+    },
+    includes = COMMON_INCLUDES,
+    deps = [":serialize"],
+)
+
+cc_test(
+    name = "module_import_test",
+    srcs = ["tests/module_import_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":serialize"],
+)
+
+cc_test(
+    name = "module_syntax_test",
+    srcs = ["tests/module_syntax_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":compiler"],
+)
+
+cc_test(
+    name = "module_identity_test",
+    srcs = ["tests/module_identity_test.c"],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [":serialize"],
@@ -495,6 +528,9 @@ cc_library(
         "c_compiler/frontend/semantic/statement_semantics.c",
         "c_compiler/frontend/syntax/symbol.c",
         "c_compiler/frontend/syntax/symbol_table.c",
+        "c_compiler/frontend/syntax/module_identity.c",
+        "c_compiler/frontend/syntax/module_syntax.c",
+        "c_compiler/frontend/syntax/module_unit.c",
         "c_compiler/frontend/syntax/syntax.c",
         "c_compiler/backend/target_basic_block.c",
         "c_compiler/backend/target_generator.c",

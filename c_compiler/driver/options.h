@@ -44,6 +44,13 @@ typedef enum {
   kOptionEmitModule,         // (hidden) Emit a C++20 module (.dcm) file.
   kOptionLoadModule,         // (hidden) Load+verify a C++20 module (.dcm) file.
   kOptionPrebuiltModulePath, // Directory to search for prebuilt .dcm modules.
+  kOptionModuleFile,         // Logical module-name=artifact path mapping.
+  kOptionModuleHeader,       // Compile input as a C++20 header unit.
+  kOptionModuleName,         // Override logical module/header-unit name.
+  kOptionModuleOutput,       // Emit module artifact alongside normal output.
+  kOptionDepsFile,           // Write P1689 module dependency information.
+  kOptionDepsFormat,         // Dependency output format (p1689r5).
+  kOptionDepsScanOnly,       // Scan module dependencies without compiling.
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

@@ -23,6 +23,8 @@
 #include "type_internal.h"
 #include "errors.h"
 #include "compiler.h"
+#include "module_identity.h"
+#include "module_syntax.h"
 
 jmp_buf error_abort_state;       // Where to abort to.
 bool abort_on_error;
@@ -234,10 +236,15 @@ static Symbol* FindFileScopeSymbol(Syntax* syntax, String* name) {
   return FindGlobalSymbol(name);
 }
 
-static bool InsertFileScopeSymbol(Syntax* syntax, Symbol* symbol) {
+static void MarkExportedDeclaration(Syntax* syntax, Symbol* symbol) {
   if (syntax->export_depth > 0) {
     symbol->flags.is_exported = true;
   }
+  SymbolAttachModuleContext(symbol, symbol->storage);
+}
+
+static bool InsertFileScopeSymbol(Syntax* syntax, Symbol* symbol) {
+  MarkExportedDeclaration(syntax, symbol);
   if (InNamedNamespace(syntax)) {
     return NamespaceInsertSymbol(syntax->current_namespace, symbol);
   }
@@ -443,9 +450,14 @@ static bool SameSignatureTemplateConstraintsAreEquivalent(Symbol* overload,
   return ConceptsFunctionTemplateConstraintsEquivalent(overload, &scratch);
 }
 
-static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type) {
+static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type,
+                                    Symbol* incoming) {
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
+    if (incoming != NULL &&
+        !SymbolCompatibleModuleRedeclaration(overload, incoming)) {
+      continue;
+    }
     bool overload_is_template = overload->flags.is_template;
     bool type_is_template =
         TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
@@ -1452,6 +1464,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->pending_placeholder_variable_constraint = NULL;
   syntax->context = kParsingFileScope;
   syntax->extern_c_depth = 0;
+  syntax->export_depth = 0;
 }
 
 
@@ -1546,6 +1559,7 @@ Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
 
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_symbol_stack == NULL) {
+    MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {
       return NamespaceInsertSymbol(syntax->current_namespace, symbol);
     }
@@ -1613,6 +1627,7 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
 
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_tag_stack == NULL) {
+    MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {
       return NamespaceInsertTag(syntax->current_namespace, symbol);
     }
@@ -4257,7 +4272,7 @@ Symbol* SyntaxRegisterInstantiatedFriendFunction(Syntax* syntax, Namespace* ns,
   Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
   Symbol* in_scope = NULL;
   if (CanOverloadFunctions(old_sym, sym)) {
-    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type, sym);
     if (matching_overload != NULL) {
       in_scope = matching_overload;
     } else {
@@ -4395,7 +4410,7 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   Symbol* old_sym = FindFileScopeSymbol(syntax, &sym->name);
   bool overload_was_appended = false;
   if (CanOverloadFunctions(old_sym, sym)) {
-    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+    Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type, sym);
     if (matching_overload != NULL) {
       old_sym = matching_overload;
     } else {
@@ -4748,6 +4763,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       if (syntax->extern_c_depth > 0) {
         sym->flags.is_c_linkage = true;
       }
+      if (syntax->export_depth > 0) {
+        sym->flags.is_exported = true;
+      }
+      SymbolAttachModuleContext(sym, storage);
       // `constexpr` on an object implies `const` on its type.  Apply it before
       // matching against any previous declaration so that an out-of-class
       // definition (`constexpr T C::x;`) compares equal to the in-class
@@ -4769,6 +4788,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             CurrentTemplateParameterListLength(syntax);
         sym->type->info.function.template_parameter_base =
             CurrentTemplateParameterBase(syntax);
+        if (sym->type->info.function.template_parameters.length == 0) {
+          MoveCurrentTemplateParametersToFunction(syntax, sym->type);
+        }
       }
       if (TypeIsFunction(sym->type)) {
         sym->type->info.function.is_explicit = is_explicit;
@@ -4788,7 +4810,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       old_sym = parser->cxx_member_definition != NULL
           ? parser->cxx_member_definition->symbol
-          : FindFileScopeSymbol(syntax, &sym->name);
+          : NULL;
+      if (parser->cxx_member_definition == NULL) {
+        Symbol* raw_old = FindFileScopeSymbol(syntax, &sym->name);
+        old_sym = SymbolFindModuleCompatibleOverload(raw_old, sym);
+        if (raw_old != NULL && old_sym == NULL) {
+          SyntaxError(syntax,
+                      "Declaration of '%s' conflicts with an unrelated module "
+                      "entity",
+                      sym->name.value);
+        }
+      }
       if (parser->cxx_member_definition != NULL &&
           syntax->parsing_template_specialization) {
         MarkMemberFunctionTemplateSpecialization(
@@ -4820,7 +4852,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           old_sym = NULL;
           overload_was_appended = true;
         } else {
-          Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type);
+          Symbol* matching_overload = FindMatchingOverload(old_sym, sym->type, sym);
           if (matching_overload != NULL) {
             old_sym = matching_overload;
           } else {
@@ -4991,6 +5023,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
 
     if (old_sym != NULL) {
+      if (sym->flags.is_module_private && !old_sym->flags.is_exported) {
+        old_sym->flags.is_module_private = true;
+      }
       if (sym->asm_name.length != 0) {
         StringSetString(&old_sym->asm_name, &sym->asm_name);
       } else if (old_sym->asm_name.length != 0) {
@@ -5282,7 +5317,14 @@ static NamespaceAliasInsertResult InsertNamespaceAliasInCurrentScope(
              NamespaceFindTag(scope, name) != NULL) {
     return kNamespaceAliasConflict;
   }
-  return NamespaceInsertAlias(scope, name, target);
+  NamespaceAliasInsertResult result = NamespaceInsertAlias(scope, name, target);
+  if (result == kNamespaceAliasInserted && syntax->export_depth > 0 &&
+      scope->namespace_aliases.length > 0) {
+    NamespaceAlias* alias = (NamespaceAlias*)VectorGet(
+        &scope->namespace_aliases, scope->namespace_aliases.length - 1);
+    alias->is_exported = true;
+  }
+  return result;
 }
 
 static void ImportNamespaceNames(Syntax* syntax, Namespace* ns) {
@@ -6491,7 +6533,13 @@ static int CurrentTemplateParameterBase(Syntax* syntax) {
 static void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
                                                     TypeRecord* func) {
   if (syntax->current_template_parameters == NULL || func == NULL ||
-      !TypeIsFunction(func)) {
+      !TypeIsFunction(func) ||
+      syntax->current_template_parameters->length == 0) {
+    return;
+  }
+  if (func->info.function.symbol != NULL &&
+      func->info.function.symbol->is_imported_module_symbol &&
+      func->info.function.template_parameters.length > 0) {
     return;
   }
   VectorDestructWithContents(&func->info.function.template_parameters,
@@ -6878,129 +6926,6 @@ static ASTNode* ParseCXXLinkageSpecification(Syntax* syntax) {
 
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
-// ---------------------------------------------------------------------------
-// C++20 modules (MVP: named interface units, export declarations, import).
-//
-// `module` and `import` are context-sensitive: they lex as ordinary
-// identifiers (see cxx_reserved_words in lex.c) and only act as keywords when
-// they begin a module directive at the start of an external declaration.
-// `export` is a real keyword (TOK(export)).
-// ---------------------------------------------------------------------------
-
-// True if the current token is an identifier spelled `spelling`, in C++20 mode.
-static bool SyntaxAtContextualKeyword(Syntax* syntax, const char* spelling) {
-  return CompilerCXXAtLeast(kLanguageStandardCXX20) &&
-         LexLookingAt(syntax->lex, TOK(identifier)) &&
-         StringEqual(&syntax->lex->spelling, spelling);
-}
-
-// True if we're at a contextual `module`/`import` keyword that actually begins
-// a module directive (followed by a name), as opposed to an identifier that
-// merely happens to be spelled "module"/"import".
-static bool SyntaxAtModuleDirective(Syntax* syntax, const char* spelling) {
-  if (!SyntaxAtContextualKeyword(syntax, spelling)) {
-    return false;
-  }
-  LexCheckpoint cp;
-  LexCheckpointSave(syntax->lex, &cp);
-  LexNextToken(syntax->lex);
-  bool followed_by_name = LexLookingAt(syntax->lex, TOK(identifier));
-  LexCheckpointRestore(syntax->lex, &cp);
-  LexCheckpointDestruct(&cp);
-  return followed_by_name;
-}
-
-// Parse a (possibly dotted) module name like `foo` or `foo.bar` into `out`
-// (which this initializes).  Partitions (`foo:part`) are not yet supported.
-static bool ParseModuleName(Syntax* syntax, String* out) {
-  StringInit(out, "");
-  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-    SyntaxError(syntax, "Expected module name");
-    return false;
-  }
-  StringAppend(out, syntax->lex->spelling.value);
-  LexNextToken(syntax->lex);
-  while (LexMatch(syntax->lex, TOK(dot))) {
-    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-      SyntaxError(syntax, "Expected identifier after '.' in module name");
-      return false;
-    }
-    StringAppendChar(out, '.');
-    StringAppend(out, syntax->lex->spelling.value);
-    LexNextToken(syntax->lex);
-  }
-  return true;
-}
-
-// Parse `module NAME ;` (implementation unit) or, when `exported`, the
-// `module NAME ;` tail of `export module NAME ;` (interface unit).  The
-// contextual `module` keyword is the current token.
-static ASTNode* ParseModuleDeclaration(Syntax* syntax, bool exported) {
-  SourceLocation location = syntax->lex->current_token_location;
-  LexNextToken(syntax->lex);  // consume contextual `module`
-  String name;
-  if (ParseModuleName(syntax, &name)) {
-    if (compiler->module_name.length != 0) {
-      SyntaxError(syntax,
-                  "Multiple module declarations in one translation unit");
-    } else {
-      StringSetString(&compiler->module_name, &name);
-      compiler->is_module_interface = exported;
-    }
-  }
-  StringDestruct(&name);
-  SyntaxNeedSemicolon(syntax, TC(decl));
-  return EmptyDeclarationList(location);
-}
-
-// Parse `import NAME ;`, triggering the driver's module import hook.  The
-// contextual `import` keyword is the current token.
-static ASTNode* ParseImportDeclaration(Syntax* syntax) {
-  SourceLocation location = syntax->lex->current_token_location;
-  LexNextToken(syntax->lex);  // consume contextual `import`
-  String name;
-  if (ParseModuleName(syntax, &name)) {
-    if (!CompilerImportModule(name.value)) {
-      SyntaxError(syntax, "Cannot import module '%s'", name.value);
-    }
-  }
-  StringDestruct(&name);
-  SyntaxNeedSemicolon(syntax, TC(decl));
-  return EmptyDeclarationList(location);
-}
-
-// Parse an `export` region: `export module ...`, `export import ...`,
-// `export { declaration-seq }`, or `export declaration`.  The `export` keyword
-// is the current token.
-static ASTNode* ParseExportDeclaration(Syntax* syntax) {
-  SourceLocation location = syntax->lex->current_token_location;
-  LexNextToken(syntax->lex);  // consume `export`
-
-  if (SyntaxAtContextualKeyword(syntax, "module")) {
-    return ParseModuleDeclaration(syntax, /*exported=*/true);
-  }
-  if (SyntaxAtContextualKeyword(syntax, "import")) {
-    SyntaxError(syntax, "'export import' is not yet supported");
-    return ParseImportDeclaration(syntax);
-  }
-
-  syntax->export_depth++;
-  ASTNode* result;
-  if (LexMatch(syntax->lex, TOK(lbrace))) {
-    Vector* declarations = NewVector();
-    while (!LexEof(syntax->lex) && !LexLookingAt(syntax->lex, TOK(rbrace))) {
-      ASTNode* node = SyntaxParseExternalDeclaration(syntax);
-      AppendDeclarationsFromNode(declarations, node);
-    }
-    SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebrace) | TC(decl));
-    result = NewDeclarationListASTNode(declarations, location);
-  } else {
-    result = SyntaxParseExternalDeclaration(syntax);
-  }
-  syntax->export_depth--;
-  return result;
-}
-
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
   syntax->context = kParsingFileScope;
   if (syntax->current_namespace == NULL) {
@@ -7009,15 +6934,15 @@ ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax) {
 
   if (CompilerCXXAtLeast(kLanguageStandardCXX20)) {
     if (LexLookingAt(syntax->lex, TOK(export))) {
-      return ParseExportDeclaration(syntax);
+      return ModuleSyntaxParseExportDeclaration(syntax);
     }
-    if (SyntaxAtModuleDirective(syntax, "module")) {
-      return ParseModuleDeclaration(syntax, /*exported=*/false);
-    }
-    if (SyntaxAtModuleDirective(syntax, "import")) {
-      return ParseImportDeclaration(syntax);
+    ASTNode* module_node = ModuleSyntaxParseExternalDeclaration(syntax);
+    if (module_node != NULL) {
+      return module_node;
     }
   }
+
+  ModuleSyntaxNoteNonImportDeclaration(syntax);
 
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
     SourceLocation location = syntax->lex->current_token_location;

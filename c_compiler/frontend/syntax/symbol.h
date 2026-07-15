@@ -23,6 +23,12 @@ struct Namespace;
 struct ASTNode;
 struct Concept;
 
+typedef enum {
+  kCXXLinkageExternal = 0,
+  kCXXLinkageInternal = 1,
+  kCXXLinkageModule = 2,
+} CXXLinkageKind;
+
 // Storage for symbol (where it is located in memory).
 #define STO(x) kStorage_##x
 typedef enum {
@@ -126,6 +132,7 @@ typedef struct Symbol {
     bool is_c_linkage: 1;          // C language linkage (extern "C").// @wire 31
     bool is_exported: 1;           // C++20 module export.            // @wire 41
     bool is_concept: 1;            // C++20 concept definition.       // @wire 43
+    bool is_module_private: 1;     // Declared in private fragment.    // @wire 52
   } flags;
   
   struct {
@@ -159,7 +166,19 @@ typedef struct Symbol {
   // Function/class/variable templates store constraints on their type bodies;
   // alias templates have no other durable owner.
   struct ConstraintExpr* associated_constraint;  // @wire 46
+  CXXLinkageKind cxx_linkage;        // C++20 external/internal/module. // @wire 48
+  String owning_module_name;         // Named-module purview owner.      // @wire 49
+  String owning_module_partition;    // Owning partition, if any.       // @wire 50
+  String import_source_module;       // Import provenance for importers. // @wire 51
   struct DIE* die;          // @wire - (debug info, not serialized)
+  // Deserialized module symbols are graph-owned until the importing compiler
+  // has finished tearing down structs/types that may still point at them.
+  bool is_imported_module_symbol;  // @wire - (transient)
+  bool destruction_complete;      // @wire - (transient)
+  // Compiler-owned copy of a deserialized function template's parameter list.
+  // Imported module symbols can have their live parameter vector cleared while
+  // pending instantiations are compiled; this backup restores completion.
+  Vector imported_function_template_parameters_backup;  // transient
 } Symbol;
 
 
@@ -173,6 +192,8 @@ Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 void SymbolSetCXXMangledAsmName(Symbol* symbol);
+void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol);
+void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol);
 // Appends the Itanium-style mangled encoding of `type` to `out`.  Used to form
 // canonical, stable keys/symbol names for RTTI type_info objects.
 void AppendCXXMangledTypeName(String* out, struct TypeRecord* type);

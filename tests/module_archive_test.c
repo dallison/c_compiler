@@ -20,9 +20,11 @@
 #include "concepts.h"
 #include "options.h"
 #include "module_archive.h"
+#include "preprocessor.h"
 #include "symbol.h"
 #include "symbol_table.h"
 #include "type.h"
+#include "type_member.h"
 #include "vector.h"
 
 static int g_failures = 0;
@@ -36,12 +38,16 @@ static int g_failures = 0;
   } while (0)
 
 // Builds a temp file path inside the test's writable tmp dir.
-static void MakeTempPath(char* out, size_t out_len) {
+static void MakeTempNamedPath(char* out, size_t out_len, const char* name) {
   const char* dir = getenv("TEST_TMPDIR");
   if (dir == NULL || dir[0] == '\0') {
     dir = "/tmp";
   }
-  snprintf(out, out_len, "%s/roundtrip.dcm", dir);
+  snprintf(out, out_len, "%s/%s", dir, name);
+}
+
+static void MakeTempPath(char* out, size_t out_len) {
+  MakeTempNamedPath(out, out_len, "roundtrip.dcm");
 }
 
 // --- Graph construction -----------------------------------------------------
@@ -307,6 +313,8 @@ static void CheckStructVariable(Symbol* p) {
   StructMember* y = FindMember(point, "y");
   CHECK(x != NULL && x->byte_offset == 0);
   CHECK(y != NULL && y->byte_offset == 4);
+  CHECK(FindStructMemberByName(point, "x") != NULL);
+  CHECK(FindStructMemberByName(point, "y") != NULL);
 }
 
 static void CheckEnumVariable(Symbol* c) {
@@ -521,14 +529,75 @@ int main(void) {
   char path[4096];
   MakeTempPath(path, sizeof(path));
 
+  String dependency;
+  String reexport;
+  StringInit(&dependency, "roundtrip_dependency");
+  StringInit(&reexport, "roundtrip_reexport");
+  Vector dependencies;
+  Vector reexports;
+  Vector header_macros;
+  VectorInit(&dependencies);
+  VectorInit(&reexports);
+  VectorInit(&header_macros);
+  VectorAppend(&dependencies, &dependency);
+  VectorAppend(&dependencies, &reexport);
+  VectorAppend(&reexports, &reexport);
+  Vector macro_args;
+  VectorInit(&macro_args);
+  VectorAppend(&macro_args, NewString("x"));
+  String macro_replacement;
+  StringInit(&macro_replacement, "tokenized replacement");
+  Macro* header_macro =
+      NewMacro("ROUNDTRIP_MACRO", true, false, &macro_args,
+               &macro_replacement, SOURCE_LOCATION_MISSING);
+  VectorDestruct(&macro_args);
+  VectorAppend(&header_macros, header_macro);
+
   ModuleWriteRequest req = {
       .module_name = "roundtrip_module",
       .target_triple = "x86_64-unknown-none",
       .compiler_version = "davecc-test",
-      .flags = 0,
+      .flags = kModuleArchiveHeaderUnit,
       .root_symbols = &roots,
+      .dependencies = &dependencies,
+      .reexports = &reexports,
+      .header_macros = &header_macros,
   };
   CHECK(ModuleWrite(path, &req));
+
+  char malformed_path[4096];
+  MakeTempNamedPath(malformed_path, sizeof(malformed_path), "malformed.dcm");
+  FILE* malformed = fopen(malformed_path, "wb");
+  CHECK(malformed != NULL);
+  if (malformed != NULL) {
+    static const char bad_archive[] = "not a DaveCC module archive";
+    CHECK(fwrite(bad_archive, 1, sizeof(bad_archive), malformed) ==
+          sizeof(bad_archive));
+    CHECK(fclose(malformed) == 0);
+    LoadedModule rejected;
+    CHECK(!ModuleLoad(malformed_path, &rejected));
+  }
+
+  char truncated_path[4096];
+  MakeTempNamedPath(truncated_path, sizeof(truncated_path), "truncated.dcm");
+  FILE* valid_file = fopen(path, "rb");
+  FILE* truncated_file = fopen(truncated_path, "wb");
+  CHECK(valid_file != NULL);
+  CHECK(truncated_file != NULL);
+  if (valid_file != NULL && truncated_file != NULL) {
+    unsigned char prefix[96];
+    size_t prefix_len = fread(prefix, 1, sizeof(prefix), valid_file);
+    CHECK(prefix_len > 0);
+    CHECK(fwrite(prefix, 1, prefix_len, truncated_file) == prefix_len);
+  }
+  if (valid_file != NULL) {
+    CHECK(fclose(valid_file) == 0);
+  }
+  if (truncated_file != NULL) {
+    CHECK(fclose(truncated_file) == 0);
+    LoadedModule rejected;
+    CHECK(!ModuleLoad(truncated_path, &rejected));
+  }
 
   LoadedModule loaded;
   CHECK(ModuleLoad(path, &loaded));
@@ -536,6 +605,31 @@ int main(void) {
     CHECK(loaded.format_version == MODULE_FORMAT_VERSION);
     CHECK(StringEqual(&loaded.module_name, "roundtrip_module"));
     CHECK(StringEqual(&loaded.target_triple, "x86_64-unknown-none"));
+    CHECK((loaded.flags & kModuleArchiveHeaderUnit) != 0);
+    CHECK(loaded.dependencies.length == 2);
+    CHECK(loaded.reexports.length == 1);
+    if (loaded.dependencies.length == 2 && loaded.reexports.length == 1) {
+      CHECK(StringEqual((String*)VectorGet(&loaded.dependencies, 0),
+                        "roundtrip_dependency"));
+      CHECK(StringEqual((String*)VectorGet(&loaded.dependencies, 1),
+                        "roundtrip_reexport"));
+      CHECK(StringEqual((String*)VectorGet(&loaded.reexports, 0),
+                        "roundtrip_reexport"));
+    }
+    CHECK(loaded.header_macros.length == 1);
+    if (loaded.header_macros.length == 1) {
+      Macro* loaded_macro =
+          (Macro*)VectorGet(&loaded.header_macros, 0);
+      CHECK(StringEqual(&loaded_macro->name, "ROUNDTRIP_MACRO"));
+      CHECK(loaded_macro->is_function_like);
+      CHECK(!loaded_macro->varargs);
+      CHECK(loaded_macro->args.length == 1);
+      if (loaded_macro->args.length == 1) {
+        CHECK(StringEqual((String*)VectorGet(&loaded_macro->args, 0), "x"));
+      }
+      CHECK(StringEqual(&loaded_macro->replacement_text,
+                        "tokenized replacement"));
+    }
     CHECK(loaded.root_symbols.length == 9);
     if (loaded.root_symbols.length == 9) {
       CheckVariable((Symbol*)VectorGet(&loaded.root_symbols, 0));
@@ -558,7 +652,18 @@ int main(void) {
       Symbol* p = (Symbol*)VectorGet(&loaded.root_symbols, 1);
       CHECK(a->namespace_ != NULL && a->namespace_ == p->namespace_);
     }
+    LoadedModuleReleaseGraph(&loaded);
+    CompilerDelete(compiler);
+    compiler = NULL;
     LoadedModuleDestruct(&loaded);
+    VectorDestruct(&dependencies);
+    VectorDestruct(&reexports);
+    MacroDestruct(header_macro);
+    free(header_macro);
+    VectorDestruct(&header_macros);
+    StringDestruct(&macro_replacement);
+    StringDestruct(&dependency);
+    StringDestruct(&reexport);
   }
 
   VectorDestruct(&roots);

@@ -928,11 +928,20 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       !TypeIsFunction(templ->type)) {
     return templ;
   }
-  if (templ->type->info.function.template_origin != NULL) {
+  if (templ->type->info.function.template_origin != NULL &&
+      templ->type->info.function.template_parameters.length == 0) {
     templ = templ->type->info.function.template_origin;
   }
+  TypeRecord* completion_type = templ->type;
+  if (completion_type != NULL && TypeIsFunction(completion_type) &&
+      completion_type->info.function.template_parameters.length == 0 &&
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
+      TypeIsFunction(templ->value.func_defn->type) &&
+      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+    completion_type = templ->value.func_defn->type;
+  }
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(parser, templ->type, args,
+      CompleteFunctionTemplateArguments(parser, completion_type, args,
                                         /*emit_error=*/true);
   if (completed_args == NULL) {
     return templ;
@@ -2206,8 +2215,16 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
+  TypeRecord* func_type = templ->type;
+  if (func_type != NULL && TypeIsFunction(func_type) &&
+      func_type->info.function.template_parameters.length == 0 &&
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
+      TypeIsFunction(templ->value.func_defn->type) &&
+      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+    func_type = templ->value.func_defn->type;
+  }
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+      CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/true);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
@@ -2244,8 +2261,16 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   TypeParser parser;
   TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
                  STO(implicit), compiler->syntax.context);
+  TypeRecord* func_type = templ->type;
+  if (func_type != NULL && TypeIsFunction(func_type) &&
+      func_type->info.function.template_parameters.length == 0 &&
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
+      TypeIsFunction(templ->value.func_defn->type) &&
+      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+    func_type = templ->value.func_defn->type;
+  }
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+      CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false);
   TypeParserDestruct(&parser);
   VectorDeleteWithContents(args,
@@ -2276,8 +2301,16 @@ FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
+  TypeRecord* func_type = templ->type;
+  if (func_type != NULL && TypeIsFunction(func_type) &&
+      func_type->info.function.template_parameters.length == 0 &&
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
+      TypeIsFunction(templ->value.func_defn->type) &&
+      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+    func_type = templ->value.func_defn->type;
+  }
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+      CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -2324,8 +2357,16 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
+  TypeRecord* func_type = templ->type;
+  if (func_type != NULL && TypeIsFunction(func_type) &&
+      func_type->info.function.template_parameters.length == 0 &&
+      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
+      TypeIsFunction(templ->value.func_defn->type) &&
+      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+    func_type = templ->value.func_defn->type;
+  }
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(&parser, templ->type, args,
+      CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false);
   VectorDeleteWithContents(args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -4106,8 +4147,18 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  TypeRecord* func,
                                                  Vector* args,
                                                  bool emit_error) {
-  if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.template_parameters.length == 0) {
+  Vector* parameters = NULL;
+  if (func != NULL && TypeIsFunction(func)) {
+    parameters = &func->info.function.template_parameters;
+    if (parameters->length == 0 && func->info.function.symbol != NULL &&
+        func->info.function.symbol->imported_function_template_parameters_backup
+                .length > 0) {
+      parameters =
+          &func->info.function.symbol->imported_function_template_parameters_backup;
+    }
+  }
+  if (func == NULL || !TypeIsFunction(func) || parameters == NULL ||
+      parameters->length == 0) {
     if (emit_error) {
       SyntaxError(parser->syntax,
                   "Function template instantiation is not supported yet");
@@ -4115,8 +4166,7 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
     return NULL;
   }
   Vector* completed =
-      CompleteTemplateArguments(parser, &func->info.function.template_parameters,
-                                args,
+      CompleteTemplateArguments(parser, parameters, args,
                                 "Function template instantiation is not supported yet",
                                 emit_error);
   if (completed == NULL) {

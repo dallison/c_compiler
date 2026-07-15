@@ -247,6 +247,12 @@ TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
 // record can be deleted.  When deleting it, the record pointed
 // to by the 'next' field is first deleted (using the same function)
 // and then the memory is freed.
+static void DeleteGraphOwnedTemplateInstantiation(Symbol* sym) {
+  if (sym != NULL && sym->is_imported_module_symbol) {
+    SymbolDelete(sym);
+  }
+}
+
 void TypeRecordDelete(TypeRecord* record) {
   if (record == NULL) {
     return;
@@ -295,12 +301,14 @@ void TypeRecordDelete(TypeRecord* record) {
       TypeRecordDelete(record->info.function.coroutine_frame_type);
       record->info.function.coroutine_frame_type = NULL;
       VectorDestructWithContents(&record->info.function.prototype,
-                                (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
+                                 (VectorElementDestructor)SymbolDelete,
+                                 /*free_element=*/false);
       VectorDestructWithContents(&record->info.function.template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);
       VectorDestructWithContents(&record->info.function.template_instantiations,
-                                 (VectorElementDestructor)SymbolDelete,
+                                 (VectorElementDestructor)
+                                     DeleteGraphOwnedTemplateInstantiation,
                                  /*free_element=*/false);
       ConstraintExprDelete(record->info.function.associated_constraint);
       record->info.function.associated_constraint = NULL;

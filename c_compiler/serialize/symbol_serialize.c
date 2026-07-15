@@ -78,6 +78,12 @@ enum {
   kSym_concept_definition = 45,
   kSym_associated_constraint = 46,
   kSym_alias_template = 47,
+  kSym_cxx_linkage = 48,
+  kSym_owning_module_name = 49,
+  kSym_owning_module_partition = 50,
+  kSym_import_source_module = 51,
+  kSym_is_module_private = 52,
+  kSym_func_defn = 53,
 };
 
 static const WireFieldDesc kSymbolFields[] = {
@@ -129,6 +135,12 @@ static const WireFieldDesc kSymbolFields[] = {
     {kSym_concept_definition, "concept_definition"},
     {kSym_associated_constraint, "associated_constraint"},
     {kSym_alias_template, "alias_template"},
+    {kSym_cxx_linkage, "cxx_linkage"},
+    {kSym_owning_module_name, "owning_module_name"},
+    {kSym_owning_module_partition, "owning_module_partition"},
+    {kSym_import_source_module, "import_source_module"},
+    {kSym_is_module_private, "is_module_private"},
+    {kSym_func_defn, "func_defn"},
 };
 
 //
@@ -347,6 +359,28 @@ static void WriteBoolField(WireBuffer* buf, int field, bool value) {
   WireWriteBool(buf, field, value);
 }
 
+static bool SymbolVisibleInModuleArtifact(SerializeContext* ctx,
+                                          Symbol* symbol) {
+  if (symbol == NULL || symbol->import_source_module.length != 0) {
+    return false;
+  }
+  if (ctx->writing_internal_partition) {
+    return symbol->owning_module_name.length != 0 &&
+           symbol->cxx_linkage != kCXXLinkageInternal;
+  }
+  return symbol->flags.is_exported;
+}
+
+static Symbol* NextVisibleOverload(SerializeContext* ctx, Symbol* symbol) {
+  for (Symbol* current = symbol; current != NULL;
+       current = current->overload_next) {
+    if (SymbolVisibleInModuleArtifact(ctx, current)) {
+      return current;
+    }
+  }
+  return NULL;
+}
+
 static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   Symbol* s = (Symbol*)obj;
   SWriteStringVal(ctx, buf, kSym_name, &s->name);
@@ -385,6 +419,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_is_c_linkage, s->flags.is_c_linkage);
   WriteBoolField(buf, kSym_is_exported, s->flags.is_exported);
   WriteBoolField(buf, kSym_is_concept, s->flags.is_concept);
+  WriteBoolField(buf, kSym_is_module_private, s->flags.is_module_private);
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -395,7 +430,18 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt64(buf, kSym_value_ivalue, s->value.ivalue);
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);
   SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol, s->alias_target);
-  SWriteRef(ctx, buf, kSym_overload_next, kSerialKindSymbol, s->overload_next);
+  Symbol* overload_next =
+      ctx->writing_module_interface &&
+              SymbolVisibleInModuleArtifact(ctx, s)
+          ? NextVisibleOverload(ctx, s->overload_next)
+          : s->overload_next;
+  SWriteRef(ctx, buf, kSym_overload_next, kSerialKindSymbol, overload_next);
+  if (s->flags.is_template && s->type != NULL && TypeIsFunction(s->type) &&
+      s->value.func_defn != NULL &&
+      s->value.func_defn != s) {
+    SWriteRef(ctx, buf, kSym_func_defn, kSerialKindSymbol,
+              s->value.func_defn);
+  }
   SWriteRef(ctx, buf, kSym_default_argument, kSerialKindAST,
             s->default_argument);
   WriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
@@ -409,6 +455,12 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   SerialWriteConcept(ctx, buf, kSym_concept_definition, s->concept_definition);
   SerialWriteConstraint(ctx, buf, kSym_associated_constraint,
                         s->associated_constraint);
+  WireWriteInt32(buf, kSym_cxx_linkage, (int32_t)s->cxx_linkage);
+  SWriteStringVal(ctx, buf, kSym_owning_module_name, &s->owning_module_name);
+  SWriteStringVal(ctx, buf, kSym_owning_module_partition,
+                  &s->owning_module_partition);
+  SWriteStringVal(ctx, buf, kSym_import_source_module,
+                  &s->import_source_module);
   return !WireBufferHasError(buf);
 }
 
@@ -417,7 +469,9 @@ static void* AllocSymbol(DeserializeContext* ctx, const void* blob,
   (void)ctx;
   (void)blob;
   (void)len;
-  return NewSymbol("", NULL, STO(implicit));
+  Symbol* symbol = NewSymbol("", NULL, STO(implicit));
+  symbol->is_imported_module_symbol = true;
+  return symbol;
 }
 
 static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
@@ -604,11 +658,43 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_alias_template:
         s->alias_template = ReadAliasTemplate(ctx, buf);
         break;
+      case kSym_cxx_linkage: {
+        int32_t v = 0;
+        WireReadInt32(buf, &v);
+        s->cxx_linkage = (CXXLinkageKind)v;
+        break;
+      }
+      case kSym_owning_module_name:
+        SReadStringVal(ctx, buf, &s->owning_module_name);
+        break;
+      case kSym_owning_module_partition:
+        SReadStringVal(ctx, buf, &s->owning_module_partition);
+        break;
+      case kSym_import_source_module:
+        SReadStringVal(ctx, buf, &s->import_source_module);
+        break;
+      case kSym_is_module_private:
+        WireReadBool(buf, &b);
+        s->flags.is_module_private = b;
+        break;
+      case kSym_func_defn:
+        s->value.func_defn =
+            (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        break;
       default:
         WireSkip(buf, wt);
         break;
     }
   }
+  if (s->type != NULL && TypeIsFunction(s->type)) {
+    if (s->type->info.function.symbol == NULL) {
+      s->type->info.function.symbol = s;
+    }
+    if (s->type->info.function.body != NULL && s->value.func_defn == NULL) {
+      s->value.func_defn = s;
+    }
+  }
+  TypeRecordIncRef(s->type);
   return !WireBufferHasError(buf);
 }
 
@@ -621,16 +707,77 @@ static void CollectSymbol(BinaryTreeNode* node, int depth, void* data) {
   VectorAppend((Vector*)data, sn->symbol);
 }
 
+typedef struct {
+  SerializeContext* ctx;
+  Vector* symbols;
+} VisibleSymbolCollector;
+
+static void CollectVisibleSymbol(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  VisibleSymbolCollector* collector = (VisibleSymbolCollector*)data;
+  Symbol* symbol = ((SymbolNode*)node)->symbol;
+  Symbol* first_visible = NextVisibleOverload(collector->ctx, symbol);
+  if (first_visible != NULL) {
+    VectorAppend(collector->symbols, first_visible);
+  }
+}
+
+static bool NamespaceHasVisibleSurface(SerializeContext* ctx, Namespace* ns) {
+  if (ns == NULL || ns->is_anonymous) {
+    return false;
+  }
+  Vector exported;
+  VectorInit(&exported);
+  VisibleSymbolCollector collector = {.ctx = ctx, .symbols = &exported};
+  BinaryTreeTraverse(&ns->symbol_table, CollectVisibleSymbol, &collector);
+  BinaryTreeTraverse(&ns->tag_table, CollectVisibleSymbol, &collector);
+  bool result = exported.length > 0;
+  VectorDestruct(&exported);
+  if (result) {
+    return true;
+  }
+  for (size_t i = 0; i < ns->namespace_aliases.length; i++) {
+    NamespaceAlias* alias =
+        (NamespaceAlias*)VectorGet(&ns->namespace_aliases, i);
+    if (alias != NULL && !alias->is_imported_module_alias &&
+        (ctx->writing_internal_partition || alias->is_exported)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < ns->children.length; i++) {
+    if (NamespaceHasVisibleSurface(
+            ctx, (Namespace*)VectorGet(&ns->children, i))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool WriteNamespace(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   Namespace* ns = (Namespace*)obj;
   SWriteStringVal(ctx, buf, kNs_name, &ns->name);
   SWriteStringVal(ctx, buf, kNs_qualified_name, &ns->qualified_name);
   WireWriteBool(buf, kNs_is_anonymous, ns->is_anonymous);
   WireWriteBool(buf, kNs_is_inline, ns->is_inline);
-  SWriteRefVector(ctx, buf, kNs_children, kSerialKindNamespace, &ns->children);
+  Vector visible_children;
+  VectorInit(&visible_children);
+  if (ctx->writing_module_interface) {
+    for (size_t i = 0; i < ns->children.length; i++) {
+      Namespace* child = (Namespace*)VectorGet(&ns->children, i);
+      if (NamespaceHasVisibleSurface(ctx, child)) {
+        VectorAppend(&visible_children, child);
+      }
+    }
+  }
+  SWriteRefVector(ctx, buf, kNs_children, kSerialKindNamespace,
+                  ctx->writing_module_interface ? &visible_children
+                                                : &ns->children);
+  VectorDestruct(&visible_children);
   SWriteRef(ctx, buf, kNs_parent, kSerialKindNamespace, ns->parent);
-  SWriteRef(ctx, buf, kNs_anonymous_child, kSerialKindNamespace,
-            ns->anonymous_child);
+  if (!ctx->writing_module_interface) {
+    SWriteRef(ctx, buf, kNs_anonymous_child, kSerialKindNamespace,
+              ns->anonymous_child);
+  }
 
   Vector alias_names;
   Vector alias_targets;
@@ -639,7 +786,10 @@ static bool WriteNamespace(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   for (size_t i = 0; i < ns->namespace_aliases.length; i++) {
     NamespaceAlias* alias =
         (NamespaceAlias*)VectorGet(&ns->namespace_aliases, i);
-    if (alias != NULL) {
+    if (alias != NULL &&
+        (!ctx->writing_module_interface ||
+         (!alias->is_imported_module_alias &&
+          (ctx->writing_internal_partition || alias->is_exported)))) {
       VectorAppend(&alias_names, &alias->name);
       VectorAppend(&alias_targets, alias->target);
     }
@@ -652,13 +802,23 @@ static bool WriteNamespace(SerializeContext* ctx, WireBuffer* buf, void* obj) {
 
   Vector symbols;
   VectorInit(&symbols);
-  BinaryTreeTraverse(&ns->symbol_table, CollectSymbol, &symbols);
+  if (ctx->writing_module_interface) {
+    VisibleSymbolCollector collector = {.ctx = ctx, .symbols = &symbols};
+    BinaryTreeTraverse(&ns->symbol_table, CollectVisibleSymbol, &collector);
+  } else {
+    BinaryTreeTraverse(&ns->symbol_table, CollectSymbol, &symbols);
+  }
   SWriteRefVector(ctx, buf, kNs_symbols, kSerialKindSymbol, &symbols);
   VectorDestruct(&symbols);
 
   Vector tags;
   VectorInit(&tags);
-  BinaryTreeTraverse(&ns->tag_table, CollectSymbol, &tags);
+  if (ctx->writing_module_interface) {
+    VisibleSymbolCollector collector = {.ctx = ctx, .symbols = &tags};
+    BinaryTreeTraverse(&ns->tag_table, CollectVisibleSymbol, &collector);
+  } else {
+    BinaryTreeTraverse(&ns->tag_table, CollectSymbol, &tags);
+  }
   SWriteRefVector(ctx, buf, kNs_tags, kSerialKindSymbol, &tags);
   VectorDestruct(&tags);
   return !WireBufferHasError(buf);

@@ -4,19 +4,44 @@
 # preprocessor behavior before later C++ parser/semantic phases are complete.
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//:davecc/modules.bzl", "davecc_binary", "davecc_module")
 
 package(default_visibility = ["//visibility:public"])
+
+davecc_module(
+    name = "bazel_hello_module",
+    src = "tests/modules/hello.cppm",
+    module_name = "hello",
+)
+
+davecc_binary(
+    name = "bazel_hello_binary",
+    src = "tests/modules/use_hello.cpp",
+    link_inputs = ["//:libc_x86_64"],
+    linkopts = [
+        "-Wl,-e",
+        "-Wl,main",
+    ],
+    modules = [":bazel_hello_module"],
+)
 
 CXX_TEST_DATA = glob([
     "include/**",
     "tests/**/*.cpp",
+    "tests/**/*.cppm",
+    "tests/**/*.hpp",
+    "tests/**/*.ixx",
 ]) + glob([
+    "tests/**/*.h",
+    "tests/**/*.hxx",
+], allow_empty = True) + glob([
     "tests/**/*.expected",
 ], allow_empty = True) + [
     "README.md",
     "run_compile_tests.sh",
     "run_exec_tests.sh",
     "run_mangling_tests.sh",
+    "run_module_tests.sh",
     "run_weak_binding_tests.sh",
 ]
 
@@ -46,6 +71,36 @@ sh_test(
     data = CXX_TEST_DATA + [
         "//:davecc",
         "//:libc_headers",
+    ],
+)
+
+sh_test(
+    name = "modules_x86_64",
+    srcs = ["run_module_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--moduledump",
+        "$(rootpath //:moduledump)",
+        "--target",
+        "x86_64",
+        "--libc",
+        "$(rootpath //:libc_x86_64)",
+        "--interpreter",
+        "$(rootpath //:x86_64)",
+        "--compile-arg",
+        "-Wl,-e",
+        "--compile-arg",
+        "-Wl,main",
+        "--interp-arg",
+        "-i",
+    ],
+    data = CXX_TEST_DATA + [
+        "//:davecc",
+        "//:libc_headers",
+        "//:libc_x86_64",
+        "//:moduledump",
+        "//:x86_64",
     ],
 )
 

@@ -620,7 +620,13 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   SWriteRef(ctx, out, kFn_symbol, kSerialKindSymbol, f->symbol);
   SWriteRefVector(ctx, out, kFn_prototype, kSerialKindSymbol, &f->prototype);
   WireWriteBool(out, kFn_varargs, f->varargs);
-  SWriteRef(ctx, out, kFn_body, kSerialKindAST, f->body);
+  bool body_is_reachable =
+      !ctx->writing_module_interface || f->is_inline || f->is_constexpr ||
+      f->template_parameter_count > 0 ||
+      (f->symbol != NULL && f->symbol->flags.is_template);
+  if (body_is_reachable) {
+    SWriteRef(ctx, out, kFn_body, kSerialKindAST, f->body);
+  }
   SWriteRef(ctx, out, kFn_explicit_condition, kSerialKindAST,
             f->explicit_condition);
   WireWriteBool(out, kFn_unknown_args, f->unknown_args);

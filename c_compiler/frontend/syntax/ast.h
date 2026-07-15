@@ -424,6 +424,9 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op);
 // function pointer in the node.
 void ASTNodeDelete(ASTNode* node);
 void ASTNodeSetType(ASTNode* node, TypeRecord* type);
+// Like ASTNodeSetType, but keeps a live function-template primary type alive
+// when replacing a call callee that still shares the template declaration type.
+void ASTNodeSetInstantiatedCalleeType(ASTNode* node, TypeRecord* type);
 void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
 void ASTNodePrint(ASTNode* node, int indents, FILE* fp);

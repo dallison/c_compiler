@@ -17,6 +17,7 @@
 #include "ast.h"
 #include "dstring.h"
 #include "compiler.h"
+#include "module_identity.h"
 #include "symbol_table.h"
 
 bool StorageIs(Storage storage, Storage value) {
@@ -148,6 +149,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_parameter_pack = false;
   sym->flags.is_weak = false;
   sym->flags.is_concept = false;
+  sym->flags.is_module_private = false;
   sym->concept_definition = NULL;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
@@ -157,6 +159,10 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->variable_template = NULL;
   sym->alias_template = NULL;
   sym->associated_constraint = NULL;
+  sym->cxx_linkage = kCXXLinkageExternal;
+  StringInit(&sym->owning_module_name, NULL);
+  StringInit(&sym->owning_module_partition, NULL);
+  StringInit(&sym->import_source_module, NULL);
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -168,6 +174,9 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->dependent_value_template_parameter_index = -1;
   SymbolSetType(sym, type);
   sym->die = NULL;
+  sym->is_imported_module_symbol = false;
+  sym->destruction_complete = false;
+  VectorInit(&sym->imported_function_template_parameters_backup);
 }
 
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
@@ -176,7 +185,55 @@ Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
   return sym;
 }
 
+void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol) {
+  if (symbol == NULL || !symbol->is_imported_module_symbol ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      !symbol->flags.is_template) {
+    return;
+  }
+  VectorDestructWithContents(
+      &symbol->imported_function_template_parameters_backup,
+      (VectorElementDestructor)TemplateParameterDelete,
+      /*free_element=*/false);
+  VectorInit(&symbol->imported_function_template_parameters_backup);
+  Vector* live = &symbol->type->info.function.template_parameters;
+  for (size_t i = 0; i < live->length; i++) {
+    TemplateParameter* param = live->value.p[i];
+    if (param != NULL) {
+      VectorAppend(&symbol->imported_function_template_parameters_backup,
+                   TemplateParameterCopy(param));
+    }
+  }
+}
+
+void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.template_parameters.length > 0 ||
+      symbol->imported_function_template_parameters_backup.length == 0) {
+    return;
+  }
+  for (size_t i = 0;
+       i < symbol->imported_function_template_parameters_backup.length; i++) {
+    TemplateParameter* param =
+        symbol->imported_function_template_parameters_backup.value.p[i];
+    if (param != NULL) {
+      VectorAppend(&symbol->type->info.function.template_parameters,
+                   TemplateParameterCopy(param));
+    }
+  }
+  if (symbol->type->info.function.template_parameters.length > 0) {
+    symbol->type->info.function.template_parameter_count =
+        (int)symbol->type->info.function.template_parameters.length;
+  }
+}
+
 void SymbolDestruct(Symbol* symbol) {
+  if (symbol == NULL || symbol->destruction_complete) {
+    return;
+  }
+  // Set this before following owned links so cycles and shared imported graph
+  // references make destruction idempotent.
+  symbol->destruction_complete = true;
   StringDestruct(&symbol->name);
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
@@ -201,16 +258,29 @@ void SymbolDestruct(Symbol* symbol) {
   }
   ConstraintExprDelete(symbol->associated_constraint);
   symbol->associated_constraint = NULL;
+  StringDestruct(&symbol->owning_module_name);
+  StringDestruct(&symbol->owning_module_partition);
+  StringDestruct(&symbol->import_source_module);
   ConceptDelete(symbol->concept_definition);
   AttributeListDestruct(&symbol->attributes);
+  VectorDestructWithContents(
+      &symbol->imported_function_template_parameters_backup,
+      (VectorElementDestructor)TemplateParameterDelete,
+      /*free_element=*/false);
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
   }
 }
 
 void SymbolDelete(Symbol* symbol) {
+  if (symbol == NULL) {
+    return;
+  }
+  bool graph_owned = symbol->is_imported_module_symbol;
   SymbolDestruct(symbol);
-  free(symbol);
+  if (!graph_owned) {
+    free(symbol);
+  }
 }
 
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute) {
@@ -668,6 +738,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
     StringAppendChar(&mangled, '_');
   }
   StringAppend(&mangled, "_Z");
+  AppendCXXModuleIdentityMangling(&mangled, symbol);
   AppendCXXName(&mangled, symbol);
   AppendCXXTemplateArguments(&mangled, symbol);
   AppendCXXFunctionParameterTypes(&mangled, symbol);
@@ -687,6 +758,7 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     StringAppendChar(&mangled, '_');
   }
   StringAppend(&mangled, "_Z");
+  AppendCXXModuleIdentityMangling(&mangled, symbol);
 
   Namespace* ns = symbol->namespace_;
   if (ns == NULL && owner != NULL && owner->tag_symbol != NULL) {
@@ -717,6 +789,10 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->concept_definition = NULL;
   new_sym->associated_constraint =
       ConceptsCloneConstraint(sym->associated_constraint);
+  new_sym->cxx_linkage = sym->cxx_linkage;
+  StringSetString(&new_sym->owning_module_name, &sym->owning_module_name);
+  StringSetString(&new_sym->owning_module_partition, &sym->owning_module_partition);
+  StringSetString(&new_sym->import_source_module, &sym->import_source_module);
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;

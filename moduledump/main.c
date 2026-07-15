@@ -197,6 +197,16 @@ static void DumpHeader(LoadedModule* m) {
          m->compiler_version.length ? m->compiler_version.value : "(none)");
   printf("  format version    : %u\n", m->format_version);
   printf("  flags             : 0x%x\n", m->flags);
+  printf("  dependencies      : %zu\n", m->dependencies.length);
+  for (size_t i = 0; i < m->dependencies.length; i++) {
+    String* dependency = (String*)VectorGet(&m->dependencies, i);
+    printf("      - %s\n", dependency->value);
+  }
+  printf("  re-exports        : %zu\n", m->reexports.length);
+  for (size_t i = 0; i < m->reexports.length; i++) {
+    String* reexport = (String*)VectorGet(&m->reexports, i);
+    printf("      - %s\n", reexport->value);
+  }
   printf("  exported symbols  : %zu\n", m->root_symbols.length);
   for (size_t i = 0; i < m->root_symbols.length; i++) {
     Symbol* s = (Symbol*)VectorGet(&m->root_symbols, i);
@@ -384,6 +394,11 @@ static void DumpSymbol(Symbol* s, size_t handle, String* scratch) {
   if (s->default_argument != NULL) {
     printf("        default argument:\n");
     ASTNodePrint(s->default_argument, 5, stdout);
+  }
+  if (s->type != NULL && TypeIsFunction(s->type)) {
+    printf("        fn template params: count=%d vec=%zu\n",
+           s->type->info.function.template_parameter_count,
+           s->type->info.function.template_parameters.length);
   }
   if (s->variable_template != NULL) {
     printf("        variable template:\n");
@@ -738,6 +753,9 @@ int main(int argc, char* argv[]) {
   if (sections.symbols) DumpSymbols(&loaded);
   if (sections.ast) DumpAST(&loaded);
 
+  LoadedModuleReleaseGraph(&loaded);
+  CompilerDelete(compiler);
+  compiler = NULL;
   LoadedModuleDestruct(&loaded);
   return 0;
 }

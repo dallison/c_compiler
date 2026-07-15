@@ -19,6 +19,7 @@
 #include "vector.h"
 #include "debug.h"
 #include "options.h"
+#include "module_unit.h"
 
 struct Generator;
 struct Namespace;
@@ -290,10 +291,8 @@ typedef struct {
   HashTable global_tag_table;
   struct Namespace* global_namespace;
 
-  // C++20 module named by this translation unit, if any.  Set when parsing a
-  // `module foo;` or `export module foo;` declaration; empty otherwise.
-  String module_name;
-  bool is_module_interface;  // True once `export module foo;` was seen.
+  // C++20 module-unit metadata for this translation unit.
+  ModuleUnitInfo module_unit;
 
   int pointer_size;  // Size of a pointer.
   int short_size;  // Size of native short int.
@@ -446,9 +445,24 @@ typedef bool (*ModuleImportHandler)(void* ctx, const char* module_name);
 void SetModuleImportHandler(ModuleImportHandler fn, void* ctx);
 
 // Invoked by the parser for `import foo;`.  Dispatches to the registered
-// handler; returns false (and reports nothing) if no handler is installed or
-// the import fails, so the caller can emit a diagnostic.
+// handler; returns false if no handler is installed or the import fails.
 bool CompilerImportModule(const char* module_name);
+
+// True when a driver has registered a module import handler for this compile.
+bool CompilerHasModuleImportHandler(void);
+
+// Optional detail for the most recent failed CompilerImportModule call on the
+// active translation unit.  Owned by the driver/import store; valid only until
+// the next import attempt.
+const char* CompilerImportLastError(void);
+
+// Records a driver-provided detail string for the next import diagnostic.
+void CompilerSetLastImportError(const char* message);
+
+// Attaches per-translation-unit import state released from CompilerDestruct
+// before lookup tables are torn down.  `release` may be NULL only when clearing.
+typedef void (*TranslationUnitImportReleaseFn)(void* state);
+void CompilerSetImportState(void* state, TranslationUnitImportReleaseFn release);
 
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,

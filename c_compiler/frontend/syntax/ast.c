@@ -16,6 +16,7 @@
 #include "errors.h"
 #include "symbol.h"
 #include "compiler.h"
+#include "type_compare.h"
 
 static int next_ast_node_id = 1;
 
@@ -608,6 +609,29 @@ void ASTNodeSetType(ASTNode* node, TypeRecord* type) {
   }
   node->type = type;
   TypeRecordIncRef(type);
+}
+
+static bool ASTTypeIsFunctionTemplatePrimary(TypeRecord* type) {
+  if (type == NULL || !TypeIsFunction(type)) {
+    return false;
+  }
+  Symbol* sym = type->info.function.symbol;
+  return sym != NULL && sym->flags.is_template && sym->type == type;
+}
+
+void ASTNodeSetInstantiatedCalleeType(ASTNode* node, TypeRecord* type) {
+  if (type == NULL) {
+    return;
+  }
+  if (node->type == type) {
+    return;
+  }
+  TypeRecord* old = node->type;
+  TypeRecordIncRef(type);
+  node->type = type;
+  if (old != NULL && !ASTTypeIsFunctionTemplatePrimary(old)) {
+    TypeRecordDelete(old);
+  }
 }
 
 void ASTNodePrint(ASTNode* node, int indents, FILE* fp) {

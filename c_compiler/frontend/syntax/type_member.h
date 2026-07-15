@@ -26,4 +26,6 @@ StructMember* FindStructMemberWithAccessAndOffsetByName(
     int* byte_offset);
 StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type);
 
+void StructRebuildMemberLookupTables(Struct* str);
+
 #endif /* type_member_h */

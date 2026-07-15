@@ -30,6 +30,8 @@ typedef struct Namespace Namespace;
 typedef struct NamespaceAlias {
   String name;
   Namespace* target;
+  bool is_exported;
+  bool is_imported_module_alias;
 } NamespaceAlias;
 
 typedef enum {
@@ -189,6 +191,13 @@ Symbol* FindGlobalSymbol(String* name);
 
 // Finds a global tag.  Returns NULL if not found.
 Symbol* FindGlobalTag(String* name);
+
+// Removes a symbol from a lookup table without deleting the Symbol object.
+bool UninstallGlobalSymbol(Symbol* symbol, bool is_tag);
+bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag);
+
+// True when `sym` is the tag symbol for a struct/union/enum type.
+bool SymbolIsTagSymbol(Symbol* sym);
 
 // Inserts a symbol into the local symbol table.  Returns true if the
 // insertion was successful.

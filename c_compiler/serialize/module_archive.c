@@ -8,10 +8,18 @@
 
 #include "module_archive.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ar.h"
+#include "preprocessor.h"
+#include "serialize.h"
+#include "symbol.h"
+#include "symbol_table.h"
+#include "type.h"
+#include "type_internal.h"
+#include "type_member.h"
 
 // MODULE-member field numbers.
 enum {
@@ -24,6 +32,17 @@ enum {
   kModule_root_handle = 7,  // Repeated.
   kModule_ns_root_count = 8,
   kModule_ns_root_handle = 9,  // Repeated.
+  kModule_dependency = 10,    // Repeated logical module name.
+  kModule_reexport = 11,      // Repeated logical module name.
+  kModule_header_macro = 12,  // Repeated nested macro definition.
+};
+
+enum {
+  kMacro_name = 1,
+  kMacro_replacement = 2,
+  kMacro_is_function_like = 3,
+  kMacro_varargs = 4,
+  kMacro_arg = 5,
 };
 
 // Maps each serializable pool kind to its archive member name.  The string pool
@@ -43,6 +62,38 @@ static const PoolMember kPoolMembers[] = {
 };
 #define kNumPoolMembers (sizeof(kPoolMembers) / sizeof(kPoolMembers[0]))
 
+static char g_module_write_error[256];
+
+const char* ModuleWriteLastError(void) {
+  return g_module_write_error[0] != '\0' ? g_module_write_error : NULL;
+}
+
+static bool ValidateReachableSymbols(SerializeContext* ctx,
+                                     bool allow_internal_reachability) {
+  Vector* symbols = &ctx->objects[kSerialKindSymbol];
+  for (size_t i = 0; i < symbols->length; i++) {
+    Symbol* symbol = (Symbol*)VectorGet(symbols, i);
+    if (symbol == NULL || symbol->flags.is_local ||
+        symbol->flags.is_argument || symbol->flags.is_template_parameter) {
+      continue;
+    }
+    if (symbol->flags.is_module_private) {
+      snprintf(g_module_write_error, sizeof(g_module_write_error),
+               "exported interface reaches private-fragment declaration '%s'",
+               symbol->name.value);
+      return false;
+    }
+    if (!allow_internal_reachability && !symbol->flags.is_exported &&
+        symbol->cxx_linkage == kCXXLinkageInternal) {
+      snprintf(g_module_write_error, sizeof(g_module_write_error),
+               "exported interface exposes internal-linkage declaration '%s'",
+               symbol->name.value);
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Write.
 // ---------------------------------------------------------------------------
@@ -54,11 +105,54 @@ static void WriteStringField(WireBuffer* buf, int field, const char* s) {
   WireWriteString(buf, field, s, strlen(s));
 }
 
+static void WriteStringVector(WireBuffer* buf, int field, Vector* strings) {
+  if (strings == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < strings->length; i++) {
+    String* value = (String*)VectorGet(strings, i);
+    if (value != NULL) {
+      WriteStringField(buf, field, value->value);
+    }
+  }
+}
+
+static void WriteHeaderMacros(WireBuffer* buf, Vector* macros) {
+  if (macros == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < macros->length; i++) {
+    Macro* macro = (Macro*)VectorGet(macros, i);
+    if (macro == NULL || macro->undefined) {
+      continue;
+    }
+    WireBuffer record;
+    WireBufferInitOwned(&record, 32);
+    WriteStringField(&record, kMacro_name, macro->name.value);
+    WireWriteBytes(&record, kMacro_replacement,
+                   macro->replacement_text.value,
+                   macro->replacement_text.length);
+    WireWriteBool(&record, kMacro_is_function_like, macro->is_function_like);
+    WireWriteBool(&record, kMacro_varargs, macro->varargs);
+    for (size_t j = 0; j < macro->args.length; j++) {
+      String* arg = (String*)VectorGet(&macro->args, j);
+      WriteStringField(&record, kMacro_arg, arg->value);
+    }
+    WireWriteBytes(buf, kModule_header_macro, WireBufferData(&record),
+                   WireBufferSize(&record));
+    WireBufferDestruct(&record);
+  }
+}
+
 bool ModuleWrite(const char* path, const ModuleWriteRequest* req) {
+  g_module_write_error[0] = '\0';
   SerializeRegisterAllKinds();
 
   SerializeContext ctx;
   SerializeContextInit(&ctx);
+  ctx.writing_module_interface = true;
+  ctx.writing_internal_partition =
+      (req->flags & kModuleArchiveInternalPartition) != 0;
 
   // Intern the exported roots, remembering their pool handles.
   Vector root_handles;
@@ -87,6 +181,13 @@ bool ModuleWrite(const char* path, const ModuleWriteRequest* req) {
     SerializeContextDestruct(&ctx);
     return false;
   }
+  if (!ValidateReachableSymbols(
+          &ctx, (req->flags & kModuleArchiveHeaderUnit) != 0)) {
+    VectorDestruct(&root_handles);
+    VectorDestruct(&ns_root_handles);
+    SerializeContextDestruct(&ctx);
+    return false;
+  }
 
   // Build the MODULE header member.
   WireBuffer module_buf;
@@ -109,6 +210,9 @@ bool ModuleWrite(const char* path, const ModuleWriteRequest* req) {
     SerialHandle h = (SerialHandle)(intptr_t)VectorGet(&ns_root_handles, i);
     WireWriteVarint(&module_buf, kModule_ns_root_handle, h);
   }
+  WriteStringVector(&module_buf, kModule_dependency, req->dependencies);
+  WriteStringVector(&module_buf, kModule_reexport, req->reexports);
+  WriteHeaderMacros(&module_buf, req->header_macros);
 
   // Build the STRINGS member and every pool member.  Kept alive until the
   // archive is written (the builder stores content pointers, not copies).
@@ -195,6 +299,78 @@ static void ReadStringFieldInto(WireBuffer* buf, String* dest) {
   }
 }
 
+static void DestructOwnedStringVector(Vector* strings) {
+  VectorDestructWithContents(strings, (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+}
+
+static void DestructOwnedMacroVector(Vector* macros) {
+  for (size_t i = 0; i < macros->length; i++) {
+    Macro* macro = (Macro*)VectorGet(macros, i);
+    MacroDestruct(macro);
+    free(macro);
+  }
+  VectorDestruct(macros);
+}
+
+static Macro* ReadHeaderMacro(const void* data, size_t len) {
+  WireBuffer in;
+  WireBufferInitReader(&in, data, len);
+  String name;
+  String replacement;
+  StringInit(&name, "");
+  StringInit(&replacement, "");
+  Vector args;
+  VectorInit(&args);
+  bool is_function_like = false;
+  bool varargs = false;
+  while (!WireBufferEof(&in) && !WireBufferHasError(&in)) {
+    int field;
+    WireType wt;
+    if (!WireReadTag(&in, &field, &wt)) {
+      break;
+    }
+    switch (field) {
+      case kMacro_name:
+        ReadStringFieldInto(&in, &name);
+        break;
+      case kMacro_replacement:
+        ReadStringFieldInto(&in, &replacement);
+        break;
+      case kMacro_is_function_like:
+        WireReadBool(&in, &is_function_like);
+        break;
+      case kMacro_varargs:
+        WireReadBool(&in, &varargs);
+        break;
+      case kMacro_arg: {
+        String* arg = NewString("");
+        ReadStringFieldInto(&in, arg);
+        VectorAppend(&args, arg);
+        break;
+      }
+      default:
+        WireSkip(&in, wt);
+        break;
+    }
+  }
+  Macro* macro = NULL;
+  if (!WireBufferHasError(&in) && name.length > 0) {
+    macro = NewMacro(name.value, is_function_like, varargs, &args,
+                     &replacement, SOURCE_LOCATION_MISSING);
+  }
+  if (macro == NULL) {
+    for (size_t i = 0; i < args.length; i++) {
+      StringDelete((String*)VectorGet(&args, i));
+    }
+  }
+  // NewMacro takes ownership of the argument strings on success.
+  VectorDestruct(&args);
+  StringDestruct(&name);
+  StringDestruct(&replacement);
+  return macro;
+}
+
 // Parses the MODULE member: validates magic + version, fills header fields, and
 // collects the exported root handles.
 static bool ParseModuleHeader(LoadedModule* out, const void* blob, size_t len,
@@ -260,6 +436,30 @@ static bool ParseModuleHeader(LoadedModule* out, const void* blob, size_t len,
         VectorAppend(ns_root_handles, (void*)(intptr_t)(SerialHandle)v);
         break;
       }
+      case kModule_dependency: {
+        String* dependency = NewString("");
+        ReadStringFieldInto(&in, dependency);
+        VectorAppend(&out->dependencies, dependency);
+        break;
+      }
+      case kModule_reexport: {
+        String* reexport = NewString("");
+        ReadStringFieldInto(&in, reexport);
+        VectorAppend(&out->reexports, reexport);
+        break;
+      }
+      case kModule_header_macro: {
+        const void* data;
+        size_t len;
+        if (WireReadBytes(&in, &data, &len)) {
+          Macro* macro = ReadHeaderMacro(data, len);
+          if (macro == NULL) {
+            return false;
+          }
+          VectorAppend(&out->header_macros, macro);
+        }
+        break;
+      }
       default:
         WireSkip(&in, wt);
         break;
@@ -273,6 +473,82 @@ static bool ParseModuleHeader(LoadedModule* out, const void* blob, size_t len,
   return true;
 }
 
+static void DetachImportedTemplateParameterVector(Vector* vec) {
+  if (vec == NULL) {
+    return;
+  }
+  VectorDestruct(vec);
+}
+
+static void RepairImportedTemplateParameterVector(Vector* vec) {
+  if (vec == NULL || vec->length == 0) {
+    return;
+  }
+  Vector owned;
+  VectorInit(&owned);
+  for (size_t i = 0; i < vec->length; i++) {
+    TemplateParameter* param = (TemplateParameter*)VectorGet(vec, i);
+    if (param != NULL) {
+      VectorAppend(&owned, TemplateParameterCopy(param));
+    }
+  }
+  DetachImportedTemplateParameterVector(vec);
+  *vec = owned;
+}
+
+static void RepairImportedFunctionTemplateParameters(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  RepairImportedTemplateParameterVector(&func->info.function.template_parameters);
+  if (func->info.function.template_parameters.length > 0) {
+    func->info.function.template_parameter_count =
+        (int)func->info.function.template_parameters.length;
+  }
+}
+
+static void RepairImportedStructTemplateParameters(Struct* st) {
+  if (st == NULL) {
+    return;
+  }
+  RepairImportedTemplateParameterVector(&st->template_parameters);
+  if (st->template_parameters.length > 0) {
+    st->template_parameter_count = (int)st->template_parameters.length;
+  }
+}
+
+static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+  Vector* struct_pool = &ctx->objects[kSerialKindStruct];
+  for (size_t i = 0; i < struct_pool->length; i++) {
+    Struct* st = (Struct*)VectorGet(struct_pool, i);
+    if (st != NULL) {
+      StructRebuildMemberLookupTables(st);
+      if (st->is_template) {
+        RepairImportedStructTemplateParameters(st);
+      }
+    }
+  }
+  Vector* sym_pool = &ctx->objects[kSerialKindSymbol];
+  for (size_t i = 0; i < sym_pool->length; i++) {
+    Symbol* sym = (Symbol*)VectorGet(sym_pool, i);
+    if (sym != NULL && sym->type != NULL && TypeIsFunction(sym->type)) {
+      if (sym->type->info.function.symbol == NULL) {
+        sym->type->info.function.symbol = sym;
+      }
+      if (sym->type->info.function.body != NULL && sym->value.func_defn == NULL) {
+        sym->value.func_defn = sym;
+      }
+      if (sym->flags.is_template ||
+          sym->type->info.function.template_parameters.length > 0) {
+        RepairImportedFunctionTemplateParameters(sym->type);
+      }
+    }
+  }
+}
+
 bool ModuleLoad(const char* path, LoadedModule* out) {
   SerializeRegisterAllKinds();
 
@@ -281,14 +557,21 @@ bool ModuleLoad(const char* path, LoadedModule* out) {
   StringInit(&out->module_name, "");
   StringInit(&out->target_triple, "");
   StringInit(&out->compiler_version, "");
+  VectorInit(&out->dependencies);
+  VectorInit(&out->reexports);
+  VectorInit(&out->header_macros);
   out->format_version = 0;
   out->flags = 0;
+  out->graph_released = false;
 
   FILE* fp = fopen(path, "r");
   if (fp == NULL) {
     StringDestruct(&out->module_name);
     StringDestruct(&out->target_triple);
     StringDestruct(&out->compiler_version);
+    DestructOwnedStringVector(&out->dependencies);
+    DestructOwnedStringVector(&out->reexports);
+    DestructOwnedMacroVector(&out->header_macros);
     return false;
   }
 
@@ -300,6 +583,9 @@ bool ModuleLoad(const char* path, LoadedModule* out) {
     StringDestruct(&out->module_name);
     StringDestruct(&out->target_triple);
     StringDestruct(&out->compiler_version);
+    DestructOwnedStringVector(&out->dependencies);
+    DestructOwnedStringVector(&out->reexports);
+    DestructOwnedMacroVector(&out->header_macros);
     return false;
   }
 
@@ -359,6 +645,9 @@ bool ModuleLoad(const char* path, LoadedModule* out) {
     if (ok) {
       ok = DeserializeContextResolve(ctx);
     }
+    if (ok) {
+      RepairDeserializedModuleGraph(ctx);
+    }
 
     // Resolve the exported roots.
     if (ok) {
@@ -394,6 +683,9 @@ bool ModuleLoad(const char* path, LoadedModule* out) {
     StringDestruct(&out->module_name);
     StringDestruct(&out->target_triple);
     StringDestruct(&out->compiler_version);
+    DestructOwnedStringVector(&out->dependencies);
+    DestructOwnedStringVector(&out->reexports);
+    DestructOwnedMacroVector(&out->header_macros);
   }
 
   VectorDestruct(&root_handles);
@@ -403,12 +695,89 @@ bool ModuleLoad(const char* path, LoadedModule* out) {
   return ok;
 }
 
+void LoadedModuleReleaseGraph(LoadedModule* out) {
+  if (out == NULL || out->graph_released) {
+    return;
+  }
+
+  DeserializeContext* ctx = &out->ctx;
+  Vector* ns_pool = &ctx->objects[kSerialKindNamespace];
+  for (size_t i = 0; i < ns_pool->length; i++) {
+    Namespace* ns = (Namespace*)VectorGet(ns_pool, i);
+    if (ns == NULL) {
+      continue;
+    }
+    BinaryTreeDestruct(&ns->symbol_table, NULL);
+    BinaryTreeDestruct(&ns->tag_table, NULL);
+    for (size_t j = 0; j < ns->namespace_aliases.length; j++) {
+      NamespaceAlias* alias = (NamespaceAlias*)VectorGet(&ns->namespace_aliases, j);
+      StringDestruct(&alias->name);
+      free(alias);
+    }
+    VectorDestruct(&ns->namespace_aliases);
+    VectorDestruct(&ns->children);
+  }
+
+  Vector* sym_pool = &ctx->objects[kSerialKindSymbol];
+  // Every symbol in an overload chain has its own pool entry.  SymbolDelete
+  // normally owns and recursively deletes overload_next, so sever those links
+  // before deleting pool entries individually.
+  for (size_t i = 0; i < sym_pool->length; i++) {
+    Symbol* sym = (Symbol*)VectorGet(sym_pool, i);
+    if (sym != NULL) {
+      sym->overload_next = NULL;
+    }
+  }
+  for (size_t i = 0; i < sym_pool->length; i++) {
+    Symbol* sym = (Symbol*)VectorGet(sym_pool, i);
+    if (sym != NULL) {
+      SymbolDestruct(sym);
+    }
+  }
+
+  for (size_t i = 0; i < ns_pool->length; i++) {
+    Namespace* ns = (Namespace*)VectorGet(ns_pool, i);
+    if (ns == NULL) {
+      continue;
+    }
+    StringDestruct(&ns->name);
+    StringDestruct(&ns->qualified_name);
+    free(ns);
+    ns_pool->value.p[i] = NULL;
+  }
+
+  for (int k = 0; k < kSerialKindCount; k++) {
+    if (k == kSerialKindSymbol) {
+      continue;
+    }
+    VectorDestruct(&ctx->objects[k]);
+    VectorInit(&ctx->objects[k]);
+  }
+  VectorDestruct(&out->root_symbols);
+  VectorInit(&out->root_symbols);
+  VectorDestruct(&out->root_namespaces);
+  VectorInit(&out->root_namespaces);
+  out->graph_released = true;
+}
+
 void LoadedModuleDestruct(LoadedModule* out) {
+  if (out == NULL) {
+    return;
+  }
   StringDestruct(&out->module_name);
   StringDestruct(&out->target_triple);
   StringDestruct(&out->compiler_version);
+  DestructOwnedStringVector(&out->dependencies);
+  DestructOwnedStringVector(&out->reexports);
+  DestructOwnedMacroVector(&out->header_macros);
   VectorDestruct(&out->root_symbols);
   VectorDestruct(&out->root_namespaces);
+  if (out->graph_released) {
+    Vector* sym_pool = &out->ctx.objects[kSerialKindSymbol];
+    for (size_t i = 0; i < sym_pool->length; i++) {
+      free(VectorGet(sym_pool, i));
+    }
+  }
   DeserializeContextDestruct(&out->ctx);
   for (size_t i = 0; i < out->owned_buffers.length; i++) {
     free(VectorGet(&out->owned_buffers, i));

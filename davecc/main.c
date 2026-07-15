@@ -19,16 +19,21 @@
 #include "x86_64_assembler.h"
 #include "arm_assembler.h"
 #include "compiler.h"
+#include "errors.h"
 #include "linker_main.h"
 #include "module_archive.h"
+#include "module_import.h"
 #include "module_install.h"
+#include "module_reachability.h"
 #include "options.h"
+#include "preprocessor.h"
 #include "source.h"
 #include "symbol_table.h"
 
 Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(Assembler* assembler);
 void AssembleAARCH64Instruction(Assembler* assembler, String* word);
+static bool DriverImportModule(void* ctx, const char* module_name);
 
 static int ParseArg(int i, int argc, char** argv,
                     Vector* compiler_args,
@@ -97,12 +102,18 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(compiler_args, argv[i+1]);
         i++;
     } else if (StringEqual(option, "-Xemit-module") ||
-               StringEqual(option, "-Xload-module")) {
-      // These hidden C++20-module hooks are followed by a module (.dcm) path.
-      // The path does not carry a recognized source extension, so route both
-      // the flag and its value into compiler_args explicitly; otherwise the
-      // path token falls through to the linker and the option ends up
-      // swallowing the following source file as its value.
+               StringEqual(option, "-Xload-module") ||
+               StringEqual(option, "-fprebuilt-module-path") ||
+               StringEqual(option, "-fmodule-file") ||
+               StringEqual(option, "-fmodule-name") ||
+               StringEqual(option, "-fmodule-output") ||
+               StringEqual(option, "-fdeps-file") ||
+               StringEqual(option, "-fdeps-format")) {
+      // These C++20-module options are followed by a path.  The path does not
+      // carry a recognized source extension, so route both the flag and its
+      // value into compiler_args explicitly; otherwise the path token falls
+      // through to the linker and the option ends up swallowing the following
+      // source file as its value.
       if (i == argc-1) {
         fprintf(stderr, "%s needs a module path\n", option->value);
         exit(1);
@@ -224,7 +235,10 @@ static int ParseArg(int i, int argc, char** argv,
         StringEndsWith(&arg, ".cpp") ||
         StringEndsWith(&arg, ".cxx") ||
         StringEndsWith(&arg, ".cppm") ||
-        StringEndsWith(&arg, ".ixx")) {
+        StringEndsWith(&arg, ".ixx") ||
+        StringEndsWith(&arg, ".h") ||
+        StringEndsWith(&arg, ".hpp") ||
+        StringEndsWith(&arg, ".hxx")) {
       VectorAppend(compiler_args, argv[i]);
       *run_compiler = true;
       (*num_inputs)++;
@@ -253,19 +267,341 @@ static bool BoolOptionValue(Vector* options, int opt, bool def) {
   return def;
 }
 
-// Collects exported symbols from a global-symbol-table bucket (a BinaryTree of
-// SymbolNodes) into the Vector passed as `data`.
-static void CollectExportedFromNode(BinaryTreeNode* node, int depth,
-                                    void* data) {
-  (void)depth;
-  Symbol* sym = ((SymbolNode*)node)->symbol;
-  if (sym != NULL && sym->flags.is_exported) {
-    VectorAppend((Vector*)data, sym);
+static const char* StringOptionValue(Vector* options, int opt) {
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* option = options->value.p[i];
+    if (option->opt == opt) {
+      return option->value.svalue.value;
+    }
+  }
+  return NULL;
+}
+
+static void AppendUniqueModuleId(Vector* names, const ModuleId* id) {
+  String formatted;
+  StringInit(&formatted, "");
+  ModuleIdFormat(id, &formatted);
+  for (size_t i = 0; i < names->length; i++) {
+    String* existing = (String*)VectorGet(names, i);
+    if (StringEqualString(existing, &formatted)) {
+      StringDestruct(&formatted);
+      return;
+    }
+  }
+  VectorAppend(names, NewString(formatted.value));
+  StringDestruct(&formatted);
+}
+
+typedef struct {
+  String provided;
+  String primary_module;
+  Vector required;  // owned String*
+  bool provides;
+  bool is_interface;
+} ModuleDependencyScan;
+
+static void ModuleDependencyScanInit(ModuleDependencyScan* scan) {
+  StringInit(&scan->provided, "");
+  StringInit(&scan->primary_module, "");
+  VectorInit(&scan->required);
+  scan->provides = false;
+  scan->is_interface = false;
+}
+
+static void ModuleDependencyScanDestruct(ModuleDependencyScan* scan) {
+  StringDestruct(&scan->provided);
+  StringDestruct(&scan->primary_module);
+  VectorDestructWithContents(&scan->required,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+}
+
+static bool LexAtContextualKeyword(Lex* lex, const char* spelling) {
+  return LexLookingAt(lex, TOK(identifier)) &&
+         StringEqual(&lex->spelling, spelling);
+}
+
+static void AppendUniqueModuleName(Vector* names, const char* name) {
+  for (size_t i = 0; i < names->length; i++) {
+    if (StringEqual((String*)VectorGet(names, i), name)) {
+      return;
+    }
+  }
+  VectorAppend(names, NewString(name));
+}
+
+static bool ScanDottedModuleName(Lex* lex, String* out) {
+  if (!LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+  StringAppendString(out, &lex->spelling);
+  LexNextToken(lex);
+  while (LexMatch(lex, TOK(dot))) {
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      return false;
+    }
+    StringAppendChar(out, '.');
+    StringAppendString(out, &lex->spelling);
+    LexNextToken(lex);
+  }
+  return true;
+}
+
+static void AppendScannedHeaderToken(Lex* lex, String* out) {
+  if (LexLookingAt(lex, TOK(identifier))) {
+    StringAppendString(out, &lex->spelling);
+  } else if (LexLookingAt(lex, TOK(number)) ||
+             LexLookingAt(lex, TOK(fnumber))) {
+    StringAppendString(out, &lex->literal_spelling);
+  } else {
+    StringAppend(out, TokenName(lex->current_token));
   }
 }
 
-static void CollectExportedFromBucket(void* entry, void* data) {
-  BinaryTreeTraverse((BinaryTree*)entry, CollectExportedFromNode, data);
+static bool ScanModuleName(Lex* lex, String* out, bool allow_header_name,
+                           bool* relative_partition) {
+  StringInit(out, "");
+  if (relative_partition != NULL) {
+    *relative_partition = false;
+  }
+  if (allow_header_name && LexLookingAt(lex, TOK(string))) {
+    StringAppendChar(out, '"');
+    StringAppendString(out, &lex->spelling);
+    StringAppendChar(out, '"');
+    LexNextToken(lex);
+    return true;
+  }
+  if (allow_header_name && LexMatch(lex, TOK(less))) {
+    StringAppendChar(out, '<');
+    while (!LexEof(lex) && !LexLookingAt(lex, TOK(greater))) {
+      AppendScannedHeaderToken(lex, out);
+      LexNextToken(lex);
+    }
+    if (!LexMatch(lex, TOK(greater))) {
+      return false;
+    }
+    StringAppendChar(out, '>');
+    return true;
+  }
+  if (LexMatch(lex, TOK(colon))) {
+    if (relative_partition != NULL) {
+      *relative_partition = true;
+    }
+    StringAppendChar(out, ':');
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      return false;
+    }
+    StringAppendString(out, &lex->spelling);
+    LexNextToken(lex);
+    return true;
+  }
+  if (!ScanDottedModuleName(lex, out)) {
+    return false;
+  }
+  if (LexMatch(lex, TOK(colon))) {
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      return false;
+    }
+    StringAppendChar(out, ':');
+    StringAppendString(out, &lex->spelling);
+    LexNextToken(lex);
+  }
+  return true;
+}
+
+static void SetPrimaryModuleName(ModuleDependencyScan* scan,
+                                 const String* module_name) {
+  const char* colon = strchr(module_name->value, ':');
+  if (colon == NULL) {
+    StringSetString(&scan->primary_module, (String*)module_name);
+    return;
+  }
+  StringClear(&scan->primary_module);
+  StringAppendSegment(&scan->primary_module, module_name->value,
+                      (size_t)(colon - module_name->value));
+}
+
+static bool ScanModuleDependencies(const char* input, Vector* options,
+                                   Vector* target_opts,
+                                   ModuleDependencyScan* scan) {
+  ClearAllFiles();
+  compiler = malloc(sizeof(Compiler));
+  if (!CompilerInitFromFile(compiler, input, options, target_opts)) {
+    fprintf(stderr, "Cannot open file %s\n", input);
+    free(compiler);
+    compiler = NULL;
+    ClearAllFiles();
+    return false;
+  }
+
+  bool header_unit = BoolOptionValue(options, kOptionModuleHeader, false);
+  const char* requested_name = StringOptionValue(options, kOptionModuleName);
+  if (header_unit) {
+    if (requested_name == NULL || requested_name[0] == '\0') {
+      fprintf(stderr,
+              "-fmodule-header requires -fmodule-name with the header name\n");
+      CompilerDelete(compiler);
+      compiler = NULL;
+      ClearAllFiles();
+      return false;
+    }
+    StringSet(&scan->provided, requested_name);
+    scan->provides = true;
+    scan->is_interface = true;
+  }
+
+  Lex* lex = &compiler->lex;
+  LexNextToken(lex);
+  while (!LexEof(lex)) {
+    bool exported = false;
+    if (LexLookingAt(lex, TOK(export))) {
+      exported = true;
+      LexNextToken(lex);
+    }
+
+    if (LexAtContextualKeyword(lex, "module")) {
+      LexNextToken(lex);
+      if (LexMatch(lex, TOK(semicolon))) {
+        continue;  // Global module fragment.
+      }
+      if (LexLookingAt(lex, TOK(colon))) {
+        LexNextToken(lex);
+        if (LexLookingAt(lex, TOK(private))) {
+          LexNextToken(lex);
+          LexMatch(lex, TOK(semicolon));
+          continue;
+        }
+      }
+      String name;
+      bool relative = false;
+      if (ScanModuleName(lex, &name, false, &relative) &&
+          LexMatch(lex, TOK(semicolon))) {
+        bool partition = strchr(name.value, ':') != NULL;
+        StringSetString(&scan->provided, &name);
+        SetPrimaryModuleName(scan, &name);
+        scan->provides = exported || partition;
+        scan->is_interface = exported;
+        if (!exported && !partition) {
+          AppendUniqueModuleName(&scan->required, name.value);
+        }
+      }
+      StringDestruct(&name);
+      continue;
+    }
+
+    if (LexAtContextualKeyword(lex, "import")) {
+      LexNextToken(lex);
+      String name;
+      bool relative = false;
+      if (ScanModuleName(lex, &name, true, &relative) &&
+          LexMatch(lex, TOK(semicolon))) {
+        if (relative && scan->primary_module.length > 0) {
+          String resolved;
+          StringInit(&resolved, scan->primary_module.value);
+          StringAppendString(&resolved, &name);
+          AppendUniqueModuleName(&scan->required, resolved.value);
+          StringDestruct(&resolved);
+        } else {
+          AppendUniqueModuleName(&scan->required, name.value);
+        }
+      }
+      StringDestruct(&name);
+      continue;
+    }
+
+    if (!exported) {
+      LexNextToken(lex);
+    }
+  }
+
+  bool ok = NumErrors() == 0;
+  CompilerDelete(compiler);
+  compiler = NULL;
+  ClearAllFiles();
+  return ok;
+}
+
+static void WriteJsonString(FILE* out, const char* value) {
+  fputc('"', out);
+  for (const unsigned char* p = (const unsigned char*)value; *p != '\0'; p++) {
+    switch (*p) {
+      case '"':
+        fputs("\\\"", out);
+        break;
+      case '\\':
+        fputs("\\\\", out);
+        break;
+      case '\n':
+        fputs("\\n", out);
+        break;
+      case '\r':
+        fputs("\\r", out);
+        break;
+      case '\t':
+        fputs("\\t", out);
+        break;
+      default:
+        if (*p < 0x20) {
+          fprintf(out, "\\u%04x", *p);
+        } else {
+          fputc(*p, out);
+        }
+        break;
+    }
+  }
+  fputc('"', out);
+}
+
+static void DefaultObjectPath(const char* input, String* output) {
+  StringInit(output, input);
+  char* slash = strrchr(output->value, '/');
+  char* dot = strrchr(output->value, '.');
+  if (dot != NULL && (slash == NULL || dot > slash)) {
+    StringReplace(output, (size_t)(dot - output->value),
+                  output->length - (size_t)(dot - output->value), ".o", 2);
+  } else {
+    StringAppend(output, ".o");
+  }
+}
+
+static bool WriteModuleDependencies(const char* path, const char* input,
+                                    const char* primary_output,
+                                    const ModuleDependencyScan* scan) {
+  FILE* out = fopen(path, "w");
+  if (out == NULL) {
+    fprintf(stderr, "Cannot write dependency file %s\n", path);
+    return false;
+  }
+  fputs("{\n  \"version\": 1,\n  \"revision\": 0,\n  \"rules\": [\n"
+        "    {\n      \"primary-output\": ",
+        out);
+  WriteJsonString(out, primary_output);
+  if (scan->provides) {
+    fputs(",\n      \"provides\": [\n        {\n"
+          "          \"logical-name\": ",
+          out);
+    WriteJsonString(out, scan->provided.value);
+    fputs(",\n          \"source-path\": ", out);
+    WriteJsonString(out, input);
+    fprintf(out, ",\n          \"is-interface\": %s\n        }\n      ]",
+            scan->is_interface ? "true" : "false");
+  }
+  if (scan->required.length > 0) {
+    fputs(",\n      \"requires\": [\n", out);
+    for (size_t i = 0; i < scan->required.length; i++) {
+      fputs("        { \"logical-name\": ", out);
+      WriteJsonString(out,
+                      ((String*)VectorGet((Vector*)&scan->required, i))->value);
+      fputs(i + 1 == scan->required.length ? " }\n" : " },\n", out);
+    }
+    fputs("      ]", out);
+  }
+  fputs("\n    }\n  ]\n}\n", out);
+  bool ok = fclose(out) == 0;
+  if (!ok) {
+    fprintf(stderr, "Failed to finish dependency file %s\n", path);
+  }
+  return ok;
 }
 
 // Hidden -Xemit-module hook: compile the front end of `input` and serialize the
@@ -278,46 +614,125 @@ static bool EmitModule(const char* input, Vector* options, Vector* target_opts,
   compiler = malloc(sizeof(Compiler));
   if (!CompilerInitFromFile(compiler, input, options, target_opts)) {
     fprintf(stderr, "Cannot open file %s\n", input);
+    free(compiler);
+    compiler = NULL;
+    ClearAllFiles();
     return false;
+  }
+  TranslationUnitImportState* import_state =
+      TranslationUnitImportStateCreate(options);
+  CompilerSetImportState(
+      import_state,
+      (TranslationUnitImportReleaseFn)TranslationUnitImportStateRelease);
+  SetModuleImportHandler(DriverImportModule, import_state);
+  bool header_unit =
+      BoolOptionValue(options, kOptionModuleHeader, false);
+  if (header_unit) {
+    compiler->syntax.export_depth = 1;
   }
   bool ok = CompileFrontEndOnly(compiler);
   if (ok) {
+    if (!header_unit &&
+        !ModuleUnitIsInterfaceUnit(&compiler->module_unit) &&
+        compiler->module_unit.kind != kModuleUnitKindInternalPartition) {
+      fprintf(stderr,
+              "Cannot emit module artifact: input is not an importable module "
+              "unit\n");
+      ok = false;
+    }
+  }
+  if (ok) {
+    ModuleReachability reachability;
+    ModuleReachabilityInit(&reachability);
+    if (!ModuleReachabilityBuild(&reachability, header_unit)) {
+      fprintf(stderr, "Cannot emit module interface: %s\n",
+              reachability.error);
+      ok = false;
+    }
+
     Vector ns_roots;
     VectorInit(&ns_roots);
     VectorAppend(&ns_roots, compiler->global_namespace);
 
-    // File-scope C/C++ symbols live in the global hash table (not the
-    // namespace tree), so gather the exported ones explicitly.
-    Vector root_syms;
-    VectorInit(&root_syms);
-    HashTableTraverse(&compiler->global_symbol_table, CollectExportedFromBucket,
-                      &root_syms);
+    Vector dependencies;
+    Vector reexports;
+    Vector header_macros;
+    VectorInit(&dependencies);
+    VectorInit(&reexports);
+    VectorInit(&header_macros);
+    for (size_t i = 0; i < compiler->module_unit.imports.length; i++) {
+      ModuleImportRef* import =
+          (ModuleImportRef*)VectorGet(&compiler->module_unit.imports, i);
+      AppendUniqueModuleId(&dependencies, &import->id);
+      if (import->is_export_import) {
+        AppendUniqueModuleId(&reexports, &import->id);
+      }
+    }
 
-    // Prefer the module name declared by `[export] module foo;`; otherwise
-    // fall back to the input filename.
-    const char* module_name = compiler->module_name.length > 0
-                                  ? compiler->module_name.value
-                                  : input;
+    String module_name;
+    StringInit(&module_name, input);
+    const char* requested_module_name =
+        StringOptionValue(options, kOptionModuleName);
+    if (requested_module_name != NULL) {
+      StringSet(&module_name, requested_module_name);
+    } else if (compiler->module_unit.id.name.length > 0) {
+      StringClear(&module_name);
+      ModuleIdFormat(&compiler->module_unit.id, &module_name);
+    }
+    if (header_unit && compiler->syntax.lex != NULL &&
+        compiler->syntax.lex->preprocessor != NULL) {
+      PreprocessorCollectHeaderUnitMacros(
+          compiler->syntax.lex->preprocessor, &header_macros);
+    }
     ModuleWriteRequest req = {
-        .module_name = module_name,
+        .module_name = module_name.value,
         .target_triple =
             compiler->target_name != NULL ? compiler->target_name->value : "",
         .compiler_version = "davecc",
-        .flags = 0,
-        .root_symbols = &root_syms,
+        .flags = header_unit
+            ? kModuleArchiveHeaderUnit
+            : compiler->module_unit.kind == kModuleUnitKindPrimaryInterface
+                ? kModuleArchivePrimaryInterface
+                : compiler->module_unit.kind ==
+                          kModuleUnitKindInterfacePartition
+                      ? kModuleArchiveInterfacePartition
+                      : kModuleArchiveInternalPartition,
+        .root_symbols = &reachability.exported_roots,
         .root_namespaces = &ns_roots,
+        .dependencies = &dependencies,
+        .reexports = &reexports,
+        .header_macros = &header_macros,
     };
-    ok = ModuleWrite(module_path, &req);
-    if (!ok) {
-      fprintf(stderr, "Failed to write module %s\n", module_path);
+    if (ok) {
+      ok = ModuleWrite(module_path, &req);
     }
-    VectorDestruct(&root_syms);
+    if (!ok) {
+      const char* detail = ModuleWriteLastError();
+      if (detail != NULL) {
+        fprintf(stderr, "Failed to write module %s: %s\n", module_path,
+                detail);
+      } else {
+        fprintf(stderr, "Failed to write module %s\n", module_path);
+      }
+    }
     VectorDestruct(&ns_roots);
+    VectorDestructWithContents(
+        &dependencies, (VectorElementDestructor)StringDelete,
+        /*free_element=*/false);
+    VectorDestructWithContents(&reexports,
+                               (VectorElementDestructor)StringDelete,
+                               /*free_element=*/false);
+    VectorDestruct(&header_macros);
+    StringDestruct(&module_name);
+    ModuleReachabilityDestruct(&reachability);
   } else {
     fprintf(stderr, "Front end failed for %s\n", input);
   }
   CompilerDelete(compiler);
   compiler = NULL;
+  SetModuleImportHandler(NULL, NULL);
+  CompilerSetImportState(NULL, NULL);
+  TranslationUnitImportStateDelete(import_state);
   ClearAllFiles();
   return ok;
 }
@@ -340,86 +755,29 @@ static bool LoadModule(const char* module_path, Vector* options) {
            loaded.module_name.value, loaded.format_version,
            loaded.target_triple.value, loaded.root_symbols.length,
            loaded.root_namespaces.length);
-    LoadedModuleDestruct(&loaded);
+    LoadedModuleReleaseGraph(&loaded);
   } else {
     fprintf(stderr, "Failed to load module %s\n", module_path);
   }
   CompilerDelete(compiler);
   compiler = NULL;
+  if (ok) {
+    LoadedModuleDestruct(&loaded);
+  }
   ClearAllFiles();
   return ok;
 }
 
-// C++20 module import support for normal compilation.  The compiler front end
-// invokes the registered handler (via CompilerImportModule) when it parses an
-// `import foo;` directive; we resolve `<foo>.dcm` across the prebuilt-module
-// search paths, load it, and install its exported names into the active
-// compiler's symbol tables.
-typedef struct {
-  Vector search_paths;  // const char* directories (borrowed from options).
-  Vector loaded;        // LoadedModule* loaded during compilation (owned).
-} DriverImportState;
-
-static bool FileExists(const char* path) {
-  FILE* f = fopen(path, "r");
-  if (f == NULL) {
-    return false;
-  }
-  fclose(f);
-  return true;
-}
-
+// C++20 module import support for normal compilation.  Each translation unit
+// gets its own TranslationUnitImportState so loaded module graphs are never
+// reused after CompilerDelete.
 static bool DriverImportModule(void* ctx, const char* module_name) {
-  DriverImportState* state = (DriverImportState*)ctx;
-  char path[4096];
-  const char* found = NULL;
-  for (size_t i = 0; i < state->search_paths.length && found == NULL; i++) {
-    const char* dir = (const char*)VectorGet(&state->search_paths, i);
-    snprintf(path, sizeof(path), "%s/%s.dcm", dir, module_name);
-    if (FileExists(path)) {
-      found = path;
-    }
+  TranslationUnitImportState* state = (TranslationUnitImportState*)ctx;
+  bool ok = TranslationUnitImportStateImport(state, module_name);
+  if (!ok) {
+    CompilerSetLastImportError(TranslationUnitImportStateLastError(state));
   }
-  if (found == NULL) {
-    // Fall back to the current directory.
-    snprintf(path, sizeof(path), "%s.dcm", module_name);
-    if (FileExists(path)) {
-      found = path;
-    }
-  }
-  if (found == NULL) {
-    return false;
-  }
-
-  LoadedModule* m = calloc(1, sizeof(LoadedModule));
-  if (!ModuleLoad(found, m)) {
-    free(m);
-    return false;
-  }
-  bool ok = ModuleInstallLoaded(m);
-  VectorAppend(&state->loaded, m);  // Keep alive for the rest of the compile.
   return ok;
-}
-
-static void DriverImportStateInit(DriverImportState* state, Vector* options) {
-  VectorInit(&state->search_paths);
-  VectorInit(&state->loaded);
-  for (size_t i = 0; i < options->length; i++) {
-    CompilerOptionValue* opt = options->value.p[i];
-    if (opt->opt == kOptionPrebuiltModulePath) {
-      VectorAppend(&state->search_paths, opt->value.svalue.value);
-    }
-  }
-}
-
-static void DriverImportStateDestruct(DriverImportState* state) {
-  for (size_t i = 0; i < state->loaded.length; i++) {
-    LoadedModule* m = (LoadedModule*)VectorGet(&state->loaded, i);
-    LoadedModuleDestruct(m);
-    free(m);
-  }
-  VectorDestruct(&state->loaded);
-  VectorDestruct(&state->search_paths);
 }
 
 int main(int argc, char * argv[]) {
@@ -474,6 +832,56 @@ int main(int argc, char * argv[]) {
                  &compiler_options);
   }
   
+  String* deps_file = OptionStringValue(kOptionDepsFile, &compiler_options);
+  String* deps_format = OptionStringValue(kOptionDepsFormat, &compiler_options);
+  bool deps_scan_only =
+      BoolOptionValue(&compiler_options, kOptionDepsScanOnly, false);
+  if (deps_format != NULL && !StringEqual(deps_format, "p1689r5")) {
+    fprintf(stderr, "Unsupported dependency format '%s'; use p1689r5\n",
+            deps_format->value);
+    exit(1);
+  }
+  if (deps_scan_only && deps_file == NULL) {
+    fprintf(stderr, "-fdeps-scan-only requires -fdeps-file\n");
+    exit(1);
+  }
+  if (deps_file != NULL) {
+    const char* scan_input = NULL;
+    size_t input_count = 0;
+    for (size_t i = 0; i < compiler_options.length; i++) {
+      CompilerOptionValue* opt = compiler_options.value.p[i];
+      if (opt->opt == kOptionInputFile) {
+        scan_input = opt->value.svalue.value;
+        input_count++;
+      }
+    }
+    if (input_count != 1) {
+      fprintf(stderr, "-fdeps-file requires exactly one source input\n");
+      exit(1);
+    }
+    ModuleDependencyScan scan;
+    ModuleDependencyScanInit(&scan);
+    bool ok =
+        ScanModuleDependencies(scan_input, &compiler_options, target_opts, &scan);
+    String default_output;
+    String* output = OptionStringValue(kOptionOutputFile, &compiler_options);
+    if (output == NULL) {
+      DefaultObjectPath(scan_input, &default_output);
+      output = &default_output;
+    }
+    if (ok) {
+      ok = WriteModuleDependencies(deps_file->value, scan_input, output->value,
+                                   &scan);
+    }
+    if (OptionStringValue(kOptionOutputFile, &compiler_options) == NULL) {
+      StringDestruct(&default_output);
+    }
+    ModuleDependencyScanDestruct(&scan);
+    if (!ok || deps_scan_only) {
+      exit(ok ? 0 : 1);
+    }
+  }
+
   // Hidden C++20-module hooks.  -Xemit-module compiles the front end and writes
   // a module instead of an object file; -Xload-module loads and verifies one.
   String* emit_module = OptionStringValue(kOptionEmitModule, &compiler_options);
@@ -494,32 +902,59 @@ int main(int argc, char * argv[]) {
     exit(LoadModule(load_module->value, &compiler_options) ? 0 : 1);
   }
 
-  // Any C files to compile?
-  DriverImportState import_state;
-  if (run_compiler) {
-    // Register the module import hook so `import foo;` resolves and installs a
-    // prebuilt module during parsing.
-    DriverImportStateInit(&import_state, &compiler_options);
-    SetModuleImportHandler(DriverImportModule, &import_state);
-
+  // Public coordinated mode: emit the module artifact and then continue with
+  // normal object generation in the same driver invocation.
+  String* module_output =
+      OptionStringValue(kOptionModuleOutput, &compiler_options);
+  if (module_output != NULL) {
+    const char* module_input = NULL;
+    size_t input_count = 0;
     for (size_t i = 0; i < compiler_options.length; i++) {
       CompilerOptionValue* opt = compiler_options.value.p[i];
       if (opt->opt == kOptionInputFile) {
-        String* object_file = CompileTranslationUnit(opt->value.svalue.value, &compiler_options, target_opts);
+        module_input = opt->value.svalue.value;
+        input_count++;
+      }
+    }
+    if (input_count != 1) {
+      fprintf(stderr, "-fmodule-output requires exactly one source input\n");
+      exit(1);
+    }
+    if (!EmitModule(module_input, &compiler_options, target_opts,
+                    module_output->value)) {
+      exit(1);
+    }
+  }
+
+  // Any C files to compile?
+  if (run_compiler) {
+    for (size_t i = 0; i < compiler_options.length; i++) {
+      CompilerOptionValue* opt = compiler_options.value.p[i];
+      if (opt->opt == kOptionInputFile) {
+        // One import store per translation unit: LoadedModule graphs must stay
+        // alive through that compile and be released before CompilerDelete.
+        TranslationUnitImportState* import_state =
+            TranslationUnitImportStateCreate(&compiler_options);
+        CompilerSetImportState(import_state,
+                               (TranslationUnitImportReleaseFn)
+                                   TranslationUnitImportStateRelease);
+        SetModuleImportHandler(DriverImportModule, import_state);
+
+        String* object_file = CompileTranslationUnit(opt->value.svalue.value,
+                                                     &compiler_options,
+                                                     target_opts);
+        SetModuleImportHandler(NULL, NULL);
+        CompilerSetImportState(NULL, NULL);
+        TranslationUnitImportStateDelete(import_state);
+
         if (object_file != NULL) {
           VectorAppend(&linker_args, object_file->value);
         } else {
-          // If -S was specified we won't have an output file.
-          if (!BoolOptionValue(&compiler_options, kOptionAssemblyOutput, false)) {
-            fprintf(stderr, "Failed to compile\n");
-            exit(1);
-          }
+          fprintf(stderr, "Failed to compile\n");
+          exit(1);
         }
       }
     }
-
-    SetModuleImportHandler(NULL, NULL);
-    DriverImportStateDestruct(&import_state);
   }
   
   if (asm_files.length > 0) {

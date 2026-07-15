@@ -508,6 +508,99 @@ void PreprocessorUndefineMacro(Preprocessor* p, String* macro_name) {
    }
 }
 
+static bool MacroDefinitionsEqual(const Macro* left, const Macro* right) {
+  if (left->is_function_like != right->is_function_like ||
+      left->varargs != right->varargs ||
+      left->args.length != right->args.length ||
+      !StringEqualString((String*)&left->replacement_text,
+                         (String*)&right->replacement_text)) {
+    return false;
+  }
+  for (size_t i = 0; i < left->args.length; i++) {
+    String* left_arg = (String*)VectorGet((Vector*)&left->args, i);
+    String* right_arg = (String*)VectorGet((Vector*)&right->args, i);
+    if (!StringEqualString(left_arg, right_arg)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+typedef struct {
+  Vector* macros;
+} HeaderUnitMacroCollector;
+
+static void CollectHeaderUnitMacroNode(BinaryTreeNode* node, int depth,
+                                       void* data) {
+  (void)depth;
+  Macro* macro = (Macro*)node;
+  HeaderUnitMacroCollector* collector = (HeaderUnitMacroCollector*)data;
+  if (!macro->undefined &&
+      macro->location != SOURCE_LOCATION_COMMAND_LINE &&
+      macro->location != SOURCE_LOCATION_MISSING) {
+    VectorAppend(collector->macros, macro);
+  }
+}
+
+static void CollectHeaderUnitMacroBucket(void* entry, void* data) {
+  BinaryTreeTraverse((BinaryTree*)entry, CollectHeaderUnitMacroNode, data);
+}
+
+void PreprocessorCollectHeaderUnitMacros(Preprocessor* p, Vector* out) {
+  HeaderUnitMacroCollector collector = {.macros = out};
+  HashTableTraverse(&p->macros, CollectHeaderUnitMacroBucket, &collector);
+}
+
+bool PreprocessorCanImportMacro(Preprocessor* p, const Macro* macro) {
+  Macro* existing = HashTableSearch(&p->macros, macro->name.value);
+  return existing == NULL || existing->undefined ||
+         MacroDefinitionsEqual(existing, macro);
+}
+
+bool PreprocessorImportMacro(Preprocessor* p, const Macro* macro,
+                             bool* inserted) {
+  if (inserted != NULL) {
+    *inserted = false;
+  }
+  Macro* existing = HashTableSearch(&p->macros, macro->name.value);
+  if (existing != NULL && !existing->undefined) {
+    return MacroDefinitionsEqual(existing, macro);
+  }
+  if (existing != NULL) {
+    existing->undefined = false;
+    existing->is_function_like = macro->is_function_like;
+    existing->varargs = macro->varargs;
+    StringSetString(&existing->replacement_text,
+                    (String*)&macro->replacement_text);
+    VectorDestructWithContents(&existing->args,
+                               (VectorElementDestructor)StringDelete,
+                               /*free_element=*/false);
+    VectorInit(&existing->args);
+    for (size_t i = 0; i < macro->args.length; i++) {
+      String* arg = (String*)VectorGet((Vector*)&macro->args, i);
+      VectorAppend(&existing->args, NewString(arg->value));
+    }
+  } else {
+    Vector args;
+    VectorInit(&args);
+    for (size_t i = 0; i < macro->args.length; i++) {
+      String* arg = (String*)VectorGet((Vector*)&macro->args, i);
+      VectorAppend(&args, NewString(arg->value));
+    }
+    Macro* copy =
+        NewMacro(macro->name.value, macro->is_function_like, macro->varargs,
+                 &args, (String*)&macro->replacement_text, macro->location);
+    // `copy` owns the argument strings; only the temporary vector backing
+    // remains here.
+    VectorDestruct(&args);
+    HashTableInsert(&p->macros, copy);
+  }
+  if (inserted != NULL) {
+    *inserted = true;
+  }
+  return true;
+}
+
 void PreprocessorError(Preprocessor* preprocessor, const char* error, ...) {
   va_list ap;
   va_start(ap, error);

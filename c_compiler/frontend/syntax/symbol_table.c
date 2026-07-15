@@ -23,6 +23,8 @@ static NamespaceAlias* NewNamespaceAlias(String* name, Namespace* target) {
   NamespaceAlias* alias = malloc(sizeof(NamespaceAlias));
   StringInit(&alias->name, name->value);
   alias->target = target;
+  alias->is_exported = false;
+  alias->is_imported_module_alias = false;
   return alias;
 }
 
@@ -785,6 +787,78 @@ Symbol* FindGlobalSymbol(String* name) {
 
 Symbol* FindGlobalTag(String* name) {
   return HashTableSearch(&compiler->global_tag_table, name);
+}
+
+bool SymbolIsTagSymbol(Symbol* sym) {
+  if (sym == NULL || sym->type == NULL || sym->flags.is_using_alias) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL) {
+    return sym->type->info.struct_info->tag_symbol == sym;
+  }
+  if (TypeIsEnum(sym->type) && sym->type->info.enum_info != NULL) {
+    return sym->type->info.enum_info->tag_symbol == sym;
+  }
+  return false;
+}
+
+static size_t HashSymbol(void* value, HashTable* table, HashMode mode);
+
+static void CollectSymbolsFromTree(BinaryTreeNode* node, Vector* symbols,
+                                   Symbol* skip) {
+  if (node == NULL) {
+    return;
+  }
+  CollectSymbolsFromTree(node->left, symbols, skip);
+  CollectSymbolsFromTree(node->right, symbols, skip);
+  SymbolNode* sn = (SymbolNode*)node;
+  if (sn->symbol != NULL && sn->symbol != skip) {
+    VectorAppend(symbols, sn->symbol);
+  }
+}
+
+static void RebuildBinaryTreeWithout(BinaryTree* tree, Symbol* remove) {
+  if (tree == NULL || remove == NULL) {
+    return;
+  }
+  Vector symbols;
+  VectorInit(&symbols);
+  CollectSymbolsFromTree(tree->root, &symbols, remove);
+  BinaryTreeDestruct(tree, NULL);
+  tree->root = NULL;
+  tree->node_count = 0;
+  for (size_t i = 0; i < symbols.length; i++) {
+    Symbol* sym = (Symbol*)VectorGet(&symbols, i);
+    SymbolNode* node = NewSymbolNode(sym);
+    BinaryTreeInsert(tree, &node->header);
+  }
+  VectorDestruct(&symbols);
+}
+
+bool UninstallGlobalSymbol(Symbol* symbol, bool is_tag) {
+  if (symbol == NULL) {
+    return false;
+  }
+  HashTable* table =
+      is_tag ? &compiler->global_tag_table : &compiler->global_symbol_table;
+  size_t index =
+      HashSymbol(&symbol->name, table, kHashSearch) % table->size;
+  BinaryTree* bucket = (BinaryTree*)table->entries[index];
+  if (bucket != NULL) {
+    RebuildBinaryTreeWithout(bucket, symbol);
+  }
+  symbol->namespace_ = NULL;
+  return true;
+}
+
+bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag) {
+  if (ns == NULL || symbol == NULL) {
+    return false;
+  }
+  BinaryTree* tree = is_tag ? &ns->tag_table : &ns->symbol_table;
+  RebuildBinaryTreeWithout(tree, symbol);
+  symbol->namespace_ = NULL;
+  return true;
 }
 
 bool InsertLocalSymbol(LocalSymbolTable* table, Symbol* symbol) {

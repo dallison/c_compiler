@@ -74,6 +74,13 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-Xemit-module", kCompilerOptionString, kOptionEmitModule, false, "(hidden) Emit a module (.dcm) file"},
     {"-Xload-module", kCompilerOptionString, kOptionLoadModule, false, "(hidden) Load and verify a module (.dcm) file"},
     {"-fprebuilt-module-path", kCompilerOptionString, kOptionPrebuiltModulePath, false, "Search dir for prebuilt .dcm modules"},
+    {"-fmodule-file", kCompilerOptionString, kOptionModuleFile, false, "Map module-name=path to a prebuilt .dcm module"},
+    {"-fmodule-header", kCompilerOptionBool, kOptionModuleHeader, false, "Compile input as a C++20 header unit"},
+    {"-fmodule-name", kCompilerOptionString, kOptionModuleName, false, "Set the logical module or header-unit name"},
+    {"-fmodule-output", kCompilerOptionString, kOptionModuleOutput, false, "Emit a .dcm module artifact alongside normal output"},
+    {"-fdeps-file", kCompilerOptionString, kOptionDepsFile, false, "Write P1689R5 module dependency information"},
+    {"-fdeps-format", kCompilerOptionString, kOptionDepsFormat, false, "Module dependency format (p1689r5)"},
+    {"-fdeps-scan-only", kCompilerOptionBool, kOptionDepsScanOnly, false, "Scan module dependencies without compiling"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -110,17 +117,46 @@ bool CompilerExceptionsEnabled(void) {
 // in compiler.h for why this indirection exists).
 static ModuleImportHandler g_module_import_handler = NULL;
 static void* g_module_import_handler_ctx = NULL;
+static char g_last_import_error[512];
+static const char* g_last_import_error_ptr = NULL;
+static void* g_translation_unit_import_state = NULL;
+static TranslationUnitImportReleaseFn g_translation_unit_import_release = NULL;
 
 void SetModuleImportHandler(ModuleImportHandler fn, void* ctx) {
   g_module_import_handler = fn;
   g_module_import_handler_ctx = ctx;
 }
 
+void CompilerSetImportState(void* state, TranslationUnitImportReleaseFn release) {
+  g_translation_unit_import_state = state;
+  g_translation_unit_import_release = release;
+}
+
+void CompilerSetLastImportError(const char* message) {
+  if (message == NULL || message[0] == '\0') {
+    g_last_import_error_ptr = NULL;
+    g_last_import_error[0] = '\0';
+    return;
+  }
+  snprintf(g_last_import_error, sizeof(g_last_import_error), "%s", message);
+  g_last_import_error_ptr = g_last_import_error;
+}
+
+const char* CompilerImportLastError(void) {
+  return g_last_import_error_ptr;
+}
+
 bool CompilerImportModule(const char* module_name) {
+  CompilerSetLastImportError(NULL);
   if (g_module_import_handler == NULL) {
     return false;
   }
-  return g_module_import_handler(g_module_import_handler_ctx, module_name);
+  bool ok = g_module_import_handler(g_module_import_handler_ctx, module_name);
+  return ok;
+}
+
+bool CompilerHasModuleImportHandler(void) {
+  return g_module_import_handler != NULL;
 }
 
 // Add new targets here.
@@ -1547,8 +1583,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
   // for command-line options (a leading '-') by later tools like the linker.
   StringInit(&compiler->infile, strcmp(filename, "-") == 0 ? "stdin" : filename);
-  StringInit(&compiler->module_name, "");
-  compiler->is_module_interface = false;
+  ModuleUnitInfoInit(&compiler->module_unit);
   VectorInit(&compiler->functions);
   VectorInit(&compiler->emitted_function_asm_names);
   VectorInit(&compiler->initialized_static_variables);
@@ -1974,7 +2009,6 @@ void CompilerDestruct(Compiler* compiler) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
   }
   VectorDestruct(&compiler->pending_template_instantiations);
-  ASTArenaRelease();
 
   // Free function-definition symbols that were superseded by an earlier
   // declaration and so never entered the global symbol table.  Deleting each
@@ -1991,16 +2025,6 @@ void CompilerDestruct(Compiler* compiler) {
     fclose(compiler->ast_output_file);
   }
   DebugBuilderDestruct(&compiler->debug_builder);
-  
-  DeleteGlobalNamespace();
-  ClearSymbolTable(&compiler->global_symbol_table, true);
-  ClearSymbolTable(&compiler->global_tag_table, true);
-  // ClearSymbolTable only empties the tables; release their bucket arrays too.
-  HashTableDestruct(&compiler->global_symbol_table);
-  HashTableDestruct(&compiler->global_tag_table);
-
-  StringDestruct(&compiler->infile);
-  StringDestruct(&compiler->module_name);
 
   for (size_t i = 0; i < compiler->functions.length; i++) {
     compiler->target->cleanup(compiler->functions.value.p[i]);
@@ -2009,6 +2033,28 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(
       &compiler->emitted_function_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+
+  // Imported module graphs use heap Symbol/Namespace nodes that must be
+  // detached and released after AST/IR teardown has finished using them, but
+  // before the AST arena and TU symbol tables disappear.
+  if (g_translation_unit_import_release != NULL &&
+      g_translation_unit_import_state != NULL) {
+    g_translation_unit_import_release(g_translation_unit_import_state);
+    g_translation_unit_import_state = NULL;
+    g_translation_unit_import_release = NULL;
+  }
+
+  ASTArenaRelease();
+
+  DeleteGlobalNamespace();
+  ClearSymbolTable(&compiler->global_symbol_table, true);
+  ClearSymbolTable(&compiler->global_tag_table, true);
+  // ClearSymbolTable only empties the tables; release their bucket arrays too.
+  HashTableDestruct(&compiler->global_symbol_table);
+  HashTableDestruct(&compiler->global_tag_table);
+
+  StringDestruct(&compiler->infile);
+  ModuleUnitInfoDestruct(&compiler->module_unit);
 
   if (compiler->target != NULL) {
     DeleteCompilerTarget(compiler->target);

@@ -14,6 +14,7 @@
 #include "expr_semantics.h"
 #include "semantics.h"
 #include "type.h"
+#include "type_internal.h"
 #include "type_template.h"
 
 typedef struct ConstexprBinding ConstexprBinding;
@@ -1833,9 +1834,25 @@ Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
   if (definition == NULL &&
       symbol->type->info.function.template_origin != NULL &&
       symbol->type->template_arguments != NULL) {
-    definition = TypeInstantiateFunctionTemplate(
-        &compiler->syntax, symbol->type->info.function.template_origin,
-        symbol->type->template_arguments);
+    Symbol* origin = symbol->type->info.function.template_origin;
+    Vector* args = symbol->type->template_arguments;
+    definition = FindFunctionTemplateInstantiation(origin, symbol->type, args);
+    if (definition == NULL) {
+      TypeRecord* origin_type = origin->type;
+      if (origin_type != NULL && TypeIsFunction(origin_type) &&
+          origin_type->info.function.template_parameters.length == 0 &&
+          origin->value.func_defn != NULL &&
+          origin->value.func_defn->type != NULL &&
+          TypeIsFunction(origin->value.func_defn->type) &&
+          origin->value.func_defn->type->info.function.template_parameters.length > 0) {
+        origin_type = origin->value.func_defn->type;
+      }
+      if (origin_type != NULL && TypeIsFunction(origin_type) &&
+          origin_type->info.function.template_parameters.length > 0) {
+        definition = TypeInstantiateFunctionTemplate(
+            &compiler->syntax, origin, args);
+      }
+    }
   }
   if (definition == NULL && symbol->value.func_defn != NULL &&
       symbol->value.func_defn->type != NULL &&

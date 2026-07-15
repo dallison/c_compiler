@@ -1555,7 +1555,7 @@ static void InstantiateClonedFunctionTemplateCall(
   }
   if (instantiated != NULL && instantiated != id->symbol) {
     id->symbol = instantiated;
-    ASTNodeSetType(call->left, instantiated->type);
+    ASTNodeSetInstantiatedCalleeType(call->left, instantiated->type);
     SetClonedCallReturnType(call, instantiated->type);
   }
 }

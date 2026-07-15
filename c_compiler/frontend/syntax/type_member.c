@@ -855,6 +855,19 @@ void StructInsertMemberIntoTables(Struct* str, StructMember* member) {
   MapInsert(&str->symbol_name_table, kv);
 }
 
+void StructRebuildMemberLookupTables(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = (StructMember*)VectorGet(&str->members, i);
+    if (member == NULL || member->symbol == NULL) {
+      continue;
+    }
+    StructInsertMemberIntoTables(str, member);
+  }
+}
+
 void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
   if (member->is_member_function) {
     RegisterCXXVirtualMember(parser, str, member);

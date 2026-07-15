@@ -84,6 +84,10 @@ typedef struct SerializeContext {
   Vector string_pool;  // handle-1 -> char* (owned copy, NUL terminated).
   Vector string_lens;  // handle-1 -> length (as int64) of the interned string.
 
+  // Module archives filter namespace lookup tables to exported names.  Hidden
+  // dependencies are still interned through direct graph references.
+  bool writing_module_interface;
+  bool writing_internal_partition;
   bool error;
 } SerializeContext;
 

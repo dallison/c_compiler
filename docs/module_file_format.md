@@ -55,11 +55,14 @@ The header begins with an 8-byte magic `"DCCMOD\x01\x00"`
 | `module_name`      | 2 | length-delimited  | Logical module name (may be empty). |
 | `target_triple`    | 3 | length-delimited  | Target description (may be empty). |
 | `compiler_version` | 4 | length-delimited  | Producer version string. |
-| `flags`            | 5 | varint            | Reserved (0 for now). |
+| `flags`            | 5 | varint            | Module-unit kind (`primary interface`, `interface partition`, `internal partition`, or `header unit`). |
 | `root_count`       | 6 | varint            | Advisory count of exported root symbols. |
 | `root_handle`      | 7 | varint (repeated) | Pool handle of each exported root symbol. |
 | `ns_root_count`    | 8 | varint            | Advisory count of exported root namespaces. |
 | `ns_root_handle`   | 9 | varint (repeated) | Pool handle of each exported root namespace. |
+| `dependency`       | 10 | length-delimited (repeated) | Direct logical module dependencies. |
+| `reexport`         | 11 | length-delimited (repeated) | Direct dependencies made visible by `export import`. |
+| `header_macro`     | 12 | length-delimited (repeated) | Macro definitions exported by a header unit. |
 
 `format_version` is validated with a **strict-match** policy: a mismatch against
 `MODULE_FORMAT_VERSION` is rejected. The `*_count` fields are advisory; the
@@ -153,14 +156,26 @@ Codegen-only and transient fields (reference counts, `codegen_info`, DIEs,
 recomputed on load. Namespace symbol/tag tables are stored as flat handle lists
 and rebuilt with `NamespaceInsertSymbol` / `NamespaceInsertTag`.
 
+### Symbol module-identity fields (format v1)
+
+Added in milestone 5 without bumping `MODULE_FORMAT_VERSION`. Old archives omit
+these fields; readers default linkage to external and leave module strings empty.
+
+| Field | Number | Wire type | Meaning |
+|-------|--------|-----------|---------|
+| `cxx_linkage` | 48 | varint | `0` external, `1` internal, `2` module linkage. |
+| `owning_module_name` | 49 | length-delimited | Named-module purview owner (may be empty). |
+| `owning_module_partition` | 50 | length-delimited | Owning partition name (may be empty). |
+| `import_source_module` | 51 | length-delimited | Import provenance stamped on install (usually empty on write). |
+
 ## 8. Loading requirements and lifetime
 
 `ModuleLoad` requires an initialized `compiler` global, because deserialized
-objects are allocated from the compiler's arenas (`NewSymbol` / `NewTypeRecord` /
-etc.). The returned `LoadedModule` keeps the `DeserializeContext` and the raw
-member byte buffers alive, because the loaded objects hold pointers into the
-interned string pool and the resolution vectors. `LoadedModuleDestruct` frees
-those buffers but not the arena-owned objects themselves.
+objects use compiler allocation and type registries. The returned `LoadedModule`
+keeps the `DeserializeContext` and raw member byte buffers alive while imported
+names are installed. `LoadedModuleReleaseGraph` detaches and destroys the loaded
+graph after importer symbols have been uninstalled; `LoadedModuleDestruct`
+then releases metadata, macro definitions, and member buffers.
 
 ## 9. Extensibility
 
@@ -175,18 +190,20 @@ those buffers but not the arena-owned objects themselves.
 
 ## 10. Producing and inspecting a module
 
-The driver exposes hidden hooks (see `davecc/main.c`):
+The public driver can produce the object and module artifact together:
 
 ```
-# Emit a module interface from a C++20 module unit:
-davecc -std=c++20 -target x86_64 -Xemit-module foo.dcm foo.cppm
-
-# Load and verify a module, printing a short summary:
-davecc -std=c++20 -target x86_64 -Xload-module foo.dcm
+# Compile a module interface to coordinated object and .dcm outputs:
+davecc -std=c++20 -target x86_64 -c \
+  -fmodule-output foo.dcm foo.cppm -o foo.o
 
 # Import a prebuilt module during a normal compile:
 davecc -std=c++20 -target x86_64 -fprebuilt-module-path=. -c main.cpp -o main.o
 ```
+
+`-Xemit-module` and `-Xload-module` remain available as low-level diagnostics.
+See `docs/cxx20_modules.md` for dependency scanning, header units, partitions,
+and Bazel rules.
 
 Because the container is a standard `ar` archive, the member list can also be
 inspected with ordinary archive tooling (e.g. `ar t foo.dcm`).

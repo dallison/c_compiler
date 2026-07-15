@@ -1,0 +1,433 @@
+#!/bin/bash
+# Exercise the complete emit, import, object, link, and execute module workflow.
+set -uo pipefail
+
+DAVECC=""
+MODULEDUMP=""
+TARGET=""
+LIBC=""
+INTERPRETER=""
+SUITE_ROOT=""
+declare -a COMPILE_ARGS=()
+declare -a INTERP_ARGS=()
+
+usage() {
+  echo "usage: $0 --davecc PATH --moduledump PATH --target NAME --libc PATH --interpreter PATH" >&2
+  exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --davecc) DAVECC=$2; shift 2 ;;
+    --moduledump) MODULEDUMP=$2; shift 2 ;;
+    --target) TARGET=$2; shift 2 ;;
+    --libc) LIBC=$2; shift 2 ;;
+    --interpreter) INTERPRETER=$2; shift 2 ;;
+    --suite-root) SUITE_ROOT=$2; shift 2 ;;
+    --compile-arg) COMPILE_ARGS+=("$2"); shift 2 ;;
+    --interp-arg) INTERP_ARGS+=("$2"); shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "unknown option: $1" >&2; usage ;;
+  esac
+done
+
+if [ -z "$DAVECC" ] || [ -z "$MODULEDUMP" ] || [ -z "$TARGET" ] ||
+   [ -z "$LIBC" ] || [ -z "$INTERPRETER" ]; then
+  usage
+fi
+
+resolve_runfile() {
+  local path=$1
+  if [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-}" ]; then
+    local rooted="${TEST_SRCDIR}/${TEST_WORKSPACE}/${path}"
+    if [ -e "$rooted" ]; then
+      echo "$rooted"
+      return
+    fi
+  fi
+  echo "$path"
+}
+
+DAVECC=$(resolve_runfile "$DAVECC")
+MODULEDUMP=$(resolve_runfile "$MODULEDUMP")
+LIBC=$(resolve_runfile "$LIBC")
+INTERPRETER=$(resolve_runfile "$INTERPRETER")
+if [ -n "$SUITE_ROOT" ]; then
+  SUITE_ROOT=$(resolve_runfile "$SUITE_ROOT")
+elif [ -n "${TEST_SRCDIR:-}" ] && [ -n "${TEST_WORKSPACE:-}" ]; then
+  SUITE_ROOT="${TEST_SRCDIR}/${TEST_WORKSPACE}/cxx_testsuite"
+else
+  SUITE_ROOT="cxx_testsuite"
+fi
+
+FIXTURES="$SUITE_ROOT/tests/modules"
+work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-modules.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+fail() {
+  echo "FAIL: $1" >&2
+  if [ -f "$work/command.log" ]; then
+    sed 's/^/  /' "$work/command.log" >&2
+  fi
+  exit 1
+}
+
+run() {
+  "$@" >"$work/command.log" 2>&1
+}
+
+echo "=== cxx_testsuite modules: target=$TARGET ==="
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fmodule-output "$work/hello.dcm" \
+  -fdeps-file "$work/hello-deps.json" -fdeps-format=p1689r5 \
+  "$FIXTURES/hello.cppm" -o "$work/hello.o" ||
+  fail "compile coordinated module artifacts"
+grep -Fq '"logical-name": "hello"' "$work/hello-deps.json" ||
+  fail "scan provided module dependency"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xload-module "$work/hello.dcm" ||
+  fail "load hello.dcm"
+grep -Fq "module hello:" "$work/command.log" ||
+  fail "loaded module summary"
+
+run "$MODULEDUMP" "$work/hello.dcm" ||
+  fail "inspect hello.dcm"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_hello.cpp" \
+  -o "$work/use_hello.o" ||
+  fail "compile module importer"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fmodule-file "hello=$work/hello.dcm" "$FIXTURES/use_hello.cpp" \
+  -o "$work/use_hello_mapping.s" ||
+  fail "compile importer with explicit module mapping"
+
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_hello.o" "$work/hello.o" "$LIBC" -o "$work/hello.bin" ||
+  fail "link module executable"
+
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/hello.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_hidden.cpp" \
+  -o "$work/use_hidden.s"
+if ! grep -Fq "error:" "$work/command.log"; then
+  fail "non-exported declaration was visible"
+fi
+grep -Fq "module_hidden" "$work/command.log" ||
+  fail "hidden declaration diagnostic"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fprebuilt-module-path "$work" "$FIXTURES/import_missing.cpp" \
+  -o "$work/import_missing.s"
+if ! grep -Fq "error:" "$work/command.log"; then
+  fail "missing module import succeeded"
+fi
+grep -Fq "Cannot import module 'does_not_exist'" "$work/command.log" ||
+  fail "missing module diagnostic"
+grep -Fq "no prebuilt module file found" "$work/command.log" ||
+  fail "missing module detail diagnostic"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/hello_wrong_name.dcm" \
+  "$FIXTURES/wrong_module_name.cppm" ||
+  fail "emit mismatched module name archive"
+cp "$work/hello.dcm" "$work/hello_good.dcm"
+cp "$work/hello_wrong_name.dcm" "$work/hello.dcm"
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_hello.cpp" \
+  -o "$work/use_wrong_name.s"
+if ! grep -Fq "error:" "$work/command.log"; then
+  fail "module name mismatch import succeeded"
+fi
+grep -Fq "module file declares 'other'" "$work/command.log" ||
+  fail "module name mismatch diagnostic"
+cp "$work/hello_good.dcm" "$work/hello.dcm"
+
+printf 'not a module\n' >"$work/corrupt.dcm"
+if run "$DAVECC" -target "$TARGET" -std=c++20 \
+     -Xload-module "$work/corrupt.dcm"; then
+  fail "corrupt module load succeeded"
+fi
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/extension_probe.dcm" "$FIXTURES/extension_probe.ixx" ||
+  fail "compile .ixx module interface"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/surface.dcm" "$FIXTURES/surface.cppm" ||
+  fail "emit surface.dcm"
+
+run "$MODULEDUMP" "$work/surface.dcm" ||
+  fail "inspect surface.dcm"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/surface.cppm" -o "$work/surface.o" ||
+  fail "compile surface module object"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_surface.cpp" \
+  -o "$work/use_surface.o" ||
+  fail "compile surface importer"
+
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_surface.o" "$work/surface.o" "$LIBC" -o "$work/surface.bin" ||
+  fail "link surface executable"
+
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/surface.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute surface module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/reachability.dcm" "$FIXTURES/reachability.cppm" ||
+  fail "emit reachability.dcm"
+run "$MODULEDUMP" --symbols "$work/reachability.dcm" ||
+  fail "inspect reachability.dcm"
+if grep -Fq "unrelated_implementation_detail" "$work/command.log"; then
+  fail "unrelated declaration leaked into reachability.dcm"
+fi
+if grep -Fq "private_implementation_detail" "$work/command.log"; then
+  fail "private fragment declaration leaked into reachability.dcm"
+fi
+grep -Fq "add_offset" "$work/command.log" ||
+  fail "reachable hidden helper missing from reachability.dcm"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/reachability.cppm" -o "$work/reachability.o" ||
+  fail "compile reachability module object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_reachability.cpp" \
+  -o "$work/use_reachability.o" ||
+  fail "compile reachability importer"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_reachability.o" "$work/reachability.o" "$LIBC" \
+  -o "$work/reachability.bin" ||
+  fail "link reachability executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/reachability.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute reachability module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_reachability_hidden.cpp" \
+  -o "$work/use_reachability_hidden.s"
+if ! grep -Fq "error:" "$work/command.log"; then
+  fail "reachable-only declaration entered importer lookup"
+fi
+
+if run "$DAVECC" -target "$TARGET" -std=c++20 \
+     -Xemit-module "$work/invalid_internal_reachability.dcm" \
+     "$FIXTURES/invalid_internal_reachability.cppm"; then
+  fail "internal-linkage exposure was accepted"
+fi
+grep -Fq "exposes internal-linkage declaration 'internal_helper'" \
+  "$work/command.log" ||
+  fail "internal-linkage exposure diagnostic"
+
+if run "$DAVECC" -target "$TARGET" -std=c++20 \
+     -Xemit-module "$work/invalid_private_reachability.dcm" \
+     "$FIXTURES/invalid_private_reachability.cppm"; then
+  fail "private-fragment exposure was accepted"
+fi
+grep -Fq "reaches private-fragment declaration 'private_helper'" \
+  "$work/command.log" ||
+  fail "private-fragment exposure diagnostic"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fdeps-file "$work/partitioned-deps.json" \
+  -fdeps-format=p1689r5 -fdeps-scan-only \
+  "$FIXTURES/partitioned.cppm" -o "$work/partitioned-scan.o" ||
+  fail "scan partitioned module dependencies"
+grep -Fq '"logical-name": "partitioned:detail"' \
+  "$work/partitioned-deps.json" ||
+  fail "scan interface partition dependency"
+grep -Fq '"logical-name": "partitioned:impl"' \
+  "$work/partitioned-deps.json" ||
+  fail "scan internal partition dependency"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/partitioned-detail.dcm" \
+  "$FIXTURES/partitioned_detail.cppm" ||
+  fail "emit interface partition"
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/partitioned-impl.dcm" \
+  "$FIXTURES/partitioned_impl.cpp" ||
+  fail "emit internal partition"
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -fprebuilt-module-path "$work" \
+  -Xemit-module "$work/partitioned.dcm" "$FIXTURES/partitioned.cppm" ||
+  fail "emit partitioned primary interface"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/partitioned_detail.cppm" -o "$work/partitioned_detail.o" ||
+  fail "compile interface partition object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/partitioned_impl.cpp" -o "$work/partitioned_impl.o" ||
+  fail "compile internal partition object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/partitioned.cppm" \
+  -o "$work/partitioned.o" ||
+  fail "compile partitioned primary object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_partitioned.cpp" \
+  -o "$work/use_partitioned.o" ||
+  fail "compile partitioned importer"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_partitioned.o" "$work/partitioned.o" \
+  "$work/partitioned_detail.o" "$work/partitioned_impl.o" "$LIBC" \
+  -o "$work/partitioned.bin" ||
+  fail "link partitioned executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/partitioned.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute partitioned module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/private_dependency.dcm" \
+  "$FIXTURES/private_dependency.cppm" ||
+  fail "emit private dependency"
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -fprebuilt-module-path "$work" \
+  -Xemit-module "$work/reexport_middle.dcm" \
+  "$FIXTURES/reexport_middle.cppm" ||
+  fail "emit middle reexport"
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -fprebuilt-module-path "$work" \
+  -Xemit-module "$work/reexport_top.dcm" "$FIXTURES/reexport_top.cppm" ||
+  fail "emit transitive reexport"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_reexport_top.cpp" \
+  -o "$work/use_reexport_top.o" ||
+  fail "compile transitive reexport importer"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/private_dependency.cppm" -o "$work/private_dependency.o" ||
+  fail "compile private dependency object"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_reexport_top.o" "$work/private_dependency.o" "$LIBC" \
+  -o "$work/reexport_top.bin" ||
+  fail "link transitive reexport executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/reexport_top.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute transitive reexport program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c -fmodule-header \
+  -fmodule-name '"header_unit.hpp"' \
+  -fmodule-output "$work/header_unit.hpp.dcm" \
+  -fdeps-file "$work/header-unit-deps.json" -fdeps-format=p1689r5 \
+  "$FIXTURES/header_unit.hpp" -o "$work/header_unit.o" ||
+  fail "compile coordinated header-unit artifacts"
+grep -Fq 'header_unit.hpp' "$work/header-unit-deps.json" ||
+  fail "scan provided header unit"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_header_unit.cpp" \
+  -o "$work/use_header_unit.o" ||
+  fail "compile header-unit importer"
+if run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+     -fprebuilt-module-path "$work" \
+     "$FIXTURES/use_header_unit_internal.cpp" \
+     -o "$work/use_header_unit_internal.s"; then
+  fail "header-unit internal-linkage declaration was visible"
+fi
+grep -Fq "header_unit_internal_value" "$work/command.log" ||
+  fail "header-unit internal-linkage diagnostic"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_header_unit.o" "$work/header_unit.o" "$LIBC" \
+  -o "$work/header_unit.bin" ||
+  fail "link header-unit executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/header_unit.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute header-unit program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -fprebuilt-module-path "$work" \
+  -Xemit-module "$work/not_reexporting.dcm" \
+  "$FIXTURES/not_reexporting.cppm" ||
+  fail "emit module with private dependency"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/not_reexporting.cppm" \
+  -o "$work/not_reexporting.o" ||
+  fail "compile private dependency wrapper object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_not_reexporting.cpp" \
+  -o "$work/use_not_reexporting.o" ||
+  fail "compile private dependency importer"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_not_reexporting.o" "$work/not_reexporting.o" \
+  "$work/private_dependency.o" "$LIBC" -o "$work/not_reexporting.bin" ||
+  fail "link private dependency executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/not_reexporting.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute private dependency program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -S \
+  -fprebuilt-module-path "$work" \
+  "$FIXTURES/use_private_dependency_name.cpp" \
+  -o "$work/use_private_dependency_name.s"
+if ! grep -Fq "error:" "$work/command.log"; then
+  fail "non-reexported dependency name was visible"
+fi
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/identity_iface.dcm" "$FIXTURES/identity_iface.cppm" ||
+  fail "emit identity_iface.dcm"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/identity_impl.cpp" \
+  -o "$work/identity_impl.o" ||
+  fail "compile identity implementation unit"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/identity_iface.cppm" -o "$work/identity_iface.o" ||
+  fail "compile identity interface object"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_identity_iface.cpp" \
+  -o "$work/use_identity_iface.o" ||
+  fail "compile identity importer"
+
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_identity_iface.o" "$work/identity_iface.o" \
+  "$work/identity_impl.o" "$LIBC" -o "$work/identity_iface.bin" ||
+  fail "link identity executable"
+
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/identity_iface.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute identity module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/alpha.dcm" "$FIXTURES/alpha.cppm" ||
+  fail "emit alpha.dcm"
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/beta.dcm" "$FIXTURES/beta.cppm" ||
+  fail "emit beta.dcm"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/alpha.cppm" -o "$work/alpha.o" ||
+  fail "compile alpha object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/beta.cppm" -o "$work/beta.o" ||
+  fail "compile beta object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_alpha_beta.cpp" \
+  -o "$work/use_alpha_beta.o" ||
+  fail "compile alpha_beta importer"
+run "$DAVECC" -target "$TARGET" -static "${COMPILE_ARGS[@]}" \
+  "$work/use_alpha_beta.o" "$work/alpha.o" "$work/beta.o" "$LIBC" \
+  -o "$work/alpha_beta.bin" ||
+  fail "link alpha_beta executable"
+"$INTERPRETER" "${INTERP_ARGS[@]}" "$work/alpha_beta.bin" \
+  >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute alpha_beta module program"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/export_conflict.dcm" \
+  "$FIXTURES/export_conflict.cppm" ||
+  fail "emit export_conflict.dcm"
+
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_export_conflict.cpp" \
+  -o "$work/use_export_conflict.o" ||
+  fail "compile export_conflict importer"
+
+echo "ok module emit/import/link/execute"

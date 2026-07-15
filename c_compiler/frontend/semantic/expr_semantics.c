@@ -5525,7 +5525,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
     Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
     if (instantiated != NULL) {
       id->symbol = instantiated;
-      ASTNodeSetType(node->left, instantiated->type);
+      ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
       CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
     }
     return;
@@ -5601,7 +5601,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
 
   best = InstantiateSelectedFunctionTemplateCandidate(best);
   id->symbol = best;
-  ASTNodeSetType(node->left, best->type);
+  ASTNodeSetInstantiatedCalleeType(node->left, best->type);
   CheckDeletedFunctionUse(best, (ASTNode*)node);
 }
 
@@ -5619,7 +5619,7 @@ static void InstantiateResolvedFunctionTemplateCall(VectorASTNode* node) {
   Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
   if (instantiated != NULL) {
     id->symbol = instantiated;
-    ASTNodeSetType(node->left, instantiated->type);
+    ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
     CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
   }
 }
@@ -6387,7 +6387,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
                 node->children);
         if (instantiated != id->symbol) {
           id->symbol = instantiated;
-          ASTNodeSetType(node->left, instantiated->type);
+          ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
         }
       }
       if (id->symbol->flags.is_template &&
