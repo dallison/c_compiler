@@ -1509,6 +1509,20 @@ static void InstantiateClonedFunctionTemplateCall(
   if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
     return;
   }
+  // A deleted function template reached by ordinary unqualified lookup is the
+  // standard-library "poison pill" idiom (e.g. `template <class T> void
+  // swap(T&, T&) = delete;` inside `std::ranges::__swap`): it exists only so
+  // that a real, non-template `swap` found by argument-dependent lookup wins
+  // overload resolution.  Eagerly deducing and instantiating it here would fail
+  // ("use of deleted"/"definition required") during substitution, before the
+  // full, ADL-aware re-analysis of the cloned expression runs.  Leave such a
+  // call unresolved so later overload resolution (which combines ordinary
+  // lookup with ADL) selects the correct function.
+  if (id->symbol->type->info.function.is_deleted &&
+      id->symbol->overload_next == NULL &&
+      (call->left->flags & kASTQualifiedName) == 0) {
+    return;
+  }
   // An actual argument whose type still contains `auto` has not been re-deduced
   // yet in this instantiation (its declaration is re-analyzed later, at compile
   // time).  A classic case is a local closure variable, `auto l = [..]{..};`,

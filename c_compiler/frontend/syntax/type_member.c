@@ -77,6 +77,14 @@ static void FinalizeMemberFunctionTemplateConstraints(
   }
   MoveTemplateParameterConstraints(member_template_parameters,
                                    &func->info.function.associated_constraint);
+  // The callers transfer the parameter entries into the function type and clear
+  // the passed-in list before calling us, so a type-constraint written as a
+  // constrained template parameter (`template <Concept T>`) now lives on a
+  // parameter in `func->template_parameters`.  Collect those too; otherwise the
+  // constraint is silently dropped and never participates in overload
+  // resolution (unlike a trailing `requires` clause, which is added below).
+  MoveTemplateParameterConstraints(&func->info.function.template_parameters,
+                                   &func->info.function.associated_constraint);
   if (member_requires_clause != NULL) {
     AddOwnedAssociatedConstraint(&func->info.function.associated_constraint,
                                  member_requires_clause);
