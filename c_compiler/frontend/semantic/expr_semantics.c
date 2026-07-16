@@ -179,6 +179,17 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     // Symbol has now been used.
     node->symbol->flags.used = true;
 
+    // Track whether the value is ever *read*, to distinguish variables that are
+    // only ever written (-Wunused-but-set-variable).  Every reference counts as
+    // a read except when the identifier is the direct target of a plain `=`
+    // assignment (its old value is discarded).  Compound assignments (`+=`),
+    // increments/decrements, address-of and any nested use all read the value
+    // and are therefore left to mark it read.
+    if (node->base.parent == NULL ||
+        node->base.parent->op != AST_OP(assign) || node->base.child_id != 0) {
+      node->symbol->is_read = true;
+    }
+
     // Warn about uses of a symbol marked __attribute__((deprecated)).
     if ((node->base.flags & kASTIsDeclaration) == 0) {
       Attribute* dep = SymbolFindAttribute(node->symbol, "deprecated");
@@ -7086,6 +7097,43 @@ static bool LowerMemberPointerFunctionCall(VectorASTNode* node) {
       access->right->type);
 }
 
+// A data member named while analyzing a compiler-synthesized special member
+// (implicit or `= default` copy/move constructor, assignment operator, or
+// destructor) is not a real use for -Wunused-private-field: those functions
+// touch every member mechanically.  Only references in user-provided code
+// count, matching clang's behavior.
+static bool CurrentFunctionCountsMemberUses(void) {
+  TypeRecord* function = compiler->current_function;
+  if (function == NULL || !TypeIsFunction(function)) {
+    // A reference outside any function (e.g. a namespace-scope initializer) is
+    // genuine user code.
+    return true;
+  }
+  FunctionInfo* info = &function->info.function;
+  if (info->cxx_special_member_kind != kCXXSpecialMemberNone &&
+      !info->is_user_provided) {
+    return false;
+  }
+  return true;
+}
+
+// A member reference that is the target of a constructor member-initializer
+// (the synthetic `this->member = ...` assignment) does not count as a use for
+// -Wunused-private-field: clang reports fields that are initialized but never
+// otherwise referenced.
+static bool MemberReferenceIsInitializerTarget(BinaryASTNode* node) {
+  ASTNode* parent = node->base.parent;
+  return parent != NULL &&
+         (parent->flags & kASTCXXMemberInitializer) != 0 &&
+         node->base.child_id == 0;
+}
+
+// Whether a data-member reference at `node` should mark the member as used.
+static bool ShouldCountMemberReferenceUse(BinaryASTNode* node) {
+  return CurrentFunctionCountsMemberUses() &&
+         !MemberReferenceIsInitializerTarget(node);
+}
+
 static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // Already analyzed.
@@ -7120,6 +7168,12 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)node->right;
     StructMember* member = member_node->member;
     if (member != NULL && member->symbol != NULL) {
+      // A data member named in a member-access expression counts as used for
+      // -Wunused-private-field (constructor member-initializers do not reach
+      // this path, matching clang's "initialized but never used" reporting).
+      if (!member->is_member_function && ShouldCountMemberReferenceUse(node)) {
+        member->symbol->flags.used = true;
+      }
       TypeRecord* member_type = member->symbol->type;
       if (!member->is_static && !member->is_member_function &&
           !member->is_mutable && MemberReceiverIsConst(node)) {
@@ -7228,6 +7282,12 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   ((StructMemberASTNode*)node->right)->template_arguments =
       TemplateArgumentVectorCopy(explicit_template_arguments);
   ASTNodeDelete(old_right);
+  // A data member named in a member-access expression counts as used for
+  // -Wunused-private-field.
+  if (!member->is_member_function && member->symbol != NULL &&
+      ShouldCountMemberReferenceUse(node)) {
+    member->symbol->flags.used = true;
+  }
   TypeRecord* member_type = member->symbol->type;
   if (!member->is_static && !member->is_member_function && !member->is_mutable &&
       MemberReceiverIsConst(node)) {

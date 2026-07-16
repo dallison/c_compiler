@@ -814,6 +814,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         Symbol* symbol =
             SyntaxFindQualifiedSymbol(parser->syntax, &typename_name);
         if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+          symbol->flags.used = true;
           type_record = TypeRecordCopy(symbol->type);
           type |= type_record->type;
         } else if (typename_name.components.length == 2) {
@@ -859,6 +860,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           parser->syntax, &typedef_name, TC(decl));
       Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, &typedef_name);
       if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+        symbol->flags.used = true;
         Vector* args = NULL;
         if (symbol->flags.is_template) {
           if (typedef_name.template_arguments.length > 0) {
@@ -950,6 +952,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       } else if (symbol != NULL) {
         // Reference to a typedef?
         if (StorageIs(symbol->storage, STO(typedef))) {
+          // Naming a typedef as a type counts as a use of it
+          // (-Wunused-local-typedef).
+          symbol->flags.used = true;
           LexNextToken(lex);
           Vector* args = NULL;
           if (symbol->flags.is_template && LexLookingAt(lex, TOK(less))) {

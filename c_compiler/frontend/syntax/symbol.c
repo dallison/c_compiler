@@ -176,6 +176,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->die = NULL;
   sym->is_imported_module_symbol = false;
   sym->destruction_complete = false;
+  sym->is_read = false;
   VectorInit(&sym->imported_function_template_parameters_backup);
 }
 

@@ -265,12 +265,11 @@ void SemanticCheckScalarType(ASTNode* node) {
   }
 }
 
-// Check that we've used all local variables and emit a warning
-// for each unused one.  These generally point to a programming
-// error where an inner scope variable hides an outer scope of the
-// same name.
-// We don't do this for arguments because it's common for arguments
-// to be unused deliberately.
+// Check that we've used all local variables and parameters and emit a warning
+// for each unused one.  Unused locals generally point to a programming error
+// where an inner scope variable hides an outer scope of the same name; unused
+// parameters (-Wunused-parameter, part of -Wextra) are off by default because
+// it is common for parameters to be unused deliberately.
 static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   String function_name;
   StringInit(&function_name, NULL);
@@ -280,20 +279,65 @@ static void CheckForUnusedLocalSymbols(Syntax* syntax, ASTNode* node) {
   }
   for (size_t i = 0; i < syntax->all_local_symbols.length; i++) {
     Symbol* symbol = syntax->all_local_symbols.value.p[i];
-    if (symbol->flags.used || symbol->flags.is_temp || symbol->flags.invented ||
-        SymbolHasAttribute(symbol, "unused")) {
+    if (symbol->flags.is_temp || symbol->flags.invented ||
+        symbol->name.length == 0 || SymbolHasAttribute(symbol, "unused")) {
       continue;
     }
-    if (symbol->flags.is_argument) {
-      SemanticSymbolWarning(symbol, "unused-parameter",
-                    "Parameter '%s' is not used in function '%s'",
-                    symbol->name.value,
-                      function_name.value);
-    } else {
+    // A typedef/alias declared in a function body is diagnosed separately and
+    // is never reported as an "unused variable".  Typedef names are marked used
+    // when they are resolved as a type (see type_parse.c).
+    if (StorageIs(symbol->storage, STO(typedef))) {
+      if (!symbol->flags.used) {
+        SemanticSymbolWarning(symbol, "unused-local-typedef",
+                              "typedef '%s' is not used in function '%s'",
+                              symbol->name.value, function_name.value);
+      }
+      continue;
+    }
+    if (!symbol->flags.used) {
       SemanticSymbolWarning(symbol, "unused-variable",
-                    "Local variable '%s' is not used in function '%s'",
-                    symbol->name.value,
-                      function_name.value);
+                            "Local variable '%s' is not used in function '%s'",
+                            symbol->name.value, function_name.value);
+      continue;
+    }
+    // Referenced, but only ever assigned to: its value is never observed.
+    // Restricted to scalar objects (matching clang): assigning a whole struct
+    // or union can be a meaningful operation even if the result is not read.
+    if (!symbol->is_read && TypeIsScalar(symbol->type)) {
+      SemanticSymbolWarning(
+          symbol, "unused-but-set-variable",
+          "Variable '%s' is set but never used in function '%s'",
+          symbol->name.value, function_name.value);
+    }
+  }
+  // Parameters live in the function type's prototype rather than in
+  // all_local_symbols, so they are checked separately here.  This mirrors the
+  // per-function-definition treatment of locals above (template patterns never
+  // reach SemanticAnalyzeFunction, so this only fires for concrete functions).
+  if (node != NULL && node->type != NULL && TypeIsFunction(node->type)) {
+    Vector* prototype = &node->type->info.function.prototype;
+    for (size_t i = 0; i < prototype->length; i++) {
+      Symbol* param = prototype->value.p[i];
+      if (param == NULL) {
+        continue;
+      }
+      // Skip the implicit 'this' parameter of C++ member functions.
+      if (StringEqual(&param->name, "this")) {
+        continue;
+      }
+      // Skip unnamed parameters: an unnamed parameter cannot be used, so it is
+      // clearly intentional (common in C prototypes and C++ overloads/interface
+      // conformance).
+      if (param->name.length == 0) {
+        continue;
+      }
+      if (param->flags.used || param->flags.is_temp || param->flags.invented ||
+          SymbolHasAttribute(param, "unused")) {
+        continue;
+      }
+      SemanticSymbolWarning(param, "unused-parameter",
+                            "Parameter '%s' is not used in function '%s'",
+                            param->name.value, function_name.value);
     }
   }
   StringDestruct(&function_name);

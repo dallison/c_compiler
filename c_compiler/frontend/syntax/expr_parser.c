@@ -4964,6 +4964,9 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
     LexCheckpointRestore(syntax->lex, &checkpoint);
     return NULL;
   }
+  // Forming a pointer-to-member (&Class::field) counts as a use of the data
+  // member for -Wunused-private-field.
+  member->symbol->flags.used = true;
   TypeRecord* member_type = TypeMemberPointerPointeeFromMember(member);
   TypeRecord* mptr = NewMemberPointerTypeRecord(class_info, kQualPlain);
   TypeRecordChain(mptr, member_type);

@@ -371,6 +371,12 @@ typedef struct {
   // structs themselves are arena allocated and freed by ASTArenaRelease.
   Vector declaration_asts;
 
+  // Non-template class/struct types defined in this translation unit, in
+  // definition order (Struct*, not owned; the structs live in their type
+  // records/symbol tables).  Used at end of translation unit to diagnose
+  // unused private data members (-Wunused-private-field).
+  Vector cxx_defined_classes;
+
   // Declaration ASTs synthesized while instantiating templates.  Drained by
   // the driver through the normal semantic/codegen path.
   Vector pending_template_instantiations;

@@ -176,6 +176,11 @@ typedef struct Symbol {
   // has finished tearing down structs/types that may still point at them.
   bool is_imported_module_symbol;  // @wire - (transient)
   bool destruction_complete;      // @wire - (transient)
+  // Set when the symbol's value is read (used in any context other than as the
+  // pure left-hand side of a plain assignment).  Combined with flags.used this
+  // distinguishes "referenced but only written" objects for
+  // -Wunused-but-set-variable.  Recomputed during analysis, never serialized.
+  bool is_read;                   // @wire - (transient)
   // Compiler-owned copy of a deserialized function template's parameter list.
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.
