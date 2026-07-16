@@ -953,6 +953,21 @@ void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
                   member->symbol->name.value, suffix.value);
       StringDestruct(&suffix);
     }
+    // A function that overrides a base virtual but carries neither `override`
+    // nor `final` is well-formed, but the omission can mask accidental
+    // signature mismatches.  Suggest the specifier (-Wsuggest-override, off by
+    // default).  Destructors are excluded to match gcc's -Wsuggest-override.
+    if (!func->info.function.is_override && !func->info.function.is_final &&
+        !func->info.function.is_destructor) {
+      String suffix;
+      StringInit(&suffix, NULL);
+      SymbolFunctionDiagnosticSuffix(member->symbol, &suffix);
+      SyntaxWarning(parser->syntax, "suggest-override",
+                    "%s overrides a virtual function but is not marked "
+                    "'override'%s",
+                    member->symbol->name.value, suffix.value);
+      StringDestruct(&suffix);
+    }
     func->info.function.is_virtual = true;
     func->info.function.virtual_index =
         override->symbol->type->info.function.virtual_index;
