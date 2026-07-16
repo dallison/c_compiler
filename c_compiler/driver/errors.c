@@ -102,6 +102,15 @@ static const WarningInfo kWarnings[] = {
     {"declaration-after-statement", NULL, true, true, false, kWarningGroupPedantic},
     {"reorder-ctor-init", NULL, true, true, true, kWarningGroupWall},
     {"unused-parameter", NULL, true, true, false, kWarningGroupExtra},
+    // gcc has no equivalent; clang enables -Wunused-private-field.  Grouped with
+    // the other unused-entity diagnostics under -Wall.
+    {"unused-private-field", NULL, true, false, false, kWarningGroupWall},
+    // A local variable that is assigned to but whose value is never read.
+    {"unused-but-set-variable", NULL, true, true, false, kWarningGroupWall},
+    // An unused typedef/alias declared in a function body.
+    {"unused-local-typedef", NULL, true, true, false, kWarningGroupWall},
+    // An unused file-scope const/constexpr object with internal linkage.
+    {"unused-const-variable", NULL, true, true, false, kWarningGroupWall},
     {"unused-function", NULL, true, true, false, kWarningGroupWall},
     {"unused-label", NULL, true, true, false, kWarningGroupWall},
     {"unused-value", NULL, true, true, false, kWarningGroupWall},

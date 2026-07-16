@@ -574,6 +574,17 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
 
   CheckFlexibleArrays(parser, str, is_union);
   AddInjectedClassName(parser, tag);
+  // Record concrete (non-template) C++ classes so unused private data members
+  // can be diagnosed at end of translation unit (-Wunused-private-field).
+  // Templates (defining_template_scope_count > 0) are skipped because member
+  // usage in a template body can be dependent; compiler-invented tags (lambda
+  // closures, anonymous types) are skipped because their members are not
+  // user-declared private fields.
+  if (CompilerIsCXX() && str != NULL && !is_union &&
+      str->defining_template_scope_count == 0 && tag != NULL &&
+      !tag->flags.invented) {
+    VectorAppend(&compiler->cxx_defined_classes, str);
+  }
   return tag;
 }
 

@@ -23,6 +23,8 @@
 #include "syntax.h"
 #include "debug.h"
 #include "member_pointer.h"
+#include "type_inheritance.h"
+#include "type_compare.h"
 
 #include "6502_target.h"
 #include "p_code_target.h"
@@ -1600,6 +1602,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   MapInitForStringKeys(&compiler->rtti_typeinfo_map);
   VectorInit(&compiler->literals);
   VectorInit(&compiler->declaration_asts);
+  VectorInit(&compiler->cxx_defined_classes);
   VectorInit(&compiler->functions_being_analyzed);
   VectorInit(&cxx_init_array_functions);
   VectorInit(&cxx_fini_array_functions);
@@ -2004,6 +2007,7 @@ void CompilerDestruct(Compiler* compiler) {
     ASTNodeDelete((ASTNode*)compiler->declaration_asts.value.p[i]);
   }
   VectorDestruct(&compiler->declaration_asts);
+  VectorDestruct(&compiler->cxx_defined_classes);
   VectorDestruct(&compiler->functions_being_analyzed);
   for (size_t i = 0; i < compiler->pending_template_instantiations.length; i++) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
@@ -2291,6 +2295,50 @@ static bool FunctionSymbolWasUsed(Symbol* sym) {
          (table_sym->flags.used || table_sym->flags.address_taken);
 }
 
+// Emits -Wunused-private-field for each non-static private data member of a
+// class defined in this translation unit that is never referenced.  A private
+// data member can only be named by the class itself or its friends, so global
+// usage tracking (Symbol::flags.used, set wherever a member is named in an
+// expression) is sufficient: any reference anywhere clears the warning, while a
+// constructor member-initializer does not (matching clang, which reports fields
+// that are "initialized but never used").
+static void CheckUnusedPrivateFields(void) {
+  for (size_t i = 0; i < compiler->cxx_defined_classes.length; i++) {
+    Struct* str = compiler->cxx_defined_classes.value.p[i];
+    if (str == NULL || str->tag_name == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < str->members.length; j++) {
+      StructMember* member = str->members.value.p[j];
+      if (member == NULL || member->symbol == NULL) {
+        continue;
+      }
+      // Only ordinary, named, non-static private data members are candidates.
+      if (member->is_member_function || member->is_static || member->is_anon ||
+          member->is_using_declaration || member->access != kAccessPrivate) {
+        continue;
+      }
+      Symbol* sym = member->symbol;
+      // Skip type members (nested using/typedef) and unnamed bitfields.
+      if (sym->name.length == 0 || StorageIs(sym->storage, STO(typedef))) {
+        continue;
+      }
+      if (sym->flags.used || SymbolHasAttribute(sym, "unused")) {
+        continue;
+      }
+      // Match clang: do not diagnose members whose type must be destroyed
+      // (RAII members are commonly held for their constructor/destructor side
+      // effects rather than being referenced).
+      if (TypeHasNonTrivialDestructor(sym->type)) {
+        continue;
+      }
+      SemanticSymbolWarning(sym, "unused-private-field",
+                            "private field '%s' is not used in class '%s'",
+                            sym->name.value, str->tag_name->value);
+    }
+  }
+}
+
 static void CheckUnusedStaticFunctions(void) {
   for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
     ASTNode* node = compiler->declaration_asts.value.p[i];
@@ -2313,6 +2361,58 @@ static void CheckUnusedStaticFunctions(void) {
   }
 }
 
+// Emits -Wunused-variable / -Wunused-const-variable for file-scope data objects
+// with internal linkage that are never referenced.  Only internal-linkage
+// objects are diagnosed: an external-linkage object may be used from another
+// translation unit, so it must be left alone.  Internal linkage is recognized
+// as either an explicit 'static' or (C++ only) a namespace-scope const/constexpr
+// object that is not declared 'extern'.
+static void CheckUnusedGlobalVariables(void) {
+  for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
+    ASTNode* node = compiler->declaration_asts.value.p[i];
+    if (node == NULL || node->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
+    for (size_t j = 0; j < decls->declarations->length; j++) {
+      VariableDeclarationASTNode* decl =
+          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      Symbol* sym = decl->symbol;
+      if (sym == NULL || sym->name.length == 0) {
+        continue;
+      }
+      // Only ordinary data objects: not functions, typedefs, tags, or template
+      // parameters.
+      if (TypeIsFunction(sym->type) || StorageIs(sym->storage, STO(typedef))) {
+        continue;
+      }
+      if (sym->flags.used || sym->flags.address_taken ||
+          SymbolHasAttribute(sym, "unused")) {
+        continue;
+      }
+      bool is_static = StorageIs(sym->storage, STO(static));
+      bool is_extern = StorageIs(sym->storage, STO(extern));
+      bool is_const = TypeIsConst(sym->type) || sym->flags.is_constexpr;
+      // C++ namespace-scope const/constexpr objects have internal linkage unless
+      // explicitly declared extern; C gives them external linkage.
+      bool cxx_internal_const =
+          CompilerIsCXX() && is_const && !is_static && !is_extern;
+      if (!is_static && !cxx_internal_const) {
+        continue;
+      }
+      if (is_const) {
+        SemanticSymbolWarning(sym, "unused-const-variable",
+                              "variable '%s' is not used", sym->name.value);
+      } else {
+        SemanticSymbolWarning(sym, "unused-variable",
+                              "variable '%s' is not used", sym->name.value);
+      }
+      // Guard against re-warning the same object across multiple declarators.
+      sym->flags.used = true;
+    }
+  }
+}
+
 // Compile a source file, returning name of object file allocated from
 // the heap.  Compiler has already been initialized.
 // Runs preprocessing, parsing and semantic analysis for the current translation
@@ -2330,6 +2430,8 @@ bool CompileFrontEndOnly(Compiler* compiler) {
     CompileDeclaration(&compiler->syntax);
   }
   CheckUnusedStaticFunctions();
+  CheckUnusedGlobalVariables();
+  CheckUnusedPrivateFields();
   return NumErrors() == 0;
 }
 
@@ -2345,6 +2447,8 @@ static String* Compile(Compiler* compiler, Vector* options) {
     CompileDeclaration(&compiler->syntax);
   }
   CheckUnusedStaticFunctions();
+  CheckUnusedGlobalVariables();
+  CheckUnusedPrivateFields();
   
   if (compiler->print_front_end) {
     HashTablePrintStats(&compiler->global_symbol_table, compiler->ast_output_file);
