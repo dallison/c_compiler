@@ -32,4 +32,12 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
 StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
                                                     bool allow_explicit);
 
+// Lower a bare braced-init-list used as an expression (function argument,
+// return value or assignment right-hand side) into a temporary of `target`
+// type initialized by the braces.  Returns the analyzed compound-literal
+// expression, or `braced` unchanged if it is not a braced-init-list.  The
+// braced node is re-parented into the result, so splice it in with
+// delete_old_child = false.
+ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target);
+
 #endif /* expr_semantics_h */

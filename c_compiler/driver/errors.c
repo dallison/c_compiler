@@ -114,6 +114,9 @@ static const WarningInfo kWarnings[] = {
     {"preprocessor", NULL, false, false, true, 0},
     {"pointer-types", NULL, false, false, false, 0},
     {"missing-template-keyword", NULL, true, true, true, kWarningGroupWall},
+    // Off by default and not part of -Wall/-Wextra, matching gcc and clang;
+    // enabled explicitly via -Wsuggest-override or -Weverything.
+    {"suggest-override", NULL, true, true, false, 0},
 };
 
 static const WarningInfo* FindWarning(const char* name) {

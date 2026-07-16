@@ -1131,6 +1131,9 @@ static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node) {
 }
 
 static TypeRecord* CXXOperatorOperandClassType(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
   if (TypeIsReference(type)) {
     type = type->next;
   }
@@ -1277,6 +1280,15 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
 static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
     BinaryASTNode* node) {
   if (BinaryOperatorFunctionName(node->base.op) == NULL) {
+    return NULL;
+  }
+  // A braced-init-list operand (e.g. the right-hand side of `x = {...}`) is not
+  // an expression and has no type, so it cannot participate in
+  // overloaded-operator resolution here.  Defer to the operator's dedicated
+  // analysis, which lowers the braced-init-list to a temporary of the
+  // appropriate type first.
+  if ((node->left != NULL && node->left->op == AST_OP(braced_init)) ||
+      (node->right != NULL && node->right->op == AST_OP(braced_init))) {
     return NULL;
   }
   node->left = AnalyzeExpression(node->left);
@@ -2225,6 +2237,60 @@ static ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
   return AnalyzeExpression(lowered);
 }
 
+static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target);
+
+// Lower a bare braced-init-list that appears where an expression of a known
+// type is required (a function argument, a return value, or the right-hand
+// side of an assignment) into a temporary of that `target` type, initialized
+// by the braces.  A braced-init-list is not itself an expression in the C++
+// grammar, so the backend cannot generate one directly; routing it through the
+// compound-literal machinery (which analyzes the initializer via
+// AnalyzeInitialization) makes scalar value-initialization, aggregate
+// initialization and class construction behave exactly as for `T{...}`.  The
+// original braced node is re-parented into the returned compound literal, so
+// callers must splice the result in with `delete_old_child = false`.  Returns
+// `braced` unchanged when it is not a braced-init-list or no target is known.
+ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target) {
+  if (braced == NULL || braced->op != AST_OP(braced_init) || target == NULL) {
+    return braced;
+  }
+  SourceLocation location = braced->location;
+  BracedInitializerASTNode* b = (BracedInitializerASTNode*)braced;
+  // List-initialization of a scalar: `{}` value-initializes (yields 0) and
+  // `{v}` initializes from the single element.  Produce the plain scalar
+  // expression rather than a temporary object; a scalar compound literal is not
+  // an lvalue result the backend loads correctly, and this matches
+  // [dcl.init.list] for scalar targets.
+  if (TypeIsScalar(target) && b->initializers->length <= 1) {
+    if (b->initializers->length == 0) {
+      ASTNode* zero =
+          TypeIsFloatingPoint(target)
+              ? NewRealConstantASTNode(0.0, TypeRecordCopy(target), location)
+              : NewIntConstantASTNode(0, TypeRecordCopy(target), location);
+      return AnalyzeExpression(zero);
+    }
+    ASTNode* element = b->initializers->value.p[0];
+    if (element != NULL && element->op == AST_OP(expr_init)) {
+      element = ((ExpressionInitializerASTNode*)element)->expr;
+    }
+    element = AnalyzeExpression(element);
+    // A braced-init-list forbids narrowing conversions ([dcl.init.list]); e.g.
+    // `x = {3.5}` for an `int x` is ill-formed.
+    DiagnoseScalarNarrowing(element, target);
+    ASTNode* cast = NewCastASTNode(TypeRecordCopy(target), location, element);
+    return AnalyzeExpression(cast);
+  }
+  // Aggregate / class target: build a temporary of `target` initialized by the
+  // braces, reusing the compound-literal machinery (which routes through
+  // AnalyzeInitialization).
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, TypeRecordCopy(target));
+  temp->location = location;
+  ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+  temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  ASTNode* literal = NewCompoundLiteralASTNode(temp_id, location, braced);
+  return AnalyzeExpression(literal);
+}
+
 // Returns true if the integer constant `value` is representable in the
 // integral target type.  Used only for constant narrowing detection, so an
 // unknown width is treated as "fits" to avoid false positives.
@@ -2528,6 +2594,20 @@ static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
 
 static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
+  // `x = {...}` assigns a braced-init-list, which is not itself an expression.
+  // Lower it to a temporary of the left-hand side's type so it is analyzed and
+  // generated like `x = T{...}`.  (The parser only produces this for simple
+  // `=`.)
+  if (CompilerIsCXX() && node->base.op == AST_OP(assign) &&
+      node->right != NULL && node->right->op == AST_OP(braced_init) &&
+      node->left->type != NULL) {
+    ASTNode* lowered =
+        LowerCXXBracedInitToTarget(node->right, node->left->type);
+    if (lowered != node->right) {
+      ASTNodeReplaceChild((ASTNode*)node, 1, lowered, false);
+      node->right = lowered;
+    }
+  }
   node->right = AnalyzeExpression(node->right);
   if (BinaryOperatorFunctionName(node->base.op) != NULL) {
     ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
@@ -6642,6 +6722,20 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         ASTNodeReplaceChild((ASTNode*)node, (int)i, converted_initializer_list,
                             true);
         actual = converted_initializer_list;
+      }
+      // A bare braced-init-list argument (`f({})`, `f({1, 2})`) targeting a
+      // non-`initializer_list` parameter is not itself an expression; lower it
+      // to a temporary of the parameter type so the backend receives a real
+      // value rather than a raw braced-init node (which it cannot generate).
+      if (actual != NULL && actual->op == AST_OP(braced_init)) {
+        TypeRecord* braced_target = TypeIsReference(formal->type)
+                                        ? formal->type->next
+                                        : formal->type;
+        ASTNode* lowered = LowerCXXBracedInitToTarget(actual, braced_target);
+        if (lowered != actual) {
+          ASTNodeReplaceChild((ASTNode*)node, (int)i, lowered, false);
+          actual = lowered;
+        }
       }
       bool polymorphic_special_this =
           i == 0 &&
