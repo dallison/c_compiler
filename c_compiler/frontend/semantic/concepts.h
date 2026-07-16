@@ -146,6 +146,12 @@ ConstraintExpr* ConceptsSubstituteConstraint(
     int rebase_base);
 bool ConceptsConstraintContainsTemplateParameter(ConstraintExpr* constraint);
 
+// True if evaluating `node` could throw: some potentially-evaluated call in the
+// (already analyzed) expression has a throwing exception specification, or the
+// expression contains a `throw`.  Backs the `noexcept` operator/requirement and
+// the `is_nothrow_*` type traits.
+bool ExpressionPotentiallyThrows(struct ASTNode* node);
+
 // Evaluates a concept-id expression represented by an identifier node.  This is
 // the semantic bridge used by constant-expression contexts such as
 // `static_assert(C<T>)`.

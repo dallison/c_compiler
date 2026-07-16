@@ -705,7 +705,7 @@ static void ExpressionPotentiallyThrowsVisitor(ASTNode* node, void* data,
   }
 }
 
-static bool ExpressionPotentiallyThrows(ASTNode* node) {
+bool ExpressionPotentiallyThrows(ASTNode* node) {
   if (node == NULL) {
     return false;
   }

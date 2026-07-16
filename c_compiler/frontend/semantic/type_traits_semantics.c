@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "compiler.h"
+#include "concepts.h"
 #include "errors.h"
 #include "expr_evaluator.h"
 #include "expr_parser.h"
@@ -657,15 +658,14 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
   DiagnosticSuppressBegin();
   ASTNode* analyzed = AnalyzeExpression(call);
   result = analyzed != NULL && !DiagnosticErrorTrapped();
-  if (result && check_nothrow && analyzed->op == AST_OP(call)) {
-    VectorASTNode* call_node = (VectorASTNode*)analyzed;
-    TypeRecord* callee_type =
-        call_node->left != NULL ? call_node->left->type : NULL;
-    while (callee_type != NULL && !TypeIsFunction(callee_type)) {
-      callee_type = callee_type->next;
-    }
-    result = callee_type != NULL && TypeIsFunction(callee_type) &&
-             callee_type->info.function.is_noexcept;
+  if (result && check_nothrow) {
+    // is_nothrow_constructible is `noexcept(T(args...))`: nothrow iff no
+    // potentially-evaluated call in the whole construction expression can
+    // throw.  Class construction analyzes to a comma expression wrapping the
+    // constructor call (and any argument/subobject initialization), not a bare
+    // call node, so scan the analyzed expression rather than special-casing a
+    // top-level call.
+    result = !ExpressionPotentiallyThrows(analyzed);
   }
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);
