@@ -267,8 +267,29 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       VectorAppend(&deferred_member_functions, member);
       continue;
     }
+    /* A by-reference lambda capture is stored as a pointer field `T*` whose
+     * pointee `T` is the captured entity's type.  When the captured variable is
+     * itself a forwarding reference (`V&& var`), `T` is the enclosing parameter
+     * `V`; substituting `V = U&` would form an (invalid) pointer-to-reference
+     * and flag substitution failure.  For a capture field this is not a
+     * SFINAE error -- capturing a reference variable by reference captures the
+     * underlying object -- so collapse `(U&)*` to `U*` and keep the prior
+     * substitution-failed state. */
+    bool saved_capture_subst_failed = parser->template_substitution_failed;
     TypeRecord* member_type =
         SubstituteTemplateParameters(parser, member->symbol->type, args);
+    if (member->symbol->flags.invented && from->tag_symbol != NULL &&
+        from->tag_symbol->flags.invented && member_type != NULL &&
+        TypeIsPointer(member_type) && member_type->next != NULL &&
+        TypeIsReference(member_type->next)) {
+      TypeRecord* reference = member_type->next;
+      TypeRecord* referent = reference->next;
+      TypeRecordIncRef(referent);
+      member_type->next = referent;
+      member_type->type = referent != NULL ? referent->type : member_type->type;
+      TypeRecordDelete(reference);
+      parser->template_substitution_failed = saved_capture_subst_failed;
+    }
     TypeRecordCalculateSize(member_type);
     Symbol* member_symbol =
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);

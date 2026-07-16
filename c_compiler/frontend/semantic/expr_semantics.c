@@ -97,9 +97,20 @@ static void EnsureAutoReturnTypeDeduced(TypeRecord* func) {
     return;
   }
   TypeRecord* saved_function = compiler->current_function;
+  Struct* saved_class_access_context =
+      compiler->current_class_access_context;
   compiler->current_function = func;
+  // Deducing a member function's return type analyzes its body in the scope of
+  // its owning class; without resetting the access context, a leaked context
+  // from an enclosing scope (e.g. a lambda closure that triggered this
+  // deduction) would wrongly deny the body access to its own private members.
+  if (func->info.function.cxx_member_owner != NULL) {
+    compiler->current_class_access_context =
+        func->info.function.cxx_member_owner;
+  }
   AnalyzeStatement(func->info.function.body);
   compiler->current_function = saved_function;
+  compiler->current_class_access_context = saved_class_access_context;
 }
 
 static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
