@@ -1,0 +1,14 @@
+//
+//  cerrno
+//  c_compiler
+//
+//  C++ wrapper for <errno.h>.  errno and the E* codes are macros / global
+//  objects, so this simply pulls in the C header.
+//
+
+#ifndef cerrno_h
+#define cerrno_h
+
+#include <errno.h>
+
+#endif /* cerrno_h */

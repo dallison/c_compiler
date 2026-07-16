@@ -1,0 +1,33 @@
+//
+//  ctime
+//  c_compiler
+//
+//  C++ wrapper for <time.h>: brings the C time names into namespace std
+//  for DaveCC.
+//
+
+#ifndef ctime_h
+#define ctime_h
+
+#include <time.h>
+
+namespace std {
+
+using ::size_t;
+using ::clock_t;
+using ::time_t;
+using ::tm;
+
+using ::clock;
+using ::difftime;
+using ::mktime;
+using ::time;
+using ::asctime;
+using ::ctime;
+using ::gmtime;
+using ::localtime;
+using ::strftime;
+
+}  // namespace std
+
+#endif /* ctime_h */

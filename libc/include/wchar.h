@@ -11,7 +11,10 @@
 
 #include <limits.h>
 
+#if !defined(__WCHAR_T) && !defined(__cplusplus)
 typedef int wchar_t;
+#define __WCHAR_T
+#endif
 #define WHAR_MAX INT_MAX
 
 #ifndef __SIZE_T

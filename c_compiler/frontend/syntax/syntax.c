@@ -1626,6 +1626,23 @@ Symbol* SyntaxFindTopScopeTag(Syntax* syntax, String* name) {
   return FindGlobalTag(name);
 }
 
+// Ordinary-name lookup restricted to the innermost declarative region only
+// (the top local scope, or the current namespace / global namespace at
+// namespace scope) -- enclosing scopes are NOT consulted.  Used to decide
+// whether a using-declaration collides with something already declared in the
+// very region it targets, which is the only place a redeclaration check
+// applies ([namespace.udecl]).
+static Symbol* SyntaxFindTopScopeSymbol(Syntax* syntax, String* name) {
+  LocalSymbolTable* scope = syntax->local_symbol_stack;
+  if (scope != NULL) {
+    return FindSymbol(&scope->table, name);
+  }
+  if (InNamedNamespace(syntax)) {
+    return NamespaceFindSymbol(syntax->current_namespace, name);
+  }
+  return FindGlobalSymbol(name);
+}
+
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
   if (syntax->local_tag_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
@@ -5477,9 +5494,24 @@ static Symbol* NewUsingAliasSymbol(const char* name, Symbol* target,
   return alias;
 }
 
-static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag) {
-  Symbol* existing = is_tag ? SyntaxFindTag(syntax, &alias->name)
-                            : SyntaxFindSymbol(syntax, &alias->name);
+// Introduce `alias` (a using-declaration alias) into the current scope.  When
+// `current_scope_only` is set, the redeclaration check considers only the
+// innermost declarative region: an explicit using-declaration such as
+// `using ::foo;` legitimately introduces `foo` into the current namespace even
+// though the same `foo` is visible from an enclosing scope, so consulting
+// enclosing scopes here would wrongly treat it as a redundant redeclaration and
+// silently drop it.  Using-directives (`using namespace N;`) keep the broader
+// check so an already-visible name is not shadowed.
+static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
+                          bool current_scope_only) {
+  Symbol* existing;
+  if (current_scope_only) {
+    existing = is_tag ? SyntaxFindTopScopeTag(syntax, &alias->name)
+                      : SyntaxFindTopScopeSymbol(syntax, &alias->name);
+  } else {
+    existing = is_tag ? SyntaxFindTag(syntax, &alias->name)
+                      : SyntaxFindSymbol(syntax, &alias->name);
+  }
   if (existing != NULL) {
     Symbol* existing_target = FollowAlias(existing);
     Symbol* new_target = alias->alias_target != NULL ? FollowAlias(alias->alias_target)
@@ -5511,7 +5543,7 @@ static void ImportNamespaceSymbol(BinaryTreeNode* node, int depth, void* data) {
   Symbol* target = ((SymbolNode*)node)->symbol;
   AddUsingAlias(syntax, NewUsingAliasSymbol(target->name.value, target,
                                             syntax->lex->current_token_location),
-                /*is_tag=*/false);
+                /*is_tag=*/false, /*current_scope_only=*/false);
 }
 
 static void ImportNamespaceTag(BinaryTreeNode* node, int depth, void* data) {
@@ -5520,7 +5552,7 @@ static void ImportNamespaceTag(BinaryTreeNode* node, int depth, void* data) {
   Symbol* target = ((SymbolNode*)node)->symbol;
   AddUsingAlias(syntax, NewUsingAliasSymbol(target->name.value, target,
                                             syntax->lex->current_token_location),
-                /*is_tag=*/true);
+                /*is_tag=*/true, /*current_scope_only=*/false);
 }
 
 static void ImportInlineNamespaceChild(Namespace* child, void* ctx) {
@@ -5807,7 +5839,7 @@ static ASTNode* ParseUsingEnumDeclaration(Syntax* syntax,
       }
       AddUsingAlias(syntax,
                     NewUsingAliasSymbol(constant->name.value, constant, location),
-                    /*is_tag=*/false);
+                    /*is_tag=*/false, /*current_scope_only=*/true);
     }
   }
 
@@ -5872,12 +5904,12 @@ static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
     } else {
       AddUsingAlias(syntax, NewUsingAliasSymbol(FullyQualifiedIdentifierLast(&name),
                                                 target, location),
-                    /*is_tag=*/true);
+                    /*is_tag=*/true, /*current_scope_only=*/true);
     }
   } else {
     AddUsingAlias(syntax, NewUsingAliasSymbol(FullyQualifiedIdentifierLast(&name),
                                               target, location),
-                  /*is_tag=*/false);
+                  /*is_tag=*/false, /*current_scope_only=*/true);
   }
 
   FullyQualifiedIdentifierDestruct(&name);
@@ -8667,6 +8699,14 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
                                                  Storage storage,
                                                  Vector* declarations) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+    return false;
+  }
+  // A NULL base type means the decl-specifier was invalid (e.g. an unknown type
+  // name, with the error already reported).  A structured binding always has a
+  // valid decl-specifier (`auto`/`const auto&`/...), so this can never be one;
+  // bail out and let the normal declarator path recover -- copying a NULL type
+  // below would dereference it.
+  if (base_type == NULL) {
     return false;
   }
   LexCheckpoint checkpoint;

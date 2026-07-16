@@ -1,0 +1,23 @@
+//
+//  csetjmp
+//  c_compiler
+//
+//  C++ wrapper for <setjmp.h>: brings the jmp_buf type and the
+//  setjmp/longjmp names into namespace std for DaveCC.
+//
+
+#ifndef csetjmp_h
+#define csetjmp_h
+
+#include <setjmp.h>
+
+namespace std {
+
+using ::jmp_buf;
+
+using ::setjmp;
+using ::longjmp;
+
+}  // namespace std
+
+#endif /* csetjmp_h */

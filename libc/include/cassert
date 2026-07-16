@@ -1,0 +1,10 @@
+//
+//  cassert
+//  c_compiler
+//
+//  C++ wrapper for <assert.h>.  The assert() macro lives in the global
+//  scope (macros are never scoped to a namespace), so this simply pulls in
+//  the C header.
+//
+
+#include <assert.h>

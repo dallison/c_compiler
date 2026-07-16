@@ -12,6 +12,10 @@
 #ifdef __DAVECC__
 #include <stdarg.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define EOF (-1)
 #define NULL ((void*)0)
 
@@ -103,7 +107,7 @@ extern FILE* __last_file;
 
 
 int remove(const char *filename);
-int rename(const char *old, const char *new);
+int rename(const char *old, const char *newpath);
 FILE *tmpfile(void);
 char *tmpnam(char *s);
 int fclose(FILE *stream);
@@ -167,6 +171,10 @@ int feof(FILE *stream);
 int ferror(FILE *stream);
 void perror(const char *s);
 char* strerror(int errnum);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 #endif /* stdio_h */

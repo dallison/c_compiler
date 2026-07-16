@@ -1,0 +1,43 @@
+//
+//  cstring
+//  c_compiler
+//
+//  C++ wrapper for <string.h>: brings the C string-handling names into
+//  namespace std for DaveCC.
+//
+
+#ifndef cstring_h
+#define cstring_h
+
+#include <string.h>
+
+namespace std {
+
+using ::size_t;
+
+using ::memcpy;
+using ::memmove;
+using ::strcpy;
+using ::strncpy;
+using ::strcat;
+using ::strncat;
+using ::memcmp;
+using ::strcmp;
+using ::strcoll;
+using ::strncmp;
+using ::strxfrm;
+using ::memchr;
+using ::strchr;
+using ::strcspn;
+using ::strpbrk;
+using ::strrchr;
+using ::strspn;
+using ::strstr;
+using ::strtok;
+using ::memset;
+using ::strerror;
+using ::strlen;
+
+}  // namespace std
+
+#endif /* cstring_h */

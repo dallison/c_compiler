@@ -1,0 +1,14 @@
+//
+//  climits
+//  c_compiler
+//
+//  C++ wrapper for <limits.h>.  All names are macros, so this simply pulls
+//  in the C header.
+//
+
+#ifndef climits_h
+#define climits_h
+
+#include <limits.h>
+
+#endif /* climits_h */

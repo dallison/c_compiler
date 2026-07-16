@@ -1,0 +1,21 @@
+//
+//  cwchar
+//  c_compiler
+//
+//  C++ wrapper for <wchar.h>.  This libc provides only minimal wide-character
+//  support, so only size_t is exposed in namespace std here.  (wchar_t is a
+//  built-in type in C++ and is always available unqualified.)
+//
+
+#ifndef cwchar_h
+#define cwchar_h
+
+#include <wchar.h>
+
+namespace std {
+
+using ::size_t;
+
+}  // namespace std
+
+#endif /* cwchar_h */

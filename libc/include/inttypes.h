@@ -34,7 +34,7 @@
 /* Decimal notation.  */
 # define PRId8    "d"
 # define PRId16    "d"
-# define PRId32    PRI_INT_PREFIX "d"
+# define PRId32    __PRI_INT_PREFIX "d"
 # define PRId64    __PRI64_PREFIX "d"
 
 # define PRIdLEAST8  "d"

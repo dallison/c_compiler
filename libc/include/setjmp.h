@@ -44,11 +44,19 @@ struct __jmp_buf {
 #error "Unknown architecture"
 #endif
 
-typedef struct jmp_buf {
+typedef struct __jmp_buf_tag {
   struct __jmp_buf buf;
 } jmp_buf[1];
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern int setjmp(jmp_buf buf);
 extern void longjmp(jmp_buf buf, int value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* setjmp_h */

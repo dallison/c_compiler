@@ -1,0 +1,1157 @@
+//
+//  set
+//  c_compiler
+//
+//  Minimal C++20 std::set support for DaveCC.
+//
+
+#ifndef __davecc_set__
+#define __davecc_set__
+
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <cstddef>
+#include <stdexcept>
+#include <utility>
+
+namespace std {
+
+namespace __set_detail {
+
+template <class Key>
+struct __node {
+  __node* parent;
+  __node* left;
+  __node* right;
+  int color;
+  Key value;
+
+  __node(const Key& key)
+      : parent(nullptr),
+        left(nullptr),
+        right(nullptr),
+        color(0),
+        value(key) {}
+
+  __node(Key&& key)
+      : parent(nullptr),
+        left(nullptr),
+        right(nullptr),
+        color(0),
+        value(std::move(key)) {}
+};
+
+template <class Compare, class = void>
+struct __is_transparent_compare : false_type {
+};
+
+template <class Compare>
+struct __is_transparent_compare<
+    Compare, void_t<typename Compare::is_transparent> > : true_type {
+};
+
+}  // namespace __set_detail
+
+template <class Key, class Compare = less<Key>,
+          class Allocator = allocator<Key> >
+class set {
+ public:
+  using key_type = Key;
+  using value_type = Key;
+  using key_compare = Compare;
+  using value_compare = Compare;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = value_type&;
+  using const_reference = const value_type&;
+  using pointer = value_type*;
+  using const_pointer = const value_type*;
+
+ private:
+  using __alloc_traits = allocator_traits<allocator_type>;
+
+  enum __color {
+    __red,
+    __black
+  };
+
+  using __node = __set_detail::__node<Key>;
+
+  using __node_allocator = typename __alloc_traits::template rebind_alloc<__node>;
+  using __node_alloc_traits = allocator_traits<__node_allocator>;
+
+ public:
+  // set elements are immutable, so both iterators expose const references.
+  class const_iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using value_type = typename set::value_type;
+    using difference_type = typename set::difference_type;
+    using pointer = typename set::const_pointer;
+    using reference = typename set::const_reference;
+
+    const __node* __node_;
+    const __node* __root_;
+
+    const_iterator() : __node_(nullptr), __root_(nullptr) {}
+    const_iterator(const __node* node, const __node* root)
+        : __node_(node), __root_(root) {}
+
+    reference operator*() const { return __node_->value; }
+    pointer operator->() const { return &__node_->value; }
+
+    const_iterator& operator++() {
+      __node_ = __next(__node_, __root_);
+      return *this;
+    }
+
+    const_iterator operator++(int) {
+      const_iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
+    const_iterator& operator--() {
+      if (__node_ == nullptr) {
+        __node_ = __maximum(__root_);
+      } else {
+        __node_ = __prev(__node_);
+      }
+      return *this;
+    }
+
+    const_iterator operator--(int) {
+      const_iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+
+    bool operator==(const const_iterator& other) const {
+      return __node_ == other.__node_;
+    }
+
+    bool operator!=(const const_iterator& other) const {
+      return __node_ != other.__node_;
+    }
+
+   private:
+    static const __node* __minimum(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      while (node->left != nullptr) {
+        node = node->left;
+      }
+      return node;
+    }
+
+    static const __node* __maximum(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      while (node->right != nullptr) {
+        node = node->right;
+      }
+      return node;
+    }
+
+    static const __node* __next(const __node* node, const __node* root) {
+      (void)root;
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->right != nullptr) {
+        return __minimum(node->right);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->right) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+
+    static const __node* __prev(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->left != nullptr) {
+        return __maximum(node->left);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->left) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+  };
+
+  // For set, iterator is also a constant iterator (elements are immutable), but
+  // it carries a mutable node pointer so container operations such as erase()
+  // and extract() can act on the node.
+  class iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using value_type = typename set::value_type;
+    using difference_type = typename set::difference_type;
+    using pointer = typename set::const_pointer;
+    using reference = typename set::const_reference;
+
+    __node* __node_;
+    __node* __root_;
+
+    iterator() : __node_(nullptr), __root_(nullptr) {}
+    iterator(__node* node, __node* root) : __node_(node), __root_(root) {}
+
+    reference operator*() const { return __node_->value; }
+    pointer operator->() const { return &__node_->value; }
+
+    iterator& operator++() {
+      __node_ = __next(__node_, __root_);
+      return *this;
+    }
+
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
+    iterator& operator--() {
+      if (__node_ == nullptr) {
+        __node_ = __maximum(__root_);
+      } else {
+        __node_ = __prev(__node_);
+      }
+      return *this;
+    }
+
+    iterator operator--(int) {
+      iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+
+    bool operator==(const iterator& other) const {
+      return __node_ == other.__node_;
+    }
+
+    bool operator!=(const iterator& other) const {
+      return __node_ != other.__node_;
+    }
+
+    operator const_iterator() const {
+      return const_iterator(__node_, __root_);
+    }
+
+   private:
+    static __node* __minimum(__node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      while (node->left != nullptr) {
+        node = node->left;
+      }
+      return node;
+    }
+
+    static __node* __maximum(__node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      while (node->right != nullptr) {
+        node = node->right;
+      }
+      return node;
+    }
+
+    static __node* __next(__node* node, __node* root) {
+      (void)root;
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->right != nullptr) {
+        return __minimum(node->right);
+      }
+      __node* parent = node->parent;
+      while (parent != nullptr && node == parent->right) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+
+    static __node* __prev(__node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->left != nullptr) {
+        return __maximum(node->left);
+      }
+      __node* parent = node->parent;
+      while (parent != nullptr && node == parent->left) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+  };
+
+  class node_type {
+   public:
+    __node* node_ptr_ = nullptr;
+
+    bool empty() const noexcept { return node_ptr_ == nullptr; }
+    explicit operator bool() const noexcept { return node_ptr_ != nullptr; }
+
+    allocator_type get_allocator() const { return allocator_type(); }
+    value_type& value() const { return node_ptr_->value; }
+  };
+
+  struct insert_return_type {
+    typename set::iterator position;
+    bool inserted = false;
+    node_type node;
+  };
+
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  template <class K2, class C2, class A2>
+  friend class set;
+
+  __node* __root_;
+  size_type __size_;
+  key_compare __comp_;
+  allocator_type __alloc_;
+  __node_allocator __node_alloc_;
+
+  static __node* __minimum(__node* node) {
+    if (node == nullptr) {
+      return nullptr;
+    }
+    while (node->left != nullptr) {
+      node = node->left;
+    }
+    return node;
+  }
+
+  static __node* __maximum(__node* node) {
+    if (node == nullptr) {
+      return nullptr;
+    }
+    while (node->right != nullptr) {
+      node = node->right;
+    }
+    return node;
+  }
+
+  __node* __find_node(const key_type& key) const {
+    __node* node = __root_;
+    while (node != nullptr) {
+      if (__comp_(key, node->value)) {
+        node = node->left;
+      } else if (__comp_(node->value, key)) {
+        node = node->right;
+      } else {
+        return node;
+      }
+    }
+    return nullptr;
+  }
+
+  template <class K>
+  __node* __find_node_as(const K& key) const {
+    __node* node = __root_;
+    while (node != nullptr) {
+      if (__comp_(key, node->value)) {
+        node = node->left;
+      } else if (__comp_(node->value, key)) {
+        node = node->right;
+      } else {
+        return node;
+      }
+    }
+    return nullptr;
+  }
+
+  __node* __lower_bound_node(const key_type& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (!__comp_(node->value, key)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  template <class K>
+  __node* __lower_bound_node_as(const K& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (!__comp_(node->value, key)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  __node* __upper_bound_node(const key_type& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(key, node->value)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  template <class K>
+  __node* __upper_bound_node_as(const K& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(key, node->value)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  __node* __create_node(const value_type& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    try {
+      new (node) __node(value);
+    } catch (...) {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      throw;
+    }
+    return node;
+  }
+
+  __node* __create_node(value_type&& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    try {
+      new (node) __node(std::move(value));
+    } catch (...) {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      throw;
+    }
+    return node;
+  }
+
+  void __destroy_node(__node* node) {
+    node->~__node();
+    ::operator delete(static_cast<void*>(node));
+  }
+
+  static __color __node_color(__node* node) {
+    return node == nullptr ? __black : node->color;
+  }
+
+  void __rotate_left(__node* x) {
+    __node* y = x->right;
+    x->right = y->left;
+    if (y->left != nullptr) {
+      y->left->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->left = x;
+    x->parent = y;
+  }
+
+  void __rotate_right(__node* x) {
+    __node* y = x->left;
+    x->left = y->right;
+    if (y->right != nullptr) {
+      y->right->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->right = x;
+    x->parent = y;
+  }
+
+  void __fix_insert(__node* node) {
+    while (node != __root_ && __node_color(node->parent) == __red) {
+      if (node->parent == node->parent->parent->left) {
+        __node* aunt = node->parent->parent->right;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->right) {
+            node = node->parent;
+            __rotate_left(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_right(node->parent->parent);
+        }
+      } else {
+        __node* aunt = node->parent->parent->left;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->left) {
+            node = node->parent;
+            __rotate_right(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_left(node->parent->parent);
+        }
+      }
+    }
+    __root_->color = __black;
+  }
+
+  pair<iterator, bool> __insert_node(__node* fresh) {
+    fresh->parent = nullptr;
+    fresh->left = nullptr;
+    fresh->right = nullptr;
+    fresh->color = __red;
+    __node* parent = nullptr;
+    __node* node = __root_;
+    while (node != nullptr) {
+      parent = node;
+      if (__comp_(fresh->value, node->value)) {
+        node = node->left;
+      } else if (__comp_(node->value, fresh->value)) {
+        node = node->right;
+      } else {
+        iterator it(node, __root_);
+        __destroy_node(fresh);
+        return pair<iterator, bool>(it, false);
+      }
+    }
+    fresh->parent = parent;
+    if (parent == nullptr) {
+      __root_ = fresh;
+    } else if (__comp_(fresh->value, parent->value)) {
+      parent->left = fresh;
+    } else {
+      parent->right = fresh;
+    }
+    __size_++;
+    __fix_insert(fresh);
+    return pair<iterator, bool>(iterator(fresh, __root_), true);
+  }
+
+  pair<iterator, bool> __insert_detached_node(__node* fresh) {
+    fresh->parent = nullptr;
+    fresh->left = nullptr;
+    fresh->right = nullptr;
+    fresh->color = __red;
+    __node* parent = nullptr;
+    __node* node = __root_;
+    while (node != nullptr) {
+      parent = node;
+      if (__comp_(fresh->value, node->value)) {
+        node = node->left;
+      } else if (__comp_(node->value, fresh->value)) {
+        node = node->right;
+      } else {
+        return pair<iterator, bool>(iterator(node, __root_), false);
+      }
+    }
+    fresh->parent = parent;
+    if (parent == nullptr) {
+      __root_ = fresh;
+    } else if (__comp_(fresh->value, parent->value)) {
+      parent->left = fresh;
+    } else {
+      parent->right = fresh;
+    }
+    __size_++;
+    __fix_insert(fresh);
+    return pair<iterator, bool>(iterator(fresh, __root_), true);
+  }
+
+  void __clear_node(__node* node) {
+    if (node == nullptr) {
+      return;
+    }
+    __clear_node(node->left);
+    __clear_node(node->right);
+    __destroy_node(node);
+  }
+
+  void __copy_from(const set& other) {
+    for (const_iterator it = other.begin(); it != other.end(); ++it) {
+      insert(*it);
+    }
+  }
+
+  void __transplant(__node* old_node, __node* new_node) {
+    if (old_node->parent == nullptr) {
+      __root_ = new_node;
+    } else if (old_node == old_node->parent->left) {
+      old_node->parent->left = new_node;
+    } else {
+      old_node->parent->right = new_node;
+    }
+    if (new_node != nullptr) {
+      new_node->parent = old_node->parent;
+    }
+  }
+
+  void __erase_node(__node* node) {
+    if (node == nullptr) {
+      return;
+    }
+    if (node->left == nullptr) {
+      __transplant(node, node->right);
+    } else if (node->right == nullptr) {
+      __transplant(node, node->left);
+    } else {
+      __node* successor = __minimum(node->right);
+      if (successor->parent != node) {
+        __transplant(successor, successor->right);
+        successor->right = node->right;
+        successor->right->parent = successor;
+      }
+      __transplant(node, successor);
+      successor->left = node->left;
+      successor->left->parent = successor;
+      successor->color = node->color;
+    }
+    __size_--;
+    __destroy_node(node);
+    if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+  }
+
+  __node* __detach_node(__node* node) {
+    if (node == nullptr) {
+      return nullptr;
+    }
+    if (node->left == nullptr) {
+      __transplant(node, node->right);
+    } else if (node->right == nullptr) {
+      __transplant(node, node->left);
+    } else {
+      __node* successor = __minimum(node->right);
+      if (successor->parent != node) {
+        __transplant(successor, successor->right);
+        successor->right = node->right;
+        successor->right->parent = successor;
+      }
+      __transplant(node, successor);
+      successor->left = node->left;
+      successor->left->parent = successor;
+      successor->color = node->color;
+    }
+    __size_--;
+    if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+    node->parent = nullptr;
+    node->left = nullptr;
+    node->right = nullptr;
+    node->color = __red;
+    return node;
+  }
+
+  node_type __extract_node(__node* node) {
+    node_type result;
+    result.node_ptr_ = __detach_node(node);
+    return result;
+  }
+
+ public:
+  set()
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(),
+        __alloc_(),
+        __node_alloc_() {}
+
+  explicit set(const key_compare& comp,
+               const allocator_type& alloc = allocator_type())
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(comp),
+        __alloc_(alloc),
+        __node_alloc_() {}
+
+  explicit set(const allocator_type& alloc)
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(),
+        __alloc_(alloc),
+        __node_alloc_() {}
+
+  template <class InputIt>
+  set(InputIt first, InputIt last,
+      const key_compare& comp = key_compare(),
+      const allocator_type& alloc = allocator_type())
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(comp),
+        __alloc_(alloc),
+        __node_alloc_() {
+    insert(first, last);
+  }
+
+  set(initializer_list<value_type> init,
+      const key_compare& comp = key_compare(),
+      const allocator_type& alloc = allocator_type())
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(comp),
+        __alloc_(alloc),
+        __node_alloc_() {
+    insert(init);
+  }
+
+  set(const set& other)
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(other.__comp_),
+        __alloc_(__alloc_traits::select_on_container_copy_construction(
+            other.__alloc_)),
+        __node_alloc_() {
+    __copy_from(other);
+  }
+
+  set(const set& other, const allocator_type& alloc)
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(other.__comp_),
+        __alloc_(alloc),
+        __node_alloc_() {
+    __copy_from(other);
+  }
+
+  set(set&& other)
+      : __root_(other.__root_),
+        __size_(other.__size_),
+        __comp_(other.__comp_),
+        __alloc_(other.__alloc_),
+        __node_alloc_() {
+    other.__root_ = nullptr;
+    other.__size_ = 0;
+  }
+
+  set(set&& other, const allocator_type& alloc)
+      : __root_(nullptr),
+        __size_(0),
+        __comp_(other.__comp_),
+        __alloc_(alloc),
+        __node_alloc_() {
+    __copy_from(other);
+    other.clear();
+  }
+
+  ~set() {
+    clear();
+  }
+
+  set& operator=(const set& other) {
+    if (this != &other) {
+      clear();
+      __comp_ = other.__comp_;
+      if (__alloc_traits::__propagate_on_container_copy_assignment()) {
+        __alloc_ = other.__alloc_;
+        __node_alloc_ = __node_allocator();
+      }
+      __copy_from(other);
+    }
+    return *this;
+  }
+
+  set& operator=(set&& other) {
+    if (this != &other) {
+      clear();
+      __root_ = other.__root_;
+      __size_ = other.__size_;
+      __comp_ = other.__comp_;
+      if (__alloc_traits::__propagate_on_container_move_assignment()) {
+        __alloc_ = other.__alloc_;
+        __node_alloc_ = __node_allocator();
+      }
+      other.__root_ = nullptr;
+      other.__size_ = 0;
+    }
+    return *this;
+  }
+
+  set& operator=(initializer_list<value_type> init) {
+    clear();
+    insert(init);
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+  key_compare key_comp() const { return __comp_; }
+  value_compare value_comp() const { return __comp_; }
+
+  iterator begin() { return iterator(__minimum(__root_), __root_); }
+  const_iterator begin() const { return const_iterator(__minimum(__root_), __root_); }
+  const_iterator cbegin() const { return begin(); }
+
+  iterator end() { return iterator(nullptr, __root_); }
+  const_iterator end() const { return const_iterator(nullptr, __root_); }
+  const_iterator cend() const { return end(); }
+
+  reverse_iterator rbegin() { return reverse_iterator(end()); }
+  const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+  const_reverse_iterator crbegin() const { return rbegin(); }
+
+  reverse_iterator rend() { return reverse_iterator(begin()); }
+  const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
+  const_reverse_iterator crend() const { return rend(); }
+
+  bool empty() const noexcept { return __size_ == 0; }
+  size_type size() const noexcept { return __size_; }
+
+  void clear() noexcept {
+    __clear_node(__root_);
+    __root_ = nullptr;
+    __size_ = 0;
+  }
+
+  void swap(set& other) noexcept {
+    std::swap(__root_, other.__root_);
+    std::swap(__size_, other.__size_);
+    std::swap(__comp_, other.__comp_);
+    if (__alloc_traits::__propagate_on_container_swap()) {
+      std::swap(__alloc_, other.__alloc_);
+      std::swap(__node_alloc_, other.__node_alloc_);
+    }
+  }
+
+  pair<iterator, bool> insert(const value_type& value) {
+    return __insert_node(__create_node(value));
+  }
+
+  pair<iterator, bool> insert(value_type&& value) {
+    return __insert_node(__create_node(std::move(value)));
+  }
+
+  iterator insert(const_iterator hint, const value_type& value) {
+    (void)hint;
+    return insert(value).first;
+  }
+
+  iterator insert(const_iterator hint, value_type&& value) {
+    (void)hint;
+    return insert(std::move(value)).first;
+  }
+
+  template <class InputIt>
+  void insert(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+
+  void insert(initializer_list<value_type> init) {
+    insert(init.begin(), init.end());
+  }
+
+  insert_return_type insert(node_type&& nh) {
+    insert_return_type out;
+    if (nh.empty()) {
+      typename set::iterator pos(nullptr, __root_);
+      out.position.__node_ = pos.__node_;
+      out.position.__root_ = pos.__root_;
+      out.inserted = false;
+      out.node.node_ptr_ = nh.node_ptr_;
+      return out;
+    }
+    pair<iterator, bool> result = __insert_detached_node(nh.node_ptr_);
+    typename set::iterator pos = result.first;
+    out.position.__node_ = pos.__node_;
+    out.position.__root_ = pos.__root_;
+    out.inserted = result.second;
+    out.node.node_ptr_ = nh.node_ptr_;
+    if (result.second) {
+      nh.node_ptr_ = nullptr;
+      out.node.node_ptr_ = nullptr;
+    }
+    return out;
+  }
+
+  iterator insert(const_iterator hint, node_type&& nh) {
+    (void)hint;
+    return insert(std::move(nh)).position;
+  }
+
+  template <class... Args>
+  pair<iterator, bool> emplace(Args&&... args) {
+    return __insert_node(__create_node(value_type(std::forward<Args>(args)...)));
+  }
+
+  template <class... Args>
+  iterator emplace_hint(const_iterator hint, Args&&... args) {
+    (void)hint;
+    return emplace(std::forward<Args>(args)...).first;
+  }
+
+  iterator find(const key_type& key) {
+    return iterator(__find_node(key), __root_);
+  }
+
+  const_iterator find(const key_type& key) const {
+    return const_iterator(__find_node(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  iterator find(const K& key) {
+    return iterator(__find_node_as(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  const_iterator find(const K& key) const {
+    return const_iterator(__find_node_as(key), __root_);
+  }
+
+  bool contains(const key_type& key) const {
+    return __find_node(key) != nullptr;
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  bool contains(const K& key) const {
+    return __find_node_as(key) != nullptr;
+  }
+
+  size_type count(const key_type& key) const {
+    return contains(key) ? 1 : 0;
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  size_type count(const K& key) const {
+    return contains(key) ? 1 : 0;
+  }
+
+  iterator lower_bound(const key_type& key) {
+    return iterator(__lower_bound_node(key), __root_);
+  }
+
+  const_iterator lower_bound(const key_type& key) const {
+    return const_iterator(__lower_bound_node(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  iterator lower_bound(const K& key) {
+    return iterator(__lower_bound_node_as(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  const_iterator lower_bound(const K& key) const {
+    return const_iterator(__lower_bound_node_as(key), __root_);
+  }
+
+  iterator upper_bound(const key_type& key) {
+    return iterator(__upper_bound_node(key), __root_);
+  }
+
+  const_iterator upper_bound(const key_type& key) const {
+    return const_iterator(__upper_bound_node(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  iterator upper_bound(const K& key) {
+    return iterator(__upper_bound_node_as(key), __root_);
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  const_iterator upper_bound(const K& key) const {
+    return const_iterator(__upper_bound_node_as(key), __root_);
+  }
+
+  pair<iterator, iterator> equal_range(const key_type& key) {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  pair<const_iterator, const_iterator> equal_range(const key_type& key) const {
+    return pair<const_iterator, const_iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  pair<iterator, iterator> equal_range(const K& key) {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  template <class K>
+    requires (__set_detail::__is_transparent_compare<Compare>::value)
+  pair<const_iterator, const_iterator> equal_range(const K& key) const {
+    return pair<const_iterator, const_iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  iterator erase(iterator pos) {
+    iterator next = pos;
+    ++next;
+    __erase_node(pos.__node_);
+    return next;
+  }
+
+  iterator erase(const_iterator pos) {
+    iterator next((__node*)pos.__node_, __root_);
+    ++next;
+    __erase_node((__node*)pos.__node_);
+    return next;
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    iterator next((__node*)first.__node_, __root_);
+    iterator finish((__node*)last.__node_, __root_);
+    while (next != finish) {
+      next = erase(next);
+    }
+    return finish;
+  }
+
+  size_type erase(const key_type& key) {
+    __node* node = __find_node(key);
+    if (node == nullptr) {
+      return 0;
+    }
+    __erase_node(node);
+    return 1;
+  }
+
+  node_type extract(const_iterator pos) {
+    return __extract_node((__node*)pos.__node_);
+  }
+
+  node_type extract(iterator pos) {
+    return __extract_node(pos.__node_);
+  }
+
+  node_type extract(const key_type& key) {
+    return __extract_node(__find_node(key));
+  }
+
+  template <class K>
+  node_type extract(const K& key) {
+    return __extract_node(__find_node_as(key));
+  }
+
+  template <class C2>
+  void merge(set<Key, C2, Allocator>& source) {
+    for (typename set<Key, C2, Allocator>::iterator it = source.begin();
+         it != source.end();) {
+      typename set<Key, C2, Allocator>::iterator next = it;
+      ++next;
+      if (__find_node(*it) == nullptr) {
+        __node* node = source.__detach_node(it.__node_);
+        __insert_detached_node(node);
+      }
+      it = next;
+    }
+  }
+
+  template <class C2>
+  void merge(set<Key, C2, Allocator>&& source) {
+    merge(source);
+  }
+};
+
+template <class Key, class Compare, class Allocator>
+bool operator==(const set<Key, Compare, Allocator>& left,
+                const set<Key, Compare, Allocator>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  typename set<Key, Compare, Allocator>::const_iterator left_it = left.begin();
+  typename set<Key, Compare, Allocator>::const_iterator right_it = right.begin();
+  for (; left_it != left.end(); ++left_it, ++right_it) {
+    if (!(*left_it == *right_it)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class Key, class Compare, class Allocator>
+auto operator<=>(const set<Key, Compare, Allocator>& left,
+                 const set<Key, Compare, Allocator>& right) {
+  typename set<Key, Compare, Allocator>::const_iterator left_it = left.begin();
+  typename set<Key, Compare, Allocator>::const_iterator right_it = right.begin();
+  for (; left_it != left.end() && right_it != right.end(); ++left_it, ++right_it) {
+    auto cmp = *left_it <=> *right_it;
+    if (cmp != 0) {
+      return cmp;
+    }
+  }
+  if (left_it == left.end() && right_it == right.end()) {
+    return 0 <=> 0;
+  }
+  return left_it == left.end() ? (0 <=> 1) : (1 <=> 0);
+}
+
+template <class Key, class Compare, class Allocator>
+void swap(set<Key, Compare, Allocator>& left,
+          set<Key, Compare, Allocator>& right) noexcept {
+  left.swap(right);
+}
+
+template <class Key, class Compare, class Allocator, class Predicate>
+typename set<Key, Compare, Allocator>::size_type erase_if(
+    set<Key, Compare, Allocator>& c, Predicate pred) {
+  typename set<Key, Compare, Allocator>::size_type old_size = c.size();
+  typename set<Key, Compare, Allocator>::iterator it = c.begin();
+  while (it != c.end()) {
+    if (pred(*it)) {
+      it = c.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return old_size - c.size();
+}
+
+}  // namespace std
+
+#endif /* __davecc_set__ */

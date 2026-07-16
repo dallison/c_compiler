@@ -1,0 +1,20 @@
+//
+//  cstdarg
+//  c_compiler
+//
+//  C++ wrapper for <stdarg.h>: brings va_list into namespace std for
+//  DaveCC.  va_start/va_arg/va_end are macros and remain global.
+//
+
+#ifndef cstdarg_h
+#define cstdarg_h
+
+#include <stdarg.h>
+
+namespace std {
+
+using ::va_list;
+
+}  // namespace std
+
+#endif /* cstdarg_h */

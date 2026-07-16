@@ -9,6 +9,10 @@
 #ifndef math_h
 #define math_h
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef float float_t;
 typedef double double_t;
 
@@ -41,5 +45,9 @@ double fabs(double x);
 
 double modf(double x, double* p);
 double ldexp(double mantissa, int exp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* math_h */

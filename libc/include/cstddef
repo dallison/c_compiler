@@ -1,0 +1,22 @@
+//
+//  cstddef
+//  c_compiler
+//
+//  C++ wrapper for <stddef.h>: brings the common C definitions into
+//  namespace std for DaveCC.
+//
+
+#ifndef cstddef_h
+#define cstddef_h
+
+#include <stddef.h>
+
+namespace std {
+
+using ::size_t;
+using ::ptrdiff_t;
+// std::nullptr_t is already provided directly by <stddef.h> in namespace std.
+
+}  // namespace std
+
+#endif /* cstddef_h */

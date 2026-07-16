@@ -1,0 +1,33 @@
+//
+//  cmath
+//  c_compiler
+//
+//  C++ wrapper for <math.h>: brings the C math names into namespace std
+//  for DaveCC.
+//
+
+#ifndef cmath_h
+#define cmath_h
+
+#include <math.h>
+
+namespace std {
+
+using ::float_t;
+using ::double_t;
+
+using ::sin;
+using ::cos;
+using ::tan;
+using ::asin;
+using ::acos;
+using ::atan;
+using ::atan2;
+using ::sqrt;
+using ::fabs;
+using ::modf;
+using ::ldexp;
+
+}  // namespace std
+
+#endif /* cmath_h */

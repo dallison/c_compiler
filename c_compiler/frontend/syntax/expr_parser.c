@@ -1072,6 +1072,48 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
 
   // Find the symbol by searching all symbol tables.  It must exist.
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+
+  // Name hiding ([basic.lookup.unqual], [class.member.lookup]): inside a member
+  // function, an unqualified name that names a non-static member of the class
+  // (or one of its bases) hides any entity of the same name declared in an
+  // enclosing namespace.  Ordinary lookup above searches namespace scopes too,
+  // so for a class defined in `namespace std`, an unqualified `end()` call can
+  // wrongly bind to the free function template `std::end` instead of the
+  // class's own `end` member (e.g. `map::rbegin`'s `reverse_iterator(end())`).
+  // A block-scope declaration (local variable or parameter) is nearer than the
+  // class and legitimately hides the member, so only redirect when the found
+  // entity is at namespace/global scope.  Names carrying explicit template
+  // arguments are left alone: the arrow member-access form built here does not
+  // retain them.
+  Vector* hiding_last_args =
+      name.template_arguments.length > 0
+          ? (Vector*)name.template_arguments.value
+                .p[name.template_arguments.length - 1]
+          : NULL;
+  bool hiding_has_explicit_template_args =
+      hiding_last_args != NULL && hiding_last_args->length > 0;
+  if (CompilerIsCXX() && !name.is_qualified && symbol != NULL &&
+      !symbol->flags.is_block_scope && !hiding_has_explicit_template_args) {
+    Symbol* this_symbol = FindThisSymbol(syntax);
+    if (this_symbol != NULL && this_symbol->type != NULL &&
+        TypeIsStructOrUnionPointer(this_symbol->type) &&
+        this_symbol->type->next != NULL &&
+        this_symbol->type->next->info.struct_info != NULL) {
+      String member_name;
+      StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+      StructMember* member = FindStructMember(
+          this_symbol->type->next->info.struct_info, &member_name);
+      StringDestruct(&member_name);
+      if (member != NULL && !member->is_static) {
+        ASTNode* member_access = NewMemberAccessFromThis(
+            syntax, &name, /*allow_unresolved_member=*/false);
+        if (member_access != NULL) {
+          FullyQualifiedIdentifierDestruct(&name);
+          return member_access;
+        }
+      }
+    }
+  }
   if (symbol == NULL) {
     if (name.is_qualified) {
       ASTNode* member_access = NewQualifiedBaseMemberAccessFromThis(syntax, &name);
