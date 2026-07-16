@@ -357,6 +357,7 @@ struct ConstraintExpr;
 #define kASTDeferredDependentAssign (1 << 27)  // Assignment whose operand conversion was deferred because an operand was still type-dependent (re-analyzed at final instantiation).
 #define kASTDependentCast (1 << 28)  // Cast target depended on template substitution.
 #define kASTDependentNewAllocation (1 << 29)  // operator new size must be recomputed after type substitution.
+#define kASTScopeExitCleanup (1 << 30)  // Jump statement already had scope-exit destructors inserted.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

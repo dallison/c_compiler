@@ -1378,6 +1378,16 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 static void GenerateReturnStatement(Generator* gen,
                                     CombinedStatementASTNode* node) {
   IRNode* nrvo_expr = NULL;
+  // For a scalar/reference return the value must survive the scope-exit
+  // destructors (a destructor call would otherwise clobber the return
+  // register), so the `result` IR that places it is deferred until after the
+  // destructors run.  A struct return is copied into the return slot (memory)
+  // first, which is safe across the destructor calls.
+  IROpcode deferred_result_op = 0;
+  IRNode* deferred_result_value = NULL;
+  bool have_deferred_result = false;
+  bool deferred_result_needs_reload = false;
+  TypeRecord* deferred_reload_type = NULL;
   if (node->cond != NULL) {
     if (node->cond->op == AST_OP(asm)) {
       // Extension: return asm(..)
@@ -1400,8 +1410,23 @@ static void GenerateReturnStatement(Generator* gen,
       }
       IRNode* expr = GenerateExpression(gen, node->cond);
       node->cond->flags = old_cond_flags;
+      // When scope-exit destructors run between here and the branch, the
+      // scalar/reference return value must survive those calls.  The register
+      // allocator does not keep it live across the `result` opcode, so spill it
+      // to a stack temporary now and reload it after the destructors.
+      bool spill_for_cleanup = node->stmt != NULL;
       if (returns_reference) {
-        GeneratorEmit(gen, NewIR1(IR_OP(resulta), expr));
+        if (spill_for_cleanup) {
+          TypeRecord* addr_type = NewPointerTo(kQualPlain, gen->func->next);
+          deferred_result_value =
+              GeneratorSpillValueToTemp(gen, expr, addr_type);
+          deferred_result_needs_reload = true;
+          deferred_reload_type = addr_type;
+        } else {
+          deferred_result_value = expr;
+        }
+        deferred_result_op = IR_OP(resulta);
+        have_deferred_result = true;
       } else if (TypeIsStructOrUnion(node->cond->type)) {
         if ((node->cond->flags & kASTRvoCall) != 0) {
           // An RVO call is passed the structresult directly from the
@@ -1430,12 +1455,36 @@ static void GenerateReturnStatement(Generator* gen,
         } else {
           result = IR_OP(resulta);
         }
-        GeneratorEmit(gen, NewIR1(result, expr));
+        deferred_result_op = result;
+        if (spill_for_cleanup) {
+          deferred_result_value =
+              GeneratorSpillValueToTemp(gen, expr, node->cond->type);
+          deferred_result_needs_reload = true;
+          deferred_reload_type = node->cond->type;
+        } else {
+          deferred_result_value = expr;
+        }
+        have_deferred_result = true;
       }
     }
   }
 
 emit_return_branch:
+  // Run the C++ scope-exit destructors for automatic objects going out of
+  // scope (attached to the return's `stmt` child by the semantic analyzer).
+  // They run after the return value has been materialised but before the
+  // deferred result register write and the branch to the epilogue.
+  if (node->stmt != NULL) {
+    GenerateStatement(gen, node->stmt);
+  }
+  if (have_deferred_result) {
+    IRNode* result_value = deferred_result_value;
+    if (deferred_result_needs_reload) {
+      result_value = GeneratorReloadSpilledValue(gen, deferred_result_value,
+                                                 deferred_reload_type);
+    }
+    GeneratorEmit(gen, NewIR1(deferred_result_op, result_value));
+  }
   // We don't explictly do the return here because the code
   // sequence can be large (restoring saved registers, etc).
   // So instead, we branch to the first return in the function.

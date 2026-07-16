@@ -289,6 +289,83 @@ bool StructHasVirtualBases(Struct* str) {
   return str != NULL && str->virtual_bases.length > 0;
 }
 
+static bool TypeHasNonTrivialDestructorImpl(TypeRecord* type, Set* visited) {
+  if (!CompilerIsCXX() || type == NULL) {
+    return false;
+  }
+  while (TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  // Guard against cycles in the type graph (CRTP bases, self-referential
+  // instantiations) which would otherwise recurse without bound.
+  if (SetContains(visited, str)) {
+    return false;
+  }
+  SetInsert(visited, str);
+  if (str->tag_name != NULL) {
+    String destructor_name;
+    StringInit(&destructor_name, "~");
+    StringAppendString(&destructor_name, str->tag_name);
+    StructMember* destructor = FindStructMember(str, &destructor_name);
+    StringDestruct(&destructor_name);
+    if (destructor != NULL && destructor->is_member_function &&
+        destructor->symbol != NULL && destructor->symbol->type != NULL &&
+        destructor->symbol->type->info.function.is_destructor) {
+      FunctionInfo* info = &destructor->symbol->type->info.function;
+      // A user-declared, non-defaulted destructor is user-provided (hence
+      // non-trivial), and so is a virtual one.  `is_user_provided` is only set
+      // on the defining declaration, which for an out-of-line definition is a
+      // different symbol than the in-class member found here, so key off
+      // implicit/defaulted instead.
+      if ((info->is_user_declared && !info->is_defaulted) ||
+          info->is_virtual) {
+        return true;
+      }
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && TypeHasNonTrivialDestructorImpl(base->type, visited)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base != NULL && TypeHasNonTrivialDestructorImpl(base->type, visited)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->is_member_function || member->is_static ||
+        member->is_using_declaration || member->symbol == NULL) {
+      continue;
+    }
+    if (TypeHasNonTrivialDestructorImpl(member->symbol->type, visited)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether destroying an object of `type` runs any non-trivial destructor.
+// Computed structurally rather than trusting a cached triviality flag, which is
+// unreliable for template instantiations (it is copied verbatim from the still
+// dependent primary template).  A destructor is non-trivial if the class has a
+// user-provided or virtual destructor, or any base or non-static data member
+// (recursively) has a non-trivial destructor.
+bool TypeHasNonTrivialDestructor(TypeRecord* type) {
+  Set visited;
+  SetInitForPointers(&visited);
+  bool result = TypeHasNonTrivialDestructorImpl(type, &visited);
+  SetDestruct(&visited);
+  return result;
+}
+
 void CopyCXXBaseVirtualMembers(Struct* str) {
   if (!CompilerIsCXX() || str->virtual_members.length != 0) {
     return;

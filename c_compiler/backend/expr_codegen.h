@@ -14,4 +14,11 @@
 
 IRNode* GenerateExpression(Generator* gen, ASTNode* node);
 
+// Spill a scalar/pointer value into a fresh stack temporary (returns its
+// address) and reload it, so it survives intervening calls.
+IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
+                                  TypeRecord* type);
+IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
+                                    TypeRecord* type);
+
 #endif /* expr_codegen_h */

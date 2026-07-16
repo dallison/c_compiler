@@ -15,4 +15,9 @@
 void AnalyzeStatement(ASTNode* node);
 void CheckUnusedLabels(ASTNode* body);
 
+// Inserts C++ scope-exit destructor calls for automatic objects at each
+// return/break/continue in a fully-analyzed, non-dependent function body.  Must
+// run with compiler->current_function (and access context) set to `func`.
+void CXXInsertScopeExitDestructors(TypeRecord* func);
+
 #endif /* statement_semantics_h */

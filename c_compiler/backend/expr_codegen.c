@@ -282,6 +282,27 @@ static IROpcode GetStoreOpcode(ASTNode* node) {
   return GetStoreOpcodeForType(node->type);
 }
 
+// Spills a scalar/pointer `value` of `type` into a fresh stack temporary and
+// returns the temporary's address.  Used so a return value survives calls
+// emitted between its computation and the return (the scope-exit destructors),
+// which the register allocator does not otherwise keep live across the
+// `result` opcode.  Reload the value with GeneratorReloadSpilledValue.
+IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
+                                  TypeRecord* type) {
+  Symbol* tmp = SyntaxNewTemporary(gen->syntax, type);
+  IRNode* var = GeneratorGetVariable(gen, tmp);
+  IRNode* addr = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
+                           NewPointerTo(kQualPlain, type));
+  GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(type), addr, value));
+  return addr;
+}
+
+IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
+                                    TypeRecord* type) {
+  return IRSetType(GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), addr)),
+                   type);
+}
+
 // String literals are global to the compiler.  Each one has a
 // unique id allocated by the compiler.  The IR instruction
 // contains this ID.

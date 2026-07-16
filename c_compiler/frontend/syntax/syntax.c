@@ -4298,6 +4298,17 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
                                        &cxx_initializers, sym->location);
+    // Destroy the function body's own block-scope locals on fall-through.  A
+    // nested compound gets these appended by ParseCompoundStatement, but the
+    // outermost function-body block is assembled here by hand, so append them
+    // explicitly -- before the class member/base destructors so that, in a
+    // destructor body, locals are destroyed before the enclosing object's
+    // members and bases.  Coroutines are skipped: their locals live in the
+    // coroutine frame and are destroyed by the lowered frame-cleanup logic.
+    if (sym->type == NULL || !TypeIsFunction(sym->type) ||
+        !sym->type->info.function.is_coroutine) {
+      SyntaxAppendCXXBlockScopeDestructors(body);
+    }
     SyntaxAppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);

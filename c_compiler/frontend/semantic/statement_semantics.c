@@ -17,6 +17,7 @@
 #include "init_semantics.h"
 #include "bitset.h"
 #include "errors.h"
+#include "type_inheritance.h"
 
 static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
   (void)data;
@@ -283,6 +284,244 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   }
   VectorDestruct(&temps);
   return expr;
+}
+
+// ---- C++ scope-exit destructor insertion ---------------------------------
+//
+// A block-scope object with a non-trivial destructor is destroyed when its
+// block exits by falling off the end -- the parser appends the destructor call
+// as a trailing statement (SyntaxAppendCXXBlockScopeDestructors).  A jump out of
+// the block (return/break/continue) branches past those trailing statements, so
+// this pass injects the required destructor calls into each jump.
+//
+// For `return` the destructors must run *after* the return value is
+// materialised (the value may name the objects, and a by-value returned local
+// must be copied to the result before it is destroyed), so they are hung off
+// the return node's otherwise-unused `stmt` child and emitted by the backend at
+// the correct point.  For `break`/`continue` there is no value, so the jump is
+// rewritten as `{ <destructors>; jump; }`.
+
+// Build and analyze `receiver.~Tag()` as an expression statement.
+static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
+                                               ASTNode* receiver,
+                                               SourceLocation location) {
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, type->info.struct_info->tag_name);
+  ASTNode* member = NewStringConstantASTNode(NewString(destructor_name.value),
+                                             NULL, location);
+  StringDestruct(&destructor_name);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
+  // A class with virtual bases has a destructor with a hidden complete-object
+  // flag; a named local is a complete (most-derived) object, so pass 1.
+  Vector* actuals = NewVector();
+  if (StructHasVirtualBases(type->info.struct_info)) {
+    VectorAppend(actuals,
+                 NewIntConstantASTNode(
+                     1, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+  }
+  ASTNode* call =
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  call = AnalyzeExpression(call);
+  ASTNode* statement = NewExpressionStatementASTNode(call, location);
+  statement->flags |= kASTAnalyzed;
+  return statement;
+}
+
+// Is `sym` an automatic object this pass is responsible for destroying?
+static bool CXXLocalNeedsScopeExitDestructor(Symbol* sym) {
+  if (sym == NULL || sym->flags.is_temp ||
+      StorageIs(sym->storage, STO(static)) ||
+      StorageIs(sym->storage, STO(extern))) {
+    return false;
+  }
+  return TypeHasNonTrivialDestructor(sym->type);
+}
+
+// Append destructor statement(s) for `sym` (a single object, or a fixed array
+// of objects destroyed in reverse index order) to `out`.
+static void AppendLocalDestructorStatements(Symbol* sym, Vector* out) {
+  SourceLocation location = sym->location;
+  if (TypeIsFixedArray(sym->type)) {
+    int64_t length = sym->type->info.array.size.fixed;
+    for (int64_t k = length; k > 0; k--) {
+      ASTNode* array = NewIdentifierASTNode(sym, location);
+      ASTNode* subscript = NewBinaryASTNode(
+          AST_OP(subscript), NULL, location, array,
+          NewIntConstantASTNode(k - 1,
+                                NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location));
+      VectorAppend(out, NewAnalyzedDestructorStatement(sym->type->next,
+                                                       subscript, location));
+    }
+    return;
+  }
+  VectorAppend(out, NewAnalyzedDestructorStatement(
+                        sym->type, NewIdentifierASTNode(sym, location),
+                        location));
+}
+
+static size_t IndexOfChildInCompound(CompoundStatementASTNode* compound,
+                                     ASTNode* child) {
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    if (compound->statements->value.p[i] == child) {
+      return i;
+    }
+  }
+  return compound->statements->length;
+}
+
+// Collect (into `out`, in destruction order) the destructor statements for the
+// automatic objects that go out of scope when control leaves `jump`.  Walks
+// enclosing compound statements from innermost outward, stopping once `limit`
+// has been reached: for a `return`, `limit` is the function-body compound (which
+// is itself processed); for `break`/`continue`, `limit` is the enclosing
+// loop/switch node (not a compound, so processing stops just inside it).  Only
+// objects declared before the path to the jump in each compound are live, and
+// `skip` (an NRVO'd returned object) is never destroyed.
+static void CollectScopeExitDestructors(ASTNode* jump, ASTNode* limit,
+                                        Symbol* skip, Vector* out) {
+  ASTNode* child = jump;
+  ASTNode* parent = jump->parent;
+  while (parent != NULL) {
+    if (parent->op == AST_OP(compound)) {
+      CompoundStatementASTNode* compound = (CompoundStatementASTNode*)parent;
+      size_t idx = IndexOfChildInCompound(compound, child);
+      for (size_t i = idx; i > 0; i--) {
+        ASTNode* stmt = compound->statements->value.p[i - 1];
+        if (stmt->op != AST_OP(decl_list)) {
+          continue;
+        }
+        DeclarationListASTNode* decls = (DeclarationListASTNode*)stmt;
+        for (size_t j = decls->declarations->length; j > 0; j--) {
+          ASTNode* decl_node = decls->declarations->value.p[j - 1];
+          if (decl_node->op != AST_OP(vardecl)) {
+            continue;
+          }
+          Symbol* sym = ((VariableDeclarationASTNode*)decl_node)->symbol;
+          if (sym == skip || !CXXLocalNeedsScopeExitDestructor(sym)) {
+            continue;
+          }
+          AppendLocalDestructorStatements(sym, out);
+        }
+      }
+    }
+    if (parent == limit) {
+      break;
+    }
+    child = parent;
+    parent = parent->parent;
+  }
+}
+
+static ASTNode* CXXEnclosingLoopOrSwitch(ASTNode* node) {
+  for (ASTNode* p = node->parent; p != NULL; p = p->parent) {
+    if (p->op == AST_OP(for) || p->op == AST_OP(while) ||
+        p->op == AST_OP(do) || p->op == AST_OP(switch)) {
+      return p;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* CXXEnclosingLoop(ASTNode* node) {
+  for (ASTNode* p = node->parent; p != NULL; p = p->parent) {
+    if (p->op == AST_OP(for) || p->op == AST_OP(while) ||
+        p->op == AST_OP(do)) {
+      return p;
+    }
+  }
+  return NULL;
+}
+
+static void ProcessReturnJump(TypeRecord* func,
+                              CombinedStatementASTNode* ret) {
+  if ((ret->base.flags & kASTScopeExitCleanup) != 0) {
+    return;
+  }
+  ret->base.flags |= kASTScopeExitCleanup;
+  Symbol* skip = NULL;
+  ASTNode* return_value = ret->cond;
+  if (return_value != NULL && return_value->op == AST_OP(identifier) &&
+      (return_value->flags & kASTNrvoMarker) != 0) {
+    skip = ((IdentifierASTNode*)return_value)->symbol;
+  }
+  Vector* destructors = NewVector();
+  CollectScopeExitDestructors((ASTNode*)ret, func->info.function.body, skip,
+                              destructors);
+  if (destructors->length == 0) {
+    VectorDelete(destructors);
+    return;
+  }
+  ASTNode* compound =
+      NewCompoundStatementASTNode(destructors, ret->base.location);
+  compound->flags |= kASTAnalyzed;
+  ret->stmt = compound;
+  compound->parent = (ASTNode*)ret;
+  compound->child_id = 1;
+}
+
+static void ProcessBreakContinueJump(ASTNode* jump) {
+  if ((jump->flags & kASTScopeExitCleanup) != 0) {
+    return;
+  }
+  jump->flags |= kASTScopeExitCleanup;
+  ASTNode* limit = jump->op == AST_OP(break) ? CXXEnclosingLoopOrSwitch(jump)
+                                             : CXXEnclosingLoop(jump);
+  if (limit == NULL) {
+    return;
+  }
+  Vector* destructors = NewVector();
+  CollectScopeExitDestructors(jump, limit, NULL, destructors);
+  if (destructors->length == 0) {
+    VectorDelete(destructors);
+    return;
+  }
+  ASTNode* parent = jump->parent;
+  int child_id = jump->child_id;
+  // The jump runs after the destructors; NewCompoundStatementASTNode reparents
+  // it into the new block, then we splice the block into the jump's old slot.
+  VectorAppend(destructors, jump);
+  ASTNode* compound = NewCompoundStatementASTNode(destructors, jump->location);
+  compound->flags |= kASTAnalyzed;
+  ASTNodeReplaceChild(parent, child_id, compound, false);
+}
+
+static void CollectJumpStatements(ASTNode* node, void* data, int child_id,
+                                  VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->op == AST_OP(return) || node->op == AST_OP(break) ||
+      node->op == AST_OP(continue)) {
+    VectorAppend((Vector*)data, node);
+  }
+}
+
+// Inserts scope-exit destructor calls for automatic objects at every
+// return/break/continue in `func`'s body (see the block comment above).
+void CXXInsertScopeExitDestructors(TypeRecord* func) {
+  if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
+      func->info.function.body == NULL ||
+      func->info.function.is_coroutine ||
+      func->info.function.coroutine_frame_type != NULL ||
+      TypeContainsTemplateParameter(func)) {
+    return;
+  }
+  Vector jumps;
+  VectorInit(&jumps);
+  ASTNodeVisit(func->info.function.body, CollectJumpStatements, 0, &jumps);
+  for (size_t i = 0; i < jumps.length; i++) {
+    ASTNode* jump = jumps.value.p[i];
+    if (jump->op == AST_OP(return)) {
+      ProcessReturnJump(func, (CombinedStatementASTNode*)jump);
+    } else {
+      ProcessBreakContinueJump(jump);
+    }
+  }
+  VectorDestruct(&jumps);
 }
 
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {

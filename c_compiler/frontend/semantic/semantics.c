@@ -361,6 +361,12 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // AnalyzeVariables(node->type->info.function.body);
   CheckForUnusedLocalSymbols(syntax, node);
 
+  // With the body fully typed, inject destructor calls for automatic objects at
+  // each return/break/continue (the parser only appends them on fall-through).
+  if (NumErrors() == 0) {
+    CXXInsertScopeExitDestructors(node->type);
+  }
+
   // Analysis is complete: the body is now fully typed and safe to lower.
   Vector* analyzing = &compiler->functions_being_analyzed;
   for (size_t i = analyzing->length; i-- > 0;) {

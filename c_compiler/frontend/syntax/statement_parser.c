@@ -13,6 +13,7 @@
 #include "statement_parser.h"
 #include "compiler.h"
 #include "type.h"
+#include "type_inheritance.h"
 
 static ASTNode* NewRangeForInitExpression(Symbol* sym, ASTNode* initializer,
                                           SourceLocation location) {
@@ -90,19 +91,27 @@ static ASTNode* NewCXXDestructorCallForReceiver(TypeRecord* type,
     StringDestruct(&destructor_name);
     return NULL;
   }
-  if (destructor->symbol->type->info.function.is_implicitly_declared &&
-      destructor->symbol->type->info.function.is_trivial_special_member) {
+  if (!TypeHasNonTrivialDestructor(type)) {
     StringDestruct(&destructor_name);
     return NULL;
   }
 
   ASTNode* member = NewStringConstantASTNode(NewString(destructor_name.value),
-                                            NULL, location);
+                                             NULL, location);
   ASTNode* member_access =
       NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member);
   StringDestruct(&destructor_name);
+  // A class with virtual bases has a destructor that takes a hidden
+  // complete-object flag; a named local is a complete (most-derived) object, so
+  // pass 1 so the destructor also tears down the virtual bases.
+  Vector* actuals = NewVector();
+  if (StructHasVirtualBases(type->info.struct_info)) {
+    VectorAppend(actuals,
+                 NewIntConstantASTNode(
+                     1, NewTypeRecordWithSize(kTypeInt, kQualPlain), location));
+  }
   return NewExpressionStatementASTNode(
-      NewVectorASTNode(AST_OP(call), NULL, location, member_access, NewVector()),
+      NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals),
       location);
 }
 
@@ -129,7 +138,7 @@ static ASTNode* NewCXXArrayElementDestructorCall(Symbol* sym, int64_t index,
   return NewCXXDestructorCallForReceiver(sym->type->next, subscript, location);
 }
 
-static void AppendCXXDestructorCalls(Vector* statements) {
+void SyntaxAppendCXXBlockScopeDestructors(Vector* statements) {
   if (!CompilerIsCXX()) {
     return;
   }
@@ -204,7 +213,7 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
     }
   }
    
-  AppendCXXDestructorCalls(statements);
+  SyntaxAppendCXXBlockScopeDestructors(statements);
 
   if (compiler->debug_output) {
     // Label at end of statements in block.
