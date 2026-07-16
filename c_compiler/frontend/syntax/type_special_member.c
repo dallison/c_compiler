@@ -440,6 +440,56 @@ void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
   }
 }
 
+// Applies `depth` constant subscripts (`indices[0..depth)`) to a freshly-built
+// member receiver so that a multidimensional array member is addressed down to
+// one of its innermost elements (e.g. `dst.g[i][j]`).
+static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
+                                        size_t depth, SourceLocation location) {
+  ASTNode* node = base;
+  for (size_t d = 0; d < depth; d++) {
+    ASTNode* index = NewIntConstantASTNode(
+        (int64_t)indices[d], NewTypeRecordWithSize(kTypeInt, kQualPlain),
+        location);
+    node = NewBinaryASTNode(AST_OP(subscript), NULL, location, node, index);
+  }
+  return node;
+}
+
+// Emits element-wise `dst.member[..] = src.member[..]` assignments for an array
+// data member, recursing through every dimension of a multidimensional array so
+// the assignment finally acts on the array's innermost (scalar or class)
+// element.  Assigning a whole sub-array row (e.g. `int[2]` from an `int[2][2]`)
+// is ill-formed, so a naive single-dimension loop breaks for such members.
+static void AppendCXXArrayMemberwiseAssignments(
+    TypeRecord* func, Symbol* source, StructMember* member,
+    TypeRecord* array_type, size_t* indices, size_t depth,
+    bool is_constructor_initializer, Vector* body, SourceLocation location) {
+  TypeRecord* element_type = array_type->next;
+  for (size_t index = 0; index < (size_t)array_type->info.array.size.fixed;
+       index++) {
+    indices[depth] = index;
+    if (TypeIsFixedArray(element_type)) {
+      AppendCXXArrayMemberwiseAssignments(func, source, member, element_type,
+                                          indices, depth + 1,
+                                          is_constructor_initializer, body,
+                                          location);
+      continue;
+    }
+    ASTNode* target =
+        ApplyConstantSubscripts(NewCXXMemberReceiver(func, member, location),
+                                indices, depth + 1, location);
+    ASTNode* value = ApplyConstantSubscripts(
+        NewCXXSourceMemberReceiver(source, member, location), indices,
+        depth + 1, location);
+    ASTNode* assign = NewBinaryASTNode(AST_OP(assign), element_type, location,
+                                       target, value);
+    if (is_constructor_initializer) {
+      assign->flags |= kASTCXXMemberInitializer;
+    }
+    VectorAppend(body, NewExpressionStatementASTNode(assign, location));
+  }
+}
+
 void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
                                     Vector* body, Struct* owner,
                                     SourceLocation location) {
@@ -464,27 +514,15 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
     }
     TypeRecord* member_type = member->symbol->type;
     if (TypeIsFixedArray(member_type)) {
-      for (size_t index = 0; index < member_type->info.array.size.fixed;
-           index++) {
-        ASTNode* target = NewCXXMemberReceiver(func, member, location);
-        ASTNode* value = NewCXXSourceMemberReceiver(source, member, location);
-        ASTNode* index_node = NewIntConstantASTNode(
-            (int64_t)index, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-            location);
-        ASTNode* value_index = NewIntConstantASTNode(
-            (int64_t)index, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-            location);
-        target = NewBinaryASTNode(AST_OP(subscript), NULL, location, target,
-                                  index_node);
-        value = NewBinaryASTNode(AST_OP(subscript), NULL, location, value,
-                                 value_index);
-        ASTNode* assign = NewBinaryASTNode(AST_OP(assign), member_type->next,
-                                           location, target, value);
-        if (is_constructor_initializer) {
-          assign->flags |= kASTCXXMemberInitializer;
-        }
-        VectorAppend(body, NewExpressionStatementASTNode(assign, location));
+      size_t ndims = 0;
+      for (TypeRecord* t = member_type; TypeIsFixedArray(t); t = t->next) {
+        ndims++;
       }
+      size_t* indices = calloc(ndims, sizeof(size_t));
+      AppendCXXArrayMemberwiseAssignments(func, source, member, member_type,
+                                          indices, 0, is_constructor_initializer,
+                                          body, location);
+      free(indices);
     } else {
       ASTNode* target = NewCXXMemberReceiver(func, member, location);
       ASTNode* value = NewCXXSourceMemberReceiver(source, member, location);
