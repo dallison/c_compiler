@@ -2048,9 +2048,20 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
          non_deduced_member;
 }
 
+/* True for the members that contribute to structural template-argument
+ * deduction: non-static data members and nested types.  Member functions and
+ * static members never yield a deduced argument, and their presence differs
+ * between a fully-instantiated specialization (which has synthesized implicit
+ * special members) and a still-dependent primary, so they are ignored. */
+static bool StructMemberParticipatesInDeduction(StructMember* member) {
+  return member != NULL && member->symbol != NULL &&
+         !member->is_member_function && !member->is_static;
+}
+
 /* Deduce template arguments by matching two structurally-identical structs
- * member-by-member (used for aggregate deduction): member layout/kind/names
- * must agree, and each data member's type is deduced recursively. */
+ * member-by-member (used for aggregate deduction): the non-static data members
+ * (and nested types) must agree in order, kind, and name, and each data
+ * member's type is deduced recursively. */
 static bool DeduceFunctionTemplateStructMembers(Vector* args,
                                                 size_t explicit_arg_count,
                                                 TypeRecord* formal,
@@ -2061,37 +2072,56 @@ static bool DeduceFunctionTemplateStructMembers(Vector* args,
   }
   Struct* formal_struct = formal->info.struct_info;
   Struct* actual_struct = actual->info.struct_info;
-  if (formal_struct->members.length != actual_struct->members.length) {
-    return false;
-  }
 
-  for (size_t i = 0; i < formal_struct->members.length; i++) {
-    StructMember* formal_member = formal_struct->members.value.p[i];
-    StructMember* actual_member = actual_struct->members.value.p[i];
-    if (formal_member == NULL || actual_member == NULL ||
-        formal_member->symbol == NULL || actual_member->symbol == NULL ||
-        formal_member->is_static != actual_member->is_static ||
-        formal_member->is_member_function != actual_member->is_member_function ||
-        StructMemberIsNestedType(formal_member) !=
+  // Only non-static data members (and nested types) participate in deduction;
+  // member functions and static members never contribute a deduced argument.
+  // The two sides may legitimately differ in their member-function/static-member
+  // sets: a concrete specialization that has already been fully instantiated has
+  // its implicit special members (default/copy/move constructor, destructor,
+  // assignment operators) synthesized, whereas the still-dependent primary the
+  // formal side comes from does not.  So walk only the deduction-relevant
+  // members on each side, in order, and ignore the rest -- comparing raw member
+  // counts (or positions) would spuriously fail after such synthesis.
+  size_t fi = 0;
+  size_t ai = 0;
+  for (;;) {
+    while (fi < formal_struct->members.length &&
+           !StructMemberParticipatesInDeduction(
+               formal_struct->members.value.p[fi])) {
+      fi++;
+    }
+    while (ai < actual_struct->members.length &&
+           !StructMemberParticipatesInDeduction(
+               actual_struct->members.value.p[ai])) {
+      ai++;
+    }
+    bool formal_done = fi >= formal_struct->members.length;
+    bool actual_done = ai >= actual_struct->members.length;
+    if (formal_done && actual_done) {
+      break;
+    }
+    if (formal_done != actual_done) {
+      return false;
+    }
+    StructMember* formal_member = formal_struct->members.value.p[fi];
+    StructMember* actual_member = actual_struct->members.value.p[ai];
+    if (StructMemberIsNestedType(formal_member) !=
             StructMemberIsNestedType(actual_member) ||
         !StringEqualString(&formal_member->symbol->name,
                            &actual_member->symbol->name)) {
       return false;
     }
-    if (formal_member->is_member_function || formal_member->is_static) {
-      continue;
-    }
     if (StructMemberIsNestedType(formal_member)) {
       if (!TypeEqual(formal_member->symbol->type, actual_member->symbol->type)) {
         return false;
       }
-      continue;
-    }
-    if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
-                                            formal_member->symbol->type,
-                                            actual_member->symbol->type)) {
+    } else if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                                   formal_member->symbol->type,
+                                                   actual_member->symbol->type)) {
       return false;
     }
+    fi++;
+    ai++;
   }
   return true;
 }
