@@ -6435,7 +6435,12 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
                                               default_type, false, 0, -1,
                                               index));
     StringDestruct(&param_name);
-    TypeRecordDelete(default_type);
+    // NewTemplateParameter takes its own reference to `default_type`
+    // (TypeRecordIncRef).  `default_type` came from ParseTemplateTypeDefault
+    // with a zero reference count, so an additional TypeRecordDelete here would
+    // drop the count back to zero and destruct the still-referenced record in
+    // place -- freeing its dependent-member-name/template-argument data and
+    // corrupting dependent defaults such as `class C = common_type<T,U>::type`.
     return true;
   }
 
@@ -6489,12 +6494,22 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
     return NewVector();
   }
   Vector* params = NewVector();
+  // Expose the in-progress parameter list while the list itself is parsed so a
+  // later parameter's default argument that names earlier parameters (e.g.
+  // `class C = typename common_type<T, U>::type`) is recognized as dependent and
+  // kept unresolved.  The enclosing code only sets `current_template_parameters`
+  // *after* the whole list is parsed, so without this such a default is eagerly
+  // -- and wrongly -- resolved against the primary template (dropping the
+  // `::type` member and yielding a bogus concrete type such as `int`).
+  Vector* saved_template_parameters = syntax->current_template_parameters;
+  syntax->current_template_parameters = params;
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     ParseTemplateParameter(syntax, params, base);
     if (!LexMatch(lex, TOK(comma))) {
       break;
     }
   }
+  syntax->current_template_parameters = saved_template_parameters;
   SyntaxNeedTemplateClose(syntax, TC(decl));
   return params;
 }
