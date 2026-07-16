@@ -6685,8 +6685,17 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       syntax->parsing_template_argument = old_parsing_template_argument;
       arg->kind = kTemplateParameterNonType;
       int direct_template_parameter_index = -1;
-      if (!ExpressionIsNonTypeTemplateParameter(
-              expr, &direct_template_parameter_index) &&
+      bool is_direct_nttp =
+          ExpressionIsNonTypeTemplateParameter(expr,
+                                               &direct_template_parameter_index);
+      // A template argument can only be value-dependent when template parameters
+      // are in scope, i.e. while parsing a template declaration.  Outside one it
+      // must be a concrete constant expression, so it has to be folded now.  The
+      // dependence probe below inspects the still-unanalysed expression, where
+      // every interior node (a `+`, a call, ...) has a null/unknown type and so
+      // is spuriously reported as dependent; gating on the parse state avoids
+      // deferring -- and thus dropping to 0 -- such non-dependent arguments.
+      if (syntax->parsing_template_declaration && !is_direct_nttp &&
           ExpressionContainsDependentTemplateParameter(expr)) {
         // A value-dependent trait condition such as `!is_integral<It>::value`:
         // resolving it now would fold the primary template's value.  Keep the
