@@ -1555,13 +1555,32 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
   return formal_arg->int_value == actual_arg->int_value;
 }
 
+// The template-argument list describing a class-template specialization type.
+// A type record obtained from an expression -- notably the type of a
+// CTAD-deduced variable used as a further deduction source (`Pair p{...}; Pair
+// q = p;`) -- may not carry `template_arguments` on the record itself, but the
+// specialization's tag symbol always records them.  Recover from the tag so
+// deduction against a same-template argument still sees the concrete arguments.
+static Vector* SpecializationTemplateArguments(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  if (type->template_arguments != NULL) {
+    return type->template_arguments;
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL &&
+      type->info.struct_info->tag_symbol->type != NULL) {
+    return type->info.struct_info->tag_symbol->type->template_arguments;
+  }
+  return NULL;
+}
+
 static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
                                                     size_t explicit_arg_count,
                                                     TypeRecord* formal,
                                                     TypeRecord* actual) {
-  if (formal == NULL || actual == NULL ||
-      formal->template_arguments == NULL ||
-      actual->template_arguments == NULL) {
+  if (formal == NULL || actual == NULL) {
     return false;
   }
   Symbol* formal_origin = formal->template_origin;
@@ -1585,8 +1604,11 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
        !StringEqualString(&formal_origin->name, &actual_origin->name))) {
     return false;
   }
-  Vector* formal_args = formal->template_arguments;
-  Vector* actual_args = actual->template_arguments;
+  Vector* formal_args = SpecializationTemplateArguments(formal);
+  Vector* actual_args = SpecializationTemplateArguments(actual);
+  if (formal_args == NULL || actual_args == NULL) {
+    return false;
+  }
   Vector flat_actual_args;
   bool flattened_actual_args = false;
   VectorInit(&flat_actual_args);

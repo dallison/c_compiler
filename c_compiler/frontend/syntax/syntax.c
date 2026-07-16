@@ -7640,10 +7640,41 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
     return NULL;
   }
   StructMember* constructor = FindCXXConstructor(sym->type);
+  // C++20 parenthesized aggregate initialization ([dcl.init]/16.6.2.5): a
+  // parenthesized expression-list initializing an aggregate is treated as
+  // aggregate initialization.  An aggregate has only implicit special-member
+  // constructors, and aggregate init's single-element-of-same-type rule already
+  // reproduces the copy/move case, so routing the whole parenthesized list
+  // through aggregate init matches "consider constructors first, fall back to
+  // aggregate init".  (The type is concrete here: any CTAD placeholder has been
+  // resolved by ResolveCXXClassTemplateArgumentDeduction above.)
+  //
+  // A class with any user-declared (non-invented) constructor is never an
+  // aggregate.  The `is_aggregate` flag on a class template's *primary* struct
+  // is unreliable (it can be stale/true even though the class has constructors),
+  // and the injected-class-name inside a member body can still refer to that
+  // primary struct, so verify structurally rather than trusting the flag alone.
+  bool has_user_declared_constructor = false;
+  for (StructMember* c = constructor; c != NULL; c = c->overload_next) {
+    if (c->is_member_function && c->symbol != NULL &&
+        !c->symbol->flags.invented) {
+      has_user_declared_constructor = true;
+      break;
+    }
+  }
+  bool paren_aggregate_init =
+      !braced && !TypeIsClassTemplatePlaceholder(sym->type) &&
+      sym->type->info.struct_info != NULL &&
+      sym->type->info.struct_info->is_aggregate &&
+      !sym->type->info.struct_info->is_template &&
+      !has_user_declared_constructor;
   if (constructor == NULL ||
-      (braced && sym->type->info.struct_info->is_aggregate)) {
+      (braced && sym->type->info.struct_info->is_aggregate) ||
+      paren_aggregate_init) {
     ASTNode* braced_initializer =
-        braced ? NewCXXBracedInitializerFromActuals(actuals, location) : NULL;
+        (braced || paren_aggregate_init)
+            ? NewCXXBracedInitializerFromActuals(actuals, location)
+            : NULL;
     if (braced_initializer == NULL) {
       VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
                                /*free_element=*/false);
