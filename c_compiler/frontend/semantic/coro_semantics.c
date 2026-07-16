@@ -1250,6 +1250,15 @@ static Vector* TakeCXXTemporaryConstructionActuals(ASTNode* expr,
       type->info.struct_info == NULL) {
     return NULL;
   }
+  /* An aggregate awaiter (`T{...}`) has no user-declared constructor: its
+   * `T(args)`-shaped construction node is aggregate initialization, not a
+   * constructor call whose arguments can be replayed as an in-place
+   * `frame->slot.T(args)` construction (that would fail overload resolution
+   * against the implicit special members).  Leave the whole node intact so the
+   * frame slot is copy-initialized from the aggregate temporary instead. */
+  if (type->info.struct_info->is_aggregate) {
+    return NULL;
+  }
   if (expr->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)expr;
     if (call->left == NULL || !TypeIsStructOrUnion(call->left->type) ||
