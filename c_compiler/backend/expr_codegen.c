@@ -1140,12 +1140,22 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
     IRNode* write = NULL;
     if (TypeIsStructOrUnion(designated_init->base.type) ||
         TypeIsMemberPointerAggregate(designated_init->base.type)) {
-      if (designated_expr->op != AST_OP(call)) {
-        // A call will place its result in the address given.  If the
-        // value is a struct we need to be copied in.
-        
-        // Initialization of a struct/union.
-        value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)), NewPointerTo(kQualPlain, designated_init->base.type));
+      // A call that returns the struct *by value* constructs its result
+      // directly into the destination address (sret), so no copy is needed.
+      // Any other initializer must be copied in -- including a call that
+      // returns a *reference* (a prvalue vs. glvalue distinction): such a call
+      // yields a pointer to an existing source object rather than constructing
+      // into the destination.
+      bool by_value_call =
+          designated_expr->op == AST_OP(call) &&
+          designated_expr->value_category == kValueCategoryPrvalue;
+      if (!by_value_call) {
+        // A reference-returning call already produces a pointer to the source
+        // object; other struct expressions produce the object and need their
+        // address taken first.
+        if (designated_expr->op != AST_OP(call)) {
+          value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)), NewPointerTo(kQualPlain, designated_init->base.type));
+        }
         CheckForVarUse(value, designated_init->init);
         write = GeneratorEmit(gen, NewIR3(IR_OP(memcpy), destaddr, value,
                                   GeneratorGetIntConstant(
@@ -1294,8 +1304,10 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   IRNode* assignment;
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
-    if (node->right->op == AST_OP(call)) {
-      // Assignment from a function call.
+    if (node->right->op == AST_OP(call) &&
+        node->right->value_category == kValueCategoryPrvalue) {
+      // Assignment from a by-value-returning call: it constructs its result
+      // directly into the destination address (sret).
       IRNode* old_struct_address = gen->current_struct_address;
       IRNode* ref = GeneratorEmit(gen, NewIR1(IR_OP(addressof), dest));
       IRSetType(ref, NewPointerTo(kQualPlain, node->left->type));
@@ -1304,9 +1316,13 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       gen->current_struct_address = old_struct_address;
       return value;
     } else {
-      // Struct or union assignment, use memcpy.
+      // Struct or union assignment, use memcpy.  A call that returns a
+      // reference already yields a pointer to the source object; any other
+      // struct expression yields the object and needs its address taken.
       value = GenerateExpression(gen, node->right);
-      value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
+      if (node->right->op != AST_OP(call)) {
+        value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
+      }
       CheckForVarUse(value, node->right);
       assignment = GeneratorEmit(
           gen,

@@ -850,6 +850,7 @@ static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
     // for it.
     if (fallthrough->code->opcode != IR_OP(label)) {
       IRNode* label = GeneratorEmitBefore(gen, NewIR(IR_OP(label)), fallthrough->code);
+      label->block = fallthrough;
       fallthrough->code = label;
     }
     IRNode* bra = GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), fallthrough->code), dest->end_code);
@@ -859,6 +860,17 @@ static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
     // branch to its single output edge.
     assert(src->out_edges.length == 1);
     BasicBlock* output = VectorGet(&gen->basic_blocks, src->out_edges.value.w[0]);
+    // The branch target must be a label so it can be resolved during target
+    // lowering.  A block reached only by fall-through (e.g. the code after a
+    // call, or after an empty-condition `for(;;)` loop) need not begin with a
+    // label; synthesize one, matching the conditional-branch case above, or the
+    // emitted `bra` would point at a non-label node and never get a fixup,
+    // producing an unconditional jump with a NULL target that crashes codegen.
+    if (output->code->opcode != IR_OP(label)) {
+      IRNode* label = GeneratorEmitBefore(gen, NewIR(IR_OP(label)), output->code);
+      label->block = output;
+      output->code = label;
+    }
     IRNode* bra = GeneratorEmitBefore(gen, NewIR1(IR_OP(bra), output->code), dest->end_code);
     bra->block = dest;
   }

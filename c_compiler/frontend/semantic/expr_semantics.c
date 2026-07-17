@@ -1440,8 +1440,11 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
       }
     } else if (TypeIsPointerOrArray(node->right->type)) {
       // Pointer - pointer: divide the result by the size of the type
-      // pointed to.
-      if (!TypeIsPointerToSameType(node->left->type, node->right->type)) {
+      // pointed to.  Both operands are pointer-or-array here, so an array
+      // operand decays to a pointer to its element type; compare the pointed-to
+      // element types rather than requiring identical declarators.
+      if (node->left->type->next == NULL || node->right->type->next == NULL ||
+          node->left->type->next->type != node->right->type->next->type) {
         SemanticTypeConversionError(
             node->left, node->right->type,
             "Illegal pointer subtraction; "

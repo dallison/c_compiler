@@ -721,6 +721,24 @@ static COMPILER_UNUSED int GetArraySizeFromInitializer(BracedInitializerASTNode*
 }
 
 
+// True if this INode (or, for an aggregate element, any of its descendants)
+// received at least one initializer.  A scalar element records initializers on
+// itself, but a struct/array element records them on its members/elements, so
+// its own `num_initializers` stays zero even when fully initialized.  The
+// flexible-array length deduction must recurse to count such elements or a
+// `T x[] = {{...},{...}}` would deduce a length (and thus size) of zero.
+static bool INodeWasInitialized(INode* inode) {
+  if (inode->num_initializers > 0 || inode->expr != NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < inode->children.length; i++) {
+    if (INodeWasInitialized((INode*)inode->children.value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only) {
   switch (init_expr->op) {
     case AST_OP(expr_init): {
@@ -750,7 +768,7 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
         // if designated initializers are used.
         for (ssize_t i = inode->children.length - 1; i >= 0; i--) {
           INode* child = inode->children.value.p[i];
-          if (child->num_initializers > 0) {
+          if (INodeWasInitialized(child)) {
             inode->num_initializers = (int)i + 1;
             break;
           }

@@ -950,6 +950,44 @@ bool TypeTemplateArgumentVectorEqual(Vector* left, Vector* right) {
  * the node shapes that appear in constant/SFINAE conditions are compared; any
  * other shape is conservatively treated as unequal so that distinct overloads
  * are never merged into one. */
+/* Stack of function-template specializations whose bodies are currently being
+ * cloned.  A self-recursive function template (e.g. an introsort or merge-sort
+ * helper that calls itself on subranges) contains a call to the very
+ * specialization being instantiated.  Cloning its body triggers that call,
+ * which re-enters instantiation and finds the in-progress specialization.  The
+ * body has not been assigned yet at that point, so without this marker the
+ * re-entry would clone the body again, recursing until the stack overflows.
+ * Instantiation runs single-threaded, so a plain intrusive stack suffices. */
+typedef struct FunctionInstantiationInProgress {
+  Symbol* symbol;
+  struct FunctionInstantiationInProgress* next;
+} FunctionInstantiationInProgress;
+static FunctionInstantiationInProgress* g_function_instantiations_in_progress =
+    NULL;
+
+static bool FunctionTemplateInstantiationInProgress(Symbol* symbol) {
+  for (FunctionInstantiationInProgress* node =
+           g_function_instantiations_in_progress;
+       node != NULL; node = node->next) {
+    if (node->symbol == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void PushFunctionInstantiationInProgress(
+    FunctionInstantiationInProgress* node, Symbol* symbol) {
+  node->symbol = symbol;
+  node->next = g_function_instantiations_in_progress;
+  g_function_instantiations_in_progress = node;
+}
+
+static void PopFunctionInstantiationInProgress(
+    FunctionInstantiationInProgress* node) {
+  g_function_instantiations_in_progress = node->next;
+}
+
 static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
                                                       Symbol* template_definition,
                                                       Symbol* symbol,
@@ -959,12 +997,16 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       symbol->type == NULL ||
       template_definition->type->info.function.body == NULL ||
       symbol->type->info.function.body != NULL ||
+      FunctionTemplateInstantiationInProgress(symbol) ||
       PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     return;
   }
+  FunctionInstantiationInProgress in_progress;
+  PushFunctionInstantiationInProgress(&in_progress, symbol);
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, args);
+  PopFunctionInstantiationInProgress(&in_progress);
   SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                 symbol, args);
   symbol->type->info.function.definition = true;
@@ -1132,11 +1174,23 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   }
   VectorDestruct(&symbol->attributes);
   AttributeListClone(&symbol->attributes, &templ->attributes);
+  // Register this instantiation in the template's cache *before* cloning its
+  // body.  A recursive function template (e.g. an introsort/merge-sort helper
+  // that calls itself on subranges) contains a call to the very specialization
+  // being instantiated; cloning the body triggers that call, which re-enters
+  // here.  If the symbol were not yet recorded, the lookups above would miss it
+  // and we would instantiate an endless chain of identical specializations
+  // until the stack overflows.  Recording it first lets the recursive call
+  // resolve to this in-progress symbol and terminate.
+  AppendFunctionTemplateInstantiation(templ, symbol);
   if (template_definition->type->info.function.body != NULL &&
       compiler->speculative_template_instantiation_depth == 0) {
+    FunctionInstantiationInProgress in_progress;
+    PushFunctionInstantiationInProgress(&in_progress, symbol);
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, completed_args);
+    PopFunctionInstantiationInProgress(&in_progress);
     // A member function *template* constructor has its member-initializer
     // preamble intentionally deferred from class instantiation (see
     // QueueTemplateMemberFunctionDefinitionImpl); insert it here now that the
@@ -1160,7 +1214,6 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
                  NewDeclarationListASTNode(declarations, symbol->location));
     VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
   }
-  AppendFunctionTemplateInstantiation(templ, symbol);
   VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);

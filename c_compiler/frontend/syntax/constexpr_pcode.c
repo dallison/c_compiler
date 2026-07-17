@@ -173,6 +173,13 @@ struct ConstexprObject {
   StructMember* active_union_member;
 };
 
+// Defined in constexpr.c; dereference an address-valued ConstexprValue and
+// read the referred-to scalar.  Declared here (rather than in constexpr.h)
+// because passing ConstexprValue by value requires its complete type, which is
+// private to these two translation units.
+bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result);
+bool ConstexprValueAsFloating(ConstexprValue value, double* result);
+
 static bool PCodeConstexprObjectIsUnion(ConstexprObject* object) {
   return object != NULL && TypeIsStructOrUnion(object->type) &&
          object->type->info.struct_info != NULL &&
@@ -2405,6 +2412,16 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
+  // A function returning a reference leaves the address of the referent (not
+  // the referent's value) in the integer return register.  Reading it as the
+  // integer result would leak that address, so evaluate the call as an address
+  // and dereference it to obtain the referred-to integer.
+  if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
+      TypeIsReference(callee->type->next)) {
+    ConstexprValue value;
+    return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
+           ConstexprValueAsInteger(value, result);
+  }
   return RunRealPCodeCall(ctx, node, callee->type, result, NULL, NULL, NULL,
                           &reason);
 }
@@ -2417,6 +2434,15 @@ bool ConstexprPCodeEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
   }
   Symbol* callee = PCodeConstexprFunctionDefinition(
       PCodeConstexprCallSymbol(node));
+  // See ConstexprPCodeEvaluateCallAsInteger: a reference return yields the
+  // referent's address in the return register; dereference it instead of
+  // reinterpreting the address bits as a floating-point value.
+  if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
+      TypeIsReference(callee->type->next)) {
+    ConstexprValue value;
+    return ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
+           ConstexprValueAsFloating(value, result);
+  }
   return RunRealPCodeCall(ctx, node, callee->type, NULL, result, NULL, NULL,
                           &reason);
 }

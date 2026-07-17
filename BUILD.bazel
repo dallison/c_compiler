@@ -12,6 +12,7 @@ filegroup(
         "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",
+        "libc/include/algorithm",
         "libc/include/chrono",
         "libc/include/compare",
         "libc/include/concepts",
