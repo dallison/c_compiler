@@ -396,7 +396,18 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   if (!str->is_class && (!CompilerIsCXX() || str->is_union)) {
     return;
   }
-  if (SyntaxFindSymbol(parser->syntax, &tag->name) != NULL) {
+  // Skip only when a *genuinely different* entity already owns this name; do not
+  // skip when the found symbol denotes this very class.  A prior forward
+  // declaration (notably a class template forward-declared before it is
+  // defined) registers the class's own name in an enclosing scope, and bailing
+  // out here would leave the class body without an injected-class-name.  Uses
+  // like `ClassName(args)` inside member bodies would then fail to resolve as a
+  // self-construction and degrade to an implicit member access, which breaks
+  // once the member is instantiated.
+  Symbol* shadowing = SyntaxFindSymbol(parser->syntax, &tag->name);
+  if (shadowing != NULL && shadowing != tag &&
+      !(shadowing->type != NULL && TypeIsStructOrUnion(shadowing->type) &&
+        shadowing->type->info.struct_info == str)) {
     return;
   }
 
@@ -529,6 +540,18 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     class_symbol_scope = NewLocalSymbolTable();
     class_symbol_scope->prev = parser->syntax->local_symbol_stack;
     parser->syntax->local_symbol_stack = class_symbol_scope;
+    // Publish the injected-class-name into the class body scope *before* any
+    // member is parsed, so it is visible while member declarations and (in
+    // particular) deferred inline member bodies are analysed in complete-class
+    // context.  Inside the class's own body the bare class name denotes the
+    // current type (the current instantiation for a template), not the class
+    // template's `is_template` alias -- which, when the class was previously
+    // forward-declared, is registered in an enclosing scope and would otherwise
+    // be found first, causing a bare self-construction like `Foo()` to be
+    // misparsed as requiring template arguments and degrade to an implicit
+    // member access.  The later AddInjectedClassName call (after the body) still
+    // registers the name in the *enclosing* scope for out-of-body uses.
+    AddInjectedClassName(parser, tag);
   }
   Struct* saved_member_owner = parser->cxx_member_owner;
   Struct* saved_class_head = parser->syntax->cxx_class_head;

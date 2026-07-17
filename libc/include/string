@@ -15,87 +15,21 @@
 #ifndef __davecc_string__
 #define __davecc_string__
 
+#include <__char_traits>
 #include <compare>
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <stdlib.h>
 #include <string.h>
 
 namespace std {
 
-// Minimal char_traits.  Only the char specialization is provided; that is all
-// std::string needs and it keeps the surface tied to tested C string routines.
-template <class CharT>
-struct char_traits;
-
-template <>
-struct char_traits<char> {
-  using char_type = char;
-  using int_type = int;
-  using pos_type = long;
-  using off_type = long;
-
-  static constexpr void assign(char_type& a, const char_type& b) noexcept {
-    a = b;
-  }
-  static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
-  static constexpr bool lt(char_type a, char_type b) noexcept {
-    return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
-  }
-
-  static size_t length(const char_type* s) { return strlen(s); }
-
-  static int compare(const char_type* a, const char_type* b, size_t n) {
-    if (n == 0) {
-      return 0;
-    }
-    return memcmp(a, b, n);
-  }
-
-  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
-    if (n != 0) {
-      memcpy(dst, src, n);
-    }
-    return dst;
-  }
-
-  static char_type* move(char_type* dst, const char_type* src, size_t n) {
-    if (n != 0) {
-      memmove(dst, src, n);
-    }
-    return dst;
-  }
-
-  static char_type* assign(char_type* dst, size_t n, char_type c) {
-    if (n != 0) {
-      memset(dst, static_cast<unsigned char>(c), n);
-    }
-    return dst;
-  }
-
-  static const char_type* find(const char_type* s, size_t n,
-                               const char_type& c) {
-    for (size_t i = 0; i < n; i++) {
-      if (s[i] == c) {
-        return s + i;
-      }
-    }
-    return nullptr;
-  }
-
-  static constexpr char_type to_char_type(int_type c) noexcept {
-    return static_cast<char_type>(c);
-  }
-  static constexpr int_type to_int_type(char_type c) noexcept {
-    return static_cast<unsigned char>(c);
-  }
-  static constexpr bool eq_int_type(int_type a, int_type b) noexcept {
-    return a == b;
-  }
-  static constexpr int_type eof() noexcept { return -1; }
-  static constexpr int_type not_eof(int_type c) noexcept {
-    return c == eof() ? 0 : c;
-  }
-};
+// Forward declaration for the string_view conversion operator below; the full
+// definition lives in <string_view>.  A translation unit that actually uses the
+// conversion (or the string_view-taking members) must include <string_view>.
+template <class CharT, class Traits>
+class basic_string_view;
 
 template <class CharT, class Traits = char_traits<CharT>,
           class Allocator = allocator<CharT> >
@@ -177,6 +111,13 @@ class basic_string {
   basic_string(const CharT* s, size_type n) {
     __set_empty();
     __assign_raw(s, n);
+  }
+
+  // Construct from anything that views characters (notably basic_string_view).
+  // Requires the complete view type at the point of instantiation.
+  explicit basic_string(basic_string_view<CharT, traits_type> sv) {
+    __set_empty();
+    __assign_raw(sv.data(), sv.size());
   }
 
   basic_string(size_type n, CharT c) {
@@ -307,6 +248,13 @@ class basic_string {
   CharT* data() noexcept { return __data; }
   const CharT* data() const noexcept { return __data; }
   const CharT* c_str() const noexcept { return __data; }
+
+  // Implicit conversion to a view over the current contents.  Requires the
+  // complete basic_string_view (i.e. <string_view> included at the point of
+  // use); the forward declaration above is enough to name the operator.
+  operator basic_string_view<CharT, traits_type>() const noexcept {
+    return basic_string_view<CharT, traits_type>(__data, __size);
+  }
 
   // Iterators.
   iterator begin() noexcept { return __data; }
@@ -562,6 +510,28 @@ void swap(basic_string<CharT, Traits, Allocator>& a,
           basic_string<CharT, Traits, Allocator>& b) {
   a.swap(b);
 }
+
+// FNV-1a over the character bytes.  Shared with hash<string_view> so that a
+// string and a view of the same characters hash identically.
+namespace __string_detail {
+
+inline size_t __fnv1a(const char* data, size_t n) noexcept {
+  size_t h = static_cast<size_t>(1469598103934665603ULL);
+  for (size_t i = 0; i < n; i++) {
+    h ^= static_cast<size_t>(static_cast<unsigned char>(data[i]));
+    h *= static_cast<size_t>(1099511628211ULL);
+  }
+  return h;
+}
+
+}  // namespace __string_detail
+
+template <>
+struct hash<basic_string<char> > {
+  size_t operator()(const basic_string<char>& s) const noexcept {
+    return __string_detail::__fnv1a(s.data(), s.size());
+  }
+};
 
 }  // namespace std
 

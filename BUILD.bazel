@@ -9,6 +9,7 @@ package(default_visibility = ["//visibility:public"])
 filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]) + [
+        "libc/include/__char_traits",
         "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",
@@ -47,6 +48,7 @@ filegroup(
         "libc/include/source_location",
         "libc/include/stdexcept",
         "libc/include/string",
+        "libc/include/string_view",
         "libc/include/tuple",
         "libc/include/type_traits",
         "libc/include/typeinfo",

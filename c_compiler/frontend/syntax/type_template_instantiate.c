@@ -4234,16 +4234,44 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
   const char* symbol_name = member->symbol->name.value;
   String destructor_name;
   StringInit(&destructor_name, NULL);
+  // A conversion operator's name is derived from its result type, so once that
+  // type has been substituted the name must be recomputed: a conversion to a
+  // dependent target (e.g. `operator View<C, int>`) is spelled "operator View"
+  // in the primary template but must become "operator View<char,int>" in the
+  // `Str<char>` instantiation, or overload resolution's conversion-operator
+  // matching (which compares the member name against the name derived from its
+  // result type) fails to recognise it as a conversion function at all.
+  String conversion_name;
+  StringInit(&conversion_name, NULL);
+  bool source_is_conversion_operator = false;
+  if (!func->info.function.is_constructor &&
+      !func->info.function.is_destructor &&
+      member->symbol->type->next != NULL) {
+    String source_expected;
+    ConversionOperatorName(member->symbol->type->next, &source_expected);
+    source_is_conversion_operator =
+        strcmp(source_expected.value, member->symbol->name.value) == 0;
+    StringDestruct(&source_expected);
+  }
   if (func->info.function.is_constructor && owner->tag_name != NULL) {
     symbol_name = owner->tag_name->value;
   } else if (func->info.function.is_destructor && owner->tag_name != NULL) {
     StringSet(&destructor_name, "~");
     StringAppendString(&destructor_name, owner->tag_name);
     symbol_name = destructor_name.value;
+  } else if (source_is_conversion_operator && func->next != NULL) {
+    // Name the instantiated conversion operator from its substituted result
+    // type.  This can still be a deferred template-id when the result names a
+    // class template completed later in the TU; overload resolution
+    // (ClassHasConversionOperatorTo) re-materializes the result type when it
+    // matches, so it does not rely on this name being fully specialized.
+    ConversionOperatorName(func->next, &conversion_name);
+    symbol_name = conversion_name.value;
   }
   Symbol* symbol = NewSymbol(symbol_name, func,
                              member->symbol->storage);
   StringDestruct(&destructor_name);
+  StringDestruct(&conversion_name);
   symbol->location = member->symbol->location;
   symbol->flags.is_template = member->symbol->flags.is_template;
   symbol->type->info.function.template_parameter_count =
@@ -4832,6 +4860,46 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     source_struct = partial->tag_symbol->type->info.struct_info;
     source_args = partial_args;
   }
+
+  // When the primary template has only been forward-declared (its body not yet
+  // parsed) and it has no partial specializations, do not materialize -- and
+  // above all do not *cache* -- a concrete specialization now.  The primary's
+  // member set is empty, so caching it would permanently shadow the real
+  // specialization once the definition is seen.  This arises when another
+  // template's member signature names a class template that is completed later
+  // in the TU (e.g. std::basic_string's conversion to the still-forward-
+  // declared std::basic_string_view).  Return the deferred template-id
+  // representation (a copy of the primary template type carrying the concrete
+  // arguments) exactly as SubstituteTemplateIdType does for still-dependent
+  // arguments; TypeMaterializeClassTemplateSpecialization then re-instantiates
+  // it against the completed definition once the type is required to be
+  // complete.
+  //
+  // The no-partial-specialization guard is essential: a deliberately
+  // incomplete traits primary (e.g. std::tuple_size, declared once and only
+  // ever completed through partial/explicit specializations) must still
+  // instantiate to its empty primary here for arguments that match no
+  // specialization -- deferring it would leave consumers that immediately need
+  // the (empty) type, such as the structured-bindings `tuple_size<E>::value`
+  // lookup, unable to complete it.
+  if (partial == NULL && template_struct->tag_symbol != NULL &&
+      !template_struct->tag_symbol->flags.is_defined &&
+      template_struct->partial_specializations.length == 0) {
+    StringDestruct(&instantiated_name);
+    TypeRecord* deferred = TypeRecordCopy(templ->type);
+    if (deferred->template_arguments != NULL) {
+      VectorDeleteWithContents(deferred->template_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    deferred->template_origin = templ;
+    deferred->template_arguments = TemplateArgumentVectorCopy(completed_args);
+    VectorDeleteWithContents(completed_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return deferred;
+  }
+
   if (!ClassTemplateInstantiationMembersSupported(parser, source_struct)) {
     StringDestruct(&instantiated_name);
     if (partial_args != NULL) {

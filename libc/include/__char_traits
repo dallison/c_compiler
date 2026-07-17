@@ -1,0 +1,96 @@
+//
+//  __char_traits
+//  c_compiler
+//
+//  Shared std::char_traits definition for <string> and <string_view>.  Both
+//  headers need the same specialization, so it lives here to avoid a
+//  one-definition-rule clash when a translation unit includes both.
+//
+
+#ifndef __davecc_char_traits__
+#define __davecc_char_traits__
+
+#include <cstddef>
+#include <string.h>
+
+namespace std {
+
+// Minimal char_traits.  Only the char specialization is provided; that is all
+// std::string and std::string_view need and it keeps the surface tied to tested
+// C string routines.
+template <class CharT>
+struct char_traits;
+
+template <>
+struct char_traits<char> {
+  using char_type = char;
+  using int_type = int;
+  using pos_type = long;
+  using off_type = long;
+
+  static constexpr void assign(char_type& a, const char_type& b) noexcept {
+    a = b;
+  }
+  static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
+  static constexpr bool lt(char_type a, char_type b) noexcept {
+    return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
+  }
+
+  static size_t length(const char_type* s) { return strlen(s); }
+
+  static int compare(const char_type* a, const char_type* b, size_t n) {
+    if (n == 0) {
+      return 0;
+    }
+    return memcmp(a, b, n);
+  }
+
+  static char_type* copy(char_type* dst, const char_type* src, size_t n) {
+    if (n != 0) {
+      memcpy(dst, src, n);
+    }
+    return dst;
+  }
+
+  static char_type* move(char_type* dst, const char_type* src, size_t n) {
+    if (n != 0) {
+      memmove(dst, src, n);
+    }
+    return dst;
+  }
+
+  static char_type* assign(char_type* dst, size_t n, char_type c) {
+    if (n != 0) {
+      memset(dst, static_cast<unsigned char>(c), n);
+    }
+    return dst;
+  }
+
+  static const char_type* find(const char_type* s, size_t n,
+                               const char_type& c) {
+    for (size_t i = 0; i < n; i++) {
+      if (s[i] == c) {
+        return s + i;
+      }
+    }
+    return nullptr;
+  }
+
+  static constexpr char_type to_char_type(int_type c) noexcept {
+    return static_cast<char_type>(c);
+  }
+  static constexpr int_type to_int_type(char_type c) noexcept {
+    return static_cast<unsigned char>(c);
+  }
+  static constexpr bool eq_int_type(int_type a, int_type b) noexcept {
+    return a == b;
+  }
+  static constexpr int_type eof() noexcept { return -1; }
+  static constexpr int_type not_eof(int_type c) noexcept {
+    return c == eof() ? 0 : c;
+  }
+};
+
+}  // namespace std
+
+#endif /* __davecc_char_traits__ */

@@ -901,6 +901,26 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   if (TypeEqual(result, to)) {
     return 0;  // Exact match: no trailing conversion required.
   }
+  // A conversion operator yields a prvalue of its result type, which binds to a
+  // more-cv-qualified target of the same class (e.g. `operator string_view`'s
+  // prvalue binds to `const string_view&`).  Adding top-level qualifiers is a
+  // zero-cost qualification adjustment, so treat class results that match the
+  // target up to top-level cv as an exact match.  (Restricted to class types;
+  // TypeEqualIgnoringQualifiers is a real structural comparison here, not the
+  // sign hack guarded against below.)
+  if (TypeIsStructOrUnion(result) && TypeIsStructOrUnion(to) &&
+      result->qualifiers != to->qualifiers) {
+    TypeRecord* bare_result = TypeRecordCopy(result);
+    TypeRecord* bare_to = TypeRecordCopy(to);
+    bare_result->qualifiers = kQualPlain;
+    bare_to->qualifiers = kQualPlain;
+    bool equal = TypeEqual(bare_result, bare_to);
+    TypeRecordDelete(bare_result);
+    TypeRecordDelete(bare_to);
+    if (equal) {
+      return 0;
+    }
+  }
   // A trailing standard conversion is only modeled for arithmetic scalars.
   // Class, pointer and reference targets require an exact match: notably, any
   // two distinct struct/union types compare equal-ignoring-sign (their sign
@@ -953,6 +973,8 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
   TypeRecord* best_result = NULL;
   int best_rank = -1;
   bool ambiguous = false;
+  Vector materialized_results;
+  VectorInit(&materialized_results);
   for (size_t i = 0; i < candidates.length; i++) {
     StructMember* member = candidates.value.p[i];
     TypeRecord* func = member->symbol->type;
@@ -966,20 +988,34 @@ static StructMember* FindConversionOperator(Struct* str, TypeRecord* to,
     if (!ConversionOperatorAllowedInContext(func, to, ctx)) {
       continue;
     }
-    int rank = ConversionOperatorTrailingRank(result, to);
+    // The recorded result type can still be a deferred template-id when it
+    // names a class template completed later in the TU (e.g.
+    // basic_string::operator basic_string_view).  Materialize it here, where
+    // `to` is necessarily complete, so ranking compares the real
+    // specialization rather than the bare primary.
+    TypeRecord* ranked_result =
+        TypeMaterializeClassTemplateSpecialization(&compiler->syntax, result);
+    if (ranked_result != result) {
+      VectorAppend(&materialized_results, ranked_result);
+    }
+    int rank = ConversionOperatorTrailingRank(ranked_result, to);
     if (rank < 0) {
       continue;
     }
     if (best == NULL || rank < best_rank) {
       best = member;
-      best_result = result;
+      best_result = ranked_result;
       best_rank = rank;
       ambiguous = false;
-    } else if (rank == best_rank && !TypeEqual(result, best_result)) {
+    } else if (rank == best_rank && !TypeEqual(ranked_result, best_result)) {
       ambiguous = true;
     }
   }
   VectorDestruct(&candidates);
+  for (size_t i = 0; i < materialized_results.length; i++) {
+    TypeRecordDelete(materialized_results.value.p[i]);
+  }
+  VectorDestruct(&materialized_results);
   return ambiguous ? NULL : best;
 }
 

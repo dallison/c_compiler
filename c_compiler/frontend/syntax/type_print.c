@@ -558,7 +558,37 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
           if (str->tag_name->value[0] != '<') {
             StringAppendString(result, str->tag_name);
           }
-          StringPrintf(result, "$S%p", (void*)str);
+          // The per-struct pointer suffix disambiguates types whose tag *name*
+          // is not by itself a unique identifier: lambda closure types and
+          // unnamed/anonymous structs, plus plain (non-template) classes -- in
+          // particular a nested class such as `iterator`, which recurs under
+          // many unrelated enclosing classes (`set<K>::iterator`,
+          // `list<T>::iterator`, ...) and shares its simple name with those
+          // siblings.  Without the suffix, `pair<iterator,bool>` would key
+          // identically regardless of *which* iterator it holds and collapse
+          // those distinct instantiations into whichever was built first.
+          //
+          // A class template *specialization*, by contrast, carries its
+          // template arguments in the tag name (e.g. `char_traits<char>`),
+          // which already denotes a single canonical C++ type; TypeEqual
+          // deliberately ignores the `$S...` suffix for these (see
+          // CXXStructTagNameEqual).  Emitting it here anyway would make two
+          // materializations of the same specialization produce divergent keys,
+          // splitting one logical type (e.g.
+          // `basic_string_view<char, char_traits<char>>`) into two divergent
+          // instantiations.  So drop the suffix only for specializations, and
+          // keep it everywhere else so the key stays consistent with equality.
+          bool is_invented =
+              str->tag_symbol != NULL && str->tag_symbol->flags.invented;
+          bool is_anonymous = str->tag_name->value[0] == '<';
+          bool is_template_specialization =
+              (str->tag_symbol != NULL && str->tag_symbol->type != NULL &&
+               (str->tag_symbol->type->template_origin != NULL ||
+                str->tag_symbol->type->template_arguments != NULL)) ||
+              strchr(str->tag_name->value, '<') != NULL;
+          if (is_invented || is_anonymous || !is_template_specialization) {
+            StringPrintf(result, "$S%p", (void*)str);
+          }
         }
       } else if (TypeIsEnum(type)) {
         Enum* e = type->info.enum_info;

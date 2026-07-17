@@ -12,6 +12,7 @@
 #include "symbol_table.h"
 #include "rtti.h"
 #include "member_pointer.h"
+#include "type_template.h"
 
 // Table to translate an AST node and type into an IR operation.
 static struct {
@@ -1890,7 +1891,29 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
                                NewIR1(IR_OP(structarg),
                                       arg_value));
         if (aggregate_value_formal) {
-          IRSetType(arg_value, formal_type);
+          // A by-value aggregate parameter whose type is a class template
+          // specialization can still be a deferred template-id (its struct is
+          // the uninstantiated primary, size 0) when the referenced template
+          // was completed only after this function was instantiated -- e.g.
+          // std::basic_string's `basic_string_view` parameter, whose type is
+          // resolved lazily.  Copying such a parameter by value would transfer
+          // 0 bytes and leave the callee reading stack garbage.  Resolve it to
+          // the concrete specialization so the argument copy uses the real
+          // layout; the argument value's own (complete) type is an equivalent
+          // fallback when materialization is unavailable.
+          TypeRecord* copy_type = formal_type;
+          if (TypeIsStructOrUnion(copy_type) && copy_type->size == 0) {
+            TypeRecord* materialized =
+                TypeMaterializeClassTemplateSpecialization(gen->syntax,
+                                                           copy_type);
+            if (materialized != NULL && materialized->size != 0) {
+              copy_type = materialized;
+            } else if (arg->type != NULL && TypeIsStructOrUnion(arg->type) &&
+                       arg->type->size != 0) {
+              copy_type = arg->type;
+            }
+          }
+          IRSetType(arg_value, copy_type);
         }
         if (arg->op == AST_OP(call)) {
           arg_value->flags |= kIRFromCall;

@@ -2113,51 +2113,54 @@ static bool IsAssignable(ASTNode* node, bool is_init) {
 
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
 
-static void ConversionOperatorName(TypeRecord* type, String* name) {
-  String type_name;
-  StringInit(&type_name, "");
-  TypeRecordToString(type, &type_name);
-  StringInit(name, "operator ");
-  for (size_t i = 0; i < type_name.length; i++) {
-    char ch = type_name.value[i];
-    if (ch == '*') {
-      StringAppend(name, " pointer");
-    } else if (ch == '&') {
-      if (i + 1 < type_name.length && type_name.value[i + 1] == '&') {
-        StringAppend(name, " rvalue_reference");
-        i++;
-      } else {
-        StringAppend(name, " reference");
-      }
-    } else {
-      StringAppendChar(name, ch);
-    }
-  }
-  while (name->length > 0 && name->value[name->length - 1] == ' ') {
-    name->value[name->length - 1] = '\0';
-    name->length--;
-  }
-  StringDestruct(&type_name);
-}
-
 static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
   if (!CompilerIsCXX() || actual == NULL || actual->type == NULL ||
       !TypeIsStructOrUnion(actual->type)) {
     return false;
   }
-  String name;
-  ConversionOperatorName(target, &name);
-  StructMember* member = FindStructMember(actual->type->info.struct_info, &name);
-  StringDestruct(&name);
-  while (member != NULL) {
-    if (member->is_member_function && member->symbol != NULL &&
-        TypeIsFunction(member->symbol->type) &&
-        TypeEqual(member->symbol->type->next, target)) {
-      return true;
+  // Match against the cv-unqualified target: a parameter of type `const T&`
+  // yields target `const T` here, but a conversion function is named
+  // "operator T" (top-level cv-qualifiers on the conversion type are dropped)
+  // and yields a prvalue `T` that binds to the `const T&`.
+  //
+  // Compare the conversion function's *result type* rather than looking members
+  // up by a reconstructed "operator T" name.  The recorded name of a conversion
+  // operator instantiated from a class template can be stale when its result
+  // type was a class template that was still incomplete at the point of
+  // instantiation (e.g. std::basic_string::operator basic_string_view, whose
+  // result names a specialization completed later in the TU): the stored name
+  // renders the still-deferred result as the bare primary "operator
+  // basic_string_view" while the target here is the fully materialized
+  // "basic_string_view<char,...>", so a name-based lookup would miss it.
+  // Materializing each candidate's result type at this point -- where the target
+  // is necessarily complete -- and comparing types directly sidesteps the name
+  // mismatch entirely.
+  TypeRecord* unqualified_target = TypeRecordCopy(target);
+  unqualified_target->qualifiers = kQualPlain;
+  Vector operators;
+  VectorInit(&operators);
+  CollectConversionOperators(actual->type->info.struct_info, &operators);
+  bool found = false;
+  for (size_t i = 0; i < operators.length && !found; i++) {
+    StructMember* member = operators.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        !TypeIsFunction(member->symbol->type) ||
+        member->symbol->type->next == NULL) {
+      continue;
     }
-    member = member->overload_next;
+    TypeRecord* result = member->symbol->type->next;
+    TypeRecord* materialized =
+        TypeMaterializeClassTemplateSpecialization(&compiler->syntax, result);
+    if (TypeEqualIgnoringQualifiers(materialized, unqualified_target)) {
+      found = true;
+    }
+    if (materialized != result) {
+      TypeRecordDelete(materialized);
+    }
   }
-  return false;
+  VectorDestruct(&operators);
+  TypeRecordDelete(unqualified_target);
+  return found;
 }
 
 static TypeRecord* ReferenceConversionTarget(ASTNode* actual,
@@ -4140,16 +4143,20 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     if (base_rank >= 0) {
       return base_rank * 10 + binding_rank;
     }
-    // A converting constructor produces a temporary. It can satisfy an rvalue
+    // A user-defined conversion produces a temporary. It can satisfy an rvalue
     // reference or a const lvalue reference, but never a non-const lvalue
-    // reference.
+    // reference.  Both directions are eligible: a converting constructor of the
+    // target class, or a conversion operator on the source class yielding the
+    // target (e.g. binding a `std::string` to `const std::string_view&` via
+    // `std::string::operator string_view`).
     if (CompilerIsCXX() && !g_suppress_user_defined_conversion_rank &&
         (formal_type->declarator == kDeclRValueReference ||
          TypeIsConst(target)) &&
         TypeIsStructOrUnion(target) &&
-        FindConvertingConstructorCandidate(target, actual,
-                                           /*allow_explicit=*/false,
-                                           /*allow_same_class=*/false) != NULL) {
+        (FindConvertingConstructorCandidate(target, actual,
+                                            /*allow_explicit=*/false,
+                                            /*allow_same_class=*/false) != NULL ||
+         ClassHasConversionOperatorTo(actual, target))) {
       return 100;
     }
     return -1;
