@@ -3169,6 +3169,92 @@ CXXConstructorInitList* SyntaxCXXConstructorInitListCloneDeferred(
       &init_list->deferred_initializers);
 }
 
+// Defined in type_template_substitute.c; declared here to avoid pulling the
+// template-instantiation internal header into syntax.c.  Both subtract `base`
+// from any template-parameter index that is >= base, leaving enclosing-template
+// parameters (index < base) untouched.
+void RebaseTemplateParameterIndices(TypeRecord* type, int base);
+void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg, int base);
+
+typedef struct {
+  TypeRecord* from_func;
+  TypeRecord* to_func;
+  int rebase_base;
+} ConstructorInitFormalRemap;
+
+/* Visitor: within a cloned member-initializer actual, (1) rewrite an identifier
+ * that names one of `from_func`'s parameters to the parameter at the same
+ * position in `to_func`, and (2) renumber template-parameter indices in any
+ * explicit template arguments / cast types down by `rebase_base` so the
+ * member's own parameters become zero-based (matching the class-level
+ * constructor whose template_parameter_base was reset to 0). */
+static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
+                                              int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  ConstructorInitFormalRemap* remap = data;
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    Vector* from = &remap->from_func->info.function.prototype;
+    Vector* to = &remap->to_func->info.function.prototype;
+    for (size_t i = 0; i < from->length && i < to->length; i++) {
+      if (from->value.p[i] == id->symbol) {
+        Symbol* replacement = to->value.p[i];
+        id->symbol = replacement;
+        if (replacement != NULL) {
+          ASTNodeSetType(node, replacement->type);
+        }
+        break;
+      }
+    }
+    if (remap->rebase_base > 0 && id->template_arguments != NULL) {
+      for (size_t i = 0; i < id->template_arguments->length; i++) {
+        RebaseTemplateArgumentParameterIndices(
+            id->template_arguments->value.p[i], remap->rebase_base);
+      }
+    }
+  } else if (node->op == AST_OP(cast) && remap->rebase_base > 0) {
+    CastASTNode* cast = (CastASTNode*)node;
+    RebaseTemplateParameterIndices(cast->cast_type, remap->rebase_base);
+  }
+}
+
+/* Rewrite every reference to one of `from_func`'s parameters inside the deferred
+ * member-initializer actuals of `init_list` to the correspondingly-positioned
+ * parameter of `to_func`, and rebase the member template's own template-
+ * parameter indices by `rebase_base`.  Used when a class-template instantiation
+ * clones a member function template constructor: the deferred init-list is
+ * shared from the primary and still names the primary's parameters and numbers
+ * the member's own template parameters relative to the enclosing class, but the
+ * per-call preamble insertion keys its clone maps off the cloned (class-level)
+ * prototype (whose parameters are fresh and whose template_parameter_base is 0).
+ * Aligning both lets pack initializers such as
+ * `value(std::forward<Args>(args)...)` expand against the concrete arguments
+ * instead of dropping `forward`'s explicit template argument. */
+void SyntaxCXXConstructorInitListRemapFormals(CXXConstructorInitList* init_list,
+                                              TypeRecord* from_func,
+                                              TypeRecord* to_func,
+                                              int rebase_base) {
+  if (init_list == NULL || from_func == NULL || to_func == NULL ||
+      !TypeIsFunction(from_func) || !TypeIsFunction(to_func)) {
+    return;
+  }
+  ConstructorInitFormalRemap remap = {from_func, to_func, rebase_base};
+  for (size_t i = 0; i < init_list->deferred_initializers.length; i++) {
+    CXXDeferredConstructorInitializer* init =
+        init_list->deferred_initializers.value.p[i];
+    if (init == NULL || init->actuals == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < init->actuals->length; j++) {
+      ASTNodeVisit(init->actuals->value.p[j],
+                   RemapConstructorInitFormalVisitor, 0, &remap);
+    }
+  }
+}
+
 static void VectorInsertOrAppend(Vector* vec, size_t index, void* value) {
   if (index >= vec->length) {
     VectorAppend(vec, value);

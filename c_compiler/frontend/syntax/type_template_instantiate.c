@@ -1819,12 +1819,26 @@ bool StructContainsTemplateParameter(Struct* str) {
   if (str == NULL) {
     return false;
   }
+  // A lambda closure with no captures has no data members, so its dependence on
+  // an enclosing template parameter lives entirely in its `operator()`
+  // signature (e.g. `[](const T&){...}`).  Such a closure must still be rebuilt
+  // per instantiation so the call operator is substituted (and emitted) with
+  // concrete types.  Consider a closure's non-template member-function
+  // signatures; a generic lambda's `operator()` is itself a template and
+  // references its own parameters, so it is excluded.
+  bool is_lambda_closure =
+      str->tag_symbol != NULL && str->tag_symbol->flags.invented;
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
-    if (member != NULL && member->symbol != NULL &&
-        !member->is_static && !member->is_member_function &&
-        !member->is_using_declaration &&
-        TypeContainsTemplateParameter(member->symbol->type)) {
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_using_declaration) {
+      continue;
+    }
+    if (member->is_member_function &&
+        !(is_lambda_closure && !member->symbol->flags.is_template)) {
+      continue;
+    }
+    if (TypeContainsTemplateParameter(member->symbol->type)) {
       return true;
     }
   }

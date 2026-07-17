@@ -4111,6 +4111,16 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
       return 2;
     }
   }
+  // Function-to-pointer conversion ([conv.func]): a function lvalue argument
+  // binds to a matching function-pointer parameter.  This is an lvalue
+  // transformation (exact-match rank), so a function argument such as a free
+  // function passed to a `Pred`-deduced `R(*)(Args...)` parameter is viable.
+  if (TypeIsFunction(actual) && TypeIsPointer(target) && target->next != NULL &&
+      TypeIsFunction(target->next) &&
+      (TypeEqual(actual, target->next) ||
+       TypeEqualIgnoringQualifiers(actual, target->next))) {
+    return 0;
+  }
   return -1;
 }
 
@@ -6690,6 +6700,14 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left == NULL) {
     return &node->base;
   }
+  // Reaching here means every deferral path above was skipped: this call is
+  // resolved to a concrete function (or function pointer).  A cloned template
+  // body may have left a stale `kASTDependentFunctorCall` marker on the node
+  // (e.g. a single-element pack expansion of `std::forward<T>(arg)`, whose
+  // callee substitution flags the enclosing call as dependent).  Clear it now
+  // so any enclosing call does not needlessly defer -- and therefore fail to
+  // lower -- on a fully-resolved actual.
+  node->base.flags &= ~kASTDependentFunctorCall;
   if (CompilerIsCXX() && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, id->symbol);

@@ -1989,6 +1989,68 @@ static ASTNode* ExpandClonedFoldExpression(TemplateFunctionBodyClone* clone,
   return result;
 }
 
+/* Expand a scalar member-initializer whose initializer is a parameter-pack
+ * expansion into a concrete assignment.  A variadic constructor initializing a
+ * scalar member -- e.g. `__node(Args&&... args) : __value(forward<Args>(args)...)`
+ * with `__value` an `int` -- is lowered by the constructor-preamble builder to a
+ * plain assignment `this->__value = forward<Args>(args)...` rather than a
+ * constructor call, so it never passes through RewriteClonedDependentNewInitializer.
+ * Its pack must still be expanded against this instantiation: an empty pack
+ * value-initializes the scalar, a single element supplies the value, and more
+ * than one element is ill-formed.  Without this the unexpanded pattern (with
+ * `args` still of pack type) survives, leaving the instantiated constructor body
+ * with an unexpanded pack -- which code generation then silently skips, yielding
+ * an undefined constructor symbol at link/run time. */
+static void ExpandClonedScalarMemberInitPack(TemplateFunctionBodyClone* clone,
+                                              ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(assign) ||
+      (node->flags & kASTDependentNewInitializer) != 0) {
+    return;
+  }
+  BinaryASTNode* assign = (BinaryASTNode*)node;
+  if (assign->right == NULL ||
+      (assign->right->flags & kASTPackExpansion) == 0) {
+    return;
+  }
+  bool multiple_packs = false;
+  Symbol* pack_symbol =
+      PackExpansionExpressionSymbol(clone, assign->right, &multiple_packs);
+  if (multiple_packs) {
+    SyntaxError(clone->parser->syntax,
+                "pack expansion with multiple parameter packs is not supported yet");
+  }
+  Vector* replacements =
+      pack_symbol != NULL
+          ? MapFindPointerKey(&clone->pack_symbol_map, pack_symbol)
+          : NULL;
+  if (replacements == NULL) {
+    // The pack belongs to an enclosing, not-yet-instantiated template: leave the
+    // pattern intact for the later (member-template) clone to expand.
+    return;
+  }
+  if (replacements->length > 1) {
+    SyntaxError(clone->parser->syntax,
+                "too many initializers for scalar member");
+    return;
+  }
+  TypeRecord* scalar_type =
+      node->type != NULL
+          ? node->type
+          : (assign->left != NULL ? assign->left->type : NULL);
+  ASTNode* pattern = ASTNodeMove(assign->right);
+  ASTNode* expanded =
+      replacements->length == 1
+          ? ClonePackExpansionPattern(clone, pattern, pack_symbol,
+                                      replacements->value.p[0], 0)
+          : NewIntConstantASTNode(0, TypeRecordCopy(scalar_type),
+                                  node->location);
+  ASTNodeDelete(pattern);
+  expanded->parent = node;
+  expanded->child_id = 1;
+  assign->right = expanded;
+  node->flags &= ~kASTPackExpansion;
+}
+
 /* Build the member-access constructor call `receiver.Tag(actuals)` for a
  * dependent `new` initializer whose type resolved to the class `record`. */
 static ASTNode* NewClonedDependentConstructorCall(TypeRecord* record,
@@ -3137,6 +3199,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       return rewritten_new;
     }
   }
+  ExpandClonedScalarMemberInitPack(clone, node);
   bool expanded_call_actuals = ExpandClonedCallPackActuals(clone, node);
   InstantiateClonedFunctionTemplateCall(clone, node);
   if (expanded_call_actuals && node->op == AST_OP(call)) {
@@ -3975,7 +4038,21 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
   clone.parser = parser;
   clone.args = args;
   clone.to_func = func;
-  clone.rebase_template_parameter_base = 0;
+  // Match CloneTemplateFunctionBody: for a member function *template* the
+  // member's own template parameters are numbered after the enclosing class
+  // parameters, so any explicit template arguments in the member-initializer
+  // list (e.g. `value(std::forward<Arg>(arg))`) reference the member's own
+  // parameters at their absolute index.  Rebasing by the template-parameter
+  // base renumbers those remaining references down to the member's zero-based
+  // arguments, exactly as the body clone does; without it the reference keeps
+  // its enclosing-offset index and the later substitution silently drops the
+  // explicit template argument (turning `forward<Arg>` into an un-deducible
+  // `forward`).  For a non-member template constructor the base is 0, so this
+  // is a no-op there.
+  clone.rebase_template_parameter_base =
+      from_func != NULL && TypeIsFunction(from_func)
+          ? from_func->info.function.template_parameter_base
+          : 0;
   clone.from_owner = CloneFunctionMemberOwner(from_func);
   clone.to_owner = TypeIsFunction(func) ? func->info.function.cxx_member_owner
                                         : NULL;

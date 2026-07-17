@@ -1226,20 +1226,39 @@ static void QueueTemplateConstructorInitializers(
 }
 
 // Associate the deferred constructor member-initializer list already recorded
-// for `from` with `to` as well.  Used when a class-template instantiation
-// creates a class-level member function *template* constructor (`to`) from the
-// primary template's constructor (`from`): the preamble is not inserted at
+// for `from` with `to`.  Used when a class-template instantiation creates a
+// class-level member function *template* constructor (`to`) from the primary
+// template's constructor (`from`): the preamble is not inserted at
 // class-instantiation time (its own template parameters are still unbound), so
 // the per-call instantiation must be able to rediscover the init-list keyed on
-// the class-level symbol it clones from.  The deferred list is shared (cloned
-// on each use), so re-keying the same pointer is safe.
+// the class-level symbol it clones from.
+//
+// The init-list is cloned (rather than the pointer shared) and its parameter
+// references are re-pointed from `from`'s prototype to `to`'s.  The class-level
+// constructor `to` has its own freshly cloned prototype, and the per-call
+// preamble insertion builds its clone maps off that prototype.  If the shared
+// list kept naming `from`'s parameters, those maps would miss them and a pack
+// initializer such as `value(std::forward<Args>(args)...)` would fail to expand
+// (its `args` pack would never be found), reintroducing the parameter's
+// dependent type into `std::forward`'s explicit argument.
 void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
   if (from == NULL || to == NULL || from == to) {
     return;
   }
   CXXConstructorInitList* inits = FindTemplateConstructorInitializers(from);
   if (inits != NULL && FindTemplateConstructorInitializers(to) == NULL) {
-    QueueTemplateConstructorInitializers(to, inits);
+    CXXConstructorInitList* cloned =
+        SyntaxCXXConstructorInitListCloneDeferred(inits);
+    // `from` (the primary constructor) numbers its own template parameters after
+    // the enclosing class's; `to` (the class-level clone) resets its base to 0.
+    // Rebase the init-list expressions by the primary's base so the member's own
+    // parameters become zero-based, matching `to` and the per-call arguments.
+    int rebase_base = TypeIsFunction(from->type)
+                          ? from->type->info.function.template_parameter_base
+                          : 0;
+    SyntaxCXXConstructorInitListRemapFormals(cloned, from->type, to->type,
+                                             rebase_base);
+    QueueTemplateConstructorInitializers(to, cloned);
   }
 }
 
