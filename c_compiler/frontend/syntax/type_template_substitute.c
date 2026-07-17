@@ -1964,19 +1964,112 @@ Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
 
 /* True if `node` is a pack-expansion of a single parameter-pack identifier,
  * i.e. the `xs` in `xs...`. */
+/* Build the template-argument that supplies `param`'s default value, or NULL if
+ * the parameter has no default or its default is still dependent (references an
+ * earlier parameter).  Dependent defaults are left unfilled so the caller keeps
+ * its previous behaviour rather than baking in an unresolved parameter. */
+static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) {
+  if (param == NULL || param->is_parameter_pack) {
+    return NULL;
+  }
+  if (param->kind == kTemplateParameterType && param->default_type != NULL &&
+      !TypeContainsTemplateParameter(param->default_type)) {
+    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+    arg->kind = kTemplateParameterType;
+    arg->is_pack_expansion = false;
+    arg->type = TypeRecordCopy(param->default_type);
+    arg->int_value = 0;
+    arg->template_parameter_index = -1;
+    arg->pack_arguments = NULL;
+    arg->dependent_expr = NULL;
+    arg->location = SOURCE_LOCATION_MISSING;
+    return arg;
+  }
+  if (param->kind == kTemplateParameterNonType && param->has_default_int &&
+      param->default_template_parameter_index < 0) {
+    TemplateArgument* arg = malloc(sizeof(TemplateArgument));
+    arg->kind = kTemplateParameterNonType;
+    arg->is_pack_expansion = false;
+    arg->type = NULL;
+    arg->int_value = param->default_int_value;
+    arg->template_parameter_index = -1;
+    arg->pack_arguments = NULL;
+    arg->dependent_expr = NULL;
+    arg->location = SOURCE_LOCATION_MISSING;
+    return arg;
+  }
+  return NULL;
+}
+
+/* Return `actuals` extended with trailing default arguments taken from the
+ * alias's declared parameters, or NULL if no extension is needed (or possible).
+ * A freshly allocated vector is returned that the caller owns; existing elements
+ * are copied so the original `actuals` is untouched.  This lets an alias such as
+ * `enable_if_t<B, T = void>` be named with just `enable_if_t<true>` and still
+ * expand to `enable_if<true, void>::type` rather than leaking the alias's own
+ * `T` parameter (which would otherwise collide with the enclosing template's
+ * parameters during substitution). */
+static Vector* AliasActualsWithDefaults(Symbol* alias, Vector* actuals) {
+  if (alias == NULL || alias->alias_template == NULL) {
+    return NULL;
+  }
+  Vector* parameters = &alias->alias_template->parameters;
+  size_t parameter_count = parameters->length;
+  size_t actual_count = actuals != NULL ? actuals->length : 0;
+  if (parameter_count == 0 || actual_count >= parameter_count) {
+    return NULL;
+  }
+  // Do not try to fill defaults across a parameter pack; pack handling is left
+  // to the existing count-based logic.
+  for (size_t i = 0; i < parameter_count; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return NULL;
+    }
+  }
+  Vector* extended = NewVector();
+  for (size_t i = 0; i < actual_count; i++) {
+    VectorAppend(extended, TemplateArgumentCopy(actuals->value.p[i]));
+  }
+  for (size_t i = actual_count; i < parameter_count; i++) {
+    TemplateArgument* def =
+        AliasDefaultTemplateArgument(parameters->value.p[i]);
+    if (def == NULL) {
+      // A trailing parameter has no usable (concrete) default; abandon the
+      // extension and let the caller fall back to its prior behaviour.
+      VectorDeleteWithContents(extended,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+    VectorAppend(extended, def);
+  }
+  return extended;
+}
+
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals) {
   if (alias == NULL) {
     return NULL;
   }
+  // Fill in trailing default arguments (e.g. the `void` in
+  // `enable_if_t<B, class T = void>`) before dispatching so an alias named with
+  // fewer arguments than it declares still expands fully.
+  Vector* extended = AliasActualsWithDefaults(alias, actuals);
+  Vector* effective = extended != NULL ? extended : actuals;
+  Vector* result = NULL;
   if (alias->type != NULL && alias->type->template_arguments != NULL) {
-    return CompleteAliasTemplateArgumentsFromPattern(alias, actuals);
+    result = CompleteAliasTemplateArgumentsFromPattern(alias, effective);
+  } else if (alias->alias_template != NULL &&
+             alias->alias_template->parameters.length != 0) {
+    result = CompleteAliasTemplateArgumentsFromParameters(
+        &alias->alias_template->parameters, effective);
   }
-  if (alias->alias_template == NULL ||
-      alias->alias_template->parameters.length == 0) {
-    return NULL;
+  if (extended != NULL) {
+    VectorDeleteWithContents(extended,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
   }
-  return CompleteAliasTemplateArgumentsFromParameters(
-      &alias->alias_template->parameters, actuals);
+  return result;
 }
 
 static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,

@@ -497,6 +497,35 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
   }
 }
 
+// Serialize the arguments of a dependent *member template* access (e.g. the
+// `<T>` of `typename Alloc::template rebind_alloc<T>`) into a template key.
+// These live in `dependent_member_template_arguments` (one argument vector per
+// path component) and are otherwise invisible to the key, which would make
+// `Traits<A>::rebind_alloc<X>` key identically for every `X` and collapse all
+// such member-alias instantiations into whichever was formed first.
+static void AppendDependentMemberTemplateArgsToKey(TypeRecord* type,
+                                                   String* result) {
+  if (type->dependent_member_template_arguments == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < type->dependent_member_template_arguments->length;
+       i++) {
+    Vector* component_args =
+        type->dependent_member_template_arguments->value.p[i];
+    if (component_args == NULL) {
+      continue;
+    }
+    StringAppendChar(result, '<');
+    for (size_t j = 0; j < component_args->length; j++) {
+      if (j != 0) {
+        StringAppendChar(result, ',');
+      }
+      TemplateArgumentToTemplateKeyString(component_args->value.p[j], result);
+    }
+    StringAppendChar(result, '>');
+  }
+}
+
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
   if (type == NULL) {
     StringAppend(result, "<invalid-type>");
@@ -525,6 +554,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         if (type->dependent_member_name != NULL) {
           StringAppend(result, "::");
           StringAppendString(result, type->dependent_member_name);
+          AppendDependentMemberTemplateArgsToKey(type, result);
         }
         break;
       }
@@ -537,6 +567,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         if (type->dependent_member_name != NULL) {
           StringAppend(result, "::");
           StringAppendString(result, type->dependent_member_name);
+          AppendDependentMemberTemplateArgsToKey(type, result);
         }
         break;
       }

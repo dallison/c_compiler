@@ -2219,6 +2219,8 @@ static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type,
   return NewBracedInitializerASTNode(list_initializers, target_type, location);
 }
 
+static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target);
+
 static bool CXXInitializerListBracedInitIsViable(ASTNode* actual,
                                                  TypeRecord* formal_type) {
   if (actual == NULL || actual->op != AST_OP(braced_init) ||
@@ -2232,7 +2234,28 @@ static bool CXXInitializerListBracedInitIsViable(ASTNode* actual,
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* initializer = braced->initializers->value.p[i];
-    if (initializer == NULL || initializer->op != AST_OP(expr_init)) {
+    if (initializer == NULL) {
+      return false;
+    }
+    // Unwrap an `expr_init` wrapper to inspect the element itself, which may be
+    // a nested braced-init-list (e.g. `{{1, 1}, {2, 2}}` initializing an
+    // `initializer_list<pair<const int, int>>`).
+    ASTNode* element = initializer;
+    if (initializer->op == AST_OP(expr_init)) {
+      element = ((ExpressionInitializerASTNode*)initializer)->expr;
+    }
+    if (element != NULL && element->op == AST_OP(braced_init)) {
+      // A nested braced element is viable if it can list-initialize the
+      // element type (via a constructor / aggregate init, or as a further
+      // initializer_list).  The array-backed lowering handles the actual
+      // construction element-by-element, so only viability matters here.
+      if (CXXBracedInitTargetRank(element, element_type) < 0 &&
+          !CXXInitializerListBracedInitIsViable(element, element_type)) {
+        return false;
+      }
+      continue;
+    }
+    if (initializer->op != AST_OP(expr_init)) {
       return false;
     }
     ExpressionInitializerASTNode* expr_init =
@@ -4127,13 +4150,131 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   return -1;
 }
 
+// Overload-resolution rank for list-initializing a *non-`initializer_list`*
+// target (a class or scalar) from the braced-init-list `actual`.  Returns a
+// non-negative base rank if the braces can initialize `target`, or -1.  This
+// mirrors the list-initialization that LowerCXXBracedInitToTarget performs at
+// call time, so that an overloaded function taking a class/scalar (by value or
+// reference) is viable for a braced-init argument -- e.g. `insert({k, v})`
+// where the parameter is `pair<const K,V>` (or a reference to it).  Without this
+// the scoring path treats the braced list as `<unknown>` and rejects every
+// candidate whenever more than one overload exists.
+static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
+  if (actual == NULL || actual->op != AST_OP(braced_init) || target == NULL) {
+    return -1;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
+  if (TypeIsScalar(target)) {
+    if (braced->initializers->length == 0) {
+      return 0;
+    }
+    if (braced->initializers->length != 1) {
+      return -1;
+    }
+    ASTNode* init = braced->initializers->value.p[0];
+    if (init == NULL || init->op != AST_OP(expr_init)) {
+      return -1;
+    }
+    ExpressionInitializerASTNode* ei = (ExpressionInitializerASTNode*)init;
+    ei->expr = AnalyzeExpression(ei->expr);
+    int r = OverloadBaseConversionRank(ei->expr->type, target);
+    return r < 0 ? -1 : r;
+  }
+  if (!TypeIsStructOrUnion(target) || target->info.struct_info == NULL) {
+    return -1;
+  }
+  Struct* str = target->info.struct_info;
+  // Analyze the element expressions once; any non-expression element (nested
+  // braces, designated initializers) is left to call-time lowering.
+  Vector elements;
+  VectorInit(&elements);
+  bool simple_elements = true;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* init = braced->initializers->value.p[i];
+    if (init == NULL || init->op != AST_OP(expr_init)) {
+      simple_elements = false;
+      break;
+    }
+    ExpressionInitializerASTNode* ei = (ExpressionInitializerASTNode*)init;
+    ei->expr = AnalyzeExpression(ei->expr);
+    VectorAppend(&elements, ei->expr);
+  }
+  int best = -1;
+  if (simple_elements) {
+    VectorASTNode call = {0};
+    call.children = &elements;
+    StructMember* ctor =
+        str->tag_name != NULL ? FindStructMember(str, str->tag_name) : NULL;
+    for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
+      if (!c->is_member_function || c->symbol == NULL ||
+          c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
+          !c->symbol->type->info.function.is_constructor ||
+          c->symbol->type->info.function.is_deleted ||
+          c->symbol->flags.is_template) {
+        continue;
+      }
+      int s = FunctionCallScore(c->symbol->type, &call, /*first_formal_arg=*/1);
+      if (s >= 0 && (best < 0 || s < best)) {
+        best = s;
+      }
+    }
+    // Aggregate initialization: element-wise conversion to each data member.
+    if (best < 0 && str->is_aggregate) {
+      size_t member_index = 0;
+      bool ok = true;
+      for (size_t i = 0; i < elements.length; i++) {
+        while (member_index < str->members.length) {
+          StructMember* m = str->members.value.p[member_index];
+          if (m != NULL && !m->is_member_function && m->symbol != NULL) {
+            break;
+          }
+          member_index++;
+        }
+        if (member_index >= str->members.length) {
+          ok = false;
+          break;
+        }
+        StructMember* m = str->members.value.p[member_index++];
+        ASTNode* element = elements.value.p[i];
+        if (element == NULL || m->symbol == NULL ||
+            OverloadBaseConversionRank(element->type, m->symbol->type) < 0) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        best = 0;
+      }
+    }
+  }
+  VectorDestruct(&elements);
+  return best;
+}
+
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   TypeRecord* target = formal_type;
   bool reference = TypeIsReference(formal_type);
   if (reference) {
     target = formal_type->next;
     if (actual != NULL && actual->op == AST_OP(braced_init)) {
-      return CXXInitializerListBracedInitIsViable(actual, target) ? 0 : -1;
+      if (CXXInitializerListBracedInitIsViable(actual, target)) {
+        return 0;
+      }
+      int base = CXXBracedInitTargetRank(actual, target);
+      if (base < 0) {
+        return -1;
+      }
+      // A braced-init-list yields a prvalue temporary: it binds to an rvalue
+      // reference or a const lvalue reference, but never a non-const lvalue
+      // reference.  Prefer the rvalue reference so, e.g., `insert(value_type&&)`
+      // wins over `insert(const value_type&)` for `insert({k, v})`.
+      if (formal_type->declarator == kDeclRValueReference) {
+        return base * 10;
+      }
+      if (TypeIsConst(target)) {
+        return base * 10 + 1;
+      }
+      return -1;
     }
     int binding_rank = ReferenceBindingRank(actual, formal_type);
     if (binding_rank < 0) {
@@ -4163,7 +4304,11 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   }
 
   if (actual != NULL && actual->op == AST_OP(braced_init)) {
-    return CXXInitializerListBracedInitIsViable(actual, target) ? 0 : -1;
+    if (CXXInitializerListBracedInitIsViable(actual, target)) {
+      return 0;
+    }
+    int base = CXXBracedInitTargetRank(actual, target);
+    return base < 0 ? -1 : base * 10;
   }
   int base_rank = OverloadBaseConversionRank(actual->type, target);
   if (base_rank >= 0) {
@@ -6785,6 +6930,16 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         if (lowered != actual) {
           ASTNodeReplaceChild((ASTNode*)node, (int)i, lowered, false);
           actual = lowered;
+          // A braced-init-list argument denotes a temporary (a prvalue) rather
+          // than a named object; LowerCXXBracedInitToTarget materializes it as a
+          // compound literal, which is categorized as an lvalue.  Re-categorize
+          // it as an xvalue so it can bind to an rvalue-reference parameter
+          // (e.g. `insert(value_type&&)` for `insert({k, v})`) while still
+          // binding to a const lvalue reference.
+          if (TypeIsReference(formal->type) &&
+              actual->op == AST_OP(compound_literal)) {
+            actual->value_category = kValueCategoryXvalue;
+          }
         }
       }
       bool polymorphic_special_this =

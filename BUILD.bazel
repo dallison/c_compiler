@@ -10,6 +10,7 @@ filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]) + [
         "libc/include/__char_traits",
+        "libc/include/__hash_table",
         "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",
@@ -52,6 +53,8 @@ filegroup(
         "libc/include/tuple",
         "libc/include/type_traits",
         "libc/include/typeinfo",
+        "libc/include/unordered_map",
+        "libc/include/unordered_set",
         "libc/include/utility",
         "libc/include/variant",
         "libc/include/vector",

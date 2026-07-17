@@ -455,12 +455,20 @@ static bool LoadStaticSegments(Loader* loader, String* filename) {
   // Get page size and mask (almost guaranteed to be 4K).
   int page_size = (int)sysconf(_SC_PAGESIZE);
 
-  // Reserve heap space above the last writable segment.  For ignore_vaddr
-  // targets (ARM ELF32) the address-translation logic rejects any access
-  // outside [vaddr, vaddr+memsz), so the heap that sits at '_end' is otherwise
-  // unreachable.  Extend the highest writable PT_LOAD segment's memsz so the
-  // mapping below (and the translation that uses memsz) covers the heap.
-  if (loader->arch->ignore_vaddr) {
+  // Reserve heap space above the last writable segment.  The libc malloc for
+  // these targets places the heap at the linker-defined '_end' (the end of the
+  // highest writable segment's memsz) and never calls brk/mmap to grow it, so
+  // the loader must map that space up front.  Without it, malloc allocations
+  // that spill past the segment's page-rounded end fault ("outside mapped
+  // memory") once the heap exceeds the small slack left by page alignment.
+  //
+  // Extending the highest writable PT_LOAD segment's memsz makes the mapping
+  // below cover the heap: for ignore_vaddr targets (ARM ELF32) the
+  // address-translation logic also rejects any access outside
+  // [vaddr, vaddr+memsz), and for fixed-vaddr targets (x86_64) the extra memsz
+  // enlarges the anonymous "additional memory" region mapped above the file
+  // contents.  Both paths therefore need the reserve.
+  {
     ELFProgramHeader* heap_segment = NULL;
     uint64_t heap_segment_end = 0;
     for (size_t i = 0; i < loader->elf_file->segments.length; i++) {

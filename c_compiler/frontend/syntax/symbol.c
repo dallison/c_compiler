@@ -178,6 +178,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->destruction_complete = false;
   sym->is_read = false;
   VectorInit(&sym->imported_function_template_parameters_backup);
+  sym->cached_target_symbol_name = NULL;
 }
 
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
@@ -272,6 +273,8 @@ void SymbolDestruct(Symbol* symbol) {
       &symbol->imported_function_template_parameters_backup,
       (VectorElementDestructor)TemplateParameterDelete,
       /*free_element=*/false);
+  free(symbol->cached_target_symbol_name);
+  symbol->cached_target_symbol_name = NULL;
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
   }
@@ -749,6 +752,9 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   AppendCXXFunctionParameterTypes(&mangled, symbol);
   StringSetString(&symbol->asm_name, &mangled);
   StringDestruct(&mangled);
+  // The cached target name derives from asm_name; drop it so it is recomputed.
+  free(symbol->cached_target_symbol_name);
+  symbol->cached_target_symbol_name = NULL;
 }
 
 void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
@@ -786,6 +792,9 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
 
   StringSetString(&symbol->asm_name, &mangled);
   StringDestruct(&mangled);
+  // The cached target name derives from asm_name; drop it so it is recomputed.
+  free(symbol->cached_target_symbol_name);
+  symbol->cached_target_symbol_name = NULL;
 }
 
 Symbol* SymbolClone(Symbol* sym) {

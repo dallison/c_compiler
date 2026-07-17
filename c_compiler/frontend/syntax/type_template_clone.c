@@ -1430,6 +1430,35 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
   return changed;
 }
 
+static void FindPackExpansionSubtreeVisitor(ASTNode* node, void* data,
+                                            int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  bool* found = data;
+  if ((node->flags & kASTPackExpansion) != 0) {
+    *found = true;
+  }
+}
+
+/* True if any node anywhere in `node`'s subtree is still an unexpanded pack
+ * expansion.  A call cannot be resolved to a concrete overload while a pack
+ * expansion survives *anywhere* beneath it -- not just among its direct actuals
+ * -- because the surviving pack makes the effective argument count (and types)
+ * unknown.  For example `value_type(key, mapped_type(static_cast<Args&&>(args)
+ * ...))` inside `unordered_map::try_emplace` has no direct pack actual (its
+ * arguments are `key` and the inner `mapped_type(...)` call), yet resolving the
+ * outer construction while the member's own pack `Args` is still unbound picks a
+ * spurious 0-or-N-argument constructor overload (a phantom `pair<const K,V>()`
+ * ambiguity).  Such a construction must stay deferred until the member template
+ * is instantiated per call, when the pack length is known. */
+static bool ASTNodeSubtreeContainsPackExpansion(ASTNode* node) {
+  bool found = false;
+  ASTNodeVisit(node, FindPackExpansionSubtreeVisitor, 0, &found);
+  return found;
+}
+
 /* True if any actual argument of `call` is still an unexpanded pack expansion
  * (so the call cannot yet be resolved to a concrete overload). */
 bool CallActualsStillContainPackExpansion(struct ASTNode* call_node) {
@@ -2524,6 +2553,24 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
       }
     }
   }
+  // A dependent member access `recv.name` / `recv->name` whose member is still an
+  // unresolved *string* name (its receiver's type was dependent when the
+  // template was defined) must be rebound after substitution.  Clear its
+  // analyzed state and placeholder type so semantic analysis re-resolves `name`
+  // against the now-concrete receiver.  Without this a member-initializer such
+  // as `p(o.p)` in a member-template constructor -- whose preamble is baked and
+  // analyzed as dependent while the enclosing class template is instantiated
+  // (the member's own parameters, and hence `o`'s sibling-specialization type,
+  // are still unbound) -- keeps its placeholder type and is never rebound at
+  // per-call instantiation, yielding a bogus "cannot convert from <receiver>"
+  // error.  A member access already resolved to a concrete `structmember` (see
+  // above) is untouched.
+  if ((node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
+      ((BinaryASTNode*)node)->right != NULL &&
+      ((BinaryASTNode*)node)->right->op == AST_OP(string)) {
+    node->flags &= ~kASTAnalyzed;
+    ClearASTNodeType(node);
+  }
   if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
     SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
     if (node->op == AST_OP(sizeof) && sizeof_node->is_pack_size &&
@@ -3278,6 +3325,16 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
       node->op != AST_OP(call)) {
     return node;
   }
+  // Keep a construction/call deferred while any pack expansion survives beneath
+  // it: a nested member-template pack (e.g. the `args...` of
+  // `value_type(key, mapped_type(static_cast<Args&&>(args)...))`) is still
+  // unbound during the enclosing class instantiation, so resolving the outer
+  // construction now mis-selects an overload against the (empty-expanded) pack.
+  // The per-call instantiation, which binds the member's own pack, re-runs this
+  // pass with the pack expanded and resolves it correctly.
+  if (ASTNodeSubtreeContainsPackExpansion(node)) {
+    return node;
+  }
   VectorASTNode* call = (VectorASTNode*)node;
   if (call->children != NULL) {
     for (size_t i = 0; i < call->children->length; i++) {
@@ -3533,7 +3590,8 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   if (call->left == NULL || call->left->op != AST_OP(identifier)) {
     return node;
   }
-  if (CallActualsStillContainPackExpansion((ASTNode*)call)) {
+  if (CallActualsStillContainPackExpansion((ASTNode*)call) ||
+      ASTNodeSubtreeContainsPackExpansion((ASTNode*)call)) {
     return node;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;

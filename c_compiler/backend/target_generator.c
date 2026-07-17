@@ -822,11 +822,25 @@ const char* TargetSanitizedSymbolName(const char* name, char* buf, size_t len) {
 }
 
 const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
-  char* out = buf;
-  size_t remaining = len;
-  if (remaining == 0) {
-    return buf;
+  // Return the previously computed, full name.  Symbol names for deeply nested
+  // template specializations can far exceed a caller's fixed-size scratch
+  // buffer; truncating them would let distinct symbols collapse onto the same
+  // label and be rejected as duplicates by the assembler, so the authoritative
+  // name is always the untruncated cached copy rather than `buf`.
+  if (symbol->cached_target_symbol_name != NULL) {
+    return symbol->cached_target_symbol_name;
   }
+  // Allocate a buffer guaranteed to hold the whole name: sanitization can
+  // expand each byte to at most four characters ("_uXX"), plus room for the
+  // ".local." prefix / numeric suffix / leading underscore.
+  size_t source_len = symbol->name.length;
+  if (symbol->asm_name.length > source_len) {
+    source_len = symbol->asm_name.length;
+  }
+  size_t cap = source_len * 4 + 64;
+  char* dyn = malloc(cap);
+  char* out = dyn;
+  size_t remaining = cap;
   if (symbol->flags.is_local && !TypeIsFunction(symbol->type)) {
     char suffix[32];
     snprintf(suffix, sizeof(suffix), ".%d", symbol->id);
@@ -841,5 +855,8 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     }
     AppendSanitizedName(&out, &remaining, symbol->name.value);
   }
-  return buf;
+  symbol->cached_target_symbol_name = dyn;
+  (void)buf;
+  (void)len;
+  return dyn;
 }

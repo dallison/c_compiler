@@ -1,0 +1,641 @@
+//
+//  __hash_table
+//  c_compiler
+//
+//  Separate-chaining hash table shared by <unordered_map> and <unordered_set>.
+//  This is an internal header (not a standard include); the container headers
+//  wrap it and expose the standard interface.  It never appears in user code.
+//
+//  Design: an array of singly-linked bucket chains.  Each node caches the hash
+//  of its key so rehashing and lookups avoid recomputing it.  A KeyOfValue
+//  policy maps the stored value type to the key used for hashing/equality, so
+//  the same table serves both the set (value == key) and map (value ==
+//  pair<const Key, T>, key == value.first) containers.
+//
+
+#ifndef __davecc_hash_table__
+#define __davecc_hash_table__
+
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace __hash_detail {
+
+template <class Value>
+struct __hash_node {
+  __hash_node* __next;
+  size_t __hash;
+  Value __value;
+
+  template <class... Args>
+  explicit __hash_node(Args&&... args)
+      : __next(nullptr), __hash(0), __value(static_cast<Args&&>(args)...) {}
+};
+
+// Key extraction policies.
+template <class Key>
+struct __identity_key {
+  const Key& operator()(const Key& value) const noexcept { return value; }
+};
+
+template <class Key, class T>
+struct __pair_first_key {
+  const Key& operator()(const pair<const Key, T>& value) const noexcept {
+    return value.first;
+  }
+};
+
+template <class Value, bool IsConst>
+class __hash_iterator {
+ public:
+  using __node = __hash_node<Value>;
+  using value_type = Value;
+  using difference_type = ptrdiff_t;
+  using reference = conditional_t<IsConst, const Value&, Value&>;
+  using pointer = conditional_t<IsConst, const Value*, Value*>;
+  using iterator_category = forward_iterator_tag;
+
+  __node** __buckets_;
+  size_t __bucket_count_;
+  size_t __index_;
+  __node* __node_;
+
+  __hash_iterator()
+      : __buckets_(nullptr), __bucket_count_(0), __index_(0), __node_(nullptr) {}
+
+  __hash_iterator(__node** buckets, size_t bucket_count, size_t index,
+                  __node* node)
+      : __buckets_(buckets),
+        __bucket_count_(bucket_count),
+        __index_(index),
+        __node_(node) {}
+
+  // A mutable iterator converts to a const iterator (but not the reverse).
+  template <bool C2, class = enable_if_t<IsConst && !C2> >
+  __hash_iterator(const __hash_iterator<Value, C2>& other)
+      : __buckets_(other.__buckets_),
+        __bucket_count_(other.__bucket_count_),
+        __index_(other.__index_),
+        __node_(other.__node_) {}
+
+  reference operator*() const { return __node_->__value; }
+  pointer operator->() const { return &__node_->__value; }
+
+  __hash_iterator& operator++() {
+    __node_ = __node_->__next;
+    if (__node_ == nullptr) {
+      for (++__index_; __index_ < __bucket_count_; ++__index_) {
+        if (__buckets_[__index_] != nullptr) {
+          __node_ = __buckets_[__index_];
+          break;
+        }
+      }
+    }
+    return *this;
+  }
+
+  __hash_iterator operator++(int) {
+    __hash_iterator tmp = *this;
+    ++(*this);
+    return tmp;
+  }
+
+  bool operator==(const __hash_iterator& other) const {
+    return __node_ == other.__node_;
+  }
+
+  bool operator!=(const __hash_iterator& other) const {
+    return __node_ != other.__node_;
+  }
+};
+
+template <class Value, class Key, class KeyOfValue, class Hash, class KeyEqual,
+          class Allocator>
+class __hash_table {
+ public:
+  using key_type = Key;
+  using value_type = Value;
+  using hasher = Hash;
+  using key_equal = KeyEqual;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = value_type&;
+  using const_reference = const value_type&;
+  using pointer = value_type*;
+  using const_pointer = const value_type*;
+
+  using __node = __hash_node<Value>;
+  using iterator = __hash_iterator<Value, false>;
+  using const_iterator = __hash_iterator<Value, true>;
+
+ private:
+  using __alloc_traits = allocator_traits<allocator_type>;
+  using __node_allocator =
+      typename __alloc_traits::template rebind_alloc<__node>;
+  using __node_alloc_traits = allocator_traits<__node_allocator>;
+  using __bucket_allocator =
+      typename __alloc_traits::template rebind_alloc<__node*>;
+  using __bucket_alloc_traits = allocator_traits<__bucket_allocator>;
+
+  __node** __buckets_;
+  size_type __bucket_count_;
+  size_type __size_;
+  float __max_load_factor_;
+  hasher __hash_;
+  key_equal __equal_;
+  KeyOfValue __key_of_;
+  allocator_type __alloc_;
+  __node_allocator __node_alloc_;
+  __bucket_allocator __bucket_alloc_;
+
+  __node** __allocate_buckets(size_type n) {
+    __node** buckets = __bucket_alloc_traits::allocate(__bucket_alloc_, n);
+    for (size_type i = 0; i < n; i++) {
+      buckets[i] = nullptr;
+    }
+    return buckets;
+  }
+
+  void __deallocate_buckets(__node** buckets, size_type n) {
+    if (buckets != nullptr) {
+      __bucket_alloc_traits::deallocate(__bucket_alloc_, buckets, n);
+    }
+  }
+
+  template <class... Args>
+  __node* __construct_node(Args&&... args) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    try {
+      ::new (static_cast<void*>(node)) __node(static_cast<Args&&>(args)...);
+    } catch (...) {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      throw;
+    }
+    return node;
+  }
+
+  void __destroy_node(__node* node) {
+    node->~__node();
+    __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+  }
+
+  void __rehash(size_type new_count) {
+    if (new_count < 1) {
+      new_count = 1;
+    }
+    __node** fresh = __allocate_buckets(new_count);
+    for (size_type i = 0; i < __bucket_count_; i++) {
+      __node* node = __buckets_[i];
+      while (node != nullptr) {
+        __node* next = node->__next;
+        size_type bucket = node->__hash % new_count;
+        node->__next = fresh[bucket];
+        fresh[bucket] = node;
+        node = next;
+      }
+    }
+    __deallocate_buckets(__buckets_, __bucket_count_);
+    __buckets_ = fresh;
+    __bucket_count_ = new_count;
+  }
+
+  void __rehash_for_insert(size_type target) {
+    if (__bucket_count_ == 0) {
+      __rehash(8);
+    }
+    while (static_cast<float>(target) >
+           static_cast<float>(__bucket_count_) * __max_load_factor_) {
+      __rehash(__bucket_count_ * 2);
+    }
+  }
+
+  void __copy_from(const __hash_table& other) {
+    reserve(other.__size_);
+    for (const_iterator it = other.begin(); it != other.end(); ++it) {
+      __insert_unique(*it);
+    }
+  }
+
+ public:
+  __hash_table()
+      : __buckets_(nullptr),
+        __bucket_count_(0),
+        __size_(0),
+        __max_load_factor_(1.0f),
+        __hash_(),
+        __equal_(),
+        __key_of_(),
+        __alloc_(),
+        __node_alloc_(),
+        __bucket_alloc_() {}
+
+  __hash_table(const hasher& hash, const key_equal& equal,
+               const allocator_type& alloc)
+      : __buckets_(nullptr),
+        __bucket_count_(0),
+        __size_(0),
+        __max_load_factor_(1.0f),
+        __hash_(hash),
+        __equal_(equal),
+        __key_of_(),
+        __alloc_(alloc),
+        __node_alloc_(),
+        __bucket_alloc_() {}
+
+  __hash_table(const __hash_table& other)
+      : __buckets_(nullptr),
+        __bucket_count_(0),
+        __size_(0),
+        __max_load_factor_(other.__max_load_factor_),
+        __hash_(other.__hash_),
+        __equal_(other.__equal_),
+        __key_of_(other.__key_of_),
+        __alloc_(__alloc_traits::select_on_container_copy_construction(
+            other.__alloc_)),
+        __node_alloc_(),
+        __bucket_alloc_() {
+    __copy_from(other);
+  }
+
+  __hash_table(__hash_table&& other)
+      : __buckets_(other.__buckets_),
+        __bucket_count_(other.__bucket_count_),
+        __size_(other.__size_),
+        __max_load_factor_(other.__max_load_factor_),
+        __hash_(other.__hash_),
+        __equal_(other.__equal_),
+        __key_of_(other.__key_of_),
+        __alloc_(other.__alloc_),
+        __node_alloc_(),
+        __bucket_alloc_() {
+    other.__buckets_ = nullptr;
+    other.__bucket_count_ = 0;
+    other.__size_ = 0;
+  }
+
+  ~__hash_table() {
+    clear();
+    __deallocate_buckets(__buckets_, __bucket_count_);
+    __buckets_ = nullptr;
+    __bucket_count_ = 0;
+  }
+
+  __hash_table& operator=(const __hash_table& other) {
+    if (this != &other) {
+      clear();
+      __hash_ = other.__hash_;
+      __equal_ = other.__equal_;
+      __max_load_factor_ = other.__max_load_factor_;
+      __copy_from(other);
+    }
+    return *this;
+  }
+
+  __hash_table& operator=(__hash_table&& other) {
+    if (this != &other) {
+      clear();
+      __deallocate_buckets(__buckets_, __bucket_count_);
+      __buckets_ = other.__buckets_;
+      __bucket_count_ = other.__bucket_count_;
+      __size_ = other.__size_;
+      __max_load_factor_ = other.__max_load_factor_;
+      __hash_ = other.__hash_;
+      __equal_ = other.__equal_;
+      other.__buckets_ = nullptr;
+      other.__bucket_count_ = 0;
+      other.__size_ = 0;
+    }
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+  hasher hash_function() const { return __hash_; }
+  key_equal key_eq() const { return __equal_; }
+
+  iterator begin() {
+    for (size_type i = 0; i < __bucket_count_; i++) {
+      if (__buckets_[i] != nullptr) {
+        return iterator(__buckets_, __bucket_count_, i, __buckets_[i]);
+      }
+    }
+    return end();
+  }
+
+  const_iterator begin() const {
+    for (size_type i = 0; i < __bucket_count_; i++) {
+      if (__buckets_[i] != nullptr) {
+        return const_iterator(__buckets_, __bucket_count_, i, __buckets_[i]);
+      }
+    }
+    return end();
+  }
+
+  const_iterator cbegin() const { return begin(); }
+
+  iterator end() {
+    return iterator(__buckets_, __bucket_count_, __bucket_count_, nullptr);
+  }
+
+  const_iterator end() const {
+    return const_iterator(__buckets_, __bucket_count_, __bucket_count_,
+                          nullptr);
+  }
+
+  const_iterator cend() const { return end(); }
+
+  bool empty() const noexcept { return __size_ == 0; }
+  size_type size() const noexcept { return __size_; }
+  size_type max_size() const noexcept {
+    return static_cast<size_type>(-1) / sizeof(__node);
+  }
+
+  void clear() noexcept {
+    for (size_type i = 0; i < __bucket_count_; i++) {
+      __node* node = __buckets_[i];
+      while (node != nullptr) {
+        __node* next = node->__next;
+        __destroy_node(node);
+        node = next;
+      }
+      __buckets_[i] = nullptr;
+    }
+    __size_ = 0;
+  }
+
+  __node* __find_node(const key_type& key) const {
+    if (__bucket_count_ == 0) {
+      return nullptr;
+    }
+    size_t hash = __hash_(key);
+    size_type bucket = hash % __bucket_count_;
+    for (__node* node = __buckets_[bucket]; node != nullptr;
+         node = node->__next) {
+      if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+        return node;
+      }
+    }
+    return nullptr;
+  }
+
+  size_type __bucket_of(const __node* node) const {
+    return node->__hash % __bucket_count_;
+  }
+
+  iterator find(const key_type& key) {
+    if (__bucket_count_ != 0) {
+      size_t hash = __hash_(key);
+      size_type bucket = hash % __bucket_count_;
+      for (__node* node = __buckets_[bucket]; node != nullptr;
+           node = node->__next) {
+        if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+          return iterator(__buckets_, __bucket_count_, bucket, node);
+        }
+      }
+    }
+    return end();
+  }
+
+  const_iterator find(const key_type& key) const {
+    if (__bucket_count_ != 0) {
+      size_t hash = __hash_(key);
+      size_type bucket = hash % __bucket_count_;
+      for (__node* node = __buckets_[bucket]; node != nullptr;
+           node = node->__next) {
+        if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+          return const_iterator(__buckets_, __bucket_count_, bucket, node);
+        }
+      }
+    }
+    return end();
+  }
+
+  size_type count(const key_type& key) const {
+    return __find_node(key) != nullptr ? 1 : 0;
+  }
+
+  bool contains(const key_type& key) const {
+    return __find_node(key) != nullptr;
+  }
+
+  pair<iterator, iterator> equal_range(const key_type& key) {
+    iterator first = find(key);
+    if (first == end()) {
+      return pair<iterator, iterator>(first, first);
+    }
+    iterator last = first;
+    ++last;
+    return pair<iterator, iterator>(first, last);
+  }
+
+  pair<const_iterator, const_iterator> equal_range(const key_type& key) const {
+    const_iterator first = find(key);
+    if (first == end()) {
+      return pair<const_iterator, const_iterator>(first, first);
+    }
+    const_iterator last = first;
+    ++last;
+    return pair<const_iterator, const_iterator>(first, last);
+  }
+
+  template <class V>
+  pair<iterator, bool> __insert_unique(V&& value) {
+    const key_type& key = __key_of_(value);
+    size_t hash = __hash_(key);
+    if (__bucket_count_ != 0) {
+      size_type bucket = hash % __bucket_count_;
+      for (__node* node = __buckets_[bucket]; node != nullptr;
+           node = node->__next) {
+        if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+          return pair<iterator, bool>(
+              iterator(__buckets_, __bucket_count_, bucket, node), false);
+        }
+      }
+    }
+    __rehash_for_insert(__size_ + 1);
+    __node* fresh = __construct_node(static_cast<V&&>(value));
+    fresh->__hash = hash;
+    size_type bucket = hash % __bucket_count_;
+    fresh->__next = __buckets_[bucket];
+    __buckets_[bucket] = fresh;
+    ++__size_;
+    return pair<iterator, bool>(
+        iterator(__buckets_, __bucket_count_, bucket, fresh), true);
+  }
+
+  template <class... Args>
+  pair<iterator, bool> __emplace_unique(Args&&... args) {
+    __node* fresh = __construct_node(static_cast<Args&&>(args)...);
+    const key_type& key = __key_of_(fresh->__value);
+    size_t hash = __hash_(key);
+    fresh->__hash = hash;
+    if (__bucket_count_ != 0) {
+      size_type bucket = hash % __bucket_count_;
+      for (__node* node = __buckets_[bucket]; node != nullptr;
+           node = node->__next) {
+        if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+          __destroy_node(fresh);
+          return pair<iterator, bool>(
+              iterator(__buckets_, __bucket_count_, bucket, node), false);
+        }
+      }
+    }
+    __rehash_for_insert(__size_ + 1);
+    size_type bucket = hash % __bucket_count_;
+    fresh->__next = __buckets_[bucket];
+    __buckets_[bucket] = fresh;
+    ++__size_;
+    return pair<iterator, bool>(
+        iterator(__buckets_, __bucket_count_, bucket, fresh), true);
+  }
+
+  // Returns a reference to the node for `key`, inserting a value-initialized
+  // one (built from `key` alone) when absent.  Used by unordered_map's
+  // operator[]; the caller layers the mapped default on top.
+  template <class... Args>
+  __node* __find_or_insert_node(const key_type& key, Args&&... args) {
+    size_t hash = __hash_(key);
+    if (__bucket_count_ != 0) {
+      size_type bucket = hash % __bucket_count_;
+      for (__node* node = __buckets_[bucket]; node != nullptr;
+           node = node->__next) {
+        if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+          return node;
+        }
+      }
+    }
+    __rehash_for_insert(__size_ + 1);
+    __node* fresh = __construct_node(static_cast<Args&&>(args)...);
+    fresh->__hash = hash;
+    size_type bucket = hash % __bucket_count_;
+    fresh->__next = __buckets_[bucket];
+    __buckets_[bucket] = fresh;
+    ++__size_;
+    return fresh;
+  }
+
+  iterator __erase(const_iterator pos) {
+    __node* node = pos.__node_;
+    size_type index = pos.__index_;
+    iterator next(__buckets_, __bucket_count_, index, node);
+    ++next;
+    __node** link = &__buckets_[index];
+    while (*link != nullptr) {
+      if (*link == node) {
+        *link = node->__next;
+        break;
+      }
+      link = &(*link)->__next;
+    }
+    __destroy_node(node);
+    --__size_;
+    return next;
+  }
+
+  iterator __erase_range(const_iterator first, const_iterator last) {
+    while (first != last) {
+      first = const_iterator(__erase(first));
+    }
+    return iterator(__buckets_, __bucket_count_, last.__index_, last.__node_);
+  }
+
+  size_type __erase_key(const key_type& key) {
+    if (__bucket_count_ == 0) {
+      return 0;
+    }
+    size_t hash = __hash_(key);
+    size_type bucket = hash % __bucket_count_;
+    __node** link = &__buckets_[bucket];
+    while (*link != nullptr) {
+      __node* node = *link;
+      if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+        *link = node->__next;
+        __destroy_node(node);
+        --__size_;
+        return 1;
+      }
+      link = &node->__next;
+    }
+    return 0;
+  }
+
+  void swap(__hash_table& other) noexcept {
+    std::swap(__buckets_, other.__buckets_);
+    std::swap(__bucket_count_, other.__bucket_count_);
+    std::swap(__size_, other.__size_);
+    std::swap(__max_load_factor_, other.__max_load_factor_);
+    std::swap(__hash_, other.__hash_);
+    std::swap(__equal_, other.__equal_);
+    std::swap(__alloc_, other.__alloc_);
+    std::swap(__node_alloc_, other.__node_alloc_);
+    std::swap(__bucket_alloc_, other.__bucket_alloc_);
+  }
+
+  // Bucket interface.
+  size_type bucket_count() const noexcept { return __bucket_count_; }
+  size_type max_bucket_count() const noexcept {
+    return static_cast<size_type>(-1) / sizeof(__node*);
+  }
+
+  size_type bucket_size(size_type n) const {
+    size_type total = 0;
+    if (n < __bucket_count_) {
+      for (__node* node = __buckets_[n]; node != nullptr; node = node->__next) {
+        total++;
+      }
+    }
+    return total;
+  }
+
+  size_type bucket(const key_type& key) const {
+    return __bucket_count_ == 0 ? 0 : __hash_(key) % __bucket_count_;
+  }
+
+  float load_factor() const noexcept {
+    return __bucket_count_ == 0
+               ? 0.0f
+               : static_cast<float>(__size_) /
+                     static_cast<float>(__bucket_count_);
+  }
+
+  float max_load_factor() const noexcept { return __max_load_factor_; }
+
+  void max_load_factor(float factor) {
+    if (factor > 0.0f) {
+      __max_load_factor_ = factor;
+    }
+  }
+
+  void rehash(size_type count) {
+    size_type needed =
+        static_cast<size_type>(static_cast<float>(__size_) /
+                               __max_load_factor_) +
+        1;
+    if (count < needed) {
+      count = needed;
+    }
+    if (count < 1) {
+      count = 1;
+    }
+    if (count != __bucket_count_) {
+      __rehash(count);
+    }
+  }
+
+  void reserve(size_type count) {
+    rehash(static_cast<size_type>(static_cast<float>(count) /
+                                  __max_load_factor_) +
+           1);
+  }
+};
+
+}  // namespace __hash_detail
+}  // namespace std
+
+#endif /* __davecc_hash_table__ */

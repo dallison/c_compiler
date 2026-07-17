@@ -8876,6 +8876,57 @@ static bool CXXTypeHasUserDeclaredCopyOrMoveConstructor(TypeRecord* type) {
   return false;
 }
 
+// True if copy-/move-initializing an object of `type` must run a copy or move
+// constructor rather than degrading to a byte-wise copy: the class itself, a
+// base, or a (possibly array) non-static data member -- recursively -- has a
+// user-declared copy or move constructor.  This is the recursive generalization
+// of CXXTypeHasUserDeclaredCopyOrMoveConstructor: a class whose own copy/move
+// constructor is implicit is still non-trivially copyable if any subobject is,
+// and a byte copy would then alias whatever resource that subobject's
+// user-defined copy constructor is responsible for duplicating (e.g. the bucket
+// array owned by std::unordered_map's __hash_table member), causing shared state
+// and later double-frees.  A class with no such subobject is left to the
+// member-wise `init` path.
+static bool CXXTypeRequiresCopyConstructorCall(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeRequiresCopyConstructorCall(type->next);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  if (CXXTypeHasUserDeclaredCopyOrMoveConstructor(type)) {
+    return true;
+  }
+  Struct* owner = type->info.struct_info;
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base != NULL && CXXTypeRequiresCopyConstructorCall(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
+    if (base != NULL && CXXTypeRequiresCopyConstructorCall(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < owner->members.length; i++) {
+    StructMember* member = owner->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (CXXTypeRequiresCopyConstructorCall(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Copy-initialization of a class object from a single expression, `T b = expr;`.
 // Like direct-initialization `T b(expr);`, this must select and invoke a
 // constructor (copy, move, or converting) rather than degrading to a shallow
@@ -8884,12 +8935,24 @@ static bool CXXTypeHasUserDeclaredCopyOrMoveConstructor(TypeRecord* type) {
 // aliases that resource instead of running the user-defined copy constructor and
 // leads to double-frees / dangling pointers.
 //
-// This rewrite is limited to classes with a user-declared copy/move constructor:
-// only those need a constructor invocation here.  Trivially-copyable classes are
-// left to the member-wise `init` path, which also performs user-defined
-// conversions (constructing one type from another via `operator T()`); rewriting
-// those into a constructor call would bypass the conversion operator and select
-// a possibly-inaccessible value constructor instead.
+// This rewrite is limited to non-aggregate classes that are not trivially
+// copyable -- those whose own, a base's, or a member's copy/move constructor is
+// user-declared (see CXXTypeRequiresCopyConstructorCall).  Trivially-copyable
+// classes are left to the member-wise `init` path, which also performs
+// user-defined conversions (constructing one type from another via
+// `operator T()`); rewriting those into a constructor call would bypass the
+// conversion operator and select a possibly-inaccessible value constructor
+// instead.
+//
+// Aggregates are excluded up front even when a member owns a resource (e.g.
+// `struct { std::string s; }`): the member-wise `init` path already recurses
+// per member and invokes each member's copy constructor, so aggregate copies are
+// deep without the rewrite.  Forcing a constructor call for an aggregate would
+// instead bypass that per-member conversion handling (and, for a class-template
+// specialization whose aggregate-ness is settled before its members finish
+// registering, mis-resolve against the injected-class-name), so only
+// non-aggregates -- whose `init` path performs a single bitwise struct copy and
+// would therefore alias a resource-owning member -- are rewritten here.
 //
 // `initializer` is the node produced by SyntaxParseInitializer after the braced
 // list-constructor rewrite; only a plain expression initializer (`expr_init`)
@@ -8903,7 +8966,7 @@ static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym
     return initializer;
   }
   if (FindCXXConstructor(sym->type) == NULL ||
-      !CXXTypeHasUserDeclaredCopyOrMoveConstructor(sym->type)) {
+      !CXXTypeRequiresCopyConstructorCall(sym->type)) {
     return initializer;
   }
   ExpressionInitializerASTNode* expr_init =

@@ -185,6 +185,12 @@ typedef struct Symbol {
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.
   Vector imported_function_template_parameters_backup;  // transient
+  // Lazily computed, full (untruncated) target assembly symbol name.  Owned by
+  // the symbol and reused across every emission site so that long mangled names
+  // (e.g. deeply nested template specializations) are never truncated to a
+  // caller's fixed-size scratch buffer, which would let distinct symbols
+  // collide.  @wire - (transient)
+  char* cached_target_symbol_name;
 } Symbol;
 
 

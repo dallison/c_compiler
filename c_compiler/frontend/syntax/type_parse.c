@@ -814,7 +814,31 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         } else {
         Symbol* symbol =
             SyntaxFindQualifiedSymbol(parser->syntax, &typename_name);
-        if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+        // If the qualifier names a local alias whose type is a *dependent*
+        // class-template specialization (e.g. `using tbl = HT<P<Key>, Key>;`
+        // followed by `typename tbl::iterator`), resolving the member eagerly
+        // against the qualified symbol would follow the alias to the primary
+        // template `HT` and copy its member's type verbatim, dropping the
+        // specialization's arguments `[P<Key>, Key]`.  The primary's member
+        // type still references `HT`'s own parameters by index (e.g. `Value`
+        // at index 0), which then aliases the enclosing template's parameter
+        // at the same index (e.g. `Key`) once substituted.  Keep such a member
+        // deferred as `HT<Args>::iterator` so it resolves against the correct
+        // specialization at instantiation time.
+        bool base_is_dependent_alias = false;
+        if (typename_name.components.length == 2) {
+          String* base_name0 = typename_name.components.value.p[0];
+          Symbol* base0 = SyntaxFindSymbol(parser->syntax, base_name0);
+          if (base0 != NULL && StorageIs(base0->storage, STO(typedef)) &&
+              base0->type != NULL &&
+              TypeIsStructOrUnion(base0->type) &&
+              base0->type->template_origin != NULL &&
+              TypeContainsTemplateParameter(base0->type)) {
+            base_is_dependent_alias = true;
+          }
+        }
+        if (symbol != NULL && StorageIs(symbol->storage, STO(typedef)) &&
+            !base_is_dependent_alias) {
           symbol->flags.used = true;
           type_record = TypeRecordCopy(symbol->type);
           type |= type_record->type;
@@ -836,11 +860,32 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                      base->type != NULL &&
                      TypeContainsTemplateParameter(base->type)) {
             String* member_name = typename_name.components.value.p[1];
-            type_record = TypeRecordCopy(base->type);
-            if (type_record->dependent_member_name != NULL) {
-              StringDelete(type_record->dependent_member_name);
+            // `typename alias::member` where `alias` names a dependent
+            // class-template specialization (e.g. `using tbl = HT<P<Key>,Key>;
+            // typename tbl::iterator`).  Copying the alias's struct spine would
+            // make `member` masquerade as the base class itself: a variable of
+            // this type would be treated as an `HT` object and its constructor
+            // baked under the base tag name (`found.HT(...)`), which then fails
+            // once `member` resolves to a *different* nested type (e.g.
+            // `__hash_iterator`) at instantiation.  Represent it instead as a
+            // clean dependent-member placeholder that carries the base's
+            // template-id (origin + arguments) plus the member name, so it
+            // resolves against the correct specialization's member later
+            // without dropping the specialization's arguments.
+            if (base->type->template_origin != NULL &&
+                base->type->template_arguments != NULL) {
+              type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+              type_record->template_origin = base->type->template_origin;
+              type_record->template_arguments =
+                  TemplateArgumentVectorCopy(base->type->template_arguments);
+              type_record->dependent_member_name = NewString(member_name->value);
+            } else {
+              type_record = TypeRecordCopy(base->type);
+              if (type_record->dependent_member_name != NULL) {
+                StringDelete(type_record->dependent_member_name);
+              }
+              type_record->dependent_member_name = NewString(member_name->value);
             }
-            type_record->dependent_member_name = NewString(member_name->value);
             type |= type_record->type;
           } else {
             SyntaxError(parser->syntax, "Unknown type name %s",

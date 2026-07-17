@@ -97,6 +97,19 @@ struct pair {
 
   constexpr pair(const T1& first_value, const T2& second_value)
       : first(first_value), second(second_value) {}
+
+  // Converting constructors: build a pair from another pair whose elements are
+  // convertible (e.g. pair<iterator, bool> from pair<const_iterator, bool>, or
+  // pair<const K, V> from pair<K, V>).  These enable the many implicit pair
+  // conversions the containers rely on.
+  template <class U1, class U2>
+  constexpr pair(const pair<U1, U2>& other)
+      : first(other.first), second(other.second) {}
+
+  template <class U1, class U2>
+  constexpr pair(pair<U1, U2>&& other)
+      : first(static_cast<U1&&>(other.first)),
+        second(static_cast<U2&&>(other.second)) {}
 };
 
 template <class T1, class T2>

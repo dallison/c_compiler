@@ -189,6 +189,35 @@ bool TemplateArgumentVectorEqual(Vector* left, Vector* right) {
   return true;
 }
 
+// Compare two `dependent_member_template_arguments` lists: a list of per-path-
+// component argument vectors (the `<...>` of a dependent member-template access
+// such as `Alloc::rebind_alloc<T>`).  Each entry is itself a nullable argument
+// vector.  Two dependent member-template types are the same only if these
+// match; otherwise `Traits<A>::rebind_alloc<node>` and
+// `Traits<A>::rebind_alloc<node*>` would be treated as one type.
+static bool TemplateArgumentVectorListEqual(Vector* left, Vector* right) {
+  if (left == NULL || right == NULL) {
+    return left == right;
+  }
+  if (left->length != right->length) {
+    return false;
+  }
+  for (size_t i = 0; i < left->length; i++) {
+    Vector* le = left->value.p[i];
+    Vector* re = right->value.p[i];
+    if (le == NULL || re == NULL) {
+      if (le != re) {
+        return false;
+      }
+      continue;
+    }
+    if (!TemplateArgumentVectorEqual(le, re)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
   if (a == b) {
     return true;
@@ -800,10 +829,43 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
           return false;
         }
         if (t1->template_origin != NULL || t2->template_origin != NULL) {
+          // Deferred dependent-member template-ids (`X<Args>::iterator` vs
+          // `X<Args>::const_iterator`) share origin and arguments but name
+          // different members, so the member name is part of their identity.
+          bool same_dependent_member =
+              ((t1->dependent_member_name == NULL &&
+                t2->dependent_member_name == NULL) ||
+               (t1->dependent_member_name != NULL &&
+                t2->dependent_member_name != NULL &&
+                StringEqualString(t1->dependent_member_name,
+                                  t2->dependent_member_name))) &&
+              TemplateArgumentVectorListEqual(
+                  t1->dependent_member_template_arguments,
+                  t2->dependent_member_template_arguments);
           if (t1->template_origin == t2->template_origin &&
+              same_dependent_member &&
               TemplateArgumentVectorEqual(t1->template_arguments,
                                           t2->template_arguments)) {
             return true;
+          }
+          // When both operands are template-ids that carry explicit arguments,
+          // their identity is exactly the (origin, arguments) pair, so an
+          // argument mismatch is decisive.  Must NOT fall through to the
+          // struct-family check below: two still-dependent template-ids such as
+          // `Iter<T, 0>` and `Iter<T, 1>` share the primary template's Struct on
+          // both sides, and that check short-circuits on the shared Struct
+          // pointer -- wrongly treating differing type or non-type arguments as
+          // equal (and collapsing overloads keyed on them).
+          if (t1->template_origin != NULL && t2->template_origin != NULL &&
+              t1->template_arguments != NULL &&
+              t2->template_arguments != NULL) {
+            bool same_family =
+                t1->template_origin == t2->template_origin ||
+                StringEqualString(&t1->template_origin->name,
+                                  &t2->template_origin->name);
+            return same_family && same_dependent_member &&
+                   TemplateArgumentVectorEqual(t1->template_arguments,
+                                               t2->template_arguments);
           }
           // Some substitution paths preserve the specialization's concrete
           // Struct but not the outer TypeRecord's template metadata.  Compare

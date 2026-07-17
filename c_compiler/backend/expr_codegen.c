@@ -2949,7 +2949,24 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       cast_node->expr->flags |= cast_node->base.flags;
       result = GenerateExpression(gen, cast_node->expr);
       if (TypeIsReference(cast_node->cast_type)) {
-        IRSetType(result, node->type);
+        // A reference cast (e.g. `static_cast<T&>(x)`, the core of
+        // std::forward) is a glvalue: it yields the operand's object, not a
+        // fresh value.  When the referent's address was requested (typically
+        // when binding the cast to a reference parameter), the operand already
+        // produced that address as a pointer.  Re-typing the result to the
+        // scalar referent type here would make it look like a loaded value and
+        // force a spurious temporary at the use site (the reference would then
+        // bind to that dead temporary instead of the real object).  Preserve
+        // the pointer type for scalar reference casts that want an address;
+        // aggregates still expose their (struct/array) type so the callee's
+        // by-reference address is taken downstream as before.
+        bool wants_address = (cast_node->base.flags & kASTNeedAddress) != 0;
+        bool aggregate = TypeIsStructOrUnion(node->type) ||
+                         TypeIsArray(node->type) ||
+                         TypeIsMemberPointerAggregate(node->type);
+        if (!wants_address || aggregate) {
+          IRSetType(result, node->type);
+        }
         break;
       }
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
