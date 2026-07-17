@@ -583,6 +583,17 @@ void ASTNodeDelete(ASTNode* node) {
   if (node == NULL) {
     return;
   }
+  // Once the arena has been released every node struct has already been
+  // destructed (via the ast_all_nodes sweep in ASTArenaRelease) and its backing
+  // memory freed, so ast_arena is NULL.  Later teardown steps still hold
+  // pointers to arena nodes -- e.g. Symbol default arguments and variable-
+  // template / partial-specialization initializers reached from SymbolDestruct
+  // -- and would call ASTNodeDelete on them.  Reading such a freed node here is
+  // an order-dependent, layout-sensitive use-after-free, so bail out: the node
+  // is already destructed and there is nothing left to release.
+  if (ast_arena == NULL) {
+    return;
+  }
   // The AST is a graph: nodes can be reached more than once (switch cases, goto
   // targets, label back-pointers, shared subtrees produced by inlining) which
   // would otherwise cause infinite recursion or double-release during teardown.
