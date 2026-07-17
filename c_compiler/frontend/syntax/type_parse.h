@@ -53,6 +53,13 @@ typedef struct {
   // `typename` may be unqualified (including a simple-template-id), unlike an
   // elaborated typename-specifier which requires a qualified dependent name.
   bool typename_allows_unqualified;
+  // While parsing a class body, points at a Vector<DeferredInlineBody*> owned by
+  // the active ParseStructMembers frame.  Inline member function bodies are not
+  // parsed where they appear; instead the body's macro-expanded text is captured
+  // here and re-parsed after the whole class is complete, so unqualified names in
+  // the body see every member (complete-class context, [class.mem]).  NULL
+  // outside a class body.
+  Vector* deferred_inline_bodies;
 } TypeParser;
 
 // Struct to hold information from a partial type specifier.

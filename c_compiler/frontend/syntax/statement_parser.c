@@ -428,12 +428,14 @@ static bool AddRangeForVariable(Syntax* syntax, Symbol* sym) {
   if (sym == NULL) {
     return false;
   }
-  Symbol* old = SyntaxFindSymbol(syntax, &sym->name);
-  if (old != NULL) {
-    SyntaxError(syntax, "Duplicate definition of local symbol %s",
-                sym->name.value);
-    return false;
-  }
+  // The range-for loop variable belongs to the for statement's own scope
+  // (opened by ParseForStatement before this runs) and may legitimately shadow
+  // a name from an enclosing scope -- e.g. `int value; for (auto value : r)`.
+  // So only a clash within the current innermost scope is an error, which is
+  // exactly what SyntaxAddSymbol's insert enforces; an enclosing-scope match
+  // must not be rejected.  (Searching all scopes here also spuriously fired
+  // during template instantiation, when a sibling member's parameter of the
+  // same name was still visible in an enclosing scope.)
   if (!SyntaxAddSymbol(syntax, sym)) {
     SyntaxError(syntax, "Duplicate definition of local symbol %s",
                 sym->name.value);

@@ -1068,6 +1068,16 @@ void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
       !StructNeedsImplicitCXXDestructor(str)) {
     return;
   }
+  // While parsing a template *declaration* the primary's implicit special
+  // members are intentionally deferred to instantiation time (see the matching
+  // guard in AddImplicitCXXSpecialMembers).  Injecting a destructor into the
+  // primary here would be cloned into every specialization and then collide
+  // with the destructor the instantiation-time AddImplicitCXXSpecialMembers
+  // synthesizes, leaving the class with two destructors.
+  if (parser->syntax != NULL &&
+      parser->syntax->parsing_template_declaration) {
+    return;
+  }
 
   SourceLocation location = tag->location;
   TypeRecord* func = NewFunctionTypeRecord();

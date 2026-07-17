@@ -61,6 +61,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->template_substitution_failed = false;
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
+  parser->deferred_inline_bodies = NULL;
 }
 
 void TypeParserReset(TypeParser* parser) {
@@ -2021,7 +2022,18 @@ static void ParseFunctionDecl(TypeParser* parser) {
   if (parser->symbol != NULL) {
     func->info.function.symbol = parser->symbol;
   }
-  
+
+  // A function's parameters have function-prototype scope ([basic.scope.param]):
+  // they are visible to later parameters' default arguments, a trailing return
+  // type, and a trailing requires-clause, but must NOT leak into the enclosing
+  // scope once the declarator is parsed.  Open a dedicated scope around the
+  // prototype so the parameter names are torn down here.  Without it, a member
+  // function's parameters stay visible in the surrounding class (or, for a
+  // class template, the template-parameter) scope and can be found by unqualified
+  // lookup inside a sibling member's body -- wrongly shadowing a data member of
+  // the same name.  The definition body re-introduces the parameters through its
+  // own scope (AddFunctionScopeSymbols / AddInlineFunctionScopeSymbols).
+  SyntaxOpenScope(parser->syntax);
   ParseFunctionPrototype(&proto_parser, func);
   SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(exprsep));
   while (LexLookingAt(parser->lex, TOK(const)) ||
@@ -2040,6 +2052,7 @@ static void ParseFunctionDecl(TypeParser* parser) {
     TypeRecordChain(func, trailing_return);
   }
   ParseCXXTrailingRequiresClause(parser, func);
+  SyntaxCloseScope(parser->syntax);
   if (parser->cxx_member_definition != NULL &&
       !parser->cxx_member_definition->is_static) {
     TypeRecordAddCXXThisParameter(

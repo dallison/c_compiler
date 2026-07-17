@@ -164,6 +164,23 @@ static void MarkCXXNestedClassTemplate(TypeRecord* type, Vector* parameters) {
   parameters->length = 0;
 }
 
+// True when `alias_type` is a class/union/enum type that designates exactly the
+// same tag as `tag` -- i.e. the existing nested-type member and the type being
+// added are the same tag (a forward declaration and its completion share one
+// Struct/Enum object).  Used to distinguish redeclaration from a real clash.
+static bool NestedTypeMemberDesignatesTag(TypeRecord* alias_type, Symbol* tag) {
+  if (alias_type == NULL || tag == NULL) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(alias_type) && alias_type->info.struct_info != NULL) {
+    return alias_type->info.struct_info->tag_symbol == tag;
+  }
+  if (TypeIsEnum(alias_type) && alias_type->info.enum_info != NULL) {
+    return alias_type->info.enum_info->tag_symbol == tag;
+  }
+  return false;
+}
+
 static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
                                    TypeRecord* type, CXXAccess access) {
   Symbol* tag = NULL;
@@ -182,7 +199,19 @@ static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     type->info.struct_info->lexical_parent = owner;
   }
-  if (FindStructMember(owner, &tag->name) != NULL) {
+  StructMember* existing = FindStructMember(owner, &tag->name);
+  if (existing != NULL) {
+    // Completing a previously forward-declared nested type -- `class X;`
+    // followed by `class X { ... };` -- reaches here twice for the same tag,
+    // which is completed in place.  Recognize that the existing alias already
+    // designates this very tag and refresh it to the (now complete) type
+    // instead of reporting a spurious duplicate.  A genuine redefinition of
+    // the type is diagnosed earlier when the second body is parsed.
+    if (existing->symbol != NULL && existing->symbol->type != NULL &&
+        NestedTypeMemberDesignatesTag(existing->symbol->type, tag)) {
+      existing->symbol->type = TypeRecordCopy(type);
+      return;
+    }
     SyntaxError(parser->syntax, "Duplicate nested type %s", tag->name.value);
     return;
   }
@@ -1114,6 +1143,14 @@ static void AddInlineFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
   Vector* formals = &func->info.function.prototype;
   for (size_t i = 0; i < formals->length; i++) {
     Symbol* formal = formals->value.p[i];
+    // A function parameter is a block-scope name and hides a class member of
+    // the same name in the body ([basic.scope.block], [basic.lookup.unqual]).
+    // Marking it block-scope makes the member name-hiding redirect (see
+    // BuildValueName in expr_parser.c) leave references to the parameter alone
+    // instead of rewriting them to `this->member`.  This matters once inline
+    // bodies are parsed in complete-class context, where a later-declared
+    // member (e.g. `data()`/`size()`) is visible while the body is analyzed.
+    formal->flags.is_block_scope = true;
     InsertLocalSymbol(syntax->local_symbol_stack, formal);
   }
 }
@@ -1221,45 +1258,39 @@ CXXConstructorInitList* FindTemplateConstructorInitializers(
   return NULL;
 }
 
-static bool ParseInlineMemberFunctionBody(TypeParser* parser,
-                                          Symbol* member_symbol) {
+// An inline member function body whose parse was deferred until the enclosing
+// class is complete.  `body_text` holds the body's macro-expanded source
+// (starting at the opening '{'), captured when the body was first scanned; it is
+// replayed from a string source with the preprocessor suppressed so that
+// unqualified names bind in complete-class context without re-running the
+// preprocessor against a possibly drifted macro state.  `body_lineno` /
+// `body_file_index` / `body_path_index` / `body_is_system_header` tag the replay
+// source so tokens keep their original diagnostic locations.  `initializers`
+// holds the already-parsed constructor member-initializer list (owned; consumed
+// by FinishInlineMemberFunctionBody).
+typedef struct {
+  Symbol* member_symbol;
+  String body_text;
+  int body_lineno;
+  uint32_t body_file_index;
+  size_t body_path_index;
+  bool body_is_system_header;
+  CXXConstructorInitList initializers;
+  ParserContext old_context;
+} DeferredInlineBody;
+
+// Parse the statements of an inline member function body and perform the
+// post-body bookkeeping (constructor preamble, member/base destructor calls,
+// definition queueing).  Assumes a fresh function scope is open, the scope
+// symbols (parameters and `this`) have been inserted, and the lexer is
+// positioned at the body's opening '{'.  Consumes the body and its optional
+// trailing ';', closes the scope and restores `syntax->context` to
+// `old_context`.  Takes ownership of `*cxx_initializers`.
+static void FinishInlineMemberFunctionBody(
+    TypeParser* parser, Symbol* member_symbol,
+    CXXConstructorInitList* cxx_initializers, ParserContext old_context) {
   Syntax* syntax = parser->syntax;
-  ParserContext old_context = syntax->context;
-  syntax->context = kParsingBlockScope;
-  SyntaxOpenScope(syntax);
-  AddInlineFunctionScopeSymbols(syntax, member_symbol->type);
-
-  CXXConstructorInitList cxx_initializers;
-  SyntaxCXXConstructorInitListInit(&cxx_initializers);
-  SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
-                                           &cxx_initializers);
-  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
-      LexLookingAt(parser->lex, TOK(requires))) {
-    ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
-    if (constraint != NULL && TypeIsFunction(member_symbol->type)) {
-      AddOwnedAssociatedConstraint(
-          &member_symbol->type->info.function.associated_constraint,
-          constraint);
-    } else {
-      ConstraintExprDelete(constraint);
-    }
-  }
-  if (!LexMatch(parser->lex, TOK(lbrace))) {
-    SyntaxCloseScope(syntax);
-    syntax->context = old_context;
-    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
-    return false;
-  }
-
-  member_symbol->flags.is_defined = true;
-  member_symbol->flags.is_inline_defn = true;
-  if (!StorageIs(member_symbol->storage, STO(static))) {
-    member_symbol->flags.is_weak = true;
-  }
-  member_symbol->type->info.function.is_inline = true;
-  member_symbol->type->info.function.definition = true;
-  member_symbol->type->info.function.is_user_provided = true;
-  member_symbol->value.func_defn = member_symbol;
+  LexMatch(parser->lex, TOK(lbrace));
 
   TypeRecord* old_current_function = compiler->current_function;
   compiler->current_function = member_symbol->type;
@@ -1286,14 +1317,14 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   if (member_symbol->type->info.function.is_constructor) {
     if (syntax->parsing_template_declaration) {
       deferred_initializers =
-          SyntaxCXXConstructorInitListCloneRaw(&cxx_initializers);
+          SyntaxCXXConstructorInitListCloneRaw(cxx_initializers);
     } else {
       deferred_initializers = malloc(sizeof(CXXConstructorInitList));
-      *deferred_initializers = cxx_initializers;
+      *deferred_initializers = *cxx_initializers;
     }
   } else {
     SyntaxInsertCXXConstructorPreamble(syntax, member_symbol->type, body,
-                                       &cxx_initializers,
+                                       cxx_initializers,
                                        member_symbol->location);
   }
   AppendCXXMemberDestructorCalls(member_symbol->type, body,
@@ -1316,14 +1347,164 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   if (deferred_initializers != NULL) {
     if (syntax->parsing_template_declaration) {
       QueueTemplateConstructorInitializers(member_symbol, deferred_initializers);
-      SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+      SyntaxCXXConstructorInitListDestruct(cxx_initializers);
     } else {
       QueueInlineConstructorPreamble(member_symbol, deferred_initializers);
     }
   } else {
-    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+    SyntaxCXXConstructorInitListDestruct(cxx_initializers);
+  }
+}
+
+// Decide whether an inline member function body should be parsed later, once
+// the whole class is defined, rather than at the point it textually appears.
+// Deferring gives the body a complete-class context so unqualified names bind
+// to members declared later in the class (e.g. `front()` calling `begin()`),
+// matching [class.mem]/7.  Member templates carry their own template-parameter
+// scope that is opened and closed around this call, so their bodies must be
+// parsed eagerly while that scope is live.
+static bool ShouldDeferInlineMemberBody(TypeParser* parser,
+                                        Symbol* member_symbol) {
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+  if (parser->deferred_inline_bodies == NULL) {
+    return false;
+  }
+  if (member_symbol == NULL || member_symbol->type == NULL ||
+      !TypeIsFunction(member_symbol->type)) {
+    return false;
+  }
+  if (member_symbol->flags.is_template ||
+      member_symbol->type->info.function.template_parameter_count > 0) {
+    return false;
   }
   return true;
+}
+
+static bool ParseInlineMemberFunctionBody(TypeParser* parser,
+                                          Symbol* member_symbol) {
+  Syntax* syntax = parser->syntax;
+  ParserContext old_context = syntax->context;
+  syntax->context = kParsingBlockScope;
+  SyntaxOpenScope(syntax);
+  AddInlineFunctionScopeSymbols(syntax, member_symbol->type);
+
+  CXXConstructorInitList cxx_initializers;
+  SyntaxCXXConstructorInitListInit(&cxx_initializers);
+  SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
+                                           &cxx_initializers);
+  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+      LexLookingAt(parser->lex, TOK(requires))) {
+    ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
+    if (constraint != NULL && TypeIsFunction(member_symbol->type)) {
+      AddOwnedAssociatedConstraint(
+          &member_symbol->type->info.function.associated_constraint,
+          constraint);
+    } else {
+      ConstraintExprDelete(constraint);
+    }
+  }
+  if (!LexLookingAt(parser->lex, TOK(lbrace))) {
+    SyntaxCloseScope(syntax);
+    syntax->context = old_context;
+    SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
+    return false;
+  }
+
+  member_symbol->flags.is_defined = true;
+  member_symbol->flags.is_inline_defn = true;
+  if (!StorageIs(member_symbol->storage, STO(static))) {
+    member_symbol->flags.is_weak = true;
+  }
+  member_symbol->type->info.function.is_inline = true;
+  member_symbol->type->info.function.definition = true;
+  member_symbol->type->info.function.is_user_provided = true;
+  member_symbol->value.func_defn = member_symbol;
+
+  if (ShouldDeferInlineMemberBody(parser, member_symbol)) {
+    // Capture the body's already-expanded text (from the '{') and skip it; it is
+    // re-parsed by FlushDeferredInlineMemberBodies once every member is known.
+    // The constructor member-initializer list, already parsed above, is carried
+    // along so the preamble can be built against the same AST.
+    Lex* lex = parser->lex;
+    DeferredInlineBody* deferred = malloc(sizeof(DeferredInlineBody));
+    deferred->member_symbol = member_symbol;
+    deferred->body_lineno = lex->source->lineno;
+    deferred->body_file_index = lex->source->file_index;
+    deferred->body_path_index = lex->source->path_index;
+    deferred->body_is_system_header = lex->source->is_system_header;
+    StringInit(&deferred->body_text, NULL);
+    LexBeginCapture(lex, &deferred->body_text);
+    deferred->initializers = cxx_initializers;  // ownership moved
+    deferred->old_context = old_context;
+    SkipInlineMemberFunctionBody(parser);
+    LexEndCapture(lex);
+    LexMatch(lex, TOK(semicolon));
+    SyntaxCloseScope(syntax);
+    syntax->context = old_context;
+    VectorAppend(parser->deferred_inline_bodies, deferred);
+    return true;
+  }
+
+  FinishInlineMemberFunctionBody(parser, member_symbol, &cxx_initializers,
+                                 old_context);
+  return true;
+}
+
+// Re-parse the inline member function bodies whose parsing was deferred while
+// the class body was scanned.  Called once the class's member declarations are
+// all registered but before the class scope is torn down, so every member is
+// visible to unqualified name lookup inside each body (complete-class context).
+// Each body is re-lexed from its captured text; the main lexer is checkpointed
+// beforehand and restored to the end-of-members position afterwards.
+static void FlushDeferredInlineMemberBodies(TypeParser* parser,
+                                            Vector* deferred) {
+  if (deferred == NULL || deferred->length == 0) {
+    return;
+  }
+  Syntax* syntax = parser->syntax;
+  Lex* lex = parser->lex;
+  // Save the lexer position at the end of the class body so parsing can resume
+  // there once every deferred body has been replayed.
+  LexCheckpoint end_checkpoint;
+  LexCheckpointSave(lex, &end_checkpoint);
+  for (size_t i = 0; i < deferred->length; i++) {
+    DeferredInlineBody* entry = deferred->value.p[i];
+
+    // Re-lex the recorded body from a throwaway string source with the
+    // preprocessor suppressed, so the already-expanded text is tokenized exactly
+    // as first seen.  The source is tagged with the body's original file index
+    // and starting line so tokens carry correct diagnostic locations.
+    String* text = NewString(NULL);
+    StringSetString(text, &entry->body_text);
+    Source* replay = NewSourceFromString("<deferred-inline-body>", text);
+    replay->file_index = entry->body_file_index;
+    replay->lineno = entry->body_lineno - 1;
+    replay->path_index = entry->body_path_index;
+    replay->is_system_header = entry->body_is_system_header;
+
+    lex->source = replay;
+    lex->suppress_preprocessing = true;
+    StringClear(&lex->line);
+    lex->pos = 0;
+    LexNextToken(lex);  // Prime the first token (the opening '{').
+
+    syntax->context = kParsingBlockScope;
+    SyntaxOpenScope(syntax);
+    AddInlineFunctionScopeSymbols(syntax, entry->member_symbol->type);
+    FinishInlineMemberFunctionBody(parser, entry->member_symbol,
+                                   &entry->initializers, entry->old_context);
+
+    lex->suppress_preprocessing = false;
+    lex->source = NULL;  // Real source is reinstated by end_checkpoint below.
+    SourceDelete(replay);
+    StringDestruct(&entry->body_text);
+    free(entry);
+  }
+  LexCheckpointRestore(lex, &end_checkpoint);
+  LexCheckpointDestruct(&end_checkpoint);
+  VectorClear(deferred);
 }
 
 void FinalizePendingInlineConstructorPreambles(TypeParser* parser,
@@ -1761,6 +1942,13 @@ static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                String* tag_name) {
   CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
+  // Inline member function bodies are parsed in complete-class context: their
+  // parse is deferred until every member of this class is declared.  Publish a
+  // collection frame for this class body; nested classes install their own.
+  Vector deferred_inline_bodies;
+  VectorInit(&deferred_inline_bodies);
+  Vector* saved_deferred_inline_bodies = parser->deferred_inline_bodies;
+  parser->deferred_inline_bodies = &deferred_inline_bodies;
   while (!LexLookingAt(parser->lex, TOK(rbrace))) {
     if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
@@ -2350,4 +2538,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       member_template_requires_clause = NULL;
     }
   }
+
+  // Every member is now declared; re-parse the deferred inline bodies in
+  // complete-class context, then restore this frame's collection pointer.
+  FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
+  parser->deferred_inline_bodies = saved_deferred_inline_bodies;
+  VectorDestruct(&deferred_inline_bodies);
 }

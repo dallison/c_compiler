@@ -65,6 +65,16 @@ typedef struct Lex {
   bool preprocessor_mode;  // Running in preprocessor mode.
   bool in_comment;         // We are inside a multi-line comment.
   bool assembler_mode;     // Running in assembler mode.
+
+  // When non-NULL, each fully macro-expanded input line is appended here as it
+  // is read.  Used to record a deferred inline function body so it can be
+  // re-lexed later (see LexBeginCapture / LexEndCapture).
+  String* capture;
+  // When set, LexReadLine reads raw lines without running the preprocessor (no
+  // directive handling, no macro expansion).  Used while replaying captured
+  // (already-expanded) text so it is not expanded a second time against a
+  // possibly drifted macro state.
+  bool suppress_preprocessing;
 } Lex;
 
 typedef struct {
@@ -103,6 +113,13 @@ void LexRewind(Lex* lex);
 void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint);
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint);
 void LexCheckpointDestruct(LexCheckpoint* checkpoint);
+
+// Begin/end capturing macro-expanded source text.  LexBeginCapture assumes the
+// current token is the '{' that opens the text to record; it seeds `out` with
+// that line (its content before the '{' replaced by spaces so column offsets are
+// preserved) and every subsequent line read is appended until LexEndCapture.
+void LexBeginCapture(Lex* lex, String* out);
+void LexEndCapture(Lex* lex);
 
 // Destructs a lexical analyzer but does not free the memory.
 void LexDestruct(Lex* lex);

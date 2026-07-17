@@ -1207,6 +1207,8 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->preprocessor_mode = false;
   lex->assembler_mode = false;
   lex->in_comment = false;
+  lex->capture = NULL;
+  lex->suppress_preprocessing = false;
   preprocessor->lex = lex;
 }
 
@@ -1321,6 +1323,24 @@ void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
   StringDestruct(&checkpoint->suffix);
   StringDestruct(&checkpoint->ud_suffix);
 }
+
+void LexBeginCapture(Lex* lex, String* out) {
+  StringClear(out);
+  // The current token is the opening '{'; it ends at lex->pos, so the brace is
+  // the character at lex->pos - 1.  Blank out everything on the line before the
+  // brace (rather than dropping it) so column numbers in the replayed text match
+  // the original source and diagnostics point at the right place.
+  size_t brace_col = lex->pos > 0 ? lex->pos - 1 : 0;
+  for (size_t i = 0; i < brace_col; i++) {
+    StringAppendChar(out, ' ');
+  }
+  StringAppendSegment(out, lex->line.value + brace_col,
+                      lex->line.length - brace_col);
+  StringAppendChar(out, '\n');
+  lex->capture = out;
+}
+
+void LexEndCapture(Lex* lex) { lex->capture = NULL; }
 
 // Destruct a lexical analyzer.
 void LexDestruct(Lex* lex) {
@@ -1646,6 +1666,20 @@ void LexReadLine(Lex* lex) {
   StringClear(&lex->line);
   lex->pos = 0;
 
+  // Replaying captured, already-expanded text (a deferred inline function
+  // body): read one raw line and neither interpret preprocessing directives nor
+  // expand macros.  The text was captured after macro replacement at its
+  // original point, so re-running the preprocessor here would (a) re-execute any
+  // directive lines and (b) expand against whatever macro state now exists,
+  // which may differ from the state that was in effect when the body first
+  // appeared.  There is no include nesting to unwind in a replay source.
+  if (lex->suppress_preprocessing) {
+    if (!SourceEof(lex->source)) {
+      SourceReadLine(lex->source, &lex->line);
+    }
+    return;
+  }
+
   // Outer loop: terminates when we have a valid line.  Iterates on EOF
   // from a nested include file.
   while (!SourceEof(lex->source)) {
@@ -1666,6 +1700,10 @@ void LexReadLine(Lex* lex) {
         // But check if the code has been #ifed out by the preprocessor.
         if (PreprocessorLineIsCompiledIn(lex->preprocessor)) {
           PreprocessorReplaceMacros(lex->preprocessor, &lex->line);
+          if (lex->capture != NULL) {
+            StringAppendSegment(lex->capture, lex->line.value, lex->line.length);
+            StringAppendChar(lex->capture, '\n');
+          }
           break;
         }
       }
