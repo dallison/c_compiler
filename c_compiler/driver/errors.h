@@ -41,6 +41,8 @@ void DisableWarning(const char* warning);
 // Enables the given warning.
 void EnableWarning(const char* warning);
 
+bool WarningIsEnabled(const char* warning);
+
 // Returns whether a warning or warning group is known to this compiler.
 bool WarningExists(const char* warning);
 bool WarningGroupExists(const char* group);

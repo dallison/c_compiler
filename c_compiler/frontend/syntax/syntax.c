@@ -8854,6 +8854,63 @@ ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,
   return rewritten;
 }
 
+// Emits -Wshadow when a newly declared block-scope variable `sym` hides a
+// variable or parameter from an enclosing scope (or a file-scope object),
+// mirroring clang/gcc -Wshadow.  Called for genuinely new local declarations,
+// so the current innermost scope is skipped and only enclosing scopes are
+// searched.
+static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
+  if (!WarningIsEnabled("shadow")) {
+    return;
+  }
+  if (sym == NULL || sym->name.length == 0) {
+    return;
+  }
+  // Only ordinary objects shadow.  Functions, typedefs, and compiler-generated
+  // symbols are not variables and are left alone.
+  if (TypeIsFunction(sym->type) || StorageIs(sym->storage, STO(typedef)) ||
+      sym->flags.is_temp || sym->flags.invented) {
+    return;
+  }
+  if (syntax->local_symbol_stack == NULL) {
+    return;
+  }
+
+  Symbol* shadowed = NULL;
+  const char* what = NULL;
+  // Enclosing local scopes first (the innermost scope is skipped via ->prev).
+  Symbol* enclosing =
+      FindLocalSymbol(syntax->local_symbol_stack->prev, &sym->name);
+  if (enclosing != NULL) {
+    if (TypeIsFunction(enclosing->type) ||
+        StorageIs(enclosing->storage, STO(typedef))) {
+      return;
+    }
+    shadowed = enclosing;
+    what = enclosing->flags.is_argument ? "a parameter" : "a previous local";
+  } else {
+    Symbol* global = FindFileScopeSymbol(syntax, &sym->name);
+    if (global == NULL || global == sym || TypeIsFunction(global->type) ||
+        StorageIs(global->storage, STO(typedef))) {
+      return;
+    }
+    shadowed = global;
+    what = "a global declaration";
+  }
+
+  const char* filename;
+  int lineno, start, end;
+  DecodeSourceLocation(sym->location, &filename, &lineno, &start, &end);
+  ReportWarning(filename, lineno, "shadow",
+                "declaration of '%s' shadows %s", sym->name.value, what);
+
+  const char* prev_filename;
+  int prev_lineno, prev_start, prev_end;
+  DecodeSourceLocation(shadowed->location, &prev_filename, &prev_lineno,
+                       &prev_start, &prev_end);
+  ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
+}
+
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -8964,6 +9021,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         } else {
           // This is the first declaration of this symbol, add to the symbol
           // table.
+          CheckLocalVariableShadow(syntax, sym);
           bool added = SyntaxAddSymbol(syntax, sym);
           assert(added);
           (void)added;
@@ -9133,7 +9191,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
 // Parses a local symbol declaration or definition.  This occurs inside a
 // function.  The symbol is added to the local scope (top symbol table in the
 // local symbol stack).
-ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
+static ASTNode* ParseLocalDeclarationImpl(Syntax* syntax,
+                                          bool require_semicolon) {
   if (LexLookingAt(syntax->lex, TOK(static_assert))) {
     return SyntaxParseStaticAssert(syntax);
   }
@@ -9195,13 +9254,27 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
   TypeParserDestruct(&parser);
   TypeRecordDelete(type);
 
-  // The declaration is followed by a semicolon.
-  SyntaxNeedSemicolon(syntax, TC(type));
+  if (require_semicolon) {
+    // The declaration is followed by a semicolon.
+    SyntaxNeedSemicolon(syntax, TC(type));
+  }
 
   AttributeListDestruct(&attributes);
   
   return NewDeclarationListASTNode(declarations,
                                    syntax->lex->current_token_location);
+}
+
+ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax) {
+  return ParseLocalDeclarationImpl(syntax, /*require_semicolon=*/true);
+}
+
+// Parses a C++ condition-declaration ("if (T x = init)", "while (T* p = q)",
+// "switch (T c = get())").  Identical to a local declaration except that the
+// terminating ')' takes the place of the usual ';', so no semicolon is
+// consumed.  The declared symbol is added to the current (caller-opened) scope.
+ASTNode* SyntaxParseConditionDeclaration(Syntax* syntax) {
+  return ParseLocalDeclarationImpl(syntax, /*require_semicolon=*/false);
 }
 
 void SyntaxNeedBracket(Syntax* syntax, Token bracket, TokenClass followers) {

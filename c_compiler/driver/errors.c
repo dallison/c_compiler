@@ -112,6 +112,7 @@ static const WarningInfo kWarnings[] = {
     // An unused file-scope const/constexpr object with internal linkage.
     {"unused-const-variable", NULL, true, true, false, kWarningGroupWall},
     {"unused-function", NULL, true, true, false, kWarningGroupWall},
+    {"shadow", NULL, true, true, false, 0},
     {"unused-label", NULL, true, true, false, kWarningGroupWall},
     {"unused-value", NULL, true, true, false, kWarningGroupWall},
     {"undef", NULL, true, true, false, kWarningGroupWall},
@@ -127,6 +128,12 @@ static const WarningInfo kWarnings[] = {
     // enabled explicitly via -Wsuggest-override or -Weverything.
     {"suggest-override", NULL, true, true, false, 0},
 };
+
+static bool IsWarningDisabled(const char* warning);
+
+bool WarningIsEnabled(const char* warning) {
+  return !IsWarningDisabled(warning);
+}
 
 static const WarningInfo* FindWarning(const char* name) {
   for (size_t i = 0; i < sizeof(kWarnings) / sizeof(kWarnings[0]); i++) {
