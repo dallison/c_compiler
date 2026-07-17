@@ -187,6 +187,7 @@ Storage SyntaxParseStorage(Syntax* syntax);
 
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
+ASTNode* SyntaxParseConditionDeclaration(Syntax* syntax);
 void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function);
 ASTNode* SyntaxNewCXXGlobalAtexitStatement(Symbol* sym, SourceLocation location);
 void SyntaxRegisterFunctionInitFiniAttributes(Syntax* syntax, Symbol* sym);

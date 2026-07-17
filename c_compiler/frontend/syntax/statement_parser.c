@@ -12,6 +12,7 @@
 #include "expr_parser.h"
 #include "statement_parser.h"
 #include "compiler.h"
+#include "errors.h"
 #include "type.h"
 #include "type_inheritance.h"
 
@@ -233,6 +234,301 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
 // 1. A condition (expression)
 // 2. An 'if' clause stateemnt
 // 3. An optional 'else' statement clause - NULL is absent.
+// --- C++ condition-declarations -------------------------------------------
+//
+// In C++ the controlling expression of if/while/switch may instead be a
+// declaration with an initializer ("if (T x = init)").  The declared variable
+// is in scope for the controlled statement(s) and its value, contextually
+// converted to bool, is the condition.  These are lowered to ordinary
+// constructs the rest of the compiler already handles:
+//
+//   if (T x = init) A else B  =>  { T x = init; if (x) A else B; }
+//   switch (T x = init) BODY  =>  { T x = init; switch (x) BODY; }
+//   while (T x = init) BODY   =>  for (;;) { T x = init;
+//                                            if (x) {} else break; BODY; }
+//
+// The while form re-creates and destroys x on every iteration, matching the
+// standard, and reuses the existing break/continue block-scope destructor
+// handling.
+
+// Returns the symbol declared by a condition-declaration node produced by
+// SyntaxParseConditionDeclaration, or NULL if none could be extracted.
+static Symbol* ConditionDeclaredSymbol(ASTNode* decl) {
+  if (decl == NULL || decl->op != AST_OP(decl_list)) {
+    return NULL;
+  }
+  DeclarationListASTNode* list = (DeclarationListASTNode*)decl;
+  if (list->declarations == NULL || list->declarations->length == 0) {
+    return NULL;
+  }
+  ASTNode* first = list->declarations->value.p[0];
+  if (first->op != AST_OP(vardecl)) {
+    return NULL;
+  }
+  return ((VariableDeclarationASTNode*)first)->symbol;
+}
+
+// Side-effect-free test for whether the condition begins with a type specifier,
+// used to gate condition-declaration parsing.  Unlike SyntaxLookingAtType, this
+// never parses template-ids or qualified names, which can perturb parser state
+// and would corrupt parsing of an ordinary comparison condition like "a < b"
+// where "a" is an unresolved dependent name.  It deliberately recognizes only
+// fundamental type keywords and plain identifiers that resolve to a typedef,
+// template type parameter, or non-template tag; qualified or template-id type
+// conditions fall through and are parsed as expressions.
+static bool ConditionStartsWithType(Syntax* syntax) {
+  switch (syntax->lex->current_token) {
+    case TOK(char): case TOK(int): case TOK(short): case TOK(long):
+    case TOK(float): case TOK(double): case TOK(bool): case TOK(signed):
+    case TOK(unsigned): case TOK(void): case TOK(wchar_t):
+    case TOK(const): case TOK(volatile): case TOK(restrict):
+    case TOK(struct): case TOK(class): case TOK(union): case TOK(enum):
+      return true;
+    case TOK(auto): case TOK(decltype): case TOK(typename):
+      return CompilerIsCXX();
+    case TOK(identifier): {
+      Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+      if (sym != NULL) {
+        if (sym->flags.is_template_type_parameter) {
+          return true;
+        }
+        return StorageIs(sym->storage, STO(typedef)) && !sym->flags.is_template;
+      }
+      Symbol* tag = SyntaxFindTag(syntax, &syntax->lex->spelling);
+      return tag != NULL && !tag->flags.is_template;
+    }
+    default:
+      return false;
+  }
+}
+
+// Decides whether the controlling condition at the current position is a
+// declaration rather than an expression.  A condition-declaration must have a
+// brace-or-equal-initializer, which distinguishes "if (T x = v)" (a
+// declaration) from "if (T(x))" or "if (T(x).f())" (functional-cast
+// expressions).  Speculatively parses a type and declarator behind a lex
+// checkpoint and an error trap, then rolls back.
+static bool LooksLikeConditionDeclaration(Syntax* syntax) {
+  if (!CompilerIsCXX() || !ConditionStartsWithType(syntax)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool trap = DiagnosticErrorTrapBegin();
+
+  bool is_declaration = false;
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingBlockScope);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  if (type != NULL) {
+    TypeRecordIncRef(type);
+    // Only a genuine declarator follows the type in a condition-declaration.
+    // If the type is immediately followed by '{', '(' or an operator, this is
+    // an expression instead (a braced temporary "T{...}", a functional cast
+    // "T(...)", or a comparison "T < x"), not a declaration.  The declarator
+    // parser synthesizes names for abstract declarators, so we must gate on the
+    // lookahead token rather than trust the parsed name.
+    Token after_type = syntax->lex->current_token;
+    if (after_type == TOK(identifier) || after_type == TOK(star) ||
+        after_type == TOK(amp) || after_type == TOK(ampamp)) {
+      Symbol* sym = TypeParserParseDeclarator(&parser, type);
+      if (sym != NULL && sym->name.length > 0 &&
+          (LexLookingAt(syntax->lex, TOK(equal)) ||
+           LexLookingAt(syntax->lex, TOK(lbrace)))) {
+        is_declaration = true;
+      }
+      if (sym != NULL) {
+        SymbolDelete(sym);
+      }
+    }
+    TypeRecordDelete(type);
+  }
+  TypeParserDestruct(&parser);
+
+  // A genuine condition-declaration ("T x = init") parses its type and
+  // declarator cleanly.  If the speculative parse tripped any diagnostic (for
+  // example a dependent comparison like "a < b" where SyntaxLookingAtType is
+  // conservatively true and the type parser mis-reads "<" as a template-id),
+  // treat it as an expression instead.
+  if (DiagnosticErrorTrapped()) {
+    is_declaration = false;
+  }
+
+  DiagnosticErrorTrapEnd(trap);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return is_declaration;
+}
+
+// Parses the controlling condition of if/while/switch.  When the condition is a
+// declaration, a fresh scope is opened for the declared variable, *out_decl
+// receives the declaration node, and the returned condition expression
+// references the declared variable.  Otherwise no scope is opened, *out_decl is
+// NULL, and the condition is a plain expression parsed exactly as before (so
+// expression conditions are entirely unaffected).  When *out_decl is non-NULL
+// the caller must eventually call FinishConditionScope (or otherwise close the
+// scope) exactly once.
+static ASTNode* ParseControllingCondition(Syntax* syntax, TokenClass followers,
+                                          ASTNode** out_decl) {
+  *out_decl = NULL;
+  if (LooksLikeConditionDeclaration(syntax)) {
+    SyntaxOpenScope(syntax);
+    ASTNode* decl = SyntaxParseConditionDeclaration(syntax);
+    Symbol* sym = ConditionDeclaredSymbol(decl);
+    *out_decl = decl;
+    if (sym != NULL) {
+      return NewIdentifierASTNode(sym, sym->location);
+    }
+    // Unreachable on well-formed input; the declaration parse already reported
+    // the error.  Return a well-typed placeholder so the AST stays valid.
+    return NewIntConstantASTNode(1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                 syntax->lex->current_token_location);
+  }
+  return SyntaxParseExpression(syntax, followers);
+}
+
+// Wraps a controlled statement whose condition declared a variable in a scope
+// block: "{ decl; stmt; <destructors> }".  Used for if and switch, whose
+// conditions are evaluated once.  When there was no declaration no scope was
+// opened, so stmt is returned unchanged.
+static ASTNode* FinishConditionScope(Syntax* syntax, ASTNode* decl,
+                                     ASTNode* stmt, SourceLocation location) {
+  if (decl == NULL) {
+    return stmt;
+  }
+  Vector* statements = NewVector();
+  VectorAppend(statements, decl);
+  VectorAppend(statements, stmt);
+  SyntaxAppendCXXBlockScopeDestructors(statements);
+  SyntaxCloseScope(syntax);
+  return NewCompoundStatementASTNode(statements, location);
+}
+
+// --- C++17 init-statements ------------------------------------------------
+//
+// if / switch may carry an init-statement before the condition:
+// "if (init; cond)".  The init-statement (an expression-statement or a
+// simple-declaration) and any names it declares are in scope for the condition
+// and the controlled statements.  We lower this to a scope block wrapping the
+// init-statement and the (already lowered) selection statement:
+//
+//   if (init; cond) A else B  =>  { init; if (cond) A else B; }
+//
+// combining with condition-declarations when both are present.
+//
+// An init-statement is present iff a ';' appears at the top level of the
+// parenthesised control clause (a plain condition is never terminated by ';').
+// We can't decide this by parsing the first component, because an init-
+// statement may be a simple-declaration using any initializer form, including
+// direct-initialization "T x(args)", which is not a valid condition-declaration
+// and would be mis-parsed as an expression.  Instead we do a side-effect-free
+// lexical scan for a top-level ';'.  When one is found, the text before it is
+// the init-statement (a simple-declaration or an expression-statement) and the
+// text after it is the real condition (which may itself be a condition-
+// declaration).  When no ';' is found, behaviour is exactly as before and
+// ordinary conditions are unaffected.
+
+// Scans, without side effects, for a ';' at the top nesting level of the
+// current control clause (before the ')' that closes it).  Parentheses, braces
+// and brackets are tracked so ';' inside a lambda body, initializer list, etc.
+// does not count.  Restores the lexer to its entry position before returning.
+static bool SelectionHasInitStatement(Syntax* syntax) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+    return false;
+  }
+  Lex* lex = syntax->lex;
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  int paren = 0, brace = 0, bracket = 0;
+  bool found = false;
+  while (!LexEof(lex)) {
+    Token t = lex->current_token;
+    if (t == TOK(lparen)) {
+      paren++;
+    } else if (t == TOK(rparen)) {
+      if (paren == 0) break;
+      paren--;
+    } else if (t == TOK(lbrace)) {
+      brace++;
+    } else if (t == TOK(rbrace)) {
+      if (brace == 0) break;
+      brace--;
+    } else if (t == TOK(lsquare)) {
+      bracket++;
+    } else if (t == TOK(rsquare)) {
+      if (bracket == 0) break;
+      bracket--;
+    } else if (t == TOK(semicolon) && paren == 0 && brace == 0 &&
+               bracket == 0) {
+      found = true;
+      break;
+    }
+    LexNextToken(lex);
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return found;
+}
+
+static ASTNode* ParseSelectionCondition(Syntax* syntax, TokenClass followers,
+                                        ASTNode** out_cond_decl,
+                                        ASTNode** out_init,
+                                        bool* out_init_scope) {
+  *out_init = NULL;
+  *out_init_scope = false;
+  *out_cond_decl = NULL;
+  SourceLocation location = syntax->lex->current_token_location;
+
+  if (SelectionHasInitStatement(syntax)) {
+    // Open one scope covering the init-statement, the condition and the
+    // controlled statements; any names the init-statement declares are visible
+    // throughout.  FinishInitScope closes it.
+    SyntaxOpenScope(syntax);
+    *out_init_scope = true;
+    if (LexLookingAt(syntax->lex, TOK(semicolon))) {
+      // A null (empty) expression-statement init-statement.
+      LexMatch(syntax->lex, TOK(semicolon));
+      *out_init = NewCompoundStatementASTNode(NewVector(), location);
+    } else if (SyntaxLookingAtDeclaration(syntax)) {
+      // A simple-declaration init-statement consumes its own ';'.
+      *out_init = SyntaxParseLocalDeclaration(syntax);
+    } else {
+      ASTNode* expr = SyntaxParseExpression(syntax, followers | TC(expr));
+      SyntaxNeedSemicolon(syntax, followers | TC(expr));
+      *out_init = NewExpressionStatementASTNode(expr, location);
+    }
+  }
+
+  // Parse the real controlling condition, which may itself be a condition-
+  // declaration (opening a further nested scope closed by FinishConditionScope).
+  ASTNode* decl = NULL;
+  ASTNode* cond = ParseControllingCondition(syntax, followers, &decl);
+  *out_cond_decl = decl;
+  return cond;
+}
+
+// Wraps a selection statement carrying an init-statement in a scope block:
+// "{ init; stmt; <destructors> }".  When there was no init-statement stmt is
+// returned unchanged.  opened_scope records whether a scope was opened for a
+// declaration init-statement so it is closed (and its destructors emitted)
+// symmetrically; an expression init-statement declares nothing and needs no
+// scope.
+static ASTNode* FinishInitScope(Syntax* syntax, ASTNode* init,
+                                bool opened_scope, ASTNode* stmt,
+                                SourceLocation location) {
+  if (init == NULL) {
+    return stmt;
+  }
+  Vector* statements = NewVector();
+  VectorAppend(statements, init);
+  VectorAppend(statements, stmt);
+  if (opened_scope) {
+    SyntaxAppendCXXBlockScopeDestructors(statements);
+    SyntaxCloseScope(syntax);
+  }
+  return NewCompoundStatementASTNode(statements, location);
+}
+
 static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
                                  SourceLocation location) {
   bool is_constexpr = false;
@@ -240,7 +536,11 @@ static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
     is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
   }
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
-  ASTNode* cond = SyntaxParseExpression(syntax, followers);
+  ASTNode* decl = NULL;
+  ASTNode* init = NULL;
+  bool init_scope = false;
+  ASTNode* cond =
+      ParseSelectionCondition(syntax, followers, &decl, &init, &init_scope);
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
   Lex* lex = syntax->lex;
 
@@ -250,22 +550,42 @@ static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
   if (LexMatch(lex, TOK(else))) {
     else_part = SyntaxParseStatement(syntax, followers);
   }
-  return NewIfStatementASTNode(cond, if_part, else_part, is_constexpr,
-                               location);
+  ASTNode* if_stmt =
+      NewIfStatementASTNode(cond, if_part, else_part, is_constexpr, location);
+  ASTNode* inner = FinishConditionScope(syntax, decl, if_stmt, location);
+  return FinishInitScope(syntax, init, init_scope, inner, location);
 }
 
 // A while statement.
 static ASTNode* ParseWhileStatement(Syntax* syntax, TokenClass followers,
                                     SourceLocation location) {
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
-  ASTNode* cond = SyntaxParseExpression(syntax, followers);
+  ASTNode* decl = NULL;
+  ASTNode* cond = ParseControllingCondition(syntax, followers, &decl);
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
   location = syntax->lex->current_token_location;
 
   syntax->loop_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   syntax->loop_count--;
-  return NewCombinedStatementASTNode(AST_OP(while), cond, stmt, location);
+
+  if (decl == NULL) {
+    return NewCombinedStatementASTNode(AST_OP(while), cond, stmt, location);
+  }
+
+  // Re-create the condition variable each iteration:
+  //   for (;;) { T x = init; if (x) {} else break; body; }
+  Vector* loop_body = NewVector();
+  VectorAppend(loop_body, decl);
+  ASTNode* guard = NewIfStatementASTNode(
+      cond, NewCompoundStatementASTNode(NewVector(), location),
+      NewASTNode(AST_OP(break), NULL, location), false, location);
+  VectorAppend(loop_body, guard);
+  VectorAppend(loop_body, stmt);
+  SyntaxAppendCXXBlockScopeDestructors(loop_body);
+  SyntaxCloseScope(syntax);
+  ASTNode* body = NewCompoundStatementASTNode(loop_body, location);
+  return NewForStatementASTNode(NULL, NULL, NULL, body, location);
 }
 
 // A do statement.
@@ -291,14 +611,20 @@ static ASTNode* ParseDoStatement(Syntax* syntax, TokenClass followers,
 static ASTNode* ParseSwitchStatement(Syntax* syntax, TokenClass followers,
                                      SourceLocation location) {
   SyntaxNeedBracket(syntax, TOK(lparen), followers);
-  ASTNode* expr = SyntaxParseExpression(syntax, followers);
+  ASTNode* decl = NULL;
+  ASTNode* init = NULL;
+  bool init_scope = false;
+  ASTNode* expr =
+      ParseSelectionCondition(syntax, followers, &decl, &init, &init_scope);
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
 
   location = syntax->lex->current_token_location;
   syntax->switch_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   syntax->switch_count--;
-  return NewSwitchStatementASTNode(expr, stmt, location);
+  ASTNode* switch_stmt = NewSwitchStatementASTNode(expr, stmt, location);
+  ASTNode* inner = FinishConditionScope(syntax, decl, switch_stmt, location);
+  return FinishInitScope(syntax, init, init_scope, inner, location);
 }
 
 static String* ParseAsmString(Syntax* syntax) {

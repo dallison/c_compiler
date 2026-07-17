@@ -131,6 +131,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_tentative_decl = false;
   sym->flags.is_forward_declared = false;
   sym->flags.is_local = false;
+  sym->flags.is_block_scope = false;
   sym->flags.is_argument = false;
   sym->flags.is_temp = false;
   sym->flags.address_taken = false;
@@ -147,7 +148,11 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_template_parameter = false;
   sym->flags.is_template_type_parameter = false;
   sym->flags.is_parameter_pack = false;
+  sym->flags.is_constexpr = false;
+  sym->flags.is_constinit = false;
   sym->flags.is_weak = false;
+  sym->flags.is_c_linkage = false;
+  sym->flags.is_exported = false;
   sym->flags.is_concept = false;
   sym->flags.is_module_private = false;
   sym->concept_definition = NULL;
